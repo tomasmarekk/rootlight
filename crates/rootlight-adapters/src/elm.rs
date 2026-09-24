@@ -1,8 +1,8 @@
 //! First-party Elm top-level structural parser.
 //!
 //! The lexer masks comments and literals without changing byte offsets. It
-//! emits only identities proven by a top-level header, leaving expression and
-//! binding coverage explicitly bounded.
+//! emits only identities proven by a top-level header and type uses in bounded
+//! declaration regions, leaving expression and binding coverage incomplete.
 
 use rootlight_adapter_sdk::{
     AdapterError, CoverageReport, DescriptorError, DiagnosticCode, DomainCoverage, EncodingId,
@@ -13,6 +13,7 @@ use rootlight_adapter_sdk::{
 use rootlight_cancel::Cancellation;
 use rootlight_ids::{ContentHash, FileId, content_hash};
 use rootlight_ir::{AnalysisTier, CoverageStatus, FactDomain, SourceSpan};
+use std::collections::HashMap;
 
 const CHECK_INTERVAL: usize = 4096;
 
@@ -115,6 +116,7 @@ impl ParseProvider for ElmParseProvider {
         let mut next_id = 2_u64;
         let mut constructor_index = 0_usize;
         let mut field_index = 0_usize;
+        let mut type_reference_index = 0_usize;
         for (index, header) in parsed.headers.iter().enumerate() {
             cancellation.check()?;
             let local_id = next_id;
@@ -198,6 +200,26 @@ impl ParseProvider for ElmParseProvider {
                 ));
                 field_index += 1;
             }
+            while let Some(reference) = parsed.type_references.get(type_reference_index)
+                && reference.owner_index == index
+            {
+                facts.push(SyntaxFact::new(
+                    next_id,
+                    Some(local_id),
+                    SyntaxFactKind::Occurrence,
+                    source_span(file, reference.name_start, reference.name_end)?,
+                    2,
+                    label(if reference.ambiguous {
+                        "elm.ambiguous_type.reference"
+                    } else {
+                        "elm.type.reference"
+                    }),
+                ));
+                next_id = next_id
+                    .checked_add(1)
+                    .ok_or_else(|| failure("elm-syntax-node-limit"))?;
+                type_reference_index += 1;
+            }
         }
         for batch in facts.chunks(32) {
             cancellation.check()?;
@@ -259,6 +281,8 @@ struct Header {
     name_end: usize,
     kind: SyntaxFactKind,
     label: &'static str,
+    type_start: Option<usize>,
+    type_end: Option<usize>,
 }
 
 #[derive(Clone, Copy)]
@@ -266,6 +290,7 @@ struct Annotation {
     line_start: usize,
     name_start: usize,
     name_end: usize,
+    type_start: usize,
 }
 
 #[derive(Clone, Copy)]
@@ -284,10 +309,19 @@ struct RecordField {
     span_end: usize,
 }
 
+#[derive(Clone, Copy)]
+struct TypeReference {
+    owner_index: usize,
+    name_start: usize,
+    name_end: usize,
+    ambiguous: bool,
+}
+
 struct ParsedSource {
     headers: Vec<Header>,
     constructors: Vec<Constructor>,
     record_fields: Vec<RecordField>,
+    type_references: Vec<TypeReference>,
 }
 
 struct ConstructorCollector<'a> {
@@ -317,6 +351,7 @@ fn syntax_fact_count(source: &ParsedSource) -> usize {
         })
         .saturating_add(source.constructors.len().saturating_mul(2))
         .saturating_add(source.record_fields.len().saturating_mul(2))
+        .saturating_add(source.type_references.len())
 }
 
 fn required_syntax_fact_count(source: &ParsedSource) -> usize {
@@ -329,6 +364,7 @@ fn required_syntax_fact_count(source: &ParsedSource) -> usize {
         .saturating_add(source.record_fields.len())
         .saturating_mul(2)
         .saturating_add(1)
+        .saturating_add(source.type_references.len())
 }
 
 fn scan_source(
@@ -366,6 +402,8 @@ fn scan_source(
                 && masked[prior.name_start..prior.name_end]
                     == masked[header.name_start..header.name_end]
             {
+                header.type_start = Some(prior.type_start);
+                header.type_end = Some(header.line_start);
                 header.line_start = prior.line_start;
             }
             annotation = None;
@@ -416,11 +454,141 @@ fn scan_source(
             .map_or(masked.len(), |next| next.line_start);
         fields.scan(header.name_end, end, owner_index)?;
     }
+    let remaining = remaining
+        .checked_sub(fields.fields.len().saturating_mul(2))
+        .ok_or_else(|| failure("elm-syntax-node-limit"))?;
+    let mut type_references = Vec::new();
+    let type_count = headers
+        .iter()
+        .filter(|header| {
+            matches!(
+                header.label,
+                "elm.enum.declaration" | "elm.type_alias.declaration"
+            )
+        })
+        .count();
+    let mut type_names = HashMap::new();
+    type_names
+        .try_reserve(type_count)
+        .map_err(|_| SinkError::AllocationFailed)?;
+    for header in &headers {
+        if matches!(
+            header.label,
+            "elm.enum.declaration" | "elm.type_alias.declaration"
+        ) {
+            let name = &masked[header.name_start..header.name_end];
+            type_names
+                .entry(name)
+                .and_modify(|duplicate| *duplicate = true)
+                .or_insert(false);
+        }
+    }
+    for (owner_index, header) in headers.iter().enumerate() {
+        cancellation.check()?;
+        let end = headers
+            .get(owner_index + 1)
+            .map_or(masked.len(), |next| next.line_start);
+        let region = match header.label {
+            "elm.function.declaration" => header.type_start.zip(header.type_end),
+            "elm.port.declaration" => declaration_type_region(&masked, header.name_end, end, b':'),
+            "elm.type_alias.declaration" => {
+                declaration_type_region(&masked, header.name_end, end, b'=')
+            }
+            _ => None,
+        };
+        if let Some((start, end)) = region {
+            collect_type_references(
+                &masked,
+                (start, end),
+                owner_index,
+                remaining,
+                &type_names,
+                &mut type_references,
+                cancellation,
+            )?;
+        }
+    }
     Ok(ParsedSource {
         headers,
         constructors: collector.constructors,
         record_fields: fields.fields,
+        type_references,
     })
+}
+
+fn declaration_type_region(
+    masked: &[u8],
+    start: usize,
+    end: usize,
+    delimiter: u8,
+) -> Option<(usize, usize)> {
+    masked[start..end]
+        .iter()
+        .position(|byte| *byte == delimiter)
+        .map(|offset| (start + offset + 1, end))
+}
+
+fn collect_type_references(
+    masked: &[u8],
+    region: (usize, usize),
+    owner_index: usize,
+    max_items: usize,
+    type_names: &HashMap<&[u8], bool>,
+    references: &mut Vec<TypeReference>,
+    cancellation: &Cancellation,
+) -> Result<(), AdapterError> {
+    let (start, end) = region;
+    let mut index = start;
+    while index < end {
+        if index.is_multiple_of(CHECK_INTERVAL) {
+            cancellation.check()?;
+        }
+        if masked[index] == b'\n'
+            && masked
+                .get(index + 1)
+                .is_some_and(|byte| !byte.is_ascii_whitespace())
+        {
+            break;
+        }
+        if !masked[index].is_ascii_uppercase()
+            || index > start
+                && (masked[index - 1].is_ascii_alphanumeric()
+                    || matches!(masked[index - 1], b'_' | b'.'))
+        {
+            index += 1;
+            continue;
+        }
+        let name_start = index;
+        index += 1;
+        while index < end {
+            if masked[index].is_ascii_alphanumeric() || masked[index] == b'_' {
+                index += 1;
+            } else if masked[index] == b'.'
+                && index + 1 < end
+                && masked[index + 1].is_ascii_uppercase()
+            {
+                index += 2;
+            } else {
+                break;
+            }
+        }
+        if references.len() >= max_items {
+            return Err(failure("elm-syntax-node-limit"));
+        }
+        references
+            .try_reserve(1)
+            .map_err(|_| SinkError::AllocationFailed)?;
+        references.push(TypeReference {
+            owner_index,
+            name_start,
+            name_end: index,
+            ambiguous: type_names
+                .get(&masked[name_start..index])
+                .copied()
+                .unwrap_or(false),
+        });
+    }
+    Ok(())
 }
 
 impl ConstructorCollector<'_> {
@@ -674,6 +842,8 @@ fn parse_header(line: &[u8], start: usize) -> Option<Header> {
         name_end: start + name_end,
         kind,
         label,
+        type_start: None,
+        type_end: None,
     })
 }
 
@@ -686,17 +856,18 @@ fn parse_annotation(line: &[u8], start: usize) -> Option<Annotation> {
         .iter()
         .position(|byte| !byte.is_ascii_alphanumeric() && *byte != b'_')
         .unwrap_or(line.len());
-    if line[name_end..]
+    let colon = line[name_end..]
         .iter()
-        .find(|byte| !byte.is_ascii_whitespace())
-        != Some(&b':')
-    {
+        .position(|byte| !byte.is_ascii_whitespace())
+        .map(|offset| name_end + offset)?;
+    if line[colon] != b':' {
         return None;
     }
     Some(Annotation {
         line_start: start,
         name_start: start,
         name_end: start + name_end,
+        type_start: start + colon + 1,
     })
 }
 
@@ -871,15 +1042,15 @@ mod tests {
             b"x"
         );
         assert_eq!(parsed.record_fields[0].owner_index, 2);
-        assert_eq!(required_syntax_fact_count(&parsed), 15);
-        assert_eq!(syntax_fact_count(&parsed), 15);
+        assert_eq!(required_syntax_fact_count(&parsed), 16);
+        assert_eq!(syntax_fact_count(&parsed), 16);
         assert!(scan_source(source, 14, &Cancellation::new()).is_err());
     }
 
     #[test]
     fn record_fields_preserve_outer_alias_spans_and_shared_fact_limit() {
         let source = b"module Demo exposing (Model)\ntype State = Ready\ntype alias Model =\n    { name : String\n    , config : { enabled : Bool, label : String }\n    , count : Int {- phantom : String -}\n    }\n";
-        let parsed = scan_source(source, 15, &Cancellation::new()).expect("bounded Elm source");
+        let parsed = scan_source(source, 19, &Cancellation::new()).expect("bounded Elm source");
         let names = parsed
             .record_fields
             .iter()
@@ -892,12 +1063,12 @@ mod tests {
                 .iter()
                 .all(|field| field.owner_index == 2)
         );
-        assert_eq!(required_syntax_fact_count(&parsed), 15);
-        assert_eq!(syntax_fact_count(&parsed), 15);
-        assert!(scan_source(source, 14, &Cancellation::new()).is_err());
+        assert_eq!(required_syntax_fact_count(&parsed), 19);
+        assert_eq!(syntax_fact_count(&parsed), 19);
+        assert!(scan_source(source, 18, &Cancellation::new()).is_err());
         let unclosed = b"module Demo exposing (Model)\ntype alias Model = { name : String";
         let parsed =
-            scan_source(unclosed, 5, &Cancellation::new()).expect("bounded malformed source");
+            scan_source(unclosed, 6, &Cancellation::new()).expect("bounded malformed source");
         assert!(parsed.record_fields.is_empty());
     }
 
@@ -914,7 +1085,52 @@ mod tests {
         assert_eq!(parsed.headers[1].label, "elm.port.declaration");
         assert!(source[parsed.headers[2].line_start..].starts_with(b"render :"));
         assert!(source[parsed.headers[3].line_start..].starts_with(b"other ="));
-        assert_eq!(required_syntax_fact_count(&parsed), 9);
-        assert!(scan_source(source, 8, &Cancellation::new()).is_err());
+        assert_eq!(required_syntax_fact_count(&parsed), 13);
+        assert!(scan_source(source, 12, &Cancellation::new()).is_err());
+    }
+
+    #[test]
+    fn type_references_keep_exact_source_and_exclude_comments_and_literals() {
+        let source = b"module Demo exposing (..)
+type alias Model = { state : State, remote : Other.State }
+type State = Ready
+view : Model -> Html Msg
+view model = \"Ghost\" -- Phantom
+";
+        let parsed = scan_source(source, usize::MAX, &Cancellation::new()).expect("valid source");
+        let names = parsed
+            .type_references
+            .iter()
+            .map(|reference| &source[reference.name_start..reference.name_end])
+            .collect::<Vec<_>>();
+        assert_eq!(
+            names,
+            [
+                b"State".as_slice(),
+                b"Other.State",
+                b"Model",
+                b"Html",
+                b"Msg"
+            ]
+        );
+        assert!(parsed.type_references.iter().all(|reference| {
+            matches!(
+                parsed.headers[reference.owner_index].label,
+                "elm.type_alias.declaration" | "elm.function.declaration"
+            )
+        }));
+        assert!(scan_source(source, syntax_fact_count(&parsed) - 1, &Cancellation::new()).is_err());
+    }
+
+    #[test]
+    fn type_regions_stop_before_unpaired_top_level_annotations() {
+        let source = b"module Demo exposing (..)\ntype alias Model = { value : Int }\norphan : Phantom\nnext = 1\n";
+        let parsed = scan_source(source, usize::MAX, &Cancellation::new()).expect("valid source");
+        let names = parsed
+            .type_references
+            .iter()
+            .map(|reference| &source[reference.name_start..reference.name_end])
+            .collect::<Vec<_>>();
+        assert_eq!(names, [b"Int".as_slice()]);
     }
 }

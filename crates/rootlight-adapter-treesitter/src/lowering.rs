@@ -5439,7 +5439,9 @@ fn occurrence_role(fact: &SyntaxFact) -> Option<OccurrenceRole> {
         SyntaxFactKind::Occurrence
             if matches!(
                 fact.syntax_kind().as_str(),
-                "typescript.type_identifier.reference"
+                "elm.type.reference"
+                    | "elm.ambiguous_type.reference"
+                    | "typescript.type_identifier.reference"
                     | "vba.direct_type_identifier.reference"
                     | "vba.automatic_type_identifier.reference"
                     | "vba.unsupported_automatic_type_identifier.reference"

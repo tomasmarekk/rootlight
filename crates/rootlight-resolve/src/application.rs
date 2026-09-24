@@ -1464,6 +1464,7 @@ fn build_provenance(
     let rule = match decision.explanation.rule {
         ResolutionRule::ClassicProjectType => "classic-project-type-v1.indexed_snapshot",
         ResolutionRule::ElmModuleImport => "elm-module-import-v1.indexed_snapshot",
+        ResolutionRule::ElmLocalType => "elm-local-type-v1.indexed_snapshot",
         ResolutionRule::ClassicProjectMember => "classic-project-member-v1.indexed_snapshot",
         ResolutionRule::GroovyStaticImport => "groovy-static-import-v1.indexed_snapshot",
         ResolutionRule::GroovyInheritedType => "groovy-inherited-type-v1.indexed_snapshot",

@@ -29649,6 +29649,115 @@ mod tests {
     }
 
     #[test]
+    fn elm_type_uses_bind_only_unique_same_file_declarations() {
+        let fixture = TempDir::new().expect("fixture root exists");
+        let source = "module Demo exposing (..)\ntype alias Model = { state : State, remote : Other.State }\ntype State = Ready\nview : Model -> Missing\nview model = \"Ghost\" -- Phantom\n";
+        fs::write(fixture.path().join("Demo.elm"), source).expect("Elm source writes");
+        fs::write(
+            fixture.path().join("Other.elm"),
+            "module Other exposing (..)\ntype State = Foreign\ntype Missing = Unknown\n",
+        )
+        .expect("other module writes");
+        let mut service = FirstSliceService::new(2).expect("service initializes");
+        let receipt = service
+            .index_repository(fixture.path(), &deadline())
+            .expect("Elm types index");
+        let generation = service
+            .loaded_generation_snapshot(receipt.generation)
+            .expect("generation remains retained");
+        let document = generation.document();
+        let file = document
+            .files
+            .iter()
+            .find(|file| file.path == "Demo.elm")
+            .expect("source file is retained");
+        let types = document
+            .occurrences
+            .iter()
+            .filter(|occurrence| {
+                occurrence.file == file.id && occurrence.syntax_kind == "elm.type.reference"
+            })
+            .map(|occurrence| {
+                let span = occurrence.source.span();
+                let start = usize::try_from(span.start_byte()).expect("offset fits");
+                let end = usize::try_from(span.end_byte()).expect("offset fits");
+                (&source[start..end], occurrence)
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(types.len(), 4);
+        for (name, occurrence) in types {
+            assert_eq!(occurrence.role, rootlight_ir::OccurrenceRole::TypeUse);
+            if matches!(name, "State" | "Model") {
+                let target = document
+                    .entities
+                    .iter()
+                    .find(|entity| {
+                        entity.language == "elm"
+                            && entity.canonical_name == name
+                            && entity
+                                .evidence
+                                .source
+                                .as_ref()
+                                .is_some_and(|source| source.span().file() == file.id)
+                    })
+                    .expect("local type has declaration evidence");
+                assert_eq!(
+                    occurrence.target,
+                    rootlight_ir::OccurrenceTarget::Resolved { symbol: target.id }
+                );
+                assert!(document.relations.iter().any(|relation| {
+                    relation.predicate == rootlight_ir::RelationPredicate::UsesType
+                        && relation.subject
+                            == rootlight_ir::RelationEndpoint::Occurrence(occurrence.id)
+                        && relation.object == rootlight_ir::RelationEndpoint::Entity(target.id)
+                        && relation.evidence.source.as_ref() == Some(&occurrence.source)
+                }));
+            } else {
+                assert!(matches!(
+                    occurrence.target,
+                    rootlight_ir::OccurrenceTarget::Unresolved { .. }
+                ));
+            }
+            let read = service
+                .source_read(
+                    receipt.generation,
+                    vec![occurrence.source.clone()],
+                    &deadline(),
+                )
+                .expect("type use source reads");
+            assert_eq!(read.data.chunks[0].reference, occurrence.source);
+        }
+    }
+
+    #[test]
+    fn elm_duplicate_local_types_do_not_claim_exact_targets() {
+        let fixture = TempDir::new().expect("fixture root exists");
+        fs::write(
+            fixture.path().join("Demo.elm"),
+            "module Demo exposing (..)\ntype State = Ready\ntype State = Failed\nview : State -> String\nview value = \"ready\"\n",
+        )
+        .expect("Elm source writes");
+        let mut service = FirstSliceService::new(2).expect("service initializes");
+        let receipt = service
+            .index_repository(fixture.path(), &deadline())
+            .expect("Elm source indexes");
+        let generation = service
+            .loaded_generation_snapshot(receipt.generation)
+            .expect("generation remains retained");
+        let occurrence = generation
+            .document()
+            .occurrences
+            .iter()
+            .find(|occurrence| occurrence.syntax_kind == "elm.ambiguous_type.reference")
+            .expect("type use is retained");
+        assert_eq!(occurrence.role, rootlight_ir::OccurrenceRole::TypeUse);
+        assert!(matches!(
+            occurrence.target,
+            rootlight_ir::OccurrenceTarget::Unresolved { .. }
+        ));
+    }
+
+    #[test]
     fn elm_local_imports_resolve_to_source_declared_modules() {
         let fixture = TempDir::new().expect("fixture root exists");
         let importer_source = "module Main exposing (main)\nimport Shared\nmain = Shared.value\n";

@@ -236,6 +236,12 @@ impl ResolutionEngine {
         {
             return self.resolve_elm_import(occurrence, index, work, cancellation);
         }
+        if language == "elm"
+            && occurrence.syntax_kind == "elm.type.reference"
+            && occurrence.role == OccurrenceRole::TypeUse
+        {
+            return self.resolve_elm_local_type(occurrence, index, work, cancellation);
+        }
         let example =
             (file_language == "markdown").then(|| markdown_example(occurrence.enclosing, index));
         let rule = if occurrence.role == OccurrenceRole::ImportUse {
@@ -540,6 +546,110 @@ impl ResolutionEngine {
             outcome,
             explanation: ResolutionExplanation {
                 rule: ResolutionRule::ElmModuleImport,
+                provider_name: RESOLVER_PROVIDER_NAME,
+                provider_version: RESOLVER_PROVIDER_VERSION,
+                candidates,
+                rejected_candidates: Vec::new(),
+                rejected_total: 0,
+                completeness_assumptions: vec![
+                    CompletenessAssumption::ValidatedNormalizedDocument,
+                    CompletenessAssumption::SingleGeneration,
+                    CompletenessAssumption::CanonicalNameHash,
+                    CompletenessAssumption::NoRepositoryExecution,
+                ],
+            },
+        })
+    }
+
+    fn resolve_elm_local_type(
+        &self,
+        occurrence: &OccurrenceRecord,
+        index: &CandidateIndex<'_>,
+        work: &mut ResolutionWorkBudget,
+        cancellation: &Cancellation,
+    ) -> Result<ResolutionDecision, ResolutionError> {
+        let source_length = occurrence
+            .source
+            .span()
+            .end_byte()
+            .checked_sub(occurrence.source.span().start_byte())
+            .ok_or(ResolutionError::InvalidScore)?;
+        let mut candidates = Vec::new();
+        let mut candidate_total = 0_u64;
+        for indexed in index
+            .by_name_hash
+            .get(&occurrence.syntactic_text_hash)
+            .into_iter()
+            .flatten()
+        {
+            cancellation.check()?;
+            work.consume()?;
+            let entity = indexed.entity;
+            if indexed.name_match != NameMatch::Canonical
+                || entity.language != "elm"
+                || !matches!(entity.kind, EntityKind::Enum | EntityKind::TypeAlias)
+                || entity.flags.contains(&EntityFlag::Synthetic)
+                || entity_source_file(entity) != Some(occurrence.file)
+                || entity.container != Some(ContainerRef::File(occurrence.file))
+                || u64::try_from(entity.canonical_name.len())
+                    .map_err(|_| ResolutionError::CountOverflow)?
+                    != source_length
+            {
+                continue;
+            }
+            candidate_total = candidate_total
+                .checked_add(1)
+                .ok_or(ResolutionError::CountOverflow)?;
+            if candidates.len() < self.limits.candidate_limit() {
+                candidates.push(CandidateExplanation {
+                    symbol: entity.id,
+                    score: confidence(950)?,
+                    positive_signals: vec![
+                        ResolutionSignal::CanonicalNameHash,
+                        ResolutionSignal::SameLanguage,
+                        ResolutionSignal::SameFile,
+                        ResolutionSignal::CompatibleKind,
+                    ],
+                    penalties: Vec::new(),
+                });
+            }
+        }
+        let outcome = if candidate_total == 1 {
+            ResolutionOutcome::Resolved {
+                symbol: candidates
+                    .first()
+                    .ok_or(ResolutionError::InvalidScore)?
+                    .symbol,
+                confidence: confidence(950)?,
+            }
+        } else if candidate_total > 1 {
+            ResolutionOutcome::Candidates {
+                symbols: candidates
+                    .iter()
+                    .map(|candidate| candidate.symbol)
+                    .collect(),
+                total_count: candidate_total,
+                completeness: if u64::try_from(candidates.len())
+                    .map_err(|_| ResolutionError::CountOverflow)?
+                    == candidate_total
+                {
+                    CoverageStatus::Complete
+                } else {
+                    CoverageStatus::Bounded
+                },
+                confidence: confidence(950)?,
+            }
+        } else {
+            ResolutionOutcome::Unresolved {
+                reason: UnresolvedReason::NoCandidate,
+                confidence: confidence(0)?,
+            }
+        };
+        Ok(ResolutionDecision {
+            occurrence: occurrence.id,
+            outcome,
+            explanation: ResolutionExplanation {
+                rule: ResolutionRule::ElmLocalType,
                 provider_name: RESOLVER_PROVIDER_NAME,
                 provider_version: RESOLVER_PROVIDER_VERSION,
                 candidates,
@@ -961,6 +1071,11 @@ fn unresolved_reason(role: OccurrenceRole, kind_rejection_total: u64) -> Unresol
 }
 
 pub(crate) fn resolvable_occurrence(occurrence: &OccurrenceRecord) -> bool {
+    // Duplicate local type declarations can collapse to one durable identity.
+    // The parser retains the written ambiguity, which name scoring must not erase.
+    if occurrence.syntax_kind == "elm.ambiguous_type.reference" {
+        return false;
+    }
     // YAML serialization bindings depend on source order within one document.
     // A name/scope score cannot recover a binding the adapter could not prove.
     if occurrence.syntax_kind == "yaml.alias.reference" {

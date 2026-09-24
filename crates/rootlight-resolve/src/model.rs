@@ -252,6 +252,8 @@ fn is_supported_dynamic_language(language: &str) -> bool {
 pub enum ResolutionRule {
     /// A unique authored Elm module declaration matches the imported module name.
     ElmModuleImport,
+    /// A unique source-declared Elm type in the same file matches a type use.
+    ElmLocalType,
     /// A native receiver's project-owned declared type selects one accessible member.
     ClassicProjectMember,
     /// Declarative classic BASIC project membership selects one native class type.
