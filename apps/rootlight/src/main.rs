@@ -1364,6 +1364,24 @@ impl RepositoryIndexPoll {
             .ok_or(ClientError::InvalidRequestTimeout)?;
         RequestTimeout::new(timeout)
     }
+
+    fn retryable_busy_delay(error: &ClientError, operation: OperationId) -> Option<Duration> {
+        let public = error.as_public_error()?;
+        if public.code() != ErrorCode::Busy
+            || !public.retryable()
+            || public.operation().is_some_and(|other| other != operation)
+        {
+            return None;
+        }
+        let delay = public
+            .retry_after_ms()
+            .unwrap_or(u64::from(INITIAL_REPOSITORY_INDEX_POLL_MS))
+            .clamp(
+                u64::from(MIN_REPOSITORY_INDEX_POLL_MS),
+                u64::from(MAX_REPOSITORY_INDEX_POLL_MS),
+            );
+        Some(Duration::from_millis(delay))
+    }
 }
 
 fn wait_for_repository_index(
@@ -1388,13 +1406,7 @@ async fn wait_for_repository_index_async(
 
     loop {
         let status = tokio::select! {
-            status = client.repository_operation_status_async(
-                operation,
-                RepositoryOperationAction::Get,
-                Some(poll.wait_ms),
-                Some(poll.after_revision),
-                poll.timeout()?,
-            ) => status?,
+            status = repository_index_status_after_busy(client, operation, poll) => status?,
             signal = &mut interrupted => {
                 signal.map_err(CliError::WaitSignal)?;
                 client.repository_operation_status_async(
@@ -1425,6 +1437,36 @@ async fn wait_for_repository_index_async(
                     .error
                     .map(|error| CliError::Public(Box::new(error)))
                     .unwrap_or(CliError::UnexpectedResponse));
+            }
+        }
+    }
+}
+
+async fn repository_index_status_after_busy(
+    client: &Client,
+    operation: OperationId,
+    poll: RepositoryIndexPoll,
+) -> Result<RepositoryOperationStatus, CliError> {
+    loop {
+        match client
+            .repository_operation_status_async(
+                operation,
+                RepositoryOperationAction::Get,
+                Some(poll.wait_ms),
+                Some(poll.after_revision),
+                poll.timeout()?,
+            )
+            .await
+        {
+            Ok(status) => return Ok(status),
+            Err(error) => {
+                // Publication can briefly reject status reads while the submitted
+                // operation remains durable; retry the same revision and handle.
+                let Some(delay) = RepositoryIndexPoll::retryable_busy_delay(&error, operation)
+                else {
+                    return Err(error.into());
+                };
+                tokio::time::sleep(delay).await;
             }
         }
     }
@@ -3423,6 +3465,57 @@ mod tests {
         assert_eq!(
             RepositoryIndexPoll::after(&stage_fallback).wait_ms,
             MAX_REPOSITORY_INDEX_POLL_MS
+        );
+    }
+
+    #[test]
+    fn foreground_index_polling_retries_only_matching_retryable_busy_errors() {
+        let operation = OperationId::from_bytes([9; 16]);
+        let other_operation = OperationId::from_bytes([10; 16]);
+        let busy = ClientError::Public(Box::new(
+            PublicError::builder(ErrorCode::Busy, "repository index is still running")
+                .retry_after(Duration::from_millis(100))
+                .build()
+                .expect("bounded retry hint is valid"),
+        ));
+        assert_eq!(
+            RepositoryIndexPoll::retryable_busy_delay(&busy, operation),
+            Some(Duration::from_millis(100))
+        );
+
+        let without_hint = ClientError::Public(Box::new(
+            PublicError::builder(ErrorCode::Busy, "repository index is still running")
+                .retryable()
+                .build()
+                .expect("retryable busy error is valid"),
+        ));
+        assert_eq!(
+            RepositoryIndexPoll::retryable_busy_delay(&without_hint, operation),
+            Some(Duration::from_millis(u64::from(
+                INITIAL_REPOSITORY_INDEX_POLL_MS
+            )))
+        );
+
+        let unrelated = ClientError::Public(Box::new(
+            PublicError::builder(ErrorCode::Busy, "another operation is running")
+                .retryable()
+                .operation(other_operation)
+                .build()
+                .expect("operation-scoped busy error is valid"),
+        ));
+        assert_eq!(
+            RepositoryIndexPoll::retryable_busy_delay(&unrelated, operation),
+            None
+        );
+
+        let terminal = ClientError::Public(Box::new(
+            PublicError::builder(ErrorCode::Busy, "retry is not permitted")
+                .build()
+                .expect("non-retryable busy error is valid"),
+        ));
+        assert_eq!(
+            RepositoryIndexPoll::retryable_busy_delay(&terminal, operation),
+            None
         );
     }
 
