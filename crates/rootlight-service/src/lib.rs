@@ -2489,7 +2489,7 @@ pub enum FirstSliceSourceCoverageReason {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 #[non_exhaustive]
 pub enum FirstSliceCoverageGapReason {
-    /// The source language is recognized but has no structural analyzer.
+    /// A recognized language or construct lacks complete structural analysis.
     Unsupported,
     /// No installed detector recognized the source language.
     Unrecognized,
@@ -13237,6 +13237,8 @@ impl FirstSliceService {
         }
         let mut grouped =
             BTreeMap::<(FirstSliceCoverageGapReason, Option<String>), BTreeSet<FileId>>::new();
+        // Lexical and generated-source warnings do not explain bounded entity coverage.
+        let mut explained_entity_files = BTreeSet::<FileId>::new();
         let embedded_languages = if file_only_fallback {
             coverage_languages::SourceLanguageScopes::default()
         } else {
@@ -13301,6 +13303,15 @@ impl FirstSliceService {
                         _ => None,
                     };
                     if let Some(reason) = reason {
+                        let explains_entities =
+                            matches!(
+                                diagnostic.code.as_str(),
+                                "unsupported-encoding" | "unsupported-language"
+                            ) || (diagnostic.code.starts_with("project-adapter-")
+                                && diagnostic.code.ends_with("-fallback"));
+                        if explains_entities && let Some(file) = file {
+                            explained_entity_files.insert(file);
+                        }
                         observe(
                             reason,
                             file,
@@ -13324,6 +13335,9 @@ impl FirstSliceService {
                         }
                         _ => continue,
                     };
+                    if skipped.domain == IrFactDomain::Entities {
+                        explained_entity_files.insert(skipped.source.span().file());
+                    }
                     observe(
                         reason,
                         Some(skipped.source.span().file()),
@@ -13351,10 +13365,6 @@ impl FirstSliceService {
             }
         }
         if !file_only_fallback {
-            let mut reported = BTreeSet::new();
-            for files in grouped.values() {
-                reported.extend(files.iter().copied());
-            }
             for coverage in &document.coverage_records {
                 check_cancellation(cancellation)?;
                 let CoverageScope::File(file) = coverage.scope else {
@@ -13362,7 +13372,7 @@ impl FirstSliceService {
                 };
                 if coverage.domain != IrFactDomain::Entities
                     || coverage.status != CoverageStatus::Bounded
-                    || reported.contains(&file)
+                    || explained_entity_files.contains(&file)
                 {
                     continue;
                 }
@@ -13379,7 +13389,6 @@ impl FirstSliceService {
                     ))
                     .or_default()
                     .insert(file);
-                reported.insert(file);
             }
         }
         let relevant_language = |language: &Option<String>| {
@@ -40335,6 +40344,35 @@ mod tests {
                 && gap.language.as_deref() == Some("yaml")
                 && gap.files == 1
         }));
+    }
+
+    #[test]
+    fn large_make_source_reports_structural_and_lexical_gaps_without_double_counting() {
+        let fixture = TempDir::new().expect("fixture root exists");
+        let source = format!("all:\n#{}\n", "x".repeat(SOURCE_FALLBACK_TEXT_BYTES + 256));
+        fs::write(fixture.path().join("Makefile"), source).expect("large source writes");
+        let mut service = FirstSliceService::new(2).expect("service initializes");
+        let receipt = service
+            .index_repository(fixture.path(), &deadline())
+            .expect("large Make source publishes");
+        let summary = service
+            .coverage_gap_summary_until(receipt.repository, receipt.generation, &[], &deadline())
+            .expect("coverage gaps resolve");
+        assert_eq!(summary.skipped_inputs, 1);
+        let gaps = &summary.gaps;
+        for reason in [
+            FirstSliceCoverageGapReason::Truncated,
+            FirstSliceCoverageGapReason::Unsupported,
+        ] {
+            assert!(
+                gaps.iter().any(|gap| {
+                    gap.reason == reason
+                        && gap.language.as_deref() == Some("make")
+                        && gap.files == 1
+                }),
+                "{gaps:?}"
+            );
+        }
     }
 
     #[test]
