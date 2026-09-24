@@ -93,7 +93,8 @@ impl<'a> SourceLanguageScopes<'a> {
 
     /// Selects a containing embedded scope without conflating neighboring blocks.
     ///
-    /// Equal ranges with conflicting languages remain repository-wide uncertainty.
+    /// Conflicting equal or crossing ranges remain uncertainty unless a nested
+    /// module gives a strictly more specific language for the selected span.
     /// # Errors
     /// Returns cancellation while checking overlapping scope evidence.
     pub(super) fn resolve(
@@ -116,14 +117,18 @@ impl<'a> SourceLanguageScopes<'a> {
             if scope.maximum_end < span.end_byte() {
                 break;
             }
-            if let Some(selected) = selected {
-                if scope.span != selected.span {
-                    break;
-                }
-                if scope.language != selected.language {
+            if scope.span.end_byte() < span.end_byte() {
+                continue;
+            }
+            if let Some(current) = selected {
+                // A wider parent does not dilute a nested module, but a
+                // crossing peer gives no defensible single attribution.
+                if (scope.span == current.span || scope.span.end_byte() < current.span.end_byte())
+                    && scope.language != current.language
+                {
                     return Ok(SourceLanguage::Ambiguous);
                 }
-            } else if scope.span.end_byte() >= span.end_byte() {
+            } else {
                 selected = Some(*scope);
             }
         }
@@ -195,5 +200,27 @@ mod tests {
             scopes.resolve(span, &cancellation),
             Err(FirstSliceError::Cancelled(_))
         ));
+    }
+
+    #[test]
+    fn crossing_language_scopes_are_ambiguous_unless_a_child_is_more_specific() {
+        let file = FileId::from_bytes([1; 20]);
+        let span = |start, end| SourceSpan::new(file, start, end).unwrap();
+        let cancellation = Cancellation::new();
+        let mut scopes = SourceLanguageScopes::default();
+        scopes.insert(span(10, 60), "html").unwrap();
+        scopes.insert(span(20, 90), "javascript").unwrap();
+        scopes.finish(&cancellation).unwrap();
+        assert_eq!(
+            scopes.resolve(span(25, 30), &cancellation).unwrap(),
+            SourceLanguage::Ambiguous
+        );
+
+        scopes.insert(span(25, 35), "css").unwrap();
+        scopes.finish(&cancellation).unwrap();
+        assert_eq!(
+            scopes.resolve(span(26, 30), &cancellation).unwrap(),
+            SourceLanguage::Embedded("css")
+        );
     }
 }
