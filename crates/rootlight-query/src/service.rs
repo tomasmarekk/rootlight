@@ -464,6 +464,7 @@ where
             self.generation.document(),
             &symbols,
             &files,
+            &plan.path_prefixes,
             &mut tracker,
             &control,
             &mut limiting_resources,
@@ -670,6 +671,7 @@ where
                 document,
                 &symbols,
                 &files,
+                &[],
                 &mut tracker,
                 &control,
                 &mut limiting_resources,
@@ -10588,45 +10590,60 @@ fn collect_coverage_partial(
     document: &NormalizedIrDocument,
     symbols: &BTreeSet<SymbolId>,
     files: &BTreeSet<FileId>,
+    scope_paths: &[String],
     tracker: &mut UsageTracker,
     control: &QueryControl<'_>,
     limiting_resources: &mut Vec<QueryResource>,
 ) -> Result<(Vec<CoverageRecord>, bool), QueryError> {
     let mut coverage = Vec::new();
     let mut truncated = false;
-    // An empty locate result has no narrower scope. Its negative claim must
-    // therefore retain repository-wide coverage instead of inheriting
-    // completeness from an empty coverage projection.
-    let repository_wide = symbols.is_empty() && files.is_empty();
+    // A miss without a path scope needs repository-wide coverage; a scoped
+    // miss needs the file and entity coverage for that scope instead.
+    let repository_wide = symbols.is_empty() && files.is_empty() && scope_paths.is_empty();
     for record in &document.coverage_records {
         control.check()?;
+        let relevant = match record.scope {
+            CoverageScope::Repository(repository) => repository == document.repository,
+            CoverageScope::File(file) => {
+                repository_wide
+                    || files.contains(&file)
+                    || (!scope_paths.is_empty()
+                        && find_file(document, file)
+                            .is_some_and(|file| path_is_in_scope(&file.path, scope_paths)))
+            }
+            CoverageScope::Entity(symbol) => {
+                repository_wide
+                    || symbols.contains(&symbol)
+                    || (!scope_paths.is_empty()
+                        && find_entity(document, symbol)
+                            .and_then(|entity| entity.evidence.source.as_ref())
+                            .and_then(|source| find_file(document, source.span().file()))
+                            .is_some_and(|file| path_is_in_scope(&file.path, scope_paths)))
+            }
+        };
+        if !relevant {
+            continue;
+        }
         if !tracker.can_add(QueryResource::Rows, 1) {
             record_limit(limiting_resources, QueryResource::Rows)?;
             truncated = true;
             break;
         }
         tracker.add_rows(1)?;
-        let relevant = match record.scope {
-            CoverageScope::Repository(repository) => repository == document.repository,
-            CoverageScope::File(file) => repository_wide || files.contains(&file),
-            CoverageScope::Entity(symbol) => repository_wide || symbols.contains(&symbol),
-        };
-        if relevant {
-            if !tracker.can_add(QueryResource::Results, 1) {
-                record_limit(limiting_resources, QueryResource::Results)?;
-                truncated = true;
-                break;
-            }
-            let bytes = serialized_size(record, u64::MAX, control)?;
-            if !tracker.can_add(QueryResource::MemoryBytes, bytes) {
-                record_limit(limiting_resources, QueryResource::MemoryBytes)?;
-                truncated = true;
-                break;
-            }
-            tracker.add_results(1)?;
-            tracker.add_memory(bytes)?;
-            try_push(&mut coverage, record.clone())?;
+        if !tracker.can_add(QueryResource::Results, 1) {
+            record_limit(limiting_resources, QueryResource::Results)?;
+            truncated = true;
+            break;
         }
+        let bytes = serialized_size(record, u64::MAX, control)?;
+        if !tracker.can_add(QueryResource::MemoryBytes, bytes) {
+            record_limit(limiting_resources, QueryResource::MemoryBytes)?;
+            truncated = true;
+            break;
+        }
+        tracker.add_results(1)?;
+        tracker.add_memory(bytes)?;
+        try_push(&mut coverage, record.clone())?;
     }
     Ok((coverage, truncated))
 }
@@ -12241,6 +12258,7 @@ mod tests {
             &document,
             &BTreeSet::new(),
             &BTreeSet::new(),
+            &[],
             &mut tracker,
             &control,
             &mut limiting_resources,
@@ -12250,6 +12268,80 @@ mod tests {
         assert!(!truncated);
         assert!(limiting_resources.is_empty());
         assert_eq!(coverage, document.coverage_records);
+    }
+
+    #[test]
+    fn scoped_coverage_miss_ignores_unrelated_records_before_row_admission() {
+        let mut document = overview_document();
+        add_file(&mut document, 1, "src/selected.rs");
+        add_file(&mut document, 2, "src/other.rs");
+        add_entity(&mut document, 3, 1, EntityKind::Function);
+        let mut template = CoverageRecord {
+            id: FactId::from_bytes([0; 20]),
+            repository: document.repository,
+            generation: document.generation,
+            scope: CoverageScope::File(file_id(2)),
+            domain: FactDomain::Entities,
+            tier: AnalysisTier::TierB,
+            status: CoverageStatus::Unknown,
+            discovered: 1,
+            indexed: 0,
+            skipped: 1,
+            provenance: FactId::from_bytes([4; 20]),
+            evidence: FactEvidence {
+                source: None,
+                derivation: Vec::new(),
+            },
+        };
+        for ordinal in 0_u64..1_001 {
+            let mut id = [0; 20];
+            id[..8].copy_from_slice(&ordinal.to_le_bytes());
+            template.id = FactId::from_bytes(id);
+            document.coverage_records.push(template.clone());
+        }
+        template.scope = CoverageScope::File(file_id(1));
+        document.coverage_records.push(template.clone());
+        template.scope = CoverageScope::Entity(document.entities[0].id);
+        document.coverage_records.push(template);
+
+        let cancellation = Cancellation::new();
+        let control = QueryControl::new(&cancellation, Duration::from_secs(1));
+        let mut tracker = UsageTracker::new(QueryBudget::new().with_max_rows(4));
+        let mut limiting_resources = Vec::new();
+        let (coverage, truncated) = collect_coverage_partial(
+            &document,
+            &BTreeSet::new(),
+            &BTreeSet::new(),
+            &["src/selected.rs".to_owned()],
+            &mut tracker,
+            &control,
+            &mut limiting_resources,
+        )
+        .expect("scoped coverage fits the same row limit");
+        assert!(!truncated);
+        assert!(limiting_resources.is_empty());
+        assert_eq!(tracker.rows, 2);
+        assert_eq!(coverage.len(), 2);
+        assert_eq!(coverage[0].scope, CoverageScope::File(file_id(1)));
+        assert_eq!(
+            coverage[1].scope,
+            CoverageScope::Entity(document.entities[0].id)
+        );
+
+        let mut unscoped_tracker = UsageTracker::new(QueryBudget::new().with_max_rows(4));
+        let mut unscoped_limits = Vec::new();
+        let (_, unscoped_truncated) = collect_coverage_partial(
+            &document,
+            &BTreeSet::new(),
+            &BTreeSet::new(),
+            &[],
+            &mut unscoped_tracker,
+            &control,
+            &mut unscoped_limits,
+        )
+        .expect("unscoped coverage remains bounded");
+        assert!(unscoped_truncated);
+        assert_eq!(unscoped_limits, [QueryResource::Rows]);
     }
 
     #[test]
