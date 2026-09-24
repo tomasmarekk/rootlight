@@ -1,7 +1,6 @@
 // Renders the persistent navigation and live daemon connection status.
 
-import { Button } from "@heroui/react/button";
-import { Chip } from "@heroui/react/chip";
+import { Button, Chip } from "../components/ui";
 import { useQuery, useQueryClient } from "../query/local-query";
 import {
   Activity,

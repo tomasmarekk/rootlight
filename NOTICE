@@ -11,8 +11,8 @@ The local Web UI incorporates the exact npm dependency graph locked in
 apps/rootlight-web/frontend/package-lock.json. The release bundle includes
 licenses/rootlight-web-third-party-notices.txt, generated from that lockfile
 and the license files carried by the exact installed packages. In particular,
-the shipped @cosmos.gl/graph 3.4.0, @heroui/react 3.2.3, React 19.2.8, and
-React DOM 19.2.8 packages each declare the MIT license. The generated notice
+the shipped @cosmos.gl/graph 3.4.0, React 19.2.8, and React DOM 19.2.8
+packages each declare the MIT license. The generated notice
 records a package declaration without inventing replacement text when an
 upstream npm tarball omits its standalone license file.
 

@@ -1,8 +1,8 @@
-/* Establishes the global HeroUI, Tailwind, reset, and accessibility baseline. */
+/* Establishes the global Tailwind, native-control, reset, and accessibility baseline. */
 
 @import "tailwindcss";
-@import "@heroui/styles";
 @import "./tokens.css";
+@import "./ui.css";
 @import "./theme.css";
 
 * {

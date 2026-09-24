@@ -1,7 +1,6 @@
 // Presents immutable repository catalog pages without mixing daemon snapshots.
 
-import { Button } from "@heroui/react/button";
-import { Card } from "@heroui/react/card";
+import { Button, Card, CardContent, CardDescription, CardTitle } from "../components/ui";
 import { useMutation, useQuery, useQueryClient, type UseQueryResult } from "../query/local-query";
 import {
   Archive,
@@ -338,20 +337,20 @@ function CatalogContent({
   if (catalog.isError && catalog.data === undefined) {
     return (
       <Card className="empty-state-card empty-state-card--error" variant="secondary">
-        <Card.Content>
+        <CardContent>
           <div className="empty-state-icon" aria-hidden="true">
             <TriangleAlert size={22} />
           </div>
           <p className="eyebrow">Catalog unavailable</p>
-          <Card.Title>Rootlight could not load this catalog snapshot</Card.Title>
-          <Card.Description>
+          <CardTitle>Rootlight could not load this catalog snapshot</CardTitle>
+          <CardDescription>
             The daemon may be reconnecting. No local catalog data was replaced.
-          </Card.Description>
+          </CardDescription>
           <Button size="sm" variant="primary" onPress={() => void catalog.refetch()}>
             <RefreshCw size={15} aria-hidden="true" />
             Retry
           </Button>
-        </Card.Content>
+        </CardContent>
       </Card>
     );
   }
@@ -366,19 +365,19 @@ function CatalogContent({
       <>
         {staleNotice}
         <Card className="empty-state-card" variant="secondary">
-          <Card.Content>
+          <CardContent>
             <div className="empty-state-icon" aria-hidden="true">
               {hasFilter ? <Search size={22} /> : <FolderPlus size={22} />}
             </div>
             <p className="eyebrow">{hasFilter ? "No matching indexes" : "Catalog ready"}</p>
-            <Card.Title>
+            <CardTitle>
               {hasFilter ? "No projects match these filters" : "No projects have been loaded yet"}
-            </Card.Title>
-            <Card.Description>
+            </CardTitle>
+            <CardDescription>
               {hasFilter
                 ? "Clear the current search and state filter to return to the complete catalog."
                 : "Add a local repository to build a bounded structural index. Source stays on this machine and is accessed only through the Rootlight daemon."}
-            </Card.Description>
+            </CardDescription>
             {hasFilter ? (
               <Button size="sm" variant="ghost" onPress={onClearFilters}>
                 Clear filters
@@ -389,7 +388,7 @@ function CatalogContent({
                 Add your first project
               </Button>
             )}
-          </Card.Content>
+          </CardContent>
         </Card>
       </>
     );

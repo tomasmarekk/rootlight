@@ -1,0 +1,107 @@
+/* Styles the native controls shared by Rootlight's local interface. */
+
+.rl-button {
+  display: inline-flex;
+  min-height: 34px;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 0 12px;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  color: var(--rl-foreground);
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1.2;
+  transition:
+    background-color var(--rl-motion-fast) ease,
+    border-color var(--rl-motion-fast) ease,
+    color var(--rl-motion-fast) ease;
+}
+
+.rl-button--primary {
+  background: var(--accent);
+  color: var(--accent-foreground);
+}
+
+.rl-button--primary:hover:not(:disabled) {
+  background: var(--accent-hover);
+}
+
+.rl-button--ghost {
+  border-color: var(--rl-border);
+  background: transparent;
+  color: var(--rl-foreground-muted);
+}
+
+.rl-button--ghost:hover:not(:disabled) {
+  border-color: var(--rl-border-strong);
+  background: var(--rl-surface-hover);
+  color: var(--rl-foreground);
+}
+
+.rl-button--sm {
+  min-height: 30px;
+  padding: 0 9px;
+  font-size: 11px;
+}
+
+.rl-button--icon {
+  width: 34px;
+  padding: 0;
+}
+
+.rl-button--icon.rl-button--sm {
+  width: 30px;
+}
+
+.rl-button:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
+.rl-chip {
+  display: inline-flex;
+  min-height: 26px;
+  align-items: center;
+  padding: 0 9px;
+  border: 1px solid transparent;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 1;
+  white-space: nowrap;
+}
+
+.rl-chip--sm {
+  min-height: 24px;
+}
+
+.rl-chip--success {
+  border-color: rgb(85 197 138 / 22%);
+  background: rgb(85 197 138 / 9%);
+  color: var(--rl-success);
+}
+
+.rl-chip--warning {
+  border-color: rgb(245 185 76 / 22%);
+  background: rgb(245 185 76 / 9%);
+  color: var(--rl-warning);
+}
+
+.rl-card {
+  border: 1px solid var(--rl-border);
+  border-radius: var(--rl-radius-md);
+  background: var(--rl-surface);
+}
+
+.rl-card [data-slot="title"] {
+  margin-bottom: 0;
+  color: var(--rl-foreground);
+  font-weight: 650;
+}
+
+.rl-card [data-slot="description"] {
+  margin-top: 7px;
+}

@@ -1,6 +1,6 @@
 // Isolates unexpected React failures without rendering repository-derived exception text.
 
-import { Button } from "@heroui/react/button";
+import { Button } from "./ui";
 import { Component, type ReactNode } from "react";
 
 type BoundaryState = {

@@ -1,6 +1,6 @@
 // Presents bounded evidence while keeping source bodies in short-lived component memory only.
 
-import { Button } from "@heroui/react/button";
+import { Button } from "../../../components/ui";
 import { useInfiniteQuery, useMutation, useQuery } from "../../../query/local-query";
 import {
   Braces,

@@ -1,6 +1,6 @@
 // Maps live daemon health and source-free local diagnostics into one bounded surface.
 
-import { Button } from "@heroui/react/button";
+import { Button } from "../components/ui";
 import { useMutation, useQuery } from "../query/local-query";
 import {
   Activity,

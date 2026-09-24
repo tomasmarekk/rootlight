@@ -1,6 +1,6 @@
 // Returns users from unknown client routes without leaking route input.
 
-import { Button } from "@heroui/react/button";
+import { Button } from "../components/ui";
 import { useNavigate } from "react-router";
 
 export function NotFoundPage() {

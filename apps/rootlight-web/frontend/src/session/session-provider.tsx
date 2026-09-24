@@ -1,6 +1,6 @@
 // Owns browser authentication state without persisting session credentials.
 
-import { Button } from "@heroui/react/button";
+import { Button } from "../components/ui";
 import { useQueryClient } from "../query/local-query";
 import { useEffect, useMemo, useState, type ReactNode } from "react";
 

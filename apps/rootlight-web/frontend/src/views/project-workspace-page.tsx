@@ -1,6 +1,6 @@
 // Resolves an immutable generation before mounting the bounded Atlas workspace.
 
-import { Button } from "@heroui/react/button";
+import { Button } from "../components/ui";
 import { useQuery } from "../query/local-query";
 import {
   Activity,
