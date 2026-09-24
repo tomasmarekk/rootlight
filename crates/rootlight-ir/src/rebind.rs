@@ -296,6 +296,8 @@ fn canonical_generation_neutral_digests_for_prevalidated_document(
         (9, document.diagnostics.len(), FactLocation::Diagnostic),
         (10, document.extensions.len(), FactLocation::Extension),
     ];
+    let mut scratch = NormalizedIrDocument::empty(document.repository, GENERATION_NEUTRAL_ID);
+    scratch.version = document.version;
     for (category, length, constructor) in fact_categories {
         hashers.complete.category(category, length)?;
         hashers.stable.category(category, length)?;
@@ -336,6 +338,7 @@ fn canonical_generation_neutral_digests_for_prevalidated_document(
                 constructor(index),
                 document,
                 &ids,
+                &mut scratch,
                 &mut hashers,
                 &mut checkpoint,
             )?;
@@ -916,14 +919,15 @@ fn derive_fact_id_map(
         }
     }
     let mut processed = 0_usize;
+    let mut scratch = NormalizedIrDocument::empty(document.repository, generation);
+    scratch.version = document.version;
     while let Some(node_index) = ready.pop() {
         ensure_projection_continues(&mut checkpoint)?;
         let location = locations
             .get(node_index)
             .map(|(_, location)| *location)
             .ok_or(NormalizedRebindError::IdentityRecipe)?;
-        let mut scratch = NormalizedIrDocument::empty(document.repository, generation);
-        scratch.version = document.version;
+        clear_fact_records(&mut scratch);
         let new_id = rebind_node(
             location.node(document),
             document.repository,
@@ -955,6 +959,18 @@ fn derive_fact_id_map(
         return Err(NormalizedRebindError::CyclicFactReferences);
     }
     Ok(ids)
+}
+
+// Reuse the projection vectors while ensuring no prior fact enters the next identity or hash.
+fn clear_fact_records(document: &mut NormalizedIrDocument) {
+    document.occurrences.clear();
+    document.relations.clear();
+    document.provenance.clear();
+    document.source_mappings.clear();
+    document.coverage_records.clear();
+    document.skipped_regions.clear();
+    document.diagnostics.clear();
+    document.extensions.clear();
 }
 
 fn rebind_document(
@@ -1128,18 +1144,18 @@ fn hash_rebound_fact(
     location: FactLocation,
     document: &NormalizedIrDocument,
     ids: &FactIdMap,
+    scratch: &mut NormalizedIrDocument,
     hashers: &mut LogicalProjectionHashers,
     checkpoint: &mut impl FnMut() -> bool,
 ) -> Result<(), NormalizedRebindError> {
     ensure_projection_continues(checkpoint)?;
-    let mut scratch = NormalizedIrDocument::empty(document.repository, GENERATION_NEUTRAL_ID);
-    scratch.version = document.version;
+    clear_fact_records(scratch);
     let id = rebind_node(
         location.node(document),
         document.repository,
         GENERATION_NEUTRAL_ID,
         ids,
-        &mut scratch,
+        scratch,
         checkpoint,
     )?;
     ensure_projection_continues(checkpoint)?;
@@ -2272,6 +2288,32 @@ mod tests {
             proof.generation_neutral_digests(|| false),
             Err(NormalizedRebindError::Interrupted)
         ));
+    }
+
+    #[test]
+    fn streamed_projection_preserves_fixture_digest_contract() {
+        let document = fixture_with_lexical_extension();
+        let digests = canonical_generation_neutral_digests(
+            &document,
+            &IrLimits::default(),
+            &ExtensionSupport::default(),
+            || true,
+        )
+        .expect("fixture projection succeeds");
+        assert_eq!(
+            [
+                digests.complete().to_string(),
+                digests.coverage().to_string(),
+                digests.provenance().to_string(),
+                digests.stable_identities().to_string(),
+            ],
+            [
+                "b3_rj4o37tgnne3vmxchwoxaadplkj3f4eei7jnmy7a5nlirfbjbxeim2mzsa",
+                "b3_zjg5eeok2zy3zkuyrwhyqacenn2ir6aeehkypuyylmlra44clpotpzqcba",
+                "b3_766ftbghicojlesy5z5cxig5lel2xeaoeyymuetst3aguh52f526uyqliu",
+                "b3_32gcbuys2zpmuwe4norymkhu5yzotmugctbktsz4pdy2ioj2uzkmh5m7oq",
+            ]
+        );
     }
 
     #[test]
