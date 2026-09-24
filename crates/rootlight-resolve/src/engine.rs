@@ -1112,6 +1112,11 @@ pub(crate) fn resolvable_occurrence(occurrence: &OccurrenceRecord) -> bool {
     if occurrence.syntax_kind.starts_with("groovy.") {
         return false;
     }
+    // SCSS mixins, selectors, and module URLs require Sass-owned visibility
+    // and selector semantics. A same-spelling symbol is not binding evidence.
+    if occurrence.syntax_kind.starts_with("scss.") {
+        return false;
+    }
     // ECMAScript member leaves require their receiver's module/type evidence.
     // Re-scoring a source-backed adapter gap by spelling would invent a target.
     if matches!(

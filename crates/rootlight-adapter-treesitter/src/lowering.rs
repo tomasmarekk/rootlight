@@ -5387,6 +5387,8 @@ fn source_reference_gap(fact: &SyntaxFact) -> Option<&'static str> {
         }
         "matlab.import.reference" => Some("matlab-import-target-unavailable"),
         "matlab.command.reference" => Some("matlab-command-target-unavailable"),
+        "scss.mixin.call" => Some("scss-mixin-target-unavailable"),
+        "scss.extend.reference" => Some("scss-selector-target-unavailable"),
         "nix.identifier.reference" | "nix.inherited_name.reference" => {
             Some("nix-lexical-binding-target-unavailable")
         }

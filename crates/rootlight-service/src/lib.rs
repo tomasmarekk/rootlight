@@ -29879,6 +29879,70 @@ mod tests {
     }
 
     #[test]
+    fn scss_extends_retain_selector_sources_without_spelling_only_targets() {
+        let fixture = TempDir::new().expect("fixture root exists");
+        let source = "@function card() { @return 1; }\n.error { color: red; }\n.rule { @extend .error !optional; @include card; content: \"@extend .ghost;\"; }\n";
+        fs::write(fixture.path().join("theme.scss"), source).expect("SCSS source writes");
+        let mut service = FirstSliceService::new(2).expect("service initializes");
+        let receipt = service
+            .index_repository(fixture.path(), &deadline())
+            .expect("SCSS source publishes");
+        let generation = service
+            .loaded_generation_snapshot(receipt.generation)
+            .expect("generation remains retained");
+        let document = generation.document();
+        let sites = document
+            .occurrences
+            .iter()
+            .filter(|occurrence| {
+                matches!(
+                    occurrence.syntax_kind.as_str(),
+                    "scss.extend.reference" | "scss.mixin.call"
+                )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(sites.len(), 2);
+        for (kind, expected, gap) in [
+            (
+                "scss.extend.reference",
+                &b".error"[..],
+                "scss-selector-target-unavailable",
+            ),
+            (
+                "scss.mixin.call",
+                &b"card"[..],
+                "scss-mixin-target-unavailable",
+            ),
+        ] {
+            let site = sites
+                .iter()
+                .find(|site| site.syntax_kind == kind)
+                .expect("SCSS use is retained");
+            assert!(matches!(site.target, OccurrenceTarget::Unresolved { .. }));
+            assert_eq!(site.source.generation(), receipt.generation);
+            let read = service
+                .source_read_with_options_and_budget(
+                    receipt.generation,
+                    vec![site.source.clone()],
+                    SourceReadOptions::new()
+                        .with_context_lines_before(0)
+                        .with_context_lines_after(0)
+                        .with_encoding(SourceEncoding::Bytes),
+                    FirstSliceBudget::default(),
+                    &deadline(),
+                )
+                .expect("SCSS use source resolves");
+            assert_eq!(read.data.chunks[0].bytes, expected);
+            assert!(
+                document
+                    .skipped_regions
+                    .iter()
+                    .any(|region| { region.source == site.source && region.detail == gap })
+            );
+        }
+    }
+
+    #[test]
     fn shared_pl_suffix_indexes_prolog_clauses_without_relabeling_perl() {
         let fixture = TempDir::new().expect("fixture root exists");
         let prolog = "% ghost(X).\nrelation(alpha, beta).\nrelation(A, B) :- helper(A, B).\nrelation(alpha).\n";

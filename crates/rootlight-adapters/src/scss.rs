@@ -1,8 +1,8 @@
 //! First-party structural scanner for source-backed SCSS declarations.
 //! Static variables, mixins, functions, keyframes, and balanced style-rule
 //! blocks become identities.
-//! Named mixin includes and quoted module loads retain source evidence;
-//! module targets, selector expansion, and value uses remain bounded.
+//! Named mixin includes, simple selector extensions, and quoted module loads
+//! retain source evidence; their targets and value uses remain bounded.
 
 use rootlight_adapter_sdk::{
     AdapterError, CoverageReport, DescriptorError, DiagnosticCode, DomainCoverage, EncodingId,
@@ -83,6 +83,7 @@ impl ScssParseProvider {
             declarations.scopes.len(),
             declarations.calls.len(),
             declarations.imports.len(),
+            declarations.extends.len(),
         )
     }
 }
@@ -121,6 +122,7 @@ impl ParseProvider for ScssParseProvider {
             declarations.scopes.len(),
             declarations.calls.len(),
             declarations.imports.len(),
+            declarations.extends.len(),
         )?;
         let file = source.source_ref().span().file();
         let mut facts = Vec::new();
@@ -236,6 +238,27 @@ impl ParseProvider for ScssParseProvider {
                 source_span(file, import.path_start, import.path_end)?,
                 import.depth,
                 label(import.kind.label()),
+            ));
+        }
+        let first_extend_id = first_import_id
+            .checked_add(
+                u64::try_from(declarations.imports.len())
+                    .map_err(|_| failure("scss-syntax-node-limit"))?,
+            )
+            .ok_or_else(|| failure("scss-syntax-node-limit"))?;
+        for (index, extend) in declarations.extends.iter().enumerate() {
+            cancellation.check()?;
+            let parent = extend.scope.map(&scope_id).transpose()?.unwrap_or(1);
+            let local_id = first_extend_id
+                .checked_add(u64::try_from(index).map_err(|_| failure("scss-syntax-node-limit"))?)
+                .ok_or_else(|| failure("scss-syntax-node-limit"))?;
+            facts.push(SyntaxFact::new(
+                local_id,
+                Some(parent),
+                SyntaxFactKind::Occurrence,
+                source_span(file, extend.selector_start, extend.selector_end)?,
+                extend.depth,
+                label("scss.extend.reference"),
             ));
         }
         facts.sort_by_key(|fact| (fact.span().start_byte(), fact.depth()));
@@ -381,11 +404,20 @@ struct QuotedImport {
     depth: usize,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct SelectorExtend {
+    selector_start: usize,
+    selector_end: usize,
+    scope: Option<usize>,
+    depth: usize,
+}
+
 struct ScanResult {
     declarations: Vec<Declaration>,
     scopes: Vec<BlockScope>,
     calls: Vec<MixinCall>,
     imports: Vec<QuotedImport>,
+    extends: Vec<SelectorExtend>,
 }
 
 impl ScanResult {
@@ -396,6 +428,7 @@ impl ScanResult {
             .chain(self.scopes.iter().map(|scope| scope.depth))
             .chain(self.calls.iter().map(|call| call.depth))
             .chain(self.imports.iter().map(|import| import.depth))
+            .chain(self.extends.iter().map(|extend| extend.depth))
             .max()
             .unwrap_or(0)
     }
@@ -406,12 +439,14 @@ fn syntax_fact_count(
     scopes: usize,
     calls: usize,
     imports: usize,
+    extends: usize,
 ) -> Result<usize, AdapterError> {
     declarations
         .checked_mul(3)
         .and_then(|value| value.checked_add(scopes))
         .and_then(|value| value.checked_add(calls))
         .and_then(|value| value.checked_add(imports))
+        .and_then(|value| value.checked_add(extends))
         .and_then(|value| value.checked_add(1))
         .ok_or_else(|| failure("scss-syntax-node-limit"))
 }
@@ -427,6 +462,7 @@ fn scan_source(
     let mut scopes = Vec::<BlockScope>::new();
     let mut calls = Vec::<MixinCall>::new();
     let mut imports = Vec::<QuotedImport>::new();
+    let mut extends = Vec::<SelectorExtend>::new();
     let mut scope_stack = Vec::<usize>::new();
     let mut interpolation_depth = 0_usize;
     let mut parentheses = 0_usize;
@@ -449,7 +485,13 @@ fn scan_source(
                     .len()
                     .checked_add(1)
                     .ok_or_else(|| failure("scss-syntax-node-limit"))?;
-                let next_count = syntax_fact_count(next, scopes.len(), calls.len(), imports.len())?;
+                let next_count = syntax_fact_count(
+                    next,
+                    scopes.len(),
+                    calls.len(),
+                    imports.len(),
+                    extends.len(),
+                )?;
                 if next_count > max_syntax_nodes {
                     return Err(failure("scss-syntax-node-limit"));
                 }
@@ -464,8 +506,13 @@ fn scan_source(
                     .len()
                     .checked_add(1)
                     .ok_or_else(|| failure("scss-syntax-node-limit"))?;
-                if syntax_fact_count(declarations.len(), scopes.len(), next, imports.len())?
-                    > max_syntax_nodes
+                if syntax_fact_count(
+                    declarations.len(),
+                    scopes.len(),
+                    next,
+                    imports.len(),
+                    extends.len(),
+                )? > max_syntax_nodes
                 {
                     return Err(failure("scss-syntax-node-limit"));
                 }
@@ -481,6 +528,7 @@ fn scan_source(
                     scopes.len(),
                     calls.len(),
                     imports.len(),
+                    extends.len(),
                 )?);
                 if let Some(mut paths) = parse_quoted_module_paths(
                     &masked,
@@ -497,6 +545,29 @@ fn scan_source(
                         .try_reserve(paths.len())
                         .map_err(|_| SinkError::AllocationFailed)?;
                     imports.extend(paths);
+                } else if scope_stack.iter().any(|&scope| {
+                    scopes[scope].selector_header.is_some()
+                        || scopes[scope].owner.is_some_and(|owner| {
+                            declarations[owner].kind == DeclarationKind::StyleRule
+                        })
+                }) && let Some(mut extend) = parse_selector_extend(&masked, index)
+                {
+                    if syntax_fact_count(
+                        declarations.len(),
+                        scopes.len(),
+                        calls.len(),
+                        imports.len(),
+                        extends.len() + 1,
+                    )? > max_syntax_nodes
+                    {
+                        return Err(failure("scss-syntax-node-limit"));
+                    }
+                    extend.scope = scope_stack.last().copied();
+                    extend.depth = scope_stack.len().saturating_mul(2).saturating_add(1);
+                    extends
+                        .try_reserve(1)
+                        .map_err(|_| SinkError::AllocationFailed)?;
+                    extends.push(extend);
                 }
             }
             statement_start = false;
@@ -517,6 +588,7 @@ fn scan_source(
                     scopes.len() + 1,
                     calls.len(),
                     imports.len(),
+                    extends.len(),
                 )?;
                 if next_count > max_syntax_nodes {
                     return Err(failure("scss-syntax-node-limit"));
@@ -572,8 +644,13 @@ fn scan_source(
                             .len()
                             .checked_add(1)
                             .ok_or_else(|| failure("scss-syntax-node-limit"))?;
-                        if syntax_fact_count(next, scopes.len(), calls.len(), imports.len())?
-                            > max_syntax_nodes
+                        if syntax_fact_count(
+                            next,
+                            scopes.len(),
+                            calls.len(),
+                            imports.len(),
+                            extends.len(),
+                        )? > max_syntax_nodes
                         {
                             return Err(failure("scss-syntax-node-limit"));
                         }
@@ -611,6 +688,7 @@ fn scan_source(
         scopes,
         calls,
         imports,
+        extends,
     })
 }
 
@@ -899,6 +977,33 @@ fn parse_mixin_call(source: &[u8], start: usize) -> Option<MixinCall> {
     Some(MixinCall {
         name_start,
         name_end,
+        scope: None,
+        depth: 0,
+    })
+}
+
+fn parse_selector_extend(source: &[u8], start: usize) -> Option<SelectorExtend> {
+    let after_keyword = start.checked_add(b"@extend".len())?;
+    if !source.get(start..)?.starts_with(b"@extend")
+        || !source.get(after_keyword)?.is_ascii_whitespace()
+    {
+        return None;
+    }
+    let selector_start = skip_whitespace(source, after_keyword);
+    if !matches!(
+        source.get(selector_start).copied(),
+        Some(b'.' | b'%' | b'#')
+    ) {
+        return None;
+    }
+    let selector_end = identifier_end(source, selector_start.checked_add(1)?)?;
+    let mut cursor = skip_whitespace(source, selector_end);
+    if source.get(cursor..)?.starts_with(b"!optional") {
+        cursor = skip_whitespace(source, cursor.checked_add(b"!optional".len())?);
+    }
+    (source.get(cursor) == Some(&b';')).then_some(SelectorExtend {
+        selector_start,
+        selector_end,
         scope: None,
         depth: 0,
     })
@@ -1225,6 +1330,36 @@ mod tests {
             );
         }
         assert!(scan_source(b"@include card;", 1, &Cancellation::new()).is_err());
+    }
+
+    #[test]
+    fn captures_simple_selector_extends_inside_style_rules_only() {
+        let source = b".error { color: red; }\n%base { color: blue; }\n.serious { @extend .error; @extend %base !optional; content: \"@extend .ghost;\"; /* @extend #phantom; */ }\n@extend .outside;\n";
+        let result = scan_source(source, 128, &Cancellation::new()).unwrap();
+        assert_eq!(result.extends.len(), 2);
+        assert_eq!(
+            result
+                .extends
+                .iter()
+                .map(|extend| &source[extend.selector_start..extend.selector_end])
+                .collect::<Vec<_>>(),
+            [&b".error"[..], &b"%base"[..]]
+        );
+        assert_eq!(result.extends[0].scope, result.extends[1].scope);
+        for source in [
+            &b".rule { @extend .missing }"[..],
+            &b".rule { @extend .one.two; }"[..],
+            &b".rule { @extend .one:hover; }"[..],
+            &b".rule { @extend #{dynamic}; }"[..],
+        ] {
+            assert!(
+                scan_source(source, 128, &Cancellation::new())
+                    .unwrap()
+                    .extends
+                    .is_empty()
+            );
+        }
+        assert!(scan_source(b".rule { @extend .one; }", 5, &Cancellation::new()).is_err());
     }
 
     #[test]
