@@ -29632,6 +29632,109 @@ mod tests {
     }
 
     #[test]
+    fn scss_mixin_includes_have_exact_call_sources_without_lookalikes() {
+        let fixture = TempDir::new().expect("fixture root exists");
+        let source = "@mixin card($radius) { border-radius: $radius; }\n.panel { @include card(2px); content: \"@include ghost;\"; }\n// @include phantom;\n";
+        fs::write(fixture.path().join("theme.scss"), source).expect("SCSS source writes");
+        let mut service = FirstSliceService::new(2).expect("service initializes");
+        let receipt = service
+            .index_repository(fixture.path(), &deadline())
+            .expect("SCSS source publishes");
+        let generation = service
+            .loaded_generation_snapshot(receipt.generation)
+            .expect("generation remains retained");
+        let calls = generation
+            .document()
+            .occurrences
+            .iter()
+            .filter(|occurrence| {
+                occurrence.syntax_kind == "scss.mixin.call"
+                    && occurrence.role == OccurrenceRole::CallSite
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(calls.len(), 1);
+        let reference = &calls[0].source;
+        let span = reference.span();
+        assert_eq!(reference.generation(), receipt.generation);
+        assert_eq!(
+            source.as_bytes().get(
+                usize::try_from(span.start_byte()).unwrap()
+                    ..usize::try_from(span.end_byte()).unwrap()
+            ),
+            Some(&b"card"[..])
+        );
+        let read = service
+            .source_read_with_options_and_budget(
+                receipt.generation,
+                vec![reference.clone()],
+                SourceReadOptions::new()
+                    .with_context_lines_before(0)
+                    .with_context_lines_after(0)
+                    .with_encoding(SourceEncoding::Bytes),
+                FirstSliceBudget::default(),
+                &deadline(),
+            )
+            .expect("SCSS include source resolves");
+        assert_eq!(read.data.chunks[0].bytes, b"card");
+    }
+
+    #[test]
+    fn scss_quoted_imports_retain_each_exact_source_without_false_targets() {
+        let fixture = TempDir::new().expect("fixture root exists");
+        let source = "@import \"base/_mixins.scss\";\n@import 'colors.scss', \"layout.scss\";\n.note { content: \"@import \\\"ghost.scss\\\";\"; }\n// @import \"comment.scss\";\n";
+        fs::write(fixture.path().join("theme.scss"), source).expect("SCSS source writes");
+        let mut service = FirstSliceService::new(2).expect("service initializes");
+        let receipt = service
+            .index_repository(fixture.path(), &deadline())
+            .expect("SCSS source publishes");
+        let generation = service
+            .loaded_generation_snapshot(receipt.generation)
+            .expect("generation remains retained");
+        let imports = generation
+            .document()
+            .occurrences
+            .iter()
+            .filter(|occurrence| {
+                occurrence.syntax_kind == "scss.import"
+                    && occurrence.role == OccurrenceRole::ImportUse
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(imports.len(), 3);
+        let mut actual = Vec::new();
+        for import in imports {
+            let reference = &import.source;
+            let span = reference.span();
+            assert_eq!(reference.generation(), receipt.generation);
+            let source_bytes = source
+                .as_bytes()
+                .get(
+                    usize::try_from(span.start_byte()).unwrap()
+                        ..usize::try_from(span.end_byte()).unwrap(),
+                )
+                .expect("SCSS import span remains in source");
+            let read = service
+                .source_read_with_options_and_budget(
+                    receipt.generation,
+                    vec![reference.clone()],
+                    SourceReadOptions::new()
+                        .with_context_lines_before(0)
+                        .with_context_lines_after(0)
+                        .with_encoding(SourceEncoding::Bytes),
+                    FirstSliceBudget::default(),
+                    &deadline(),
+                )
+                .expect("SCSS import source resolves");
+            assert_eq!(read.data.chunks[0].bytes, source_bytes);
+            actual.push(std::str::from_utf8(source_bytes).unwrap().to_owned());
+            assert!(generation.document().skipped_regions.iter().any(|gap| {
+                gap.detail == "unresolved-import-target" && gap.source == *reference
+            }));
+        }
+        actual.sort();
+        assert_eq!(actual, ["base/_mixins.scss", "colors.scss", "layout.scss"]);
+    }
+
+    #[test]
     fn shared_pl_suffix_indexes_prolog_clauses_without_relabeling_perl() {
         let fixture = TempDir::new().expect("fixture root exists");
         let prolog = "% ghost(X).\nrelation(alpha, beta).\nrelation(A, B) :- helper(A, B).\nrelation(alpha).\n";

@@ -1,6 +1,7 @@
 //! First-party structural scanner for source-backed SCSS declarations.
-//! Only complete variables, mixins, and functions become identities;
-//! selectors, imports, and value uses remain bounded.
+//! Complete variables, mixins, and functions become identities, while named
+//! mixin includes and quoted imports retain source evidence. Import targets and
+//! value uses remain bounded.
 
 use rootlight_adapter_sdk::{
     AdapterError, CoverageReport, DescriptorError, DiagnosticCode, DomainCoverage, EncodingId,
@@ -76,7 +77,12 @@ impl ScssParseProvider {
         {
             return Err(failure("scss-syntax-depth-limit"));
         }
-        syntax_fact_count(declarations.declarations.len(), declarations.scopes.len())
+        syntax_fact_count(
+            declarations.declarations.len(),
+            declarations.scopes.len(),
+            declarations.calls.len(),
+            declarations.imports.len(),
+        )
     }
 }
 
@@ -109,8 +115,12 @@ impl ParseProvider for ScssParseProvider {
         {
             return Err(failure("scss-syntax-depth-limit"));
         }
-        let fact_count =
-            syntax_fact_count(declarations.declarations.len(), declarations.scopes.len())?;
+        let fact_count = syntax_fact_count(
+            declarations.declarations.len(),
+            declarations.scopes.len(),
+            declarations.calls.len(),
+            declarations.imports.len(),
+        )?;
         let file = source.source_ref().span().file();
         let mut facts = Vec::new();
         facts
@@ -188,6 +198,43 @@ impl ParseProvider for ScssParseProvider {
                 source_span(file, scope.start, scope.end)?,
                 scope.depth,
                 label("scss.block.scope"),
+            ));
+        }
+        let first_call_id = scope_id(declarations.scopes.len())?;
+        for (index, call) in declarations.calls.iter().enumerate() {
+            cancellation.check()?;
+            let parent = call.scope.map(&scope_id).transpose()?.unwrap_or(1);
+            let local_id = first_call_id
+                .checked_add(u64::try_from(index).map_err(|_| failure("scss-syntax-node-limit"))?)
+                .ok_or_else(|| failure("scss-syntax-node-limit"))?;
+            facts.push(SyntaxFact::new(
+                local_id,
+                Some(parent),
+                SyntaxFactKind::Occurrence,
+                source_span(file, call.name_start, call.name_end)?,
+                call.depth,
+                label("scss.mixin.call"),
+            ));
+        }
+        let first_import_id = first_call_id
+            .checked_add(
+                u64::try_from(declarations.calls.len())
+                    .map_err(|_| failure("scss-syntax-node-limit"))?,
+            )
+            .ok_or_else(|| failure("scss-syntax-node-limit"))?;
+        for (index, import) in declarations.imports.iter().enumerate() {
+            cancellation.check()?;
+            let parent = import.scope.map(&scope_id).transpose()?.unwrap_or(1);
+            let local_id = first_import_id
+                .checked_add(u64::try_from(index).map_err(|_| failure("scss-syntax-node-limit"))?)
+                .ok_or_else(|| failure("scss-syntax-node-limit"))?;
+            facts.push(SyntaxFact::new(
+                local_id,
+                Some(parent),
+                SyntaxFactKind::Import,
+                source_span(file, import.path_start, import.path_end)?,
+                import.depth,
+                label("scss.import"),
             ));
         }
         facts.sort_by_key(|fact| (fact.span().start_byte(), fact.depth()));
@@ -275,9 +322,27 @@ struct BlockScope {
     depth: usize,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct MixinCall {
+    name_start: usize,
+    name_end: usize,
+    scope: Option<usize>,
+    depth: usize,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct QuotedImport {
+    path_start: usize,
+    path_end: usize,
+    scope: Option<usize>,
+    depth: usize,
+}
+
 struct ScanResult {
     declarations: Vec<Declaration>,
     scopes: Vec<BlockScope>,
+    calls: Vec<MixinCall>,
+    imports: Vec<QuotedImport>,
 }
 
 impl ScanResult {
@@ -286,15 +351,24 @@ impl ScanResult {
             .iter()
             .map(|declaration| declaration.depth + 1)
             .chain(self.scopes.iter().map(|scope| scope.depth))
+            .chain(self.calls.iter().map(|call| call.depth))
+            .chain(self.imports.iter().map(|import| import.depth))
             .max()
             .unwrap_or(0)
     }
 }
 
-fn syntax_fact_count(declarations: usize, scopes: usize) -> Result<usize, AdapterError> {
+fn syntax_fact_count(
+    declarations: usize,
+    scopes: usize,
+    calls: usize,
+    imports: usize,
+) -> Result<usize, AdapterError> {
     declarations
         .checked_mul(3)
         .and_then(|value| value.checked_add(scopes))
+        .and_then(|value| value.checked_add(calls))
+        .and_then(|value| value.checked_add(imports))
         .and_then(|value| value.checked_add(1))
         .ok_or_else(|| failure("scss-syntax-node-limit"))
 }
@@ -308,6 +382,8 @@ fn scan_source(
     let masked = mask_non_code(source, cancellation)?;
     let mut declarations = Vec::new();
     let mut scopes = Vec::<BlockScope>::new();
+    let mut calls = Vec::<MixinCall>::new();
+    let mut imports = Vec::<QuotedImport>::new();
     let mut scope_stack = Vec::<usize>::new();
     let mut interpolation_depth = 0_usize;
     let mut parentheses = 0_usize;
@@ -328,7 +404,7 @@ fn scan_source(
                     .len()
                     .checked_add(1)
                     .ok_or_else(|| failure("scss-syntax-node-limit"))?;
-                let next_count = syntax_fact_count(next, scopes.len())?;
+                let next_count = syntax_fact_count(next, scopes.len(), calls.len(), imports.len())?;
                 if next_count > max_syntax_nodes {
                     return Err(failure("scss-syntax-node-limit"));
                 }
@@ -338,6 +414,39 @@ fn scan_source(
                     .try_reserve(1)
                     .map_err(|_| SinkError::AllocationFailed)?;
                 declarations.push(declaration);
+            } else if let Some(mut call) = parse_mixin_call(&masked, index) {
+                let next = calls
+                    .len()
+                    .checked_add(1)
+                    .ok_or_else(|| failure("scss-syntax-node-limit"))?;
+                if syntax_fact_count(declarations.len(), scopes.len(), next, imports.len())?
+                    > max_syntax_nodes
+                {
+                    return Err(failure("scss-syntax-node-limit"));
+                }
+                call.scope = scope_stack.last().copied();
+                call.depth = scope_stack.len().saturating_mul(2).saturating_add(1);
+                calls
+                    .try_reserve(1)
+                    .map_err(|_| SinkError::AllocationFailed)?;
+                calls.push(call);
+            } else {
+                let available = max_syntax_nodes.saturating_sub(syntax_fact_count(
+                    declarations.len(),
+                    scopes.len(),
+                    calls.len(),
+                    imports.len(),
+                )?);
+                if let Some(mut paths) = parse_quoted_import_paths(source, index, available)? {
+                    for import in &mut paths {
+                        import.scope = scope_stack.last().copied();
+                        import.depth = scope_stack.len().saturating_mul(2).saturating_add(1);
+                    }
+                    imports
+                        .try_reserve(paths.len())
+                        .map_err(|_| SinkError::AllocationFailed)?;
+                    imports.extend(paths);
+                }
             }
             statement_start = false;
         }
@@ -352,7 +461,12 @@ fn scan_source(
                 interpolation_depth = interpolation_depth.saturating_add(1);
             }
             b'{' if parentheses == 0 && brackets == 0 => {
-                let next_count = syntax_fact_count(declarations.len(), scopes.len() + 1)?;
+                let next_count = syntax_fact_count(
+                    declarations.len(),
+                    scopes.len() + 1,
+                    calls.len(),
+                    imports.len(),
+                )?;
                 if next_count > max_syntax_nodes {
                     return Err(failure("scss-syntax-node-limit"));
                 }
@@ -399,7 +513,130 @@ fn scan_source(
     Ok(ScanResult {
         declarations,
         scopes,
+        calls,
+        imports,
     })
+}
+
+fn parse_quoted_import_paths(
+    source: &[u8],
+    start: usize,
+    maximum_paths: usize,
+) -> Result<Option<Vec<QuotedImport>>, AdapterError> {
+    let Some(after_keyword) = start.checked_add(b"@import".len()) else {
+        return Ok(None);
+    };
+    if !source
+        .get(start..)
+        .is_some_and(|tail| tail.starts_with(b"@import"))
+        || !source
+            .get(after_keyword)
+            .is_some_and(u8::is_ascii_whitespace)
+    {
+        return Ok(None);
+    }
+    let mut cursor = skip_whitespace(source, after_keyword);
+    let mut imports = Vec::new();
+    loop {
+        let Some(&quote) = source.get(cursor) else {
+            return Ok(None);
+        };
+        if !matches!(quote, b'\'' | b'"') {
+            return Ok(None);
+        }
+        let path_start = cursor + 1;
+        cursor = path_start;
+        while let Some(&byte) = source.get(cursor) {
+            if byte == b'\\' {
+                cursor = cursor.saturating_add(2);
+            } else if byte == quote {
+                break;
+            } else {
+                cursor += 1;
+            }
+        }
+        if source.get(cursor) != Some(&quote) || cursor == path_start {
+            return Ok(None);
+        }
+        if imports.len() >= maximum_paths {
+            return Err(failure("scss-syntax-node-limit"));
+        }
+        imports
+            .try_reserve(1)
+            .map_err(|_| SinkError::AllocationFailed)?;
+        imports.push(QuotedImport {
+            path_start,
+            path_end: cursor,
+            scope: None,
+            depth: 0,
+        });
+        cursor = skip_whitespace(source, cursor + 1);
+        match source.get(cursor) {
+            Some(b',') => cursor = skip_whitespace(source, cursor + 1),
+            Some(b';') => return Ok(Some(imports)),
+            _ => return Ok(None),
+        }
+    }
+}
+
+fn parse_mixin_call(source: &[u8], start: usize) -> Option<MixinCall> {
+    let after_keyword = start.checked_add(b"@include".len())?;
+    if !source.get(start..)?.starts_with(b"@include")
+        || !source.get(after_keyword)?.is_ascii_whitespace()
+    {
+        return None;
+    }
+    let name_start = skip_whitespace(source, after_keyword);
+    let mut name_end = identifier_end(source, name_start)?;
+    if source.get(name_start..)?.starts_with(b"--") {
+        return None;
+    }
+    if source.get(name_end) == Some(&b'.') {
+        name_end = identifier_end(source, name_end.checked_add(1)?)?;
+    }
+    let mut cursor = skip_whitespace(source, name_end);
+    if source.get(cursor) == Some(&b'(') {
+        cursor = balanced_end(source, cursor, b'(', b')')?;
+        cursor = skip_whitespace(source, cursor);
+    }
+    if source.get(cursor..)?.starts_with(b"using")
+        && source.get(cursor + b"using".len())?.is_ascii_whitespace()
+    {
+        cursor = skip_whitespace(source, cursor + b"using".len());
+        cursor = balanced_end(source, cursor, b'(', b')')?;
+        cursor = skip_whitespace(source, cursor);
+    }
+    match source.get(cursor)? {
+        b';' => {}
+        b'{' => {
+            balanced_end(source, cursor, b'{', b'}')?;
+        }
+        _ => return None,
+    }
+    Some(MixinCall {
+        name_start,
+        name_end,
+        scope: None,
+        depth: 0,
+    })
+}
+
+fn balanced_end(source: &[u8], start: usize, open: u8, close: u8) -> Option<usize> {
+    if source.get(start) != Some(&open) {
+        return None;
+    }
+    let mut depth = 0_usize;
+    for (offset, &byte) in source.get(start..)?.iter().enumerate() {
+        if byte == open {
+            depth = depth.checked_add(1)?;
+        } else if byte == close {
+            depth = depth.checked_sub(1)?;
+            if depth == 0 {
+                return start.checked_add(offset)?.checked_add(1);
+            }
+        }
+    }
+    None
 }
 
 fn parse_declaration(masked: &[u8], source: &[u8], start: usize) -> Option<Declaration> {
@@ -671,5 +908,68 @@ mod tests {
         assert_eq!(result.scopes.len(), 2);
         assert_eq!(result.declarations[3].scope, Some(0));
         assert_eq!(result.declarations[4].scope, Some(1));
+    }
+
+    #[test]
+    fn captures_complete_named_includes_and_ignores_incomplete_or_masked_ones() {
+        let source = b"@mixin card($radius) { border-radius: $radius; }\n.panel { @include card(2px); @include theme.card using ($value) { color: $value; } content: \"@include ghost;\"; /* @include phantom; */ }\n";
+        let result = scan_source(source, 64, &Cancellation::new()).unwrap();
+        assert_eq!(result.calls.len(), 2);
+        assert_eq!(
+            result
+                .calls
+                .iter()
+                .map(|call| &source[call.name_start..call.name_end])
+                .collect::<Vec<_>>(),
+            [&b"card"[..], &b"theme.card"[..]]
+        );
+        assert_eq!(result.calls[0].scope, Some(1));
+        assert_eq!(result.calls[1].scope, Some(1));
+        for source in [
+            &b"@include card"[..],
+            &b"@include card("[..],
+            &b"@include card nonsense;"[..],
+            &b"@include card#{dynamic};"[..],
+        ] {
+            assert!(
+                scan_source(source, 64, &Cancellation::new())
+                    .unwrap()
+                    .calls
+                    .is_empty()
+            );
+        }
+        assert!(scan_source(b"@include card;", 1, &Cancellation::new()).is_err());
+    }
+
+    #[test]
+    fn captures_each_quoted_import_path_without_comment_or_string_lookalikes() {
+        let source = b"@import \"base/_mixins.scss\";\n@import 'colors.scss', \"layout.scss\";\n.note { content: \"@import ghost.scss;\"; /* @import 'phantom.scss'; */ }\n";
+        let result = scan_source(source, 64, &Cancellation::new()).unwrap();
+        assert_eq!(result.imports.len(), 3);
+        assert_eq!(
+            result
+                .imports
+                .iter()
+                .map(|import| &source[import.path_start..import.path_end])
+                .collect::<Vec<_>>(),
+            [
+                &b"base/_mixins.scss"[..],
+                &b"colors.scss"[..],
+                &b"layout.scss"[..],
+            ]
+        );
+        for source in [
+            &b"@import \"unfinished;"[..],
+            &b"@import \"path.scss\""[..],
+            &b"@import url(\"sheet.css\");"[..],
+        ] {
+            assert!(
+                scan_source(source, 64, &Cancellation::new())
+                    .unwrap()
+                    .imports
+                    .is_empty()
+            );
+        }
+        assert!(scan_source(b"@import \"path.scss\";", 1, &Cancellation::new()).is_err());
     }
 }
