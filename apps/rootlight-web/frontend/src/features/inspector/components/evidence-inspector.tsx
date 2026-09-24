@@ -1,7 +1,7 @@
 // Presents bounded evidence while keeping source bodies in short-lived component memory only.
 
 import { Button } from "@heroui/react/button";
-import { useInfiniteQuery, useMutation, useQuery } from "@tanstack/react-query";
+import { useInfiniteQuery, useMutation, useQuery } from "../../../query/local-query";
 import {
   Braces,
   EyeOff,

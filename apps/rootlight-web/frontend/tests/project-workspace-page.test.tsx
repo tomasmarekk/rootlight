@@ -1,6 +1,7 @@
 // Verifies exact-generation workspace integration and safe browser-history state.
 
-import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { QueryClient } from "../src/query/local-query";
+import { QueryClientProvider } from "../src/query/query-provider";
 import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import type { ReactNode } from "react";

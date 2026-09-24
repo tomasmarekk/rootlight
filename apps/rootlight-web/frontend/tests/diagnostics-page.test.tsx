@@ -1,6 +1,7 @@
 // Verifies diagnostics render only live, source-free host and daemon results.
 
-import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { QueryClient } from "../src/query/local-query";
+import { QueryClientProvider } from "../src/query/query-provider";
 import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";

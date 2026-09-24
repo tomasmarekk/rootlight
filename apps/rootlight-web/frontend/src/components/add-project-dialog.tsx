@@ -1,7 +1,7 @@
 // Keeps local directory selection behind short-lived server capabilities.
 
 import { Button } from "@heroui/react/button";
-import { useMutation, useQuery } from "@tanstack/react-query";
+import { useMutation, useQuery } from "../query/local-query";
 import {
   ArrowLeft,
   ChevronRight,

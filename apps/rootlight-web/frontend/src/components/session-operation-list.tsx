@@ -1,7 +1,7 @@
 // Tracks authoritative daemon revisions for operations admitted by this browser session.
 
 import { Button } from "@heroui/react/button";
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "../query/local-query";
 import {
   Activity,
   Check,

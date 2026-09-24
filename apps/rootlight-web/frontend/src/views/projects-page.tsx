@@ -2,7 +2,7 @@
 
 import { Button } from "@heroui/react/button";
 import { Card } from "@heroui/react/card";
-import { useMutation, useQuery, useQueryClient, type UseQueryResult } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient, type UseQueryResult } from "../query/local-query";
 import {
   Archive,
   ArrowLeft,

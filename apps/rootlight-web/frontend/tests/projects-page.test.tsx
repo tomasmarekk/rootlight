@@ -1,6 +1,7 @@
 // Verifies catalog rendering, filtering, paging, and immutable project navigation.
 
-import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { QueryClient } from "../src/query/local-query";
+import { QueryClientProvider } from "../src/query/query-provider";
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { MemoryRouter } from "react-router";

@@ -1,6 +1,7 @@
 // Verifies revision tracking, explicit cancellation, and separate semantic refinement rows.
 
-import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { QueryClient } from "../src/query/local-query";
+import { QueryClientProvider } from "../src/query/query-provider";
 import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { useEffect } from "react";

@@ -1,14 +1,18 @@
 // Exercises one-time session bootstrap and the authenticated shell boundary.
 
-import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import type { ReactNode } from "react";
 import { MemoryRouter } from "react-router";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-beforeEach(() => {
+let QueryClient: typeof import("../src/query/local-query").QueryClient;
+let QueryClientProvider: typeof import("../src/query/query-provider").QueryClientProvider;
+
+beforeEach(async () => {
   vi.resetModules();
+  ({ QueryClient } = await import("../src/query/local-query"));
+  ({ QueryClientProvider } = await import("../src/query/query-provider"));
 });
 
 afterEach(() => {

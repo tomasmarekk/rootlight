@@ -1,6 +1,7 @@
 // Verifies explicit source disclosure, isolated failures, and typed impact interactions.
 
-import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { QueryClient } from "../src/query/local-query";
+import { QueryClientProvider } from "../src/query/query-provider";
 import { act, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";

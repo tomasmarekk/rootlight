@@ -1,6 +1,7 @@
 // Verifies daemon readiness transitions refresh source-free route data.
 
-import { QueryClient, QueryClientProvider, useQuery } from "@tanstack/react-query";
+import { QueryClient, useQuery } from "../src/query/local-query";
+import { QueryClientProvider } from "../src/query/query-provider";
 import { act, render, screen, waitFor } from "@testing-library/react";
 import { MemoryRouter, Route, Routes } from "react-router";
 import { beforeEach, describe, expect, it, vi } from "vitest";

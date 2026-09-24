@@ -1,6 +1,7 @@
 // Boots the authenticated React application and its bounded query cache.
 
-import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { QueryClient } from "./query/local-query";
+import { QueryClientProvider } from "./query/query-provider";
 import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
 

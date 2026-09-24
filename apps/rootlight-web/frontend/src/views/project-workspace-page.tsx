@@ -1,7 +1,7 @@
 // Resolves an immutable generation before mounting the bounded Atlas workspace.
 
 import { Button } from "@heroui/react/button";
-import { useQuery } from "@tanstack/react-query";
+import { useQuery } from "../query/local-query";
 import { Activity, ArrowLeft, Database, RefreshCw, RotateCcw, TriangleAlert } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { Link, useLocation, useParams, useSearchParams } from "react-router";
