@@ -394,6 +394,22 @@ fn embedded_css_crosses_process_boundaries_with_host_sources() {
 }
 
 #[test]
+fn scss_bounded_declarations_cross_real_process_boundaries() {
+    source_entities_with_coverage_cross_process_boundaries(
+        "scss",
+        "theme.scss",
+        "$accent: #123; @mixin card($color) { $local: $color; } .first { $local: red; }",
+        &[
+            ("accent", "variable", 1),
+            ("card", "function", 1),
+            ("local", "variable", 2),
+        ],
+        &[],
+        Some(true),
+    );
+}
+
+#[test]
 fn markup_analysis_gaps_preserve_scoped_exact_source_access() {
     let source = "<main><script>const embedded = '<fake />';</script><noscript><b>conditional</b></noscript><svg><title>foreign</title></svg></main>\n";
     let mut fixture =
@@ -1754,6 +1770,7 @@ fn source_entities_with_coverage_cross_process_boundaries(
                     | "nix"
                     | "matlab"
                     | "perl"
+                    | "scss"
             )
         {
             // These fixtures use existing IR kinds, unlike the newer data

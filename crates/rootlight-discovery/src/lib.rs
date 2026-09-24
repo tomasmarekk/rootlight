@@ -1886,7 +1886,7 @@ const LANGUAGE_CAPABILITIES: &[LanguageCapability] = &[
         aliases: &[],
         detectors: &["extension"],
         maximum_tier: "tier_d",
-        analyzers: &["source-fallback"],
+        analyzers: &["native"],
     },
     LanguageCapability {
         language: "solidity",
@@ -3458,7 +3458,6 @@ max_source_file_bytes = 2097152
             ("actor.pony", "pony"),
             ("theme.less", "less"),
             ("theme.sass", "sass"),
-            ("theme.scss", "scss"),
         ] {
             assert_eq!(extension_language(path), Some(language), "{path}");
             let (_, signals) = classify(
@@ -3491,7 +3490,7 @@ max_source_file_bytes = 2097152
 
     #[test]
     fn first_party_parsers_advertise_native_structural_analysis() {
-        for language in ["elm", "prolog"] {
+        for language in ["elm", "prolog", "scss"] {
             let capability = language_capabilities()
                 .iter()
                 .find(|capability| capability.language == language)

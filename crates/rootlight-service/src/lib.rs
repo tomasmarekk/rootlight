@@ -49,8 +49,8 @@ use rootlight_adapter_treesitter::{
     TreeSitterAnalyzer, TreeSitterProvider, TreeSitterStructuralArtifact,
 };
 use rootlight_adapters::{
-    ElmParseProvider, PrologParseProvider, RuntimeTraceImportRequest, SemanticProjectLanguage,
-    import_runtime_trace,
+    ElmParseProvider, PrologParseProvider, RuntimeTraceImportRequest, ScssParseProvider,
+    SemanticProjectLanguage, import_runtime_trace,
 };
 pub use rootlight_adapters::{
     PROJECT_SYNTAX_FACT_LIMIT_DIAGNOSTIC, RUNTIME_TRACE_SCHEMA_VERSION, RuntimeTraceImportError,
@@ -5229,6 +5229,16 @@ impl StructuralPreflight for PrologParseProvider {
     }
 }
 
+impl StructuralPreflight for ScssParseProvider {
+    fn required_syntax_fact_count(
+        &self,
+        request: &rootlight_adapter_sdk::ParseRequest<'_>,
+        cancellation: &Cancellation,
+    ) -> Result<usize, AdapterError> {
+        ScssParseProvider::required_syntax_fact_count(self, request, cancellation)
+    }
+}
+
 /// Transport-independent owner of bounded repository generations.
 ///
 /// The service retains at most the caller-selected hard-bounded generation
@@ -6125,6 +6135,10 @@ impl FirstSliceService {
             PrologParseProvider::new(maximum_source_bytes, MAX_SYNTAX_NODES)
                 .map_err(|_| FirstSliceError::Adapter)?,
         );
+        let scss_parser = Arc::new(
+            ScssParseProvider::new(maximum_source_bytes, MAX_SYNTAX_NODES)
+                .map_err(|_| FirstSliceError::Adapter)?,
+        );
         let producer =
             ProducerIdentity::new("rootlight-first-slice-treesitter", "1.0", config.hash())
                 .map_err(|_| FirstSliceError::Adapter)?;
@@ -6224,6 +6238,29 @@ impl FirstSliceService {
             .insert(
                 "prolog".to_owned(),
                 prolog_parser as Arc<dyn StructuralPreflight>,
+            )
+            .is_some()
+        {
+            return Err(FirstSliceError::Adapter);
+        }
+        let scss_provider: Arc<dyn ParseProvider> =
+            Arc::clone(&scss_parser) as Arc<dyn ParseProvider>;
+        let scss_analyzer = TreeSitterAnalyzer::new(
+            scss_provider,
+            ProducerIdentity::new("rootlight-first-slice-scss-native", "1.0", config.hash())
+                .map_err(|_| FirstSliceError::Adapter)?,
+            LanguageId::new("scss").map_err(|_| FirstSliceError::Adapter)?,
+            "scss-native-structural-1",
+            ScssParseProvider::binary_digest(),
+        )
+        .map_err(|_| FirstSliceError::Adapter)?;
+        if analyzers.insert("scss".to_owned(), scss_analyzer).is_some() {
+            return Err(FirstSliceError::Adapter);
+        }
+        if structural_parsers
+            .insert(
+                "scss".to_owned(),
+                scss_parser as Arc<dyn StructuralPreflight>,
             )
             .is_some()
         {
@@ -13274,6 +13311,38 @@ impl FirstSliceService {
                         observe(FirstSliceCoverageGapReason::Truncated, Some(file.id), None)?;
                     }
                 }
+            }
+        }
+        if !file_only_fallback {
+            let mut reported = BTreeSet::new();
+            for files in grouped.values() {
+                reported.extend(files.iter().copied());
+            }
+            for coverage in &document.coverage_records {
+                check_cancellation(cancellation)?;
+                let CoverageScope::File(file) = coverage.scope else {
+                    continue;
+                };
+                if coverage.domain != IrFactDomain::Entities
+                    || coverage.status != CoverageStatus::Bounded
+                    || reported.contains(&file)
+                {
+                    continue;
+                }
+                let Some(source) = snapshot
+                    .find_file(file)
+                    .filter(|source| in_path_scope(source))
+                else {
+                    continue;
+                };
+                grouped
+                    .entry((
+                        FirstSliceCoverageGapReason::Unsupported,
+                        Some(source.language.clone()),
+                    ))
+                    .or_default()
+                    .insert(file);
+                reported.insert(file);
             }
         }
         let relevant_language = |language: &Option<String>| {
@@ -29380,7 +29449,6 @@ mod tests {
             ("actor.pony", "actor Main\n", "pony"),
             ("theme.less", "@accent: blue;\n", "less"),
             ("theme.sass", "$accent: blue\n", "sass"),
-            ("theme.scss", "$accent: blue;\n", "scss"),
         ];
         for (path, content, _) in sources {
             fs::write(fixture.path().join(path), content).expect("source fixture writes");
@@ -29467,7 +29535,6 @@ mod tests {
             "pony",
             "less",
             "sass",
-            "scss",
         ] {
             assert!(gaps.iter().any(|gap| {
                 gap.reason == FirstSliceCoverageGapReason::Unsupported
@@ -29475,6 +29542,93 @@ mod tests {
                     && gap.files == 1
             }));
         }
+    }
+
+    #[test]
+    fn scss_declarations_have_exact_source_backed_identities() {
+        let fixture = TempDir::new().expect("fixture root exists");
+        let source = "$accent: #123456;\n@mixin card($radius) { border-radius: $radius; $local: $radius; }\n@function scale($value) { @return $value * 2; }\n/* $phantom: red; */\n.note { content: \"@mixin ghost {}\"; $nested: blue; color: $accent; }\n.first { $same: 1; }\n.second { $same: 2; }\n";
+        fs::write(fixture.path().join("theme.scss"), source).expect("SCSS source writes");
+        let mut service = FirstSliceService::new(2).expect("service initializes");
+        let receipt = service
+            .index_repository(fixture.path(), &deadline())
+            .expect("SCSS source publishes");
+        let generation = service
+            .loaded_generation_snapshot(receipt.generation)
+            .expect("generation remains retained");
+        let mut entities = generation
+            .document()
+            .entities
+            .iter()
+            .filter(|entity| entity.language == "scss")
+            .collect::<Vec<_>>();
+        entities.sort_unstable_by_key(|entity| entity.canonical_name.as_str());
+        assert_eq!(
+            entities
+                .iter()
+                .map(|entity| (entity.canonical_name.as_str(), entity.kind))
+                .collect::<Vec<_>>(),
+            [
+                ("accent", EntityKind::Variable),
+                ("card", EntityKind::Function),
+                ("local", EntityKind::Variable),
+                ("nested", EntityKind::Variable),
+                ("same", EntityKind::Variable),
+                ("same", EntityKind::Variable),
+                ("scale", EntityKind::Function),
+            ]
+        );
+        let scoped = entities
+            .iter()
+            .filter(|entity| entity.canonical_name == "same")
+            .collect::<Vec<_>>();
+        assert_ne!(scoped[0].id, scoped[1].id);
+        for entity in entities {
+            let reference = entity
+                .evidence
+                .source
+                .clone()
+                .expect("declaration retains source evidence");
+            assert_eq!(reference.generation(), receipt.generation);
+            let read = service
+                .source_read_with_options_and_budget(
+                    receipt.generation,
+                    vec![reference.clone()],
+                    SourceReadOptions::new()
+                        .with_context_lines_before(0)
+                        .with_context_lines_after(0)
+                        .with_encoding(SourceEncoding::Bytes),
+                    FirstSliceBudget::default(),
+                    &deadline(),
+                )
+                .expect("declaration source resolves");
+            let span = reference.span();
+            let expected = source
+                .as_bytes()
+                .get(
+                    usize::try_from(span.start_byte()).unwrap()
+                        ..usize::try_from(span.end_byte()).unwrap(),
+                )
+                .expect("declaration span is within source");
+            assert_eq!(read.data.chunks[0].bytes, expected);
+        }
+        let coverage = service
+            .repository_status(receipt.repository, None)
+            .expect("repository status resolves");
+        assert!(coverage.coverage.iter().any(|entry| {
+            entry.language == "scss"
+                && entry.discovered_files == 1
+                && entry.indexed_files == 1
+                && entry.status == "bounded"
+        }));
+        let gaps = service
+            .coverage_gaps_until(receipt.repository, receipt.generation, &deadline())
+            .expect("SCSS coverage gaps resolve");
+        assert!(gaps.iter().any(|gap| {
+            gap.language.as_deref() == Some("scss")
+                && gap.reason == FirstSliceCoverageGapReason::Unsupported
+                && gap.files == 1
+        }));
     }
 
     #[test]
