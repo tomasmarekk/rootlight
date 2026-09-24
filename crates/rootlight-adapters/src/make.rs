@@ -3,16 +3,24 @@
 //! Expansion, recipes, directives, and continued headers remain bounded gaps.
 
 use rootlight_adapter_sdk::{
-    AdapterError, CoverageReport, DescriptorError, DiagnosticCode, DomainCoverage, EncodingId,
-    LanguageId, MemoryEnforcement, ParseCapabilities, ParseProvider, ParseReport, ParseRequest,
-    ResourceUsage, SinkError, StreamEnd, SyntaxFact, SyntaxFactBatch, SyntaxFactKind,
-    SyntaxFactSink, SyntaxKindLabel,
+    AdapterDiagnostic, AdapterError, CoverageReport, DescriptorError, DiagnosticCode,
+    DomainCoverage, EncodingId, LanguageId, MemoryEnforcement, ParseCapabilities, ParseProvider,
+    ParseReport, ParseRequest, ResourceUsage, SinkError, StreamEnd, StreamUsage, SyntaxFact,
+    SyntaxFactBatch, SyntaxFactKind, SyntaxFactSink, SyntaxKindLabel,
 };
 use rootlight_cancel::Cancellation;
 use rootlight_ids::{ContentHash, FileId, content_hash};
-use rootlight_ir::{AnalysisTier, CoverageStatus, FactDomain, SourceSpan};
+use rootlight_ir::{
+    AnalysisTier, CoverageStatus, DiagnosticSeverity, FactDomain, SourceRef, SourceSpan,
+};
 
 const CHECK_INTERVAL: usize = 4096;
+const MAX_SCOPED_GAPS: usize = 32;
+const MAX_GAP_CODE_BYTES: usize = 40;
+const MAX_GAP_IR_BYTES: usize = 128;
+// The syntax sink accounts one logical record plus its code; this larger
+// reservation keeps optional gap evidence inside caller-owned stream quotas.
+const MAX_GAP_ACCOUNTED_BYTES: usize = 256;
 
 /// Bounded native provider for source-backed Makefile definitions.
 pub struct MakeParseProvider {
@@ -162,6 +170,44 @@ impl ParseProvider for MakeParseProvider {
                 cancellation,
             )?;
         }
+        let diagnostic_budget = gap_diagnostic_budget(request, sink.staged_usage());
+        if parsed.skipped_regions > 0 && diagnostic_budget > 0 {
+            let mut diagnostics = Vec::new();
+            let diagnostic_count = parsed.skipped_regions.min(diagnostic_budget);
+            diagnostics
+                .try_reserve_exact(diagnostic_count)
+                .map_err(|_| SinkError::AllocationFailed)?;
+            let precise_count = if parsed.skipped_regions > diagnostic_budget {
+                diagnostic_count - 1
+            } else {
+                diagnostic_count
+            };
+            for gap in parsed.gaps.iter().take(precise_count) {
+                diagnostics.push(gap_diagnostic(
+                    source.source_ref(),
+                    gap.start,
+                    gap.end,
+                    gap.kind.code(),
+                )?);
+            }
+            if parsed.skipped_regions > diagnostic_budget {
+                let start = parsed
+                    .gaps
+                    .get(precise_count)
+                    .ok_or_else(|| failure("make-gap-accounting"))?
+                    .start;
+                diagnostics.push(gap_diagnostic(
+                    source.source_ref(),
+                    start,
+                    parsed.last_gap_end,
+                    "make-gap-diagnostic-limit",
+                )?);
+            }
+            sink.push_cancellable(
+                SyntaxFactBatch::new(sink.next_sequence(), Vec::new(), diagnostics),
+                cancellation,
+            )?;
+        }
         let usage = sink.staged_usage();
         let source_bytes = source.bytes().len();
         let reference_count: usize = parsed
@@ -201,6 +247,63 @@ impl ParseProvider for MakeParseProvider {
     }
 }
 
+fn gap_diagnostic_budget(request: &ParseRequest<'_>, used: StreamUsage) -> usize {
+    let syntax = request.limits().syntax_stream();
+    if used.batches() >= syntax.max_batches() {
+        return 0;
+    }
+    let batch = syntax.batch();
+    let ir = request.limits().ir();
+    [
+        MAX_SCOPED_GAPS,
+        batch.max_diagnostics(),
+        batch.max_diagnostic_bytes() / MAX_GAP_CODE_BYTES,
+        batch.max_output_bytes() / MAX_GAP_ACCOUNTED_BYTES,
+        syntax.max_diagnostics().saturating_sub(used.diagnostics()),
+        syntax
+            .max_diagnostic_bytes()
+            .saturating_sub(used.diagnostic_bytes())
+            / MAX_GAP_CODE_BYTES,
+        syntax
+            .max_string_bytes()
+            .saturating_sub(used.string_bytes())
+            / MAX_GAP_CODE_BYTES,
+        syntax
+            .max_output_bytes()
+            .saturating_sub(used.output_bytes())
+            / MAX_GAP_ACCOUNTED_BYTES,
+        ir.max_diagnostics,
+        ir.max_skipped_regions,
+        ir.max_total_diagnostic_bytes / MAX_GAP_IR_BYTES,
+    ]
+    .into_iter()
+    .min()
+    .unwrap_or(0)
+}
+
+fn gap_diagnostic(
+    full: &SourceRef,
+    start: usize,
+    end: usize,
+    code: &str,
+) -> Result<AdapterDiagnostic, AdapterError> {
+    debug_assert!(code.len() <= MAX_GAP_CODE_BYTES);
+    let span = source_span(full.span().file(), start, end)?;
+    let source = SourceRef::new(
+        full.repository(),
+        full.generation(),
+        span,
+        full.content_hash(),
+        None,
+    );
+    Ok(AdapterDiagnostic::new(
+        DiagnosticCode::new(code).map_err(|_| failure("make-diagnostic-code"))?,
+        DiagnosticSeverity::Warning,
+        Some(source),
+        CoverageStatus::Bounded,
+    ))
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum DeclarationKind {
     Target,
@@ -224,6 +327,62 @@ struct ParsedSource {
     declarations: Vec<Declaration>,
     skipped_regions: usize,
     fact_count: usize,
+    gaps: Vec<Gap>,
+    last_gap_end: usize,
+}
+
+#[derive(Clone, Copy)]
+enum GapKind {
+    ContinuedHeader,
+    DefineBlock,
+    Recipe,
+    UnsupportedStatement,
+    UnsupportedTarget,
+    UnsupportedPrerequisite,
+    OrderOnlyPrerequisite,
+    VariableValue,
+    DynamicTarget,
+    DynamicPrerequisite,
+    MultipleTargetPrerequisite,
+}
+
+impl GapKind {
+    const fn code(self) -> &'static str {
+        match self {
+            Self::ContinuedHeader => "make-continued-header-not-analyzed",
+            Self::DefineBlock => "make-define-block-not-analyzed",
+            Self::Recipe => "make-recipe-not-analyzed",
+            Self::UnsupportedStatement => "make-statement-not-analyzed",
+            Self::UnsupportedTarget => "make-target-name-not-analyzed",
+            Self::UnsupportedPrerequisite => "make-prerequisite-token-not-analyzed",
+            Self::OrderOnlyPrerequisite => "make-order-only-semantics-not-analyzed",
+            Self::VariableValue => "make-variable-value-not-analyzed",
+            Self::DynamicTarget => "make-dynamic-target-not-analyzed",
+            Self::DynamicPrerequisite => "make-dynamic-prerequisite-not-analyzed",
+            Self::MultipleTargetPrerequisite => "make-multi-target-relations-not-analyzed",
+        }
+    }
+}
+
+struct Gap {
+    start: usize,
+    end: usize,
+    kind: GapKind,
+}
+
+struct TokenScan {
+    tokens: Vec<(usize, usize)>,
+    unsupported: Option<(usize, usize)>,
+    order_only: Option<usize>,
+    dynamic: Option<(usize, usize)>,
+}
+
+fn record_gap(parsed: &mut ParsedSource, start: usize, end: usize, kind: GapKind) {
+    parsed.skipped_regions = parsed.skipped_regions.saturating_add(1);
+    parsed.last_gap_end = end;
+    if parsed.gaps.len() < MAX_SCOPED_GAPS {
+        parsed.gaps.push(Gap { start, end, kind });
+    }
 }
 
 fn syntax_fact_count(parsed: &ParsedSource) -> usize {
@@ -243,6 +402,8 @@ fn scan_source(
         declarations: Vec::new(),
         skipped_regions: 0,
         fact_count: 1,
+        gaps: Vec::new(),
+        last_gap_end: 0,
     };
     let mut line_start = 0;
     let mut continued = false;
@@ -285,6 +446,9 @@ fn scan_line(
     parsed: &mut ParsedSource,
     max_syntax_nodes: usize,
 ) -> Result<(), AdapterError> {
+    let raw_line_end = offset
+        .checked_add(line.len())
+        .ok_or_else(|| failure("make-source-offset-limit"))?;
     let code = line.get(..comment_start(line)).unwrap_or_default();
     let code = code.trim_ascii_end();
     let previous_continued = *continued;
@@ -295,7 +459,7 @@ fn scan_line(
         return Ok(());
     }
     if *define_depth > 0 {
-        parsed.skipped_regions = parsed.skipped_regions.saturating_add(1);
+        record_gap(parsed, offset, raw_line_end, GapKind::DefineBlock);
         if trimmed == b"endef" {
             *define_depth -= 1;
         } else if trimmed.starts_with(b"define ") || trimmed.starts_with(b"define\t") {
@@ -305,13 +469,17 @@ fn scan_line(
         }
         return Ok(());
     }
-    if previous_continued || *continued || line.first() == Some(&b'\t') {
-        parsed.skipped_regions = parsed.skipped_regions.saturating_add(1);
+    if previous_continued || *continued {
+        record_gap(parsed, offset, raw_line_end, GapKind::ContinuedHeader);
+        return Ok(());
+    }
+    if line.first() == Some(&b'\t') {
+        record_gap(parsed, offset, raw_line_end, GapKind::Recipe);
         return Ok(());
     }
     if trimmed.starts_with(b"define ") || trimmed.starts_with(b"define\t") {
         *define_depth = 1;
-        parsed.skipped_regions = parsed.skipped_regions.saturating_add(1);
+        record_gap(parsed, offset, raw_line_end, GapKind::DefineBlock);
         return Ok(());
     }
     let leading = code.len() - trimmed.len();
@@ -333,6 +501,23 @@ fn scan_line(
             },
             max_syntax_nodes,
         )?;
+        if let Some(equals) = trimmed
+            .get(name_end..)
+            .and_then(|tail| tail.iter().position(|byte| *byte == b'='))
+        {
+            let value_start = name_end + equals + 1;
+            if trimmed
+                .get(value_start..)
+                .is_some_and(|value| !value.trim_ascii().is_empty())
+            {
+                record_gap(
+                    parsed,
+                    start + value_start,
+                    line_end,
+                    GapKind::VariableValue,
+                );
+            }
+        }
         return Ok(());
     }
     if let Some(colon) = trimmed.iter().position(|byte| *byte == b':') {
@@ -341,7 +526,27 @@ fn scan_line(
             start,
             max_syntax_nodes,
         )?;
-        if !targets.is_empty() {
+        if let Some((dynamic_start, dynamic_end)) = targets.dynamic {
+            record_gap(
+                parsed,
+                dynamic_start,
+                if targets.tokens.is_empty() {
+                    line_end
+                } else {
+                    dynamic_end
+                },
+                GapKind::DynamicTarget,
+            );
+        }
+        if !targets.tokens.is_empty() {
+            if let Some((unsupported_start, unsupported_end)) = targets.unsupported {
+                record_gap(
+                    parsed,
+                    unsupported_start,
+                    unsupported_end,
+                    GapKind::UnsupportedTarget,
+                );
+            }
             let prerequisite_start = colon + 1 + usize::from(trimmed.get(colon + 1) == Some(&b':'));
             let prerequisite_text = trimmed.get(prerequisite_start..).unwrap_or_default();
             let prerequisite_end = prerequisite_text
@@ -355,10 +560,37 @@ fn scan_line(
                 start + prerequisite_start,
                 max_syntax_nodes,
             )?;
-            let single_target = targets.len() == 1;
-            for (name_start, name_end) in targets {
+            if let Some((unsupported_start, unsupported_end)) = prerequisites.unsupported {
+                record_gap(
+                    parsed,
+                    unsupported_start,
+                    unsupported_end,
+                    GapKind::UnsupportedPrerequisite,
+                );
+            }
+            if let Some((dynamic_start, dynamic_end)) = prerequisites.dynamic {
+                record_gap(
+                    parsed,
+                    dynamic_start,
+                    dynamic_end,
+                    GapKind::DynamicPrerequisite,
+                );
+            }
+            if let Some(order_only_start) = prerequisites.order_only {
+                record_gap(
+                    parsed,
+                    order_only_start,
+                    line_end,
+                    GapKind::OrderOnlyPrerequisite,
+                );
+            }
+            let single_target = targets.tokens.len() == 1
+                && targets.dynamic.is_none()
+                && targets.unsupported.is_none();
+            for (name_start, name_end) in targets.tokens {
                 let references = if single_target {
                     prerequisites
+                        .tokens
                         .iter()
                         .map(|&(start, end)| Reference { start, end })
                         .collect()
@@ -377,17 +609,30 @@ fn scan_line(
                     max_syntax_nodes,
                 )?;
             }
-            if !single_target
-                || trimmed
-                    .get(prerequisite_start..)
-                    .is_some_and(|tail| tail.contains(&b'$'))
-            {
-                parsed.skipped_regions = parsed.skipped_regions.saturating_add(1);
+            if !single_target && !prerequisites.tokens.is_empty() {
+                record_gap(
+                    parsed,
+                    start + prerequisite_start,
+                    line_end,
+                    GapKind::MultipleTargetPrerequisite,
+                );
             }
             return Ok(());
         }
+        if let Some((unsupported_start, unsupported_end)) = targets.unsupported {
+            record_gap(
+                parsed,
+                unsupported_start,
+                unsupported_end,
+                GapKind::UnsupportedTarget,
+            );
+            return Ok(());
+        }
+        if targets.dynamic.is_some() {
+            return Ok(());
+        }
     }
-    parsed.skipped_regions = parsed.skipped_regions.saturating_add(1);
+    record_gap(parsed, offset, raw_line_end, GapKind::UnsupportedStatement);
     Ok(())
 }
 
@@ -451,8 +696,13 @@ fn static_tokens(
     source: &[u8],
     offset: usize,
     max_syntax_nodes: usize,
-) -> Result<Vec<(usize, usize)>, AdapterError> {
-    let mut tokens = Vec::new();
+) -> Result<TokenScan, AdapterError> {
+    let mut scan = TokenScan {
+        tokens: Vec::new(),
+        unsupported: None,
+        order_only: None,
+        dynamic: None,
+    };
     let mut index = 0;
     while index < source.len() {
         while source.get(index).is_some_and(u8::is_ascii_whitespace) {
@@ -471,20 +721,34 @@ fn static_tokens(
         let Some(token) = source.get(start..index) else {
             break;
         };
-        if token == b"|" || token.first() == Some(&b';') {
+        if token == b"|" {
+            scan.order_only.get_or_insert(offset + start);
             continue;
         }
-        if valid_static_name(token) {
-            if tokens.len() >= max_syntax_nodes {
+        if token.first() == Some(&b';') {
+            continue;
+        }
+        if token.contains(&b'$') {
+            if let Some((_, end)) = &mut scan.dynamic {
+                *end = offset + index;
+            } else {
+                scan.dynamic = Some((offset + start, offset + index));
+            }
+        } else if valid_static_name(token) {
+            if scan.tokens.len() >= max_syntax_nodes {
                 return Err(failure("make-syntax-node-limit"));
             }
-            tokens
+            scan.tokens
                 .try_reserve(1)
                 .map_err(|_| SinkError::AllocationFailed)?;
-            tokens.push((offset + start, offset + index));
+            scan.tokens.push((offset + start, offset + index));
+        } else if let Some((_, end)) = &mut scan.unsupported {
+            *end = offset + index;
+        } else {
+            scan.unsupported = Some((offset + start, offset + index));
         }
     }
-    Ok(tokens)
+    Ok(scan)
 }
 
 fn valid_static_name(name: &[u8]) -> bool {
@@ -550,6 +814,14 @@ mod tests {
         assert_eq!(parsed.declarations[2].prerequisites.len(), 1);
         assert_eq!(syntax_fact_count(&parsed), 12);
         assert!(parsed.skipped_regions >= 3);
+        assert!(parsed.gaps.iter().any(|gap| {
+            gap.kind.code() == "make-dynamic-prerequisite-not-analyzed"
+                && &source[gap.start..gap.end] == b"$(DYNAMIC)"
+        }));
+        assert!(parsed.gaps.iter().any(|gap| {
+            gap.kind.code() == "make-recipe-not-analyzed"
+                && &source[gap.start..gap.end] == b"\t@echo fake: target"
+        }));
         assert!(scan_source(source, 11, &Cancellation::new()).is_err());
     }
 
@@ -573,6 +845,87 @@ mod tests {
             b"real"
         );
         assert!(parsed.skipped_regions >= 4);
+    }
+
+    #[test]
+    fn recipe_text_cannot_open_a_define_block() {
+        let source = b"all:\n\tdefine PHANTOM\nreal: check\ncheck:\n";
+        let parsed = scan_source(source, 8, &Cancellation::new()).unwrap();
+        let names: Vec<_> = parsed
+            .declarations
+            .iter()
+            .map(|declaration| &source[declaration.name_start..declaration.name_end])
+            .collect();
+        assert_eq!(names, [b"all".as_slice(), b"real", b"check"]);
+        assert_eq!(parsed.gaps[0].kind.code(), "make-recipe-not-analyzed");
+    }
+
+    #[test]
+    fn many_unsupported_lines_preserve_a_bounded_gap_summary_range() {
+        let source = b"include first.mk\n".repeat(MAX_SCOPED_GAPS + 8);
+        let parsed = scan_source(&source, 1, &Cancellation::new()).unwrap();
+        assert_eq!(parsed.skipped_regions, MAX_SCOPED_GAPS + 8);
+        assert_eq!(parsed.gaps.len(), MAX_SCOPED_GAPS);
+        assert_eq!(parsed.last_gap_end, source.len() - 1);
+        assert_eq!(parsed.gaps[0].kind.code(), "make-statement-not-analyzed");
+    }
+
+    #[test]
+    fn unsupported_names_and_order_only_semantics_are_explicit_gaps() {
+        let source = b"ROOT := src\nobj/main.o: src/main.c | generated/\n";
+        let parsed = scan_source(source, 8, &Cancellation::new()).unwrap();
+        let observed: Vec<_> = parsed
+            .gaps
+            .iter()
+            .map(|gap| (gap.kind.code(), &source[gap.start..gap.end]))
+            .collect();
+        assert!(observed.contains(&("make-variable-value-not-analyzed", b" src".as_slice())));
+        assert!(observed.contains(&("make-target-name-not-analyzed", b"obj/main.o".as_slice())));
+        assert_eq!(parsed.declarations.len(), 1);
+
+        let source = b"all: check | generated/\ncheck:\n";
+        let parsed = scan_source(source, 8, &Cancellation::new()).unwrap();
+        assert!(parsed.gaps.iter().any(|gap| {
+            gap.kind.code() == "make-prerequisite-token-not-analyzed"
+                && &source[gap.start..gap.end] == b"generated/"
+        }));
+        assert!(parsed.gaps.iter().any(|gap| {
+            gap.kind.code() == "make-order-only-semantics-not-analyzed"
+                && &source[gap.start..gap.end] == b"| generated/"
+        }));
+
+        let source = b"$(TARGET): source.c\n";
+        let parsed = scan_source(source, 8, &Cancellation::new()).unwrap();
+        assert!(parsed.declarations.is_empty());
+        assert_eq!(parsed.gaps.len(), 1);
+        assert_eq!(
+            parsed.gaps[0].kind.code(),
+            "make-dynamic-target-not-analyzed"
+        );
+        assert_eq!(
+            &source[parsed.gaps[0].start..parsed.gaps[0].end],
+            b"$(TARGET): source.c"
+        );
+    }
+
+    #[test]
+    fn gap_codes_fit_the_conservative_stream_budget() {
+        for kind in [
+            GapKind::ContinuedHeader,
+            GapKind::DefineBlock,
+            GapKind::Recipe,
+            GapKind::UnsupportedStatement,
+            GapKind::UnsupportedTarget,
+            GapKind::UnsupportedPrerequisite,
+            GapKind::OrderOnlyPrerequisite,
+            GapKind::VariableValue,
+            GapKind::DynamicTarget,
+            GapKind::DynamicPrerequisite,
+            GapKind::MultipleTargetPrerequisite,
+        ] {
+            assert!(kind.code().len() <= MAX_GAP_CODE_BYTES);
+        }
+        assert!("make-gap-diagnostic-limit".len() <= MAX_GAP_CODE_BYTES);
     }
 
     #[test]

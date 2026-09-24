@@ -25949,6 +25949,20 @@ mod tests {
         assert!(document.entities.iter().any(|entity| {
             entity.canonical_name == "APP" && entity.kind == EntityKind::Variable
         }));
+        assert!(document.skipped_regions.iter().any(|gap| {
+            gap.detail == "make-recipe-not-analyzed"
+                && gap.source.generation() == receipt.generation
+                && source.as_bytes().get(
+                    usize::try_from(gap.source.span().start_byte()).unwrap()
+                        ..usize::try_from(gap.source.span().end_byte()).unwrap(),
+                ) == Some(b"\t@echo $(APP)".as_slice())
+        }));
+        assert!(
+            !document
+                .skipped_regions
+                .iter()
+                .any(|gap| gap.detail == "parser-coverage-incomplete")
+        );
         assert!(
             document.occurrences.iter().any(|occurrence| {
                 occurrence.role == OccurrenceRole::Reference
@@ -25960,6 +25974,52 @@ mod tests {
             }),
             "{:?}",
             document.occurrences
+        );
+    }
+
+    #[test]
+    fn make_gap_diagnostic_budget_keeps_an_explicit_source_range() {
+        use rootlight_ir::EntityKind;
+
+        let fixture = TempDir::new().expect("fixture root exists");
+        let mut source = "include ./shared.mk\n".repeat(40);
+        source.push_str("all: ready\nready:\n");
+        fs::write(fixture.path().join("Makefile"), &source).unwrap();
+        let cancellation = deadline();
+        let mut service = FirstSliceService::new(2).expect("service initializes");
+        let receipt = service
+            .index_repository(fixture.path(), &cancellation)
+            .unwrap();
+        let snapshot = service
+            .loaded_generation_snapshot(receipt.generation)
+            .unwrap();
+        let document = snapshot.document();
+        assert!(document.entities.iter().any(|entity| {
+            entity.kind == EntityKind::BuildTarget && entity.canonical_name == "ready"
+        }));
+        assert_eq!(
+            document
+                .skipped_regions
+                .iter()
+                .filter(|gap| gap.detail == "make-statement-not-analyzed")
+                .count(),
+            31
+        );
+        let overflow = document
+            .skipped_regions
+            .iter()
+            .find(|gap| gap.detail == "make-gap-diagnostic-limit")
+            .unwrap();
+        let skipped_source = &source.as_bytes()[usize::try_from(overflow.source.span().start_byte())
+            .unwrap()
+            ..usize::try_from(overflow.source.span().end_byte()).unwrap()];
+        assert!(skipped_source.starts_with(b"include ./shared.mk"));
+        assert!(skipped_source.ends_with(b"include ./shared.mk"));
+        assert!(
+            !document
+                .skipped_regions
+                .iter()
+                .any(|gap| gap.detail == "parser-coverage-incomplete")
         );
     }
 
