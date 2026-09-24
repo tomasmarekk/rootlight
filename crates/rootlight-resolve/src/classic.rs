@@ -739,16 +739,26 @@ impl<'a> ClassicIndex<'a> {
                 },
             );
         }
-        // A project-proven UDT type also owns its declared fields. Enum values
-        // do not establish an instance member environment.
+        // A project-proven UDT type owns its declared fields, while a property
+        // getter's result type can establish the next receiver in a chain.
+        // Enum values do not establish an instance member environment.
         let mut value_types = BTreeMap::new();
         let mut receivers = BTreeMap::new();
         let mut members = BTreeMap::new();
+        let mut parameterized_properties = BTreeSet::new();
         let mut field_definitions = BTreeMap::new();
         let mut unconditional_udts = BTreeMap::new();
         for entity in entities.values() {
             cancellation.check()?;
             work.consume()?;
+            if entity.kind == EntityKind::Parameter
+                && let Some(ContainerRef::Entity(owner)) = entity.container
+                && entities
+                    .get(&owner)
+                    .is_some_and(|owner| owner.kind == EntityKind::Property)
+            {
+                parameterized_properties.insert(owner);
+            }
             if let Some(ContainerRef::Entity(owner)) = entity.container {
                 members
                     .entry((owner, entity.canonical_name.to_ascii_lowercase()))
@@ -793,7 +803,10 @@ impl<'a> ClassicIndex<'a> {
                 .copied()
                 && matches!(
                     owner.kind,
-                    EntityKind::Parameter | EntityKind::Variable | EntityKind::Field
+                    EntityKind::Parameter
+                        | EntityKind::Variable
+                        | EntityKind::Field
+                        | EntityKind::Property
                 )
             {
                 let typed = result
@@ -933,19 +946,28 @@ impl<'a> ClassicIndex<'a> {
                         (*owner, *class, Arc::clone(context), source.clone())
                     })
             } else if receiver.contains('.') {
-                // A qualified receiver is usable only when the shorter exact
-                // source expression already resolved to a declared UDT field.
+                // A qualified receiver requires the shorter exact expression:
+                // a declared UDT field or a project-typed property result.
                 resolved_members
                     .get(&receiver_span)
                     .and_then(|id: &Option<FactId>| *id)
                     .and_then(|id| result.proofs.get(&id))
-                    .filter(|proof| proof.target.kind == EntityKind::Field)
+                    .filter(|proof| {
+                        matches!(proof.target.kind, EntityKind::Field | EntityKind::Property)
+                    })
                     .and_then(|proof| value_types.get(&proof.target.id))
                     .and_then(Option::as_ref)
-                    .filter(|(_, class, _, _)| {
-                        entities
-                            .get(class)
-                            .is_some_and(|entity| entity.kind == EntityKind::Struct)
+                    .filter(|(owner, class, _, _)| {
+                        entities.get(class).is_some_and(|entity| {
+                            matches!(
+                                (owner.kind, entity.kind),
+                                (EntityKind::Field, EntityKind::Struct)
+                                    | (
+                                        EntityKind::Property,
+                                        EntityKind::Class | EntityKind::Struct
+                                    )
+                            )
+                        })
                     })
                     .map(|(owner, class, context, source)| {
                         (*owner, *class, Arc::clone(context), source.clone())
@@ -1071,7 +1093,14 @@ impl<'a> ClassicIndex<'a> {
                             | EntityKind::Field
                             | EntityKind::Constant
                     ),
-                    _ => matches!(target.kind, EntityKind::Method | EntityKind::Field),
+                    _ => {
+                        matches!(target.kind, EntityKind::Method | EntityKind::Field)
+                            || (target.kind == EntityKind::Property
+                                && value_types
+                                    .get(&target.id)
+                                    .and_then(Option::as_ref)
+                                    .is_some())
+                    }
                 }
             };
             if !accessible {
@@ -1085,7 +1114,12 @@ impl<'a> ClassicIndex<'a> {
                     receiver: Some((owner, type_source)),
                 },
             );
-            if occurrence.syntax_kind == "vba.member.reference" && target.kind == EntityKind::Field
+            // Without arity evidence, a bare parameterized getter cannot be
+            // used as the receiver for another member.
+            if occurrence.syntax_kind == "vba.member.reference"
+                && (target.kind == EntityKind::Field
+                    || (target.kind == EntityKind::Property
+                        && !parameterized_properties.contains(&target.id)))
             {
                 resolved_members
                     .entry(span)

@@ -35273,6 +35273,146 @@ mod tests {
     }
 
     #[test]
+    fn classic_project_property_results_resolve_nested_members() {
+        let client = "Attribute VB_Name = \"Client\"\nPublic Sub Run(ByVal value As Owner)\nvalue.Child.Apply\nEnd Sub\n";
+        for (access, listed_result, getter, indexed, expected_child, expected_apply) in [
+            ("Public", true, true, false, true, true),
+            ("Private", true, true, false, false, false),
+            ("Public", false, true, false, false, false),
+            ("Public", true, false, false, false, false),
+            ("Public", true, true, true, true, false),
+        ] {
+            let storage = durable_test_tempdir();
+            let fixture = durable_test_tempdir();
+            let paths =
+                RuntimePaths::new(storage.path().join("state"), storage.path().join("runtime"))
+                    .unwrap();
+            paths.prepare_owner().unwrap();
+            let manifest = format!(
+                "Type=OleDll\nName=\"Primary\"\nClass=Owner; Owner.cls\n{}Module=Client; Client.bas\n",
+                if listed_result {
+                    "Class=Result; Result.cls\n"
+                } else {
+                    ""
+                }
+            );
+            fs::write(fixture.path().join("project.vbp"), manifest).unwrap();
+            fs::write(
+                fixture.path().join("Owner.cls"),
+                if getter {
+                    format!(
+                        "VERSION 1.0 CLASS\nAttribute VB_Name = \"Owner\"\n{access} Property Get Child({}) As Result\nSet Child = New Result\nEnd Property\n",
+                        if indexed { "ByVal index As Long" } else { "" }
+                    )
+                } else {
+                    format!(
+                        "VERSION 1.0 CLASS\nAttribute VB_Name = \"Owner\"\n{access} Property Set Child(ByVal value As Result)\nEnd Property\n"
+                    )
+                },
+            )
+            .unwrap();
+            fs::write(
+                fixture.path().join("Result.cls"),
+                "VERSION 1.0 CLASS\nAttribute VB_Name = \"Result\"\nPublic Sub Apply()\nEnd Sub\n",
+            )
+            .unwrap();
+            fs::write(fixture.path().join("Client.bas"), client).unwrap();
+            let mut service =
+                FirstSliceService::new_durable(4, paths.state_dir(), &deadline()).unwrap();
+            let receipt = service
+                .index_repository(fixture.path(), &deadline())
+                .unwrap();
+            assert_eq!(
+                receipt,
+                service
+                    .index_repository(fixture.path(), &deadline())
+                    .unwrap()
+            );
+            drop(service);
+            let service =
+                FirstSliceService::new_durable(4, paths.state_dir(), &deadline()).unwrap();
+            let snapshot = service
+                .loaded_generation_snapshot(receipt.generation)
+                .unwrap();
+            let document = snapshot.document();
+            let file = document
+                .files
+                .iter()
+                .find(|file| file.path == "Client.bas")
+                .unwrap();
+            let start = u64::try_from(client.find("value.Child.Apply").unwrap()).unwrap();
+            for (text, name, kind, expected) in [
+                ("value.Child", "Child", EntityKind::Property, expected_child),
+                (
+                    "value.Child.Apply",
+                    "Apply",
+                    EntityKind::Method,
+                    expected_apply,
+                ),
+            ] {
+                let target = document
+                    .entities
+                    .iter()
+                    .find(|entity| entity.canonical_name == name && entity.kind == kind)
+                    .unwrap();
+                if indexed && name == "Child" {
+                    assert!(document.entities.iter().any(|entity| {
+                        entity.kind == EntityKind::Parameter
+                            && entity.container == Some(ContainerRef::Entity(target.id))
+                    }));
+                }
+                let site = document
+                    .occurrences
+                    .iter()
+                    .find(|site| {
+                        site.file == file.id
+                            && site.source.span().start_byte() == start
+                            && site.source.span().end_byte()
+                                == start + u64::try_from(text.len()).unwrap()
+                            && site.syntax_kind != "vba.application.reference"
+                    })
+                    .unwrap();
+                if expected {
+                    assert_eq!(
+                        site.target,
+                        OccurrenceTarget::Resolved { symbol: target.id }
+                    );
+                    let read = service
+                        .source_read_with_options_and_budget(
+                            receipt.generation,
+                            vec![site.source.clone()],
+                            SourceReadOptions::new()
+                                .with_context_lines_before(0)
+                                .with_context_lines_after(0)
+                                .with_encoding(SourceEncoding::Bytes),
+                            FirstSliceBudget::default(),
+                            &deadline(),
+                        )
+                        .unwrap();
+                    assert_eq!(read.data.chunks[0].bytes, text.as_bytes());
+                    if name == "Apply" {
+                        assert!(document.relations.iter().any(|relation| {
+                            relation.predicate == RelationPredicate::Calls
+                                && relation.subject == RelationEndpoint::Occurrence(site.id)
+                                && relation.object == RelationEndpoint::Entity(target.id)
+                                && relation.evidence.source.as_ref() == Some(&site.source)
+                        }));
+                    }
+                } else {
+                    assert!(matches!(site.target, OccurrenceTarget::Unresolved { .. }));
+                }
+                assert_eq!(
+                    document.skipped_regions.iter().any(|gap| {
+                        gap.source == site.source && gap.detail == "vba-member-target-unavailable"
+                    }),
+                    !expected,
+                    "{access} listed_result={listed_result} getter={getter} indexed={indexed} {text}"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn classic_project_bindings_follow_access_and_membership_changes() {
         let storage = durable_test_tempdir();
         let fixture = durable_test_tempdir();
