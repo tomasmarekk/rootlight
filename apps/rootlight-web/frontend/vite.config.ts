@@ -1,6 +1,5 @@
 // Configures deterministic production assets and the explicit local development proxy.
 
-import tailwindcss from "@tailwindcss/vite";
 import react from "@vitejs/plugin-react";
 import { fileURLToPath } from "node:url";
 import type { Plugin } from "vite";
@@ -68,7 +67,7 @@ function cosmosStrictCspPlugin(): Plugin {
 }
 
 export default defineConfig({
-  plugins: [cosmosStrictCspPlugin(), react(), tailwindcss()],
+  plugins: [cosmosStrictCspPlugin(), react()],
   optimizeDeps: {
     exclude: ["@cosmos.gl/graph"],
   },
