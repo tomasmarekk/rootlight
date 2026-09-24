@@ -620,10 +620,11 @@ enum FactNodeRef<'a> {
 impl FactNodeRef<'_> {
     fn dependencies(
         &self,
+        dependencies: &mut Vec<FactId>,
         checkpoint: &mut impl FnMut() -> bool,
-    ) -> Result<Vec<FactId>, NormalizedRebindError> {
+    ) -> Result<(), NormalizedRebindError> {
         ensure_projection_continues(checkpoint)?;
-        let mut dependencies = Vec::new();
+        dependencies.clear();
         let capacity = match self {
             Self::Occurrence(record) => 1_usize.checked_add(record.evidence.derivation.len()),
             Self::Relation(record) => 3_usize.checked_add(record.evidence.derivation.len()),
@@ -641,44 +642,44 @@ impl FactNodeRef<'_> {
         match self {
             Self::Occurrence(record) => {
                 dependencies.push(record.provenance);
-                collect_evidence_dependencies(&record.evidence, &mut dependencies, checkpoint)?;
+                collect_evidence_dependencies(&record.evidence, dependencies, checkpoint)?;
             }
             Self::Relation(record) => {
                 dependencies.push(record.provenance);
-                collect_endpoint_dependency(record.subject, &mut dependencies);
-                collect_endpoint_dependency(record.object, &mut dependencies);
-                collect_evidence_dependencies(&record.evidence, &mut dependencies, checkpoint)?;
+                collect_endpoint_dependency(record.subject, dependencies);
+                collect_endpoint_dependency(record.object, dependencies);
+                collect_evidence_dependencies(&record.evidence, dependencies, checkpoint)?;
             }
             Self::Provenance(record) => {
                 collect_fact_ref_dependencies(
                     &record.derivation_parents,
-                    &mut dependencies,
+                    dependencies,
                     checkpoint,
                 )?;
             }
             Self::SourceMapping(record) => {
                 dependencies.push(record.provenance);
-                collect_evidence_dependencies(&record.evidence, &mut dependencies, checkpoint)?;
+                collect_evidence_dependencies(&record.evidence, dependencies, checkpoint)?;
             }
             Self::Coverage(record) => {
                 dependencies.push(record.provenance);
-                collect_evidence_dependencies(&record.evidence, &mut dependencies, checkpoint)?;
+                collect_evidence_dependencies(&record.evidence, dependencies, checkpoint)?;
             }
             Self::Skipped(record) => {
                 dependencies.push(record.provenance);
-                collect_evidence_dependencies(&record.evidence, &mut dependencies, checkpoint)?;
+                collect_evidence_dependencies(&record.evidence, dependencies, checkpoint)?;
             }
             Self::Diagnostic(record) => {
                 dependencies.push(record.provenance);
-                collect_evidence_dependencies(&record.evidence, &mut dependencies, checkpoint)?;
+                collect_evidence_dependencies(&record.evidence, dependencies, checkpoint)?;
             }
             Self::Extension(record) => {
                 dependencies.push(record.provenance);
-                collect_evidence_dependencies(&record.evidence, &mut dependencies, checkpoint)?;
+                collect_evidence_dependencies(&record.evidence, dependencies, checkpoint)?;
                 if record.namespace == LEXICAL_EXTENSION_NAMESPACE {
                     let evidence = decode_lexical_evidence_envelope(record)
                         .map_err(|_| NormalizedRebindError::IdentityRecipe)?;
-                    collect_fact_ref_dependency(evidence.subject(), &mut dependencies);
+                    collect_fact_ref_dependency(evidence.subject(), dependencies);
                 }
             }
         }
@@ -688,7 +689,7 @@ impl FactNodeRef<'_> {
         dependencies.sort_unstable();
         ensure_projection_continues(checkpoint)?;
         dependencies.dedup();
-        Ok(dependencies)
+        Ok(())
     }
 }
 
@@ -891,10 +892,14 @@ fn derive_fact_id_map(
     edges
         .try_reserve_exact(dependency_capacity)
         .map_err(|_| NormalizedRebindError::ResourceLimit)?;
+    // Each fact has bounded fan-in; retain the scratch allocation across facts.
+    let mut dependencies = Vec::new();
     for (node_index, (_, location)) in locations.iter().enumerate() {
         ensure_projection_continues(&mut checkpoint)?;
-        let dependencies = location.node_ref(document).dependencies(&mut checkpoint)?;
-        for dependency in dependencies {
+        location
+            .node_ref(document)
+            .dependencies(&mut dependencies, &mut checkpoint)?;
+        for &dependency in &dependencies {
             ensure_projection_continues(&mut checkpoint)?;
             let dependency_index = ids.index(dependency)?;
             edges.push((dependency_index, node_index));
@@ -1535,6 +1540,32 @@ mod tests {
             &ExtensionSupport::default(),
         )
         .expect("fixture canonicalizes")
+    }
+
+    #[test]
+    fn fact_dependency_scratch_clears_prior_edges_and_retains_capacity() {
+        let document = fixture_with_lexical_extension();
+        let occurrence = &document.occurrences[0];
+        let mut dependencies = Vec::new();
+        FactNodeRef::Occurrence(occurrence)
+            .dependencies(&mut dependencies, &mut || true)
+            .expect("occurrence dependencies build");
+        assert!(dependencies.contains(&occurrence.provenance));
+        let capacity = dependencies.capacity();
+
+        let mut provenance = document.provenance[0].clone();
+        provenance.derivation_parents.clear();
+        FactNodeRef::Provenance(&provenance)
+            .dependencies(&mut dependencies, &mut || true)
+            .expect("empty provenance dependencies build");
+        assert!(dependencies.is_empty());
+        assert_eq!(dependencies.capacity(), capacity);
+
+        FactNodeRef::Extension(&document.extensions[0])
+            .dependencies(&mut dependencies, &mut || true)
+            .expect("extension dependencies build");
+        assert!(dependencies.contains(&occurrence.id));
+        assert!(dependencies.windows(2).all(|pair| pair[0] < pair[1]));
     }
 
     fn fact_ids(document: &NormalizedIrDocument) -> BTreeSet<FactId> {
