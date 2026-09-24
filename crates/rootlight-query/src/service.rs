@@ -461,7 +461,10 @@ where
             }
         }
         let (coverage, coverage_truncated) = collect_coverage_partial(
-            self.generation.document(),
+            CoverageView {
+                document: self.generation.document(),
+                scope_ordinals: self.generation.coverage_ordinals_by_scope(),
+            },
             &symbols,
             &files,
             &plan.path_prefixes,
@@ -668,7 +671,10 @@ where
             Vec::new()
         } else {
             collect_coverage_partial(
-                document,
+                CoverageView {
+                    document,
+                    scope_ordinals: self.generation.coverage_ordinals_by_scope(),
+                },
                 &symbols,
                 &files,
                 &[],
@@ -10586,8 +10592,13 @@ fn occurrence_targets_symbol(
     }
 }
 
+struct CoverageView<'a> {
+    document: &'a NormalizedIrDocument,
+    scope_ordinals: &'a [usize],
+}
+
 fn collect_coverage_partial(
-    document: &NormalizedIrDocument,
+    view: CoverageView<'_>,
     symbols: &BTreeSet<SymbolId>,
     files: &BTreeSet<FileId>,
     scope_paths: &[String],
@@ -10595,35 +10606,105 @@ fn collect_coverage_partial(
     control: &QueryControl<'_>,
     limiting_resources: &mut Vec<QueryResource>,
 ) -> Result<(Vec<CoverageRecord>, bool), QueryError> {
-    let mut coverage = Vec::new();
-    let mut truncated = false;
+    let CoverageView {
+        document,
+        scope_ordinals,
+    } = view;
     // A miss without a path scope needs repository-wide coverage; a scoped
     // miss needs the file and entity coverage for that scope instead.
     let repository_wide = symbols.is_empty() && files.is_empty() && scope_paths.is_empty();
-    for record in &document.coverage_records {
+    if repository_wide {
+        return emit_coverage_records(
+            document,
+            0..document.coverage_records.len(),
+            tracker,
+            control,
+            limiting_resources,
+        );
+    }
+
+    // Retain only the earliest canonical ordinals that can fit the row and
+    // result budgets, plus one to prove truncation without buffering a whole
+    // repository's coverage for a narrowly scoped request.
+    let remaining_rows = usize::try_from(tracker.remaining_rows()).unwrap_or(usize::MAX);
+    let remaining_results =
+        usize::try_from(tracker.budget.max_results.saturating_sub(tracker.results))
+            .unwrap_or(usize::MAX);
+    let selection_cap = remaining_rows
+        .min(remaining_results)
+        .saturating_add(1)
+        .min(document.coverage_records.len());
+    let mut selected = BTreeSet::new();
+    let mut include_scope = |scope| -> Result<(), QueryError> {
         control.check()?;
-        let relevant = match record.scope {
-            CoverageScope::Repository(repository) => repository == document.repository,
-            CoverageScope::File(file) => {
-                repository_wide
-                    || files.contains(&file)
-                    || (!scope_paths.is_empty()
-                        && find_file(document, file)
-                            .is_some_and(|file| path_is_in_scope(&file.path, scope_paths)))
+        let start = scope_ordinals
+            .partition_point(|&ordinal| document.coverage_records[ordinal].scope < scope);
+        let end = start
+            + scope_ordinals[start..]
+                .partition_point(|&ordinal| document.coverage_records[ordinal].scope == scope);
+        for &ordinal in &scope_ordinals[start..end] {
+            control.check()?;
+            if selected.contains(&ordinal) {
+                continue;
             }
-            CoverageScope::Entity(symbol) => {
-                repository_wide
-                    || symbols.contains(&symbol)
-                    || (!scope_paths.is_empty()
-                        && find_entity(document, symbol)
-                            .and_then(|entity| entity.evidence.source.as_ref())
-                            .and_then(|source| find_file(document, source.span().file()))
-                            .is_some_and(|file| path_is_in_scope(&file.path, scope_paths)))
+            if selected.len() < selection_cap {
+                selected.insert(ordinal);
+            } else if selected.last().is_some_and(|&largest| ordinal < largest) {
+                selected.pop_last();
+                selected.insert(ordinal);
             }
-        };
-        if !relevant {
-            continue;
         }
+        Ok(())
+    };
+    include_scope(CoverageScope::Repository(document.repository))?;
+    for &file in files {
+        include_scope(CoverageScope::File(file))?;
+    }
+    for &symbol in symbols {
+        include_scope(CoverageScope::Entity(symbol))?;
+    }
+    if !scope_paths.is_empty() {
+        let mut cursor = 0;
+        while cursor < scope_ordinals.len() {
+            control.check()?;
+            let scope = document.coverage_records[scope_ordinals[cursor]].scope;
+            let relevant = match scope {
+                CoverageScope::Repository(_) => false,
+                CoverageScope::File(file) => find_file(document, file)
+                    .is_some_and(|file| path_is_in_scope(&file.path, scope_paths)),
+                CoverageScope::Entity(symbol) => find_entity(document, symbol)
+                    .and_then(|entity| entity.evidence.source.as_ref())
+                    .and_then(|source| find_file(document, source.span().file()))
+                    .is_some_and(|file| path_is_in_scope(&file.path, scope_paths)),
+            };
+            if relevant {
+                include_scope(scope)?;
+            }
+            cursor += 1 + scope_ordinals[cursor + 1..]
+                .partition_point(|&ordinal| document.coverage_records[ordinal].scope == scope);
+        }
+    }
+    emit_coverage_records(
+        document,
+        selected.into_iter(),
+        tracker,
+        control,
+        limiting_resources,
+    )
+}
+
+fn emit_coverage_records(
+    document: &NormalizedIrDocument,
+    ordinals: impl Iterator<Item = usize>,
+    tracker: &mut UsageTracker,
+    control: &QueryControl<'_>,
+    limiting_resources: &mut Vec<QueryResource>,
+) -> Result<(Vec<CoverageRecord>, bool), QueryError> {
+    let mut coverage = Vec::new();
+    let mut truncated = false;
+    for ordinal in ordinals {
+        control.check()?;
+        let record = &document.coverage_records[ordinal];
         if !tracker.can_add(QueryResource::Rows, 1) {
             record_limit(limiting_resources, QueryResource::Rows)?;
             truncated = true;
@@ -11941,6 +12022,13 @@ mod tests {
         )
     }
 
+    fn coverage_scope_ordinals(document: &NormalizedIrDocument) -> Vec<usize> {
+        let mut ordinals: Vec<_> = (0..document.coverage_records.len()).collect();
+        ordinals
+            .sort_unstable_by_key(|&ordinal| (document.coverage_records[ordinal].scope, ordinal));
+        ordinals
+    }
+
     fn add_file(document: &mut NormalizedIrDocument, byte: u8, path: &str) {
         document.files.push(FileRecord {
             id: file_id(byte),
@@ -12255,7 +12343,10 @@ mod tests {
         let mut limiting_resources = Vec::new();
 
         let (coverage, truncated) = collect_coverage_partial(
-            &document,
+            CoverageView {
+                document: &document,
+                scope_ordinals: &coverage_scope_ordinals(&document),
+            },
             &BTreeSet::new(),
             &BTreeSet::new(),
             &[],
@@ -12309,7 +12400,10 @@ mod tests {
         let mut tracker = UsageTracker::new(QueryBudget::new().with_max_rows(4));
         let mut limiting_resources = Vec::new();
         let (coverage, truncated) = collect_coverage_partial(
-            &document,
+            CoverageView {
+                document: &document,
+                scope_ordinals: &coverage_scope_ordinals(&document),
+            },
             &BTreeSet::new(),
             &BTreeSet::new(),
             &["src/selected.rs".to_owned()],
@@ -12331,7 +12425,10 @@ mod tests {
         let mut unscoped_tracker = UsageTracker::new(QueryBudget::new().with_max_rows(4));
         let mut unscoped_limits = Vec::new();
         let (_, unscoped_truncated) = collect_coverage_partial(
-            &document,
+            CoverageView {
+                document: &document,
+                scope_ordinals: &coverage_scope_ordinals(&document),
+            },
             &BTreeSet::new(),
             &BTreeSet::new(),
             &[],
@@ -12342,6 +12439,67 @@ mod tests {
         .expect("unscoped coverage remains bounded");
         assert!(unscoped_truncated);
         assert_eq!(unscoped_limits, [QueryResource::Rows]);
+    }
+
+    #[test]
+    fn scoped_coverage_preserves_canonical_order_when_result_limited() {
+        let mut document = overview_document();
+        add_file(&mut document, 1, "src/selected.rs");
+        add_file(&mut document, 2, "src/other.rs");
+        add_entity(&mut document, 3, 1, EntityKind::Function);
+        let mut record = CoverageRecord {
+            id: FactId::from_bytes([0; 20]),
+            repository: document.repository,
+            generation: document.generation,
+            scope: CoverageScope::File(file_id(1)),
+            domain: FactDomain::Entities,
+            tier: AnalysisTier::TierB,
+            status: CoverageStatus::Unknown,
+            discovered: 1,
+            indexed: 0,
+            skipped: 1,
+            provenance: FactId::from_bytes([9; 20]),
+            evidence: FactEvidence {
+                source: None,
+                derivation: Vec::new(),
+            },
+        };
+        for (id, scope) in [
+            (1, CoverageScope::File(file_id(1))),
+            (2, CoverageScope::File(file_id(2))),
+            (3, CoverageScope::Entity(symbol(3))),
+            (4, CoverageScope::Repository(document.repository)),
+        ] {
+            record.id = FactId::from_bytes([id; 20]);
+            record.scope = scope;
+            document.coverage_records.push(record.clone());
+        }
+
+        let cancellation = Cancellation::new();
+        let control = QueryControl::new(&cancellation, Duration::from_secs(1));
+        let mut tracker = UsageTracker::new(QueryBudget::new().with_max_results(2));
+        let mut limits = Vec::new();
+        let (coverage, truncated) = collect_coverage_partial(
+            CoverageView {
+                document: &document,
+                scope_ordinals: &coverage_scope_ordinals(&document),
+            },
+            &BTreeSet::new(),
+            &BTreeSet::new(),
+            &["src/selected.rs".to_owned()],
+            &mut tracker,
+            &control,
+            &mut limits,
+        )
+        .expect("scoped coverage is projected in canonical order");
+
+        assert!(truncated);
+        assert_eq!(limits, [QueryResource::Results]);
+        assert_eq!(tracker.rows, 3);
+        assert_eq!(
+            coverage.iter().map(|row| row.id).collect::<Vec<_>>(),
+            vec![FactId::from_bytes([1; 20]), FactId::from_bytes([3; 20]),]
+        );
     }
 
     #[test]

@@ -236,6 +236,7 @@ pub struct GenerationSnapshot {
     metadata: GenerationMetadata,
     document: CanonicalNormalizedIrDocument,
     source_files: SourceFileCatalog,
+    coverage_ordinals_by_scope: Vec<usize>,
 }
 
 impl GenerationSnapshot {
@@ -282,10 +283,15 @@ impl GenerationSnapshot {
         }
         validate_source_file_catalog(metadata, document.document(), &source_files)
             .map_err(GenerationValidationError::InvalidSourceCatalog)?;
+        let coverage_records = &document.document().coverage_records;
+        let mut coverage_ordinals_by_scope: Vec<_> = (0..coverage_records.len()).collect();
+        coverage_ordinals_by_scope
+            .sort_unstable_by_key(|&ordinal| (coverage_records[ordinal].scope, ordinal));
         Ok(Self {
             metadata,
             document,
             source_files,
+            coverage_ordinals_by_scope,
         })
     }
 
@@ -361,6 +367,16 @@ impl GenerationSnapshot {
     #[must_use]
     pub const fn document(&self) -> &NormalizedIrDocument {
         self.document.document()
+    }
+
+    /// Returns canonical coverage-record ordinals grouped by scope.
+    ///
+    /// Records within each scope retain their canonical fact-ID order. This
+    /// auxiliary index is derived from the validated document and is not part
+    /// of generation identity or persistence.
+    #[must_use]
+    pub fn coverage_ordinals_by_scope(&self) -> &[usize] {
+        &self.coverage_ordinals_by_scope
     }
 
     /// Returns the canonical file-only source catalog.
