@@ -1,6 +1,6 @@
 // Frames Rootlight-owned operation activity without exposing system processes.
 
-import { Activity, CircleCheck, Clock3 } from "lucide-react";
+import { Activity, CircleCheck, Clock3 } from "../components/icons";
 
 import { PageHeading } from "../components/page-heading";
 import { SessionOperationList } from "../components/session-operation-list";

@@ -11,7 +11,7 @@ import {
   RefreshCw,
   TriangleAlert,
   X,
-} from "lucide-react";
+} from "../../../components/icons";
 import { Component, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 
 import {

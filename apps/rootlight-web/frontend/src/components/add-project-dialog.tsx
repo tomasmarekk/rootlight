@@ -13,7 +13,7 @@ import {
   ShieldCheck,
   TriangleAlert,
   X,
-} from "lucide-react";
+} from "./icons";
 import { useRef, useState, type KeyboardEvent } from "react";
 
 import {

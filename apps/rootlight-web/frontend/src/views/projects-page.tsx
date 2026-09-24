@@ -16,7 +16,7 @@ import {
   Trash2,
   TriangleAlert,
   X,
-} from "lucide-react";
+} from "../components/icons";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Link, useLocation } from "react-router";
 

@@ -2,7 +2,14 @@
 
 import { Button } from "@heroui/react/button";
 import { useQuery } from "../query/local-query";
-import { Activity, ArrowLeft, Database, RefreshCw, RotateCcw, TriangleAlert } from "lucide-react";
+import {
+  Activity,
+  ArrowLeft,
+  Database,
+  RefreshCw,
+  RotateCcw,
+  TriangleAlert,
+} from "../components/icons";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { Link, useLocation, useParams, useSearchParams } from "react-router";
 

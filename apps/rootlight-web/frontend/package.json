@@ -28,7 +28,6 @@
   "dependencies": {
     "@cosmos.gl/graph": "3.4.0",
     "@heroui/react": "3.2.3",
-    "lucide-react": "1.28.0",
     "react": "19.2.8",
     "react-dom": "19.2.8",
     "react-router": "8.3.0"

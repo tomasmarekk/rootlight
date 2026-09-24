@@ -12,7 +12,7 @@ import {
   RotateCcw,
   Search,
   ShieldCheck,
-} from "lucide-react";
+} from "../components/icons";
 import { useEffect, useRef } from "react";
 import { NavLink, Outlet } from "react-router";
 

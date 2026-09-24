@@ -14,7 +14,7 @@ import {
   Square,
   TriangleAlert,
   X,
-} from "lucide-react";
+} from "./icons";
 import { useEffect, useId, useRef, useState } from "react";
 import { Link } from "react-router";
 
