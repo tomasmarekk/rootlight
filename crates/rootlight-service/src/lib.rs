@@ -25913,8 +25913,11 @@ mod tests {
         use rootlight_ir::{EntityKind, OccurrenceRole, OccurrenceTarget};
 
         let fixture = TempDir::new().expect("fixture root exists");
-        let source =
-            "APP := app\n.PHONY: all check\nall: check\n\t@echo $(APP)\ncheck:\n\t@echo ready\n";
+        let source = concat!(
+            "APP := app\n.PHONY: all check\nall: check\n",
+            "\t@echo $(APP)\ncheck:\n\t@echo ready\n",
+            "build/output.o: src/input.c\nsrc/input.c:\n",
+        );
         fs::write(fixture.path().join("Makefile"), source).unwrap();
         let cancellation = deadline();
         let mut service = FirstSliceService::new(2).expect("service initializes");
@@ -25946,6 +25949,13 @@ mod tests {
                 entity.canonical_name == "check" && entity.kind == EntityKind::BuildTarget
             })
             .unwrap();
+        let path_target = document
+            .entities
+            .iter()
+            .find(|entity| {
+                entity.canonical_name == "src/input.c" && entity.kind == EntityKind::BuildTarget
+            })
+            .expect("static path target survives lowering");
         assert!(document.entities.iter().any(|entity| {
             entity.canonical_name == "APP" && entity.kind == EntityKind::Variable
         }));
@@ -25956,6 +25966,10 @@ mod tests {
                     usize::try_from(gap.source.span().start_byte()).unwrap()
                         ..usize::try_from(gap.source.span().end_byte()).unwrap(),
                 ) == Some(b"\t@echo $(APP)".as_slice())
+        }));
+        assert!(!document.skipped_regions.iter().any(|gap| {
+            gap.detail == "make-target-name-not-analyzed"
+                || gap.detail == "make-prerequisite-token-not-analyzed"
         }));
         assert!(
             !document
@@ -25974,6 +25988,34 @@ mod tests {
             }),
             "{:?}",
             document.occurrences
+        );
+        assert!(document.occurrences.iter().any(|occurrence| {
+            occurrence.role == OccurrenceRole::Reference
+                && occurrence.target
+                    == OccurrenceTarget::Resolved {
+                        symbol: path_target.id,
+                    }
+                && source.as_bytes().get(
+                    usize::try_from(occurrence.source.span().start_byte()).unwrap()
+                        ..usize::try_from(occurrence.source.span().end_byte()).unwrap(),
+                ) == Some(b"src/input.c".as_slice())
+        }));
+        let located = service
+            .code_locate(
+                receipt.generation,
+                "src/input.c".to_owned(),
+                LocateMode::Exact,
+                10,
+                0,
+                &cancellation,
+            )
+            .unwrap();
+        assert!(
+            located
+                .data
+                .hits
+                .iter()
+                .any(|hit| { hit.path == "Makefile" && hit.symbol == Some(path_target.id) })
         );
     }
 

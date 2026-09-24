@@ -352,6 +352,8 @@ pub fn structural_captured_name(text: &str, maximum_bytes: usize) -> Option<&str
 /// canonical source identity is not evaluated attribute-name equivalence.
 /// Markdown preserves authored heading and label text; rendered text, reference
 /// case folding and generated fragment identifiers require separate interpretation.
+/// Make retains reviewed static relative paths in targets and prerequisites;
+/// expansions and escaped names remain outside that borrowed-name contract.
 /// ECMAScript identifiers decode Unicode escapes without Unicode normalization;
 /// other grammar-reviewed names keep the shared borrowed-name contract.
 /// Groovy constant member strings decode their own delimiters and ordered escapes.
@@ -452,7 +454,22 @@ pub fn structural_captured_name_for_fact<'a>(
     text: &'a str,
     maximum_bytes: usize,
 ) -> Option<Cow<'a, str>> {
-    if language == "scss"
+    if language == "make"
+        && matches!(
+            fact.syntax_kind().as_str(),
+            "make.name.definition" | "make.target.reference"
+        )
+    {
+        let bytes = text.as_bytes();
+        (bytes.len() <= maximum_bytes
+            && bytes
+                .first()
+                .is_some_and(|byte| byte.is_ascii_alphabetic() || matches!(byte, b'_' | b'.'))
+            && bytes.iter().all(|byte| {
+                byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.' | b'/')
+            }))
+        .then_some(Cow::Borrowed(text))
+    } else if language == "scss"
         && matches!(
             fact.syntax_kind().as_str(),
             "scss.selector.definition" | "scss.selector.signature"
@@ -786,6 +803,34 @@ mod tests {
         assert!(
             structural_captured_name_for_fact("scss", &identifier, ".card, .tile", 32).is_none()
         );
+    }
+
+    #[test]
+    fn make_static_paths_keep_authored_identity_without_relaxing_other_names() {
+        use crate::SyntaxKindLabel;
+        use rootlight_ids::FileId;
+        use rootlight_ir::SourceSpan;
+
+        let span = SourceSpan::new(FileId::from_bytes([3; 20]), 0, 1).unwrap();
+        for label in ["make.name.definition", "make.target.reference"] {
+            let fact = SyntaxFact::new(
+                1,
+                None,
+                SyntaxFactKind::Occurrence,
+                span,
+                0,
+                SyntaxKindLabel::new(label).unwrap(),
+            );
+            assert_eq!(
+                structural_captured_name_for_fact("make", &fact, "src/main.c", 32).as_deref(),
+                Some("src/main.c")
+            );
+            for name in ["/root", "src/$(NAME)", "src\\name", "src name"] {
+                assert!(structural_captured_name_for_fact("make", &fact, name, 32).is_none());
+            }
+            assert!(structural_captured_name_for_fact("make", &fact, "src/main.c", 4).is_none());
+            assert!(structural_captured_name_for_fact("rust", &fact, "src/main.c", 32).is_none());
+        }
     }
 
     #[test]

@@ -1075,18 +1075,29 @@ fn matlab_script_bindings_cross_mcp_without_function_headers() {
 
 #[test]
 fn make_static_targets_cross_mcp_with_exact_prerequisite_sources() {
-    let source = "APP := app\nall: check\n\t@echo $(APP)\ncheck:\n\t@echo ready\n";
+    let source = concat!(
+        "APP := app\nall: check\n\t@echo $(APP)\ncheck:\n\t@echo ready\n",
+        "build/output.o: src/input.c\nsrc/input.c:\n",
+    );
     source_entities_cross_process_boundaries(
         "make",
         "Makefile",
         source,
-        &[("all", "build_target", 1), ("check", "build_target", 1)],
+        &[
+            ("all", "build_target", 1),
+            ("check", "build_target", 1),
+            ("build/output.o", "build_target", 1),
+            ("src/input.c", "build_target", 1),
+        ],
     );
     assert_lexical_relationship_sources(
         "make",
         "Makefile",
         source,
-        &[("check", "build_target", "check")],
+        &[
+            ("check", "build_target", "check"),
+            ("src/input.c", "build_target", "src/input.c"),
+        ],
     );
 }
 

@@ -758,7 +758,7 @@ fn valid_static_name(name: &[u8]) -> bool {
 }
 
 fn static_name_byte(byte: u8) -> bool {
-    byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.')
+    byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.' | b'/')
 }
 
 fn comment_start(line: &[u8]) -> usize {
@@ -871,24 +871,48 @@ mod tests {
     }
 
     #[test]
-    fn unsupported_names_and_order_only_semantics_are_explicit_gaps() {
+    fn static_path_names_are_retained_with_order_only_semantics_as_a_gap() {
         let source = b"ROOT := src\nobj/main.o: src/main.c | generated/\n";
         let parsed = scan_source(source, 8, &Cancellation::new()).unwrap();
+        let targets: Vec<_> = parsed
+            .declarations
+            .iter()
+            .filter(|declaration| declaration.kind == DeclarationKind::Target)
+            .map(|declaration| &source[declaration.name_start..declaration.name_end])
+            .collect();
+        assert_eq!(targets, [b"obj/main.o".as_slice()]);
+        let prerequisites: Vec<_> = parsed.declarations[1]
+            .prerequisites
+            .iter()
+            .map(|reference| &source[reference.start..reference.end])
+            .collect();
+        assert_eq!(prerequisites, [b"src/main.c".as_slice(), b"generated/"]);
         let observed: Vec<_> = parsed
             .gaps
             .iter()
             .map(|gap| (gap.kind.code(), &source[gap.start..gap.end]))
             .collect();
         assert!(observed.contains(&("make-variable-value-not-analyzed", b" src".as_slice())));
-        assert!(observed.contains(&("make-target-name-not-analyzed", b"obj/main.o".as_slice())));
-        assert_eq!(parsed.declarations.len(), 1);
+        assert!(
+            !observed
+                .iter()
+                .any(|(code, _)| *code == "make-target-name-not-analyzed")
+        );
+        assert!(
+            observed
+                .iter()
+                .any(|(code, _)| *code == "make-order-only-semantics-not-analyzed")
+        );
+        assert_eq!(parsed.declarations.len(), 2);
 
         let source = b"all: check | generated/\ncheck:\n";
         let parsed = scan_source(source, 8, &Cancellation::new()).unwrap();
-        assert!(parsed.gaps.iter().any(|gap| {
-            gap.kind.code() == "make-prerequisite-token-not-analyzed"
-                && &source[gap.start..gap.end] == b"generated/"
-        }));
+        assert!(
+            !parsed
+                .gaps
+                .iter()
+                .any(|gap| { gap.kind.code() == "make-prerequisite-token-not-analyzed" })
+        );
         assert!(parsed.gaps.iter().any(|gap| {
             gap.kind.code() == "make-order-only-semantics-not-analyzed"
                 && &source[gap.start..gap.end] == b"| generated/"
