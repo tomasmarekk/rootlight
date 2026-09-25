@@ -1338,7 +1338,9 @@ fn build_provenance(
 
     if matches!(
         decision.explanation.rule,
-        ResolutionRule::ClassicProjectType | ResolutionRule::ClassicProjectMember
+        ResolutionRule::ClassicProjectType
+            | ResolutionRule::ClassicProjectMember
+            | ResolutionRule::ClassicProjectModule
     ) {
         let proof = lookup
             .classic
@@ -1464,6 +1466,7 @@ fn build_provenance(
         .ok_or(ResolutionError::UnsupportedIdentityRemap)?;
     let rule = match decision.explanation.rule {
         ResolutionRule::ClassicProjectType => "classic-project-type-v1.indexed_snapshot",
+        ResolutionRule::ClassicProjectModule => "classic-project-module-v1.indexed_snapshot",
         ResolutionRule::ElmModuleImport => "elm-module-import-v1.indexed_snapshot",
         ResolutionRule::ElmLocalType => "elm-local-type-v1.indexed_snapshot",
         ResolutionRule::ClassicProjectMember => "classic-project-member-v1.indexed_snapshot",

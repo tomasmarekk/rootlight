@@ -98,6 +98,7 @@ pub(crate) struct Proof<'a> {
     pub(crate) target: &'a EntityRecord,
     pub(crate) context: Arc<ProjectEvidence>,
     pub(crate) receiver: Option<(&'a EntityRecord, SourceRef)>,
+    rule: ResolutionRule,
     getter_read: bool,
 }
 
@@ -791,6 +792,7 @@ impl<'a> ClassicIndex<'a> {
                     target,
                     context: Arc::clone(&project.evidence),
                     receiver: None,
+                    rule: ResolutionRule::ClassicProjectType,
                     getter_read: false,
                 },
             );
@@ -966,10 +968,20 @@ impl<'a> ClassicIndex<'a> {
                     .or_insert(Some(symbol));
             }
         }
+        let mut module_qualifiers = BTreeMap::new();
         let mut member_occurrences = Vec::new();
         let mut read_receivers = BTreeSet::new();
         for occurrence in occurrences {
             cancellation.check()?;
+            if occurrence.syntax_kind == "vba.value_identifier.reference"
+                && occurrence.role == OccurrenceRole::Reference
+                && matches!(occurrence.target, OccurrenceTarget::Unresolved { .. })
+            {
+                module_qualifiers
+                    .entry(occurrence.source.span())
+                    .and_modify(|prior| *prior = None)
+                    .or_insert(Some(occurrence));
+            }
             let member = matches!(
                 occurrence.syntax_kind.as_str(),
                 "vba.member.reference" | "vba.invoked_member.reference"
@@ -1118,7 +1130,7 @@ impl<'a> ClassicIndex<'a> {
                 if !unshadowed {
                     continue;
                 }
-                project
+                let default_instance = project
                     .types
                     .get(&receiver_name)
                     .copied()
@@ -1133,27 +1145,40 @@ impl<'a> ClassicIndex<'a> {
                         entities.get(&id).map(|owner| {
                             (*owner, id, Arc::clone(&project.evidence), source.clone())
                         })
-                    })
-                    .or_else(|| {
-                        // Standard modules have no instance. Their verified
-                        // project declaration itself owns the qualified member.
-                        project
-                            .modules
-                            .get(&receiver_name)
-                            .copied()
-                            .flatten()
-                            .and_then(|id| entities.get(&id).copied())
-                            .and_then(|owner| {
-                                owner.evidence.source.as_ref().map(|source| {
-                                    (
-                                        owner,
-                                        owner.id,
-                                        Arc::clone(&project.evidence),
-                                        source.clone(),
-                                    )
-                                })
+                    });
+                default_instance.or_else(|| {
+                    // Standard modules have no instance. Their verified
+                    // project declaration itself owns the qualified member.
+                    let module = project
+                        .modules
+                        .get(&receiver_name)
+                        .copied()
+                        .flatten()
+                        .and_then(|id| entities.get(&id).copied())
+                        .and_then(|owner| {
+                            owner.evidence.source.as_ref().map(|source| {
+                                (
+                                    owner,
+                                    owner.id,
+                                    Arc::clone(&project.evidence),
+                                    source.clone(),
+                                )
                             })
-                    })
+                        });
+                    if let Some((owner, _, context, _)) = &module
+                        && let Some(qualifier) =
+                            module_qualifiers.get(&receiver_span).and_then(|site| *site)
+                    {
+                        result.proofs.entry(qualifier.id).or_insert_with(|| Proof {
+                            target: owner,
+                            context: Arc::clone(context),
+                            receiver: None,
+                            rule: ResolutionRule::ClassicProjectModule,
+                            getter_read: false,
+                        });
+                    }
+                    module
+                })
             };
             let Some((owner, class, context, type_source)) = binding else {
                 continue;
@@ -1225,6 +1250,7 @@ impl<'a> ClassicIndex<'a> {
                     target,
                     context,
                     receiver: Some((owner, type_source)),
+                    rule: ResolutionRule::ClassicProjectMember,
                     getter_read: occurrence.syntax_kind == "vba.member.reference"
                         && read_receivers.contains(&span)
                         && !parameterized_properties.contains(&target.id)
@@ -1273,11 +1299,7 @@ impl<'a> ClassicIndex<'a> {
                 confidence,
             },
             explanation: ResolutionExplanation {
-                rule: if proof.receiver.is_some() {
-                    ResolutionRule::ClassicProjectMember
-                } else {
-                    ResolutionRule::ClassicProjectType
-                },
+                rule: proof.rule,
                 provider_name: RESOLVER_PROVIDER_NAME,
                 provider_version: RESOLVER_PROVIDER_VERSION,
                 candidates: vec![CandidateExplanation {

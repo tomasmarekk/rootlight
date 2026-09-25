@@ -1375,6 +1375,63 @@ fn native_project_module_calls_require_public_targets_and_unshadowed_names() {
                 client.as_bytes().get(start..end) == Some(b"Utility.Compute".as_slice())
             })
             .unwrap();
+        let utility_path = derived_path(
+            if foreign { "other.xlsm" } else { "book.xlsm" },
+            "Utility",
+            ModuleKind::Procedural,
+        )
+        .unwrap();
+        let utility_file = document
+            .files
+            .iter()
+            .find(|file| file.path == utility_path.as_str())
+            .unwrap();
+        let module = document
+            .entities
+            .iter()
+            .find(|entity| {
+                entity.kind == EntityKind::Module
+                    && entity.canonical_name == "Utility"
+                    && entity
+                        .evidence
+                        .source
+                        .as_ref()
+                        .is_some_and(|source| source.span().file() == utility_file.id)
+            })
+            .unwrap();
+        let qualifier = document
+            .occurrences
+            .iter()
+            .find(|site| {
+                if site.file != client_file.id
+                    || site.syntax_kind != "vba.value_identifier.reference"
+                {
+                    return false;
+                }
+                let span = site.source.span();
+                let start = usize::try_from(span.start_byte()).unwrap();
+                let end = usize::try_from(span.end_byte()).unwrap();
+                client.as_bytes().get(start..end) == Some(b"Utility".as_slice())
+            })
+            .unwrap();
+        assert_eq!(
+            matches!(qualifier.target, OccurrenceTarget::Resolved { symbol } if symbol == module.id),
+            local.is_empty() && !foreign,
+            "{visibility} {local} {foreign}"
+        );
+        assert_eq!(
+            document
+                .relations
+                .iter()
+                .filter(|edge| {
+                    edge.subject == RelationEndpoint::Occurrence(qualifier.id)
+                        && edge.predicate == RelationPredicate::RefersTo
+                        && edge.object == RelationEndpoint::Entity(module.id)
+                })
+                .count(),
+            usize::from(local.is_empty() && !foreign),
+            "{visibility} {local} {foreign}"
+        );
         assert_eq!(
             matches!(site.target, OccurrenceTarget::Resolved { .. }),
             expected,

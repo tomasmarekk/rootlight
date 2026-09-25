@@ -256,6 +256,8 @@ pub enum ResolutionRule {
     ElmLocalType,
     /// A native receiver's project-owned declared type selects one accessible member.
     ClassicProjectMember,
+    /// A verified project module qualifies a member expression without lexical shadowing.
+    ClassicProjectModule,
     /// Declarative classic BASIC project membership selects one native class type.
     ClassicProjectType,
     /// Native static import or call context selects one member or namespace declaration.
