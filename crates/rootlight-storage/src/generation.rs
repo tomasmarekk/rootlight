@@ -17,10 +17,10 @@ use rootlight_ir::{
     CanonicalGenerationNeutralDigests, CanonicalNormalizedIrDocument, ExtensionSupport,
     FILE_IDENTITY_CLAIM_NAMESPACE, FactEvidence, FileIdentityClaim, FileRecord, IdentityClaimError,
     IrDocumentDecodeError, IrDocumentValidationError, IrLimits, IrVersion,
-    LEXICAL_EXTENSION_NAMESPACE, NORMALIZED_IR_VERSION, NormalizedIrDocument,
-    NormalizedRebindError, OccurrenceTarget, PERL_BINDING_NAMESPACE,
+    LEXICAL_EXTENSION_NAMESPACE, LEXICAL_SUMMARY_BATCH_VERSION, NORMALIZED_IR_VERSION,
+    NormalizedIrDocument, NormalizedRebindError, OccurrenceTarget, PERL_BINDING_NAMESPACE,
     SYMBOL_IDENTITY_CLAIM_NAMESPACE, SourceRef,
-    decode_file_identity_claim_envelope_with_checkpoint,
+    decode_file_identity_claim_envelope_with_checkpoint, decode_lexical_summary_batch_envelope,
     decode_normalized_ir_document_messagepack_reader_with_checkpoint,
     decode_normalized_ir_document_with_checkpoint, decode_perl_binding_envelope,
     decode_symbol_identity_claim_envelope_with_checkpoint,
@@ -1374,6 +1374,7 @@ fn verify_snapshot_identities(
     let document = snapshot.document();
     let mut file_claims = BTreeMap::new();
     let mut symbol_claims = BTreeMap::new();
+    let mut lexical_batch_files = None;
     let mut has_unsupported_extension = false;
     for envelope in &document.extensions {
         context
@@ -1488,6 +1489,47 @@ fn verify_snapshot_identities(
                     .map_err(IdentityVerificationError::Control)?;
             }
             LEXICAL_EXTENSION_NAMESPACE => {
+                if envelope.version == LEXICAL_SUMMARY_BATCH_VERSION {
+                    let children =
+                        decode_lexical_summary_batch_envelope(envelope).map_err(|_| {
+                            IdentityVerificationError::IdentityMismatch(
+                                IdentityMismatchComponent::LexicalEvidence,
+                            )
+                        })?;
+                    let files = lexical_batch_files.get_or_insert_with(|| {
+                        document
+                            .files
+                            .iter()
+                            .map(|file| (file.id, file))
+                            .collect::<BTreeMap<_, _>>()
+                    });
+                    for child in children {
+                        context
+                            .check()
+                            .map_err(IdentityVerificationError::Control)?;
+                        let source = child.evidence.source.as_ref().ok_or(
+                            IdentityVerificationError::IdentityMismatch(
+                                IdentityMismatchComponent::LexicalEvidence,
+                            ),
+                        )?;
+                        let file = files.get(&source.span().file()).ok_or(
+                            IdentityVerificationError::IdentityMismatch(
+                                IdentityMismatchComponent::LexicalEvidence,
+                            ),
+                        )?;
+                        if source.content_hash() != file.content_hash
+                            || source.span().end_byte() > file.byte_length
+                        {
+                            return Err(IdentityVerificationError::IdentityMismatch(
+                                IdentityMismatchComponent::LexicalEvidence,
+                            ));
+                        }
+                    }
+                    context
+                        .check()
+                        .map_err(IdentityVerificationError::Control)?;
+                    continue;
+                }
                 let subject = envelope
                     .evidence
                     .derivation
@@ -2566,6 +2608,62 @@ mod tests {
 
         assert_eq!(snapshot.metadata().generation(), generation);
         assert_eq!(snapshot.document().repository, repository);
+    }
+
+    #[test]
+    fn lexical_batch_verification_checks_each_hidden_source() {
+        let (metadata, document, catalog) = file_only_generation(true);
+        let file = &document.files[0];
+        let source = file.evidence.source.clone().unwrap();
+        let lexical = |source: SourceRef, text: &str| {
+            let evidence = rootlight_ir::LexicalEvidenceV1::from_complete_text(
+                rootlight_ir::LexicalEvidenceKind::CommentSummary,
+                rootlight_ir::FactRef::File(file.id),
+                rootlight_ir::LexicalEvidenceFormat::PlainText,
+                text,
+            )
+            .unwrap();
+            rootlight_ir::new_lexical_evidence_envelope(
+                document.repository,
+                document.generation,
+                file.provenance,
+                source,
+                &evidence,
+            )
+            .unwrap()
+        };
+        let good = lexical(source.clone(), "source-linked comment");
+        let wrong_source = SourceRef::new(
+            document.repository,
+            document.generation,
+            source.span(),
+            rootlight_ids::content_hash(b"different content"),
+            None,
+        );
+        let bad = (0..100)
+            .map(|index| lexical(wrong_source.clone(), &format!("hidden comment {index}")))
+            .find(|candidate| good.id < candidate.id)
+            .expect("fixture finds a later child identity");
+        let mut document = document;
+        document
+            .extensions
+            .push(rootlight_ir::new_lexical_summary_batch_envelope(&[good, bad]).unwrap());
+        let cancellation = Cancellation::new();
+        let context = GenerationContext::new(&cancellation, GenerationBudget::default());
+        let snapshot = GenerationSnapshot::new_with_source_files(
+            metadata,
+            document,
+            catalog,
+            &IrLimits::default(),
+            &ExtensionSupport::default(),
+        )
+        .expect("outer source alone passes generic IR validation");
+        assert_eq!(
+            IdentityVerifiedGeneration::verify_snapshot(snapshot, &context),
+            Err(IdentityVerificationError::IdentityMismatch(
+                IdentityMismatchComponent::LexicalEvidence
+            ))
+        );
     }
 
     #[test]

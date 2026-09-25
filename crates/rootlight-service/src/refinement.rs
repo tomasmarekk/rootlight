@@ -288,7 +288,13 @@ pub(super) fn retain_structural_occurrences(
                         SYMBOL_IDENTITY_CLAIM_NAMESPACE | LEXICAL_EXTENSION_NAMESPACE
                     ) =>
                 {
-                    if let [subject] = extension.evidence.derivation.as_slice() {
+                    if extension.namespace == LEXICAL_EXTENSION_NAMESPACE
+                        && extension.version == rootlight_ir::LEXICAL_SUMMARY_BATCH_VERSION
+                    {
+                        for subject in &extension.evidence.derivation {
+                            associated.entry(*subject).or_default().insert(record.key());
+                        }
+                    } else if let [subject] = extension.evidence.derivation.as_slice() {
                         associated.entry(*subject).or_default().insert(record.key());
                     }
                 }

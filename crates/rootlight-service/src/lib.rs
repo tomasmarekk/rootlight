@@ -18511,6 +18511,7 @@ fn append_normalized_document(
     append_state: &mut DocumentAppendState,
 ) -> Result<(), FirstSliceError> {
     let version = merged_document_version(target, &source)?;
+    compact_lexical_summaries(&mut source, limits)?;
     reserve_resource_records(
         &mut target.files,
         source.files.len(),
@@ -19083,7 +19084,9 @@ fn truncate_optional_extensions(
         let dropped = dropped_from_target
             .entry((file, extension.provenance))
             .or_default();
-        *dropped = dropped.checked_add(1).ok_or(FirstSliceError::Limits)?;
+        *dropped = dropped
+            .checked_add(optional_extension_logical_count(extension)?)
+            .ok_or(FirstSliceError::Limits)?;
         dropped_target_indices.push(index);
     }
     let adjusted_target_coverage = (!dropped_from_target.is_empty())
@@ -19178,7 +19181,9 @@ fn truncate_optional_extensions(
         let dropped = dropped_by_file
             .entry((file, extension.provenance))
             .or_default();
-        *dropped = dropped.checked_add(1).ok_or(FirstSliceError::Limits)?;
+        *dropped = dropped
+            .checked_add(optional_extension_logical_count(&extension)?)
+            .ok_or(FirstSliceError::Limits)?;
     }
     let adjusted_source_coverage = (!dropped_by_file.is_empty())
         .then(|| adjusted_extension_coverage(&source.coverage_records, &dropped_by_file))
@@ -19233,11 +19238,77 @@ struct LexicalKindProbe {
 }
 
 fn is_lexical_signature(extension: &ExtensionEnvelope) -> Result<bool, FirstSliceError> {
+    if extension.version == rootlight_ir::LEXICAL_SUMMARY_BATCH_VERSION {
+        return Ok(false);
+    }
     // The retention decision needs only the kind; generation verification
     // subsequently validates the complete retained lexical envelope.
     serde_json::from_str::<LexicalKindProbe>(&extension.payload)
         .map(|evidence| evidence.kind == rootlight_ir::LexicalEvidenceKind::Signature)
         .map_err(|_| FirstSliceError::Identity)
+}
+
+fn optional_extension_logical_count(extension: &ExtensionEnvelope) -> Result<u64, FirstSliceError> {
+    if extension.version == rootlight_ir::LEXICAL_SUMMARY_BATCH_VERSION {
+        let entries = rootlight_ir::decode_lexical_summary_batch_envelope(extension)
+            .map_err(|_| FirstSliceError::Identity)?;
+        u64::try_from(entries.len()).map_err(|_| FirstSliceError::Limits)
+    } else {
+        Ok(1)
+    }
+}
+
+fn compact_lexical_summaries(
+    source: &mut NormalizedIrDocument,
+    limits: &IrLimits,
+) -> Result<(), FirstSliceError> {
+    let mut grouped = BTreeMap::<(FileId, FactId), Vec<ExtensionEnvelope>>::new();
+    let mut retained = Vec::with_capacity(source.extensions.len());
+    for extension in source.extensions.drain(..) {
+        if extension.namespace != LEXICAL_EXTENSION_NAMESPACE
+            || extension.version == rootlight_ir::LEXICAL_SUMMARY_BATCH_VERSION
+            || is_lexical_signature(&extension)?
+        {
+            retained.push(extension);
+            continue;
+        }
+        let file = extension_file(&extension)?;
+        grouped
+            .entry((file, extension.provenance))
+            .or_default()
+            .push(extension);
+    }
+    for entries in grouped.into_values() {
+        let mut offset = 0;
+        while offset < entries.len() {
+            let mut count =
+                (entries.len() - offset).min(rootlight_ir::MAX_LEXICAL_SUMMARY_BATCH_ENTRIES);
+            let batch = loop {
+                if count < 8 {
+                    break None;
+                }
+                match rootlight_ir::new_lexical_summary_batch_envelope(
+                    &entries[offset..offset + count],
+                ) {
+                    Ok(batch) if batch.payload.len() <= limits.max_extension_payload_bytes => {
+                        break Some(batch);
+                    }
+                    Ok(_) | Err(rootlight_ir::LexicalExtensionError::PayloadTooLarge { .. }) => {
+                        count /= 2;
+                    }
+                    Err(_) => return Err(FirstSliceError::Identity),
+                }
+            };
+            if let Some(batch) = batch {
+                retained.push(batch);
+            } else {
+                retained.extend_from_slice(&entries[offset..offset + count]);
+            }
+            offset += count;
+        }
+    }
+    source.extensions = retained;
+    Ok(())
 }
 
 fn previous_optional_extension(
@@ -47169,7 +47240,7 @@ mod tests {
     }
 
     #[test]
-    fn aggregate_lexical_extension_limit_publishes_bounded_coverage() {
+    fn aggregate_lexical_summary_batches_preserve_full_coverage() {
         let fixture = TempDir::new().expect("fixture root exists");
         fs::create_dir(fixture.path().join("src")).expect("fixture source directory exists");
         for file_index in 0..16 {
@@ -47189,7 +47260,7 @@ mod tests {
             .expect("extension-heavy source writes");
         }
         // macOS and Windows debug builds need extra headroom to materialize
-        // and merge the full 10,000-extension boundary. This deadline guards
+        // and merge the full lexical fixture. This deadline guards
         // against hangs; the test does not define a performance SLO.
         let deadline_seconds = if cfg!(any(target_os = "macos", target_os = "windows")) {
             300
@@ -47214,18 +47285,29 @@ mod tests {
             .loaded_generation_snapshot(first.generation)
             .expect("bounded generation remains retained");
         let document = snapshot.document();
-        assert_eq!(
-            document
-                .extensions
-                .iter()
-                .filter(|extension| extension.namespace == LEXICAL_EXTENSION_NAMESPACE)
-                .count(),
-            MAX_RETAINED_OPTIONAL_EXTENSIONS
-        );
-        let retained_signatures = document
+        let lexical = document
             .extensions
             .iter()
             .filter(|extension| extension.namespace == LEXICAL_EXTENSION_NAMESPACE)
+            .collect::<Vec<_>>();
+        assert!(lexical.len() < MAX_RETAINED_OPTIONAL_EXTENSIONS);
+        let retained_summaries = lexical
+            .iter()
+            .filter(|extension| extension.version == rootlight_ir::LEXICAL_SUMMARY_BATCH_VERSION)
+            .map(|extension| {
+                rootlight_ir::decode_lexical_summary_batch_envelope(extension)
+                    .expect("each summary batch validates")
+                    .len()
+            })
+            .sum::<usize>();
+        assert!(retained_summaries >= 12_800);
+        let retained_signatures = document
+            .extensions
+            .iter()
+            .filter(|extension| {
+                extension.namespace == LEXICAL_EXTENSION_NAMESPACE
+                    && extension.version != rootlight_ir::LEXICAL_SUMMARY_BATCH_VERSION
+            })
             .filter_map(|extension| {
                 let evidence = rootlight_ir::decode_lexical_evidence_envelope(extension)
                     .expect("retained lexical evidence validates");
@@ -47245,12 +47327,12 @@ mod tests {
             document.extensions.len() <= service.analysis_limits.ir().max_extensions,
             "required identity extensions remain inside the hard IR capacity"
         );
-        assert!(document.coverage_records.iter().any(|coverage| {
+        assert!(!document.coverage_records.iter().any(|coverage| {
             coverage.domain == rootlight_ir::FactDomain::Extensions
                 && coverage.status == CoverageStatus::Bounded
                 && coverage.skipped > 0
         }));
-        assert!(first.diagnostics.iter().any(|diagnostic| {
+        assert!(!first.diagnostics.iter().any(|diagnostic| {
             diagnostic.code == "extension-coverage-bounded"
                 && diagnostic
                     .message
@@ -47342,6 +47424,89 @@ mod tests {
                 .expect("optional eviction preserves required facts");
         assert!(target.extensions.is_empty());
         assert_eq!(next.extensions.len(), 1);
+        assert_eq!(next_state.truncated_extensions, 2);
+        assert_eq!(target.coverage_records[0].indexed, 0);
+        assert_eq!(target.coverage_records[0].skipped, 2);
+        assert_eq!(target.coverage_records[0].status, CoverageStatus::Bounded);
+    }
+
+    #[test]
+    fn evicted_summary_batch_charges_each_logical_extension() {
+        let repository = derive_repository(b"optional-summary-batch-eviction").id();
+        let generation = GenerationId::from_bytes([51; 20]);
+        let file = FileId::from_bytes([52; 20]);
+        let provenance = FactId::from_bytes([53; 20]);
+        let source = SourceRef::new(
+            repository,
+            generation,
+            SourceSpan::new(file, 0, 1).unwrap(),
+            content_hash(b"x"),
+            None,
+        );
+        let children = ["one", "two"]
+            .into_iter()
+            .map(|text| {
+                let evidence = rootlight_ir::LexicalEvidenceV1::from_complete_text(
+                    rootlight_ir::LexicalEvidenceKind::CommentSummary,
+                    FactRef::File(file),
+                    rootlight_ir::LexicalEvidenceFormat::PlainText,
+                    text,
+                )
+                .unwrap();
+                rootlight_ir::new_lexical_evidence_envelope(
+                    repository,
+                    generation,
+                    provenance,
+                    source.clone(),
+                    &evidence,
+                )
+                .unwrap()
+            })
+            .collect::<Vec<_>>();
+        let mut target = NormalizedIrDocument::empty(repository, generation);
+        target
+            .extensions
+            .push(rootlight_ir::new_lexical_summary_batch_envelope(&children).unwrap());
+        let mut coverage = CoverageRecord {
+            id: FactId::from_bytes([0; 20]),
+            repository,
+            generation,
+            scope: CoverageScope::File(file),
+            domain: IrFactDomain::Extensions,
+            tier: AnalysisTier::TierB,
+            status: CoverageStatus::Complete,
+            discovered: 2,
+            indexed: 2,
+            skipped: 0,
+            provenance,
+            evidence: FactEvidence {
+                source: Some(source.clone()),
+                derivation: Vec::new(),
+            },
+        };
+        coverage.id = derive_coverage_record_id(&coverage).unwrap();
+        target.coverage_records.push(coverage);
+        let state = DocumentAppendState::from_document(&target).unwrap();
+        let mut next = NormalizedIrDocument::empty(repository, generation);
+        next.extensions.push(ExtensionEnvelope {
+            id: FactId::from_bytes([54; 20]),
+            repository,
+            generation,
+            namespace: "test.required".to_owned(),
+            version: "1".to_owned(),
+            criticality: rootlight_ir::ExtensionCriticality::Noncritical,
+            payload: "{}".to_owned(),
+            provenance,
+            evidence: FactEvidence {
+                source: Some(source),
+                derivation: Vec::new(),
+            },
+        });
+        let mut limits = IrLimits::default();
+        limits.max_extensions = 1;
+        let next_state =
+            truncate_optional_extensions(&mut target, &mut next, &state, 0, 0, &limits).unwrap();
+        assert!(target.extensions.is_empty());
         assert_eq!(next_state.truncated_extensions, 2);
         assert_eq!(target.coverage_records[0].indexed, 0);
         assert_eq!(target.coverage_records[0].skipped, 2);

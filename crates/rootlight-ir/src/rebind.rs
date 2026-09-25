@@ -15,15 +15,17 @@ use crate::validation::validate_canonical_ir_document;
 use crate::{
     CoverageRecord, DiagnosticRecord, ExtensionEnvelope, ExtensionSupport,
     FILE_IDENTITY_CLAIM_NAMESPACE, FactEvidence, FactRef, FileRecord, IrDocumentValidationError,
-    IrLimits, LEXICAL_EXTENSION_NAMESPACE, NormalizedIrDocument, OccurrenceRecord,
-    ProvenanceRecord, RelationEndpoint, RelationRecord, SYMBOL_IDENTITY_CLAIM_NAMESPACE,
-    SkippedRegion, SourceMappingRecord, SourceRef, UnknownNoncriticalExtensionPolicy,
-    canonicalize_ir_document, decode_file_identity_claim_envelope,
-    decode_lexical_evidence_envelope, decode_symbol_identity_claim_envelope,
+    IrLimits, LEXICAL_EXTENSION_NAMESPACE, LEXICAL_SUMMARY_BATCH_VERSION, NormalizedIrDocument,
+    OccurrenceRecord, ProvenanceRecord, RelationEndpoint, RelationRecord,
+    SYMBOL_IDENTITY_CLAIM_NAMESPACE, SkippedRegion, SourceMappingRecord, SourceRef,
+    UnknownNoncriticalExtensionPolicy, canonicalize_ir_document,
+    decode_file_identity_claim_envelope, decode_lexical_evidence_envelope,
+    decode_lexical_summary_batch_envelope, decode_symbol_identity_claim_envelope,
     derive_coverage_record_id, derive_diagnostic_record_id, derive_occurrence_record_id,
     derive_provenance_record_id, derive_relation_record_id, derive_skipped_region_id,
     derive_source_mapping_record_id, new_file_identity_claim_envelope,
-    new_lexical_evidence_envelope, new_symbol_identity_claim_envelope,
+    new_lexical_evidence_envelope, new_lexical_summary_batch_envelope,
+    new_symbol_identity_claim_envelope,
 };
 use crate::{
     GROOVY_BINDING_NAMESPACE, decode_groovy_binding_envelope, new_groovy_binding_envelope,
@@ -677,9 +679,19 @@ impl FactNodeRef<'_> {
                 dependencies.push(record.provenance);
                 collect_evidence_dependencies(&record.evidence, dependencies, checkpoint)?;
                 if record.namespace == LEXICAL_EXTENSION_NAMESPACE {
-                    let evidence = decode_lexical_evidence_envelope(record)
-                        .map_err(|_| NormalizedRebindError::IdentityRecipe)?;
-                    collect_fact_ref_dependency(evidence.subject(), dependencies);
+                    if record.version == LEXICAL_SUMMARY_BATCH_VERSION {
+                        for child in decode_lexical_summary_batch_envelope(record)
+                            .map_err(|_| NormalizedRebindError::IdentityRecipe)?
+                        {
+                            let evidence = decode_lexical_evidence_envelope(&child)
+                                .map_err(|_| NormalizedRebindError::IdentityRecipe)?;
+                            collect_fact_ref_dependency(evidence.subject(), dependencies);
+                        }
+                    } else {
+                        let evidence = decode_lexical_evidence_envelope(record)
+                            .map_err(|_| NormalizedRebindError::IdentityRecipe)?;
+                        collect_fact_ref_dependency(evidence.subject(), dependencies);
+                    }
                 }
             }
         }
@@ -1361,6 +1373,31 @@ fn rebind_extension(
                 .map_err(|_| NormalizedRebindError::IdentityRecipe)
         }
         LEXICAL_EXTENSION_NAMESPACE => {
+            if extension.version == LEXICAL_SUMMARY_BATCH_VERSION {
+                let children = decode_lexical_summary_batch_envelope(&extension)
+                    .map_err(|_| NormalizedRebindError::IdentityRecipe)?;
+                let rebound = children
+                    .into_iter()
+                    .map(|child| {
+                        let evidence = decode_lexical_evidence_envelope(&child)
+                            .map_err(|_| NormalizedRebindError::IdentityRecipe)?;
+                        let subject = rebind_fact_ref(evidence.subject(), ids)?;
+                        let evidence = rebind_lexical_evidence_subject(&evidence, subject)
+                            .map_err(|_| NormalizedRebindError::IdentityRecipe)?;
+                        let source = child
+                            .evidence
+                            .source
+                            .map(|source| rebind_source(source, generation))
+                            .ok_or(NormalizedRebindError::IdentityRecipe)?;
+                        new_lexical_evidence_envelope(
+                            repository, generation, provenance, source, &evidence,
+                        )
+                        .map_err(|_| NormalizedRebindError::IdentityRecipe)
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
+                return new_lexical_summary_batch_envelope(&rebound)
+                    .map_err(|_| NormalizedRebindError::IdentityRecipe);
+            }
             let evidence = decode_lexical_evidence_envelope(&extension)
                 .map_err(|_| NormalizedRebindError::IdentityRecipe)?;
             let subject = rebind_fact_ref(evidence.subject(), ids)?;
@@ -2555,6 +2592,71 @@ mod tests {
                 .chain(&record.evidence_sources)
                 .all(|source| source.generation() == generation)
         }));
+    }
+
+    #[test]
+    fn summary_batch_rebinds_child_subjects_and_neutral_digest() {
+        let mut original = fixture_with_lexical_extension();
+        let occurrence = &original.occurrences[0];
+        let children = ["first comment", "second comment"]
+            .into_iter()
+            .map(|text| {
+                let evidence = LexicalEvidenceV1::from_complete_text(
+                    LexicalEvidenceKind::CommentSummary,
+                    FactRef::Fact(occurrence.id),
+                    LexicalEvidenceFormat::PlainText,
+                    text,
+                )
+                .unwrap();
+                new_lexical_evidence_envelope(
+                    original.repository,
+                    original.generation,
+                    occurrence.provenance,
+                    occurrence.source.clone(),
+                    &evidence,
+                )
+                .unwrap()
+            })
+            .collect::<Vec<_>>();
+        original.extensions = vec![new_lexical_summary_batch_envelope(&children).unwrap()];
+        let original = canonical_preserving_extensions(
+            original,
+            &IrLimits::default(),
+            &ExtensionSupport::default(),
+        )
+        .unwrap();
+        let generation = GenerationId::from_bytes([93; 20]);
+        let rebound = rebind_document(
+            original.clone(),
+            generation,
+            &IrLimits::default(),
+            &ExtensionSupport::default(),
+        )
+        .unwrap();
+        let batch = &rebound.extensions[0];
+        let children = decode_lexical_summary_batch_envelope(batch).unwrap();
+        assert_eq!(children.len(), 2);
+        assert_ne!(batch.id, original.extensions[0].id);
+        assert!(children.iter().all(|child| {
+            child.generation == generation
+                && child.evidence.derivation == [FactRef::Fact(rebound.occurrences[0].id)]
+        }));
+        assert_eq!(
+            canonical_generation_neutral_digests(
+                &original,
+                &IrLimits::default(),
+                &ExtensionSupport::default(),
+                || true,
+            )
+            .unwrap(),
+            canonical_generation_neutral_digests(
+                &rebound,
+                &IrLimits::default(),
+                &ExtensionSupport::default(),
+                || true,
+            )
+            .unwrap()
+        );
     }
 
     #[test]

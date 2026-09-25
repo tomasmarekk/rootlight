@@ -73,10 +73,12 @@ pub use identity::{
 pub use lexical::LexicalProjectionSchema;
 pub use lexical::{
     LEXICAL_EXTENSION_NAMESPACE, LEXICAL_EXTENSION_VERSION, LEXICAL_PROJECTION_VERSION,
-    LexicalEvidence, LexicalEvidenceFormat, LexicalEvidenceKind, LexicalEvidenceV1,
-    LexicalExtensionError, MAX_LEXICAL_PAYLOAD_BYTES, MAX_LEXICAL_SIGNATURE_BYTES,
-    MAX_LEXICAL_SUMMARY_BYTES, decode_lexical_evidence, decode_lexical_evidence_envelope,
-    encode_lexical_evidence, new_lexical_evidence_envelope, validate_lexical_evidence_envelope,
+    LEXICAL_SUMMARY_BATCH_VERSION, LexicalEvidence, LexicalEvidenceFormat, LexicalEvidenceKind,
+    LexicalEvidenceV1, LexicalExtensionError, MAX_LEXICAL_PAYLOAD_BYTES,
+    MAX_LEXICAL_SIGNATURE_BYTES, MAX_LEXICAL_SUMMARY_BATCH_ENTRIES, MAX_LEXICAL_SUMMARY_BYTES,
+    decode_lexical_evidence, decode_lexical_evidence_envelope,
+    decode_lexical_summary_batch_envelope, encode_lexical_evidence, new_lexical_evidence_envelope,
+    new_lexical_summary_batch_envelope, validate_lexical_evidence_envelope,
 };
 pub use normalized::{
     ContainerRef, CoverageRecord, CoverageScope, DiagnosticRecord, DiagnosticSeverity, EntityFlag,

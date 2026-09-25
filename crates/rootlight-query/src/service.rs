@@ -2710,6 +2710,7 @@ fn collect_symbol_signature(
         }
         tracker.add_rows(1)?;
         if envelope.namespace != rootlight_ir::LEXICAL_EXTENSION_NAMESPACE
+            || envelope.version == rootlight_ir::LEXICAL_SUMMARY_BATCH_VERSION
             || envelope.evidence.derivation.as_slice() != [rootlight_ir::FactRef::Entity(entity.id)]
         {
             continue;

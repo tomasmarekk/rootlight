@@ -17,6 +17,10 @@ pub const LEXICAL_EXTENSION_NAMESPACE: &str = "rootlight.lexical";
 pub const LEXICAL_EXTENSION_VERSION: &str = "1";
 /// Lexical envelope version for complete source-fragment projections.
 pub const LEXICAL_PROJECTION_VERSION: &str = "2";
+/// Lexical envelope version for bounded batches of source-linked summaries.
+pub const LEXICAL_SUMMARY_BATCH_VERSION: &str = "3";
+/// Maximum summaries in one independently validated lexical envelope.
+pub const MAX_LEXICAL_SUMMARY_BATCH_ENTRIES: usize = 128;
 /// Maximum retained UTF-8 bytes in one signature.
 pub const MAX_LEXICAL_SIGNATURE_BYTES: usize = 4 * 1024;
 /// Maximum retained UTF-8 bytes in one documentation or comment summary.
@@ -29,6 +33,8 @@ pub const MAX_LEXICAL_SUMMARY_BYTES: usize = 512;
 pub const MAX_LEXICAL_PAYLOAD_BYTES: usize = 25 * 1024;
 
 const LEXICAL_FACT_DOMAIN: &str = "rootlight.lexical/v1";
+const LEXICAL_SUMMARY_BATCH_DOMAIN: &str = "rootlight.lexical.summary-batch/v1";
+const MAX_LEXICAL_SUMMARY_BATCH_PAYLOAD_BYTES: usize = 1024 * 1024;
 const MAX_UTF8_BOUNDARY_BACKTRACK: usize = 3;
 
 /// Closed evidence classes retained by lexical indexing.
@@ -593,6 +599,192 @@ pub fn validate_lexical_evidence_envelope(
     Ok(evidence)
 }
 
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct LexicalSummaryBatchEntry {
+    source: SourceRef,
+    payload: String,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct LexicalSummaryBatchPayload {
+    entries: Vec<LexicalSummaryBatchEntry>,
+}
+
+#[derive(Serialize)]
+struct LexicalSummaryBatchIdentity<'a> {
+    repository: RepositoryId,
+    generation: GenerationId,
+    provenance: FactId,
+    payload: &'a str,
+}
+
+/// Packs a bounded set of complete source-linked summaries into one envelope.
+///
+/// Every child remains independently reconstructible with its original source,
+/// provenance, subject, payload, and deterministic identity. Signatures are
+/// deliberately excluded so symbol queries keep their direct envelope lookup.
+///
+/// # Errors
+///
+/// Rejects empty, oversized, mixed-owner, cross-file, malformed, or signature
+/// inputs without producing a partially populated batch.
+pub fn new_lexical_summary_batch_envelope(
+    entries: &[ExtensionEnvelope],
+) -> Result<ExtensionEnvelope, LexicalExtensionError> {
+    if entries.is_empty() || entries.len() > MAX_LEXICAL_SUMMARY_BATCH_ENTRIES {
+        return Err(LexicalExtensionError::MalformedPayload);
+    }
+    let mut ordered = entries.iter().collect::<Vec<_>>();
+    ordered.sort_unstable_by_key(|entry| entry.id);
+    let first = ordered[0];
+    let first_source = first
+        .evidence
+        .source
+        .as_ref()
+        .ok_or(LexicalExtensionError::MissingDirectSourceEvidence)?;
+    let file = first_source.span().file();
+    let mut previous_id = None;
+    let mut payload_entries = Vec::with_capacity(ordered.len());
+    let mut derivation = Vec::with_capacity(ordered.len());
+    for entry in ordered {
+        if previous_id.replace(entry.id) == Some(entry.id)
+            || entry.repository != first.repository
+            || entry.generation != first.generation
+            || entry.provenance != first.provenance
+        {
+            return Err(LexicalExtensionError::EnvelopeIdentityMismatch);
+        }
+        let evidence = decode_lexical_evidence_envelope(entry)?;
+        if evidence.kind() == LexicalEvidenceKind::Signature {
+            return Err(LexicalExtensionError::IncompatibleFormat);
+        }
+        let source = entry
+            .evidence
+            .source
+            .as_ref()
+            .ok_or(LexicalExtensionError::MissingDirectSourceEvidence)?;
+        if source.span().file() != file {
+            return Err(LexicalExtensionError::FileSubjectSourceMismatch);
+        }
+        payload_entries.push(LexicalSummaryBatchEntry {
+            source: source.clone(),
+            payload: entry.payload.clone(),
+        });
+        derivation.push(evidence.subject());
+    }
+    derivation.sort_unstable();
+    derivation.dedup();
+    let payload = serde_json::to_string(&LexicalSummaryBatchPayload {
+        entries: payload_entries,
+    })
+    .map_err(|_| LexicalExtensionError::PayloadEncoding)?;
+    if payload.len() > MAX_LEXICAL_SUMMARY_BATCH_PAYLOAD_BYTES {
+        return Err(LexicalExtensionError::PayloadTooLarge {
+            observed: payload.len(),
+            limit: MAX_LEXICAL_SUMMARY_BATCH_PAYLOAD_BYTES,
+        });
+    }
+    let id = derive_lexical_summary_batch_id(
+        first.repository,
+        first.generation,
+        first.provenance,
+        &payload,
+    )?;
+    Ok(ExtensionEnvelope {
+        id,
+        repository: first.repository,
+        generation: first.generation,
+        namespace: LEXICAL_EXTENSION_NAMESPACE.to_owned(),
+        version: LEXICAL_SUMMARY_BATCH_VERSION.to_owned(),
+        criticality: ExtensionCriticality::Noncritical,
+        payload,
+        provenance: first.provenance,
+        evidence: FactEvidence {
+            source: Some(first_source.clone()),
+            derivation,
+        },
+    })
+}
+
+/// Reconstructs and validates every independent summary in one batch.
+///
+/// # Errors
+///
+/// Rejects noncanonical encoding, altered source or derivation, wrong ownership,
+/// an invalid child, or a mismatched deterministic identity.
+pub fn decode_lexical_summary_batch_envelope(
+    envelope: &ExtensionEnvelope,
+) -> Result<Vec<ExtensionEnvelope>, LexicalExtensionError> {
+    if envelope.namespace != LEXICAL_EXTENSION_NAMESPACE {
+        return Err(LexicalExtensionError::UnsupportedNamespace);
+    }
+    if envelope.version != LEXICAL_SUMMARY_BATCH_VERSION {
+        return Err(LexicalExtensionError::UnsupportedVersion);
+    }
+    if envelope.criticality != ExtensionCriticality::Noncritical {
+        return Err(LexicalExtensionError::WrongCriticality);
+    }
+    if envelope.payload.len() > MAX_LEXICAL_SUMMARY_BATCH_PAYLOAD_BYTES {
+        return Err(LexicalExtensionError::PayloadTooLarge {
+            observed: envelope.payload.len(),
+            limit: MAX_LEXICAL_SUMMARY_BATCH_PAYLOAD_BYTES,
+        });
+    }
+    let payload: LexicalSummaryBatchPayload = serde_json::from_str(&envelope.payload)
+        .map_err(|_| LexicalExtensionError::MalformedPayload)?;
+    if payload.entries.is_empty() || payload.entries.len() > MAX_LEXICAL_SUMMARY_BATCH_ENTRIES {
+        return Err(LexicalExtensionError::MalformedPayload);
+    }
+    let mut entries = Vec::with_capacity(payload.entries.len());
+    for entry in payload.entries {
+        validate_source_owner(envelope.repository, envelope.generation, &entry.source)?;
+        let evidence = decode_lexical_evidence(&entry.payload)?;
+        let child = new_lexical_evidence_envelope(
+            envelope.repository,
+            envelope.generation,
+            envelope.provenance,
+            entry.source,
+            &evidence,
+        )?;
+        if evidence.kind() == LexicalEvidenceKind::Signature {
+            return Err(LexicalExtensionError::IncompatibleFormat);
+        }
+        entries.push(child);
+    }
+    let canonical = new_lexical_summary_batch_envelope(&entries)?;
+    if canonical.payload != envelope.payload {
+        return Err(LexicalExtensionError::NoncanonicalPayload);
+    }
+    if canonical.id != envelope.id
+        || canonical.evidence != envelope.evidence
+        || canonical.repository != envelope.repository
+        || canonical.generation != envelope.generation
+        || canonical.provenance != envelope.provenance
+    {
+        return Err(LexicalExtensionError::EnvelopeIdentityMismatch);
+    }
+    Ok(entries)
+}
+
+fn derive_lexical_summary_batch_id(
+    repository: RepositoryId,
+    generation: GenerationId,
+    provenance: FactId,
+    payload: &str,
+) -> Result<FactId, LexicalExtensionError> {
+    let identity = LexicalSummaryBatchIdentity {
+        repository,
+        generation,
+        provenance,
+        payload,
+    };
+    let bytes =
+        serde_json::to_vec(&identity).map_err(|_| LexicalExtensionError::PayloadEncoding)?;
+    Ok(derive_fact(LEXICAL_SUMMARY_BATCH_DOMAIN, &bytes).id())
+}
+
 fn retained_prefix(input: &str, limit: usize) -> (&str, bool) {
     if input.len() <= limit {
         return (input, false);
@@ -911,6 +1103,74 @@ mod tests {
             text,
         )
         .expect("signature fixture is valid")
+    }
+
+    #[test]
+    fn summary_batch_reconstructs_children_and_rejects_corruption() {
+        let (repository, generation, provenance, source, _) = owner();
+        let children = (0..3)
+            .map(|index| {
+                let subject = FactRef::Fact(FactId::from_bytes([index + 10; 20]));
+                let evidence = LexicalEvidenceV1::from_complete_text(
+                    LexicalEvidenceKind::CommentSummary,
+                    subject,
+                    LexicalEvidenceFormat::PlainText,
+                    &format!("comment {index}"),
+                )
+                .unwrap();
+                new_lexical_evidence_envelope(
+                    repository,
+                    generation,
+                    provenance,
+                    source.clone(),
+                    &evidence,
+                )
+                .unwrap()
+            })
+            .collect::<Vec<_>>();
+        let batch = new_lexical_summary_batch_envelope(&children).unwrap();
+        assert_eq!(batch.version, LEXICAL_SUMMARY_BATCH_VERSION);
+        let mut reconstructed = decode_lexical_summary_batch_envelope(&batch).unwrap();
+        reconstructed.sort_unstable_by_key(|entry| entry.id);
+        let mut expected = children.clone();
+        expected.sort_unstable_by_key(|entry| entry.id);
+        assert_eq!(reconstructed, expected);
+        assert_eq!(
+            new_lexical_summary_batch_envelope(&vec![children[0].clone(); 129]),
+            Err(LexicalExtensionError::MalformedPayload)
+        );
+
+        let mut changed_payload = batch.clone();
+        changed_payload.payload.push(' ');
+        assert_eq!(
+            decode_lexical_summary_batch_envelope(&changed_payload),
+            Err(LexicalExtensionError::NoncanonicalPayload)
+        );
+        let mut changed_derivation = batch.clone();
+        changed_derivation.evidence.derivation.pop();
+        assert_eq!(
+            decode_lexical_summary_batch_envelope(&changed_derivation),
+            Err(LexicalExtensionError::EnvelopeIdentityMismatch)
+        );
+        let mut changed_source = batch;
+        changed_source.evidence.source = None;
+        assert_eq!(
+            decode_lexical_summary_batch_envelope(&changed_source),
+            Err(LexicalExtensionError::EnvelopeIdentityMismatch)
+        );
+
+        let signature = new_lexical_evidence_envelope(
+            repository,
+            generation,
+            provenance,
+            source,
+            &signature("fn counted()"),
+        )
+        .unwrap();
+        assert_eq!(
+            new_lexical_summary_batch_envelope(&[signature]),
+            Err(LexicalExtensionError::IncompatibleFormat)
+        );
     }
 
     #[test]
