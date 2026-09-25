@@ -63,8 +63,7 @@ use rootlight_protocol::{
     generated::{common::v1 as common, daemon::v1 as daemon, ui::graph::v1 as graph},
     validate_graph_page,
 };
-use rootlight_unicode::UnicodeCaseFold as _;
-use unicode_normalization::UnicodeNormalization as _;
+use rootlight_unicode::canonical_case_fold;
 
 /// Protocol major supported by the first local daemon contract.
 pub const PROTOCOL_MAJOR: u32 = 1;
@@ -9236,35 +9235,21 @@ fn repository_catalog_entry_matches_request(
     let Some(query) = request.normalized_query.as_deref() else {
         return true;
     };
-    let display_matches = entry
-        .display_name
-        .nfd()
-        .case_fold()
-        .nfc()
-        .collect::<String>()
-        .contains(query);
-    let alias_matches = entry.alias.as_deref().is_some_and(|alias| {
-        alias
-            .nfd()
-            .case_fold()
-            .nfc()
-            .collect::<String>()
-            .contains(query)
-    });
+    let display_matches = canonical_case_fold(&entry.display_name).contains(query);
+    let alias_matches = entry
+        .alias
+        .as_deref()
+        .is_some_and(|alias| canonical_case_fold(alias).contains(query));
     let repository_matches = entry
         .repository
         .as_ref()
         .and_then(|repository| <[u8; 16]>::try_from(repository.value.as_slice()).ok())
         .map(RepositoryId::from_bytes)
         .is_some_and(|repository| repository.to_string().contains(query));
-    let root_path_matches = entry.root_path.as_deref().is_some_and(|root_path| {
-        root_path
-            .nfd()
-            .case_fold()
-            .nfc()
-            .collect::<String>()
-            .contains(query)
-    });
+    let root_path_matches = entry
+        .root_path
+        .as_deref()
+        .is_some_and(|root_path| canonical_case_fold(root_path).contains(query));
     display_matches || alias_matches || repository_matches || root_path_matches
 }
 
@@ -9323,12 +9308,7 @@ fn repository_catalog_entry_order(
     entry: &daemon::RepositoryCatalogEntry,
 ) -> Option<(String, &[u8])> {
     let repository = entry.repository.as_ref()?.value.as_slice();
-    let normalized = entry
-        .display_name
-        .nfd()
-        .case_fold()
-        .nfc()
-        .collect::<String>();
+    let normalized = canonical_case_fold(&entry.display_name);
     (normalized.len() <= MAX_REPOSITORY_CATALOG_QUERY_BYTES).then_some((normalized, repository))
 }
 
@@ -9336,12 +9316,7 @@ fn repository_catalog_sort_key_for_wire_entry(
     entry: &daemon::RepositoryCatalogEntry,
 ) -> Option<Vec<u8>> {
     let repository = entry.repository.as_ref()?.value.as_slice();
-    let normalized = entry
-        .display_name
-        .nfd()
-        .case_fold()
-        .nfc()
-        .collect::<String>();
+    let normalized = canonical_case_fold(&entry.display_name);
     let name_len = u16::try_from(normalized.len()).ok()?;
     let mut bytes = Vec::with_capacity(2 + normalized.len() + repository.len());
     bytes.extend_from_slice(&name_len.to_le_bytes());
@@ -9391,7 +9366,7 @@ fn valid_repository_catalog_sort_key(bytes: &[u8]) -> bool {
     !name
         .chars()
         .any(|character| character.is_control() || matches!(character, '/' | '\\'))
-        && name.nfd().case_fold().nfc().collect::<String>() == name
+        && canonical_case_fold(name) == name
 }
 
 fn repository_catalog_label_is_safe(value: &str) -> bool {
@@ -9943,7 +9918,7 @@ fn validate_first_slice_request(request: &FirstSliceIpcRequest) -> Result<(), Bo
                     query.is_empty()
                         || query.len() > MAX_REPOSITORY_CATALOG_QUERY_BYTES
                         || query.as_bytes().contains(&0)
-                        || query.nfd().case_fold().nfc().collect::<String>() != *query
+                        || canonical_case_fold(query) != *query
                 })
                 || request
                     .states
@@ -19254,7 +19229,7 @@ mod tests {
     }
 
     fn catalog_sort_key(display_name: &str, repository: &[u8; 16]) -> Vec<u8> {
-        let normalized = display_name.nfd().case_fold().nfc().collect::<String>();
+        let normalized = canonical_case_fold(display_name);
         let length = u16::try_from(normalized.len()).expect("test catalog name length fits");
         let mut bytes = Vec::with_capacity(2 + normalized.len() + repository.len());
         bytes.extend_from_slice(&length.to_le_bytes());

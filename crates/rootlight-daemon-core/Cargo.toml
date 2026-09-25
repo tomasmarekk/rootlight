@@ -19,7 +19,6 @@ rootlight-unicode = { path = "../rootlight-unicode" }
 rootlight-crypto = { path = "../rootlight-crypto" }
 thiserror.workspace = true
 tokio.workspace = true
-unicode-normalization.workspace = true
 
 [dev-dependencies]
 rootlight-client = { path = "../rootlight-client" }

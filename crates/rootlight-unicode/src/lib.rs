@@ -1,17 +1,23 @@
 //! First-party Unicode properties for repository and query identity.
 //!
-//! Case folding uses Unicode 9 to preserve existing index keys. Source-language
-//! general categories use Unicode 16. Both implementations are first-party;
-//! the checked-in character data retains its Unicode provenance and terms.
+//! Case folding uses Unicode 9 to preserve existing index keys, canonical
+//! normalization uses Unicode 17, and source-language general categories use
+//! Unicode 16. The implementations are first-party; checked-in character data
+//! retains its Unicode provenance and terms.
 
 use std::{iter, str::Chars};
 
 include!("case_folding.rs");
 mod general_category;
 mod general_category_data;
+mod normalization;
+mod normalization_data;
 
 pub use general_category::{
     GENERAL_CATEGORY_UNICODE_VERSION, GeneralCategory, get_general_category,
+};
+pub use normalization::{
+    NORMALIZATION_UNICODE_VERSION, canonical_case_fold, normalize_nfc, normalize_nfd,
 };
 
 /// Unicode data version used for case-insensitive index keys.

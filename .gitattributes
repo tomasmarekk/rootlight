@@ -27,3 +27,5 @@ third_party/dekobon-tree-sitter-groovy-0.2.0/LICENSE-APACHE whitespace=-blank-at
 adapters/licenses/dekobon-tree-sitter-groovy-0.2.0-LICENSE-APACHE whitespace=-blank-at-eof
 # Preserve the published Unicode 9 case-fold data byte-for-byte.
 crates/rootlight-unicode/data/CaseFolding-9.0.0.txt whitespace=-blank-at-eol
+# Preserve the published Unicode 17 composition exclusions byte-for-byte.
+crates/rootlight-unicode/data/CompositionExclusions-17.0.0.txt whitespace=-blank-at-eol

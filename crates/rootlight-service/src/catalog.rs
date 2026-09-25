@@ -10,8 +10,7 @@ use std::{
 
 use rootlight_ids::{ContentHash, GenerationId, RepositoryId, content_hash};
 use rootlight_ir::{AnalysisTier, CoverageStatus};
-use rootlight_unicode::UnicodeCaseFold as _;
-use unicode_normalization::UnicodeNormalization as _;
+use rootlight_unicode::canonical_case_fold;
 
 /// Current binary encoding version for [`CatalogSortKey`].
 pub const CATALOG_SORT_VERSION: u16 = 1;
@@ -1177,7 +1176,7 @@ fn normalize_query(query: &str) -> Result<Option<String>, CatalogError> {
 }
 
 fn canonical_text(value: &str) -> String {
-    value.nfd().case_fold().nfc().collect()
+    canonical_case_fold(value)
 }
 
 pub(super) fn validate_label(label: &str) -> Result<(), CatalogError> {

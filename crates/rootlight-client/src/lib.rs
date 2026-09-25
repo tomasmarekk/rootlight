@@ -83,9 +83,8 @@ use rootlight_runtime::{
     LaunchLock, RuntimePaths, STARTUP_ACTIVE_GENERATION_RESTORE_TIMEOUT,
 };
 use rootlight_sandbox::{ChildProcess, KillOnCloseJob, ProcessCommand, ProcessError, StdioMode};
-use rootlight_unicode::UnicodeCaseFold as _;
+use rootlight_unicode::canonical_case_fold;
 use tokio::time::Instant as TokioInstant;
-use unicode_normalization::UnicodeNormalization as _;
 use zip::CompressionMethod;
 
 const CLIENT_CAPABILITIES: &[&str] = &[
@@ -9101,7 +9100,7 @@ fn normalize_repository_catalog_query(query: Option<&str>) -> Result<Option<Stri
     if query.chars().count() > MAX_REPOSITORY_CATALOG_QUERY_CHARS || query.as_bytes().contains(&0) {
         return Err(ClientError::InvalidRepositoryCatalogRequest);
     }
-    let normalized = query.nfd().case_fold().nfc().collect::<String>();
+    let normalized = canonical_case_fold(query);
     if normalized.len() > MAX_REPOSITORY_CATALOG_QUERY_BYTES {
         return Err(ClientError::InvalidRepositoryCatalogRequest);
     }
@@ -9128,7 +9127,7 @@ fn validate_repository_catalog_sort_key(bytes: &[u8]) -> Result<(), ClientError>
         .ok_or(ClientError::InvalidRepositoryCatalogRequest)?;
     let name = std::str::from_utf8(name_bytes)
         .map_err(|_| ClientError::InvalidRepositoryCatalogRequest)?;
-    let canonical = name.nfd().case_fold().nfc().collect::<String>();
+    let canonical = canonical_case_fold(name);
     if canonical != name
         || name
             .chars()
@@ -10604,14 +10603,10 @@ fn repository_catalog_entry_matches_request(
             normalize_repository_catalog_display_name(alias)
                 .is_ok_and(|alias| alias.contains(query))
         })
-        || entry.root_path.as_deref().is_some_and(|root_path| {
-            root_path
-                .nfd()
-                .case_fold()
-                .nfc()
-                .collect::<String>()
-                .contains(query)
-        })
+        || entry
+            .root_path
+            .as_deref()
+            .is_some_and(|root_path| canonical_case_fold(root_path).contains(query))
         || entry.repository_id.to_string().contains(query)
 }
 
@@ -10767,7 +10762,7 @@ fn repository_catalog_label_is_safe(value: &str, allow_empty: bool) -> bool {
 }
 
 fn normalize_repository_catalog_display_name(value: &str) -> Result<String, ClientError> {
-    let normalized = value.nfd().case_fold().nfc().collect::<String>();
+    let normalized = canonical_case_fold(value);
     if normalized.len() > MAX_REPOSITORY_CATALOG_QUERY_BYTES {
         return Err(ClientError::InvalidResponseCorrelation);
     }
@@ -15672,7 +15667,7 @@ mod tests {
         display_name: &str,
         repository: RepositoryId,
     ) -> RepositoryCatalogSortKey {
-        let normalized = display_name.nfd().case_fold().nfc().collect::<String>();
+        let normalized = canonical_case_fold(display_name);
         let length = u16::try_from(normalized.len()).expect("test catalog name length fits");
         let mut bytes = Vec::with_capacity(2 + normalized.len() + 16);
         bytes.extend_from_slice(&length.to_le_bytes());

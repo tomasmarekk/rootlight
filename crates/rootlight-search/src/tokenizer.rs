@@ -1,7 +1,5 @@
-use rootlight_unicode::UnicodeCaseFold as _;
-use rootlight_unicode::{GeneralCategory, get_general_category};
+use rootlight_unicode::{GeneralCategory, canonical_case_fold, get_general_category};
 use tantivy::tokenizer::{Token, TokenStream, Tokenizer};
-use unicode_normalization::UnicodeNormalization;
 
 use crate::model::MAX_TERM_BYTES;
 
@@ -84,11 +82,7 @@ pub(crate) fn token_texts(text: &str) -> Vec<String> {
 
 /// Applies the index format's full, non-Turkic Unicode normalization.
 pub(crate) fn normalize_text(input: &str) -> String {
-    if input.is_ascii() {
-        input.to_ascii_lowercase()
-    } else {
-        input.nfd().case_fold().nfc().collect()
-    }
+    canonical_case_fold(input)
 }
 
 fn split_spans(text: &str, output: &mut Vec<Span>) {

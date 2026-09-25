@@ -11,7 +11,7 @@ use rootlight_mcp_contract::{
     },
     vertical::{ContinuationCursor, GenerationSelector, ResponseProfile},
 };
-use unicode_normalization::UnicodeNormalization;
+use rootlight_unicode::normalize_nfc;
 
 use crate::context_pack::EvidenceRole;
 
@@ -449,14 +449,14 @@ pub fn normalize_task(value: &str) -> String {
 
 fn normalize_whitespace(value: &str, lowercase: bool) -> String {
     let normalized: String = if lowercase {
-        value
-            .nfc()
-            .flat_map(char::to_lowercase)
-            .collect::<String>()
-            .nfc()
-            .collect()
+        normalize_nfc(
+            &normalize_nfc(value)
+                .chars()
+                .flat_map(char::to_lowercase)
+                .collect::<String>(),
+        )
     } else {
-        value.nfc().collect()
+        normalize_nfc(value)
     };
     normalized.split_whitespace().collect::<Vec<_>>().join(" ")
 }
@@ -480,7 +480,7 @@ fn normalized_paths(values: &[String]) -> Result<Vec<String>, CanonicalContextPa
 }
 
 fn normalize_repository_path(value: &str) -> Result<String, CanonicalContextPackRequestError> {
-    let normalized = value.nfc().collect::<String>().replace('\\', "/");
+    let normalized = normalize_nfc(value).replace('\\', "/");
     if normalized.starts_with('/')
         || normalized
             .as_bytes()

@@ -11,11 +11,11 @@ publish = false
 rootlight-ids = { path = "../rootlight-ids" }
 rootlight-ir = { path = "../rootlight-ir" }
 rootlight-mcp-contract = { path = "../rootlight-mcp-contract" }
+rootlight-unicode = { path = "../rootlight-unicode" }
 thiserror.workspace = true
 blake3.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-unicode-normalization.workspace = true
 
 [dev-dependencies]
 proptest.workspace = true
