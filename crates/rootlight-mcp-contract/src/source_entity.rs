@@ -12,13 +12,13 @@ use crate::vertical::{
 
 /// Contract revision for build-target-aware advanced queries.
 pub const QUERY_VERSION: &str = "1.6";
-/// Contract revision for build-target-aware explanations.
-pub const EXPLAIN_VERSION: &str = "1.7";
+/// Contract revision for exact source entity kinds in explanations.
+pub const EXPLAIN_VERSION: &str = "1.8";
 /// Contract revision for change results containing source entities.
 pub const CHANGE_VERSION: &str = "1.5";
 
-/// Contract revision for build targets and explicit extracted-source origins.
-pub const LOCATE_VERSION: &str = "1.7";
+/// Contract revision for exact source entity kinds in locate results.
+pub const LOCATE_VERSION: &str = "1.8";
 /// Contract revision for source reads with explicit extracted-source origins.
 pub const SOURCE_READ_VERSION: &str = "1.1";
 
@@ -37,6 +37,20 @@ pub enum BuildTargetLocateVersion {
     #[serde(rename = "1.7")]
     V1_7,
 }
+
+/// Exact version of precise-kind locate responses.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub enum PreciseLocateVersion {
+    /// Locate contract 1.8.
+    #[serde(rename = "1.8")]
+    V1_8,
+}
+
+/// Precise-kind `code.locate` success or domain error.
+pub type CodeLocateOutputV1_8 = EntityToolResponse<
+    EntityReadEnvelope<CodeLocateData, PreciseLocateVersion>,
+    PreciseLocateVersion,
+>;
 
 /// Build-target-aware `code.locate` success or domain error.
 pub type CodeLocateOutputV1_7 = EntityToolResponse<
@@ -65,6 +79,20 @@ pub enum BuildTargetExplainVersion {
     #[serde(rename = "1.7")]
     V1_7,
 }
+
+/// Exact version of precise-kind explanation responses.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub enum PreciseExplainVersion {
+    /// Explanation contract 1.8.
+    #[serde(rename = "1.8")]
+    V1_8,
+}
+
+/// Precise-kind `symbol.explain` success or domain error.
+pub type SymbolExplainOutputV1_8 = EntityToolResponse<
+    EntityReadEnvelope<SymbolExplainData, PreciseExplainVersion>,
+    PreciseExplainVersion,
+>;
 
 /// Build-target-aware `symbol.explain` success or domain error.
 pub type SymbolExplainOutputV1_7 = EntityToolResponse<

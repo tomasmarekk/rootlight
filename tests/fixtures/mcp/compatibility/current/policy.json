@@ -33,12 +33,12 @@
         "tool": "operation.status"
       },
       {
-        "current_version": "1.7",
+        "current_version": "1.8",
         "projected_version": "1.0",
         "tool": "code.locate"
       },
       {
-        "current_version": "1.7",
+        "current_version": "1.8",
         "projected_version": "1.0",
         "tool": "symbol.explain"
       },
@@ -237,11 +237,11 @@
     },
     {
       "tool": "code.locate",
-      "version": "1.7"
+      "version": "1.8"
     },
     {
       "tool": "symbol.explain",
-      "version": "1.7"
+      "version": "1.8"
     },
     {
       "tool": "symbol.relationships",

@@ -1054,6 +1054,18 @@ fn generate_json_schemas(workspace_root: &Path, staged_root: &Path) -> Result<()
         "output",
         "1.7",
     )?;
+    write_mcp_tool_schema_version::<SymbolExplainInput>(
+        &schema_root,
+        "symbol.explain",
+        "input",
+        "1.8",
+    )?;
+    write_mcp_tool_schema_version::<rootlight_mcp_contract::source_entity::SymbolExplainOutputV1_8>(
+        &schema_root,
+        "symbol.explain",
+        "output",
+        "1.8",
+    )?;
     write_mcp_tool_schema_version::<CodeLocateInput>(&schema_root, "code.locate", "input", "1.3")?;
     write_mcp_tool_schema_version::<CodeLocateOutputV1_3>(
         &schema_root,
@@ -1231,6 +1243,13 @@ fn generate_json_schemas(workspace_root: &Path, staged_root: &Path) -> Result<()
         "code.locate",
         "output",
         "1.7",
+    )?;
+    write_mcp_tool_schema_version::<CodeLocateInput>(&schema_root, "code.locate", "input", "1.8")?;
+    write_mcp_tool_schema_version::<rootlight_mcp_contract::source_entity::CodeLocateOutputV1_8>(
+        &schema_root,
+        "code.locate",
+        "output",
+        "1.8",
     )?;
     write_mcp_tool_schema::<RepoStatusInput>(&schema_root, "repo.status", "input")?;
     write_mcp_tool_schema::<RepoStatusOutputV1_0>(&schema_root, "repo.status", "output")?;
@@ -1528,6 +1547,8 @@ fn write_schema_value(path: &Path, mut schema: schemars::Schema) -> Result<(), S
                 | "mcp-code-locate-output-1.6.schema.json"
                 | "mcp-code-locate-input-1.7.schema.json"
                 | "mcp-code-locate-output-1.7.schema.json"
+                | "mcp-code-locate-input-1.8.schema.json"
+                | "mcp-code-locate-output-1.8.schema.json"
                 | "mcp-query-advanced-input-1.5.schema.json"
                 | "mcp-query-advanced-output-1.5.schema.json"
                 | "mcp-query-advanced-input-1.6.schema.json"
@@ -1536,6 +1557,19 @@ fn write_schema_value(path: &Path, mut schema: schemars::Schema) -> Result<(), S
                 | "mcp-symbol-explain-output-1.6.schema.json"
                 | "mcp-symbol-explain-input-1.7.schema.json"
                 | "mcp-symbol-explain-output-1.7.schema.json"
+                | "mcp-symbol-explain-input-1.8.schema.json"
+                | "mcp-symbol-explain-output-1.8.schema.json"
+        );
+        let precise_kinds = matches!(
+            name,
+            "mcp-code-locate-input-1.8.schema.json"
+                | "mcp-code-locate-output-1.8.schema.json"
+                | "mcp-symbol-explain-input-1.8.schema.json"
+                | "mcp-symbol-explain-output-1.8.schema.json"
+        );
+        let precise_output = matches!(
+            name,
+            "mcp-code-locate-output-1.8.schema.json" | "mcp-symbol-explain-output-1.8.schema.json"
         );
         let document_kinds = binding_kinds
             || matches!(
@@ -1616,12 +1650,27 @@ fn write_schema_value(path: &Path, mut schema: schemars::Schema) -> Result<(), S
                         name,
                         "mcp-code-locate-input-1.7.schema.json"
                             | "mcp-code-locate-output-1.7.schema.json"
+                            | "mcp-code-locate-input-1.8.schema.json"
+                            | "mcp-code-locate-output-1.8.schema.json"
                             | "mcp-query-advanced-input-1.6.schema.json"
                             | "mcp-query-advanced-output-1.6.schema.json"
                             | "mcp-symbol-explain-input-1.7.schema.json"
                             | "mcp-symbol-explain-output-1.7.schema.json"
+                            | "mcp-symbol-explain-input-1.8.schema.json"
+                            | "mcp-symbol-explain-output-1.8.schema.json"
                     ) || name.starts_with("mcp-change-impact-output-")
                         || name.starts_with("mcp-history-compare-output-")
+                }
+                Some("type" | "configuration") if precise_output => false,
+                Some(
+                    "namespace" | "class" | "struct" | "enum" | "union" | "type_alias" | "trait"
+                    | "interface" | "protocol" | "type_parameter" | "closure" | "constructor"
+                    | "property" | "parameter" | "configuration_key",
+                ) => {
+                    precise_kinds
+                        || !(name.starts_with("mcp-code-locate-")
+                            || name.starts_with("mcp-symbol-explain-")
+                            || name.starts_with("mcp-query-advanced-input-"))
                 }
                 _ => true,
             },
@@ -3086,10 +3135,14 @@ fn expected_artifact_paths() -> Vec<String> {
         format!("{SCHEMA_ROOT}/json/mcp-code-locate-output-1.6.schema.json"),
         format!("{SCHEMA_ROOT}/json/mcp-code-locate-input-1.7.schema.json"),
         format!("{SCHEMA_ROOT}/json/mcp-code-locate-output-1.7.schema.json"),
+        format!("{SCHEMA_ROOT}/json/mcp-code-locate-input-1.8.schema.json"),
+        format!("{SCHEMA_ROOT}/json/mcp-code-locate-output-1.8.schema.json"),
         format!("{SCHEMA_ROOT}/json/mcp-query-advanced-input-1.6.schema.json"),
         format!("{SCHEMA_ROOT}/json/mcp-query-advanced-output-1.6.schema.json"),
         format!("{SCHEMA_ROOT}/json/mcp-symbol-explain-input-1.7.schema.json"),
         format!("{SCHEMA_ROOT}/json/mcp-symbol-explain-output-1.7.schema.json"),
+        format!("{SCHEMA_ROOT}/json/mcp-symbol-explain-input-1.8.schema.json"),
+        format!("{SCHEMA_ROOT}/json/mcp-symbol-explain-output-1.8.schema.json"),
         format!("{SCHEMA_ROOT}/json/mcp-repo-status-input-1.0.schema.json"),
         format!("{SCHEMA_ROOT}/json/mcp-repo-status-output-1.0.schema.json"),
         format!("{SCHEMA_ROOT}/json/mcp-repo-status-input-1.1.schema.json"),

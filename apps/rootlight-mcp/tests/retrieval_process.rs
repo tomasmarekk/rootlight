@@ -501,11 +501,12 @@ fn agda_nested_declarations_keep_exact_sources_across_mcp() {
     for (name, query_entity, exact_kind) in
         [("yes", "method", "constructor"), ("left", "field", "field")]
     {
+        let arguments = json!({"query": name, "search_modes": ["exact"], "languages": ["agda"],
+            "scope": {"paths": ["Main.agda"]}, "response_profile": "evidence"});
         let located = fixture.standalone(
             &format!("agda-{name}-locate"),
             "code.locate",
-            json!({"query": name, "search_modes": ["exact"], "languages": ["agda"],
-                "scope": {"paths": ["Main.agda"]}, "response_profile": "evidence"}),
+            arguments.clone(),
         );
         assert_success(&located, "code.locate");
         let found = located["result"]["structuredContent"]["data"]["matches"]
@@ -514,6 +515,72 @@ fn agda_nested_declarations_keep_exact_sources_across_mcp() {
             .iter()
             .find(|item| item["display_name"] == name && item["symbol_id"].is_string())
             .unwrap_or_else(|| panic!("missing Agda {exact_kind}: {located:#}"));
+        assert_eq!(found["kind"], exact_kind);
+        let exact = fixture.standalone(
+            &format!("agda-{name}-kind-filter"),
+            "code.locate",
+            json!({"query": name, "search_modes": ["exact"], "languages": ["agda"],
+                "scope": {"paths": ["Main.agda"]}, "kinds": [exact_kind],
+                "response_profile": "evidence"}),
+        );
+        assert_success(&exact, "code.locate");
+        assert!(
+            exact["result"]["structuredContent"]["data"]["matches"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|item| item["symbol_id"] == found["symbol_id"] && item["kind"] == exact_kind)
+        );
+        if exact_kind != query_entity {
+            let old_filter = fixture.standalone_version(
+                &format!("agda-{name}-old-kind-filter"),
+                "code.locate",
+                json!({"query": name, "search_modes": ["exact"], "languages": ["agda"],
+                    "scope": {"paths": ["Main.agda"]}, "kinds": [exact_kind],
+                    "response_profile": "evidence"}),
+                "1.7",
+            );
+            assert_eq!(old_filter["result"]["isError"], true);
+        }
+        let retained = fixture.standalone_version(
+            &format!("agda-{name}-retained-locate"),
+            "code.locate",
+            arguments,
+            "1.7",
+        );
+        assert_success(&retained, "code.locate");
+        assert_eq!(
+            retained["result"]["structuredContent"]["schema_version"],
+            "1.7"
+        );
+        let retained_match = retained["result"]["structuredContent"]["data"]["matches"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|item| item["symbol_id"] == found["symbol_id"])
+            .unwrap();
+        assert_eq!(retained_match["kind"], query_entity);
+        let explanation = fixture.standalone(
+            &format!("agda-{name}-explain"),
+            "symbol.explain",
+            json!({"symbol_ids": [found["symbol_id"]], "response_profile": "evidence"}),
+        );
+        assert_success(&explanation, "symbol.explain");
+        assert_eq!(
+            explanation["result"]["structuredContent"]["data"]["symbols"][0]["kind"],
+            exact_kind
+        );
+        let retained_explanation = fixture.standalone_version(
+            &format!("agda-{name}-retained-explain"),
+            "symbol.explain",
+            json!({"symbol_ids": [found["symbol_id"]], "response_profile": "evidence"}),
+            "1.7",
+        );
+        assert_success(&retained_explanation, "symbol.explain");
+        assert_eq!(
+            retained_explanation["result"]["structuredContent"]["data"]["symbols"][0]["kind"],
+            query_entity
+        );
         let advanced = fixture.standalone(
             &format!("agda-{name}-exact-kind"),
             "query.advanced",
@@ -848,7 +915,7 @@ fn matlab_lexical_relationships_cross_mcp_with_exact_read_sources() {
         "inspect.m",
         "function result = inspect(input)\nlocal = input;\nlocal = 2;\nresult = local;\ndisp(result);\nend\n",
         &[
-            ("input", "variable", "input"),
+            ("input", "parameter", "input"),
             ("local", "variable", "local"),
             ("result", "variable", "result"),
         ],
@@ -1033,8 +1100,8 @@ fn perl_lexical_relationships_cross_mcp_with_exact_read_sources() {
         "measure.pm",
         "package Measure; sub adjust ($value, $step = $value + 1) { my $result = $step; return $result; }\n",
         &[
-            ("$value", "variable", "$value"),
-            ("$step", "variable", "$step"),
+            ("$value", "parameter", "$value"),
+            ("$step", "parameter", "$step"),
             ("$result", "variable", "$result"),
         ],
     );
@@ -1371,8 +1438,8 @@ fn nix_lexical_relationships_cross_mcp_with_exact_generation_bound_read_sources(
         source,
         &[
             ("identity", "function", "identity"),
-            ("value", "variable", "value"),
-            ("args", "variable", "args"),
+            ("value", "parameter", "value"),
+            ("args", "parameter", "args"),
         ],
     );
 }
@@ -1385,8 +1452,8 @@ fn nix_quoted_lexical_relationships_preserve_authored_mcp_sources() {
         &[
             (r#""\identity""#, "function", "identity"),
             ("identity", "function", "identity"),
-            ("value", "variable", "value"),
-            ("args", "variable", "args"),
+            ("value", "parameter", "value"),
+            ("args", "parameter", "args"),
         ],
     );
 }
@@ -1398,8 +1465,8 @@ fn nix_merged_rec_sets_cross_mcp_with_source_proven_added_field_reads() {
         &[
             ("identity", "variable", "identity"),
             ("part", "function", "part"),
-            ("value", "variable", "value"),
-            ("args", "variable", "args"),
+            ("value", "parameter", "value"),
+            ("args", "parameter", "args"),
         ],
     );
 }
@@ -1411,8 +1478,8 @@ fn nix_literal_keys_cross_mcp_with_authored_and_decoded_search_names() {
         &[
             (r#"${"identity"}"#, "function", "identity"),
             ("identity", "function", "identity"),
-            ("value", "variable", "value"),
-            ("args", "variable", "args"),
+            ("value", "parameter", "value"),
+            ("args", "parameter", "args"),
         ],
     );
 }
@@ -1423,8 +1490,8 @@ fn nix_implicit_path_owners_cross_mcp_as_noncallable_lexical_targets() {
         "{ system ? \"portable\" }@args: let identity.part = value: value; identity.other = 2; in { inherit system; result = [ identity args ]; }",
         &[
             ("identity", "variable", "identity"),
-            ("value", "variable", "value"),
-            ("args", "variable", "args"),
+            ("value", "parameter", "value"),
+            ("args", "parameter", "args"),
         ],
     );
 }
@@ -1492,8 +1559,8 @@ fn nix_selected_attributes_cross_mcp_with_exact_component_sources() {
         &[
             ("settings", "variable", "settings"),
             ("identity", "function", "identity"),
-            ("value", "variable", "value"),
-            ("args", "variable", "args"),
+            ("value", "parameter", "value"),
+            ("args", "parameter", "args"),
         ],
     );
 }
@@ -1506,8 +1573,8 @@ fn nix_inherit_from_fields_cross_mcp_as_distinct_source_and_local_symbols() {
             ("settings", "variable", "settings"),
             ("identity", "function", "identity"),
             ("identity", "variable", "identity"),
-            ("value", "variable", "value"),
-            ("args", "variable", "args"),
+            ("value", "parameter", "value"),
+            ("args", "parameter", "args"),
         ],
     );
 }
@@ -1686,12 +1753,15 @@ fn objective_c_forward_sources_remain_non_defining_in_current_and_retained_mcp()
         let output = &located["result"]["structuredContent"];
         assert_common_read_contract(output, &fixture.repository_id);
         let matches = output["data"]["matches"].as_array().unwrap();
-        for hit in matches.iter().filter(|hit| hit["kind"] != "type") {
+        for hit in matches.iter().filter(|hit| hit["kind"] != ir_kind) {
             assert_eq!(hit["kind"], "file");
             assert_eq!(hit["path"], "forwards.m");
             assert!(hit["symbol_id"].is_null());
         }
-        let found: Vec<_> = matches.iter().filter(|hit| hit["kind"] == "type").collect();
+        let found: Vec<_> = matches
+            .iter()
+            .filter(|hit| hit["kind"] == ir_kind)
+            .collect();
         assert_eq!(found.len(), total, "{output:#}");
         let mut non_defining = 0;
         let scan = fixture.standalone(
@@ -1701,7 +1771,7 @@ fn objective_c_forward_sources_remain_non_defining_in_current_and_retained_mcp()
         );
         assert_success(&scan, "query.advanced");
         for found in found {
-            assert_eq!(found["kind"], "type");
+            assert_eq!(found["kind"], ir_kind);
             let symbol = &found["symbol_id"];
             let reference = &found["source_ref"];
             let start = usize::try_from(reference["span"]["start_byte"].as_u64().unwrap()).unwrap();
@@ -1894,6 +1964,14 @@ fn source_entities_with_coverage_cross_process_boundaries(
             "type_parameter" => "type",
             other => other,
         };
+        let row_kind = match (language, expected_kind) {
+            ("r", "variable") => "parameter",
+            ("powershell", "field") => "property",
+            ("scala" | "dart" | "powershell", "type") => "class",
+            ("scala", "module") => "namespace",
+            ("dart", "method") if name == "Store.named" => "constructor",
+            _ => expected_kind,
+        };
         if matches!(kind, "import" | "export") {
             let located = fixture.standalone(
                 &format!("binding-path-{kind}"),
@@ -1934,7 +2012,7 @@ fn source_entities_with_coverage_cross_process_boundaries(
         assert_standalone_batch_parity(&located, &batch, "code.locate");
         let output = &located["result"]["structuredContent"];
         assert_common_read_contract(output, &fixture.repository_id);
-        assert_eq!(output["schema_version"], "1.7");
+        assert_eq!(output["schema_version"], "1.8");
         if let Some(unsupported) = unsupported {
             assert_eq!(
                 output["warnings"]
@@ -1971,7 +2049,7 @@ fn source_entities_with_coverage_cross_process_boundaries(
             .as_array()
             .expect("matches")
             .iter()
-            .filter(|item| item["kind"] == kind)
+            .filter(|item| item["kind"] == row_kind)
             .collect();
         assert_eq!(matches.len(), count, "{output:#}");
         let identities: std::collections::BTreeSet<_> = matches
@@ -1989,8 +2067,8 @@ fn source_entities_with_coverage_cross_process_boundaries(
             );
             assert_success(&explained, "symbol.explain");
             let explanation = &explained["result"]["structuredContent"];
-            assert_eq!(explanation["schema_version"], "1.7");
-            assert_eq!(explanation["data"]["symbols"][0]["kind"], kind);
+            assert_eq!(explanation["schema_version"], "1.8");
+            assert_eq!(explanation["data"]["symbols"][0]["kind"], row_kind);
             assert_eq!(explanation["data"]["symbols"][0]["symbol_id"], symbol);
             if let Some((_, signature)) = signatures.iter().find(|(query, _)| *query == name) {
                 assert_eq!(explanation["data"]["symbols"][0]["signature"], *signature);
@@ -2022,16 +2100,7 @@ fn source_entities_with_coverage_cross_process_boundaries(
             let rows = advanced["result"]["structuredContent"]["data"]["rows"]
                 .as_array()
                 .expect("scan rows");
-            // Public selectors group kinds; advanced rows retain the exact IR
-            // kind independently asserted by these source-backed fixtures.
-            let row_kind = match (language, expected_kind) {
-                ("r", "variable") => "parameter",
-                ("powershell", "field") => "property",
-                ("scala" | "dart" | "powershell", "type") => "class",
-                ("scala", "module") => "namespace",
-                ("dart", "method") if name == "Store.named" => "constructor",
-                _ => expected_kind,
-            };
+            // Advanced rows independently confirm the exact source entity kind.
             assert!(
                 rows.iter().any(|row| row["id"] == symbol
                     && row["kind"] == row_kind
@@ -2762,7 +2831,7 @@ fn supported_symbol_explain_projection_crosses_process_boundaries(fixture: &mut 
     assert_success(&response, "symbol.explain");
     let output = &response["result"]["structuredContent"];
     assert_common_read_contract(output, &fixture.repository_id);
-    assert_eq!(output["schema_version"], "1.7");
+    assert_eq!(output["schema_version"], "1.8");
     let explanation = &output["data"]["symbols"][0];
     assert!(
         explanation["qualified_name"]
@@ -3578,7 +3647,7 @@ fn assert_common_read_contract(output: &Value, repository_id: &str) {
     assert!(
         matches!(
             output["schema_version"].as_str(),
-            Some("1.0" | "1.1" | "1.2" | "1.3" | "1.4" | "1.5" | "1.6" | "1.7")
+            Some("1.0" | "1.1" | "1.2" | "1.3" | "1.4" | "1.5" | "1.6" | "1.7" | "1.8")
         ),
         "read response uses a supported additive schema version"
     );

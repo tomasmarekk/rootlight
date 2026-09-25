@@ -1807,7 +1807,7 @@ const fn input_shape_hash(tool: McpTool) -> &'static str {
         McpTool::OperationStatus => {
             "9703820cfd7dba86a224059c47287e73e06876df4d3245375fef88489f2554f3"
         }
-        McpTool::CodeLocate => "750482058c08497b6c9aca3000dc56365b4c0c6e0508850339996f17da4946c8",
+        McpTool::CodeLocate => "049fbe5d696a9dfc9ac86d992897f5ced36cde6cc23dc977f64dcbc4b75245a7",
         McpTool::SymbolExplain => {
             "94f736e1ad7a5cc7a6aa51f5a9ce52d23c2e912065e6403d2a194ae942d13cab"
         }

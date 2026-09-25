@@ -260,7 +260,7 @@
           "display_name": "fixture",
           "repository_id": "repo1_3hhm6hhk3shhmievg6ra3yjlhp2wuv5v"
         },
-        "schema_version": "1.7",
+        "schema_version": "1.8",
         "truncated": false,
         "trust": "untrusted_repository_data",
         "usage": {
@@ -316,7 +316,7 @@
           "display_name": "fixture",
           "repository_id": "repo1_3hhm6hhk3shhmievg6ra3yjlhp2wuv5v"
         },
-        "schema_version": "1.7",
+        "schema_version": "1.8",
         "truncated": false,
         "trust": "untrusted_repository_data",
         "usage": {

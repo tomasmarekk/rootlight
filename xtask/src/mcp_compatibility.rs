@@ -436,7 +436,9 @@ fn validate_retained_output_projections(tools: &[Value]) -> Result<(), Compatibi
                     tool.name()
                 ))
             })?;
-        let schema = if tool.previous_contract_version() == Some(output_version) {
+        let schema = if tool.recent_contract_version() == Some(output_version) {
+            tool.recent_output_schema_json()
+        } else if tool.previous_contract_version() == Some(output_version) {
             tool.previous_output_schema_json()
         } else if tool.legacy_contract_version() == Some(output_version) {
             tool.legacy_output_schema_json()
@@ -1450,12 +1452,12 @@ mod tests {
                 },
                 {
                     "tool": "code.locate",
-                    "current_version": "1.7",
+                    "current_version": "1.8",
                     "projected_version": "1.0",
                 },
                 {
                     "tool": "symbol.explain",
-                    "current_version": "1.7",
+                    "current_version": "1.8",
                     "projected_version": "1.0",
                 },
                 {

@@ -70,11 +70,11 @@
     },
     {
       "path": "crates/rootlight-mcp-contract/src/source_entity.rs",
-      "blake3": "47f89447aca6730823923b1222632ddcf444234aa828b8f0c20652e6425b7071"
+      "blake3": "d868f73850231c08c117e22c854c9d98b511cd116842ec6a3ffb97662c3e46a6"
     },
     {
       "path": "crates/rootlight-mcp-contract/src/vertical.rs",
-      "blake3": "4a664c05f97f3a8c8977e74fde070681a3e42b90af7a8fdb1c56ef579f912635"
+      "blake3": "6ac08441b68053331578a8d5e08c9879c7dfe4f5565b0a76f1bf90284ca82967"
     },
     {
       "path": "crates/rootlight-storage/src/generation.rs",
@@ -266,7 +266,7 @@
     },
     {
       "path": "xtask/src/schemas.rs",
-      "blake3": "5f31979feaeac819c13121b1a5cb7508d1c814bcb6b16c2977b10b39e94bdef7"
+      "blake3": "96190d6505d4c5aa2dea42caf52a420490cdc57f23381287c0468b607158cc7f"
     }
   ],
   "artifacts": [
@@ -471,6 +471,10 @@
       "blake3": "b5d8d16c02be2af05955de5e8974d73a350997d6186504902de482be3957c774"
     },
     {
+      "path": "schemas/generated/json/mcp-code-locate-input-1.8.schema.json",
+      "blake3": "93ff6ffc854f8737accd63f59aeb9517146b5775aaf0b29e06b8afaa95614060"
+    },
+    {
       "path": "schemas/generated/json/mcp-code-locate-output-1.0.schema.json",
       "blake3": "afea86f046092a9f6eec5b0da6c35531eb0e33b8378b2f10ceff22833f37da74"
     },
@@ -501,6 +505,10 @@
     {
       "path": "schemas/generated/json/mcp-code-locate-output-1.7.schema.json",
       "blake3": "43fb36a0e6a900b5776fe19089b3a89035625dd77e1a91d23ae6b613b773b746"
+    },
+    {
+      "path": "schemas/generated/json/mcp-code-locate-output-1.8.schema.json",
+      "blake3": "e0c155f0db08847ad917b2be3e333173be2ffbcfaa7384805625b8b773326265"
     },
     {
       "path": "schemas/generated/json/mcp-context-pack-input-1.0.schema.json",
@@ -839,6 +847,10 @@
       "blake3": "2567b5fd8bfb91bcdbf63351c232491c6974ab2d2769e9d4c1019deb17c9afc6"
     },
     {
+      "path": "schemas/generated/json/mcp-symbol-explain-input-1.8.schema.json",
+      "blake3": "307c9e4e8d105e0282867a0d5b114fea8fc7399ad1e385371b1177278e1f2256"
+    },
+    {
       "path": "schemas/generated/json/mcp-symbol-explain-output-1.0.schema.json",
       "blake3": "46dcf76f53c32bbee9bf153c036799a96c440822d8fef8701bdd2c8809cd3418"
     },
@@ -869,6 +881,10 @@
     {
       "path": "schemas/generated/json/mcp-symbol-explain-output-1.7.schema.json",
       "blake3": "ffa3aeff3e0d7f1d14e8b67e97b41052114a7315c544effb7718fa0a55bb6de3"
+    },
+    {
+      "path": "schemas/generated/json/mcp-symbol-explain-output-1.8.schema.json",
+      "blake3": "5680d2143e7db9915080e622811c566450afb4dcd897ad3c9f4d6f6985201ab2"
     },
     {
       "path": "schemas/generated/json/mcp-symbol-relationships-input-1.0.schema.json",

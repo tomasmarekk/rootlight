@@ -5916,6 +5916,24 @@
                 },
                 {
                   "additionalProperties": false,
+                  "description": "Selected parser route for one source with an ambiguous suffix.",
+                  "properties": {
+                    "kind": {
+                      "const": "file_parser_route",
+                      "type": "string"
+                    },
+                    "subject": {
+                      "$ref": "#/$defs/FileId"
+                    }
+                  },
+                  "required": [
+                    "kind",
+                    "subject"
+                  ],
+                  "type": "object"
+                },
+                {
+                  "additionalProperties": false,
                   "description": "Exported surface of one analysis unit.",
                   "properties": {
                     "kind": {
@@ -6634,11 +6652,11 @@
             "batchEligible": true,
             "batchSharedBudget": false,
             "budget": "per_request",
-            "contractVersion": "1.7",
+            "contractVersion": "1.8",
             "explainSupported": true,
             "fallbackSummary": "bounded exact-identifier or indexed lexical-text matching",
             "generation": "selects_generation",
-            "inputShapeHash": "750482058c08497b6c9aca3000dc56365b4c0c6e0508850339996f17da4946c8",
+            "inputShapeHash": "049fbe5d696a9dfc9ac86d992897f5ced36cde6cc23dc977f64dcbc4b75245a7",
             "limitations": [
               {
                 "errorCode": "UNSUPPORTED_CAPABILITY",
@@ -6786,8 +6804,58 @@
                   "type": "string"
                 },
                 {
+                  "const": "namespace",
+                  "description": "Namespace declaration distinct from a module.",
+                  "type": "string"
+                },
+                {
                   "const": "type",
                   "description": "Type declaration.",
+                  "type": "string"
+                },
+                {
+                  "const": "class",
+                  "description": "Class declaration.",
+                  "type": "string"
+                },
+                {
+                  "const": "struct",
+                  "description": "Struct declaration.",
+                  "type": "string"
+                },
+                {
+                  "const": "enum",
+                  "description": "Enumeration declaration.",
+                  "type": "string"
+                },
+                {
+                  "const": "union",
+                  "description": "Union declaration.",
+                  "type": "string"
+                },
+                {
+                  "const": "type_alias",
+                  "description": "Type alias declaration.",
+                  "type": "string"
+                },
+                {
+                  "const": "trait",
+                  "description": "Trait declaration.",
+                  "type": "string"
+                },
+                {
+                  "const": "interface",
+                  "description": "Interface declaration.",
+                  "type": "string"
+                },
+                {
+                  "const": "protocol",
+                  "description": "Protocol declaration.",
+                  "type": "string"
+                },
+                {
+                  "const": "type_parameter",
+                  "description": "Type parameter declaration.",
                   "type": "string"
                 },
                 {
@@ -6796,13 +6864,28 @@
                   "type": "string"
                 },
                 {
+                  "const": "closure",
+                  "description": "Closure declaration.",
+                  "type": "string"
+                },
+                {
                   "const": "method",
                   "description": "Method declaration.",
                   "type": "string"
                 },
                 {
+                  "const": "constructor",
+                  "description": "Constructor declaration.",
+                  "type": "string"
+                },
+                {
                   "const": "field",
                   "description": "Field declaration.",
+                  "type": "string"
+                },
+                {
+                  "const": "property",
+                  "description": "Property declaration.",
                   "type": "string"
                 },
                 {
@@ -6813,6 +6896,11 @@
                 {
                   "const": "variable",
                   "description": "Variable declaration.",
+                  "type": "string"
+                },
+                {
+                  "const": "parameter",
+                  "description": "Callable parameter declaration.",
                   "type": "string"
                 },
                 {
@@ -6828,6 +6916,11 @@
                 {
                   "const": "configuration",
                   "description": "Configuration record.",
+                  "type": "string"
+                },
+                {
+                  "const": "configuration_key",
+                  "description": "Configuration key declaration.",
                   "type": "string"
                 },
                 {
@@ -7165,7 +7258,7 @@
               "type": "object"
             }
           },
-          "$id": "https://rootlight.local/schema/mcp/code.locate/input/1.7",
+          "$id": "https://rootlight.local/schema/mcp/code.locate/input/1.8",
           "$schema": "https://json-schema.org/draft/2020-12/schema",
           "additionalProperties": false,
           "description": "Strict input for `code.locate`.",
@@ -7308,16 +7401,6 @@
                 {
                   "const": "D",
                   "description": "Lexical-only support.",
-                  "type": "string"
-                }
-              ]
-            },
-            "BuildTargetLocateVersion": {
-              "description": "Exact version of build-target-aware locate responses.",
-              "oneOf": [
-                {
-                  "const": "1.7",
-                  "description": "Locate contract 1.7.",
                   "type": "string"
                 }
               ]
@@ -7562,7 +7645,7 @@
                   "description": "Source-free error and remediation."
                 },
                 "schema_version": {
-                  "$ref": "#/$defs/BuildTargetLocateVersion",
+                  "$ref": "#/$defs/PreciseLocateVersion",
                   "description": "Exact error contract version."
                 }
               },
@@ -7591,8 +7674,53 @@
                   "type": "string"
                 },
                 {
-                  "const": "type",
-                  "description": "Type declaration.",
+                  "const": "namespace",
+                  "description": "Namespace declaration distinct from a module.",
+                  "type": "string"
+                },
+                {
+                  "const": "class",
+                  "description": "Class declaration.",
+                  "type": "string"
+                },
+                {
+                  "const": "struct",
+                  "description": "Struct declaration.",
+                  "type": "string"
+                },
+                {
+                  "const": "enum",
+                  "description": "Enumeration declaration.",
+                  "type": "string"
+                },
+                {
+                  "const": "union",
+                  "description": "Union declaration.",
+                  "type": "string"
+                },
+                {
+                  "const": "type_alias",
+                  "description": "Type alias declaration.",
+                  "type": "string"
+                },
+                {
+                  "const": "trait",
+                  "description": "Trait declaration.",
+                  "type": "string"
+                },
+                {
+                  "const": "interface",
+                  "description": "Interface declaration.",
+                  "type": "string"
+                },
+                {
+                  "const": "protocol",
+                  "description": "Protocol declaration.",
+                  "type": "string"
+                },
+                {
+                  "const": "type_parameter",
+                  "description": "Type parameter declaration.",
                   "type": "string"
                 },
                 {
@@ -7601,13 +7729,28 @@
                   "type": "string"
                 },
                 {
+                  "const": "closure",
+                  "description": "Closure declaration.",
+                  "type": "string"
+                },
+                {
                   "const": "method",
                   "description": "Method declaration.",
                   "type": "string"
                 },
                 {
+                  "const": "constructor",
+                  "description": "Constructor declaration.",
+                  "type": "string"
+                },
+                {
                   "const": "field",
                   "description": "Field declaration.",
+                  "type": "string"
+                },
+                {
+                  "const": "property",
+                  "description": "Property declaration.",
                   "type": "string"
                 },
                 {
@@ -7621,6 +7764,11 @@
                   "type": "string"
                 },
                 {
+                  "const": "parameter",
+                  "description": "Callable parameter declaration.",
+                  "type": "string"
+                },
+                {
                   "const": "import",
                   "description": "Authored import binding or clause, not its external target.",
                   "type": "string"
@@ -7631,8 +7779,8 @@
                   "type": "string"
                 },
                 {
-                  "const": "configuration",
-                  "description": "Configuration record.",
+                  "const": "configuration_key",
+                  "description": "Configuration key declaration.",
                   "type": "string"
                 },
                 {
@@ -7726,7 +7874,7 @@
                   "description": "Resolved repository."
                 },
                 "schema_version": {
-                  "$ref": "#/$defs/BuildTargetLocateVersion",
+                  "$ref": "#/$defs/PreciseLocateVersion",
                   "description": "Exact response contract version."
                 },
                 "truncated": {
@@ -8393,6 +8541,16 @@
               ],
               "type": "object"
             },
+            "PreciseLocateVersion": {
+              "description": "Exact version of precise-kind locate responses.",
+              "oneOf": [
+                {
+                  "const": "1.8",
+                  "description": "Locate contract 1.8.",
+                  "type": "string"
+                }
+              ]
+            },
             "PublicError": {
               "additionalProperties": false,
               "description": "A stable source-redacted failure safe to serialize across public boundaries.",
@@ -8989,7 +9147,7 @@
               "type": "object"
             }
           },
-          "$id": "https://rootlight.local/schema/mcp/code.locate/output/1.7",
+          "$id": "https://rootlight.local/schema/mcp/code.locate/output/1.8",
           "$schema": "https://json-schema.org/draft/2020-12/schema",
           "anyOf": [
             {
@@ -9014,7 +9172,7 @@
             "batchEligible": true,
             "batchSharedBudget": false,
             "budget": "per_request",
-            "contractVersion": "1.7",
+            "contractVersion": "1.8",
             "explainSupported": true,
             "fallbackSummary": "bounded sectioned explanations with typed evidence, source preview, and provenance",
             "generation": "selects_generation",
@@ -9269,7 +9427,7 @@
               "type": "string"
             }
           },
-          "$id": "https://rootlight.local/schema/mcp/symbol.explain/input/1.7",
+          "$id": "https://rootlight.local/schema/mcp/symbol.explain/input/1.8",
           "$schema": "https://json-schema.org/draft/2020-12/schema",
           "additionalProperties": false,
           "description": "Strict input for `symbol.explain`.",
@@ -9379,16 +9537,6 @@
                 {
                   "const": "D",
                   "description": "Lexical-only support.",
-                  "type": "string"
-                }
-              ]
-            },
-            "BuildTargetExplainVersion": {
-              "description": "Exact version of build-target-aware explanations.",
-              "oneOf": [
-                {
-                  "const": "1.7",
-                  "description": "Explanation contract 1.7.",
                   "type": "string"
                 }
               ]
@@ -9613,7 +9761,7 @@
                   "description": "Source-free error and remediation."
                 },
                 "schema_version": {
-                  "$ref": "#/$defs/BuildTargetExplainVersion",
+                  "$ref": "#/$defs/PreciseExplainVersion",
                   "description": "Exact error contract version."
                 }
               },
@@ -9642,8 +9790,53 @@
                   "type": "string"
                 },
                 {
-                  "const": "type",
-                  "description": "Type declaration.",
+                  "const": "namespace",
+                  "description": "Namespace declaration distinct from a module.",
+                  "type": "string"
+                },
+                {
+                  "const": "class",
+                  "description": "Class declaration.",
+                  "type": "string"
+                },
+                {
+                  "const": "struct",
+                  "description": "Struct declaration.",
+                  "type": "string"
+                },
+                {
+                  "const": "enum",
+                  "description": "Enumeration declaration.",
+                  "type": "string"
+                },
+                {
+                  "const": "union",
+                  "description": "Union declaration.",
+                  "type": "string"
+                },
+                {
+                  "const": "type_alias",
+                  "description": "Type alias declaration.",
+                  "type": "string"
+                },
+                {
+                  "const": "trait",
+                  "description": "Trait declaration.",
+                  "type": "string"
+                },
+                {
+                  "const": "interface",
+                  "description": "Interface declaration.",
+                  "type": "string"
+                },
+                {
+                  "const": "protocol",
+                  "description": "Protocol declaration.",
+                  "type": "string"
+                },
+                {
+                  "const": "type_parameter",
+                  "description": "Type parameter declaration.",
                   "type": "string"
                 },
                 {
@@ -9652,13 +9845,28 @@
                   "type": "string"
                 },
                 {
+                  "const": "closure",
+                  "description": "Closure declaration.",
+                  "type": "string"
+                },
+                {
                   "const": "method",
                   "description": "Method declaration.",
                   "type": "string"
                 },
                 {
+                  "const": "constructor",
+                  "description": "Constructor declaration.",
+                  "type": "string"
+                },
+                {
                   "const": "field",
                   "description": "Field declaration.",
+                  "type": "string"
+                },
+                {
+                  "const": "property",
+                  "description": "Property declaration.",
                   "type": "string"
                 },
                 {
@@ -9672,6 +9880,11 @@
                   "type": "string"
                 },
                 {
+                  "const": "parameter",
+                  "description": "Callable parameter declaration.",
+                  "type": "string"
+                },
+                {
                   "const": "import",
                   "description": "Authored import binding or clause, not its external target.",
                   "type": "string"
@@ -9682,8 +9895,8 @@
                   "type": "string"
                 },
                 {
-                  "const": "configuration",
-                  "description": "Configuration record.",
+                  "const": "configuration_key",
+                  "description": "Configuration key declaration.",
                   "type": "string"
                 },
                 {
@@ -9777,7 +9990,7 @@
                   "description": "Resolved repository."
                 },
                 "schema_version": {
-                  "$ref": "#/$defs/BuildTargetExplainVersion",
+                  "$ref": "#/$defs/PreciseExplainVersion",
                   "description": "Exact response contract version."
                 },
                 "truncated": {
@@ -10310,6 +10523,16 @@
                 "fingerprint"
               ],
               "type": "object"
+            },
+            "PreciseExplainVersion": {
+              "description": "Exact version of precise-kind explanation responses.",
+              "oneOf": [
+                {
+                  "const": "1.8",
+                  "description": "Explanation contract 1.8.",
+                  "type": "string"
+                }
+              ]
             },
             "ProvenanceSummary": {
               "additionalProperties": false,
@@ -10969,7 +11192,7 @@
             },
             "SymbolRelationSample": {
               "additionalProperties": false,
-              "description": "One bounded typed relation sample for a symbol explanation.",
+              "description": "One bounded exact relation or explicitly uncertain reference sample.",
               "properties": {
                 "confidence": {
                   "description": "Fixed-point confidence from 0 through 1000.",
@@ -10985,7 +11208,7 @@
                   "type": "string"
                 },
                 "kind": {
-                  "description": "Stable relation predicate label.",
+                  "description": "Stable relation predicate or `refers_to_candidate` label.",
                   "maxLength": 128,
                   "minLength": 1,
                   "type": "string"
@@ -11098,7 +11321,7 @@
               "type": "object"
             }
           },
-          "$id": "https://rootlight.local/schema/mcp/symbol.explain/output/1.7",
+          "$id": "https://rootlight.local/schema/mcp/symbol.explain/output/1.8",
           "$schema": "https://json-schema.org/draft/2020-12/schema",
           "anyOf": [
             {

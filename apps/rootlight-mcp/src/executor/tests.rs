@@ -4001,7 +4001,7 @@ async fn maps_code_locate_with_trust_generation_and_deterministic_output() {
         Some(parent_generation())
     );
     assert_eq!(output.data.matches[0].symbol_id, Some(symbol()));
-    assert_eq!(output.data.matches[0].kind, EntityKind::Type);
+    assert_eq!(output.data.matches[0].kind, EntityKind::Struct);
     assert_eq!(
         output.data.matches[0].trust,
         TrustClassification::UntrustedRepositoryData
@@ -4082,7 +4082,10 @@ fn locate_kind_groups_and_cursor_bindings_match_public_output_semantics() {
     ] {
         let public: EntityKind = serde_json::from_value(json!(label)).unwrap();
         for raw in raw_entity_kinds(public) {
-            assert_eq!(entity_kind(raw).unwrap(), public);
+            assert_eq!(
+                serde_json::to_value(entity_kind(raw).unwrap()).unwrap(),
+                json!(raw)
+            );
             assert!(
                 raw_union.insert((*raw).to_owned()),
                 "raw kind belongs to exactly one public group"
@@ -4143,7 +4146,7 @@ async fn locate_kind_filter_is_forwarded_and_rejects_wrong_backend_kinds() {
     let ToolResponse::Success(output) = output else {
         panic!("supported function filter");
     };
-    assert_eq!(output.data.matches[0].kind, EntityKind::Function);
+    assert_eq!(output.data.matches[0].kind, EntityKind::Closure);
     {
         let calls = harness.calls.lock().unwrap();
         let ObservedCall::CodeLocate(request) = &calls[0] else {
@@ -4331,6 +4334,7 @@ async fn source_entity_contracts_preserve_evidence_and_reject_lossy_downgrades()
             };
             for version in [
                 Some(tool.contract_version()),
+                tool.recent_contract_version(),
                 tool.previous_contract_version(),
                 tool.legacy_contract_version(),
                 tool.second_legacy_contract_version(),

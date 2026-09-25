@@ -154,10 +154,10 @@ impl VerticalTool {
                 "../../../schemas/generated/json/mcp-operation-status-input-1.6.schema.json"
             ),
             Self::CodeLocate => include_str!(
-                "../../../schemas/generated/json/mcp-code-locate-input-1.7.schema.json"
+                "../../../schemas/generated/json/mcp-code-locate-input-1.8.schema.json"
             ),
             Self::SymbolExplain => include_str!(
-                "../../../schemas/generated/json/mcp-symbol-explain-input-1.7.schema.json"
+                "../../../schemas/generated/json/mcp-symbol-explain-input-1.8.schema.json"
             ),
             Self::SymbolRelationships => include_str!(
                 "../../../schemas/generated/json/mcp-symbol-relationships-input-1.1.schema.json"
@@ -218,10 +218,10 @@ impl VerticalTool {
                 "../../../schemas/generated/json/mcp-operation-status-output-1.6.schema.json"
             ),
             Self::CodeLocate => include_str!(
-                "../../../schemas/generated/json/mcp-code-locate-output-1.7.schema.json"
+                "../../../schemas/generated/json/mcp-code-locate-output-1.8.schema.json"
             ),
             Self::SymbolExplain => include_str!(
-                "../../../schemas/generated/json/mcp-symbol-explain-output-1.7.schema.json"
+                "../../../schemas/generated/json/mcp-symbol-explain-output-1.8.schema.json"
             ),
             Self::SymbolRelationships => include_str!(
                 "../../../schemas/generated/json/mcp-symbol-relationships-output-1.1.schema.json"
@@ -262,6 +262,43 @@ impl VerticalTool {
             Self::QueryBatch => include_str!(
                 "../../../schemas/generated/json/mcp-query-batch-output-1.0.schema.json"
             ),
+        }
+    }
+
+    /// Most recent retained additive-minor contract version, when required.
+    #[must_use]
+    pub const fn recent_contract_version(self) -> Option<&'static str> {
+        match self {
+            Self::CodeLocate | Self::SymbolExplain => Some("1.7"),
+            _ => None,
+        }
+    }
+
+    /// Most recent retained input schema, when required.
+    #[must_use]
+    pub const fn recent_input_schema_json(self) -> Option<&'static str> {
+        match self {
+            Self::CodeLocate => Some(include_str!(
+                "../../../schemas/generated/json/mcp-code-locate-input-1.7.schema.json"
+            )),
+            Self::SymbolExplain => Some(include_str!(
+                "../../../schemas/generated/json/mcp-symbol-explain-input-1.7.schema.json"
+            )),
+            _ => None,
+        }
+    }
+
+    /// Most recent retained output schema, when required.
+    #[must_use]
+    pub const fn recent_output_schema_json(self) -> Option<&'static str> {
+        match self {
+            Self::CodeLocate => Some(include_str!(
+                "../../../schemas/generated/json/mcp-code-locate-output-1.7.schema.json"
+            )),
+            Self::SymbolExplain => Some(include_str!(
+                "../../../schemas/generated/json/mcp-symbol-explain-output-1.7.schema.json"
+            )),
+            _ => None,
         }
     }
 
@@ -2589,24 +2626,54 @@ pub enum EntityKind {
     BuildTarget,
     /// Namespace or module.
     Module,
+    /// Namespace declaration distinct from a module.
+    Namespace,
     /// Type declaration.
     Type,
+    /// Class declaration.
+    Class,
+    /// Struct declaration.
+    Struct,
+    /// Enumeration declaration.
+    Enum,
+    /// Union declaration.
+    Union,
+    /// Type alias declaration.
+    TypeAlias,
+    /// Trait declaration.
+    Trait,
+    /// Interface declaration.
+    Interface,
+    /// Protocol declaration.
+    Protocol,
+    /// Type parameter declaration.
+    TypeParameter,
     /// Function declaration.
     Function,
+    /// Closure declaration.
+    Closure,
     /// Method declaration.
     Method,
+    /// Constructor declaration.
+    Constructor,
     /// Field declaration.
     Field,
+    /// Property declaration.
+    Property,
     /// Constant declaration.
     Constant,
     /// Variable declaration.
     Variable,
+    /// Callable parameter declaration.
+    Parameter,
     /// Authored import binding or clause, not its external target.
     Import,
     /// Authored export binding or clause, not its referenced declaration.
     Export,
     /// Configuration record.
     Configuration,
+    /// Configuration key declaration.
+    ConfigurationKey,
     /// Service route or endpoint.
     Route,
     /// A symbol whose definition is outside the indexed repository.
@@ -4505,7 +4572,8 @@ mod tests {
         assert_eq!(tool.fifth_legacy_contract_version(), Some("1.0"));
         assert_eq!(tool.initial_contract_version(), None);
         let tool = VerticalTool::CodeLocate;
-        assert_eq!(tool.contract_version(), "1.7");
+        assert_eq!(tool.contract_version(), "1.8");
+        assert_eq!(tool.recent_contract_version(), Some("1.7"));
         assert_eq!(tool.previous_contract_version(), Some("1.6"));
         assert_eq!(tool.legacy_contract_version(), Some("1.5"));
         assert_eq!(tool.second_legacy_contract_version(), Some("1.4"));
@@ -4518,7 +4586,8 @@ mod tests {
         assert_eq!(tool.previous_contract_version(), Some("1.0"));
         assert_eq!(tool.legacy_contract_version(), None);
         let tool = VerticalTool::SymbolExplain;
-        assert_eq!(tool.contract_version(), "1.7");
+        assert_eq!(tool.contract_version(), "1.8");
+        assert_eq!(tool.recent_contract_version(), Some("1.7"));
         assert_eq!(tool.previous_contract_version(), Some("1.6"));
         assert_eq!(tool.legacy_contract_version(), Some("1.5"));
         assert_eq!(tool.second_legacy_contract_version(), Some("1.4"));
@@ -4549,6 +4618,42 @@ mod tests {
             ) {
                 assert_eq!(tool.contract_version(), crate::MCP_SCHEMA_VERSION);
             }
+        }
+    }
+
+    #[test]
+    fn precise_read_schemas_keep_broad_filters_but_not_broad_results() {
+        let kinds = |schema_text: &str| -> Vec<Value> {
+            let schema: Value = serde_json::from_str(schema_text).expect("schema is valid JSON");
+            schema
+                .pointer("/$defs/EntityKind/oneOf")
+                .and_then(Value::as_array)
+                .expect("entity kinds are versioned")
+                .iter()
+                .map(|variant| variant["const"].clone())
+                .collect()
+        };
+        for tool in [VerticalTool::CodeLocate, VerticalTool::SymbolExplain] {
+            let current_output = kinds(tool.output_schema_json());
+            let retained_output = kinds(tool.recent_output_schema_json().unwrap());
+            for precise in ["class", "constructor", "parameter"] {
+                assert!(current_output.contains(&json!(precise)));
+                assert!(!retained_output.contains(&json!(precise)));
+            }
+            for broad in ["type", "configuration"] {
+                assert!(!current_output.contains(&json!(broad)));
+                assert!(retained_output.contains(&json!(broad)));
+            }
+        }
+        let current_input = kinds(VerticalTool::CodeLocate.input_schema_json());
+        let retained_input = kinds(VerticalTool::CodeLocate.recent_input_schema_json().unwrap());
+        for precise in ["class", "constructor", "parameter"] {
+            assert!(current_input.contains(&json!(precise)));
+            assert!(!retained_input.contains(&json!(precise)));
+        }
+        for broad in ["type", "configuration"] {
+            assert!(current_input.contains(&json!(broad)));
+            assert!(retained_input.contains(&json!(broad)));
         }
     }
 
@@ -4633,14 +4738,14 @@ mod tests {
         let mut maximum = fixture.clone();
         maximum["next_cursor"] = json!("c".repeat(4_096));
         assert!(validator.is_valid(&maximum));
-        serde_json::from_value::<crate::source_entity::CodeLocateOutputV1_7>(maximum)
+        serde_json::from_value::<crate::source_entity::CodeLocateOutputV1_8>(maximum)
             .expect("maximum-sized cursor decodes");
 
         let mut oversized = fixture;
         oversized["next_cursor"] = json!("c".repeat(4_097));
         assert!(!validator.is_valid(&oversized));
         assert!(
-            serde_json::from_value::<crate::source_entity::CodeLocateOutputV1_7>(oversized)
+            serde_json::from_value::<crate::source_entity::CodeLocateOutputV1_8>(oversized)
                 .is_err()
         );
     }
