@@ -412,6 +412,142 @@ fn scss_bounded_declarations_cross_real_process_boundaries() {
 }
 
 #[test]
+fn agda_nested_declarations_keep_exact_sources_across_mcp() {
+    let source = "module Main where\n  module Left where\n    same : Nat\n    same = 1\n  module Right where\n    same : Nat\n    same = 2\n  data Choice : Set where\n    yes : Choice\n  record Pair : Set where\n    field\n      left : Nat\n  result : Nat\n  result = 0 where\n    local : Nat\n    local = 1\n";
+    let mut fixture =
+        RetrievalFixture::spawn_with_layout(Some(("Main.agda", source)), FixtureLayout::Data);
+    let located = fixture.standalone(
+        "agda-same-locate",
+        "code.locate",
+        json!({"query": "same", "search_modes": ["exact"], "languages": ["agda"],
+            "scope": {"paths": ["Main.agda"]}, "response_profile": "evidence"}),
+    );
+    assert_success(&located, "code.locate");
+    let output = &located["result"]["structuredContent"];
+    assert_common_read_contract(output, &fixture.repository_id);
+    assert_eq!(
+        output["coverage"]["languages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|entry| entry["language"] == "agda")
+            .expect("Agda coverage is reported")["status"],
+        "bounded"
+    );
+    assert_eq!(
+        output["data"]["query_interpretation"]["semantic_available"],
+        false
+    );
+    let warnings = output["warnings"].as_array().expect("coverage warnings");
+    assert!(
+        warnings
+            .iter()
+            .any(|warning| warning["code"] == "coverage_unsupported")
+    );
+    assert!(
+        !warnings
+            .iter()
+            .any(|warning| warning["code"] == "coverage_parse_error")
+    );
+    let definitions = output["data"]["matches"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|item| item["kind"] == "function" && item["display_name"] == "same")
+        .collect::<Vec<_>>();
+    assert_eq!(definitions.len(), 2, "{output:#}");
+    let mut owners = std::collections::BTreeSet::new();
+    for (ordinal, definition) in definitions.into_iter().enumerate() {
+        let explained = fixture.standalone(
+            &format!("agda-same-explain-{ordinal}"),
+            "symbol.explain",
+            json!({"symbol_ids": [definition["symbol_id"]], "response_profile": "evidence"}),
+        );
+        assert_success(&explained, "symbol.explain");
+        let symbol = &explained["result"]["structuredContent"]["data"]["symbols"][0];
+        let qualified = symbol["qualified_name"]
+            .as_str()
+            .expect("nested symbol has a qualified name");
+        let (equation, other) = match qualified {
+            "Main::Left::same" => ("same = 1", "same = 2"),
+            "Main::Right::same" => ("same = 2", "same = 1"),
+            _ => panic!("unexpected nested identity: {qualified}"),
+        };
+        assert!(owners.insert(qualified.to_owned()));
+        let reference = definition["source_ref"].clone();
+        assert!(reference["generation"].is_string());
+        let read = fixture.standalone(
+            &format!("agda-same-read-{ordinal}"),
+            "source.read",
+            json!({"references": [{"source_ref": reference}], "context_lines_before": 0,
+                "context_lines_after": 0, "response_profile": "evidence"}),
+        );
+        assert_success(&read, "source.read");
+        let chunk = &read["result"]["structuredContent"]["data"]["chunks"][0];
+        let start = usize::try_from(reference["span"]["start_byte"].as_u64().unwrap()).unwrap();
+        let end = usize::try_from(reference["span"]["end_byte"].as_u64().unwrap()).unwrap();
+        let text = chunk["content"].as_str().expect("Agda source is UTF-8");
+        assert_eq!(text, source.get(start..end).unwrap());
+        assert!(text.contains(equation), "missing equation for {qualified}");
+        assert!(!text.contains(other), "cross-scope source for {qualified}");
+    }
+    assert_eq!(
+        owners,
+        ["Main::Left::same", "Main::Right::same"]
+            .into_iter()
+            .map(str::to_owned)
+            .collect()
+    );
+    for (name, query_entity, exact_kind) in
+        [("yes", "method", "constructor"), ("left", "field", "field")]
+    {
+        let located = fixture.standalone(
+            &format!("agda-{name}-locate"),
+            "code.locate",
+            json!({"query": name, "search_modes": ["exact"], "languages": ["agda"],
+                "scope": {"paths": ["Main.agda"]}, "response_profile": "evidence"}),
+        );
+        assert_success(&located, "code.locate");
+        let found = located["result"]["structuredContent"]["data"]["matches"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|item| item["display_name"] == name && item["symbol_id"].is_string())
+            .unwrap_or_else(|| panic!("missing Agda {exact_kind}: {located:#}"));
+        let advanced = fixture.standalone(
+            &format!("agda-{name}-exact-kind"),
+            "query.advanced",
+            json!({"query": {"op": "scan", "entity": query_entity}}),
+        );
+        assert_success(&advanced, "query.advanced");
+        assert!(
+            advanced["result"]["structuredContent"]["data"]["rows"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|row| row["id"] == found["symbol_id"] && row["kind"] == exact_kind),
+            "exact Agda {exact_kind} was not retained: {advanced:#}"
+        );
+    }
+    let local = fixture.standalone(
+        "agda-local-file-only",
+        "code.locate",
+        json!({"query": "local", "search_modes": ["exact"], "languages": ["agda"],
+            "scope": {"paths": ["Main.agda"]}, "response_profile": "evidence"}),
+    );
+    assert_success(&local, "code.locate");
+    let local_matches = local["result"]["structuredContent"]["data"]["matches"]
+        .as_array()
+        .unwrap();
+    assert!(!local_matches.is_empty(), "local source remains searchable");
+    assert!(
+        local_matches.iter().all(|item| item["symbol_id"].is_null()),
+        "local declaration must not masquerade as a top-level symbol: {local:#}"
+    );
+    fixture.finish();
+}
+
+#[test]
 fn markup_analysis_gaps_preserve_scoped_exact_source_access() {
     let source = "<main><script>const embedded = '<fake />';</script><noscript><b>conditional</b></noscript><svg><title>foreign</title></svg></main>\n";
     let mut fixture =

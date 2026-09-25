@@ -2628,16 +2628,11 @@ impl<'context, 'source> Lowering<'context, 'source> {
             let normalized = diagnostic_record(self.full_source, diagnostic, provenance_id)?;
             diagnostics.insert(normalized.id, normalized);
             if let Some(source) = diagnostic.source() {
-                let reason = if diagnostic.code().as_str().contains("limit") {
-                    SkippedRegionReason::ResourceLimit
-                } else {
-                    SkippedRegionReason::ParseError
-                };
                 let region = skipped_region(
                     self.full_source,
                     source.span(),
                     FactDomain::Diagnostics,
-                    reason,
+                    diagnostic_skip_reason(diagnostic.code().as_str()),
                     diagnostic.code().as_str(),
                     provenance_id,
                 )?;
@@ -4849,6 +4844,17 @@ fn diagnostic_record(
     Ok(record)
 }
 
+fn diagnostic_skip_reason(code: &str) -> SkippedRegionReason {
+    // A declared semantic bound is not evidence that the parser rejected source syntax.
+    if code.ends_with("-semantics-partial") {
+        SkippedRegionReason::UnsupportedConstruct
+    } else if code.contains("limit") {
+        SkippedRegionReason::ResourceLimit
+    } else {
+        SkippedRegionReason::ParseError
+    }
+}
+
 fn skipped_region(
     full_source: &SourceRef,
     span: SourceSpan,
@@ -5866,6 +5872,28 @@ mod tests {
             0,
             SyntaxKindLabel::new(label).expect("test label is valid"),
         )
+    }
+
+    #[test]
+    fn semantic_bounds_do_not_claim_parse_errors() {
+        for code in [
+            "agda-layout-and-expression-semantics-partial",
+            "awk-expression-semantics-partial",
+            "erlang-macro-and-expression-semantics-partial",
+        ] {
+            assert_eq!(
+                diagnostic_skip_reason(code),
+                SkippedRegionReason::UnsupportedConstruct
+            );
+        }
+        assert_eq!(
+            diagnostic_skip_reason("parser-node-limit"),
+            SkippedRegionReason::ResourceLimit
+        );
+        assert_eq!(
+            diagnostic_skip_reason("unexpected-token"),
+            SkippedRegionReason::ParseError
+        );
     }
 
     #[test]
