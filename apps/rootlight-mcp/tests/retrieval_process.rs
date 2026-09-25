@@ -997,6 +997,20 @@ fn perl_function_calls_cross_mcp_with_exact_sources() {
 }
 
 #[test]
+fn erlang_arity_bound_calls_cross_mcp_with_exact_sources() {
+    assert_relationship_sources(
+        "erlang",
+        "flow.erl",
+        "-module(flow).\nroute(X) -> helper(X).\nroute(X, Y) -> helper(X, Y).\nhelper(X) -> X.\nhelper(X, Y) -> {X, Y}.\n",
+        &[
+            ("helper/1", "function", "helper(X)"),
+            ("helper/2", "function", "helper(X, Y)"),
+        ],
+        "calls",
+    );
+}
+
+#[test]
 fn perl_direct_coderef_calls_cross_mcp_with_both_exact_sources() {
     assert_relationship_sources_with_count(
         "perl",

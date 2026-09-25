@@ -7,6 +7,7 @@
 
 mod awk;
 mod elm;
+mod erlang;
 mod make;
 mod project_context;
 mod project_semantics;
@@ -32,6 +33,7 @@ use rootlight_ir::{
 
 pub use awk::AwkParseProvider;
 pub use elm::ElmParseProvider;
+pub use erlang::ErlangParseProvider;
 pub use make::MakeParseProvider;
 pub use project_context::{
     CxxProjectContext, DotnetProjectContext, GeneratedOriginMapping, GoProjectContext,

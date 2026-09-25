@@ -477,6 +477,15 @@ pub fn structural_captured_name_for_fact<'a>(
     {
         (!text.is_empty() && text.len() <= maximum_bytes && !text.contains('\0'))
             .then_some(Cow::Borrowed(text))
+    } else if language == "erlang"
+        && matches!(
+            fact.syntax_kind().as_str(),
+            "erlang.function.definition" | "erlang.function.call"
+        )
+    {
+        crate::erlang_names::canonical_function_head(text, maximum_bytes).map(Cow::Owned)
+    } else if language == "erlang" && fact.syntax_kind().as_str() == "erlang.module.definition" {
+        crate::erlang_names::canonical_atom(text, maximum_bytes).map(Cow::Owned)
     } else if language == "prolog" && fact.syntax_kind().as_str() == "prolog.predicate.definition" {
         crate::prolog_names::canonical_predicate_head(text, maximum_bytes).map(Cow::Owned)
     } else if language == "prolog" && fact.syntax_kind().as_str() == "prolog.nonterminal.definition"

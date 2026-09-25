@@ -41,7 +41,7 @@ pub use incremental::{
 };
 
 /// Current deterministic manifest and source-classification revision.
-pub const DISCOVERY_MANIFEST_VERSION: &str = "1.16";
+pub const DISCOVERY_MANIFEST_VERSION: &str = "1.17";
 /// Stable source-free diagnostic emitted when the entry budget truncates discovery.
 pub const DISCOVERY_ENTRY_LIMIT_DIAGNOSTIC_CODE: &str = "DISCOVERY_ENTRY_LIMIT";
 /// Stable source-free diagnostic emitted when retained source bytes truncate discovery.
@@ -1737,6 +1737,14 @@ const LANGUAGE_CAPABILITIES: &[LanguageCapability] = &[
     LanguageCapability {
         language: "elm",
         suffixes: &[".elm"],
+        aliases: &[],
+        detectors: &["extension"],
+        maximum_tier: "tier_d",
+        analyzers: &["native"],
+    },
+    LanguageCapability {
+        language: "erlang",
+        suffixes: &[".app.src", ".erl", ".hrl"],
         aliases: &[],
         detectors: &["extension"],
         maximum_tier: "tier_d",
@@ -3660,6 +3668,19 @@ max_source_file_bytes = 2097152
         assert_eq!(extension_language("scripts/REPORT.AWK"), Some("awk"));
         assert_ne!(extension_language("scripts/report.awk.bak"), Some("awk"));
         assert_eq!(canonical_language("gawk"), Some("awk"));
+    }
+
+    #[test]
+    fn erlang_source_and_header_extensions_have_native_capability() {
+        for path in ["src/worker.erl", "include/worker.hrl", "src/worker.app.src"] {
+            assert_eq!(extension_language(path), Some("erlang"));
+        }
+        assert_ne!(extension_language("src/worker.erl.bak"), Some("erlang"));
+        let capability = language_capabilities()
+            .iter()
+            .find(|capability| capability.language == "erlang")
+            .expect("Erlang capability exists");
+        assert_eq!(capability.analyzers, &["native"]);
     }
 
     #[test]

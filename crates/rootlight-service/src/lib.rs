@@ -49,8 +49,9 @@ use rootlight_adapter_treesitter::{
     TreeSitterAnalyzer, TreeSitterProvider, TreeSitterStructuralArtifact,
 };
 use rootlight_adapters::{
-    AwkParseProvider, ElmParseProvider, MakeParseProvider, PrologParseProvider,
-    RuntimeTraceImportRequest, ScssParseProvider, SemanticProjectLanguage, import_runtime_trace,
+    AwkParseProvider, ElmParseProvider, ErlangParseProvider, MakeParseProvider,
+    PrologParseProvider, RuntimeTraceImportRequest, ScssParseProvider, SemanticProjectLanguage,
+    import_runtime_trace,
 };
 pub use rootlight_adapters::{
     PROJECT_SYNTAX_FACT_LIMIT_DIAGNOSTIC, RUNTIME_TRACE_SCHEMA_VERSION, RuntimeTraceImportError,
@@ -5235,6 +5236,16 @@ impl StructuralPreflight for AwkParseProvider {
     }
 }
 
+impl StructuralPreflight for ErlangParseProvider {
+    fn required_syntax_fact_count(
+        &self,
+        request: &rootlight_adapter_sdk::ParseRequest<'_>,
+        cancellation: &Cancellation,
+    ) -> Result<usize, AdapterError> {
+        ErlangParseProvider::required_syntax_fact_count(self, request, cancellation)
+    }
+}
+
 impl StructuralPreflight for ElmParseProvider {
     fn required_syntax_fact_count(
         &self,
@@ -6171,6 +6182,10 @@ impl FirstSliceService {
             ElmParseProvider::new(maximum_source_bytes, MAX_SYNTAX_NODES)
                 .map_err(|_| FirstSliceError::Adapter)?,
         );
+        let erlang_parser = Arc::new(
+            ErlangParseProvider::new(maximum_source_bytes, MAX_SYNTAX_NODES)
+                .map_err(|_| FirstSliceError::Adapter)?,
+        );
         let make_parser = Arc::new(
             MakeParseProvider::new(maximum_source_bytes, MAX_SYNTAX_NODES)
                 .map_err(|_| FirstSliceError::Adapter)?,
@@ -6257,6 +6272,32 @@ impl FirstSliceService {
         }
         if structural_parsers
             .insert("awk".to_owned(), awk_parser as Arc<dyn StructuralPreflight>)
+            .is_some()
+        {
+            return Err(FirstSliceError::Adapter);
+        }
+        let erlang_provider: Arc<dyn ParseProvider> =
+            Arc::clone(&erlang_parser) as Arc<dyn ParseProvider>;
+        let erlang_analyzer = TreeSitterAnalyzer::new(
+            erlang_provider,
+            ProducerIdentity::new("rootlight-first-slice-erlang-native", "1.0", config.hash())
+                .map_err(|_| FirstSliceError::Adapter)?,
+            LanguageId::new("erlang").map_err(|_| FirstSliceError::Adapter)?,
+            "erlang-native-structural-1",
+            ErlangParseProvider::binary_digest(),
+        )
+        .map_err(|_| FirstSliceError::Adapter)?;
+        if analyzers
+            .insert("erlang".to_owned(), erlang_analyzer)
+            .is_some()
+        {
+            return Err(FirstSliceError::Adapter);
+        }
+        if structural_parsers
+            .insert(
+                "erlang".to_owned(),
+                erlang_parser as Arc<dyn StructuralPreflight>,
+            )
             .is_some()
         {
             return Err(FirstSliceError::Adapter);
@@ -26397,6 +26438,168 @@ mod tests {
         assert!(!snapshot.document().relations.iter().any(|relation| {
             relation.predicate == rootlight_ir::RelationPredicate::Calls
                 && relation.subject == rootlight_ir::RelationEndpoint::Occurrence(call.id)
+        }));
+    }
+
+    #[test]
+    fn erlang_module_functions_and_direct_calls_keep_arity_bound_source() {
+        use rootlight_ir::{
+            EntityKind, OccurrenceRole, OccurrenceTarget, RelationEndpoint, RelationPredicate,
+        };
+
+        let fixture = TempDir::new().expect("fixture root exists");
+        let source = concat!(
+            "-module(flow).\n",
+            "-export([route/1, route/2]).\n",
+            "route(X) -> helper(X);\n",
+            "route(Y) when is_atom(Y) -> helper(Y).\n",
+            "route(X, Y) -> helper(X, Y).\n",
+            "helper(X) -> X.\n",
+            "helper(X, Y) -> {X, Y}.\n",
+        );
+        fs::write(fixture.path().join("flow.erl"), source).unwrap();
+        fs::write(fixture.path().join("flow.hrl"), "-define(READY, true).\n").unwrap();
+        fs::write(
+            fixture.path().join("flow.app.src"),
+            "{application, flow, [{modules, [flow]}]}.\n",
+        )
+        .unwrap();
+        let cancellation = deadline();
+        let mut service = FirstSliceService::new(2).expect("service initializes");
+        let receipt = service
+            .index_repository(fixture.path(), &cancellation)
+            .expect("Erlang source indexes");
+        let snapshot = service
+            .loaded_generation_snapshot(receipt.generation)
+            .expect("generation remains loaded");
+        let document = snapshot.document();
+        assert!(document.files.iter().any(|file| {
+            file.path == "flow.erl" && file.language == "erlang" && file.byte_length > 0
+        }));
+        assert!(document.files.iter().any(|file| {
+            file.path == "flow.hrl" && file.language == "erlang" && file.byte_length > 0
+        }));
+        assert!(document.files.iter().any(|file| {
+            file.path == "flow.app.src" && file.language == "erlang" && file.byte_length > 0
+        }));
+        let module = document
+            .entities
+            .iter()
+            .find(|entity| entity.kind == EntityKind::Module && entity.canonical_name == "flow")
+            .expect("written module identity exists");
+        let functions = document
+            .entities
+            .iter()
+            .filter(|entity| entity.kind == EntityKind::Function)
+            .collect::<Vec<_>>();
+        for name in ["route/1", "route/2", "helper/1", "helper/2"] {
+            assert!(
+                functions.iter().any(|entity| {
+                    entity.canonical_name == name
+                        && entity.qualified_name == format!("{}::{name}", module.canonical_name)
+                }),
+                "{name}"
+            );
+        }
+        let helper = functions
+            .iter()
+            .find(|entity| entity.canonical_name == "helper/2")
+            .expect("arity-two helper exists");
+        let unary_helper = functions
+            .iter()
+            .find(|entity| entity.canonical_name == "helper/1")
+            .expect("arity-one helper exists");
+        assert!(document.occurrences.iter().any(|occurrence| {
+            occurrence.role == OccurrenceRole::CallSite
+                && occurrence.target == OccurrenceTarget::Resolved { symbol: helper.id }
+                && source.as_bytes().get(
+                    usize::try_from(occurrence.source.span().start_byte()).unwrap()
+                        ..usize::try_from(occurrence.source.span().end_byte()).unwrap(),
+                ) == Some(b"helper(X, Y)".as_slice())
+        }));
+        assert!(document.relations.iter().any(|relation| {
+            relation.predicate == RelationPredicate::Calls
+                && relation.object == RelationEndpoint::Entity(helper.id)
+        }));
+        assert!(document.occurrences.iter().any(|occurrence| {
+            occurrence.role == OccurrenceRole::CallSite
+                && occurrence.target
+                    == OccurrenceTarget::Resolved {
+                        symbol: unary_helper.id,
+                    }
+                && source.as_bytes().get(
+                    usize::try_from(occurrence.source.span().start_byte()).unwrap()
+                        ..usize::try_from(occurrence.source.span().end_byte()).unwrap(),
+                ) == Some(b"helper(X)".as_slice())
+        }));
+        assert!(document.skipped_regions.iter().any(|gap| {
+            gap.detail == "erlang-macro-and-expression-semantics-partial"
+                && gap.source.generation() == receipt.generation
+        }));
+        let file = document
+            .files
+            .iter()
+            .find(|file| file.path == "flow.erl")
+            .expect("Erlang file exists");
+        let read = service
+            .source_read(
+                receipt.generation,
+                vec![
+                    file.evidence
+                        .source
+                        .clone()
+                        .expect("generation-bound source"),
+                ],
+                &cancellation,
+            )
+            .expect("exact source is readable");
+        assert_eq!(read.data.chunks[0].bytes, source.as_bytes());
+        let located = service
+            .code_locate(
+                receipt.generation,
+                "helper/2".to_owned(),
+                LocateMode::Exact,
+                10,
+                0,
+                &cancellation,
+            )
+            .expect("exact indicator is locatable");
+        assert!(located.data.hits.iter().any(|hit| {
+            hit.path == "flow.erl" && hit.language == "erlang" && hit.symbol == Some(helper.id)
+        }));
+    }
+
+    #[test]
+    fn duplicate_erlang_function_indicators_do_not_claim_local_calls() {
+        use rootlight_ir::{OccurrenceRole, OccurrenceTarget, RelationEndpoint, RelationPredicate};
+
+        let fixture = TempDir::new().expect("fixture root exists");
+        let source = "-module(flow).\nroute(X) -> helper(X).\nhelper(X) -> X.\nhelper(Y) -> Y.\n";
+        fs::write(fixture.path().join("flow.erl"), source).expect("fixture writes");
+        let cancellation = deadline();
+        let mut service = FirstSliceService::new(2).expect("service initializes");
+        let receipt = service
+            .index_repository(fixture.path(), &cancellation)
+            .expect("ambiguous source remains available");
+        let snapshot = service
+            .loaded_generation_snapshot(receipt.generation)
+            .expect("generation remains loaded");
+        let call = snapshot
+            .document()
+            .occurrences
+            .iter()
+            .find(|occurrence| {
+                occurrence.role == OccurrenceRole::CallSite
+                    && source.as_bytes().get(
+                        usize::try_from(occurrence.source.span().start_byte()).unwrap()
+                            ..usize::try_from(occurrence.source.span().end_byte()).unwrap(),
+                    ) == Some(b"helper(X)".as_slice())
+            })
+            .expect("written call is visible");
+        assert!(!matches!(call.target, OccurrenceTarget::Resolved { .. }));
+        assert!(!snapshot.document().relations.iter().any(|relation| {
+            relation.predicate == RelationPredicate::Calls
+                && relation.subject == RelationEndpoint::Occurrence(call.id)
         }));
     }
 

@@ -9,6 +9,7 @@
 mod dart_names;
 mod descriptor;
 mod ecmascript_names;
+mod erlang_names;
 mod error;
 mod groovy_names;
 mod ir_accounting;
@@ -37,6 +38,10 @@ pub use descriptor::{
     ParseCapabilities, ProducerDescriptor,
 };
 pub use ecmascript_names::canonical_ecmascript_identifier;
+pub use erlang_names::{
+    atom_end as erlang_atom_end, canonical_function_head as canonical_erlang_function_head,
+    function_head as erlang_function_head,
+};
 pub use error::{
     AdapterError, DescriptorError, LabelError, LabelField, LabelViolation, LimitError, ReportError,
     RequestError, ResourceKind, SinkError, SnapshotError,

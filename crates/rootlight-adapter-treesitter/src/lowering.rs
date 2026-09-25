@@ -1292,6 +1292,37 @@ impl<'context, 'source> Lowering<'context, 'source> {
                 }
             }
         }
+        let mut erlang_functions = HashMap::<String, Option<SymbolId>>::new();
+        if self.request.language().as_str() == "erlang" {
+            let mut definition_counts = HashMap::<String, usize>::new();
+            for fact in self
+                .parse_output
+                .facts()
+                .iter()
+                .filter(|fact| fact.syntax_kind().as_str() == "erlang.function.definition")
+            {
+                cancellation.check()?;
+                let head = self.text_for_span(fact.span())?;
+                if let Some(indicator) = rootlight_adapter_sdk::canonical_erlang_function_head(
+                    head,
+                    self.request.limits().ir().max_string_bytes,
+                ) {
+                    let count = definition_counts.entry(indicator).or_default();
+                    *count = count.saturating_add(1);
+                }
+            }
+            for entity in entities
+                .values()
+                .filter(|entity| entity.kind == EntityKind::Function)
+            {
+                if definition_counts.get(&entity.canonical_name) == Some(&1) {
+                    erlang_functions
+                        .entry(entity.canonical_name.clone())
+                        .and_modify(|symbol| *symbol = None)
+                        .or_insert(Some(entity.id));
+                }
+            }
+        }
         let mut make_targets = HashMap::<String, Option<SymbolId>>::new();
         if self.request.language().as_str() == "make" {
             for entity in entities
@@ -2095,6 +2126,20 @@ impl<'context, 'source> Lowering<'context, 'source> {
                 }
                 if fact.syntax_kind().as_str() == "awk.function.call"
                     && let Some(Some(symbol)) = awk_functions.get(text)
+                {
+                    occurrence.target = OccurrenceTarget::Resolved { symbol: *symbol };
+                    occurrence.id = derive_occurrence_record_id(&occurrence)
+                        .map_err(|_| provider_failure("treesitter-occurrence-identity"))?;
+                    let mut relation = lexical_reference_relation(&occurrence, *symbol)?;
+                    relation.predicate = RelationPredicate::Calls;
+                    relation.id = derive_relation_record_id(&relation)
+                        .map_err(|_| provider_failure("treesitter-relation-identity"))?;
+                    relations.insert(relation.id, relation);
+                }
+                if fact.syntax_kind().as_str() == "erlang.function.call"
+                    && let Some(Some(symbol)) = resolution_text
+                        .as_deref()
+                        .and_then(|indicator| erlang_functions.get(indicator))
                 {
                     occurrence.target = OccurrenceTarget::Resolved { symbol: *symbol };
                     occurrence.id = derive_occurrence_record_id(&occurrence)
@@ -4542,6 +4587,10 @@ fn structural_resolution_text<'a>(
     terminal_call_name: Option<&'a str>,
     maximum_name_bytes: usize,
 ) -> Option<std::borrow::Cow<'a, str>> {
+    if language == "erlang" && fact.syntax_kind().as_str() == "erlang.function.call" {
+        return rootlight_adapter_sdk::canonical_erlang_function_head(text, maximum_name_bytes)
+            .map(std::borrow::Cow::Owned);
+    }
     if language == "groovy"
         && matches!(
             fact.syntax_kind().as_str(),
