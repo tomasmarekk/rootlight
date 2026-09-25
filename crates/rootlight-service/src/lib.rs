@@ -30722,10 +30722,16 @@ mod tests {
         entity("Main::Left::same", EntityKind::Function);
         entity("Main::Right::same", EntityKind::Function);
         entity("Main::hidden", EntityKind::Function);
-        entity("Main::top", EntityKind::Function);
+        let top = entity("Main::top", EntityKind::Function);
+        let local = entity("Main::top::local", EntityKind::Function);
+        assert_eq!(
+            local.container,
+            Some(rootlight_ir::ContainerRef::Entity(top.id))
+        );
         for (qualified, equation, other) in [
             ("Main::Left::same", "same = 1", "same = 2"),
             ("Main::Right::same", "same = 2", "same = 1"),
+            ("Main::top::local", "local = 1", "top = 0"),
         ] {
             let reference = entity(qualified, EntityKind::Function)
                 .evidence
@@ -30748,12 +30754,6 @@ mod tests {
             assert!(body.contains(equation), "missing {equation} in {qualified}");
             assert!(!body.contains(other), "cross-scope source in {qualified}");
         }
-        assert!(
-            !document
-                .entities
-                .iter()
-                .any(|entity| entity.canonical_name == "local")
-        );
         let located = service
             .code_locate(
                 receipt.generation,

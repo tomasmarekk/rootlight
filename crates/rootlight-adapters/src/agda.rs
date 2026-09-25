@@ -1,5 +1,5 @@
 //! First-party Agda scanner for explicit source-backed layout declarations.
-//! Local scopes, mixfix applications, and type checking remain bounded.
+//! Complex local scopes, mixfix applications, and type checking remain bounded.
 
 use std::collections::BTreeMap;
 
@@ -767,12 +767,21 @@ fn scan_source(
                     },
                 )?
             {
+                let inline_where = has_token(&code[first_end..line_end], b"where");
                 push_scope(
                     &mut scopes,
                     max_syntax_nodes,
                     indent,
-                    parent_item,
-                    ScopeMode::Opaque,
+                    if inline_where {
+                        Some(index)
+                    } else {
+                        parent_item
+                    },
+                    if inline_where {
+                        ScopeMode::Normal
+                    } else {
+                        ScopeMode::Opaque
+                    },
                     Some(index),
                     false,
                 )?;
@@ -1235,7 +1244,7 @@ mod tests {
     }
 
     #[test]
-    fn explicit_layout_owns_nested_names_without_promoting_continuations() {
+    fn explicit_layout_owns_nested_names_and_inline_where_locals() {
         let source = "module Main where\n  module Inner where\n    value : Nat\n    value = 1\n    private\n      hidden : Nat\n  data Choice : Set where\n    yes no : Choice\n  record Pair : Set where\n    constructor mkPair\n    field\n      left right : Nat\n  result : Nat\n  result = value where\n    local : Nat\n    local = 2\n";
         let parsed = scan_source(source.as_bytes(), "Main.agda", 80, &Cancellation::new())
             .expect("bounded source");
@@ -1258,9 +1267,10 @@ mod tests {
                 ("left", ItemKind::Field),
                 ("right", ItemKind::Field),
                 ("result", ItemKind::Function),
+                ("local", ItemKind::Function),
             ]
         );
-        assert!(!captures.iter().any(|(name, _)| *name == "local"));
+        assert_eq!(parsed.items[11].parent_item, Some(10));
     }
 
     #[test]
@@ -1280,6 +1290,7 @@ mod tests {
                 ("α", ItemKind::Variable),
                 ("β", ItemKind::Variable),
                 ("value", ItemKind::Function),
+                ("local", ItemKind::Function),
                 ("next", ItemKind::Function),
             ]
         );
@@ -1292,6 +1303,35 @@ mod tests {
         assert!(body.contains("value = axiom where"));
         assert!(body.contains("local = axiom"));
         assert!(!body.contains("next : Set"));
+        assert_eq!(parsed.items[4].parent_item, Some(3));
+    }
+
+    #[test]
+    fn inline_where_names_are_owned_per_function_without_promoting_continuations() {
+        let source = "module Main where\n  first : Nat\n  first = 1 where\n    local : Nat\n    local = 1\n  second : Nat\n  second = 2 where\n    local : Nat\n    local = 2\n  plain : Nat\n  plain =\n    3\n";
+        let parsed = scan_source(source.as_bytes(), "Main.agda", 64, &Cancellation::new())
+            .expect("bounded source");
+        let captures = parsed
+            .items
+            .iter()
+            .map(|item| (&source[item.name_start..item.name_end], item.parent_item))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            captures,
+            [
+                ("first", None),
+                ("local", Some(0)),
+                ("second", None),
+                ("local", Some(2)),
+                ("plain", None),
+            ]
+        );
+        let first = &source[parsed.items[0].line_start..parsed.items[0].declaration_end];
+        let second = &source[parsed.items[2].line_start..parsed.items[2].declaration_end];
+        assert!(first.contains("local = 1"));
+        assert!(!first.contains("local = 2"));
+        assert!(second.contains("local = 2"));
+        assert!(!second.contains("plain : Nat"));
     }
 
     #[test]

@@ -530,7 +530,7 @@ fn agda_nested_declarations_keep_exact_sources_across_mcp() {
         );
     }
     let local = fixture.standalone(
-        "agda-local-file-only",
+        "agda-local-locate",
         "code.locate",
         json!({"query": "local", "search_modes": ["exact"], "languages": ["agda"],
             "scope": {"paths": ["Main.agda"]}, "response_profile": "evidence"}),
@@ -539,11 +539,37 @@ fn agda_nested_declarations_keep_exact_sources_across_mcp() {
     let local_matches = local["result"]["structuredContent"]["data"]["matches"]
         .as_array()
         .unwrap();
-    assert!(!local_matches.is_empty(), "local source remains searchable");
-    assert!(
-        local_matches.iter().all(|item| item["symbol_id"].is_null()),
-        "local declaration must not masquerade as a top-level symbol: {local:#}"
+    let local_symbol = local_matches
+        .iter()
+        .find(|item| item["display_name"] == "local" && item["symbol_id"].is_string())
+        .unwrap_or_else(|| panic!("missing owned local declaration: {local:#}"));
+    let explained = fixture.standalone(
+        "agda-local-explain",
+        "symbol.explain",
+        json!({"symbol_ids": [local_symbol["symbol_id"]], "response_profile": "evidence"}),
     );
+    assert_success(&explained, "symbol.explain");
+    assert_eq!(
+        explained["result"]["structuredContent"]["data"]["symbols"][0]["qualified_name"],
+        "Main::result::local"
+    );
+    let reference = local_symbol["source_ref"].clone();
+    assert!(reference["generation"].is_string());
+    let read = fixture.standalone(
+        "agda-local-read",
+        "source.read",
+        json!({"references": [{"source_ref": reference}], "context_lines_before": 0,
+            "context_lines_after": 0, "response_profile": "evidence"}),
+    );
+    assert_success(&read, "source.read");
+    let content = read["result"]["structuredContent"]["data"]["chunks"][0]["content"]
+        .as_str()
+        .expect("local source is UTF-8");
+    let start = usize::try_from(reference["span"]["start_byte"].as_u64().unwrap()).unwrap();
+    let end = usize::try_from(reference["span"]["end_byte"].as_u64().unwrap()).unwrap();
+    assert_eq!(content, source.get(start..end).unwrap());
+    assert!(content.contains("local = 1"));
+    assert!(!content.contains("result = 0"));
     fixture.finish();
 }
 
