@@ -1994,11 +1994,11 @@ dependencies = [
  "rootlight-cancel",
  "rootlight-ids",
  "rootlight-ir",
+ "rootlight-unicode",
  "rootlight-vfs",
  "serde_json",
  "tempfile",
  "thiserror 2.0.18",
- "unicode-general-category",
  "yaml-rust2",
 ]
 
@@ -2051,7 +2051,6 @@ dependencies = [
  "tree-sitter-vba",
  "tree-sitter-yaml",
  "ts-parser-perl",
- "unicode-general-category",
 ]
 
 [[package]]
@@ -2524,7 +2523,6 @@ dependencies = [
  "tantivy-fst",
  "tempfile",
  "thiserror 2.0.18",
- "unicode-general-category",
  "unicode-normalization",
  "windows",
 ]

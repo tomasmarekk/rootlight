@@ -1,6 +1,6 @@
 use rootlight_unicode::UnicodeCaseFold as _;
+use rootlight_unicode::{GeneralCategory, get_general_category};
 use tantivy::tokenizer::{Token, TokenStream, Tokenizer};
-use unicode_general_category::{GeneralCategory, get_general_category};
 use unicode_normalization::UnicodeNormalization;
 
 use crate::model::MAX_TERM_BYTES;

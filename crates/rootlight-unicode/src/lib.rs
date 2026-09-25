@@ -1,11 +1,18 @@
-//! First-party Unicode case folding for repository and query identity.
+//! First-party Unicode properties for repository and query identity.
 //!
-//! The pinned Unicode 9 data preserves existing index keys while the
-//! implementation and compiler inputs remain owned by Rootlight.
+//! Case folding uses Unicode 9 to preserve existing index keys. Source-language
+//! general categories use Unicode 16. Both implementations are first-party;
+//! the checked-in character data retains its Unicode provenance and terms.
 
 use std::{iter, str::Chars};
 
 include!("case_folding.rs");
+mod general_category;
+mod general_category_data;
+
+pub use general_category::{
+    GENERAL_CATEGORY_UNICODE_VERSION, GeneralCategory, get_general_category,
+};
 
 /// Unicode data version used for case-insensitive index keys.
 pub const UNICODE_VERSION: (u8, u8, u8) = (9, 0, 0);

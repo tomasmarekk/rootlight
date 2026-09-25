@@ -4,7 +4,7 @@
 
 use std::{borrow::Cow, iter::Peekable, slice::Iter};
 
-use unicode_general_category::{GeneralCategory, get_general_category};
+use rootlight_unicode::{GeneralCategory, get_general_category};
 
 use crate::json_names::{append, append_character, append_unit_escape};
 

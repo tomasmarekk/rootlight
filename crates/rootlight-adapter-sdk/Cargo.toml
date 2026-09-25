@@ -12,9 +12,9 @@ blake3.workspace = true
 rootlight-cancel = { path = "../rootlight-cancel" }
 rootlight-ids = { path = "../rootlight-ids" }
 rootlight-ir = { path = "../rootlight-ir" }
+rootlight-unicode = { path = "../rootlight-unicode" }
 rootlight-vfs = { path = "../rootlight-vfs" }
 thiserror.workspace = true
-unicode-general-category.workspace = true
 
 [dev-dependencies]
 serde_json.workspace = true

@@ -2,7 +2,7 @@
 
 use std::borrow::Cow;
 
-use unicode_general_category::{GeneralCategory, get_general_category};
+use rootlight_unicode::{GeneralCategory, get_general_category};
 
 /// Returns the exact code-point identity of a bounded ECMAScript identifier.
 ///
@@ -195,7 +195,10 @@ mod tests {
 
     #[test]
     fn unicode_identifier_exceptions_preserve_start_and_continue_roles() {
-        assert_eq!(unicode_general_category::UNICODE_VERSION, (16, 0, 0));
+        assert_eq!(
+            rootlight_unicode::GENERAL_CATEGORY_UNICODE_VERSION,
+            (16, 0, 0)
+        );
         for ch in [
             '\u{1885}', '\u{1886}', '\u{2118}', '\u{212e}', '\u{309b}', '\u{309c}',
         ] {

@@ -3,8 +3,8 @@
 
 use rootlight_adapter_sdk::AdapterError;
 use rootlight_cancel::Cancellation;
+use rootlight_unicode::{GeneralCategory, get_general_category};
 use tree_sitter::Node;
-use unicode_general_category::{GeneralCategory, get_general_category};
 
 use super::StructuralRole;
 

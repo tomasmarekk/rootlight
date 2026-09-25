@@ -18,7 +18,6 @@ rootlight-vfs = { path = "../rootlight-vfs" }
 tantivy.workspace = true
 tantivy-fst.workspace = true
 thiserror.workspace = true
-unicode-general-category.workspace = true
 unicode-normalization.workspace = true
 
 [target.'cfg(unix)'.dependencies]
