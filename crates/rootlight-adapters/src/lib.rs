@@ -5,6 +5,7 @@
 
 #![forbid(unsafe_code)]
 
+mod agda;
 mod awk;
 mod elm;
 mod erlang;
@@ -31,6 +32,7 @@ use rootlight_ir::{
     ProducerKind, canonicalize_ir_document,
 };
 
+pub use agda::AgdaParseProvider;
 pub use awk::AwkParseProvider;
 pub use elm::ElmParseProvider;
 pub use erlang::ErlangParseProvider;

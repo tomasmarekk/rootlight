@@ -41,7 +41,7 @@ pub use incremental::{
 };
 
 /// Current deterministic manifest and source-classification revision.
-pub const DISCOVERY_MANIFEST_VERSION: &str = "1.17";
+pub const DISCOVERY_MANIFEST_VERSION: &str = "1.18";
 /// Stable source-free diagnostic emitted when the entry budget truncates discovery.
 pub const DISCOVERY_ENTRY_LIMIT_DIAGNOSTIC_CODE: &str = "DISCOVERY_ENTRY_LIMIT";
 /// Stable source-free diagnostic emitted when retained source bytes truncate discovery.
@@ -1652,7 +1652,7 @@ const LANGUAGE_CAPABILITIES: &[LanguageCapability] = &[
         aliases: &[],
         detectors: &["extension"],
         maximum_tier: "tier_d",
-        analyzers: &["source-fallback"],
+        analyzers: &["agda-native-structural-1"],
     },
     LanguageCapability {
         language: "assembly",
@@ -3611,8 +3611,6 @@ max_source_file_bytes = 2097152
     #[test]
     fn unparsed_language_suffixes_advertise_only_file_retrieval() {
         for (path, language) in [
-            ("Module.agda", "agda"),
-            ("Guide.lagda.md", "agda"),
             ("Shape.impl.carbon", "carbon"),
             ("Main.idr", "idris"),
             ("Main.lidr", "idris"),
@@ -3647,6 +3645,25 @@ max_source_file_bytes = 2097152
             "theme.less.map",
         ] {
             assert_eq!(extension_language(path), None, "{path}");
+        }
+    }
+
+    #[test]
+    fn agda_source_and_literate_suffixes_advertise_native_structure() {
+        let capability = language_capabilities()
+            .iter()
+            .find(|capability| capability.language == "agda")
+            .expect("Agda capability is declared");
+        assert_eq!(capability.analyzers, &["agda-native-structural-1"]);
+        assert_eq!(capability.maximum_tier, "tier_d");
+        for path in [
+            "Module.agda",
+            "Guide.lagda",
+            "Guide.lagda.md",
+            "Guide.lagda.rst",
+            "Guide.lagda.tex",
+        ] {
+            assert_eq!(extension_language(path), Some("agda"), "{path}");
         }
     }
 

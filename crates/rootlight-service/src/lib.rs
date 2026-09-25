@@ -49,7 +49,7 @@ use rootlight_adapter_treesitter::{
     TreeSitterAnalyzer, TreeSitterProvider, TreeSitterStructuralArtifact,
 };
 use rootlight_adapters::{
-    AwkParseProvider, ElmParseProvider, ErlangParseProvider, MakeParseProvider,
+    AgdaParseProvider, AwkParseProvider, ElmParseProvider, ErlangParseProvider, MakeParseProvider,
     PrologParseProvider, RuntimeTraceImportRequest, ScssParseProvider, SemanticProjectLanguage,
     import_runtime_trace,
 };
@@ -5226,6 +5226,16 @@ impl StructuralPreflight for TreeSitterProvider {
     }
 }
 
+impl StructuralPreflight for AgdaParseProvider {
+    fn required_syntax_fact_count(
+        &self,
+        request: &rootlight_adapter_sdk::ParseRequest<'_>,
+        cancellation: &Cancellation,
+    ) -> Result<usize, AdapterError> {
+        AgdaParseProvider::required_syntax_fact_count(self, request, cancellation)
+    }
+}
+
 impl StructuralPreflight for AwkParseProvider {
     fn required_syntax_fact_count(
         &self,
@@ -6174,6 +6184,10 @@ impl FirstSliceService {
                 .map_err(|_| FirstSliceError::Adapter)?,
         );
         let registry = GrammarRegistry::audited().map_err(|_| FirstSliceError::Adapter)?;
+        let agda_parser = Arc::new(
+            AgdaParseProvider::new(maximum_source_bytes, MAX_SYNTAX_NODES)
+                .map_err(|_| FirstSliceError::Adapter)?,
+        );
         let awk_parser = Arc::new(
             AwkParseProvider::new(maximum_source_bytes, MAX_SYNTAX_NODES)
                 .map_err(|_| FirstSliceError::Adapter)?,
@@ -6254,6 +6268,29 @@ impl FirstSliceService {
             }
         }
         if analyzers.len() != registry.descriptors().len() {
+            return Err(FirstSliceError::Adapter);
+        }
+        let agda_provider: Arc<dyn ParseProvider> =
+            Arc::clone(&agda_parser) as Arc<dyn ParseProvider>;
+        let agda_analyzer = TreeSitterAnalyzer::new(
+            agda_provider,
+            ProducerIdentity::new("rootlight-first-slice-agda-native", "1.0", config.hash())
+                .map_err(|_| FirstSliceError::Adapter)?,
+            LanguageId::new("agda").map_err(|_| FirstSliceError::Adapter)?,
+            "agda-native-structural-1",
+            AgdaParseProvider::binary_digest(),
+        )
+        .map_err(|_| FirstSliceError::Adapter)?;
+        if analyzers.insert("agda".to_owned(), agda_analyzer).is_some() {
+            return Err(FirstSliceError::Adapter);
+        }
+        if structural_parsers
+            .insert(
+                "agda".to_owned(),
+                agda_parser as Arc<dyn StructuralPreflight>,
+            )
+            .is_some()
+        {
             return Err(FirstSliceError::Adapter);
         }
         let awk_provider: Arc<dyn ParseProvider> =
@@ -30452,7 +30489,6 @@ mod tests {
                 "opaqueWidget configures lexicalFallback\n",
                 "unknown",
             ),
-            ("Module.agda", "module Module where\n", "agda"),
             ("Shape.carbon", "fn MakeShape() {}\n", "carbon"),
             ("Main.idr", "module Main\n", "idris"),
             ("Algebra.lean", "namespace Algebra\n", "lean"),
@@ -30538,7 +30574,6 @@ mod tests {
         for language in [
             "objective-cpp",
             "matlab",
-            "agda",
             "carbon",
             "idris",
             "lean",
@@ -30552,6 +30587,93 @@ mod tests {
                     && gap.files == 1
             }));
         }
+    }
+
+    #[test]
+    fn agda_declarations_are_source_backed_and_literate_prose_is_not_code() {
+        let fixture = TempDir::new().expect("fixture root exists");
+        let source = "{-# OPTIONS --safe #-}\nopen import Prelude\nmodule Sample where\n{- module Ghost where -}\n_∙_ : Nat → Nat → Nat\n_∙_ x y = x\ndata Choice : Set where\n  yes : Choice\nrecord Pair : Set where\n  field left : Nat\n";
+        let literate =
+            "module Prose where\n```agda\nmodule Literate where\nanswer : Nat\nanswer = 42\n```\n";
+        fs::write(fixture.path().join("Sample.agda"), source).expect("Agda source writes");
+        fs::write(fixture.path().join("Literate.lagda.md"), literate)
+            .expect("literate source writes");
+        let cancellation = deadline();
+        let mut service = FirstSliceService::new(2).expect("service initializes");
+        let receipt = service
+            .index_repository(fixture.path(), &cancellation)
+            .expect("Agda source indexes");
+        let snapshot = service
+            .loaded_generation_snapshot(receipt.generation)
+            .expect("generation remains loaded");
+        let document = snapshot.document();
+        for (name, kind) in [
+            ("Sample", EntityKind::Module),
+            ("_∙_", EntityKind::Function),
+            ("Choice", EntityKind::Enum),
+            ("Pair", EntityKind::Struct),
+            ("Literate", EntityKind::Module),
+            ("answer", EntityKind::Function),
+        ] {
+            assert!(
+                document.entities.iter().any(|entity| {
+                    entity.language == "agda"
+                        && entity.kind == kind
+                        && entity.canonical_name == name
+                }),
+                "missing {name}"
+            );
+        }
+        assert!(
+            !document
+                .entities
+                .iter()
+                .any(|entity| entity.canonical_name == "Ghost" || entity.canonical_name == "Prose")
+        );
+        assert!(document.skipped_regions.iter().any(|gap| {
+            gap.detail == "agda-layout-and-expression-semantics-partial"
+                && gap.source.generation() == receipt.generation
+        }));
+        let file = document
+            .files
+            .iter()
+            .find(|file| file.path == "Sample.agda")
+            .expect("Agda file exists");
+        let read = service
+            .source_read(
+                receipt.generation,
+                vec![
+                    file.evidence
+                        .source
+                        .clone()
+                        .expect("generation-bound source"),
+                ],
+                &cancellation,
+            )
+            .expect("Agda source remains readable");
+        assert_eq!(read.data.chunks[0].bytes, source.as_bytes());
+        let located = service
+            .code_locate(
+                receipt.generation,
+                "_∙_".to_owned(),
+                LocateMode::Exact,
+                10,
+                0,
+                &cancellation,
+            )
+            .expect("Agda symbol is locatable");
+        assert!(located.data.hits.iter().any(|hit| {
+            hit.path == "Sample.agda" && hit.language == "agda" && hit.symbol.is_some()
+        }));
+        let status = service
+            .repository_status(receipt.repository, Some(receipt.generation))
+            .expect("Agda coverage resolves");
+        assert!(status.coverage.iter().any(|entry| {
+            entry.language == "agda"
+                && entry.discovered_files == 2
+                && entry.indexed_files == 2
+                && entry.status == "bounded"
+        }));
     }
 
     #[test]

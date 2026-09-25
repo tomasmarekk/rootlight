@@ -208,6 +208,7 @@ pub fn structural_entity_kind(fact: &SyntaxFact) -> Option<EntityKind> {
         SyntaxFactKind::Declaration if label == "elm.port.declaration" => {
             Some(EntityKind::Function)
         }
+        SyntaxFactKind::Declaration if label == "agda.data.declaration" => Some(EntityKind::Enum),
         SyntaxFactKind::Declaration
             if matches!(
                 label,
@@ -404,6 +405,15 @@ pub fn structural_captured_name_for_language<'a>(
         crate::yaml_names::canonical_flow_key(text, maximum_bytes).map(Cow::Owned)
     } else if language == "r" {
         crate::r_names::canonical_r_name(text, maximum_bytes)
+    } else if language == "agda" {
+        (!text.is_empty()
+            && text.len() <= maximum_bytes
+            && text.chars().all(|character| {
+                !character.is_control()
+                    && !character.is_whitespace()
+                    && !matches!(character, ';' | '{' | '}' | '(' | ')' | '@' | '"')
+            }))
+        .then_some(Cow::Borrowed(text))
     } else if matches!(language, "css" | "html" | "powershell" | "markdown" | "nix") {
         (!text.is_empty() && text.len() <= maximum_bytes && !text.contains('\0'))
             .then_some(Cow::Borrowed(text))
