@@ -1,7 +1,7 @@
-//! First-party Agda source scanner for explicit top-level declarations.
-//! Layout scopes, mixfix applications, and type checking remain bounded.
+//! First-party Agda scanner for explicit source-backed layout declarations.
+//! Local scopes, mixfix applications, and type checking remain bounded.
 
-use std::collections::BTreeSet;
+use std::collections::BTreeMap;
 
 use rootlight_adapter_sdk::{
     AdapterDiagnostic, AdapterError, CoverageReport, DescriptorError, DiagnosticCode,
@@ -138,10 +138,33 @@ impl ParseProvider for AgdaParseProvider {
         } else {
             None
         };
-        let parent = module_id.unwrap_or(1);
-        let depth = if module_id.is_some() { 2 } else { 1 };
+        let root_parent = module_id.unwrap_or(1);
+        let root_depth = if module_id.is_some() { 2 } else { 1 };
+        let mut item_ids = Vec::new();
+        let mut item_depths = Vec::new();
+        item_ids
+            .try_reserve_exact(parsed.items.len())
+            .map_err(|_| SinkError::AllocationFailed)?;
+        item_depths
+            .try_reserve_exact(parsed.items.len())
+            .map_err(|_| SinkError::AllocationFailed)?;
         for item in &parsed.items {
             cancellation.check()?;
+            let (parent, depth) = if let Some(index) = item.parent_item {
+                (
+                    *item_ids
+                        .get(index)
+                        .ok_or_else(|| failure("agda-parent-order-invalid"))?,
+                    item_depths
+                        .get(index)
+                        .ok_or_else(|| failure("agda-parent-order-invalid"))?
+                        + 1,
+                )
+            } else {
+                (root_parent, root_depth)
+            };
+            item_ids.push(next_id);
+            item_depths.push(depth);
             match item.kind {
                 ItemKind::Import => {
                     facts.push(SyntaxFact::new(
@@ -153,6 +176,25 @@ impl ParseProvider for AgdaParseProvider {
                         label("agda.module.import"),
                     ));
                     next_id += 1;
+                }
+                ItemKind::Module => {
+                    facts.push(SyntaxFact::new(
+                        next_id,
+                        Some(parent),
+                        SyntaxFactKind::Module,
+                        source_span(file, item.line_start, item.declaration_end)?,
+                        depth,
+                        label("agda.module.declaration"),
+                    ));
+                    facts.push(SyntaxFact::new(
+                        next_id + 1,
+                        Some(next_id),
+                        SyntaxFactKind::Occurrence,
+                        source_span(file, item.name_start, item.name_end)?,
+                        depth + 1,
+                        label("agda.module.definition"),
+                    ));
+                    next_id += 2;
                 }
                 kind => {
                     let (declaration, signature, definition) = match kind {
@@ -171,13 +213,33 @@ impl ParseProvider for AgdaParseProvider {
                             "agda.record.signature",
                             "agda.record.definition",
                         ),
-                        ItemKind::Import => unreachable!("handled above"),
+                        ItemKind::Constructor => (
+                            "agda.constructor.declaration",
+                            "agda.constructor.signature",
+                            "agda.constructor.definition",
+                        ),
+                        ItemKind::Field => (
+                            "agda.field.declaration",
+                            "agda.field.signature",
+                            "agda.field.definition",
+                        ),
+                        ItemKind::Constant => (
+                            "agda.constant.declaration",
+                            "agda.constant.signature",
+                            "agda.constant.definition",
+                        ),
+                        ItemKind::Variable => (
+                            "agda.variable.declaration",
+                            "agda.variable.signature",
+                            "agda.variable.definition",
+                        ),
+                        ItemKind::Import | ItemKind::Module => unreachable!("handled above"),
                     };
                     facts.push(SyntaxFact::new(
                         next_id,
                         Some(parent),
                         SyntaxFactKind::Declaration,
-                        source_span(file, item.line_start, item.line_end)?,
+                        source_span(file, item.line_start, item.declaration_end)?,
                         depth,
                         label(declaration),
                     ));
@@ -320,9 +382,30 @@ struct Module {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ItemKind {
     Import,
+    Module,
     Function,
     Data,
     Record,
+    Constructor,
+    Field,
+    Constant,
+    Variable,
+}
+
+impl ItemKind {
+    const fn fact_count(self) -> usize {
+        match self {
+            Self::Import => 1,
+            Self::Module => 2,
+            Self::Function
+            | Self::Data
+            | Self::Record
+            | Self::Constructor
+            | Self::Field
+            | Self::Constant
+            | Self::Variable => 3,
+        }
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -330,8 +413,31 @@ struct Item {
     kind: ItemKind,
     line_start: usize,
     line_end: usize,
+    declaration_end: usize,
     name_start: usize,
     name_end: usize,
+    parent_item: Option<usize>,
+}
+
+#[derive(Clone, Copy)]
+enum ScopeMode {
+    Normal,
+    Data,
+    Record,
+    Field,
+    Postulate,
+    Variable,
+    Opaque,
+}
+
+struct Scope {
+    header_indent: usize,
+    // Agda fixes a layout block's statement column at its first non-trivia token.
+    body_indent: Option<usize>,
+    owner: Option<usize>,
+    mode: ScopeMode,
+    extends_item: Option<usize>,
+    root_module: bool,
 }
 
 struct ParsedSource {
@@ -340,6 +446,121 @@ struct ParsedSource {
     fact_count: usize,
     lexical_incomplete: bool,
     literate_incomplete: bool,
+}
+
+#[derive(Clone, Copy)]
+struct ItemLocation {
+    line_start: usize,
+    line_end: usize,
+    name_start: usize,
+    name_end: usize,
+}
+
+struct ItemCollector<'a> {
+    code: &'a [u8],
+    items: Vec<Item>,
+    seen_names: BTreeMap<(Option<usize>, Vec<u8>), usize>,
+    fact_count: usize,
+    max_syntax_nodes: usize,
+}
+
+impl<'a> ItemCollector<'a> {
+    fn new(code: &'a [u8], max_syntax_nodes: usize) -> Self {
+        Self {
+            code,
+            items: Vec::new(),
+            seen_names: BTreeMap::new(),
+            fact_count: 1,
+            max_syntax_nodes,
+        }
+    }
+
+    fn add(
+        &mut self,
+        kind: ItemKind,
+        parent_item: Option<usize>,
+        location: ItemLocation,
+    ) -> Result<Option<usize>, AdapterError> {
+        let name = self
+            .code
+            .get(location.name_start..location.name_end)
+            .ok_or_else(|| failure("agda-source-span-invalid"))?;
+        let valid = if matches!(kind, ItemKind::Import | ItemKind::Module) {
+            valid_qualified_name(name)
+        } else {
+            valid_name(name)
+        };
+        if !valid {
+            return Ok(None);
+        }
+        let key = if kind != ItemKind::Import {
+            let mut key = Vec::new();
+            key.try_reserve_exact(name.len())
+                .map_err(|_| SinkError::AllocationFailed)?;
+            key.extend_from_slice(name);
+            let key = (parent_item, key);
+            if self.seen_names.contains_key(&key) {
+                return Ok(None);
+            }
+            Some(key)
+        } else {
+            None
+        };
+        self.fact_count =
+            checked_fact_count(self.fact_count, kind.fact_count(), self.max_syntax_nodes)?;
+        self.items
+            .try_reserve(1)
+            .map_err(|_| SinkError::AllocationFailed)?;
+        let index = self.items.len();
+        if let Some(key) = key {
+            self.seen_names.insert(key, index);
+        }
+        self.items.push(Item {
+            kind,
+            line_start: location.line_start,
+            line_end: location.line_end,
+            declaration_end: location.line_end,
+            name_start: location.name_start,
+            name_end: location.name_end,
+            parent_item,
+        });
+        Ok(Some(index))
+    }
+
+    fn add_equation(
+        &mut self,
+        parent_item: Option<usize>,
+        location: ItemLocation,
+    ) -> Result<Option<usize>, AdapterError> {
+        let name = self
+            .code
+            .get(location.name_start..location.name_end)
+            .ok_or_else(|| failure("agda-source-span-invalid"))?;
+        if !valid_name(name) {
+            return Ok(None);
+        }
+        let mut key = Vec::new();
+        key.try_reserve_exact(name.len())
+            .map_err(|_| SinkError::AllocationFailed)?;
+        key.extend_from_slice(name);
+        let index = if let Some(&existing) = self.seen_names.get(&(parent_item, key)) {
+            existing
+        } else {
+            let Some(inserted) = self.add(ItemKind::Function, parent_item, location)? else {
+                return Ok(None);
+            };
+            inserted
+        };
+        let item = self
+            .items
+            .get_mut(index)
+            .ok_or_else(|| failure("agda-parent-order-invalid"))?;
+        if item.kind != ItemKind::Function {
+            return Ok(None);
+        }
+        item.declaration_end = item.declaration_end.max(location.line_end);
+        Ok(Some(index))
+    }
 }
 
 fn scan_source(
@@ -364,9 +585,8 @@ fn scan_source(
         })
         .min();
     let mut module = None;
-    let mut items = Vec::new();
-    let mut seen_names = BTreeSet::new();
-    let mut fact_count = 1_usize;
+    let mut collector = ItemCollector::new(&code, max_syntax_nodes);
+    let mut scopes = Vec::new();
     for (line_number, (line_start, line)) in lines(&code).enumerate() {
         if line_number % CHECK_INTERVAL == 0 {
             cancellation.check()?;
@@ -375,27 +595,118 @@ fn scan_source(
             .iter()
             .take_while(|byte| matches!(byte, b' ' | b'\t'))
             .count();
-        if Some(indent) != base_indent || indent == line.len() {
+        if indent == line.len() {
+            continue;
+        }
+        while scopes.last().is_some_and(|scope: &Scope| {
+            !scope.root_module
+                && (indent <= scope.header_indent
+                    || scope.body_indent.is_some_and(|body| indent < body))
+        }) {
+            close_scope(&mut scopes, &mut collector.items, line_start)?;
+        }
+        if let Some(scope) = scopes.last_mut()
+            && scope.body_indent.is_none()
+        {
+            scope.body_indent = Some(indent);
+        }
+        let expected_indent = scopes
+            .last()
+            .and_then(|scope| scope.body_indent)
+            .or(base_indent);
+        if Some(indent) != expected_indent {
+            continue;
+        }
+        let parent_item = scopes.last().and_then(|scope| scope.owner);
+        let mode = scopes.last().map_or(ScopeMode::Normal, |scope| scope.mode);
+        if matches!(mode, ScopeMode::Opaque) {
             continue;
         }
         let line_end = line_start + line.trim_ascii_end().len();
         let first_start = line_start + indent;
         let first_end = token_end(&code, first_start, line_end);
         let first = &code[first_start..first_end];
-        if first == b"module" && module.is_none() {
+        if first == b"module" {
             let name_start = skip_space(&code, first_end, line_end);
             let name_end = token_end(&code, name_start, line_end);
-            if valid_qualified_name(&code[name_start..name_end])
-                && code[name_end..line_end]
-                    .split(|byte| byte.is_ascii_whitespace())
-                    .any(|token| token == b"where")
+            let has_where = has_token(&code[name_end..line_end], b"where");
+            let has_alias = has_token(&code[name_end..line_end], b"=");
+            if !valid_qualified_name(&code[name_start..name_end]) {
+                continue;
+            }
+            if module.is_none() && parent_item.is_none() && Some(indent) == base_indent && has_where
             {
                 module = Some(Module {
                     name_start,
                     name_end,
                 });
-                fact_count = checked_fact_count(fact_count, 2, max_syntax_nodes)?;
+                collector.fact_count =
+                    checked_fact_count(collector.fact_count, 2, max_syntax_nodes)?;
+                push_scope(
+                    &mut scopes,
+                    max_syntax_nodes,
+                    indent,
+                    None,
+                    ScopeMode::Normal,
+                    None,
+                    true,
+                )?;
+            } else if (has_where || has_alias)
+                && let Some(index) = collector.add(
+                    ItemKind::Module,
+                    parent_item,
+                    ItemLocation {
+                        line_start: first_start,
+                        line_end,
+                        name_start,
+                        name_end,
+                    },
+                )?
+                && has_where
+            {
+                push_scope(
+                    &mut scopes,
+                    max_syntax_nodes,
+                    indent,
+                    Some(index),
+                    ScopeMode::Normal,
+                    Some(index),
+                    false,
+                )?;
             }
+            continue;
+        }
+        if first == b"field" && matches!(mode, ScopeMode::Record) {
+            let names_start = skip_space(&code, first_end, line_end);
+            if let Some(colon_start) = signature_colon(&code, names_start, line_end) {
+                let mut cursor = names_start;
+                while cursor < colon_start {
+                    let name_end = token_end(&code, cursor, colon_start);
+                    collector.add(
+                        ItemKind::Field,
+                        parent_item,
+                        ItemLocation {
+                            line_start: first_start,
+                            line_end,
+                            name_start: cursor,
+                            name_end,
+                        },
+                    )?;
+                    cursor = skip_space(&code, name_end, colon_start);
+                }
+                continue;
+            }
+        }
+        if let Some(next_mode) = transparent_scope(first, mode) {
+            push_scope(
+                &mut scopes,
+                max_syntax_nodes,
+                indent,
+                parent_item,
+                next_mode,
+                None,
+                false,
+            )?;
             continue;
         }
         let (kind, name_start) = if first == b"open" {
@@ -411,50 +722,180 @@ fn scan_source(
             (ItemKind::Data, skip_space(&code, first_end, line_end))
         } else if first == b"record" {
             (ItemKind::Record, skip_space(&code, first_end, line_end))
-        } else if !reserved(first) {
-            let second_start = skip_space(&code, first_end, line_end);
-            let second_end = token_end(&code, second_start, line_end);
-            let signature = &code[second_start..second_end] == b":";
-            let equation = code[second_start..line_end]
-                .split(|byte| byte.is_ascii_whitespace())
-                .any(|token| token == b"=");
-            if !signature && !equation {
+        } else if first == b"constructor" && matches!(mode, ScopeMode::Record) {
+            (
+                ItemKind::Constructor,
+                skip_space(&code, first_end, line_end),
+            )
+        } else {
+            if reserved(first) {
                 continue;
             }
-            (ItemKind::Function, first_start)
-        } else {
+            let kind = match mode {
+                ScopeMode::Normal | ScopeMode::Record => ItemKind::Function,
+                ScopeMode::Data => ItemKind::Constructor,
+                ScopeMode::Field => ItemKind::Field,
+                ScopeMode::Postulate => ItemKind::Constant,
+                ScopeMode::Variable => ItemKind::Variable,
+                ScopeMode::Opaque => unreachable!("handled above"),
+            };
+            if let Some(colon_start) = signature_colon(&code, first_start, line_end) {
+                let mut cursor = first_start;
+                while cursor < colon_start {
+                    let name_end = token_end(&code, cursor, colon_start);
+                    collector.add(
+                        kind,
+                        parent_item,
+                        ItemLocation {
+                            line_start: first_start,
+                            line_end,
+                            name_start: cursor,
+                            name_end,
+                        },
+                    )?;
+                    cursor = skip_space(&code, name_end, colon_start);
+                }
+            } else if matches!(mode, ScopeMode::Normal | ScopeMode::Record)
+                && has_token(&code[first_end..line_end], b"=")
+                && let Some(index) = collector.add_equation(
+                    parent_item,
+                    ItemLocation {
+                        line_start: first_start,
+                        line_end,
+                        name_start: first_start,
+                        name_end: first_end,
+                    },
+                )?
+            {
+                push_scope(
+                    &mut scopes,
+                    max_syntax_nodes,
+                    indent,
+                    parent_item,
+                    ScopeMode::Opaque,
+                    Some(index),
+                    false,
+                )?;
+            }
             continue;
         };
         let name_end = token_end(&code, name_start, line_end);
-        let name = &code[name_start..name_end];
-        let valid = if kind == ItemKind::Import {
-            valid_qualified_name(name)
-        } else {
-            valid_name(name)
-        };
-        if !valid || kind != ItemKind::Import && !seen_names.insert(name.to_vec()) {
-            continue;
-        }
-        fact_count = checked_fact_count(
-            fact_count,
-            if kind == ItemKind::Import { 1 } else { 3 },
-            max_syntax_nodes,
-        )?;
-        items.push(Item {
+        if let Some(index) = collector.add(
             kind,
-            line_start: first_start,
-            line_end,
-            name_start,
-            name_end,
-        });
+            parent_item,
+            ItemLocation {
+                line_start: first_start,
+                line_end,
+                name_start,
+                name_end,
+            },
+        )? {
+            let has_where = has_token(&code[name_end..line_end], b"where");
+            let mode = match kind {
+                ItemKind::Data if has_where => Some(ScopeMode::Data),
+                ItemKind::Record if has_where => Some(ScopeMode::Record),
+                _ => None,
+            };
+            if let Some(mode) = mode {
+                push_scope(
+                    &mut scopes,
+                    max_syntax_nodes,
+                    indent,
+                    Some(index),
+                    mode,
+                    Some(index),
+                    false,
+                )?;
+            }
+        }
+    }
+    while !scopes.is_empty() {
+        close_scope(&mut scopes, &mut collector.items, source.len())?;
     }
     Ok(ParsedSource {
         module,
-        items,
-        fact_count,
+        items: collector.items,
+        fact_count: collector.fact_count,
         lexical_incomplete,
         literate_incomplete,
     })
+}
+
+fn push_scope(
+    scopes: &mut Vec<Scope>,
+    max_syntax_nodes: usize,
+    header_indent: usize,
+    owner: Option<usize>,
+    mode: ScopeMode,
+    extends_item: Option<usize>,
+    root_module: bool,
+) -> Result<(), AdapterError> {
+    if scopes.len() >= max_syntax_nodes {
+        return Err(failure("agda-syntax-node-limit"));
+    }
+    scopes
+        .try_reserve(1)
+        .map_err(|_| SinkError::AllocationFailed)?;
+    scopes.push(Scope {
+        header_indent,
+        body_indent: None,
+        owner,
+        mode,
+        extends_item,
+        root_module,
+    });
+    Ok(())
+}
+
+fn close_scope(
+    scopes: &mut Vec<Scope>,
+    items: &mut [Item],
+    end: usize,
+) -> Result<(), AdapterError> {
+    let scope = scopes
+        .pop()
+        .ok_or_else(|| failure("agda-scope-underflow"))?;
+    if let Some(index) = scope.extends_item {
+        items
+            .get_mut(index)
+            .ok_or_else(|| failure("agda-parent-order-invalid"))?
+            .declaration_end = end;
+    }
+    Ok(())
+}
+
+fn transparent_scope(first: &[u8], mode: ScopeMode) -> Option<ScopeMode> {
+    match first {
+        b"private" | b"abstract" | b"mutual" | b"instance" | b"macro" | b"opaque" => Some(mode),
+        b"field" if matches!(mode, ScopeMode::Record) => Some(ScopeMode::Field),
+        b"postulate" => Some(ScopeMode::Postulate),
+        b"variable" => Some(ScopeMode::Variable),
+        _ => None,
+    }
+}
+
+fn has_token(source: &[u8], token: &[u8]) -> bool {
+    source
+        .split(|byte| byte.is_ascii_whitespace())
+        .any(|part| part == token)
+}
+
+fn signature_colon(source: &[u8], start: usize, end: usize) -> Option<usize> {
+    let mut cursor = start;
+    let mut names = 0_usize;
+    while cursor < end {
+        let next = token_end(source, cursor, end);
+        let token = source.get(cursor..next)?;
+        if token == b":" {
+            return (names > 0).then_some(cursor);
+        }
+        if !valid_name(token) {
+            return None;
+        }
+        names += 1;
+        cursor = skip_space(source, next, end);
+    }
+    None
 }
 
 fn checked_fact_count(
@@ -710,7 +1151,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn captures_unicode_names_without_comments_or_nested_definitions() {
+    fn captures_unicode_names_and_explicit_layout_without_comments() {
         let source = "{-# OPTIONS --safe #-}\nopen import Prelude\nmodule Sample where\n{- outer {- module Ghost where -} -}\n_∙_ : Nat → Nat → Nat\n_∙_ x y = x\nprivate\n  hidden : Nat\ndata Choice : Set where\n  yes : Choice\nrecord Pair : Set where\n  field left : Nat\n";
         let parsed = scan_source(source.as_bytes(), "Sample.agda", 64, &Cancellation::new())
             .expect("bounded source");
@@ -729,11 +1170,14 @@ mod tests {
             [
                 ("Prelude", ItemKind::Import),
                 ("_∙_", ItemKind::Function),
+                ("hidden", ItemKind::Function),
                 ("Choice", ItemKind::Data),
-                ("Pair", ItemKind::Record)
+                ("yes", ItemKind::Constructor),
+                ("Pair", ItemKind::Record),
+                ("left", ItemKind::Field),
             ]
         );
-        assert_eq!(parsed.fact_count, 1 + 2 + 1 + 3 * 3);
+        assert_eq!(parsed.fact_count, 1 + 2 + 1 + 6 * 3);
     }
 
     #[test]
@@ -788,6 +1232,66 @@ mod tests {
             .collect::<Vec<_>>();
         assert_eq!(names, ["quoted", "next"]);
         assert!(!parsed.lexical_incomplete);
+    }
+
+    #[test]
+    fn explicit_layout_owns_nested_names_without_promoting_continuations() {
+        let source = "module Main where\n  module Inner where\n    value : Nat\n    value = 1\n    private\n      hidden : Nat\n  data Choice : Set where\n    yes no : Choice\n  record Pair : Set where\n    constructor mkPair\n    field\n      left right : Nat\n  result : Nat\n  result = value where\n    local : Nat\n    local = 2\n";
+        let parsed = scan_source(source.as_bytes(), "Main.agda", 80, &Cancellation::new())
+            .expect("bounded source");
+        let captures = parsed
+            .items
+            .iter()
+            .map(|item| (&source[item.name_start..item.name_end], item.kind))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            captures,
+            [
+                ("Inner", ItemKind::Module),
+                ("value", ItemKind::Function),
+                ("hidden", ItemKind::Function),
+                ("Choice", ItemKind::Data),
+                ("yes", ItemKind::Constructor),
+                ("no", ItemKind::Constructor),
+                ("Pair", ItemKind::Record),
+                ("mkPair", ItemKind::Constructor),
+                ("left", ItemKind::Field),
+                ("right", ItemKind::Field),
+                ("result", ItemKind::Function),
+            ]
+        );
+        assert!(!captures.iter().any(|(name, _)| *name == "local"));
+    }
+
+    #[test]
+    fn equation_spans_and_typed_blocks_keep_their_declared_kinds() {
+        let source = "module Main where\npostulate\n  axiom : Set\nvariable\n  α β : Set\nvalue : Set\nvalue = axiom where\n  local : Set\n  local = axiom\nnext : Set\n";
+        let parsed = scan_source(source.as_bytes(), "Main.agda", 64, &Cancellation::new())
+            .expect("bounded source");
+        let captures = parsed
+            .items
+            .iter()
+            .map(|item| (&source[item.name_start..item.name_end], item.kind))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            captures,
+            [
+                ("axiom", ItemKind::Constant),
+                ("α", ItemKind::Variable),
+                ("β", ItemKind::Variable),
+                ("value", ItemKind::Function),
+                ("next", ItemKind::Function),
+            ]
+        );
+        let value = parsed
+            .items
+            .iter()
+            .find(|item| &source[item.name_start..item.name_end] == "value")
+            .expect("value is captured");
+        let body = &source[value.line_start..value.declaration_end];
+        assert!(body.contains("value = axiom where"));
+        assert!(body.contains("local = axiom"));
+        assert!(!body.contains("next : Set"));
     }
 
     #[test]

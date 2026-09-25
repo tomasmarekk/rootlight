@@ -30677,6 +30677,105 @@ mod tests {
     }
 
     #[test]
+    fn agda_layout_preserves_nested_owners_and_distinct_names() {
+        let fixture = TempDir::new().expect("fixture root exists");
+        let source = "module Main where\n  module Left where\n    same : Nat\n    same = 1\n  module Right where\n    same : Nat\n    same = 2\n  data Choice : Set where\n    yes no : Choice\n  record Pair : Set where\n    constructor mkPair\n    field\n      left right : Nat\n    swap : Pair\n    swap = mkPair right left\n  private\n    hidden : Nat\n  top : Nat\n  top = 0 where\n    local : Nat\n    local = 1\n";
+        fs::write(fixture.path().join("Main.agda"), source).expect("Agda source writes");
+        let cancellation = deadline();
+        let mut service = FirstSliceService::new(2).expect("service initializes");
+        let receipt = service
+            .index_repository(fixture.path(), &cancellation)
+            .expect("nested Agda source indexes");
+        let snapshot = service
+            .loaded_generation_snapshot(receipt.generation)
+            .expect("generation remains loaded");
+        let document = snapshot.document();
+        let entity = |qualified: &str, kind: EntityKind| {
+            document
+                .entities
+                .iter()
+                .find(|entity| {
+                    entity.language == "agda"
+                        && entity.qualified_name == qualified
+                        && entity.kind == kind
+                })
+                .unwrap_or_else(|| panic!("missing {qualified}"))
+        };
+        let choice = entity("Main::Choice", EntityKind::Enum);
+        for name in ["yes", "no"] {
+            let constructor = entity(&format!("Main::Choice::{name}"), EntityKind::Constructor);
+            assert_eq!(
+                constructor.container,
+                Some(rootlight_ir::ContainerRef::Entity(choice.id))
+            );
+        }
+        let pair = entity("Main::Pair", EntityKind::Struct);
+        for name in ["left", "right"] {
+            let field = entity(&format!("Main::Pair::{name}"), EntityKind::Field);
+            assert_eq!(
+                field.container,
+                Some(rootlight_ir::ContainerRef::Entity(pair.id))
+            );
+        }
+        entity("Main::Pair::mkPair", EntityKind::Constructor);
+        entity("Main::Pair::swap", EntityKind::Method);
+        entity("Main::Left::same", EntityKind::Function);
+        entity("Main::Right::same", EntityKind::Function);
+        entity("Main::hidden", EntityKind::Function);
+        entity("Main::top", EntityKind::Function);
+        for (qualified, equation, other) in [
+            ("Main::Left::same", "same = 1", "same = 2"),
+            ("Main::Right::same", "same = 2", "same = 1"),
+        ] {
+            let reference = entity(qualified, EntityKind::Function)
+                .evidence
+                .source
+                .clone()
+                .expect("nested definition has generation-bound source");
+            let read = service
+                .source_read_with_options_and_budget(
+                    receipt.generation,
+                    vec![reference],
+                    SourceReadOptions::new()
+                        .with_context_lines_before(0)
+                        .with_context_lines_after(0),
+                    FirstSliceBudget::default(),
+                    &cancellation,
+                )
+                .expect("nested definition source is readable");
+            let body =
+                std::str::from_utf8(&read.data.chunks[0].bytes).expect("Agda definition is UTF-8");
+            assert!(body.contains(equation), "missing {equation} in {qualified}");
+            assert!(!body.contains(other), "cross-scope source in {qualified}");
+        }
+        assert!(
+            !document
+                .entities
+                .iter()
+                .any(|entity| entity.canonical_name == "local")
+        );
+        let located = service
+            .code_locate(
+                receipt.generation,
+                "same".to_owned(),
+                LocateMode::Exact,
+                10,
+                0,
+                &cancellation,
+            )
+            .expect("both scoped names locate");
+        assert_eq!(
+            located
+                .data
+                .hits
+                .iter()
+                .filter(|hit| hit.language == "agda" && hit.symbol.is_some())
+                .count(),
+            2
+        );
+    }
+
+    #[test]
     fn scss_declarations_have_exact_source_backed_identities() {
         let fixture = TempDir::new().expect("fixture root exists");
         let source = "$accent: #123456;\n@mixin card($radius) { border-radius: $radius; $local: $radius; }\n@function scale($value) { @return $value * 2; }\n/* $phantom: red; */\n.note { content: \"@mixin ghost {}\"; $nested: blue; color: $accent; }\n.first { $same: 1; }\n.second { $same: 2; }\n";
