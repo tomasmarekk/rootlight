@@ -3207,6 +3207,170 @@ fn vba_type_label_and_argument_names_do_not_bind_to_local_values() {
 }
 
 #[test]
+fn vba_named_arguments_bind_only_to_the_called_procedure_parameters() {
+    let source = "Public Sub Visit(ByVal size As Long)\nEnd Sub\nPublic Sub Run(ByVal size As Long)\nCall Visit(size:=size)\nCall Visit(missing:=size)\nEnd Sub\n";
+    let result = output(source);
+    let document = result.document();
+    let callee = document
+        .entities
+        .iter()
+        .find(|entity| entity.canonical_name == "Visit")
+        .unwrap();
+    let callee_parameter = document
+        .entities
+        .iter()
+        .find(|entity| {
+            entity.kind == EntityKind::Parameter
+                && entity.canonical_name == "size"
+                && entity.container == Some(ContainerRef::Entity(callee.id))
+        })
+        .unwrap();
+    let caller = document
+        .entities
+        .iter()
+        .find(|entity| entity.canonical_name == "Run")
+        .unwrap();
+    let caller_parameter = document
+        .entities
+        .iter()
+        .find(|entity| {
+            entity.kind == EntityKind::Parameter
+                && entity.canonical_name == "size"
+                && entity.container == Some(ContainerRef::Entity(caller.id))
+        })
+        .unwrap();
+    let label_at = |marker: &str| {
+        let start = u64::try_from(source.find(marker).unwrap()).unwrap();
+        document
+            .occurrences
+            .iter()
+            .find(|site| {
+                site.syntax_kind == "vba.nonvalue_identifier.reference"
+                    && site.source.span().start_byte() == start
+            })
+            .unwrap()
+    };
+    let label = label_at("size:=size");
+    assert_eq!(label.syntax_kind, "vba.nonvalue_identifier.reference");
+    assert_eq!(
+        label.target,
+        OccurrenceTarget::Resolved {
+            symbol: callee_parameter.id
+        }
+    );
+    assert_eq!(label.role, OccurrenceRole::Reference);
+    assert!(document.relations.iter().any(|edge| {
+        edge.predicate == RelationPredicate::RefersTo
+            && edge.object == RelationEndpoint::Entity(callee_parameter.id)
+            && edge.evidence.source.as_ref() == Some(&label.source)
+    }));
+    let value_start = u64::try_from(source.find("size:=size").unwrap() + "size:=".len()).unwrap();
+    let value = document
+        .occurrences
+        .iter()
+        .find(|site| site.source.span().start_byte() == value_start)
+        .unwrap();
+    assert_eq!(
+        value.target,
+        OccurrenceTarget::Resolved {
+            symbol: caller_parameter.id
+        }
+    );
+    assert_ne!(callee_parameter.id, caller_parameter.id);
+    let missing = label_at("missing:=size");
+    assert!(matches!(
+        missing.target,
+        OccurrenceTarget::Unresolved { .. }
+    ));
+}
+
+#[test]
+fn vba_nested_named_arguments_follow_their_own_application() {
+    let source = "Public Function Inner(ByVal value As Long) As Long\nInner = value\nEnd Function\nPublic Sub Visit(ByVal size As Long, ByVal label As Long)\nEnd Sub\nPublic Sub Run(ByVal size As Long)\nCall Visit(size:=Inner(value:=size), label:=size)\nCall Visit(size:=Len(\"a)\"\"(\"), label:=size)\nEnd Sub\n";
+    let result = output(source);
+    let document = result.document();
+    for (marker, owner_name, parameter_name) in [
+        ("size:=Inner", "Visit", "size"),
+        ("value:=size", "Inner", "value"),
+        ("label:=size", "Visit", "label"),
+    ] {
+        let owner = document
+            .entities
+            .iter()
+            .find(|entity| entity.canonical_name == owner_name)
+            .unwrap();
+        let parameter = document
+            .entities
+            .iter()
+            .find(|entity| {
+                entity.kind == EntityKind::Parameter
+                    && entity.canonical_name == parameter_name
+                    && entity.container == Some(ContainerRef::Entity(owner.id))
+            })
+            .unwrap();
+        let start = u64::try_from(source.find(marker).unwrap()).unwrap();
+        let label = document
+            .occurrences
+            .iter()
+            .find(|site| site.source.span().start_byte() == start)
+            .unwrap();
+        assert_eq!(
+            label.target,
+            OccurrenceTarget::Resolved {
+                symbol: parameter.id
+            },
+            "{marker}"
+        );
+    }
+    let visit = document
+        .entities
+        .iter()
+        .find(|entity| entity.canonical_name == "Visit")
+        .unwrap();
+    let parameter = document
+        .entities
+        .iter()
+        .find(|entity| {
+            entity.kind == EntityKind::Parameter
+                && entity.canonical_name == "label"
+                && entity.container == Some(ContainerRef::Entity(visit.id))
+        })
+        .unwrap();
+    let second_label = u64::try_from(source.rfind("label:=size").unwrap()).unwrap();
+    assert!(document.occurrences.iter().any(|site| {
+        site.source.span().start_byte() == second_label
+            && site.target
+                == OccurrenceTarget::Resolved {
+                    symbol: parameter.id,
+                }
+    }));
+}
+
+#[test]
+fn vba_named_arguments_do_not_guess_ambiguous_or_receiver_callees() {
+    for source in [
+        "Public Sub Visit(ByVal size As Long)\nEnd Sub\nPublic Sub Visit(ByVal size As Long)\nEnd Sub\nPublic Sub Run()\nCall Visit(size:=1)\nEnd Sub\n",
+        "Public Function Factory(ByVal size As Long) As Object\nEnd Function\nPublic Sub Run()\nCall Factory().Visit(size:=1)\nEnd Sub\n",
+    ] {
+        let result = output(source);
+        let start = u64::try_from(source.find("size:=1").unwrap()).unwrap();
+        let label = result
+            .document()
+            .occurrences
+            .iter()
+            .find(|site| {
+                site.syntax_kind == "vba.nonvalue_identifier.reference"
+                    && site.source.span().start_byte() == start
+            })
+            .unwrap();
+        assert!(
+            matches!(label.target, OccurrenceTarget::Unresolved { .. }),
+            "{source}"
+        );
+    }
+}
+
+#[test]
 fn vba_accessor_parameters_remain_separate_environments() {
     let source = "Private stored As Long\nPublic Property Let Value(ByVal item As Long)\nstored = ITEM\nEnd Property\nPublic Property Let Other(ByVal item As Long)\nstored = item\nEnd Property\n";
     let result = output(source);

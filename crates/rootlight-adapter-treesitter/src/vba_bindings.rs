@@ -78,8 +78,12 @@ struct DeclaredType {
 
 pub(super) struct VbaBindings<'a> {
     facts: BTreeMap<u64, &'a SyntaxFact>,
+    source: &'a [u8],
     applications: BTreeMap<u64, Vec<&'a SyntaxFact>>,
     invocations: BTreeMap<u64, Vec<&'a SyntaxFact>>,
+    callable_scopes: BTreeMap<SymbolId, u64>,
+    named_parameters: BTreeMap<u64, BTreeMap<String, Option<SymbolId>>>,
+    incomplete_parameter_scopes: BTreeSet<u64>,
     bindings: BTreeMap<u64, BTreeMap<String, Option<Binding>>>,
     branch_bindings: BTreeMap<u64, BTreeMap<String, Option<Binding>>>,
     // A shared None also represents conditional shadowing, so it cannot tell
@@ -101,7 +105,7 @@ pub(super) struct VbaBindings<'a> {
 impl<'a> VbaBindings<'a> {
     pub(super) fn new(
         facts: &'a [SyntaxFact],
-        source: &[u8],
+        source: &'a [u8],
         symbols: &HashMap<u64, SymbolId>,
         maximum_name_bytes: usize,
         cancellation: &Cancellation,
@@ -109,8 +113,12 @@ impl<'a> VbaBindings<'a> {
         cancellation.check()?;
         let mut result = Self {
             facts: BTreeMap::new(),
+            source,
             applications: BTreeMap::new(),
             invocations: BTreeMap::new(),
+            callable_scopes: BTreeMap::new(),
+            named_parameters: BTreeMap::new(),
+            incomplete_parameter_scopes: BTreeSet::new(),
             bindings: BTreeMap::new(),
             branch_bindings: BTreeMap::new(),
             unconditional_names: BTreeMap::new(),
@@ -178,6 +186,7 @@ impl<'a> VbaBindings<'a> {
             else {
                 continue;
             };
+            let declaration_scope = owner;
             let start = usize::try_from(fact.span().start_byte()).map_err(|_| invalid_capture())?;
             let end = usize::try_from(fact.span().end_byte()).map_err(|_| invalid_capture())?;
             let text = std::str::from_utf8(source.get(start..end).ok_or_else(invalid_capture)?)
@@ -223,6 +232,30 @@ impl<'a> VbaBindings<'a> {
                 }
             });
             let mut symbol = if conditional { None } else { candidate };
+            if matches!(
+                declaration.syntax_kind().as_str(),
+                "vba.parameter.declaration" | "vba.omittable_parameter.declaration"
+            ) {
+                let parameter = match symbol {
+                    Some(Binding::Value(symbol)) => Some(symbol),
+                    _ => None,
+                };
+                if let (Some(name), Some(parameter)) =
+                    (name.as_deref().filter(|name| name.is_ascii()), parameter)
+                {
+                    let names = result.named_parameters.entry(owner).or_default();
+                    let duplicate = names
+                        .entry(name.to_ascii_lowercase())
+                        .and_modify(|prior| *prior = None)
+                        .or_insert(Some(parameter))
+                        .is_none();
+                    if duplicate {
+                        result.incomplete_parameter_scopes.insert(owner);
+                    }
+                } else {
+                    result.incomplete_parameter_scopes.insert(owner);
+                }
+            }
             if conditional
                 && matches!(
                     declaration.syntax_kind().as_str(),
@@ -287,6 +320,33 @@ impl<'a> VbaBindings<'a> {
                     result.insert(owner, name.as_deref(), result_binding);
                 }
                 owner = parent;
+            }
+            if !conditional
+                && matches!(
+                    declaration.syntax_kind().as_str(),
+                    "vba.sub_function.declaration"
+                        | "vba.function.declaration"
+                        | "vba.get_property.declaration"
+                        | "vba.let_property.declaration"
+                        | "vba.set_property.declaration"
+                )
+                && let Some(symbol) = symbol.and_then(|binding| match binding {
+                    Binding::Procedure(symbol)
+                    | Binding::Function { symbol, .. }
+                    | Binding::Property(PropertyAccessors {
+                        get: Some(symbol), ..
+                    })
+                    | Binding::Property(PropertyAccessors {
+                        let_value: Some(symbol),
+                        ..
+                    })
+                    | Binding::Property(PropertyAccessors {
+                        set: Some(symbol), ..
+                    }) => Some(symbol),
+                    _ => None,
+                })
+            {
+                result.callable_scopes.insert(symbol, declaration_scope);
             }
             if !conditional && let Some(name) = name.as_deref().filter(|name| name.is_ascii()) {
                 result
@@ -729,6 +789,153 @@ impl<'a> VbaBindings<'a> {
             }))
     }
 
+    fn containing_application(
+        &self,
+        fact: &SyntaxFact,
+        cancellation: &Cancellation,
+    ) -> Result<Option<&'a SyntaxFact>, AdapterError> {
+        for (_, candidates) in self.applications.range(..=fact.span().start_byte()).rev() {
+            cancellation.check()?;
+            let mut containing = candidates
+                .iter()
+                .copied()
+                .filter(|candidate| candidate.span().end_byte() >= fact.span().end_byte());
+            if let Some(application) = containing.next() {
+                return Ok((containing.next().is_none()).then_some(application));
+            }
+        }
+        Ok(None)
+    }
+
+    fn argument_open(
+        &self,
+        application: &SyntaxFact,
+        fact: &SyntaxFact,
+        cancellation: &Cancellation,
+    ) -> Result<Option<usize>, AdapterError> {
+        let start =
+            usize::try_from(application.span().start_byte()).map_err(|_| invalid_capture())?;
+        let end = usize::try_from(fact.span().start_byte()).map_err(|_| invalid_capture())?;
+        let Some(source) = self.source.get(start..end) else {
+            return Ok(None);
+        };
+        let mut closed = 0_usize;
+        let mut quoted = false;
+        let mut index = source.len();
+        while index > 0 {
+            index -= 1;
+            if index % 4096 == 0 {
+                cancellation.check()?;
+            }
+            match source[index] {
+                b'"' if quoted && index > 0 && source[index - 1] == b'"' => index -= 1,
+                b'"' => quoted = !quoted,
+                b')' if !quoted => closed = closed.checked_add(1).ok_or_else(invalid_capture)?,
+                b'(' if !quoted && closed == 0 => return Ok(Some(start + index)),
+                b'(' if !quoted => closed -= 1,
+                b'\'' if !quoted => return Ok(None),
+                _ => {}
+            }
+        }
+        Ok(None)
+    }
+
+    fn named_argument(
+        &self,
+        fact: &SyntaxFact,
+        text: &str,
+        cancellation: &Cancellation,
+    ) -> Result<Option<ResolvedBinding>, AdapterError> {
+        let end = usize::try_from(fact.span().end_byte()).map_err(|_| invalid_capture())?;
+        let Some(tail) = self.source.get(end..) else {
+            return Ok(None);
+        };
+        let separator = tail
+            .iter()
+            .take_while(|byte| matches!(byte, b' ' | b'\t'))
+            .count();
+        if !tail
+            .get(separator..)
+            .is_some_and(|tail| tail.starts_with(b":="))
+        {
+            return Ok(None);
+        }
+        let Some(name) =
+            structural_captured_name_for_fact("vba", fact, text, self.maximum_name_bytes)
+                .filter(|name| name.is_ascii())
+        else {
+            return Ok(None);
+        };
+        let Some(application) = self.containing_application(fact, cancellation)? else {
+            return Ok(None);
+        };
+        let Some(open) = self.argument_open(application, fact, cancellation)? else {
+            return Ok(None);
+        };
+        let mut callee = None;
+        for invocations in self
+            .invocations
+            .range(
+                application.span().start_byte()
+                    ..u64::try_from(open).map_err(|_| invalid_capture())?,
+            )
+            .map(|(_, invocations)| invocations)
+        {
+            for invocation in invocations {
+                cancellation.check()?;
+                let invocation_end =
+                    usize::try_from(invocation.span().end_byte()).map_err(|_| invalid_capture())?;
+                // An identifier preceding a receiver application is not the
+                // callee of this argument list, even if both spans overlap.
+                if !self
+                    .source
+                    .get(invocation_end..open)
+                    .is_some_and(|separator| separator.iter().all(u8::is_ascii_whitespace))
+                {
+                    continue;
+                }
+                if callee.replace(*invocation).is_some() {
+                    return Ok(None);
+                }
+            }
+        }
+        let Some(callee) = callee else {
+            return Ok(None);
+        };
+        let start = usize::try_from(callee.span().start_byte()).map_err(|_| invalid_capture())?;
+        let end = usize::try_from(callee.span().end_byte()).map_err(|_| invalid_capture())?;
+        let Some(callee_text) = self
+            .source
+            .get(start..end)
+            .and_then(|bytes| std::str::from_utf8(bytes).ok())
+        else {
+            return Ok(None);
+        };
+        let Some(ResolvedBinding {
+            symbol: procedure,
+            is_call: true,
+        }) = self.resolve(callee, callee_text, cancellation)?
+        else {
+            return Ok(None);
+        };
+        let Some(scope) = self.callable_scopes.get(&procedure).copied() else {
+            return Ok(None);
+        };
+        if self.incomplete_parameter_scopes.contains(&scope) {
+            return Ok(None);
+        }
+        Ok(self
+            .named_parameters
+            .get(&scope)
+            .and_then(|parameters| parameters.get(&name.to_ascii_lowercase()))
+            .copied()
+            .flatten()
+            .map(|symbol| ResolvedBinding {
+                symbol,
+                is_call: false,
+            }))
+    }
+
     pub(super) fn resolve(
         &self,
         fact: &SyntaxFact,
@@ -744,6 +951,9 @@ impl<'a> VbaBindings<'a> {
             "vba.member.reference" | "vba.invoked_member.reference"
         ) {
             return self.field_reference(fact, text, cancellation);
+        }
+        if fact.syntax_kind().as_str() == "vba.nonvalue_identifier.reference" {
+            return self.named_argument(fact, text, cancellation);
         }
         if matches!(
             fact.syntax_kind().as_str(),
