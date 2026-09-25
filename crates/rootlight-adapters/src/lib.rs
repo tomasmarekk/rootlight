@@ -5,6 +5,7 @@
 
 #![forbid(unsafe_code)]
 
+mod awk;
 mod elm;
 mod make;
 mod project_context;
@@ -29,6 +30,7 @@ use rootlight_ir::{
     ProducerKind, canonicalize_ir_document,
 };
 
+pub use awk::AwkParseProvider;
 pub use elm::ElmParseProvider;
 pub use make::MakeParseProvider;
 pub use project_context::{

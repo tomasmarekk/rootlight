@@ -1264,6 +1264,34 @@ impl<'context, 'source> Lowering<'context, 'source> {
             }
         }
 
+        let mut awk_functions = HashMap::<String, Option<SymbolId>>::new();
+        if self.request.language().as_str() == "awk" {
+            let mut definition_counts = HashMap::<String, usize>::new();
+            // Entity identity can coalesce same-named declarations, so count
+            // authored definition captures before accepting a call target.
+            for fact in self
+                .parse_output
+                .facts()
+                .iter()
+                .filter(|fact| fact.syntax_kind().as_str() == "awk.function.definition")
+            {
+                cancellation.check()?;
+                let name = self.text_for_span(fact.span())?;
+                let count = definition_counts.entry(name.to_owned()).or_default();
+                *count = count.saturating_add(1);
+            }
+            for entity in entities
+                .values()
+                .filter(|entity| entity.kind == EntityKind::Function)
+            {
+                if definition_counts.get(&entity.canonical_name) == Some(&1) {
+                    awk_functions
+                        .entry(entity.canonical_name.clone())
+                        .and_modify(|symbol| *symbol = None)
+                        .or_insert(Some(entity.id));
+                }
+            }
+        }
         let mut make_targets = HashMap::<String, Option<SymbolId>>::new();
         if self.request.language().as_str() == "make" {
             for entity in entities
@@ -2063,6 +2091,18 @@ impl<'context, 'source> Lowering<'context, 'source> {
                     occurrence.id = derive_occurrence_record_id(&occurrence)
                         .map_err(|_| provider_failure("treesitter-occurrence-identity"))?;
                     let relation = lexical_reference_relation(&occurrence, *symbol)?;
+                    relations.insert(relation.id, relation);
+                }
+                if fact.syntax_kind().as_str() == "awk.function.call"
+                    && let Some(Some(symbol)) = awk_functions.get(text)
+                {
+                    occurrence.target = OccurrenceTarget::Resolved { symbol: *symbol };
+                    occurrence.id = derive_occurrence_record_id(&occurrence)
+                        .map_err(|_| provider_failure("treesitter-occurrence-identity"))?;
+                    let mut relation = lexical_reference_relation(&occurrence, *symbol)?;
+                    relation.predicate = RelationPredicate::Calls;
+                    relation.id = derive_relation_record_id(&relation)
+                        .map_err(|_| provider_failure("treesitter-relation-identity"))?;
                     relations.insert(relation.id, relation);
                 }
                 if let Some(bindings) = &vba_bindings

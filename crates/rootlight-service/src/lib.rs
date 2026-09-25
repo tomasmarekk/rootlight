@@ -49,8 +49,8 @@ use rootlight_adapter_treesitter::{
     TreeSitterAnalyzer, TreeSitterProvider, TreeSitterStructuralArtifact,
 };
 use rootlight_adapters::{
-    ElmParseProvider, MakeParseProvider, PrologParseProvider, RuntimeTraceImportRequest,
-    ScssParseProvider, SemanticProjectLanguage, import_runtime_trace,
+    AwkParseProvider, ElmParseProvider, MakeParseProvider, PrologParseProvider,
+    RuntimeTraceImportRequest, ScssParseProvider, SemanticProjectLanguage, import_runtime_trace,
 };
 pub use rootlight_adapters::{
     PROJECT_SYNTAX_FACT_LIMIT_DIAGNOSTIC, RUNTIME_TRACE_SCHEMA_VERSION, RuntimeTraceImportError,
@@ -5225,6 +5225,16 @@ impl StructuralPreflight for TreeSitterProvider {
     }
 }
 
+impl StructuralPreflight for AwkParseProvider {
+    fn required_syntax_fact_count(
+        &self,
+        request: &rootlight_adapter_sdk::ParseRequest<'_>,
+        cancellation: &Cancellation,
+    ) -> Result<usize, AdapterError> {
+        AwkParseProvider::required_syntax_fact_count(self, request, cancellation)
+    }
+}
+
 impl StructuralPreflight for ElmParseProvider {
     fn required_syntax_fact_count(
         &self,
@@ -6153,6 +6163,10 @@ impl FirstSliceService {
                 .map_err(|_| FirstSliceError::Adapter)?,
         );
         let registry = GrammarRegistry::audited().map_err(|_| FirstSliceError::Adapter)?;
+        let awk_parser = Arc::new(
+            AwkParseProvider::new(maximum_source_bytes, MAX_SYNTAX_NODES)
+                .map_err(|_| FirstSliceError::Adapter)?,
+        );
         let elm_parser = Arc::new(
             ElmParseProvider::new(maximum_source_bytes, MAX_SYNTAX_NODES)
                 .map_err(|_| FirstSliceError::Adapter)?,
@@ -6225,6 +6239,26 @@ impl FirstSliceService {
             }
         }
         if analyzers.len() != registry.descriptors().len() {
+            return Err(FirstSliceError::Adapter);
+        }
+        let awk_provider: Arc<dyn ParseProvider> =
+            Arc::clone(&awk_parser) as Arc<dyn ParseProvider>;
+        let awk_analyzer = TreeSitterAnalyzer::new(
+            awk_provider,
+            ProducerIdentity::new("rootlight-first-slice-awk-native", "1.0", config.hash())
+                .map_err(|_| FirstSliceError::Adapter)?,
+            LanguageId::new("awk").map_err(|_| FirstSliceError::Adapter)?,
+            "awk-native-structural-1",
+            AwkParseProvider::binary_digest(),
+        )
+        .map_err(|_| FirstSliceError::Adapter)?;
+        if analyzers.insert("awk".to_owned(), awk_analyzer).is_some() {
+            return Err(FirstSliceError::Adapter);
+        }
+        if structural_parsers
+            .insert("awk".to_owned(), awk_parser as Arc<dyn StructuralPreflight>)
+            .is_some()
+        {
             return Err(FirstSliceError::Adapter);
         }
         let elm_provider: Arc<dyn ParseProvider> =
@@ -26252,6 +26286,117 @@ mod tests {
             .unwrap();
         assert!(located.data.hits.iter().any(|hit| {
             hit.path == "measure.m" && hit.language == "matlab" && hit.symbol.is_some()
+        }));
+    }
+
+    #[test]
+    fn awk_functions_and_direct_calls_keep_source_bound_identity() {
+        use rootlight_ir::{
+            EntityKind, OccurrenceRole, OccurrenceTarget, RelationEndpoint, RelationPredicate,
+        };
+
+        let fixture = TempDir::new().expect("fixture root exists");
+        let source = concat!(
+            "BEGIN { start() }\n",
+            "function start(value) { return helper(value) }\n",
+            "function helper(value) { return value }\n",
+        );
+        fs::write(fixture.path().join("script.awk"), source).unwrap();
+        fs::write(
+            fixture.path().join("runner"),
+            "#!/usr/bin/env -S awk -f\nBEGIN { run() }\nfunction run() {}\n",
+        )
+        .unwrap();
+        let cancellation = deadline();
+        let mut service = FirstSliceService::new(2).expect("service initializes");
+        let receipt = service
+            .index_repository(fixture.path(), &cancellation)
+            .unwrap();
+        let snapshot = service
+            .loaded_generation_snapshot(receipt.generation)
+            .unwrap();
+        let document = snapshot.document();
+        let file = document
+            .files
+            .iter()
+            .find(|file| file.path == "script.awk")
+            .expect("AWK source is retained");
+        assert_eq!(file.language, "awk");
+        assert!(document.files.iter().any(|file| {
+            file.path == "runner" && file.language == "awk" && file.byte_length > 0
+        }));
+        let helper = document
+            .entities
+            .iter()
+            .find(|entity| entity.canonical_name == "helper" && entity.kind == EntityKind::Function)
+            .expect("native AWK function is indexed");
+        assert!(document.occurrences.iter().any(|occurrence| {
+            occurrence.role == OccurrenceRole::CallSite
+                && occurrence.target == OccurrenceTarget::Resolved { symbol: helper.id }
+                && source.as_bytes().get(
+                    usize::try_from(occurrence.source.span().start_byte()).unwrap()
+                        ..usize::try_from(occurrence.source.span().end_byte()).unwrap(),
+                ) == Some(b"helper".as_slice())
+        }));
+        assert!(document.relations.iter().any(|relation| {
+            relation.predicate == RelationPredicate::Calls
+                && relation.object == RelationEndpoint::Entity(helper.id)
+        }));
+        assert!(document.skipped_regions.iter().any(|gap| {
+            gap.detail == "awk-expression-semantics-partial"
+                && gap.source.generation() == receipt.generation
+        }));
+        let read = service
+            .source_read(
+                receipt.generation,
+                vec![file.evidence.source.clone().unwrap()],
+                &cancellation,
+            )
+            .unwrap();
+        assert_eq!(read.data.chunks[0].bytes, source.as_bytes());
+        let located = service
+            .code_locate(
+                receipt.generation,
+                "helper".to_owned(),
+                LocateMode::Exact,
+                10,
+                0,
+                &cancellation,
+            )
+            .unwrap();
+        assert!(located.data.hits.iter().any(|hit| {
+            hit.path == "script.awk" && hit.language == "awk" && hit.symbol == Some(helper.id)
+        }));
+    }
+
+    #[test]
+    fn ambiguous_awk_function_names_do_not_claim_a_call_target() {
+        use rootlight_ir::{OccurrenceRole, OccurrenceTarget};
+
+        let fixture = TempDir::new().expect("fixture root exists");
+        fs::write(
+            fixture.path().join("script.awk"),
+            "function duplicate() {}\nfunction duplicate() {}\nBEGIN { duplicate() }\n",
+        )
+        .unwrap();
+        let cancellation = deadline();
+        let mut service = FirstSliceService::new(2).expect("service initializes");
+        let receipt = service
+            .index_repository(fixture.path(), &cancellation)
+            .unwrap();
+        let snapshot = service
+            .loaded_generation_snapshot(receipt.generation)
+            .unwrap();
+        let call = snapshot
+            .document()
+            .occurrences
+            .iter()
+            .find(|occurrence| occurrence.role == OccurrenceRole::CallSite)
+            .expect("direct call stays visible");
+        assert!(!matches!(call.target, OccurrenceTarget::Resolved { .. }));
+        assert!(!snapshot.document().relations.iter().any(|relation| {
+            relation.predicate == rootlight_ir::RelationPredicate::Calls
+                && relation.subject == rootlight_ir::RelationEndpoint::Occurrence(call.id)
         }));
     }
 

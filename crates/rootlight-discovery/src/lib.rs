@@ -41,7 +41,7 @@ pub use incremental::{
 };
 
 /// Current deterministic manifest and source-classification revision.
-pub const DISCOVERY_MANIFEST_VERSION: &str = "1.15";
+pub const DISCOVERY_MANIFEST_VERSION: &str = "1.16";
 /// Stable source-free diagnostic emitted when the entry budget truncates discovery.
 pub const DISCOVERY_ENTRY_LIMIT_DIAGNOSTIC_CODE: &str = "DISCOVERY_ENTRY_LIMIT";
 /// Stable source-free diagnostic emitted when retained source bytes truncate discovery.
@@ -1669,6 +1669,14 @@ const LANGUAGE_CAPABILITIES: &[LanguageCapability] = &[
         detectors: &["extension"],
         maximum_tier: "tier_d",
         analyzers: &["treesitter"],
+    },
+    LanguageCapability {
+        language: "awk",
+        suffixes: &[".awk"],
+        aliases: &["gawk", "mawk", "nawk"],
+        detectors: &["extension", "shebang"],
+        maximum_tier: "tier_d",
+        analyzers: &["native"],
     },
     LanguageCapability {
         language: "bash",
@@ -3636,7 +3644,7 @@ max_source_file_bytes = 2097152
 
     #[test]
     fn first_party_parsers_advertise_native_structural_analysis() {
-        for language in ["elm", "make", "prolog", "scss"] {
+        for language in ["awk", "elm", "make", "prolog", "scss"] {
             let capability = language_capabilities()
                 .iter()
                 .find(|capability| capability.language == language)
@@ -3644,6 +3652,36 @@ max_source_file_bytes = 2097152
             assert_eq!(capability.analyzers, ["native"]);
             assert_eq!(capability.maximum_tier, "tier_d");
         }
+    }
+
+    #[test]
+    fn awk_extension_keeps_source_and_backup_files_distinct() {
+        assert_eq!(extension_language("scripts/report.awk"), Some("awk"));
+        assert_eq!(extension_language("scripts/REPORT.AWK"), Some("awk"));
+        assert_ne!(extension_language("scripts/report.awk.bak"), Some("awk"));
+        assert_eq!(canonical_language("gawk"), Some("awk"));
+    }
+
+    #[test]
+    fn awk_shebang_recognizes_only_the_interpreter() {
+        for header in [
+            "#!/usr/bin/awk -f",
+            "#!/usr/bin/gawk -f",
+            "#!/usr/bin/env mawk",
+            "#!/usr/bin/env -S nawk -f",
+        ] {
+            let source = format!("{header}\nBEGIN {{ print \"ready\" }}\n");
+            assert_eq!(shebang_language(source.as_bytes()), Some("awk"), "{header}");
+            let (_, signals) = classify(
+                &RelativePath::parse(Path::new("scripts/report")).unwrap(),
+                source.as_bytes(),
+            );
+            assert!(signals.iter().any(|signal| {
+                signal.language == "awk" && signal.evidence == LanguageEvidence::Shebang
+            }));
+        }
+        assert_eq!(shebang_language(b"#!/usr/bin/python awk\n"), Some("python"));
+        assert_eq!(shebang_language(b"#!/usr/bin/env -S tool awk\n"), None);
     }
 
     #[test]
