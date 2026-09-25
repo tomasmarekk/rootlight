@@ -1,0 +1,12 @@
+[package]
+name = "lru"
+version = "0.16.4+rootlight.1"
+edition.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+license.workspace = true
+publish = false
+description = "First-party bounded LRU cache for Rootlight's Tantivy integration"
+
+[lints]
+workspace = true

@@ -1,5 +1,6 @@
 schema_version = "1.0"
 workspace_members = [
+  "lru",
   "rootlight",
   "rootlight-launcher",
   "rootlight-mcp",
@@ -47,6 +48,11 @@ workspace_members = [
   "xtask",
 ]
 dev_only_members = ["rootlight-bench", "xtask"]
+
+[[crates]]
+name = "lru"
+allowed_internal_dependencies = []
+allow_build_script = false
 
 [[crates]]
 name = "rootlight-adapter-host"

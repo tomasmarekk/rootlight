@@ -1,4 +1,4 @@
 [[IgnoredVulns]]
 id = "RUSTSEC-2026-0253"
 ignoreUntil = 2027-02-01
-reason = "Rootlight backports upstream lru-rs fix 2776ded569ee89a99c515bca8194f65639182c96 in third_party/lru-0.16.4 until Tantivy accepts lru 0.18.2."
+reason = "The workspace lru@0.16.4+rootlight.1 is a first-party replacement with no upstream lru-rs source. Copy keys have no destructor; eviction preserves cache consistency even when a value destructor panics. This advisory matches only the compatibility package name and version."
