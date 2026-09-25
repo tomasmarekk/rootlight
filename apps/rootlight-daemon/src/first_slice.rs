@@ -7682,61 +7682,110 @@ fn semantic_refinement_worker(
             Err(RecvTimeoutError::Timeout) => continue,
             Err(RecvTimeoutError::Disconnected) => return,
         };
-        let cancelled = command.context.cancellation.check().is_err();
-        // A cancelled command can settle from journal state alone; waiting for
-        // a service writer here would delay shutdown without validating work.
-        let superseded = !cancelled
-            && read_service(&lanes.service).map_or(true, |service| {
-                service.active_generation_for(command.repository)
-                    != Some(command.structural_generation)
-            });
-        if cancelled || superseded {
-            let error = command
-                .context
-                .cancellation
-                .reason()
-                .map_or_else(stale_generation, cancellation_error);
-            if fail_queued_semantic_refinement(
-                command.operation,
-                error.clone(),
-                &journal,
-                &runtime,
-                command.context.deadline,
-            )
-            .is_err()
-            {
+        loop {
+            if stopping.load(Ordering::Acquire) {
                 return;
+            }
+            let cancelled = command.context.cancellation.check().is_err();
+            // A cancelled command can settle from journal state alone; waiting
+            // for a service writer would delay shutdown without validating work.
+            let superseded = !cancelled
+                && read_service(&lanes.service).map_or(true, |service| {
+                    service.active_generation_for(command.repository)
+                        != Some(command.structural_generation)
+                });
+            if cancelled || superseded {
+                let error = command
+                    .context
+                    .cancellation
+                    .reason()
+                    .map_or_else(stale_generation, cancellation_error);
+                if fail_queued_semantic_refinement(
+                    command.operation,
+                    error.clone(),
+                    &journal,
+                    &runtime,
+                    command.context.deadline,
+                )
+                .is_err()
+                {
+                    return;
+                }
+                if remove_semantic_refinement(&lanes.semantic_refinements, command.operation)
+                    .is_err()
+                {
+                    return;
+                }
+                let _ = command.admitted.try_send(Err(error));
+                break;
+            }
+            let resources = ServiceRequestResources {
+                journal: &journal,
+                metadata: metadata.as_ref(),
+                runtime: &runtime,
+                catalog_epoch,
+                publication_hook: None,
+            };
+            let mut reply = None;
+            let result = repository_index_with_intent(
+                &lanes,
+                resources,
+                command.request.clone(),
+                &command.context,
+                &mut reply,
+                RepositoryIndexIntent::SemanticRefinement {
+                    structural_generation: command.structural_generation,
+                },
+                Some(&command.admitted),
+            );
+            let retryable_busy = result
+                .as_ref()
+                .err()
+                .filter(|error| error.code() == ErrorCode::Busy && error.retryable());
+            if let Some(error) = retryable_busy {
+                match journal_call(
+                    &runtime,
+                    command.context.deadline,
+                    journal.control(ControlRequest::OperationStatus(command.operation)),
+                ) {
+                    Ok(ControlResponse::OperationStatus(record))
+                        if record.state == OperationState::Queued =>
+                    {
+                        // A watcher can enter the index lane just before this
+                        // child is registered. Its no-op must not strand Auto
+                        // at the structural generation.
+                        thread::park_timeout(
+                            OPERATION_STATUS_POLL_INTERVAL.min(
+                                command
+                                    .context
+                                    .deadline
+                                    .saturating_duration_since(Instant::now()),
+                            ),
+                        );
+                        continue;
+                    }
+                    Err(_)
+                        if fail_queued_semantic_refinement(
+                            command.operation,
+                            error.clone(),
+                            &journal,
+                            &runtime,
+                            command.context.deadline,
+                        )
+                        .is_err() =>
+                    {
+                        return;
+                    }
+                    _ => {}
+                }
             }
             if remove_semantic_refinement(&lanes.semantic_refinements, command.operation).is_err() {
                 return;
             }
-            let _ = command.admitted.try_send(Err(error));
-            continue;
-        }
-        let resources = ServiceRequestResources {
-            journal: &journal,
-            metadata: metadata.as_ref(),
-            runtime: &runtime,
-            catalog_epoch,
-            publication_hook: None,
-        };
-        let mut reply = None;
-        let result = repository_index_with_intent(
-            &lanes,
-            resources,
-            command.request,
-            &command.context,
-            &mut reply,
-            RepositoryIndexIntent::SemanticRefinement {
-                structural_generation: command.structural_generation,
-            },
-            Some(&command.admitted),
-        );
-        if remove_semantic_refinement(&lanes.semantic_refinements, command.operation).is_err() {
-            return;
-        }
-        if let Err(error) = result {
-            let _ = command.admitted.try_send(Err(error));
+            if let Err(error) = result {
+                let _ = command.admitted.try_send(Err(error));
+            }
+            break;
         }
     }
 }
@@ -9720,7 +9769,9 @@ fn terminalize_pre_submitted_semantic(
     error: &PublicError,
     journal: &JournalActorHandle,
 ) -> Result<(), PublicError> {
-    if !pre_submitted {
+    // The semantic worker retries admission against the same queued handle
+    // when an already-running watcher temporarily occupies the index lane.
+    if !pre_submitted || error.code() == ErrorCode::Busy && error.retryable() {
         return Ok(());
     }
     let record = journal
@@ -21379,6 +21430,37 @@ mod tests {
             .recv_timeout(Duration::from_secs(1))
             .expect("semantic refinement is scheduled");
         let mut refinement_reply = None;
+        let competing_watcher = OperationId::from_bytes([92; 16]);
+        metadata
+            .lock()
+            .expect("operation metadata locks")
+            .reserve(competing_watcher, 1, Some(repository.repository))
+            .expect("competing watcher occupies the repository lane");
+        let busy = repository_index_with_intent(
+            &lanes,
+            resources,
+            refinement.request.clone(),
+            &refinement.context,
+            &mut refinement_reply,
+            RepositoryIndexIntent::SemanticRefinement {
+                structural_generation: refinement.structural_generation,
+            },
+            None,
+        )
+        .expect_err("competing watcher blocks semantic admission");
+        assert_eq!(busy.code(), ErrorCode::Busy);
+        assert!(busy.retryable());
+        assert_eq!(
+            journal
+                .status(semantic_refinement_operation(operation))
+                .expect("semantic child remains queryable")
+                .state,
+            OperationState::Queued
+        );
+        metadata
+            .lock()
+            .expect("operation metadata locks")
+            .remove_unpublished(competing_watcher);
         drop(repository_index_with_intent(
             &lanes,
             resources,
@@ -21511,6 +21593,60 @@ mod tests {
                 semantic_context.bytes_examined
             )
         );
+    }
+
+    #[test]
+    fn retryable_busy_preserves_queued_semantic_refinement() {
+        let journal = Arc::new(OperationJournal::open_in_memory().expect("journal opens"));
+        let operation = OperationId::from_bytes([71; 16]);
+        let repository = RepositoryId::from_bytes([72; 16]);
+        let parent = GenerationId::from_bytes([73; 20]);
+        journal
+            .submit(
+                OperationSubmission::new(
+                    operation,
+                    OperationKind::RepositoryIndex,
+                    PlanHash::from_bytes([74; 32]),
+                    ClientInstanceId::SYSTEM,
+                    true,
+                    None,
+                    None,
+                )
+                .expect("semantic submission is valid")
+                .with_repository_context(
+                    RepositoryOperationSubmission::new(
+                        repository,
+                        Some(parent),
+                        1,
+                        1,
+                        RepositoryOperationMode::Deep,
+                    )
+                    .expect("semantic context is valid")
+                    .with_root_identity([75; 32]),
+                )
+                .expect("semantic context attaches"),
+            )
+            .expect("semantic child queues");
+        let actor = JournalActor::start(Arc::clone(&journal), 8, 8).expect("journal actor starts");
+        let handle = actor.handle();
+
+        terminalize_pre_submitted_semantic(
+            true,
+            operation,
+            &index_admission_in_progress(OperationId::from_bytes([76; 16])),
+            &handle,
+        )
+        .expect("a competing watcher leaves the child retryable");
+
+        assert_eq!(
+            journal
+                .status(operation)
+                .expect("semantic child remains queryable")
+                .state,
+            OperationState::Queued
+        );
+        drop(handle);
+        actor.join().expect("journal actor joins");
     }
 
     #[test]
