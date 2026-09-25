@@ -646,6 +646,7 @@ impl<'a> ClassicIndex<'a> {
                         };
                         if namespace == Some(ContainerRef::Entity(named[0].id))
                             && entity.visibility != EntityVisibility::Private
+                            && !matches!(entity.kind, EntityKind::Struct | EntityKind::Enum)
                         {
                             value_names.insert(entity.canonical_name.to_ascii_lowercase());
                         }
@@ -1130,6 +1131,10 @@ impl<'a> ClassicIndex<'a> {
                 if !unshadowed {
                     continue;
                 }
+                // An uncertain local type still outranks a project export.
+                if local_types.contains_key(&(occurrence.file, receiver_name.clone())) {
+                    continue;
+                }
                 let default_instance = project
                     .types
                     .get(&receiver_name)
@@ -1146,39 +1151,67 @@ impl<'a> ClassicIndex<'a> {
                             (*owner, id, Arc::clone(&project.evidence), source.clone())
                         })
                     });
-                default_instance.or_else(|| {
-                    // Standard modules have no instance. Their verified
-                    // project declaration itself owns the qualified member.
-                    let module = project
-                        .modules
-                        .get(&receiver_name)
-                        .copied()
-                        .flatten()
-                        .and_then(|id| entities.get(&id).copied())
-                        .and_then(|owner| {
-                            owner.evidence.source.as_ref().map(|source| {
-                                (
-                                    owner,
-                                    owner.id,
-                                    Arc::clone(&project.evidence),
-                                    source.clone(),
-                                )
-                            })
-                        });
-                    if let Some((owner, _, context, _)) = &module
-                        && let Some(qualifier) =
-                            module_qualifiers.get(&receiver_span).and_then(|site| *site)
-                    {
-                        result.proofs.entry(qualifier.id).or_insert_with(|| Proof {
-                            target: owner,
-                            context: Arc::clone(context),
-                            receiver: None,
-                            rule: ResolutionRule::ClassicProjectModule,
-                            getter_read: false,
-                        });
-                    }
-                    module
-                })
+                default_instance
+                    .or_else(|| {
+                        // Standard modules have no instance. Their verified
+                        // project declaration itself owns the qualified member.
+                        let module = project
+                            .modules
+                            .get(&receiver_name)
+                            .copied()
+                            .flatten()
+                            .and_then(|id| entities.get(&id).copied())
+                            .and_then(|owner| {
+                                owner.evidence.source.as_ref().map(|source| {
+                                    (
+                                        owner,
+                                        owner.id,
+                                        Arc::clone(&project.evidence),
+                                        source.clone(),
+                                    )
+                                })
+                            });
+                        if let Some((owner, _, context, _)) = &module
+                            && let Some(qualifier) =
+                                module_qualifiers.get(&receiver_span).and_then(|site| *site)
+                        {
+                            result.proofs.entry(qualifier.id).or_insert_with(|| Proof {
+                                target: owner,
+                                context: Arc::clone(context),
+                                receiver: None,
+                                rule: ResolutionRule::ClassicProjectModule,
+                                getter_read: false,
+                            });
+                        }
+                        module
+                    })
+                    .or_else(|| {
+                        // Enum qualification names a static type in a standard
+                        // module, not an instance of a project class.
+                        let enumeration = project
+                            .types
+                            .get(&receiver_name)
+                            .copied()
+                            .flatten()
+                            .and_then(|id| entities.get(&id).copied())
+                            .filter(|owner| {
+                                owner.kind == EntityKind::Enum
+                                    && owner
+                                        .container
+                                        .and_then(|container| match container {
+                                            ContainerRef::Entity(id) => entities.get(&id),
+                                            _ => None,
+                                        })
+                                        .is_some_and(|module| module.kind == EntityKind::Module)
+                            })?;
+                        let source = enumeration.evidence.source.as_ref()?.clone();
+                        Some((
+                            enumeration,
+                            enumeration.id,
+                            Arc::clone(&project.evidence),
+                            source,
+                        ))
+                    })
             };
             let Some((owner, class, context, type_source)) = binding else {
                 continue;
@@ -1198,7 +1231,11 @@ impl<'a> ClassicIndex<'a> {
             let Some(receiver_type) = entities.get(&class).copied() else {
                 continue;
             };
-            let accessible = if receiver_type.kind == EntityKind::Struct {
+            let accessible = if receiver_type.kind == EntityKind::Enum {
+                target.kind == EntityKind::Constant
+                    && target.container == Some(ContainerRef::Entity(class))
+                    && target.visibility != EntityVisibility::Private
+            } else if receiver_type.kind == EntityKind::Struct {
                 // Type fields have no independent access modifier in VBA. The
                 // project-proven public UDT and exact field owner supply access.
                 target.kind == EntityKind::Field
@@ -1243,6 +1280,18 @@ impl<'a> ClassicIndex<'a> {
             };
             if !accessible {
                 continue;
+            }
+            if receiver_type.kind == EntityKind::Enum
+                && let Some(qualifier) =
+                    module_qualifiers.get(&receiver_span).and_then(|site| *site)
+            {
+                result.proofs.entry(qualifier.id).or_insert_with(|| Proof {
+                    target: receiver_type,
+                    context: Arc::clone(&context),
+                    receiver: None,
+                    rule: ResolutionRule::ClassicProjectEnum,
+                    getter_read: false,
+                });
             }
             result.proofs.insert(
                 occurrence.id,

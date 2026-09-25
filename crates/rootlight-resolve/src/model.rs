@@ -258,6 +258,8 @@ pub enum ResolutionRule {
     ClassicProjectMember,
     /// A verified project module qualifies a member expression without lexical shadowing.
     ClassicProjectModule,
+    /// A verified public project enum qualifies one of its declared constants.
+    ClassicProjectEnum,
     /// Declarative classic BASIC project membership selects one native class type.
     ClassicProjectType,
     /// Native static import or call context selects one member or namespace declaration.

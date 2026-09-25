@@ -1341,6 +1341,7 @@ fn build_provenance(
         ResolutionRule::ClassicProjectType
             | ResolutionRule::ClassicProjectMember
             | ResolutionRule::ClassicProjectModule
+            | ResolutionRule::ClassicProjectEnum
     ) {
         let proof = lookup
             .classic
@@ -1467,6 +1468,7 @@ fn build_provenance(
     let rule = match decision.explanation.rule {
         ResolutionRule::ClassicProjectType => "classic-project-type-v1.indexed_snapshot",
         ResolutionRule::ClassicProjectModule => "classic-project-module-v1.indexed_snapshot",
+        ResolutionRule::ClassicProjectEnum => "classic-project-enum-v1.indexed_snapshot",
         ResolutionRule::ElmModuleImport => "elm-module-import-v1.indexed_snapshot",
         ResolutionRule::ElmLocalType => "elm-local-type-v1.indexed_snapshot",
         ResolutionRule::ClassicProjectMember => "classic-project-member-v1.indexed_snapshot",

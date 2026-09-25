@@ -2,7 +2,7 @@
 //! These fixtures are authored, not copied from a diagnostic repository.
 
 use super::*;
-use rootlight_ir::OccurrenceTarget;
+use rootlight_ir::{ContainerRef, OccurrenceTarget};
 use std::fs;
 
 #[path = "fixture.rs"]
@@ -1449,6 +1449,155 @@ fn native_project_module_calls_require_public_targets_and_unshadowed_names() {
             usize::from(expected),
             "{visibility} {local} {foreign}"
         );
+    }
+}
+
+#[test]
+fn native_project_enum_qualification_requires_public_unshadowed_members() {
+    for (visibility, local, foreign, duplicate, expected) in [
+        ("Public", "", false, false, true),
+        ("Private", "", false, false, false),
+        ("Public", "Dim Phase As Variant\r\n", false, false, false),
+        ("Public", "", true, false, false),
+        ("Public", "", false, true, false),
+    ] {
+        let root = tempdir();
+        let client = format!(
+            "Attribute VB_Name = \"Client\"\r\nPublic Sub Run()\r\n{local}Dim result As Long\r\nresult = Phase.Ready\r\nEnd Sub\r\n"
+        );
+        let globals = format!(
+            "Attribute VB_Name = \"Globals\"\r\n{visibility} Enum Phase\r\nReady = 1\r\nEnd Enum\r\n"
+        );
+        if foreign {
+            fs::write(
+                root.path().join("book.xlsm"),
+                fixture::book_with_project_value(
+                    &[("Client", client.as_bytes(), false)],
+                    "\"Project\"",
+                ),
+            )
+            .unwrap();
+            fs::write(
+                root.path().join("other.xlsm"),
+                fixture::book_with_project_value(
+                    &[("Globals", globals.as_bytes(), false)],
+                    "\"Project\"",
+                ),
+            )
+            .unwrap();
+        } else if duplicate {
+            let other =
+                b"Attribute VB_Name = \"Other\"\r\nPublic Enum Phase\r\nReady = 2\r\nEnd Enum\r\n";
+            fs::write(
+                root.path().join("book.xlsm"),
+                fixture::book_with_project_value(
+                    &[
+                        ("Client", client.as_bytes(), false),
+                        ("Globals", globals.as_bytes(), false),
+                        ("Other", other, false),
+                    ],
+                    "\"Project\"",
+                ),
+            )
+            .unwrap();
+        } else {
+            fs::write(
+                root.path().join("book.xlsm"),
+                fixture::book_with_project_value(
+                    &[
+                        ("Client", client.as_bytes(), false),
+                        ("Globals", globals.as_bytes(), false),
+                    ],
+                    "\"Project\"",
+                ),
+            )
+            .unwrap();
+        }
+        let mut service = FirstSliceService::new(4).unwrap();
+        let receipt = service.index_repository(root.path(), &deadline()).unwrap();
+        let snapshot = service
+            .loaded_generation_snapshot(receipt.generation)
+            .unwrap();
+        let document = snapshot.document();
+        let client_path = derived_path("book.xlsm", "Client", ModuleKind::Procedural).unwrap();
+        let client_file = document
+            .files
+            .iter()
+            .find(|file| file.path == client_path.as_str())
+            .unwrap();
+        let globals_path = derived_path(
+            if foreign { "other.xlsm" } else { "book.xlsm" },
+            "Globals",
+            ModuleKind::Procedural,
+        )
+        .unwrap();
+        let globals_file = document
+            .files
+            .iter()
+            .find(|file| file.path == globals_path.as_str())
+            .unwrap();
+        let enumeration = document
+            .entities
+            .iter()
+            .find(|entity| {
+                entity.kind == EntityKind::Enum
+                    && entity.canonical_name == "Phase"
+                    && entity
+                        .evidence
+                        .source
+                        .as_ref()
+                        .is_some_and(|source| source.span().file() == globals_file.id)
+            })
+            .unwrap();
+        let member = document
+            .entities
+            .iter()
+            .find(|entity| {
+                entity.kind == EntityKind::Constant
+                    && entity.canonical_name == "Ready"
+                    && entity.container == Some(ContainerRef::Entity(enumeration.id))
+            })
+            .unwrap();
+        for (syntax_kind, text, target) in [
+            ("vba.member.reference", "Phase.Ready", member.id),
+            ("vba.value_identifier.reference", "Phase", enumeration.id),
+        ] {
+            let site = document
+                .occurrences
+                .iter()
+                .find(|site| {
+                    if site.file != client_file.id || site.syntax_kind != syntax_kind {
+                        return false;
+                    }
+                    let span = site.source.span();
+                    let start = usize::try_from(span.start_byte()).unwrap();
+                    let end = usize::try_from(span.end_byte()).unwrap();
+                    client.as_bytes().get(start..end) == Some(text.as_bytes())
+                })
+                .unwrap();
+            assert_eq!(
+                matches!(site.target, OccurrenceTarget::Resolved { symbol } if symbol == target),
+                expected,
+                "{visibility} {local} {foreign} {duplicate} {syntax_kind}: {:?}, enum {:?}, member {:?}",
+                site.target,
+                enumeration.visibility,
+                member.visibility
+            );
+            assert_eq!(
+                document
+                    .relations
+                    .iter()
+                    .filter(|edge| {
+                        edge.subject == RelationEndpoint::Occurrence(site.id)
+                            && edge.predicate == RelationPredicate::RefersTo
+                            && edge.object == RelationEndpoint::Entity(target)
+                            && edge.evidence.source.as_ref() == Some(&site.source)
+                    })
+                    .count(),
+                usize::from(expected),
+                "{visibility} {local} {foreign} {duplicate} {syntax_kind}"
+            );
+        }
     }
 }
 
