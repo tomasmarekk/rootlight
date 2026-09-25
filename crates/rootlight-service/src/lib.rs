@@ -30679,7 +30679,7 @@ mod tests {
     #[test]
     fn agda_layout_preserves_nested_owners_and_distinct_names() {
         let fixture = TempDir::new().expect("fixture root exists");
-        let source = "module Main where\n  module Left where\n    same : Nat\n    same = 1\n  module Right where\n    same : Nat\n    same = 2\n  data Choice : Set where\n    yes no : Choice\n  record Pair : Set where\n    constructor mkPair\n    field\n      left right : Nat\n    swap : Pair\n    swap = mkPair right left\n  private\n    hidden : Nat\n  top : Nat\n  top = 0 where\n    local : Nat\n    local = 1\n";
+        let source = "module Main where\n  module Left where\n    same : Nat\n    same = 1\n  module Right where\n    same : Nat\n    same = 2\n  data Choice : Set where\n    yes no : Choice\n  record Pair : Set where\n    constructor mkPair\n    field\n      left right : Nat\n    swap : Pair\n    swap = mkPair right left\n  private\n    hidden : Nat\n  top : Nat\n  top = 0 where\n    local : Nat\n    local = 1\n  another : Nat\n  another = local\n    where\n      local : Nat\n      local = 2\n";
         fs::write(fixture.path().join("Main.agda"), source).expect("Agda source writes");
         let cancellation = deadline();
         let mut service = FirstSliceService::new(2).expect("service initializes");
@@ -30728,10 +30728,17 @@ mod tests {
             local.container,
             Some(rootlight_ir::ContainerRef::Entity(top.id))
         );
+        let another = entity("Main::another", EntityKind::Function);
+        let nested_local = entity("Main::another::local", EntityKind::Function);
+        assert_eq!(
+            nested_local.container,
+            Some(rootlight_ir::ContainerRef::Entity(another.id))
+        );
         for (qualified, equation, other) in [
             ("Main::Left::same", "same = 1", "same = 2"),
             ("Main::Right::same", "same = 2", "same = 1"),
-            ("Main::top::local", "local = 1", "top = 0"),
+            ("Main::top::local", "local = 1", "local = 2"),
+            ("Main::another::local", "local = 2", "local = 1"),
         ] {
             let reference = entity(qualified, EntityKind::Function)
                 .evidence

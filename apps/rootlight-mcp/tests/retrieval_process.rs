@@ -413,7 +413,7 @@ fn scss_bounded_declarations_cross_real_process_boundaries() {
 
 #[test]
 fn agda_nested_declarations_keep_exact_sources_across_mcp() {
-    let source = "module Main where\n  module Left where\n    same : Nat\n    same = 1\n  module Right where\n    same : Nat\n    same = 2\n  data Choice : Set where\n    yes : Choice\n  record Pair : Set where\n    field\n      left : Nat\n  result : Nat\n  result = 0 where\n    local : Nat\n    local = 1\n";
+    let source = "module Main where\n  module Left where\n    same : Nat\n    same = 1\n  module Right where\n    same : Nat\n    same = 2\n  data Choice : Set where\n    yes : Choice\n  record Pair : Set where\n    field\n      left : Nat\n  result : Nat\n  result = 0 where\n    local : Nat\n    local = 1\n  alternate : Nat\n  alternate = local\n    where\n      local : Nat\n      local = 2\n";
     let mut fixture =
         RetrievalFixture::spawn_with_layout(Some(("Main.agda", source)), FixtureLayout::Data);
     let located = fixture.standalone(
@@ -606,37 +606,58 @@ fn agda_nested_declarations_keep_exact_sources_across_mcp() {
     let local_matches = local["result"]["structuredContent"]["data"]["matches"]
         .as_array()
         .unwrap();
-    let local_symbol = local_matches
+    let local_symbols = local_matches
         .iter()
-        .find(|item| item["display_name"] == "local" && item["symbol_id"].is_string())
-        .unwrap_or_else(|| panic!("missing owned local declaration: {local:#}"));
-    let explained = fixture.standalone(
-        "agda-local-explain",
-        "symbol.explain",
-        json!({"symbol_ids": [local_symbol["symbol_id"]], "response_profile": "evidence"}),
-    );
-    assert_success(&explained, "symbol.explain");
+        .filter(|item| item["display_name"] == "local" && item["symbol_id"].is_string())
+        .collect::<Vec<_>>();
     assert_eq!(
-        explained["result"]["structuredContent"]["data"]["symbols"][0]["qualified_name"],
-        "Main::result::local"
+        local_symbols.len(),
+        2,
+        "missing owned local declarations: {local:#}"
     );
-    let reference = local_symbol["source_ref"].clone();
-    assert!(reference["generation"].is_string());
-    let read = fixture.standalone(
-        "agda-local-read",
-        "source.read",
-        json!({"references": [{"source_ref": reference}], "context_lines_before": 0,
-            "context_lines_after": 0, "response_profile": "evidence"}),
+    let mut owners = std::collections::BTreeSet::new();
+    for (ordinal, local_symbol) in local_symbols.into_iter().enumerate() {
+        let explained = fixture.standalone(
+            &format!("agda-local-explain-{ordinal}"),
+            "symbol.explain",
+            json!({"symbol_ids": [local_symbol["symbol_id"]], "response_profile": "evidence"}),
+        );
+        assert_success(&explained, "symbol.explain");
+        let qualified =
+            explained["result"]["structuredContent"]["data"]["symbols"][0]["qualified_name"]
+                .as_str()
+                .expect("owned local has a qualified identity");
+        let (equation, other) = match qualified {
+            "Main::result::local" => ("local = 1", "local = 2"),
+            "Main::alternate::local" => ("local = 2", "local = 1"),
+            _ => panic!("unexpected local owner: {qualified}"),
+        };
+        assert!(owners.insert(qualified.to_owned()));
+        let reference = local_symbol["source_ref"].clone();
+        assert!(reference["generation"].is_string());
+        let read = fixture.standalone(
+            &format!("agda-local-read-{ordinal}"),
+            "source.read",
+            json!({"references": [{"source_ref": reference}], "context_lines_before": 0,
+                "context_lines_after": 0, "response_profile": "evidence"}),
+        );
+        assert_success(&read, "source.read");
+        let content = read["result"]["structuredContent"]["data"]["chunks"][0]["content"]
+            .as_str()
+            .expect("local source is UTF-8");
+        let start = usize::try_from(reference["span"]["start_byte"].as_u64().unwrap()).unwrap();
+        let end = usize::try_from(reference["span"]["end_byte"].as_u64().unwrap()).unwrap();
+        assert_eq!(content, source.get(start..end).unwrap());
+        assert!(content.contains(equation));
+        assert!(!content.contains(other));
+    }
+    assert_eq!(
+        owners,
+        ["Main::result::local", "Main::alternate::local"]
+            .into_iter()
+            .map(str::to_owned)
+            .collect()
     );
-    assert_success(&read, "source.read");
-    let content = read["result"]["structuredContent"]["data"]["chunks"][0]["content"]
-        .as_str()
-        .expect("local source is UTF-8");
-    let start = usize::try_from(reference["span"]["start_byte"].as_u64().unwrap()).unwrap();
-    let end = usize::try_from(reference["span"]["end_byte"].as_u64().unwrap()).unwrap();
-    assert_eq!(content, source.get(start..end).unwrap());
-    assert!(content.contains("local = 1"));
-    assert!(!content.contains("result = 0"));
     fixture.finish();
 }
 

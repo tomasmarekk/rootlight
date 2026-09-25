@@ -620,6 +620,23 @@ fn scan_source(
         let parent_item = scopes.last().and_then(|scope| scope.owner);
         let mode = scopes.last().map_or(ScopeMode::Normal, |scope| scope.mode);
         if matches!(mode, ScopeMode::Opaque) {
+            // Only a bare where at the equation's continuation column opens local declarations.
+            if line
+                .get(indent..)
+                .and_then(|body| body.strip_prefix(b"where"))
+                .is_some_and(|tail| tail.iter().all(u8::is_ascii_whitespace))
+                && let Some(owner) = scopes.last().and_then(|scope| scope.extends_item)
+            {
+                push_scope(
+                    &mut scopes,
+                    max_syntax_nodes,
+                    indent,
+                    Some(owner),
+                    ScopeMode::Normal,
+                    None,
+                    false,
+                )?;
+            }
             continue;
         }
         let line_end = line_start + line.trim_ascii_end().len();
@@ -1330,6 +1347,35 @@ mod tests {
         let second = &source[parsed.items[2].line_start..parsed.items[2].declaration_end];
         assert!(first.contains("local = 1"));
         assert!(!first.contains("local = 2"));
+        assert!(second.contains("local = 2"));
+        assert!(!second.contains("plain : Nat"));
+    }
+
+    #[test]
+    fn standalone_where_owns_nested_declarations_without_promoting_expression_lines() {
+        let source = "module Main where\n  first : Nat\n  first = local\n    where -- scoped declarations\n      local : Nat\n      local = helper\n        where\n          helper = 1\n  second : Nat\n  second = local\n    where\n      local = 2\n  plain : Nat\n  plain =\n    3\n";
+        let parsed = scan_source(source.as_bytes(), "Main.agda", 64, &Cancellation::new())
+            .expect("bounded source");
+        let captures = parsed
+            .items
+            .iter()
+            .map(|item| (&source[item.name_start..item.name_end], item.parent_item))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            captures,
+            [
+                ("first", None),
+                ("local", Some(0)),
+                ("helper", Some(1)),
+                ("second", None),
+                ("local", Some(3)),
+                ("plain", None),
+            ]
+        );
+        let first = &source[parsed.items[0].line_start..parsed.items[0].declaration_end];
+        let second = &source[parsed.items[3].line_start..parsed.items[3].declaration_end];
+        assert!(first.contains("helper = 1"));
+        assert!(!first.contains("second : Nat"));
         assert!(second.contains("local = 2"));
         assert!(!second.contains("plain : Nat"));
     }
