@@ -18987,6 +18987,34 @@ fn truncate_optional_extensions(
             limits.max_total_extension_bytes,
         ));
     }
+    let optional_count_limit = limits
+        .max_extensions
+        .checked_sub(observed_required_count)
+        .ok_or(FirstSliceError::Limits)?
+        .min(MAX_RETAINED_OPTIONAL_EXTENSIONS);
+    let optional_bytes_limit = limits
+        .max_total_extension_bytes
+        .checked_sub(observed_required_bytes)
+        .ok_or(FirstSliceError::Limits)?
+        .min(MAX_RETAINED_OPTIONAL_EXTENSION_BYTES);
+    let (source_signature_count, source_signature_bytes) = source
+        .extensions
+        .iter()
+        .filter(|extension| extension.namespace == LEXICAL_EXTENSION_NAMESPACE)
+        .try_fold(
+            (0_usize, 0_usize),
+            |(count, bytes), extension| -> Result<_, FirstSliceError> {
+                if !is_lexical_signature(extension)? {
+                    return Ok((count, bytes));
+                }
+                Ok((
+                    count.checked_add(1).ok_or(FirstSliceError::Limits)?,
+                    bytes
+                        .checked_add(extension.payload.len())
+                        .ok_or(FirstSliceError::Limits)?,
+                ))
+            },
+        )?;
 
     let mut dropped_from_target = BTreeMap::<(FileId, FactId), u64>::new();
     let mut dropped_target_indices = Vec::new();
@@ -19010,24 +19038,34 @@ fn truncate_optional_extensions(
         .extension_payload_bytes
         .checked_sub(retained_required_bytes)
         .ok_or(FirstSliceError::Limits)?;
-    let mut search_before = target.extensions.len();
-    while target_extension_count
-        .checked_add(required_count)
-        .is_none_or(|observed| observed > limits.max_extensions)
-        || target_extension_bytes
-            .checked_add(required_bytes)
-            .is_none_or(|observed| observed > limits.max_total_extension_bytes)
-        || target_optional_count > MAX_RETAINED_OPTIONAL_EXTENSIONS
-        || target_optional_bytes > MAX_RETAINED_OPTIONAL_EXTENSION_BYTES
-    {
-        let index = target
-            .extensions
-            .get(..search_before)
-            .ok_or(FirstSliceError::Limits)?
-            .iter()
-            .rposition(|extension| extension.namespace == LEXICAL_EXTENSION_NAMESPACE)
-            .ok_or(FirstSliceError::Limits)?;
-        search_before = index;
+    let mut summary_cursor = target.extensions.len();
+    let mut signature_cursor = target.extensions.len();
+    loop {
+        let target_over_limit = target_optional_count > optional_count_limit
+            || target_optional_bytes > optional_bytes_limit;
+        let signatures_need_room = target_optional_count
+            .checked_add(source_signature_count)
+            .is_none_or(|count| count > optional_count_limit)
+            || target_optional_bytes
+                .checked_add(source_signature_bytes)
+                .is_none_or(|bytes| bytes > optional_bytes_limit);
+        if !target_over_limit && !signatures_need_room {
+            break;
+        }
+        let index = match previous_optional_extension(
+            &target.extensions,
+            &mut summary_cursor,
+            LexicalRetentionClass::Summary,
+        )? {
+            Some(index) => index,
+            None if target_over_limit => previous_optional_extension(
+                &target.extensions,
+                &mut signature_cursor,
+                LexicalRetentionClass::Signature,
+            )?
+            .ok_or(FirstSliceError::Limits)?,
+            None => break,
+        };
         let extension = &target.extensions[index];
         target_extension_count = target_extension_count
             .checked_sub(1)
@@ -19084,16 +19122,44 @@ fn truncate_optional_extensions(
     let mut retained_optional_bytes = 0_usize;
     let mut retained_bytes = 0_usize;
     let mut dropped_by_file = BTreeMap::<(FileId, FactId), u64>::new();
+    let mut pending_signature_count = source_signature_count;
+    let mut pending_signature_bytes = source_signature_bytes;
 
     for extension in source.extensions.drain(..) {
         let payload_bytes = extension.payload.len();
         let optional = extension.namespace == LEXICAL_EXTENSION_NAMESPACE;
+        let signature = optional && is_lexical_signature(&extension)?;
+        if signature {
+            pending_signature_count = pending_signature_count
+                .checked_sub(1)
+                .ok_or(FirstSliceError::Limits)?;
+            pending_signature_bytes = pending_signature_bytes
+                .checked_sub(payload_bytes)
+                .ok_or(FirstSliceError::Limits)?;
+        }
         let next_optional_bytes = retained_optional_bytes
             .checked_add(payload_bytes)
             .ok_or(FirstSliceError::Limits)?;
+        // Signatures serve symbol.explain directly; reserve their remaining
+        // capacity before admitting summaries that are also in exact source.
         let keep = !optional
-            || (retained_optional_count < available_optional_count
-                && next_optional_bytes <= available_optional_bytes);
+            || (retained_optional_count
+                .checked_add(1)
+                .and_then(|count| {
+                    count.checked_add(if signature {
+                        0
+                    } else {
+                        pending_signature_count
+                    })
+                })
+                .is_some_and(|count| count <= available_optional_count)
+                && next_optional_bytes
+                    .checked_add(if signature {
+                        0
+                    } else {
+                        pending_signature_bytes
+                    })
+                    .is_some_and(|bytes| bytes <= available_optional_bytes));
         if keep {
             if optional {
                 retained_optional_count = retained_optional_count
@@ -19141,6 +19207,7 @@ fn truncate_optional_extensions(
             .ok_or(FirstSliceError::Limits)?,
     };
 
+    dropped_target_indices.sort_unstable_by(|left, right| right.cmp(left));
     for index in dropped_target_indices {
         target.extensions.remove(index);
     }
@@ -19152,6 +19219,44 @@ fn truncate_optional_extensions(
         source.coverage_records = coverage_records;
     }
     Ok(next_state)
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum LexicalRetentionClass {
+    Signature,
+    Summary,
+}
+
+#[derive(Deserialize)]
+struct LexicalKindProbe {
+    kind: rootlight_ir::LexicalEvidenceKind,
+}
+
+fn is_lexical_signature(extension: &ExtensionEnvelope) -> Result<bool, FirstSliceError> {
+    // The retention decision needs only the kind; generation verification
+    // subsequently validates the complete retained lexical envelope.
+    serde_json::from_str::<LexicalKindProbe>(&extension.payload)
+        .map(|evidence| evidence.kind == rootlight_ir::LexicalEvidenceKind::Signature)
+        .map_err(|_| FirstSliceError::Identity)
+}
+
+fn previous_optional_extension(
+    extensions: &[ExtensionEnvelope],
+    cursor: &mut usize,
+    class: LexicalRetentionClass,
+) -> Result<Option<usize>, FirstSliceError> {
+    while *cursor > 0 {
+        *cursor -= 1;
+        let extension = extensions.get(*cursor).ok_or(FirstSliceError::Limits)?;
+        if extension.namespace != LEXICAL_EXTENSION_NAMESPACE {
+            continue;
+        }
+        let signature = is_lexical_signature(extension)?;
+        if signature == (class == LexicalRetentionClass::Signature) {
+            return Ok(Some(*cursor));
+        }
+    }
+    Ok(None)
 }
 
 fn extension_payload_bytes<'a>(
@@ -47117,6 +47222,25 @@ mod tests {
                 .count(),
             MAX_RETAINED_OPTIONAL_EXTENSIONS
         );
+        let retained_signatures = document
+            .extensions
+            .iter()
+            .filter(|extension| extension.namespace == LEXICAL_EXTENSION_NAMESPACE)
+            .filter_map(|extension| {
+                let evidence = rootlight_ir::decode_lexical_evidence_envelope(extension)
+                    .expect("retained lexical evidence validates");
+                (evidence.kind() == rootlight_ir::LexicalEvidenceKind::Signature)
+                    .then_some(evidence.subject())
+            })
+            .collect::<BTreeSet<_>>();
+        let expected_signatures = document
+            .entities
+            .iter()
+            .filter(|entity| entity.canonical_name.starts_with("indexed_"))
+            .map(|entity| FactRef::Entity(entity.id))
+            .collect::<BTreeSet<_>>();
+        assert_eq!(expected_signatures.len(), 16);
+        assert_eq!(retained_signatures, expected_signatures);
         assert!(
             document.extensions.len() <= service.analysis_limits.ir().max_extensions,
             "required identity extensions remain inside the hard IR capacity"
@@ -47132,6 +47256,96 @@ mod tests {
                     .message
                     .ends_with("optional lexical extensions omitted by aggregate resource limit")
         }));
+    }
+
+    #[test]
+    fn mixed_optional_evictions_keep_coverage_and_indices_consistent() {
+        let repository = derive_repository(b"optional-extension-eviction").id();
+        let generation = GenerationId::from_bytes([41; 20]);
+        let file = FileId::from_bytes([42; 20]);
+        let provenance = FactId::from_bytes([43; 20]);
+        let source = SourceRef::new(
+            repository,
+            generation,
+            SourceSpan::new(file, 0, 1).expect("fixture span is valid"),
+            content_hash(b"x"),
+            None,
+        );
+        let lexical = |kind, format, text| {
+            let evidence = rootlight_ir::LexicalEvidenceV1::from_complete_text(
+                kind,
+                FactRef::File(file),
+                format,
+                text,
+            )
+            .expect("fixture lexical evidence is valid");
+            rootlight_ir::new_lexical_evidence_envelope(
+                repository,
+                generation,
+                provenance,
+                source.clone(),
+                &evidence,
+            )
+            .expect("fixture lexical envelope is valid")
+        };
+        let mut target = NormalizedIrDocument::empty(repository, generation);
+        target.extensions.push(lexical(
+            rootlight_ir::LexicalEvidenceKind::CommentSummary,
+            rootlight_ir::LexicalEvidenceFormat::PlainText,
+            "comment",
+        ));
+        target.extensions.push(lexical(
+            rootlight_ir::LexicalEvidenceKind::Signature,
+            rootlight_ir::LexicalEvidenceFormat::SourceText,
+            "signature",
+        ));
+        let mut coverage = CoverageRecord {
+            id: FactId::from_bytes([0; 20]),
+            repository,
+            generation,
+            scope: CoverageScope::File(file),
+            domain: IrFactDomain::Extensions,
+            tier: AnalysisTier::TierB,
+            status: CoverageStatus::Complete,
+            discovered: 2,
+            indexed: 2,
+            skipped: 0,
+            provenance,
+            evidence: FactEvidence {
+                source: Some(source.clone()),
+                derivation: Vec::new(),
+            },
+        };
+        coverage.id = derive_coverage_record_id(&coverage).expect("coverage identity derives");
+        target.coverage_records.push(coverage);
+        let state = DocumentAppendState::from_document(&target).expect("append state initializes");
+        let mut next = NormalizedIrDocument::empty(repository, generation);
+        next.extensions.push(ExtensionEnvelope {
+            id: FactId::from_bytes([44; 20]),
+            repository,
+            generation,
+            namespace: "test.required".to_owned(),
+            version: "1".to_owned(),
+            criticality: rootlight_ir::ExtensionCriticality::Noncritical,
+            payload: "{}".to_owned(),
+            provenance,
+            evidence: FactEvidence {
+                source: Some(source),
+                derivation: Vec::new(),
+            },
+        });
+        let mut limits = IrLimits::default();
+        limits.max_extensions = 1;
+
+        let next_state =
+            truncate_optional_extensions(&mut target, &mut next, &state, 0, 0, &limits)
+                .expect("optional eviction preserves required facts");
+        assert!(target.extensions.is_empty());
+        assert_eq!(next.extensions.len(), 1);
+        assert_eq!(next_state.truncated_extensions, 2);
+        assert_eq!(target.coverage_records[0].indexed, 0);
+        assert_eq!(target.coverage_records[0].skipped, 2);
+        assert_eq!(target.coverage_records[0].status, CoverageStatus::Bounded);
     }
 
     #[test]
