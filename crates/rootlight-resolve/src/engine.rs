@@ -198,7 +198,11 @@ impl ResolutionEngine {
         }
         let example =
             (file_language == "markdown").then(|| markdown_example(occurrence.enclosing, index));
-        let rule = if occurrence.role == OccurrenceRole::ImportUse {
+        let matlab_primary_candidate =
+            language == "matlab" && matlab_candidate_reference(occurrence);
+        let rule = if matlab_primary_candidate {
+            ResolutionRule::MatlabPrimaryFunctionCandidate
+        } else if occurrence.role == OccurrenceRole::ImportUse {
             ResolutionRule::Import
         } else {
             ResolutionRule::LexicalScope
@@ -231,6 +235,9 @@ impl ResolutionEngine {
             cancellation.check()?;
             work.consume()?;
             let entity = indexed.entity;
+            if matlab_primary_candidate && !matlab_primary_function(occurrence, entity, index) {
+                continue;
+            }
             let parameter_call = language == "r"
                 && entity.kind == EntityKind::Parameter
                 && occurrence.role == OccurrenceRole::CallSite
@@ -274,6 +281,13 @@ impl ResolutionEngine {
                 .checked_add(1)
                 .ok_or(ResolutionError::CountOverflow)?;
             let mut candidate = score_candidate(occurrence, entity, indexed.name_match, index)?;
+            if matlab_primary_candidate {
+                // Runtime variables and path order can override an indexed .m file.
+                candidate.score = confidence(candidate.score.get().min(399))?;
+                candidate
+                    .penalties
+                    .push(ResolutionPenalty::UnverifiedMatlabSearchPath);
+            }
             if parameter_call {
                 // A formal binding is not proof of the function value supplied at runtime.
                 candidate.score = confidence(candidate.score.get().min(899))?;
@@ -857,6 +871,22 @@ impl<'a> CandidateIndex<'a> {
         {
             return Ok(None);
         }
+        if matlab_candidate_reference(occurrence)
+            && (self
+                .files
+                .get(&occurrence.file)
+                .is_none_or(|file| file.language != "matlab")
+                || !self
+                    .by_name_hash
+                    .get(&occurrence.syntactic_text_hash)
+                    .is_some_and(|entries| {
+                        entries
+                            .iter()
+                            .any(|entry| matlab_primary_function(occurrence, entry.entity, self))
+                    }))
+        {
+            return Ok(None);
+        }
         if is_javascript_lexical_reference(occurrence, self) {
             let (candidates, scope_work) = self.javascript_lexical_candidates(occurrence);
             return 1_usize
@@ -1147,10 +1177,10 @@ pub(crate) fn resolvable_occurrence(occurrence: &OccurrenceRecord) -> bool {
     if occurrence.syntax_kind.starts_with("nix.") {
         return false;
     }
-    // MATLAB applications can index arrays or call functions. Unproven workspace
-    // bindings and member targets cannot be recovered by spelling-only scores.
+    // MATLAB applications can index arrays or call functions. Only source-owned
+    // primary function files may be offered as uncertain cross-file candidates.
     if occurrence.syntax_kind.starts_with("matlab.") {
-        return false;
+        return matlab_candidate_reference(occurrence);
     }
     // VBA names bind case-insensitively inside language-owned environments.
     // Exact-spelling scores cannot recover a rejected local or dynamic target.
@@ -1210,6 +1240,61 @@ pub(crate) fn resolvable_occurrence(occurrence: &OccurrenceRecord) -> bool {
             | OccurrenceRole::Documentation
             | OccurrenceRole::StringEvidence
     )
+}
+
+fn matlab_candidate_reference(occurrence: &OccurrenceRecord) -> bool {
+    occurrence.role == OccurrenceRole::Reference
+        && matches!(
+            occurrence.syntax_kind.as_str(),
+            "matlab.identifier.reference" | "matlab.unqualified_function_handle_name.reference"
+        )
+}
+
+fn matlab_primary_function(
+    occurrence: &OccurrenceRecord,
+    entity: &EntityRecord,
+    index: &CandidateIndex<'_>,
+) -> bool {
+    if entity.language != "matlab" || entity.kind != EntityKind::Function {
+        return false;
+    }
+    let Some(ContainerRef::Entity(module_id)) = entity.container else {
+        return false;
+    };
+    let Some(module) = index.entities.get(&module_id) else {
+        return false;
+    };
+    let Some(ContainerRef::File(file_id)) = module.container else {
+        return false;
+    };
+    if module.kind != EntityKind::Module
+        || module.language != "matlab"
+        || file_id == occurrence.file
+        || entity_source_file(module) != Some(file_id)
+        || entity_source_file(entity) != Some(file_id)
+    {
+        return false;
+    }
+    let Some(file) = index.files.get(&file_id) else {
+        return false;
+    };
+    if file.language != "matlab" {
+        return false;
+    }
+    let Some(stem) = file
+        .path
+        .rsplit('/')
+        .next()
+        .and_then(|name| name.strip_suffix(".m"))
+    else {
+        return false;
+    };
+    // Package, class and private directories have their own visibility rules.
+    !file
+        .path
+        .split('/')
+        .any(|segment| segment == "private" || segment.starts_with('+') || segment.starts_with('@'))
+        && stem == entity.canonical_name
 }
 
 fn kind_supports_role(kind: EntityKind, role: OccurrenceRole) -> bool {

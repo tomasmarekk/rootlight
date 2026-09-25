@@ -911,6 +911,76 @@ fn matlab_local_calls_cross_mcp_with_exact_call_sources() {
 }
 
 #[test]
+fn matlab_cross_file_candidates_cross_mcp_without_exact_reference_claims() {
+    let entry = "function result = entry(value)\nresult = helper(value);\nend\n";
+    let helper = "function result = helper(value)\nresult = value;\nend\n";
+    let mut fixture = RetrievalFixture::spawn_with_sources(
+        &[("entry.m", entry), ("helpers/helper.m", helper)],
+        FixtureLayout::Data,
+    );
+    let located = fixture.standalone(
+        "matlab-candidate-locate",
+        "code.locate",
+        json!({"query": "helper", "search_modes": ["exact"], "response_profile": "evidence"}),
+    );
+    assert_success(&located, "code.locate");
+    let definition = located["result"]["structuredContent"]["data"]["matches"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|hit| hit["kind"] == "function" && hit["path"] == "helpers/helper.m")
+        .expect("cross-file primary function is located");
+    let explained = fixture.standalone(
+        "matlab-candidate-explain",
+        "symbol.explain",
+        json!({
+            "symbol_ids": [definition["symbol_id"]],
+            "sections": ["references_summary"],
+            "relation_sample_limit": 5,
+            "response_profile": "evidence"
+        }),
+    );
+    assert_success(&explained, "symbol.explain");
+    let symbol = &explained["result"]["structuredContent"]["data"]["symbols"][0];
+    assert_eq!(symbol["relations"]["references_exact"], 0);
+    let sample = symbol["relation_samples"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|sample| sample["kind"] == "refers_to_candidate")
+        .expect("candidate reference is projected explicitly");
+    assert_eq!(sample["direction"], "inbound");
+    assert_eq!(sample["confidence"], 399);
+    assert!(
+        symbol["section_gaps"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|gap| {
+                gap["code"] == "reference_candidates_unverified"
+                    && gap["message"] == "reference candidates have unverified binding targets"
+            })
+    );
+    let source_ref = sample["source_refs"][0].clone();
+    let read = fixture.standalone(
+        "matlab-candidate-source",
+        "source.read",
+        json!({
+            "references": [{"source_ref": source_ref}],
+            "context_lines_before": 0,
+            "context_lines_after": 0,
+            "response_profile": "evidence"
+        }),
+    );
+    assert_success(&read, "source.read");
+    assert_eq!(
+        read["result"]["structuredContent"]["data"]["chunks"][0]["content"],
+        "helper"
+    );
+    fixture.finish();
+}
+
+#[test]
 fn perl_function_calls_cross_mcp_with_exact_sources() {
     for source in [
         "package Harbor; sub target { 1 } { our sub target; package Cove; target(); } external();\n",

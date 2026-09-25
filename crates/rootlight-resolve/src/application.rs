@@ -1466,6 +1466,9 @@ fn build_provenance(
         .map(|file| file.language.clone())
         .ok_or(ResolutionError::UnsupportedIdentityRemap)?;
     let rule = match decision.explanation.rule {
+        ResolutionRule::MatlabPrimaryFunctionCandidate => {
+            "matlab-primary-function-v1.indexed_snapshot"
+        }
         ResolutionRule::ClassicProjectType => "classic-project-type-v1.indexed_snapshot",
         ResolutionRule::ClassicProjectModule => "classic-project-module-v1.indexed_snapshot",
         ResolutionRule::ClassicProjectEnum => "classic-project-enum-v1.indexed_snapshot",

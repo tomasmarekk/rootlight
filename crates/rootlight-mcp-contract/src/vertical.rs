@@ -3177,11 +3177,11 @@ pub struct ProvenanceSummaryV1_0 {
     pub confidence: u16,
 }
 
-/// One bounded typed relation sample for a symbol explanation.
+/// One bounded exact relation or explicitly uncertain reference sample.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct SymbolRelationSample {
-    /// Stable relation predicate label.
+    /// Stable relation predicate or `refers_to_candidate` label.
     #[schemars(length(min = 1, max = 128))]
     pub kind: String,
     /// Direction relative to the explained symbol.

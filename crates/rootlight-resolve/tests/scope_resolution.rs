@@ -689,6 +689,219 @@ fn language_owned_targets_are_not_promoted_or_replaced_by_name_scoring() {
 }
 
 #[test]
+fn matlab_primary_functions_remain_uncertain_cross_file_candidates() {
+    let mut fixture = Fixture::new();
+    fixture.document.files[0].path = "main.m".to_owned();
+    fixture.document.files[0].language = "matlab".to_owned();
+    let helper_file = fixture.add_file(2, "helpers/helper.m");
+    fixture.document.files[1].language = "matlab".to_owned();
+    let module = fixture.add_entity(
+        10,
+        "helpers/helper.m",
+        helper_file,
+        EntityKind::Module,
+        None,
+    );
+    let function = fixture.add_entity(
+        11,
+        "helper",
+        helper_file,
+        EntityKind::Function,
+        Some(module),
+    );
+    let variable = fixture.add_entity(
+        12,
+        "helper",
+        helper_file,
+        EntityKind::Variable,
+        Some(module),
+    );
+    for entity in &mut fixture.document.entities {
+        entity.language = "matlab".to_owned();
+    }
+    fixture.add_occurrence(
+        20,
+        "helper",
+        fixture.primary_file,
+        OccurrenceRole::Reference,
+        None,
+    );
+    fixture.document.occurrences[0].syntax_kind = "matlab.identifier.reference".to_owned();
+    fixture.add_occurrence(
+        21,
+        "helper",
+        fixture.primary_file,
+        OccurrenceRole::Reference,
+        None,
+    );
+    fixture.document.occurrences[1].syntax_kind =
+        "matlab.unqualified_function_handle_name.reference".to_owned();
+    fixture.add_occurrence(
+        22,
+        "helper",
+        fixture.primary_file,
+        OccurrenceRole::Reference,
+        None,
+    );
+    fixture.document.occurrences[2].syntax_kind = "matlab.named_application.reference".to_owned();
+    fixture.validate();
+
+    let engine = ResolutionEngine::default();
+    let cancellation = Cancellation::new();
+    let batch = engine.resolve(&fixture.document, &cancellation).unwrap();
+    assert_eq!(batch.decisions.len(), 2);
+    for decision in &batch.decisions {
+        assert!(matches!(
+            &decision.outcome,
+            ResolutionOutcome::Candidates {
+                symbols,
+                total_count: 1,
+                completeness: CoverageStatus::Complete,
+                confidence,
+            } if symbols == &[function] && confidence.get() <= 399
+        ));
+        assert_eq!(decision.explanation.candidates.len(), 1);
+        assert!(
+            decision.explanation.candidates[0]
+                .penalties
+                .contains(&ResolutionPenalty::UnverifiedMatlabSearchPath)
+        );
+        assert!(decision.explanation.rejected_candidates.is_empty());
+        assert_ne!(decision.explanation.candidates[0].symbol, variable);
+    }
+    let (document, estimate) = engine
+        .apply_document_bounded(
+            fixture.document,
+            ResolverFactContext::new(fixture.content_hash),
+            &cancellation,
+        )
+        .unwrap();
+    assert_eq!(estimate.required, 6);
+    for syntax in [
+        "matlab.identifier.reference",
+        "matlab.unqualified_function_handle_name.reference",
+    ] {
+        let occurrence = document
+            .occurrences
+            .iter()
+            .find(|occurrence| occurrence.syntax_kind == syntax)
+            .unwrap();
+        assert!(matches!(
+            &occurrence.target,
+            OccurrenceTarget::Candidates { symbols, total_count: 1, .. } if symbols == &[function]
+        ));
+    }
+    assert!(document.occurrences.iter().any(|occurrence| {
+        occurrence.syntax_kind == "matlab.named_application.reference"
+            && matches!(occurrence.target, OccurrenceTarget::Unresolved { .. })
+    }));
+    assert!(document.relations.is_empty());
+}
+
+#[test]
+fn matlab_nonprimary_and_special_folder_functions_are_not_candidates() {
+    let mut fixture = Fixture::new();
+    fixture.document.files[0].language = "matlab".to_owned();
+    for (identity, path) in [
+        (2, "helpers/other.m"),
+        (3, "private/helper.m"),
+        (4, "+package/helper.m"),
+    ] {
+        let file = fixture.add_file(identity, path);
+        fixture.document.files.last_mut().unwrap().language = "matlab".to_owned();
+        let module = fixture.add_entity(identity + 10, path, file, EntityKind::Module, None);
+        fixture.add_entity(
+            identity + 20,
+            "helper",
+            file,
+            EntityKind::Function,
+            Some(module),
+        );
+    }
+    for entity in &mut fixture.document.entities {
+        entity.language = "matlab".to_owned();
+    }
+    fixture.add_occurrence(
+        30,
+        "helper",
+        fixture.primary_file,
+        OccurrenceRole::Reference,
+        None,
+    );
+    fixture.document.occurrences[0].syntax_kind = "matlab.identifier.reference".to_owned();
+    fixture.validate();
+
+    let engine = ResolutionEngine::default();
+    let cancellation = Cancellation::new();
+    assert_eq!(
+        engine
+            .estimate_work(&fixture.document, &cancellation)
+            .unwrap()
+            .required,
+        0
+    );
+    assert!(
+        engine
+            .resolve(&fixture.document, &cancellation)
+            .unwrap()
+            .decisions
+            .is_empty()
+    );
+}
+
+#[test]
+fn matlab_duplicate_primary_files_remain_ambiguous() {
+    let mut fixture = Fixture::new();
+    fixture.document.files[0].language = "matlab".to_owned();
+    let mut functions = Vec::new();
+    for (identity, path) in [(2, "one/helper.m"), (3, "two/helper.m")] {
+        let file = fixture.add_file(identity, path);
+        fixture.document.files.last_mut().unwrap().language = "matlab".to_owned();
+        let module = fixture.add_entity(identity + 10, path, file, EntityKind::Module, None);
+        functions.push(fixture.add_entity(
+            identity + 20,
+            "helper",
+            file,
+            EntityKind::Function,
+            Some(module),
+        ));
+    }
+    for entity in &mut fixture.document.entities {
+        entity.language = "matlab".to_owned();
+    }
+    fixture.add_occurrence(
+        30,
+        "helper",
+        fixture.primary_file,
+        OccurrenceRole::Reference,
+        None,
+    );
+    fixture.document.occurrences[0].syntax_kind = "matlab.identifier.reference".to_owned();
+    fixture.validate();
+
+    let (document, _) = ResolutionEngine::default()
+        .apply_document_bounded(
+            fixture.document,
+            ResolverFactContext::new(fixture.content_hash),
+            &Cancellation::new(),
+        )
+        .unwrap();
+    let OccurrenceTarget::Candidates {
+        symbols,
+        total_count,
+        completeness,
+    } = &document.occurrences[0].target
+    else {
+        panic!("multiple path candidates must remain ambiguous");
+    };
+    functions.sort_unstable();
+    assert_eq!(symbols, &functions);
+    assert_eq!(*total_count, 2);
+    assert_eq!(*completeness, CoverageStatus::Complete);
+    assert!(document.relations.is_empty());
+}
+
+#[test]
 fn resolves_a_unique_same_file_declaration() {
     let mut fixture = Fixture::new();
     let target = fixture.add_entity(

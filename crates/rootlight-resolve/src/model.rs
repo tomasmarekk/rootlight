@@ -250,6 +250,8 @@ fn is_supported_dynamic_language(language: &str) -> bool {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum ResolutionRule {
+    /// A source-declared primary MATLAB function is a possible path target.
+    MatlabPrimaryFunctionCandidate,
     /// A unique authored Elm module declaration matches the imported module name.
     ElmModuleImport,
     /// A unique source-declared Elm type in the same file matches a type use.
@@ -335,6 +337,8 @@ pub enum ResolutionPenalty {
     DynamicCallUncalibrated,
     /// A callable binding does not identify the value supplied at runtime.
     IndirectCallableBinding,
+    /// The MATLAB search path and runtime variable precedence are unverified.
+    UnverifiedMatlabSearchPath,
 }
 
 /// Why a same-spelling entity was excluded from the candidate set.

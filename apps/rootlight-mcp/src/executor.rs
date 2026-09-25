@@ -8300,10 +8300,15 @@ fn map_symbol_explain(
             .section_gaps
             .into_iter()
             .map(|gap| {
+                let message = if gap == "reference_candidates_unverified" {
+                    "reference candidates have unverified binding targets"
+                } else {
+                    "requested section evidence is unavailable"
+                };
                 Ok(ResponseWarning {
                     code: SafeLabel::parse(&gap)
                         .map_err(|_| internal(ToolExecutionFailure::InvalidResponse))?,
-                    message: source_free_message("requested section evidence is unavailable")?,
+                    message: source_free_message(message)?,
                 })
             })
             .collect::<Result<Vec<_>, ToolExecutionError>>()?;

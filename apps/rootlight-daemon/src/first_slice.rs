@@ -42,8 +42,8 @@ use rootlight_ids::{
 };
 use rootlight_ir::{
     AnalysisTier, ContainerRef, CoverageRecord, CoverageStatus, FactDomain as IrFactDomain,
-    LineRange, NormalizedIrDocument, OccurrenceRole, RelationEndpoint, RelationPredicate,
-    SourceRef, SourceSpan,
+    LineRange, NormalizedIrDocument, OccurrenceRecord, OccurrenceRole, OccurrenceTarget,
+    RelationEndpoint, RelationPredicate, SourceRef, SourceSpan,
 };
 use rootlight_observability::{
     ShutdownPhase, SpanGuard, SpanKind, SupportAdapterInventory, SupportChecksumStatus,
@@ -11499,18 +11499,19 @@ fn symbol_explain(
         for relation in &response.data.relations {
             relations.observe(symbol, relation)?;
         }
-        for occurrence in &response.data.occurrences {
-            if occurrence.role == OccurrenceRole::Reference {
-                relations.references_exact = relations
-                    .references_exact
-                    .checked_add(1)
-                    .ok_or_else(resource_exhausted)?;
-            }
-        }
+        let has_candidate_references = response
+            .data
+            .occurrences
+            .iter()
+            .any(|occurrence| candidate_reference_to(occurrence, symbol));
         let provider = response.data.provenance.producer.name().to_owned();
         let evidence = enum_label(response.data.provenance.producer_kind)?;
-        let relation_samples =
-            symbol_relation_samples(symbol, &response.data.relations, relation_sample_limit)?;
+        let relation_samples = symbol_relation_samples(
+            symbol,
+            &response.data.relations,
+            &response.data.occurrences,
+            relation_sample_limit,
+        )?;
         let container = entity.container.map(container_label);
         let source_lines = u8::try_from(request.source_preview_lines.unwrap_or(0))
             .map_err(|_| invalid_argument())?;
@@ -11553,6 +11554,9 @@ fn symbol_explain(
         );
         if signature_truncated {
             section_gaps.push("signature_truncated".to_owned());
+        }
+        if has_candidate_references && sections.contains("references_summary") {
+            section_gaps.push("reference_candidates_unverified".to_owned());
         }
         // Classify the selected source site, not the absence of a definition
         // elsewhere in a possibly bounded occurrence scan. The selected source
@@ -11672,6 +11676,7 @@ fn explain_sections(requested: &[String]) -> Result<BTreeSet<String>, PublicErro
 fn symbol_relation_samples(
     symbol: SymbolId,
     relations: &[rootlight_ir::RelationRecord],
+    occurrences: &[OccurrenceRecord],
     per_kind_limit: u32,
 ) -> Result<Vec<daemon::FirstSliceSymbolRelationSample>, PublicError> {
     let mut samples = Vec::new();
@@ -11710,6 +11715,20 @@ fn symbol_relation_samples(
             confidence: u32::from(relation.confidence.get()),
         });
     }
+    for occurrence in occurrences {
+        if !candidate_reference_to(occurrence, symbol) {
+            continue;
+        }
+        // This is an occurrence candidate, not a proved relation. The distinct
+        // kind lets clients show its source without counting it as an exact edge.
+        samples.push(daemon::FirstSliceSymbolRelationSample {
+            kind: "refers_to_candidate".to_owned(),
+            direction: "inbound".to_owned(),
+            target: occurrence.enclosing.map(symbol_to_wire),
+            source_refs: vec![source_ref_to_wire(&occurrence.source)],
+            confidence: u32::from(occurrence.confidence.get()),
+        });
+    }
     // Fact identities are repository-scoped, so their normalized storage order
     // cannot decide which logical samples survive a clean originless rebuild.
     samples.sort_by(compare_symbol_relation_samples);
@@ -11723,6 +11742,14 @@ fn symbol_relation_samples(
         true
     });
     Ok(samples)
+}
+
+fn candidate_reference_to(occurrence: &OccurrenceRecord, symbol: SymbolId) -> bool {
+    occurrence.role == OccurrenceRole::Reference
+        && matches!(
+            &occurrence.target,
+            OccurrenceTarget::Candidates { symbols, .. } if symbols.binary_search(&symbol).is_ok()
+        )
 }
 
 fn compare_symbol_relation_samples(
@@ -14168,7 +14195,9 @@ impl RelationCounts {
                     .ok_or_else(resource_exhausted)?;
             }
         }
-        if relation.predicate == RelationPredicate::RefersTo {
+        if relation.predicate == RelationPredicate::RefersTo
+            && relation.object == RelationEndpoint::Entity(symbol)
+        {
             self.references_exact = self
                 .references_exact
                 .checked_add(1)
@@ -22752,8 +22781,8 @@ mod tests {
             ),
         ];
 
-        let samples =
-            symbol_relation_samples(symbol, &relations, 1).expect("relation samples materialize");
+        let samples = symbol_relation_samples(symbol, &relations, &[], 1)
+            .expect("relation samples materialize");
 
         assert_eq!(
             samples
@@ -22762,6 +22791,82 @@ mod tests {
                 .collect::<Vec<_>>(),
             ["declares", "defines_at"]
         );
+    }
+
+    #[test]
+    fn candidate_references_keep_their_sources_without_claiming_exact_edges() {
+        let repository = RepositoryId::from_bytes([1; 16]);
+        let generation = GenerationId::from_bytes([2; 20]);
+        let symbol = SymbolId::from_bytes([3; 20]);
+        let caller = SymbolId::from_bytes([4; 20]);
+        let file = FileId::from_bytes([5; 20]);
+        let source = SourceRef::new(
+            repository,
+            generation,
+            SourceSpan::new(file, 4, 10).expect("candidate source is bounded"),
+            content_hash(b"candidate-source"),
+            None,
+        );
+        let candidate = OccurrenceRecord {
+            id: FactId::from_bytes([6; 20]),
+            repository,
+            generation,
+            file,
+            source: source.clone(),
+            role: OccurrenceRole::Reference,
+            enclosing: Some(caller),
+            target: OccurrenceTarget::Candidates {
+                symbols: vec![symbol],
+                total_count: 1,
+                completeness: CoverageStatus::Complete,
+            },
+            syntactic_text_hash: content_hash(b"helper"),
+            syntax_kind: "matlab.identifier.reference".to_owned(),
+            provenance: FactId::from_bytes([7; 20]),
+            confidence: Confidence::new(399).expect("candidate confidence is bounded"),
+            evidence: FactEvidence {
+                source: Some(source.clone()),
+                derivation: Vec::new(),
+            },
+        };
+        let samples = symbol_relation_samples(symbol, &[], &[candidate], 1)
+            .expect("candidate sample materializes");
+        assert_eq!(samples.len(), 1);
+        assert_eq!(samples[0].kind, "refers_to_candidate");
+        assert_eq!(samples[0].direction, "inbound");
+        assert_eq!(samples[0].target, Some(symbol_to_wire(caller)));
+        assert_eq!(samples[0].source_refs, vec![source_ref_to_wire(&source)]);
+        assert_eq!(samples[0].confidence, 399);
+
+        let exact = RelationRecord {
+            id: FactId::from_bytes([8; 20]),
+            repository,
+            generation,
+            subject: RelationEndpoint::Entity(caller),
+            predicate: RelationPredicate::RefersTo,
+            object: RelationEndpoint::Entity(symbol),
+            confidence: Confidence::new(1_000).expect("exact confidence is bounded"),
+            evidence_kind: EvidenceKind::Syntax,
+            provenance: FactId::from_bytes([7; 20]),
+            evidence: FactEvidence {
+                source: Some(source),
+                derivation: Vec::new(),
+            },
+        };
+        let mut counts = RelationCounts::default();
+        counts
+            .observe(symbol, &exact)
+            .expect("exact relation counts");
+        assert_eq!(counts.references_exact, 1);
+        let outbound = RelationRecord {
+            subject: RelationEndpoint::Entity(symbol),
+            object: RelationEndpoint::Entity(caller),
+            ..exact
+        };
+        counts
+            .observe(symbol, &outbound)
+            .expect("outbound reference is not inbound");
+        assert_eq!(counts.references_exact, 1);
     }
 
     #[test]
