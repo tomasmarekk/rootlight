@@ -13,7 +13,7 @@ rootlight-error = { path = "../rootlight-error" }
 rootlight-ids = { path = "../rootlight-ids" }
 rusqlite.workspace = true
 serde.workspace = true
-sha2.workspace = true
+rootlight-crypto = { path = "../rootlight-crypto" }
 serde_json.workspace = true
 thiserror.workspace = true
 

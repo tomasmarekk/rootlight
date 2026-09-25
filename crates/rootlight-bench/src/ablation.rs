@@ -8,8 +8,8 @@ use std::{
     fmt,
 };
 
+use rootlight_crypto::Sha256;
 use serde::{Deserialize, Serialize};
-use sha2::{Digest as _, Sha256};
 
 use crate::{
     TrajectoryAttemptOutcome, TrajectoryCondition, TrajectoryEvidencePackage,
@@ -2477,7 +2477,7 @@ fn randomized_order_key(seed: u64, blinding_key: &AblationBlindingKey, blind_id:
     hasher.update(seed.to_le_bytes());
     hasher.update(blinding_key.0);
     hasher.update(blind_id.as_bytes());
-    hasher.finalize().into()
+    hasher.finalize()
 }
 
 fn hex_digest(bytes: &[u8]) -> String {

@@ -33,8 +33,8 @@ use rootlight_bench::{
     preregister_context_pack_ablation, preregister_workflow_quality_protocol,
     preregistered_trajectory_protocol, run_trajectory_suite, sha256_hex, trajectory_task_prompt,
 };
+use rootlight_crypto::Sha256;
 use serde_json::{Value, json};
-use sha2::{Digest as _, Sha256};
 
 const REPORT_ENV: &str = "ROOTLIGHT_TRAJECTORY_REPORT";
 const ABLATION_REPORT_ENV: &str = "ROOTLIGHT_ABLATION_REPORT";

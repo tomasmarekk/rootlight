@@ -22,6 +22,7 @@ use rootlight_adapter_sdk::{
 use rootlight_adapter_treesitter::{ParserSettings, RuntimeConfig, TreeSitterProvider};
 use rootlight_adapters::{SemanticProjectAnalyzer, SemanticProjectLanguage};
 use rootlight_cancel::Cancellation;
+use rootlight_crypto::Sha256;
 use rootlight_ids::{FileId, GenerationId, RepositoryId, SymbolId, content_hash};
 #[cfg(test)]
 use rootlight_ir::Confidence;
@@ -39,7 +40,6 @@ use rootlight_resolve::{
 };
 use rootlight_vfs::{RelativePath, RepositoryRoot};
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 use tempfile::tempdir_in;
 
 const MANIFEST_SCHEMA: &str = "rootlight.project-semantic-holdout-manifest/1";

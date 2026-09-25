@@ -25,6 +25,7 @@ use std::{
 };
 
 pub use rootlight_cancel::{Cancellation, CancellationReason};
+use rootlight_crypto::Sha256;
 use rootlight_error::PublicError;
 use rootlight_ids::{FactId, FileId, GenerationId, OperationId, RepositoryId};
 use rusqlite::{
@@ -33,7 +34,6 @@ use rusqlite::{
     hooks::{AuthAction, Authorization},
     params,
 };
-use sha2::{Digest as _, Sha256};
 
 /// Maximum terminal operation records retained after pruning.
 pub const MAX_OPERATION_HISTORY: usize = 10_000;
@@ -4080,7 +4080,7 @@ fn migration_checksum_input() -> String {
 }
 
 fn operation_schema_migration_checksum() -> [u8; 32] {
-    Sha256::digest(migration_checksum_input()).into()
+    Sha256::digest(migration_checksum_input())
 }
 
 fn version_two_migration_checksum() -> [u8; 32] {
@@ -4092,7 +4092,6 @@ fn version_two_migration_checksum() -> [u8; 32] {
         ]
         .join("\n"),
     )
-    .into()
 }
 
 fn version_three_migration_checksum() -> [u8; 32] {
@@ -4104,7 +4103,6 @@ fn version_three_migration_checksum() -> [u8; 32] {
         ]
         .join("\n"),
     )
-    .into()
 }
 
 fn version_four_migration_checksum() -> [u8; 32] {
@@ -4116,7 +4114,6 @@ fn version_four_migration_checksum() -> [u8; 32] {
         ]
         .join("\n"),
     )
-    .into()
 }
 
 fn create_schema(connection: &Connection) -> Result<(), OperationError> {
@@ -7818,8 +7815,6 @@ mod tests {
 
     #[test]
     fn repository_context_versions_one_through_six_keep_golden_bytes() {
-        use sha2::Digest as _;
-
         let mut version_one = sample_repository_context(None);
         version_one.root_identity = None;
         version_one.published_generation = None;
@@ -8248,8 +8243,6 @@ mod tests {
 
     #[test]
     fn clean_rebuild_evidence_uses_v7_and_survives_restart() {
-        use sha2::Digest as _;
-
         let mut fact_work = sample_fact_work();
         fact_work.planned.groups.truncate(1);
         fact_work.planned.groups[0].cause = RepositoryFactWorkCause::UserRequestedCleanRebuild;

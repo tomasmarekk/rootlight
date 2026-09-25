@@ -16,12 +16,12 @@ use axum::{
 };
 use rootlight_cancel::Cancellation;
 use rootlight_client::{HealthStatus, RequestTimeout};
+use rootlight_crypto::Sha256;
 use rootlight_vfs::{
     BrowseDirectory, BrowseDirectoryEntry, BrowseDirectorySnapshot, BrowsePageOffset,
     BrowsePageSize, MAX_BROWSE_CHILD_NAME_BYTES, MAX_BROWSE_PAGE_SIZE,
 };
 use serde::{Deserialize, Serialize};
-use sha2::{Digest as _, Sha256};
 
 use crate::{
     app::{ApiError, AppState},
@@ -583,7 +583,7 @@ fn filter_digest(filter: Option<&str>) -> [u8; 32] {
         }
         None => hasher.update([0]),
     }
-    hasher.finalize().into()
+    hasher.finalize()
 }
 
 fn safe_path_label(path: &Path) -> String {

@@ -25,6 +25,7 @@ use rootlight_adapters::{
     ADAPTER_VERSION as SEMANTIC_ADAPTER_VERSION, ScipImportLimits, initial_semantic_registry,
 };
 use rootlight_cancel::Cancellation;
+use rootlight_crypto::Sha256;
 use rootlight_ids::{
     ContentHash, FactId, GenerationId, RepositoryId, content_hash as derive_content_hash,
 };
@@ -41,7 +42,6 @@ use rootlight_workspace::{
     WorkspaceSnapshotRequest, build_link_overlay, execute_workflow,
 };
 use serde::{Deserialize, Serialize};
-use sha2::{Digest as _, Sha256};
 
 /// Schema written by the language and workspace evidence generator.
 pub const LANGUAGE_WORKSPACE_EVIDENCE_SCHEMA: &str = "rootlight.language-workspace-evidence/3";

@@ -627,7 +627,7 @@ pub(crate) enum ContractMatrixError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use sha2::{Digest as _, Sha256};
+    use rootlight_crypto::Sha256;
 
     const REVISION: &str = "0123456789abcdef0123456789abcdef01234567";
 

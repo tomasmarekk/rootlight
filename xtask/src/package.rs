@@ -26,8 +26,8 @@ use rootlight_client::{
     canonical_artifact_signature_message, canonical_update_metadata_bytes,
     install_package_with_policy, recover_update, uninstall_package, update_runtime_status,
 };
+use rootlight_crypto::Sha256;
 use serde::{Deserialize, Serialize};
-use sha2::{Digest as _, Sha256};
 use tempfile::NamedTempFile;
 use zip::{CompressionMethod, ZipArchive, ZipWriter, write::SimpleFileOptions};
 

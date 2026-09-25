@@ -4,8 +4,8 @@
 //! offline evidence where byte counts, deterministic estimates, and counts
 //! from an identified tokenizer must remain distinguishable.
 
+use rootlight_crypto::Sha256;
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 
 /// Schema version for workflow token-accounting evidence.
 pub const TOKEN_ACCOUNTING_SCHEMA_VERSION: &str = "1.0";

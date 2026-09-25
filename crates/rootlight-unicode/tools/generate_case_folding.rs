@@ -1,5 +1,6 @@
-//! Generates first-party case-fold lookup data from the pinned Unicode 9 file.
-//! Cargo reads only the reviewed local input; this build script has no network path.
+//! Regenerates the checked-in case-fold table from the pinned Unicode 9 file.
+//!
+//! Run from the `crates/rootlight-unicode` directory when updating the data.
 
 use std::{collections::BTreeMap, error::Error, fmt::Write as _, fs, path::PathBuf};
 
@@ -75,8 +76,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         )?;
     }
     generated.push_str("];\n");
-    let path = PathBuf::from(std::env::var_os("OUT_DIR").ok_or("missing Cargo output directory")?)
-        .join("case_folding.rs");
+    let path = PathBuf::from("src/case_folding.rs");
     fs::write(path, generated)?;
     Ok(())
 }

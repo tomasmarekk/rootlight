@@ -881,7 +881,7 @@ fn adapter_error_code(error: &AdapterError) -> &'static str {
 }
 
 fn sha256_hex(bytes: &[u8]) -> String {
-    use sha2::{Digest as _, Sha256};
+    use rootlight_crypto::Sha256;
     let digest = Sha256::digest(bytes);
     let mut output = String::with_capacity(64);
     for byte in digest {

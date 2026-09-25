@@ -21,7 +21,7 @@ use rootlight_client::{
     UpdatePublicKey, canonical_artifact_signature_message, canonical_update_metadata_bytes,
     verify_update,
 };
-use sha2::{Digest as _, Sha256};
+use rootlight_crypto::Sha256;
 use tempfile::NamedTempFile;
 
 const MAX_PRIVATE_SEED_FILE_BYTES: u64 = 65;

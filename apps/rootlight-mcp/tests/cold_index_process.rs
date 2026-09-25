@@ -24,8 +24,8 @@ use rootlight_bench::{
     cold_index_corpus_sha256, encode_cold_index_evidence, load_cold_index_corpus,
     verify_cold_index_evidence,
 };
+use rootlight_crypto::Sha256;
 use serde_json::{Value, json};
-use sha2::{Digest as _, Sha256};
 
 const STARTUP_TIMEOUT: Duration = Duration::from_secs(30);
 const RECOVERY_TIMEOUT: Duration = Duration::from_secs(5 * 60);

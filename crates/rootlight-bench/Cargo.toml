@@ -14,6 +14,7 @@ rootlight-adapter-sdk = { path = "../rootlight-adapter-sdk" }
 rootlight-adapter-treesitter = { path = "../rootlight-adapter-treesitter" }
 rootlight-adapters = { path = "../rootlight-adapters" }
 rootlight-cancel = { path = "../rootlight-cancel" }
+rootlight-crypto = { path = "../rootlight-crypto" }
 rootlight-ids = { path = "../rootlight-ids" }
 rootlight-ir = { path = "../rootlight-ir" }
 rootlight-query = { path = "../rootlight-query" }
@@ -24,7 +25,6 @@ rootlight-vfs = { path = "../rootlight-vfs" }
 rootlight-workspace = { path = "../rootlight-workspace" }
 serde.workspace = true
 serde_json.workspace = true
-sha2.workspace = true
 tempfile.workspace = true
 thiserror.workspace = true
 tiktoken-rs.workspace = true

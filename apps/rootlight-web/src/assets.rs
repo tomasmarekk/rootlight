@@ -7,9 +7,9 @@ use std::{
 };
 
 use axum::body::Bytes;
+use rootlight_crypto::Sha256;
 use rootlight_encoding::HEXLOWER;
 use serde::Deserialize;
-use sha2::{Digest as _, Sha256};
 
 use crate::error::WebError;
 

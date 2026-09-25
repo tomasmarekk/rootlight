@@ -17,7 +17,7 @@ rootlight-runtime = { path = "../../crates/rootlight-runtime" }
 rootlight-vfs = { path = "../../crates/rootlight-vfs" }
 serde.workspace = true
 serde_json.workspace = true
-sha2.workspace = true
+rootlight-crypto = { path = "../../crates/rootlight-crypto" }
 thiserror.workspace = true
 tokio.workspace = true
 tower.workspace = true

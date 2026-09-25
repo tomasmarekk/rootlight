@@ -10,8 +10,8 @@ use rootlight_client::{
     OperationId, OperationStage, OperationState, RecoveryClass, RepositoryIndex,
     RepositoryIndexMode, RepositoryOperationAction, RepositoryOperationStatus, RequestTimeout,
 };
+use rootlight_crypto::Sha256;
 use serde::{Deserialize, Serialize};
-use sha2::{Digest as _, Sha256};
 
 use crate::{
     api::filesystem::IndexMode,
@@ -379,7 +379,7 @@ fn idempotency_digest(value: &str) -> [u8; 32] {
     let mut hasher = Sha256::new();
     hasher.update(b"rootlight.web-index-idempotency/1");
     hasher.update(value.as_bytes());
-    hasher.finalize().into()
+    hasher.finalize()
 }
 
 fn request_fingerprint(root_capability: &str, mode: IndexMode) -> [u8; 32] {
@@ -391,7 +391,7 @@ fn request_fingerprint(root_capability: &str, mode: IndexMode) -> [u8; 32] {
         IndexMode::Structural => 2,
         IndexMode::Deep => 3,
     }]);
-    hasher.finalize().into()
+    hasher.finalize()
 }
 
 fn random_operation_id() -> Result<OperationId, ApiError> {

@@ -32,7 +32,7 @@ proptest.workspace = true
 rootlight-bench = { path = "../../crates/rootlight-bench" }
 rootlight-ipc = { path = "../../crates/rootlight-ipc" }
 serde_json.workspace = true
-sha2.workspace = true
+rootlight-crypto = { path = "../../crates/rootlight-crypto" }
 tempfile.workspace = true
 tiktoken-rs.workspace = true
 

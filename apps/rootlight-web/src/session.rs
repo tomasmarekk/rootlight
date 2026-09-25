@@ -5,8 +5,8 @@ use std::{
     time::{Duration, Instant},
 };
 
+use rootlight_crypto::Sha256;
 use rootlight_encoding::BASE64URL_NOPAD;
-use sha2::{Digest as _, Sha256};
 
 use crate::{error::WebError, secret::equal_secret_bytes};
 
@@ -235,7 +235,7 @@ fn decode_secret(encoded: &str) -> Option<[u8; SECRET_BYTES]> {
 }
 
 fn secret_digest(secret: &[u8; SECRET_BYTES]) -> [u8; 32] {
-    Sha256::digest(secret).into()
+    Sha256::digest(secret)
 }
 
 fn constant_time_session_index(records: &[SessionRecord], candidate: &[u8; 32]) -> Option<usize> {

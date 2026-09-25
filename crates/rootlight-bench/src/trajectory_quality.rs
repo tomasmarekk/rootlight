@@ -6,8 +6,8 @@
 
 use std::{collections::BTreeMap, fmt::Write as _};
 
+use rootlight_crypto::Sha256;
 use serde::{Deserialize, Serialize};
-use sha2::{Digest as _, Sha256};
 use thiserror::Error;
 
 use crate::{

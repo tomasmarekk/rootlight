@@ -6,11 +6,11 @@
 
 use std::{collections::BTreeMap, fmt, io};
 
+use rootlight_crypto::Sha256;
 use serde::{
     Deserialize, Deserializer, Serialize,
     de::{SeqAccess, Visitor},
 };
-use sha2::{Digest as _, Sha256};
 
 use crate::{
     Availability, BenchmarkCommand, BuildProvenance, DatasetManifest, EnvironmentEvidence,

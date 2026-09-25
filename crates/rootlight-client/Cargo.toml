@@ -10,6 +10,7 @@ publish = false
 [dependencies]
 cap-std.workspace = true
 rootlight-encoding = { path = "../rootlight-encoding" }
+rootlight-crypto = { path = "../rootlight-crypto" }
 ed25519-compact.workspace = true
 rootlight-build = { path = "../rootlight-build" }
 rootlight-error = { path = "../rootlight-error" }
@@ -23,7 +24,6 @@ rootlight-unicode = { path = "../rootlight-unicode" }
 rootlight-vfs = { path = "../rootlight-vfs" }
 serde.workspace = true
 serde_json.workspace = true
-sha2.workspace = true
 tempfile.workspace = true
 thiserror.workspace = true
 tokio.workspace = true

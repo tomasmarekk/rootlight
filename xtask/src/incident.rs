@@ -12,8 +12,8 @@ use std::{
     path::{Path, PathBuf},
 };
 
+use rootlight_crypto::Sha256;
 use serde::{Deserialize, Serialize};
-use sha2::{Digest as _, Sha256};
 use tempfile::NamedTempFile;
 
 const TABLETOP_PATH: &str = "operations/tabletop.toml";

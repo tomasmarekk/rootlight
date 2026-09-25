@@ -10,9 +10,9 @@ use std::{
 
 use ed25519_compact::{PublicKey, Signature};
 use rootlight_build::version::Version;
+use rootlight_crypto::Sha256;
 use rootlight_encoding::BASE64;
 use serde::{Deserialize, Serialize};
-use sha2::{Digest as _, Sha256};
 
 mod filesystem;
 
@@ -625,7 +625,7 @@ pub fn verify_update(
         metadata.artifact.size_bytes,
         declared_artifact_digest,
     )?;
-    let metadata_sha256 = encode_sha256(Sha256::digest(metadata_bytes).into());
+    let metadata_sha256 = encode_sha256(Sha256::digest(metadata_bytes));
     let artifact_sha256 = encode_sha256(observed_artifact_digest);
 
     Ok(VerifiedUpdate {
@@ -682,7 +682,7 @@ fn require_supporting_digest(
     mismatch: UpdateError,
 ) -> Result<(), UpdateError> {
     let expected = decode_sha256(expected)?;
-    let observed: [u8; 32] = Sha256::digest(bytes).into();
+    let observed: [u8; 32] = Sha256::digest(bytes);
     if observed != expected {
         return Err(mismatch);
     }
@@ -1043,7 +1043,7 @@ fn hash_exact_artifact(
     {
         return Err(UpdateError::ArtifactSizeMismatch);
     }
-    let observed: [u8; 32] = hasher.finalize().into();
+    let observed: [u8; 32] = hasher.finalize();
     if observed != declared_digest {
         return Err(UpdateError::ArtifactDigestMismatch);
     }
@@ -1272,7 +1272,7 @@ mod tests {
         UpdatePublicKey,
         UpdateContext,
     ) {
-        let artifact_sha256 = encode_sha256(Sha256::digest(artifact).into());
+        let artifact_sha256 = encode_sha256(Sha256::digest(artifact));
         let metadata = json!({
             "schema_version": "1.0",
             "key_id": "rootlight-release-2026",
@@ -1328,7 +1328,7 @@ mod tests {
 
     fn release_evidence_fixture() -> ReleaseEvidenceFixture {
         let artifact = b"verified release artifact".to_vec();
-        let artifact_sha256 = encode_sha256(Sha256::digest(&artifact).into());
+        let artifact_sha256 = encode_sha256(Sha256::digest(&artifact));
         let source_revision = "0123456789abcdef0123456789abcdef01234567";
         let target = "x86_64-pc-windows-msvc";
         let sbom = serde_json::to_vec(&json!({
@@ -1408,9 +1408,9 @@ mod tests {
                 file_name: "rootlight-x86_64-pc-windows-msvc.zip".to_owned(),
                 sha256: artifact_sha256,
                 size_bytes: u64::try_from(artifact.len()).expect("artifact length fits"),
-                sbom_sha256: encode_sha256(Sha256::digest(&sbom).into()),
-                provenance_sha256: encode_sha256(Sha256::digest(&provenance).into()),
-                license_bundle_sha256: encode_sha256(Sha256::digest(&license_bundle).into()),
+                sbom_sha256: encode_sha256(Sha256::digest(&sbom)),
+                provenance_sha256: encode_sha256(Sha256::digest(&provenance)),
+                license_bundle_sha256: encode_sha256(Sha256::digest(&license_bundle)),
                 reproducibility: ReproducibilityLevel::BitForBit,
             },
             compatibility: UpdateCompatibility {
@@ -1521,7 +1521,7 @@ mod tests {
         assert_eq!(verified.version, "1.3.0");
         assert_eq!(
             verified.artifact_sha256,
-            encode_sha256(Sha256::digest(&fixture.artifact).into())
+            encode_sha256(Sha256::digest(&fixture.artifact))
         );
     }
 

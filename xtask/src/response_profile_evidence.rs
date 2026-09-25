@@ -12,6 +12,7 @@ use std::{
 };
 
 use rootlight_agent::response_profile::{shape_batch_child_data, shape_data};
+use rootlight_crypto::Sha256;
 use rootlight_mcp_contract::{
     accounting::estimate_tokens,
     capability::{CAPABILITIES, ResponseProfileSupport},
@@ -22,7 +23,6 @@ use rootlight_mcp_contract::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use sha2::{Digest, Sha256};
 
 use crate::token_accounting::{O200kTokenizer, OfflineTokenizer};
 

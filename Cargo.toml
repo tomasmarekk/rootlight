@@ -17,6 +17,7 @@ members = [
     "crates/rootlight-catalog",
     "crates/rootlight-client",
     "crates/rootlight-config",
+    "crates/rootlight-crypto",
     "crates/rootlight-daemon-core",
     "crates/rootlight-error",
     "crates/rootlight-git",
@@ -106,7 +107,6 @@ scip = { version = "=0.9.0" }
 seccompiler = { version = "=0.5.0", default-features = false }
 serde = { version = "1.0.228", default-features = false, features = ["derive", "std"] }
 serde_json = { version = "1.0.150", default-features = false, features = ["std"] }
-sha2 = { version = "0.11.0", default-features = false }
 syn = { version = "=2.0.119", default-features = false, features = ["full", "parsing", "visit"] }
 sysinfo = { version = "=0.37.2", default-features = false, features = ["system"] }
 tantivy = { version = "=0.26.1", default-features = false, features = ["mmap"] }
@@ -184,7 +184,7 @@ tree-sitter-swift = { path = "third_party/tree-sitter-swift-0.7.3" }
 tree-sitter-typescript = { path = "third_party/tree-sitter-typescript-0.23.2" }
 
 # Debug daemons hash large executables inside the bounded support-bundle request.
-[profile.dev.package.sha2]
+[profile.dev.package.rootlight-crypto]
 opt-level = 3
 
 # Adapter authentication hashes large executables under the sandbox CPU grant.

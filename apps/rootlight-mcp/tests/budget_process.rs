@@ -16,10 +16,10 @@ use std::{
     time::{Duration, Instant},
 };
 
+use rootlight_crypto::Sha256;
 use rootlight_mcp_contract::{accounting::estimate_tokens, context::OBJECTIVE_ROLE_POLICY_VERSION};
 use serde::Serialize;
 use serde_json::{Value, json};
-use sha2::{Digest as _, Sha256};
 
 const REPORT_SCHEMA: &str = "rootlight.mcp-budget-runtime/1";
 const REPORT_ENV: &str = "ROOTLIGHT_BUDGET_RUNTIME_REPORT";

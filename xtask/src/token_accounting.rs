@@ -10,10 +10,10 @@ use std::path::{Component, Path, PathBuf};
 use rootlight_bench::{
     ActualTokenizerIdentity, TokenInputKind, TokenMeasurement as BoundaryTokenMeasurement,
 };
+use rootlight_crypto::Sha256;
 use rootlight_mcp_contract::accounting::{estimate_tokens, tool_list_payload};
 use rootlight_mcp_contract::catalog::ExposureProfile;
 use serde::{Deserialize, Serialize};
-use sha2::{Digest as _, Sha256};
 use tiktoken_rs::CoreBPE;
 
 const REPORT_SCHEMA: &str = "rootlight.mcp-token-accounting/3";

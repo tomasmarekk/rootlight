@@ -30,9 +30,9 @@ use rootlight_bench::{
     LinuxProcTreeSampler, ProcessTreeMeasurement, ProcessTreeSample, ProcessTreeSampler,
 };
 use rootlight_client::{Client, ConnectPolicy};
+use rootlight_crypto::Sha256;
 use rootlight_runtime::RuntimePaths;
 use serde_json::{Value, json};
-use sha2::{Digest as _, Sha256};
 
 const EVIDENCE_PATH_ENV: &str = "ROOTLIGHT_PERFORMANCE_EVIDENCE";
 const STARTUP_TIMEOUT: Duration = Duration::from_secs(15);

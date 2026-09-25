@@ -15,8 +15,8 @@ use std::{
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
+use rootlight_crypto::Sha256;
 use serde::{Deserialize, Serialize};
-use sha2::{Digest as _, Sha256};
 use zip::{CompressionMethod, ZipWriter, write::SimpleFileOptions};
 
 /// Frozen support-bundle schema used by protocol 1.3 clients.
@@ -2881,7 +2881,7 @@ fn finish_support_bundle(entries: &[SupportEntry]) -> Result<SupportBundle, Supp
     if archive.len() > MAX_SUPPORT_ARCHIVE_BYTES {
         return Err(SupportBundleError::ArchiveTooLarge);
     }
-    let sha256: [u8; 32] = Sha256::digest(&archive).into();
+    let sha256: [u8; 32] = Sha256::digest(&archive);
     Ok(SupportBundle { archive, sha256 })
 }
 
@@ -2943,7 +2943,7 @@ fn encode_zip(entries: &[SupportEntry]) -> Result<Vec<u8>, SupportBundleError> {
 fn hex_digest(bytes: &[u8]) -> String {
     use std::fmt::Write as _;
 
-    let digest: [u8; 32] = Sha256::digest(bytes).into();
+    let digest: [u8; 32] = Sha256::digest(bytes);
     let mut encoded = String::with_capacity(64);
     for byte in digest {
         write!(&mut encoded, "{byte:02x}")
@@ -3440,10 +3440,7 @@ mod tests {
         assert_eq!(first, second);
         assert!(!first.contains_source());
         assert!(first.archive().len() <= MAX_SUPPORT_ARCHIVE_BYTES);
-        assert_eq!(
-            <[u8; 32]>::from(Sha256::digest(first.archive())),
-            first.sha256()
-        );
+        assert_eq!(Sha256::digest(first.archive()), first.sha256());
 
         let cursor = Cursor::new(first.archive());
         let mut archive = zip::ZipArchive::new(cursor).expect("support ZIP opens");

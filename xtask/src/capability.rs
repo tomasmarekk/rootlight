@@ -10,6 +10,7 @@ use std::fmt::Write as _;
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use rootlight_crypto::Sha256;
 use rootlight_mcp_contract::MCP_SCHEMA_VERSION;
 use rootlight_mcp_contract::capability::{
     BudgetSemantics, CAPABILITIES, CapabilityRule, CapabilityStatus, GenerationSemantics,
@@ -19,7 +20,6 @@ use rootlight_mcp_contract::catalog::{ExposureProfile, McpTool};
 use rootlight_mcp_contract::{ErrorCode, VerticalTool};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use sha2::{Digest, Sha256};
 
 const REGISTRY_ARTIFACT_SCHEMA: &str = "rootlight.mcp-capability-registry/1";
 const PARITY_ARTIFACT_SCHEMA: &str = "rootlight.mcp-capability-parity/1";

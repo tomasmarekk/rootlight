@@ -11,7 +11,6 @@ use std::{
 
 use crate::cargo_metadata::{Metadata, MetadataCommand, MetadataError, Package};
 use serde::Deserialize;
-use sha2::Digest as _;
 use syn::{
     AttrStyle, Attribute, Expr, Item, Lit, LitStr, Meta, Path as SynPath, UseTree,
     visit::{self, Visit},
@@ -746,7 +745,7 @@ fn validate_sha256(value: &str, name: &str) -> Result<(), PolicyError> {
 fn sha256_hex(bytes: &[u8]) -> String {
     use std::fmt::Write as _;
 
-    let digest = sha2::Sha256::digest(bytes);
+    let digest = rootlight_crypto::Sha256::digest(bytes);
     let mut encoded = String::with_capacity(64);
     for byte in digest {
         write!(encoded, "{byte:02x}").expect("writing to a string cannot fail");

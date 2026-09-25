@@ -18,13 +18,13 @@ use std::{
 use rootlight_bench::{TokenInputKind, TokenMeasurement, WorkflowTokenAccounting};
 use rootlight_client::{Client, ConnectPolicy};
 use rootlight_config::{ConfigLayer, ConfigSnapshot, ConfigSource};
+use rootlight_crypto::Sha256;
 use rootlight_ids::{GenerationId, OperationId, RepositoryId};
 use rootlight_mcp_contract::{MCP_SPECIFICATION_DATE, capability::DISCOVERY_METADATA_KEY};
 use rootlight_operations::{OperationCounts, OperationJournal};
 use rootlight_runtime::{RuntimeError, RuntimePaths};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use sha2::{Digest as _, Sha256};
 
 use crate::token_accounting::{O200kTokenizer, OfflineTokenizer, TokenAccountingError};
 

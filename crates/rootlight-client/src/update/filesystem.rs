@@ -19,9 +19,9 @@ use std::fs::OpenOptions;
 use cap_std::{ambient_authority, fs::Dir};
 use rootlight_build::PRODUCT_VERSION;
 use rootlight_build::version::Version;
+use rootlight_crypto::Sha256;
 use rootlight_vfs::platform::{PlatformError, PrivateDirectory, PublishError};
 use serde::{Deserialize, Serialize};
-use sha2::{Digest as _, Sha256};
 use zip::{CompressionMethod, ZipArchive};
 
 use super::{
@@ -2209,7 +2209,7 @@ fn copy_bounded_hash(
     {
         return Err(FilesystemUpdateError::InvalidArchive);
     }
-    Ok(hex_sha256(hasher.finalize().into()))
+    Ok(hex_sha256(hasher.finalize()))
 }
 
 fn read_zip_entry_bounded(
@@ -2380,7 +2380,7 @@ fn hash_file_exact(file: &File, maximum: u64) -> Result<String, FilesystemUpdate
             }
             hasher.update(&buffer[..read]);
         }
-        Ok(hex_sha256(hasher.finalize().into()))
+        Ok(hex_sha256(hasher.finalize()))
     })();
     reader
         .seek(SeekFrom::Start(original_position))
@@ -2950,7 +2950,7 @@ mod tests {
                     "path": path,
                     "kind": kind,
                     "bytes": bytes.len(),
-                    "sha256": hex_sha256(Sha256::digest(bytes).into()),
+                    "sha256": hex_sha256(Sha256::digest(bytes)),
                     "unix_mode": mode
                 })
             })
@@ -3056,7 +3056,7 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .expect("test clock is valid")
             .as_secs();
-        let artifact_sha256 = hex_sha256(Sha256::digest(artifact).into());
+        let artifact_sha256 = hex_sha256(Sha256::digest(artifact));
         let source_revision = "a".repeat(40);
         let target = current_target().expect("test platform is supported");
         let sbom = serde_json::to_vec(&serde_json::json!({
@@ -3135,9 +3135,9 @@ mod tests {
                 "file_name": "update.zip",
                 "sha256": artifact_sha256,
                 "size_bytes": artifact.len(),
-                "sbom_sha256": hex_sha256(Sha256::digest(&sbom).into()),
-                "provenance_sha256": hex_sha256(Sha256::digest(&provenance).into()),
-                "license_bundle_sha256": hex_sha256(Sha256::digest(&license_bundle).into()),
+                "sbom_sha256": hex_sha256(Sha256::digest(&sbom)),
+                "provenance_sha256": hex_sha256(Sha256::digest(&provenance)),
+                "license_bundle_sha256": hex_sha256(Sha256::digest(&license_bundle)),
                 "reproducibility": "provenance_only"
             },
             "compatibility": {
@@ -3299,7 +3299,7 @@ mod tests {
         install_package_with_policy(
             &root,
             &archive,
-            &hex_sha256(Sha256::digest(&baseline).into()),
+            &hex_sha256(Sha256::digest(&baseline)),
             &policy(UpdatePublicKey(*key_pair.pk)),
         )
         .expect("baseline package installs");
@@ -3401,7 +3401,7 @@ mod tests {
         let archive = temporary.path().join("package.zip");
         let bytes = package_bytes("1.0.0");
         fs::write(&archive, &bytes).expect("package writes");
-        let digest = hex_sha256(Sha256::digest(&bytes).into());
+        let digest = hex_sha256(Sha256::digest(&bytes));
 
         let key_pair = test_key_pair();
         let installed = install_package_with_policy(
@@ -3470,7 +3470,7 @@ mod tests {
         let archive = temporary.path().join("package.zip");
         let bytes = package_bytes_with_schema("1.0.0", &"a".repeat(40), TestPackageSchema::V1);
         fs::write(&archive, &bytes).expect("package writes");
-        let digest = hex_sha256(Sha256::digest(&bytes).into());
+        let digest = hex_sha256(Sha256::digest(&bytes));
         let key_pair = test_key_pair();
 
         install_package_with_policy(
@@ -3498,7 +3498,7 @@ mod tests {
         let archive = temporary.path().join("package.zip");
         let bytes = package_bytes_with_schema("1.0.0", &"a".repeat(40), TestPackageSchema::V2);
         fs::write(&archive, &bytes).expect("package writes");
-        let digest = hex_sha256(Sha256::digest(&bytes).into());
+        let digest = hex_sha256(Sha256::digest(&bytes));
         let key_pair = test_key_pair();
 
         install_package_with_policy(
@@ -3545,7 +3545,7 @@ mod tests {
         let archive = temporary.path().join("package.zip");
         let bytes = package_bytes_with_revision("1.0.0", &"a".repeat(64));
         fs::write(&archive, &bytes).expect("package writes");
-        let digest = hex_sha256(Sha256::digest(&bytes).into());
+        let digest = hex_sha256(Sha256::digest(&bytes));
         let key_pair = test_key_pair();
 
         let installed = install_package_with_policy(
@@ -3571,7 +3571,7 @@ mod tests {
         install_package_with_policy(
             &root,
             &initial_archive,
-            &hex_sha256(Sha256::digest(&initial_bytes).into()),
+            &hex_sha256(Sha256::digest(&initial_bytes)),
             &trusted_policy,
         )
         .expect("initial package installs");
@@ -3608,7 +3608,7 @@ mod tests {
         install_package_with_policy(
             &root,
             &initial_archive,
-            &hex_sha256(Sha256::digest(&initial_bytes).into()),
+            &hex_sha256(Sha256::digest(&initial_bytes)),
             &trusted_policy,
         )
         .expect("initial package installs");
@@ -3692,7 +3692,7 @@ mod tests {
             install_package_with_policy(
                 &root,
                 &archive,
-                &hex_sha256(Sha256::digest(bytes).into()),
+                &hex_sha256(Sha256::digest(bytes)),
                 &policy(UpdatePublicKey(*key_pair.pk)),
             ),
             Err(FilesystemUpdateError::Zip(_))

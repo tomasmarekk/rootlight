@@ -213,15 +213,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "block-buffer"
-version = "0.12.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d2f6c7dbe95a6ed67ad9f18e57daf93a2f034c524b99fd2b76d18fdfeb6660aa"
-dependencies = [
- "hybrid-array",
-]
-
-[[package]]
 name = "bon"
 version = "3.9.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -422,15 +413,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "460fbee9c2c2f33933d720630a6a0bac33ba7053db5344fac858d4b8952d77d5"
 
 [[package]]
-name = "crypto-common"
-version = "0.2.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ce6e4c961d6cd6c9a86db418387425e8bdeaf05b3c8bc1411e6dca4c252f1453"
-dependencies = [
- "hybrid-array",
-]
-
-[[package]]
 name = "darling"
 version = "0.23.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -502,16 +484,6 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn",
-]
-
-[[package]]
-name = "digest"
-version = "0.11.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f1dd6dbb5841937940781866fa1281a1ff7bd3bf827091440879f9994983d5c2"
-dependencies = [
- "block-buffer",
- "crypto-common",
 ]
 
 [[package]]
@@ -918,15 +890,6 @@ name = "httpdate"
 version = "1.0.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "df3b46402a9d5adb4c86a0cf463f42e19994e3ee891101b1841f30a545cb49a9"
-
-[[package]]
-name = "hybrid-array"
-version = "0.4.13"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "818356c5132c1fede50f837ca96afbe78ff42413047f4abb886217845e1b6c8c"
-dependencies = [
- "typenum",
-]
 
 [[package]]
 name = "hyper"
@@ -2141,6 +2104,7 @@ dependencies = [
  "rootlight-adapter-treesitter",
  "rootlight-adapters",
  "rootlight-cancel",
+ "rootlight-crypto",
  "rootlight-ids",
  "rootlight-ir",
  "rootlight-query",
@@ -2151,7 +2115,6 @@ dependencies = [
  "rootlight-workspace",
  "serde",
  "serde_json",
- "sha2",
  "tempfile",
  "thiserror 2.0.18",
  "tiktoken-rs",
@@ -2201,6 +2164,7 @@ dependencies = [
  "ed25519-compact",
  "nt-token",
  "rootlight-build",
+ "rootlight-crypto",
  "rootlight-encoding",
  "rootlight-error",
  "rootlight-ids",
@@ -2214,7 +2178,6 @@ dependencies = [
  "rustix",
  "serde",
  "serde_json",
- "sha2",
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
@@ -2236,6 +2199,10 @@ dependencies = [
  "thiserror 2.0.18",
  "toml",
 ]
+
+[[package]]
+name = "rootlight-crypto"
+version = "0.1.0"
 
 [[package]]
 name = "rootlight-daemon"
@@ -2269,6 +2236,7 @@ version = "0.1.0"
 dependencies = [
  "rootlight-build",
  "rootlight-client",
+ "rootlight-crypto",
  "rootlight-error",
  "rootlight-ids",
  "rootlight-ipc",
@@ -2277,7 +2245,6 @@ dependencies = [
  "rootlight-protocol",
  "rootlight-unicode",
  "serde_json",
- "sha2",
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
@@ -2411,6 +2378,7 @@ dependencies = [
  "rootlight-bench",
  "rootlight-build",
  "rootlight-client",
+ "rootlight-crypto",
  "rootlight-ids",
  "rootlight-ipc",
  "rootlight-ir",
@@ -2418,7 +2386,6 @@ dependencies = [
  "rootlight-runtime",
  "serde",
  "serde_json",
- "sha2",
  "tempfile",
  "thiserror 2.0.18",
  "tiktoken-rs",
@@ -2446,9 +2413,9 @@ dependencies = [
 name = "rootlight-observability"
 version = "0.1.0"
 dependencies = [
+ "rootlight-crypto",
  "serde",
  "serde_json",
- "sha2",
  "thiserror 2.0.18",
  "zip",
 ]
@@ -2460,12 +2427,12 @@ dependencies = [
  "nix",
  "nt-token",
  "rootlight-cancel",
+ "rootlight-crypto",
  "rootlight-error",
  "rootlight-ids",
  "rusqlite",
  "serde",
  "serde_json",
- "sha2",
  "tempfile",
  "thiserror 2.0.18",
  "windows",
@@ -2490,6 +2457,7 @@ version = "0.1.0"
 dependencies = [
  "proptest",
  "rootlight-cancel",
+ "rootlight-crypto",
  "rootlight-ids",
  "rootlight-ir",
  "rootlight-search",
@@ -2498,7 +2466,6 @@ dependencies = [
  "rootlight-vfs",
  "serde",
  "serde_json",
- "sha2",
  "tempfile",
  "thiserror 2.0.18",
 ]
@@ -2702,12 +2669,12 @@ dependencies = [
  "getrandom 0.3.4",
  "rootlight-cancel",
  "rootlight-client",
+ "rootlight-crypto",
  "rootlight-encoding",
  "rootlight-runtime",
  "rootlight-vfs",
  "serde",
  "serde_json",
- "sha2",
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
@@ -2917,17 +2884,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6662b5879511e06e8999a8a235d848113e942c9124f211511b16466ee2995f26"
 dependencies = [
  "serde_core",
-]
-
-[[package]]
-name = "sha2"
-version = "0.11.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "446ba717509524cb3f22f17ecc096f10f4822d76ab5c0b9822c5f9c284e825f4"
-dependencies = [
- "cfg-if",
- "cpufeatures",
- "digest",
 ]
 
 [[package]]
@@ -3725,12 +3681,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "bc7d623258602320d5c55d1bc22793b57daff0ec7efc270ea7d55ce1d5f5471c"
 
 [[package]]
-name = "typenum"
-version = "1.20.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b6f5e870be6c3b371b77fe0ee0bafb859fa4964b4404c27de1d380043c4dda20"
-
-[[package]]
 name = "typetag"
 version = "0.2.22"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4205,6 +4155,7 @@ dependencies = [
  "rootlight-catalog",
  "rootlight-client",
  "rootlight-config",
+ "rootlight-crypto",
  "rootlight-encoding",
  "rootlight-error",
  "rootlight-ids",
@@ -4221,7 +4172,6 @@ dependencies = [
  "schemars",
  "serde",
  "serde_json",
- "sha2",
  "syn",
  "tempfile",
  "thiserror 2.0.18",

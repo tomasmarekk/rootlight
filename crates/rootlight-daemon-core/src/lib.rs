@@ -20,6 +20,7 @@ use std::{
 };
 
 use rootlight_build::PRODUCT_VERSION;
+use rootlight_crypto::Sha256;
 use rootlight_error::{DetailKey, ErrorCode, NextAction, PublicError, PublicValue, SafeLabel};
 use rootlight_ids::{GenerationId, OperationId, RepositoryId};
 use rootlight_ipc::{
@@ -63,7 +64,6 @@ use rootlight_protocol::{
     validate_graph_page,
 };
 use rootlight_unicode::UnicodeCaseFold as _;
-use sha2::{Digest as _, Sha256};
 use unicode_normalization::UnicodeNormalization as _;
 
 /// Protocol major supported by the first local daemon contract.
@@ -6241,7 +6241,7 @@ fn compute_running_binary_sha256() -> Option<String> {
         }
         hasher.update(&buffer[..read]);
     }
-    let digest: [u8; 32] = hasher.finalize().into();
+    let digest: [u8; 32] = hasher.finalize();
     Some(hex_bytes(&digest))
 }
 

@@ -200,7 +200,6 @@ fn support_registry_error(error: SupportRegistryError) -> ApiError {
 #[cfg(test)]
 mod tests {
     use rootlight_client::{DiagnosticResult, DiagnosticsQuick, HealthStatus};
-    use sha2::Digest as _;
 
     use super::*;
 
@@ -227,7 +226,7 @@ mod tests {
     #[test]
     fn support_download_is_local_attachment_with_digest() {
         let archive = b"PK\x03\x04support".to_vec();
-        let digest = sha2::Sha256::digest(&archive).into();
+        let digest = rootlight_crypto::Sha256::digest(&archive);
         let response = support_download(SupportArtifact {
             archive: archive.clone(),
             sha256: digest,

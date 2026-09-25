@@ -890,9 +890,9 @@ mod tests {
         RepositoryCatalogState, RepositoryCoverageEntry, RepositoryId, RepositoryStatus,
         RepositoryStatusRequest,
     };
+    use rootlight_crypto::Sha256;
     use rootlight_encoding::HEXLOWER;
     use serde_json::json;
-    use sha2::{Digest as _, Sha256};
     use tempfile::TempDir;
     use tower::ServiceExt as _;
 

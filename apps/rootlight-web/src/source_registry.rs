@@ -11,7 +11,6 @@ use std::{
 
 use rootlight_client::{GenerationId, RepositoryId, SourceReference};
 use rootlight_encoding::BASE64URL_NOPAD;
-use sha2::Digest as _;
 
 use crate::{secret::equal_secret_bytes, session::SessionIdentity};
 
@@ -170,7 +169,7 @@ fn random_token() -> Result<(String, [u8; 32]), SourceRegistryError> {
     getrandom::fill(&mut bytes).map_err(|_| SourceRegistryError::ResourceUnavailable)?;
     let encoded = BASE64URL_NOPAD.encode(&bytes);
     debug_assert_eq!(encoded.len(), TOKEN_LENGTH);
-    Ok((encoded, sha2::Sha256::digest(bytes).into()))
+    Ok((encoded, rootlight_crypto::Sha256::digest(bytes)))
 }
 
 fn decode_token_digest(token: &str) -> Result<[u8; 32], SourceRegistryError> {
@@ -183,7 +182,7 @@ fn decode_token_digest(token: &str) -> Result<[u8; 32], SourceRegistryError> {
     if bytes.len() != TOKEN_BYTES {
         return Err(SourceRegistryError::Invalid);
     }
-    Ok(sha2::Sha256::digest(bytes).into())
+    Ok(rootlight_crypto::Sha256::digest(bytes))
 }
 
 #[cfg(test)]

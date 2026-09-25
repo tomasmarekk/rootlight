@@ -16,11 +16,11 @@ use std::borrow::Cow;
 #[cfg(test)]
 use std::fs;
 
+use rootlight_crypto::Sha256;
 use serde::{
     Deserialize, Serialize,
     de::{IgnoredAny, SeqAccess, Visitor},
 };
-use sha2::{Digest as _, Sha256};
 
 use cap_fs_ext::DirExt as _;
 use rootlight_vfs::platform::PrivateDirectory;

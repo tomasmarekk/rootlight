@@ -7,7 +7,6 @@ use std::{
 };
 
 use rootlight_encoding::BASE64URL_NOPAD;
-use sha2::Digest as _;
 
 use crate::{secret::equal_secret_bytes, session::SessionIdentity};
 
@@ -159,7 +158,10 @@ impl SupportRegistry {
         state.reservations.remove(reservation);
         if archive.is_empty()
             || archive.len() > MAX_ARCHIVE_BYTES
-            || !equal_secret_bytes(&sha256, sha2::Sha256::digest(&archive).as_slice())
+            || !equal_secret_bytes(
+                &sha256,
+                rootlight_crypto::Sha256::digest(&archive).as_slice(),
+            )
         {
             return Err(SupportRegistryError::ArchiveInvalid);
         }
@@ -282,7 +284,7 @@ fn random_receipt() -> Result<(String, [u8; 32]), SupportRegistryError> {
     getrandom::fill(&mut bytes).map_err(|_| SupportRegistryError::ResourceUnavailable)?;
     let encoded = BASE64URL_NOPAD.encode(&bytes);
     debug_assert_eq!(encoded.len(), TOKEN_LENGTH);
-    Ok((encoded, sha2::Sha256::digest(bytes).into()))
+    Ok((encoded, rootlight_crypto::Sha256::digest(bytes)))
 }
 
 fn decode_receipt_digest(receipt: &str) -> Result<[u8; 32], SupportRegistryError> {
@@ -295,7 +297,7 @@ fn decode_receipt_digest(receipt: &str) -> Result<[u8; 32], SupportRegistryError
     if bytes.len() != TOKEN_BYTES {
         return Err(SupportRegistryError::Invalid);
     }
-    Ok(sha2::Sha256::digest(bytes).into())
+    Ok(rootlight_crypto::Sha256::digest(bytes))
 }
 
 #[cfg(test)]
@@ -308,7 +310,7 @@ mod tests {
 
     fn archive() -> (Vec<u8>, [u8; 32]) {
         let archive = b"PK\x03\x04source-free-support".to_vec();
-        let digest = sha2::Sha256::digest(&archive).into();
+        let digest = rootlight_crypto::Sha256::digest(&archive);
         (archive, digest)
     }
 

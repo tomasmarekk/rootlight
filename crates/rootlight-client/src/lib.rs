@@ -46,6 +46,7 @@ use std::{
     time::{Duration, Instant},
 };
 
+use rootlight_crypto::Sha256;
 use rootlight_error::{DetailKey, ErrorCode, NextAction, PublicError, PublicValue, SafeLabel};
 use rootlight_ipc::{
     Endpoint, FrameCodec, IpcError, connect, connect_async, read_response, read_response_async,
@@ -83,7 +84,6 @@ use rootlight_runtime::{
 };
 use rootlight_sandbox::{ChildProcess, KillOnCloseJob, ProcessCommand, ProcessError, StdioMode};
 use rootlight_unicode::UnicodeCaseFold as _;
-use sha2::{Digest as _, Sha256};
 use tokio::time::Instant as TokioInstant;
 use unicode_normalization::UnicodeNormalization as _;
 use zip::CompressionMethod;
@@ -8287,7 +8287,7 @@ fn parse_support_bundle(
         .sha256
         .try_into()
         .map_err(|_| ClientError::InvalidSupportBundle)?;
-    if <[u8; 32]>::from(Sha256::digest(&response.archive)) != sha256 {
+    if Sha256::digest(&response.archive) != sha256 {
         return Err(ClientError::InvalidSupportBundle);
     }
     let validated = validate_support_archive(&response.archive, response.schema_version)?;
@@ -8660,7 +8660,7 @@ fn sequences_increase<T>(records: &[T], sequence: impl Fn(&T) -> u64) -> bool {
 fn hex_sha256(bytes: &[u8]) -> Result<String, ClientError> {
     use std::fmt::Write as _;
 
-    let digest: [u8; 32] = Sha256::digest(bytes).into();
+    let digest: [u8; 32] = Sha256::digest(bytes);
     let mut encoded = String::with_capacity(64);
     for byte in digest {
         write!(&mut encoded, "{byte:02x}").map_err(|_| ClientError::InvalidSupportBundle)?;
@@ -18900,7 +18900,7 @@ mod tests {
         archive: Vec<u8>,
         schema_version: u32,
     ) -> daemon::SupportBundleResponse {
-        let digest: [u8; 32] = Sha256::digest(&archive).into();
+        let digest: [u8; 32] = Sha256::digest(&archive);
         daemon::SupportBundleResponse {
             schema_version,
             archive_bytes: u64::try_from(archive.len()).expect("test archive fits u64"),

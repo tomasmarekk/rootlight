@@ -11,9 +11,9 @@ use std::{
 };
 
 use rootlight_cancel::Cancellation;
+use rootlight_crypto::Sha256;
 use rootlight_encoding::BASE64URL_NOPAD;
 use rootlight_vfs::{BrowseDirectory, BrowseDirectorySnapshot, BrowseError};
-use sha2::{Digest as _, Sha256};
 
 use crate::{secret::equal_secret_bytes, session::SessionIdentity};
 
@@ -519,7 +519,7 @@ fn random_token() -> Result<OpaqueToken, FilesystemRegistryError> {
     getrandom::fill(&mut secret).map_err(|_| FilesystemRegistryError::ResourceUnavailable)?;
     Ok(OpaqueToken {
         encoded: BASE64URL_NOPAD.encode(&secret),
-        digest: Sha256::digest(secret).into(),
+        digest: Sha256::digest(secret),
     })
 }
 
@@ -530,7 +530,7 @@ fn decode_token_digest(encoded: &str) -> Result<[u8; 32], FilesystemRegistryErro
     let secret: [u8; TOKEN_BYTES] = decoded
         .try_into()
         .map_err(|_| FilesystemRegistryError::CapabilityInvalid)?;
-    Ok(Sha256::digest(secret).into())
+    Ok(Sha256::digest(secret))
 }
 
 fn token_matches(left: &[u8; 32], right: &[u8; 32]) -> bool {

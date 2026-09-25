@@ -13,9 +13,9 @@ use std::{
 
 use cap_fs_ext::{DirExt as _, FollowSymlinks, OpenOptionsFollowExt as _};
 use cap_std::{ambient_authority, fs::Dir};
+use rootlight_crypto::Sha256;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use sha2::{Digest, Sha256};
 
 use crate::{
     ActualTokenizerIdentity, AgentTrajectory, RESULT_BUNDLE_SCHEMA_VERSION,

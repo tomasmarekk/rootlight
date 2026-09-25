@@ -16,7 +16,7 @@ rootlight-observability = { path = "../rootlight-observability" }
 rootlight-operations = { path = "../rootlight-operations" }
 rootlight-protocol = { path = "../rootlight-protocol" }
 rootlight-unicode = { path = "../rootlight-unicode" }
-sha2.workspace = true
+rootlight-crypto = { path = "../rootlight-crypto" }
 thiserror.workspace = true
 tokio.workspace = true
 unicode-normalization.workspace = true

@@ -3,12 +3,12 @@
 //! The same bounded wire checks protect publication and later verification so
 //! checksums cannot legitimize internally contradictory benchmark evidence.
 
+use rootlight_crypto::Sha256;
 use serde::{
     Deserialize, Serialize,
     de::{DeserializeSeed as _, Error as _, MapAccess, SeqAccess, Visitor},
     ser::{SerializeMap as _, SerializeSeq as _},
 };
-use sha2::{Digest as _, Sha256};
 
 use crate::bundle::{
     AGENT_TRAJECTORIES_FILE, BUILD_PROVENANCE_FILE, BundleError, COMMAND_FILE, COVERAGE_FILE,

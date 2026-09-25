@@ -15,6 +15,7 @@ use rootlight_agent::policy::{
     BudgetCharge, BudgetLedger, BudgetLimits, BudgetResource, ExecutionPolicyError,
 };
 use rootlight_bench::ActualTokenizerIdentity;
+use rootlight_crypto::Sha256;
 use rootlight_mcp_contract::{
     McpTool,
     accounting::estimate_tokens,
@@ -26,7 +27,6 @@ use rootlight_mcp_contract::{
     vertical::ResponseBudget,
 };
 use serde::{Deserialize, Serialize};
-use sha2::{Digest as _, Sha256};
 
 use crate::token_accounting::{O200kTokenizer, OfflineTokenizer};
 

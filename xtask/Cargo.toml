@@ -12,6 +12,7 @@ anyhow.workspace = true
 blake3.workspace = true
 rootlight-build = { path = "../crates/rootlight-build" }
 rootlight-encoding = { path = "../crates/rootlight-encoding" }
+rootlight-crypto = { path = "../crates/rootlight-crypto" }
 ed25519-compact.workspace = true
 getrandom.workspace = true
 jsonschema.workspace = true
@@ -38,7 +39,6 @@ rootlight-sandbox = { path = "../crates/rootlight-sandbox" }
 schemars.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-sha2.workspace = true
 syn.workspace = true
 tempfile.workspace = true
 thiserror.workspace = true

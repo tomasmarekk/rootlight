@@ -10,7 +10,7 @@ publish = false
 [dependencies]
 serde.workspace = true
 serde_json.workspace = true
-sha2.workspace = true
+rootlight-crypto = { path = "../rootlight-crypto" }
 thiserror.workspace = true
 zip.workspace = true
 

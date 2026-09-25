@@ -8,6 +8,7 @@ use std::{
 
 use proptest::prelude::*;
 use proptest::test_runner::{RngAlgorithm, RngSeed};
+use rootlight_crypto::Sha256;
 use rootlight_ids::SymbolId;
 use rootlight_query::{
     ADVANCED_MAX_DEPTH, ADVANCED_MAX_TRAVERSAL, AdvancedAggregateFunction, AdvancedAstNode,
@@ -15,7 +16,6 @@ use rootlight_query::{
     AdvancedSortKey, AdvancedTraverseDirection, AdvancedValue,
 };
 use serde::Deserialize;
-use sha2::{Digest, Sha256};
 
 const CAMPAIGN_SEED: u64 = 202_607_220_040;
 const CI_CASES: u32 = 96;

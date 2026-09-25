@@ -11,7 +11,6 @@ use std::{
 
 use crate::cargo_metadata::{Dependency, DependencyKind, Metadata};
 use serde::Deserialize;
-use sha2::Digest as _;
 
 const GRAMMAR_LOCK_PATH: &str = "adapters/grammars.lock";
 const CARGO_LOCK_PATH: &str = "Cargo.lock";
@@ -584,7 +583,7 @@ fn validate_source_provenance(grammar: &GrammarEvidence) -> Result<(), GrammarLo
 // to sorted UTF-8 paths and lowercase file hashes instead: domain prefix, then
 // path, NUL, hash, NUL for each entry. NUL-free paths make framing unambiguous.
 fn vendored_source_digest(files: &BTreeMap<String, String>) -> Result<String, GrammarLockError> {
-    let mut digest = sha2::Sha256::new();
+    let mut digest = rootlight_crypto::Sha256::new();
     digest.update(b"rootlight-vendored-source-v1\0");
     for (path, checksum) in files {
         if !is_source_relative_path(path) {
@@ -921,7 +920,7 @@ fn validate_sha256(label: &'static str, value: &str) -> Result<(), GrammarLockEr
 fn sha256_hex(bytes: &[u8]) -> String {
     use std::fmt::Write as _;
 
-    let digest = sha2::Sha256::digest(bytes);
+    let digest = rootlight_crypto::Sha256::digest(bytes);
     let mut encoded = String::with_capacity(64);
     for byte in digest {
         write!(encoded, "{byte:02x}").expect("writing to a string cannot fail");

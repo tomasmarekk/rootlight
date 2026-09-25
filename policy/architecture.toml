@@ -16,6 +16,7 @@ workspace_members = [
   "rootlight-catalog",
   "rootlight-client",
   "rootlight-config",
+  "rootlight-crypto",
   "rootlight-daemon",
   "rootlight-daemon-core",
   "rootlight-discovery",
@@ -40,6 +41,7 @@ workspace_members = [
   "rootlight-service",
   "rootlight-source",
   "rootlight-storage",
+  "rootlight-unicode",
   "rootlight-vfs",
   "rootlight-workspace",
   "xtask",
@@ -111,6 +113,7 @@ name = "rootlight-web"
 allowed_internal_dependencies = [
   "rootlight-cancel",
   "rootlight-client",
+  "rootlight-crypto",
   "rootlight-encoding",
   "rootlight-runtime",
   "rootlight-vfs",
@@ -134,6 +137,7 @@ allowed_internal_dependencies = [
   "rootlight-cancel",
   "rootlight-ids",
   "rootlight-ir",
+  "rootlight-unicode",
   "rootlight-vfs",
 ]
 allow_build_script = false
@@ -164,6 +168,7 @@ allowed_internal_dependencies = [
   "rootlight-adapter-treesitter",
   "rootlight-adapters",
   "rootlight-cancel",
+  "rootlight-crypto",
   "rootlight-ids",
   "rootlight-ir",
   "rootlight-query",
@@ -200,9 +205,15 @@ allowed_internal_dependencies = []
 allow_build_script = false
 
 [[crates]]
+name = "rootlight-crypto"
+allowed_internal_dependencies = []
+allow_build_script = false
+
+[[crates]]
 name = "rootlight-client"
 allowed_internal_dependencies = [
   "rootlight-build",
+  "rootlight-crypto",
   "rootlight-encoding",
   "rootlight-error",
   "rootlight-ids",
@@ -211,6 +222,7 @@ allowed_internal_dependencies = [
   "rootlight-protocol",
   "rootlight-runtime",
   "rootlight-sandbox",
+  "rootlight-unicode",
   "rootlight-vfs",
 ]
 allow_build_script = false
@@ -247,12 +259,14 @@ allow_build_script = false
 name = "rootlight-daemon-core"
 allowed_internal_dependencies = [
   "rootlight-build",
+  "rootlight-crypto",
   "rootlight-error",
   "rootlight-ids",
   "rootlight-ipc",
   "rootlight-observability",
   "rootlight-operations",
   "rootlight-protocol",
+  "rootlight-unicode",
 ]
 allow_build_script = false
 
@@ -310,13 +324,14 @@ allow_build_script = false
 
 [[crates]]
 name = "rootlight-observability"
-allowed_internal_dependencies = []
+allowed_internal_dependencies = ["rootlight-crypto"]
 allow_build_script = false
 
 [[crates]]
 name = "rootlight-operations"
 allowed_internal_dependencies = [
   "rootlight-cancel",
+  "rootlight-crypto",
   "rootlight-error",
   "rootlight-ids",
 ]
@@ -363,6 +378,7 @@ name = "rootlight-search"
 allowed_internal_dependencies = [
   "rootlight-cancel",
   "rootlight-ids",
+  "rootlight-unicode",
   "rootlight-vfs",
 ]
 allow_build_script = false
@@ -403,6 +419,7 @@ allowed_internal_dependencies = [
   "rootlight-search",
   "rootlight-source",
   "rootlight-storage",
+  "rootlight-unicode",
   "rootlight-vfs",
 ]
 allow_build_script = false
@@ -428,6 +445,11 @@ allowed_internal_dependencies = [
 allow_build_script = false
 
 [[crates]]
+name = "rootlight-unicode"
+allowed_internal_dependencies = []
+allow_build_script = false
+
+[[crates]]
 name = "rootlight-vfs"
 allowed_internal_dependencies = ["rootlight-cancel", "rootlight-ids", "rootlight-ir"]
 allow_build_script = false
@@ -450,6 +472,7 @@ allowed_internal_dependencies = [
   "rootlight-catalog",
   "rootlight-client",
   "rootlight-config",
+  "rootlight-crypto",
   "rootlight-encoding",
   "rootlight-error",
   "rootlight-ids",

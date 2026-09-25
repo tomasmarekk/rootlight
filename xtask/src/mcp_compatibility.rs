@@ -10,6 +10,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use rootlight_crypto::Sha256;
 use rootlight_mcp_contract::accounting::tool_list_payload;
 use rootlight_mcp_contract::batch::BATCH_TOOL_REGISTRY;
 use rootlight_mcp_contract::catalog::{ExposureProfile, McpTool};
@@ -17,7 +18,6 @@ use rootlight_mcp_contract::vertical::VerticalTool;
 use rootlight_mcp_contract::{ErrorCode, MCP_SPECIFICATION_DATE};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use sha2::{Digest, Sha256};
 
 const HISTORY_FILE: &str = "release-history-v1.json";
 const MANIFEST_FILE: &str = "immutable-manifest-v1.json";

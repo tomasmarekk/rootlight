@@ -7,7 +7,6 @@
 use std::{fs, path::Path};
 
 use crate::cargo_metadata::{Metadata, MetadataCommand, MetadataError};
-use sha2::Digest as _;
 
 const LICENSE_PATH: &str = "LICENSE";
 const README_PATH: &str = "README.md";
@@ -105,7 +104,7 @@ fn package_license_offender(name: &str, declared: Option<&str>) -> Option<String
 fn sha256_hex(bytes: &[u8]) -> String {
     use std::fmt::Write as _;
 
-    let digest = sha2::Sha256::digest(bytes);
+    let digest = rootlight_crypto::Sha256::digest(bytes);
     let mut encoded = String::with_capacity(64);
     for byte in digest {
         write!(encoded, "{byte:02x}").expect("writing to a string cannot fail");

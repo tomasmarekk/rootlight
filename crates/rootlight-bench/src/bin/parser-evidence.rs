@@ -29,10 +29,10 @@ use rootlight_bench::{
     UnavailableProcessTreeSampler, UnavailableSemanticFacts, build_parser_ci_evidence,
     encode_parser_ci_evidence, run_parser_benchmark, verify_parser_ci_evidence,
 };
+use rootlight_crypto::Sha256;
 use rootlight_ids::{GenerationId, derive_repository};
 use rootlight_ir::{IrLimits, SourceRef, SourceSpan};
 use rootlight_vfs::{RelativePath, RepositoryRoot};
-use sha2::{Digest as _, Sha256};
 use tempfile::TempDir;
 
 const DATASET_ID: &str = "rootlight-parser-micro-v1";

@@ -1,11 +1,11 @@
 //! First-party Unicode case folding for repository and query identity.
 //!
 //! The pinned Unicode 9 data preserves existing index keys while the
-//! implementation and build path remain owned by Rootlight.
+//! implementation and compiler inputs remain owned by Rootlight.
 
 use std::{iter, str::Chars};
 
-include!(concat!(env!("OUT_DIR"), "/case_folding.rs"));
+include!("case_folding.rs");
 
 /// Unicode data version used for case-insensitive index keys.
 pub const UNICODE_VERSION: (u8, u8, u8) = (9, 0, 0);
@@ -89,6 +89,7 @@ impl UnicodeCaseFold<iter::Once<char>> for char {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::BTreeMap;
 
     #[test]
     fn full_folding_preserves_expansions_and_pinned_unicode_version() {
@@ -97,6 +98,57 @@ mod tests {
         assert_eq!("ﬃ".case_fold().collect::<String>(), "ffi");
         assert_eq!("\u{1c90}".case_fold().collect::<String>(), "\u{1c90}");
         assert_eq!(UNICODE_VERSION, (9, 0, 0));
+    }
+
+    #[test]
+    fn checked_in_table_matches_pinned_unicode_data() {
+        let data = include_str!("../data/CaseFolding-9.0.0.txt");
+        assert!(data.starts_with("# CaseFolding-9.0.0.txt\n"));
+        let mut common = BTreeMap::new();
+        let mut full = BTreeMap::new();
+        for line in data.lines() {
+            let content = line
+                .split('#')
+                .next()
+                .expect("split always yields a field")
+                .trim();
+            if content.is_empty() {
+                continue;
+            }
+            let fields: Vec<_> = content.split(';').map(str::trim).collect();
+            assert_eq!(fields.len(), 4);
+            let source = char::from_u32(u32::from_str_radix(fields[0], 16).expect("scalar hex"))
+                .expect("Unicode scalar");
+            let mapping: Vec<_> = fields[2]
+                .split_whitespace()
+                .map(|hex| {
+                    char::from_u32(u32::from_str_radix(hex, 16).expect("mapping hex"))
+                        .expect("mapping scalar")
+                })
+                .collect();
+            if !matches!(fields[1], "C" | "F") {
+                continue;
+            }
+            assert!((1..=3).contains(&mapping.len()));
+            let mut expanded = ['\0'; 3];
+            expanded[..mapping.len()].copy_from_slice(&mapping);
+            let value = (
+                expanded,
+                u8::try_from(mapping.len()).expect("mapping width fits"),
+            );
+            let destination = if fields[1] == "C" {
+                &mut common
+            } else {
+                &mut full
+            };
+            assert!(destination.insert(source, value).is_none());
+        }
+        common.extend(full);
+        let expected: Vec<_> = common
+            .into_iter()
+            .map(|(source, (mapping, width))| (source, mapping, width))
+            .collect();
+        assert_eq!(CASE_FOLD_TABLE, expected.as_slice());
     }
 
     #[test]
