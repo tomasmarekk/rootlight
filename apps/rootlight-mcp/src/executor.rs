@@ -7506,6 +7506,9 @@ fn map_operation_planning(
                     client::RepositoryPlanningDependencyKey::FilePath(id) => {
                         OperationPlanningDependencyKey::FilePath(id)
                     }
+                    client::RepositoryPlanningDependencyKey::FileParserRoute(id) => {
+                        OperationPlanningDependencyKey::FileParserRoute(id)
+                    }
                     client::RepositoryPlanningDependencyKey::PublicSurface(id) => {
                         OperationPlanningDependencyKey::PublicSurface(id)
                     }

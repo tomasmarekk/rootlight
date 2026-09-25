@@ -4355,6 +4355,8 @@ pub enum RepositoryPlanningDependencyKind {
     RepositoryPlanningDependencySearchRevision = 13,
     #[allow(missing_docs)]
     RepositoryPlanningDependencyDerivedPlan = 14,
+    #[allow(missing_docs)]
+    RepositoryPlanningDependencyFileParserRoute = 15,
 }
 impl RepositoryPlanningDependencyKind {
     /// String value of the enum field names used in the ProtoBuf definition.
@@ -4406,6 +4408,9 @@ impl RepositoryPlanningDependencyKind {
             Self::RepositoryPlanningDependencyDerivedPlan => {
                 "REPOSITORY_PLANNING_DEPENDENCY_DERIVED_PLAN"
             }
+            Self::RepositoryPlanningDependencyFileParserRoute => {
+                "REPOSITORY_PLANNING_DEPENDENCY_FILE_PARSER_ROUTE"
+            }
         }
     }
     /// Creates an enum from field names used in the ProtoBuf definition.
@@ -4453,6 +4458,9 @@ impl RepositoryPlanningDependencyKind {
             }
             "REPOSITORY_PLANNING_DEPENDENCY_DERIVED_PLAN" => {
                 Some(Self::RepositoryPlanningDependencyDerivedPlan)
+            }
+            "REPOSITORY_PLANNING_DEPENDENCY_FILE_PARSER_ROUTE" => {
+                Some(Self::RepositoryPlanningDependencyFileParserRoute)
             }
             _ => None,
         }

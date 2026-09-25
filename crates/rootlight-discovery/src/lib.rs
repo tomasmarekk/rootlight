@@ -41,7 +41,7 @@ pub use incremental::{
 };
 
 /// Current deterministic manifest and source-classification revision.
-pub const DISCOVERY_MANIFEST_VERSION: &str = "1.14";
+pub const DISCOVERY_MANIFEST_VERSION: &str = "1.15";
 /// Stable source-free diagnostic emitted when the entry budget truncates discovery.
 pub const DISCOVERY_ENTRY_LIMIT_DIAGNOSTIC_CODE: &str = "DISCOVERY_ENTRY_LIMIT";
 /// Stable source-free diagnostic emitted when retained source bytes truncate discovery.
@@ -524,6 +524,8 @@ pub enum LanguageEvidence {
     Manifest,
     /// Bounded deterministic content signal.
     Content,
+    /// Unanimous source-language evidence from peers sharing an ambiguous suffix.
+    Context,
     /// Exact conventional source filename, independent of its directory.
     Filename,
     /// Explicit source-language assignment in the immutable configuration.
@@ -1380,6 +1382,7 @@ impl<'a> DiscoveryState<'a> {
                 .cmp(&right.path)
                 .then_with(|| left.file.cmp(&right.file))
         });
+        infer_shared_m_suffix_context(&mut self.inputs);
         self.exclusions.sort_by(|left, right| {
             left.path
                 .cmp(&right.path)
@@ -1522,6 +1525,73 @@ fn classify(path: &RelativePath, content: &[u8]) -> (InputClass, Vec<LanguageSig
         });
     }
     (class, signals.into_iter().collect())
+}
+
+fn infer_shared_m_suffix_context(inputs: &mut [ManifestInput]) {
+    let mut proven = None;
+    let mut proven_count = 0;
+    for input in inputs.iter().filter(|input| is_shared_m_source(input)) {
+        if input
+            .language_signals
+            .iter()
+            .any(|signal| signal.evidence == LanguageEvidence::Configuration)
+        {
+            continue;
+        }
+        let mut explicit = None;
+        for signal in input
+            .language_signals
+            .iter()
+            .filter(|signal| signal.evidence == LanguageEvidence::Content)
+        {
+            let language = match signal.language.as_str() {
+                "matlab" => "matlab",
+                "objective-c" => "objective-c",
+                _ => return,
+            };
+            if explicit.is_some_and(|previous| previous != language) {
+                return;
+            }
+            explicit = Some(language);
+        }
+        if let Some(language) = explicit {
+            if proven.is_some_and(|previous| previous != language) {
+                return;
+            }
+            proven = Some(language);
+            proven_count += 1;
+        }
+    }
+    // One source cannot establish the language of an otherwise ambiguous
+    // repository. Mixed explicit evidence must leave each undecidable file's
+    // original extension fallback intact.
+    if proven_count < 2 {
+        return;
+    }
+    let language = proven.expect("two explicit peers establish one language");
+    for input in inputs.iter_mut().filter(|input| is_shared_m_source(input)) {
+        if input.language_signals.iter().any(|signal| {
+            matches!(
+                signal.evidence,
+                LanguageEvidence::Content | LanguageEvidence::Configuration
+            )
+        }) {
+            continue;
+        }
+        input.language_signals.push(LanguageSignal {
+            language: language.to_owned(),
+            evidence: LanguageEvidence::Context,
+        });
+        input.language_signals.sort();
+    }
+}
+
+fn is_shared_m_source(input: &ManifestInput) -> bool {
+    input.encoding == "utf-8"
+        && input
+            .path
+            .rsplit_once('.')
+            .is_some_and(|(_, suffix)| suffix.eq_ignore_ascii_case("m"))
 }
 
 fn legacy_source_encoding() -> String {
@@ -1772,7 +1842,7 @@ const LANGUAGE_CAPABILITIES: &[LanguageCapability] = &[
         language: "matlab",
         suffixes: &[".mlx"],
         aliases: &[],
-        detectors: &["content", "extension"],
+        detectors: &["content", "context", "extension"],
         maximum_tier: "tier_d",
         analyzers: &["treesitter"],
     },
@@ -1780,7 +1850,7 @@ const LANGUAGE_CAPABILITIES: &[LanguageCapability] = &[
         language: "objective-c",
         suffixes: &[".m"],
         aliases: &["objc"],
-        detectors: &["content", "extension"],
+        detectors: &["content", "context", "extension"],
         maximum_tier: "tier_d",
         analyzers: &["treesitter"],
     },
@@ -3127,6 +3197,58 @@ max_source_file_bytes = 2097152
     }
 
     #[test]
+    fn ambiguous_m_sources_inherit_only_unanimous_peer_evidence() {
+        let temporary = local_tempdir();
+        write_fixture(&temporary, "startup.m", b"addpath(genpath(pwd));\n");
+        write_fixture(
+            &temporary,
+            "measure.m",
+            b"function result = measure(value)\nresult = value;\nend\n",
+        );
+        let root = fixture_root(&temporary, b"shared-m-context");
+        let policy = DiscoveryPolicy::build(Vec::new(), true).unwrap();
+        let discover = || {
+            discover_manifest_streaming(&root, &config(), &policy, limits(), &Cancellation::new())
+                .unwrap()
+        };
+        let signals = |manifest: &DiscoveryManifest| {
+            manifest
+                .inputs
+                .iter()
+                .find(|input| input.path == "startup.m")
+                .unwrap()
+                .language_signals
+                .clone()
+        };
+        assert!(
+            !signals(&discover())
+                .iter()
+                .any(|signal| signal.evidence == LanguageEvidence::Context)
+        );
+
+        write_fixture(
+            &temporary,
+            "estimate.m",
+            b"function result = estimate(value)\nresult = value;\nend\n",
+        );
+        assert!(signals(&discover()).iter().any(|signal| {
+            signal.evidence == LanguageEvidence::Context && signal.language == "matlab"
+        }));
+
+        write_fixture(&temporary, "estimate.m", b"@interface Estimate\n@end\n");
+        assert!(
+            !signals(&discover())
+                .iter()
+                .any(|signal| signal.evidence == LanguageEvidence::Context)
+        );
+
+        write_fixture(&temporary, "measure.m", b"@interface Measure\n@end\n");
+        assert!(signals(&discover()).iter().any(|signal| {
+            signal.evidence == LanguageEvidence::Context && signal.language == "objective-c"
+        }));
+    }
+
+    #[test]
     fn matlab_script_hints_do_not_override_objc_or_known_suffixes() {
         for source in [
             "/* % example\nclassdef Phantom\n*/\n@interface Meter\n@end\n",
@@ -3366,6 +3488,7 @@ max_source_file_bytes = 2097152
             ("shebang", LanguageEvidence::Shebang),
             ("manifest", LanguageEvidence::Manifest),
             ("content", LanguageEvidence::Content),
+            ("context", LanguageEvidence::Context),
             ("filename", LanguageEvidence::Filename),
         ] {
             let value = serde_json::json!(label);

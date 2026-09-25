@@ -3749,7 +3749,10 @@ struct DaemonProcess {
 
 impl DaemonProcess {
     fn spawn(binary: &Path, state_dir: &Path, runtime_dir: &Path) -> Self {
-        let stderr_path = runtime_dir.join("retrieval-daemon.stderr");
+        let stderr_path = runtime_dir
+            .parent()
+            .unwrap()
+            .join("retrieval-daemon.stderr");
         fs::create_dir_all(runtime_dir).expect("daemon runtime directory is available");
         let stderr = fs::File::create(&stderr_path).expect("daemon stderr file is available");
         let mut child = Command::new(binary)

@@ -2278,6 +2278,8 @@ pub enum OperationPlanningDependencyKey {
     FileContent(FileId),
     /// Canonical path semantics of one file.
     FilePath(FileId),
+    /// Selected parser route for one source with an ambiguous suffix.
+    FileParserRoute(FileId),
     /// Exported surface of one analysis unit.
     PublicSurface(FactId),
     /// Body summary of one analysis unit.

@@ -926,6 +926,8 @@ pub enum RepositoryPlanningDependencyKey {
     FileContent(FileId),
     /// Canonical path semantics of one file.
     FilePath(FileId),
+    /// Selected parser route for one source with an ambiguous suffix.
+    FileParserRoute(FileId),
     /// Exported surface of one analysis unit.
     PublicSurface(FactId),
     /// Body summary of one analysis unit.
@@ -9765,6 +9767,12 @@ fn parse_repository_planning_dependency_key(
             file,
         ))?)),
         (
+            daemon::RepositoryPlanningDependencyKind::RepositoryPlanningDependencyFileParserRoute,
+            Some(Subject::File(file)),
+        ) => Ok(RepositoryPlanningDependencyKey::FileParserRoute(parse_file(
+            Some(file),
+        )?)),
+        (
             daemon::RepositoryPlanningDependencyKind::RepositoryPlanningDependencyPublicSurface,
             Some(Subject::Fact(fact)),
         ) => Ok(RepositoryPlanningDependencyKey::PublicSurface(
@@ -18258,10 +18266,19 @@ mod tests {
             estimated_cost_units: 34,
             estimated_durable_bytes: 2_048,
             dependency_keys: Some(daemon::RepositoryPlanningDependencyKeys {
-                total: 2,
+                total: 3,
                 samples: vec![
                     daemon::RepositoryPlanningDependencyKey {
                         kind: daemon::RepositoryPlanningDependencyKind::RepositoryPlanningDependencyFileContent
+                            as i32,
+                        subject: Some(
+                            daemon::repository_planning_dependency_key::Subject::File(
+                                file_to_wire(FileId::from_bytes([3; 20])),
+                            ),
+                        ),
+                    },
+                    daemon::RepositoryPlanningDependencyKey {
+                        kind: daemon::RepositoryPlanningDependencyKind::RepositoryPlanningDependencyFileParserRoute
                             as i32,
                         subject: Some(
                             daemon::repository_planning_dependency_key::Subject::File(
@@ -18314,7 +18331,7 @@ mod tests {
                 .dependency_keys
                 .samples
                 .len(),
-            2
+            3
         );
         let mut incoherent_subject = running_with_planning.clone();
         incoherent_subject

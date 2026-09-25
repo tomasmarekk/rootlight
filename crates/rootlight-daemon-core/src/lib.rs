@@ -9080,7 +9080,8 @@ fn repository_planning_dependency_key_order(
     let subject = match (kind, key.subject.as_ref()) {
         (
             daemon::RepositoryPlanningDependencyKind::RepositoryPlanningDependencyFileContent
-            | daemon::RepositoryPlanningDependencyKind::RepositoryPlanningDependencyFilePath,
+            | daemon::RepositoryPlanningDependencyKind::RepositoryPlanningDependencyFilePath
+            | daemon::RepositoryPlanningDependencyKind::RepositoryPlanningDependencyFileParserRoute,
             Some(Subject::File(file)),
         ) if file.value.len() == 20 => file.value.as_slice(),
         (
@@ -9103,7 +9104,14 @@ fn repository_planning_dependency_key_order(
         ) => &[],
         _ => return None,
     };
-    Some((key.kind, subject))
+    // The new file-scoped route keeps the next free wire tag while sorting
+    // beside the existing file inputs in the operation journal.
+    let order = match key.kind {
+        15 => 3,
+        3..=14 => key.kind + 1,
+        _ => key.kind,
+    };
+    Some((order, subject))
 }
 
 fn repository_index_analysis_mode_correlates(
@@ -20663,6 +20671,50 @@ mod tests {
         assert!(first_slice_response_correlates_for_minor(
             &status_request,
             &FirstSliceIpcResponse::RepositoryOperationStatus(running_with_planning.clone()),
+            17,
+        ));
+        let mut routed = running_with_planning.clone();
+        let keys = routed
+            .planning
+            .as_mut()
+            .and_then(|planning| planning.dependency_keys.as_mut())
+            .expect("planning keys exist");
+        let file = common::FileId { value: vec![5; 20] };
+        keys.samples.splice(
+            0..0,
+            [
+                daemon::RepositoryPlanningDependencyKey {
+                    kind: daemon::RepositoryPlanningDependencyKind::RepositoryPlanningDependencyFilePath
+                        as i32,
+                    subject: Some(daemon::repository_planning_dependency_key::Subject::File(
+                        file.clone(),
+                    )),
+                },
+                daemon::RepositoryPlanningDependencyKey {
+                    kind: daemon::RepositoryPlanningDependencyKind::RepositoryPlanningDependencyFileParserRoute
+                        as i32,
+                    subject: Some(daemon::repository_planning_dependency_key::Subject::File(
+                        file,
+                    )),
+                },
+            ],
+        );
+        keys.total = 4;
+        assert!(first_slice_response_correlates_for_minor(
+            &status_request,
+            &FirstSliceIpcResponse::RepositoryOperationStatus(routed.clone()),
+            17,
+        ));
+        routed
+            .planning
+            .as_mut()
+            .and_then(|planning| planning.dependency_keys.as_mut())
+            .expect("planning keys exist")
+            .samples
+            .swap(0, 1);
+        assert!(!first_slice_response_correlates_for_minor(
+            &status_request,
+            &FirstSliceIpcResponse::RepositoryOperationStatus(routed),
             17,
         ));
         assert!(!first_slice_response_correlates_for_minor(

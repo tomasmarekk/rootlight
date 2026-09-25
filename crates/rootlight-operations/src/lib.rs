@@ -361,6 +361,8 @@ pub enum RepositoryPlanningDependencyKey {
     FileContent(FileId),
     /// Canonical path semantics of one file.
     FilePath(FileId),
+    /// Selected parser route for one source with an ambiguous suffix.
+    FileParserRoute(FileId),
     /// Exported surface of one analysis unit.
     PublicSurface(FactId),
     /// Body summary of one analysis unit.
@@ -392,6 +394,7 @@ impl RepositoryPlanningDependencyKey {
         match self {
             Self::FileContent(_) => 1,
             Self::FilePath(_) => 2,
+            Self::FileParserRoute(_) => 15,
             Self::PublicSurface(_) => 3,
             Self::BodySummary(_) => 4,
             Self::ImportSet(_) => 5,
@@ -5256,7 +5259,8 @@ fn repository_planning_dependency_subject(
 ) -> Option<&[u8; 20]> {
     match key {
         RepositoryPlanningDependencyKey::FileContent(id)
-        | RepositoryPlanningDependencyKey::FilePath(id) => Some(id.as_bytes()),
+        | RepositoryPlanningDependencyKey::FilePath(id)
+        | RepositoryPlanningDependencyKey::FileParserRoute(id) => Some(id.as_bytes()),
         RepositoryPlanningDependencyKey::PublicSurface(id)
         | RepositoryPlanningDependencyKey::BodySummary(id)
         | RepositoryPlanningDependencyKey::ImportSet(id)
@@ -5357,6 +5361,9 @@ fn decode_repository_planning_dependency_key(
         13 => Ok(RepositoryPlanningDependencyKey::SearchRevision),
         14 => Ok(RepositoryPlanningDependencyKey::DerivedPlan(
             FactId::from_bytes(subject()?),
+        )),
+        15 => Ok(RepositoryPlanningDependencyKey::FileParserRoute(
+            FileId::from_bytes(subject()?),
         )),
         _ => Err(OperationError::CorruptState),
     }
@@ -7983,6 +7990,7 @@ mod tests {
         let keys = vec![
             RepositoryPlanningDependencyKey::FileContent(file),
             RepositoryPlanningDependencyKey::FilePath(file),
+            RepositoryPlanningDependencyKey::FileParserRoute(file),
             RepositoryPlanningDependencyKey::PublicSurface(fact),
             RepositoryPlanningDependencyKey::BodySummary(fact),
             RepositoryPlanningDependencyKey::ImportSet(fact),
@@ -8001,11 +8009,11 @@ mod tests {
                 .copied()
                 .map(|key| key.tag())
                 .collect::<Vec<_>>(),
-            (1_u8..=14).collect::<Vec<_>>()
+            [1, 2, 15].into_iter().chain(3_u8..=14).collect::<Vec<_>>()
         );
 
         let mut planning = sample_repository_planning();
-        planning.dependency_keys.total = 14;
+        planning.dependency_keys.total = 15;
         planning.dependency_keys.samples = keys;
         let encoded =
             encode_repository_operation_planning(&planning).expect("all key variants encode");

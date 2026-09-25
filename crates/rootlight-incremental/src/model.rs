@@ -251,6 +251,8 @@ pub enum InputKind {
     FileContent,
     /// Canonical path and containment semantics for one file.
     FilePath,
+    /// Selected parser route for one source with an ambiguous suffix.
+    FileParserRoute,
     /// Exported declaration and signature summary.
     PublicSurface,
     /// Local implementation-body summary.
@@ -286,9 +288,10 @@ impl InputKind {
             Self::BuildTarget | Self::CompilerOptions | Self::DependencyVersion => {
                 ChangeClass::BuildContext
             }
-            Self::GrammarVersion | Self::AdapterVersion | Self::ResolverVersion => {
-                ChangeClass::ProviderChange
-            }
+            Self::FileParserRoute
+            | Self::GrammarVersion
+            | Self::AdapterVersion
+            | Self::ResolverVersion => ChangeClass::ProviderChange,
             Self::ConfigurationRevision | Self::SearchRevision | Self::DerivedPlan => {
                 ChangeClass::Configuration
             }
@@ -304,6 +307,8 @@ pub enum InputKey {
     FileContent(FileId),
     /// Canonical path semantics of one file.
     FilePath(FileId),
+    /// Selected parser route for one source with an ambiguous suffix.
+    FileParserRoute(FileId),
     /// Exported surface of one analysis unit.
     PublicSurface(AnalysisUnitId),
     /// Body summary of one analysis unit.
@@ -337,6 +342,7 @@ impl InputKey {
         match self {
             Self::FileContent(_) => InputKind::FileContent,
             Self::FilePath(_) => InputKind::FilePath,
+            Self::FileParserRoute(_) => InputKind::FileParserRoute,
             Self::PublicSurface(_) => InputKind::PublicSurface,
             Self::BodySummary(_) => InputKind::BodySummary,
             Self::ImportSet(_) => InputKind::ImportSet,

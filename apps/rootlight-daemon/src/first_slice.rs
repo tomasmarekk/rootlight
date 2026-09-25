@@ -10290,6 +10290,9 @@ fn repository_planning_dependency_key(
         FirstSlicePlanningDependencyKey::FilePath(file) => {
             RepositoryPlanningDependencyKey::FilePath(file)
         }
+        FirstSlicePlanningDependencyKey::FileParserRoute(file) => {
+            RepositoryPlanningDependencyKey::FileParserRoute(file)
+        }
         FirstSlicePlanningDependencyKey::PublicSurface(fact) => {
             RepositoryPlanningDependencyKey::PublicSurface(fact)
         }
@@ -10798,6 +10801,10 @@ fn repository_planning_dependency_key_to_wire(
         ),
         RepositoryPlanningDependencyKey::FilePath(file) => (
             daemon::RepositoryPlanningDependencyKind::RepositoryPlanningDependencyFilePath,
+            Some(Subject::File(file_to_wire(*file))),
+        ),
+        RepositoryPlanningDependencyKey::FileParserRoute(file) => (
+            daemon::RepositoryPlanningDependencyKind::RepositoryPlanningDependencyFileParserRoute,
             Some(Subject::File(file_to_wire(*file))),
         ),
         RepositoryPlanningDependencyKey::PublicSurface(fact) => (
@@ -16791,9 +16798,10 @@ mod tests {
             estimated_cost_units: 72,
             estimated_durable_bytes: 4_096,
             dependency_keys: RepositoryPlanningDependencyKeys {
-                total: 3,
+                total: 4,
                 samples: vec![
                     RepositoryPlanningDependencyKey::FileContent(file),
+                    RepositoryPlanningDependencyKey::FileParserRoute(file),
                     RepositoryPlanningDependencyKey::BodySummary(fact),
                     RepositoryPlanningDependencyKey::ResolverVersion,
                 ],
@@ -16821,9 +16829,9 @@ mod tests {
         let keys = visible
             .dependency_keys
             .expect("bounded dependency keys are retained");
-        assert_eq!(keys.total, 3);
+        assert_eq!(keys.total, 4);
         assert!(keys.complete);
-        assert_eq!(keys.samples.len(), 3);
+        assert_eq!(keys.samples.len(), 4);
         assert!(matches!(
             keys.samples[0].subject,
             Some(daemon::repository_planning_dependency_key::Subject::File(
@@ -16832,11 +16840,22 @@ mod tests {
         ));
         assert!(matches!(
             keys.samples[1].subject,
+            Some(daemon::repository_planning_dependency_key::Subject::File(
+                ref value
+            )) if value.value == file.as_bytes()
+        ));
+        assert_eq!(
+            keys.samples[1].kind,
+            daemon::RepositoryPlanningDependencyKind::RepositoryPlanningDependencyFileParserRoute
+                as i32
+        );
+        assert!(matches!(
+            keys.samples[2].subject,
             Some(daemon::repository_planning_dependency_key::Subject::Fact(
                 ref value
             )) if value.value == fact.as_bytes()
         ));
-        assert!(keys.samples[2].subject.is_none());
+        assert!(keys.samples[3].subject.is_none());
     }
 
     #[test]

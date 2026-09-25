@@ -1734,6 +1734,24 @@
           ]
         },
         {
+          "description": "Selected parser route for one source with an ambiguous suffix.",
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "file_parser_route"
+            },
+            "subject": {
+              "$ref": "#/$defs/FileId"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "subject"
+          ]
+        },
+        {
           "description": "Exported surface of one analysis unit.",
           "type": "object",
           "properties": {

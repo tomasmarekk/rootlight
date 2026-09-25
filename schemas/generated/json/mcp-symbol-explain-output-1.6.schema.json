@@ -1621,7 +1621,7 @@
       "pattern": "^sym1_[a-z2-7]{39}$"
     },
     "SymbolRelationSample": {
-      "description": "One bounded typed relation sample for a symbol explanation.",
+      "description": "One bounded exact relation or explicitly uncertain reference sample.",
       "type": "object",
       "properties": {
         "confidence": {
@@ -1638,7 +1638,7 @@
           "minLength": 1
         },
         "kind": {
-          "description": "Stable relation predicate label.",
+          "description": "Stable relation predicate or `refers_to_candidate` label.",
           "type": "string",
           "maxLength": 128,
           "minLength": 1

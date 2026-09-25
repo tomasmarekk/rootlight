@@ -480,6 +480,8 @@ pub enum FirstSlicePlanningDependencyKey {
     FileContent(FileId),
     /// Canonical path semantics of one file.
     FilePath(FileId),
+    /// Selected parser route for one source with an ambiguous suffix.
+    FileParserRoute(FileId),
     /// Exported surface of one analysis unit.
     PublicSurface(FactId),
     /// Body summary of one analysis unit.
@@ -7747,6 +7749,7 @@ impl FirstSliceService {
             .try_reserve_exact(file_claims.len().saturating_sub(source_count))
             .map_err(|_| FirstSliceError::Limits)?;
         let mut source_languages = BTreeMap::new();
+        let mut parser_route_languages = BTreeMap::new();
         for (input, claim) in manifest
             .inputs
             .iter()
@@ -7789,6 +7792,13 @@ impl FirstSliceService {
                 .is_some()
             {
                 return Err(FirstSliceError::Identity.into());
+            }
+            if input
+                .path
+                .rsplit_once('.')
+                .is_some_and(|(_, suffix)| suffix.eq_ignore_ascii_case("m"))
+            {
+                parser_route_languages.insert(input.file, language.to_owned());
             }
             sources.push(RustSourceInput {
                 snapshot,
@@ -7842,6 +7852,7 @@ impl FirstSliceService {
                 parent_artifacts: parent_structural_artifacts,
                 discovery: &incremental,
                 source_files: &source_files,
+                parser_route_languages: &parser_route_languages,
                 semantic_inputs: &derived.fingerprints,
                 estimated_facts: u64::try_from(self.analysis_limits.ir().max_total_records)
                     .map_err(|_| FirstSliceError::Limits)?,
@@ -8212,6 +8223,7 @@ impl FirstSliceService {
                 parent_artifacts: parent_structural_artifacts,
                 discovery: &incremental,
                 source_files: &source_files,
+                parser_route_languages: &parser_route_languages,
                 semantic_inputs: &semantic_inputs,
                 estimated_facts: u64::try_from(self.analysis_limits.ir().max_total_records)
                     .map_err(|_| FirstSliceError::Limits)?,
@@ -14444,6 +14456,7 @@ struct FirstSliceIncrementalPlanningContext<'a> {
     parent_artifacts: Option<&'a StructuralGenerationArtifacts>,
     discovery: &'a IncrementalDiscovery,
     source_files: &'a BTreeSet<FileId>,
+    parser_route_languages: &'a BTreeMap<FileId, String>,
     semantic_inputs: &'a [InputFingerprint],
     estimated_facts: u64,
     estimated_durable_bytes: u64,
@@ -14461,6 +14474,7 @@ fn prepare_incremental_state(
         parent_artifacts,
         discovery,
         source_files,
+        parser_route_languages,
         semantic_inputs,
         estimated_facts,
         estimated_durable_bytes,
@@ -14471,8 +14485,13 @@ fn prepare_incremental_state(
         None => InputSnapshot::new([], PlanningLimits::default(), cancellation)
             .map_err(|error| map_incremental_error(error, cancellation))?,
     };
-    let current_inputs =
-        first_slice_input_snapshot(discovery, source_files, semantic_inputs, cancellation)?;
+    let current_inputs = first_slice_input_snapshot(
+        discovery,
+        source_files,
+        parser_route_languages,
+        semantic_inputs,
+        cancellation,
+    )?;
     let input_keys = incremental_input_keys(&parent_inputs, &current_inputs, cancellation)?;
     let files = incremental_file_ids(&input_keys, cancellation)?;
     let passes = first_slice_passes()?;
@@ -14553,7 +14572,8 @@ fn prepare_file_only_incremental_state(
     cancellation: &Cancellation,
 ) -> Result<PreparedIncrementalPlan, FirstSliceError> {
     check_cancellation(cancellation)?;
-    let current_inputs = first_slice_input_snapshot(discovery, source_files, &[], cancellation)?;
+    let current_inputs =
+        first_slice_input_snapshot(discovery, source_files, &BTreeMap::new(), &[], cancellation)?;
     let mut input_counts = BTreeMap::new();
     for change in discovery.changes().changes() {
         check_cancellation(cancellation)?;
@@ -14715,6 +14735,7 @@ const fn first_slice_planning_dependency_key(key: InputKey) -> FirstSlicePlannin
     match key {
         InputKey::FileContent(file) => FirstSlicePlanningDependencyKey::FileContent(file),
         InputKey::FilePath(file) => FirstSlicePlanningDependencyKey::FilePath(file),
+        InputKey::FileParserRoute(file) => FirstSlicePlanningDependencyKey::FileParserRoute(file),
         InputKey::PublicSurface(unit) => {
             FirstSlicePlanningDependencyKey::PublicSurface(unit.as_fact_id())
         }
@@ -14773,6 +14794,7 @@ impl FirstSlicePasses {
                 [
                     InputKind::FileContent,
                     InputKind::FilePath,
+                    InputKind::FileParserRoute,
                     InputKind::GrammarVersion,
                     InputKind::AdapterVersion,
                     InputKind::ConfigurationRevision,
@@ -14786,6 +14808,7 @@ impl FirstSlicePasses {
                 [
                     InputKind::FileContent,
                     InputKind::FilePath,
+                    InputKind::FileParserRoute,
                     InputKind::AdapterVersion,
                     InputKind::CompilerOptions,
                     InputKind::ConfigurationRevision,
@@ -14867,6 +14890,7 @@ fn verify_first_slice_observations(
                 [
                     InputKind::FileContent,
                     InputKind::FilePath,
+                    InputKind::FileParserRoute,
                     InputKind::GrammarVersion,
                     InputKind::AdapterVersion,
                     InputKind::ConfigurationRevision,
@@ -14881,6 +14905,7 @@ fn verify_first_slice_observations(
                 [
                     InputKind::FileContent,
                     InputKind::FilePath,
+                    InputKind::FileParserRoute,
                     InputKind::AdapterVersion,
                     InputKind::CompilerOptions,
                     InputKind::ConfigurationRevision,
@@ -14941,6 +14966,7 @@ fn verify_first_slice_observations(
 fn first_slice_input_snapshot(
     discovery: &IncrementalDiscovery,
     source_files: &BTreeSet<FileId>,
+    parser_route_languages: &BTreeMap<FileId, String>,
     semantic_inputs: &[InputFingerprint],
     cancellation: &Cancellation,
 ) -> Result<InputSnapshot, FirstSliceError> {
@@ -14948,6 +14974,7 @@ fn first_slice_input_snapshot(
     let expected = source_files
         .len()
         .checked_mul(2)
+        .and_then(|count| count.checked_add(parser_route_languages.len()))
         .and_then(|count| count.checked_add(semantic_inputs.len()))
         .and_then(|count| count.checked_add(7))
         .ok_or(FirstSliceError::Limits)?;
@@ -14976,6 +15003,17 @@ fn first_slice_input_snapshot(
     }
     if !configuration_present || !adapter_present {
         return Err(FirstSliceError::Incremental);
+    }
+    for (file, language) in parser_route_languages {
+        if !source_files.contains(file) {
+            return Err(FirstSliceError::Incremental);
+        }
+        // Peer evidence can change the selected parser without changing this
+        // file's own path or bytes, so retain a separate file-scoped input.
+        inputs.push(InputFingerprint::new(
+            InputKey::FileParserRoute(*file),
+            hash_static_components(&[b"rootlight.file-parser-route/1", language.as_bytes()])?,
+        ));
     }
 
     inputs.extend([
@@ -15258,7 +15296,9 @@ fn incremental_file_ids(
     for input in inputs {
         check_cancellation(cancellation)?;
         match input {
-            InputKey::FileContent(file) | InputKey::FilePath(file) => {
+            InputKey::FileContent(file)
+            | InputKey::FilePath(file)
+            | InputKey::FileParserRoute(file) => {
                 files.insert(*file);
             }
             _ => {}
@@ -15310,7 +15350,9 @@ fn first_slice_dependency_parts(
     for input in inputs {
         check_cancellation(cancellation)?;
         match *input {
-            InputKey::FileContent(file) | InputKey::FilePath(file) => {
+            InputKey::FileContent(file)
+            | InputKey::FilePath(file)
+            | InputKey::FileParserRoute(file) => {
                 add_file_input_edges(*input, file, passes, &mut edges);
             }
             InputKey::GrammarVersion(_) | InputKey::AdapterVersion(_) => {
@@ -15481,7 +15523,9 @@ fn parent_artifact_summaries(
 
 fn parser_artifact_depends_on(key: InputKey, file: FileId) -> bool {
     match key {
-        InputKey::FileContent(candidate) | InputKey::FilePath(candidate) => candidate == file,
+        InputKey::FileContent(candidate)
+        | InputKey::FilePath(candidate)
+        | InputKey::FileParserRoute(candidate) => candidate == file,
         InputKey::GrammarVersion(_)
         | InputKey::AdapterVersion(_)
         | InputKey::ConfigurationRevision => true,
@@ -15897,13 +15941,14 @@ fn detected_source_language(input: &ManifestInput) -> Option<&str> {
     if let Some(language) = c_header_content_language(input) {
         return Some(language);
     }
-    // `.m` is shared by Objective-C and MATLAB, so bounded content evidence
-    // resolves that suffix before the fallback extension claim.
+    // `.m` is shared by Objective-C and MATLAB, so explicit content and
+    // unanimous peer context resolve it before the fallback extension claim.
     // Manifest signals describe the toolchain, never the manifest's own syntax.
     let evidence_order = if extension_language(&input.path) == Some("objective-c") {
         [
             LanguageEvidence::Filename,
             LanguageEvidence::Content,
+            LanguageEvidence::Context,
             LanguageEvidence::Extension,
             LanguageEvidence::Shebang,
         ]
@@ -15913,6 +15958,7 @@ fn detected_source_language(input: &ManifestInput) -> Option<&str> {
             LanguageEvidence::Extension,
             LanguageEvidence::Shebang,
             LanguageEvidence::Content,
+            LanguageEvidence::Context,
         ]
     };
     for evidence in evidence_order {
@@ -24717,6 +24763,110 @@ mod tests {
             .index_repository(fixture.path(), &deadline())
             .expect("mixed-language no-op succeeds");
         assert_eq!(repeated, receipt);
+    }
+
+    #[test]
+    fn ambiguous_m_script_tracks_unanimous_sibling_language_changes() {
+        let storage = durable_test_tempdir();
+        let paths = RuntimePaths::new(storage.path().join("state"), storage.path().join("runtime"))
+            .expect("runtime paths resolve");
+        paths.prepare_owner().expect("runtime owner prepares");
+        let fixture = TempDir::new().expect("fixture root exists");
+        let script = "addpath(genpath(pwd));\n";
+        write_language_fixture(
+            fixture.path(),
+            &[
+                ("src/lib.rs", "pub fn companion() {}\n"),
+                ("startup.m", script),
+                (
+                    "measure.m",
+                    "function result = measure(value)\nresult = value;\nend\n",
+                ),
+                (
+                    "estimate.m",
+                    "function result = estimate(value)\nresult = value;\nend\n",
+                ),
+            ],
+        );
+        let mut service = FirstSliceService::new_durable(4, paths.state_dir(), &deadline())
+            .expect("durable service initializes");
+        let initial = service
+            .index_repository(fixture.path(), &deadline())
+            .expect("MATLAB source publishes");
+        let initial_document = service
+            .loaded_generation_snapshot(initial.generation)
+            .expect("generation remains retained");
+        let startup = initial_document
+            .document()
+            .files
+            .iter()
+            .find(|file| file.path == "startup.m")
+            .expect("script is retained");
+        assert_eq!(startup.language, "matlab");
+        let reference = startup.evidence.source.clone().expect("source is bound");
+        assert_eq!(reference.generation(), initial.generation);
+        assert_eq!(
+            service
+                .source_read(initial.generation, vec![reference], &deadline())
+                .expect("script source reads")
+                .data
+                .chunks[0]
+                .bytes,
+            script.as_bytes()
+        );
+
+        fs::write(
+            fixture.path().join("estimate.m"),
+            "@interface Estimate\n@end\n",
+        )
+        .expect("one peer changes language");
+        let mixed = service
+            .index_repository(fixture.path(), &deadline())
+            .expect("mixed-language source publishes");
+        assert_ne!(mixed.generation, initial.generation);
+        let mixed_document = service
+            .loaded_generation_snapshot(mixed.generation)
+            .expect("mixed generation remains retained");
+        let startup = mixed_document
+            .document()
+            .files
+            .iter()
+            .find(|file| file.path == "startup.m")
+            .expect("script is retained");
+        assert_eq!(startup.language, "objective-c");
+        let evidence = service
+            .incremental_evidence(mixed.generation)
+            .expect("incremental evidence exists");
+        assert_eq!(evidence.parsed_files(), 2);
+        assert_eq!(evidence.reused_parser_artifacts(), 2);
+        assert_eq!(
+            service
+                .index_repository(fixture.path(), &deadline())
+                .expect("mixed-language no-op succeeds"),
+            mixed
+        );
+        drop(service);
+        let mut restored = FirstSliceService::new_durable(4, paths.state_dir(), &deadline())
+            .expect("durable service restores");
+        let restored_script = restored
+            .loaded_generation_snapshot(mixed.generation)
+            .expect("mixed generation restores");
+        assert_eq!(
+            restored_script
+                .document()
+                .files
+                .iter()
+                .find(|file| file.path == "startup.m")
+                .expect("script restores")
+                .language,
+            "objective-c"
+        );
+        assert_eq!(
+            restored
+                .index_repository(fixture.path(), &deadline())
+                .expect("restored no-op succeeds"),
+            mixed
+        );
     }
 
     #[test]
