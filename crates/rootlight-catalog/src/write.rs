@@ -113,7 +113,8 @@ pub(crate) fn write_generation(
     schema::create_deferred_oracle_indexes(&transaction)?;
     context.check().map_err(CatalogError::control)?;
     transaction.commit().map_err(CatalogError::sqlite)?;
-    schema::validate_oracle(connection, context)?;
+    // Both seal paths validate the committed database before exposing a reader;
+    // repeating quick_check here scans every page twice.
     Ok(plan.stats)
 }
 
