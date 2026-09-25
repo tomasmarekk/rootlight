@@ -27,7 +27,12 @@ impl ErlangParseProvider {
     /// Returns the content identity of this first-party frontend.
     #[must_use]
     pub fn binary_digest() -> ContentHash {
-        content_hash(include_bytes!("erlang.rs"))
+        let parser = include_bytes!("erlang.rs");
+        let names = include_bytes!("../../rootlight-adapter-sdk/src/erlang_names.rs");
+        let mut source = Vec::with_capacity(parser.len() + names.len());
+        source.extend_from_slice(parser);
+        source.extend_from_slice(names);
+        content_hash(&source)
     }
 
     /// Creates the parser with caller-owned source and syntax-node ceilings.
@@ -721,5 +726,13 @@ mod tests {
         assert_eq!(parsed.functions.len(), 1);
         assert!(parsed.lexical_incomplete);
         assert!(scan_source(b"run() -> ok.\n", 3, 128, &Cancellation::new()).is_err());
+    }
+
+    #[test]
+    fn frontend_digest_includes_the_shared_arity_rules() {
+        assert_ne!(
+            ErlangParseProvider::binary_digest(),
+            content_hash(include_bytes!("erlang.rs"))
+        );
     }
 }
