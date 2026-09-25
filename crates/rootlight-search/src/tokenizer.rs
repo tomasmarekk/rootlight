@@ -1,5 +1,5 @@
+use rootlight_unicode::UnicodeCaseFold as _;
 use tantivy::tokenizer::{Token, TokenStream, Tokenizer};
-use unicode_casefold::UnicodeCaseFold as _;
 use unicode_general_category::{GeneralCategory, get_general_category};
 use unicode_normalization::UnicodeNormalization;
 

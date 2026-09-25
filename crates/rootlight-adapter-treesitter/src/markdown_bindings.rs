@@ -8,7 +8,7 @@ use rootlight_adapter_sdk::{AdapterError, DiagnosticCode, SyntaxFact};
 use rootlight_cancel::Cancellation;
 use rootlight_ids::SymbolId;
 use rootlight_ir::SourceSpan;
-use unicode_casefold::UnicodeCaseFold as _;
+use rootlight_unicode::UnicodeCaseFold as _;
 
 pub(super) const TARGET_UNAVAILABLE: &str = "markdown-reference-target-unavailable";
 

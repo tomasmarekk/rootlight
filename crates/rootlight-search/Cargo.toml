@@ -13,11 +13,11 @@ cap-fs-ext.workspace = true
 cap-std.workspace = true
 rootlight-cancel = { path = "../rootlight-cancel" }
 rootlight-ids = { path = "../rootlight-ids" }
+rootlight-unicode = { path = "../rootlight-unicode" }
 rootlight-vfs = { path = "../rootlight-vfs" }
 tantivy.workspace = true
 tantivy-fst.workspace = true
 thiserror.workspace = true
-unicode-casefold.workspace = true
 unicode-general-category.workspace = true
 unicode-normalization.workspace = true
 

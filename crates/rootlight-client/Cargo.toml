@@ -19,6 +19,7 @@ rootlight-observability = { path = "../rootlight-observability" }
 rootlight-protocol = { path = "../rootlight-protocol" }
 rootlight-runtime = { path = "../rootlight-runtime" }
 rootlight-sandbox = { path = "../rootlight-sandbox" }
+rootlight-unicode = { path = "../rootlight-unicode" }
 rootlight-vfs = { path = "../rootlight-vfs" }
 serde.workspace = true
 serde_json.workspace = true
@@ -26,7 +27,6 @@ sha2.workspace = true
 tempfile.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
-unicode-casefold.workspace = true
 unicode-normalization.workspace = true
 zip.workspace = true
 

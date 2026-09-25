@@ -62,8 +62,8 @@ use rootlight_protocol::{
     generated::{common::v1 as common, daemon::v1 as daemon, ui::graph::v1 as graph},
     validate_graph_page,
 };
+use rootlight_unicode::UnicodeCaseFold as _;
 use sha2::{Digest as _, Sha256};
-use unicode_casefold::UnicodeCaseFold as _;
 use unicode_normalization::UnicodeNormalization as _;
 
 /// Protocol major supported by the first local daemon contract.

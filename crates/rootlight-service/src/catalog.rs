@@ -10,7 +10,7 @@ use std::{
 
 use rootlight_ids::{ContentHash, GenerationId, RepositoryId, content_hash};
 use rootlight_ir::{AnalysisTier, CoverageStatus};
-use unicode_casefold::UnicodeCaseFold as _;
+use rootlight_unicode::UnicodeCaseFold as _;
 use unicode_normalization::UnicodeNormalization as _;
 
 /// Current binary encoding version for [`CatalogSortKey`].

@@ -13,9 +13,9 @@ rootlight-adapter-sdk = { path = "../rootlight-adapter-sdk" }
 rootlight-cancel = { path = "../rootlight-cancel" }
 rootlight-ids = { path = "../rootlight-ids" }
 rootlight-ir = { path = "../rootlight-ir" }
+rootlight-unicode = { path = "../rootlight-unicode" }
 thiserror.workspace = true
 unicode-general-category.workspace = true
-unicode-casefold.workspace = true
 tree-sitter.workspace = true
 tree-sitter-bash.workspace = true
 tree-sitter-json.workspace = true

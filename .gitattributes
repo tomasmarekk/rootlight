@@ -25,3 +25,5 @@ third_party/tree-sitter-objc-3.0.2/queries/highlights.scm whitespace=-blank-at-e
 # Preserve the published Groovy Apache notice, including its final blank line.
 third_party/dekobon-tree-sitter-groovy-0.2.0/LICENSE-APACHE whitespace=-blank-at-eof
 adapters/licenses/dekobon-tree-sitter-groovy-0.2.0-LICENSE-APACHE whitespace=-blank-at-eof
+# Preserve the published Unicode 9 case-fold data byte-for-byte.
+crates/rootlight-unicode/data/CaseFolding-9.0.0.txt whitespace=-blank-at-eol

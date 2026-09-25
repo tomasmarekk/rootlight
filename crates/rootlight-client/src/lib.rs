@@ -82,9 +82,9 @@ use rootlight_runtime::{
     LaunchLock, RuntimePaths, STARTUP_ACTIVE_GENERATION_RESTORE_TIMEOUT,
 };
 use rootlight_sandbox::{ChildProcess, KillOnCloseJob, ProcessCommand, ProcessError, StdioMode};
+use rootlight_unicode::UnicodeCaseFold as _;
 use sha2::{Digest as _, Sha256};
 use tokio::time::Instant as TokioInstant;
-use unicode_casefold::UnicodeCaseFold as _;
 use unicode_normalization::UnicodeNormalization as _;
 use zip::CompressionMethod;
 
