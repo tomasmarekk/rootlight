@@ -727,11 +727,14 @@ fn wait_for_background_noop(mcp: &mut McpProcess, repository_id: &str, generatio
             let operation_id = operation["operation_id"]
                 .as_str()
                 .expect("background operation has an identity");
-            let detail = mcp.call(
-                "background-noop-evidence",
-                "operation.status",
-                json!({"operation_id": operation_id}),
-            );
+            let detail =
+                process_support::retry_transient_busy("background-noop-evidence", |attempt_id| {
+                    mcp.call(
+                        attempt_id,
+                        "operation.status",
+                        json!({"operation_id": operation_id}),
+                    )
+                });
             assert_success(&detail, "operation.status");
             let data = &detail["result"]["structuredContent"]["data"];
             assert_eq!(data["published_generation"], generation);
