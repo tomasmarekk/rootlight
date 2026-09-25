@@ -1336,6 +1336,10 @@ fn candidate_for_capture(
     };
     let mut start = capture.node.start_byte();
     let mut end = capture.node.end_byte();
+    if family == GrammarFamily::Matlab && end == source.len().saturating_add(1) {
+        // MATLAB's parser-only EOF delimiter cannot become source evidence.
+        end = source.len();
+    }
     if family.is_classic_basic()
         && matches!(role, StructuralRole::Signature | StructuralRole::Expression)
     {

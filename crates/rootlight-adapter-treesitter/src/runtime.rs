@@ -423,6 +423,7 @@ impl TreeSitterProvider {
             encoding: request.encoding().as_str().to_owned(),
             included_ranges: Arc::clone(&included_ranges),
             settings,
+            virtual_line_ending: needs_virtual_matlab_line_ending(request),
         };
         let cached = self.resolve_previous(previous, cancellation)?;
         let previous_hash = cached
@@ -521,6 +522,7 @@ impl TreeSitterProvider {
             .set_included_ranges(&included_ranges)
             .map_err(|_| provider_failure("included-ranges"))?;
 
+        let virtual_line_ending = context.is_none() && needs_virtual_matlab_line_ending(request);
         let mut callback_cancelled = false;
         let envelope = context
             .as_ref()
@@ -549,6 +551,11 @@ impl TreeSitterProvider {
         };
         let chunk_bytes = settings.input_chunk_bytes();
         let mut input = |offset: usize, _point: Point| {
+            if virtual_line_ending && offset == source_bytes.len() {
+                // The grammar requires a statement delimiter at EOF. This byte
+                // is parser-only; query spans are clamped to the real snapshot.
+                return b"\n".as_slice();
+            }
             let end = offset.saturating_add(chunk_bytes).min(source_bytes.len());
             envelope.map_or_else(
                 || source_bytes.get(offset..end).unwrap_or_default(),
@@ -939,7 +946,18 @@ fn invalid_identity() -> ParseIdentity {
         encoding: String::new(),
         included_ranges: Arc::new(Vec::new()),
         settings: ParserSettings::new(1).expect("hard-coded parser setting is nonzero"),
+        virtual_line_ending: false,
     }
+}
+
+fn needs_virtual_matlab_line_ending(request: &ParseRequest<'_>) -> bool {
+    request.language().as_str() == "matlab"
+        && request.included_ranges().is_empty()
+        && request
+            .source()
+            .bytes()
+            .last()
+            .is_some_and(|last| !matches!(last, b'\n' | b'\r' | b';' | b','))
 }
 
 fn validate_edit_admission(
@@ -1034,6 +1052,12 @@ fn prepare_reuse(
         return Ok((
             None,
             ReuseStatus::Invalidated(ReuseInvalidation::ParserSettings),
+        ));
+    }
+    if cached.identity.virtual_line_ending != current.virtual_line_ending {
+        return Ok((
+            None,
+            ReuseStatus::Invalidated(ReuseInvalidation::VirtualLineEnding),
         ));
     }
     if cached.identity.content_hash != current.content_hash && edits.is_empty() {
@@ -2966,6 +2990,9 @@ mod tests {
         let mut changed = base.clone();
         changed.settings = ParserSettings::new(2).expect("test setting is nonzero");
         assert_invalidated(&cached, changed, ReuseInvalidation::ParserSettings);
+        let mut changed = base.clone();
+        changed.virtual_line_ending = true;
+        assert_invalidated(&cached, changed, ReuseInvalidation::VirtualLineEnding);
         let mut changed = base;
         changed.content_hash = ContentHash::from_bytes([2; 32]);
         assert_invalidated(&cached, changed, ReuseInvalidation::MissingEdits);

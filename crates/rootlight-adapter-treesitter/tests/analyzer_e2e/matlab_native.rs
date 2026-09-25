@@ -50,6 +50,38 @@ fn reference_in<'a>(
 }
 
 #[test]
+fn matlab_final_statement_without_newline_keeps_complete_exact_source() {
+    let source = "function result = twice(value)\nresult = value * 2";
+    let fixture = Fixture::new(MATLAB, source.as_bytes());
+    let budget = limits();
+    let request = request(&fixture.snapshot, &fixture.source, MATLAB, &budget);
+    let parsed = rootlight_adapter_sdk::execute_parse(
+        &provider(),
+        &request.to_parse_request(),
+        MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
+        &deadline(),
+    )
+    .unwrap();
+    assert_eq!(
+        parsed.report().coverage().status(),
+        CoverageStatus::Complete
+    );
+    assert!(
+        parsed
+            .facts()
+            .iter()
+            .all(|fact| { usize::try_from(fact.span().end_byte()).unwrap() <= source.len() })
+    );
+    let analyzed = output(source);
+    assert!(analyzed.document().skipped_regions.is_empty());
+    assert!(
+        analyzed.document().entities.iter().any(|entity| {
+            entity.kind == EntityKind::Function && entity.canonical_name == "twice"
+        })
+    );
+}
+
+#[test]
 fn matlab_local_functions_bind_names_and_prove_direct_calls() {
     let source = "function result = entry(value)\nresult = helper(value);\ncallback = @helper;\nend\nfunction result = helper(value)\nresult = value;\nend\n";
     let result = output(source);

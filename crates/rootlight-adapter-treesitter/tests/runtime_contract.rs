@@ -546,6 +546,120 @@ fn typescript_dialect_changes_invalidate_native_tree_reuse() {
 }
 
 #[test]
+fn matlab_virtual_final_line_ending_preserves_reuse_and_exact_spans() {
+    let initial = b"function result = twice(value)\nresult = value * 2";
+    let limits = limits(MAX_SOURCE_BYTES, 1024, 64);
+    let provider = provider(MAX_SOURCE_BYTES, 1024, 64, 2 * 1024 * 1024);
+    let settings = ParserSettings::new(64).expect("settings are bounded");
+    let fixture = Fixture::new("twice.m", initial);
+    let cancellation = deadline(Duration::from_secs(30));
+    let first = provider
+        .execute_with_previous(
+            &request(
+                &fixture.snapshot,
+                &fixture.source,
+                &limits,
+                "matlab",
+                Vec::new(),
+            ),
+            None,
+            &[],
+            settings,
+            MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
+            &cancellation,
+        )
+        .expect("unterminated final statement parses");
+    assert_eq!(
+        first.output().report().coverage().status(),
+        CoverageStatus::Complete
+    );
+    assert!(
+        first
+            .output()
+            .facts()
+            .iter()
+            .all(|fact| { usize::try_from(fact.span().end_byte()).unwrap() <= initial.len() })
+    );
+    let previous = first.previous().expect("initial tree is cached").clone();
+
+    let changed = fixture.rewrite(b"function result = twice(value)\nresult = value * 3");
+    let digit = initial.len() - 1;
+    let second = provider
+        .execute_with_previous(
+            &request(
+                &changed.snapshot,
+                &changed.source,
+                &limits,
+                "matlab",
+                Vec::new(),
+            ),
+            Some(&previous),
+            &[SourceEdit::new(digit, digit + 1, "3").unwrap()],
+            settings,
+            MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
+            &cancellation,
+        )
+        .expect("body edit reuses the virtual terminator");
+    assert!(matches!(second.reuse_status(), ReuseStatus::Reused { .. }));
+    assert_eq!(
+        second.output().report().coverage().status(),
+        CoverageStatus::Complete
+    );
+
+    let terminated = changed.rewrite(b"function result = twice(value)\nresult = value * 3\n");
+    let third = provider
+        .execute_with_previous(
+            &request(
+                &terminated.snapshot,
+                &terminated.source,
+                &limits,
+                "matlab",
+                Vec::new(),
+            ),
+            second.previous(),
+            &[SourceEdit::new(initial.len(), initial.len(), "\n").unwrap()],
+            settings,
+            MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
+            &cancellation,
+        )
+        .expect("real final newline invalidates the virtual terminator");
+    assert_eq!(
+        third.reuse_status(),
+        ReuseStatus::Invalidated(ReuseInvalidation::VirtualLineEnding)
+    );
+    assert_eq!(
+        third.output().report().coverage().status(),
+        CoverageStatus::Complete
+    );
+
+    let unterminated = terminated.rewrite(b"function result = twice(value)\nresult = value * 3");
+    let fourth = provider
+        .execute_with_previous(
+            &request(
+                &unterminated.snapshot,
+                &unterminated.source,
+                &limits,
+                "matlab",
+                Vec::new(),
+            ),
+            third.previous(),
+            &[SourceEdit::new(initial.len(), initial.len() + 1, "").unwrap()],
+            settings,
+            MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
+            &cancellation,
+        )
+        .expect("removing final newline restores virtual termination");
+    assert_eq!(
+        fourth.reuse_status(),
+        ReuseStatus::Invalidated(ReuseInvalidation::VirtualLineEnding)
+    );
+    assert_eq!(
+        fourth.output().report().coverage().status(),
+        CoverageStatus::Complete
+    );
+}
+
+#[test]
 fn provider_and_parser_settings_mismatches_invalidate_reuse() {
     let fixture = Fixture::new("identity.rs", b"fn identity() {}\n");
     let limits = limits(MAX_SOURCE_BYTES, 1024, 64);

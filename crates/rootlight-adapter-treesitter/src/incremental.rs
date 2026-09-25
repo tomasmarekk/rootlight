@@ -247,6 +247,8 @@ pub enum ReuseInvalidation {
     IncludedRanges,
     /// Parser scheduling options changed.
     ParserSettings,
+    /// A source edit changed whether MATLAB needs a virtual final line ending.
+    VirtualLineEnding,
     /// Content changed without a validating edit sequence.
     MissingEdits,
     /// An edit referenced bytes outside the sequential old source.
@@ -323,4 +325,5 @@ pub(crate) struct ParseIdentity {
     pub(crate) encoding: String,
     pub(crate) included_ranges: Arc<Vec<IncludedRange>>,
     pub(crate) settings: ParserSettings,
+    pub(crate) virtual_line_ending: bool,
 }
