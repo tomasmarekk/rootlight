@@ -441,6 +441,15 @@ fn scan_source(
                     *slot = Some(word);
                 }
                 word_count = word_count.saturating_add(1);
+                queue_substitutions(
+                    source,
+                    word,
+                    &mut scripts,
+                    script.owner_item,
+                    script.depth,
+                    max_syntax_nodes,
+                    cancellation,
+                )?;
                 cursor = word.end;
             }
             let command_end = cursor;
@@ -471,6 +480,7 @@ fn scan_source(
                     body_end,
                     Some(index),
                     script.depth,
+                    max_syntax_nodes,
                 )?;
             } else if word_count == 4
                 && first.literal_name(source) == Some(&b"namespace"[..])
@@ -496,8 +506,12 @@ fn scan_source(
                     body_end,
                     Some(index),
                     script.depth,
+                    max_syntax_nodes,
                 )?;
             } else if first.literal_name(source).is_some() {
+                if command_calls.len() >= max_syntax_nodes {
+                    return Err(failure("tcl-syntax-node-limit"));
+                }
                 command_calls
                     .try_reserve(1)
                     .map_err(|_| SinkError::AllocationFailed)?;
@@ -546,7 +560,11 @@ fn push_script(
     end: usize,
     owner_item: Option<usize>,
     parent_depth: usize,
+    max_syntax_nodes: usize,
 ) -> Result<(), AdapterError> {
+    if scripts.len() >= max_syntax_nodes {
+        return Err(failure("tcl-syntax-node-limit"));
+    }
     let depth = parent_depth
         .checked_add(1)
         .filter(|depth| *depth <= MAX_SCRIPT_DEPTH)
@@ -560,6 +578,45 @@ fn push_script(
         owner_item,
         depth,
     });
+    Ok(())
+}
+
+fn queue_substitutions(
+    source: &[u8],
+    word: Word,
+    scripts: &mut Vec<Script>,
+    owner_item: Option<usize>,
+    parent_depth: usize,
+    max_syntax_nodes: usize,
+    cancellation: &Cancellation,
+) -> Result<(), AdapterError> {
+    if word.form == WordForm::Braced {
+        return Ok(());
+    }
+    let mut cursor = word.content_start;
+    while cursor < word.content_end {
+        if cursor.is_multiple_of(CHECK_INTERVAL) {
+            cancellation.check()?;
+        }
+        match source.get(cursor) {
+            Some(b'\\') => cursor = (cursor + 2).min(word.content_end),
+            Some(b'[') => {
+                let after = balanced_brackets(source, cursor, word.content_end, cancellation)?
+                    .ok_or_else(|| failure("tcl-lexical-balance-invalid"))?;
+                push_script(
+                    scripts,
+                    cursor + 1,
+                    after - 1,
+                    owner_item,
+                    parent_depth,
+                    max_syntax_nodes,
+                )?;
+                cursor = after;
+            }
+            Some(_) => cursor += 1,
+            None => return Err(failure("tcl-lexical-balance-invalid")),
+        }
+    }
     Ok(())
 }
 
@@ -847,6 +904,29 @@ mod tests {
     }
 
     #[test]
+    fn command_substitutions_retain_executed_calls_without_braced_or_escaped_data() {
+        let source = b"proc render {} {\n  set output [format \"%s\" [compute]]\n  puts \"result=[decorate [clock seconds]]\"\n  set escaped \\[ignored\\]\n  set literal {[ignored]}\n}\n";
+        let parsed = scan_source(source, 16, &Cancellation::new()).expect("Tcl source parses");
+        assert_eq!(parsed.items.len(), 1);
+        let mut calls = parsed
+            .calls
+            .iter()
+            .map(|call| {
+                assert_eq!(call.owner_item, Some(0));
+                std::str::from_utf8(&source[call.start..call.end]).expect("call is UTF-8")
+            })
+            .collect::<Vec<_>>();
+        calls.sort_unstable();
+        assert_eq!(
+            calls,
+            [
+                "clock", "compute", "decorate", "format", "puts", "set", "set", "set"
+            ]
+        );
+        assert_eq!(parsed.fact_count, 12);
+    }
+
+    #[test]
     fn duplicate_names_keep_candidate_call_sites() {
         let source = b"proc route/(edit) {} {shared}\nproc shared {} {}\nproc shared {} {}\nproc caller {} {route/(edit)}\n";
         let parsed = scan_source(source, 32, &Cancellation::new()).expect("Tcl source parses");
@@ -877,6 +957,7 @@ mod tests {
     fn syntax_ceiling_rejects_partial_admission() {
         let source = b"proc one {} {}\nproc two {} {}\n";
         assert!(scan_source(source, 4, &Cancellation::new()).is_err());
+        assert!(scan_source(b"set value [][][][]\n", 4, &Cancellation::new()).is_err());
         assert!(scan_source(b"\xff", 4, &Cancellation::new()).is_err());
     }
 }

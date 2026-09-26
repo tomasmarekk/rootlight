@@ -30821,6 +30821,65 @@ mod tests {
     }
 
     #[test]
+    fn tcl_substitution_calls_keep_exact_generation_bound_sources() {
+        let fixture = TempDir::new().expect("fixture root exists");
+        let source = "proc pulse {} {return ok}\nproc caller {} {\n  set value [pulse]\n  puts \"[pulse]\"\n  set escaped \\[pulse\\]\n  set literal {[pulse]}\n}\n";
+        fs::write(fixture.path().join("commands.tcl"), source).expect("Tcl source writes");
+        let cancellation = deadline();
+        let mut service = FirstSliceService::new(2).expect("service initializes");
+        let receipt = service
+            .index_repository(fixture.path(), &cancellation)
+            .expect("Tcl source indexes");
+        let snapshot = service
+            .loaded_generation_snapshot(receipt.generation)
+            .expect("generation remains loaded");
+        let document = snapshot.document();
+        let pulse = document
+            .entities
+            .iter()
+            .find(|entity| entity.language == "tcl" && entity.canonical_name == "pulse")
+            .expect("procedure is indexed");
+        let calls = document
+            .occurrences
+            .iter()
+            .filter(|occurrence| {
+                let span = occurrence.source.span();
+                occurrence.syntax_kind == "tcl.command.call"
+                    && source.as_bytes().get(
+                        usize::try_from(span.start_byte()).expect("span fits")
+                            ..usize::try_from(span.end_byte()).expect("span fits"),
+                    ) == Some(b"pulse".as_slice())
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(calls.len(), 2);
+        for call in &calls {
+            assert_eq!(call.source.generation(), receipt.generation);
+            assert!(matches!(
+                &call.target,
+                rootlight_ir::OccurrenceTarget::Candidates { symbols, .. }
+                    if symbols.contains(&pulse.id)
+            ));
+        }
+        let read = service
+            .source_read(
+                receipt.generation,
+                calls.iter().map(|call| call.source.clone()).collect(),
+                &cancellation,
+            )
+            .expect("both substitutions retain exact source");
+        assert_eq!(read.data.chunks.len(), 2);
+        for (call, chunk) in calls.into_iter().zip(&read.data.chunks) {
+            assert_eq!(chunk.reference, call.source);
+            let start = usize::try_from(call.source.span().start_byte() - chunk.start_byte)
+                .expect("selected start fits");
+            assert_eq!(
+                chunk.bytes.get(start..start + b"pulse".len()),
+                Some(b"pulse".as_slice())
+            );
+        }
+    }
+
+    #[test]
     fn agda_declarations_are_source_backed_and_literate_prose_is_not_code() {
         let fixture = TempDir::new().expect("fixture root exists");
         let source = "{-# OPTIONS --safe #-}\nopen import Prelude\nmodule Sample where\n{- module Ghost where -}\n_∙_ : Nat → Nat → Nat\n_∙_ x y = x\ndata Choice : Set where\n  yes : Choice\nrecord Pair : Set where\n  field left : Nat\n";

@@ -428,6 +428,64 @@ fn tcl_bounded_procedures_cross_real_process_boundaries() {
 }
 
 #[test]
+fn tcl_substitution_call_is_source_grounded_without_exact_binding_claim() {
+    let source = "proc pulse {} {return ok}\nproc caller {} {set value [pulse]; set escaped \\[pulse\\]; set literal {[pulse]}}\n";
+    let mut fixture =
+        RetrievalFixture::spawn_with_layout(Some(("commands.tcl", source)), FixtureLayout::Data);
+    let located = fixture.standalone(
+        "tcl-substitution-locate",
+        "code.locate",
+        json!({"query": "pulse", "search_modes": ["exact"], "languages": ["tcl"],
+            "scope": {"paths": ["commands.tcl"]}, "response_profile": "evidence"}),
+    );
+    assert_success(&located, "code.locate");
+    let definition = located["result"]["structuredContent"]["data"]["matches"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|hit| hit["kind"] == "function" && hit["display_name"] == "pulse")
+        .expect("Tcl procedure is located");
+    let explained = fixture.standalone(
+        "tcl-substitution-explain",
+        "symbol.explain",
+        json!({"symbol_ids": [definition["symbol_id"]],
+            "sections": ["references_summary"], "response_profile": "evidence"}),
+    );
+    assert_success(&explained, "symbol.explain");
+    let symbol = &explained["result"]["structuredContent"]["data"]["symbols"][0];
+    assert_eq!(symbol["relations"]["references_exact"], 0);
+    let samples = symbol["relation_samples"]
+        .as_array()
+        .expect("candidate samples are present");
+    let references = samples
+        .iter()
+        .filter(|sample| sample["kind"] == "dispatch_candidate")
+        .flat_map(|sample| sample["source_refs"].as_array().unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(references.len(), 1, "{symbol:#}");
+    let reference = references[0];
+    assert_eq!(
+        reference["generation"],
+        definition["source_ref"]["generation"]
+    );
+    let start = usize::try_from(reference["span"]["start_byte"].as_u64().unwrap()).unwrap();
+    let end = usize::try_from(reference["span"]["end_byte"].as_u64().unwrap()).unwrap();
+    assert_eq!(source.get(start..end), Some("pulse"));
+    let read = fixture.standalone(
+        "tcl-substitution-read",
+        "source.read",
+        json!({"references": [{"source_ref": reference}], "context_lines_before": 0,
+            "context_lines_after": 0, "response_profile": "evidence"}),
+    );
+    assert_success(&read, "source.read");
+    assert_eq!(
+        read["result"]["structuredContent"]["data"]["chunks"][0]["content"],
+        "pulse"
+    );
+    fixture.finish();
+}
+
+#[test]
 fn agda_nested_declarations_keep_exact_sources_across_mcp() {
     let source = "module Main where\n  module Left where\n    same : Nat\n    same = 1\n  module Right where\n    same : Nat\n    same = 2\n  data Choice : Set where\n    yes : Choice\n  record Pair : Set where\n    field\n      left : Nat\n  result : Nat\n  result = 0 where\n    local : Nat\n    local = 1\n  alternate : Nat\n  alternate = local\n    where\n      local : Nat\n      local = 2\n";
     let mut fixture =
