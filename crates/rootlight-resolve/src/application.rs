@@ -423,7 +423,7 @@ impl ResolutionEngine {
         reconcile_groovy_import_gaps(&mut document, cancellation)?;
         reconcile_elm_import_relations(&mut document, cancellation)?;
         reconcile_elm_import_gaps(&mut document, cancellation)?;
-        reconcile_classic_target_gaps(&mut document, cancellation)?;
+        reconcile_vba_target_gaps(&mut document, cancellation)?;
         let document = canonicalize_ir_document(document, &ir_limits, &Default::default())
             .map_err(ResolutionError::InvalidDocument)?;
         Ok((document, estimate))
@@ -586,7 +586,7 @@ impl ResolutionEngine {
     }
 }
 
-fn reconcile_classic_target_gaps(
+fn reconcile_vba_target_gaps(
     document: &mut NormalizedIrDocument,
     cancellation: &Cancellation,
 ) -> Result<(), ResolutionError> {
@@ -612,11 +612,11 @@ fn reconcile_classic_target_gaps(
         };
         producers.insert(record.id, (selection, record));
     }
-    if producers.is_empty() {
+    if producers.is_empty() && !document.files.iter().any(|file| file.language == "vba") {
         return Ok(());
     }
-    let files: BTreeMap<_, _> = document.files.iter().map(|file| (file.id, file)).collect();
     let mut resolved = BTreeMap::new();
+    let mut value_source_counts = BTreeMap::new();
     for site in &document.occurrences {
         cancellation.check()?;
         if let Some(((syntax, detail), _)) = producers.get(&site.provenance)
@@ -625,9 +625,71 @@ fn reconcile_classic_target_gaps(
         {
             resolved.insert((site.source.clone(), *detail), site.provenance);
         }
+        if site.syntax_kind == "vba.value_identifier.reference" {
+            let count = value_source_counts.entry(&site.source).or_insert(0_u8);
+            *count = count.saturating_add(1).min(2);
+        }
     }
+    let mut binding_gap_counts = BTreeMap::new();
+    for gap in &document.skipped_regions {
+        cancellation.check()?;
+        if gap.domain == FactDomain::Relations && gap.detail == "vba-binding-target-unavailable" {
+            let count = binding_gap_counts.entry(&gap.source).or_insert(0_u8);
+            *count = count.saturating_add(1).min(2);
+        }
+    }
+    let value_sites: BTreeMap<_, _> = document
+        .occurrences
+        .iter()
+        .filter(|site| {
+            site.syntax_kind == "vba.value_identifier.reference"
+                && site.role == OccurrenceRole::Reference
+                && matches!(site.target, OccurrenceTarget::Resolved { .. })
+                && value_source_counts.get(&site.source) == Some(&1)
+                && binding_gap_counts.get(&site.source) == Some(&1)
+        })
+        .map(|site| (site.id, site))
+        .collect();
+    if resolved.is_empty() && value_sites.is_empty() {
+        return Ok(());
+    }
+    // A resolved target alone is insufficient; the exact source relation must
+    // already exist before retiring its missing-target gap.
+    for relation in &document.relations {
+        cancellation.check()?;
+        if relation.predicate != RelationPredicate::RefersTo {
+            continue;
+        }
+        let RelationEndpoint::Occurrence(site_id) = relation.subject else {
+            continue;
+        };
+        let Some(site) = value_sites.get(&site_id) else {
+            continue;
+        };
+        let OccurrenceTarget::Resolved { symbol } = site.target else {
+            continue;
+        };
+        if relation.object == RelationEndpoint::Entity(symbol)
+            && relation.evidence.source.as_ref() == Some(&site.source)
+            && relation.provenance == site.provenance
+        {
+            resolved.insert(
+                (site.source.clone(), "vba-binding-target-unavailable"),
+                site.provenance,
+            );
+        }
+    }
+    if resolved.is_empty() {
+        return Ok(());
+    }
+    let provenance: BTreeMap<_, _> = document
+        .provenance
+        .iter()
+        .map(|record| (record.id, record))
+        .collect();
+    let files: BTreeMap<_, _> = document.files.iter().map(|file| (file.id, file)).collect();
     let mut removed = BTreeMap::new();
-    let mut native_counts = BTreeMap::<_, u64>::new();
+    let mut source_gap_counts = BTreeMap::<_, u64>::new();
     let mut recovered = BTreeMap::<_, (u64, BTreeSet<FactRef>)>::new();
     for gap in &document.skipped_regions {
         cancellation.check()?;
@@ -637,7 +699,7 @@ fn reconcile_classic_target_gaps(
         if gap.domain != FactDomain::Relations || gap.provenance != file.provenance {
             continue;
         }
-        let count = native_counts.entry(file.id).or_default();
+        let count = source_gap_counts.entry(file.id).or_default();
         *count = count.checked_add(1).ok_or(ResolutionError::CountOverflow)?;
         if gap.reason != SkippedRegionReason::UnsupportedConstruct {
             continue;
@@ -674,7 +736,7 @@ fn reconcile_classic_target_gaps(
         if coverage.provenance != file.provenance
             || coverage.evidence.source != file.evidence.source
             || coverage.status != CoverageStatus::Bounded
-            || native_counts.get(&file_id) != Some(&coverage.skipped)
+            || source_gap_counts.get(&file_id) != Some(&coverage.skipped)
             || !updated_files.insert(file_id)
         {
             return Err(ResolutionError::UnsupportedIdentityRemap);
@@ -682,7 +744,7 @@ fn reconcile_classic_target_gaps(
         let proof = proofs
             .iter()
             .find_map(|proof| match proof {
-                FactRef::Fact(id) => producers.get(id).map(|(_, record)| *record),
+                FactRef::Fact(id) => provenance.get(id).copied(),
                 _ => None,
             })
             .ok_or(ResolutionError::UnsupportedIdentityRemap)?;
@@ -694,7 +756,7 @@ fn reconcile_classic_target_gaps(
             ProvenanceTree {
                 sources: &sources,
                 facts: &facts,
-                rule: "classic-project-coverage-v1",
+                rule: "vba-target-coverage-v1",
             },
             proof.clone(),
             &limits,

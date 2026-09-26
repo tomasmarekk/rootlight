@@ -1433,6 +1433,13 @@ fn native_project_module_calls_require_public_targets_and_unshadowed_names() {
             "{visibility} {local} {foreign}"
         );
         assert_eq!(
+            document.skipped_regions.iter().any(|gap| {
+                gap.source == qualifier.source && gap.detail == "vba-binding-target-unavailable"
+            }),
+            !matches!(qualifier.target, OccurrenceTarget::Resolved { .. }),
+            "source binding gap disagrees with its target: {visibility} {local} {foreign}"
+        );
+        assert_eq!(
             matches!(site.target, OccurrenceTarget::Resolved { .. }),
             expected,
             "{visibility} {local} {foreign}"

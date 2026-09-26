@@ -218,7 +218,7 @@ const PROJECT_FACTS_TRUNCATED_MESSAGE: &str =
     "additional project semantic facts were omitted by aggregate resource limits";
 const AGGREGATE_DIAGNOSTICS_TRUNCATED_CODE: &str = "aggregate-diagnostics-truncated";
 const ANALYZER_BINARY_SEED: &[u8] = b"rootlight.first-slice.treesitter-structural/149";
-const RESOLVER_BINARY_SEED: &[u8] = b"rootlight.first-slice.resolve/40";
+const RESOLVER_BINARY_SEED: &[u8] = b"rootlight.first-slice.resolve/41";
 const INCREMENTAL_PROVIDER_SEED: &[u8] = b"rootlight.first-slice.incremental-provider/1";
 const LANGUAGE_DISPOSITION_PROVIDER_SEED: &[u8] = b"rootlight.first-slice.language-disposition/5";
 const SOURCE_FILE_FALLBACK_PROVIDER_SEED: &[u8] = b"rootlight.source-file-fallback/4";
@@ -29194,6 +29194,27 @@ mod tests {
                 assert!(!symbols.contains_key("Update"));
                 continue;
             }
+            if language == "vba" {
+                let resolved_values: Vec<_> = document
+                    .occurrences
+                    .iter()
+                    .filter(|site| {
+                        site.syntax_kind == "vba.value_identifier.reference"
+                            && matches!(site.target, OccurrenceTarget::Resolved { .. })
+                    })
+                    .collect();
+                assert!(!resolved_values.is_empty());
+                for site in resolved_values {
+                    assert!(document.relations.iter().any(|edge| {
+                        edge.subject == RelationEndpoint::Occurrence(site.id)
+                            && edge.predicate == RelationPredicate::RefersTo
+                            && edge.evidence.source.as_ref() == Some(&site.source)
+                    }));
+                    assert!(document.skipped_regions.iter().all(|gap| {
+                        gap.source != site.source || gap.detail != "vba-binding-target-unavailable"
+                    }));
+                }
+            }
             assert!(
                 document
                     .entities
@@ -32731,12 +32752,13 @@ mod tests {
             parser.as_bytes(),
             DISCOVERY_MANIFEST_VERSION.as_bytes(),
             RESOLVER_PROVIDER_VERSION.as_bytes(),
-            b"rootlight.first-slice.resolve/28",
+            b"rootlight.first-slice.resolve/40",
             SEARCH_REVISION_SEED,
             INCREMENTAL_SCHEMA_VERSION.as_bytes(),
             DERIVED_PLAN_REVISION_SEED,
             LANGUAGE_DISPOSITION_PROVIDER_SEED,
             SOURCE_FILE_FALLBACK_PROVIDER_SEED,
+            container_sources::REVISION,
         ])
         .unwrap();
         assert_ne!(first_slice_provider_set_hash().unwrap(), previous_resolver);
