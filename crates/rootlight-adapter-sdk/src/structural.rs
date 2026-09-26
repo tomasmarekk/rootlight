@@ -99,7 +99,12 @@ pub fn structural_entity_kind(fact: &SyntaxFact) -> Option<EntityKind> {
         {
             Some(EntityKind::DatabaseObject)
         }
-        SyntaxFactKind::Declaration if label == "sql.schema.declaration" => {
+        SyntaxFactKind::Declaration
+            if matches!(
+                label,
+                "sql.schema.declaration" | "tcl.namespace.declaration"
+            ) =>
+        {
             Some(EntityKind::Namespace)
         }
         SyntaxFactKind::Declaration if label == "sql.column.declaration" => Some(EntityKind::Field),
@@ -355,6 +360,8 @@ pub fn structural_captured_name(text: &str, maximum_bytes: usize) -> Option<&str
 /// case folding and generated fragment identifiers require separate interpretation.
 /// Make retains reviewed static relative paths in targets and prerequisites;
 /// expansions and escaped names remain outside that borrowed-name contract.
+/// Tcl retains exact literal command names, including `/` and parentheses;
+/// substitution and namespace lookup remain outside that source identity.
 /// ECMAScript identifiers decode Unicode escapes without Unicode normalization;
 /// other grammar-reviewed names keep the shared borrowed-name contract.
 /// Groovy constant member strings decode their own delimiters and ordered escapes.
@@ -412,6 +419,15 @@ pub fn structural_captured_name_for_language<'a>(
                 !character.is_control()
                     && !character.is_whitespace()
                     && !matches!(character, ';' | '{' | '}' | '(' | ')' | '@' | '"')
+            }))
+        .then_some(Cow::Borrowed(text))
+    } else if language == "tcl" {
+        (!text.is_empty()
+            && text.len() <= maximum_bytes
+            && text.chars().all(|character| {
+                !character.is_control()
+                    && !character.is_whitespace()
+                    && !matches!(character, '\\' | '$' | '[' | ']' | '{' | '}' | ';' | '"')
             }))
         .then_some(Cow::Borrowed(text))
     } else if matches!(language, "css" | "html" | "powershell" | "markdown" | "nix") {
@@ -788,6 +804,39 @@ mod tests {
             SyntaxKindLabel::new("elm.port.declaration").unwrap(),
         );
         assert_eq!(structural_entity_kind(&fact), Some(EntityKind::Function));
+    }
+
+    #[test]
+    fn tcl_declarations_retain_namespace_and_function_identity() {
+        use crate::SyntaxKindLabel;
+        use rootlight_ids::FileId;
+        use rootlight_ir::SourceSpan;
+
+        for (syntax, expected) in [
+            ("tcl.namespace.declaration", EntityKind::Namespace),
+            ("tcl.function.declaration", EntityKind::Function),
+        ] {
+            let fact = SyntaxFact::new(
+                1,
+                None,
+                SyntaxFactKind::Declaration,
+                SourceSpan::new(FileId::from_bytes([3; 20]), 0, 1).unwrap(),
+                0,
+                SyntaxKindLabel::new(syntax).unwrap(),
+            );
+            assert_eq!(structural_entity_kind(&fact), Some(expected));
+        }
+    }
+
+    #[test]
+    fn tcl_literal_command_names_keep_source_spelling() {
+        assert_eq!(
+            structural_captured_name_for_language("tcl", "route/(edit)", 256).as_deref(),
+            Some("route/(edit)")
+        );
+        for dynamic in ["$name", "[makeName]", "a\\b", "a b"] {
+            assert!(structural_captured_name_for_language("tcl", dynamic, 256).is_none());
+        }
     }
 
     #[test]

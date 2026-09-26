@@ -412,6 +412,22 @@ fn scss_bounded_declarations_cross_real_process_boundaries() {
 }
 
 #[test]
+fn tcl_bounded_procedures_cross_real_process_boundaries() {
+    source_entities_with_coverage_cross_process_boundaries(
+        "tcl",
+        "theme.tcl",
+        "namespace eval palette {\n  proc tone {value} {return $value}\n}\nproc render {} {tone blue}\n",
+        &[
+            ("palette", "namespace", 1),
+            ("tone", "function", 1),
+            ("render", "function", 1),
+        ],
+        &[],
+        Some(true),
+    );
+}
+
+#[test]
 fn agda_nested_declarations_keep_exact_sources_across_mcp() {
     let source = "module Main where\n  module Left where\n    same : Nat\n    same = 1\n  module Right where\n    same : Nat\n    same = 2\n  data Choice : Set where\n    yes : Choice\n  record Pair : Set where\n    field\n      left : Nat\n  result : Nat\n  result = 0 where\n    local : Nat\n    local = 1\n  alternate : Nat\n  alternate = local\n    where\n      local : Nat\n      local = 2\n";
     let mut fixture =
@@ -1983,6 +1999,7 @@ fn source_entities_with_coverage_cross_process_boundaries(
             "property" => "field",
             "parameter" => "variable",
             "type_parameter" => "type",
+            "namespace" => "module",
             other => other,
         };
         let row_kind = match (language, expected_kind) {
@@ -2147,6 +2164,7 @@ fn source_entities_with_coverage_cross_process_boundaries(
                     | "matlab"
                     | "perl"
                     | "scss"
+                    | "tcl"
             )
         {
             // Only these kinds retain a lossless representation in the

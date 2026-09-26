@@ -17,6 +17,7 @@ mod runtime_trace;
 mod scip_export;
 mod scip_import;
 mod scss;
+mod tcl;
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -65,6 +66,7 @@ pub use scip_import::{
     ScipImportSource, ScipResource, import_scip_index,
 };
 pub use scss::ScssParseProvider;
+pub use tcl::TclParseProvider;
 
 const CANCELLATION_CHECK_INTERVAL: usize = 64;
 /// Version of the shared first-party semantic adapter implementation.

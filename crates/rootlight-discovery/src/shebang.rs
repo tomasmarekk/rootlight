@@ -56,6 +56,12 @@ fn interpreter_language(path: &str) -> Option<&'static str> {
         Some("perl")
     } else if name == "python" || versioned(name, "python") {
         Some("python")
+    } else if name == "tclsh"
+        || versioned(name, "tclsh")
+        || name == "wish"
+        || versioned(name, "wish")
+    {
+        Some("tcl")
     } else {
         match name {
             "awk" | "gawk" | "mawk" | "nawk" => Some("awk"),
@@ -227,6 +233,18 @@ fn split_words(input: &str) -> Option<Vec<String>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn tcl_interpreters_select_only_static_shebangs() {
+        for line in [
+            "#!/usr/bin/tclsh\n",
+            "#!/usr/bin/env wish8.6\n",
+            "#!/usr/bin/env -S tclsh8.7 -n\n",
+        ] {
+            assert_eq!(language(line.as_bytes()), Some("tcl"), "{line}");
+        }
+        assert_eq!(language(b"#!/usr/bin/env -S $INTERPRETER\n"), None);
+    }
 
     #[test]
     fn dynamic_env_operands_do_not_hide_a_static_interpreter() {

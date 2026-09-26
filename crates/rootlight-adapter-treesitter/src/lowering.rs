@@ -3298,7 +3298,7 @@ impl<'context, 'source> Lowering<'context, 'source> {
                 ))
             } else if matches!(
                 self.language_for_fact(fact),
-                "r" | "powershell" | "nix" | "matlab" | "perl" | "groovy"
+                "r" | "powershell" | "nix" | "matlab" | "perl" | "groovy" | "tcl"
             ) && kind != EntityKind::Module
             {
                 // Separate written occurrences and their children without claiming

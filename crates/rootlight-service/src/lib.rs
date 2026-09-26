@@ -51,7 +51,7 @@ use rootlight_adapter_treesitter::{
 use rootlight_adapters::{
     AgdaParseProvider, AwkParseProvider, ElmParseProvider, ErlangParseProvider, MakeParseProvider,
     PrologParseProvider, RuntimeTraceImportRequest, ScssParseProvider, SemanticProjectLanguage,
-    import_runtime_trace,
+    TclParseProvider, import_runtime_trace,
 };
 pub use rootlight_adapters::{
     PROJECT_SYNTAX_FACT_LIMIT_DIAGNOSTIC, RUNTIME_TRACE_SCHEMA_VERSION, RuntimeTraceImportError,
@@ -5296,6 +5296,16 @@ impl StructuralPreflight for ScssParseProvider {
     }
 }
 
+impl StructuralPreflight for TclParseProvider {
+    fn required_syntax_fact_count(
+        &self,
+        request: &rootlight_adapter_sdk::ParseRequest<'_>,
+        cancellation: &Cancellation,
+    ) -> Result<usize, AdapterError> {
+        TclParseProvider::required_syntax_fact_count(self, request, cancellation)
+    }
+}
+
 /// Transport-independent owner of bounded repository generations.
 ///
 /// The service retains at most the caller-selected hard-bounded generation
@@ -6212,6 +6222,10 @@ impl FirstSliceService {
             ScssParseProvider::new(maximum_source_bytes, MAX_SYNTAX_NODES)
                 .map_err(|_| FirstSliceError::Adapter)?,
         );
+        let tcl_parser = Arc::new(
+            TclParseProvider::new(maximum_source_bytes, MAX_SYNTAX_NODES)
+                .map_err(|_| FirstSliceError::Adapter)?,
+        );
         let producer =
             ProducerIdentity::new("rootlight-first-slice-treesitter", "1.0", config.hash())
                 .map_err(|_| FirstSliceError::Adapter)?;
@@ -6427,6 +6441,26 @@ impl FirstSliceService {
                 "scss".to_owned(),
                 scss_parser as Arc<dyn StructuralPreflight>,
             )
+            .is_some()
+        {
+            return Err(FirstSliceError::Adapter);
+        }
+        let tcl_provider: Arc<dyn ParseProvider> =
+            Arc::clone(&tcl_parser) as Arc<dyn ParseProvider>;
+        let tcl_analyzer = TreeSitterAnalyzer::new(
+            tcl_provider,
+            ProducerIdentity::new("rootlight-first-slice-tcl-native", "1.0", config.hash())
+                .map_err(|_| FirstSliceError::Adapter)?,
+            LanguageId::new("tcl").map_err(|_| FirstSliceError::Adapter)?,
+            "tcl-native-structural-1",
+            TclParseProvider::binary_digest(),
+        )
+        .map_err(|_| FirstSliceError::Adapter)?;
+        if analyzers.insert("tcl".to_owned(), tcl_analyzer).is_some() {
+            return Err(FirstSliceError::Adapter);
+        }
+        if structural_parsers
+            .insert("tcl".to_owned(), tcl_parser as Arc<dyn StructuralPreflight>)
             .is_some()
         {
             return Err(FirstSliceError::Adapter);
@@ -30587,6 +30621,203 @@ mod tests {
                     && gap.files == 1
             }));
         }
+    }
+
+    #[test]
+    fn tcl_procedures_remain_source_backed_with_bounded_dynamic_semantics() {
+        let fixture = TempDir::new().expect("fixture root exists");
+        let source = "# proc hidden {} {}\nnamespace eval palette {\n  proc tone {value} {return $value}\n}\nproc render {} {tone blue}\nproc $runtime {} {return unknown}\n";
+        fs::write(fixture.path().join("theme.tcl"), source).expect("Tcl source writes");
+        let cancellation = deadline();
+        let mut service = FirstSliceService::new(2).expect("service initializes");
+        let receipt = service
+            .index_repository(fixture.path(), &cancellation)
+            .expect("Tcl source indexes");
+        let snapshot = service
+            .loaded_generation_snapshot(receipt.generation)
+            .expect("generation remains loaded");
+        let document = snapshot.document();
+        for (name, kind) in [
+            ("palette", EntityKind::Namespace),
+            ("tone", EntityKind::Function),
+            ("render", EntityKind::Function),
+        ] {
+            assert!(
+                document.entities.iter().any(|entity| {
+                    entity.language == "tcl" && entity.kind == kind && entity.canonical_name == name
+                }),
+                "missing {name}"
+            );
+        }
+        assert!(
+            !document
+                .entities
+                .iter()
+                .any(|entity| { matches!(entity.canonical_name.as_str(), "hidden" | "$runtime") })
+        );
+        let call = document
+            .occurrences
+            .iter()
+            .find(|occurrence| {
+                let span = occurrence.source.span();
+                occurrence.syntax_kind == "tcl.command.call"
+                    && source.as_bytes().get(
+                        usize::try_from(span.start_byte()).expect("span fits")
+                            ..usize::try_from(span.end_byte()).expect("span fits"),
+                    ) == Some(b"tone".as_slice())
+            })
+            .expect("literal procedure call is retained");
+        let span = call.source.span();
+        assert_eq!(
+            &source.as_bytes()[usize::try_from(span.start_byte()).expect("span fits")
+                ..usize::try_from(span.end_byte()).expect("span fits")],
+            b"tone"
+        );
+        assert!(
+            !matches!(call.target, rootlight_ir::OccurrenceTarget::Resolved { .. }),
+            "literal Tcl spelling alone does not prove a runtime binding"
+        );
+        assert!(document.skipped_regions.iter().any(|gap| {
+            gap.detail == "tcl-dynamic-command-semantics-partial"
+                && gap.source.generation() == receipt.generation
+        }));
+        let file = document
+            .files
+            .iter()
+            .find(|file| file.path == "theme.tcl")
+            .expect("Tcl file exists");
+        let reference = file
+            .evidence
+            .source
+            .clone()
+            .expect("generation-bound source exists");
+        let read = service
+            .source_read(receipt.generation, vec![reference], &cancellation)
+            .expect("Tcl source remains readable");
+        assert_eq!(read.data.chunks[0].bytes, source.as_bytes());
+        for (query, mode) in [
+            ("tone", LocateMode::Exact),
+            ("return", LocateMode::Text),
+            ("theme.tcl", LocateMode::Prefix),
+        ] {
+            let located = service
+                .code_locate(
+                    receipt.generation,
+                    query.to_owned(),
+                    mode,
+                    10,
+                    0,
+                    &cancellation,
+                )
+                .expect("Tcl source locates");
+            assert!(located.data.hits.iter().any(|hit| hit.path == "theme.tcl"));
+        }
+        let status = service
+            .repository_status(receipt.repository, Some(receipt.generation))
+            .expect("Tcl coverage resolves");
+        assert!(status.coverage.iter().any(|entry| {
+            entry.language == "tcl"
+                && entry.discovered_files == 1
+                && entry.indexed_files == 1
+                && entry.status == "bounded"
+        }));
+    }
+
+    #[test]
+    fn repeated_tcl_declarations_keep_separate_source_identities() {
+        let fixture = TempDir::new().expect("fixture root exists");
+        fs::write(
+            fixture.path().join("commands.tcl"),
+            "proc route {} {}\nproc route {} {}\nproc caller {} {route}\n",
+        )
+        .expect("Tcl source writes");
+        let cancellation = deadline();
+        let mut service = FirstSliceService::new(2).expect("service initializes");
+        let receipt = service
+            .index_repository(fixture.path(), &cancellation)
+            .expect("Tcl source indexes");
+        let snapshot = service
+            .loaded_generation_snapshot(receipt.generation)
+            .expect("generation remains loaded");
+        let document = snapshot.document();
+        let definitions: Vec<_> = document
+            .entities
+            .iter()
+            .filter(|entity| {
+                entity.language == "tcl"
+                    && entity.kind == EntityKind::Function
+                    && entity.canonical_name == "route"
+            })
+            .collect();
+        assert_eq!(definitions.len(), 2);
+        assert_ne!(definitions[0].id, definitions[1].id);
+        assert_ne!(
+            definitions[0]
+                .evidence
+                .source
+                .as_ref()
+                .map(|source| source.span()),
+            definitions[1]
+                .evidence
+                .source
+                .as_ref()
+                .map(|source| source.span())
+        );
+        let call = document
+            .occurrences
+            .iter()
+            .find(|occurrence| occurrence.syntax_kind == "tcl.command.call")
+            .expect("ambiguous written call stays in the index");
+        assert!(!matches!(
+            call.target,
+            rootlight_ir::OccurrenceTarget::Resolved { .. }
+        ));
+    }
+
+    #[test]
+    fn tcl_cross_file_command_calls_retain_bounded_targets() {
+        let fixture = TempDir::new().expect("fixture root exists");
+        fs::write(
+            fixture.path().join("caller.tcl"),
+            "proc invoke {} {shared}\n",
+        )
+        .expect("caller source writes");
+        fs::write(
+            fixture.path().join("library.tcl"),
+            "proc shared {} {return ok}\n",
+        )
+        .expect("library source writes");
+        let cancellation = deadline();
+        let mut service = FirstSliceService::new(2).expect("service initializes");
+        let receipt = service
+            .index_repository(fixture.path(), &cancellation)
+            .expect("Tcl sources index");
+        let snapshot = service
+            .loaded_generation_snapshot(receipt.generation)
+            .expect("generation remains loaded");
+        let document = snapshot.document();
+        let shared = document
+            .entities
+            .iter()
+            .find(|entity| entity.language == "tcl" && entity.canonical_name == "shared")
+            .expect("shared command is indexed");
+        let caller = document
+            .files
+            .iter()
+            .find(|file| file.path == "caller.tcl")
+            .expect("caller source is indexed");
+        let call = document
+            .occurrences
+            .iter()
+            .find(|occurrence| {
+                occurrence.file == caller.id && occurrence.syntax_kind == "tcl.command.call"
+            })
+            .expect("cross-file command invocation is retained");
+        assert!(matches!(
+            &call.target,
+            rootlight_ir::OccurrenceTarget::Candidates { symbols, .. }
+                if symbols.contains(&shared.id)
+        ));
     }
 
     #[test]

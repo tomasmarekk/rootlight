@@ -243,7 +243,7 @@ impl ResolutionPolicy {
 }
 
 fn is_supported_dynamic_language(language: &str) -> bool {
-    matches!(language, "javascript" | "python" | "typescript")
+    matches!(language, "javascript" | "python" | "tcl" | "typescript")
 }
 
 /// Language-neutral rule that produced one decision.

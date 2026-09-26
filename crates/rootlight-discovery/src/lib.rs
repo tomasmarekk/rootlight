@@ -2007,6 +2007,14 @@ const LANGUAGE_CAPABILITIES: &[LanguageCapability] = &[
         analyzers: &["treesitter"],
     },
     LanguageCapability {
+        language: "tcl",
+        suffixes: &[".tcl", ".tk"],
+        aliases: &["tk"],
+        detectors: &["extension", "shebang"],
+        maximum_tier: "tier_d",
+        analyzers: &["native"],
+    },
+    LanguageCapability {
         language: "toml",
         suffixes: &[".toml"],
         aliases: &[],
@@ -3525,6 +3533,29 @@ max_source_file_bytes = 2097152
         assert_eq!(capability.analyzers, ["treesitter"]);
         assert_eq!(capability.maximum_tier, "tier_d");
         assert_eq!(capability.detectors, ["extension", "filename", "shebang"]);
+    }
+
+    #[test]
+    fn tcl_capability_classifies_scripts_without_claiming_backups() {
+        let capability = language_capabilities()
+            .iter()
+            .find(|entry| entry.language == "tcl")
+            .expect("Tcl capability is declared");
+        assert_eq!(capability.analyzers, ["native"]);
+        assert_eq!(capability.maximum_tier, "tier_d");
+        for path in ["script.tcl", "widget.tk", "SCRIPT.TCL"] {
+            assert_eq!(extension_language(path), Some("tcl"), "{path}");
+        }
+        assert_eq!(extension_language("script.tcl.bak"), None);
+        assert_eq!(canonical_language("tk"), Some("tcl"));
+        let (class, signals) = classify(
+            &RelativePath::parse(Path::new("runner")).expect("fixture path is valid"),
+            b"#!/usr/bin/env tclsh\nproc main {} {}\n",
+        );
+        assert_eq!(class, InputClass::Source);
+        assert!(signals.iter().any(|signal| {
+            signal.language == "tcl" && signal.evidence == LanguageEvidence::Shebang
+        }));
     }
 
     #[test]

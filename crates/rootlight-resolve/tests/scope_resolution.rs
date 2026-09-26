@@ -2015,6 +2015,47 @@ fn dynamic_calls_require_calibrated_exact_promotion() {
 }
 
 #[test]
+fn tcl_command_spelling_never_proves_uncalibrated_binding() {
+    let mut fixture = Fixture::new();
+    let target = fixture.add_entity(
+        162,
+        "literal_command",
+        fixture.primary_file,
+        EntityKind::Function,
+        None,
+    );
+    fixture.add_occurrence(
+        163,
+        "literal_command",
+        fixture.primary_file,
+        OccurrenceRole::CallSite,
+        None,
+    );
+    fixture.document.files[0].language = "tcl".to_owned();
+    fixture.document.entities[0].language = "tcl".to_owned();
+    fixture.document.provenance[0].language = "tcl".to_owned();
+    fixture.validate();
+
+    let resolved = ResolutionEngine::default()
+        .resolve(&fixture.document, &Cancellation::new())
+        .expect("literal Tcl command has bounded candidates");
+    assert_eq!(
+        resolved.decisions[0].outcome,
+        ResolutionOutcome::Candidates {
+            symbols: vec![target],
+            total_count: 1,
+            completeness: CoverageStatus::Complete,
+            confidence: Confidence::new(899).expect("dynamic ceiling is valid"),
+        }
+    );
+    assert!(
+        resolved.decisions[0].explanation.candidates[0]
+            .penalties
+            .contains(&ResolutionPenalty::DynamicCallUncalibrated)
+    );
+}
+
+#[test]
 fn typed_foreign_links_retain_protocol_evidence_and_confidence() {
     let mut fixture = Fixture::new();
     let caller = fixture.add_entity(
