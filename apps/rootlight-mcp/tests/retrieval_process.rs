@@ -486,6 +486,65 @@ fn tcl_substitution_call_is_source_grounded_without_exact_binding_claim() {
 }
 
 #[test]
+fn tcl_control_body_calls_retain_exact_source_without_exact_binding_claim() {
+    let source = "proc pulse {} {return ok}\nproc caller {} {if {1} {pulse} else {pulse}; set data {pulse}}\n";
+    let mut fixture =
+        RetrievalFixture::spawn_with_layout(Some(("commands.tcl", source)), FixtureLayout::Data);
+    let located = fixture.standalone(
+        "tcl-control-locate",
+        "code.locate",
+        json!({"query": "pulse", "search_modes": ["exact"], "languages": ["tcl"],
+            "scope": {"paths": ["commands.tcl"]}, "response_profile": "evidence"}),
+    );
+    assert_success(&located, "code.locate");
+    let definition = located["result"]["structuredContent"]["data"]["matches"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|hit| hit["kind"] == "function" && hit["display_name"] == "pulse")
+        .expect("Tcl procedure is located");
+    let explained = fixture.standalone(
+        "tcl-control-explain",
+        "symbol.explain",
+        json!({"symbol_ids": [definition["symbol_id"]],
+            "sections": ["references_summary"], "response_profile": "evidence"}),
+    );
+    assert_success(&explained, "symbol.explain");
+    let symbol = &explained["result"]["structuredContent"]["data"]["symbols"][0];
+    assert_eq!(symbol["relations"]["references_exact"], 0);
+    let references = symbol["relation_samples"]
+        .as_array()
+        .expect("candidate samples are present")
+        .iter()
+        .filter(|sample| sample["kind"] == "dispatch_candidate")
+        .flat_map(|sample| sample["source_refs"].as_array().unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(references.len(), 2, "{symbol:#}");
+    for reference in &references {
+        assert_eq!(
+            reference["generation"],
+            definition["source_ref"]["generation"]
+        );
+        let start = usize::try_from(reference["span"]["start_byte"].as_u64().unwrap()).unwrap();
+        let end = usize::try_from(reference["span"]["end_byte"].as_u64().unwrap()).unwrap();
+        assert_eq!(source.get(start..end), Some("pulse"));
+    }
+    let read = fixture.standalone(
+        "tcl-control-read",
+        "source.read",
+        json!({"references": references.iter().map(|reference| json!({"source_ref": reference})).collect::<Vec<_>>(),
+            "context_lines_before": 0, "context_lines_after": 0, "response_profile": "evidence"}),
+    );
+    assert_success(&read, "source.read");
+    let chunks = read["result"]["structuredContent"]["data"]["chunks"]
+        .as_array()
+        .expect("both control bodies have source chunks");
+    assert_eq!(chunks.len(), 2);
+    assert!(chunks.iter().all(|chunk| chunk["content"] == "pulse"));
+    fixture.finish();
+}
+
+#[test]
 fn agda_nested_declarations_keep_exact_sources_across_mcp() {
     let source = "module Main where\n  module Left where\n    same : Nat\n    same = 1\n  module Right where\n    same : Nat\n    same = 2\n  data Choice : Set where\n    yes : Choice\n  record Pair : Set where\n    field\n      left : Nat\n  result : Nat\n  result = 0 where\n    local : Nat\n    local = 1\n  alternate : Nat\n  alternate = local\n    where\n      local : Nat\n      local = 2\n";
     let mut fixture =

@@ -1,4 +1,4 @@
-//! First-party Tcl command scanner for literal procedures and namespaces.
+//! First-party Tcl scanner for literal procedures, namespaces, and script bodies.
 //! It retains exact source spans without executing Tcl substitutions; dynamic
 //! command construction and unvisited script-bearing arguments stay bounded.
 
@@ -415,9 +415,13 @@ fn scan_source(
                 continue;
             }
             let command_start = cursor;
-            let mut words = [None; 4];
+            let mut words = [None; 5];
             let mut word_count = 0_usize;
+            let mut last_word = None;
             loop {
+                if word_count.is_multiple_of(CHECK_INTERVAL) {
+                    cancellation.check()?;
+                }
                 while cursor < script.end
                     && source
                         .get(cursor)
@@ -441,6 +445,7 @@ fn scan_source(
                     *slot = Some(word);
                 }
                 word_count = word_count.saturating_add(1);
+                last_word = Some(word);
                 queue_substitutions(
                     source,
                     word,
@@ -521,6 +526,19 @@ fn scan_source(
                     owner_item: script.owner_item,
                 });
             }
+            queue_script_arguments(
+                source,
+                first,
+                &words,
+                word_count,
+                last_word,
+                command_end,
+                &mut scripts,
+                script.owner_item,
+                script.depth,
+                max_syntax_nodes,
+                cancellation,
+            )?;
         }
     }
     let declaration_facts = items.iter().try_fold(0_usize, |count, item| {
@@ -616,6 +634,186 @@ fn queue_substitutions(
             Some(_) => cursor += 1,
             None => return Err(failure("tcl-lexical-balance-invalid")),
         }
+    }
+    Ok(())
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the bounded source scan passes its existing queue context without allocating"
+)]
+fn queue_script_arguments(
+    source: &[u8],
+    first: Word,
+    words: &[Option<Word>; 5],
+    word_count: usize,
+    last_word: Option<Word>,
+    command_end: usize,
+    scripts: &mut Vec<Script>,
+    owner_item: Option<usize>,
+    parent_depth: usize,
+    max_syntax_nodes: usize,
+    cancellation: &Cancellation,
+) -> Result<(), AdapterError> {
+    let Some(name) = first.literal_name(source) else {
+        return Ok(());
+    };
+    match name {
+        b"if" => queue_if_scripts(
+            source,
+            first.end,
+            command_end,
+            scripts,
+            owner_item,
+            parent_depth,
+            max_syntax_nodes,
+            cancellation,
+        )?,
+        b"while" if word_count == 3 => {
+            queue_braced_script(
+                words[2],
+                scripts,
+                owner_item,
+                parent_depth,
+                max_syntax_nodes,
+            )?;
+        }
+        b"for" if word_count == 5 => {
+            for word in [words[1], words[3], words[4]] {
+                queue_braced_script(word, scripts, owner_item, parent_depth, max_syntax_nodes)?;
+            }
+        }
+        b"foreach" if word_count >= 4 && word_count.is_multiple_of(2) => {
+            queue_braced_script(
+                last_word,
+                scripts,
+                owner_item,
+                parent_depth,
+                max_syntax_nodes,
+            )?;
+        }
+        b"catch" if (2..=4).contains(&word_count) => {
+            queue_braced_script(
+                words[1],
+                scripts,
+                owner_item,
+                parent_depth,
+                max_syntax_nodes,
+            )?;
+        }
+        b"eval" if word_count == 2 => {
+            queue_braced_script(
+                words[1],
+                scripts,
+                owner_item,
+                parent_depth,
+                max_syntax_nodes,
+            )?;
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+fn queue_braced_script(
+    word: Option<Word>,
+    scripts: &mut Vec<Script>,
+    owner_item: Option<usize>,
+    parent_depth: usize,
+    max_syntax_nodes: usize,
+) -> Result<(), AdapterError> {
+    if let Some((start, end)) = word.and_then(Word::braced_script) {
+        push_script(
+            scripts,
+            start,
+            end,
+            owner_item,
+            parent_depth,
+            max_syntax_nodes,
+        )?;
+    }
+    Ok(())
+}
+
+#[derive(Clone, Copy)]
+enum IfArgument {
+    Condition,
+    OptionalThen,
+    Body,
+    Clause,
+    ElseBody,
+    Done,
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the variable-length if clauses are rescanned without retaining an argument vector"
+)]
+fn queue_if_scripts(
+    source: &[u8],
+    start: usize,
+    end: usize,
+    scripts: &mut Vec<Script>,
+    owner_item: Option<usize>,
+    parent_depth: usize,
+    max_syntax_nodes: usize,
+    cancellation: &Cancellation,
+) -> Result<(), AdapterError> {
+    let mut cursor = start;
+    let mut state = IfArgument::Condition;
+    let mut word_count = 0_usize;
+    while cursor < end {
+        if word_count.is_multiple_of(CHECK_INTERVAL) {
+            cancellation.check()?;
+        }
+        while cursor < end
+            && source
+                .get(cursor)
+                .is_some_and(|byte| matches!(byte, b' ' | b'\t' | b'\r'))
+        {
+            cursor += 1;
+        }
+        if cursor >= end {
+            break;
+        }
+        let Some(word) = read_word(source, cursor, end, cancellation)? else {
+            break;
+        };
+        word_count = word_count.saturating_add(1);
+        cursor = word.end;
+        state = match state {
+            IfArgument::Condition => IfArgument::OptionalThen,
+            IfArgument::OptionalThen if word.literal_name(source) == Some(&b"then"[..]) => {
+                IfArgument::Body
+            }
+            IfArgument::OptionalThen | IfArgument::Body => {
+                queue_braced_script(
+                    Some(word),
+                    scripts,
+                    owner_item,
+                    parent_depth,
+                    max_syntax_nodes,
+                )?;
+                IfArgument::Clause
+            }
+            IfArgument::Clause if word.literal_name(source) == Some(&b"elseif"[..]) => {
+                IfArgument::Condition
+            }
+            IfArgument::Clause if word.literal_name(source) == Some(&b"else"[..]) => {
+                IfArgument::ElseBody
+            }
+            IfArgument::Clause | IfArgument::ElseBody => {
+                queue_braced_script(
+                    Some(word),
+                    scripts,
+                    owner_item,
+                    parent_depth,
+                    max_syntax_nodes,
+                )?;
+                IfArgument::Done
+            }
+            IfArgument::Done => IfArgument::Done,
+        };
     }
     Ok(())
 }
@@ -927,6 +1125,44 @@ mod tests {
     }
 
     #[test]
+    fn control_command_scripts_retain_calls_without_treating_conditions_or_lists_as_scripts() {
+        let source = b"proc dispatch {} {\n  if {condition} then {first} elseif {other} {second} else {third}\n  while {condition} {fourth}\n  for {initialize} {condition} {advance} {fifth}\n  foreach key {list data} value {more data} {sixth}\n  catch {seventh} result options\n  eval {eighth}\n  set literal {hidden}\n}\n";
+        let parsed = scan_source(source, 64, &Cancellation::new()).expect("Tcl source parses");
+        assert_eq!(parsed.items.len(), 1);
+        let mut calls = parsed
+            .calls
+            .iter()
+            .map(|call| {
+                assert_eq!(call.owner_item, Some(0));
+                std::str::from_utf8(&source[call.start..call.end]).expect("call is UTF-8")
+            })
+            .collect::<Vec<_>>();
+        calls.sort_unstable();
+        assert_eq!(
+            calls,
+            [
+                "advance",
+                "catch",
+                "eighth",
+                "eval",
+                "fifth",
+                "first",
+                "for",
+                "foreach",
+                "fourth",
+                "if",
+                "initialize",
+                "second",
+                "set",
+                "seventh",
+                "sixth",
+                "third",
+                "while",
+            ]
+        );
+    }
+
+    #[test]
     fn duplicate_names_keep_candidate_call_sites() {
         let source = b"proc route/(edit) {} {shared}\nproc shared {} {}\nproc shared {} {}\nproc caller {} {route/(edit)}\n";
         let parsed = scan_source(source, 32, &Cancellation::new()).expect("Tcl source parses");
@@ -958,6 +1194,14 @@ mod tests {
         let source = b"proc one {} {}\nproc two {} {}\n";
         assert!(scan_source(source, 4, &Cancellation::new()).is_err());
         assert!(scan_source(b"set value [][][][]\n", 4, &Cancellation::new()).is_err());
+        assert!(
+            scan_source(
+                b"while {1} {while {1} {while {1} {stop}}}",
+                4,
+                &Cancellation::new()
+            )
+            .is_err()
+        );
         assert!(scan_source(b"\xff", 4, &Cancellation::new()).is_err());
     }
 }
