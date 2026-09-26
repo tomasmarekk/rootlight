@@ -545,6 +545,44 @@ fn tcl_control_body_calls_retain_exact_source_without_exact_binding_claim() {
 }
 
 #[test]
+fn tcl_continued_list_data_does_not_create_candidate_call_edges() {
+    let source =
+        "proc card {} {return ok}\r\nset sprites [list \\\r\n  card 0 0 \\\r\n  border 1 2]\r\n";
+    let mut fixture =
+        RetrievalFixture::spawn_with_layout(Some(("commands.tcl", source)), FixtureLayout::Data);
+    let located = fixture.standalone(
+        "tcl-continued-data-locate",
+        "code.locate",
+        json!({"query": "card", "search_modes": ["exact"], "languages": ["tcl"],
+            "scope": {"paths": ["commands.tcl"]}, "response_profile": "evidence"}),
+    );
+    assert_success(&located, "code.locate");
+    let definition = located["result"]["structuredContent"]["data"]["matches"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|hit| hit["kind"] == "function" && hit["display_name"] == "card")
+        .expect("Tcl procedure is located");
+    let explained = fixture.standalone(
+        "tcl-continued-data-explain",
+        "symbol.explain",
+        json!({"symbol_ids": [definition["symbol_id"]],
+            "sections": ["references_summary"], "response_profile": "evidence"}),
+    );
+    assert_success(&explained, "symbol.explain");
+    let symbol = &explained["result"]["structuredContent"]["data"]["symbols"][0];
+    assert_eq!(symbol["relations"]["references_exact"], 0);
+    let candidates = symbol["relation_samples"]
+        .as_array()
+        .expect("relation samples are present")
+        .iter()
+        .filter(|sample| sample["kind"] == "dispatch_candidate")
+        .count();
+    assert_eq!(candidates, 0, "{symbol:#}");
+    fixture.finish();
+}
+
+#[test]
 fn agda_nested_declarations_keep_exact_sources_across_mcp() {
     let source = "module Main where\n  module Left where\n    same : Nat\n    same = 1\n  module Right where\n    same : Nat\n    same = 2\n  data Choice : Set where\n    yes : Choice\n  record Pair : Set where\n    field\n      left : Nat\n  result : Nat\n  result = 0 where\n    local : Nat\n    local = 1\n  alternate : Nat\n  alternate = local\n    where\n      local : Nat\n      local = 2\n";
     let mut fixture =

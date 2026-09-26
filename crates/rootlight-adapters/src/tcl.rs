@@ -398,20 +398,23 @@ fn scan_source(
             if cursor.is_multiple_of(CHECK_INTERVAL) {
                 cancellation.check()?;
             }
-            while source
-                .get(cursor)
-                .is_some_and(|byte| matches!(byte, b' ' | b'\t' | b'\r' | b'\n' | b';'))
-                && cursor < script.end
-            {
-                cursor += 1;
+            loop {
+                skip_word_space(source, &mut cursor, script.end);
+                if cursor < script.end
+                    && source
+                        .get(cursor)
+                        .is_some_and(|byte| matches!(byte, b'\r' | b'\n' | b';'))
+                {
+                    cursor = line_ending_end(source, cursor, script.end).unwrap_or(cursor + 1);
+                } else {
+                    break;
+                }
             }
             if cursor >= script.end {
                 break;
             }
             if source.get(cursor) == Some(&b'#') {
-                while cursor < script.end && source.get(cursor) != Some(&b'\n') {
-                    cursor += 1;
-                }
+                cursor = skip_comment(source, cursor, script.end);
                 continue;
             }
             let command_start = cursor;
@@ -422,17 +425,11 @@ fn scan_source(
                 if word_count.is_multiple_of(CHECK_INTERVAL) {
                     cancellation.check()?;
                 }
-                while cursor < script.end
-                    && source
-                        .get(cursor)
-                        .is_some_and(|byte| matches!(byte, b' ' | b'\t' | b'\r'))
-                {
-                    cursor += 1;
-                }
+                skip_word_space(source, &mut cursor, script.end);
                 if cursor >= script.end
                     || source
                         .get(cursor)
-                        .is_some_and(|byte| matches!(byte, b'\n' | b';'))
+                        .is_some_and(|byte| matches!(byte, b'\r' | b'\n' | b';'))
                 {
                     break;
                 }
@@ -617,7 +614,10 @@ fn queue_substitutions(
             cancellation.check()?;
         }
         match source.get(cursor) {
-            Some(b'\\') => cursor = (cursor + 2).min(word.content_end),
+            Some(b'\\') => {
+                cursor = line_continuation_end(source, cursor, word.content_end)
+                    .unwrap_or((cursor + 2).min(word.content_end));
+            }
             Some(b'[') => {
                 let after = balanced_brackets(source, cursor, word.content_end, cancellation)?
                     .ok_or_else(|| failure("tcl-lexical-balance-invalid"))?;
@@ -766,13 +766,7 @@ fn queue_if_scripts(
         if word_count.is_multiple_of(CHECK_INTERVAL) {
             cancellation.check()?;
         }
-        while cursor < end
-            && source
-                .get(cursor)
-                .is_some_and(|byte| matches!(byte, b' ' | b'\t' | b'\r'))
-        {
-            cursor += 1;
-        }
+        skip_word_space(source, &mut cursor, end);
         if cursor >= end {
             break;
         }
@@ -831,7 +825,10 @@ fn read_word(
         let Some(after) = balanced_braces(source, start, end, cancellation)? else {
             return Ok(None);
         };
-        if after < end && !source.get(after).is_some_and(|byte| word_separator(*byte)) {
+        if after < end
+            && !source.get(after).is_some_and(|byte| word_separator(*byte))
+            && line_continuation_end(source, after, end).is_none()
+        {
             return Ok(None);
         }
         return Ok(Some(Word {
@@ -849,7 +846,10 @@ fn read_word(
                 cancellation.check()?;
             }
             match source.get(cursor) {
-                Some(b'\\') => cursor = (cursor + 2).min(end),
+                Some(b'\\') => {
+                    cursor =
+                        line_continuation_end(source, cursor, end).unwrap_or((cursor + 2).min(end));
+                }
                 Some(b'[') => {
                     let Some(after) = balanced_brackets(source, cursor, end, cancellation)? else {
                         return Ok(None);
@@ -861,6 +861,7 @@ fn read_word(
                         && !source
                             .get(cursor + 1)
                             .is_some_and(|byte| word_separator(*byte))
+                        && line_continuation_end(source, cursor + 1, end).is_none()
                     {
                         return Ok(None);
                     }
@@ -885,6 +886,7 @@ fn read_word(
         }
         match source.get(cursor) {
             Some(byte) if word_separator(*byte) => break,
+            Some(b'\\') if line_continuation_end(source, cursor, end).is_some() => break,
             Some(b'\\') => cursor = (cursor + 2).min(end),
             Some(b'[') => {
                 let Some(after) = balanced_brackets(source, cursor, end, cancellation)? else {
@@ -909,6 +911,63 @@ fn word_separator(byte: u8) -> bool {
     matches!(byte, b' ' | b'\t' | b'\r' | b'\n' | b';')
 }
 
+fn line_ending_end(source: &[u8], cursor: usize, end: usize) -> Option<usize> {
+    if cursor >= end {
+        return None;
+    }
+    match source.get(cursor) {
+        Some(b'\n') => Some(cursor + 1),
+        Some(b'\r') if cursor + 1 < end && source.get(cursor + 1) == Some(&b'\n') => {
+            Some(cursor + 2)
+        }
+        Some(b'\r') => Some(cursor + 1),
+        _ => None,
+    }
+}
+
+fn line_continuation_end(source: &[u8], cursor: usize, end: usize) -> Option<usize> {
+    if source.get(cursor) != Some(&b'\\') {
+        return None;
+    }
+    let mut after = line_ending_end(source, cursor + 1, end)?;
+    while after < end
+        && source
+            .get(after)
+            .is_some_and(|byte| matches!(byte, b' ' | b'\t'))
+    {
+        after += 1;
+    }
+    Some(after)
+}
+
+fn skip_word_space(source: &[u8], cursor: &mut usize, end: usize) {
+    while *cursor < end {
+        if source
+            .get(*cursor)
+            .is_some_and(|byte| matches!(byte, b' ' | b'\t'))
+        {
+            *cursor += 1;
+        } else if let Some(after) = line_continuation_end(source, *cursor, end) {
+            *cursor = after;
+        } else {
+            break;
+        }
+    }
+}
+
+fn skip_comment(source: &[u8], mut cursor: usize, end: usize) -> usize {
+    while cursor < end {
+        if let Some(after) = line_continuation_end(source, cursor, end) {
+            cursor = after;
+        } else if let Some(after) = line_ending_end(source, cursor, end) {
+            return after;
+        } else {
+            cursor += 1;
+        }
+    }
+    cursor
+}
+
 fn balanced_braces(
     source: &[u8],
     start: usize,
@@ -926,7 +985,7 @@ fn balanced_braces(
         };
         if byte == b'\\' {
             // Escaped braces do not change Tcl's brace nesting.
-            cursor = (cursor + 2).min(end);
+            cursor = line_continuation_end(source, cursor, end).unwrap_or((cursor + 2).min(end));
             continue;
         }
         if byte == b'{' {
@@ -966,11 +1025,18 @@ fn balanced_brackets(
             return Ok(None);
         };
         if byte == b'\\' {
-            if brace_depth == 0 && !quoted[bracket_depth - 1] {
-                word_start[bracket_depth - 1] = false;
-                command_start[bracket_depth - 1] = false;
+            if let Some(after) = line_continuation_end(source, cursor, end) {
+                if brace_depth == 0 && !quoted[bracket_depth - 1] {
+                    word_start[bracket_depth - 1] = true;
+                }
+                cursor = after;
+            } else {
+                if brace_depth == 0 && !quoted[bracket_depth - 1] {
+                    word_start[bracket_depth - 1] = false;
+                    command_start[bracket_depth - 1] = false;
+                }
+                cursor = (cursor + 2).min(end);
             }
-            cursor = (cursor + 2).min(end);
             continue;
         }
         if brace_depth > 0 {
@@ -999,15 +1065,13 @@ fn balanced_brackets(
             }
         } else {
             match byte {
-                b' ' | b'\t' | b'\r' => word_start[bracket_depth - 1] = true,
-                b'\n' | b';' => {
+                b' ' | b'\t' => word_start[bracket_depth - 1] = true,
+                b'\r' | b'\n' | b';' => {
                     word_start[bracket_depth - 1] = true;
                     command_start[bracket_depth - 1] = true;
                 }
                 b'#' if command_start[bracket_depth - 1] => {
-                    while cursor < end && source.get(cursor) != Some(&b'\n') {
-                        cursor += 1;
-                    }
+                    cursor = skip_comment(source, cursor, end);
                     continue;
                 }
                 b'{' if word_start[bracket_depth - 1] => {
@@ -1099,6 +1163,52 @@ mod tests {
             &source[parsed.items[0].name_start..parsed.items[0].name_end],
             b"visible"
         );
+    }
+
+    #[test]
+    fn continued_data_words_do_not_become_commands() {
+        for source in [
+            &b"set palette [list \\\n  card 0 0 \\\n  border 1 2]\nproc draw {} {puts ok}\n"[..],
+            &b"set palette [list \\\r\n  card 0 0 \\\r\n  border 1 2]\r\nproc draw {} {puts ok}\r\n"[..],
+            &b"set palette [list \\\r  card 0 0 \\\r  border 1 2]\rproc draw {} {puts ok}\r"[..],
+        ] {
+            let parsed = scan_source(source, 32, &Cancellation::new()).expect("Tcl source parses");
+            assert!(!parsed.lexical_incomplete);
+            assert_eq!(parsed.items.len(), 1);
+            let calls = parsed
+                .calls
+                .iter()
+                .map(|call| &source[call.start..call.end])
+                .collect::<Vec<_>>();
+            assert_eq!(calls, [&b"set"[..], &b"list"[..], &b"puts"[..]]);
+        }
+    }
+
+    #[test]
+    fn continued_bare_words_stay_in_the_same_command() {
+        for source in [
+            &b"set value \\\n  data\n"[..],
+            &b"set value \\\r\n  data\r\n"[..],
+            &b"set value \\\r  data\r"[..],
+        ] {
+            let parsed = scan_source(source, 8, &Cancellation::new()).expect("Tcl source parses");
+            assert_eq!(parsed.calls.len(), 1);
+            assert_eq!(&source[parsed.calls[0].start..parsed.calls[0].end], b"set");
+        }
+    }
+
+    #[test]
+    fn continued_control_bodies_and_comments_keep_command_boundaries() {
+        let source = b"# hidden \\\r\n  still hidden\r\nproc visible {} {\r\n  if {1} \\\r\n    {puts ok}\r\n  set value [list \\\r\n    data]\r\n}\r\n";
+        let parsed = scan_source(source, 32, &Cancellation::new()).expect("Tcl source parses");
+        assert_eq!(parsed.items.len(), 1);
+        let mut calls = parsed
+            .calls
+            .iter()
+            .map(|call| &source[call.start..call.end])
+            .collect::<Vec<_>>();
+        calls.sort_unstable();
+        assert_eq!(calls, [&b"if"[..], &b"list"[..], &b"puts"[..], &b"set"[..]]);
     }
 
     #[test]
