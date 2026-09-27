@@ -23,6 +23,14 @@ const FIRST: &[u8] = b"Attribute VB_Name = \"Alpha\"\r\nPublic Function Compute(
 const SECOND: &[u8] = b"Attribute VB_Name = \"Beta\"\r\nPublic Sub Dispatch()\r\nEnd Sub\r\n";
 
 fn reference_book(major: u16) -> (Vec<u8>, Vec<Vec<u8>>) {
+    reference_book_with_names(major, None, None)
+}
+
+fn reference_book_with_names(
+    major: u16,
+    leading: Option<(&[u8], &str)>,
+    extended: Option<(&[u8], &str)>,
+) -> (Vec<u8>, Vec<Vec<u8>>) {
     fn text(out: &mut Vec<u8>, value: &[u8]) {
         out.extend(u32::try_from(value.len()).unwrap().to_le_bytes());
         out.extend(value);
@@ -31,21 +39,38 @@ fn reference_book(major: u16) -> (Vec<u8>, Vec<Vec<u8>>) {
         out.extend(id.to_le_bytes());
         out.extend(0u32.to_le_bytes());
     }
+    fn name(out: &mut Vec<u8>, pair: Option<(&[u8], &str)>) {
+        if let Some((mbcs, unicode)) = pair {
+            out.extend(0x0016u16.to_le_bytes());
+            text(out, mbcs);
+            out.extend(0x003eu16.to_le_bytes());
+            text(
+                out,
+                &unicode
+                    .encode_utf16()
+                    .flat_map(u16::to_le_bytes)
+                    .collect::<Vec<_>>(),
+            );
+        }
+    }
     let first = format!("*\\G{{01234567-89AB-CDEF-1032-547698BADCFE}}#{major:x}.2#409#C:\\unavailable\\first.tlb#LibraryShared").into_bytes();
     let second = b"*\\G{01234567-89AB-CDEF-1032-547698BADCFE}#1.3#409#C:\\unavailable\\second.tlb#LibraryShared".to_vec();
     let mut records = Vec::new();
     for identifier in [&first[..], &second[..], b"malformed-library".as_slice()] {
+        name(&mut records, leading);
         marker(&mut records, 0x000d);
         text(&mut records, identifier);
         records.extend([0; 6]);
     }
     let project_start = records.len();
+    name(&mut records, leading);
     marker(&mut records, 0x000e);
     text(&mut records, b"*\\CC:\\unavailable\\project.xlsm");
     text(&mut records, b"*\\C../project.xlsm");
     records.extend(1u32.to_le_bytes());
     records.extend(2u16.to_le_bytes());
     let project_record = records[project_start..].to_vec();
+    name(&mut records, leading);
     records.extend(0x0033u16.to_le_bytes());
     text(&mut records, &first);
     marker(&mut records, 0x002f);
@@ -54,6 +79,7 @@ fn reference_book(major: u16) -> (Vec<u8>, Vec<Vec<u8>>) {
         b"*\\G{00000000-0000-0000-0000-000000000000}#0.0#0##",
     );
     records.extend([0; 6]);
+    name(&mut records, extended);
     records.extend([0; 6]);
     text(&mut records, &second);
     records.extend([0; 26]);
@@ -70,6 +96,269 @@ fn reference_book(major: u16) -> (Vec<u8>, Vec<Vec<u8>>) {
         book,
         vec![first.clone(), second.clone(), project_record, first, second],
     )
+}
+
+#[test]
+fn declared_vba_reference_names_are_searchable_and_source_bound_after_restart() {
+    let root = tempdir();
+    let storage = tempdir();
+    let paths = rootlight_runtime::RuntimePaths::new(
+        storage.path().join("state"),
+        storage.path().join("runtime"),
+    )
+    .unwrap();
+    paths.prepare_owner().unwrap();
+    let (book, _) = reference_book_with_names(
+        1,
+        Some((b"Caf\xe9", "Café")),
+        Some((b"ExtendedApi", "ExtendedApi")),
+    );
+    fs::write(root.path().join("book.xlsm"), &book).unwrap();
+    let mut service = FirstSliceService::new_durable(4, paths.state_dir(), &deadline()).unwrap();
+    let receipt = service.index_repository(root.path(), &deadline()).unwrap();
+    let mut first_sources = Vec::new();
+    for restart in [false, true] {
+        if restart {
+            drop(service);
+            service = FirstSliceService::new_durable(4, paths.state_dir(), &deadline()).unwrap();
+        }
+        assert_eq!(
+            service.index_repository(root.path(), &deadline()).unwrap(),
+            receipt
+        );
+        let snapshot = service
+            .loaded_generation_snapshot(receipt.generation)
+            .unwrap();
+        let entities: Vec<_> = snapshot
+            .document()
+            .entities
+            .iter()
+            .filter(|entity| entity.kind == EntityKind::ExternalSymbol)
+            .collect();
+        assert_eq!(entities.len(), 5);
+        assert_eq!(
+            entities
+                .iter()
+                .map(|entity| entity.id)
+                .collect::<BTreeSet<_>>()
+                .len(),
+            5
+        );
+        let mut sources = Vec::new();
+        for (query, count) in [("Café", 4), ("ExtendedApi", 1), ("LibraryShared", 4)] {
+            let located = service
+                .code_locate_with_languages_and_budget(
+                    receipt.generation,
+                    query.to_owned(),
+                    LocateMode::Exact,
+                    vec!["vba".to_owned()],
+                    16,
+                    0,
+                    FirstSliceBudget::default(),
+                    &deadline(),
+                )
+                .unwrap();
+            let symbols: BTreeSet<_> = located
+                .data
+                .hits
+                .iter()
+                .filter_map(|hit| hit.symbol)
+                .collect();
+            assert_eq!(symbols.len(), count, "{query}");
+            assert_eq!(
+                symbols,
+                entities
+                    .iter()
+                    .filter(|entity| entity.qualified_name == query || entity.display_name == query)
+                    .map(|entity| entity.id)
+                    .collect()
+            );
+        }
+        for entity in &entities {
+            let source = entity.evidence.source.clone().unwrap();
+            let read = service
+                .source_read_with_options_and_budget(
+                    receipt.generation,
+                    vec![source.clone()],
+                    SourceReadOptions::new()
+                        .with_context_lines_before(0)
+                        .with_context_lines_after(0)
+                        .with_encoding(SourceEncoding::Bytes),
+                    FirstSliceBudget::default(),
+                    &deadline(),
+                )
+                .unwrap();
+            let bytes = &read.data.chunks[0].bytes;
+            let mbcs = if entity.qualified_name == "Café" {
+                b"Caf\xe9".as_slice()
+            } else {
+                b"ExtendedApi".as_slice()
+            };
+            let unicode: Vec<_> = entity
+                .qualified_name
+                .encode_utf16()
+                .flat_map(u16::to_le_bytes)
+                .collect();
+            assert!(
+                bytes.starts_with(mbcs) || bytes.windows(mbcs.len()).any(|window| window == mbcs)
+            );
+            assert!(bytes.windows(unicode.len()).any(|window| window == unicode));
+            assert_eq!(source.generation(), receipt.generation);
+            assert_eq!(
+                read.data.chunks[0]
+                    .extracted_from
+                    .as_ref()
+                    .unwrap()
+                    .content_hash(),
+                content_hash(&book)
+            );
+            let explained = service
+                .symbol_explain(receipt.generation, entity.id, &deadline())
+                .unwrap();
+            assert_eq!(explained.data.entity, **entity);
+            assert!(explained.data.occurrences.is_empty());
+            sources.push(source);
+        }
+        if restart {
+            assert_eq!(sources, first_sources);
+        } else {
+            first_sources = sources;
+        }
+    }
+    let (changed, _) = reference_book_with_names(1, Some((b"RenamedApi", "RenamedApi")), None);
+    fs::write(root.path().join("book.xlsm"), changed).unwrap();
+    let updated = service.index_repository(root.path(), &deadline()).unwrap();
+    assert_ne!(receipt.generation, updated.generation);
+    for (query, count) in [("Café", 0), ("ExtendedApi", 0), ("RenamedApi", 4)] {
+        let located = service
+            .code_locate_with_languages_and_budget(
+                updated.generation,
+                query.to_owned(),
+                LocateMode::Exact,
+                vec!["vba".to_owned()],
+                16,
+                0,
+                FirstSliceBudget::default(),
+                &deadline(),
+            )
+            .unwrap();
+        assert_eq!(
+            located
+                .data
+                .hits
+                .iter()
+                .filter_map(|hit| hit.symbol)
+                .count(),
+            count,
+            "{query}"
+        );
+    }
+    let prepared = service
+        .prepare_repository_with_options(
+            root.path(),
+            FirstSliceIndexOptions::clean_rebuild(FirstSliceIndexMode::Structural),
+            &deadline(),
+        )
+        .unwrap();
+    let rebuilt = service.publish_prepared(prepared, &deadline()).unwrap();
+    assert!(updated.logical_snapshot.is_some());
+    assert_eq!(rebuilt.logical_snapshot, updated.logical_snapshot);
+}
+
+#[test]
+fn inconsistent_vba_reference_names_do_not_hide_valid_library_declarations() {
+    for (mbcs, unicode) in [
+        (b"Alias".as_slice(), "ALIAS"),
+        (b"".as_slice(), ""),
+        (b"Caf\xe9".as_slice(), "Cafe\u{301}"),
+        (b"\x81".as_slice(), "Alias"),
+    ] {
+        let (book, _) = reference_book_with_names(
+            1,
+            Some((mbcs, unicode)),
+            Some((b"ExtendedApi", "ExtendedApi")),
+        );
+        let (prepared, _) = prepared_fixture(&book, 100, 128 * 1024 * 1024, &deadline());
+        assert_eq!(prepared.references.len(), 5);
+        let name_issues: Vec<_> = prepared
+            .issues
+            .iter()
+            .filter(|(_, message)| message.ends_with("name rejected"))
+            .collect();
+        assert_eq!(name_issues.len(), 4, "{unicode}");
+        assert!(
+            name_issues
+                .iter()
+                .all(|(_, message)| public_diagnostic_message(message))
+        );
+    }
+}
+
+#[test]
+fn conflicting_reference_name_is_not_an_indexed_alias() {
+    let root = tempdir();
+    let (book, _) = reference_book_with_names(
+        1,
+        Some((b"FalseAlias", "OtherAlias")),
+        Some((b"ExtendedApi", "ExtendedApi")),
+    );
+    fs::write(root.path().join("book.xlsm"), book).unwrap();
+    let mut service = FirstSliceService::new(4).unwrap();
+    let receipt = service.index_repository(root.path(), &deadline()).unwrap();
+    assert_eq!(
+        receipt
+            .diagnostics
+            .iter()
+            .filter(|diagnostic| diagnostic.message.ends_with("name rejected"))
+            .count(),
+        4
+    );
+    let snapshot = service
+        .loaded_generation_snapshot(receipt.generation)
+        .unwrap();
+    let references: Vec<_> = snapshot
+        .document()
+        .entities
+        .iter()
+        .filter(|entity| entity.kind == EntityKind::ExternalSymbol)
+        .collect();
+    assert_eq!(references.len(), 5);
+    assert_eq!(
+        references
+            .iter()
+            .filter(|entity| entity.qualified_name == entity.canonical_name)
+            .count(),
+        4
+    );
+    for (query, count) in [
+        ("FalseAlias", 0),
+        ("OtherAlias", 0),
+        ("ExtendedApi", 1),
+        ("LibraryShared", 4),
+    ] {
+        let located = service
+            .code_locate_with_languages_and_budget(
+                receipt.generation,
+                query.to_owned(),
+                LocateMode::Exact,
+                vec!["vba".to_owned()],
+                16,
+                0,
+                FirstSliceBudget::default(),
+                &deadline(),
+            )
+            .unwrap();
+        assert_eq!(
+            located
+                .data
+                .hits
+                .iter()
+                .filter_map(|hit| hit.symbol)
+                .count(),
+            count,
+            "{query}"
+        );
+    }
 }
 
 #[test]

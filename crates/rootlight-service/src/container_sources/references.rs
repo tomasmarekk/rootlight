@@ -19,6 +19,12 @@ pub(super) struct DeclaredReference {
     range: std::ops::Range<usize>,
     identity: String,
     display: String,
+    name: Option<DeclaredName>,
+}
+
+struct DeclaredName {
+    text: String,
+    range: std::ops::Range<usize>,
 }
 
 pub(super) fn prepare(
@@ -237,6 +243,46 @@ pub(super) fn prepare(
                 .filter(|name| !name.is_empty())
                 .unwrap_or(&identity)
                 .to_owned();
+            // A control's extended library has its own name. Never infer it
+            // from the leading name of the original/twiddled library.
+            let name = match (field, reference.payload()) {
+                (
+                    ReferenceField::ControlExtended,
+                    ReferencePayload::Control { extended_name, .. },
+                ) => extended_name.as_ref(),
+                _ => reference.name(),
+            };
+            let name = if let Some(name) = name {
+                let reserved = budget.reserve();
+                limits.input_bytes = reserved;
+                limits.output_bytes = reserved;
+                match declared_name(
+                    bytes,
+                    name.name_range(),
+                    name.unicode_name_range(),
+                    project.code_page(),
+                    limits,
+                    cancellation,
+                ) {
+                    Ok(name) => {
+                        budget.settle(
+                            reserved,
+                            name.range.len().max(name.text.len()).min(reserved),
+                        )?;
+                        Some(name)
+                    }
+                    Err(error) => {
+                        check_cancellation(cancellation)?;
+                        prepared.issue(
+                            file,
+                            format!("{} name rejected", reference_error(ordinal, *field, &error)),
+                        )?;
+                        None
+                    }
+                }
+            } else {
+                None
+            };
             prepared
                 .references
                 .try_reserve(1)
@@ -247,10 +293,78 @@ pub(super) fn prepare(
                 range,
                 identity,
                 display,
+                name,
             });
         }
     }
     Ok(())
+}
+
+fn declared_name(
+    bytes: &[u8],
+    range: std::ops::Range<usize>,
+    unicode_range: std::ops::Range<usize>,
+    code_page: u16,
+    limits: TextLimits,
+    cancellation: &Cancellation,
+) -> Result<DeclaredName, rootlight_source::vba_reference::ReferenceError> {
+    use rootlight_source::{
+        vba_reference::ReferenceError,
+        vba_text::{DecodedText, TextError},
+    };
+    if unicode_range.start < range.end {
+        return Err(ReferenceError::Range);
+    }
+    let original = bytes.get(range.clone()).ok_or(ReferenceError::Range)?;
+    let unicode = bytes
+        .get(unicode_range.clone())
+        .ok_or(ReferenceError::Range)?;
+    let length = original
+        .len()
+        .checked_add(unicode.len())
+        .ok_or(ReferenceError::Range)?;
+    if length > limits.input_bytes {
+        return Err(ReferenceError::Text(TextError::Limit {
+            resource: "name bytes",
+            maximum: limits.input_bytes,
+        }));
+    }
+    let decoded = DecodedText::decode(original, code_page, limits, cancellation)
+        .map_err(ReferenceError::Text)?;
+    if decoded.text().is_empty() {
+        return Err(ReferenceError::Invalid {
+            offset: range.start,
+        });
+    }
+    // REFERENCENAME requires identical text in both encodings. Comparing exact
+    // UTF-16LE bytes avoids normalization, lossy fallback and a second allocation.
+    let mut expected = decoded.text().encode_utf16().flat_map(u16::to_le_bytes);
+    for (offset, byte) in unicode.iter().enumerate() {
+        if offset % 1024 == 0 {
+            cancellation
+                .check()
+                .map_err(TextError::Cancelled)
+                .map_err(ReferenceError::Text)?;
+        }
+        if expected.next() != Some(*byte) {
+            return Err(ReferenceError::Invalid {
+                offset: unicode_range.start + offset,
+            });
+        }
+    }
+    if expected.next().is_some() {
+        return Err(ReferenceError::Invalid {
+            offset: unicode_range.end,
+        });
+    }
+    let mut text = String::new();
+    text.try_reserve_exact(decoded.text().len())
+        .map_err(|_| ReferenceError::Text(TextError::Limits))?;
+    text.push_str(decoded.text());
+    Ok(DeclaredName {
+        text,
+        range: range.start..unicode_range.end,
+    })
 }
 
 fn absent_twiddled(field: ReferenceField, bytes: &[u8]) -> bool {
@@ -354,13 +468,19 @@ pub(super) fn append(
         if !files.contains_key(&reference.owner) {
             return Err(FirstSliceError::Identity);
         }
+        let evidence_range = reference.name.as_ref().map_or_else(
+            || reference.range.clone(),
+            |name| {
+                reference.range.start.min(name.range.start)..reference.range.end.max(name.range.end)
+            },
+        );
         let source = SourceRef::new(
             document.repository,
             document.generation,
             SourceSpan::new(
                 file.id,
-                u64::try_from(reference.range.start).map_err(|_| FirstSliceError::Limits)?,
-                u64::try_from(reference.range.end).map_err(|_| FirstSliceError::Limits)?,
+                u64::try_from(evidence_range.start).map_err(|_| FirstSliceError::Limits)?,
+                u64::try_from(evidence_range.end).map_err(|_| FirstSliceError::Limits)?,
             )
             .map_err(|_| FirstSliceError::Identity)?,
             file.content_hash,
@@ -461,7 +581,10 @@ pub(super) fn append(
             container: Some(ContainerRef::File(file.id)),
             container_identity,
             declared_identity: reference.identity.clone(),
-            signature_discriminator: source.span().start_byte().to_le_bytes().to_vec(),
+            signature_discriminator: u64::try_from(reference.range.start)
+                .map_err(|_| FirstSliceError::Limits)?
+                .to_le_bytes()
+                .to_vec(),
             build_context_discriminator: first_slice_build_context().as_bytes().to_vec(),
         };
         claim.symbol = claim.derived_symbol();
@@ -478,7 +601,13 @@ pub(super) fn append(
             tier: AnalysisTier::TierC,
             canonical_name: reference.identity.clone(),
             display_name: reference.display.clone(),
-            qualified_name: reference.identity.clone(),
+            // This is a source-authored lookup label, not proof of identifier
+            // grammar, uniqueness, or a resolved external namespace.
+            qualified_name: reference
+                .name
+                .as_ref()
+                .map_or(&reference.identity, |name| &name.text)
+                .clone(),
             container: claim.container,
             visibility: EntityVisibility::Unknown,
             flags: vec![EntityFlag::External, EntityFlag::Synthetic],
@@ -522,6 +651,94 @@ pub(super) fn append(
 mod tests {
     use super::*;
     use rootlight_source::{vba_reference::ReferenceError, vba_text::TextError};
+
+    #[test]
+    fn declared_names_enforce_decoding_limits_and_exact_encoding_equivalence() {
+        for (original, text, page) in [
+            (b"Alias".as_slice(), "Alias", 1252),
+            (b"Caf\xe9".as_slice(), "Café", 1252),
+            ("Δ𝄞".as_bytes(), "Δ𝄞", 65001),
+        ] {
+            let mut bytes = original.to_vec();
+            let start = bytes.len();
+            bytes.extend(text.encode_utf16().flat_map(u16::to_le_bytes));
+            let mut limits = TextLimits::default();
+            limits.input_bytes = bytes.len();
+            limits.output_bytes = text.len();
+            let cancellation = Cancellation::new();
+            let decoded = declared_name(
+                &bytes,
+                0..start,
+                start..bytes.len(),
+                page,
+                limits,
+                &cancellation,
+            )
+            .unwrap();
+            assert_eq!(decoded.text, text);
+            assert_eq!(decoded.range, 0..bytes.len());
+            limits.input_bytes -= 1;
+            assert!(matches!(
+                declared_name(
+                    &bytes,
+                    0..start,
+                    start..bytes.len(),
+                    page,
+                    limits,
+                    &cancellation
+                ),
+                Err(ReferenceError::Text(TextError::Limit { .. }))
+            ));
+            limits.input_bytes += 1;
+            limits.output_bytes -= 1;
+            assert!(matches!(
+                declared_name(
+                    &bytes,
+                    0..start,
+                    start..bytes.len(),
+                    page,
+                    limits,
+                    &cancellation
+                ),
+                Err(ReferenceError::Text(TextError::Limit { .. }))
+            ));
+            limits.output_bytes += 1;
+            assert!(matches!(
+                declared_name(
+                    &bytes,
+                    0..start,
+                    start..bytes.len(),
+                    932,
+                    limits,
+                    &cancellation
+                ),
+                Err(ReferenceError::Text(TextError::Unsupported {
+                    code_page: 932
+                }))
+            ));
+            for unicode in [
+                start..bytes.len() - 1,
+                start..bytes.len() + 1,
+                0..bytes.len(),
+            ] {
+                assert!(
+                    declared_name(&bytes, 0..start, unicode, page, limits, &cancellation).is_err()
+                );
+            }
+            cancellation.cancel(rootlight_cancel::CancellationReason::ClientRequest);
+            assert!(matches!(
+                declared_name(
+                    &bytes,
+                    0..start,
+                    start..bytes.len(),
+                    page,
+                    limits,
+                    &cancellation
+                ),
+                Err(ReferenceError::Text(TextError::Cancelled(_)))
+            ));
+        }
+    }
 
     #[test]
     fn only_the_exact_twiddled_sentinel_omits_an_external_dependency() {
