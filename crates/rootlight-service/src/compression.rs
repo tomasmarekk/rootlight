@@ -1,4 +1,4 @@
-//! First-party decompression shared by source containers and durable recovery.
+//! First-party compression codecs shared by source containers and durable recovery.
 //! Callers retain admission, provenance and publication ownership; codecs reject
 //! malformed framing and never convert cancellation into successful completion.
 
@@ -6,6 +6,7 @@ use rootlight_cancel::Cancelled;
 use std::fmt;
 
 mod deflate;
+mod encode;
 pub(crate) mod gzip;
 pub(crate) use deflate::inflate;
 

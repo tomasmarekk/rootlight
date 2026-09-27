@@ -1,4 +1,4 @@
-//! Single-member GZIP recovery reader over the shared first-party DEFLATE core.
+//! Single-member GZIP recovery IO over the shared first-party DEFLATE core.
 //! Optional header fields are validated but never interpreted as filesystem paths.
 //! EOF proves the exact admitted size, CRC and absence of trailing members/data.
 
@@ -8,6 +8,9 @@ use rootlight_cancel::Cancellation;
 use std::{io, sync::LazyLock};
 
 use super::{Error, deflate};
+
+mod write;
+pub(crate) use write::Writer;
 
 #[cfg(test)]
 mod tests;

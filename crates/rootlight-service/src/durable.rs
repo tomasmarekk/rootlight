@@ -15,6 +15,7 @@ use std::{
 };
 
 use cap_std::{ambient_authority, fs::Dir};
+#[cfg(test)]
 use flate2::{Compression, write::GzEncoder};
 use rootlight_cancel::{Cancellation, CancellationReason};
 use rootlight_catalog::OracleReader;
@@ -1338,7 +1339,7 @@ fn decode_recovery_snapshot(
         usize::try_from(expected_bytes).map_err(|_| FirstSliceError::Limits)?,
         cancellation,
     )
-    .map_err(|error| recovery_decode_error(error, cancellation))?;
+    .map_err(|error| recovery_codec_error(error, cancellation))?;
     let mut decoded = Vec::new();
     decoded
         .try_reserve_exact(usize::try_from(expected_bytes).map_err(|_| FirstSliceError::Limits)?)
@@ -1348,7 +1349,7 @@ fn decode_recovery_snapshot(
         check_cancellation(cancellation)?;
         let read = decoder
             .read(&mut buffer)
-            .map_err(|error| recovery_decode_error(error, cancellation))?;
+            .map_err(|error| recovery_codec_error(error, cancellation))?;
         if read == 0 {
             break;
         }
@@ -1370,7 +1371,7 @@ fn decode_recovery_snapshot(
     Ok(decoded)
 }
 
-fn recovery_decode_error(error: std::io::Error, cancellation: &Cancellation) -> FirstSliceError {
+fn recovery_codec_error(error: std::io::Error, cancellation: &Cancellation) -> FirstSliceError {
     if let Err(cancelled) = check_cancellation(cancellation) {
         return cancelled;
     }
@@ -3563,10 +3564,12 @@ impl DurablePreparedGeneration {
             .map_err(|_| FirstSliceError::Catalog)?;
         let encoded_writer =
             buffered_recovery_writer(file, MAX_RECOVERY_ENCODED_BYTES, cancellation);
-        let encoder = GzEncoder::new(encoded_writer, Compression::fast());
+        let encoder = gzip::Writer::new(encoded_writer, cancellation)
+            .map_err(|error| recovery_codec_error(error, cancellation))?;
         let mut decoded_writer =
             RecoverySnapshotWriter::new(encoder, MAX_RECOVERY_SNAPSHOT_BYTES, cancellation);
         if rmp_serde::encode::write_named(&mut decoded_writer, snapshot.document()).is_err() {
+            check_cancellation(cancellation)?;
             return Err(recovery_writer_error(
                 [
                     decoded_writer.failure,
@@ -3577,6 +3580,7 @@ impl DurablePreparedGeneration {
             ));
         }
         if decoded_writer.flush().is_err() {
+            check_cancellation(cancellation)?;
             return Err(recovery_writer_error(
                 [
                     decoded_writer.failure,
@@ -3595,6 +3599,7 @@ impl DurablePreparedGeneration {
         let decoded_digest = ContentHash::from_bytes(*decoded_writer.hasher.finalize().as_bytes());
         let mut encoder = decoded_writer.inner;
         if encoder.try_finish().is_err() {
+            check_cancellation(cancellation)?;
             return Err(recovery_writer_error(
                 [encoder.get_ref().failure],
                 FirstSliceError::Catalog,
@@ -6687,7 +6692,7 @@ fn restore_recovery_generation(
                     usize::try_from(plan.decoded_bytes).map_err(|_| FirstSliceError::Limits)?,
                     cancellation,
                 )
-                .map_err(|error| recovery_decode_error(error, cancellation))?,
+                .map_err(|error| recovery_codec_error(error, cancellation))?,
             );
             IdentityVerifiedGeneration::restore_published_messagepack_reader_with_source_files(
                 plan.metadata,
@@ -8151,7 +8156,7 @@ mod tests {
             source
         );
         assert!(matches!(
-            recovery_decode_error(std::io::ErrorKind::OutOfMemory.into(), &cancellation),
+            recovery_codec_error(std::io::ErrorKind::OutOfMemory.into(), &cancellation),
             FirstSliceError::Limits
         ));
         encoded.extend_from_within(..);
