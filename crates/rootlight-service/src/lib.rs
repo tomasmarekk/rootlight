@@ -13503,17 +13503,21 @@ impl FirstSliceService {
                         {
                             Some(FirstSliceCoverageGapReason::AdapterFailed)
                         }
-                        code if code.contains("truncated") || code == "resolution-work-bounded" => {
+                        code if code.contains("truncated")
+                            || code == "resolution-work-bounded"
+                            || code == PROJECT_SYNTAX_FACT_LIMIT_DIAGNOSTIC =>
+                        {
                             Some(FirstSliceCoverageGapReason::Truncated)
                         }
                         _ => None,
                     };
                     if let Some(reason) = reason {
-                        let explains_entities =
-                            matches!(
-                                diagnostic.code.as_str(),
-                                "unsupported-encoding" | "unsupported-language"
-                            ) || (diagnostic.code.starts_with("project-adapter-")
+                        let explains_entities = matches!(
+                            diagnostic.code.as_str(),
+                            "unsupported-encoding" | "unsupported-language"
+                        ) || diagnostic.code
+                            == PROJECT_SYNTAX_FACT_LIMIT_DIAGNOSTIC
+                            || (diagnostic.code.starts_with("project-adapter-")
                                 && diagnostic.code.ends_with("-fallback"));
                         if explains_entities && let Some(file) = file {
                             explained_entity_files.insert(file);
@@ -27523,6 +27527,18 @@ mod tests {
                 .iter()
                 .any(|diagnostic| diagnostic.code == PROJECT_SYNTAX_FACT_LIMIT_DIAGNOSTIC)
         );
+        let gaps = service
+            .coverage_gaps_until(receipt.repository, receipt.generation, &deadline())
+            .expect("bounded project gaps resolve");
+        assert!(gaps.iter().any(|gap| {
+            gap.reason == FirstSliceCoverageGapReason::Truncated
+                && gap.language.as_deref() == Some("python")
+                && gap.files == 1
+        }));
+        assert!(!gaps.iter().any(|gap| {
+            gap.reason == FirstSliceCoverageGapReason::Unsupported
+                && gap.language.as_deref() == Some("python")
+        }));
 
         assert_eq!(calls.load(Ordering::Relaxed), 1);
         assert!(status.coverage.iter().any(|coverage| {
