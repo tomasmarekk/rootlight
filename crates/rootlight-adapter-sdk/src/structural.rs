@@ -562,6 +562,7 @@ pub fn structural_captured_name_for_fact<'a>(
                 | "vba.direct_type_identifier.reference"
                 | "vba.constructed_type_identifier.reference"
                 | "vba.tested_type_identifier.reference"
+                | "vba.procedure_pointer.reference"
                 | "vba.type_identifier.reference"
                 | "vba.invoked_identifier.reference"
                 | "vba.self_member.reference"

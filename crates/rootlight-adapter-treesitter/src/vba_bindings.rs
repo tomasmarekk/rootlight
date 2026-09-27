@@ -1332,6 +1332,9 @@ impl<'a> VbaBindings<'a> {
         if text.len() > self.maximum_name_bytes {
             return Ok(None);
         }
+        if fact.syntax_kind().as_str() == "vba.procedure_pointer.reference" {
+            return self.procedure_pointer(fact, text, cancellation);
+        }
         if fact.syntax_kind().as_str() == "vba.application.reference" {
             return self.array_application(fact, cancellation);
         }
@@ -1633,6 +1636,51 @@ impl<'a> VbaBindings<'a> {
                 return Ok(None);
             }
             parent = scope.parent();
+        }
+        Err(invalid_capture())
+    }
+
+    fn procedure_pointer(
+        &self,
+        fact: &SyntaxFact,
+        text: &str,
+        cancellation: &Cancellation,
+    ) -> Result<Option<ResolvedBinding>, AdapterError> {
+        let Some(key) = member_key(text) else {
+            return Ok(None);
+        };
+        // MS-VBAL 5.6.10 gives procedure pointers a separate namespace tier:
+        // locals (including a function's result slot) cannot shadow callbacks.
+        // Class instance callbacks have implementation-defined behavior; retain
+        // their gap until the host supplies a supported calling-context proof.
+        if self.class_module.is_some() || text.ends_with(['$', '%', '&', '#', '@', '^', '!']) {
+            return Ok(None);
+        }
+        let mut parent = fact.parent();
+        for _ in 0..self.facts.len() {
+            cancellation.check()?;
+            let Some((owner, _)) = self.scope(parent, cancellation)? else {
+                return Ok(None);
+            };
+            let scope = self.fact(owner)?;
+            if scope.syntax_kind().as_str() != "vba.file.scope" {
+                parent = scope.parent();
+                continue;
+            }
+            if self.foreign_scopes.contains(&owner) {
+                return Ok(None);
+            }
+            let symbol = match self.bindings.get(&owner).and_then(|names| names.get(&key)) {
+                Some(Some(Binding::Procedure(symbol) | Binding::Function { symbol, .. })) => {
+                    Some(*symbol)
+                }
+                Some(Some(Binding::Property(accessors))) => accessors.get,
+                _ => None,
+            };
+            return Ok(symbol.map(|symbol| ResolvedBinding {
+                symbol,
+                is_call: false,
+            }));
         }
         Err(invalid_capture())
     }

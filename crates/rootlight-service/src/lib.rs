@@ -219,7 +219,7 @@ const PROJECT_FACTS_TRUNCATED_CODE: &str = "project-adapter-facts-truncated";
 const PROJECT_FACTS_TRUNCATED_MESSAGE: &str =
     "additional project semantic facts were omitted by aggregate resource limits";
 const AGGREGATE_DIAGNOSTICS_TRUNCATED_CODE: &str = "aggregate-diagnostics-truncated";
-const ANALYZER_BINARY_SEED: &[u8] = b"rootlight.first-slice.treesitter-structural/161";
+const ANALYZER_BINARY_SEED: &[u8] = b"rootlight.first-slice.treesitter-structural/162";
 const RESOLVER_BINARY_SEED: &[u8] = b"rootlight.first-slice.resolve/41";
 const INCREMENTAL_PROVIDER_SEED: &[u8] = b"rootlight.first-slice.incremental-provider/1";
 const LANGUAGE_DISPOSITION_PROVIDER_SEED: &[u8] = b"rootlight.first-slice.language-disposition/5";
@@ -30306,6 +30306,116 @@ mod tests {
                 assert_eq!(read.data.chunks.len(), 1);
                 assert_eq!(read.data.chunks[0].bytes, b"mE");
             }
+        }
+    }
+
+    #[test]
+    fn vba_procedure_pointers_follow_mutation_and_restart() {
+        let storage = durable_test_tempdir();
+        let paths = RuntimePaths::new(storage.path().join("state"), storage.path().join("runtime"))
+            .unwrap();
+        paths.prepare_owner().unwrap();
+        let fixture = durable_test_tempdir();
+        let path = fixture.path().join("callbacks.bas");
+        let original = "Private Declare PtrSafe Sub Register Lib \"callbacks\" (ByVal address As LongPtr)\nPrivate Sub Notify()\nEnd Sub\nSub Run()\nDim Notify As Long\nRegister AddressOf [Notify]\nEnd Sub\n";
+        let mut previous = None;
+        for (source, resolved) in [
+            (original.to_owned(), true),
+            (original.replace("Sub Notify()", "Sub Changed()"), false),
+            (original.to_owned(), true),
+        ] {
+            fs::write(&path, &source).unwrap();
+            let mut service =
+                FirstSliceService::new_durable(4, paths.state_dir(), &deadline()).unwrap();
+            let receipt = service
+                .index_repository(fixture.path(), &deadline())
+                .unwrap();
+            assert_eq!(receipt.indexed_files, 1);
+            assert_eq!(
+                service
+                    .index_repository(fixture.path(), &deadline())
+                    .unwrap(),
+                receipt
+            );
+            if let Some(generation) = previous {
+                assert_ne!(receipt.generation, generation);
+            }
+            previous = Some(receipt.generation);
+            let before = service
+                .loaded_generation_snapshot(receipt.generation)
+                .unwrap()
+                .document()
+                .clone();
+            drop(service);
+            let service =
+                FirstSliceService::new_durable(4, paths.state_dir(), &deadline()).unwrap();
+            let snapshot = service
+                .loaded_generation_snapshot(receipt.generation)
+                .unwrap();
+            let document = snapshot.document();
+            assert_eq!(document, &before);
+            let site = document
+                .occurrences
+                .iter()
+                .find(|site| site.syntax_kind == "vba.procedure_pointer.reference")
+                .unwrap();
+            assert_eq!(
+                matches!(site.target, OccurrenceTarget::Resolved { .. }),
+                resolved
+            );
+            assert_eq!(site.role, OccurrenceRole::Reference);
+            assert_eq!(site.source.generation(), receipt.generation);
+            assert_eq!(
+                document.skipped_regions.iter().any(|gap| {
+                    gap.source == site.source
+                        && gap.detail == "vba-procedure-pointer-target-unavailable"
+                }),
+                !resolved
+            );
+            assert!(!document.relations.iter().any(|edge| {
+                edge.predicate == RelationPredicate::Calls
+                    && edge.evidence.source.as_ref() == Some(&site.source)
+            }));
+            if let OccurrenceTarget::Resolved { symbol } = site.target {
+                assert!(document.entities.iter().any(|entity| {
+                    entity.id == symbol
+                        && entity.canonical_name == "Notify"
+                        && entity.kind == EntityKind::Function
+                }));
+                let relationships = service
+                    .symbol_relationships(
+                        receipt.generation,
+                        BTreeSet::from([symbol]),
+                        vec![RelationFamily::References, RelationFamily::Calls],
+                        Some(RelationDirection::Inbound),
+                        0,
+                        10,
+                        0,
+                        &deadline(),
+                    )
+                    .unwrap();
+                let references: Vec<_> = relationships
+                    .data
+                    .groups
+                    .iter()
+                    .flat_map(|group| &group.items)
+                    .flat_map(|edge| &edge.source_refs)
+                    .collect();
+                assert_eq!(references, vec![&site.source]);
+            }
+            let read = service
+                .source_read_with_options_and_budget(
+                    receipt.generation,
+                    vec![site.source.clone()],
+                    SourceReadOptions::new()
+                        .with_context_lines_before(0)
+                        .with_context_lines_after(0),
+                    FirstSliceBudget::default(),
+                    &deadline(),
+                )
+                .unwrap();
+            assert_eq!(read.data.chunks.len(), 1);
+            assert_eq!(read.data.chunks[0].bytes, b"[Notify]");
         }
     }
 

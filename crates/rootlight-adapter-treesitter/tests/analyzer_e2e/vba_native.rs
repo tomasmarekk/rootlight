@@ -40,6 +40,227 @@ fn output_with_native_kind(
 }
 
 #[test]
+fn vba_procedure_pointers_bind_without_calling_or_reading_locals() {
+    // MS-VBAL 5.6.10 skips the procedure-local tier in pointer context.
+    for (declaration, body, target_name) in [
+        (
+            "Private Sub Notify(ByVal value As Long)\nEnd Sub\n",
+            "Dim Notify As Long\nAccept AddressOf nOtIfY\n",
+            "Notify",
+        ),
+        (
+            "Private Function Notify(ByVal value As Long) As Long\nAccept AddressOf [Notify]\nEnd Function\n",
+            "",
+            "Notify",
+        ),
+        (
+            "Private Property Get Notify(ByVal value As Long) As Long\nEnd Property\nPrivate Property Let Notify(ByVal value As Long, ByVal nextValue As Long)\nEnd Property\n",
+            "Accept AddressOf Notify\n",
+            "Notify",
+        ),
+    ] {
+        let source = format!("{declaration}Sub Run()\n{body}End Sub\n");
+        let result = output(&source);
+        let document = result.document();
+        let site = document
+            .occurrences
+            .iter()
+            .find(|site| site.syntax_kind == "vba.procedure_pointer.reference")
+            .expect("native procedure pointer occurrence");
+        let target = document
+            .entities
+            .iter()
+            .find(|entity| {
+                entity.canonical_name == target_name
+                    && !matches!(entity.kind, rootlight_ir::EntityKind::Variable)
+                    && document.occurrences.iter().any(|definition| {
+                        definition.role == OccurrenceRole::Definition
+                            && definition.source.span().start_byte()
+                                == u64::try_from(source.find(target_name).unwrap()).unwrap()
+                            && definition.target == OccurrenceTarget::Resolved { symbol: entity.id }
+                    })
+            })
+            .unwrap();
+        assert_eq!(
+            site.target,
+            OccurrenceTarget::Resolved { symbol: target.id },
+            "{source}"
+        );
+        assert_eq!(site.role, OccurrenceRole::Reference);
+        assert!(document.relations.iter().any(|edge| {
+            edge.predicate == rootlight_ir::RelationPredicate::RefersTo
+                && edge.object == rootlight_ir::RelationEndpoint::Entity(target.id)
+                && edge.evidence.source.as_ref() == Some(&site.source)
+        }));
+        assert!(!document.relations.iter().any(|edge| {
+            edge.predicate == rootlight_ir::RelationPredicate::Calls
+                && edge.evidence.source.as_ref() == Some(&site.source)
+        }));
+        assert!(!document.skipped_regions.iter().any(|gap| {
+            gap.source == site.source && gap.detail == "vba-procedure-pointer-target-unavailable"
+        }));
+    }
+}
+
+#[test]
+fn vba_procedure_pointers_preserve_unproven_targets() {
+    for declaration in [
+        "Dim Notify As Long\n",
+        "Declare Sub Notify Lib \"callbacks\" ()\n",
+        "Private Property Let Notify(ByVal value As Long)\nEnd Property\n",
+        "Sub Notify()\nEnd Sub\nSub Notify()\nEnd Sub\n",
+        "#If FEATURE Then\nSub Notify()\nEnd Sub\n#End If\n",
+        "VERSION 1.0 CLASS\nAttribute VB_Name = \"Listener\"\nSub Notify()\nEnd Sub\n",
+        "",
+    ] {
+        let source = format!("{declaration}Sub Run()\nAccept AddressOf Notify\nEnd Sub\n");
+        let result = output(&source);
+        let document = result.document();
+        let site = document
+            .occurrences
+            .iter()
+            .find(|site| site.syntax_kind == "vba.procedure_pointer.reference")
+            .expect("native procedure pointer occurrence");
+        assert!(
+            matches!(site.target, OccurrenceTarget::Unresolved { .. }),
+            "{source}"
+        );
+        assert!(
+            document.skipped_regions.iter().any(|gap| {
+                gap.source == site.source
+                    && gap.detail == "vba-procedure-pointer-target-unavailable"
+            }),
+            "{source}"
+        );
+    }
+}
+
+#[test]
+fn vba_procedure_pointers_do_not_bind_partial_or_type_suffixed_names() {
+    for expression in [
+        "Notify.Other",
+        "Notify .Other",
+        "Notify _\n.Other",
+        "Notify$",
+        "Notify!Other",
+    ] {
+        let source =
+            format!("Sub Notify()\nEnd Sub\nSub Run()\nAccept AddressOf {expression}\nEnd Sub\n");
+        let result = output(&source);
+        let document = result.document();
+        let site = document
+            .occurrences
+            .iter()
+            .find(|site| {
+                matches!(
+                    site.syntax_kind.as_str(),
+                    "vba.procedure_pointer.reference"
+                        | "vba.unsupported_procedure_pointer.reference"
+                )
+            })
+            .expect("native pointer target retained");
+        assert!(
+            matches!(site.target, OccurrenceTarget::Unresolved { .. }),
+            "{expression}"
+        );
+        assert!(
+            document.skipped_regions.iter().any(|gap| {
+                gap.source == site.source
+                    && gap.detail == "vba-procedure-pointer-target-unavailable"
+            }),
+            "{expression}"
+        );
+    }
+}
+
+#[test]
+fn vba_procedure_pointer_continuations_do_not_consume_following_statements() {
+    for body in [
+        "Accept AddressOf Notify _\n, 1\n",
+        "Accept AddressOf Notify _\r\n, 1\r\n",
+        "With receiver\nAccept AddressOf Notify\n.Value = 1\nEnd With\n",
+    ] {
+        let source = format!("Sub Notify()\nEnd Sub\nSub Run()\n{body}End Sub\n");
+        let result = output(&source);
+        let site = result
+            .document()
+            .occurrences
+            .iter()
+            .find(|site| site.syntax_kind == "vba.procedure_pointer.reference")
+            .expect("complete simple pointer target");
+        assert!(
+            matches!(site.target, OccurrenceTarget::Resolved { .. }),
+            "{body}"
+        );
+        assert_eq!(site.role, OccurrenceRole::Reference);
+    }
+}
+
+#[test]
+fn vba_procedure_pointers_replay_with_native_module_context() {
+    use rootlight_adapter_sdk::NativeVbaModuleKind;
+
+    let source = "Attribute VB_Name = \"Callbacks\"\nSub Notify()\nEnd Sub\nSub Run()\nAccept AddressOf Notify\nEnd Sub\n";
+    let provider = Arc::new(provider());
+    let analyzer = analyzer(&provider, VBA);
+    let fixture = Fixture::new(VBA, source.as_bytes());
+    let budget = limits();
+    for kind in [NativeVbaModuleKind::Procedural, NativeVbaModuleKind::Object] {
+        let initial = request(&fixture.snapshot, &fixture.source, VBA, &budget)
+            .with_native_vba_module(kind)
+            .unwrap();
+        let (first, artifact) = analyzer
+            .analyze_and_capture(
+                &initial,
+                ExtensionSupport::default(),
+                MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
+                &deadline(),
+            )
+            .unwrap();
+        let site = first
+            .document()
+            .occurrences
+            .iter()
+            .find(|site| site.syntax_kind == "vba.procedure_pointer.reference")
+            .unwrap();
+        assert_eq!(
+            matches!(site.target, OccurrenceTarget::Resolved { .. }),
+            kind == NativeVbaModuleKind::Procedural
+        );
+        let changed = fixture.next_generation();
+        let next = request(&changed.snapshot, &changed.source, VBA, &budget)
+            .with_native_vba_module(kind)
+            .unwrap();
+        let replay = analyzer
+            .analyze_from_artifact(
+                &next,
+                &artifact,
+                ExtensionSupport::default(),
+                MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
+                &deadline(),
+            )
+            .unwrap();
+        let (fresh, _) = analyzer
+            .analyze_and_capture(
+                &next,
+                ExtensionSupport::default(),
+                MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
+                &deadline(),
+            )
+            .unwrap();
+        assert_eq!(replay.document(), fresh.document());
+        assert_eq!(replay.report(), fresh.report());
+        assert!(
+            replay
+                .document()
+                .occurrences
+                .iter()
+                .all(|site| { site.source.generation() == changed.source.generation() })
+        );
+    }
+}
+
+#[test]
 fn vba_native_context_binds_artifacts_and_required_fact_budgets() {
     use rootlight_adapter_sdk::NativeVbaModuleKind;
     let provider = Arc::new(provider());

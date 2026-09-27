@@ -384,12 +384,26 @@ pub(super) fn reference_syntax(
                 "vba.statement_label"
             });
         }
+        if kind == "addressof_expression" {
+            // VBA's pinned grammar admits only a simple target here. Do not
+            // bind the first component if a qualified name was split off.
+            return Ok(
+                if child.kind() == "identifier"
+                    && parent.child_by_field_name("target") == Some(child)
+                    && !parent.has_error()
+                    && !procedure_pointer_has_qualifier(child, source, cancellation)?
+                {
+                    "vba.procedure_pointer"
+                } else {
+                    "vba.unsupported_procedure_pointer"
+                },
+            );
+        }
         if matches!(
             kind,
             "type_expression"
                 | "dotted_type_expression"
                 | "implements_statement"
-                | "addressof_expression"
                 | "preprocessor_const"
                 | "goto_statement"
                 | "gosub_statement"
@@ -461,6 +475,32 @@ pub(super) fn reference_syntax(
     } else {
         "vba.identifier"
     })
+}
+
+fn procedure_pointer_has_qualifier(
+    target: Node<'_>,
+    source: &[u8],
+    cancellation: &Cancellation,
+) -> Result<bool, AdapterError> {
+    let mut continued = false;
+    for (offset, byte) in source
+        .get(target.end_byte()..)
+        .unwrap_or_default()
+        .iter()
+        .enumerate()
+    {
+        if offset % 512 == 0 {
+            cancellation.check()?;
+        }
+        match byte {
+            b' ' | b'\t' | b'\r' => {}
+            b'_' if !continued => continued = true,
+            b'\n' if continued => continued = false,
+            b'.' | b'!' => return Ok(true),
+            _ => return Ok(false),
+        }
+    }
+    Ok(false)
 }
 
 fn split_output_argument_is_invoked(expression: Node<'_>, source: &[u8]) -> bool {
