@@ -2537,7 +2537,9 @@ fn inspect_tree(
     max_depth: usize,
     cancellation: &Cancellation,
 ) -> Result<TraversalReport, AdapterError> {
-    let traversal = traverse_syntax(tree, max_nodes, max_depth, cancellation)?;
+    let pointer_source = matches!(request.language().as_str(), "vba" | "visual-basic-classic")
+        .then(|| request.source().bytes());
+    let traversal = traverse_syntax(tree, max_nodes, max_depth, pointer_source, cancellation)?;
     cancellation.check()?;
     let SyntaxTraversal {
         processed_nodes,
@@ -2617,6 +2619,7 @@ fn traverse_syntax(
     tree: &Tree,
     max_nodes: usize,
     max_depth: usize,
+    pointer_source: Option<&[u8]>,
     cancellation: &Cancellation,
 ) -> Result<SyntaxTraversal, AdapterError> {
     cancellation.check()?;
@@ -2640,7 +2643,14 @@ fn traverse_syntax(
             .ok_or_else(|| provider_failure("node-accounting"))?;
         observed_depth = observed_depth.max(depth);
         if error_span.is_none() && (node.is_error() || node.is_missing()) {
-            error_span = Some((node.start_byte(), node.end_byte()));
+            let recovered_pointer = if let Some(source) = pointer_source {
+                crate::query_pack::vba::is_pointer_comparison_recovery(node, source, cancellation)?
+            } else {
+                false
+            };
+            if !recovered_pointer {
+                error_span = Some((node.start_byte(), node.end_byte()));
+            }
         }
         if depth >= max_depth && node.child_count() > 0 {
             limited_depth = true;
@@ -3127,7 +3137,7 @@ mod tests {
         let tree = language_tree(GrammarFamily::Rust, b"fn cancelled() {}");
 
         assert!(matches!(
-            traverse_syntax(&tree, 1024, 64, &cancellation),
+            traverse_syntax(&tree, 1024, 64, None, &cancellation),
             Err(AdapterError::Cancelled {
                 reason: rootlight_cancel::CancellationReason::ClientRequest
             })

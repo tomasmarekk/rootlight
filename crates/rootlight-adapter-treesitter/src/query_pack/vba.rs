@@ -391,7 +391,13 @@ pub(super) fn reference_syntax(
                 if child.kind() == "identifier"
                     && parent.child_by_field_name("target") == Some(child)
                     && !parent.has_error()
-                    && !procedure_pointer_has_qualifier(child, source, cancellation)?
+                    && crate::vba_pointer::parse(
+                        source.get(child.start_byte()..).unwrap_or_default(),
+                        cancellation,
+                    )?
+                    .is_some_and(|path| {
+                        path.components == 1 && path.end == child.end_byte() - child.start_byte()
+                    })
                 {
                     "vba.procedure_pointer"
                 } else {
@@ -477,30 +483,147 @@ pub(super) fn reference_syntax(
     })
 }
 
-fn procedure_pointer_has_qualifier(
-    target: Node<'_>,
+pub(super) fn qualified_pointer_range(
+    node: Node<'_>,
+    source: &[u8],
+    cancellation: &Cancellation,
+) -> Result<Option<std::ops::Range<usize>>, AdapterError> {
+    if node.kind() != "identifier"
+        || !node.parent().is_some_and(|parent| {
+            parent.kind() == "addressof_expression"
+                && parent.child_by_field_name("target") == Some(node)
+                && !parent.has_error()
+        })
+    {
+        return Ok(None);
+    }
+    let start = node.start_byte();
+    Ok(
+        crate::vba_pointer::parse(source.get(start..).unwrap_or_default(), cancellation)?
+            .filter(|path| path.components > 1)
+            .map(|path| start..start + path.end),
+    )
+}
+
+pub(super) fn is_pointer_fragment(
+    node: Node<'_>,
     source: &[u8],
     cancellation: &Cancellation,
 ) -> Result<bool, AdapterError> {
-    let mut continued = false;
-    for (offset, byte) in source
-        .get(target.end_byte()..)
-        .unwrap_or_default()
-        .iter()
-        .enumerate()
+    if !matches!(
+        node.kind(),
+        "implicit_member_expression" | "qualified_member_expression" | "call_statement"
+    ) {
+        return Ok(false);
+    }
+    let mut statement = node;
+    while statement.kind() != "call_statement" {
+        cancellation.check()?;
+        if statement.kind() == "comparison_expression"
+            && let Some(operator) = statement.child_by_field_name("operator")
+            && let Some(missing) = operator.child(0)
+            && is_pointer_comparison_recovery(missing, source, cancellation)?
+            && let Some(right) = statement.child_by_field_name("right")
+            && node.start_byte() >= right.start_byte()
+            && node.end_byte() <= right.end_byte()
+        {
+            return Ok(true);
+        }
+        let Some(parent) = statement.parent() else {
+            return Ok(false);
+        };
+        if declaration_syntax(parent.kind()).is_some() {
+            return Ok(false);
+        }
+        statement = parent;
+    }
+    let Some(mut previous) = statement.prev_named_sibling() else {
+        return Ok(false);
+    };
+    while previous.kind() == "line_continuation" {
+        cancellation.check()?;
+        let Some(prior) = previous.prev_named_sibling() else {
+            return Ok(false);
+        };
+        previous = prior;
+    }
+    if previous.kind() != "call_statement" {
+        return Ok(false);
+    }
+    // The native grammar splits the trailing pointer argument into an adjacent
+    // implicit-member call. Suppress only its counterfeit callee/application,
+    // preserving any actual argument expressions after the complete name.
+    while previous.kind() != "addressof_expression" {
+        cancellation.check()?;
+        let Some(child) = u32::try_from(previous.named_child_count().saturating_sub(1))
+            .ok()
+            .and_then(|last| previous.named_child(last))
+        else {
+            return Ok(false);
+        };
+        previous = child;
+    }
+    let Some(target) = previous.child_by_field_name("target") else {
+        return Ok(false);
+    };
+    let Some(range) = qualified_pointer_range(target, source, cancellation)? else {
+        return Ok(false);
+    };
+    if let Some(callee) = statement.child_by_field_name("callee")
+        && callee.start_byte() >= target.end_byte()
+        && callee.end_byte() <= range.end
     {
-        if offset % 512 == 0 {
-            cancellation.check()?;
-        }
-        match byte {
-            b' ' | b'\t' | b'\r' => {}
-            b'_' if !continued => continued = true,
-            b'\n' if continued => continued = false,
-            b'.' | b'!' => return Ok(true),
-            _ => return Ok(false),
-        }
+        return Ok(node == statement
+            || (node.start_byte() >= callee.start_byte() && node.end_byte() <= range.end));
     }
     Ok(false)
+}
+
+pub(crate) fn is_pointer_comparison_recovery(
+    node: Node<'_>,
+    source: &[u8],
+    cancellation: &Cancellation,
+) -> Result<bool, AdapterError> {
+    if !node.is_missing() || node.kind() != "=" {
+        return Ok(false);
+    }
+    let Some(operator) = node
+        .parent()
+        .filter(|parent| parent.kind() == "comparison_operator" && parent.child_count() == 1)
+    else {
+        return Ok(false);
+    };
+    let Some(comparison) = operator
+        .parent()
+        .filter(|parent| parent.kind() == "comparison_expression")
+    else {
+        return Ok(false);
+    };
+    let Some(left) = comparison
+        .child_by_field_name("left")
+        .filter(|left| left.kind() == "addressof_expression")
+    else {
+        return Ok(false);
+    };
+    let Some(target) = left.child_by_field_name("target") else {
+        return Ok(false);
+    };
+    let Some(right) = comparison
+        .child_by_field_name("right")
+        .filter(|right| !right.has_error())
+    else {
+        return Ok(false);
+    };
+    let Some(range) = qualified_pointer_range(target, source, cancellation)? else {
+        return Ok(false);
+    };
+    // Inside parentheses the grammar inserts an '=' between the pointer's two
+    // pieces. The first-party name parser proves these exact bytes form one
+    // qualified target; no other error or real comparison is repaired here.
+    Ok(right.end_byte() == range.end
+        && target.end_byte() <= node.start_byte()
+        && node.end_byte() <= right.start_byte()
+        && comparison.end_byte() == range.end)
 }
 
 fn split_output_argument_is_invoked(expression: Node<'_>, source: &[u8]) -> bool {
@@ -652,6 +775,39 @@ pub(super) fn header_end(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn procedure_pointer_capture_retains_the_complete_qualified_target() {
+        let source = "Sub Run()\nAccept AddressOf Callbacks _\n.Notify\nEnd Sub\n";
+        let mut parser = tree_sitter::Parser::new();
+        parser
+            .set_language(&tree_sitter_vba::LANGUAGE.into())
+            .unwrap();
+        let tree = parser.parse(source, None).unwrap();
+        let family = super::super::GrammarFamily::Vba;
+        let pack = super::super::QueryPack::compile(family, include_str!("../../queries/vba.scm"))
+            .unwrap();
+        let extraction = pack
+            .extract(
+                family,
+                &tree,
+                source.as_bytes(),
+                1024,
+                1024,
+                &Cancellation::new(),
+            )
+            .unwrap();
+        let expected = "Callbacks _\n.Notify";
+        assert!(
+            extraction.candidates.iter().any(|candidate| {
+                candidate.syntax == "vba.qualified_procedure_pointer"
+                    && source.get(candidate.start..candidate.end) == Some(expected)
+            }),
+            "{} {:#?}",
+            tree.root_node().to_sexp(),
+            extraction.candidates
+        );
+    }
 
     #[test]
     fn automatic_type_capture_requires_a_scalar_variable_or_field() {

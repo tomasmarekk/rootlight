@@ -219,7 +219,7 @@ const PROJECT_FACTS_TRUNCATED_CODE: &str = "project-adapter-facts-truncated";
 const PROJECT_FACTS_TRUNCATED_MESSAGE: &str =
     "additional project semantic facts were omitted by aggregate resource limits";
 const AGGREGATE_DIAGNOSTICS_TRUNCATED_CODE: &str = "aggregate-diagnostics-truncated";
-const ANALYZER_BINARY_SEED: &[u8] = b"rootlight.first-slice.treesitter-structural/162";
+const ANALYZER_BINARY_SEED: &[u8] = b"rootlight.first-slice.treesitter-structural/163";
 const RESOLVER_BINARY_SEED: &[u8] = b"rootlight.first-slice.resolve/41";
 const INCREMENTAL_PROVIDER_SEED: &[u8] = b"rootlight.first-slice.incremental-provider/1";
 const LANGUAGE_DISPOSITION_PROVIDER_SEED: &[u8] = b"rootlight.first-slice.language-disposition/5";
@@ -30311,13 +30311,27 @@ mod tests {
 
     #[test]
     fn vba_procedure_pointers_follow_mutation_and_restart() {
+        assert_vba_pointer_restart("[Notify]", "vba.procedure_pointer.reference");
+    }
+
+    #[test]
+    fn vba_qualified_procedure_pointers_follow_mutation_and_restart() {
+        assert_vba_pointer_restart(
+            "Callbacks.[Notify]",
+            "vba.qualified_procedure_pointer.reference",
+        );
+    }
+
+    fn assert_vba_pointer_restart(spelling: &str, syntax: &str) {
         let storage = durable_test_tempdir();
         let paths = RuntimePaths::new(storage.path().join("state"), storage.path().join("runtime"))
             .unwrap();
         paths.prepare_owner().unwrap();
         let fixture = durable_test_tempdir();
         let path = fixture.path().join("callbacks.bas");
-        let original = "Private Declare PtrSafe Sub Register Lib \"callbacks\" (ByVal address As LongPtr)\nPrivate Sub Notify()\nEnd Sub\nSub Run()\nDim Notify As Long\nRegister AddressOf [Notify]\nEnd Sub\n";
+        let original = format!(
+            "Attribute VB_Name = \"Callbacks\"\nPrivate Declare PtrSafe Sub Register Lib \"callbacks\" (ByVal address As LongPtr)\nPrivate Sub Notify()\nEnd Sub\nSub Run()\nDim Notify As Long\nCall Register(AddressOf {spelling})\nEnd Sub\n"
+        );
         let mut previous = None;
         for (source, resolved) in [
             (original.to_owned(), true),
@@ -30357,7 +30371,7 @@ mod tests {
             let site = document
                 .occurrences
                 .iter()
-                .find(|site| site.syntax_kind == "vba.procedure_pointer.reference")
+                .find(|site| site.syntax_kind == syntax)
                 .unwrap();
             assert_eq!(
                 matches!(site.target, OccurrenceTarget::Resolved { .. }),
@@ -30415,7 +30429,7 @@ mod tests {
                 )
                 .unwrap();
             assert_eq!(read.data.chunks.len(), 1);
-            assert_eq!(read.data.chunks[0].bytes, b"[Notify]");
+            assert_eq!(read.data.chunks[0].bytes, spelling.as_bytes());
         }
     }
 

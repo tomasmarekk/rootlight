@@ -30,7 +30,7 @@ mod powershell;
 mod r;
 mod scala;
 mod sql;
-mod vba;
+pub(super) mod vba;
 mod yaml;
 
 const QUERY_CURSOR_MATCH_LIMIT: u32 = 4096;
@@ -657,6 +657,12 @@ impl QueryPack {
                     continue;
                 }
                 if input.family.is_classic_basic()
+                    && role == StructuralRole::Reference
+                    && vba::is_pointer_fragment(capture.node, input.source, input.cancellation)?
+                {
+                    continue;
+                }
+                if input.family.is_classic_basic()
                     && !vba::retain_capture(capture.node, role, input.source)
                 {
                     continue;
@@ -968,6 +974,19 @@ fn candidate_for_capture(
     source: &[u8],
     cancellation: &Cancellation,
 ) -> Result<QueryCandidate, AdapterError> {
+    if family.is_classic_basic()
+        && role == StructuralRole::Reference
+        && let Some(range) = vba::qualified_pointer_range(capture.node, source, cancellation)?
+    {
+        return Ok(QueryCandidate {
+            start: range.start,
+            end: range.end,
+            role,
+            syntax: "vba.qualified_procedure_pointer",
+            required: false,
+            native_depth: 0,
+        });
+    }
     if family == GrammarFamily::Yaml {
         return yaml::candidate(capture.node, role);
     }

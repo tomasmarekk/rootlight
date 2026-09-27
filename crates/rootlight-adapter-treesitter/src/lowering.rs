@@ -5457,7 +5457,9 @@ fn comment_text(text: &str) -> Option<&str> {
 
 fn source_reference_gap(fact: &SyntaxFact) -> Option<&'static str> {
     match fact.syntax_kind().as_str() {
-        "vba.procedure_pointer.reference" | "vba.unsupported_procedure_pointer.reference" => {
+        "vba.procedure_pointer.reference"
+        | "vba.qualified_procedure_pointer.reference"
+        | "vba.unsupported_procedure_pointer.reference" => {
             Some("vba-procedure-pointer-target-unavailable")
         }
         "vba.event_identifier.reference" => Some("vba-event-target-unavailable"),

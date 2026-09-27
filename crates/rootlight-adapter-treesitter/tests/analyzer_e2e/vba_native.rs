@@ -155,6 +155,7 @@ fn vba_procedure_pointers_do_not_bind_partial_or_type_suffixed_names() {
                 matches!(
                     site.syntax_kind.as_str(),
                     "vba.procedure_pointer.reference"
+                        | "vba.qualified_procedure_pointer.reference"
                         | "vba.unsupported_procedure_pointer.reference"
                 )
             })
@@ -169,6 +170,207 @@ fn vba_procedure_pointers_do_not_bind_partial_or_type_suffixed_names() {
                     && gap.detail == "vba-procedure-pointer-target-unavailable"
             }),
             "{expression}"
+        );
+    }
+}
+
+#[test]
+fn vba_qualified_procedure_pointers_preserve_exact_targets_and_argument_forms() {
+    for target in [
+        "Callbacks.Notify",
+        "[Callbacks].[Notify]",
+        "cAlLbAcKs.nOtIfY",
+        "Callbacks _\n.Notify",
+        "Callbacks. _\r\nNotify",
+    ] {
+        for call in [
+            format!("Accept AddressOf {target}"),
+            format!("Call Accept(AddressOf {target})"),
+            format!("value = Accept(AddressOf {target})"),
+        ] {
+            let source = format!(
+                "Attribute VB_Name = \"Callbacks\"\nSub Notify()\nEnd Sub\nSub Run()\nDim Callbacks As Long\n{call}\nEnd Sub\n"
+            );
+            let result = output(&source);
+            let document = result.document();
+            let site = document
+                .occurrences
+                .iter()
+                .find(|site| site.syntax_kind == "vba.qualified_procedure_pointer.reference")
+                .unwrap_or_else(|| panic!("complete target absent: {call}"));
+            let symbol = document
+                .entities
+                .iter()
+                .find(|entity| entity.canonical_name == "Notify")
+                .unwrap()
+                .id;
+            assert_eq!(site.target, OccurrenceTarget::Resolved { symbol }, "{call}");
+            assert_eq!(site.role, OccurrenceRole::Reference);
+            let start = usize::try_from(site.source.span().start_byte()).unwrap();
+            let end = usize::try_from(site.source.span().end_byte()).unwrap();
+            assert_eq!(source.get(start..end), Some(target));
+            assert!(document.relations.iter().any(|edge| {
+                edge.predicate == rootlight_ir::RelationPredicate::RefersTo
+                    && edge.evidence.source.as_ref() == Some(&site.source)
+                    && edge.object == rootlight_ir::RelationEndpoint::Entity(symbol)
+            }));
+            assert!(
+                !document.occurrences.iter().any(|other| {
+                    other.id != site.id
+                        && other.source.span().start_byte() >= site.source.span().start_byte()
+                        && other.source.span().end_byte() <= site.source.span().end_byte()
+                }),
+                "counterfeit target fragment: {call}"
+            );
+            assert!(
+                !document
+                    .skipped_regions
+                    .iter()
+                    .any(|gap| gap.source == site.source
+                        && gap.detail == "vba-procedure-pointer-target-unavailable")
+            );
+        }
+    }
+}
+
+#[test]
+fn vba_pointer_normalization_preserves_real_argument_calls() {
+    let source = "Attribute VB_Name = \"Callbacks\"\nSub Notify()\nEnd Sub\nFunction ReadValue() As Long\nEnd Function\nSub Run()\nAccept AddressOf Callbacks.Notify, ReadValue()\nEnd Sub\n";
+    let result = output(source);
+    let document = result.document();
+    let symbol = document
+        .entities
+        .iter()
+        .find(|entity| entity.canonical_name == "ReadValue")
+        .unwrap()
+        .id;
+    let start = u64::try_from(source.rfind("ReadValue()").unwrap()).unwrap();
+    assert!(
+        document
+            .occurrences
+            .iter()
+            .any(|site| site.source.span().start_byte() == start
+                && site.target == OccurrenceTarget::Resolved { symbol }
+                && site.role == OccurrenceRole::CallSite)
+    );
+    let pointer = document
+        .occurrences
+        .iter()
+        .find(|site| site.syntax_kind == "vba.qualified_procedure_pointer.reference")
+        .unwrap();
+    assert!(matches!(pointer.target, OccurrenceTarget::Resolved { .. }));
+    assert!(
+        !document
+            .occurrences
+            .iter()
+            .any(
+                |site| site.source.span().start_byte() > pointer.source.span().start_byte()
+                    && site.source.span().start_byte() < pointer.source.span().end_byte()
+            )
+    );
+}
+
+#[test]
+fn vba_qualified_procedure_pointers_preserve_namespace_and_target_barriers() {
+    for (header, declaration, target) in [
+        ("", "Sub Notify()\nEnd Sub\n", "Callbacks.Notify"),
+        (
+            "Attribute VB_Name = \"Other\"\n",
+            "Sub Notify()\nEnd Sub\n",
+            "Callbacks.Notify",
+        ),
+        (
+            "Attribute VB_Name = \"Callbacks\"\n",
+            "Dim Notify As Long\n",
+            "Callbacks.Notify",
+        ),
+        (
+            "Attribute VB_Name = \"Callbacks\"\n",
+            "Declare Sub Notify Lib \"native\" ()\n",
+            "Callbacks.Notify",
+        ),
+        (
+            "Attribute VB_Name = \"Callbacks\"\n",
+            "Property Get Notify() As Long\nEnd Property\n",
+            "Callbacks.Notify",
+        ),
+        (
+            "Attribute VB_Name = \"Callbacks\"\n",
+            "Sub Notify()\nEnd Sub\nSub Callbacks()\nEnd Sub\n",
+            "Callbacks.Notify",
+        ),
+        (
+            "Attribute VB_Name = \"Callbacks\"\n",
+            "#If Enabled Then\nSub Notify()\nEnd Sub\n#End If\n",
+            "Callbacks.Notify",
+        ),
+        (
+            "VERSION 1.0 CLASS\nAttribute VB_Name = \"Callbacks\"\n",
+            "Sub Notify()\nEnd Sub\n",
+            "Callbacks.Notify",
+        ),
+        (
+            "Attribute VB_Name = \"Callbacks\"\n",
+            "Sub Notify()\nEnd Sub\n",
+            "Project.Callbacks.Notify",
+        ),
+    ] {
+        let source =
+            format!("{header}{declaration}Sub Run()\nCall Accept(AddressOf {target})\nEnd Sub\n");
+        let result = output(&source);
+        let site = result
+            .document()
+            .occurrences
+            .iter()
+            .find(|site| site.syntax_kind == "vba.qualified_procedure_pointer.reference")
+            .expect("whole qualified target retained");
+        assert!(
+            matches!(site.target, OccurrenceTarget::Unresolved { .. }),
+            "{source}"
+        );
+        assert!(
+            result
+                .document()
+                .skipped_regions
+                .iter()
+                .any(|gap| gap.source == site.source
+                    && gap.detail == "vba-procedure-pointer-target-unavailable"),
+            "{source}"
+        );
+    }
+}
+
+#[test]
+fn vba_pointer_recovery_never_hides_unrelated_or_real_expression_errors() {
+    for body in [
+        "Call Accept(AddressOf Callbacks.Notify)\n@\n",
+        "Call Accept(AddressOf Callbacks.Notify + 1)\n",
+        "Call Accept(AddressOf Callbacks.Notify(1))\n",
+    ] {
+        let source = format!(
+            "Attribute VB_Name = \"Callbacks\"\nSub Notify()\nEnd Sub\nSub Run()\n{body}End Sub\n"
+        );
+        let fixture = Fixture::new(VBA, source.as_bytes());
+        let budget = limits();
+        let request = request(&fixture.snapshot, &fixture.source, VBA, &budget);
+        let parsed = rootlight_adapter_sdk::execute_parse(
+            &provider(),
+            &request.to_parse_request(),
+            MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
+            &deadline(),
+        )
+        .unwrap();
+        assert_ne!(
+            parsed.report().coverage().status(),
+            CoverageStatus::Complete,
+            "{body}"
+        );
+        assert!(
+            parsed
+                .diagnostics()
+                .iter()
+                .any(|diagnostic| diagnostic.code().as_str() == "syntax-error-recovery"),
+            "{body}"
         );
     }
 }
@@ -198,9 +400,23 @@ fn vba_procedure_pointer_continuations_do_not_consume_following_statements() {
 
 #[test]
 fn vba_procedure_pointers_replay_with_native_module_context() {
+    assert_vba_pointer_replay(
+        "Attribute VB_Name = \"Callbacks\"\nSub Notify()\nEnd Sub\nSub Run()\nAccept AddressOf Notify\nEnd Sub\n",
+        "vba.procedure_pointer.reference",
+    );
+}
+
+#[test]
+fn vba_qualified_procedure_pointers_replay_with_native_module_context() {
+    assert_vba_pointer_replay(
+        "Attribute VB_Name = \"Callbacks\"\nSub Notify()\nEnd Sub\nSub Run()\nCall Accept(AddressOf Callbacks.Notify)\nEnd Sub\n",
+        "vba.qualified_procedure_pointer.reference",
+    );
+}
+
+fn assert_vba_pointer_replay(source: &str, syntax: &str) {
     use rootlight_adapter_sdk::NativeVbaModuleKind;
 
-    let source = "Attribute VB_Name = \"Callbacks\"\nSub Notify()\nEnd Sub\nSub Run()\nAccept AddressOf Notify\nEnd Sub\n";
     let provider = Arc::new(provider());
     let analyzer = analyzer(&provider, VBA);
     let fixture = Fixture::new(VBA, source.as_bytes());
@@ -221,7 +437,7 @@ fn vba_procedure_pointers_replay_with_native_module_context() {
             .document()
             .occurrences
             .iter()
-            .find(|site| site.syntax_kind == "vba.procedure_pointer.reference")
+            .find(|site| site.syntax_kind == syntax)
             .unwrap();
         assert_eq!(
             matches!(site.target, OccurrenceTarget::Resolved { .. }),

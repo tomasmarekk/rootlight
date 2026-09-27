@@ -1332,7 +1332,10 @@ impl<'a> VbaBindings<'a> {
         if text.len() > self.maximum_name_bytes {
             return Ok(None);
         }
-        if fact.syntax_kind().as_str() == "vba.procedure_pointer.reference" {
+        if matches!(
+            fact.syntax_kind().as_str(),
+            "vba.procedure_pointer.reference" | "vba.qualified_procedure_pointer.reference"
+        ) {
             return self.procedure_pointer(fact, text, cancellation);
         }
         if fact.syntax_kind().as_str() == "vba.application.reference" {
@@ -1646,7 +1649,14 @@ impl<'a> VbaBindings<'a> {
         text: &str,
         cancellation: &Cancellation,
     ) -> Result<Option<ResolvedBinding>, AdapterError> {
-        let Some(key) = member_key(text) else {
+        let Some(path) = crate::vba_pointer::parse(text.as_bytes(), cancellation)? else {
+            return Ok(None);
+        };
+        if path.components > 2 {
+            return Ok(None);
+        }
+        let key = std::str::from_utf8(path.last).ok().and_then(member_key);
+        let Some(key) = key else {
             return Ok(None);
         };
         // MS-VBAL 5.6.10 gives procedure pointers a separate namespace tier:
@@ -1670,11 +1680,40 @@ impl<'a> VbaBindings<'a> {
             if self.foreign_scopes.contains(&owner) {
                 return Ok(None);
             }
+            if path.components == 2 {
+                let Some((module, _)) = &self.procedural_module else {
+                    return Ok(None);
+                };
+                if !path.first.eq_ignore_ascii_case(module.as_bytes()) {
+                    return Ok(None);
+                }
+                // The pointer namespace ignores value declarations, but a
+                // procedure/getter in the module tier outranks a module name.
+                if self
+                    .bindings
+                    .get(&owner)
+                    .and_then(|names| names.get(module))
+                    .is_some_and(|binding| match binding {
+                        None
+                        | Some(
+                            Binding::Procedure(_)
+                            | Binding::Function { .. }
+                            | Binding::ExternalProcedure(_),
+                        ) => true,
+                        Some(Binding::Property(accessors)) => accessors.get.is_some(),
+                        _ => false,
+                    })
+                {
+                    return Ok(None);
+                }
+            }
+            // MS-VBAL 5.6.12 admits only Sub/Function through qualification;
+            // Property Get is eligible only in the simple-name pointer context.
             let symbol = match self.bindings.get(&owner).and_then(|names| names.get(&key)) {
                 Some(Some(Binding::Procedure(symbol) | Binding::Function { symbol, .. })) => {
                     Some(*symbol)
                 }
-                Some(Some(Binding::Property(accessors))) => accessors.get,
+                Some(Some(Binding::Property(accessors))) if path.components == 1 => accessors.get,
                 _ => None,
             };
             return Ok(symbol.map(|symbol| ResolvedBinding {

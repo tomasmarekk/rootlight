@@ -23,6 +23,7 @@ mod query_pack;
 mod registry;
 mod runtime;
 mod vba_bindings;
+mod vba_pointer;
 
 pub use config::{ParserSettings, RuntimeConfig, RuntimeConfigError};
 pub use incremental::{
