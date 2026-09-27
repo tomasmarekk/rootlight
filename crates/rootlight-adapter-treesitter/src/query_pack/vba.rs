@@ -307,6 +307,9 @@ pub(super) fn reference_syntax(
     while let Some(parent) = child.parent() {
         cancellation.check()?;
         let kind = parent.kind();
+        if kind == "raise_event_statement" && parent.child_by_field_name("event") == Some(child) {
+            return Ok("vba.event_identifier");
+        }
         if matches!(
             kind,
             "type_expression"
@@ -330,8 +333,6 @@ pub(super) fn reference_syntax(
                     | "type_preprocessor_if"
                     | "type_preprocessor_elseif"
             ) && parent.child_by_field_name("condition") == Some(child))
-            || (kind == "raise_event_statement"
-                && parent.child_by_field_name("event") == Some(child))
         {
             return Ok("vba.nonvalue_identifier");
         }

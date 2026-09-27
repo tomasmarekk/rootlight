@@ -597,6 +597,140 @@ fn reference_admission_does_not_displace_source_modules() {
     );
 }
 
+#[test]
+fn native_raised_events_keep_exact_relationships_through_rename_and_restart() {
+    for kind in [
+        ProjectModuleKind::Class,
+        ProjectModuleKind::Document {
+            automation_version: 1,
+        },
+        ProjectModuleKind::Designer,
+    ] {
+        let root = tempdir();
+        let storage = tempdir();
+        let paths = rootlight_runtime::RuntimePaths::new(
+            storage.path().join("state"),
+            storage.path().join("runtime"),
+        )
+        .unwrap();
+        paths.prepare_owner().unwrap();
+        let mut previous = None;
+        for (event_name, resolved) in [("Changed", true), ("Renamed", false), ("Changed", true)] {
+            let source = format!(
+                "Attribute VB_Name = \"Emitter\"\r\nPublic Event {event_name}(ByVal value As Long)\r\nPublic Sub Send(ByVal changed As Long)\r\nRaiseEvent CHANGED(changed)\r\nEnd Sub\r\n"
+            );
+            let book = fixture::native_book(&[("Emitter", source.as_bytes(), kind)], "\"Project\"");
+            fs::write(root.path().join("book.xlsm"), &book).unwrap();
+            let mut service =
+                FirstSliceService::new_durable(4, paths.state_dir(), &deadline()).unwrap();
+            let receipt = service.index_repository(root.path(), &deadline()).unwrap();
+            assert_eq!(
+                service.index_repository(root.path(), &deadline()).unwrap(),
+                receipt
+            );
+            if let Some(previous) = previous {
+                assert_ne!(receipt.generation, previous);
+            }
+            previous = Some(receipt.generation);
+            drop(service);
+            let mut service =
+                FirstSliceService::new_durable(4, paths.state_dir(), &deadline()).unwrap();
+            let snapshot = service
+                .loaded_generation_snapshot(receipt.generation)
+                .unwrap();
+            let document = snapshot.document();
+            let event = document
+                .entities
+                .iter()
+                .find(|entity| {
+                    entity.kind == EntityKind::Event && entity.canonical_name == event_name
+                })
+                .unwrap();
+            let site = document
+                .occurrences
+                .iter()
+                .find(|site| site.syntax_kind == "vba.event_identifier.reference")
+                .unwrap();
+            if resolved {
+                assert_eq!(site.target, OccurrenceTarget::Resolved { symbol: event.id });
+            } else {
+                assert!(matches!(site.target, OccurrenceTarget::Unresolved { .. }));
+            }
+            for (detail, expected) in [
+                ("vba-event-target-unavailable", !resolved),
+                ("vba-event-handlers-unavailable", resolved),
+            ] {
+                assert_eq!(
+                    document
+                        .skipped_regions
+                        .iter()
+                        .any(|gap| gap.source == site.source && gap.detail == detail),
+                    expected
+                );
+            }
+            let relationships = service
+                .symbol_relationships(
+                    receipt.generation,
+                    BTreeSet::from([event.id]),
+                    vec![RelationFamily::References],
+                    Some(RelationDirection::Inbound),
+                    0,
+                    16,
+                    0,
+                    &deadline(),
+                )
+                .unwrap();
+            assert_eq!(
+                relationships
+                    .data
+                    .groups
+                    .iter()
+                    .flat_map(|group| &group.items)
+                    .flat_map(|edge| &edge.source_refs)
+                    .any(|source| source == &site.source),
+                resolved
+            );
+            assert!(!relationships.data.truncated);
+            assert!(!document.relations.iter().any(|edge| matches!(
+                edge.predicate,
+                RelationPredicate::Calls | RelationPredicate::DispatchCandidate
+            ) && edge.evidence.source.as_ref()
+                == Some(&site.source)));
+            let read = service
+                .source_read_with_options_and_budget(
+                    receipt.generation,
+                    vec![site.source.clone()],
+                    SourceReadOptions::new()
+                        .with_context_lines_before(0)
+                        .with_context_lines_after(0),
+                    FirstSliceBudget::default(),
+                    &deadline(),
+                )
+                .unwrap();
+            assert_eq!(read.data.chunks[0].bytes, b"CHANGED");
+            assert_eq!(site.source.generation(), receipt.generation);
+            assert_eq!(
+                read.data.chunks[0]
+                    .extracted_from
+                    .as_ref()
+                    .unwrap()
+                    .content_hash(),
+                content_hash(&book)
+            );
+            let prepared = service
+                .prepare_repository_with_options(
+                    root.path(),
+                    FirstSliceIndexOptions::clean_rebuild(FirstSliceIndexMode::Structural),
+                    &deadline(),
+                )
+                .unwrap();
+            let rebuilt = service.publish_prepared(prepared, &deadline()).unwrap();
+            assert!(receipt.logical_snapshot.is_some());
+            assert_eq!(rebuilt.logical_snapshot, receipt.logical_snapshot);
+        }
+    }
+}
+
 fn deadline() -> Cancellation {
     Cancellation::with_deadline(Instant::now().checked_add(Duration::from_secs(30)).unwrap())
 }

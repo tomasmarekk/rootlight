@@ -2154,6 +2154,19 @@ impl<'context, 'source> Lowering<'context, 'source> {
                 if let Some(bindings) = &vba_bindings
                     && let Some(binding) = bindings.resolve(fact, text, cancellation)?
                 {
+                    if fact.syntax_kind().as_str() == "vba.event_identifier.reference" {
+                        // A declared event is a static reference target. Its
+                        // connected runtime handlers are not implied by that edge.
+                        let gap = skipped_region(
+                            self.full_source,
+                            fact.span(),
+                            FactDomain::Relations,
+                            SkippedRegionReason::UnsupportedConstruct,
+                            "vba-event-handlers-unavailable",
+                            provenance_id,
+                        )?;
+                        skipped.insert(gap.id, gap);
+                    }
                     occurrence.target = OccurrenceTarget::Resolved {
                         symbol: binding.symbol,
                     };
@@ -5444,6 +5457,7 @@ fn comment_text(text: &str) -> Option<&str> {
 
 fn source_reference_gap(fact: &SyntaxFact) -> Option<&'static str> {
     match fact.syntax_kind().as_str() {
+        "vba.event_identifier.reference" => Some("vba-event-target-unavailable"),
         "vba.direct_type_identifier.reference"
         | "vba.automatic_type_identifier.reference"
         | "vba.unsupported_automatic_type_identifier.reference"

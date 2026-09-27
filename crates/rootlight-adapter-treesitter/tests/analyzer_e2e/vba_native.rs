@@ -3692,6 +3692,165 @@ fn vba_unproven_applications_and_members_keep_scoped_relation_gaps() {
 }
 
 #[test]
+fn vba_raise_event_binds_its_class_declaration_not_a_local_or_runtime_handler() {
+    use rootlight_ir::{RelationEndpoint, RelationPredicate};
+    for header in ["VERSION 1.0 CLASS\n", ""] {
+        let source = format!(
+            "{header}Attribute VB_Name = \"Emitter\"\nPublic Event Changed(ByVal value As Long)\nPublic Sub Send(ByVal changed As Long)\nRaiseEvent CHANGED(changed)\nEnd Sub\n"
+        );
+        let result = output_with_native_kind(
+            &source,
+            header
+                .is_empty()
+                .then_some(rootlight_adapter_sdk::NativeVbaModuleKind::Object),
+        );
+        let document = result.document();
+        let event = document
+            .entities
+            .iter()
+            .find(|entity| entity.kind == EntityKind::Event && entity.canonical_name == "Changed")
+            .unwrap();
+        let start = u64::try_from(source.find("CHANGED(changed)").unwrap()).unwrap();
+        let site = document
+            .occurrences
+            .iter()
+            .find(|site| site.source.span().start_byte() == start)
+            .unwrap();
+        assert_eq!(site.target, OccurrenceTarget::Resolved { symbol: event.id });
+        assert_ne!(site.role, OccurrenceRole::CallSite);
+        assert_eq!(site.syntax_kind, "vba.event_identifier.reference");
+        assert!(
+            document
+                .relations
+                .iter()
+                .any(|edge| edge.predicate == RelationPredicate::RefersTo
+                    && edge.object == RelationEndpoint::Entity(event.id)
+                    && edge.evidence.source.as_ref() == Some(&site.source))
+        );
+        assert!(!document.relations.iter().any(|edge| matches!(
+            edge.predicate,
+            RelationPredicate::Calls | RelationPredicate::DispatchCandidate
+        ) && edge.evidence.source.as_ref()
+            == Some(&site.source)));
+        assert!(
+            document
+                .skipped_regions
+                .iter()
+                .any(|gap| gap.source.span() == site.source.span()
+                    && gap.detail == "vba-event-handlers-unavailable")
+        );
+        assert!(
+            !document
+                .skipped_regions
+                .iter()
+                .any(|gap| gap.source.span() == site.source.span()
+                    && gap.detail == "vba-event-target-unavailable")
+        );
+        let argument_start = u64::try_from(source.find("changed)\nEnd Sub").unwrap()).unwrap();
+        let argument = document
+            .occurrences
+            .iter()
+            .find(|site| site.source.span().start_byte() == argument_start)
+            .unwrap();
+        let parameter = document
+            .entities
+            .iter()
+            .find(|entity| {
+                entity.kind == EntityKind::Parameter && entity.canonical_name == "changed"
+            })
+            .unwrap();
+        assert_eq!(
+            argument.target,
+            OccurrenceTarget::Resolved {
+                symbol: parameter.id
+            }
+        );
+    }
+}
+
+#[test]
+fn vba_raise_event_rejects_missing_ambiguous_conditional_or_nonclass_targets() {
+    for (header, declarations) in [
+        ("", "Public Event Changed()\n"),
+        ("VERSION 1.0 CLASS\n", ""),
+        ("VERSION 1.0 CLASS\n", "Private Changed As Long\n"),
+        (
+            "VERSION 1.0 CLASS\n",
+            "Public Event Changed()\nPublic Event changed()\n",
+        ),
+        (
+            "VERSION 1.0 CLASS\n",
+            "Public Event Changed()\nPrivate Changed As Long\n",
+        ),
+        (
+            "VERSION 1.0 CLASS\n",
+            "#If Enabled Then\nPublic Event Changed()\n#End If\n",
+        ),
+    ] {
+        let source = format!(
+            "{header}Attribute VB_Name = \"Emitter\"\n{declarations}Public Sub Send()\nRaiseEvent Changed\nEnd Sub\n"
+        );
+        let result = output(&source);
+        let start = u64::try_from(source.rfind("Changed\n").unwrap()).unwrap();
+        let site = result
+            .document()
+            .occurrences
+            .iter()
+            .find(|site| site.source.span().start_byte() == start)
+            .unwrap();
+        assert!(
+            matches!(site.target, OccurrenceTarget::Unresolved { .. }),
+            "{source}"
+        );
+        assert!(
+            result
+                .document()
+                .skipped_regions
+                .iter()
+                .any(|gap| gap.source.span() == site.source.span()
+                    && gap.detail == "vba-event-target-unavailable"),
+            "{source}"
+        );
+    }
+}
+
+#[test]
+fn vba_events_are_not_ordinary_values_or_callable_procedures() {
+    let source = "VERSION 1.0 CLASS\nAttribute VB_Name = \"Emitter\"\nPublic Event Changed()\nPublic Sub Send()\nRaiseEvent Changed\nCall Changed()\nDim item As Variant\nitem = Changed\nEnd Sub\n";
+    let result = output(source);
+    let document = result.document();
+    let event = document
+        .entities
+        .iter()
+        .find(|entity| entity.kind == EntityKind::Event)
+        .unwrap();
+    let raises: Vec<_> = document
+        .occurrences
+        .iter()
+        .filter(|site| site.syntax_kind == "vba.event_identifier.reference")
+        .collect();
+    assert_eq!(raises.len(), 1);
+    assert_eq!(
+        raises[0].target,
+        OccurrenceTarget::Resolved { symbol: event.id }
+    );
+    for marker in ["Changed()\nDim", "Changed\nEnd"] {
+        let start = u64::try_from(source.find(marker).unwrap()).unwrap();
+        let sites: Vec<_> = document
+            .occurrences
+            .iter()
+            .filter(|site| site.source.span().start_byte() == start)
+            .collect();
+        assert!(!sites.is_empty());
+        assert!(
+            sites
+                .iter()
+                .all(|site| matches!(site.target, OccurrenceTarget::Unresolved { .. }))
+        );
+    }
+}
+
+#[test]
 fn vba_conditional_local_declarations_block_outer_fallthrough() {
     let source = "Private Count As Long\nPublic Sub Update()\n#If Wide Then\nDim count As Long\n#End If\nCount = 1\nEnd Sub\n";
     let result = output(source);

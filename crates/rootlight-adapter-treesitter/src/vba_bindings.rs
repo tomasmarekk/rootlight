@@ -24,6 +24,7 @@ enum Binding {
         defined_at: u64,
     },
     Procedure(SymbolId),
+    Event(SymbolId),
     Function {
         symbol: SymbolId,
         accepts_empty: bool,
@@ -297,6 +298,7 @@ impl<'a> VbaBindings<'a> {
                         defined_at: declaration.span().start_byte(),
                     }),
                     "vba.sub_function.declaration" => Some(Binding::Procedure(symbol)),
+                    "vba.event.declaration" => Some(Binding::Event(symbol)),
                     "vba.function.declaration" => Some(Binding::Function {
                         symbol,
                         accepts_empty: !required_parameter_scopes.contains(&owner),
@@ -1283,6 +1285,9 @@ impl<'a> VbaBindings<'a> {
         if fact.syntax_kind().as_str() == "vba.nonvalue_identifier.reference" {
             return self.named_argument(fact, text, cancellation);
         }
+        if fact.syntax_kind().as_str() == "vba.event_identifier.reference" {
+            return self.event_reference(fact, text, cancellation);
+        }
         if matches!(
             fact.syntax_kind().as_str(),
             "vba.type_identifier.reference" | "vba.direct_type_identifier.reference"
@@ -1539,6 +1544,51 @@ impl<'a> VbaBindings<'a> {
                 return Ok(None);
             }
             parent = scope.parent();
+        }
+        Err(invalid_capture())
+    }
+
+    fn event_reference(
+        &self,
+        fact: &SyntaxFact,
+        text: &str,
+        cancellation: &Cancellation,
+    ) -> Result<Option<ResolvedBinding>, AdapterError> {
+        let Some(name) = member_key(text) else {
+            return Ok(None);
+        };
+        let mut parent = fact.parent();
+        let mut instance_context = false;
+        for _ in 0..self.facts.len() {
+            cancellation.check()?;
+            let Some((owner, _)) = self.scope(parent, cancellation)? else {
+                return Ok(None);
+            };
+            let scope = self.fact(owner)?;
+            if scope.syntax_kind().as_str() != "vba.file.scope" {
+                instance_context |= is_instance_procedure_scope(scope);
+                parent = scope.parent();
+                continue;
+            }
+            // RaiseEvent selects an explicitly declared event of this object
+            // module, not a procedure-local value or a host-provided event.
+            if !instance_context
+                || !self
+                    .class_module
+                    .is_some_and(|class| class.span() == scope.span())
+                || self.foreign_scopes.contains(&owner)
+            {
+                return Ok(None);
+            }
+            return Ok(
+                match self.bindings.get(&owner).and_then(|names| names.get(&name)) {
+                    Some(Some(Binding::Event(symbol))) => Some(ResolvedBinding {
+                        symbol: *symbol,
+                        is_call: false,
+                    }),
+                    _ => None,
+                },
+            );
         }
         Err(invalid_capture())
     }
