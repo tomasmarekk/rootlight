@@ -3894,6 +3894,221 @@ fn vba_named_arguments_bind_only_to_the_called_procedure_parameters() {
 }
 
 #[test]
+fn vba_self_named_arguments_bind_the_method_parameter_not_caller_shadows() {
+    for invocation in [
+        "Call Me.Visit(size:=size)",
+        "Me.Visit(size:=size)",
+        "Call mE . [Visit](size:=size)",
+    ] {
+        let source = format!(
+            "VERSION 1.0 CLASS\nAttribute VB_Name = \"Receiver\"\nPublic Sub Visit(ByVal size As Long)\nEnd Sub\nPublic Sub Run(ByVal size As Long, ByVal Visit As Object)\n{invocation}\nEnd Sub\n"
+        );
+        let result = output(&source);
+        let document = result.document();
+        let method = document
+            .entities
+            .iter()
+            .find(|entity| entity.canonical_name == "Visit" && entity.kind == EntityKind::Method)
+            .unwrap();
+        let parameter = document
+            .entities
+            .iter()
+            .find(|entity| {
+                entity.canonical_name == "size"
+                    && entity.container == Some(ContainerRef::Entity(method.id))
+            })
+            .unwrap();
+        let label_start = u64::try_from(source.find("size:=size").unwrap()).unwrap();
+        let label = document
+            .occurrences
+            .iter()
+            .find(|site| {
+                site.syntax_kind == "vba.nonvalue_identifier.reference"
+                    && site.source.span().start_byte() == label_start
+            })
+            .unwrap();
+        assert_eq!(
+            label.target,
+            OccurrenceTarget::Resolved {
+                symbol: parameter.id
+            },
+            "{source}"
+        );
+        assert_eq!(label.role, OccurrenceRole::Reference);
+        assert_eq!(label.source.span().end_byte(), label_start + 4);
+        assert!(!document.skipped_regions.iter().any(
+            |gap| gap.source == label.source && gap.detail == "vba-nonvalue-target-unavailable"
+        ));
+        let value = document
+            .occurrences
+            .iter()
+            .find(|site| site.source.span().start_byte() == label_start + 6)
+            .unwrap();
+        assert!(
+            matches!(value.target, OccurrenceTarget::Resolved { symbol } if symbol != parameter.id)
+        );
+    }
+}
+
+#[test]
+fn vba_self_named_arguments_follow_nested_calls_and_accessor_contexts() {
+    let declarations = "Public Function Inner(ByVal value As Long) As Long\nInner = value\nEnd Function\nPublic Sub Visit(ByVal size As Long)\nEnd Sub\nPublic Property Get Item(ByVal index As Long) As Variant\nItem = index\nEnd Property\nPublic Property Let Item(ByVal index As Long, ByVal value As Variant)\nEnd Property\nPublic Property Set Item(ByVal index As Long, ByVal value As Object)\nEnd Property\n";
+    for (statement, marker, owner_marker, parameter_name) in [
+        (
+            "Call Me.Visit(size:=Me.Inner(value:=1))",
+            "size:=",
+            "Sub Visit",
+            "size",
+        ),
+        (
+            "Call Me.Visit(size:=Me.Inner(value:=1))",
+            "value:=",
+            "Function Inner",
+            "value",
+        ),
+        ("value = Me.Item(index:=1)", "index:=", "Get Item", "index"),
+        (
+            "Let Me.Item(index:=1) = value",
+            "index:=",
+            "Let Item",
+            "index",
+        ),
+        (
+            "Set Me.Item(index:=1) = value",
+            "index:=",
+            "Set Item",
+            "index",
+        ),
+    ] {
+        let source = format!(
+            "VERSION 1.0 CLASS\nAttribute VB_Name = \"Receiver\"\n{declarations}Sub Run(ByVal value As Variant)\n{statement}\nEnd Sub\n"
+        );
+        let result = output(&source);
+        let document = result.document();
+        let name_offset = owner_marker.rfind(' ').unwrap() + 1;
+        let definition_start =
+            u64::try_from(source.find(owner_marker).unwrap() + name_offset).unwrap();
+        let definition = document
+            .occurrences
+            .iter()
+            .find(|site| {
+                site.role == OccurrenceRole::Definition
+                    && site.source.span().start_byte() == definition_start
+            })
+            .unwrap();
+        let OccurrenceTarget::Resolved { symbol: owner } = definition.target else {
+            panic!("accessor definition must resolve")
+        };
+        let parameter = document
+            .entities
+            .iter()
+            .find(|entity| {
+                entity.kind == EntityKind::Parameter
+                    && entity.canonical_name == parameter_name
+                    && entity.container == Some(ContainerRef::Entity(owner))
+            })
+            .unwrap();
+        let label_start = u64::try_from(source.find(marker).unwrap()).unwrap();
+        let label = document
+            .occurrences
+            .iter()
+            .find(|site| {
+                site.syntax_kind == "vba.nonvalue_identifier.reference"
+                    && site.source.span().start_byte() == label_start
+            })
+            .unwrap();
+        assert_eq!(
+            label.target,
+            OccurrenceTarget::Resolved {
+                symbol: parameter.id
+            },
+            "{statement}: {marker}"
+        );
+    }
+}
+
+#[test]
+fn vba_self_named_arguments_preserve_unknown_and_ambiguous_receivers() {
+    let method = "Public Sub Visit(ByVal size As Long)\nEnd Sub\n";
+    for (class_header, declarations, invocation, marker) in [
+        (
+            "VERSION 1.0 CLASS\n",
+            "Public Property Let Item(ByVal value As Long, ByVal value As Long)\nEnd Property\n"
+                .to_owned(),
+            "Let Me.Item(value:=1) = 2",
+            "value:=",
+        ),
+        (
+            "VERSION 1.0 CLASS\n",
+            "Public Property Let Item(ByVal index As Long, ByVal value As Long)\nEnd Property\n"
+                .to_owned(),
+            "Let Me.Item(value:=1) = 2",
+            "value:=",
+        ),
+        (
+            "VERSION 1.0 CLASS\n",
+            "Public Property Set Item(ByVal index As Long, ByVal value As Object)\nEnd Property\n"
+                .to_owned(),
+            "Set Me.Item(value:=1) = Nothing",
+            "value:=",
+        ),
+        ("", method.to_owned(), "Call Me.Visit(size:=1)", "size:="),
+        (
+            "VERSION 1.0 CLASS\n",
+            method.to_owned(),
+            "Call [Me].Visit(size:=1)",
+            "size:=",
+        ),
+        (
+            "VERSION 1.0 CLASS\n",
+            method.repeat(2),
+            "Call Me.Visit(size:=1)",
+            "size:=",
+        ),
+        (
+            "VERSION 1.0 CLASS\n",
+            format!("{method}Public Function Factory() As Object\nEnd Function\n"),
+            "Call Me.Factory().Visit(size:=1)",
+            "size:=",
+        ),
+        (
+            "VERSION 1.0 CLASS\n",
+            "Private items(2) As Long\n".to_owned(),
+            "Call Me.items(size:=1)",
+            "size:=",
+        ),
+        (
+            "VERSION 1.0 CLASS\n",
+            method.to_owned(),
+            "Call Me.Visit(missing:=1)",
+            "missing:=",
+        ),
+    ] {
+        let source = format!(
+            "{class_header}Attribute VB_Name = \"Receiver\"\n{declarations}Sub Run()\n{invocation}\nEnd Sub\n"
+        );
+        let result = output(&source);
+        let document = result.document();
+        let start = u64::try_from(source.find(marker).unwrap()).unwrap();
+        let label = document
+            .occurrences
+            .iter()
+            .find(|site| {
+                site.syntax_kind == "vba.nonvalue_identifier.reference"
+                    && site.source.span().start_byte() == start
+            })
+            .unwrap();
+        assert!(
+            matches!(label.target, OccurrenceTarget::Unresolved { .. }),
+            "{source}"
+        );
+        assert!(document.skipped_regions.iter().any(
+            |gap| gap.source == label.source && gap.detail == "vba-nonvalue-target-unavailable"
+        ));
+    }
+}
+
+#[test]
 fn vba_nested_named_arguments_follow_their_own_application() {
     let source = "Public Function Inner(ByVal value As Long) As Long\nInner = value\nEnd Function\nPublic Sub Visit(ByVal size As Long, ByVal label As Long)\nEnd Sub\nPublic Sub Run(ByVal size As Long)\nCall Visit(size:=Inner(value:=size), label:=size)\nCall Visit(size:=Len(\"a)\"\"(\"), label:=size)\nEnd Sub\n";
     let result = output(source);

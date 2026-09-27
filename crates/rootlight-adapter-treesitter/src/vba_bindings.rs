@@ -85,6 +85,7 @@ pub(super) struct VbaBindings<'a> {
     member_references: BTreeMap<u64, u64>,
     callable_scopes: BTreeMap<SymbolId, u64>,
     named_parameters: BTreeMap<u64, BTreeMap<String, Option<SymbolId>>>,
+    property_value_symbols: BTreeSet<SymbolId>,
     incomplete_parameter_scopes: BTreeSet<u64>,
     bindings: BTreeMap<u64, BTreeMap<String, Option<Binding>>>,
     branch_bindings: BTreeMap<u64, BTreeMap<String, Option<Binding>>>,
@@ -124,6 +125,7 @@ impl<'a> VbaBindings<'a> {
             member_references: BTreeMap::new(),
             callable_scopes: BTreeMap::new(),
             named_parameters: BTreeMap::new(),
+            property_value_symbols: BTreeSet::new(),
             incomplete_parameter_scopes: BTreeSet::new(),
             bindings: BTreeMap::new(),
             branch_bindings: BTreeMap::new(),
@@ -153,7 +155,14 @@ impl<'a> VbaBindings<'a> {
                     .entry(fact.span().start_byte())
                     .or_default()
                     .push(fact),
-                "vba.invoked_identifier.reference" | "vba.invoked_get_identifier.reference" => {
+                "vba.invoked_identifier.reference"
+                | "vba.invoked_get_identifier.reference"
+                | "vba.self_invoked_member.reference"
+                | "vba.self_invoked_get_member.reference"
+                | "vba.self_invoked_let_member.reference"
+                | "vba.self_invoked_set_member.reference" => {
+                    // Named arguments use the exact callee span. Self array
+                    // applications additionally need the receiver-start index below.
                     result
                         .invocations
                         .entry(fact.span().start_byte())
@@ -226,13 +235,32 @@ impl<'a> VbaBindings<'a> {
             }
         }
         let mut required_parameter_scopes = BTreeSet::new();
+        let mut property_value_parameters = BTreeMap::<u64, (u64, u64)>::new();
         let mut enum_module_bindings = Vec::new();
         for fact in facts {
             cancellation.check()?;
-            if fact.syntax_kind().as_str() == "vba.parameter.declaration"
-                && let Some((owner, _)) = result.scope(fact.parent(), cancellation)?
+            if matches!(
+                fact.syntax_kind().as_str(),
+                "vba.parameter.declaration" | "vba.omittable_parameter.declaration"
+            ) && let Some((owner, _)) = result.scope(fact.parent(), cancellation)?
             {
-                required_parameter_scopes.insert(owner);
+                if fact.syntax_kind().as_str() == "vba.parameter.declaration" {
+                    required_parameter_scopes.insert(owner);
+                }
+                if matches!(
+                    result.fact(owner)?.syntax_kind().as_str(),
+                    "vba.let_property.scope" | "vba.set_property.scope"
+                ) {
+                    let candidate = (fact.span().start_byte(), fact.local_id());
+                    property_value_parameters
+                        .entry(owner)
+                        .and_modify(|last| {
+                            if candidate.0 > last.0 {
+                                *last = candidate;
+                            }
+                        })
+                        .or_insert(candidate);
+                }
             }
         }
         for fact in facts {
@@ -311,6 +339,14 @@ impl<'a> VbaBindings<'a> {
                 if let (Some(name), Some(parameter)) =
                     (name.as_deref().filter(|name| name.is_ascii()), parameter)
                 {
+                    // A setter's final parameter is supplied by the assignment
+                    // RHS, not by named arguments in the indexed property target.
+                    if property_value_parameters
+                        .get(&owner)
+                        .is_some_and(|(_, id)| *id == declaration.local_id())
+                    {
+                        result.property_value_symbols.insert(parameter);
+                    }
                     let names = result.named_parameters.entry(owner).or_default();
                     let duplicate = names
                         .entry(name.to_ascii_lowercase())
@@ -1167,6 +1203,7 @@ impl<'a> VbaBindings<'a> {
             .and_then(|parameters| parameters.get(&name.to_ascii_lowercase()))
             .copied()
             .flatten()
+            .filter(|symbol| !self.property_value_symbols.contains(symbol))
             .map(|symbol| ResolvedBinding {
                 symbol,
                 is_call: false,
