@@ -81,7 +81,7 @@ pub(super) struct VbaBindings<'a> {
     source: &'a [u8],
     applications: BTreeMap<u64, Vec<&'a SyntaxFact>>,
     invocations: BTreeMap<u64, Vec<&'a SyntaxFact>>,
-    self_array_invocations: BTreeMap<u64, Vec<&'a SyntaxFact>>,
+    array_only_invocations: BTreeMap<u64, Vec<&'a SyntaxFact>>,
     member_references: BTreeMap<u64, u64>,
     callable_scopes: BTreeMap<SymbolId, u64>,
     named_parameters: BTreeMap<u64, BTreeMap<String, Option<SymbolId>>>,
@@ -120,7 +120,7 @@ impl<'a> VbaBindings<'a> {
             source,
             applications: BTreeMap::new(),
             invocations: BTreeMap::new(),
-            self_array_invocations: BTreeMap::new(),
+            array_only_invocations: BTreeMap::new(),
             member_references: BTreeMap::new(),
             callable_scopes: BTreeMap::new(),
             named_parameters: BTreeMap::new(),
@@ -160,6 +160,13 @@ impl<'a> VbaBindings<'a> {
                         .or_default()
                         .push(fact);
                 }
+                "vba.invoked_let_identifier.reference" | "vba.invoked_set_identifier.reference" => {
+                    result
+                        .array_only_invocations
+                        .entry(fact.span().start_byte())
+                        .or_default()
+                        .push(fact);
+                }
                 "vba.member.reference" | "vba.invoked_member.reference" => {
                     result
                         .member_references
@@ -182,7 +189,7 @@ impl<'a> VbaBindings<'a> {
                 && let Some(start) = result.array_invocation_start(fact)?
             {
                 result
-                    .self_array_invocations
+                    .array_only_invocations
                     .entry(start)
                     .or_default()
                     .push(fact);
@@ -942,7 +949,7 @@ impl<'a> VbaBindings<'a> {
 
     fn array_invocations_at(&self, start: u64) -> impl Iterator<Item = &&'a SyntaxFact> {
         self.invocations.get(&start).into_iter().flatten().chain(
-            self.self_array_invocations
+            self.array_only_invocations
                 .get(&start)
                 .into_iter()
                 .flatten(),
@@ -979,10 +986,14 @@ impl<'a> VbaBindings<'a> {
         ) else {
             return Ok(None);
         };
+        let statement_assignment = matches!(
+            invocation.syntax_kind().as_str(),
+            "vba.invoked_identifier.reference" | "vba.self_invoked_member.reference"
+        );
         if !self
             .source
             .get(callee_end..application_end)
-            .is_some_and(complete_array_application_suffix)
+            .is_some_and(|suffix| complete_array_application_suffix(suffix, statement_assignment))
         {
             return Ok(None);
         }
@@ -1744,11 +1755,14 @@ fn declaration_has_array_designator(
 fn is_self_array_invocation(fact: &SyntaxFact) -> bool {
     matches!(
         fact.syntax_kind().as_str(),
-        "vba.self_invoked_member.reference" | "vba.self_invoked_get_member.reference"
+        "vba.self_invoked_member.reference"
+            | "vba.self_invoked_get_member.reference"
+            | "vba.self_invoked_let_member.reference"
+            | "vba.self_invoked_set_member.reference"
     )
 }
 
-fn complete_array_application_suffix(suffix: &[u8]) -> bool {
+fn complete_array_application_suffix(suffix: &[u8], statement_assignment: bool) -> bool {
     let suffix = suffix.trim_ascii_start();
     if suffix.first() != Some(&b'(') {
         return false;
@@ -1775,11 +1789,21 @@ fn complete_array_application_suffix(suffix: &[u8]) -> bool {
                     };
                     depth = outer_depth;
                     if depth == 0 {
-                        // A native call-statement capture can include trailing
-                        // assignment text after the indexed receiver.
-                        return suffix
-                            .get(index + 1..)
-                            .is_some_and(|tail| tail.iter().all(u8::is_ascii_whitespace));
+                        let Some(tail) = suffix.get(index + 1..) else {
+                            return false;
+                        };
+                        let tail = tail.trim_ascii();
+                        // Native call statements can represent an indexed assignment
+                        // as a comparison argument. Only a proven array may resolve
+                        // that reading; the occurrence retains the entire statement
+                        // and the right-hand expression keeps its own binding gaps.
+                        return tail.is_empty()
+                            || (statement_assignment
+                                && tail.strip_prefix(b"=").is_some_and(|value| {
+                                    let value = value.trim_ascii_start();
+                                    !value.is_empty()
+                                        && !matches!(value.first(), Some(b'=' | b'\''))
+                                }));
                     }
                 }
                 b'\'' => return false,
@@ -1807,9 +1831,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn array_application_suffix_requires_one_closed_expression() {
+    fn array_application_suffix_requires_closed_indices_and_statement_context() {
         for suffix in [b"(1)".as_slice(), b" (Inner(\"(\")) ", b"(\"x\"\"y\")"] {
-            assert!(complete_array_application_suffix(suffix));
+            assert!(complete_array_application_suffix(suffix, false));
         }
         for suffix in [
             b"(1) = Len(\"x\")".as_slice(),
@@ -1817,7 +1841,17 @@ mod tests {
             b"(\"unterminated)",
             b"(1) ' comment",
         ] {
-            assert!(!complete_array_application_suffix(suffix));
+            assert!(!complete_array_application_suffix(suffix, false));
+        }
+        assert!(complete_array_application_suffix(b"(1) = Len(\"x\")", true));
+        for suffix in [
+            b"(1) =".as_slice(),
+            b"(1) == value",
+            b"(1) = ' comment",
+            b"(1)(2) = value",
+            b"(1) + value",
+        ] {
+            assert!(!complete_array_application_suffix(suffix, true));
         }
     }
 

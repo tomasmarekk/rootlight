@@ -1562,14 +1562,14 @@ fn vba_unqualified_properties_respect_local_array_proofs_and_dynamic_index_gaps(
             );
             assert_eq!(site.role, OccurrenceRole::Reference);
             if statement.contains('(') {
-                let proven_array_read = parameter.is_empty() && statement == "value = iTeM(0)";
+                let proven_array_access = parameter.is_empty();
                 assert_eq!(
                     document.skipped_regions.iter().any(|gap| {
                         gap.domain == FactDomain::Relations
                             && gap.source.span() == site.source.span()
                             && gap.detail == "vba-call-or-index-target-unavailable"
                     }),
-                    !proven_array_read,
+                    !proven_array_access,
                     "{source}"
                 );
                 assert!(!document.relations.iter().any(|edge| {
@@ -1887,14 +1887,136 @@ fn vba_declared_array_application_binds_without_guessing_object_defaults() {
                 && site.source.span().start_byte() == assignment_start
         })
         .unwrap();
-    assert!(matches!(
+    assert_eq!(
         assignment_application.target,
-        OccurrenceTarget::Unresolved { .. }
-    ));
-    assert!(document.skipped_regions.iter().any(|gap| {
+        OccurrenceTarget::Resolved { symbol: array.id }
+    );
+    assert!(!document.skipped_regions.iter().any(|gap| {
         gap.source.span() == assignment_receiver.source.span()
             && gap.detail == "vba-call-or-index-target-unavailable"
     }));
+    let value_start = u64::try_from(source.find("Len(\"x\")").unwrap()).unwrap();
+    assert!(
+        document
+            .skipped_regions
+            .iter()
+            .any(|gap| gap.source.span().start_byte() == value_start
+                && gap.detail == "vba-call-or-index-target-unavailable")
+    );
+}
+
+#[test]
+fn vba_array_writes_bind_exact_local_and_self_targets_without_calls() {
+    for prefix in ["", "Let ", "Set "] {
+        for receiver in ["items", "Me.items"] {
+            let expression = format!("{receiver}(0)");
+            let source = format!(
+                "VERSION 1.0 CLASS\nAttribute VB_Name = \"Holder\"\nPrivate items(2) As Variant\nSub Run(ByVal value As Variant)\nDim items(2) As Variant\n{prefix}{expression} = value\nEnd Sub\n"
+            );
+            let result = output(&source);
+            let document = result.document();
+            let kind = if receiver.starts_with("Me.") {
+                EntityKind::Field
+            } else {
+                EntityKind::Variable
+            };
+            let target = document
+                .entities
+                .iter()
+                .find(|entity| entity.kind == kind && entity.canonical_name == "items")
+                .unwrap();
+            let start = u64::try_from(source.find(&expression).unwrap()).unwrap();
+            let end = start + u64::try_from(expression.len()).unwrap();
+            let statement_end = end + u64::try_from(" = value".len()).unwrap();
+            let application = document
+                .occurrences
+                .iter()
+                .find(|site| {
+                    site.syntax_kind == "vba.application.reference"
+                        && site.source.span().start_byte() == start
+                        && matches!(site.source.span().end_byte(), at if at == end || at == statement_end)
+                })
+                .unwrap();
+            assert_eq!(
+                application.target,
+                OccurrenceTarget::Resolved { symbol: target.id },
+                "{source}"
+            );
+            assert_eq!(application.role, OccurrenceRole::Reference);
+            assert!(
+                !document
+                    .skipped_regions
+                    .iter()
+                    .any(|gap| gap.detail == "vba-call-or-index-target-unavailable"
+                        && gap.source.span().start_byte() >= start
+                        && gap.source.span().end_byte() <= end),
+                "{source}"
+            );
+            assert!(
+                !document
+                    .relations
+                    .iter()
+                    .any(|edge| edge.predicate == RelationPredicate::Calls
+                        && edge.subject == RelationEndpoint::Occurrence(application.id))
+            );
+        }
+    }
+}
+
+#[test]
+fn vba_array_write_resolution_keeps_dynamic_and_procedure_barriers() {
+    for declaration in ["Dim items As Object", "Dim items As Variant"] {
+        for prefix in ["", "Let ", "Set "] {
+            let source = format!(
+                "Sub Run(ByVal value As Variant)\n{declaration}\n{prefix}items(0) = value\nEnd Sub\n"
+            );
+            let result = output(&source);
+            let document = result.document();
+            let start = u64::try_from(source.find("items(0)").unwrap()).unwrap();
+            let application = document
+                .occurrences
+                .iter()
+                .find(|site| {
+                    site.syntax_kind == "vba.application.reference"
+                        && site.source.span().start_byte() == start
+                })
+                .unwrap();
+            assert!(
+                matches!(application.target, OccurrenceTarget::Unresolved { .. }),
+                "{source}"
+            );
+            assert!(
+                document
+                    .skipped_regions
+                    .iter()
+                    .any(|gap| gap.source == application.source
+                        && gap.detail == "vba-call-or-index-target-unavailable")
+            );
+        }
+    }
+    let source = "Sub Accept(ByVal flag As Boolean)\nEnd Sub\nSub Run(ByVal value As Long)\nAccept (0) = value\nEnd Sub\n";
+    let result = output(source);
+    let document = result.document();
+    let start = u64::try_from(source.find("Accept (0)").unwrap()).unwrap();
+    let application = document
+        .occurrences
+        .iter()
+        .find(|site| {
+            site.syntax_kind == "vba.application.reference"
+                && site.source.span().start_byte() == start
+        })
+        .unwrap();
+    assert!(matches!(
+        application.target,
+        OccurrenceTarget::Unresolved { .. }
+    ));
+    assert!(
+        document
+            .skipped_regions
+            .iter()
+            .any(|gap| gap.source == application.source
+                && gap.detail == "vba-call-or-index-target-unavailable")
+    );
 }
 
 #[test]
@@ -2297,7 +2419,7 @@ fn vba_self_value_calls_and_indexed_fields_keep_distinct_roles() {
         assert_eq!(site.role, role, "{marker}");
         if role == OccurrenceRole::Reference {
             assert!(
-                document
+                !document
                     .skipped_regions
                     .iter()
                     .any(|gap| gap.source.span().start_byte() == start
@@ -3164,12 +3286,13 @@ fn vba_callable_spelling_does_not_bypass_local_value_shadowing() {
         };
         assert!(document.entities.iter().any(|entity| entity.id == symbol
             && matches!(entity.kind, EntityKind::Variable | EntityKind::Parameter)));
-        assert!(
+        assert_eq!(
             document
                 .skipped_regions
                 .iter()
                 .any(|gap| gap.source.span().start_byte() == start
-                    && gap.domain == FactDomain::Relations)
+                    && gap.domain == FactDomain::Relations),
+            marker == "VISIT(1)"
         );
     }
 }

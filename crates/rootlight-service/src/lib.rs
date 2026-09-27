@@ -218,7 +218,7 @@ const PROJECT_FACTS_TRUNCATED_CODE: &str = "project-adapter-facts-truncated";
 const PROJECT_FACTS_TRUNCATED_MESSAGE: &str =
     "additional project semantic facts were omitted by aggregate resource limits";
 const AGGREGATE_DIAGNOSTICS_TRUNCATED_CODE: &str = "aggregate-diagnostics-truncated";
-const ANALYZER_BINARY_SEED: &[u8] = b"rootlight.first-slice.treesitter-structural/153";
+const ANALYZER_BINARY_SEED: &[u8] = b"rootlight.first-slice.treesitter-structural/154";
 const RESOLVER_BINARY_SEED: &[u8] = b"rootlight.first-slice.resolve/41";
 const INCREMENTAL_PROVIDER_SEED: &[u8] = b"rootlight.first-slice.incremental-provider/1";
 const LANGUAGE_DISPOSITION_PROVIDER_SEED: &[u8] = b"rootlight.first-slice.language-disposition/5";
@@ -29796,13 +29796,19 @@ mod tests {
         paths.prepare_owner().unwrap();
         let fixture = durable_test_tempdir();
         let mut previous_generation = None;
-        for (declaration, resolved, self_field) in [
-            ("ByRef items() As Long", true, false),
-            ("ByRef items As Variant", false, false),
-            ("ParamArray items() As Variant", true, false),
-            ("Private items(1) As Long", true, true),
-            ("Private items As Variant", false, true),
-            ("Private items() As Long", true, true),
+        for (declaration, resolved, self_field, write_prefix) in [
+            ("ByRef items() As Long", true, false, None),
+            ("ByRef items As Variant", false, false, None),
+            ("ParamArray items() As Variant", true, false, None),
+            ("Private items(1) As Long", true, true, None),
+            ("Private items As Variant", false, true, None),
+            ("Private items() As Long", true, true, None),
+            ("ByRef items() As Variant", true, false, Some("Let ")),
+            ("ByRef items As Variant", false, false, Some("Let ")),
+            ("ParamArray items() As Variant", true, false, Some("Set ")),
+            ("Private items(1) As Variant", true, true, Some("Let ")),
+            ("Private items As Variant", false, true, Some("Let ")),
+            ("Private items() As Variant", true, true, Some("")),
         ] {
             let header = if self_field {
                 format!("VERSION 1.0 CLASS\nAttribute VB_Name = \"Counter\"\n{declaration}\n")
@@ -29819,8 +29825,12 @@ mod tests {
             } else {
                 "items(0)"
             };
+            let statement = match write_prefix {
+                Some(prefix) => format!("{prefix}{expression} = first"),
+                None => format!("first = {expression}"),
+            };
             let source = format!(
-                "{header}Private Declare PtrSafe Function ReadClock Lib \"clock\" () As LongPtr\nSub Run({parameter})\nDim first As Variant\nfirst = {expression}\nEnd Sub\n"
+                "{header}Private Declare PtrSafe Function ReadClock Lib \"clock\" () As LongPtr\nSub Run({parameter})\nDim first As Variant\n{statement}\nEnd Sub\n"
             );
             fs::write(fixture.path().join("module.bas"), &source).unwrap();
             let mut service =
@@ -29861,16 +29871,23 @@ mod tests {
                 .unwrap();
             let start = u64::try_from(source.find(expression).unwrap()).unwrap();
             let callee_start = u64::try_from(source.find("items(0)").unwrap()).unwrap();
-            let end = start + u64::try_from(expression.len()).unwrap();
+            let expression_end = start + u64::try_from(expression.len()).unwrap();
+            let statement_end = expression_end
+                + if write_prefix.is_some() {
+                    u64::try_from(" = first".len()).unwrap()
+                } else {
+                    0
+                };
             let application = document
                 .occurrences
                 .iter()
                 .find(|site| {
                     site.syntax_kind == "vba.application.reference"
                         && site.source.span().start_byte() == start
-                        && site.source.span().end_byte() == end
+                        && matches!(site.source.span().end_byte(), at if at == expression_end || at == statement_end)
                 })
                 .unwrap();
+            let end = application.source.span().end_byte();
             if resolved {
                 assert_eq!(
                     application.target,
@@ -29926,7 +29943,10 @@ mod tests {
                     &deadline(),
                 )
                 .unwrap();
-            assert_eq!(read.data.chunks[0].bytes, expression.as_bytes());
+            assert_eq!(
+                read.data.chunks[0].bytes,
+                &source.as_bytes()[usize::try_from(start).unwrap()..usize::try_from(end).unwrap()]
+            );
         }
     }
 
@@ -33250,7 +33270,7 @@ mod tests {
             PARSER_PROVIDER_SET_SEED,
             TREE_SITTER_ADAPTER_VERSION.as_bytes(),
             TREE_SITTER_RUNTIME_VERSION.as_bytes(),
-            b"rootlight.first-slice.treesitter-structural/152",
+            b"rootlight.first-slice.treesitter-structural/153",
             grammar.as_bytes(),
         ])
         .unwrap();
