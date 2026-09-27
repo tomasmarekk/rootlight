@@ -5463,6 +5463,7 @@ fn source_reference_gap(fact: &SyntaxFact) -> Option<&'static str> {
         | "vba.resume_label.reference" => Some("vba-statement-label-target-unavailable"),
         "vba.direct_type_identifier.reference"
         | "vba.constructed_type_identifier.reference"
+        | "vba.tested_type_identifier.reference"
         | "vba.unsupported_constructed_type_identifier.reference"
         | "vba.automatic_type_identifier.reference"
         | "vba.unsupported_automatic_type_identifier.reference"
@@ -5597,6 +5598,7 @@ fn occurrence_role(fact: &SyntaxFact) -> Option<OccurrenceRole> {
                     | "typescript.type_identifier.reference"
                     | "vba.direct_type_identifier.reference"
                     | "vba.constructed_type_identifier.reference"
+                    | "vba.tested_type_identifier.reference"
                     | "vba.unsupported_constructed_type_identifier.reference"
                     | "vba.automatic_type_identifier.reference"
                     | "vba.unsupported_automatic_type_identifier.reference"

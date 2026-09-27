@@ -1093,11 +1093,11 @@ fn automatic_object_receivers_keep_project_types_and_calls_after_restart() {
 }
 
 #[test]
-fn constructed_object_types_follow_project_sources_without_inventing_value_types() {
+fn expression_types_follow_project_sources_without_inventing_value_types() {
     for native in [false, true] {
         let root = tempdir();
         let storage = tempdir();
-        let client = b"Attribute VB_Name = \"Client\"\r\nPublic Sub Run(ByVal Worker As Long)\r\nDim receiver As Object\r\nSet receiver = New Worker\r\nreceiver.Apply\r\nEnd Sub\r\n";
+        let client = b"Attribute VB_Name = \"Client\"\r\nPublic Sub Run(ByVal Worker As Long)\r\nDim receiver As Object\r\nSet receiver = New Worker\r\nIf TypeOf receiver Is Worker Then\r\nreceiver.Apply\r\nEnd If\r\nEnd Sub\r\n";
         let worker = b"Attribute VB_Name = \"Worker\"\r\nPublic Sub Apply()\r\nEnd Sub\r\n";
         if native {
             fs::write(
@@ -1162,6 +1162,31 @@ fn constructed_object_types_follow_project_sources_without_inventing_value_types
                     && edge.evidence.source.as_ref() == Some(&site.source))
         );
         assert!(!document.skipped_regions.iter().any(|gap| gap.source == site.source && gap.detail == "vba-type-target-unavailable"));
+        let tested = document
+            .occurrences
+            .iter()
+            .find(|site| site.syntax_kind == "vba.tested_type_identifier.reference")
+            .unwrap();
+        assert_eq!(
+            tested.target,
+            OccurrenceTarget::Resolved { symbol: target.id }
+        );
+        assert_eq!(tested.role, OccurrenceRole::TypeUse);
+        assert!(
+            document
+                .relations
+                .iter()
+                .any(|edge| edge.predicate == RelationPredicate::UsesType
+                    && edge.object == RelationEndpoint::Entity(target.id)
+                    && edge.evidence.source.as_ref() == Some(&tested.source))
+        );
+        assert!(
+            !document
+                .skipped_regions
+                .iter()
+                .any(|gap| gap.source == tested.source
+                    && gap.detail == "vba-type-target-unavailable")
+        );
         let construction = document
             .occurrences
             .iter()
@@ -1183,7 +1208,7 @@ fn constructed_object_types_follow_project_sources_without_inventing_value_types
         let read = service
             .source_read_with_options_and_budget(
                 receipt.generation,
-                vec![site.source.clone()],
+                vec![site.source.clone(), tested.source.clone()],
                 SourceReadOptions::new()
                     .with_context_lines_before(0)
                     .with_context_lines_after(0),
@@ -1192,6 +1217,9 @@ fn constructed_object_types_follow_project_sources_without_inventing_value_types
             )
             .unwrap();
         assert_eq!(read.data.chunks[0].bytes, b"Worker");
+        assert_eq!(read.data.chunks[1].bytes, b"Worker");
+        assert_eq!(tested.source.generation(), receipt.generation);
+        assert_eq!(read.data.chunks[1].extracted_from.is_some(), native);
         assert_eq!(site.source.generation(), receipt.generation);
         assert_eq!(read.data.chunks[0].extracted_from.is_some(), native);
         let prepared = service
@@ -1208,45 +1236,64 @@ fn constructed_object_types_follow_project_sources_without_inventing_value_types
 }
 
 #[test]
-fn constructed_object_types_do_not_turn_property_bodies_into_return_types() {
-    let root = tempdir();
-    let client = b"Attribute VB_Name = \"Client\"\r\nPublic Sub Run(ByVal factory As Maker)\r\nfactory.Item.Apply\r\nEnd Sub\r\n";
-    let maker = b"Attribute VB_Name = \"Maker\"\r\nPublic Property Get Item() As Object\r\nSet Item = New Worker\r\nEnd Property\r\n";
-    let worker = b"Attribute VB_Name = \"Worker\"\r\nPublic Sub Apply()\r\nEnd Sub\r\n";
-    fs::write(
-        root.path().join("book.xlsm"),
-        fixture::typed_book(&[
-            ("Client", client, false),
-            ("Maker", maker, true),
-            ("Worker", worker, true),
-        ]),
-    )
-    .unwrap();
-    let mut service = FirstSliceService::new(4).unwrap();
-    let receipt = service.index_repository(root.path(), &deadline()).unwrap();
-    let snapshot = service
-        .loaded_generation_snapshot(receipt.generation)
+fn expression_type_uses_do_not_declare_property_return_types() {
+    for body in [
+        "Set Item = New Worker",
+        "If TypeOf candidate Is Worker Then\r\nSet Item = candidate\r\nEnd If",
+    ] {
+        let root = tempdir();
+        let client = b"Attribute VB_Name = \"Client\"\r\nPublic Sub Run(ByVal factory As Maker)\r\nfactory.Item.Apply\r\nEnd Sub\r\n";
+        let maker = format!(
+            "Attribute VB_Name = \"Maker\"\r\nPrivate candidate As Object\r\nPublic Property Get Item() As Object\r\n{body}\r\nEnd Property\r\n"
+        );
+        let worker = b"Attribute VB_Name = \"Worker\"\r\nPublic Sub Apply()\r\nEnd Sub\r\n";
+        fs::write(
+            root.path().join("book.xlsm"),
+            fixture::typed_book(&[
+                ("Client", client, false),
+                ("Maker", maker.as_bytes(), true),
+                ("Worker", worker, true),
+            ]),
+        )
         .unwrap();
-    let document = snapshot.document();
-    let site = document
-        .occurrences
-        .iter()
-        .find(|site| site.syntax_kind == "vba.constructed_type_identifier.reference")
-        .unwrap();
-    assert!(matches!(site.target, OccurrenceTarget::Resolved { .. }));
-    let member = document
-        .occurrences
-        .iter()
-        .find(|site| site.syntax_kind == "vba.invoked_member.reference")
-        .unwrap();
-    assert!(matches!(member.target, OccurrenceTarget::Unresolved { .. }));
-    assert!(
-        !document
-            .relations
+        let mut service = FirstSliceService::new(4).unwrap();
+        let receipt = service.index_repository(root.path(), &deadline()).unwrap();
+        let snapshot = service
+            .loaded_generation_snapshot(receipt.generation)
+            .unwrap();
+        let document = snapshot.document();
+        let site = document
+            .occurrences
             .iter()
-            .any(|edge| edge.predicate == RelationPredicate::Calls
-                && edge.evidence.source.as_ref() == Some(&member.source))
-    );
+            .find(|site| {
+                site.role == OccurrenceRole::TypeUse
+                    && site.enclosing.is_some_and(|owner| {
+                        document
+                            .entities
+                            .iter()
+                            .any(|entity| entity.id == owner && entity.kind == EntityKind::Property)
+                    })
+            })
+            .unwrap();
+        assert!(matches!(site.target, OccurrenceTarget::Resolved { .. }));
+        let member = document
+            .occurrences
+            .iter()
+            .find(|site| site.syntax_kind == "vba.invoked_member.reference")
+            .unwrap();
+        assert!(
+            matches!(member.target, OccurrenceTarget::Unresolved { .. }),
+            "{body}: {:?}",
+            member.target
+        );
+        assert!(
+            !document
+                .relations
+                .iter()
+                .any(|edge| edge.predicate == RelationPredicate::Calls
+                    && edge.evidence.source.as_ref() == Some(&member.source))
+        );
+    }
 }
 
 #[test]

@@ -716,6 +716,42 @@ fn vba_declared_type_references_ignore_value_namespace_shadowing() {
 }
 
 #[test]
+fn vba_type_tests_reference_udts_without_declaring_function_return_types() {
+    let source = "Private Type Shape\nX As Long\nEnd Type\nPrivate candidate As Variant\nFunction Item() As Object\nIf TypeOf candidate Is Shape Then\nEnd If\nEnd Function\nSub Run()\nItem().X = 1\nEnd Sub\n";
+    let result = output(source);
+    let document = result.document();
+    let target = document
+        .entities
+        .iter()
+        .find(|entity| entity.kind == EntityKind::Struct && entity.canonical_name == "Shape")
+        .unwrap();
+    let site = document
+        .occurrences
+        .iter()
+        .find(|site| site.syntax_kind == "vba.tested_type_identifier.reference")
+        .unwrap();
+    assert_eq!(site.role, OccurrenceRole::TypeUse);
+    assert_eq!(
+        site.target,
+        OccurrenceTarget::Resolved { symbol: target.id }
+    );
+    assert!(
+        document
+            .relations
+            .iter()
+            .any(|edge| edge.predicate == RelationPredicate::UsesType
+                && edge.object == rootlight_ir::RelationEndpoint::Entity(target.id)
+                && edge.evidence.source.as_ref() == Some(&site.source))
+    );
+    let member = document
+        .occurrences
+        .iter()
+        .find(|site| site.syntax_kind == "vba.member.reference")
+        .unwrap();
+    assert!(matches!(member.target, OccurrenceTarget::Unresolved { .. }));
+}
+
+#[test]
 fn vba_construction_types_never_bind_to_values_or_udts() {
     let mut parser = tree_sitter::Parser::new();
     parser

@@ -1377,7 +1377,9 @@ impl<'a> VbaBindings<'a> {
         }
         if matches!(
             fact.syntax_kind().as_str(),
-            "vba.type_identifier.reference" | "vba.direct_type_identifier.reference"
+            "vba.type_identifier.reference"
+                | "vba.direct_type_identifier.reference"
+                | "vba.tested_type_identifier.reference"
         ) {
             if text.ends_with(['$', '%', '&', '#', '@', '^', '!']) {
                 return Ok(None);

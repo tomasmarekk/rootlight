@@ -78,8 +78,8 @@ pub fn scope_page_candidate() -> usize {
 ";
 
 #[test]
-fn vba_constructed_class_types_keep_exact_evidence_across_processes() {
-    let client = b"Attribute VB_Name = \"Client\"\nPublic Sub Run(ByVal Worker As Long)\nDim receiver As Object\nSet receiver = New Worker\nreceiver.Apply\nEnd Sub\n";
+fn vba_expression_class_types_keep_exact_evidence_across_processes() {
+    let client = b"Attribute VB_Name = \"Client\"\nPublic Sub Run(ByVal Worker As Long)\nDim receiver As Object\nSet receiver = New Worker\nIf TypeOf receiver Is Worker Then\nreceiver.Apply\nEnd If\nEnd Sub\n";
     let worker =
         b"VERSION 1.0 CLASS\nAttribute VB_Name = \"Worker\"\nPublic Sub Apply()\nEnd Sub\n";
     let mut fixture = RetrievalFixture::spawn_with_sources(
@@ -102,14 +102,19 @@ fn vba_constructed_class_types_keep_exact_evidence_across_processes() {
     let symbol = found["symbol_id"].clone();
     let related = fixture.standalone("constructed-type-uses", "symbol.relationships", json!({"symbol_ids": [symbol], "relations": ["types"], "direction": "inbound", "include_candidates": false, "response_profile": "evidence"}));
     assert_success(&related, "symbol.relationships");
-    let start = u64::try_from(
-        std::str::from_utf8(client)
+    let starts: std::collections::BTreeSet<_> = ["New ", "Is "]
+        .into_iter()
+        .map(|prefix| {
+            u64::try_from(
+                std::str::from_utf8(client)
+                    .unwrap()
+                    .find(&format!("{prefix}Worker"))
+                    .unwrap()
+                    + prefix.len(),
+            )
             .unwrap()
-            .find("New Worker")
-            .unwrap()
-            + 4,
-    )
-    .unwrap();
+        })
+        .collect();
     let references: Vec<_> = related["result"]["structuredContent"]["data"]["groups"]
         .as_array()
         .unwrap()
@@ -117,20 +122,28 @@ fn vba_constructed_class_types_keep_exact_evidence_across_processes() {
         .flat_map(|group| group["items"].as_array().unwrap())
         .flat_map(|edge| edge["source_refs"].as_array().unwrap())
         .collect();
-    assert_eq!(references.len(), 1, "{related:#}");
-    let reference = references[0];
-    assert_eq!(reference["span"]["start_byte"], start);
-    assert_eq!(reference["span"]["end_byte"], start + 6);
+    assert_eq!(references.len(), 2, "{related:#}");
     assert_eq!(
-        reference["generation"],
-        output["generation"]["generation_id"]
+        references
+            .iter()
+            .map(|reference| reference["span"]["start_byte"].as_u64().unwrap())
+            .collect::<std::collections::BTreeSet<_>>(),
+        starts
     );
-    let read = fixture.standalone("constructed-type-source", "source.read", json!({"references": [{"source_ref": reference}], "context_lines_before": 0, "context_lines_after": 0, "response_profile": "evidence"}));
-    assert_success(&read, "source.read");
-    assert_eq!(
-        read["result"]["structuredContent"]["data"]["chunks"][0]["content"],
-        "Worker"
-    );
+    for reference in references {
+        let start = reference["span"]["start_byte"].as_u64().unwrap();
+        assert_eq!(reference["span"]["end_byte"], start + 6);
+        assert_eq!(
+            reference["generation"],
+            output["generation"]["generation_id"]
+        );
+        let read = fixture.standalone("constructed-type-source", "source.read", json!({"references": [{"source_ref": reference}], "context_lines_before": 0, "context_lines_after": 0, "response_profile": "evidence"}));
+        assert_success(&read, "source.read");
+        assert_eq!(
+            read["result"]["structuredContent"]["data"]["chunks"][0]["content"],
+            "Worker"
+        );
+    }
     let client_scope = fixture.standalone("constructed-client-coverage", "code.locate", json!({"query": "Run", "search_modes": ["exact"], "scope": {"paths": ["Client.bas"]}, "response_profile": "evidence"}));
     assert_success(&client_scope, "code.locate");
     assert!(

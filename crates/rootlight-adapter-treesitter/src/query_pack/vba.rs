@@ -285,6 +285,11 @@ pub(super) fn reference_syntax(
         .parent()
         .filter(|node| node.kind() == "type_expression")
     {
+        if ty.parent().is_some_and(|parent| {
+            parent.kind() == "type_of_expression" && parent.child_by_field_name("type") == Some(ty)
+        }) {
+            return Ok("vba.tested_type_identifier");
+        }
         let syntax = if let Some(clause) =
             ty.parent().filter(|node| node.kind() == "as_type_clause")
             && let Some(declaration) = clause.parent()
