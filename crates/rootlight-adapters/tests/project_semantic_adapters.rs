@@ -1826,6 +1826,17 @@ fn bounded_javascript_syntax_retains_local_and_import_diverse_calls() {
             .iter()
             .any(|diagnostic| { diagnostic.code.as_str() == PROJECT_SYNTAX_FACT_LIMIT_DIAGNOSTIC })
     );
+    assert!(
+        output
+            .document()
+            .skipped_regions
+            .iter()
+            .all(|region| region.reason != rootlight_ir::SkippedRegionReason::ParseError)
+    );
+    assert_eq!(
+        output.report().work().coverage().status(),
+        CoverageStatus::Bounded
+    );
     assert!(output.document().occurrences.iter().any(|occurrence| {
         occurrence.role == OccurrenceRole::CallSite
             && occurrence.enclosing == Some(local_caller.id)
@@ -3241,7 +3252,13 @@ fn malformed_source_commits_partial_diagnostics() {
         CoverageStatus::Bounded
     );
     assert!(!output.document().diagnostics.is_empty());
-    assert!(!output.document().skipped_regions.is_empty());
+    assert!(
+        output
+            .document()
+            .skipped_regions
+            .iter()
+            .any(|region| { region.reason == rootlight_ir::SkippedRegionReason::ParseError })
+    );
     assert!(
         output
             .document()

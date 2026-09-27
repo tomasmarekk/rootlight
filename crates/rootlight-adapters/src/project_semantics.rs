@@ -469,7 +469,6 @@ fn bound_project_syntax_facts(
                 Some(input.input.source().source_ref().clone()),
                 CoverageStatus::Bounded,
             ));
-            input.parse_status = merge_status(input.parse_status, CoverageStatus::Bounded);
         }
         let retained_optional = input
             .facts
