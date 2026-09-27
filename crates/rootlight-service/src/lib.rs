@@ -49,9 +49,9 @@ use rootlight_adapter_treesitter::{
     TreeSitterAnalyzer, TreeSitterProvider, TreeSitterStructuralArtifact,
 };
 use rootlight_adapters::{
-    AgdaParseProvider, AwkParseProvider, ElmParseProvider, ErlangParseProvider, MakeParseProvider,
-    PrologParseProvider, RuntimeTraceImportRequest, ScssParseProvider, SemanticProjectLanguage,
-    TclParseProvider, import_runtime_trace,
+    AgdaParseProvider, AwkParseProvider, ElmParseProvider, ErlangParseProvider, IniParseProvider,
+    MakeParseProvider, PrologParseProvider, RuntimeTraceImportRequest, ScssParseProvider,
+    SemanticProjectLanguage, TclParseProvider, import_runtime_trace,
 };
 pub use rootlight_adapters::{
     PROJECT_SYNTAX_FACT_LIMIT_DIAGNOSTIC, RUNTIME_TRACE_SCHEMA_VERSION, RuntimeTraceImportError,
@@ -5276,6 +5276,16 @@ impl StructuralPreflight for MakeParseProvider {
     }
 }
 
+impl StructuralPreflight for IniParseProvider {
+    fn required_syntax_fact_count(
+        &self,
+        request: &rootlight_adapter_sdk::ParseRequest<'_>,
+        cancellation: &Cancellation,
+    ) -> Result<usize, AdapterError> {
+        IniParseProvider::required_syntax_fact_count(self, request, cancellation)
+    }
+}
+
 impl StructuralPreflight for PrologParseProvider {
     fn required_syntax_fact_count(
         &self,
@@ -6214,6 +6224,10 @@ impl FirstSliceService {
             MakeParseProvider::new(maximum_source_bytes, MAX_SYNTAX_NODES)
                 .map_err(|_| FirstSliceError::Adapter)?,
         );
+        let ini_parser = Arc::new(
+            IniParseProvider::new(maximum_source_bytes, MAX_SYNTAX_NODES)
+                .map_err(|_| FirstSliceError::Adapter)?,
+        );
         let prolog_parser = Arc::new(
             PrologParseProvider::new(maximum_source_bytes, MAX_SYNTAX_NODES)
                 .map_err(|_| FirstSliceError::Adapter)?,
@@ -6392,6 +6406,26 @@ impl FirstSliceService {
                 "make".to_owned(),
                 make_parser as Arc<dyn StructuralPreflight>,
             )
+            .is_some()
+        {
+            return Err(FirstSliceError::Adapter);
+        }
+        let ini_provider: Arc<dyn ParseProvider> =
+            Arc::clone(&ini_parser) as Arc<dyn ParseProvider>;
+        let ini_analyzer = TreeSitterAnalyzer::new(
+            ini_provider,
+            ProducerIdentity::new("rootlight-first-slice-ini-native", "1.0", config.hash())
+                .map_err(|_| FirstSliceError::Adapter)?,
+            LanguageId::new("ini").map_err(|_| FirstSliceError::Adapter)?,
+            "ini-native-structural-1",
+            IniParseProvider::binary_digest(),
+        )
+        .map_err(|_| FirstSliceError::Adapter)?;
+        if analyzers.insert("ini".to_owned(), ini_analyzer).is_some() {
+            return Err(FirstSliceError::Adapter);
+        }
+        if structural_parsers
+            .insert("ini".to_owned(), ini_parser as Arc<dyn StructuralPreflight>)
             .is_some()
         {
             return Err(FirstSliceError::Adapter);
@@ -26672,6 +26706,83 @@ mod tests {
             relation.predicate == RelationPredicate::Calls
                 && relation.subject == RelationEndpoint::Occurrence(call.id)
         }));
+    }
+
+    #[test]
+    fn ini_sections_and_keys_are_source_bound_with_scoped_value_gaps() {
+        use rootlight_ir::EntityKind;
+
+        let fixture = TempDir::new().expect("fixture root exists");
+        let source = "[Network]\n    Host=server\n    Port=443\n[Display]\nTheme=dark\n";
+        fs::write(fixture.path().join("settings.ini"), source).unwrap();
+        let cancellation = deadline();
+        let mut service = FirstSliceService::new(2).expect("service initializes");
+        let receipt = service
+            .index_repository(fixture.path(), &cancellation)
+            .expect("INI source is indexed");
+        let snapshot = service
+            .loaded_generation_snapshot(receipt.generation)
+            .expect("generation remains loaded");
+        let document = snapshot.document();
+        let file = document
+            .files
+            .iter()
+            .find(|file| file.path == "settings.ini")
+            .expect("INI file is retained");
+        assert_eq!(file.language, "ini");
+        let read = service
+            .source_read(
+                receipt.generation,
+                vec![file.evidence.source.clone().expect("file source is bound")],
+                &cancellation,
+            )
+            .expect("generation-bound source remains readable");
+        assert_eq!(read.data.chunks[0].bytes, source.as_bytes());
+        let section = document
+            .entities
+            .iter()
+            .find(|entity| {
+                entity.kind == EntityKind::DocumentSection && entity.canonical_name == "Network"
+            })
+            .expect("section has a source-bound identity");
+        let host = document
+            .entities
+            .iter()
+            .find(|entity| entity.kind == EntityKind::Field && entity.canonical_name == "Host")
+            .expect("key has a source-bound identity");
+        assert_eq!(
+            host.container,
+            Some(rootlight_ir::ContainerRef::Entity(section.id))
+        );
+        assert!(document.skipped_regions.iter().any(|gap| {
+            gap.detail == "ini-value-semantics-not-analyzed"
+                && gap.source.generation() == receipt.generation
+                && source.as_bytes().get(
+                    usize::try_from(gap.source.span().start_byte()).unwrap()
+                        ..usize::try_from(gap.source.span().end_byte()).unwrap(),
+                ) == Some(b"server".as_slice())
+        }));
+        assert!(document.skipped_regions.iter().any(|gap| {
+            gap.detail == "ini-indented-key-dialect-unverified"
+                && gap.source.generation() == receipt.generation
+        }));
+        let located = service
+            .code_locate(
+                receipt.generation,
+                "Host".to_owned(),
+                LocateMode::Exact,
+                10,
+                0,
+                &cancellation,
+            )
+            .expect("key can be located");
+        assert!(
+            located
+                .data
+                .hits
+                .iter()
+                .any(|hit| { hit.path == "settings.ini" && hit.symbol == Some(host.id) })
+        );
     }
 
     #[test]

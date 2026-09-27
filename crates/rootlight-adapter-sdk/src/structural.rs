@@ -32,6 +32,10 @@ pub fn structural_entity_kind(fact: &SyntaxFact) -> Option<EntityKind> {
         SyntaxFactKind::Declaration if label == "markdown.section.declaration" => {
             Some(EntityKind::DocumentSection)
         }
+        SyntaxFactKind::Declaration if label == "ini.section.declaration" => {
+            Some(EntityKind::DocumentSection)
+        }
+        SyntaxFactKind::Declaration if label == "ini.key.declaration" => Some(EntityKind::Field),
         SyntaxFactKind::Declaration if label == "make.target.declaration" => {
             Some(EntityKind::BuildTarget)
         }
@@ -480,7 +484,23 @@ pub fn structural_captured_name_for_fact<'a>(
     text: &'a str,
     maximum_bytes: usize,
 ) -> Option<Cow<'a, str>> {
-    if language == "make"
+    if language == "ini"
+        && matches!(
+            fact.syntax_kind().as_str(),
+            "ini.section.definition" | "ini.key.definition"
+        )
+    {
+        (!text.is_empty()
+            && text.len() <= maximum_bytes
+            && text.chars().all(|character| {
+                !character.is_control()
+                    && !matches!(
+                        character,
+                        '[' | ']' | '=' | ';' | '#' | '%' | '$' | '{' | '}'
+                    )
+            }))
+        .then_some(Cow::Borrowed(text))
+    } else if language == "make"
         && matches!(
             fact.syntax_kind().as_str(),
             "make.name.definition" | "make.target.reference"
@@ -898,6 +918,33 @@ mod tests {
             }
             assert!(structural_captured_name_for_fact("make", &fact, "src/main.c", 4).is_none());
             assert!(structural_captured_name_for_fact("rust", &fact, "src/main.c", 32).is_none());
+        }
+    }
+
+    #[test]
+    fn ini_names_keep_authored_spacing_with_explicit_capture_bounds() {
+        use crate::SyntaxKindLabel;
+        use rootlight_ids::FileId;
+        use rootlight_ir::SourceSpan;
+
+        let span = SourceSpan::new(FileId::from_bytes([3; 20]), 0, 1).unwrap();
+        for label in ["ini.section.definition", "ini.key.definition"] {
+            let fact = SyntaxFact::new(
+                1,
+                None,
+                SyntaxFactKind::Occurrence,
+                span,
+                0,
+                SyntaxKindLabel::new(label).unwrap(),
+            );
+            assert_eq!(
+                structural_captured_name_for_fact("ini", &fact, "Unit Name", 32).as_deref(),
+                Some("Unit Name")
+            );
+            assert!(structural_captured_name_for_fact("ini", &fact, "Unit Name", 4).is_none());
+            assert!(structural_captured_name_for_fact("ini", &fact, "bad\0name", 32).is_none());
+            assert!(structural_captured_name_for_fact("ini", &fact, "bad=key", 32).is_none());
+            assert!(structural_captured_name_for_fact("rust", &fact, "Unit Name", 32).is_none());
         }
     }
 

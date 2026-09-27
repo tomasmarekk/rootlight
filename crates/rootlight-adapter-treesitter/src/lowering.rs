@@ -4845,8 +4845,11 @@ fn diagnostic_record(
 }
 
 fn diagnostic_skip_reason(code: &str) -> SkippedRegionReason {
-    // A declared semantic bound is not evidence that the parser rejected source syntax.
-    if code.ends_with("-semantics-partial") {
+    // Unanalyzed constructs and dialect uncertainty are not rejected syntax.
+    if code.ends_with("-semantics-partial")
+        || code.ends_with("-not-analyzed")
+        || code.ends_with("-dialect-unverified")
+    {
         SkippedRegionReason::UnsupportedConstruct
     } else if code.contains("limit") {
         SkippedRegionReason::ResourceLimit
@@ -5875,11 +5878,14 @@ mod tests {
     }
 
     #[test]
-    fn semantic_bounds_do_not_claim_parse_errors() {
+    fn unsupported_constructs_do_not_claim_parse_errors() {
         for code in [
             "agda-layout-and-expression-semantics-partial",
             "awk-expression-semantics-partial",
             "erlang-macro-and-expression-semantics-partial",
+            "make-recipe-not-analyzed",
+            "ini-value-semantics-not-analyzed",
+            "ini-indented-key-dialect-unverified",
         ] {
             assert_eq!(
                 diagnostic_skip_reason(code),
@@ -5892,6 +5898,10 @@ mod tests {
         );
         assert_eq!(
             diagnostic_skip_reason("unexpected-token"),
+            SkippedRegionReason::ParseError
+        );
+        assert_eq!(
+            diagnostic_skip_reason("ini-section-header-parse-error"),
             SkippedRegionReason::ParseError
         );
     }

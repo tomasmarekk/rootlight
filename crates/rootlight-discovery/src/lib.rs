@@ -1783,6 +1783,14 @@ const LANGUAGE_CAPABILITIES: &[LanguageCapability] = &[
         analyzers: &["source-fallback"],
     },
     LanguageCapability {
+        language: "ini",
+        suffixes: &[".ini"],
+        aliases: &[],
+        detectors: &["extension"],
+        maximum_tier: "tier_d",
+        analyzers: &["native"],
+    },
+    LanguageCapability {
         language: "java",
         suffixes: &[".java"],
         aliases: &[],
@@ -3700,7 +3708,7 @@ max_source_file_bytes = 2097152
 
     #[test]
     fn first_party_parsers_advertise_native_structural_analysis() {
-        for language in ["awk", "elm", "make", "prolog", "scss"] {
+        for language in ["awk", "elm", "ini", "make", "prolog", "scss"] {
             let capability = language_capabilities()
                 .iter()
                 .find(|capability| capability.language == language)
@@ -3708,6 +3716,14 @@ max_source_file_bytes = 2097152
             assert_eq!(capability.analyzers, ["native"]);
             assert_eq!(capability.maximum_tier, "tier_d");
         }
+    }
+
+    #[test]
+    fn ini_extension_keeps_source_and_backup_files_distinct() {
+        assert_eq!(extension_language("config/settings.ini"), Some("ini"));
+        assert_eq!(extension_language("config/SETTINGS.INI"), Some("ini"));
+        assert_ne!(extension_language("config/settings.ini.bak"), Some("ini"));
+        assert_eq!(canonical_language("ini"), Some("ini"));
     }
 
     #[test]

@@ -9,6 +9,7 @@ mod agda;
 mod awk;
 mod elm;
 mod erlang;
+mod ini;
 mod make;
 mod project_context;
 mod project_semantics;
@@ -37,6 +38,7 @@ pub use agda::AgdaParseProvider;
 pub use awk::AwkParseProvider;
 pub use elm::ElmParseProvider;
 pub use erlang::ErlangParseProvider;
+pub use ini::IniParseProvider;
 pub use make::MakeParseProvider;
 pub use project_context::{
     CxxProjectContext, DotnetProjectContext, GeneratedOriginMapping, GoProjectContext,

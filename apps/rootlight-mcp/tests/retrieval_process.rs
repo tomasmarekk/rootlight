@@ -1579,6 +1579,70 @@ fn matlab_script_bindings_cross_mcp_without_function_headers() {
 }
 
 #[test]
+fn ini_sections_and_indented_keys_cross_mcp_with_exact_sources() {
+    source_entities_cross_process_boundaries(
+        "ini",
+        "settings.ini",
+        "[Network]\n    Host=server\n    Port=443\n[Display]\nTheme=dark\n",
+        &[
+            ("Network", "document_section", 1),
+            ("Host", "field", 1),
+            ("Theme", "field", 1),
+        ],
+    );
+}
+
+#[test]
+fn ini_value_gaps_warn_only_for_scoped_ini_queries() {
+    let source = "[Network]\nHost=server\n";
+    let mut fixture =
+        RetrievalFixture::spawn_with_layout(Some(("settings.ini", source)), FixtureLayout::Data);
+    for (query, language, path, bounded) in [
+        ("Host", "ini", "settings.ini", true),
+        ("matrix_target_alpha", "rust", "src/lib.rs", false),
+    ] {
+        let located = fixture.standalone(
+            &format!("ini-scoped-coverage-{language}"),
+            "code.locate",
+            json!({"query": query, "search_modes": ["exact"], "languages": [language],
+                "scope": {"paths": [path]}, "response_profile": "evidence"}),
+        );
+        assert_success(&located, "code.locate");
+        let output = &located["result"]["structuredContent"];
+        assert_common_read_contract(output, &fixture.repository_id);
+        assert!(!output["data"]["matches"].as_array().unwrap().is_empty());
+        let language_coverage = output["coverage"]["languages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|entry| entry["language"] == language)
+            .expect("scoped language coverage is reported");
+        assert_eq!(
+            language_coverage["status"],
+            if bounded { "bounded" } else { "complete" }
+        );
+        let warnings = output["warnings"].as_array().expect("coverage warnings");
+        assert_eq!(
+            warnings.iter().any(|warning| {
+                warning["code"] == "coverage_unsupported"
+                    && warning["message"]
+                        .as_str()
+                        .is_some_and(|message| message.ends_with(&format!("language {language}")))
+            }),
+            bounded,
+            "{output:#}"
+        );
+        assert!(
+            warnings
+                .iter()
+                .all(|warning| warning["code"] != "coverage_parse_error"),
+            "{output:#}"
+        );
+    }
+    fixture.finish();
+}
+
+#[test]
 fn make_static_targets_cross_mcp_with_exact_prerequisite_sources() {
     let source = concat!(
         "APP := app\nall: check\n\t@echo $(APP)\ncheck:\n\t@echo ready\n",
@@ -2308,7 +2372,7 @@ fn source_entities_with_coverage_cross_process_boundaries(
             "1.0",
         );
         if !matches!(kind, "import" | "export" | "style_rule" | "keyframes")
-            && matches!(
+            && (matches!(
                 language,
                 "r" | "scala"
                     | "dart"
@@ -2320,7 +2384,7 @@ fn source_entities_with_coverage_cross_process_boundaries(
                     | "perl"
                     | "scss"
                     | "tcl"
-            )
+            ) || (language == "ini" && kind == "field"))
         {
             // Only these kinds retain a lossless representation in the
             // legacy retrieval contract.
