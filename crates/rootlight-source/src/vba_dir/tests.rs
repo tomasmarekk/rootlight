@@ -161,6 +161,62 @@ fn ordered_metadata_retains_all_reference_variants_and_exact_module_ranges() {
             .collect::<Vec<_>>(),
         expected_refs
     );
+    for (index, reference) in directory.references().iter().enumerate() {
+        let field = |range: &Range<usize>| {
+            assert!(range.start >= reference.range().start);
+            assert!(range.end <= reference.range().end);
+            &input[range.clone()]
+        };
+        if let Some(name) = reference.name() {
+            assert_eq!(index, 0);
+            assert_eq!(field(&name.name_range()), b"Library");
+            assert_eq!(field(&name.unicode_name_range()), utf16("Library"));
+        } else {
+            assert_ne!(index, 0);
+        }
+        match reference.payload() {
+            ReferencePayload::Registered { libid } => {
+                assert_eq!(field(libid), b"registered");
+            }
+            ReferencePayload::Project {
+                absolute_libid,
+                relative_libid,
+                major_version,
+                minor_version,
+                version_range,
+            } => {
+                assert_eq!(field(absolute_libid), b"/external/project");
+                assert_eq!(field(relative_libid), b"../project");
+                assert_eq!((*major_version, *minor_version), (2, 3));
+                assert_eq!(field(version_range), [2, 0, 0, 0, 3, 0]);
+            }
+            ReferencePayload::Control {
+                original_libid,
+                twiddled_libid,
+                extended_name,
+                extended_libid,
+                original_type_library,
+                cookie,
+                cookie_range,
+            } => {
+                assert_eq!(
+                    original_libid.as_ref().map(field),
+                    (index == 3).then_some(b"original".as_slice())
+                );
+                assert_eq!(field(twiddled_libid), b"twiddled");
+                assert_eq!(field(extended_libid), b"extended");
+                assert_eq!(field(original_type_library), [0xff; 16]);
+                assert_eq!(*cookie, u32::MAX);
+                assert_eq!(field(cookie_range), cookie.to_le_bytes());
+                assert_eq!(extended_name.is_some(), index == 3);
+                if let Some(name) = extended_name {
+                    assert_eq!(field(&name.name_range()), b"Library");
+                    assert_eq!(field(&name.unicode_name_range()), utf16("Library"));
+                }
+            }
+        }
+        assert!(!format!("{reference:?}").contains("Library"));
+    }
     let modules = directory.modules();
     assert_eq!(modules.len(), 2);
     assert_eq!(modules[0].range(), first);
@@ -193,6 +249,58 @@ fn ordered_metadata_retains_all_reference_variants_and_exact_module_ranges() {
     }
     assert!(!format!("{directory:?}").contains("ModuleStream"));
     assert!(!format!("{:?}", modules[0]).contains("description"));
+}
+
+#[test]
+fn reference_names_and_binary_identity_remain_distinct_and_source_bound() {
+    let mut input = Vec::new();
+    information(&mut input, false, 932);
+    pair(&mut input, 0x0016, &[0x81, 0x40], "Δ𝄞");
+    let original_start = input.len();
+    word(&mut input, 0x0033);
+    sized(&mut input, &[0x0f, 1, 0x19, 2]);
+    control(&mut input, true);
+    let control_end = input.len();
+    let guid: Vec<u8> = (0..16).collect();
+    input[control_end - 20..control_end - 4].copy_from_slice(&guid);
+    input[control_end - 4..control_end].copy_from_slice(&0x1234_abcd_u32.to_le_bytes());
+    pair(&mut input, 0x0016, b"", "");
+    marker(&mut input, 0x000d);
+    sized(&mut input, b"");
+    input.extend([0; 6]);
+    module_header(&mut input, 0);
+    marker(&mut input, 0x0010);
+
+    let directory = parse(&input).unwrap();
+    let first = &directory.references()[0];
+    let name = first.name().unwrap();
+    assert_eq!(&input[name.name_range()], [0x81, 0x40]);
+    assert_eq!(&input[name.unicode_name_range()], utf16("Δ𝄞"));
+    let ReferencePayload::Control {
+        original_libid: Some(original),
+        extended_name: Some(extended_name),
+        original_type_library,
+        cookie,
+        cookie_range,
+        ..
+    } = first.payload()
+    else {
+        panic!("expected original control metadata")
+    };
+    assert_eq!(*original, original_start + 6..original_start + 10);
+    assert_eq!(&input[original.clone()], [0x0f, 1, 0x19, 2]);
+    assert_eq!(&input[extended_name.name_range()], b"Library");
+    assert_eq!(&input[original_type_library.clone()], guid);
+    assert_eq!(*cookie, 0x1234_abcd);
+    assert_eq!(&input[cookie_range.clone()], cookie.to_le_bytes());
+    let empty = &directory.references()[1];
+    assert!(empty.name().unwrap().name_range().is_empty());
+    assert!(empty.name().unwrap().unicode_name_range().is_empty());
+    let ReferencePayload::Registered { libid } = empty.payload() else {
+        panic!("expected registered reference")
+    };
+    assert!(libid.is_empty());
+    assert!(libid.start >= empty.range().start && libid.end <= empty.range().end);
 }
 
 #[test]

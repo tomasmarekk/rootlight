@@ -192,11 +192,78 @@ pub enum ReferenceKind {
     Project,
 }
 
-/// A complete reference boundary, retaining uninterpreted identifiers in input.
+/// Ranges of the two name encodings in one REFERENCENAME record.
+/// Both ranges address the owning directory's decompressed bytes. Their decoded
+/// values have not been compared and must not be treated as a resolved identity.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReferenceName {
+    name: Range<usize>,
+    unicode_name: Range<usize>,
+}
+
+impl ReferenceName {
+    /// Returns the MBCS name payload in the project's declared code page.
+    #[must_use]
+    pub fn name_range(&self) -> Range<usize> {
+        self.name.clone()
+    }
+
+    /// Returns the UTF-16LE name payload, without its length or reserved word.
+    #[must_use]
+    pub fn unicode_name_range(&self) -> Range<usize> {
+        self.unicode_name.clone()
+    }
+}
+
+/// Structured reference fields over the owning decompressed directory.
+/// Text ranges retain exact MBCS bytes, not validated Libid grammar or filesystem
+/// locations. No referenced library, project, registry entry or network is read.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum ReferencePayload {
+    /// A registered Automation library's uninterpreted identifier.
+    Registered {
+        /// Exact Libid payload, excluding its byte count.
+        libid: Range<usize>,
+    },
+    /// An external project identifier pair and declared version.
+    Project {
+        /// LibidAbsolute payload; this is not a trusted local path.
+        absolute_libid: Range<usize>,
+        /// LibidRelative payload; no path resolution has occurred.
+        relative_libid: Range<usize>,
+        /// Declared major version, decoded as an unsigned 32-bit value.
+        major_version: u32,
+        /// Declared minor version, decoded as an unsigned 16-bit value.
+        minor_version: u16,
+        /// Exact six bytes carrying the major then minor version.
+        version_range: Range<usize>,
+    },
+    /// A control library and its optional original Automation identifier.
+    Control {
+        /// LibidOriginal payload when preceded by REFERENCEORIGINAL.
+        original_libid: Option<Range<usize>>,
+        /// LibidTwiddled payload, without defaulting an empty or placeholder ID.
+        twiddled_libid: Range<usize>,
+        /// Optional name record belonging specifically to the extended library.
+        extended_name: Option<ReferenceName>,
+        /// LibidExtended payload.
+        extended_libid: Range<usize>,
+        /// Exact 16-byte OriginalTypeLib GUID in its original binary layout.
+        original_type_library: Range<usize>,
+        /// Declared cookie; uniqueness within the project is not established.
+        cookie: u32,
+        /// Exact four little-endian bytes carrying the cookie.
+        cookie_range: Range<usize>,
+    },
+}
+
+/// A complete reference boundary and its uninterpreted, source-bound fields.
 #[derive(Debug, Clone)]
 pub struct ReferenceRecord {
     range: Range<usize>,
-    kind: ReferenceKind,
+    name: Option<ReferenceName>,
+    payload: ReferencePayload,
 }
 
 impl ReferenceRecord {
@@ -208,7 +275,28 @@ impl ReferenceRecord {
     /// Returns the structural reference variant, not evidence of resolution.
     #[must_use]
     pub const fn kind(&self) -> ReferenceKind {
-        self.kind
+        match &self.payload {
+            ReferencePayload::Registered { .. } => ReferenceKind::Registered,
+            ReferencePayload::Project { .. } => ReferenceKind::Project,
+            ReferencePayload::Control {
+                original_libid: Some(_),
+                ..
+            } => ReferenceKind::OriginalControl,
+            ReferencePayload::Control {
+                original_libid: None,
+                ..
+            } => ReferenceKind::Control,
+        }
+    }
+    /// Returns the optional leading name record, separate from a control's extended name.
+    #[must_use]
+    pub fn name(&self) -> Option<&ReferenceName> {
+        self.name.as_ref()
+    }
+    /// Returns parsed field ranges and numeric metadata, not resolution evidence.
+    #[must_use]
+    pub fn payload(&self) -> &ReferencePayload {
+        &self.payload
     }
 }
 
@@ -281,6 +369,10 @@ impl<'a> ProjectDirectory<'a> {
     #[must_use]
     pub fn references(&self) -> &[ReferenceRecord] {
         &self.references
+    }
+    /// Moves the owned reference inventory after consumers have read borrowed module fields.
+    pub(crate) fn into_references(self) -> Vec<ReferenceRecord> {
+        self.references
     }
     /// Returns exactly the declared number of ordered module records.
     #[must_use]

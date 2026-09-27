@@ -4,7 +4,7 @@
 
 use super::{
     Cancellation, DirectoryError, DirectoryLimits, ModuleKind, ModuleRecord, ProjectDirectory,
-    ReferenceKind, ReferenceRecord, TextField,
+    ReferenceName, ReferencePayload, ReferenceRecord, TextField,
 };
 
 pub(super) fn parse<'a>(
@@ -249,55 +249,83 @@ impl<'a> Reader<'a, '_> {
 
     fn reference(&mut self) -> Result<ReferenceRecord, DirectoryError> {
         let start = self.position;
-        if self.peek()? == 0x0016 {
-            self.pair(0x0016, self.bytes.len())?;
-        }
+        let name = self.reference_name()?;
         let offset = self.position;
         let id = self.peek()?;
-        let kind = match id {
-            0x002f => {
-                self.control()?;
-                ReferenceKind::Control
-            }
+        let payload = match id {
+            0x002f => self.control(None)?,
             0x0033 => {
                 self.id(0x0033)?;
-                self.text(self.bytes.len())?;
-                self.control()?;
-                ReferenceKind::OriginalControl
+                let original = self.text(self.bytes.len())?.range;
+                self.control(Some(original))?
             }
             0x000d => {
                 self.marker(0x000d)?;
-                self.text(self.bytes.len())?;
+                let libid = self.text(self.bytes.len())?.range;
                 self.take(6)?;
-                ReferenceKind::Registered
+                ReferencePayload::Registered { libid }
             }
             0x000e => {
                 self.marker(0x000e)?;
-                self.text(self.bytes.len())?;
-                self.text(self.bytes.len())?;
-                self.take(6)?;
-                ReferenceKind::Project
+                let absolute_libid = self.text(self.bytes.len())?.range;
+                let relative_libid = self.text(self.bytes.len())?.range;
+                let version_start = self.position;
+                let major_version = self.u32()?;
+                let minor_version = self.u16()?;
+                ReferencePayload::Project {
+                    absolute_libid,
+                    relative_libid,
+                    major_version,
+                    minor_version,
+                    version_range: version_start..self.position,
+                }
             }
             _ => return Err(DirectoryError::Record { offset, id }),
         };
         Ok(ReferenceRecord {
             range: start..self.position,
-            kind,
+            name,
+            payload,
         })
     }
 
-    fn control(&mut self) -> Result<(), DirectoryError> {
-        self.marker(0x002f)?;
-        self.text(self.bytes.len())?;
-        self.take(6)?;
-        if self.peek()? == 0x0016 {
-            self.pair(0x0016, self.bytes.len())?;
+    fn reference_name(&mut self) -> Result<Option<ReferenceName>, DirectoryError> {
+        if self.peek()? != 0x0016 {
+            return Ok(None);
         }
+        let (name, unicode_name) = self.pair(0x0016, self.bytes.len())?;
+        Ok(Some(ReferenceName {
+            name: name.range,
+            unicode_name: unicode_name.range,
+        }))
+    }
+
+    fn control(
+        &mut self,
+        original_libid: Option<std::ops::Range<usize>>,
+    ) -> Result<ReferencePayload, DirectoryError> {
+        self.marker(0x002f)?;
+        let twiddled_libid = self.text(self.bytes.len())?.range;
+        self.take(6)?;
+        let extended_name = self.reference_name()?;
         self.take(2)?;
         self.take(4)?;
-        self.text(self.bytes.len())?;
-        self.take(26)?;
-        Ok(())
+        let extended_libid = self.text(self.bytes.len())?.range;
+        self.take(6)?;
+        let guid_start = self.position;
+        self.take(16)?;
+        let original_type_library = guid_start..self.position;
+        let cookie_start = self.position;
+        let cookie = self.u32()?;
+        Ok(ReferencePayload::Control {
+            original_libid,
+            twiddled_libid,
+            extended_name,
+            extended_libid,
+            original_type_library,
+            cookie,
+            cookie_range: cookie_start..self.position,
+        })
     }
 
     fn module(&mut self) -> Result<ModuleRecord<'a>, DirectoryError> {

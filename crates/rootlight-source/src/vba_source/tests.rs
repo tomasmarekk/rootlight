@@ -293,6 +293,99 @@ fn parse(bytes: &[u8]) -> CompoundFile<'_> {
     CompoundFile::parse(bytes, CompoundLimits::default(), &Cancellation::new()).unwrap()
 }
 
+#[test]
+fn project_retains_reference_fields_with_original_directory_provenance() {
+    use crate::vba_dir::ReferencePayload;
+
+    let cancel = Cancellation::new();
+    let mut decoded = directory(&[("Module", 0)]);
+    let insertion = ProjectDirectory::parse(&decoded, DirectoryLimits::default(), &cancel)
+        .unwrap()
+        .information_range()
+        .end;
+    let mut references = Vec::new();
+    pair(&mut references, 0x0016, "LocalLibrary");
+    header(&mut references, 0x000d, 0);
+    text(&mut references, b"unresolved-library");
+    references.extend([0; 6]);
+    header(&mut references, 0x000e, 0);
+    text(&mut references, b"/unavailable/project");
+    text(&mut references, b"../project");
+    dword(&mut references, 0x1234_5678);
+    word(&mut references, 0xabcd);
+    header(&mut references, 0x002f, 0);
+    text(&mut references, b"twiddled");
+    references.extend([0; 6]);
+    pair(&mut references, 0x0016, "ExtendedLibrary");
+    word(&mut references, 0);
+    dword(&mut references, 0);
+    text(&mut references, b"extended");
+    references.extend([0; 6]);
+    references.extend(0..16);
+    dword(&mut references, 0x8765_4321);
+    decoded.splice(insertion..insertion, references.iter().copied());
+    let encoded = compress_literals(&decoded);
+    let body = b"Sub Run()\r\nEnd Sub\r\n";
+    let input = compound(&[
+        Stream {
+            name: "dir",
+            bytes: encoded.clone(),
+            inside: true,
+        },
+        stream("Module", body),
+    ]);
+    let file = parse(&input);
+    let project = VbaProject::open(&file, 1, ProjectReadLimits::default(), &cancel).unwrap();
+    let expected = ProjectDirectory::parse(&decoded, DirectoryLimits::default(), &cancel).unwrap();
+    assert_eq!(project.references().len(), 3);
+    assert_eq!(project.decoded_directory().bytes(), decoded);
+    for (actual, expected) in project.references().iter().zip(expected.references()) {
+        assert_eq!(actual.range(), expected.range());
+        assert_eq!(actual.kind(), expected.kind());
+        assert_eq!(actual.name(), expected.name());
+        assert_eq!(actual.payload(), expected.payload());
+    }
+    let ReferencePayload::Registered { libid } = project.references()[0].payload() else {
+        panic!("expected retained registered reference")
+    };
+    assert_eq!(
+        &project.decoded_directory().bytes()[libid.clone()],
+        b"unresolved-library"
+    );
+    let ReferencePayload::Project {
+        major_version,
+        minor_version,
+        ..
+    } = project.references()[1].payload()
+    else {
+        panic!("expected retained project reference")
+    };
+    assert_eq!((*major_version, *minor_version), (0x1234_5678, 0xabcd));
+    let mut reconstructed = Vec::new();
+    for part in project.encoded_directory().source_parts() {
+        reconstructed.extend_from_slice(&input[part.container_range()]);
+    }
+    assert_eq!(reconstructed, encoded);
+    let decoded_again = vba_compression::decompress(
+        &reconstructed,
+        ProjectReadLimits::default().compression,
+        &cancel,
+    )
+    .unwrap();
+    assert_eq!(
+        &decoded_again.bytes()[insertion..insertion + references.len()],
+        references
+    );
+    assert_eq!(
+        project
+            .read_module(0, ModuleReadLimits::default(), &cancel)
+            .unwrap()
+            .bytes(),
+        body
+    );
+    assert!(!format!("{project:?}").contains("LocalLibrary"));
+}
+
 fn renamed_entry(bytes: &mut [u8], id: usize, name: &str) {
     let start = 1024 + id * 128;
     bytes[start..start + 64].fill(0);

@@ -13,7 +13,7 @@ use rootlight_cancel::{Cancellation, Cancelled};
 use crate::{
     compound::{CompoundEntry, CompoundEntryKind, CompoundError, CompoundFile, CompoundStream},
     vba_compression::{self, DecompressedContainer, DecompressionError, DecompressionLimits},
-    vba_dir::{DirectoryError, DirectoryLimits, ProjectDirectory},
+    vba_dir::{DirectoryError, DirectoryLimits, ProjectDirectory, ReferenceRecord},
 };
 
 pub mod root;
@@ -236,6 +236,7 @@ pub struct VbaProject<'container, 'input> {
     encoded_directory: CompoundStream,
     decoded_directory: DecompressedContainer,
     code_page: u16,
+    references: Vec<ReferenceRecord>,
     modules: Vec<ModuleDescriptor>,
 }
 
@@ -245,6 +246,7 @@ impl fmt::Debug for VbaProject<'_, '_> {
             .field("storage_id", &self.storage_id)
             .field("directory_id", &self.directory_id)
             .field("code_page", &self.code_page)
+            .field("references", &self.references.len())
             .field("modules", &self.modules.len())
             .finish()
     }
@@ -338,6 +340,7 @@ impl<'container, 'input> VbaProject<'container, 'input> {
                 module.stream = Err(BindingError::Reused);
             }
         }
+        let references = metadata.into_references();
         Ok(Self {
             compound,
             storage_id,
@@ -345,6 +348,7 @@ impl<'container, 'input> VbaProject<'container, 'input> {
             encoded_directory,
             decoded_directory,
             code_page,
+            references,
             modules,
         })
     }
@@ -353,6 +357,13 @@ impl<'container, 'input> VbaProject<'container, 'input> {
     #[must_use]
     pub fn modules(&self) -> &[ModuleDescriptor] {
         &self.modules
+    }
+    /// Returns untrusted reference metadata in declaration order, without loading it.
+    /// All field ranges address [`Self::decoded_directory`]'s bytes; they do not
+    /// establish library availability, identity equivalence or symbol resolution.
+    #[must_use]
+    pub fn references(&self) -> &[ReferenceRecord] {
+        &self.references
     }
     /// Returns the original project code page without guessing an encoding.
     #[must_use]
