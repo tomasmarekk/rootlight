@@ -220,7 +220,7 @@ const PROJECT_FACTS_TRUNCATED_MESSAGE: &str =
     "additional project semantic facts were omitted by aggregate resource limits";
 const AGGREGATE_DIAGNOSTICS_TRUNCATED_CODE: &str = "aggregate-diagnostics-truncated";
 const ANALYZER_BINARY_SEED: &[u8] = b"rootlight.first-slice.treesitter-structural/163";
-const RESOLVER_BINARY_SEED: &[u8] = b"rootlight.first-slice.resolve/42";
+const RESOLVER_BINARY_SEED: &[u8] = b"rootlight.first-slice.resolve/43";
 const INCREMENTAL_PROVIDER_SEED: &[u8] = b"rootlight.first-slice.incremental-provider/1";
 const LANGUAGE_DISPOSITION_PROVIDER_SEED: &[u8] = b"rootlight.first-slice.language-disposition/5";
 const SOURCE_FILE_FALLBACK_PROVIDER_SEED: &[u8] = b"rootlight.source-file-fallback/4";
@@ -36998,12 +36998,31 @@ mod tests {
 
     #[test]
     fn classic_project_callback_references_follow_access_and_restart() {
+        assert_classic_project_callback_restart(
+            "[nOtIfY]",
+            "vba.procedure_pointer.reference",
+            true,
+        );
+    }
+
+    #[test]
+    fn classic_project_qualified_callback_references_follow_access_and_restart() {
+        assert_classic_project_callback_restart(
+            "[cAlLbAcKs] _\r\n. _\r\n[nOtIfY]",
+            "vba.qualified_procedure_pointer.reference",
+            false,
+        );
+    }
+
+    fn assert_classic_project_callback_restart(spelling: &str, syntax: &str, getter: bool) {
         let storage = durable_test_tempdir();
         let fixture = durable_test_tempdir();
         let paths = RuntimePaths::new(storage.path().join("state"), storage.path().join("runtime"))
             .unwrap();
         paths.prepare_owner().unwrap();
-        let client = "Attribute VB_Name = \"Client\"\nPrivate Notify As Long\nPrivate Declare PtrSafe Sub Register Lib \"callbacks\" (ByVal address As LongPtr)\nPublic Sub Run()\nDim Notify As Long\nCall Register(AddressOf [nOtIfY])\nEnd Sub\n";
+        let client = format!(
+            "Attribute VB_Name = \"Client\"\nPrivate Notify As Long\nPrivate Callbacks As Long\nPrivate Declare PtrSafe Sub Register Lib \"callbacks\" (ByVal address As LongPtr)\nPublic Sub Run()\nDim Notify As Long\nDim Callbacks As Long\nCall Register(AddressOf {spelling})\nEnd Sub\n"
+        );
         fs::write(fixture.path().join("Client.bas"), client).unwrap();
         let manifest = "Type=OleDll\nName=\"Primary\"\nModule=Client; Client.bas\nModule=Callbacks; Callbacks.bas\n";
         fs::write(fixture.path().join("project.vbp"), manifest).unwrap();
@@ -37012,7 +37031,10 @@ mod tests {
             ("Public Sub Notify()\nEnd Sub\n", true),
             ("Private Sub Notify()\nEnd Sub\n", false),
             ("Public Function Notify() As Long\nEnd Function\n", true),
-            ("Public Property Get Notify() As Long\nEnd Property\n", true),
+            (
+                "Public Property Get Notify() As Long\nEnd Property\n",
+                getter,
+            ),
             (
                 "Public Declare PtrSafe Sub Notify Lib \"callbacks\" ()\n",
                 false,
@@ -37054,7 +37076,7 @@ mod tests {
             let site = document
                 .occurrences
                 .iter()
-                .find(|site| site.syntax_kind == "vba.procedure_pointer.reference")
+                .find(|site| site.syntax_kind == syntax)
                 .unwrap();
             assert_eq!(
                 matches!(site.target, OccurrenceTarget::Resolved { .. }),
@@ -37130,7 +37152,7 @@ mod tests {
                     &deadline(),
                 )
                 .unwrap();
-            assert_eq!(read.data.chunks[0].bytes, b"[nOtIfY]");
+            assert_eq!(read.data.chunks[0].bytes, spelling.as_bytes());
             for coverage in &document.coverage_records {
                 assert_eq!(coverage.discovered, coverage.indexed + coverage.skipped);
             }
@@ -37139,7 +37161,16 @@ mod tests {
 
     #[test]
     fn classic_project_callback_references_preserve_namespace_barriers() {
-        for (case, local, callback, sibling, extra, project_name, resolved) in [
+        assert_classic_project_callback_barriers(false);
+    }
+
+    #[test]
+    fn classic_project_qualified_callback_references_preserve_namespace_barriers() {
+        assert_classic_project_callback_barriers(true);
+    }
+
+    fn assert_classic_project_callback_barriers(qualified: bool) {
+        for (case, local, callback, sibling, extra, project_name, simple, member) in [
             (
                 "public-duplicate",
                 "",
@@ -37148,6 +37179,7 @@ mod tests {
                 "",
                 "Primary",
                 false,
+                true,
             ),
             (
                 "private-sibling",
@@ -37156,6 +37188,7 @@ mod tests {
                 "Private Sub Notify()\nEnd Sub\n",
                 "",
                 "Primary",
+                true,
                 true,
             ),
             (
@@ -37166,6 +37199,7 @@ mod tests {
                 "",
                 "Primary",
                 true,
+                false,
             ),
             (
                 "local-setter",
@@ -37174,6 +37208,7 @@ mod tests {
                 "",
                 "",
                 "Primary",
+                true,
                 true,
             ),
             (
@@ -37184,6 +37219,7 @@ mod tests {
                 "",
                 "Primary",
                 false,
+                true,
             ),
             (
                 "duplicate-local",
@@ -37192,6 +37228,7 @@ mod tests {
                 "",
                 "",
                 "Primary",
+                false,
                 false,
             ),
             (
@@ -37202,6 +37239,7 @@ mod tests {
                 "",
                 "Primary",
                 false,
+                false,
             ),
             (
                 "conditional-export",
@@ -37210,6 +37248,7 @@ mod tests {
                 "",
                 "",
                 "Primary",
+                false,
                 false,
             ),
             (
@@ -37220,6 +37259,7 @@ mod tests {
                 "",
                 "Primary",
                 false,
+                false,
             ),
             (
                 "missing-inventory",
@@ -37228,6 +37268,7 @@ mod tests {
                 "",
                 "Module=Missing; Missing.bas\n",
                 "Primary",
+                false,
                 false,
             ),
             (
@@ -37238,6 +37279,7 @@ mod tests {
                 "Module=Notify; Notify.bas\n",
                 "Primary",
                 false,
+                true,
             ),
             (
                 "project-name",
@@ -37247,6 +37289,7 @@ mod tests {
                 "",
                 "Notify",
                 false,
+                true,
             ),
             (
                 "overlapping-membership",
@@ -37255,6 +37298,7 @@ mod tests {
                 "",
                 "",
                 "Primary",
+                false,
                 false,
             ),
             (
@@ -37265,6 +37309,7 @@ mod tests {
                 "",
                 "Primary",
                 false,
+                false,
             ),
             (
                 "foreign-project",
@@ -37274,8 +37319,70 @@ mod tests {
                 "",
                 "Primary",
                 false,
+                false,
+            ),
+            (
+                "local-qualifier-procedure",
+                "Private Sub Callbacks()\nEnd Sub\n",
+                "Public Sub Notify()\nEnd Sub\n",
+                "",
+                "",
+                "Primary",
+                true,
+                false,
+            ),
+            (
+                "local-qualifier-getter",
+                "Private Property Get Callbacks() As Long\nEnd Property\n",
+                "Public Sub Notify()\nEnd Sub\n",
+                "",
+                "",
+                "Primary",
+                true,
+                false,
+            ),
+            (
+                "local-qualifier-setter",
+                "Private Property Let Callbacks(ByVal value As Long)\nEnd Property\n",
+                "Public Sub Notify()\nEnd Sub\n",
+                "",
+                "",
+                "Primary",
+                true,
+                true,
+            ),
+            (
+                "local-qualifier-type",
+                "Private Type Callbacks\nValue As Long\nEnd Type\n",
+                "Public Sub Notify()\nEnd Sub\n",
+                "",
+                "",
+                "Primary",
+                true,
+                true,
+            ),
+            (
+                "project-qualifier-name",
+                "",
+                "Public Sub Notify()\nEnd Sub\n",
+                "",
+                "",
+                "Callbacks",
+                true,
+                false,
             ),
         ] {
+            let resolved = if qualified { member } else { simple };
+            let spelling = if qualified {
+                "Callbacks.Notify"
+            } else {
+                "Notify"
+            };
+            let syntax = if qualified {
+                "vba.qualified_procedure_pointer.reference"
+            } else {
+                "vba.procedure_pointer.reference"
+            };
             let storage = durable_test_tempdir();
             let fixture = durable_test_tempdir();
             let paths =
@@ -37305,7 +37412,7 @@ mod tests {
                 (
                     "Client",
                     format!(
-                        "{local}Private Declare PtrSafe Sub Register Lib \"callbacks\" (ByVal address As LongPtr)\nSub Run()\nCall Register(AddressOf Notify)\nEnd Sub\n"
+                        "{local}Private Declare PtrSafe Sub Register Lib \"callbacks\" (ByVal address As LongPtr)\nSub Run()\nCall Register(AddressOf {spelling})\nEnd Sub\n"
                     ),
                 ),
                 ("Callbacks", callback.to_owned()),
@@ -37331,7 +37438,7 @@ mod tests {
             let site = document
                 .occurrences
                 .iter()
-                .find(|site| site.syntax_kind == "vba.procedure_pointer.reference")
+                .find(|site| site.syntax_kind == syntax)
                 .unwrap();
             assert_eq!(
                 matches!(site.target, OccurrenceTarget::Resolved { .. }),

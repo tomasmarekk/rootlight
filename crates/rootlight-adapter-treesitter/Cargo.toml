@@ -14,6 +14,7 @@ rootlight-cancel = { path = "../rootlight-cancel" }
 rootlight-ids = { path = "../rootlight-ids" }
 rootlight-ir = { path = "../rootlight-ir" }
 rootlight-unicode = { path = "../rootlight-unicode" }
+rootlight-vba = { path = "../rootlight-vba" }
 thiserror.workspace = true
 tree-sitter.workspace = true
 tree-sitter-bash.workspace = true

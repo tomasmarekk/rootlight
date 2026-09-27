@@ -44,6 +44,7 @@ workspace_members = [
   "rootlight-source",
   "rootlight-storage",
   "rootlight-unicode",
+  "rootlight-vba",
   "rootlight-vfs",
   "rootlight-workspace",
   "xtask",
@@ -147,6 +148,7 @@ allowed_internal_dependencies = [
   "rootlight-ids",
   "rootlight-ir",
   "rootlight-unicode",
+  "rootlight-vba",
   "rootlight-vfs",
 ]
 allow_build_script = false
@@ -376,6 +378,7 @@ allowed_internal_dependencies = [
   "rootlight-cancel",
   "rootlight-ids",
   "rootlight-ir",
+  "rootlight-vba",
 ]
 allow_build_script = false
 
@@ -467,6 +470,11 @@ allow_build_script = false
 [[crates]]
 name = "rootlight-vfs"
 allowed_internal_dependencies = ["rootlight-cancel", "rootlight-ids", "rootlight-ir"]
+allow_build_script = false
+
+[[crates]]
+name = "rootlight-vba"
+allowed_internal_dependencies = []
 allow_build_script = false
 
 [[crates]]

@@ -175,8 +175,8 @@ struct ResolvedProject {
     modules: BTreeMap<String, Option<SymbolId>>,
     default_instances: BTreeMap<SymbolId, SourceRef>,
     value_names: BTreeSet<String>,
-    procedural_modules: BTreeMap<FileId, SymbolId>,
-    pointer_names: BTreeSet<String>,
+    member_modules: BTreeMap<FileId, SymbolId>,
+    pointer_names: BTreeMap<String, Option<FileId>>,
     evidence: Arc<ProjectEvidence>,
 }
 
@@ -191,7 +191,7 @@ fn pointer_callable(entity: &EntityRecord, sources: &BTreeMap<FileId, &[u8]>) ->
             None => Some(false),
         };
     }
-    if entity.kind != EntityKind::Function {
+    if !matches!(entity.kind, EntityKind::Function | EntityKind::Method) {
         return None;
     }
     let header = entity.evidence.source.as_ref().and_then(|source| {
@@ -561,8 +561,8 @@ impl<'a> ClassicIndex<'a> {
             };
             evidence.sources.push(source.clone());
             let mut types = BTreeMap::from([(project.name.clone(), None)]);
-            let mut pointer_names = BTreeSet::from([project.name.clone()]);
-            let mut procedural_modules = BTreeMap::new();
+            let mut pointer_names = BTreeMap::from([(project.name.clone(), None)]);
+            let mut member_modules = BTreeMap::new();
             let mut modules = BTreeMap::from([(project.name, None)]);
             let mut default_instances = BTreeMap::new();
             let mut value_names = BTreeSet::new();
@@ -671,10 +671,14 @@ impl<'a> ClassicIndex<'a> {
                         ),
                     );
                 }
+                work.consume()?;
+                member_modules.insert(file.id, named[0].id);
                 if !member.class {
-                    work.consume_many(2)?;
-                    procedural_modules.insert(file.id, named[0].id);
-                    pointer_names.insert(member.name.clone());
+                    work.consume()?;
+                    pointer_names
+                        .entry(member.name.clone())
+                        .and_modify(|prior| *prior = None)
+                        .or_insert(Some(file.id));
                     for entity in records {
                         cancellation.check()?;
                         work.consume()?;
@@ -753,7 +757,7 @@ impl<'a> ClassicIndex<'a> {
                 modules,
                 default_instances,
                 value_names,
-                procedural_modules,
+                member_modules,
                 pointer_names,
                 evidence: Arc::new(evidence),
             }));
@@ -762,8 +766,10 @@ impl<'a> ClassicIndex<'a> {
         for occurrence in occurrences {
             cancellation.check()?;
             work.consume()?;
-            if occurrence.syntax_kind == "vba.procedure_pointer.reference"
-                && occurrence.role == OccurrenceRole::Reference
+            if matches!(
+                occurrence.syntax_kind.as_str(),
+                "vba.procedure_pointer.reference" | "vba.qualified_procedure_pointer.reference"
+            ) && occurrence.role == OccurrenceRole::Reference
                 && matches!(occurrence.target, OccurrenceTarget::Unresolved { .. })
                 && let Some(project) = memberships.get(&occurrence.file).copied().flatten()
             {
@@ -777,14 +783,29 @@ impl<'a> ClassicIndex<'a> {
             };
             let mut bindings = BTreeMap::<(FileId, String), (Option<SymbolId>, bool)>::new();
             let mut complete = true;
-            for (file, module) in &project.procedural_modules {
+            let mut source_files = BTreeSet::new();
+            let mut blocked_sources = BTreeSet::new();
+            for site in &sites {
                 cancellation.check()?;
                 work.consume()?;
-                if memberships.get(file) != Some(&Some(project_id)) {
-                    complete = false;
+                source_files.insert(site.file);
+            }
+            for (file, module) in &project.member_modules {
+                cancellation.check()?;
+                work.consume()?;
+                let procedural = entities
+                    .get(module)
+                    .is_some_and(|owner| owner.kind == EntityKind::Module);
+                // Class members participate only in their own lexical tier;
+                // an unrelated class cannot add competing project callbacks.
+                if !procedural && !source_files.contains(file) {
+                    continue;
                 }
+                let mut source_complete = memberships.get(file) == Some(&Some(project_id));
                 let Some(bytes) = sources.get(file) else {
-                    complete = false;
+                    complete &= !procedural;
+                    work.consume()?;
+                    blocked_sources.insert(*file);
                     continue;
                 };
                 // Without a selected compilation profile, conditional declarations
@@ -793,7 +814,7 @@ impl<'a> ClassicIndex<'a> {
                     cancellation.check()?;
                     work.consume_many(line.len().div_ceil(64).max(1))?;
                     if line.trim_ascii_start().starts_with(b"#") {
-                        complete = false;
+                        source_complete = false;
                     }
                 }
                 for entity in declarations.get(file).into_iter().flatten() {
@@ -806,10 +827,10 @@ impl<'a> ClassicIndex<'a> {
                         continue;
                     };
                     let Some(name) = identifier(&entity.canonical_name) else {
-                        complete = false;
+                        source_complete = false;
                         continue;
                     };
-                    let exported = entity.visibility != EntityVisibility::Private;
+                    let exported = procedural && entity.visibility != EntityVisibility::Private;
                     let target = (eligible
                         && matches!(
                             entity.visibility,
@@ -824,6 +845,11 @@ impl<'a> ClassicIndex<'a> {
                             *public |= exported;
                         })
                         .or_insert((target, exported));
+                }
+                if !source_complete {
+                    complete &= !procedural;
+                    work.consume()?;
+                    blocked_sources.insert(*file);
                 }
             }
             if !complete {
@@ -843,7 +869,9 @@ impl<'a> ClassicIndex<'a> {
             for occurrence in sites {
                 cancellation.check()?;
                 work.consume()?;
-                if !project.procedural_modules.contains_key(&occurrence.file) {
+                if !project.member_modules.contains_key(&occurrence.file)
+                    || blocked_sources.contains(&occurrence.file)
+                {
                     continue;
                 }
                 let span = occurrence.source.span();
@@ -851,37 +879,81 @@ impl<'a> ClassicIndex<'a> {
                     .map_err(|_| ResolutionError::CountOverflow)?;
                 let end =
                     usize::try_from(span.end_byte()).map_err(|_| ResolutionError::CountOverflow)?;
-                let Some(name) = sources
+                let Some(text) = sources
                     .get(&occurrence.file)
                     .and_then(|bytes| bytes.get(start..end))
-                    .and_then(|bytes| std::str::from_utf8(bytes).ok())
-                    .and_then(identifier)
                 else {
                     continue;
                 };
-                // A local procedure or a project/module name occupies an earlier
-                // tier even when it cannot supply a valid procedure address.
-                if bindings.contains_key(&(occurrence.file, name.clone()))
-                    || project.pointer_names.contains(&name)
-                {
+                work.consume_many(text.len().div_ceil(64).max(1))?;
+                let Some(path) = rootlight_vba::procedure_pointer_path(text, &mut || {
+                    cancellation.check()?;
+                    work.consume()
+                })?
+                else {
+                    continue;
+                };
+                let qualified =
+                    occurrence.syntax_kind == "vba.qualified_procedure_pointer.reference";
+                if path.end() != text.len() || path.components() != if qualified { 2 } else { 1 } {
                     continue;
                 }
-                let Some(target) = exports
-                    .get(name.as_str())
-                    .copied()
-                    .flatten()
-                    .and_then(|symbol| entities.get(&symbol))
-                    .copied()
-                else {
+                let Some(name) = std::str::from_utf8(path.last()).ok().and_then(identifier) else {
                     continue;
                 };
+                let (symbol, receiver) = if qualified {
+                    let Some(qualifier) =
+                        std::str::from_utf8(path.first()).ok().and_then(identifier)
+                    else {
+                        continue;
+                    };
+                    // A procedure/getter outranks a module in pointer context,
+                    // but ordinary values and types cannot shadow that module.
+                    if bindings.contains_key(&(occurrence.file, qualifier.clone())) {
+                        continue;
+                    }
+                    let Some(file) = project.pointer_names.get(&qualifier).copied().flatten()
+                    else {
+                        continue;
+                    };
+                    let Some(module) = project
+                        .member_modules
+                        .get(&file)
+                        .and_then(|symbol| entities.get(symbol))
+                        .copied()
+                    else {
+                        continue;
+                    };
+                    let Some(source) = module.evidence.source.as_ref() else {
+                        continue;
+                    };
+                    let symbol = bindings.get(&(file, name)).and_then(|(target, _)| *target);
+                    (symbol, Some((module, source.clone())))
+                } else {
+                    // A local procedure or a project/module name occupies an earlier
+                    // tier even when it cannot supply a valid procedure address.
+                    if bindings.contains_key(&(occurrence.file, name.clone()))
+                        || project.pointer_names.contains_key(&name)
+                    {
+                        continue;
+                    }
+                    (exports.get(name.as_str()).copied().flatten(), None)
+                };
+                let Some(target) = symbol.and_then(|symbol| entities.get(&symbol)).copied() else {
+                    continue;
+                };
+                // MS-VBAL 5.6.12 permits qualified Sub/Function addresses, not
+                // Property Get addresses admitted by simple-name pointer lookup.
+                if qualified && target.kind != EntityKind::Function {
+                    continue;
+                }
                 work.consume()?;
                 result.proofs.insert(
                     occurrence.id,
                     Proof {
                         target,
                         context: Arc::clone(&project.evidence),
-                        receiver: None,
+                        receiver,
                         rule: ResolutionRule::ClassicProjectPointer,
                         getter_read: false,
                     },

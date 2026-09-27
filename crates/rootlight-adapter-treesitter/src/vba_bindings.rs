@@ -1652,10 +1652,10 @@ impl<'a> VbaBindings<'a> {
         let Some(path) = crate::vba_pointer::parse(text.as_bytes(), cancellation)? else {
             return Ok(None);
         };
-        if path.components > 2 {
+        if path.components() > 2 {
             return Ok(None);
         }
-        let key = std::str::from_utf8(path.last).ok().and_then(member_key);
+        let key = std::str::from_utf8(path.last()).ok().and_then(member_key);
         let Some(key) = key else {
             return Ok(None);
         };
@@ -1680,11 +1680,11 @@ impl<'a> VbaBindings<'a> {
             if self.foreign_scopes.contains(&owner) {
                 return Ok(None);
             }
-            if path.components == 2 {
+            if path.components() == 2 {
                 let Some((module, _)) = &self.procedural_module else {
                     return Ok(None);
                 };
-                if !path.first.eq_ignore_ascii_case(module.as_bytes()) {
+                if !path.first().eq_ignore_ascii_case(module.as_bytes()) {
                     return Ok(None);
                 }
                 // The pointer namespace ignores value declarations, but a
@@ -1713,7 +1713,7 @@ impl<'a> VbaBindings<'a> {
                 Some(Some(Binding::Procedure(symbol) | Binding::Function { symbol, .. })) => {
                     Some(*symbol)
                 }
-                Some(Some(Binding::Property(accessors))) if path.components == 1 => accessors.get,
+                Some(Some(Binding::Property(accessors))) if path.components() == 1 => accessors.get,
                 _ => None,
             };
             return Ok(symbol.map(|symbol| ResolvedBinding {

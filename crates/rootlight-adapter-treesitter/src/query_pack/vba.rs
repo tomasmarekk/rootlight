@@ -396,7 +396,8 @@ pub(super) fn reference_syntax(
                         cancellation,
                     )?
                     .is_some_and(|path| {
-                        path.components == 1 && path.end == child.end_byte() - child.start_byte()
+                        path.components() == 1
+                            && path.end() == child.end_byte() - child.start_byte()
                     })
                 {
                     "vba.procedure_pointer"
@@ -500,8 +501,8 @@ pub(super) fn qualified_pointer_range(
     let start = node.start_byte();
     Ok(
         crate::vba_pointer::parse(source.get(start..).unwrap_or_default(), cancellation)?
-            .filter(|path| path.components > 1)
-            .map(|path| start..start + path.end),
+            .filter(|path| path.components() > 1)
+            .map(|path| start..start + path.end()),
     )
 }
 

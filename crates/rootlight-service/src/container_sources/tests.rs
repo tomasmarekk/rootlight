@@ -2433,13 +2433,39 @@ fn native_project_resolution_survives_duplicate_private_types_in_conditional_bra
 
 #[test]
 fn native_project_callback_references_require_the_same_container() {
-    let client = b"Attribute VB_Name = \"Client\"\r\nPrivate Declare PtrSafe Sub Register Lib \"callbacks\" (ByVal address As LongPtr)\r\nSub Run()\r\nDim Notify As Long\r\nCall Register(AddressOf Notify)\r\nEnd Sub\r\n";
-    for (access, class, foreign, expected) in [
-        ("Public", false, false, true),
-        ("Private", false, false, false),
-        ("Public", true, false, false),
-        ("Public", false, true, false),
+    for class in [false, true] {
+        assert_native_callback_container("Notify", "vba.procedure_pointer.reference", class);
+    }
+}
+
+#[test]
+fn native_project_qualified_callback_references_require_the_same_container() {
+    for class in [false, true] {
+        assert_native_callback_container(
+            "[Callbacks].Notify",
+            "vba.qualified_procedure_pointer.reference",
+            class,
+        );
+    }
+}
+
+fn assert_native_callback_container(spelling: &str, syntax: &str, client_class: bool) {
+    for (access, class, foreign, local, expected) in [
+        ("Public", false, false, "", true),
+        ("Private", false, false, "", false),
+        ("Public", true, false, "", false),
+        ("Public", false, true, "", false),
+        (
+            "Public",
+            false,
+            false,
+            "Private Sub Callbacks()\r\nEnd Sub\r\n",
+            syntax == "vba.procedure_pointer.reference",
+        ),
     ] {
+        let client = format!(
+            "Attribute VB_Name = \"Client\"\r\n{local}Private Declare PtrSafe Sub Register Lib \"callbacks\" (ByVal address As LongPtr)\r\nSub Run()\r\nDim Notify As Long\r\nCall Register(AddressOf {spelling})\r\nEnd Sub\r\n"
+        );
         let storage = tempdir();
         let root = tempdir();
         let paths = rootlight_runtime::RuntimePaths::new(
@@ -2450,7 +2476,8 @@ fn native_project_callback_references_require_the_same_container() {
         paths.prepare_owner().unwrap();
         let callback =
             format!("Attribute VB_Name = \"Callbacks\"\r\n{access} Sub Notify()\r\nEnd Sub\r\n");
-        let mut modules = vec![("Client", client.as_slice(), false)];
+        let mut modules = vec![("Client", client.as_bytes(), client_class)];
+        modules.push(("Unused", b"Attribute VB_Name = \"Unused\"\r\n#If Choice Then\r\nPrivate Sub Hidden()\r\nEnd Sub\r\n#End If\r\n", true));
         if foreign {
             fs::write(
                 root.path().join("other.xlsm"),
@@ -2483,7 +2510,7 @@ fn native_project_callback_references_require_the_same_container() {
         let site = document
             .occurrences
             .iter()
-            .find(|site| site.syntax_kind == "vba.procedure_pointer.reference")
+            .find(|site| site.syntax_kind == syntax)
             .unwrap();
         assert_eq!(
             matches!(site.target, OccurrenceTarget::Resolved { .. }),

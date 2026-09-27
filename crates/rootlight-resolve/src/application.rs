@@ -637,7 +637,10 @@ fn reconcile_vba_target_gaps(
                 "vba-member-target-unavailable",
             ),
             Some("classic-project-pointer-v1.indexed_snapshot") => (
-                &["vba.procedure_pointer.reference"],
+                &[
+                    "vba.procedure_pointer.reference",
+                    "vba.qualified_procedure_pointer.reference",
+                ],
                 "vba-procedure-pointer-target-unavailable",
             ),
             _ => continue,

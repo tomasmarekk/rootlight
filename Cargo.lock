@@ -1635,6 +1635,7 @@ dependencies = [
  "rootlight-ids",
  "rootlight-ir",
  "rootlight-unicode",
+ "rootlight-vba",
  "rootlight-vfs",
  "serde_json",
  "tempfile",
@@ -2096,6 +2097,7 @@ dependencies = [
  "rootlight-cancel",
  "rootlight-ids",
  "rootlight-ir",
+ "rootlight-vba",
  "thiserror 2.0.18",
 ]
 
@@ -2256,6 +2258,10 @@ dependencies = [
 
 [[package]]
 name = "rootlight-unicode"
+version = "0.1.0"
+
+[[package]]
+name = "rootlight-vba"
 version = "0.1.0"
 
 [[package]]

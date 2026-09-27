@@ -44,6 +44,7 @@ members = [
     "crates/rootlight-source",
     "crates/rootlight-storage",
     "crates/rootlight-unicode",
+    "crates/rootlight-vba",
     "crates/rootlight-vfs",
     "crates/rootlight-workspace",
     "xtask",
