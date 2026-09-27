@@ -1876,6 +1876,92 @@ fn vba_declared_array_application_binds_without_guessing_object_defaults() {
 }
 
 #[test]
+fn vba_array_parameters_bind_indexed_reads_to_their_declarations() {
+    for parameter in [
+        "ByRef items() As Long",
+        "items() As String",
+        "ParamArray items() As Variant",
+        "ByRef items%()",
+        "bYrEf items( ) As Long",
+        "ByRef _\nitems() As Long",
+    ] {
+        let source =
+            format!("Sub Run({parameter})\nDim first As Variant\nfirst = items(0)\nEnd Sub\n");
+        let result = output(&source);
+        let document = result.document();
+        let parameter = document
+            .entities
+            .iter()
+            .find(|entity| entity.kind == EntityKind::Parameter && entity.canonical_name == "items")
+            .unwrap();
+        let start = u64::try_from(source.find("items(0)").unwrap()).unwrap();
+        let application = document
+            .occurrences
+            .iter()
+            .find(|site| {
+                site.syntax_kind == "vba.application.reference"
+                    && site.source.span().start_byte() == start
+                    && site.source.span().end_byte() == start + 8
+            })
+            .unwrap();
+        assert_eq!(
+            application.target,
+            OccurrenceTarget::Resolved {
+                symbol: parameter.id
+            },
+            "{source}"
+        );
+        assert_eq!(application.role, OccurrenceRole::Reference);
+        assert!(document.relations.iter().any(|edge| {
+            edge.predicate == RelationPredicate::RefersTo
+                && edge.subject == RelationEndpoint::Occurrence(application.id)
+                && edge.object == RelationEndpoint::Entity(parameter.id)
+        }));
+        assert!(!document.relations.iter().any(|edge| {
+            edge.predicate == RelationPredicate::Calls
+                && edge.subject == RelationEndpoint::Occurrence(application.id)
+        }));
+        assert!(!document.skipped_regions.iter().any(|gap| {
+            gap.source.span() == application.source.span()
+                && gap.detail == "vba-call-or-index-target-unavailable"
+        }));
+    }
+}
+
+#[test]
+fn vba_array_parameter_binding_preserves_unknown_or_invalid_shapes() {
+    for parameters in [
+        "ByVal items() As Long",
+        "ByRef items As Variant",
+        "ByVal items As Object",
+        "ByRef items(2) As Long",
+        "ByRef items() As Long, items As Variant",
+    ] {
+        let source =
+            format!("Sub Run({parameters})\nDim first As Variant\nfirst = items(0)\nEnd Sub\n");
+        let result = output(&source);
+        let document = result.document();
+        let start = u64::try_from(source.find("items(0)").unwrap()).unwrap();
+        let application = document
+            .occurrences
+            .iter()
+            .find(|site| {
+                site.syntax_kind == "vba.application.reference"
+                    && site.source.span().start_byte() == start
+            })
+            .unwrap();
+        assert!(
+            matches!(application.target, OccurrenceTarget::Unresolved { .. }),
+            "{source}"
+        );
+        assert!(document.skipped_regions.iter().any(|gap| {
+            gap.source.span() == application.source.span()
+                && gap.detail == "vba-call-or-index-target-unavailable"
+        }));
+    }
+}
+
+#[test]
 fn vba_conditional_array_declaration_does_not_choose_a_compile_branch() {
     let source = "Sub Run()\n#If Flag Then\nDim values(2) As Long\n#Else\nDim values As Object\n#End If\nDim output As Long\noutput = values(1)\nEnd Sub\n";
     let result = output(source);

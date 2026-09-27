@@ -271,21 +271,10 @@ impl<'a> VbaBindings<'a> {
                     _ => None,
                 }
             });
-            // The parsed variable declarator owns its bounds. A later ReDim or
-            // a runtime Variant value alone cannot prove indexed identity.
-            if declaration.syntax_kind().as_str() == "vba.variable.declaration"
-                && let Some(Binding::Value(symbol)) = candidate
-                && let (Ok(start), Ok(end)) = (
-                    usize::try_from(fact.span().end_byte()),
-                    usize::try_from(declaration.span().end_byte()),
-                )
-                && source.get(start..end).is_some_and(|suffix| {
-                    suffix
-                        .iter()
-                        .copied()
-                        .find(|byte| !byte.is_ascii_whitespace())
-                        == Some(b'(')
-                })
+            // Only the declaration's array designator proves indexed identity;
+            // a later ReDim or runtime Variant value cannot supply this proof.
+            if let Some(Binding::Value(symbol)) = candidate
+                && declaration_has_array_designator(declaration, fact, source)?
             {
                 result.array_symbols.insert(symbol);
             }
@@ -1613,6 +1602,52 @@ fn member_key(text: &str) -> Option<String> {
         return None;
     }
     Some(name.to_ascii_lowercase())
+}
+
+fn declaration_has_array_designator(
+    declaration: &SyntaxFact,
+    name: &SyntaxFact,
+    source: &[u8],
+) -> Result<bool, AdapterError> {
+    let parameter = matches!(
+        declaration.syntax_kind().as_str(),
+        "vba.parameter.declaration" | "vba.omittable_parameter.declaration"
+    );
+    if !parameter && declaration.syntax_kind().as_str() != "vba.variable.declaration" {
+        return Ok(false);
+    }
+    let name_end = usize::try_from(name.span().end_byte()).map_err(|_| invalid_capture())?;
+    let declaration_end =
+        usize::try_from(declaration.span().end_byte()).map_err(|_| invalid_capture())?;
+    let suffix = source
+        .get(name_end..declaration_end)
+        .ok_or_else(invalid_capture)?
+        .trim_ascii_start();
+    let Some(bounds) = suffix.strip_prefix(b"(") else {
+        return Ok(false);
+    };
+    if !parameter {
+        return Ok(true);
+    }
+    // Parameters require an empty designator and cannot pass arrays ByVal
+    // (MS-VBAL 5.3.1.5), even when the native parser accepts that syntax.
+    if !bounds.trim_ascii_start().starts_with(b")") {
+        return Ok(false);
+    }
+    let declaration_start =
+        usize::try_from(declaration.span().start_byte()).map_err(|_| invalid_capture())?;
+    let name_start = usize::try_from(name.span().start_byte()).map_err(|_| invalid_capture())?;
+    let prefix = source
+        .get(declaration_start..name_start)
+        .ok_or_else(invalid_capture)?;
+    Ok(prefix
+        .split(u8::is_ascii_whitespace)
+        .filter(|word| !word.is_empty() && *word != b"_")
+        .all(|word| {
+            word.eq_ignore_ascii_case(b"ByRef")
+                || word.eq_ignore_ascii_case(b"Optional")
+                || word.eq_ignore_ascii_case(b"ParamArray")
+        }))
 }
 
 fn complete_array_application_suffix(suffix: &[u8]) -> bool {

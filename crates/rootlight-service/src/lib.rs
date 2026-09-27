@@ -218,7 +218,7 @@ const PROJECT_FACTS_TRUNCATED_CODE: &str = "project-adapter-facts-truncated";
 const PROJECT_FACTS_TRUNCATED_MESSAGE: &str =
     "additional project semantic facts were omitted by aggregate resource limits";
 const AGGREGATE_DIAGNOSTICS_TRUNCATED_CODE: &str = "aggregate-diagnostics-truncated";
-const ANALYZER_BINARY_SEED: &[u8] = b"rootlight.first-slice.treesitter-structural/150";
+const ANALYZER_BINARY_SEED: &[u8] = b"rootlight.first-slice.treesitter-structural/151";
 const RESOLVER_BINARY_SEED: &[u8] = b"rootlight.first-slice.resolve/41";
 const INCREMENTAL_PROVIDER_SEED: &[u8] = b"rootlight.first-slice.incremental-provider/1";
 const LANGUAGE_DISPOSITION_PROVIDER_SEED: &[u8] = b"rootlight.first-slice.language-disposition/5";
@@ -29789,6 +29789,119 @@ mod tests {
     }
 
     #[test]
+    fn vba_array_parameter_references_follow_mutation_and_restart() {
+        let storage = durable_test_tempdir();
+        let paths = RuntimePaths::new(storage.path().join("state"), storage.path().join("runtime"))
+            .unwrap();
+        paths.prepare_owner().unwrap();
+        let fixture = durable_test_tempdir();
+        let mut previous_generation = None;
+        for (parameter, resolved) in [
+            ("ByRef items() As Long", true),
+            ("ByRef items As Variant", false),
+            ("ParamArray items() As Variant", true),
+        ] {
+            let source = format!(
+                "Private Declare PtrSafe Function ReadClock Lib \"clock\" () As LongPtr\nSub Run({parameter})\nDim first As Variant\nfirst = items(0)\nEnd Sub\n"
+            );
+            fs::write(fixture.path().join("module.bas"), &source).unwrap();
+            let mut service =
+                FirstSliceService::new_durable(2, paths.state_dir(), &deadline()).unwrap();
+            let receipt = service
+                .index_repository(fixture.path(), &deadline())
+                .unwrap();
+            assert_eq!(receipt.indexed_files, 1);
+            assert_eq!(
+                service
+                    .index_repository(fixture.path(), &deadline())
+                    .unwrap(),
+                receipt
+            );
+            if let Some(previous) = previous_generation {
+                assert_ne!(receipt.generation, previous);
+            }
+            previous_generation = Some(receipt.generation);
+            drop(service);
+            let service =
+                FirstSliceService::new_durable(2, paths.state_dir(), &deadline()).unwrap();
+            let snapshot = service
+                .loaded_generation_snapshot(receipt.generation)
+                .unwrap();
+            let document = snapshot.document();
+            let target = document
+                .entities
+                .iter()
+                .find(|entity| {
+                    entity.kind == EntityKind::Parameter && entity.canonical_name == "items"
+                })
+                .unwrap();
+            let start = u64::try_from(source.find("items(0)").unwrap()).unwrap();
+            let application = document
+                .occurrences
+                .iter()
+                .find(|site| {
+                    site.syntax_kind == "vba.application.reference"
+                        && site.source.span().start_byte() == start
+                        && site.source.span().end_byte() == start + 8
+                })
+                .unwrap();
+            if resolved {
+                assert_eq!(
+                    application.target,
+                    OccurrenceTarget::Resolved { symbol: target.id }
+                );
+            } else {
+                assert!(matches!(
+                    application.target,
+                    OccurrenceTarget::Unresolved { .. }
+                ));
+            }
+            assert_eq!(
+                document.skipped_regions.iter().any(|gap| {
+                    gap.source == application.source
+                        && gap.detail == "vba-call-or-index-target-unavailable"
+                }),
+                !resolved
+            );
+            let relationships = service
+                .symbol_relationships(
+                    receipt.generation,
+                    BTreeSet::from([target.id]),
+                    vec![RelationFamily::References],
+                    Some(RelationDirection::Inbound),
+                    0,
+                    10,
+                    0,
+                    &deadline(),
+                )
+                .unwrap();
+            assert_eq!(
+                relationships
+                    .data
+                    .groups
+                    .iter()
+                    .flat_map(|group| &group.items)
+                    .flat_map(|edge| &edge.source_refs)
+                    .any(|reference| reference == &application.source),
+                resolved
+            );
+            assert_eq!(application.source.generation(), receipt.generation);
+            let read = service
+                .source_read_with_options_and_budget(
+                    receipt.generation,
+                    vec![application.source.clone()],
+                    SourceReadOptions::new()
+                        .with_context_lines_before(0)
+                        .with_context_lines_after(0),
+                    FirstSliceBudget::default(),
+                    &deadline(),
+                )
+                .unwrap();
+            assert_eq!(read.data.chunks[0].bytes, b"items(0)");
+        }
+    }
+
+    #[test]
     fn vba_function_value_calls_follow_parameter_changes_after_restart() {
         let storage = durable_test_tempdir();
         let paths = RuntimePaths::new(storage.path().join("state"), storage.path().join("runtime"))
@@ -33108,7 +33221,7 @@ mod tests {
             PARSER_PROVIDER_SET_SEED,
             TREE_SITTER_ADAPTER_VERSION.as_bytes(),
             TREE_SITTER_RUNTIME_VERSION.as_bytes(),
-            b"rootlight.first-slice.treesitter-structural/149",
+            b"rootlight.first-slice.treesitter-structural/150",
             grammar.as_bytes(),
         ])
         .unwrap();
