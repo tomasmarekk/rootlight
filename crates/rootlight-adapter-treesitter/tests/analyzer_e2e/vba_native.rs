@@ -1792,6 +1792,114 @@ fn vba_nested_index_argument_does_not_call_shadowed_function() {
 }
 
 #[test]
+fn vba_declared_array_application_binds_without_guessing_object_defaults() {
+    let source = "Sub Run()\nDim values(2) As Long\nDim dynamic() As Long\nDim objectValue As Object\nDim output As Long\nReDim dynamic(2)\nvalues(0) = Len(\"x\")\noutput = values(1)\noutput = dynamic(1)\noutput = objectValue(1)\nEnd Sub\n";
+    let result = output(source);
+    let document = result.document();
+    let array = document
+        .entities
+        .iter()
+        .find(|entity| entity.kind == EntityKind::Variable && entity.canonical_name == "values")
+        .unwrap();
+    let dynamic = document
+        .entities
+        .iter()
+        .find(|entity| entity.kind == EntityKind::Variable && entity.canonical_name == "dynamic")
+        .unwrap();
+    for (expression, target) in [
+        ("values(1)", Some(array.id)),
+        ("dynamic(1)", Some(dynamic.id)),
+        ("objectValue(1)", None),
+    ] {
+        let start = u64::try_from(source.find(expression).unwrap()).unwrap();
+        let end = start + u64::try_from(expression.len()).unwrap();
+        let application = document
+            .occurrences
+            .iter()
+            .find(|site| {
+                site.syntax_kind == "vba.application.reference"
+                    && site.source.span().start_byte() == start
+                    && site.source.span().end_byte() == end
+            })
+            .unwrap_or_else(|| panic!("missing application: {expression}"));
+        match target {
+            Some(symbol) => {
+                assert_eq!(application.target, OccurrenceTarget::Resolved { symbol });
+                assert_eq!(application.role, OccurrenceRole::Reference);
+                assert!(document.relations.iter().any(|edge| {
+                    edge.predicate == RelationPredicate::RefersTo
+                        && edge.subject == RelationEndpoint::Occurrence(application.id)
+                        && edge.object == RelationEndpoint::Entity(symbol)
+                }));
+                assert!(!document.skipped_regions.iter().any(|gap| {
+                    gap.detail == "vba-call-or-index-target-unavailable"
+                        && gap.source.span() == application.source.span()
+                }));
+            }
+            None => {
+                assert!(matches!(
+                    application.target,
+                    OccurrenceTarget::Unresolved { .. }
+                ));
+                assert!(document.skipped_regions.iter().any(|gap| {
+                    gap.detail == "vba-call-or-index-target-unavailable"
+                        && gap.source.span() == application.source.span()
+                }));
+            }
+        }
+    }
+    let assignment_start = u64::try_from(source.find("values(0) = Len").unwrap()).unwrap();
+    let assignment_receiver = document
+        .occurrences
+        .iter()
+        .find(|site| {
+            site.syntax_kind == "vba.invoked_identifier.reference"
+                && site.source.span().start_byte() == assignment_start
+        })
+        .unwrap();
+    assert_eq!(
+        assignment_receiver.target,
+        OccurrenceTarget::Resolved { symbol: array.id }
+    );
+    let assignment_application = document
+        .occurrences
+        .iter()
+        .find(|site| {
+            site.syntax_kind == "vba.application.reference"
+                && site.source.span().start_byte() == assignment_start
+        })
+        .unwrap();
+    assert!(matches!(
+        assignment_application.target,
+        OccurrenceTarget::Unresolved { .. }
+    ));
+}
+
+#[test]
+fn vba_conditional_array_declaration_does_not_choose_a_compile_branch() {
+    let source = "Sub Run()\n#If Flag Then\nDim values(2) As Long\n#Else\nDim values As Object\n#End If\nDim output As Long\noutput = values(1)\nEnd Sub\n";
+    let result = output(source);
+    let document = result.document();
+    let start = u64::try_from(source.find("values(1)").unwrap()).unwrap();
+    let application = document
+        .occurrences
+        .iter()
+        .find(|site| {
+            site.syntax_kind == "vba.application.reference"
+                && site.source.span().start_byte() == start
+        })
+        .unwrap();
+    assert!(matches!(
+        application.target,
+        OccurrenceTarget::Unresolved { .. }
+    ));
+    assert!(document.skipped_regions.iter().any(|gap| {
+        gap.detail == "vba-call-or-index-target-unavailable"
+            && gap.source.span() == application.source.span()
+    }));
+}
+
+#[test]
 fn vba_function_values_do_not_guess_required_arguments_or_sub_results() {
     for declaration in [
         "Function Measure(ByVal input As Long) As Long\nEnd Function",

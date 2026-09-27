@@ -92,6 +92,7 @@ pub(super) struct VbaBindings<'a> {
     unconditional_names: BTreeMap<u64, BTreeSet<String>>,
     foreign_scopes: BTreeSet<u64>,
     constant_symbols: BTreeSet<SymbolId>,
+    array_symbols: BTreeSet<SymbolId>,
     class_module: Option<&'a SyntaxFact>,
     class_symbol: Option<SymbolId>,
     procedural_module: Option<(String, SymbolId)>,
@@ -127,6 +128,7 @@ impl<'a> VbaBindings<'a> {
             unconditional_names: BTreeMap::new(),
             foreign_scopes: BTreeSet::new(),
             constant_symbols: BTreeSet::new(),
+            array_symbols: BTreeSet::new(),
             class_module: None,
             class_symbol: None,
             procedural_module: None,
@@ -269,6 +271,24 @@ impl<'a> VbaBindings<'a> {
                     _ => None,
                 }
             });
+            // The parsed variable declarator owns its bounds. A later ReDim or
+            // a runtime Variant value alone cannot prove indexed identity.
+            if declaration.syntax_kind().as_str() == "vba.variable.declaration"
+                && let Some(Binding::Value(symbol)) = candidate
+                && let (Ok(start), Ok(end)) = (
+                    usize::try_from(fact.span().end_byte()),
+                    usize::try_from(declaration.span().end_byte()),
+                )
+                && source.get(start..end).is_some_and(|suffix| {
+                    suffix
+                        .iter()
+                        .copied()
+                        .find(|byte| !byte.is_ascii_whitespace())
+                        == Some(b'(')
+                })
+            {
+                result.array_symbols.insert(symbol);
+            }
             let mut symbol = if conditional { None } else { candidate };
             if matches!(
                 declaration.syntax_kind().as_str(),
@@ -846,6 +866,59 @@ impl<'a> VbaBindings<'a> {
         }))
     }
 
+    fn array_application(
+        &self,
+        fact: &SyntaxFact,
+        cancellation: &Cancellation,
+    ) -> Result<Option<ResolvedBinding>, AdapterError> {
+        let start = fact.span().start_byte();
+        let end = fact.span().end_byte();
+        if self.applications.get(&start).is_some_and(|applications| {
+            applications
+                .iter()
+                .any(|application| application.span().end_byte() < end)
+        }) {
+            return Ok(None);
+        }
+        let mut invocations = self
+            .invocations
+            .get(&start)
+            .into_iter()
+            .flatten()
+            .filter(|invocation| invocation.span().end_byte() < end);
+        let Some(invocation) = invocations.next() else {
+            return Ok(None);
+        };
+        if invocations.next().is_some() {
+            return Ok(None);
+        }
+        let (Ok(callee_start), Ok(callee_end), Ok(application_end)) = (
+            usize::try_from(invocation.span().start_byte()),
+            usize::try_from(invocation.span().end_byte()),
+            usize::try_from(end),
+        ) else {
+            return Ok(None);
+        };
+        if !self
+            .source
+            .get(callee_end..application_end)
+            .is_some_and(complete_array_application_suffix)
+        {
+            return Ok(None);
+        }
+        let Some(callee) = self
+            .source
+            .get(callee_start..callee_end)
+            .and_then(|source| std::str::from_utf8(source).ok())
+        else {
+            return Ok(None);
+        };
+        let Some(binding) = self.resolve(invocation, callee, cancellation)? else {
+            return Ok(None);
+        };
+        Ok((!binding.is_call && self.array_symbols.contains(&binding.symbol)).then_some(binding))
+    }
+
     fn enum_member_precedes_initializer(
         &self,
         fact: &SyntaxFact,
@@ -1069,6 +1142,9 @@ impl<'a> VbaBindings<'a> {
         cancellation.check()?;
         if text.len() > self.maximum_name_bytes {
             return Ok(None);
+        }
+        if fact.syntax_kind().as_str() == "vba.application.reference" {
+            return self.array_application(fact, cancellation);
         }
         if matches!(
             fact.syntax_kind().as_str(),
@@ -1539,6 +1615,49 @@ fn member_key(text: &str) -> Option<String> {
     Some(name.to_ascii_lowercase())
 }
 
+fn complete_array_application_suffix(suffix: &[u8]) -> bool {
+    let suffix = suffix.trim_ascii_start();
+    if suffix.first() != Some(&b'(') {
+        return false;
+    }
+    let mut depth = 0_usize;
+    let mut quoted = false;
+    let mut index = 0_usize;
+    while let Some(&byte) = suffix.get(index) {
+        if quoted {
+            if byte == b'"' {
+                if suffix.get(index + 1) == Some(&b'"') {
+                    index += 2;
+                    continue;
+                }
+                quoted = false;
+            }
+        } else {
+            match byte {
+                b'"' => quoted = true,
+                b'(' => depth += 1,
+                b')' => {
+                    let Some(outer_depth) = depth.checked_sub(1) else {
+                        return false;
+                    };
+                    depth = outer_depth;
+                    if depth == 0 {
+                        // A native call-statement capture can include trailing
+                        // assignment text after the indexed receiver.
+                        return suffix
+                            .get(index + 1..)
+                            .is_some_and(|tail| tail.iter().all(u8::is_ascii_whitespace));
+                    }
+                }
+                b'\'' => return false,
+                _ => {}
+            }
+        }
+        index += 1;
+    }
+    false
+}
+
 fn invalid_capture() -> AdapterError {
     AdapterError::ProviderFailed {
         code: DiagnosticCode::new("vba-binding-capture").expect("built-in VBA diagnostic is valid"),
@@ -1553,6 +1672,21 @@ mod tests {
     use rootlight_ir::SourceSpan;
 
     use super::*;
+
+    #[test]
+    fn array_application_suffix_requires_one_closed_expression() {
+        for suffix in [b"(1)".as_slice(), b" (Inner(\"(\")) ", b"(\"x\"\"y\")"] {
+            assert!(complete_array_application_suffix(suffix));
+        }
+        for suffix in [
+            b"(1) = Len(\"x\")".as_slice(),
+            b"(1)(2)",
+            b"(\"unterminated)",
+            b"(1) ' comment",
+        ] {
+            assert!(!complete_array_application_suffix(suffix));
+        }
+    }
 
     fn fact(
         id: u64,
