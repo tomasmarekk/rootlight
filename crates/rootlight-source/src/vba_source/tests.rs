@@ -386,6 +386,138 @@ fn project_retains_reference_fields_with_original_directory_provenance() {
     assert!(!format!("{project:?}").contains("LocalLibrary"));
 }
 
+#[test]
+fn project_interprets_each_reference_field_without_loading_targets_or_hiding_modules() {
+    use crate::vba_reference::{ReferenceError, ReferenceField, ReferenceIdentity};
+    use crate::vba_text::TextLimits;
+
+    let cancel = Cancellation::new();
+    let mut decoded = directory(&[("Module", 0)]);
+    let insertion = ProjectDirectory::parse(&decoded, DirectoryLimits::default(), &cancel)
+        .unwrap()
+        .information_range()
+        .end;
+    let library =
+        b"*\\G{01234567-89AB-CDEF-1032-547698BADCFE}#a.b#409#C:\\unavailable\\caf\xe9.tlb#Display";
+    let placeholder = b"*\\G{00000000-0000-0000-0000-000000000000}#0.0#0##";
+    let mut references = Vec::new();
+    header(&mut references, 0x000d, 0);
+    text(&mut references, library);
+    references.extend([0; 6]);
+    header(&mut references, 0x000e, 0);
+    text(&mut references, b"*\\CC:\\unavailable\\project");
+    text(&mut references, b"*\\C../project");
+    dword(&mut references, 1);
+    word(&mut references, 2);
+    word(&mut references, 0x0033);
+    text(&mut references, library);
+    let control = |out: &mut Vec<u8>| {
+        header(out, 0x002f, 0);
+        text(out, placeholder);
+        out.extend([0; 6]);
+        word(out, 0);
+        dword(out, 0);
+        text(out, library);
+        out.extend([0; 26]);
+    };
+    control(&mut references);
+    for invalid in [b"*\\Cproject".as_slice(), b"malformed-library"] {
+        header(&mut references, 0x000d, 0);
+        text(&mut references, invalid);
+        references.extend([0; 6]);
+    }
+    control(&mut references);
+    decoded.splice(insertion..insertion, references);
+    let body = b"Sub Run()\r\nEnd Sub\r\n";
+    let input = compound(&[
+        Stream {
+            name: "dir",
+            bytes: compress_literals(&decoded),
+            inside: true,
+        },
+        stream("Module", body),
+    ]);
+    let file = parse(&input);
+    let project = VbaProject::open(&file, 1, ProjectReadLimits::default(), &cancel).unwrap();
+    for (ordinal, field, path, is_project) in [
+        (
+            0,
+            ReferenceField::Registered,
+            "C:\\unavailable\\café.tlb",
+            false,
+        ),
+        (
+            1,
+            ReferenceField::ProjectAbsolute,
+            "C:\\unavailable\\project",
+            true,
+        ),
+        (1, ReferenceField::ProjectRelative, "../project", true),
+        (
+            2,
+            ReferenceField::ControlOriginal,
+            "C:\\unavailable\\café.tlb",
+            false,
+        ),
+        (2, ReferenceField::ControlTwiddled, "", false),
+        (
+            2,
+            ReferenceField::ControlExtended,
+            "C:\\unavailable\\café.tlb",
+            false,
+        ),
+        (
+            5,
+            ReferenceField::ControlExtended,
+            "C:\\unavailable\\café.tlb",
+            false,
+        ),
+    ] {
+        let identifier = project
+            .reference_identifier(ordinal, field, TextLimits::default(), &cancel)
+            .unwrap();
+        assert_eq!(identifier.path(), path);
+        assert_eq!(
+            matches!(identifier.identity(), ReferenceIdentity::Project { .. }),
+            is_project
+        );
+        assert_eq!(
+            &project.decoded_directory().bytes()[identifier.source_range()],
+            identifier.original_bytes()
+        );
+        assert!(identifier.path_range().start >= project.references()[ordinal].range().start);
+        assert!(identifier.path_range().end <= project.references()[ordinal].range().end);
+    }
+    for ordinal in [3, 4] {
+        assert!(matches!(
+            project.reference_identifier(
+                ordinal,
+                ReferenceField::Registered,
+                TextLimits::default(),
+                &cancel
+            ),
+            Err(ReferenceError::Invalid { .. })
+        ));
+    }
+    for (ordinal, field) in [
+        (99, ReferenceField::Registered),
+        (0, ReferenceField::ProjectAbsolute),
+        (5, ReferenceField::ControlOriginal),
+    ] {
+        assert!(matches!(
+            project.reference_identifier(ordinal, field, TextLimits::default(), &cancel),
+            Err(ReferenceError::Unavailable)
+        ));
+    }
+    assert_eq!(
+        project
+            .read_module(0, ModuleReadLimits::default(), &cancel)
+            .unwrap()
+            .bytes(),
+        body
+    );
+}
+
 fn renamed_entry(bytes: &mut [u8], id: usize, name: &str) {
     let start = 1024 + id * 128;
     bytes[start..start + 64].fill(0);

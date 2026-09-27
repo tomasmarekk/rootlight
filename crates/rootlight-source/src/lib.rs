@@ -15,6 +15,7 @@ pub mod vba_dir;
 pub mod vba_header;
 pub mod vba_membership;
 pub mod vba_project;
+pub mod vba_reference;
 pub mod vba_source;
 pub mod vba_text;
 pub mod zip;

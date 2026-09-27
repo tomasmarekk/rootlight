@@ -365,6 +365,75 @@ impl<'container, 'input> VbaProject<'container, 'input> {
     pub fn references(&self) -> &[ReferenceRecord] {
         &self.references
     }
+    /// Interprets one declared library or project identifier without loading its target.
+    /// Returned byte ranges address [`Self::decoded_directory`], including for
+    /// non-ASCII paths whose UTF-8 and original codepage offsets differ.
+    ///
+    /// # Errors
+    /// Returns [`crate::vba_reference::ReferenceError`] for absent ordinals/fields,
+    /// malformed identifiers, unsupported text encoding, limits or cancellation.
+    /// A bad reference does not prevent independent module source reads.
+    pub fn reference_identifier(
+        &self,
+        ordinal: usize,
+        field: crate::vba_reference::ReferenceField,
+        limits: crate::vba_text::TextLimits,
+        cancellation: &Cancellation,
+    ) -> Result<crate::vba_reference::ReferenceIdentifier<'_>, crate::vba_reference::ReferenceError>
+    {
+        use crate::vba_dir::ReferencePayload;
+        use crate::vba_reference::{
+            ReferenceError, ReferenceField, ReferenceIdentifier, ReferenceIdentity,
+        };
+
+        cancellation
+            .check()
+            .map_err(crate::vba_text::TextError::from)?;
+        let record = self
+            .references
+            .get(ordinal)
+            .ok_or(ReferenceError::Unavailable)?;
+        let range = match (record.payload(), field) {
+            (ReferencePayload::Registered { libid }, ReferenceField::Registered) => libid,
+            (ReferencePayload::Project { absolute_libid, .. }, ReferenceField::ProjectAbsolute) => {
+                absolute_libid
+            }
+            (ReferencePayload::Project { relative_libid, .. }, ReferenceField::ProjectRelative) => {
+                relative_libid
+            }
+            (
+                ReferencePayload::Control {
+                    original_libid: Some(libid),
+                    ..
+                },
+                ReferenceField::ControlOriginal,
+            ) => libid,
+            (ReferencePayload::Control { twiddled_libid, .. }, ReferenceField::ControlTwiddled) => {
+                twiddled_libid
+            }
+            (ReferencePayload::Control { extended_libid, .. }, ReferenceField::ControlExtended) => {
+                extended_libid
+            }
+            _ => return Err(ReferenceError::Unavailable),
+        };
+        let identifier = ReferenceIdentifier::parse(
+            self.decoded_directory.bytes(),
+            range.clone(),
+            self.code_page,
+            limits,
+            cancellation,
+        )?;
+        let project_field = matches!(
+            field,
+            ReferenceField::ProjectAbsolute | ReferenceField::ProjectRelative
+        );
+        if project_field != matches!(identifier.identity(), ReferenceIdentity::Project { .. }) {
+            return Err(ReferenceError::Invalid {
+                offset: range.start,
+            });
+        }
+        Ok(identifier)
+    }
     /// Returns the original project code page without guessing an encoding.
     #[must_use]
     pub const fn code_page(&self) -> u16 {
