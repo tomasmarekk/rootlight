@@ -2486,6 +2486,122 @@ fn vba_exported_module_names_preserve_authored_identity_and_source() {
 }
 
 #[test]
+fn vba_procedural_module_qualifier_resolves_own_member_without_hiding_a_local() {
+    for shadow in [
+        "",
+        "Dim Utility As Variant\n",
+        "#If FEATURE Then\nDim Utility As Variant\n#End If\n",
+    ] {
+        let source = format!(
+            "Attribute VB_Name = \"Utility\"\nPublic Function Measure(ByVal value As Long) As Long\nMeasure = value\nEnd Function\nPublic Sub Run()\n{shadow}Dim result As Long\nresult = Utility.Measure(1)\nEnd Sub\n"
+        );
+        let document = output(&source);
+        let document = document.document();
+        let module = document
+            .entities
+            .iter()
+            .find(|entity| entity.kind == EntityKind::Module && entity.canonical_name == "Utility")
+            .unwrap();
+        let measure = document
+            .entities
+            .iter()
+            .find(|entity| {
+                entity.kind == EntityKind::Function && entity.canonical_name == "Measure"
+            })
+            .unwrap();
+        let start = u64::try_from(source.find("Utility.Measure(1)").unwrap()).unwrap();
+        let qualifier = document
+            .occurrences
+            .iter()
+            .find(|site| {
+                site.source.span().start_byte() == start
+                    && site.source.span().end_byte() == start + 7
+                    && site.syntax_kind == "vba.value_identifier.reference"
+            })
+            .unwrap();
+        let member = document
+            .occurrences
+            .iter()
+            .find(|site| {
+                site.source.span().start_byte() == start
+                    && site.source.span().end_byte() == start + 15
+                    && site.syntax_kind == "vba.invoked_member.reference"
+            })
+            .unwrap();
+        if shadow.is_empty() {
+            assert_eq!(
+                qualifier.target,
+                OccurrenceTarget::Resolved { symbol: module.id }
+            );
+            assert_eq!(
+                member.target,
+                OccurrenceTarget::Resolved { symbol: measure.id }
+            );
+            assert_eq!(member.role, OccurrenceRole::CallSite);
+            assert!(document.relations.iter().any(|relation| {
+                relation.predicate == RelationPredicate::Calls
+                    && relation.subject == RelationEndpoint::Occurrence(member.id)
+                    && relation.object == RelationEndpoint::Entity(measure.id)
+            }));
+            assert!(!document.skipped_regions.iter().any(|gap| {
+                gap.source == qualifier.source && gap.detail == "vba-binding-target-unavailable"
+                    || gap.source == member.source && gap.detail == "vba-member-target-unavailable"
+            }));
+        } else {
+            assert_ne!(
+                qualifier.target,
+                OccurrenceTarget::Resolved { symbol: module.id }
+            );
+            assert_ne!(
+                member.target,
+                OccurrenceTarget::Resolved { symbol: measure.id }
+            );
+        }
+    }
+}
+
+#[test]
+fn vba_procedural_module_qualifier_requires_an_unambiguous_header_and_member() {
+    for (prefix, target) in [
+        ("Attribute VB_Name = \"Invalid.Name\"\n", "Measure"),
+        (
+            "VERSION 1.0 CLASS\nAttribute VB_Name = \"Utility\"\n",
+            "Measure",
+        ),
+        ("Attribute VB_Name = \"Utility\"\n", "Missing"),
+    ] {
+        let source = format!(
+            "{prefix}Public Function Measure(ByVal value As Long) As Long\nMeasure = value\nEnd Function\nPublic Sub Run()\nDim result As Long\nresult = Utility.{target}(1)\nresult = Utility\nEnd Sub\n"
+        );
+        let result = output(&source);
+        let document = result.document();
+        let start = u64::try_from(source.find(&format!("Utility.{target}(1)")).unwrap()).unwrap();
+        let member = document
+            .occurrences
+            .iter()
+            .find(|site| {
+                site.source.span().start_byte() == start
+                    && site.source.span().end_byte() == start + 15
+                    && site.syntax_kind == "vba.invoked_member.reference"
+            })
+            .unwrap();
+        assert!(matches!(member.target, OccurrenceTarget::Unresolved { .. }));
+        let bare =
+            u64::try_from(source.find("result = Utility\n").unwrap() + "result = ".len()).unwrap();
+        let site = document
+            .occurrences
+            .iter()
+            .find(|site| {
+                site.source.span().start_byte() == bare
+                    && site.source.span().end_byte() == bare + 7
+                    && site.syntax_kind == "vba.value_identifier.reference"
+            })
+            .unwrap();
+        assert!(matches!(site.target, OccurrenceTarget::Unresolved { .. }));
+    }
+}
+
+#[test]
 fn vba_exported_module_header_uses_last_attribute_not_body_attributes() {
     let source = "Attribute VB_Name = \"OldName\"\nAttribute vb_name = \"CurrentName\"\nSub Run()\nAttribute Run.VB_Name = \"NotModule\"\nEnd Sub\nAttribute VB_Name = \"AfterBody\"\n";
     let result = output(source);

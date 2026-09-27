@@ -30465,6 +30465,66 @@ mod tests {
     }
 
     #[test]
+    fn vba_own_module_calls_publish_exact_generation_bound_relationships() {
+        let source = "Attribute VB_Name = \"Utility\"\nPublic Function Measure(ByVal value As Long) As Long\nMeasure = value\nEnd Function\nPublic Sub Run()\nDim answer As Long\nanswer = Utility.Measure(1)\nEnd Sub\n";
+        let fixture = TempDir::new().unwrap();
+        fs::write(fixture.path().join("module.bas"), source).unwrap();
+        let mut service = FirstSliceService::new(2).unwrap();
+        let receipt = service
+            .index_repository(fixture.path(), &deadline())
+            .unwrap();
+        let generation = service
+            .loaded_generation_snapshot(receipt.generation)
+            .unwrap();
+        let symbols: BTreeMap<_, _> = generation
+            .document()
+            .entities
+            .iter()
+            .map(|entity| (entity.canonical_name.as_str(), entity.id))
+            .collect();
+        let relationships = service
+            .symbol_relationships(
+                receipt.generation,
+                BTreeSet::from([symbols["Run"]]),
+                vec![RelationFamily::Calls],
+                Some(RelationDirection::Outbound),
+                0,
+                10,
+                0,
+                &deadline(),
+            )
+            .unwrap();
+        let edges: Vec<_> = relationships
+            .data
+            .groups
+            .iter()
+            .flat_map(|group| &group.items)
+            .collect();
+        assert_eq!(edges.len(), 1);
+        assert_eq!(edges[0].symbol, symbols["Measure"]);
+        assert_eq!(edges[0].source_refs.len(), 1);
+        let reference = &edges[0].source_refs[0];
+        assert_eq!(reference.generation(), receipt.generation);
+        assert_eq!(
+            reference.span().start_byte(),
+            u64::try_from(source.find("Utility.Measure(1)").unwrap()).unwrap()
+        );
+        let read = service
+            .source_read_with_options_and_budget(
+                receipt.generation,
+                vec![reference.clone()],
+                SourceReadOptions::new()
+                    .with_context_lines_before(0)
+                    .with_context_lines_after(0),
+                FirstSliceBudget::default(),
+                &deadline(),
+            )
+            .unwrap();
+        assert_eq!(read.data.chunks.len(), 1);
+        assert_eq!(read.data.chunks[0].bytes, b"Utility.Measure");
+    }
+
+    #[test]
     fn unsupported_text_repository_publishes_an_explicit_disposition() {
         let fixture = TempDir::new().expect("fixture root exists");
         fs::write(

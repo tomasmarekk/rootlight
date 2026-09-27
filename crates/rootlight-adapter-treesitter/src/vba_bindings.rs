@@ -81,6 +81,7 @@ pub(super) struct VbaBindings<'a> {
     source: &'a [u8],
     applications: BTreeMap<u64, Vec<&'a SyntaxFact>>,
     invocations: BTreeMap<u64, Vec<&'a SyntaxFact>>,
+    member_references: BTreeMap<u64, u64>,
     callable_scopes: BTreeMap<SymbolId, u64>,
     named_parameters: BTreeMap<u64, BTreeMap<String, Option<SymbolId>>>,
     incomplete_parameter_scopes: BTreeSet<u64>,
@@ -93,6 +94,7 @@ pub(super) struct VbaBindings<'a> {
     constant_symbols: BTreeSet<SymbolId>,
     class_module: Option<&'a SyntaxFact>,
     class_symbol: Option<SymbolId>,
+    procedural_module: Option<(String, SymbolId)>,
     maximum_name_bytes: usize,
     types: BTreeMap<u64, BTreeMap<String, Option<DeclaredType>>>,
     foreign_type_scopes: BTreeSet<u64>,
@@ -116,6 +118,7 @@ impl<'a> VbaBindings<'a> {
             source,
             applications: BTreeMap::new(),
             invocations: BTreeMap::new(),
+            member_references: BTreeMap::new(),
             callable_scopes: BTreeMap::new(),
             named_parameters: BTreeMap::new(),
             incomplete_parameter_scopes: BTreeSet::new(),
@@ -126,6 +129,7 @@ impl<'a> VbaBindings<'a> {
             constant_symbols: BTreeSet::new(),
             class_module: None,
             class_symbol: None,
+            procedural_module: None,
             maximum_name_bytes,
             types: BTreeMap::new(),
             foreign_type_scopes: BTreeSet::new(),
@@ -152,6 +156,13 @@ impl<'a> VbaBindings<'a> {
                         .or_default()
                         .push(fact);
                 }
+                "vba.member.reference" | "vba.invoked_member.reference" => {
+                    result
+                        .member_references
+                        .entry(fact.span().start_byte())
+                        .and_modify(|end| *end = (*end).max(fact.span().end_byte()))
+                        .or_insert(fact.span().end_byte());
+                }
                 _ => {}
             }
             if fact.kind() == SyntaxFactKind::Module
@@ -164,6 +175,33 @@ impl<'a> VbaBindings<'a> {
         result.class_symbol = result
             .class_module
             .and_then(|fact| symbols.get(&fact.local_id()).copied());
+        if result.class_module.is_none()
+            && facts
+                .iter()
+                .filter(|fact| fact.syntax_kind().as_str() == "vba.file.module")
+                .count()
+                == 1
+        {
+            let mut names = facts
+                .iter()
+                .filter(|fact| fact.syntax_kind().as_str() == "vba.module_name.definition");
+            if let Some(name) = names.next()
+                && names.next().is_none()
+                && let Some(symbol) = symbols.get(&name.local_id()).copied()
+                && let (Ok(start), Ok(end)) = (
+                    usize::try_from(name.span().start_byte()),
+                    usize::try_from(name.span().end_byte()),
+                )
+                && let Some(text) = source
+                    .get(start..end)
+                    .and_then(|bytes| std::str::from_utf8(bytes).ok())
+                && let Some(key) =
+                    structural_captured_name_for_fact("vba", name, text, maximum_name_bytes)
+                        .and_then(|name| member_key(&name))
+            {
+                result.procedural_module = Some((key, symbol));
+            }
+        }
         let mut required_parameter_scopes = BTreeSet::new();
         let mut enum_module_bindings = Vec::new();
         for fact in facts {
@@ -665,6 +703,41 @@ impl<'a> VbaBindings<'a> {
                     is_call: false,
                 }));
         }
+        if receiver_binding.is_none()
+            && !instance
+            && let Some((_, scope)) = self.local_procedural_module(fact, &receiver, cancellation)?
+        {
+            let Some(name) = components.next().and_then(member_key) else {
+                return Ok(None);
+            };
+            if components.next().is_some() {
+                return Ok(None);
+            }
+            let invoked = fact.syntax_kind().as_str() == "vba.invoked_member.reference";
+            return Ok(
+                match self.bindings.get(&scope).and_then(|names| names.get(&name)) {
+                    Some(Some(Binding::Procedure(symbol) | Binding::ExternalProcedure(symbol)))
+                        if invoked =>
+                    {
+                        Some(ResolvedBinding {
+                            symbol: *symbol,
+                            is_call: true,
+                        })
+                    }
+                    Some(Some(Binding::Function { symbol, .. })) if invoked => {
+                        Some(ResolvedBinding {
+                            symbol: *symbol,
+                            is_call: true,
+                        })
+                    }
+                    Some(Some(Binding::Value(symbol))) if !invoked => Some(ResolvedBinding {
+                        symbol: *symbol,
+                        is_call: false,
+                    }),
+                    _ => None,
+                },
+            );
+        }
         let Some(Binding::Value(mut symbol)) = receiver_binding else {
             return Ok(None);
         };
@@ -936,6 +1009,57 @@ impl<'a> VbaBindings<'a> {
             }))
     }
 
+    fn local_procedural_module(
+        &self,
+        fact: &SyntaxFact,
+        name: &str,
+        cancellation: &Cancellation,
+    ) -> Result<Option<(SymbolId, u64)>, AdapterError> {
+        let Some((module_name, symbol)) = &self.procedural_module else {
+            return Ok(None);
+        };
+        if module_name != name {
+            return Ok(None);
+        }
+        // MS-VBAL 5.6.12 admits procedural-module member access, but a lexical
+        // declaration (including a conditional barrier) may own the receiver.
+        let mut parent = fact.parent();
+        for _ in 0..self.facts.len() {
+            cancellation.check()?;
+            let Some((owner, _)) = self.scope(parent, cancellation)? else {
+                return Ok(None);
+            };
+            if self.foreign_scopes.contains(&owner)
+                || self
+                    .bindings
+                    .get(&owner)
+                    .is_some_and(|names| names.contains_key(name))
+                || !matches!(
+                    self.conditional_binding(parent, owner, name, cancellation)?,
+                    ConditionalBinding::Absent
+                )
+            {
+                return Ok(None);
+            }
+            let scope = self.fact(owner)?;
+            if scope.syntax_kind().as_str() == "vba.file.scope" {
+                return Ok(Some((*symbol, owner)));
+            }
+            parent = scope.parent();
+        }
+        Err(invalid_capture())
+    }
+
+    fn is_member_receiver(&self, fact: &SyntaxFact) -> bool {
+        self.source
+            .get(usize::try_from(fact.span().end_byte()).unwrap_or(usize::MAX))
+            == Some(&b'.')
+            && self
+                .member_references
+                .get(&fact.span().start_byte())
+                .is_some_and(|end| *end > fact.span().end_byte())
+    }
+
     pub(super) fn resolve(
         &self,
         fact: &SyntaxFact,
@@ -1198,6 +1322,16 @@ impl<'a> VbaBindings<'a> {
                 });
             }
             if scope.syntax_kind().as_str() == "vba.file.scope" {
+                if fact.syntax_kind().as_str() == "vba.value_identifier.reference"
+                    && self.is_member_receiver(fact)
+                    && let Some((symbol, _)) =
+                        self.local_procedural_module(fact, &key, cancellation)?
+                {
+                    return Ok(Some(ResolvedBinding {
+                        symbol,
+                        is_call: false,
+                    }));
+                }
                 return Ok(None);
             }
             parent = scope.parent();
