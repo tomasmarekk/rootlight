@@ -4,13 +4,15 @@
 
 use std::{fmt, ops::Range};
 
-use flate2::{Decompress, FlushDecompress, Status};
 use rootlight_cancel::{Cancellation, Cancelled};
 use rootlight_ids::{ContentHash, content_hash};
 use rootlight_source::zip::{ZipArchive, ZipEntry, ZipError, ZipLimits};
 
 const DECODE_CHUNK_BYTES: usize = 16 * 1024;
 const MAX_READS: usize = 65_536;
+
+mod inflate;
+use inflate::inflate;
 
 /// Independent preparation, expansion and repeated-work limits for one archive.
 #[derive(Debug, Clone, Copy)]
@@ -317,76 +319,6 @@ fn charge(
     used.checked_add(amount)
         .filter(|total| *total <= maximum)
         .ok_or(ZipExpansionError::Limit { resource, maximum })
-}
-
-fn inflate(
-    input: &[u8],
-    expected: usize,
-    cancellation: &Cancellation,
-) -> Result<Vec<u8>, ZipExpansionError> {
-    let mut decoder = Decompress::new(false);
-    let mut result = Vec::new();
-    result
-        .try_reserve_exact(expected)
-        .map_err(|_| ZipExpansionError::Allocation)?;
-    let mut buffer = [0; DECODE_CHUNK_BYTES];
-    loop {
-        cancellation.check()?;
-        let before_in = decoder.total_in();
-        let before_out = decoder.total_out();
-        let consumed = usize::try_from(before_in).map_err(|_| ZipExpansionError::Limits)?;
-        let remaining = input.get(consumed..).ok_or(ZipExpansionError::Deflate {
-            input_offset: consumed,
-        })?;
-        let offered = remaining
-            .get(..remaining.len().min(DECODE_CHUNK_BYTES))
-            .ok_or(ZipExpansionError::Deflate {
-                input_offset: consumed,
-            })?;
-        // Bounded input/output slices make cancellation cooperative even for long
-        // runs of empty blocks; StreamEnd, not Read EOF, proves complete framing.
-        let status = decoder
-            .decompress(offered, &mut buffer, FlushDecompress::None)
-            .map_err(|_| ZipExpansionError::Deflate {
-                input_offset: consumed,
-            })?;
-        let produced = decoder
-            .total_out()
-            .checked_sub(before_out)
-            .and_then(|value| usize::try_from(value).ok())
-            .ok_or(ZipExpansionError::OutputSize)?;
-        let next = result
-            .len()
-            .checked_add(produced)
-            .ok_or(ZipExpansionError::OutputSize)?;
-        if next > expected {
-            return Err(ZipExpansionError::OutputSize);
-        }
-        result.extend_from_slice(
-            buffer
-                .get(..produced)
-                .ok_or(ZipExpansionError::OutputSize)?,
-        );
-        if status == Status::StreamEnd {
-            if decoder.total_in()
-                != u64::try_from(input.len()).map_err(|_| ZipExpansionError::Limits)?
-            {
-                return Err(ZipExpansionError::Deflate {
-                    input_offset: usize::try_from(decoder.total_in())
-                        .map_err(|_| ZipExpansionError::Limits)?,
-                });
-            }
-            if result.len() != expected {
-                return Err(ZipExpansionError::OutputSize);
-            }
-            return Ok(result);
-        }
-        if decoder.total_in() == before_in && decoder.total_out() == before_out {
-            return Err(ZipExpansionError::Deflate {
-                input_offset: consumed,
-            });
-        }
-    }
 }
 
 #[cfg(test)]

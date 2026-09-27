@@ -15,7 +15,7 @@ use rootlight_source::{
     vba_text::TextLimits,
 };
 
-pub(super) const REVISION: &[u8] = b"rootlight.container-sources/6";
+pub(super) const REVISION: &[u8] = b"rootlight.container-sources/7";
 
 mod references;
 
