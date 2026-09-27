@@ -79,7 +79,15 @@ pub fn scope_page_candidate() -> usize {
 
 #[test]
 fn vba_statement_labels_cross_real_process_boundaries_without_lossy_downgrades() {
-    let source = b"Private Declare PtrSafe Function Clock Lib \"clock\" () As Long\nPublic Sub Run()\nGoTo Finish\nFinish:\nEnd Sub\n";
+    for source in [
+        b"Private Declare PtrSafe Function Clock Lib \"clock\" () As Long\nPublic Sub Run()\nGoTo Finish\nFinish:\nEnd Sub\n".as_slice(),
+        b"Private Declare PtrSafe Function Clock Lib \"clock\" () As Long\nPublic Sub Run()\n#If Enabled Then\nGoTo Finish\nFinish:\n#End If\nEnd Sub\n".as_slice(),
+    ] {
+        assert_statement_label_process(source);
+    }
+}
+
+fn assert_statement_label_process(source: &[u8]) {
     let mut fixture =
         RetrievalFixture::spawn_with_sources(&[("Module.bas", source)], FixtureLayout::Data);
     let arguments =

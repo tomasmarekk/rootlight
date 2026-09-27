@@ -770,9 +770,20 @@ fn native_statement_labels_survive_rename_noop_restart_and_clean_rebuild() {
     .unwrap();
     paths.prepare_owner().unwrap();
     let mut previous = None;
-    for (name, resolved) in [("Finish", true), ("Renamed", false), ("Finish", true)] {
+    for (name, resolved, conditional) in [
+        ("Finish", true, false),
+        ("Finish", true, true),
+        ("Renamed", false, true),
+        ("Finish", true, true),
+        ("Finish", true, false),
+    ] {
+        let (prefix, suffix) = if conditional {
+            ("#If Enabled Then\r\n", "#End If\r\n")
+        } else {
+            ("", "")
+        };
         let source = format!(
-            "Attribute VB_Name = \"Worker\"\r\nPublic Sub Run()\r\nGoTo Finish\r\n{name}:\r\nEnd Sub\r\n"
+            "Attribute VB_Name = \"Worker\"\r\nPublic Sub Run()\r\n{prefix}GoTo Finish\r\n{name}:\r\n{suffix}End Sub\r\n"
         );
         let book = fixture::typed_book(&[
             ("Worker", source.as_bytes(), false),

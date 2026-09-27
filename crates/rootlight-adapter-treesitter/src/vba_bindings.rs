@@ -76,6 +76,11 @@ struct DeclaredType {
     field_scope: Option<u64>,
 }
 
+struct StatementLabel {
+    definition: u64,
+    symbol: Option<SymbolId>,
+}
+
 pub(super) struct VbaBindings<'a> {
     facts: BTreeMap<u64, &'a SyntaxFact>,
     source: &'a [u8],
@@ -92,7 +97,7 @@ pub(super) struct VbaBindings<'a> {
     // Their ambiguity and foreign-name barriers must not cross namespaces.
     events: BTreeMap<u64, BTreeMap<String, Option<SymbolId>>>,
     foreign_event_scopes: BTreeSet<u64>,
-    statement_labels: BTreeMap<u64, BTreeMap<String, Option<SymbolId>>>,
+    statement_labels: BTreeMap<u64, BTreeMap<String, Vec<StatementLabel>>>,
     foreign_label_scopes: BTreeSet<u64>,
     branch_bindings: BTreeMap<u64, BTreeMap<String, Option<Binding>>>,
     // A shared None also represents conditional shadowing, so it cannot tell
@@ -302,18 +307,16 @@ impl<'a> VbaBindings<'a> {
                         .then(|| statement_label_key(text))
                         .flatten()
                     {
-                        let symbol = if conditional {
-                            None
-                        } else {
-                            symbols.get(&fact.local_id()).copied()
-                        };
                         result
                             .statement_labels
                             .entry(owner)
                             .or_default()
                             .entry(key)
-                            .and_modify(|prior| *prior = None)
-                            .or_insert(symbol);
+                            .or_default()
+                            .push(StatementLabel {
+                                definition: fact.local_id(),
+                                symbol: symbols.get(&fact.local_id()).copied(),
+                            });
                     } else {
                         result.foreign_label_scopes.insert(owner);
                     }
@@ -1366,11 +1369,7 @@ impl<'a> VbaBindings<'a> {
                 return Ok(None);
             }
             return Ok(self
-                .statement_labels
-                .get(&owner)
-                .and_then(|names| names.get(&key))
-                .copied()
-                .flatten()
+                .statement_label_reference(owner, fact.parent(), &key, cancellation)?
                 .map(|symbol| ResolvedBinding {
                     symbol,
                     is_call: false,
@@ -1713,6 +1712,92 @@ impl<'a> VbaBindings<'a> {
                 };
             })
             .or_insert(symbol);
+    }
+
+    fn statement_label_reference(
+        &self,
+        owner: u64,
+        parent: Option<u64>,
+        name: &str,
+        cancellation: &Cancellation,
+    ) -> Result<Option<SymbolId>, AdapterError> {
+        let Some(labels) = self
+            .statement_labels
+            .get(&owner)
+            .and_then(|names| names.get(name))
+        else {
+            return Ok(None);
+        };
+        let reference_conditions = self.statement_label_conditions(parent, owner, cancellation)?;
+        let mut matched = None;
+        for label in labels {
+            cancellation.check()?;
+            let conditions = self.statement_label_conditions(
+                self.fact(label.definition)?.parent(),
+                owner,
+                cancellation,
+            )?;
+            if conditions.iter().any(|(group, branch)| {
+                reference_conditions
+                    .get(group)
+                    .is_some_and(|other| other != branch)
+            }) {
+                continue;
+            }
+            // MS-VBAL 3.4 removes excluded branches before name resolution.
+            // Bind only a unique label present whenever this use is present;
+            // a possible coexisting duplicate is ambiguous, not a shadowing label.
+            if matched.is_some()
+                || label.symbol.is_none()
+                || conditions
+                    .iter()
+                    .any(|(group, branch)| reference_conditions.get(group) != Some(branch))
+            {
+                return Ok(None);
+            }
+            matched = label.symbol;
+        }
+        Ok(matched)
+    }
+
+    fn statement_label_conditions(
+        &self,
+        mut parent: Option<u64>,
+        owner: u64,
+        cancellation: &Cancellation,
+    ) -> Result<BTreeMap<u64, u64>, AdapterError> {
+        let mut conditions = BTreeMap::new();
+        let mut branch = None;
+        for _ in 0..self.facts.len() {
+            cancellation.check()?;
+            let id = parent.ok_or_else(invalid_capture)?;
+            if id == owner {
+                return if branch.is_none() {
+                    Ok(conditions)
+                } else {
+                    Err(invalid_capture())
+                };
+            }
+            let fact = self.fact(id)?;
+            if fact.kind() == SyntaxFactKind::Scope {
+                match fact.syntax_kind().as_str() {
+                    "vba.preprocessor_branch.scope" => {
+                        if branch.replace(id).is_some() {
+                            return Err(invalid_capture());
+                        }
+                    }
+                    "vba.preprocessor.scope" => {
+                        let selected = branch.take().ok_or_else(invalid_capture)?;
+                        if conditions.insert(id, selected).is_some() {
+                            return Err(invalid_capture());
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            parent = fact.parent();
+        }
+        Err(invalid_capture())
     }
 
     fn conditional_owner(

@@ -46,7 +46,7 @@ fn vba_native_context_binds_artifacts_and_required_fact_budgets() {
     let analyzer = analyzer(&provider, VBA);
     let fixture = Fixture::new(
         VBA,
-        b"Attribute VB_Name = \"Counter\"\nPrivate total As Long\nPublic Sub Run()\nGoTo Finish\nFinish:\nGoTo 10\n10: Me.total = 1\nEnd Sub\n",
+        b"Attribute VB_Name = \"Counter\"\nPrivate total As Long\nPublic Sub Run()\n#If Enabled Then\nGoTo Finish\nFinish:\nGoTo 10\n10: Me.total = 1\n#End If\nEnd Sub\n",
     );
     let budget = limits();
     let extensions = ExtensionSupport::default();
@@ -4330,6 +4330,127 @@ fn vba_statement_label_ambiguity_is_procedure_local_and_never_binds_values() {
         label_reference_at(result.document(), source, "10\n").target,
         OccurrenceTarget::Unresolved { .. }
     ));
+}
+
+#[test]
+fn vba_statement_labels_resolve_only_within_compatible_compile_branches() {
+    let source = "Sub Run()\n#If Host Then\nOn Error GoTo Finish\n#If Trace Then\nGoTo Finish\n#End If\nFinish:\n#ElseIf Alternate Then\nGoSub Finish\nFinish:\n#Else\nResume Finish\nFinish:\n#End If\nGoTo Finish\nEnd Sub\n";
+    let result = output(source);
+    let document = result.document();
+    let transfers: Vec<_> = document
+        .occurrences
+        .iter()
+        .filter(|site| {
+            matches!(
+                site.syntax_kind.as_str(),
+                "vba.statement_label.reference"
+                    | "vba.error_label.reference"
+                    | "vba.resume_label.reference"
+            )
+        })
+        .collect();
+    assert_eq!(transfers.len(), 5);
+    let mut transfers = transfers;
+    transfers.sort_by_key(|site| site.source.span().start_byte());
+    let symbols: Vec<_> = transfers[..4]
+        .iter()
+        .map(|site| {
+            let OccurrenceTarget::Resolved { symbol } = site.target else {
+                panic!("same-branch transfer must resolve: {site:#?}");
+            };
+            assert!(
+                !document
+                    .skipped_regions
+                    .iter()
+                    .any(|gap| gap.source == site.source)
+            );
+            symbol
+        })
+        .collect();
+    assert_eq!(symbols[0], symbols[1]);
+    assert_ne!(symbols[0], symbols[2]);
+    assert_ne!(symbols[0], symbols[3]);
+    assert_ne!(symbols[2], symbols[3]);
+    for ((start, _), symbol) in source
+        .match_indices("Finish:")
+        .zip([symbols[0], symbols[2], symbols[3]])
+    {
+        let definition = document
+            .occurrences
+            .iter()
+            .find(|site| {
+                site.role == OccurrenceRole::Definition
+                    && site.source.span().start_byte() == u64::try_from(start).unwrap()
+            })
+            .unwrap();
+        assert_eq!(definition.target, OccurrenceTarget::Resolved { symbol });
+    }
+    assert!(matches!(
+        transfers[4].target,
+        OccurrenceTarget::Unresolved { .. }
+    ));
+}
+
+#[test]
+fn vba_statement_labels_do_not_guess_independent_or_nested_compile_conditions() {
+    for body in [
+        "#If Enabled Then\nFinish:\n#Else\nGoTo Finish\n#End If\n",
+        "#If Enabled Then\nFinish:\n#End If\n#If Enabled Then\nGoTo Finish\n#End If\n",
+        "Finish:\n#If Enabled Then\nFinish:\nGoTo Finish\n#End If\n",
+        "#If Enabled Then\nFinish:\n#If Trace Then\nFinish:\n#End If\nGoTo Finish\n#End If\n",
+        "#If Enabled Then\nFinish:\n#If Trace Then\nFinish:\nGoTo Finish\n#End If\n#End If\n",
+        "#If Enabled Then\nFinish:\nfinish:\nGoTo Finish\n#End If\n",
+        "#If Enabled Then\n10:\n&H0A:\nGoTo 10\n#End If\n",
+    ] {
+        let source = format!("Sub Run()\n{body}End Sub\n");
+        let result = output(&source);
+        let document = result.document();
+        let site = document
+            .occurrences
+            .iter()
+            .find(|site| site.syntax_kind == "vba.statement_label.reference")
+            .unwrap();
+        assert!(
+            matches!(site.target, OccurrenceTarget::Unresolved { .. }),
+            "{source}"
+        );
+        assert!(
+            document
+                .skipped_regions
+                .iter()
+                .any(|gap| gap.source == site.source
+                    && gap.detail == "vba-statement-label-target-unavailable")
+        );
+    }
+}
+
+#[test]
+fn vba_statement_labels_exclude_duplicates_from_incompatible_nested_branches() {
+    let source = "Sub Run()\n#If Enabled Then\nFinish:\n#If Trace Then\nFinish:\n#Else\nGoTo Finish\n#End If\n#End If\nEnd Sub\n";
+    let result = output(source);
+    let site = label_reference_at(result.document(), source, "Finish\n#End If");
+    assert!(matches!(site.target, OccurrenceTarget::Resolved { .. }));
+    let start = u64::try_from(source.find("Finish:").unwrap()).unwrap();
+    let definition = result
+        .document()
+        .occurrences
+        .iter()
+        .find(|site| {
+            site.role == OccurrenceRole::Definition && site.source.span().start_byte() == start
+        })
+        .unwrap();
+    assert_eq!(site.target, definition.target);
+}
+
+#[test]
+fn vba_statement_labels_resolve_inside_conditionally_declared_procedures() {
+    let source = "#If Host Then\nSub Run()\nGoTo 0010\n10:\nEnd Sub\n#Else\nSub Run()\nGoTo &HA\n10:\nEnd Sub\n#End If\n";
+    let result = output(source);
+    let first = label_reference_at(result.document(), source, "0010\n");
+    let second = label_reference_at(result.document(), source, "&HA\n");
+    assert!(matches!(first.target, OccurrenceTarget::Resolved { .. }));
+    assert!(matches!(second.target, OccurrenceTarget::Resolved { .. }));
+    assert_ne!(first.target, second.target);
 }
 
 fn label_reference_at<'a>(
