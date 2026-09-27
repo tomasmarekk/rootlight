@@ -2150,6 +2150,7 @@ impl<'context, 'source> Lowering<'context, 'source> {
                         .map_err(|_| provider_failure("treesitter-relation-identity"))?;
                     relations.insert(relation.id, relation);
                 }
+                let mut vba_array_invocation_proven = false;
                 if let Some(bindings) = &vba_bindings
                     && let Some(binding) = bindings.resolve(fact, text, cancellation)?
                 {
@@ -2158,6 +2159,12 @@ impl<'context, 'source> Lowering<'context, 'source> {
                     };
                     if binding.is_call {
                         occurrence.role = OccurrenceRole::CallSite;
+                    } else {
+                        vba_array_invocation_proven = bindings.array_invocation_target_is_proven(
+                            fact,
+                            binding.symbol,
+                            cancellation,
+                        )?;
                     }
                     occurrence.id = derive_occurrence_record_id(&occurrence)
                         .map_err(|_| provider_failure("treesitter-occurrence-identity"))?;
@@ -2381,7 +2388,8 @@ impl<'context, 'source> Lowering<'context, 'source> {
                                 | "vba.self_invoked_get_member.reference"
                                 | "vba.self_invoked_let_member.reference"
                                 | "vba.self_invoked_set_member.reference"
-                        ) && occurrence.role != OccurrenceRole::CallSite))
+                        ) && occurrence.role != OccurrenceRole::CallSite
+                            && !vba_array_invocation_proven))
                 {
                     let region = skipped_region(
                         self.full_source,

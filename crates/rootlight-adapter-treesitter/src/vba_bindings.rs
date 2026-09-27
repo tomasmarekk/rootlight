@@ -855,6 +855,45 @@ impl<'a> VbaBindings<'a> {
         }))
     }
 
+    /// Checks whether a complete array application proves this exact callee target.
+    ///
+    /// # Errors
+    ///
+    /// Returns adapter errors for inconsistent captured evidence or cancellation.
+    pub(super) fn array_invocation_target_is_proven(
+        &self,
+        fact: &SyntaxFact,
+        target: SymbolId,
+        cancellation: &Cancellation,
+    ) -> Result<bool, AdapterError> {
+        cancellation.check()?;
+        let start = fact.span().start_byte();
+        if !self.array_symbols.contains(&target)
+            || !self.invocations.get(&start).is_some_and(|invocations| {
+                invocations
+                    .iter()
+                    .any(|candidate| candidate.local_id() == fact.local_id())
+            })
+        {
+            return Ok(false);
+        }
+        for application in self.applications.get(&start).into_iter().flatten() {
+            cancellation.check()?;
+            let length = usize::try_from(application.span().end_byte() - start)
+                .map_err(|_| invalid_capture())?;
+            // Use the same admission as resolve, so an oversized or incomplete
+            // application cannot retire a gap on its shorter callee capture.
+            if length <= self.maximum_name_bytes
+                && self
+                    .array_application(application, cancellation)?
+                    .is_some_and(|binding| !binding.is_call && binding.symbol == target)
+            {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
     fn array_application(
         &self,
         fact: &SyntaxFact,

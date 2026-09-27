@@ -1521,7 +1521,7 @@ fn vba_unqualified_properties_select_source_bound_accessors() {
 }
 
 #[test]
-fn vba_unqualified_properties_respect_local_values_and_index_gaps() {
+fn vba_unqualified_properties_respect_local_array_proofs_and_dynamic_index_gaps() {
     for (parameter, local) in [
         ("", "Dim Item(2) As Variant\n"),
         ("ByVal Item As Variant", ""),
@@ -1562,10 +1562,19 @@ fn vba_unqualified_properties_respect_local_values_and_index_gaps() {
             );
             assert_eq!(site.role, OccurrenceRole::Reference);
             if statement.contains('(') {
-                assert!(document.skipped_regions.iter().any(|gap| {
-                    gap.domain == FactDomain::Relations
-                        && gap.source.span() == site.source.span()
-                        && gap.detail == "vba-call-or-index-target-unavailable"
+                let proven_array_read = parameter.is_empty() && statement == "value = iTeM(0)";
+                assert_eq!(
+                    document.skipped_regions.iter().any(|gap| {
+                        gap.domain == FactDomain::Relations
+                            && gap.source.span() == site.source.span()
+                            && gap.detail == "vba-call-or-index-target-unavailable"
+                    }),
+                    !proven_array_read,
+                    "{source}"
+                );
+                assert!(!document.relations.iter().any(|edge| {
+                    edge.predicate == RelationPredicate::Calls
+                        && edge.subject == RelationEndpoint::Occurrence(site.id)
                 }));
             }
         }
@@ -1833,7 +1842,10 @@ fn vba_declared_array_application_binds_without_guessing_object_defaults() {
                 }));
                 assert!(!document.skipped_regions.iter().any(|gap| {
                     gap.detail == "vba-call-or-index-target-unavailable"
-                        && gap.source.span() == application.source.span()
+                        && gap.source.span().start_byte() == start
+                        && (gap.source.span().end_byte() == end
+                            || gap.source.span().end_byte()
+                                == start + u64::try_from(expression.find('(').unwrap()).unwrap())
                 }));
             }
             None => {
@@ -1844,6 +1856,12 @@ fn vba_declared_array_application_binds_without_guessing_object_defaults() {
                 assert!(document.skipped_regions.iter().any(|gap| {
                     gap.detail == "vba-call-or-index-target-unavailable"
                         && gap.source.span() == application.source.span()
+                }));
+                assert!(document.skipped_regions.iter().any(|gap| {
+                    gap.detail == "vba-call-or-index-target-unavailable"
+                        && gap.source.span().start_byte() == start
+                        && gap.source.span().end_byte()
+                            == start + u64::try_from(expression.find('(').unwrap()).unwrap()
                 }));
             }
         }
@@ -1873,6 +1891,10 @@ fn vba_declared_array_application_binds_without_guessing_object_defaults() {
         assignment_application.target,
         OccurrenceTarget::Unresolved { .. }
     ));
+    assert!(document.skipped_regions.iter().any(|gap| {
+        gap.source.span() == assignment_receiver.source.span()
+            && gap.detail == "vba-call-or-index-target-unavailable"
+    }));
 }
 
 #[test]
@@ -1922,8 +1944,44 @@ fn vba_array_parameters_bind_indexed_reads_to_their_declarations() {
                 && edge.subject == RelationEndpoint::Occurrence(application.id)
         }));
         assert!(!document.skipped_regions.iter().any(|gap| {
-            gap.source.span() == application.source.span()
+            gap.source.span().start_byte() == start
+                && matches!(gap.source.span().end_byte() - start, 5 | 8)
                 && gap.detail == "vba-call-or-index-target-unavailable"
+        }));
+    }
+}
+
+#[test]
+fn vba_proven_array_targets_preserve_argument_and_returned_value_gaps() {
+    let source = "Sub Run(ByRef values() As Long)\nDim first As Variant\nfirst = values(Missing(0))\nfirst = values(0)(1)\nEnd Sub\n";
+    let result = output(source);
+    let document = result.document();
+    let argument_start = u64::try_from(source.find("Missing(0)").unwrap()).unwrap();
+    assert!(document.skipped_regions.iter().any(|gap| {
+        gap.detail == "vba-call-or-index-target-unavailable"
+            && gap.source.span().start_byte() == argument_start
+    }));
+    let outer_start = u64::try_from(source.find("values(0)(1)").unwrap()).unwrap();
+    let outer = document
+        .occurrences
+        .iter()
+        .find(|site| {
+            site.syntax_kind == "vba.application.reference"
+                && site.source.span().start_byte() == outer_start
+                && site.source.span().end_byte() == outer_start + 12
+        })
+        .unwrap();
+    assert!(matches!(outer.target, OccurrenceTarget::Unresolved { .. }));
+    assert!(document.skipped_regions.iter().any(|gap| {
+        gap.detail == "vba-call-or-index-target-unavailable"
+            && gap.source.span() == outer.source.span()
+    }));
+    for expression in ["values(Missing(0))", "values(0)(1)"] {
+        let start = u64::try_from(source.find(expression).unwrap()).unwrap();
+        assert!(!document.skipped_regions.iter().any(|gap| {
+            gap.detail == "vba-call-or-index-target-unavailable"
+                && gap.source.span().start_byte() == start
+                && gap.source.span().end_byte() == start + 6
         }));
     }
 }
