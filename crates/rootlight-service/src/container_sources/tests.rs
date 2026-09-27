@@ -2432,6 +2432,105 @@ fn native_project_resolution_survives_duplicate_private_types_in_conditional_bra
 }
 
 #[test]
+fn native_project_callback_references_require_the_same_container() {
+    let client = b"Attribute VB_Name = \"Client\"\r\nPrivate Declare PtrSafe Sub Register Lib \"callbacks\" (ByVal address As LongPtr)\r\nSub Run()\r\nDim Notify As Long\r\nCall Register(AddressOf Notify)\r\nEnd Sub\r\n";
+    for (access, class, foreign, expected) in [
+        ("Public", false, false, true),
+        ("Private", false, false, false),
+        ("Public", true, false, false),
+        ("Public", false, true, false),
+    ] {
+        let storage = tempdir();
+        let root = tempdir();
+        let paths = rootlight_runtime::RuntimePaths::new(
+            storage.path().join("state"),
+            storage.path().join("runtime"),
+        )
+        .unwrap();
+        paths.prepare_owner().unwrap();
+        let callback =
+            format!("Attribute VB_Name = \"Callbacks\"\r\n{access} Sub Notify()\r\nEnd Sub\r\n");
+        let mut modules = vec![("Client", client.as_slice(), false)];
+        if foreign {
+            fs::write(
+                root.path().join("other.xlsm"),
+                fixture::typed_book(&[("Callbacks", callback.as_bytes(), class)]),
+            )
+            .unwrap();
+        } else {
+            modules.push(("Callbacks", callback.as_bytes(), class));
+        }
+        fs::write(root.path().join("book.xlsm"), fixture::typed_book(&modules)).unwrap();
+        let mut service =
+            FirstSliceService::new_durable(4, paths.state_dir(), &deadline()).unwrap();
+        let receipt = service.index_repository(root.path(), &deadline()).unwrap();
+        assert_eq!(
+            service.index_repository(root.path(), &deadline()).unwrap(),
+            receipt
+        );
+        let before = service
+            .loaded_generation_snapshot(receipt.generation)
+            .unwrap()
+            .document()
+            .clone();
+        drop(service);
+        let service = FirstSliceService::new_durable(4, paths.state_dir(), &deadline()).unwrap();
+        let snapshot = service
+            .loaded_generation_snapshot(receipt.generation)
+            .unwrap();
+        let document = snapshot.document();
+        assert_eq!(document, &before);
+        let site = document
+            .occurrences
+            .iter()
+            .find(|site| site.syntax_kind == "vba.procedure_pointer.reference")
+            .unwrap();
+        assert_eq!(
+            matches!(site.target, OccurrenceTarget::Resolved { .. }),
+            expected,
+            "{access} class={class} foreign={foreign}"
+        );
+        assert_eq!(site.role, rootlight_ir::OccurrenceRole::Reference);
+        assert_eq!(
+            document
+                .skipped_regions
+                .iter()
+                .any(|gap| gap.source == site.source
+                    && gap.detail == "vba-procedure-pointer-target-unavailable"),
+            !expected
+        );
+        assert!(!document.relations.iter().any(|relation| relation.subject
+            == RelationEndpoint::Occurrence(site.id)
+            && relation.predicate == RelationPredicate::Calls));
+        if let OccurrenceTarget::Resolved { symbol } = site.target {
+            let path = derived_path("book.xlsm", "Callbacks", ModuleKind::Procedural).unwrap();
+            let target = document
+                .entities
+                .iter()
+                .find(|entity| entity.id == symbol)
+                .unwrap();
+            assert!(document.files.iter().any(|file| file.path == path.as_str()
+                && target.evidence.source.as_ref().unwrap().span().file() == file.id));
+            assert!(document.relations.iter().any(|relation| relation.subject
+                == RelationEndpoint::Occurrence(site.id)
+                && relation.object == RelationEndpoint::Entity(symbol)
+                && relation.predicate == RelationPredicate::RefersTo
+                && relation.evidence.source.as_ref() == Some(&site.source)));
+            assert!(
+                document
+                    .provenance
+                    .iter()
+                    .any(|record| record.rule.as_deref()
+                        == Some("native-classic-project-membership-v1.leaf"))
+            );
+        }
+        for coverage in &document.coverage_records {
+            assert_eq!(coverage.discovered, coverage.indexed + coverage.skipped);
+        }
+    }
+}
+
+#[test]
 fn native_project_module_calls_require_public_targets_and_unshadowed_names() {
     for (visibility, local, foreign, expected) in [
         ("Public", "", false, true),

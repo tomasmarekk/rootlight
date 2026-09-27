@@ -220,7 +220,7 @@ const PROJECT_FACTS_TRUNCATED_MESSAGE: &str =
     "additional project semantic facts were omitted by aggregate resource limits";
 const AGGREGATE_DIAGNOSTICS_TRUNCATED_CODE: &str = "aggregate-diagnostics-truncated";
 const ANALYZER_BINARY_SEED: &[u8] = b"rootlight.first-slice.treesitter-structural/163";
-const RESOLVER_BINARY_SEED: &[u8] = b"rootlight.first-slice.resolve/41";
+const RESOLVER_BINARY_SEED: &[u8] = b"rootlight.first-slice.resolve/42";
 const INCREMENTAL_PROVIDER_SEED: &[u8] = b"rootlight.first-slice.incremental-provider/1";
 const LANGUAGE_DISPOSITION_PROVIDER_SEED: &[u8] = b"rootlight.first-slice.language-disposition/5";
 const SOURCE_FILE_FALLBACK_PROVIDER_SEED: &[u8] = b"rootlight.source-file-fallback/4";
@@ -36992,6 +36992,378 @@ mod tests {
             );
             for coverage in &document.coverage_records {
                 assert_eq!(coverage.discovered, coverage.indexed + coverage.skipped);
+            }
+        }
+    }
+
+    #[test]
+    fn classic_project_callback_references_follow_access_and_restart() {
+        let storage = durable_test_tempdir();
+        let fixture = durable_test_tempdir();
+        let paths = RuntimePaths::new(storage.path().join("state"), storage.path().join("runtime"))
+            .unwrap();
+        paths.prepare_owner().unwrap();
+        let client = "Attribute VB_Name = \"Client\"\nPrivate Notify As Long\nPrivate Declare PtrSafe Sub Register Lib \"callbacks\" (ByVal address As LongPtr)\nPublic Sub Run()\nDim Notify As Long\nCall Register(AddressOf [nOtIfY])\nEnd Sub\n";
+        fs::write(fixture.path().join("Client.bas"), client).unwrap();
+        let manifest = "Type=OleDll\nName=\"Primary\"\nModule=Client; Client.bas\nModule=Callbacks; Callbacks.bas\n";
+        fs::write(fixture.path().join("project.vbp"), manifest).unwrap();
+        let mut previous = None;
+        for (declaration, resolved) in [
+            ("Public Sub Notify()\nEnd Sub\n", true),
+            ("Private Sub Notify()\nEnd Sub\n", false),
+            ("Public Function Notify() As Long\nEnd Function\n", true),
+            ("Public Property Get Notify() As Long\nEnd Property\n", true),
+            (
+                "Public Declare PtrSafe Sub Notify Lib \"callbacks\" ()\n",
+                false,
+            ),
+            ("Public Sub Changed()\nEnd Sub\n", false),
+            ("Public Sub Notify()\nEnd Sub\n", true),
+        ] {
+            fs::write(
+                fixture.path().join("Callbacks.bas"),
+                format!("Attribute VB_Name = \"Callbacks\"\n{declaration}"),
+            )
+            .unwrap();
+            let mut service =
+                FirstSliceService::new_durable(4, paths.state_dir(), &deadline()).unwrap();
+            let receipt = service
+                .index_repository(fixture.path(), &deadline())
+                .unwrap();
+            assert_ne!(Some(receipt.generation), previous);
+            previous = Some(receipt.generation);
+            assert_eq!(
+                service
+                    .index_repository(fixture.path(), &deadline())
+                    .unwrap(),
+                receipt
+            );
+            let before = service
+                .loaded_generation_snapshot(receipt.generation)
+                .unwrap()
+                .document()
+                .clone();
+            drop(service);
+            let service =
+                FirstSliceService::new_durable(4, paths.state_dir(), &deadline()).unwrap();
+            let snapshot = service
+                .loaded_generation_snapshot(receipt.generation)
+                .unwrap();
+            let document = snapshot.document();
+            assert_eq!(document, &before);
+            let site = document
+                .occurrences
+                .iter()
+                .find(|site| site.syntax_kind == "vba.procedure_pointer.reference")
+                .unwrap();
+            assert_eq!(
+                matches!(site.target, OccurrenceTarget::Resolved { .. }),
+                resolved,
+                "{declaration}"
+            );
+            assert_eq!(site.role, OccurrenceRole::Reference);
+            assert_eq!(
+                document
+                    .skipped_regions
+                    .iter()
+                    .any(|gap| gap.source == site.source
+                        && gap.detail == "vba-procedure-pointer-target-unavailable"),
+                !resolved
+            );
+            assert!(
+                !document
+                    .relations
+                    .iter()
+                    .any(|edge| edge.predicate == RelationPredicate::Calls
+                        && edge.evidence.source.as_ref() == Some(&site.source))
+            );
+            if let OccurrenceTarget::Resolved { symbol } = site.target {
+                let target = document
+                    .entities
+                    .iter()
+                    .find(|entity| entity.id == symbol)
+                    .unwrap();
+                let target_file = target.evidence.source.as_ref().unwrap().span().file();
+                assert!(
+                    document
+                        .files
+                        .iter()
+                        .any(|file| file.id == target_file && file.path == "Callbacks.bas")
+                );
+                assert!(
+                    document
+                        .provenance
+                        .iter()
+                        .any(|record| record.id == site.provenance
+                            && record.rule.as_deref()
+                                == Some("classic-project-pointer-v1.indexed_snapshot"))
+                );
+                let relationships = service
+                    .symbol_relationships(
+                        receipt.generation,
+                        BTreeSet::from([symbol]),
+                        vec![RelationFamily::References, RelationFamily::Calls],
+                        Some(RelationDirection::Inbound),
+                        0,
+                        16,
+                        0,
+                        &deadline(),
+                    )
+                    .unwrap();
+                let sources: Vec<_> = relationships
+                    .data
+                    .groups
+                    .iter()
+                    .flat_map(|group| &group.items)
+                    .flat_map(|edge| &edge.source_refs)
+                    .collect();
+                assert_eq!(sources, vec![&site.source]);
+            }
+            let read = service
+                .source_read_with_options_and_budget(
+                    receipt.generation,
+                    vec![site.source.clone()],
+                    SourceReadOptions::new()
+                        .with_context_lines_before(0)
+                        .with_context_lines_after(0),
+                    FirstSliceBudget::default(),
+                    &deadline(),
+                )
+                .unwrap();
+            assert_eq!(read.data.chunks[0].bytes, b"[nOtIfY]");
+            for coverage in &document.coverage_records {
+                assert_eq!(coverage.discovered, coverage.indexed + coverage.skipped);
+            }
+        }
+    }
+
+    #[test]
+    fn classic_project_callback_references_preserve_namespace_barriers() {
+        for (case, local, callback, sibling, extra, project_name, resolved) in [
+            (
+                "public-duplicate",
+                "",
+                "Public Sub Notify()\nEnd Sub\n",
+                "Public Sub Notify()\nEnd Sub\n",
+                "",
+                "Primary",
+                false,
+            ),
+            (
+                "private-sibling",
+                "",
+                "Public Sub Notify()\nEnd Sub\n",
+                "Private Sub Notify()\nEnd Sub\n",
+                "",
+                "Primary",
+                true,
+            ),
+            (
+                "getter-and-setter",
+                "",
+                "Public Property Get Notify() As Long\nEnd Property\nPublic Property Let Notify(ByVal value As Long)\nEnd Property\n",
+                "",
+                "",
+                "Primary",
+                true,
+            ),
+            (
+                "local-setter",
+                "Private Property Let Notify(ByVal value As Long)\nEnd Property\n",
+                "Public Sub Notify()\nEnd Sub\n",
+                "",
+                "",
+                "Primary",
+                true,
+            ),
+            (
+                "local-external",
+                "Private Declare PtrSafe Sub Notify Lib \"callbacks\" ()\n",
+                "Public Sub Notify()\nEnd Sub\n",
+                "",
+                "",
+                "Primary",
+                false,
+            ),
+            (
+                "duplicate-local",
+                "Private Sub Notify()\nEnd Sub\nPrivate Sub Notify()\nEnd Sub\n",
+                "Public Sub Notify()\nEnd Sub\n",
+                "",
+                "",
+                "Primary",
+                false,
+            ),
+            (
+                "conditional-local",
+                "#If Choice Then\nPrivate Sub Notify()\nEnd Sub\n#End If\n",
+                "Public Sub Notify()\nEnd Sub\n",
+                "",
+                "",
+                "Primary",
+                false,
+            ),
+            (
+                "conditional-export",
+                "",
+                "#If Choice Then\nPublic Sub Notify()\nEnd Sub\n#End If\n",
+                "",
+                "",
+                "Primary",
+                false,
+            ),
+            (
+                "mixed-access-duplicate",
+                "",
+                "Public Sub Notify()\nEnd Sub\nPrivate Sub Notify()\nEnd Sub\n",
+                "",
+                "",
+                "Primary",
+                false,
+            ),
+            (
+                "missing-inventory",
+                "",
+                "Public Sub Notify()\nEnd Sub\n",
+                "",
+                "Module=Missing; Missing.bas\n",
+                "Primary",
+                false,
+            ),
+            (
+                "module-name",
+                "",
+                "Public Sub Notify()\nEnd Sub\n",
+                "",
+                "Module=Notify; Notify.bas\n",
+                "Primary",
+                false,
+            ),
+            (
+                "project-name",
+                "",
+                "Public Sub Notify()\nEnd Sub\n",
+                "",
+                "",
+                "Notify",
+                false,
+            ),
+            (
+                "overlapping-membership",
+                "",
+                "Public Sub Notify()\nEnd Sub\n",
+                "",
+                "",
+                "Primary",
+                false,
+            ),
+            (
+                "unlisted-export",
+                "",
+                "Public Sub Notify()\nEnd Sub\n",
+                "",
+                "",
+                "Primary",
+                false,
+            ),
+            (
+                "foreign-project",
+                "",
+                "Public Sub Changed()\nEnd Sub\n",
+                "",
+                "",
+                "Primary",
+                false,
+            ),
+        ] {
+            let storage = durable_test_tempdir();
+            let fixture = durable_test_tempdir();
+            let paths =
+                RuntimePaths::new(storage.path().join("state"), storage.path().join("runtime"))
+                    .unwrap();
+            paths.prepare_owner().unwrap();
+            let members = if case == "unlisted-export" {
+                ""
+            } else {
+                "Module=Callbacks; Callbacks.bas\n"
+            };
+            let manifest = format!(
+                "Type=OleDll\nName=\"{project_name}\"\nModule=Client; Client.bas\nModule=Sibling; Sibling.bas\n{members}{extra}"
+            );
+            fs::write(fixture.path().join("project.vbp"), &manifest).unwrap();
+            if case == "overlapping-membership" {
+                fs::write(fixture.path().join("overlap.vbp"), &manifest).unwrap();
+            }
+            if case == "foreign-project" {
+                fs::write(
+                    fixture.path().join("foreign.vbp"),
+                    "Type=OleDll\nName=\"Other\"\nModule=Foreign; Foreign.bas\n",
+                )
+                .unwrap();
+            }
+            for (name, declarations) in [
+                (
+                    "Client",
+                    format!(
+                        "{local}Private Declare PtrSafe Sub Register Lib \"callbacks\" (ByVal address As LongPtr)\nSub Run()\nCall Register(AddressOf Notify)\nEnd Sub\n"
+                    ),
+                ),
+                ("Callbacks", callback.to_owned()),
+                ("Sibling", sibling.to_owned()),
+                ("Notify", String::new()),
+                ("Foreign", "Public Sub Notify()\nEnd Sub\n".to_owned()),
+            ] {
+                fs::write(
+                    fixture.path().join(format!("{name}.bas")),
+                    format!("Attribute VB_Name = \"{name}\"\n{declarations}"),
+                )
+                .unwrap();
+            }
+            let mut service =
+                FirstSliceService::new_durable(4, paths.state_dir(), &deadline()).unwrap();
+            let receipt = service
+                .index_repository(fixture.path(), &deadline())
+                .unwrap();
+            let snapshot = service
+                .loaded_generation_snapshot(receipt.generation)
+                .unwrap();
+            let document = snapshot.document();
+            let site = document
+                .occurrences
+                .iter()
+                .find(|site| site.syntax_kind == "vba.procedure_pointer.reference")
+                .unwrap();
+            assert_eq!(
+                matches!(site.target, OccurrenceTarget::Resolved { .. }),
+                resolved,
+                "{case}"
+            );
+            assert_eq!(
+                document
+                    .skipped_regions
+                    .iter()
+                    .any(|gap| gap.source == site.source
+                        && gap.detail == "vba-procedure-pointer-target-unavailable"),
+                !resolved,
+                "{case}"
+            );
+            if let OccurrenceTarget::Resolved { symbol } = site.target {
+                let target = document
+                    .entities
+                    .iter()
+                    .find(|entity| entity.id == symbol)
+                    .unwrap();
+                let file = target.evidence.source.as_ref().unwrap().span().file();
+                assert!(
+                    document
+                        .files
+                        .iter()
+                        .any(|record| record.id == file && record.path == "Callbacks.bas"),
+                    "{case}"
+                );
+            }
+            for record in &document.coverage_records {
+                assert_eq!(record.discovered, record.indexed + record.skipped, "{case}");
             }
         }
     }

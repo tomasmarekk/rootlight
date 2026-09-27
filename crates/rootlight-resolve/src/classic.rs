@@ -175,7 +175,46 @@ struct ResolvedProject {
     modules: BTreeMap<String, Option<SymbolId>>,
     default_instances: BTreeMap<SymbolId, SourceRef>,
     value_names: BTreeSet<String>,
+    procedural_modules: BTreeMap<FileId, SymbolId>,
+    pointer_names: BTreeSet<String>,
     evidence: Arc<ProjectEvidence>,
+}
+
+// Procedure-pointer lookup excludes variables and setter-only properties
+// (MS-VBAL 5.6.10). DLL declarations occupy the tier but cannot be AddressOf
+// targets; retain them as barriers instead of falling through.
+fn pointer_callable(entity: &EntityRecord, sources: &BTreeMap<FileId, &[u8]>) -> Option<bool> {
+    if entity.kind == EntityKind::Property {
+        return match property_accessor_kind(entity, sources) {
+            Some(PropertyAccessorKind::Get) => Some(true),
+            Some(PropertyAccessorKind::Let | PropertyAccessorKind::Set) => None,
+            None => Some(false),
+        };
+    }
+    if entity.kind != EntityKind::Function {
+        return None;
+    }
+    let header = entity.evidence.source.as_ref().and_then(|source| {
+        let span = source.span();
+        sources
+            .get(&span.file())?
+            .get(usize::try_from(span.start_byte()).ok()?..usize::try_from(span.end_byte()).ok()?)
+    });
+    let body = header.unwrap_or_default();
+    let mut words = body
+        .split(u8::is_ascii_whitespace)
+        .filter(|word| !word.is_empty());
+    let mut word = words.next().unwrap_or_default();
+    if [b"Public".as_slice(), b"Private", b"Friend"]
+        .iter()
+        .any(|access| word.eq_ignore_ascii_case(access))
+    {
+        word = words.next().unwrap_or_default();
+    }
+    if word.eq_ignore_ascii_case(b"Static") {
+        word = words.next().unwrap_or_default();
+    }
+    Some(word.eq_ignore_ascii_case(b"Sub") || word.eq_ignore_ascii_case(b"Function"))
 }
 
 enum MemberLocation {
@@ -522,6 +561,8 @@ impl<'a> ClassicIndex<'a> {
             };
             evidence.sources.push(source.clone());
             let mut types = BTreeMap::from([(project.name.clone(), None)]);
+            let mut pointer_names = BTreeSet::from([project.name.clone()]);
+            let mut procedural_modules = BTreeMap::new();
             let mut modules = BTreeMap::from([(project.name, None)]);
             let mut default_instances = BTreeMap::new();
             let mut value_names = BTreeSet::new();
@@ -631,6 +672,9 @@ impl<'a> ClassicIndex<'a> {
                     );
                 }
                 if !member.class {
+                    work.consume_many(2)?;
+                    procedural_modules.insert(file.id, named[0].id);
+                    pointer_names.insert(member.name.clone());
                     for entity in records {
                         cancellation.check()?;
                         work.consume()?;
@@ -709,8 +753,140 @@ impl<'a> ClassicIndex<'a> {
                 modules,
                 default_instances,
                 value_names,
+                procedural_modules,
+                pointer_names,
                 evidence: Arc::new(evidence),
             }));
+        }
+        let mut pointer_sites = BTreeMap::<usize, Vec<&OccurrenceRecord>>::new();
+        for occurrence in occurrences {
+            cancellation.check()?;
+            work.consume()?;
+            if occurrence.syntax_kind == "vba.procedure_pointer.reference"
+                && occurrence.role == OccurrenceRole::Reference
+                && matches!(occurrence.target, OccurrenceTarget::Unresolved { .. })
+                && let Some(project) = memberships.get(&occurrence.file).copied().flatten()
+            {
+                work.consume()?;
+                pointer_sites.entry(project).or_default().push(occurrence);
+            }
+        }
+        for (project_id, sites) in pointer_sites {
+            let Some(project) = projects.get(project_id).and_then(Option::as_ref) else {
+                continue;
+            };
+            let mut bindings = BTreeMap::<(FileId, String), (Option<SymbolId>, bool)>::new();
+            let mut complete = true;
+            for (file, module) in &project.procedural_modules {
+                cancellation.check()?;
+                work.consume()?;
+                if memberships.get(file) != Some(&Some(project_id)) {
+                    complete = false;
+                }
+                let Some(bytes) = sources.get(file) else {
+                    complete = false;
+                    continue;
+                };
+                // Without a selected compilation profile, conditional declarations
+                // can change both the local barrier and project-wide uniqueness.
+                for line in bytes.split(|byte| matches!(byte, b'\r' | b'\n')) {
+                    cancellation.check()?;
+                    work.consume_many(line.len().div_ceil(64).max(1))?;
+                    if line.trim_ascii_start().starts_with(b"#") {
+                        complete = false;
+                    }
+                }
+                for entity in declarations.get(file).into_iter().flatten() {
+                    cancellation.check()?;
+                    work.consume()?;
+                    if entity.container != Some(ContainerRef::Entity(*module)) {
+                        continue;
+                    }
+                    let Some(eligible) = pointer_callable(entity, &sources) else {
+                        continue;
+                    };
+                    let Some(name) = identifier(&entity.canonical_name) else {
+                        complete = false;
+                        continue;
+                    };
+                    let exported = entity.visibility != EntityVisibility::Private;
+                    let target = (eligible
+                        && matches!(
+                            entity.visibility,
+                            EntityVisibility::Public | EntityVisibility::Restricted
+                        ))
+                    .then_some(entity.id);
+                    work.consume()?;
+                    bindings
+                        .entry((*file, name))
+                        .and_modify(|(prior, public)| {
+                            *prior = None;
+                            *public |= exported;
+                        })
+                        .or_insert((target, exported));
+                }
+            }
+            if !complete {
+                continue;
+            }
+            let mut exports = BTreeMap::new();
+            for ((_, name), (target, exported)) in &bindings {
+                cancellation.check()?;
+                work.consume()?;
+                if *exported {
+                    exports
+                        .entry(name.as_str())
+                        .and_modify(|prior| *prior = None)
+                        .or_insert(*target);
+                }
+            }
+            for occurrence in sites {
+                cancellation.check()?;
+                work.consume()?;
+                if !project.procedural_modules.contains_key(&occurrence.file) {
+                    continue;
+                }
+                let span = occurrence.source.span();
+                let start = usize::try_from(span.start_byte())
+                    .map_err(|_| ResolutionError::CountOverflow)?;
+                let end =
+                    usize::try_from(span.end_byte()).map_err(|_| ResolutionError::CountOverflow)?;
+                let Some(name) = sources
+                    .get(&occurrence.file)
+                    .and_then(|bytes| bytes.get(start..end))
+                    .and_then(|bytes| std::str::from_utf8(bytes).ok())
+                    .and_then(identifier)
+                else {
+                    continue;
+                };
+                // A local procedure or a project/module name occupies an earlier
+                // tier even when it cannot supply a valid procedure address.
+                if bindings.contains_key(&(occurrence.file, name.clone()))
+                    || project.pointer_names.contains(&name)
+                {
+                    continue;
+                }
+                let Some(target) = exports
+                    .get(name.as_str())
+                    .copied()
+                    .flatten()
+                    .and_then(|symbol| entities.get(&symbol))
+                    .copied()
+                else {
+                    continue;
+                };
+                work.consume()?;
+                result.proofs.insert(
+                    occurrence.id,
+                    Proof {
+                        target,
+                        context: Arc::clone(&project.evidence),
+                        receiver: None,
+                        rule: ResolutionRule::ClassicProjectPointer,
+                        getter_read: false,
+                    },
+                );
+            }
         }
         for occurrence in occurrences {
             cancellation.check()?;

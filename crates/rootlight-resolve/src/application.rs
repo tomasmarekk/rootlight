@@ -636,6 +636,10 @@ fn reconcile_vba_target_gaps(
                 &["vba.member.reference", "vba.invoked_member.reference"],
                 "vba-member-target-unavailable",
             ),
+            Some("classic-project-pointer-v1.indexed_snapshot") => (
+                &["vba.procedure_pointer.reference"],
+                "vba-procedure-pointer-target-unavailable",
+            ),
             _ => continue,
         };
         producers.insert(record.id, (selection, record));
@@ -1430,6 +1434,7 @@ fn build_provenance(
         decision.explanation.rule,
         ResolutionRule::ClassicProjectType
             | ResolutionRule::ClassicProjectMember
+            | ResolutionRule::ClassicProjectPointer
             | ResolutionRule::ClassicProjectModule
             | ResolutionRule::ClassicProjectEnum
     ) {
@@ -1565,6 +1570,7 @@ fn build_provenance(
         ResolutionRule::ElmModuleImport => "elm-module-import-v1.indexed_snapshot",
         ResolutionRule::ElmLocalType => "elm-local-type-v1.indexed_snapshot",
         ResolutionRule::ClassicProjectMember => "classic-project-member-v1.indexed_snapshot",
+        ResolutionRule::ClassicProjectPointer => "classic-project-pointer-v1.indexed_snapshot",
         ResolutionRule::GroovyStaticImport => "groovy-static-import-v1.indexed_snapshot",
         ResolutionRule::GroovyInheritedType => "groovy-inherited-type-v1.indexed_snapshot",
         ResolutionRule::GroovyQualifiedHeader => "groovy-qualified-header-v1.indexed_snapshot",
