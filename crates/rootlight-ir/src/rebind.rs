@@ -560,12 +560,13 @@ impl ProjectionHasher {
         let mut record_hasher = RecordHasher {
             hasher: blake3::Hasher::new_derive_key("rootlight.ir.logical.record/1"),
             bytes: 0,
+            pending: [0; RECORD_HASH_BUFFER_BYTES],
+            pending_len: 0,
         };
         serde_json::to_writer(&mut record_hasher, record)
             .map_err(|_| NormalizedRebindError::IdentityRecipe)?;
         self.hasher.update(&record_hasher.bytes.to_be_bytes());
-        self.hasher
-            .update(record_hasher.hasher.finalize().as_bytes());
+        self.hasher.update(record_hasher.finish().as_bytes());
         Ok(())
     }
 
@@ -574,9 +575,27 @@ impl ProjectionHasher {
     }
 }
 
+const RECORD_HASH_BUFFER_BYTES: usize = 4 * 1024;
+
 struct RecordHasher {
     hasher: blake3::Hasher,
     bytes: u64,
+    pending: [u8; RECORD_HASH_BUFFER_BYTES],
+    pending_len: usize,
+}
+
+impl RecordHasher {
+    fn flush_pending(&mut self) {
+        if self.pending_len != 0 {
+            self.hasher.update(&self.pending[..self.pending_len]);
+            self.pending_len = 0;
+        }
+    }
+
+    fn finish(mut self) -> blake3::Hash {
+        self.flush_pending();
+        self.hasher.finalize()
+    }
 }
 
 impl std::io::Write for RecordHasher {
@@ -587,11 +606,31 @@ impl std::io::Write for RecordHasher {
             .bytes
             .checked_add(length)
             .ok_or_else(|| std::io::Error::other("record byte accounting overflowed"))?;
-        self.hasher.update(bytes);
+        let mut remaining = bytes;
+        while !remaining.is_empty() {
+            if self.pending_len == 0 && remaining.len() >= RECORD_HASH_BUFFER_BYTES {
+                let complete =
+                    remaining.len() / RECORD_HASH_BUFFER_BYTES * RECORD_HASH_BUFFER_BYTES;
+                self.hasher.update(&remaining[..complete]);
+                remaining = &remaining[complete..];
+                continue;
+            }
+            let count = remaining
+                .len()
+                .min(RECORD_HASH_BUFFER_BYTES - self.pending_len);
+            self.pending[self.pending_len..self.pending_len + count]
+                .copy_from_slice(&remaining[..count]);
+            self.pending_len += count;
+            remaining = &remaining[count..];
+            if self.pending_len == RECORD_HASH_BUFFER_BYTES {
+                self.flush_pending();
+            }
+        }
         Ok(bytes.len())
     }
 
     fn flush(&mut self) -> std::io::Result<()> {
+        self.flush_pending();
         Ok(())
     }
 }
@@ -1537,6 +1576,28 @@ mod tests {
         LexicalEvidenceFormat, LexicalEvidenceKind, LexicalEvidenceV1, SymbolIdentityClaim,
         validate_ir_document,
     };
+
+    #[test]
+    fn record_hash_is_independent_of_serializer_write_boundaries() {
+        let payload = (0..(3 * RECORD_HASH_BUFFER_BYTES + 17))
+            .map(|index| u8::try_from(index % 251).unwrap())
+            .collect::<Vec<_>>();
+        let mut expected = blake3::Hasher::new_derive_key("rootlight.ir.logical.record/1");
+        expected.update(&payload);
+        for chunk_size in [1, 17, RECORD_HASH_BUFFER_BYTES, payload.len()] {
+            let mut record = RecordHasher {
+                hasher: blake3::Hasher::new_derive_key("rootlight.ir.logical.record/1"),
+                bytes: 0,
+                pending: [0; RECORD_HASH_BUFFER_BYTES],
+                pending_len: 0,
+            };
+            for chunk in payload.chunks(chunk_size) {
+                std::io::Write::write_all(&mut record, chunk).unwrap();
+            }
+            assert_eq!(record.bytes, u64::try_from(payload.len()).unwrap());
+            assert_eq!(record.finish(), expected.finalize());
+        }
+    }
 
     fn fixture_with_lexical_extension() -> NormalizedIrDocument {
         let decoded = crate::decode_ir_document(

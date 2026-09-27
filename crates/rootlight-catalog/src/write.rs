@@ -1169,13 +1169,19 @@ fn serialize_json<T>(
 where
     T: serde::Serialize + ?Sized,
 {
-    match serde_json::to_writer(&mut *writer, value) {
-        Ok(()) => Ok(()),
-        Err(error) => writer.failure().map_or_else(
-            || Err(CatalogError::json(error)),
-            |kind| Err(CatalogError::new(kind)),
-        ),
-    }
+    // Batch serializer fragments while the checked writer still enforces the
+    // same byte ceiling and cancellation checkpoint on every bounded chunk.
+    let result = {
+        let mut buffered = io::BufWriter::with_capacity(JSON_CHECKPOINT_BYTES, &mut *writer);
+        serde_json::to_writer(&mut buffered, value)
+            .map_err(CatalogError::json)
+            .and_then(|()| {
+                buffered
+                    .flush()
+                    .map_err(|error| CatalogError::io(CatalogErrorKind::Storage, error))
+            })
+    };
+    result.map_err(|error| writer.failure().map_or(error, CatalogError::new))
 }
 
 struct CheckedJsonWriter<'a, W> {
@@ -1348,6 +1354,33 @@ mod tests {
             sequence.serialize_element("unreachable after the next writer checkpoint")?;
             sequence.end()
         }
+    }
+
+    #[test]
+    fn buffered_json_preserves_canonical_bytes_and_exact_budget_boundary() {
+        let value = "x".repeat(2 * JSON_CHECKPOINT_BYTES - 2);
+        let expected = serde_json::to_string(&value).unwrap();
+        let cancellation = Cancellation::new();
+        let exact_budget = GenerationBudget::new(1, 1, 128).unwrap();
+        assert_eq!(
+            exact_budget.limit(GenerationResource::EncodedTextBytes),
+            u64::try_from(expected.len()).unwrap()
+        );
+        let exact_context = GenerationContext::new(&cancellation, exact_budget);
+        assert_eq!(
+            serialize_json_text(&value, &exact_context).unwrap(),
+            expected
+        );
+
+        let short_budget = GenerationBudget::new(1, 1, 127).unwrap();
+        let short_context = GenerationContext::new(&cancellation, short_budget);
+        assert!(matches!(
+            serialize_json_text(&value, &short_context).map_err(|error| error.kind()),
+            Err(CatalogErrorKind::BudgetExceeded {
+                resource: GenerationResource::EncodedTextBytes,
+                ..
+            })
+        ));
     }
 
     #[test]
