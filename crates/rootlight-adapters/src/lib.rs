@@ -49,8 +49,8 @@ pub use project_context::{
     ProjectContextSkip, PythonProjectContext, RustProjectContext, TypeScriptProjectContext,
 };
 pub use project_semantics::{
-    PROJECT_SYNTAX_FACT_LIMIT_DIAGNOSTIC, SemanticProjectAnalyzer,
-    SemanticProjectAnalyzerConfigError, SemanticProjectLanguage,
+    PROJECT_MODULE_RESOLUTION_MARKER, PROJECT_SYNTAX_FACT_LIMIT_DIAGNOSTIC,
+    SemanticProjectAnalyzer, SemanticProjectAnalyzerConfigError, SemanticProjectLanguage,
 };
 pub use prolog::PrologParseProvider;
 pub use runtime_trace::{

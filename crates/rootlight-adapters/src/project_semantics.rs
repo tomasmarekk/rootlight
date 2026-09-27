@@ -10,6 +10,9 @@ use std::{
 
 mod dart;
 mod ecmascript;
+mod module_resolution;
+
+use module_resolution::ModuleResolution;
 
 use rootlight_adapter_sdk::{
     AdapterDiagnostic, AdapterError, CoverageReport, DiagnosticCode, DomainCoverage, IrBatch,
@@ -51,6 +54,8 @@ const MAX_OPTIONAL_PROJECT_SYNTAX_FACTS: usize = 256;
 const MIN_OPTIONAL_PYTHON_LOCAL_CALL_FACTS_PER_INPUT: usize = 8;
 /// Diagnostic emitted when project analysis had to discard syntax facts.
 pub const PROJECT_SYNTAX_FACT_LIMIT_DIAGNOSTIC: &str = "project-syntax-fact-limit";
+/// Versioned suffix for source-bound ECMAScript module-resolution metadata.
+pub const PROJECT_MODULE_RESOLUTION_MARKER: &[u8] = b"\0rootlight-module-resolution/1\0";
 const PROJECT_DIAGNOSTICS_TRUNCATED_CODE: &str = "project-parser-diagnostics-truncated";
 const PROJECT_DIAGNOSTICS_TRUNCATED_MESSAGE: &str =
     "additional parser diagnostics were omitted by the project diagnostic limit";
@@ -1806,6 +1811,7 @@ struct ProjectFactsBuilder<'analyzer, 'request, 'source> {
     path_by_file: BTreeMap<FileId, String>,
     package_by_file: BTreeMap<FileId, String>,
     symbol_by_declaration: BTreeMap<(FileId, u64), SymbolId>,
+    module_resolution: ModuleResolution,
 }
 
 impl<'analyzer, 'request, 'source> ProjectFactsBuilder<'analyzer, 'request, 'source> {
@@ -1835,6 +1841,10 @@ impl<'analyzer, 'request, 'source> ProjectFactsBuilder<'analyzer, 'request, 'sou
             path_by_file: BTreeMap::new(),
             package_by_file: BTreeMap::new(),
             symbol_by_declaration: BTreeMap::new(),
+            module_resolution: ModuleResolution::from_manifest(
+                request.context_manifest(),
+                analyzer.language,
+            ),
         }
     }
 
@@ -3731,19 +3741,36 @@ impl<'analyzer, 'request, 'source> ProjectFactsBuilder<'analyzer, 'request, 'sou
                 .get(&import.file)
                 .map(String::as_str)
                 .unwrap_or_default();
-            let mut targets = self
-                .path_by_file
-                .iter()
-                .filter_map(|(file, path)| {
-                    module_matches(self.analyzer.language, current_path, &import.module, path)
-                        .then_some(*file)
-                })
-                .collect::<Vec<_>>();
+            let mut targets = self.module_target_files(current_path, &import.module);
             targets.sort_unstable();
             targets.dedup();
             index.insert((import.file, import.module.clone()), targets);
         }
         index
+    }
+
+    fn module_target_files(&self, current_path: &str, module: &str) -> Vec<FileId> {
+        if let Some(candidates) = self.module_resolution.candidates(current_path, module) {
+            for candidate in candidates {
+                let targets = self
+                    .path_by_file
+                    .iter()
+                    .filter_map(|(file, path)| {
+                        module_path_matches(&candidate, path).then_some(*file)
+                    })
+                    .collect::<Vec<_>>();
+                if !targets.is_empty() {
+                    return targets;
+                }
+            }
+            return Vec::new();
+        }
+        self.path_by_file
+            .iter()
+            .filter_map(|(file, path)| {
+                module_matches(self.analyzer.language, current_path, module, path).then_some(*file)
+            })
+            .collect()
     }
 
     fn resolve_dart_occurrence(
@@ -5755,6 +5782,11 @@ fn module_matches(
         | SemanticProjectLanguage::Php
         | SemanticProjectLanguage::C => false,
     }
+}
+
+fn module_path_matches(resolved: &str, candidate_path: &str) -> bool {
+    let candidate_no_extension = strip_extension(candidate_path);
+    candidate_no_extension == resolved || candidate_no_extension == format!("{resolved}/index")
 }
 
 fn resolve_relative_module(current_path: &str, module: &str) -> String {

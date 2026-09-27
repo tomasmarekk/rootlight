@@ -24,7 +24,8 @@ use rootlight_adapter_treesitter::{
     ParserSettings, RuntimeConfig, TreeSitterAnalyzer, TreeSitterProvider,
 };
 use rootlight_adapters::{
-    PROJECT_SYNTAX_FACT_LIMIT_DIAGNOSTIC, SemanticProjectAnalyzer, SemanticProjectLanguage,
+    PROJECT_MODULE_RESOLUTION_MARKER, PROJECT_SYNTAX_FACT_LIMIT_DIAGNOSTIC,
+    SemanticProjectAnalyzer, SemanticProjectLanguage,
 };
 use rootlight_cancel::{Cancellation, CancellationReason};
 use rootlight_ids::{GenerationId, RepositoryId, content_hash};
@@ -3038,6 +3039,14 @@ fn analyze_with_real_parser_limits(
     fixture: &ProjectFixture,
     limits: &AnalysisLimits,
 ) -> rootlight_adapter_sdk::ProjectAnalysisOutput {
+    analyze_with_real_parser_manifest(fixture, limits, b"{\"target\":\"fixture\"}")
+}
+
+fn analyze_with_real_parser_manifest(
+    fixture: &ProjectFixture,
+    limits: &AnalysisLimits,
+    manifest: &[u8],
+) -> rootlight_adapter_sdk::ProjectAnalysisOutput {
     let parser: Arc<dyn ParseProvider> = Arc::new(real_parser());
     let analyzer = SemanticProjectAnalyzer::new(
         fixture.language,
@@ -3049,7 +3058,7 @@ fn analyze_with_real_parser_limits(
     .expect("project analyzer constructs");
     execute_project_analysis(
         &analyzer,
-        &fixture.request(limits, AnalysisTier::TierB),
+        &fixture.request_with_manifest(limits, AnalysisTier::TierB, manifest),
         ExtensionSupport::default(),
         MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
         &deadline(),
@@ -4128,7 +4137,15 @@ impl ProjectFixture {
         limits: &'a AnalysisLimits,
         tier: AnalysisTier,
     ) -> ProjectAnalysisRequest<'a> {
-        let manifest = b"{\"target\":\"fixture\"}";
+        self.request_with_manifest(limits, tier, b"{\"target\":\"fixture\"}")
+    }
+
+    fn request_with_manifest<'a>(
+        &'a self,
+        limits: &'a AnalysisLimits,
+        tier: AnalysisTier,
+        manifest: &'a [u8],
+    ) -> ProjectAnalysisRequest<'a> {
         let mut inputs: Vec<_> = self
             .snapshots
             .iter()

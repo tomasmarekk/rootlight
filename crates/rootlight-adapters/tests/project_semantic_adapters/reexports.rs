@@ -5,6 +5,92 @@
 use super::*;
 
 #[test]
+fn source_bound_tsconfig_aliases_resolve_imports_and_reexports() {
+    let config = r#"{
+        "compilerOptions": {
+            "baseUrl": ".",
+            "paths": {
+                "@surface/*": ["src/surface/*",],
+                "@implementation/*": ["src/implementation/*"],
+            },
+        },
+    }"#;
+    let caller = "import {ping} from '@surface/api'; export function run() { ping(); }";
+    let fixture = ProjectFixture::new(
+        [
+            "src/caller.ts",
+            "src/implementation/core.ts",
+            "src/surface/api.ts",
+        ],
+        [
+            caller,
+            "export function ping() { return 1; }",
+            "export {ping} from '@implementation/core';",
+        ],
+        SemanticProjectLanguage::TypeScript,
+    );
+    let source = serde_json::json!({"configs": [{
+        "path": "tsconfig.json",
+        "content_hash": content_hash(config.as_bytes()),
+        "content": config,
+    }]});
+    let mut manifest = b"fixture".to_vec();
+    manifest.extend_from_slice(PROJECT_MODULE_RESOLUTION_MARKER);
+    manifest.extend_from_slice(&serde_json::to_vec(&source).expect("manifest encodes"));
+    let output = analyze_with_real_parser_manifest(&fixture, &real_parser_limits(), &manifest);
+    let target = output
+        .document()
+        .entities
+        .iter()
+        .find(|entity| {
+            entity.canonical_name == "ping"
+                && entity
+                    .evidence
+                    .source
+                    .as_ref()
+                    .is_some_and(|source| source.span().file() == fixture.snapshots[1].file())
+        })
+        .expect("implementation declaration is materialized");
+    let call_offset = u64::try_from(caller.rfind("ping()").expect("call site exists"))
+        .expect("fixture offset fits");
+    let call = output
+        .document()
+        .occurrences
+        .iter()
+        .find(|occurrence| {
+            occurrence.file == fixture.snapshots[0].file()
+                && occurrence.source.span().start_byte() == call_offset
+                && occurrence.role == OccurrenceRole::CallSite
+        })
+        .expect("call site is materialized");
+    assert_eq!(
+        call.target,
+        OccurrenceTarget::Resolved { symbol: target.id }
+    );
+    assert_eq!(call.source.content_hash(), content_hash(caller.as_bytes()));
+
+    let mut altered = source;
+    altered["configs"][0]["content_hash"] =
+        serde_json::to_value(content_hash(b"different config")).expect("hash encodes");
+    let mut invalid_manifest = b"fixture".to_vec();
+    invalid_manifest.extend_from_slice(PROJECT_MODULE_RESOLUTION_MARKER);
+    invalid_manifest.extend_from_slice(&serde_json::to_vec(&altered).expect("manifest encodes"));
+    let without_source_evidence =
+        analyze_with_real_parser_manifest(&fixture, &real_parser_limits(), &invalid_manifest);
+    assert!(
+        without_source_evidence
+            .document()
+            .occurrences
+            .iter()
+            .any(|occurrence| {
+                occurrence.file == fixture.snapshots[0].file()
+                    && occurrence.source.span().start_byte() == call_offset
+                    && matches!(occurrence.target, OccurrenceTarget::Unresolved { .. })
+            })
+    );
+}
+
+#[test]
 fn qualified_namespace_reads_and_types_reach_exact_source_definitions() {
     for language in [
         SemanticProjectLanguage::JavaScript,

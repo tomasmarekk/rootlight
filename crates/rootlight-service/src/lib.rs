@@ -50,8 +50,9 @@ use rootlight_adapter_treesitter::{
 };
 use rootlight_adapters::{
     AgdaParseProvider, AwkParseProvider, ElmParseProvider, ErlangParseProvider, IniParseProvider,
-    MakeParseProvider, PrologParseProvider, RuntimeTraceImportRequest, ScssParseProvider,
-    SemanticProjectLanguage, TclParseProvider, import_runtime_trace,
+    MAX_PROJECT_CONTEXT_BYTES, MakeParseProvider, PROJECT_MODULE_RESOLUTION_MARKER,
+    PrologParseProvider, RuntimeTraceImportRequest, ScssParseProvider, SemanticProjectLanguage,
+    TclParseProvider, import_runtime_trace,
 };
 pub use rootlight_adapters::{
     PROJECT_SYNTAX_FACT_LIMIT_DIAGNOSTIC, RUNTIME_TRACE_SCHEMA_VERSION, RuntimeTraceImportError,
@@ -8369,6 +8370,7 @@ impl FirstSliceService {
             &mut document,
             structural_documents,
             &sources,
+            &retained_sources,
             &source_languages,
             mode,
             representation == DurableGenerationRepresentation::RecoverySnapshot,
@@ -9405,6 +9407,7 @@ impl FirstSliceService {
         target: &mut NormalizedIrDocument,
         structural_documents: BTreeMap<String, Vec<NormalizedIrDocument>>,
         sources: &[RustSourceInput],
+        configuration_sources: &[RustSourceInput],
         source_languages: &BTreeMap<FileId, String>,
         mode: FirstSliceIndexMode,
         require_complete_project_analysis: bool,
@@ -9446,7 +9449,8 @@ impl FirstSliceService {
                 && project_adapter_supports_language(&language)
                 && let Some(project_analyzer) = &self.project_analyzer
             {
-                let context_manifest = project_context_manifest(&language, self.config.hash())?;
+                let context_manifest =
+                    project_context_manifest(&language, self.config.hash(), configuration_sources)?;
                 // Symbol identity includes the build-context digest. Structural
                 // and project providers therefore share this exact value; the
                 // language remains independently encoded in both the symbol
@@ -17120,6 +17124,7 @@ fn logical_projection_staged_memory_bytes(
 fn project_context_manifest(
     language: &str,
     configuration: ContentHash,
+    sources: &[RustSourceInput],
 ) -> Result<Vec<u8>, FirstSliceError> {
     let capacity = PROJECT_CONTEXT_SEED
         .len()
@@ -17136,7 +17141,71 @@ fn project_context_manifest(
     manifest.extend_from_slice(configuration.as_bytes());
     manifest.push(0);
     manifest.extend_from_slice(language.as_bytes());
+    if !matches!(language, "typescript" | "javascript") {
+        return Ok(manifest);
+    }
+    let mut encoded = b"{\"configs\":[".to_vec();
+    let maximum_encoded_bytes = MAX_PROJECT_CONTEXT_BYTES
+        .checked_sub(manifest.len())
+        .and_then(|bytes| bytes.checked_sub(PROJECT_MODULE_RESOLUTION_MARKER.len()))
+        .ok_or(FirstSliceError::Limits)?;
+    let mut config_count = 0_usize;
+    for source in sources {
+        let path = source.snapshot.path().as_str();
+        if !matches!(
+            path.rsplit('/').next(),
+            Some("tsconfig.json" | "jsconfig.json")
+        ) {
+            continue;
+        }
+        let Ok(content) = std::str::from_utf8(source.snapshot.content()) else {
+            continue;
+        };
+        if content.len() > maximum_encoded_bytes {
+            continue;
+        }
+        let entry = serde_json::to_vec(&ProjectModuleConfigSnapshot {
+            path,
+            content_hash: source.snapshot.content_hash(),
+            content,
+        })
+        .map_err(|_| FirstSliceError::Limits)?;
+        let Some(next_length) = encoded
+            .len()
+            .checked_add(usize::from(config_count > 0))
+            .and_then(|length| length.checked_add(entry.len()))
+            .and_then(|length| length.checked_add(2))
+        else {
+            continue;
+        };
+        if next_length > maximum_encoded_bytes {
+            continue;
+        }
+        encoded
+            .try_reserve(next_length - encoded.len())
+            .map_err(|_| FirstSliceError::Limits)?;
+        if config_count > 0 {
+            encoded.push(b',');
+        }
+        encoded.extend_from_slice(&entry);
+        config_count += 1;
+    }
+    if config_count > 0 {
+        encoded.extend_from_slice(b"]}");
+        manifest
+            .try_reserve_exact(PROJECT_MODULE_RESOLUTION_MARKER.len() + encoded.len())
+            .map_err(|_| FirstSliceError::Limits)?;
+        manifest.extend_from_slice(PROJECT_MODULE_RESOLUTION_MARKER);
+        manifest.extend_from_slice(&encoded);
+    }
     Ok(manifest)
+}
+
+#[derive(Serialize)]
+struct ProjectModuleConfigSnapshot<'a> {
+    path: &'a str,
+    content_hash: ContentHash,
+    content: &'a str,
 }
 
 #[cfg(test)]
@@ -21415,6 +21484,59 @@ mod tests {
     use super::*;
 
     #[test]
+    fn project_manifest_carries_source_bound_tsconfig_snapshots() {
+        let fixture = TempDir::new().expect("fixture root exists");
+        write_language_fixture(
+            fixture.path(),
+            &[
+                ("tsconfig.json", r#"{"compilerOptions":{"baseUrl":"."}}"#),
+                ("src/main.ts", "export const value = 1;"),
+            ],
+        );
+        let root = RepositoryRoot::open(
+            derive_repository(b"module-config-fixture").id(),
+            fixture.path(),
+        )
+        .expect("fixture root opens");
+        let snapshot = root
+            .snapshot(
+                &RelativePath::parse(Path::new("tsconfig.json"))
+                    .expect("configuration path is valid"),
+                1024,
+            )
+            .expect("configuration snapshot captures");
+        let expected_hash = snapshot.content_hash();
+        let sources = [RustSourceInput {
+            snapshot,
+            generated: false,
+            origins: Vec::new(),
+        }];
+        let manifest =
+            project_context_manifest("typescript", content_hash(b"configuration"), &sources)
+                .expect("project manifest encodes");
+        let marker = manifest
+            .windows(PROJECT_MODULE_RESOLUTION_MARKER.len())
+            .position(|window| window == PROJECT_MODULE_RESOLUTION_MARKER)
+            .expect("module metadata marker exists");
+        let encoded = &manifest[marker + PROJECT_MODULE_RESOLUTION_MARKER.len()..];
+        let metadata: serde_json::Value =
+            serde_json::from_slice(encoded).expect("module metadata decodes");
+        assert_eq!(metadata["configs"][0]["path"], "tsconfig.json");
+        assert_eq!(metadata["configs"][0]["content_hash"], json!(expected_hash));
+        assert_eq!(
+            metadata["configs"][0]["content"],
+            r#"{"compilerOptions":{"baseUrl":"."}}"#
+        );
+        assert_eq!(
+            project_context_manifest("rust", content_hash(b"configuration"), &sources)
+                .expect("non-ECMAScript manifest encodes")
+                .windows(PROJECT_MODULE_RESOLUTION_MARKER.len())
+                .position(|window| window == PROJECT_MODULE_RESOLUTION_MARKER),
+            None
+        );
+    }
+
+    #[test]
     fn storage_policy_distinguishes_current_defaults_user_overrides_and_legacy_config() {
         let current = FirstSliceStoragePolicy::resolve_user_config(None, 8)
             .expect("absent config resolves current defaults");
@@ -23865,6 +23987,7 @@ mod tests {
     struct CapturingProjectAnalyzer {
         identity: ContentHash,
         observations: Arc<Mutex<Vec<CapturedProjectInput>>>,
+        manifests: Arc<Mutex<Vec<Vec<u8>>>>,
     }
 
     impl FirstSliceProjectAnalyzer for CapturingProjectAnalyzer {
@@ -23877,6 +24000,10 @@ mod tests {
             request: FirstSliceProjectAnalysisRequest<'_>,
             _cancellation: &Cancellation,
         ) -> Result<FirstSliceProjectAnalysis, FirstSliceProjectAnalysisError> {
+            self.manifests
+                .lock()
+                .expect("capture mutex is not poisoned")
+                .push(request.context_manifest().to_vec());
             let captured = request
                 .inputs()
                 .iter()
@@ -28317,6 +28444,7 @@ mod tests {
         let analyzer = Arc::new(CapturingProjectAnalyzer {
             identity: content_hash(b"generated-origin-capture"),
             observations: Arc::clone(&observations),
+            manifests: Arc::new(Mutex::new(Vec::new())),
         });
         let mut service =
             FirstSliceService::new_with_storage(2, MAX_RETAINED_SOURCE_BYTES, None, Some(analyzer))
@@ -28356,6 +28484,58 @@ mod tests {
                 .filter(|input| input.path != "src/mapped.generated.rs")
                 .all(|input| input.origins.is_empty())
         );
+    }
+
+    #[test]
+    fn deep_project_path_forwards_discovered_tsconfig_evidence() {
+        let fixture = TempDir::new().expect("fixture root exists");
+        let config =
+            r#"{"compilerOptions":{"baseUrl":".","paths":{"@library/*":["src/library/*"]}}}"#;
+        write_language_fixture(
+            fixture.path(),
+            &[
+                ("tsconfig.json", config),
+                ("src/library/value.ts", "export const value = 1;"),
+                (
+                    "src/main.ts",
+                    "import {value} from '@library/value'; export {value};",
+                ),
+            ],
+        );
+        let manifests = Arc::new(Mutex::new(Vec::new()));
+        let analyzer = Arc::new(CapturingProjectAnalyzer {
+            identity: content_hash(b"module-config-capture"),
+            observations: Arc::new(Mutex::new(Vec::new())),
+            manifests: Arc::clone(&manifests),
+        });
+        let mut service =
+            FirstSliceService::new_with_storage(2, MAX_RETAINED_SOURCE_BYTES, None, Some(analyzer))
+                .expect("service initializes with a project adapter");
+        service
+            .index_repository_with_mode(fixture.path(), FirstSliceIndexMode::Deep, &deadline())
+            .expect("structural fallback remains publishable");
+        let observed = manifests.lock().expect("capture mutex is not poisoned");
+        let manifest = observed
+            .iter()
+            .find(|manifest| {
+                manifest
+                    .windows(PROJECT_MODULE_RESOLUTION_MARKER.len())
+                    .any(|window| window == PROJECT_MODULE_RESOLUTION_MARKER)
+            })
+            .expect("TypeScript project manifest carries configuration");
+        let marker = manifest
+            .windows(PROJECT_MODULE_RESOLUTION_MARKER.len())
+            .position(|window| window == PROJECT_MODULE_RESOLUTION_MARKER)
+            .expect("module marker exists");
+        let metadata: serde_json::Value =
+            serde_json::from_slice(&manifest[marker + PROJECT_MODULE_RESOLUTION_MARKER.len()..])
+                .expect("module metadata decodes");
+        assert_eq!(metadata["configs"][0]["path"], "tsconfig.json");
+        assert_eq!(
+            metadata["configs"][0]["content_hash"],
+            json!(content_hash(config.as_bytes()))
+        );
+        assert_eq!(metadata["configs"][0]["content"], config);
     }
 
     #[test]

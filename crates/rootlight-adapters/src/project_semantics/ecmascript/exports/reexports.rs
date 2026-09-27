@@ -91,13 +91,7 @@ impl ProjectFactsBuilder<'_, '_, '_> {
                             .get(&file)
                             .map(String::as_str)
                             .unwrap_or_default();
-                        self.path_by_file
-                            .iter()
-                            .filter_map(|(target, target_path)| {
-                                module_matches(self.analyzer.language, path, &module, target_path)
-                                    .then_some(*target)
-                            })
-                            .collect()
+                        self.module_target_files(path, &module)
                     })
                     .clone();
                 if targets.is_empty() {
