@@ -31,6 +31,32 @@ fn reserved<T>(capacity: usize) -> io::Result<Vec<T>> {
     Ok(values)
 }
 
+fn matching_prefix(left: &[u8], right: &[u8]) -> io::Result<usize> {
+    let mut matched = 0;
+    // Match discovery dominates block encoding. Word comparisons preserve the
+    // bytewise result, including unaligned and overlapping dictionary slices.
+    for (left, right) in left.as_chunks::<8>().0.iter().zip(right.as_chunks::<8>().0) {
+        let difference = u64::from_le_bytes(*left) ^ u64::from_le_bytes(*right);
+        if difference != 0 {
+            return Ok(matched
+                + usize::try_from(difference.trailing_zeros() / 8).map_err(|_| invalid())?);
+        }
+        matched += 8;
+    }
+    Ok(matched
+        + left
+            .get(matched..)
+            .ok_or_else(invalid)?
+            .iter()
+            .zip(right.get(matched..).ok_or_else(invalid)?)
+            .take_while(|(left, right)| left == right)
+            .count())
+}
+
+fn hash([a, b, c]: [u8; 3]) -> usize {
+    (usize::from(a) * 63_001 + usize::from(b) * 251 + usize::from(c)) & (HASH_SLOTS - 1)
+}
+
 #[derive(Clone, Copy, Default)]
 struct Code {
     bits: u16,
@@ -220,23 +246,43 @@ impl Encoder {
         let Some(&[a, b, c]) = self.input.get(position..position + 3) else {
             return Ok(NONE);
         };
-        let hash =
-            ((usize::from(a) * 251 + usize::from(b)) * 251 + usize::from(c)) & (HASH_SLOTS - 1);
-        let head = self.heads.get_mut(hash).ok_or_else(invalid)?;
+        let head = self.heads.get_mut(hash([a, b, c])).ok_or_else(invalid)?;
         let old = *head;
         *self.previous.get_mut(position).ok_or_else(invalid)? = old;
         *head = u32::try_from(position).map_err(|_| invalid())?;
         Ok(old)
     }
 
+    fn insert_range(&mut self, start: usize, end: usize) -> io::Result<()> {
+        let input = self
+            .input
+            .get(start..end.saturating_add(2).min(self.input.len()))
+            .ok_or_else(invalid)?;
+        let previous = self.previous.get_mut(start..end).ok_or_else(invalid)?;
+        let heads: &mut [u32; HASH_SLOTS] = self
+            .heads
+            .as_mut_slice()
+            .try_into()
+            .map_err(|_| invalid())?;
+        // Preserve insertion order while checking contiguous dictionary bounds
+        // once per range, rather than for every byte in a copied match.
+        for ((bytes, previous), position) in input.windows(3).zip(previous).zip(start..end) {
+            let &[a, b, c] = bytes else {
+                return Err(invalid());
+            };
+            let head = heads.get_mut(hash([a, b, c])).ok_or_else(invalid)?;
+            *previous = *head;
+            *head = u32::try_from(position).map_err(|_| invalid())?;
+        }
+        Ok(())
+    }
+
     fn tokenize(&mut self, cancellation: &Cancellation) -> io::Result<([u32; 286], [u32; 30])> {
         self.heads.fill(NONE);
         self.tokens.clear();
-        for position in 0..self.history {
-            if position.is_multiple_of(512) {
-                cancellation.check().map_err(io::Error::other)?;
-            }
-            self.insert(position)?;
+        for position in (0..self.history).step_by(512) {
+            cancellation.check().map_err(io::Error::other)?;
+            self.insert_range(position, (position + 512).min(self.history))?;
         }
         let mut literals = [0_u32; 286];
         let mut distances = [0_u32; 30];
@@ -263,11 +309,7 @@ impl Encoder {
                 }
                 let matching = self.input.get(prior..prior + maximum).ok_or_else(invalid)?;
                 if matching.get(length) == current.get(length) {
-                    let found = matching
-                        .iter()
-                        .zip(current)
-                        .take_while(|(a, b)| a == b)
-                        .count();
+                    let found = matching_prefix(matching, current)?;
                     if found > length {
                         length = found;
                         distance = position - prior;
@@ -282,9 +324,7 @@ impl Encoder {
                 let length_code = LENGTH_BASE.partition_point(|base| *base <= length) - 1;
                 let distance_code = DISTANCE_BASE.partition_point(|base| *base <= distance) - 1;
                 *distances.get_mut(distance_code).ok_or_else(invalid)? += 1;
-                for skipped in position + 1..position + length {
-                    self.insert(skipped)?;
-                }
+                self.insert_range(position + 1, position + length)?;
                 position += length;
                 Token {
                     literal: u16::try_from(257 + length_code).map_err(|_| invalid())?,
