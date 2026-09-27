@@ -20,7 +20,7 @@ use rootlight_ir::{
 use crate::{
     AppliedResolution, RESOLVER_PROVIDER_NAME, RESOLVER_PROVIDER_VERSION, ResolutionDecision,
     ResolutionEngine, ResolutionError, ResolutionOutcome, ResolutionRule, ResolverFactContext,
-    engine::{CandidateIndex, ResolutionWorkBudget},
+    engine::{CandidateIndex, ResolutionContextKey, ResolutionMemo, ResolutionWorkBudget},
 };
 
 impl ResolutionEngine {
@@ -156,7 +156,8 @@ impl ResolutionEngine {
     /// Applies as many semantic decisions as fit the operation-wide work limit.
     ///
     /// Sites requiring fewer same-name candidate inspections are selected
-    /// first, with occurrence identity as the deterministic tie-breaker. The
+    /// first. Reusable contexts are selected together by their amortized work,
+    /// with occurrence identity as the deterministic tie-breaker. The
     /// returned estimate always describes the complete pass, so callers can
     /// explicitly mark facts that remain bounded.
     ///
@@ -272,17 +273,31 @@ impl ResolutionEngine {
             }
             Err(error) => return Err(error),
         };
+        let mut memo = ResolutionMemo::new(&document.occurrences, &lookup, cancellation)?;
         let mut required = work.consumed();
         let mut sites = Vec::new();
+        let mut repeated_groups = BTreeMap::<ResolutionContextKey, (usize, Vec<FactId>)>::new();
         for occurrence in &document.occurrences {
             cancellation.check()?;
             let Some(site_work) = lookup.occurrence_work(occurrence)? else {
                 continue;
             };
             required = required
-                .checked_add(site_work)
+                .checked_add(memo.estimated_work(occurrence, &lookup, site_work))
                 .ok_or(ResolutionError::CountOverflow)?;
-            sites.push((site_work, occurrence.id));
+            if let Some(key) = memo.repeated_key(occurrence, &lookup) {
+                if let Some(group) = repeated_groups.get_mut(&key) {
+                    group.0 = group
+                        .0
+                        .checked_add(1)
+                        .ok_or(ResolutionError::CountOverflow)?;
+                    group.1.push(occurrence.id);
+                } else {
+                    repeated_groups.insert(key, (site_work, vec![occurrence.id]));
+                }
+            } else {
+                sites.push((site_work, occurrence.id));
+            }
         }
         let estimate = crate::ResolutionWorkEstimate {
             required,
@@ -291,15 +306,27 @@ impl ResolutionEngine {
         let selected = if estimate.fits() {
             None
         } else if bounded {
-            sites.sort_unstable();
+            let mut groups = sites
+                .into_iter()
+                .map(|(site_work, occurrence)| (site_work, vec![occurrence]))
+                .collect::<Vec<_>>();
+            groups.extend(repeated_groups.into_values());
+            for (_, occurrences) in &mut groups {
+                occurrences.sort_unstable();
+            }
+            groups.sort_unstable_by(|(left_cost, left), (right_cost, right)| {
+                ((*left_cost as u128) * (right.len() as u128))
+                    .cmp(&((*right_cost as u128) * (left.len() as u128)))
+                    .then_with(|| left[0].cmp(&right[0]))
+            });
             let mut remaining = work.remaining();
             let mut selected = BTreeSet::new();
-            for (site_work, occurrence) in sites {
-                if site_work > remaining {
-                    break;
+            for (group_work, occurrences) in groups {
+                if group_work > remaining {
+                    continue;
                 }
-                remaining -= site_work;
-                selected.insert(occurrence);
+                remaining -= group_work;
+                selected.extend(occurrences);
             }
             Some(selected)
         } else {
@@ -328,8 +355,7 @@ impl ResolutionEngine {
             {
                 continue;
             }
-            work.consume()?;
-            let decision = self.resolve_occurrence(occurrence, &lookup, &mut work, cancellation)?;
+            let decision = memo.resolve(self, occurrence, &lookup, &mut work, cancellation)?;
             if matches!(decision.outcome, ResolutionOutcome::Unresolved { .. }) {
                 continue;
             }

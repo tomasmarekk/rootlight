@@ -1192,6 +1192,167 @@ fn resolver_work_limit_bounds_same_name_candidate_scans() {
 }
 
 #[test]
+fn repeated_typescript_contexts_reuse_decisions_without_merging_occurrences() {
+    let mut fixture = Fixture::new();
+    let first_file = fixture.primary_file;
+    let second_file = fixture.add_file(11, "src/other.ts");
+    let first = fixture.add_entity(20, "shared", first_file, EntityKind::Variable, None);
+    let second = fixture.add_entity(21, "shared", second_file, EntityKind::Variable, None);
+    for identity in [30, 31, 32] {
+        fixture.add_occurrence(
+            identity,
+            "shared",
+            first_file,
+            OccurrenceRole::Reference,
+            None,
+        );
+    }
+    fixture.add_occurrence(33, "shared", second_file, OccurrenceRole::Reference, None);
+    for (index, occurrence) in fixture.document.occurrences.iter_mut().take(3).enumerate() {
+        let start = 16 + u64::try_from(index).unwrap() * 8;
+        let source = source_ref(
+            fixture.document.repository,
+            fixture.document.generation,
+            first_file,
+            fixture.content_hash,
+            start,
+            start + 8,
+        );
+        occurrence.source = source.clone();
+        occurrence.evidence.source = Some(source);
+    }
+    for file in &mut fixture.document.files {
+        file.language = "typescript".to_owned();
+    }
+    fixture.document.provenance[0].language = "typescript".to_owned();
+    for entity in &mut fixture.document.entities {
+        entity.language = "typescript".to_owned();
+    }
+    for occurrence in &mut fixture.document.occurrences {
+        occurrence.syntax_kind = "typescript.identifier.reference".to_owned();
+    }
+    fixture.validate();
+
+    let engine = ResolutionEngine::new(ResolutionLimits::with_work_limit(8, 8).unwrap());
+    let estimate = engine
+        .estimate_work(&fixture.document, &Cancellation::new())
+        .unwrap();
+    assert_eq!(estimate.required, 8);
+    let batch = engine
+        .resolve(&fixture.document, &Cancellation::new())
+        .unwrap();
+    assert_eq!(batch.decisions.len(), 4);
+    for decision in &batch.decisions[..3] {
+        assert!(matches!(
+            decision.outcome,
+            ResolutionOutcome::Resolved { symbol, .. } if symbol == first
+        ));
+        assert_eq!(decision.explanation, batch.decisions[0].explanation);
+    }
+    assert!(matches!(
+        batch.decisions[3].outcome,
+        ResolutionOutcome::Resolved { symbol, .. } if symbol == second
+    ));
+    assert_ne!(batch.decisions[0].occurrence, batch.decisions[1].occurrence);
+    for decision in &batch.decisions {
+        let mut single = fixture.document.clone();
+        single
+            .occurrences
+            .retain(|occurrence| occurrence.id == decision.occurrence);
+        let independent = engine.resolve(&single, &Cancellation::new()).unwrap();
+        assert_eq!(&independent.decisions[0], decision);
+    }
+
+    let context = ResolverFactContext::new(fixture.content_hash);
+    let limited = ResolutionEngine::new(ResolutionLimits::with_work_limit(8, 7).unwrap());
+    let (partial, partial_estimate) = limited
+        .apply_document_bounded(fixture.document.clone(), context, &Cancellation::new())
+        .unwrap();
+    assert_eq!(partial_estimate.required, 8);
+    assert_eq!(
+        partial
+            .occurrences
+            .iter()
+            .filter(|occurrence| matches!(occurrence.target, OccurrenceTarget::Resolved { .. }))
+            .count(),
+        3
+    );
+    let mut reordered = fixture.document.clone();
+    reordered.occurrences.reverse();
+    let (reordered_partial, reordered_estimate) = limited
+        .apply_document_bounded(reordered, context, &Cancellation::new())
+        .unwrap();
+    assert_eq!(reordered_estimate, partial_estimate);
+    assert_eq!(reordered_partial, partial);
+    let expected = engine
+        .apply(fixture.document.clone(), context, &Cancellation::new())
+        .unwrap();
+    let streamed = engine
+        .apply_document(fixture.document.clone(), context, &Cancellation::new())
+        .unwrap();
+    let (bounded, bounded_estimate) = engine
+        .apply_document_bounded(fixture.document, context, &Cancellation::new())
+        .unwrap();
+    assert_eq!(streamed, expected.document);
+    assert_eq!(bounded, expected.document);
+    assert_eq!(bounded_estimate.required, 8);
+    assert_eq!(bounded.occurrences.len(), 4);
+}
+
+#[test]
+fn repeated_typescript_properties_and_calls_share_bounded_candidate_work() {
+    for (syntax_kind, role) in [
+        (
+            "typescript.property_identifier.reference",
+            OccurrenceRole::Reference,
+        ),
+        ("typescript.call.call", OccurrenceRole::CallSite),
+    ] {
+        let mut fixture = Fixture::new();
+        fixture.add_entity(
+            40,
+            "shared",
+            fixture.primary_file,
+            EntityKind::Function,
+            None,
+        );
+        fixture.add_occurrence(41, "shared", fixture.primary_file, role, None);
+        fixture.add_occurrence(42, "shared", fixture.primary_file, role, None);
+        for file in &mut fixture.document.files {
+            file.language = "typescript".to_owned();
+        }
+        fixture.document.provenance[0].language = "typescript".to_owned();
+        for entity in &mut fixture.document.entities {
+            entity.language = "typescript".to_owned();
+        }
+        for occurrence in &mut fixture.document.occurrences {
+            occurrence.syntax_kind = syntax_kind.to_owned();
+        }
+        fixture.validate();
+
+        let engine = ResolutionEngine::new(ResolutionLimits::with_work_limit(8, 3).unwrap());
+        assert_eq!(
+            engine
+                .estimate_work(&fixture.document, &Cancellation::new())
+                .unwrap()
+                .required,
+            3,
+            "{syntax_kind}"
+        );
+        let batch = engine
+            .resolve(&fixture.document, &Cancellation::new())
+            .unwrap();
+        assert_eq!(batch.decisions.len(), 2);
+        assert_eq!(batch.decisions[0].outcome, batch.decisions[1].outcome);
+        assert_eq!(
+            batch.decisions[0].explanation,
+            batch.decisions[1].explanation
+        );
+        assert_ne!(batch.decisions[0].occurrence, batch.decisions[1].occurrence);
+    }
+}
+
+#[test]
 fn javascript_lexical_references_inspect_only_visible_owners() {
     let mut fixture = Fixture::new();
     let file = fixture.primary_file;

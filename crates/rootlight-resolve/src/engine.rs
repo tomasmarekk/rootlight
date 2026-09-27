@@ -85,14 +85,14 @@ impl ResolutionEngine {
             cancellation,
         )?;
         let mut work = ResolutionWorkBudget::new(self.limits.work_limit());
+        let mut memo = ResolutionMemo::new(&document.occurrences, &index, cancellation)?;
         let mut decisions = Vec::new();
         for occurrence in &document.occurrences {
             cancellation.check()?;
             if index.occurrence_work(occurrence)?.is_none() {
                 continue;
             }
-            work.consume()?;
-            decisions.push(self.resolve_occurrence(occurrence, &index, &mut work, cancellation)?);
+            decisions.push(memo.resolve(self, occurrence, &index, &mut work, cancellation)?);
         }
         decisions.sort_unstable_by_key(|decision| decision.occurrence);
 
@@ -130,11 +130,13 @@ impl ResolutionEngine {
             &document.occurrences,
             cancellation,
         )?;
+        let mut memo = ResolutionMemo::new(&document.occurrences, &index, cancellation)?;
         let mut required = 0_usize;
         for occurrence in &document.occurrences {
             cancellation.check()?;
+            let site_work = index.occurrence_work(occurrence)?.unwrap_or(0);
             required = required
-                .checked_add(index.occurrence_work(occurrence)?.unwrap_or(0))
+                .checked_add(memo.estimated_work(occurrence, &index, site_work))
                 .ok_or(ResolutionError::CountOverflow)?;
         }
         Ok(ResolutionWorkEstimate {
@@ -672,6 +674,125 @@ impl Ord for RankedCandidate {
 impl PartialOrd for RankedCandidate {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
         Some(self.cmp(other))
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) struct ResolutionContextKey {
+    file: FileId,
+    enclosing: Option<SymbolId>,
+    spelling: ContentHash,
+    provenance: FactId,
+    role: OccurrenceRole,
+    syntax_kind: &'static str,
+}
+
+impl ResolutionContextKey {
+    fn for_occurrence(occurrence: &OccurrenceRecord, index: &CandidateIndex<'_>) -> Option<Self> {
+        let syntax_kind = match occurrence.syntax_kind.as_str() {
+            "typescript.identifier.reference" => "typescript.identifier.reference",
+            "typescript.property_identifier.reference" => {
+                "typescript.property_identifier.reference"
+            }
+            "typescript.call.call" => "typescript.call.call",
+            _ => return None,
+        };
+        if matches!(occurrence.target, OccurrenceTarget::Resolved { .. })
+            || index
+                .files
+                .get(&occurrence.file)
+                .is_none_or(|file| file.language != "typescript")
+        {
+            return None;
+        }
+        Some(Self {
+            file: occurrence.file,
+            enclosing: occurrence.enclosing,
+            spelling: occurrence.syntactic_text_hash,
+            provenance: occurrence.provenance,
+            role: occurrence.role,
+            syntax_kind,
+        })
+    }
+}
+
+pub(crate) struct ResolutionMemo {
+    repeated: BTreeSet<ResolutionContextKey>,
+    estimated: BTreeSet<ResolutionContextKey>,
+    decisions: BTreeMap<ResolutionContextKey, ResolutionDecision>,
+}
+
+impl ResolutionMemo {
+    pub(crate) fn new(
+        occurrences: &[OccurrenceRecord],
+        index: &CandidateIndex<'_>,
+        cancellation: &Cancellation,
+    ) -> Result<Self, ResolutionError> {
+        let mut seen = BTreeSet::new();
+        let mut repeated = BTreeSet::new();
+        for occurrence in occurrences {
+            cancellation.check()?;
+            if let Some(key) = ResolutionContextKey::for_occurrence(occurrence, index)
+                && !seen.insert(key)
+            {
+                repeated.insert(key);
+            }
+        }
+        Ok(Self {
+            repeated,
+            estimated: BTreeSet::new(),
+            decisions: BTreeMap::new(),
+        })
+    }
+
+    pub(crate) fn estimated_work(
+        &mut self,
+        occurrence: &OccurrenceRecord,
+        index: &CandidateIndex<'_>,
+        site_work: usize,
+    ) -> usize {
+        if site_work > 0
+            && let Some(key) = ResolutionContextKey::for_occurrence(occurrence, index)
+            && self.repeated.contains(&key)
+            && !self.estimated.insert(key)
+        {
+            return 1;
+        }
+        site_work
+    }
+
+    pub(crate) fn repeated_key(
+        &self,
+        occurrence: &OccurrenceRecord,
+        index: &CandidateIndex<'_>,
+    ) -> Option<ResolutionContextKey> {
+        let key = ResolutionContextKey::for_occurrence(occurrence, index)?;
+        self.repeated.contains(&key).then_some(key)
+    }
+
+    pub(crate) fn resolve(
+        &mut self,
+        engine: &ResolutionEngine,
+        occurrence: &OccurrenceRecord,
+        index: &CandidateIndex<'_>,
+        work: &mut ResolutionWorkBudget,
+        cancellation: &Cancellation,
+    ) -> Result<ResolutionDecision, ResolutionError> {
+        work.consume()?;
+        if let Some(key) = ResolutionContextKey::for_occurrence(occurrence, index)
+            && self.repeated.contains(&key)
+        {
+            if let Some(decision) = self.decisions.get(&key) {
+                let mut decision = decision.clone();
+                decision.occurrence = occurrence.id;
+                return Ok(decision);
+            }
+            // Scoring depends on this context, not the source span or fact ID.
+            let decision = engine.resolve_occurrence(occurrence, index, work, cancellation)?;
+            self.decisions.insert(key, decision.clone());
+            return Ok(decision);
+        }
+        engine.resolve_occurrence(occurrence, index, work, cancellation)
     }
 }
 
