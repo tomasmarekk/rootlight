@@ -275,15 +275,6 @@ fn compound(streams: &[Stream<'_>]) -> Vec<u8> {
     bytes
 }
 
-fn fixture(modules: &[(&str, u32, bool)], streams: Vec<Stream<'_>>) -> Vec<u8> {
-    let mut all = vec![Stream {
-        name: "dir",
-        bytes: compress_literals(&directory(modules)),
-        inside: true,
-    }];
-    all.extend(streams);
-    compound(&all)
-}
 fn stream<'a>(name: &'a str, body: &[u8]) -> Stream<'a> {
     Stream {
         name,
@@ -408,6 +399,18 @@ pub(super) fn native_book(
     )],
     value: &str,
 ) -> Vec<u8> {
+    native_book_with_references(modules, value, &[])
+}
+
+pub(super) fn native_book_with_references(
+    modules: &[(
+        &str,
+        &[u8],
+        rootlight_source::vba_project::ProjectModuleKind,
+    )],
+    value: &str,
+    references: &[u8],
+) -> Vec<u8> {
     use rootlight_source::vba_project::ProjectModuleKind;
     let declarations = modules
         .iter()
@@ -437,6 +440,22 @@ pub(super) fn native_book(
         inside: true,
     });
     let mut entries = package_entries();
-    entries[4].1 = fixture(&declarations, streams);
+    let mut metadata = directory(&declarations);
+    let insertion = rootlight_source::vba_dir::ProjectDirectory::parse(
+        &metadata,
+        rootlight_source::vba_dir::DirectoryLimits::default(),
+        &rootlight_cancel::Cancellation::new(),
+    )
+    .unwrap()
+    .information_range()
+    .end;
+    metadata.splice(insertion..insertion, references.iter().copied());
+    let mut all = vec![Stream {
+        name: "dir",
+        bytes: compress_literals(&metadata),
+        inside: true,
+    }];
+    all.extend(streams);
+    entries[4].1 = compound(&all);
     zip(&entries)
 }

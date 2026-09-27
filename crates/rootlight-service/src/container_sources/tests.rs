@@ -22,6 +22,292 @@ fn tempdir() -> tempfile::TempDir {
 const FIRST: &[u8] = b"Attribute VB_Name = \"Alpha\"\r\nPublic Function Compute() As Long\r\n Compute = 1\r\nEnd Function\r\n";
 const SECOND: &[u8] = b"Attribute VB_Name = \"Beta\"\r\nPublic Sub Dispatch()\r\nEnd Sub\r\n";
 
+fn reference_book(major: u16) -> (Vec<u8>, Vec<Vec<u8>>) {
+    fn text(out: &mut Vec<u8>, value: &[u8]) {
+        out.extend(u32::try_from(value.len()).unwrap().to_le_bytes());
+        out.extend(value);
+    }
+    fn marker(out: &mut Vec<u8>, id: u16) {
+        out.extend(id.to_le_bytes());
+        out.extend(0u32.to_le_bytes());
+    }
+    let first = format!("*\\G{{01234567-89AB-CDEF-1032-547698BADCFE}}#{major:x}.2#409#C:\\unavailable\\first.tlb#LibraryShared").into_bytes();
+    let second = b"*\\G{01234567-89AB-CDEF-1032-547698BADCFE}#1.3#409#C:\\unavailable\\second.tlb#LibraryShared".to_vec();
+    let mut records = Vec::new();
+    for identifier in [&first[..], &second[..], b"malformed-library".as_slice()] {
+        marker(&mut records, 0x000d);
+        text(&mut records, identifier);
+        records.extend([0; 6]);
+    }
+    let project_start = records.len();
+    marker(&mut records, 0x000e);
+    text(&mut records, b"*\\CC:\\unavailable\\project.xlsm");
+    text(&mut records, b"*\\C../project.xlsm");
+    records.extend(1u32.to_le_bytes());
+    records.extend(2u16.to_le_bytes());
+    let project_record = records[project_start..].to_vec();
+    records.extend(0x0033u16.to_le_bytes());
+    text(&mut records, &first);
+    marker(&mut records, 0x002f);
+    text(
+        &mut records,
+        b"*\\G{00000000-0000-0000-0000-000000000000}#0.0#0##",
+    );
+    records.extend([0; 6]);
+    records.extend([0; 6]);
+    text(&mut records, &second);
+    records.extend([0; 26]);
+    let book = fixture::native_book_with_references(
+        &[(
+            "Alpha",
+            FIRST,
+            rootlight_source::vba_project::ProjectModuleKind::Procedural,
+        )],
+        "\"Project\"",
+        &records,
+    );
+    (
+        book,
+        vec![first.clone(), second.clone(), project_record, first, second],
+    )
+}
+
+#[test]
+fn declared_vba_references_survive_restart_with_exact_binary_evidence_and_imports() {
+    let root = tempdir();
+    let storage = tempdir();
+    let paths = rootlight_runtime::RuntimePaths::new(
+        storage.path().join("state"),
+        storage.path().join("runtime"),
+    )
+    .unwrap();
+    paths.prepare_owner().unwrap();
+    let (book, expected) = reference_book(1);
+    fs::write(root.path().join("book.xlsm"), &book).unwrap();
+    let mut service = FirstSliceService::new_durable(4, paths.state_dir(), &deadline()).unwrap();
+    let receipt = service.index_repository(root.path(), &deadline()).unwrap();
+    let mut first_sources = Vec::new();
+    for restart in [false, true] {
+        if restart {
+            drop(service);
+            service = FirstSliceService::new_durable(4, paths.state_dir(), &deadline()).unwrap();
+        }
+        assert_eq!(
+            service.index_repository(root.path(), &deadline()).unwrap(),
+            receipt
+        );
+        let snapshot = service
+            .loaded_generation_snapshot(receipt.generation)
+            .unwrap();
+        let document = snapshot.document();
+        let metadata = document
+            .files
+            .iter()
+            .find(|file| file.path == "book.xlsm/@vba/references.bin")
+            .unwrap();
+        assert_eq!(metadata.encoding, "binary");
+        assert_eq!(metadata.language, "vba");
+        let mut entities: Vec<_> = document
+            .entities
+            .iter()
+            .filter(|entity| entity.language == "vba" && entity.kind == EntityKind::ExternalSymbol)
+            .collect();
+        entities.sort_by_key(|entity| entity.evidence.source.as_ref().unwrap().span().start_byte());
+        assert_eq!(entities.len(), expected.len());
+        assert_ne!(entities[0].canonical_name, entities[1].canonical_name);
+        assert_eq!(entities[0].display_name, entities[1].display_name);
+        let mut sources = Vec::new();
+        for (entity, expected) in entities.iter().zip(&expected) {
+            assert_eq!(entity.kind, EntityKind::ExternalSymbol);
+            assert!(entity.flags.contains(&rootlight_ir::EntityFlag::External));
+            assert!(entity.flags.contains(&rootlight_ir::EntityFlag::Synthetic));
+            let source = entity.evidence.source.clone().unwrap();
+            assert_eq!(source.span().file(), metadata.id);
+            assert_eq!(source.generation(), receipt.generation);
+            let read = service
+                .source_read_with_options_and_budget(
+                    receipt.generation,
+                    vec![source.clone()],
+                    SourceReadOptions::new()
+                        .with_context_lines_before(0)
+                        .with_context_lines_after(0)
+                        .with_encoding(SourceEncoding::Bytes),
+                    FirstSliceBudget::default(),
+                    &deadline(),
+                )
+                .unwrap();
+            assert_eq!(&read.data.chunks[0].bytes, expected);
+            assert_eq!(
+                read.data.chunks[0]
+                    .extracted_from
+                    .as_ref()
+                    .unwrap()
+                    .content_hash(),
+                content_hash(&book)
+            );
+            let relationships = service
+                .symbol_relationships(
+                    receipt.generation,
+                    BTreeSet::from([entity.id]),
+                    vec![RelationFamily::Imports],
+                    Some(RelationDirection::Inbound),
+                    0,
+                    16,
+                    0,
+                    &deadline(),
+                )
+                .unwrap();
+            assert_eq!(relationships.data.returned_edges, 1);
+            assert!(!relationships.data.truncated);
+            assert!(
+                relationships
+                    .data
+                    .groups
+                    .iter()
+                    .flat_map(|g| &g.items)
+                    .any(|item| item.source_refs.contains(&source))
+            );
+            let explanation = service
+                .symbol_explain(receipt.generation, entity.id, &deadline())
+                .unwrap();
+            assert_eq!(explanation.data.entity, **entity);
+            assert!(explanation.data.occurrences.is_empty());
+            sources.push(source);
+        }
+        assert!(
+            document
+                .diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.message.contains("vba reference 2 registered"))
+        );
+        assert!(receipt.diagnostics.iter().any(|diagnostic| {
+            diagnostic
+                .message
+                .starts_with("vba reference 2 registered invalid identifier at byte ")
+        }));
+        let located = service
+            .code_locate_with_languages_and_budget(
+                receipt.generation,
+                "LibraryShared".to_owned(),
+                LocateMode::Exact,
+                vec!["vba".to_owned()],
+                16,
+                0,
+                FirstSliceBudget::default(),
+                &deadline(),
+            )
+            .unwrap();
+        assert_eq!(
+            located
+                .data
+                .hits
+                .iter()
+                .filter_map(|hit| hit.symbol)
+                .collect::<BTreeSet<_>>(),
+            entities
+                .iter()
+                .filter(|entity| entity.display_name == "LibraryShared")
+                .map(|entity| entity.id)
+                .collect()
+        );
+        assert!(
+            !document
+                .occurrences
+                .iter()
+                .any(|occurrence| occurrence.file == metadata.id
+                    && occurrence.role == OccurrenceRole::Definition)
+        );
+        for domain in [
+            IrFactDomain::Entities,
+            IrFactDomain::Relations,
+            IrFactDomain::Extensions,
+            IrFactDomain::Provenance,
+        ] {
+            let coverage = document
+                .coverage_records
+                .iter()
+                .find(|record| {
+                    record.scope == CoverageScope::File(metadata.id) && record.domain == domain
+                })
+                .unwrap();
+            let extra = match domain {
+                IrFactDomain::Entities => 1,
+                IrFactDomain::Relations => 0,
+                IrFactDomain::Extensions | IrFactDomain::Provenance => 2,
+                _ => unreachable!("test only enumerates reference projection domains"),
+            };
+            assert_eq!(
+                coverage.indexed,
+                u64::try_from(expected.len()).unwrap() + extra
+            );
+            if matches!(domain, IrFactDomain::Entities | IrFactDomain::Relations) {
+                assert_eq!(coverage.status, CoverageStatus::Unknown);
+            }
+            assert_eq!(coverage.discovered, coverage.indexed + coverage.skipped);
+        }
+        if restart {
+            assert_eq!(sources, first_sources);
+        } else {
+            first_sources = sources;
+        }
+    }
+    let (changed, changed_expected) = reference_book(2);
+    fs::write(root.path().join("book.xlsm"), changed).unwrap();
+    let updated = service.index_repository(root.path(), &deadline()).unwrap();
+    assert_ne!(receipt.generation, updated.generation);
+    let snapshot = service
+        .loaded_generation_snapshot(updated.generation)
+        .unwrap();
+    let mut entities: Vec<_> = snapshot
+        .document()
+        .entities
+        .iter()
+        .filter(|entity| entity.language == "vba" && entity.kind == EntityKind::ExternalSymbol)
+        .collect();
+    entities.sort_by_key(|entity| entity.evidence.source.as_ref().unwrap().span().start_byte());
+    let read = service
+        .source_read_with_options_and_budget(
+            updated.generation,
+            vec![entities[0].evidence.source.clone().unwrap()],
+            SourceReadOptions::new()
+                .with_context_lines_before(0)
+                .with_context_lines_after(0)
+                .with_encoding(SourceEncoding::Bytes),
+            FirstSliceBudget::default(),
+            &deadline(),
+        )
+        .unwrap();
+    assert_eq!(read.data.chunks[0].bytes, changed_expected[0]);
+    let prepared = service
+        .prepare_repository_with_options(
+            root.path(),
+            FirstSliceIndexOptions::clean_rebuild(FirstSliceIndexMode::Structural),
+            &deadline(),
+        )
+        .unwrap();
+    let rebuilt = service.publish_prepared(prepared, &deadline()).unwrap();
+    assert!(updated.logical_snapshot.is_some());
+    assert_eq!(rebuilt.logical_snapshot, updated.logical_snapshot);
+    assert_eq!(rebuilt.entities, updated.entities);
+    assert_eq!(rebuilt.indexed_files, updated.indexed_files);
+}
+
+#[test]
+fn reference_admission_does_not_displace_source_modules() {
+    let (book, _) = reference_book(1);
+    let (prepared, snapshots) = prepared_fixture(&book, 1, 1_000_000, &deadline());
+    assert_eq!(prepared.inputs.len(), 1);
+    assert_eq!(snapshots.len(), 2);
+    assert!(prepared.references.is_empty());
+    assert!(prepared.inputs[0].path.ends_with(".bas"));
+    assert!(
+        prepared
+            .issues
+            .iter()
+            .any(|(_, issue)| issue.contains("reference metadata admission exhausted"))
+    );
+}
+
 fn deadline() -> Cancellation {
     Cancellation::with_deadline(Instant::now().checked_add(Duration::from_secs(30)).unwrap())
 }

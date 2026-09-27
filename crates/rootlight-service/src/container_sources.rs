@@ -15,7 +15,9 @@ use rootlight_source::{
     vba_text::TextLimits,
 };
 
-pub(super) const REVISION: &[u8] = b"rootlight.container-sources/4";
+pub(super) const REVISION: &[u8] = b"rootlight.container-sources/5";
+
+mod references;
 
 #[cfg(test)]
 mod tests;
@@ -29,6 +31,7 @@ pub(super) struct PreparedSources {
     incomplete_native_contexts: BTreeSet<FileId>,
     pub(super) native_projects: Vec<rootlight_resolve::NativeClassicProject>,
     issues: Vec<(FileId, String)>,
+    references: Vec<references::DeclaredReference>,
 }
 
 struct Budget {
@@ -130,7 +133,7 @@ impl PreparedSources {
         limits: &IrLimits,
         cancellation: &Cancellation,
     ) -> Result<(), FirstSliceError> {
-        if self.origins.is_empty() && self.issues.is_empty() {
+        if self.origins.is_empty() && self.issues.is_empty() && self.references.is_empty() {
             return Ok(());
         }
         let extra = self
@@ -244,10 +247,13 @@ impl PreparedSources {
         if !self.origins.is_empty() {
             document.version = NormalizedIrVersion::V1_6;
         }
-        let mut increments = BTreeMap::<_, u64>::new();
+        let mut increments = references::append(&self.references, document, limits, cancellation)?;
         for &(derived, _) in &self.origins {
             increments.insert((derived, IrFactDomain::SourceMappings), 1);
-            increments.insert((derived, IrFactDomain::Provenance), 1);
+            let count = increments
+                .entry((derived, IrFactDomain::Provenance))
+                .or_default();
+            *count = count.checked_add(1).ok_or(FirstSliceError::Limits)?;
         }
         for &(file, _) in &self.issues {
             let count = increments
@@ -615,6 +621,15 @@ fn prepare_office(
         .try_reserve(1)
         .map_err(|_| FirstSliceError::Limits)?;
     prepared.native_projects.push(native_project);
+    references::prepare(
+        input,
+        project,
+        repository,
+        budget,
+        prepared,
+        snapshots,
+        cancellation,
+    )?;
     Ok(())
 }
 
