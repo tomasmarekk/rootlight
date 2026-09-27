@@ -35,6 +35,7 @@
 (qualified_member_expression) @reference
 (implicit_member_expression) @reference
 (call_expression) @reference
+(new_expression) @reference
 (call_statement) @reference
 (comment) @comment
 (string_literal) @string

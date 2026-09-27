@@ -5462,10 +5462,13 @@ fn source_reference_gap(fact: &SyntaxFact) -> Option<&'static str> {
         | "vba.error_label.reference"
         | "vba.resume_label.reference" => Some("vba-statement-label-target-unavailable"),
         "vba.direct_type_identifier.reference"
+        | "vba.constructed_type_identifier.reference"
+        | "vba.unsupported_constructed_type_identifier.reference"
         | "vba.automatic_type_identifier.reference"
         | "vba.unsupported_automatic_type_identifier.reference"
         | "vba.type_identifier.reference" => Some("vba-type-target-unavailable"),
         "vba.instance.reference" => Some("vba-instance-owner-unavailable"),
+        "vba.construction.reference" => Some("vba-construction-semantics-unavailable"),
         "vba.module_name.reference" => Some("vba-module-name-unavailable"),
         "vba.identifier.reference"
         | "vba.value_identifier.reference"
@@ -5593,6 +5596,8 @@ fn occurrence_role(fact: &SyntaxFact) -> Option<OccurrenceRole> {
                     | "elm.ambiguous_type.reference"
                     | "typescript.type_identifier.reference"
                     | "vba.direct_type_identifier.reference"
+                    | "vba.constructed_type_identifier.reference"
+                    | "vba.unsupported_constructed_type_identifier.reference"
                     | "vba.automatic_type_identifier.reference"
                     | "vba.unsupported_automatic_type_identifier.reference"
                     | "vba.type_identifier.reference"

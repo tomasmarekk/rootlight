@@ -627,6 +627,7 @@ fn reconcile_vba_target_gaps(
                     "vba.direct_type_identifier.reference",
                     "vba.type_identifier.reference",
                     "vba.automatic_type_identifier.reference",
+                    "vba.constructed_type_identifier.reference",
                 ],
                 "vba-type-target-unavailable",
             ),

@@ -1093,6 +1093,228 @@ fn automatic_object_receivers_keep_project_types_and_calls_after_restart() {
 }
 
 #[test]
+fn constructed_object_types_follow_project_sources_without_inventing_value_types() {
+    for native in [false, true] {
+        let root = tempdir();
+        let storage = tempdir();
+        let client = b"Attribute VB_Name = \"Client\"\r\nPublic Sub Run(ByVal Worker As Long)\r\nDim receiver As Object\r\nSet receiver = New Worker\r\nreceiver.Apply\r\nEnd Sub\r\n";
+        let worker = b"Attribute VB_Name = \"Worker\"\r\nPublic Sub Apply()\r\nEnd Sub\r\n";
+        if native {
+            fs::write(
+                root.path().join("book.xlsm"),
+                fixture::typed_book(&[("Client", client, false), ("Worker", worker, true)]),
+            )
+            .unwrap();
+        } else {
+            fs::write(root.path().join("Client.bas"), client).unwrap();
+            fs::write(
+                root.path().join("Worker.cls"),
+                [b"VERSION 1.0 CLASS\r\n".as_slice(), worker].concat(),
+            )
+            .unwrap();
+            fs::write(
+                root.path().join("project.vbp"),
+                "Type=Exe\nName=\"Project\"\nModule=Client; Client.bas\nClass=Worker; Worker.cls\n",
+            )
+            .unwrap();
+        }
+        let paths = rootlight_runtime::RuntimePaths::new(
+            storage.path().join("state"),
+            storage.path().join("runtime"),
+        )
+        .unwrap();
+        paths.prepare_owner().unwrap();
+        let mut service =
+            FirstSliceService::new_durable(4, paths.state_dir(), &deadline()).unwrap();
+        let receipt = service.index_repository(root.path(), &deadline()).unwrap();
+        assert_eq!(
+            service.index_repository(root.path(), &deadline()).unwrap(),
+            receipt
+        );
+        drop(service);
+        let mut service =
+            FirstSliceService::new_durable(4, paths.state_dir(), &deadline()).unwrap();
+        let snapshot = service
+            .loaded_generation_snapshot(receipt.generation)
+            .unwrap();
+        let document = snapshot.document();
+        let target = document
+            .entities
+            .iter()
+            .find(|entity| entity.kind == EntityKind::Class && entity.canonical_name == "Worker")
+            .unwrap();
+        let site = document
+            .occurrences
+            .iter()
+            .find(|site| site.syntax_kind == "vba.constructed_type_identifier.reference")
+            .expect("New must retain its type reference");
+        assert_eq!(
+            site.target,
+            OccurrenceTarget::Resolved { symbol: target.id }
+        );
+        assert_eq!(site.role, OccurrenceRole::TypeUse);
+        assert!(
+            document
+                .relations
+                .iter()
+                .any(|edge| edge.predicate == RelationPredicate::UsesType
+                    && edge.object == RelationEndpoint::Entity(target.id)
+                    && edge.evidence.source.as_ref() == Some(&site.source))
+        );
+        assert!(!document.skipped_regions.iter().any(|gap| gap.source == site.source && gap.detail == "vba-type-target-unavailable"));
+        let construction = document
+            .occurrences
+            .iter()
+            .find(|site| site.syntax_kind == "vba.construction.reference")
+            .unwrap();
+        assert!(
+            document
+                .skipped_regions
+                .iter()
+                .any(|gap| gap.source == construction.source
+                    && gap.detail == "vba-construction-semantics-unavailable")
+        );
+        let member = document
+            .occurrences
+            .iter()
+            .find(|site| site.syntax_kind == "vba.invoked_member.reference")
+            .unwrap();
+        assert!(matches!(member.target, OccurrenceTarget::Unresolved { .. }));
+        let read = service
+            .source_read_with_options_and_budget(
+                receipt.generation,
+                vec![site.source.clone()],
+                SourceReadOptions::new()
+                    .with_context_lines_before(0)
+                    .with_context_lines_after(0),
+                FirstSliceBudget::default(),
+                &deadline(),
+            )
+            .unwrap();
+        assert_eq!(read.data.chunks[0].bytes, b"Worker");
+        assert_eq!(site.source.generation(), receipt.generation);
+        assert_eq!(read.data.chunks[0].extracted_from.is_some(), native);
+        let prepared = service
+            .prepare_repository_with_options(
+                root.path(),
+                FirstSliceIndexOptions::clean_rebuild(FirstSliceIndexMode::Structural),
+                &deadline(),
+            )
+            .unwrap();
+        let rebuilt = service.publish_prepared(prepared, &deadline()).unwrap();
+        assert!(receipt.logical_snapshot.is_some());
+        assert_eq!(rebuilt.logical_snapshot, receipt.logical_snapshot);
+    }
+}
+
+#[test]
+fn constructed_object_types_do_not_turn_property_bodies_into_return_types() {
+    let root = tempdir();
+    let client = b"Attribute VB_Name = \"Client\"\r\nPublic Sub Run(ByVal factory As Maker)\r\nfactory.Item.Apply\r\nEnd Sub\r\n";
+    let maker = b"Attribute VB_Name = \"Maker\"\r\nPublic Property Get Item() As Object\r\nSet Item = New Worker\r\nEnd Property\r\n";
+    let worker = b"Attribute VB_Name = \"Worker\"\r\nPublic Sub Apply()\r\nEnd Sub\r\n";
+    fs::write(
+        root.path().join("book.xlsm"),
+        fixture::typed_book(&[
+            ("Client", client, false),
+            ("Maker", maker, true),
+            ("Worker", worker, true),
+        ]),
+    )
+    .unwrap();
+    let mut service = FirstSliceService::new(4).unwrap();
+    let receipt = service.index_repository(root.path(), &deadline()).unwrap();
+    let snapshot = service
+        .loaded_generation_snapshot(receipt.generation)
+        .unwrap();
+    let document = snapshot.document();
+    let site = document
+        .occurrences
+        .iter()
+        .find(|site| site.syntax_kind == "vba.constructed_type_identifier.reference")
+        .unwrap();
+    assert!(matches!(site.target, OccurrenceTarget::Resolved { .. }));
+    let member = document
+        .occurrences
+        .iter()
+        .find(|site| site.syntax_kind == "vba.invoked_member.reference")
+        .unwrap();
+    assert!(matches!(member.target, OccurrenceTarget::Unresolved { .. }));
+    assert!(
+        !document
+            .relations
+            .iter()
+            .any(|edge| edge.predicate == RelationPredicate::Calls
+                && edge.evidence.source.as_ref() == Some(&member.source))
+    );
+}
+
+#[test]
+fn constructed_object_types_reject_missing_ambiguous_and_nonclass_targets() {
+    let root = tempdir();
+    let mut service = FirstSliceService::new(4).unwrap();
+    for scenario in [
+        "missing",
+        "record",
+        "enum",
+        "local-record",
+        "local-enum",
+        "collision",
+        "qualified",
+        "qualified-local",
+    ] {
+        let local = match scenario {
+            "local-record" => "Private Type Worker\r\nValue As Long\r\nEnd Type\r\n",
+            "local-enum" => "Private Enum Worker\r\nReady = 1\r\nEnd Enum\r\n",
+            _ => "",
+        };
+        let name = match scenario {
+            "qualified" => "Missing.Worker",
+            "qualified-local" => "Worker.Unknown",
+            _ => "Worker",
+        };
+        let client = format!(
+            "Attribute VB_Name = \"Client\"\r\n{local}Public Sub Run()\r\nDim value As Object\r\nSet value = New {name}\r\nEnd Sub\r\n"
+        );
+        let exported = match scenario {
+            "record" | "collision" => "Public Type Worker\r\nValue As Long\r\nEnd Type\r\n",
+            "enum" => "Public Enum Worker\r\nReady = 1\r\nEnd Enum\r\n",
+            _ => "",
+        };
+        let globals = format!("Attribute VB_Name = \"Globals\"\r\n{exported}");
+        let worker = b"Attribute VB_Name = \"Worker\"\r\nPublic Sub Apply()\r\nEnd Sub\r\n";
+        let mut modules = vec![
+            ("Client", client.as_bytes(), false),
+            ("Globals", globals.as_bytes(), false),
+        ];
+        if !matches!(scenario, "missing" | "record" | "enum") {
+            modules.push(("Worker", worker, true));
+        }
+        fs::write(root.path().join("book.xlsm"), fixture::typed_book(&modules)).unwrap();
+        let receipt = service.index_repository(root.path(), &deadline()).unwrap();
+        let snapshot = service
+            .loaded_generation_snapshot(receipt.generation)
+            .unwrap();
+        let document = snapshot.document();
+        let sites: Vec<_> = document
+            .occurrences
+            .iter()
+            .filter(|site| site.syntax_kind.contains("constructed_type_identifier"))
+            .collect();
+        assert!(!sites.is_empty(), "{scenario}");
+        for site in sites {
+            assert!(
+                matches!(site.target, OccurrenceTarget::Unresolved { .. }),
+                "{scenario}"
+            );
+            assert!(document.skipped_regions.iter().any(
+                |gap| gap.source == site.source && gap.detail == "vba-type-target-unavailable"
+            ));
+        }
+    }
+}
+
+#[test]
 fn automatic_object_types_do_not_invent_class_or_member_bindings() {
     let root = tempdir();
     let mut service = FirstSliceService::new(4).unwrap();

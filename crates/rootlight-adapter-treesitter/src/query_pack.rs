@@ -1127,7 +1127,10 @@ fn candidate_for_capture(
             {
                 vba::reference_syntax(capture.node, source, cancellation)?
             } else if role == StructuralRole::Reference
-                && capture.node.kind() == "qualified_member_expression"
+                && matches!(
+                    capture.node.kind(),
+                    "qualified_member_expression" | "implicit_member_expression"
+                )
             {
                 vba::member_syntax(capture.node, source, cancellation)?
             } else {

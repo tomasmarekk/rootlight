@@ -721,6 +721,7 @@ impl<'a> ClassicIndex<'a> {
                     "vba.direct_type_identifier.reference"
                         | "vba.type_identifier.reference"
                         | "vba.automatic_type_identifier.reference"
+                        | "vba.constructed_type_identifier.reference"
                 )
                 || !matches!(occurrence.target, OccurrenceTarget::Unresolved { .. })
             {
@@ -780,10 +781,13 @@ impl<'a> ClassicIndex<'a> {
             else {
                 continue;
             };
-            // As New requires a named class (MS-VBAL 5.2.3.1.4), not a
-            // UDT/enum that happens to occupy the same type lookup tier.
-            if occurrence.syntax_kind == "vba.automatic_type_identifier.reference"
-                && target.kind != EntityKind::Class
+            // As New and New name classes (MS-VBAL 5.2.3.1.4 / 5.6.8), not
+            // UDTs/enums that happen to occupy the same type lookup tier.
+            if matches!(
+                occurrence.syntax_kind.as_str(),
+                "vba.automatic_type_identifier.reference"
+                    | "vba.constructed_type_identifier.reference"
+            ) && target.kind != EntityKind::Class
             {
                 continue;
             }
@@ -892,6 +896,9 @@ impl<'a> ClassicIndex<'a> {
                         | EntityKind::Field
                         | EntityKind::Property
                 )
+                // A New expression does not declare the enclosing property's
+                // return type or the type of an assignment's receiver.
+                && occurrence.syntax_kind != "vba.constructed_type_identifier.reference"
             {
                 let typed = result
                     .proof(occurrence)

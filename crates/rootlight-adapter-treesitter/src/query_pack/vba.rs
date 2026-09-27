@@ -200,6 +200,7 @@ pub(super) fn syntax(node: Node<'_>, role: StructuralRole) -> Option<&'static st
         "call_expression" | "call_statement" if role == StructuralRole::Reference => {
             "vba.application"
         }
+        "new_expression" if role == StructuralRole::Reference => "vba.construction",
         "comment" => "vba.comment",
         "string_literal" => "vba.string",
         _ => return None,
@@ -337,7 +338,29 @@ pub(super) fn reference_syntax(
     }
     while let Some(parent) = child.parent() {
         cancellation.check()?;
+        if child.kind() == "implicit_member_expression"
+            && parent.kind() == "call_statement"
+            && parent
+                .prev_named_sibling()
+                .is_some_and(|statement| split_construction_type(statement, source) == Some(child))
+        {
+            return Ok("vba.unsupported_constructed_type_identifier");
+        }
         let kind = parent.kind();
+        if kind == "new_expression" {
+            return Ok(
+                if child.kind() == "identifier"
+                    && parent.child_by_field_name("type") == Some(child)
+                    && !parent.parent().is_some_and(|statement| {
+                        split_construction_type(statement, source).is_some()
+                    })
+                {
+                    "vba.constructed_type_identifier"
+                } else {
+                    "vba.unsupported_constructed_type_identifier"
+                },
+            );
+        }
         if kind == "raise_event_statement" && parent.child_by_field_name("event") == Some(child) {
             return Ok("vba.event_identifier");
         }
@@ -361,7 +384,6 @@ pub(super) fn reference_syntax(
             "type_expression"
                 | "dotted_type_expression"
                 | "implements_statement"
-                | "new_expression"
                 | "addressof_expression"
                 | "preprocessor_const"
                 | "goto_statement"
@@ -459,6 +481,22 @@ fn split_output_argument_is_invoked(expression: Node<'_>, source: &[u8]) -> bool
         && source.get(expression.end_byte()) == Some(&b'(')
 }
 
+fn split_construction_type<'tree>(statement: Node<'tree>, source: &[u8]) -> Option<Node<'tree>> {
+    let construction = statement.child_by_field_name("right")?;
+    let next = statement.next_named_sibling()?;
+    let member = next.child_by_field_name("callee")?;
+    // The grammar can split `New Library.Class` into a simple construction and
+    // an adjacent implicit-member statement. Neither half proves a type target.
+    (construction.kind() == "new_expression"
+        && next.kind() == "call_statement"
+        && member.kind() == "implicit_member_expression"
+        && source
+            .get(construction.end_byte()..member.start_byte())?
+            .iter()
+            .all(|byte| matches!(byte, b' ' | b'\t')))
+    .then_some(member)
+}
+
 pub(super) fn member_syntax(
     node: Node<'_>,
     source: &[u8],
@@ -487,7 +525,14 @@ pub(super) fn member_syntax(
     // Invocation position alone cannot distinguish a procedure from a field or
     // default-member dispatch. Keep it as a reference until binding supplies a target.
     Ok(match reference_syntax(node, source, cancellation)? {
-        "vba.invoked_identifier" | "vba.invoked_get_identifier" => "vba.invoked_member",
+        "vba.invoked_identifier" | "vba.invoked_get_identifier"
+            if node.kind() == "qualified_member_expression" =>
+        {
+            "vba.invoked_member"
+        }
+        "vba.unsupported_constructed_type_identifier" => {
+            "vba.unsupported_constructed_type_identifier"
+        }
         _ => "vba.member",
     })
 }

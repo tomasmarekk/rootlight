@@ -78,6 +78,73 @@ pub fn scope_page_candidate() -> usize {
 ";
 
 #[test]
+fn vba_constructed_class_types_keep_exact_evidence_across_processes() {
+    let client = b"Attribute VB_Name = \"Client\"\nPublic Sub Run(ByVal Worker As Long)\nDim receiver As Object\nSet receiver = New Worker\nreceiver.Apply\nEnd Sub\n";
+    let worker =
+        b"VERSION 1.0 CLASS\nAttribute VB_Name = \"Worker\"\nPublic Sub Apply()\nEnd Sub\n";
+    let mut fixture = RetrievalFixture::spawn_with_sources(
+        &[
+            ("Client.bas", client.as_slice()),
+            ("Worker.cls", worker.as_slice()),
+            ("project.vbp", b"Type=Exe\nName=\"Project\"\nModule=Client; Client.bas\nClass=Worker; Worker.cls\n"),
+        ],
+        FixtureLayout::Data,
+    );
+    let located = fixture.standalone("constructed-class", "code.locate", json!({"query": "Worker", "search_modes": ["exact"], "kinds": ["class"], "response_profile": "evidence"}));
+    assert_success(&located, "code.locate");
+    let output = &located["result"]["structuredContent"];
+    let found = output["data"]["matches"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|item| item["kind"] == "class")
+        .unwrap();
+    let symbol = found["symbol_id"].clone();
+    let related = fixture.standalone("constructed-type-uses", "symbol.relationships", json!({"symbol_ids": [symbol], "relations": ["types"], "direction": "inbound", "include_candidates": false, "response_profile": "evidence"}));
+    assert_success(&related, "symbol.relationships");
+    let start = u64::try_from(
+        std::str::from_utf8(client)
+            .unwrap()
+            .find("New Worker")
+            .unwrap()
+            + 4,
+    )
+    .unwrap();
+    let references: Vec<_> = related["result"]["structuredContent"]["data"]["groups"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .flat_map(|group| group["items"].as_array().unwrap())
+        .flat_map(|edge| edge["source_refs"].as_array().unwrap())
+        .collect();
+    assert_eq!(references.len(), 1, "{related:#}");
+    let reference = references[0];
+    assert_eq!(reference["span"]["start_byte"], start);
+    assert_eq!(reference["span"]["end_byte"], start + 6);
+    assert_eq!(
+        reference["generation"],
+        output["generation"]["generation_id"]
+    );
+    let read = fixture.standalone("constructed-type-source", "source.read", json!({"references": [{"source_ref": reference}], "context_lines_before": 0, "context_lines_after": 0, "response_profile": "evidence"}));
+    assert_success(&read, "source.read");
+    assert_eq!(
+        read["result"]["structuredContent"]["data"]["chunks"][0]["content"],
+        "Worker"
+    );
+    let client_scope = fixture.standalone("constructed-client-coverage", "code.locate", json!({"query": "Run", "search_modes": ["exact"], "scope": {"paths": ["Client.bas"]}, "response_profile": "evidence"}));
+    assert_success(&client_scope, "code.locate");
+    assert!(
+        client_scope["result"]["structuredContent"]["warnings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|warning| warning["code"] == "coverage_unsupported"),
+        "construction and dynamic dispatch remain explicitly incomplete: {client_scope:#}"
+    );
+    fixture.finish();
+}
+
+#[test]
 fn vba_statement_labels_cross_real_process_boundaries_without_lossy_downgrades() {
     for source in [
         b"Private Declare PtrSafe Function Clock Lib \"clock\" () As Long\nPublic Sub Run()\nGoTo Finish\nFinish:\nEnd Sub\n".as_slice(),
@@ -2360,7 +2427,10 @@ fn source_entities_with_coverage_cross_process_boundaries(
         assert_standalone_batch_parity(&located, &batch, "code.locate");
         let output = &located["result"]["structuredContent"];
         assert_common_read_contract(output, &fixture.repository_id);
-        assert_eq!(output["schema_version"], "1.8");
+        assert_eq!(
+            output["schema_version"],
+            rootlight_mcp_contract::source_entity::LOCATE_VERSION
+        );
         if let Some(unsupported) = unsupported {
             assert_eq!(
                 output["warnings"]
@@ -2415,7 +2485,10 @@ fn source_entities_with_coverage_cross_process_boundaries(
             );
             assert_success(&explained, "symbol.explain");
             let explanation = &explained["result"]["structuredContent"];
-            assert_eq!(explanation["schema_version"], "1.8");
+            assert_eq!(
+                explanation["schema_version"],
+                rootlight_mcp_contract::source_entity::EXPLAIN_VERSION
+            );
             assert_eq!(explanation["data"]["symbols"][0]["kind"], row_kind);
             assert_eq!(explanation["data"]["symbols"][0]["symbol_id"], symbol);
             if let Some((_, signature)) = signatures.iter().find(|(query, _)| *query == name) {
@@ -3180,7 +3253,10 @@ fn supported_symbol_explain_projection_crosses_process_boundaries(fixture: &mut 
     assert_success(&response, "symbol.explain");
     let output = &response["result"]["structuredContent"];
     assert_common_read_contract(output, &fixture.repository_id);
-    assert_eq!(output["schema_version"], "1.8");
+    assert_eq!(
+        output["schema_version"],
+        rootlight_mcp_contract::source_entity::EXPLAIN_VERSION
+    );
     let explanation = &output["data"]["symbols"][0];
     assert!(
         explanation["qualified_name"]
@@ -3996,7 +4072,7 @@ fn assert_common_read_contract(output: &Value, repository_id: &str) {
     assert!(
         matches!(
             output["schema_version"].as_str(),
-            Some("1.0" | "1.1" | "1.2" | "1.3" | "1.4" | "1.5" | "1.6" | "1.7" | "1.8")
+            Some("1.0" | "1.1" | "1.2" | "1.3" | "1.4" | "1.5" | "1.6" | "1.7" | "1.8" | "1.9")
         ),
         "read response uses a supported additive schema version"
     );

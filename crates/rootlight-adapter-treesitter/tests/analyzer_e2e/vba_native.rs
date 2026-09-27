@@ -716,6 +716,54 @@ fn vba_declared_type_references_ignore_value_namespace_shadowing() {
 }
 
 #[test]
+fn vba_construction_types_never_bind_to_values_or_udts() {
+    let mut parser = tree_sitter::Parser::new();
+    parser
+        .set_language(&tree_sitter_vba::LANGUAGE.into())
+        .unwrap();
+    for declaration in [
+        "",
+        "Private Type Worker\nValue As Long\nEnd Type\n",
+        "Private Enum Worker\nReady = 1\nEnd Enum\n",
+    ] {
+        let source = format!(
+            "{declaration}Sub Run(ByVal Worker As Long)\nDim value As Object\nSet value = New Worker\nSet value = New [Worker]\nSet value = New Missing.Worker\nEnd Sub\n"
+        );
+        let result = output(&source);
+        let document = result.document();
+        let types: Vec<_> = document
+            .occurrences
+            .iter()
+            .filter(|site| site.syntax_kind.contains("constructed_type_identifier"))
+            .collect();
+        assert!(types.len() >= 3, "{:#?}", document.occurrences);
+        for site in types {
+            assert_eq!(site.role, OccurrenceRole::TypeUse);
+            assert!(matches!(site.target, OccurrenceTarget::Unresolved { .. }));
+            assert!(document.skipped_regions.iter().any(
+                |gap| gap.source == site.source && gap.detail == "vba-type-target-unavailable"
+            ));
+        }
+        assert_eq!(
+            document
+                .occurrences
+                .iter()
+                .filter(|site| site.syntax_kind == "vba.construction.reference")
+                .count(),
+            3
+        );
+        assert!(
+            !document
+                .occurrences
+                .iter()
+                .any(|site| site.syntax_kind == "vba.member.reference"),
+            "{}",
+            parser.parse(&source, None).unwrap().root_node().to_sexp()
+        );
+    }
+}
+
+#[test]
 fn vba_declared_udt_members_preserve_ambiguous_dynamic_and_array_barriers() {
     for (types, globals, parameter, body, unresolved) in [
         (
