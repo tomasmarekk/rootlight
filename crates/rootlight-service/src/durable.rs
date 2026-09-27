@@ -15,7 +15,7 @@ use std::{
 };
 
 use cap_std::{ambient_authority, fs::Dir};
-use flate2::{Compression, read::GzDecoder, write::GzEncoder};
+use flate2::{Compression, write::GzEncoder};
 use rootlight_cancel::{Cancellation, CancellationReason};
 use rootlight_catalog::OracleReader;
 use rootlight_config::DEFAULT_MAX_SOURCE_FILE_BYTES;
@@ -43,6 +43,8 @@ use rootlight_vfs::{
     platform::{PlatformError, PrivateDirectory, PublishError, PublishedPrivateDirectory},
 };
 use serde::{Deserialize, Serialize};
+
+use crate::compression::gzip;
 
 use super::{
     FirstSliceError, FirstSliceIncrementalEvidence, FirstSliceIndexReceipt,
@@ -1331,7 +1333,12 @@ fn decode_recovery_snapshot(
     expected_bytes: u64,
     cancellation: &Cancellation,
 ) -> Result<Vec<u8>, FirstSliceError> {
-    let mut decoder = GzDecoder::new(encoded);
+    let mut decoder = gzip::Reader::new(
+        encoded,
+        usize::try_from(expected_bytes).map_err(|_| FirstSliceError::Limits)?,
+        cancellation,
+    )
+    .map_err(|error| recovery_decode_error(error, cancellation))?;
     let mut decoded = Vec::new();
     decoded
         .try_reserve_exact(usize::try_from(expected_bytes).map_err(|_| FirstSliceError::Limits)?)
@@ -1341,7 +1348,7 @@ fn decode_recovery_snapshot(
         check_cancellation(cancellation)?;
         let read = decoder
             .read(&mut buffer)
-            .map_err(|_| FirstSliceError::CatalogCorrupt)?;
+            .map_err(|error| recovery_decode_error(error, cancellation))?;
         if read == 0 {
             break;
         }
@@ -1361,6 +1368,17 @@ fn decode_recovery_snapshot(
         return Err(FirstSliceError::CatalogCorrupt);
     }
     Ok(decoded)
+}
+
+fn recovery_decode_error(error: std::io::Error, cancellation: &Cancellation) -> FirstSliceError {
+    if let Err(cancelled) = check_cancellation(cancellation) {
+        return cancelled;
+    }
+    if error.kind() == std::io::ErrorKind::OutOfMemory {
+        FirstSliceError::Limits
+    } else {
+        FirstSliceError::CatalogCorrupt
+    }
 }
 
 impl<W: std::io::Write> std::io::Write for RecoverySnapshotWriter<'_, W> {
@@ -6664,7 +6682,12 @@ fn restore_recovery_generation(
         RecoverySnapshotFormat::MessagePackGzip => {
             let reader = BufReader::with_capacity(
                 RECOVERY_WRITE_BUFFER_BYTES,
-                GzDecoder::new(encoded.as_slice()),
+                gzip::Reader::new(
+                    encoded.as_slice(),
+                    usize::try_from(plan.decoded_bytes).map_err(|_| FirstSliceError::Limits)?,
+                    cancellation,
+                )
+                .map_err(|error| recovery_decode_error(error, cancellation))?,
             );
             IdentityVerifiedGeneration::restore_published_messagepack_reader_with_source_files(
                 plan.metadata,
@@ -6736,6 +6759,11 @@ fn map_persisted_identity_error(
     error: IdentityVerificationError,
     cancellation: &Cancellation,
 ) -> FirstSliceError {
+    // A reader may observe cancellation before the deserializer's next
+    // checkpoint. Its IO failure must not quarantine a valid generation.
+    if let Err(cancelled) = check_cancellation(cancellation) {
+        return cancelled;
+    }
     match error {
         error @ IdentityVerificationError::Control(_) => map_identity_error(error, cancellation),
         _ => FirstSliceError::CatalogCorrupt,
@@ -8108,6 +8136,48 @@ mod tests {
         let name = activation_name(42, generation);
         assert_eq!(parse_activation_name(&name), Some((42, generation)));
         assert!(parse_activation_name("activation-42-invalid").is_none());
+    }
+
+    #[test]
+    fn recovery_gzip_rejects_extra_members_and_preserves_cancellation() {
+        let source = b"{\"recovery\":\"source-bound\"}";
+        let expected = u64::try_from(source.len()).unwrap();
+        let mut encoder = GzEncoder::new(Vec::new(), Compression::fast());
+        encoder.write_all(source).unwrap();
+        let mut encoded = encoder.finish().unwrap();
+        let cancellation = Cancellation::new();
+        assert_eq!(
+            decode_recovery_snapshot(&encoded, expected, &cancellation).unwrap(),
+            source
+        );
+        assert!(matches!(
+            recovery_decode_error(std::io::ErrorKind::OutOfMemory.into(), &cancellation),
+            FirstSliceError::Limits
+        ));
+        encoded.extend_from_within(..);
+        assert!(matches!(
+            decode_recovery_snapshot(&encoded, expected, &cancellation),
+            Err(FirstSliceError::CatalogCorrupt)
+        ));
+        assert!(matches!(
+            map_persisted_identity_error(
+                IdentityVerificationError::InvalidGeneration,
+                &cancellation
+            ),
+            FirstSliceError::CatalogCorrupt
+        ));
+        cancellation.cancel(CancellationReason::ClientRequest);
+        assert!(matches!(
+            decode_recovery_snapshot(&encoded, expected, &cancellation),
+            Err(FirstSliceError::Cancelled(_))
+        ));
+        assert!(matches!(
+            map_persisted_identity_error(
+                IdentityVerificationError::InvalidGeneration,
+                &cancellation
+            ),
+            FirstSliceError::Cancelled(CancellationReason::ClientRequest)
+        ));
     }
 
     #[test]

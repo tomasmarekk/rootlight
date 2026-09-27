@@ -1,12 +1,12 @@
-//! First-party raw DEFLATE decoding for admitted immutable ZIP payloads.
+//! First-party raw DEFLATE decoding for admitted immutable compressed payloads.
 //! RFC 1951 framing, canonical codes and bounded LZ77 copies are independent
-//! of ZIP ownership and CRC validation, which remain in the archive reader.
+//! of container framing and CRC validation, which remain with the callers.
 
 #![cfg_attr(not(test), deny(clippy::indexing_slicing))]
 
 use rootlight_cancel::Cancellation;
 
-use super::ZipExpansionError as Error;
+use super::Error;
 
 #[cfg(test)]
 mod tests;
@@ -29,6 +29,10 @@ const DISTANCE_EXTRA: [u8; 30] = [
 const LENGTH_ORDER: [usize; 19] = [
     16, 17, 18, 0, 8, 7, 9, 6, 10, 5, 11, 4, 12, 3, 13, 2, 14, 1, 15,
 ];
+
+const HISTORY_BYTES: usize = 32 * 1024;
+const STAGING_BYTES: usize = 2 * HISTORY_BYTES;
+const MAX_MATCH_BYTES: usize = 258;
 
 struct Bits<'a> {
     input: &'a [u8],
@@ -259,6 +263,71 @@ fn dynamic(bits: &mut Bits<'_>) -> Result<(Huffman, Huffman), Error> {
     ))
 }
 
+fn fixed(bits: &Bits<'_>) -> Result<(Huffman, Huffman), Error> {
+    let mut lengths = [8; 288];
+    lengths
+        .get_mut(144..256)
+        .ok_or_else(|| bits.invalid())?
+        .fill(9);
+    lengths
+        .get_mut(256..280)
+        .ok_or_else(|| bits.invalid())?
+        .fill(7);
+    Ok((
+        Huffman::new(&lengths, Alphabet::Complete, bits)?,
+        Huffman::new(&[5; 32], Alphabet::Complete, bits)?,
+    ))
+}
+
+enum Token {
+    Literal(u8),
+    Copy { length: usize, distance: usize },
+    End,
+}
+
+fn token(bits: &mut Bits<'_>, literal: &Huffman, distance: &Huffman) -> Result<Token, Error> {
+    match literal.symbol(bits)? {
+        byte @ 0..=255 => Ok(Token::Literal(
+            u8::try_from(byte).map_err(|_| bits.invalid())?,
+        )),
+        256 => Ok(Token::End),
+        symbol @ 257..=285 => {
+            let index = usize::from(symbol - 257);
+            let base = *LENGTH_BASE.get(index).ok_or_else(|| bits.invalid())?;
+            let width = *LENGTH_EXTRA.get(index).ok_or_else(|| bits.invalid())?;
+            let length = base + usize::from(bits.take(width)?);
+            let index = usize::from(distance.symbol(bits)?);
+            let base = *DISTANCE_BASE.get(index).ok_or_else(|| bits.invalid())?;
+            let width = *DISTANCE_EXTRA.get(index).ok_or_else(|| bits.invalid())?;
+            Ok(Token::Copy {
+                length,
+                distance: base + usize::from(bits.take(width)?),
+            })
+        }
+        _ => Err(bits.invalid()),
+    }
+}
+
+fn copy_match(
+    output: &mut Vec<u8>,
+    length: usize,
+    distance: usize,
+    bits: &Bits<'_>,
+) -> Result<(), Error> {
+    let start = output
+        .len()
+        .checked_sub(distance)
+        .ok_or_else(|| bits.invalid())?;
+    let end = output.len().checked_add(length).ok_or(Error::OutputSize)?;
+    // Each copy uses only already-produced bytes. Growing the source prefix
+    // preserves overlapping LZ77 matches without unsafe writes.
+    while output.len() < end {
+        let count = (end - output.len()).min(output.len() - start);
+        output.extend_from_within(start..start + count);
+    }
+    Ok(())
+}
+
 fn compressed(
     bits: &mut Bits<'_>,
     literal: &Huffman,
@@ -273,47 +342,29 @@ fn compressed(
             cancellation.check()?;
         }
         work = (work + 1) % 64;
-        match literal.symbol(bits)? {
-            byte @ 0..=255 => {
+        match token(bits, literal, distance)? {
+            Token::Literal(byte) => {
                 if output.len() == expected {
                     return Err(Error::OutputSize);
                 }
-                output.push(u8::try_from(byte).map_err(|_| bits.invalid())?);
+                output.push(byte);
             }
-            256 => return Ok(()),
-            symbol @ 257..=285 => {
-                let index = usize::from(symbol - 257);
-                let base = *LENGTH_BASE.get(index).ok_or_else(|| bits.invalid())?;
-                let width = *LENGTH_EXTRA.get(index).ok_or_else(|| bits.invalid())?;
-                let length = base + usize::from(bits.take(width)?);
-                let index = usize::from(distance.symbol(bits)?);
-                let base = *DISTANCE_BASE.get(index).ok_or_else(|| bits.invalid())?;
-                let width = *DISTANCE_EXTRA.get(index).ok_or_else(|| bits.invalid())?;
-                let distance = base + usize::from(bits.take(width)?);
-                let start = output
-                    .len()
-                    .checked_sub(distance)
-                    .ok_or_else(|| bits.invalid())?;
-                let end = output
+            Token::End => return Ok(()),
+            Token::Copy { length, distance } => {
+                output
                     .len()
                     .checked_add(length)
                     .filter(|end| *end <= expected)
                     .ok_or(Error::OutputSize)?;
-                // Each copy uses only already-produced bytes. Growing the source
-                // prefix preserves overlapping LZ77 matches without unsafe writes.
-                while output.len() < end {
-                    let count = (end - output.len()).min(output.len() - start);
-                    output.extend_from_within(start..start + count);
-                }
+                copy_match(output, length, distance, bits)?;
             }
-            _ => return Err(bits.invalid()),
         }
     }
 }
 
 /// Decode one complete raw stream within the archive reader's admitted size.
 /// No partial bytes escape on malformed framing, size mismatch or cancellation.
-pub(super) fn inflate(
+pub(crate) fn inflate(
     input: &[u8],
     expected: usize,
     cancellation: &Cancellation,
@@ -343,7 +394,7 @@ pub(super) fn inflate(
                 {
                     return Err(Error::OutputSize);
                 }
-                for chunk in source.chunks(super::DECODE_CHUNK_BYTES) {
+                for chunk in source.chunks(16 * 1024) {
                     cancellation.check()?;
                     output.extend_from_slice(chunk);
                 }
@@ -352,19 +403,7 @@ pub(super) fn inflate(
                 let dynamic;
                 let (literal, distance) = if kind == 1 {
                     if fixed.is_none() {
-                        let mut lengths = [8; 288];
-                        lengths
-                            .get_mut(144..256)
-                            .ok_or_else(|| bits.invalid())?
-                            .fill(9);
-                        lengths
-                            .get_mut(256..280)
-                            .ok_or_else(|| bits.invalid())?
-                            .fill(7);
-                        fixed = Some((
-                            Huffman::new(&lengths, Alphabet::Complete, &bits)?,
-                            Huffman::new(&[5; 32], Alphabet::Complete, &bits)?,
-                        ));
+                        fixed = Some(self::fixed(&bits)?);
                     }
                     fixed.as_ref().ok_or_else(|| bits.invalid())?
                 } else {
@@ -392,5 +431,173 @@ pub(super) fn inflate(
             cancellation.check()?;
             return Ok(output);
         }
+    }
+}
+
+enum Block {
+    Header,
+    Stored(std::ops::Range<usize>),
+    Compressed,
+    Done,
+}
+
+/// Pull decoder with bounded staging and the RFC-required 32 KiB history.
+/// The caller must consume EOF to prove exact framing and declared size.
+pub(super) struct Reader<'a> {
+    bits: Bits<'a>,
+    cancellation: &'a Cancellation,
+    window: Vec<u8>,
+    delivered: usize,
+    produced: usize,
+    expected: usize,
+    block: Block,
+    last: bool,
+    trees: Option<(Huffman, Huffman)>,
+}
+
+impl<'a> Reader<'a> {
+    pub(super) fn new(
+        input: &'a [u8],
+        expected: usize,
+        cancellation: &'a Cancellation,
+    ) -> Result<Self, Error> {
+        cancellation.check()?;
+        let mut window = Vec::new();
+        window
+            .try_reserve_exact(expected.min(STAGING_BYTES + MAX_MATCH_BYTES))
+            .map_err(|_| Error::Allocation)?;
+        Ok(Self {
+            bits: Bits {
+                input,
+                cursor: 0,
+                buffer: 0,
+                available: 0,
+            },
+            cancellation,
+            window,
+            delivered: 0,
+            produced: 0,
+            expected,
+            block: Block::Header,
+            last: false,
+            trees: None,
+        })
+    }
+
+    fn end_block(&mut self) -> Result<(), Error> {
+        if self.last {
+            if self.bits.offset() != self.bits.input.len() {
+                return Err(self.bits.invalid());
+            }
+            if self.produced != self.expected {
+                return Err(Error::OutputSize);
+            }
+            self.block = Block::Done;
+        } else {
+            self.block = Block::Header;
+        }
+        Ok(())
+    }
+
+    fn charge(&mut self, length: usize) -> Result<(), Error> {
+        self.produced = self
+            .produced
+            .checked_add(length)
+            .filter(|size| *size <= self.expected)
+            .ok_or(Error::OutputSize)?;
+        Ok(())
+    }
+
+    fn fill(&mut self) -> Result<(), Error> {
+        let retained = self.window.len().min(HISTORY_BYTES);
+        let start = self.window.len() - retained;
+        self.window.copy_within(start.., 0);
+        self.window.truncate(retained);
+        self.delivered = retained;
+        let mut work = 0_u8;
+        while self.window.len() < STAGING_BYTES {
+            if work == 0 {
+                self.cancellation.check()?;
+            }
+            work = (work + 1) % 64;
+            match &mut self.block {
+                Block::Header => {
+                    self.last = self.bits.take(1)? != 0;
+                    self.block = match self.bits.take(2)? {
+                        0 => {
+                            let length = self.bits.stored()?.len();
+                            let end = self.bits.offset();
+                            Block::Stored(end - length..end)
+                        }
+                        kind @ (1 | 2) => {
+                            self.trees = Some(if kind == 1 {
+                                fixed(&self.bits)?
+                            } else {
+                                dynamic(&mut self.bits)?
+                            });
+                            Block::Compressed
+                        }
+                        _ => return Err(self.bits.invalid()),
+                    };
+                }
+                Block::Stored(range) => {
+                    let count = range
+                        .len()
+                        .min(16 * 1024)
+                        .min(STAGING_BYTES - self.window.len());
+                    let source = self
+                        .bits
+                        .input
+                        .get(range.start..range.start + count)
+                        .ok_or_else(|| self.bits.invalid())?;
+                    range.start += count;
+                    let complete = range.start == range.end;
+                    self.charge(count)?;
+                    self.window.extend_from_slice(source);
+                    if complete {
+                        self.end_block()?;
+                    }
+                }
+                Block::Compressed => {
+                    let (literal, distance) =
+                        self.trees.as_ref().ok_or_else(|| self.bits.invalid())?;
+                    match token(&mut self.bits, literal, distance)? {
+                        Token::Literal(byte) => {
+                            self.charge(1)?;
+                            self.window.push(byte);
+                        }
+                        Token::Copy { length, distance } => {
+                            self.charge(length)?;
+                            copy_match(&mut self.window, length, distance, &self.bits)?;
+                        }
+                        Token::End => self.end_block()?,
+                    }
+                }
+                Block::Done => break,
+            }
+        }
+        self.cancellation.check()?;
+        Ok(())
+    }
+
+    pub(super) fn read(&mut self, output: &mut [u8]) -> Result<usize, Error> {
+        self.cancellation.check()?;
+        if output.is_empty() {
+            return Ok(0);
+        }
+        if self.delivered == self.window.len() {
+            self.fill()?;
+        }
+        let count = output.len().min(self.window.len() - self.delivered);
+        output
+            .get_mut(..count)
+            .ok_or(Error::OutputSize)?
+            .copy_from_slice(
+                self.window
+                    .get(self.delivered..self.delivered + count)
+                    .ok_or(Error::OutputSize)?,
+            );
+        self.delivered += count;
+        Ok(count)
     }
 }

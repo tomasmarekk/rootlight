@@ -7,6 +7,7 @@
 #![forbid(unsafe_code)]
 
 pub mod catalog;
+mod compression;
 mod container_sources;
 mod coverage_languages;
 mod durable;
@@ -45205,6 +45206,95 @@ mod tests {
             Some(receipt.generation)
         );
         assert!(generation_directory.exists());
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos", windows))]
+    #[test]
+    fn gzip_recovery_restores_both_encodings_without_an_oracle_fallback() {
+        for legacy in [false, true] {
+            let storage = durable_test_tempdir();
+            let paths =
+                RuntimePaths::new(storage.path().join("state"), storage.path().join("runtime"))
+                    .expect("test runtime paths are valid");
+            paths.prepare_owner().expect("private runtime prepares");
+            let fixture = durable_test_tempdir();
+            fs::write(
+                fixture.path().join("lib.rs"),
+                "pub fn recovered_value() -> u32 { 42 }\n",
+            )
+            .expect("fixture writes");
+            let cancellation = deadline();
+            let analyzer: Arc<dyn FirstSliceProjectAnalyzer> =
+                Arc::new(SuccessfulProjectAnalyzer {
+                    identity: content_hash(b"gzip-recovery-analyzer"),
+                    calls: Arc::new(AtomicUsize::new(0)),
+                    partitioned: false,
+                    syntax_facts_bounded: false,
+                });
+            let (receipt, original) = {
+                let mut service = FirstSliceService::new_durable_with_project_analyzer(
+                    3,
+                    paths.state_dir(),
+                    Arc::clone(&analyzer),
+                    &cancellation,
+                )
+                .expect("durable service initializes");
+                let receipt = if legacy {
+                    service
+                        .index_rust_fixture(fixture.path(), &cancellation)
+                        .expect("generation publishes")
+                } else {
+                    service
+                        .index_repository_two_stage(fixture.path(), &cancellation)
+                        .expect("semantic recovery generation publishes")
+                        .semantic()
+                        .clone()
+                };
+                let snapshot = service
+                    .loaded_generation_snapshot(receipt.generation)
+                    .expect("published snapshot resolves");
+                if legacy {
+                    let directory = paths
+                        .state_dir()
+                        .join("first-slice/repositories")
+                        .join(receipt.repository.to_string())
+                        .join(receipt.generation.to_string());
+                    durable::write_legacy_gzip_recovery_snapshot(&directory, &snapshot)
+                        .expect("legacy gzip writes");
+                }
+                (receipt, serde_json::to_value(snapshot.document()).unwrap())
+            };
+            let directory = paths
+                .state_dir()
+                .join("first-slice/repositories")
+                .join(receipt.repository.to_string())
+                .join(receipt.generation.to_string());
+            // A broken decoder must fail this test, not silently pass through
+            // the independently stored oracle's recovery fallback.
+            if legacy {
+                assert!(directory.join("recovery.json.gz").is_file());
+                fs::write(directory.join("oracle.sqlite3"), b"unavailable oracle")
+                    .expect("fixture oracle is unavailable");
+            } else {
+                assert!(directory.join("recovery.msgpack.gz").is_file());
+                assert!(!directory.join("oracle.sqlite3").exists());
+            }
+            let restored = FirstSliceService::new_durable_with_project_analyzer(
+                3,
+                paths.state_dir(),
+                analyzer,
+                &cancellation,
+            )
+            .expect("the gzip snapshot restores without an oracle");
+            assert_eq!(
+                restored.active_generation_for(receipt.repository),
+                Some(receipt.generation)
+            );
+            let snapshot = restored
+                .loaded_generation_snapshot(receipt.generation)
+                .expect("recovered snapshot resolves");
+            assert_eq!(serde_json::to_value(snapshot.document()).unwrap(), original);
+        }
     }
 
     #[cfg(windows)]

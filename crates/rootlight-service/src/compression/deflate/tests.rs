@@ -73,7 +73,24 @@ impl Stream {
 }
 
 fn decode(input: &[u8], expected: usize) -> Result<Vec<u8>, Error> {
-    inflate(input, expected, &Cancellation::new())
+    let cancellation = Cancellation::new();
+    let decoded = inflate(input, expected, &cancellation);
+    let streamed = (|| {
+        let mut reader = Reader::new(input, expected, &cancellation)?;
+        let mut output = Vec::new();
+        let mut buffer = [0; 97];
+        loop {
+            let count = reader.read(&mut buffer)?;
+            assert!(reader.window.capacity() <= 65_536 + 258);
+            if count == 0 {
+                break;
+            }
+            output.extend_from_slice(&buffer[..count]);
+        }
+        Ok::<_, Error>(output)
+    })();
+    assert_eq!(decoded.as_ref().ok(), streamed.as_ref().ok());
+    decoded
 }
 
 fn reference(input: &[u8], expected: usize) -> Option<Vec<u8>> {

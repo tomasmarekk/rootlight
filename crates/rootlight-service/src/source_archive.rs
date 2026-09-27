@@ -11,8 +11,7 @@ use rootlight_source::zip::{ZipArchive, ZipEntry, ZipError, ZipLimits};
 const DECODE_CHUNK_BYTES: usize = 16 * 1024;
 const MAX_READS: usize = 65_536;
 
-mod inflate;
-use inflate::inflate;
+use crate::compression::{Error as CompressionError, inflate};
 
 /// Independent preparation, expansion and repeated-work limits for one archive.
 #[derive(Debug, Clone, Copy)]
@@ -86,6 +85,17 @@ pub enum ZipExpansionError {
     /// The caller cancelled or its deadline expired.
     #[error(transparent)]
     Cancelled(#[from] Cancelled),
+}
+
+impl From<CompressionError> for ZipExpansionError {
+    fn from(error: CompressionError) -> Self {
+        match error {
+            CompressionError::Deflate { input_offset } => Self::Deflate { input_offset },
+            CompressionError::OutputSize => Self::OutputSize,
+            CompressionError::Allocation => Self::Allocation,
+            CompressionError::Cancelled(error) => Self::Cancelled(error),
+        }
+    }
 }
 
 /// Verified entry bytes and their original archive decoding dependencies.
