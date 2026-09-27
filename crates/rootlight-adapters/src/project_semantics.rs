@@ -1634,6 +1634,9 @@ struct SemanticEntity {
     source: SourceRef,
 }
 
+type ProjectDefinitionIndex = BTreeMap<String, Vec<SemanticEntity>>;
+type ProjectImportTargetIndex = BTreeMap<(FileId, String), Vec<FileId>>;
+
 #[derive(Debug, Clone)]
 struct DeclarationDraft {
     local_id: u64,
@@ -1856,8 +1859,8 @@ impl<'analyzer, 'request, 'source> ProjectFactsBuilder<'analyzer, 'request, 'sou
         self.materialize_default_exports()?;
         self.materialize_named_exports()?;
         self.materialize_reexports()?;
-        self.materialize_imports_and_occurrences()?;
-        self.materialize_inheritance()?;
+        let (definitions, import_targets) = self.materialize_imports_and_occurrences()?;
+        self.materialize_inheritance(&definitions, &import_targets)?;
         self.materialize_generated_mappings()?;
         self.materialize_parser_diagnostics()?;
         self.materialize_coverage()
@@ -2929,7 +2932,9 @@ impl<'analyzer, 'request, 'source> ProjectFactsBuilder<'analyzer, 'request, 'sou
         Ok(())
     }
 
-    fn materialize_imports_and_occurrences(&mut self) -> Result<(), AdapterError> {
+    fn materialize_imports_and_occurrences(
+        &mut self,
+    ) -> Result<(ProjectDefinitionIndex, ProjectImportTargetIndex), AdapterError> {
         let definitions = self.definition_index();
         let import_targets = self.import_target_index();
         let mut definition_occurrences = BTreeMap::new();
@@ -3073,7 +3078,7 @@ impl<'analyzer, 'request, 'source> ProjectFactsBuilder<'analyzer, 'request, 'sou
                 )?;
             }
         }
-        Ok(())
+        Ok((definitions, import_targets))
     }
 
     fn materialize_go_route(
@@ -3245,28 +3250,76 @@ impl<'analyzer, 'request, 'source> ProjectFactsBuilder<'analyzer, 'request, 'sou
         self.push_diagnostic(&input, &diagnostic)
     }
 
-    fn materialize_inheritance(&mut self) -> Result<(), AdapterError> {
-        let definitions = self.definition_index();
+    fn materialize_inheritance(
+        &mut self,
+        definitions: &ProjectDefinitionIndex,
+        import_targets: &ProjectImportTargetIndex,
+    ) -> Result<(), AdapterError> {
+        let ecmascript = matches!(
+            self.analyzer.language,
+            SemanticProjectLanguage::TypeScript | SemanticProjectLanguage::JavaScript
+        );
+        let entity_positions = if ecmascript {
+            self.entities
+                .iter()
+                .enumerate()
+                .map(|(index, entity)| (entity.symbol, index))
+                .collect::<BTreeMap<_, _>>()
+        } else {
+            BTreeMap::new()
+        };
         for index in 0..self.declarations.len() {
             check_periodically(index, self.cancellation)?;
             let declaration = self.declarations[index].clone();
-            let Some(subject) = definitions
-                .get(&declaration.name)
-                .and_then(|entities| {
-                    entities
-                        .iter()
-                        .find(|entity| entity.file == declaration.file)
-                })
-                .cloned()
+            let Some(subject) = self
+                .symbol_by_declaration
+                .get(&(declaration.file, declaration.local_id))
+                .copied()
             else {
                 continue;
             };
-            for (predicate, name) in inheritance_names(self.analyzer.language, &declaration.header)
-            {
-                let target = definitions
-                    .get(&name)
-                    .and_then(|entities| entities.first())
-                    .cloned();
+            for (predicate, name) in inheritance_names(
+                self.analyzer.language,
+                declaration.kind,
+                &declaration.header,
+            ) {
+                let target = if ecmascript {
+                    let (qualifier, local_name) = name
+                        .rsplit_once('.')
+                        .map_or((None, name.as_str()), |(qualifier, local)| {
+                            (Some(qualifier.to_owned()), local)
+                        });
+                    let occurrence = OccurrenceDraft {
+                        file: declaration.file,
+                        name: local_name.to_owned(),
+                        qualifier,
+                        call_text: None,
+                        arity: None,
+                        syntax_kind: format!("{}.type.reference", self.analyzer.language.as_str()),
+                        role: OccurrenceRole::TypeUse,
+                        enclosing_declaration: Some(declaration.local_id),
+                        enclosing: Some(subject),
+                        source: declaration.source.clone(),
+                    };
+                    // A same-spelled declaration elsewhere is not evidence of an
+                    // imported base; use reviewed bindings without global fallback.
+                    let resolution =
+                        self.resolve_occurrence(&occurrence, definitions, import_targets, false);
+                    match resolution.symbols.as_slice() {
+                        [symbol] => entity_positions
+                            .get(symbol)
+                            .and_then(|index| self.entities.get(*index))
+                            .filter(|entity| inheritance_target_kind(entity.kind))
+                            .cloned(),
+                        _ => None,
+                    }
+                } else {
+                    definitions
+                        .get(&name)
+                        .and_then(|entities| entities.first())
+                        .filter(|entity| inheritance_target_kind(entity.kind))
+                        .cloned()
+                };
                 let target = match target {
                     Some(target) => target,
                     None => {
@@ -3275,7 +3328,7 @@ impl<'analyzer, 'request, 'source> ProjectFactsBuilder<'analyzer, 'request, 'sou
                 };
                 self.push_relation(
                     declaration.file,
-                    RelationEndpoint::Entity(subject.symbol),
+                    RelationEndpoint::Entity(subject),
                     predicate,
                     RelationEndpoint::Entity(target.symbol),
                     STATIC_CALL_CONFIDENCE,
@@ -3712,7 +3765,7 @@ impl<'analyzer, 'request, 'source> ProjectFactsBuilder<'analyzer, 'request, 'sou
             .ok_or_else(|| provider_failure("project-file-input"))
     }
 
-    fn definition_index(&self) -> BTreeMap<String, Vec<SemanticEntity>> {
+    fn definition_index(&self) -> ProjectDefinitionIndex {
         let mut index = BTreeMap::<String, Vec<SemanticEntity>>::new();
         for entity in &self.entities {
             // Import declarations identify the local alias, not the callable or
@@ -3734,7 +3787,7 @@ impl<'analyzer, 'request, 'source> ProjectFactsBuilder<'analyzer, 'request, 'sou
         index
     }
 
-    fn import_target_index(&self) -> BTreeMap<(FileId, String), Vec<FileId>> {
+    fn import_target_index(&self) -> ProjectImportTargetIndex {
         let mut index = BTreeMap::new();
         for import in &self.imports {
             let current_path = self
@@ -5347,7 +5400,14 @@ fn declaration_header(language: SemanticProjectLanguage, declaration: &str) -> S
                 .to_owned()
         }
         _ => {
-            let brace = declaration.find('{').unwrap_or(line_end);
+            let first_line = declaration.get(..line_end).unwrap_or(declaration);
+            let brace = match first_line.find('{') {
+                Some(first) if first_line[..first].contains('<') => {
+                    top_level_declaration_brace(first_line).unwrap_or(line_end)
+                }
+                Some(first) => first,
+                None => line_end,
+            };
             declaration
                 .get(..brace.min(line_end))
                 .unwrap_or(declaration)
@@ -5357,6 +5417,28 @@ fn declaration_header(language: SemanticProjectLanguage, declaration: &str) -> S
                 .to_owned()
         }
     }
+}
+
+fn top_level_declaration_brace(declaration: &str) -> Option<usize> {
+    let mut angles = 0_usize;
+    let mut parentheses = 0_usize;
+    let mut brackets = 0_usize;
+    let mut previous = None;
+    for (offset, character) in declaration.char_indices() {
+        match character {
+            '<' => angles = angles.saturating_add(1),
+            '>' if angles > 0 && previous != Some('=') => angles -= 1,
+            '(' => parentheses = parentheses.saturating_add(1),
+            ')' if parentheses > 0 => parentheses -= 1,
+            '[' => brackets = brackets.saturating_add(1),
+            ']' if brackets > 0 => brackets -= 1,
+            // Object-shaped generic bounds are not the declaration body.
+            '{' if angles == 0 && parentheses == 0 && brackets == 0 => return Some(offset),
+            _ => {}
+        }
+        previous = Some(character);
+    }
+    None
 }
 
 fn select_unique_syntax_fact<'a>(facts: &[&'a SyntaxFact]) -> Option<&'a SyntaxFact> {
@@ -5819,8 +5901,34 @@ fn strip_extension(path: &str) -> String {
 
 fn inheritance_names(
     language: SemanticProjectLanguage,
+    kind: EntityKind,
     header: &str,
 ) -> Vec<(RelationPredicate, String)> {
+    let eligible = match language {
+        SemanticProjectLanguage::TypeScript | SemanticProjectLanguage::JavaScript => {
+            matches!(kind, EntityKind::Class | EntityKind::Interface)
+        }
+        SemanticProjectLanguage::Python => kind == EntityKind::Class,
+        SemanticProjectLanguage::Go => kind == EntityKind::Interface,
+        SemanticProjectLanguage::Java
+        | SemanticProjectLanguage::Cpp
+        | SemanticProjectLanguage::CSharp
+        | SemanticProjectLanguage::Php => matches!(
+            kind,
+            EntityKind::Class
+                | EntityKind::Interface
+                | EntityKind::Struct
+                | EntityKind::Enum
+                | EntityKind::Trait
+                | EntityKind::Protocol
+        ),
+        SemanticProjectLanguage::Rust
+        | SemanticProjectLanguage::C
+        | SemanticProjectLanguage::Dart => false,
+    };
+    if !eligible {
+        return Vec::new();
+    }
     match language {
         SemanticProjectLanguage::TypeScript | SemanticProjectLanguage::JavaScript => {
             keyword_targets(header, "extends", RelationPredicate::Extends)
@@ -5884,16 +5992,89 @@ fn keyword_targets(
     keyword: &str,
     predicate: RelationPredicate,
 ) -> Vec<(RelationPredicate, String)> {
-    let tokens = tokenize_identifiers(header);
-    let Some(start) = tokens.iter().position(|token| token == keyword) else {
+    let outer = outer_type_header(header);
+    let Some(start) = inheritance_keyword_start(&outer, keyword) else {
         return Vec::new();
     };
-    tokens
+    let tail = &outer[start + keyword.len()..];
+    let end = ["extends", "implements"]
         .into_iter()
-        .skip(start + 1)
-        .take_while(|token| !matches!(token.as_str(), "extends" | "implements"))
+        .filter_map(|next| inheritance_keyword_start(tail, next))
+        .min()
+        .unwrap_or(tail.len());
+    tail[..end]
+        .split(',')
+        .filter_map(|base| {
+            let name = base.split_whitespace().next()?;
+            name.split('.').all(is_identifier).then(|| name.to_owned())
+        })
         .map(|name| (predicate, name))
         .collect()
+}
+
+fn inheritance_target_kind(kind: EntityKind) -> bool {
+    matches!(
+        kind,
+        EntityKind::Class
+            | EntityKind::Interface
+            | EntityKind::Struct
+            | EntityKind::Trait
+            | EntityKind::Protocol
+            | EntityKind::TypeAlias
+    )
+}
+
+fn inheritance_keyword_start(header: &str, keyword: &str) -> Option<usize> {
+    header.match_indices(keyword).find_map(|(start, _)| {
+        let before = header[..start].chars().next_back();
+        let after = header[start + keyword.len()..].chars().next();
+        let is_word =
+            |character: char| character == '_' || character == '$' || character.is_alphanumeric();
+        (before.is_none_or(|character| !is_word(character))
+            && after.is_none_or(|character| !is_word(character)))
+        .then_some(start)
+    })
+}
+
+fn outer_type_header(header: &str) -> String {
+    let mut visible = String::with_capacity(header.len());
+    let mut angles = 0_usize;
+    let mut parentheses = 0_usize;
+    let mut brackets = 0_usize;
+    let mut previous = None;
+    for character in header.chars() {
+        match character {
+            '<' => {
+                angles = angles.saturating_add(1);
+                visible.push(' ');
+            }
+            // A function-type arrow inside a generic bound does not close it.
+            '>' if angles > 0 && previous != Some('=') => {
+                angles -= 1;
+                visible.push(' ');
+            }
+            '(' => {
+                parentheses = parentheses.saturating_add(1);
+                visible.push(' ');
+            }
+            ')' if parentheses > 0 => {
+                parentheses -= 1;
+                visible.push(' ');
+            }
+            '[' => {
+                brackets = brackets.saturating_add(1);
+                visible.push(' ');
+            }
+            ']' if brackets > 0 => {
+                brackets -= 1;
+                visible.push(' ');
+            }
+            _ if angles == 0 && parentheses == 0 && brackets == 0 => visible.push(character),
+            _ => visible.push(' '),
+        }
+        previous = Some(character);
+    }
+    visible
 }
 
 fn rust_impl_pairs(source: &str) -> Vec<(String, String)> {

@@ -45,6 +45,8 @@ mod dart;
 mod escaped_names;
 #[path = "project_semantic_adapters/infer_bindings.rs"]
 mod infer_bindings;
+#[path = "project_semantic_adapters/inheritance.rs"]
+mod inheritance;
 #[path = "project_semantic_adapters/inner_type_bindings.rs"]
 mod inner_type_bindings;
 #[path = "project_semantic_adapters/receiver_dispatch.rs"]
