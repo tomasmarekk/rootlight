@@ -2949,7 +2949,10 @@ fn generate_manifest(workspace_root: &Path, staged_root: &Path) -> Result<(), Sc
     let manifest = ArtifactManifest {
         schema_version: MANIFEST_VERSION,
         generators: GeneratorVersions {
-            jsonschema: required_package_version(&package_versions, "jsonschema")?,
+            rootlight_json_schema: required_package_version(
+                &package_versions,
+                "rootlight-json-schema",
+            )?,
             prost: required_package_version(&package_versions, "prost")?,
             prost_build: required_package_version(&package_versions, "prost-build")?,
             protoc_bin_vendored: required_package_version(
@@ -3412,7 +3415,7 @@ struct ArtifactManifest<'a> {
 
 #[derive(Debug, Serialize)]
 struct GeneratorVersions<'a> {
-    jsonschema: &'a str,
+    rootlight_json_schema: &'a str,
     prost: &'a str,
     prost_build: &'a str,
     protoc_bin_vendored: &'a str,

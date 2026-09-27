@@ -5,7 +5,7 @@
 
 use std::{fmt, future::Future, io, pin::Pin, sync::Arc};
 
-use jsonschema::{Validator, error::ValidationErrorKind};
+use rootlight_json_schema::{self as jsonschema, Validator};
 use rootlight_mcp_contract::{
     CodeLocateInput, CodeLocateOutput, ContinuationCursor, DetailKey, ErrorCode, ExposureProfile,
     GenerationSelector, McpTool, NextAction, OperationStatusInput, OperationStatusOutput,
@@ -1143,26 +1143,8 @@ fn materialized_capability_error(error: &CapabilityAdmissionError) -> Materializ
     MaterializedInputError::Public(Box::new(public_error))
 }
 
-fn schema_error_instance_path(error: &jsonschema::ValidationError<'_>) -> Option<String> {
-    let parent = error.instance_path().to_string();
-    match error.kind() {
-        ValidationErrorKind::AdditionalProperties { unexpected } => unexpected
-            .first()
-            .map(|property| json_pointer_child(&parent, property)),
-        ValidationErrorKind::AnyOf { context } | ValidationErrorKind::OneOfNotValid { context } => {
-            context
-                .iter()
-                .flatten()
-                .find_map(schema_error_instance_path)
-        }
-        _ if parent.is_empty() => None,
-        _ => Some(parent),
-    }
-}
-
-fn json_pointer_child(parent: &str, segment: &str) -> String {
-    let escaped = segment.replace('~', "~0").replace('/', "~1");
-    format!("{parent}/{escaped}")
+fn schema_error_instance_path(error: &jsonschema::ValidationError) -> Option<String> {
+    (!error.instance_path().is_empty()).then(|| error.instance_path().to_owned())
 }
 
 impl ToolContract {

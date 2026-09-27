@@ -25,6 +25,7 @@ members = [
     "crates/rootlight-ids",
     "crates/rootlight-ipc",
     "crates/rootlight-ir",
+    "crates/rootlight-json-schema",
     "crates/rootlight-incremental",
     "crates/rootlight-discovery",
     "crates/rootlight-encoding",
@@ -88,7 +89,7 @@ flate2 = { version = "1.1.9", default-features = false, features = ["rust_backen
 getrandom = { version = "0.3.4", default-features = false }
 ignore = { version = "0.4.29", default-features = false }
 interprocess = { version = "=2.2.3", default-features = false, features = ["tokio"] }
-jsonschema = { version = "0.47.0", default-features = false }
+jsonschema = { package = "rootlight-json-schema", path = "crates/rootlight-json-schema" }
 landlock = { version = "=0.4.7", default-features = false }
 libc = { version = "=0.2.186", default-features = false }
 nix = { version = "0.31.3", default-features = false, features = ["fs", "socket", "user"] }

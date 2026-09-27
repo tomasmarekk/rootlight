@@ -13,7 +13,7 @@ process-test-hooks = []
 [dependencies]
 blake3.workspace = true
 getrandom.workspace = true
-jsonschema.workspace = true
+rootlight-json-schema = { path = "../../crates/rootlight-json-schema" }
 rootlight-agent = { path = "../../crates/rootlight-agent" }
 rootlight-build = { path = "../../crates/rootlight-build" }
 rootlight-client = { path = "../../crates/rootlight-client" }

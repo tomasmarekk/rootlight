@@ -1,7 +1,7 @@
 {
   "schema_version": "1.0",
   "generators": {
-    "jsonschema": "0.47.0",
+    "rootlight_json_schema": "0.0.1",
     "prost": "0.14.4",
     "prost_build": "0.14.4",
     "protoc_bin_vendored": "3.2.0",
@@ -10,7 +10,7 @@
   "inputs": [
     {
       "path": "Cargo.lock",
-      "blake3": "925bf7ebd3952689ca81ee0df3801429dbfaa32324f23022bd9b2cd847a110c3"
+      "blake3": "05f7fd6862c7a69f7797316509c8544becd7b54377d126116540e04746a08bd7"
     },
     {
       "path": "crates/rootlight-catalog/src/schema.rs",
@@ -266,7 +266,7 @@
     },
     {
       "path": "xtask/src/schemas.rs",
-      "blake3": "96190d6505d4c5aa2dea42caf52a420490cdc57f23381287c0468b607158cc7f"
+      "blake3": "d00189300a8c34e94abf1d532345e02714060a91b96b90749d7737d9cab54190"
     }
   ],
   "artifacts": [
