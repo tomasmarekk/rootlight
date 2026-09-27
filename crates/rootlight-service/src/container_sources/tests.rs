@@ -617,7 +617,7 @@ fn native_raised_events_keep_exact_relationships_through_rename_and_restart() {
         let mut previous = None;
         for (event_name, resolved) in [("Changed", true), ("Renamed", false), ("Changed", true)] {
             let source = format!(
-                "Attribute VB_Name = \"Emitter\"\r\nPublic Event {event_name}(ByVal value As Long)\r\nPublic Sub Send(ByVal changed As Long)\r\nRaiseEvent CHANGED(changed)\r\nEnd Sub\r\n"
+                "Attribute VB_Name = \"Emitter\"\r\nPublic Event {event_name}(ByVal value As Long)\r\nPublic Property Get Changed() As Long\r\nChanged = 1\r\nEnd Property\r\nPublic Sub Send(ByVal changed As Long)\r\nRaiseEvent CHANGED(changed)\r\nDim observed As Long\r\nobserved = Me.Changed\r\nEnd Sub\r\n"
             );
             let book = fixture::native_book(&[("Emitter", source.as_bytes(), kind)], "\"Project\"");
             fs::write(root.path().join("book.xlsm"), &book).unwrap();
@@ -646,6 +646,34 @@ fn native_raised_events_keep_exact_relationships_through_rename_and_restart() {
                     entity.kind == EntityKind::Event && entity.canonical_name == event_name
                 })
                 .unwrap();
+            let property = document
+                .entities
+                .iter()
+                .find(|entity| {
+                    entity.canonical_name == "Changed" && entity.kind != EntityKind::Event
+                })
+                .unwrap();
+            let property_start =
+                u64::try_from(source.rfind("Changed\r\nEnd Sub").unwrap()).unwrap();
+            let property_site = document
+                .occurrences
+                .iter()
+                .find(|site| site.source.span().start_byte() == property_start)
+                .unwrap();
+            assert_eq!(
+                property_site.target,
+                OccurrenceTarget::Resolved {
+                    symbol: property.id
+                }
+            );
+            assert!(
+                document
+                    .relations
+                    .iter()
+                    .any(|edge| edge.predicate == RelationPredicate::Calls
+                        && edge.object == RelationEndpoint::Entity(property.id)
+                        && edge.evidence.source.as_ref() == Some(&property_site.source))
+            );
             let site = document
                 .occurrences
                 .iter()

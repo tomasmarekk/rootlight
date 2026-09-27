@@ -3780,10 +3780,6 @@ fn vba_raise_event_rejects_missing_ambiguous_conditional_or_nonclass_targets() {
         ),
         (
             "VERSION 1.0 CLASS\n",
-            "Public Event Changed()\nPrivate Changed As Long\n",
-        ),
-        (
-            "VERSION 1.0 CLASS\n",
             "#If Enabled Then\nPublic Event Changed()\n#End If\n",
         ),
     ] {
@@ -3847,6 +3843,146 @@ fn vba_events_are_not_ordinary_values_or_callable_procedures() {
                 .iter()
                 .all(|site| matches!(site.target, OccurrenceTarget::Unresolved { .. }))
         );
+    }
+}
+
+#[test]
+fn vba_event_names_are_independent_of_value_and_procedure_names() {
+    for (declaration, use_site, marker) in [
+        ("Private Status As Long\n", "Status = 1", "Status = 1"),
+        (
+            "Private Const Status As Long = 1\n",
+            "item = Status",
+            "Status\nEnd",
+        ),
+        (
+            "Private Enum Phase\nStatus = 1\nEnd Enum\n",
+            "item = Status",
+            "Status\nEnd",
+        ),
+        (
+            "Public Sub Status()\nEnd Sub\n",
+            "Call Status()",
+            "Status()\nEnd",
+        ),
+        (
+            "Public Function Status() As Long\nStatus = 1\nEnd Function\n",
+            "item = Status()",
+            "Status()\nEnd",
+        ),
+        (
+            "Public Property Get Status() As Long\nStatus = 1\nEnd Property\n",
+            "item = Status",
+            "Status\nEnd",
+        ),
+    ] {
+        for event_first in [false, true] {
+            let event = "Public Event Status()\n";
+            let declarations = if event_first {
+                format!("{event}{declaration}")
+            } else {
+                format!("{declaration}{event}")
+            };
+            let source = format!(
+                "VERSION 1.0 CLASS\nAttribute VB_Name = \"Emitter\"\n{declarations}Public Sub Send()\nDim item As Long\nRaiseEvent STATUS\n{use_site}\nEnd Sub\n"
+            );
+            let result = output(&source);
+            let document = result.document();
+            let event = document
+                .entities
+                .iter()
+                .find(|entity| entity.kind == EntityKind::Event)
+                .unwrap();
+            let ordinary = document
+                .entities
+                .iter()
+                .find(|entity| {
+                    entity.canonical_name == "Status" && entity.kind != EntityKind::Event
+                })
+                .unwrap();
+            let raised = document
+                .occurrences
+                .iter()
+                .find(|site| site.syntax_kind == "vba.event_identifier.reference")
+                .unwrap();
+            assert_eq!(
+                raised.target,
+                OccurrenceTarget::Resolved { symbol: event.id },
+                "{source}"
+            );
+            let start = u64::try_from(source.rfind(marker).unwrap()).unwrap();
+            let ordinary_use = document
+                .occurrences
+                .iter()
+                .find(|site| {
+                    site.source.span().start_byte() == start
+                        && site.source.span().end_byte() == start + 6
+                })
+                .unwrap();
+            assert_eq!(
+                ordinary_use.target,
+                OccurrenceTarget::Resolved {
+                    symbol: ordinary.id
+                },
+                "{source}"
+            );
+            assert_ne!(raised.target, ordinary_use.target);
+        }
+    }
+}
+
+#[test]
+fn vba_event_and_value_barriers_stay_in_their_own_namespaces() {
+    for (declarations, event_resolves, value_resolves) in [
+        (
+            "#If Enabled Then\nPublic Event Status()\n#End If\nPrivate Status As Long\n",
+            false,
+            true,
+        ),
+        (
+            "Public Event Status()\n#If Enabled Then\nPrivate Status As Long\n#End If\n",
+            true,
+            false,
+        ),
+        (
+            "Public Event Status()\nPublic Event status()\nPrivate Status As Long\n",
+            false,
+            true,
+        ),
+        (
+            "Public Event Status()\nPrivate Status As Long\nPrivate status As Long\n",
+            true,
+            false,
+        ),
+        (
+            "Public Event Status()\nPublic Event État()\nPrivate Status As Long\n",
+            false,
+            true,
+        ),
+        (
+            "Public Event Status()\nPrivate Status As Long\nPrivate État As Long\n",
+            true,
+            false,
+        ),
+    ] {
+        let source = format!(
+            "VERSION 1.0 CLASS\nAttribute VB_Name = \"Emitter\"\n{declarations}Public Sub Send()\nRaiseEvent STATUS\nStatus = 1\nEnd Sub\n"
+        );
+        let result = output(&source);
+        for (marker, expected) in [("STATUS\n", event_resolves), ("Status = 1", value_resolves)] {
+            let start = u64::try_from(source.rfind(marker).unwrap()).unwrap();
+            let site = result
+                .document()
+                .occurrences
+                .iter()
+                .find(|site| site.source.span().start_byte() == start)
+                .unwrap();
+            assert_eq!(
+                matches!(site.target, OccurrenceTarget::Resolved { .. }),
+                expected,
+                "{source}: {marker}"
+            );
+        }
     }
 }
 

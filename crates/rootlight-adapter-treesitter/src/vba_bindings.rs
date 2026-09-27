@@ -24,7 +24,6 @@ enum Binding {
         defined_at: u64,
     },
     Procedure(SymbolId),
-    Event(SymbolId),
     Function {
         symbol: SymbolId,
         accepts_empty: bool,
@@ -89,6 +88,10 @@ pub(super) struct VbaBindings<'a> {
     property_value_symbols: BTreeSet<SymbolId>,
     incomplete_parameter_scopes: BTreeSet<u64>,
     bindings: BTreeMap<u64, BTreeMap<String, Option<Binding>>>,
+    // MS-VBAL 5.2.4.3 permits events to share names with ordinary members.
+    // Their ambiguity and foreign-name barriers must not cross namespaces.
+    events: BTreeMap<u64, BTreeMap<String, Option<SymbolId>>>,
+    foreign_event_scopes: BTreeSet<u64>,
     branch_bindings: BTreeMap<u64, BTreeMap<String, Option<Binding>>>,
     // A shared None also represents conditional shadowing, so it cannot tell
     // whether a same-named unconditional declaration makes a branch ambiguous.
@@ -129,6 +132,8 @@ impl<'a> VbaBindings<'a> {
             property_value_symbols: BTreeSet::new(),
             incomplete_parameter_scopes: BTreeSet::new(),
             bindings: BTreeMap::new(),
+            events: BTreeMap::new(),
+            foreign_event_scopes: BTreeSet::new(),
             branch_bindings: BTreeMap::new(),
             unconditional_names: BTreeMap::new(),
             foreign_scopes: BTreeSet::new(),
@@ -298,7 +303,6 @@ impl<'a> VbaBindings<'a> {
                         defined_at: declaration.span().start_byte(),
                     }),
                     "vba.sub_function.declaration" => Some(Binding::Procedure(symbol)),
-                    "vba.event.declaration" => Some(Binding::Event(symbol)),
                     "vba.function.declaration" => Some(Binding::Function {
                         symbol,
                         accepts_empty: !required_parameter_scopes.contains(&owner),
@@ -426,6 +430,25 @@ impl<'a> VbaBindings<'a> {
                     result.insert(owner, name.as_deref(), result_binding);
                 }
                 owner = parent;
+            }
+            if declaration.syntax_kind().as_str() == "vba.event.declaration" {
+                if let Some(name) = name.as_deref().filter(|name| name.is_ascii()) {
+                    let symbol = if conditional {
+                        None
+                    } else {
+                        symbols.get(&fact.local_id()).copied()
+                    };
+                    result
+                        .events
+                        .entry(owner)
+                        .or_default()
+                        .entry(name.to_ascii_lowercase())
+                        .and_modify(|prior| *prior = None)
+                        .or_insert(symbol);
+                } else {
+                    result.foreign_event_scopes.insert(owner);
+                }
+                continue;
             }
             if !conditional
                 && matches!(
@@ -1576,13 +1599,13 @@ impl<'a> VbaBindings<'a> {
                 || !self
                     .class_module
                     .is_some_and(|class| class.span() == scope.span())
-                || self.foreign_scopes.contains(&owner)
+                || self.foreign_event_scopes.contains(&owner)
             {
                 return Ok(None);
             }
             return Ok(
-                match self.bindings.get(&owner).and_then(|names| names.get(&name)) {
-                    Some(Some(Binding::Event(symbol))) => Some(ResolvedBinding {
+                match self.events.get(&owner).and_then(|names| names.get(&name)) {
+                    Some(Some(symbol)) => Some(ResolvedBinding {
                         symbol: *symbol,
                         is_call: false,
                     }),
