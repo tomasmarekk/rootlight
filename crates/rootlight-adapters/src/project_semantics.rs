@@ -12,6 +12,7 @@ mod dart;
 mod ecmascript;
 mod module_resolution;
 
+pub use module_resolution::ModuleResolution as ProjectModuleResolution;
 use module_resolution::ModuleResolution;
 
 use rootlight_adapter_sdk::{

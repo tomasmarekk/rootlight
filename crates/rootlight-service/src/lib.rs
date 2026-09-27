@@ -50,14 +50,14 @@ use rootlight_adapter_treesitter::{
 };
 use rootlight_adapters::{
     AgdaParseProvider, AwkParseProvider, ElmParseProvider, ErlangParseProvider, IniParseProvider,
-    MAX_PROJECT_CONTEXT_BYTES, MakeParseProvider, PROJECT_MODULE_RESOLUTION_MARKER,
-    PrologParseProvider, RuntimeTraceImportRequest, ScssParseProvider, SemanticProjectLanguage,
-    TclParseProvider, import_runtime_trace,
+    MAX_PROJECT_CONTEXT_BYTES, MakeParseProvider, PrologParseProvider, RuntimeTraceImportRequest,
+    ScssParseProvider, TclParseProvider, import_runtime_trace,
 };
 pub use rootlight_adapters::{
-    PROJECT_SYNTAX_FACT_LIMIT_DIAGNOSTIC, RUNTIME_TRACE_SCHEMA_VERSION, RuntimeTraceImportError,
+    PROJECT_MODULE_RESOLUTION_MARKER, PROJECT_SYNTAX_FACT_LIMIT_DIAGNOSTIC,
+    ProjectModuleResolution, RUNTIME_TRACE_SCHEMA_VERSION, RuntimeTraceImportError,
     RuntimeTraceLimits, RuntimeTraceOverlay, RuntimeTraceProvenance, RuntimeTraceRelation,
-    RuntimeTraceRelationKind, RuntimeTraceResource,
+    RuntimeTraceRelationKind, RuntimeTraceResource, SemanticProjectLanguage,
 };
 pub use rootlight_cancel::{Cancellation, CancellationReason};
 use rootlight_catalog::{CatalogError, CatalogErrorKind, EphemeralOracleWriter, OracleWriter};

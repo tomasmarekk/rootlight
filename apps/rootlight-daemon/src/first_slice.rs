@@ -101,7 +101,8 @@ use rootlight_service::{
     FirstSliceService, FirstSliceStorageAccountingState, FirstSliceStoragePolicy,
     FirstSliceSupplementalPrefix, FirstSliceSupportInventory, FirstSliceWorkingTreeSelection,
     HistoryChangeKind, PROJECT_SYNTAX_FACT_LIMIT_DIAGNOSTIC, PlanChangeObjective,
-    SourceEncoding as ServiceSourceEncoding, SourceReadOptions,
+    ProjectModuleResolution, SemanticProjectLanguage, SourceEncoding as ServiceSourceEncoding,
+    SourceReadOptions,
     catalog::{
         CATALOG_SORT_VERSION, CatalogError, CatalogInstant, CatalogListFilter, CatalogPageRequest,
         CatalogPageSize, CatalogRepositoryRecord, CatalogRepositoryState, CatalogSnapshotId,
@@ -109,7 +110,10 @@ use rootlight_service::{
     },
 };
 #[cfg(test)]
-use rootlight_service::{FirstSliceProjectCoverageLanguage, FirstSliceProjectCoverageReason};
+use rootlight_service::{
+    FirstSliceProjectCoverageLanguage, FirstSliceProjectCoverageReason,
+    PROJECT_MODULE_RESOLUTION_MARKER,
+};
 use sysinfo::{Pid, ProcessesToUpdate, System};
 
 use crate::graph_projection::{
@@ -321,6 +325,17 @@ impl FirstSliceProjectAnalyzer for InstalledProjectAnalyzer {
         if ordered_inputs.is_empty() {
             return Err(FirstSliceProjectAnalysisError::Analysis);
         }
+        let module_resolution = match request.language() {
+            "typescript" => Some(Arc::new(ProjectModuleResolution::from_manifest(
+                request.context_manifest(),
+                SemanticProjectLanguage::TypeScript,
+            ))),
+            "javascript" => Some(Arc::new(ProjectModuleResolution::from_manifest(
+                request.context_manifest(),
+                SemanticProjectLanguage::JavaScript,
+            ))),
+            _ => None,
+        };
         let total_files = u64::try_from(ordered_inputs.len())
             .map_err(|_| FirstSliceProjectAnalysisError::Analysis)?;
         let total_bytes = ordered_inputs.iter().try_fold(0_u64, |total, input| {
@@ -510,7 +525,8 @@ impl FirstSliceProjectAnalyzer for InstalledProjectAnalyzer {
         let mut bridge_planner = ProjectIncludeBridgePlanner::new(
             request.context_manifest().len(),
             base_request_payload_bytes,
-        )?;
+        )?
+        .with_module_resolution(module_resolution);
         bridge_planner.scan_top_level_partitions(
             &request,
             &ordered_inputs,
@@ -1007,8 +1023,10 @@ fn project_partition_assignment(
         let Ok(source) = std::str::from_utf8(&input.source) else {
             continue;
         };
-        let observed = for_each_ecmascript_relative_import(
+        let observed = for_each_ecmascript_import(
             source,
+            &input.path,
+            None,
             remaining_imports,
             cancellation,
             |module, _bindings, demand, _statement_end, _occurrence_end| {
@@ -1183,8 +1201,10 @@ struct EcmascriptBridgeDemand<'a> {
     demand: usize,
 }
 
-fn for_each_ecmascript_relative_import(
+fn for_each_ecmascript_import(
     source: &str,
+    current_path: &str,
+    module_resolution: Option<&ProjectModuleResolution>,
     max_imports: usize,
     cancellation: &Cancellation,
     mut observe: impl FnMut(
@@ -1243,7 +1263,12 @@ fn for_each_ecmascript_relative_import(
             offset = from.saturating_add(" from ".len());
             continue;
         };
-        if module.starts_with('.') && !module.contains('\\') {
+        if !module.contains('\\')
+            && (module.starts_with('.')
+                || module_resolution
+                    .and_then(|resolution| resolution.candidates(current_path, module))
+                    .is_some_and(|candidates| !candidates.is_empty()))
+        {
             let statement_end = from
                 .checked_add(" from ".len())
                 .and_then(|value| value.checked_add(module_end))
@@ -1330,6 +1355,20 @@ fn for_each_ecmascript_relative_import(
         )?;
     }
     Ok(observed)
+}
+
+fn project_ecmascript_module_candidates(
+    current_path: &str,
+    module: &str,
+    module_resolution: Option<&ProjectModuleResolution>,
+) -> Option<Vec<String>> {
+    if module.contains('\\') {
+        return None;
+    }
+    if module.starts_with('.') {
+        return relative_include_path(current_path, module).map(|path| vec![path]);
+    }
+    module_resolution?.candidates(current_path, module)
 }
 
 fn first_quoted_slice(value: &str) -> Option<(&str, usize)> {
@@ -1596,6 +1635,7 @@ fn apply_supplemental_prefix_identity(
 }
 
 struct ProjectIncludeBridgePlanner {
+    module_resolution: Option<Arc<ProjectModuleResolution>>,
     candidates: Vec<ProjectIncludeBridgeCandidate>,
     retained_pairs: BTreeSet<(FileId, FileId)>,
     base_request_payload_bytes: usize,
@@ -1637,6 +1677,7 @@ impl ProjectIncludeBridgePlanner {
         let max_bytes = remaining_scan_bytes.min(PROJECT_ADAPTER_PARTITION_CONTEXT_BYTES);
         let enabled = usize::from(max_bytes > 0);
         Ok(Self {
+            module_resolution: None,
             candidates: Vec::new(),
             retained_pairs: BTreeSet::new(),
             base_request_payload_bytes,
@@ -1652,6 +1693,14 @@ impl ProjectIncludeBridgePlanner {
             remaining_scan_bytes,
             remaining_imports: enabled.saturating_mul(PROJECT_ADAPTER_PARTITION_CONTEXT_WORK),
         })
+    }
+
+    fn with_module_resolution(
+        mut self,
+        module_resolution: Option<Arc<ProjectModuleResolution>>,
+    ) -> Self {
+        self.module_resolution = module_resolution;
+        self
     }
 
     fn scan_partition_pair(
@@ -1770,13 +1819,17 @@ impl ProjectIncludeBridgePlanner {
             }
             let mut remaining_scan_bytes = self.remaining_scan_bytes;
             let mut remaining_imports = self.remaining_imports;
+            let module_resolution = self.module_resolution.clone();
             // Primary output can remain ambiguity-bounded without a syntax split,
             // so direct dependencies share one fixed planner across every partition.
             scan_partitioned_ecmascript(
                 inputs,
                 partitions,
-                &mut remaining_scan_bytes,
-                &mut remaining_imports,
+                module_resolution.as_deref(),
+                EcmascriptScanBudget {
+                    bytes: &mut remaining_scan_bytes,
+                    imports: &mut remaining_imports,
+                },
                 ProjectPartitionDependencyScope::All,
                 cancellation,
                 |consumer, provider, bindings, demand, occurrence_end, scan_bytes| {
@@ -2048,8 +2101,10 @@ impl ProjectIncludeBridgePlanner {
                     {
                         return Ok(());
                     }
-                    let observed = for_each_ecmascript_relative_import(
+                    let observed = for_each_ecmascript_import(
                         source,
+                        &consumer.path,
+                        None,
                         self.remaining_imports,
                         cancellation,
                         |module, bindings, demand, _statement_end, occurrence_end| {
@@ -3609,11 +3664,16 @@ fn scan_partitioned_includes<'a, T: ProjectIncludeSource>(
     Ok(())
 }
 
+struct EcmascriptScanBudget<'a> {
+    bytes: &'a mut usize,
+    imports: &'a mut usize,
+}
+
 fn scan_partitioned_ecmascript<'a, T: ProjectIncludeSource>(
     inputs: &[&'a T],
     partitions: &BTreeMap<&str, usize>,
-    remaining_scan_bytes: &mut usize,
-    remaining_imports: &mut usize,
+    module_resolution: Option<&ProjectModuleResolution>,
+    budget: EcmascriptScanBudget<'_>,
     scope: ProjectPartitionDependencyScope,
     cancellation: &Cancellation,
     mut visit: impl FnMut(
@@ -3625,6 +3685,10 @@ fn scan_partitioned_ecmascript<'a, T: ProjectIncludeSource>(
         &mut usize,
     ) -> Result<bool, FirstSliceProjectAnalysisError>,
 ) -> Result<(), FirstSliceProjectAnalysisError> {
+    let EcmascriptScanBudget {
+        bytes: remaining_scan_bytes,
+        imports: remaining_imports,
+    } = budget;
     if inputs
         .windows(2)
         .any(|pair| pair[0].include_path() >= pair[1].include_path())
@@ -3634,7 +3698,22 @@ fn scan_partitioned_ecmascript<'a, T: ProjectIncludeSource>(
     {
         return Err(FirstSliceProjectAnalysisError::Analysis);
     }
-    for consumer in inputs.iter().take(PROJECT_ADAPTER_PARTITION_CONTEXT_WORK) {
+    let mut consumers = Vec::new();
+    consumers
+        .try_reserve_exact(inputs.len())
+        .map_err(|_| FirstSliceProjectAnalysisError::Analysis)?;
+    consumers.extend_from_slice(inputs);
+    // Favor more complete source scans within the fixed discovery-byte budget.
+    consumers.sort_unstable_by(|left, right| {
+        left.include_source()
+            .len()
+            .cmp(&right.include_source().len())
+            .then_with(|| left.include_path().cmp(right.include_path()))
+    });
+    for consumer in consumers
+        .into_iter()
+        .take(PROJECT_ADAPTER_PARTITION_CONTEXT_WORK)
+    {
         cancellation
             .check()
             .map_err(|cancelled| FirstSliceProjectAnalysisError::Cancelled(cancelled.reason()))?;
@@ -3655,8 +3734,10 @@ fn scan_partitioned_ecmascript<'a, T: ProjectIncludeSource>(
             .copied()
             .ok_or(FirstSliceProjectAnalysisError::Analysis)?;
         let mut continue_scanning = true;
-        let observed = for_each_ecmascript_relative_import(
+        let observed = for_each_ecmascript_import(
             source,
+            consumer.include_path(),
+            module_resolution,
             *remaining_imports,
             cancellation,
             |module, bindings, demand, _statement_end, occurrence_end| {
@@ -3666,6 +3747,7 @@ fn scan_partitioned_ecmascript<'a, T: ProjectIncludeSource>(
                 let Some(provider) = project_ecmascript_provider_from_sorted(
                     consumer.include_path(),
                     module,
+                    module_resolution,
                     inputs,
                 ) else {
                     return Ok(());
@@ -3700,6 +3782,7 @@ fn scan_partitioned_ecmascript<'a, T: ProjectIncludeSource>(
 fn project_ecmascript_provider_from_sorted<'a, T: ProjectIncludeSource>(
     consumer_path: &str,
     module: &str,
+    module_resolution: Option<&ProjectModuleResolution>,
     inputs: &[&'a T],
 ) -> Option<&'a T> {
     const MODULE_SUFFIXES: [&str; 12] = [
@@ -3707,25 +3790,30 @@ fn project_ecmascript_provider_from_sorted<'a, T: ProjectIncludeSource>(
         ".ts",
     ];
 
-    let resolved = relative_include_path(consumer_path, module)?;
-    let module = project_module_path_ref(&resolved);
-    let index_module = format!("{module}/index");
-    let mut provider = None;
-    for stem in [module, index_module.as_str()] {
-        for suffix in MODULE_SUFFIXES {
-            let candidate_path = format!("{stem}{suffix}");
-            let Some(candidate) = exact_project_include(inputs, &candidate_path) else {
-                continue;
-            };
-            if provider
-                .is_some_and(|provider: &T| provider.include_path() != candidate.include_path())
-            {
-                return None;
+    for resolved in project_ecmascript_module_candidates(consumer_path, module, module_resolution)?
+    {
+        let module = project_module_path_ref(&resolved);
+        let index_module = format!("{module}/index");
+        let mut provider = None;
+        for stem in [module, index_module.as_str()] {
+            for suffix in MODULE_SUFFIXES {
+                let candidate_path = format!("{stem}{suffix}");
+                let Some(candidate) = exact_project_include(inputs, &candidate_path) else {
+                    continue;
+                };
+                if provider
+                    .is_some_and(|provider: &T| provider.include_path() != candidate.include_path())
+                {
+                    return None;
+                }
+                provider = Some(candidate);
             }
-            provider = Some(candidate);
+        }
+        if provider.is_some() {
+            return provider;
         }
     }
-    provider
+    None
 }
 
 fn project_include_provider<'a, T: ProjectIncludeSource>(
@@ -18158,8 +18246,10 @@ mod tests {
         let consumer_text =
             std::str::from_utf8(&consumer.source).expect("consumer fixture is UTF-8");
         let mut import = None;
-        for_each_ecmascript_relative_import(
+        for_each_ecmascript_import(
             consumer_text,
+            &consumer.path,
+            None,
             PROJECT_ADAPTER_PARTITION_CONTEXT_REFERENCES,
             &Cancellation::new(),
             |module, bindings, demand, statement_end, occurrence_end| {
@@ -18860,8 +18950,11 @@ mod tests {
         scan_partitioned_ecmascript(
             &ordered,
             &partitions,
-            &mut scan_bytes,
-            &mut remaining_imports,
+            None,
+            EcmascriptScanBudget {
+                bytes: &mut scan_bytes,
+                imports: &mut remaining_imports,
+            },
             ProjectPartitionDependencyScope::CrossPartition,
             &Cancellation::new(),
             |consumer, provider, _, _, _, _| {
@@ -18914,8 +19007,11 @@ mod tests {
         scan_partitioned_ecmascript(
             &ordered,
             &partitions,
-            &mut scan_bytes,
-            &mut remaining_imports,
+            None,
+            EcmascriptScanBudget {
+                bytes: &mut scan_bytes,
+                imports: &mut remaining_imports,
+            },
             ProjectPartitionDependencyScope::All,
             &Cancellation::new(),
             |consumer, provider, _, _, _, _| {
@@ -18926,6 +19022,82 @@ mod tests {
         .expect("top-level ECMAScript discovery succeeds");
 
         assert_eq!(pairs, [("src/consumer.ts", "src/provider.ts")]);
+    }
+
+    #[test]
+    fn source_bound_alias_bridges_ecmascript_partitions() {
+        fn input(file_byte: u8, path: &str, source: &[u8]) -> adapter::ProjectInput {
+            adapter::ProjectInput {
+                file: Some(common::FileId {
+                    value: vec![file_byte; 20],
+                }),
+                path: path.to_owned(),
+                language: "typescript".to_owned(),
+                source_digest: Some(common::ContentHash {
+                    value: content_hash(source).as_bytes().to_vec(),
+                }),
+                source: source.to_vec(),
+                generated: false,
+                origins: Vec::new(),
+            }
+        }
+
+        fn resolution(root_hash: ContentHash) -> ProjectModuleResolution {
+            let root =
+                r#"{"compilerOptions":{"baseUrl":".","paths":{"library/*":["src/library/*"]}}}"#;
+            let nested = r#"{"extends":"../tsconfig.json","compilerOptions":{"types":["node"]}}"#;
+            let configs = serde_json::json!({"configs": [
+                {"path":"tsconfig.json","content_hash":root_hash,"content":root},
+                {"path":"test/tsconfig.json","content_hash":content_hash(nested.as_bytes()),"content":nested}
+            ]});
+            let mut manifest = b"fixture".to_vec();
+            manifest.extend_from_slice(PROJECT_MODULE_RESOLUTION_MARKER);
+            manifest.extend_from_slice(&serde_json::to_vec(&configs).expect("manifest encodes"));
+            ProjectModuleResolution::from_manifest(&manifest, SemanticProjectLanguage::TypeScript)
+        }
+
+        let noise = input(3, "aaa/noise.ts", &vec![b'x'; 4096]);
+        let provider = input(1, "src/library/public.ts", b"export function target() {}\n");
+        let consumer = input(
+            2,
+            "test/unit/caller.ts",
+            b"import {\n  target\n} from 'library/public';\ntarget();\n",
+        );
+        let ordered = [&noise, &provider, &consumer];
+        let partitions = BTreeMap::from([
+            (noise.path.as_str(), 0),
+            (provider.path.as_str(), 0),
+            (consumer.path.as_str(), 1),
+        ]);
+        let root = r#"{"compilerOptions":{"baseUrl":".","paths":{"library/*":["src/library/*"]}}}"#;
+        let valid = resolution(content_hash(root.as_bytes()));
+        let invalid = resolution(content_hash(b"other configuration"));
+
+        for (resolver, expected) in [(&valid, 1_usize), (&invalid, 0)] {
+            let mut scan_bytes = 256_usize;
+            let mut remaining_imports = PROJECT_ADAPTER_PARTITION_CONTEXT_WORK;
+            let mut pairs = Vec::new();
+            scan_partitioned_ecmascript(
+                &ordered,
+                &partitions,
+                Some(resolver),
+                EcmascriptScanBudget {
+                    bytes: &mut scan_bytes,
+                    imports: &mut remaining_imports,
+                },
+                ProjectPartitionDependencyScope::CrossPartition,
+                &Cancellation::new(),
+                |consumer, provider, _, _, _, _| {
+                    pairs.push((consumer.path.as_str(), provider.path.as_str()));
+                    Ok(true)
+                },
+            )
+            .expect("alias discovery succeeds");
+            assert_eq!(pairs.len(), expected);
+            if expected > 0 {
+                assert_eq!(pairs, [("test/unit/caller.ts", "src/library/public.ts")]);
+            }
+        }
     }
 
     #[test]

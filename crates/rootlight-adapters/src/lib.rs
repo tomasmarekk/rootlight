@@ -50,7 +50,8 @@ pub use project_context::{
 };
 pub use project_semantics::{
     PROJECT_MODULE_RESOLUTION_MARKER, PROJECT_SYNTAX_FACT_LIMIT_DIAGNOSTIC,
-    SemanticProjectAnalyzer, SemanticProjectAnalyzerConfigError, SemanticProjectLanguage,
+    ProjectModuleResolution, SemanticProjectAnalyzer, SemanticProjectAnalyzerConfigError,
+    SemanticProjectLanguage,
 };
 pub use prolog::PrologParseProvider;
 pub use runtime_trace::{

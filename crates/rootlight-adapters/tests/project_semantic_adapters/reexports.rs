@@ -91,6 +91,64 @@ fn source_bound_tsconfig_aliases_resolve_imports_and_reexports() {
 }
 
 #[test]
+fn multiline_imports_use_root_paths_without_nested_resolution() {
+    let root_config =
+        r#"{"compilerOptions":{"baseUrl":".","paths":{"library/*":["src/library/*"]}}}"#;
+    let nested_config = r#"{"extends":"../tsconfig.json","compilerOptions":{"types":["node"]}}"#;
+    let caller = "import {\n  relay\n} from 'library/index';\nexport function run() { relay(); }\n";
+    let fixture = ProjectFixture::new(
+        [
+            "src/library/index.ts",
+            "src/library/relay.ts",
+            "test/unit/caller.ts",
+        ],
+        [
+            "export {relay} from './relay';",
+            "export function relay() { return 1; }",
+            caller,
+        ],
+        SemanticProjectLanguage::TypeScript,
+    );
+    let source = serde_json::json!({"configs": [
+        {"path":"tsconfig.json","content_hash":content_hash(root_config.as_bytes()),"content":root_config},
+        {"path":"test/tsconfig.json","content_hash":content_hash(nested_config.as_bytes()),"content":nested_config}
+    ]});
+    let mut manifest = b"fixture".to_vec();
+    manifest.extend_from_slice(PROJECT_MODULE_RESOLUTION_MARKER);
+    manifest.extend_from_slice(&serde_json::to_vec(&source).expect("manifest encodes"));
+    let output = analyze_with_real_parser_manifest(&fixture, &real_parser_limits(), &manifest);
+    let target = output
+        .document()
+        .entities
+        .iter()
+        .find(|entity| {
+            entity.canonical_name == "relay"
+                && entity
+                    .evidence
+                    .source
+                    .as_ref()
+                    .is_some_and(|source| source.span().file() == fixture.snapshots[1].file())
+        })
+        .expect("implementation declaration is materialized");
+    let call_offset = u64::try_from(caller.rfind("relay()").expect("call site exists"))
+        .expect("fixture offset fits");
+    let call = output
+        .document()
+        .occurrences
+        .iter()
+        .find(|occurrence| {
+            occurrence.file == fixture.snapshots[2].file()
+                && occurrence.source.span().start_byte() == call_offset
+                && occurrence.role == OccurrenceRole::CallSite
+        })
+        .expect("call site is materialized");
+    assert_eq!(
+        call.target,
+        OccurrenceTarget::Resolved { symbol: target.id }
+    );
+}
+
+#[test]
 fn qualified_namespace_reads_and_types_reach_exact_source_definitions() {
     for language in [
         SemanticProjectLanguage::JavaScript,

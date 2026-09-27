@@ -10,8 +10,9 @@ use serde_json::Value;
 
 use super::{PROJECT_MODULE_RESOLUTION_MARKER, SemanticProjectLanguage};
 
+/// Source-verified project-local module paths shared by analysis and partition discovery.
 #[derive(Default)]
-pub(super) struct ModuleResolution {
+pub struct ModuleResolution {
     configs: Vec<Config>,
     language: Option<SemanticProjectLanguage>,
 }
@@ -48,7 +49,9 @@ struct ConfigSource {
 }
 
 impl ModuleResolution {
-    pub(super) fn from_manifest(manifest: &[u8], language: SemanticProjectLanguage) -> Self {
+    /// Reads only configuration snapshots whose content matches the manifest hash.
+    #[must_use]
+    pub fn from_manifest(manifest: &[u8], language: SemanticProjectLanguage) -> Self {
         if !matches!(
             language,
             SemanticProjectLanguage::TypeScript | SemanticProjectLanguage::JavaScript
@@ -76,7 +79,9 @@ impl ModuleResolution {
         }
     }
 
-    pub(super) fn candidates(&self, current_path: &str, module: &str) -> Option<Vec<String>> {
+    /// Returns configured local paths in declaration priority, or `None` if not configured.
+    #[must_use]
+    pub fn candidates(&self, current_path: &str, module: &str) -> Option<Vec<String>> {
         if module.starts_with('.') || module.starts_with('/') {
             return None;
         }
@@ -382,6 +387,25 @@ mod tests {
         assert_eq!(
             javascript.candidates("src/main.js", "@script/value"),
             Some(vec!["src/value".to_owned()])
+        );
+    }
+
+    #[test]
+    fn nested_config_without_local_paths_uses_root_resolution() {
+        let root = r#"{"compilerOptions":{"baseUrl":".","paths":{"library/*":["src/library/*"],"library":["src/library/index"]}}}"#;
+        let nested = r#"{"extends":"../tsconfig.json","compilerOptions":{"types":["node"]}}"#;
+        let encoded = serde_json::json!({"configs":[
+            {"path":"tsconfig.json","content_hash":content_hash(root.as_bytes()),"content":root},
+            {"path":"test/tsconfig.json","content_hash":content_hash(nested.as_bytes()),"content":nested}
+        ]});
+        let mut manifest = b"fixture".to_vec();
+        manifest.extend_from_slice(PROJECT_MODULE_RESOLUTION_MARKER);
+        manifest.extend_from_slice(&serde_json::to_vec(&encoded).expect("manifest encodes"));
+        let resolver =
+            ModuleResolution::from_manifest(&manifest, SemanticProjectLanguage::TypeScript);
+        assert_eq!(
+            resolver.candidates("test/unit/example.ts", "library/index"),
+            Some(vec!["src/library/index".to_owned()])
         );
     }
 }
