@@ -218,7 +218,7 @@ const PROJECT_FACTS_TRUNCATED_CODE: &str = "project-adapter-facts-truncated";
 const PROJECT_FACTS_TRUNCATED_MESSAGE: &str =
     "additional project semantic facts were omitted by aggregate resource limits";
 const AGGREGATE_DIAGNOSTICS_TRUNCATED_CODE: &str = "aggregate-diagnostics-truncated";
-const ANALYZER_BINARY_SEED: &[u8] = b"rootlight.first-slice.treesitter-structural/152";
+const ANALYZER_BINARY_SEED: &[u8] = b"rootlight.first-slice.treesitter-structural/153";
 const RESOLVER_BINARY_SEED: &[u8] = b"rootlight.first-slice.resolve/41";
 const INCREMENTAL_PROVIDER_SEED: &[u8] = b"rootlight.first-slice.incremental-provider/1";
 const LANGUAGE_DISPOSITION_PROVIDER_SEED: &[u8] = b"rootlight.first-slice.language-disposition/5";
@@ -29789,20 +29789,38 @@ mod tests {
     }
 
     #[test]
-    fn vba_array_parameter_references_follow_mutation_and_restart() {
+    fn vba_array_references_follow_mutation_and_restart() {
         let storage = durable_test_tempdir();
         let paths = RuntimePaths::new(storage.path().join("state"), storage.path().join("runtime"))
             .unwrap();
         paths.prepare_owner().unwrap();
         let fixture = durable_test_tempdir();
         let mut previous_generation = None;
-        for (parameter, resolved) in [
-            ("ByRef items() As Long", true),
-            ("ByRef items As Variant", false),
-            ("ParamArray items() As Variant", true),
+        for (declaration, resolved, self_field) in [
+            ("ByRef items() As Long", true, false),
+            ("ByRef items As Variant", false, false),
+            ("ParamArray items() As Variant", true, false),
+            ("Private items(1) As Long", true, true),
+            ("Private items As Variant", false, true),
+            ("Private items() As Long", true, true),
         ] {
+            let header = if self_field {
+                format!("VERSION 1.0 CLASS\nAttribute VB_Name = \"Counter\"\n{declaration}\n")
+            } else {
+                String::new()
+            };
+            let parameter = if self_field {
+                "ByVal items As Object"
+            } else {
+                declaration
+            };
+            let expression = if self_field {
+                "Me.items(0)"
+            } else {
+                "items(0)"
+            };
             let source = format!(
-                "Private Declare PtrSafe Function ReadClock Lib \"clock\" () As LongPtr\nSub Run({parameter})\nDim first As Variant\nfirst = items(0)\nEnd Sub\n"
+                "{header}Private Declare PtrSafe Function ReadClock Lib \"clock\" () As LongPtr\nSub Run({parameter})\nDim first As Variant\nfirst = {expression}\nEnd Sub\n"
             );
             fs::write(fixture.path().join("module.bas"), &source).unwrap();
             let mut service =
@@ -29832,17 +29850,25 @@ mod tests {
                 .entities
                 .iter()
                 .find(|entity| {
-                    entity.kind == EntityKind::Parameter && entity.canonical_name == "items"
+                    entity.kind
+                        == if self_field {
+                            EntityKind::Field
+                        } else {
+                            EntityKind::Parameter
+                        }
+                        && entity.canonical_name == "items"
                 })
                 .unwrap();
-            let start = u64::try_from(source.find("items(0)").unwrap()).unwrap();
+            let start = u64::try_from(source.find(expression).unwrap()).unwrap();
+            let callee_start = u64::try_from(source.find("items(0)").unwrap()).unwrap();
+            let end = start + u64::try_from(expression.len()).unwrap();
             let application = document
                 .occurrences
                 .iter()
                 .find(|site| {
                     site.syntax_kind == "vba.application.reference"
                         && site.source.span().start_byte() == start
-                        && site.source.span().end_byte() == start + 8
+                        && site.source.span().end_byte() == end
                 })
                 .unwrap();
             if resolved {
@@ -29858,8 +29884,10 @@ mod tests {
             }
             assert_eq!(
                 document.skipped_regions.iter().any(|gap| {
-                    gap.source.span().start_byte() == start
-                        && matches!(gap.source.span().end_byte() - start, 5 | 8)
+                    ((gap.source.span().start_byte() == start
+                        && gap.source.span().end_byte() == end)
+                        || (gap.source.span().start_byte() == callee_start
+                            && gap.source.span().end_byte() == callee_start + 5))
                         && gap.detail == "vba-call-or-index-target-unavailable"
                 }),
                 !resolved
@@ -29898,7 +29926,7 @@ mod tests {
                     &deadline(),
                 )
                 .unwrap();
-            assert_eq!(read.data.chunks[0].bytes, b"items(0)");
+            assert_eq!(read.data.chunks[0].bytes, expression.as_bytes());
         }
     }
 
@@ -33222,7 +33250,7 @@ mod tests {
             PARSER_PROVIDER_SET_SEED,
             TREE_SITTER_ADAPTER_VERSION.as_bytes(),
             TREE_SITTER_RUNTIME_VERSION.as_bytes(),
-            b"rootlight.first-slice.treesitter-structural/151",
+            b"rootlight.first-slice.treesitter-structural/152",
             grammar.as_bytes(),
         ])
         .unwrap();

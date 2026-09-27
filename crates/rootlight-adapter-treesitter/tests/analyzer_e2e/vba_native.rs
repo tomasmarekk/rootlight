@@ -2438,7 +2438,7 @@ fn vba_self_members_keep_unproven_owners_and_targets_explicit() {
 }
 
 #[test]
-fn vba_self_indexed_fields_are_references_not_proven_method_calls() {
+fn vba_self_indexed_fields_bind_array_applications_without_method_calls() {
     let source = "VERSION 1.0 CLASS\nAttribute VB_Name = \"Counter\"\nPrivate items(1) As Long\nPublic Sub Run()\nDim value As Long\nvalue = Me.items(0)\nEnd Sub\n";
     let result = output(source);
     let document = result.document();
@@ -2455,13 +2455,131 @@ fn vba_self_indexed_fields_are_references_not_proven_method_calls() {
         .unwrap();
     assert_eq!(site.target, OccurrenceTarget::Resolved { symbol: field.id });
     assert_eq!(site.role, OccurrenceRole::Reference);
-    assert!(
-        document
-            .skipped_regions
-            .iter()
-            .any(|gap| gap.source.span().start_byte() == start
-                && gap.detail == "vba-call-or-index-target-unavailable")
+    let application = document
+        .occurrences
+        .iter()
+        .find(|site| {
+            site.syntax_kind == "vba.application.reference"
+                && site.source.span().start_byte() == start - 3
+                && site.source.span().end_byte() == start + 8
+        })
+        .unwrap();
+    assert_eq!(
+        application.target,
+        OccurrenceTarget::Resolved { symbol: field.id }
     );
+    assert_eq!(application.role, OccurrenceRole::Reference);
+    assert!(!document.relations.iter().any(|edge| {
+        edge.predicate == RelationPredicate::Calls
+            && matches!(edge.subject, RelationEndpoint::Occurrence(id) if id == site.id || id == application.id)
+    }));
+    assert!(document.skipped_regions.iter().all(
+        |gap| !(matches!(gap.source.span().start_byte(), at if at == start || at == start - 3)
+            && gap.detail == "vba-call-or-index-target-unavailable")
+    ));
+}
+
+#[test]
+fn vba_self_array_reads_preserve_spelling_and_bypass_local_shadows() {
+    for expression in [
+        "Me.items(0)",
+        "mE . [items](0)",
+        "Me. _\nitems(0)",
+        "Me.items(Me.items(0))",
+    ] {
+        let source = format!(
+            "VERSION 1.0 CLASS\nAttribute VB_Name = \"Counter\"\nPrivate items(1) As Long\nPublic Sub Run(ByVal items As Object)\nDim value As Long\nvalue = {expression}\nEnd Sub\n"
+        );
+        let result = output(&source);
+        let document = result.document();
+        let field = document
+            .entities
+            .iter()
+            .find(|entity| entity.kind == EntityKind::Field && entity.canonical_name == "items")
+            .unwrap();
+        let start = u64::try_from(source.find(expression).unwrap()).unwrap();
+        let end = start + u64::try_from(expression.len()).unwrap();
+        let application = document
+            .occurrences
+            .iter()
+            .find(|site| {
+                site.syntax_kind == "vba.application.reference"
+                    && site.source.span().start_byte() == start
+                    && site.source.span().end_byte() == end
+            })
+            .unwrap();
+        assert_eq!(
+            application.target,
+            OccurrenceTarget::Resolved { symbol: field.id },
+            "{source}"
+        );
+        assert_eq!(application.role, OccurrenceRole::Reference);
+        assert!(
+            !document
+                .skipped_regions
+                .iter()
+                .any(|gap| gap.detail == "vba-call-or-index-target-unavailable"
+                    && gap.source.span().start_byte() >= start
+                    && gap.source.span().end_byte() <= end),
+            "{source}"
+        );
+    }
+}
+
+#[test]
+fn vba_self_array_reads_require_class_array_and_direct_application_evidence() {
+    for (header, declarations, expression) in [
+        ("", "Private items(1) As Long", "Me.items(0)"),
+        (
+            "VERSION 1.0 CLASS\n",
+            "Private items As Object",
+            "Me.items(0)",
+        ),
+        (
+            "VERSION 1.0 CLASS\n",
+            "Private items(1) As Long\nPrivate items(2) As Long",
+            "Me.items(0)",
+        ),
+        (
+            "VERSION 1.0 CLASS\n",
+            "Private items(1) As Long",
+            "[Me].items(0)",
+        ),
+        (
+            "VERSION 1.0 CLASS\n",
+            "Private items(1) As Long",
+            "Me.items(0)(1)",
+        ),
+    ] {
+        let source = format!(
+            "{header}Attribute VB_Name = \"Counter\"\n{declarations}\nPublic Sub Run()\nDim value As Long\nvalue = {expression}\nEnd Sub\n"
+        );
+        let result = output(&source);
+        let document = result.document();
+        let start = u64::try_from(source.find(expression).unwrap()).unwrap();
+        let end = start + u64::try_from(expression.len()).unwrap();
+        let application = document
+            .occurrences
+            .iter()
+            .find(|site| {
+                site.syntax_kind == "vba.application.reference"
+                    && site.source.span().start_byte() == start
+                    && site.source.span().end_byte() == end
+            })
+            .unwrap();
+        assert!(
+            matches!(application.target, OccurrenceTarget::Unresolved { .. }),
+            "{source}"
+        );
+        assert!(
+            document
+                .skipped_regions
+                .iter()
+                .any(|gap| gap.detail == "vba-call-or-index-target-unavailable"
+                    && gap.source == application.source),
+            "{source}"
+        );
+    }
 }
 
 #[test]

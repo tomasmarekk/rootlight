@@ -81,6 +81,7 @@ pub(super) struct VbaBindings<'a> {
     source: &'a [u8],
     applications: BTreeMap<u64, Vec<&'a SyntaxFact>>,
     invocations: BTreeMap<u64, Vec<&'a SyntaxFact>>,
+    self_array_invocations: BTreeMap<u64, Vec<&'a SyntaxFact>>,
     member_references: BTreeMap<u64, u64>,
     callable_scopes: BTreeMap<SymbolId, u64>,
     named_parameters: BTreeMap<u64, BTreeMap<String, Option<SymbolId>>>,
@@ -119,6 +120,7 @@ impl<'a> VbaBindings<'a> {
             source,
             applications: BTreeMap::new(),
             invocations: BTreeMap::new(),
+            self_array_invocations: BTreeMap::new(),
             member_references: BTreeMap::new(),
             callable_scopes: BTreeMap::new(),
             named_parameters: BTreeMap::new(),
@@ -172,6 +174,18 @@ impl<'a> VbaBindings<'a> {
                 && result.class_module.replace(fact).is_some()
             {
                 return Err(invalid_capture());
+            }
+        }
+        for fact in facts {
+            cancellation.check()?;
+            if is_self_array_invocation(fact)
+                && let Some(start) = result.array_invocation_start(fact)?
+            {
+                result
+                    .self_array_invocations
+                    .entry(start)
+                    .or_default()
+                    .push(fact);
             }
         }
         result.class_symbol = result
@@ -867,13 +881,13 @@ impl<'a> VbaBindings<'a> {
         cancellation: &Cancellation,
     ) -> Result<bool, AdapterError> {
         cancellation.check()?;
-        let start = fact.span().start_byte();
+        let Some(start) = self.array_invocation_start(fact)? else {
+            return Ok(false);
+        };
         if !self.array_symbols.contains(&target)
-            || !self.invocations.get(&start).is_some_and(|invocations| {
-                invocations
-                    .iter()
-                    .any(|candidate| candidate.local_id() == fact.local_id())
-            })
+            || !self
+                .array_invocations_at(start)
+                .any(|candidate| candidate.local_id() == fact.local_id())
         {
             return Ok(false);
         }
@@ -894,6 +908,47 @@ impl<'a> VbaBindings<'a> {
         Ok(false)
     }
 
+    fn array_invocation_start(&self, fact: &SyntaxFact) -> Result<Option<u64>, AdapterError> {
+        if !is_self_array_invocation(fact) {
+            return Ok(Some(fact.span().start_byte()));
+        }
+        let Some((&start, _)) = self
+            .applications
+            .range(..fact.span().start_byte())
+            .next_back()
+        else {
+            return Ok(None);
+        };
+        let prefix_length =
+            usize::try_from(fact.span().start_byte() - start).map_err(|_| invalid_capture())?;
+        if prefix_length > self.maximum_name_bytes {
+            return Ok(None);
+        }
+        let begin = usize::try_from(start).map_err(|_| invalid_capture())?;
+        let end = usize::try_from(fact.span().start_byte()).map_err(|_| invalid_capture())?;
+        let Some(prefix) = self.source.get(begin..end) else {
+            return Ok(None);
+        };
+        // The native self-member capture proves Me's syntax. Match its receiver
+        // to this application, ignoring only whitespace and line continuation.
+        Ok(prefix
+            .iter()
+            .copied()
+            .filter(|byte| !byte.is_ascii_whitespace() && *byte != b'_')
+            .map(|byte| byte.to_ascii_lowercase())
+            .eq(b"me.".iter().copied())
+            .then_some(start))
+    }
+
+    fn array_invocations_at(&self, start: u64) -> impl Iterator<Item = &&'a SyntaxFact> {
+        self.invocations.get(&start).into_iter().flatten().chain(
+            self.self_array_invocations
+                .get(&start)
+                .into_iter()
+                .flatten(),
+        )
+    }
+
     fn array_application(
         &self,
         fact: &SyntaxFact,
@@ -909,10 +964,7 @@ impl<'a> VbaBindings<'a> {
             return Ok(None);
         }
         let mut invocations = self
-            .invocations
-            .get(&start)
-            .into_iter()
-            .flatten()
+            .array_invocations_at(start)
             .filter(|invocation| invocation.span().end_byte() < end);
         let Some(invocation) = invocations.next() else {
             return Ok(None);
@@ -1687,6 +1739,13 @@ fn declaration_has_array_designator(
                 || word.eq_ignore_ascii_case(b"Optional")
                 || word.eq_ignore_ascii_case(b"ParamArray")
         }))
+}
+
+fn is_self_array_invocation(fact: &SyntaxFact) -> bool {
+    matches!(
+        fact.syntax_kind().as_str(),
+        "vba.self_invoked_member.reference" | "vba.self_invoked_get_member.reference"
+    )
 }
 
 fn complete_array_application_suffix(suffix: &[u8]) -> bool {
