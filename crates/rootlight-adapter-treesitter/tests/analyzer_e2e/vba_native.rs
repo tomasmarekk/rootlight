@@ -46,7 +46,7 @@ fn vba_native_context_binds_artifacts_and_required_fact_budgets() {
     let analyzer = analyzer(&provider, VBA);
     let fixture = Fixture::new(
         VBA,
-        b"Attribute VB_Name = \"Counter\"\nPrivate total As Long\nPublic Sub Run()\nMe.total = 1\nEnd Sub\n",
+        b"Attribute VB_Name = \"Counter\"\nPrivate total As Long\nPublic Sub Run()\nGoTo Finish\nFinish:\nGoTo 10\n10: Me.total = 1\nEnd Sub\n",
     );
     let budget = limits();
     let extensions = ExtensionSupport::default();
@@ -4091,6 +4091,15 @@ fn vba_type_label_and_argument_names_do_not_bind_to_local_values() {
             assert_eq!(site.syntax_kind, "vba.direct_type_identifier.reference");
             assert_eq!(site.role, OccurrenceRole::TypeUse);
             assert_eq!(site.target, OccurrenceTarget::Resolved { symbol: model.id });
+        } else if marker == "Finish\nFinish:" {
+            let label = result
+                .document()
+                .entities
+                .iter()
+                .find(|entity| entity.kind == EntityKind::StatementLabel)
+                .unwrap();
+            assert_eq!(site.syntax_kind, "vba.statement_label.reference");
+            assert_eq!(site.target, OccurrenceTarget::Resolved { symbol: label.id });
         } else {
             assert_eq!(site.syntax_kind, "vba.nonvalue_identifier.reference");
             assert!(matches!(site.target, OccurrenceTarget::Unresolved { .. }));
@@ -4108,6 +4117,245 @@ fn vba_type_label_and_argument_names_do_not_bind_to_local_values() {
             symbol: parameter.id
         }
     );
+}
+
+#[test]
+fn vba_statement_labels_bind_control_transfers_in_their_own_namespace() {
+    let source = "Sub Run(ByVal Finish As Long, ByVal choice As Long)\nOn Error GoTo Recover\nGoTo Finish\nGoSub Finish\nOn choice GoTo Finish, Recover\nOn choice GoSub Finish, Recover\nFinish:\nFinish = choice\nResume Recover\nRecover:\nResume Finish\nEnd Sub\nSub Other()\nGoTo Finish\nFinish:\nEnd Sub\n";
+    let result = output(source);
+    let document = result.document();
+    assert_eq!(document.version, rootlight_ir::NormalizedIrVersion::V1_7);
+    let labels: Vec<_> = document
+        .entities
+        .iter()
+        .filter(|entity| entity.kind == EntityKind::StatementLabel)
+        .collect();
+    assert_eq!(labels.len(), 3, "{:#?}", document.entities);
+    let transfers: Vec<_> = document
+        .occurrences
+        .iter()
+        .filter(|site| {
+            matches!(
+                site.syntax_kind.as_str(),
+                "vba.statement_label.reference"
+                    | "vba.error_label.reference"
+                    | "vba.resume_label.reference"
+            )
+        })
+        .collect();
+    assert_eq!(transfers.len(), 10, "{:#?}", document.occurrences);
+    for site in transfers {
+        let OccurrenceTarget::Resolved { symbol } = site.target else {
+            panic!("unresolved control transfer: {site:#?}");
+        };
+        let label = labels.iter().find(|label| label.id == symbol).unwrap();
+        let span = site.source.span();
+        let text = &source[usize::try_from(span.start_byte()).unwrap()
+            ..usize::try_from(span.end_byte()).unwrap()];
+        assert!(label.canonical_name.eq_ignore_ascii_case(text));
+        let owner = if span.start_byte() < u64::try_from(source.find("Sub Other").unwrap()).unwrap()
+        {
+            "Run"
+        } else {
+            "Other"
+        };
+        let procedure = document
+            .entities
+            .iter()
+            .find(|entity| entity.canonical_name == owner)
+            .unwrap();
+        assert_eq!(label.container, Some(ContainerRef::Entity(procedure.id)));
+        assert_eq!(site.role, OccurrenceRole::Reference);
+        assert!(
+            document
+                .relations
+                .iter()
+                .any(|edge| edge.predicate == RelationPredicate::RefersTo
+                    && edge.subject == RelationEndpoint::Occurrence(site.id)
+                    && edge.object == RelationEndpoint::Entity(symbol))
+        );
+        assert!(
+            !document
+                .relations
+                .iter()
+                .any(|edge| edge.predicate == RelationPredicate::Calls
+                    && edge.subject == RelationEndpoint::Occurrence(site.id))
+        );
+        assert!(
+            !document
+                .skipped_regions
+                .iter()
+                .any(|gap| gap.source == site.source)
+        );
+    }
+    let parameter = document
+        .entities
+        .iter()
+        .find(|entity| entity.kind == EntityKind::Parameter && entity.canonical_name == "Finish")
+        .unwrap();
+    assert_eq!(
+        reference_at(document, source, "Finish = choice").target,
+        OccurrenceTarget::Resolved {
+            symbol: parameter.id
+        }
+    );
+}
+
+#[test]
+fn vba_numeric_statement_labels_compare_values_and_preserve_error_policy_zero() {
+    let source = "Sub Run()\nGoTo 0010\nGoSub &HA\nOn Error GoTo 10\nResume &H0A\nGoTo 0\n10: Resume 0\n0 On Error GoTo 0\n20\nGoTo 20\nEnd Sub\n";
+    let mut parser = tree_sitter::Parser::new();
+    parser
+        .set_language(&tree_sitter_vba::LANGUAGE.into())
+        .unwrap();
+    let tree = parser.parse(source, None).unwrap();
+    assert!(
+        !tree.root_node().has_error(),
+        "{}",
+        tree.root_node().to_sexp()
+    );
+    let result = output(source);
+    let document = result.document();
+    assert!(
+        !document
+            .skipped_regions
+            .iter()
+            .any(|gap| gap.detail.contains("parse")),
+        "{:#?}",
+        document.skipped_regions
+    );
+    let labels: Vec<_> = document
+        .entities
+        .iter()
+        .filter(|entity| entity.kind == EntityKind::StatementLabel)
+        .collect();
+    assert_eq!(labels.len(), 3, "{:#?}", document.entities);
+    for (marker, target) in [
+        ("0010", "10"),
+        ("&HA", "10"),
+        ("10\nResume", "10"),
+        ("&H0A", "10"),
+        ("0\n10:", "0"),
+        ("20\nEnd", "20"),
+    ] {
+        let site = label_reference_at(document, source, marker);
+        let label = labels
+            .iter()
+            .find(|label| label.canonical_name == target)
+            .unwrap();
+        assert_eq!(
+            site.target,
+            OccurrenceTarget::Resolved { symbol: label.id },
+            "{marker}: {site:#?}"
+        );
+        assert_eq!(site.role, OccurrenceRole::Reference);
+    }
+    for marker in ["0\n0 On", "0\n20"] {
+        let start = u64::try_from(source.find(marker).unwrap()).unwrap();
+        assert!(
+            !document
+                .occurrences
+                .iter()
+                .any(|site| site.source.span().start_byte() == start)
+        );
+        assert!(
+            !document
+                .skipped_regions
+                .iter()
+                .any(|gap| gap.source.span().start_byte() == start)
+        );
+    }
+}
+
+#[test]
+fn vba_unparsed_octal_labels_remain_explicit_without_fabricated_bindings() {
+    let source = "Sub Run()\nGoTo &O12\n10:\nEnd Sub\n";
+    let result = output(source);
+    assert!(
+        result
+            .document()
+            .skipped_regions
+            .iter()
+            .any(|gap| gap.reason == rootlight_ir::SkippedRegionReason::ParseError)
+    );
+    assert!(
+        !result
+            .document()
+            .occurrences
+            .iter()
+            .any(|site| site.role != OccurrenceRole::Definition
+                && matches!(site.target, OccurrenceTarget::Resolved { .. }))
+    );
+}
+
+#[test]
+fn vba_statement_label_ambiguity_is_procedure_local_and_never_binds_values() {
+    for body in [
+        "",
+        "Finish:\nfinish:\n",
+        "#If DEBUG Then\nFinish:\n#End If\n",
+    ] {
+        let source = format!(
+            "Sub Run(ByVal Finish As Long)\nGoTo Finish\n{body}End Sub\nSub Other()\nGoTo Finish\nFinish:\nEnd Sub\n"
+        );
+        let result = output(&source);
+        let document = result.document();
+        let site = label_reference_at(document, &source, "Finish\n");
+        assert!(
+            matches!(site.target, OccurrenceTarget::Unresolved { .. }),
+            "{source}"
+        );
+        assert!(
+            document
+                .skipped_regions
+                .iter()
+                .any(|gap| gap.detail == "vba-statement-label-target-unavailable"
+                    && gap.source == site.source)
+        );
+        let other_start =
+            u64::try_from(source.rfind("GoTo Finish").unwrap() + "GoTo ".len()).unwrap();
+        let other = document
+            .occurrences
+            .iter()
+            .find(|site| site.source.span().start_byte() == other_start)
+            .unwrap();
+        assert!(
+            matches!(other.target, OccurrenceTarget::Resolved { .. }),
+            "{source}"
+        );
+    }
+    let source = "Sub Run()\nGoTo 10\n10:\n&H0A:\nEnd Sub\n";
+    let result = output(source);
+    assert!(matches!(
+        label_reference_at(result.document(), source, "10\n").target,
+        OccurrenceTarget::Unresolved { .. }
+    ));
+}
+
+fn label_reference_at<'a>(
+    document: &'a rootlight_ir::NormalizedIrDocument,
+    source: &str,
+    marker: &str,
+) -> &'a rootlight_ir::OccurrenceRecord {
+    let start = u64::try_from(source.find(marker).unwrap()).unwrap();
+    document
+        .occurrences
+        .iter()
+        .find(|site| {
+            site.source.span().start_byte() == start
+                && matches!(
+                    site.syntax_kind.as_str(),
+                    "vba.statement_label.reference"
+                        | "vba.error_label.reference"
+                        | "vba.resume_label.reference"
+                )
+        })
+        .unwrap_or_else(|| {
+            panic!(
+                "missing label reference {marker}: {:#?}",
+                document.occurrences
+            )
+        })
 }
 
 #[test]

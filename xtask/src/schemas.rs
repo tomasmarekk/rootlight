@@ -74,7 +74,7 @@ const GENERATED_RUST_FILES: [&str; 4] = [
 const SCHEMA_ROOT: &str = "schemas/generated";
 const PROTOCOL_GENERATED_ROOT: &str = "crates/rootlight-protocol/src/generated";
 const COMPATIBILITY_ROOT: &str = "tests/fixtures/compatibility";
-const STORAGE_COMPATIBILITY_BASELINES: [&str; 7] = [
+const STORAGE_COMPATIBILITY_BASELINES: [&str; 8] = [
     "storage/1.0/schema-fingerprints.json",
     "storage/1.1/schema-fingerprints.json",
     "storage/1.2/schema-fingerprints.json",
@@ -82,6 +82,7 @@ const STORAGE_COMPATIBILITY_BASELINES: [&str; 7] = [
     "storage/1.2/oracle-5-schema-fingerprints.json",
     "storage/1.2/oracle-6-schema-fingerprints.json",
     "storage/1.2/oracle-7-schema-fingerprints.json",
+    "storage/1.2/oracle-8-schema-fingerprints.json",
 ];
 const STORAGE_GENERATOR_INPUTS: [&str; 2] = [
     "crates/rootlight-catalog/src/schema.rs",
@@ -345,7 +346,16 @@ fn validate_storage_compatibility(workspace_root: &Path) -> Result<(), SchemaErr
                 )
             })
             .collect::<Vec<_>>()
-            != [(1, 0), (1, 1), (1, 2), (1, 2), (1, 2), (1, 2), (1, 2)]
+            != [
+                (1, 0),
+                (1, 1),
+                (1, 2),
+                (1, 2),
+                (1, 2),
+                (1, 2),
+                (1, 2),
+                (1, 2),
+            ]
         || !schema_history_is_valid(&fixtures, |fixture| &fixture.catalog)
         || !schema_history_is_valid(&fixtures, |fixture| &fixture.oracle)
     {
@@ -888,6 +898,7 @@ fn generate_json_schemas(workspace_root: &Path, staged_root: &Path) -> Result<()
         "ir-1.3.schema.json",
         "ir-1.4.schema.json",
         "ir-1.5.schema.json",
+        "ir-1.6.schema.json",
         "mcp-symbol-explain-input-1.0.schema.json",
         "mcp-symbol-explain-output-1.0.schema.json",
         "mcp-symbol-relationships-input-1.0.schema.json",
@@ -921,7 +932,62 @@ fn generate_json_schemas(workspace_root: &Path, staged_root: &Path) -> Result<()
     write_schema::<ConfigDocumentSchemaV1_2>(&schema_root.join("config-1.2.schema.json"))?;
     write_schema::<ConfigDocumentSchemaV1_3>(&schema_root.join("config-1.3.schema.json"))?;
     write_schema::<IrDocumentSchema>(&schema_root.join("ir-1.0.schema.json"))?;
-    write_normalized_ir_schema(&schema_root.join("ir-1.6.schema.json"))?;
+    write_normalized_ir_schema(&schema_root.join("ir-1.7.schema.json"))?;
+    write_mcp_tool_schema_version::<CodeLocateInput>(&schema_root, "code.locate", "input", "1.9")?;
+    write_mcp_tool_schema_version::<rootlight_mcp_contract::source_entity::CodeLocateOutputV1_9>(
+        &schema_root,
+        "code.locate",
+        "output",
+        "1.9",
+    )?;
+    write_mcp_tool_schema_version::<SymbolExplainInput>(
+        &schema_root,
+        "symbol.explain",
+        "input",
+        "1.9",
+    )?;
+    write_mcp_tool_schema_version::<rootlight_mcp_contract::source_entity::SymbolExplainOutputV1_9>(
+        &schema_root,
+        "symbol.explain",
+        "output",
+        "1.9",
+    )?;
+    write_mcp_tool_schema_version::<QueryAdvancedInput>(
+        &schema_root,
+        "query.advanced",
+        "input",
+        "1.7",
+    )?;
+    write_mcp_tool_schema_version::<rootlight_mcp_contract::source_entity::QueryAdvancedOutputV1_7>(
+        &schema_root,
+        "query.advanced",
+        "output",
+        "1.7",
+    )?;
+    write_mcp_tool_schema_version::<ChangeImpactInput>(
+        &schema_root,
+        "change.impact",
+        "input",
+        "1.6",
+    )?;
+    write_mcp_tool_schema_version::<rootlight_mcp_contract::source_entity::ChangeImpactOutputV1_6>(
+        &schema_root,
+        "change.impact",
+        "output",
+        "1.6",
+    )?;
+    write_mcp_tool_schema_version::<HistoryCompareInput>(
+        &schema_root,
+        "history.compare",
+        "input",
+        "1.6",
+    )?;
+    write_mcp_tool_schema_version::<rootlight_mcp_contract::source_entity::HistoryCompareOutputV1_6>(
+        &schema_root,
+        "history.compare",
+        "output",
+        "1.6",
+    )?;
     write_schema::<LexicalEvidenceV1>(
         &schema_root.join("ir-extension-rootlight-lexical-1.schema.json"),
     )?;
@@ -1422,7 +1488,7 @@ fn write_normalized_ir_schema(path: &Path) -> Result<(), SchemaError> {
         .into_generator()
         .into_root_schema_for::<NormalizedIrDocument>();
     // Runtime readers accept supported normalized versions, but each published
-    // schema names exactly one contract. The 1.1 through 1.5 artifacts remain frozen.
+    // schema names exactly one contract. The 1.1 through 1.6 artifacts remain frozen.
     let minor = schema
         .as_object_mut()
         .and_then(|object| object.get_mut("$defs"))
@@ -1432,7 +1498,7 @@ fn write_normalized_ir_schema(path: &Path) -> Result<(), SchemaError> {
                 "normalized IR schema is missing its exact version marker".to_owned(),
             )
         })?;
-    *minor = serde_json::json!({"type": "integer", "const": 6});
+    *minor = serde_json::json!({"type": "integer", "const": 7});
     write_schema_value(path, schema)
 }
 
@@ -1539,37 +1605,58 @@ fn write_schema_value(path: &Path, mut schema: schemars::Schema) -> Result<(), S
             .file_name()
             .and_then(std::ffi::OsStr::to_str)
             .unwrap_or("");
-        let binding_kinds = matches!(
+        let statement_kinds = matches!(
             name,
-            "mcp-code-locate-input-1.5.schema.json"
-                | "mcp-code-locate-output-1.5.schema.json"
-                | "mcp-code-locate-input-1.6.schema.json"
-                | "mcp-code-locate-output-1.6.schema.json"
-                | "mcp-code-locate-input-1.7.schema.json"
-                | "mcp-code-locate-output-1.7.schema.json"
-                | "mcp-code-locate-input-1.8.schema.json"
-                | "mcp-code-locate-output-1.8.schema.json"
-                | "mcp-query-advanced-input-1.5.schema.json"
-                | "mcp-query-advanced-output-1.5.schema.json"
-                | "mcp-query-advanced-input-1.6.schema.json"
-                | "mcp-query-advanced-output-1.6.schema.json"
-                | "mcp-symbol-explain-input-1.6.schema.json"
-                | "mcp-symbol-explain-output-1.6.schema.json"
-                | "mcp-symbol-explain-input-1.7.schema.json"
-                | "mcp-symbol-explain-output-1.7.schema.json"
-                | "mcp-symbol-explain-input-1.8.schema.json"
-                | "mcp-symbol-explain-output-1.8.schema.json"
+            "mcp-code-locate-input-1.9.schema.json"
+                | "mcp-code-locate-output-1.9.schema.json"
+                | "mcp-symbol-explain-input-1.9.schema.json"
+                | "mcp-symbol-explain-output-1.9.schema.json"
+                | "mcp-query-advanced-input-1.7.schema.json"
+                | "mcp-query-advanced-output-1.7.schema.json"
+                | "mcp-change-impact-input-1.6.schema.json"
+                | "mcp-change-impact-output-1.6.schema.json"
+                | "mcp-history-compare-input-1.6.schema.json"
+                | "mcp-history-compare-output-1.6.schema.json"
         );
+        let binding_kinds = statement_kinds
+            || matches!(
+                name,
+                "mcp-code-locate-input-1.5.schema.json"
+                    | "mcp-code-locate-output-1.5.schema.json"
+                    | "mcp-code-locate-input-1.6.schema.json"
+                    | "mcp-code-locate-output-1.6.schema.json"
+                    | "mcp-code-locate-input-1.7.schema.json"
+                    | "mcp-code-locate-output-1.7.schema.json"
+                    | "mcp-code-locate-input-1.8.schema.json"
+                    | "mcp-code-locate-output-1.8.schema.json"
+                    | "mcp-query-advanced-input-1.5.schema.json"
+                    | "mcp-query-advanced-output-1.5.schema.json"
+                    | "mcp-query-advanced-input-1.6.schema.json"
+                    | "mcp-query-advanced-output-1.6.schema.json"
+                    | "mcp-symbol-explain-input-1.6.schema.json"
+                    | "mcp-symbol-explain-output-1.6.schema.json"
+                    | "mcp-symbol-explain-input-1.7.schema.json"
+                    | "mcp-symbol-explain-output-1.7.schema.json"
+                    | "mcp-symbol-explain-input-1.8.schema.json"
+                    | "mcp-symbol-explain-output-1.8.schema.json"
+            );
         let precise_kinds = matches!(
             name,
             "mcp-code-locate-input-1.8.schema.json"
+                | "mcp-code-locate-input-1.9.schema.json"
+                | "mcp-code-locate-output-1.9.schema.json"
+                | "mcp-symbol-explain-input-1.9.schema.json"
+                | "mcp-symbol-explain-output-1.9.schema.json"
                 | "mcp-code-locate-output-1.8.schema.json"
                 | "mcp-symbol-explain-input-1.8.schema.json"
                 | "mcp-symbol-explain-output-1.8.schema.json"
         );
         let precise_output = matches!(
             name,
-            "mcp-code-locate-output-1.8.schema.json" | "mcp-symbol-explain-output-1.8.schema.json"
+            "mcp-code-locate-output-1.8.schema.json"
+                | "mcp-symbol-explain-output-1.8.schema.json"
+                | "mcp-code-locate-output-1.9.schema.json"
+                | "mcp-symbol-explain-output-1.9.schema.json"
         );
         let document_kinds = binding_kinds
             || matches!(
@@ -1641,24 +1728,27 @@ fn write_schema_value(path: &Path, mut schema: schemars::Schema) -> Result<(), S
                         || name.starts_with("mcp-history-compare-output-")
                 }
                 Some("document_section" | "link_definition") => document_kinds,
+                Some("statement_label") => statement_kinds,
                 Some("event" | "error_declaration" | "modifier") => declaration_kinds,
                 Some("markup_element" | "markup_attribute") => source_kinds,
                 Some("style_rule" | "keyframes") => stylesheet_kinds,
                 Some("database_object") => database_kinds,
                 Some("build_target") => {
-                    matches!(
-                        name,
-                        "mcp-code-locate-input-1.7.schema.json"
-                            | "mcp-code-locate-output-1.7.schema.json"
-                            | "mcp-code-locate-input-1.8.schema.json"
-                            | "mcp-code-locate-output-1.8.schema.json"
-                            | "mcp-query-advanced-input-1.6.schema.json"
-                            | "mcp-query-advanced-output-1.6.schema.json"
-                            | "mcp-symbol-explain-input-1.7.schema.json"
-                            | "mcp-symbol-explain-output-1.7.schema.json"
-                            | "mcp-symbol-explain-input-1.8.schema.json"
-                            | "mcp-symbol-explain-output-1.8.schema.json"
-                    ) || name.starts_with("mcp-change-impact-output-")
+                    statement_kinds
+                        || matches!(
+                            name,
+                            "mcp-code-locate-input-1.7.schema.json"
+                                | "mcp-code-locate-output-1.7.schema.json"
+                                | "mcp-code-locate-input-1.8.schema.json"
+                                | "mcp-code-locate-output-1.8.schema.json"
+                                | "mcp-query-advanced-input-1.6.schema.json"
+                                | "mcp-query-advanced-output-1.6.schema.json"
+                                | "mcp-symbol-explain-input-1.7.schema.json"
+                                | "mcp-symbol-explain-output-1.7.schema.json"
+                                | "mcp-symbol-explain-input-1.8.schema.json"
+                                | "mcp-symbol-explain-output-1.8.schema.json"
+                        )
+                        || name.starts_with("mcp-change-impact-output-")
                         || name.starts_with("mcp-history-compare-output-")
                 }
                 Some("type" | "configuration") if precise_output => false,
@@ -2512,6 +2602,34 @@ fn validate_generated_json_schemas(
         }
     }
     let mut extracted = declaration_ir.clone();
+    let mut label = declaration_ir.clone();
+    label["version"]["minor"] = serde_json::json!(7);
+    label["entities"][0]["kind"] = serde_json::json!("statement_label");
+    cases.push(SchemaSemanticCase::valid(
+        "ir-1.7.schema.json",
+        "procedure statement label",
+        label.clone(),
+    ));
+    for (minor, schema) in [
+        (1, "ir-1.1.schema.json"),
+        (2, "ir-1.2.schema.json"),
+        (3, "ir-1.3.schema.json"),
+        (4, "ir-1.4.schema.json"),
+        (5, "ir-1.5.schema.json"),
+        (6, "ir-1.6.schema.json"),
+    ] {
+        label["version"]["minor"] = serde_json::json!(minor);
+        cases.push(SchemaSemanticCase::invalid(
+            schema,
+            "label in older vocabulary",
+            label.clone(),
+        ));
+        cases.push(SchemaSemanticCase::invalid(
+            "ir-1.7.schema.json",
+            "label version downgrade",
+            label.clone(),
+        ));
+    }
     extracted["version"]["minor"] = serde_json::json!(6);
     let mut container = extracted["files"][0].clone();
     let container_id = rootlight_ids::FileId::from_bytes([240; 20]).to_string();
@@ -2628,6 +2746,18 @@ fn validate_generated_json_schemas(
                             &ExtensionSupport::default()
                         ),
                         Ok(IrDocument::NormalizedV1_6(_))
+                    )
+                }
+                "ir-1.7.schema.json" => {
+                    let encoded =
+                        serde_json::to_vec(&case.instance).map_err(SchemaError::SerializeJson)?;
+                    matches!(
+                        decode_ir_document(
+                            &encoded,
+                            &IrLimits::default(),
+                            &ExtensionSupport::default()
+                        ),
+                        Ok(IrDocument::NormalizedV1_7(_))
                     )
                 }
                 "ir-1.5.schema.json" => {
@@ -3056,6 +3186,17 @@ fn expected_artifact_paths() -> Vec<String> {
         format!("{SCHEMA_ROOT}/json/ir-1.4.schema.json"),
         format!("{SCHEMA_ROOT}/json/ir-1.5.schema.json"),
         format!("{SCHEMA_ROOT}/json/ir-1.6.schema.json"),
+        format!("{SCHEMA_ROOT}/json/ir-1.7.schema.json"),
+        format!("{SCHEMA_ROOT}/json/mcp-code-locate-input-1.9.schema.json"),
+        format!("{SCHEMA_ROOT}/json/mcp-code-locate-output-1.9.schema.json"),
+        format!("{SCHEMA_ROOT}/json/mcp-symbol-explain-input-1.9.schema.json"),
+        format!("{SCHEMA_ROOT}/json/mcp-symbol-explain-output-1.9.schema.json"),
+        format!("{SCHEMA_ROOT}/json/mcp-query-advanced-input-1.7.schema.json"),
+        format!("{SCHEMA_ROOT}/json/mcp-query-advanced-output-1.7.schema.json"),
+        format!("{SCHEMA_ROOT}/json/mcp-change-impact-input-1.6.schema.json"),
+        format!("{SCHEMA_ROOT}/json/mcp-change-impact-output-1.6.schema.json"),
+        format!("{SCHEMA_ROOT}/json/mcp-history-compare-input-1.6.schema.json"),
+        format!("{SCHEMA_ROOT}/json/mcp-history-compare-output-1.6.schema.json"),
         format!("{SCHEMA_ROOT}/json/ir-extension-rootlight-lexical-1.schema.json"),
         format!("{SCHEMA_ROOT}/json/ir-extension-rootlight-lexical-2.schema.json"),
         format!("{SCHEMA_ROOT}/json/mcp-response-metadata-1.0.schema.json"),

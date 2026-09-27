@@ -29,6 +29,8 @@ pub const NORMALIZED_IR_VERSION_V1_4: IrVersion = IrVersion::new(1, 4);
 pub const NORMALIZED_IR_VERSION_V1_5: IrVersion = IrVersion::new(1, 5);
 /// The normalized fact-document version admitting container extraction dependencies.
 pub const NORMALIZED_IR_VERSION_V1_6: IrVersion = IrVersion::new(1, 6);
+/// The normalized fact-document version admitting source statement labels.
+pub const NORMALIZED_IR_VERSION_V1_7: IrVersion = IrVersion::new(1, 7);
 /// Maximum components in one lossless file-path locator.
 pub const MAX_FILE_PATH_LOCATOR_COMPONENTS: usize = 256;
 /// Maximum aggregate hexadecimal bytes in one lossless file-path locator.
@@ -50,6 +52,8 @@ pub enum NormalizedIrVersion {
     V1_5,
     /// Common facts including immutable whole-file container extraction dependencies.
     V1_6,
+    /// Common facts including procedure-local statement labels.
+    V1_7,
 }
 
 impl NormalizedIrVersion {
@@ -69,6 +73,7 @@ impl NormalizedIrVersion {
             Self::V1_4 => NORMALIZED_IR_VERSION_V1_4,
             Self::V1_5 => NORMALIZED_IR_VERSION_V1_5,
             Self::V1_6 => NORMALIZED_IR_VERSION_V1_6,
+            Self::V1_7 => NORMALIZED_IR_VERSION_V1_7,
         }
     }
 }
@@ -95,8 +100,9 @@ impl<'de> Deserialize<'de> for NormalizedIrVersion {
             NORMALIZED_IR_VERSION_V1_4 => Ok(Self::V1_4),
             NORMALIZED_IR_VERSION_V1_5 => Ok(Self::V1_5),
             NORMALIZED_IR_VERSION_V1_6 => Ok(Self::V1_6),
+            NORMALIZED_IR_VERSION_V1_7 => Ok(Self::V1_7),
             version => Err(de::Error::custom(format_args!(
-                "expected normalized IR version 1.1 through 1.6, got {}.{}",
+                "expected normalized IR version 1.1 through 1.7, got {}.{}",
                 version.major(),
                 version.minor()
             ))),
@@ -115,7 +121,7 @@ impl schemars::JsonSchema for NormalizedIrVersion {
             "type": "object",
             "properties": {
                 "major": { "type": "integer", "const": 1 },
-                "minor": { "type": "integer", "enum": [1, 2, 3, 4, 5, 6] }
+                "minor": { "type": "integer", "enum": [1, 2, 3, 4, 5, 6, 7] }
             },
             "required": ["major", "minor"],
             "additionalProperties": false
@@ -222,6 +228,8 @@ pub enum EntityKind {
     DocumentSection,
     /// A named source binding for a link destination, not the destination resource itself.
     LinkDefinition,
+    /// A source statement position named for control transfer, not a value or callable.
+    StatementLabel,
 }
 
 impl EntityKind {
@@ -232,6 +240,7 @@ impl EntityKind {
     #[must_use]
     pub const fn minimum_ir_version(self) -> NormalizedIrVersion {
         match self {
+            Self::StatementLabel => NormalizedIrVersion::V1_7,
             Self::DocumentSection | Self::LinkDefinition => NormalizedIrVersion::V1_5,
             Self::Event | Self::ErrorDeclaration | Self::Modifier => NormalizedIrVersion::V1_4,
             Self::MarkupElement | Self::MarkupAttribute => NormalizedIrVersion::V1_3,
@@ -1147,6 +1156,8 @@ pub enum IrDocument {
     NormalizedV1_5(NormalizedIrDocument),
     /// The normalized 1.6 fact document with container extraction dependencies.
     NormalizedV1_6(NormalizedIrDocument),
+    /// The normalized 1.7 fact document with source statement labels.
+    NormalizedV1_7(NormalizedIrDocument),
 }
 
 impl IrDocument {
@@ -1161,6 +1172,7 @@ impl IrDocument {
             Self::NormalizedV1_4(_) => NORMALIZED_IR_VERSION_V1_4,
             Self::NormalizedV1_5(_) => NORMALIZED_IR_VERSION_V1_5,
             Self::NormalizedV1_6(_) => NORMALIZED_IR_VERSION_V1_6,
+            Self::NormalizedV1_7(_) => NORMALIZED_IR_VERSION_V1_7,
         }
     }
 }
@@ -1177,7 +1189,8 @@ impl Serialize for IrDocument {
             | Self::NormalizedV1_3(document)
             | Self::NormalizedV1_4(document)
             | Self::NormalizedV1_5(document)
-            | Self::NormalizedV1_6(document) => {
+            | Self::NormalizedV1_6(document)
+            | Self::NormalizedV1_7(document) => {
                 if document.version.value() != self.version() {
                     return Err(serde::ser::Error::custom(
                         "IR dispatch and document versions differ",
@@ -1686,6 +1699,7 @@ pub fn decode_ir_document_with_checkpoint(
         && version != NORMALIZED_IR_VERSION_V1_4
         && version != NORMALIZED_IR_VERSION_V1_5
         && version != NORMALIZED_IR_VERSION_V1_6
+        && version != NORMALIZED_IR_VERSION_V1_7
     {
         return Err(IrDocumentDecodeError::UnsupportedVersion {
             major: version.major(),
@@ -1727,6 +1741,10 @@ pub fn decode_ir_document_with_checkpoint(
         NORMALIZED_IR_VERSION_V1_6 => {
             decode_current_normalized_document(encoded, limits, extensions, &mut checkpoint)
                 .map(IrDocument::NormalizedV1_6)
+        }
+        NORMALIZED_IR_VERSION_V1_7 => {
+            decode_current_normalized_document(encoded, limits, extensions, &mut checkpoint)
+                .map(IrDocument::NormalizedV1_7)
         }
         version => Err(IrDocumentDecodeError::UnsupportedVersion {
             major: version.major(),
@@ -3016,8 +3034,15 @@ mod tests {
                 "link_definition",
                 "link-definition",
             ),
+            (
+                EntityKind::StatementLabel,
+                "statement_label",
+                "statement-label",
+            ),
         ] {
-            let version = if matches!(
+            let version = if kind == EntityKind::StatementLabel {
+                NormalizedIrVersion::V1_7
+            } else if matches!(
                 kind,
                 EntityKind::DocumentSection | EntityKind::LinkDefinition
             ) {
@@ -3034,9 +3059,9 @@ mod tests {
             let dispatched = decode(&encoded, &limits).unwrap();
             assert_eq!(dispatched.version(), version.value());
             let document = match &dispatched {
-                IrDocument::NormalizedV1_4(document) | IrDocument::NormalizedV1_5(document) => {
-                    document.clone()
-                }
+                IrDocument::NormalizedV1_4(document)
+                | IrDocument::NormalizedV1_5(document)
+                | IrDocument::NormalizedV1_7(document) => document.clone(),
                 _ => panic!("expected the exact required normalized version"),
             };
             assert_eq!(document.entities[0].kind, kind);
@@ -3075,6 +3100,8 @@ mod tests {
                 IrDocument::NormalizedV1_2(document.clone()),
                 IrDocument::NormalizedV1_3(document.clone()),
                 IrDocument::NormalizedV1_4(document.clone()),
+                IrDocument::NormalizedV1_5(document.clone()),
+                IrDocument::NormalizedV1_6(document.clone()),
             ] {
                 if wrapper.version() < version.value() {
                     assert!(serde_json::to_vec(&wrapper).is_err());
@@ -3085,6 +3112,8 @@ mod tests {
                 NormalizedIrVersion::V1_2,
                 NormalizedIrVersion::V1_3,
                 NormalizedIrVersion::V1_4,
+                NormalizedIrVersion::V1_5,
+                NormalizedIrVersion::V1_6,
             ] {
                 if lower >= version {
                     continue;
@@ -3200,10 +3229,10 @@ mod tests {
         );
 
         let mut value = normalized_value();
-        value["version"]["minor"] = serde_json::json!(7);
+        value["version"]["minor"] = serde_json::json!(8);
         assert_eq!(
             decode(&encode_test_value(&value), &IrLimits::default()),
-            Err(IrDocumentDecodeError::UnsupportedVersion { major: 1, minor: 7 })
+            Err(IrDocumentDecodeError::UnsupportedVersion { major: 1, minor: 8 })
         );
     }
 

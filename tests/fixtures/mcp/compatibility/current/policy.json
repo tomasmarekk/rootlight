@@ -33,12 +33,12 @@
         "tool": "operation.status"
       },
       {
-        "current_version": "1.8",
+        "current_version": "1.9",
         "projected_version": "1.0",
         "tool": "code.locate"
       },
       {
-        "current_version": "1.8",
+        "current_version": "1.9",
         "projected_version": "1.0",
         "tool": "symbol.explain"
       },
@@ -48,7 +48,7 @@
         "tool": "symbol.relationships"
       },
       {
-        "current_version": "1.5",
+        "current_version": "1.6",
         "projected_version": "1.0",
         "tool": "change.impact"
       },
@@ -73,7 +73,7 @@
         "tool": "code.dead"
       },
       {
-        "current_version": "1.5",
+        "current_version": "1.6",
         "projected_version": "1.0",
         "tool": "history.compare"
       },
@@ -93,7 +93,7 @@
         "tool": "source.read"
       },
       {
-        "current_version": "1.6",
+        "current_version": "1.7",
         "projected_version": "1.0",
         "tool": "query.advanced"
       }
@@ -214,6 +214,72 @@
         "tools": [
           "query.advanced"
         ]
+      },
+      {
+        "kinds": [
+          "statement_label"
+        ],
+        "partial_result_returned": false,
+        "public_error": "PROTOCOL_MISMATCH",
+        "recovery": "select_supported_version",
+        "required_version": "1.9",
+        "retained_versions": [
+          "1.0",
+          "1.1",
+          "1.2",
+          "1.3",
+          "1.4",
+          "1.5",
+          "1.6",
+          "1.7",
+          "1.8"
+        ],
+        "tools": [
+          "code.locate",
+          "symbol.explain"
+        ]
+      },
+      {
+        "kinds": [
+          "statement_label"
+        ],
+        "partial_result_returned": false,
+        "public_error": "PROTOCOL_MISMATCH",
+        "recovery": "select_supported_version",
+        "required_version": "1.7",
+        "retained_versions": [
+          "1.0",
+          "1.1",
+          "1.2",
+          "1.3",
+          "1.4",
+          "1.5",
+          "1.6"
+        ],
+        "tools": [
+          "query.advanced"
+        ]
+      },
+      {
+        "kinds": [
+          "statement_label"
+        ],
+        "partial_result_returned": false,
+        "public_error": "PROTOCOL_MISMATCH",
+        "recovery": "select_supported_version",
+        "required_version": "1.6",
+        "retained_versions": [
+          "1.0",
+          "1.1",
+          "1.2",
+          "1.3",
+          "1.4",
+          "1.5"
+        ],
+        "tools": [
+          "change.impact",
+          "history.compare"
+        ]
       }
     ]
   },
@@ -237,11 +303,11 @@
     },
     {
       "tool": "code.locate",
-      "version": "1.8"
+      "version": "1.9"
     },
     {
       "tool": "symbol.explain",
-      "version": "1.8"
+      "version": "1.9"
     },
     {
       "tool": "symbol.relationships",
@@ -253,7 +319,7 @@
     },
     {
       "tool": "change.impact",
-      "version": "1.5"
+      "version": "1.6"
     },
     {
       "tool": "tests.select",
@@ -273,7 +339,7 @@
     },
     {
       "tool": "history.compare",
-      "version": "1.5"
+      "version": "1.6"
     },
     {
       "tool": "plan.change",
@@ -289,7 +355,7 @@
     },
     {
       "tool": "query.advanced",
-      "version": "1.6"
+      "version": "1.7"
     },
     {
       "tool": "query.batch",

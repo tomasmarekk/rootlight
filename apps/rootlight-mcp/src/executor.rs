@@ -8894,6 +8894,7 @@ fn raw_entity_kinds(kind: EntityKind) -> &'static [&'static str] {
         EntityKind::Modifier => &["modifier"],
         EntityKind::DocumentSection => &["document_section"],
         EntityKind::LinkDefinition => &["link_definition"],
+        EntityKind::StatementLabel => &["statement_label"],
     }
 }
 
@@ -8936,6 +8937,7 @@ fn entity_kind(kind: &str) -> Result<EntityKind, ToolExecutionError> {
         "modifier" => EntityKind::Modifier,
         "document_section" => EntityKind::DocumentSection,
         "link_definition" => EntityKind::LinkDefinition,
+        "statement_label" => EntityKind::StatementLabel,
         _ => return Err(internal(ToolExecutionFailure::InvalidResponse)),
     };
     Ok(kind)

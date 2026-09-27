@@ -2562,6 +2562,8 @@ pub enum AdvancedEntityKind {
     DocumentSection,
     /// Authored named document link definition.
     LinkDefinition,
+    /// Source statement label, not an ordinary value or callable.
+    StatementLabel,
     /// Authored build target.
     BuildTarget,
 }
@@ -2593,6 +2595,7 @@ impl AdvancedEntityKind {
             Self::Modifier => "modifier",
             Self::DocumentSection => "document_section",
             Self::LinkDefinition => "link_definition",
+            Self::StatementLabel => "statement_label",
             Self::BuildTarget => "build_target",
         }
     }
@@ -2623,6 +2626,7 @@ impl AdvancedEntityKind {
             "modifier" => Some(Self::Modifier),
             "document_section" => Some(Self::DocumentSection),
             "link_definition" => Some(Self::LinkDefinition),
+            "statement_label" => Some(Self::StatementLabel),
             "build_target" => Some(Self::BuildTarget),
             _ => None,
         }
@@ -2674,6 +2678,7 @@ impl AdvancedEntityKind {
             Self::Modifier => matches!(kind, IrEntityKind::Modifier),
             Self::DocumentSection => matches!(kind, IrEntityKind::DocumentSection),
             Self::LinkDefinition => matches!(kind, IrEntityKind::LinkDefinition),
+            Self::StatementLabel => matches!(kind, IrEntityKind::StatementLabel),
             Self::BuildTarget => matches!(kind, IrEntityKind::BuildTarget),
         }
     }
@@ -3409,6 +3414,11 @@ mod tests {
                 AdvancedEntityKind::BuildTarget,
                 EntityKind::BuildTarget,
                 "build_target",
+            ),
+            (
+                AdvancedEntityKind::StatementLabel,
+                EntityKind::StatementLabel,
+                "statement_label",
             ),
         ];
         for (kind, ir_kind, label) in cases {

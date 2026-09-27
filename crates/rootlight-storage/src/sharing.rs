@@ -325,7 +325,8 @@ pub fn import_shared_generation(
         | IrDocument::NormalizedV1_3(document)
         | IrDocument::NormalizedV1_4(document)
         | IrDocument::NormalizedV1_5(document)
-        | IrDocument::NormalizedV1_6(document) => document,
+        | IrDocument::NormalizedV1_6(document)
+        | IrDocument::NormalizedV1_7(document) => document,
         IrDocument::LegacyV1_0(_) => return Err(SharedGenerationError::Document),
     };
     if document.repository != manifest.repository || document.generation != manifest.generation {

@@ -656,7 +656,9 @@ impl QueryPack {
                 {
                     continue;
                 }
-                if input.family.is_classic_basic() && !vba::retain_capture(capture.node, role) {
+                if input.family.is_classic_basic()
+                    && !vba::retain_capture(capture.node, role, input.source)
+                {
                     continue;
                 }
                 if input.family.is_classic_basic()
@@ -1118,7 +1120,10 @@ fn candidate_for_capture(
             {
                 "vba.class"
             } else if role == StructuralRole::Reference
-                && matches!(capture.node.kind(), "identifier" | "bang_identifier")
+                && matches!(
+                    capture.node.kind(),
+                    "identifier" | "bang_identifier" | "line_number_literal"
+                )
             {
                 vba::reference_syntax(capture.node, source, cancellation)?
             } else if role == StructuralRole::Reference

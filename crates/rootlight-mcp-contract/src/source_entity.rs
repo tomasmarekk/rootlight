@@ -10,17 +10,67 @@ use crate::vertical::{
     RequiredNullable, ResolvedRepository, ResponseWarning, SymbolExplainData, UsageSummary,
 };
 
-/// Contract revision for build-target-aware advanced queries.
-pub const QUERY_VERSION: &str = "1.6";
+/// Contract revision for statement-label-aware advanced queries.
+pub const QUERY_VERSION: &str = "1.7";
 /// Contract revision for exact source entity kinds in explanations.
-pub const EXPLAIN_VERSION: &str = "1.8";
+pub const EXPLAIN_VERSION: &str = "1.9";
 /// Contract revision for change results containing source entities.
-pub const CHANGE_VERSION: &str = "1.5";
+pub const CHANGE_VERSION: &str = "1.6";
 
 /// Contract revision for exact source entity kinds in locate results.
-pub const LOCATE_VERSION: &str = "1.8";
+pub const LOCATE_VERSION: &str = "1.9";
 /// Contract revision for source reads with explicit extracted-source origins.
 pub const SOURCE_READ_VERSION: &str = "1.1";
+
+/// Exact version of statement-label-aware locate and explanation responses.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub enum StatementEntityVersion {
+    /// Locate and explanation contract 1.9.
+    #[serde(rename = "1.9")]
+    V1_9,
+}
+
+/// Exact version of statement-label-aware advanced queries.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub enum StatementQueryVersion {
+    /// Advanced query contract 1.7.
+    #[serde(rename = "1.7")]
+    V1_7,
+}
+
+/// Exact version of statement-label-aware change and history responses.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub enum StatementChangeVersion {
+    /// Change and history contract 1.6.
+    #[serde(rename = "1.6")]
+    V1_6,
+}
+
+/// Statement-label-aware `code.locate` success or domain error.
+pub type CodeLocateOutputV1_9 = EntityToolResponse<
+    EntityReadEnvelope<CodeLocateData, StatementEntityVersion>,
+    StatementEntityVersion,
+>;
+/// Statement-label-aware `symbol.explain` success or domain error.
+pub type SymbolExplainOutputV1_9 = EntityToolResponse<
+    EntityReadEnvelope<SymbolExplainData, StatementEntityVersion>,
+    StatementEntityVersion,
+>;
+/// Statement-label-aware `query.advanced` success or domain error.
+pub type QueryAdvancedOutputV1_7 = EntityToolResponse<
+    EntityReadEnvelope<crate::context::QueryAdvancedData, StatementQueryVersion>,
+    StatementQueryVersion,
+>;
+/// Statement-label-aware `change.impact` success or domain error.
+pub type ChangeImpactOutputV1_6 = EntityToolResponse<
+    EntityReadEnvelope<crate::change::ChangeImpactData, StatementChangeVersion>,
+    StatementChangeVersion,
+>;
+/// Statement-label-aware `history.compare` success or domain error.
+pub type HistoryCompareOutputV1_6 = EntityToolResponse<
+    EntityReadEnvelope<crate::change::HistoryCompareData, StatementChangeVersion>,
+    StatementChangeVersion,
+>;
 
 /// Exact version of origin-aware locate responses.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]

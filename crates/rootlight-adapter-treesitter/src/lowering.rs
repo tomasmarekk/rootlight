@@ -5458,6 +5458,9 @@ fn comment_text(text: &str) -> Option<&str> {
 fn source_reference_gap(fact: &SyntaxFact) -> Option<&'static str> {
     match fact.syntax_kind().as_str() {
         "vba.event_identifier.reference" => Some("vba-event-target-unavailable"),
+        "vba.statement_label.reference"
+        | "vba.error_label.reference"
+        | "vba.resume_label.reference" => Some("vba-statement-label-target-unavailable"),
         "vba.direct_type_identifier.reference"
         | "vba.automatic_type_identifier.reference"
         | "vba.unsupported_automatic_type_identifier.reference"

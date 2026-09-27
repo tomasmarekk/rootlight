@@ -245,7 +245,7 @@ impl PreparedSources {
             document.diagnostics.push(diagnostic);
         }
         if !self.origins.is_empty() {
-            document.version = NormalizedIrVersion::V1_6;
+            document.version = document.version.max(NormalizedIrVersion::V1_6);
         }
         let mut increments = references::append(&self.references, document, limits, cancellation)?;
         for &(derived, _) in &self.origins {

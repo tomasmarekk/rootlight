@@ -1309,6 +1309,7 @@ fn project_entity_kind(kind: EntityKind) -> Option<Kind> {
         | EntityKind::Modifier
         | EntityKind::DocumentSection
         | EntityKind::LinkDefinition
+        | EntityKind::StatementLabel
         | EntityKind::Commit
         | EntityKind::Change
         | EntityKind::CommunityView

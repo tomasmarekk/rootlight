@@ -759,6 +759,124 @@ fn native_raised_events_keep_exact_relationships_through_rename_and_restart() {
     }
 }
 
+#[test]
+fn native_statement_labels_survive_rename_noop_restart_and_clean_rebuild() {
+    let root = tempdir();
+    let storage = tempdir();
+    let paths = rootlight_runtime::RuntimePaths::new(
+        storage.path().join("state"),
+        storage.path().join("runtime"),
+    )
+    .unwrap();
+    paths.prepare_owner().unwrap();
+    let mut previous = None;
+    for (name, resolved) in [("Finish", true), ("Renamed", false), ("Finish", true)] {
+        let source = format!(
+            "Attribute VB_Name = \"Worker\"\r\nPublic Sub Run()\r\nGoTo Finish\r\n{name}:\r\nEnd Sub\r\n"
+        );
+        let book = fixture::typed_book(&[
+            ("Worker", source.as_bytes(), false),
+            ("Beta", SECOND, false),
+        ]);
+        fs::write(root.path().join("book.xlsm"), &book).unwrap();
+        let mut service =
+            FirstSliceService::new_durable(4, paths.state_dir(), &deadline()).unwrap();
+        let receipt = service.index_repository(root.path(), &deadline()).unwrap();
+        assert_eq!(
+            service.index_repository(root.path(), &deadline()).unwrap(),
+            receipt
+        );
+        assert_ne!(previous, Some(receipt.generation));
+        previous = Some(receipt.generation);
+        drop(service);
+        let mut service =
+            FirstSliceService::new_durable(4, paths.state_dir(), &deadline()).unwrap();
+        let snapshot = service
+            .loaded_generation_snapshot(receipt.generation)
+            .unwrap();
+        let document = snapshot.document();
+        assert_eq!(document.version, NormalizedIrVersion::V1_7);
+        let label = document
+            .entities
+            .iter()
+            .find(|entity| {
+                entity.kind == EntityKind::StatementLabel && entity.canonical_name == name
+            })
+            .unwrap();
+        let site = document
+            .occurrences
+            .iter()
+            .find(|site| site.syntax_kind == "vba.statement_label.reference")
+            .unwrap();
+        assert_eq!(
+            site.target == OccurrenceTarget::Resolved { symbol: label.id },
+            resolved
+        );
+        assert_eq!(
+            document
+                .skipped_regions
+                .iter()
+                .any(|gap| gap.source == site.source
+                    && gap.detail == "vba-statement-label-target-unavailable"),
+            !resolved
+        );
+        let relationships = service
+            .symbol_relationships(
+                receipt.generation,
+                BTreeSet::from([label.id]),
+                vec![RelationFamily::References],
+                Some(RelationDirection::Inbound),
+                0,
+                16,
+                0,
+                &deadline(),
+            )
+            .unwrap();
+        assert_eq!(
+            relationships
+                .data
+                .groups
+                .iter()
+                .flat_map(|group| &group.items)
+                .flat_map(|edge| &edge.source_refs)
+                .any(|reference| reference == &site.source),
+            resolved
+        );
+        assert!(!relationships.data.truncated);
+        let read = service
+            .source_read_with_options_and_budget(
+                receipt.generation,
+                vec![site.source.clone()],
+                SourceReadOptions::new()
+                    .with_context_lines_before(0)
+                    .with_context_lines_after(0),
+                FirstSliceBudget::default(),
+                &deadline(),
+            )
+            .unwrap();
+        assert_eq!(read.data.chunks[0].bytes, b"Finish");
+        assert_eq!(site.source.generation(), receipt.generation);
+        assert_eq!(
+            read.data.chunks[0]
+                .extracted_from
+                .as_ref()
+                .unwrap()
+                .content_hash(),
+            content_hash(&book)
+        );
+        let prepared = service
+            .prepare_repository_with_options(
+                root.path(),
+                FirstSliceIndexOptions::clean_rebuild(FirstSliceIndexMode::Structural),
+                &deadline(),
+            )
+            .unwrap();
+        let rebuilt = service.publish_prepared(prepared, &deadline()).unwrap();
+        assert!(receipt.logical_snapshot.is_some());
+        assert_eq!(rebuilt.logical_snapshot, receipt.logical_snapshot);
+    }
+}
+
 fn deadline() -> Cancellation {
     Cancellation::with_deadline(Instant::now().checked_add(Duration::from_secs(30)).unwrap())
 }

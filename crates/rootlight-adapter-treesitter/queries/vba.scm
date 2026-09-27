@@ -26,7 +26,11 @@
 (parameter name: (_) @definition) @declaration
 (variable_declarator name: (_) @definition) @declaration
 (const_declarator name: (_) @definition) @declaration
+(label_statement name: (_) @definition) @declaration
+(line_number_prefix (line_number_literal) @definition @declaration)
+(line_number_statement number: (line_number_literal) @definition @declaration)
 (identifier) @reference
+(line_number_literal) @reference
 (bang_identifier) @reference
 (qualified_member_expression) @reference
 (implicit_member_expression) @reference

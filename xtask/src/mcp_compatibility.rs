@@ -356,7 +356,12 @@ fn success_examples(root: &Path) -> Result<Value, CompatibilityError> {
         |_| Ok(()),
     )?;
     upgrade_additive_success_example(&mut tools, "symbol.relationships", "1.1", |_| Ok(()))?;
-    upgrade_additive_success_example(&mut tools, "change.impact", "1.5", |_| Ok(()))?;
+    upgrade_additive_success_example(
+        &mut tools,
+        "change.impact",
+        VerticalTool::ChangeImpact.contract_version(),
+        |_| Ok(()),
+    )?;
     upgrade_additive_success_example(&mut tools, "tests.select", "1.1", |data| {
         data.get_mut("coverage_strategy")
             .and_then(Value::as_object_mut)
@@ -394,7 +399,12 @@ fn success_examples(root: &Path) -> Result<Value, CompatibilityError> {
             .insert("entry_symbols".to_owned(), json!([]));
         Ok(())
     })?;
-    upgrade_additive_success_example(&mut tools, "history.compare", "1.5", |_| Ok(()))?;
+    upgrade_additive_success_example(
+        &mut tools,
+        "history.compare",
+        VerticalTool::HistoryCompare.contract_version(),
+        |_| Ok(()),
+    )?;
     upgrade_additive_success_example(&mut tools, "plan.change", "1.1", |_| Ok(()))?;
     upgrade_additive_success_example(&mut tools, "context.pack", "1.1", |_| Ok(()))?;
     validate_examples(&tools)?;
@@ -436,7 +446,9 @@ fn validate_retained_output_projections(tools: &[Value]) -> Result<(), Compatibi
                     tool.name()
                 ))
             })?;
-        let schema = if tool.recent_contract_version() == Some(output_version) {
+        let schema = if tool.pre_label_contract_version() == Some(output_version) {
+            tool.pre_label_output_schema_json()
+        } else if tool.recent_contract_version() == Some(output_version) {
             tool.recent_output_schema_json()
         } else if tool.previous_contract_version() == Some(output_version) {
             tool.previous_output_schema_json()
@@ -694,6 +706,30 @@ fn policy_snapshot() -> Value {
                 "tools": ["query.advanced"],
                 "retained_versions": ["1.0", "1.1", "1.2", "1.3", "1.4", "1.5"],
                 "kinds": ["build_target"],
+                "required_version": "1.6",
+                "public_error": ErrorCode::ProtocolMismatch,
+                "recovery": "select_supported_version",
+                "partial_result_returned": false,
+            }, {
+                "tools": ["code.locate", "symbol.explain"],
+                "retained_versions": ["1.0", "1.1", "1.2", "1.3", "1.4", "1.5", "1.6", "1.7", "1.8"],
+                "kinds": ["statement_label"],
+                "required_version": "1.9",
+                "public_error": ErrorCode::ProtocolMismatch,
+                "recovery": "select_supported_version",
+                "partial_result_returned": false,
+            }, {
+                "tools": ["query.advanced"],
+                "retained_versions": ["1.0", "1.1", "1.2", "1.3", "1.4", "1.5", "1.6"],
+                "kinds": ["statement_label"],
+                "required_version": "1.7",
+                "public_error": ErrorCode::ProtocolMismatch,
+                "recovery": "select_supported_version",
+                "partial_result_returned": false,
+            }, {
+                "tools": ["change.impact", "history.compare"],
+                "retained_versions": ["1.0", "1.1", "1.2", "1.3", "1.4", "1.5"],
+                "kinds": ["statement_label"],
                 "required_version": "1.6",
                 "public_error": ErrorCode::ProtocolMismatch,
                 "recovery": "select_supported_version",
@@ -1452,12 +1488,12 @@ mod tests {
                 },
                 {
                     "tool": "code.locate",
-                    "current_version": "1.8",
+                    "current_version": "1.9",
                     "projected_version": "1.0",
                 },
                 {
                     "tool": "symbol.explain",
-                    "current_version": "1.8",
+                    "current_version": "1.9",
                     "projected_version": "1.0",
                 },
                 {
@@ -1467,7 +1503,7 @@ mod tests {
                 },
                 {
                     "tool": "change.impact",
-                    "current_version": "1.5",
+                    "current_version": "1.6",
                     "projected_version": "1.0",
                 },
                 {
@@ -1492,7 +1528,7 @@ mod tests {
                 },
                 {
                     "tool": "history.compare",
-                    "current_version": "1.5",
+                    "current_version": "1.6",
                     "projected_version": "1.0",
                 },
                 {
@@ -1512,7 +1548,7 @@ mod tests {
                 },
                 {
                     "tool": "query.advanced",
-                    "current_version": "1.6",
+                    "current_version": "1.7",
                     "projected_version": "1.0",
                 },
             ])

@@ -78,6 +78,89 @@ pub fn scope_page_candidate() -> usize {
 ";
 
 #[test]
+fn vba_statement_labels_cross_real_process_boundaries_without_lossy_downgrades() {
+    let source = b"Private Declare PtrSafe Function Clock Lib \"clock\" () As Long\nPublic Sub Run()\nGoTo Finish\nFinish:\nEnd Sub\n";
+    let mut fixture =
+        RetrievalFixture::spawn_with_sources(&[("Module.bas", source)], FixtureLayout::Data);
+    let arguments =
+        json!({"query": "Finish", "search_modes": ["exact"], "response_profile": "evidence"});
+    let located = fixture.standalone("label-locate", "code.locate", arguments.clone());
+    assert_success(&located, "code.locate");
+    let found = located["result"]["structuredContent"]["data"]["matches"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|item| item["kind"] == "statement_label")
+        .unwrap_or_else(|| panic!("missing statement label: {located:#}"));
+    let symbol = found["symbol_id"].clone();
+    assert!(symbol.is_string());
+    let reference = found["source_ref"].clone();
+    let read = fixture.standalone("label-source", "source.read", json!({"references": [{"source_ref": reference}], "context_lines_before": 0, "context_lines_after": 0, "response_profile": "evidence"}));
+    assert_success(&read, "source.read");
+    let start = usize::try_from(reference["span"]["start_byte"].as_u64().unwrap()).unwrap();
+    let end = usize::try_from(reference["span"]["end_byte"].as_u64().unwrap()).unwrap();
+    assert_eq!(
+        read["result"]["structuredContent"]["data"]["chunks"][0]["content"]
+            .as_str()
+            .unwrap()
+            .as_bytes(),
+        &source[start..end]
+    );
+    assert_eq!(
+        reference["generation"],
+        located["result"]["structuredContent"]["generation"]["generation_id"]
+    );
+    let explanation = fixture.standalone(
+        "label-explain",
+        "symbol.explain",
+        json!({"symbol_ids": [symbol], "response_profile": "evidence"}),
+    );
+    assert_success(&explanation, "symbol.explain");
+    assert_eq!(
+        explanation["result"]["structuredContent"]["data"]["symbols"][0]["kind"],
+        "statement_label"
+    );
+    let advanced = fixture.standalone(
+        "label-query",
+        "query.advanced",
+        json!({"query": {"op": "scan", "entity": "statement_label"}}),
+    );
+    assert_success(&advanced, "query.advanced");
+    assert!(
+        advanced["result"]["structuredContent"]["data"]["rows"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|row| row["id"] == symbol && row["kind"] == "statement_label")
+    );
+    let related = fixture.standalone("label-references", "symbol.relationships", json!({"symbol_ids": [symbol], "relations": ["references"], "direction": "inbound", "include_candidates": false, "response_profile": "evidence"}));
+    assert_success(&related, "symbol.relationships");
+    let edge = &related["result"]["structuredContent"]["data"]["groups"][0]["items"][0];
+    let reference = edge["source_refs"][0].clone();
+    let transfer = fixture.standalone("label-transfer-source", "source.read", json!({"references": [{"source_ref": reference}], "context_lines_before": 0, "context_lines_after": 0}));
+    assert_success(&transfer, "source.read");
+    assert_eq!(
+        transfer["result"]["structuredContent"]["data"]["chunks"][0]["content"],
+        "Finish"
+    );
+    for (tool, arguments) in [
+        ("code.locate", arguments),
+        (
+            "symbol.explain",
+            json!({"symbol_ids": [symbol], "response_profile": "evidence"}),
+        ),
+    ] {
+        let old = fixture.standalone_version("label-retained", tool, arguments, "1.8");
+        assert_eq!(old["result"]["isError"], true);
+        assert_eq!(
+            old["result"]["structuredContent"]["error"]["code"],
+            "PROTOCOL_MISMATCH"
+        );
+    }
+    fixture.finish();
+}
+
+#[test]
 fn office_modules_preserve_exact_sources_and_origins_across_processes() {
     let alpha = b"Attribute VB_Name = \"Alpha\"\r\nPublic Function OfficeCompute() As Long\r\n OfficeCompute = 7\r\nEnd Function\r\n";
     let beta = b"Attribute VB_Name = \"Beta\"\r\nPublic Sub OfficeDispatch()\r\nEnd Sub\r\n";

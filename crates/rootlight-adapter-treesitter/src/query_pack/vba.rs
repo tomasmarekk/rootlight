@@ -112,11 +112,34 @@ fn declaration_syntax(kind: &str) -> Option<&'static str> {
         "parameter" => "vba.parameter",
         "variable_declarator" => "vba.variable",
         "const_declarator" => "vba.constant",
+        "label_statement" => "vba.statement_label",
         _ => return None,
     })
 }
 
-pub(super) fn retain_capture(node: Node<'_>, role: StructuralRole) -> bool {
+pub(super) fn retain_capture(node: Node<'_>, role: StructuralRole, source: &[u8]) -> bool {
+    if role == StructuralRole::Reference && node.kind() == "line_number_literal" {
+        return node.parent().is_some_and(|parent| {
+            if matches!(parent.kind(), "on_error_statement" | "resume_statement")
+                && source
+                    .get(node.byte_range())
+                    .and_then(|bytes| std::str::from_utf8(bytes).ok())
+                    .and_then(crate::vba_bindings::statement_label_key)
+                    .as_deref()
+                    == Some("0")
+            {
+                return false;
+            }
+            matches!(
+                parent.kind(),
+                "goto_statement"
+                    | "gosub_statement"
+                    | "on_goto_statement"
+                    | "on_error_statement"
+                    | "resume_statement"
+            )
+        });
+    }
     // Keep application evidence even when its named procedure can be bound:
     // argument compatibility and dispatch through returned values are separate.
     if role != StructuralRole::Reference || !matches!(node.kind(), "identifier" | "bang_identifier")
@@ -142,6 +165,14 @@ pub(super) fn retain_capture(node: Node<'_>, role: StructuralRole) -> bool {
 }
 
 pub(super) fn syntax(node: Node<'_>, role: StructuralRole) -> Option<&'static str> {
+    if node.kind() == "line_number_literal"
+        && matches!(
+            role,
+            StructuralRole::Definition | StructuralRole::Declaration
+        )
+    {
+        return Some("vba.statement_label");
+    }
     if matches!(role, StructuralRole::Definition | StructuralRole::Reference)
         && node.parent().is_some_and(|parent| {
             parent.kind() == "attribute_statement"
@@ -309,6 +340,21 @@ pub(super) fn reference_syntax(
         let kind = parent.kind();
         if kind == "raise_event_statement" && parent.child_by_field_name("event") == Some(child) {
             return Ok("vba.event_identifier");
+        }
+        if (matches!(
+            kind,
+            "goto_statement" | "gosub_statement" | "on_error_statement" | "resume_statement"
+        ) && parent.child_by_field_name("target") == Some(child))
+            || (kind == "on_goto_statement"
+                && parent.child_by_field_name("selector") != Some(child))
+        {
+            return Ok(if kind == "on_error_statement" {
+                "vba.error_label"
+            } else if kind == "resume_statement" {
+                "vba.resume_label"
+            } else {
+                "vba.statement_label"
+            });
         }
         if matches!(
             kind,

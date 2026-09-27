@@ -62,7 +62,7 @@
           "next_actions": [],
           "retryable": false
         },
-        "schema_version": "1.8"
+        "schema_version": "1.9"
       },
       "tool": "code.locate"
     },
@@ -75,7 +75,7 @@
           "next_actions": [],
           "retryable": false
         },
-        "schema_version": "1.8"
+        "schema_version": "1.9"
       },
       "tool": "symbol.explain"
     },
@@ -114,7 +114,7 @@
           "next_actions": [],
           "retryable": false
         },
-        "schema_version": "1.5"
+        "schema_version": "1.6"
       },
       "tool": "change.impact"
     },
@@ -179,7 +179,7 @@
           "next_actions": [],
           "retryable": false
         },
-        "schema_version": "1.5"
+        "schema_version": "1.6"
       },
       "tool": "history.compare"
     },
@@ -231,7 +231,7 @@
           "next_actions": [],
           "retryable": false
         },
-        "schema_version": "1.6"
+        "schema_version": "1.7"
       },
       "tool": "query.advanced"
     },

@@ -109,6 +109,7 @@ fn source_declaration_kinds_preserve_their_exact_public_labels() {
         "modifier",
         "document_section",
         "link_definition",
+        "statement_label",
         "build_target",
     ] {
         let kind = entity_kind(label).expect("source declaration maps without coercion");
@@ -4311,6 +4312,7 @@ async fn source_entity_contracts_preserve_evidence_and_reject_lossy_downgrades()
         "modifier",
         "document_section",
         "link_definition",
+        "statement_label",
     ] {
         for tool in [VerticalTool::CodeLocate, VerticalTool::SymbolExplain] {
             let mut locate = locate_response();
@@ -4334,6 +4336,7 @@ async fn source_entity_contracts_preserve_evidence_and_reject_lossy_downgrades()
             };
             for version in [
                 Some(tool.contract_version()),
+                tool.pre_label_contract_version(),
                 tool.recent_contract_version(),
                 tool.previous_contract_version(),
                 tool.legacy_contract_version(),
@@ -4358,7 +4361,9 @@ async fn source_entity_contracts_preserve_evidence_and_reject_lossy_downgrades()
                 let HandlerResponse::Success(result) = response else {
                     panic!("checked tool result for {tool:?} {kind} {version}: {response:?}");
                 };
-                let minimum = if kind == "build_target" {
+                let minimum = if kind == "statement_label" {
+                    9
+                } else if kind == "build_target" {
                     7
                 } else {
                     (match kind {

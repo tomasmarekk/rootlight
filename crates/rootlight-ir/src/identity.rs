@@ -911,6 +911,7 @@ pub const fn entity_kind_identity_label(kind: EntityKind) -> &'static str {
         EntityKind::Modifier => "modifier",
         EntityKind::DocumentSection => "document-section",
         EntityKind::LinkDefinition => "link-definition",
+        EntityKind::StatementLabel => "statement-label",
         EntityKind::Commit => "commit",
         EntityKind::Change => "change",
         EntityKind::CommunityView => "community-view",

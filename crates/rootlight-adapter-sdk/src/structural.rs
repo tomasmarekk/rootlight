@@ -54,6 +54,9 @@ pub fn structural_entity_kind(fact: &SyntaxFact) -> Option<EntityKind> {
         SyntaxFactKind::Declaration if label == "markdown.link_definition.declaration" => {
             Some(EntityKind::LinkDefinition)
         }
+        SyntaxFactKind::Declaration if label == "vba.statement_label.declaration" => {
+            Some(EntityKind::StatementLabel)
+        }
         SyntaxFactKind::Declaration
             if matches!(
                 label,

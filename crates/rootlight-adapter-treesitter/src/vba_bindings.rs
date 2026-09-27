@@ -92,6 +92,8 @@ pub(super) struct VbaBindings<'a> {
     // Their ambiguity and foreign-name barriers must not cross namespaces.
     events: BTreeMap<u64, BTreeMap<String, Option<SymbolId>>>,
     foreign_event_scopes: BTreeSet<u64>,
+    statement_labels: BTreeMap<u64, BTreeMap<String, Option<SymbolId>>>,
+    foreign_label_scopes: BTreeSet<u64>,
     branch_bindings: BTreeMap<u64, BTreeMap<String, Option<Binding>>>,
     // A shared None also represents conditional shadowing, so it cannot tell
     // whether a same-named unconditional declaration makes a branch ambiguous.
@@ -134,6 +136,8 @@ impl<'a> VbaBindings<'a> {
             bindings: BTreeMap::new(),
             events: BTreeMap::new(),
             foreign_event_scopes: BTreeSet::new(),
+            statement_labels: BTreeMap::new(),
+            foreign_label_scopes: BTreeSet::new(),
             branch_bindings: BTreeMap::new(),
             unconditional_names: BTreeMap::new(),
             foreign_scopes: BTreeSet::new(),
@@ -271,7 +275,10 @@ impl<'a> VbaBindings<'a> {
         }
         for fact in facts {
             cancellation.check()?;
-            if fact.syntax_kind().as_str() != "vba.identifier.definition" {
+            if !matches!(
+                fact.syntax_kind().as_str(),
+                "vba.identifier.definition" | "vba.statement_label.definition"
+            ) {
                 continue;
             }
             let Some(declaration) = result.declaration(fact.parent(), cancellation)? else {
@@ -287,6 +294,32 @@ impl<'a> VbaBindings<'a> {
             let text = std::str::from_utf8(source.get(start..end).ok_or_else(invalid_capture)?)
                 .map_err(|_| invalid_capture())?;
             let name = structural_captured_name_for_fact("vba", fact, text, maximum_name_bytes);
+            if declaration.syntax_kind().as_str() == "vba.statement_label.declaration" {
+                // Labels belong to the procedure, independently of ordinary
+                // names and nested executable blocks (MS-VBAL 5.4.1.1).
+                if is_instance_procedure_scope(result.fact(owner)?) {
+                    if let Some(key) = (text.len() <= maximum_name_bytes)
+                        .then(|| statement_label_key(text))
+                        .flatten()
+                    {
+                        let symbol = if conditional {
+                            None
+                        } else {
+                            symbols.get(&fact.local_id()).copied()
+                        };
+                        result
+                            .statement_labels
+                            .entry(owner)
+                            .or_default()
+                            .entry(key)
+                            .and_modify(|prior| *prior = None)
+                            .or_insert(symbol);
+                    } else {
+                        result.foreign_label_scopes.insert(owner);
+                    }
+                }
+                continue;
+            }
             let candidate = symbols.get(&fact.local_id()).copied().and_then(|symbol| {
                 match declaration.syntax_kind().as_str() {
                     "vba.parameter.declaration"
@@ -1313,6 +1346,38 @@ impl<'a> VbaBindings<'a> {
         }
         if matches!(
             fact.syntax_kind().as_str(),
+            "vba.statement_label.reference"
+                | "vba.error_label.reference"
+                | "vba.resume_label.reference"
+        ) {
+            let Some(key) = statement_label_key(text) else {
+                return Ok(None);
+            };
+            // Zero changes the error/resume policy; it does not name label 0.
+            if key == "0" && fact.syntax_kind().as_str() != "vba.statement_label.reference" {
+                return Ok(None);
+            }
+            let Some((owner, _)) = self.scope(fact.parent(), cancellation)? else {
+                return Ok(None);
+            };
+            if !is_instance_procedure_scope(self.fact(owner)?)
+                || self.foreign_label_scopes.contains(&owner)
+            {
+                return Ok(None);
+            }
+            return Ok(self
+                .statement_labels
+                .get(&owner)
+                .and_then(|names| names.get(&key))
+                .copied()
+                .flatten()
+                .map(|symbol| ResolvedBinding {
+                    symbol,
+                    is_call: false,
+                }));
+        }
+        if matches!(
+            fact.syntax_kind().as_str(),
             "vba.type_identifier.reference" | "vba.direct_type_identifier.reference"
         ) {
             if text.ends_with(['$', '%', '&', '#', '@', '^', '!']) {
@@ -1799,6 +1864,61 @@ fn owns_scope(declaration: &SyntaxFact) -> bool {
     )
 }
 
+/// Compares ASCII labels case-insensitively and integer labels by nonnegative
+/// VBA data value; unsupported spellings remain unbound instead of being guessed.
+pub(crate) fn statement_label_key(text: &str) -> Option<String> {
+    let (literal, suffix) = match text.as_bytes().last() {
+        Some(b'%' | b'&' | b'^') => (
+            text.get(..text.len().checked_sub(1)?)?,
+            text.as_bytes().last().copied(),
+        ),
+        _ => (text, None),
+    };
+    if text
+        .as_bytes()
+        .first()
+        .is_some_and(|byte| byte.is_ascii_digit() || *byte == b'&')
+    {
+        let (digits, radix) = if let Some(digits) = literal
+            .strip_prefix("&H")
+            .or_else(|| literal.strip_prefix("&h"))
+        {
+            (digits, 16)
+        } else if let Some(digits) = literal
+            .strip_prefix("&O")
+            .or_else(|| literal.strip_prefix("&o"))
+        {
+            (digits, 8)
+        } else if let Some(digits) = literal.strip_prefix('&') {
+            (digits, 8)
+        } else {
+            (literal, 10)
+        };
+        if digits.is_empty() || !digits.bytes().all(|byte| char::from(byte).is_digit(radix)) {
+            return None;
+        }
+        let value = u32::from_str_radix(digits, radix).ok()?;
+        // MS-VBAL integer tokens can encode signed 16-bit hex/octal values;
+        // labels require a nonnegative data value bounded by Long's maximum.
+        if value > i32::MAX.unsigned_abs()
+            || (suffix == Some(b'%') && value > 32_767)
+            || (radix != 10 && suffix.is_none() && (32_768..=65_535).contains(&value))
+        {
+            return None;
+        }
+        return Some(value.to_string());
+    }
+    if text.eq_ignore_ascii_case("Randomize")
+        || !text.as_bytes().first().is_some_and(u8::is_ascii_alphabetic)
+        || !text
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+    {
+        return None;
+    }
+    Some(text.to_ascii_lowercase())
+}
+
 fn member_key(text: &str) -> Option<String> {
     let text = text.trim();
     let name = text
@@ -1933,6 +2053,53 @@ fn invalid_capture() -> AdapterError {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn statement_label_keys_compare_integer_values_and_reject_invalid_labels() {
+        for (text, expected) in [
+            ("Finish", "finish"),
+            ("CLEAN_UP", "clean_up"),
+            ("0", "0"),
+            ("0010", "10"),
+            ("&HA", "10"),
+            ("&o12", "10"),
+            ("&12", "10"),
+            ("10%", "10"),
+            ("&H8000&", "32768"),
+            ("65535", "65535"),
+            ("&H10000", "65536"),
+            ("2147483647&", "2147483647"),
+        ] {
+            assert_eq!(
+                super::statement_label_key(text).as_deref(),
+                Some(expected),
+                "{text}"
+            );
+        }
+        for text in [
+            "",
+            "Randomize",
+            "randomize",
+            "_label",
+            "étiquette",
+            "Done$",
+            "10.0",
+            "1E1",
+            "-1",
+            "&H",
+            "&O8",
+            "2147483648",
+            "4294967296",
+            "&HFFFF",
+            "&O100000",
+            "32768%",
+            "&H8000%",
+            "10!",
+            "10#",
+        ] {
+            assert_eq!(super::statement_label_key(text), None, "{text}");
+        }
+    }
+
     use rootlight_adapter_sdk::SyntaxKindLabel;
     use rootlight_cancel::CancellationReason;
     use rootlight_ids::FileId;
