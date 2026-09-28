@@ -2679,6 +2679,10 @@ fn vba_array_parameters_bind_indexed_reads_to_their_declarations() {
         "ByRef items%()",
         "bYrEf items( ) As Long",
         "ByRef _\nitems() As Long",
+        "ByRef items _\n( _\n ) As Long",
+        "ByRef items _\r\n( _\r\n ) As Long",
+        "ParamArray items( _\n ) As Variant",
+        "Optional ByRef items( _\n ) As Variant",
     ] {
         let source =
             format!("Sub Run({parameter})\nDim first As Variant\nfirst = items(0)\nEnd Sub\n");
@@ -2766,6 +2770,8 @@ fn vba_array_parameter_binding_preserves_unknown_or_invalid_shapes() {
         "ByRef items As Variant",
         "ByVal items As Object",
         "ByRef items(2) As Long",
+        "ByVal items( _\n ) As Long",
+        "ByRef items( _\n 2) As Long",
         "ByRef items() As Long, items As Variant",
     ] {
         let source =

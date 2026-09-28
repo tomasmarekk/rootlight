@@ -1,13 +1,15 @@
-//! Reads source-written VBA names, procedure prefixes and expression boundaries.
+//! Reads source-written VBA names, declaration prefixes and expression boundaries.
 //! No parser runtime is required. Identifier paths retain argument boundaries;
 //! procedure categories come from source, never from an uncontinued following line.
 
 #![forbid(unsafe_code)]
 
 mod group;
+mod parameter;
 mod procedure;
 
 pub use group::parenthesized_expression_end;
+pub use parameter::array_parameter_modifiers;
 pub use procedure::{ProcedureHeader, ProcedureKind, procedure_header};
 
 /// A syntactically valid pointer path borrowing its original source bytes.

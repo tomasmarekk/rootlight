@@ -391,7 +391,7 @@ impl<'a> VbaBindings<'a> {
             // Only the declaration's array designator proves indexed identity;
             // a later ReDim or runtime Variant value cannot supply this proof.
             if let Some(Binding::Value(symbol)) = candidate
-                && declaration_has_array_designator(declaration, fact, source)?
+                && declaration_has_array_designator(declaration, fact, source, cancellation)?
             {
                 result.array_symbols.insert(symbol);
             }
@@ -2193,7 +2193,9 @@ fn declaration_has_array_designator(
     declaration: &SyntaxFact,
     name: &SyntaxFact,
     source: &[u8],
+    cancellation: &Cancellation,
 ) -> Result<bool, AdapterError> {
+    let mut check = || cancellation.check().map_err(AdapterError::from);
     let parameter = matches!(
         declaration.syntax_kind().as_str(),
         "vba.parameter.declaration" | "vba.omittable_parameter.declaration"
@@ -2206,8 +2208,9 @@ fn declaration_has_array_designator(
         usize::try_from(declaration.span().end_byte()).map_err(|_| invalid_capture())?;
     let suffix = source
         .get(name_end..declaration_end)
-        .ok_or_else(invalid_capture)?
-        .trim_ascii_start();
+        .ok_or_else(invalid_capture)?;
+    let whitespace = rootlight_vba::logical_whitespace_len(suffix, &mut check)?;
+    let suffix = suffix.get(whitespace..).ok_or_else(invalid_capture)?;
     let Some(bounds) = suffix.strip_prefix(b"(") else {
         return Ok(false);
     };
@@ -2216,7 +2219,11 @@ fn declaration_has_array_designator(
     }
     // Parameters require an empty designator and cannot pass arrays ByVal
     // (MS-VBAL 5.3.1.5), even when the native parser accepts that syntax.
-    if !bounds.trim_ascii_start().starts_with(b")") {
+    let whitespace = rootlight_vba::logical_whitespace_len(bounds, &mut check)?;
+    if !bounds
+        .get(whitespace..)
+        .is_some_and(|tail| tail.starts_with(b")"))
+    {
         return Ok(false);
     }
     let declaration_start =
@@ -2225,14 +2232,7 @@ fn declaration_has_array_designator(
     let prefix = source
         .get(declaration_start..name_start)
         .ok_or_else(invalid_capture)?;
-    Ok(prefix
-        .split(u8::is_ascii_whitespace)
-        .filter(|word| !word.is_empty() && *word != b"_")
-        .all(|word| {
-            word.eq_ignore_ascii_case(b"ByRef")
-                || word.eq_ignore_ascii_case(b"Optional")
-                || word.eq_ignore_ascii_case(b"ParamArray")
-        }))
+    rootlight_vba::array_parameter_modifiers(prefix, &mut check)
 }
 
 fn is_self_array_invocation(fact: &SyntaxFact) -> bool {
