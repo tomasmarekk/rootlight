@@ -371,6 +371,27 @@ impl<'a, 'o> CallIndex<'a, 'o> {
         Ok(())
     }
 
+    pub(super) fn has_empty_parameter_list(
+        &mut self,
+        target: &'a EntityRecord,
+        sources: &BTreeMap<FileId, &[u8]>,
+        cancellation: &Cancellation,
+        work: &mut ResolutionWorkBudget,
+    ) -> Result<bool, ResolutionError> {
+        let mut check = || {
+            cancellation.check()?;
+            work.consume()
+        };
+        self.ensure_contract(target, sources, &mut check)?;
+        // Optional parameters can accept arguments and therefore cannot forward
+        // an incompatible call to a returned object's default member (MS-VBAL 5.6.13).
+        Ok(self
+            .contracts
+            .get(&target.id)
+            .and_then(Option::as_ref)
+            .is_some_and(|contract| contract.parameters.is_empty()))
+    }
+
     pub(super) fn implicit_property_parameters(
         &mut self,
         target: &'a EntityRecord,

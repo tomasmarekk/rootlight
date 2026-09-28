@@ -220,7 +220,7 @@ const PROJECT_FACTS_TRUNCATED_MESSAGE: &str =
     "additional project semantic facts were omitted by aggregate resource limits";
 const AGGREGATE_DIAGNOSTICS_TRUNCATED_CODE: &str = "aggregate-diagnostics-truncated";
 const ANALYZER_BINARY_SEED: &[u8] = b"rootlight.first-slice.treesitter-structural/176";
-const RESOLVER_BINARY_SEED: &[u8] = b"rootlight.first-slice.resolve/53";
+const RESOLVER_BINARY_SEED: &[u8] = b"rootlight.first-slice.resolve/54";
 const INCREMENTAL_PROVIDER_SEED: &[u8] = b"rootlight.first-slice.incremental-provider/1";
 const LANGUAGE_DISPOSITION_PROVIDER_SEED: &[u8] = b"rootlight.first-slice.language-disposition/5";
 const SOURCE_FILE_FALLBACK_PROVIDER_SEED: &[u8] = b"rootlight.source-file-fallback/4";
@@ -40058,6 +40058,217 @@ mod tests {
                     )
                     .unwrap();
                 assert_eq!(read.data.chunks[0].bytes, text.as_bytes());
+            }
+        }
+    }
+
+    #[test]
+    fn classic_default_reads_follow_qualified_fields_and_parameterless_returns() {
+        let fixture = durable_test_tempdir();
+        let storage = durable_test_tempdir();
+        let paths = RuntimePaths::new(storage.path().join("state"), storage.path().join("runtime"))
+            .unwrap();
+        paths.prepare_owner().unwrap();
+        fs::write(fixture.path().join("project.vbp"), "Type=OleDll\nName=\"Primary\"\nClass=Lookup; Lookup.cls\nClass=Holder; Holder.cls\nModule=Client; Client.bas\n").unwrap();
+        let lookup = "VERSION 1.0 CLASS\nAttribute VB_Name = \"Lookup\"\nPublic Property Get Fetch(ByVal offset As Long) As Long\nAttribute Fetch.VB_UserMemId = 0\nFetch = offset\nEnd Property\n";
+        fs::write(fixture.path().join("Lookup.cls"), lookup).unwrap();
+        let cases = [
+            ("holder.Entries(2)", Some("Fetch")),
+            ("holder.Values(2)", Some("Fetch")),
+            ("holder.Create(2)", Some("Fetch")),
+            ("holder.Entries(offset:=2)", Some("Fetch")),
+            ("holder.Entries()", Some("Entries")),
+            ("holder.OptionalEntries(2)", Some("OptionalEntries")),
+            ("holder.OptionalEntries(offset:=2)", None),
+            ("holder.NeedsArg(2, 3)", None),
+            ("holder.Dynamic(2)", None),
+            ("holder.Entries(unknown:=2)", None),
+            ("holder.Entries(2)(3)", None),
+            ("NeedsValue(offset:=2)", None),
+        ];
+        let mut client = "Attribute VB_Name = \"Client\"\nSub Run(ByVal holder As Holder)\nDim result As Variant\n".to_owned();
+        for (expression, _) in &cases {
+            client.push_str(&format!("result = {expression}\n"));
+        }
+        client.push_str(
+            "End Sub\nFunction NeedsValue(ByVal required As Long) As Lookup\nEnd Function\n",
+        );
+        fs::write(fixture.path().join("Client.bas"), &client).unwrap();
+        for return_type in ["Lookup", "Object", "Lookup"] {
+            let holder = format!(
+                "VERSION 1.0 CLASS\nAttribute VB_Name = \"Holder\"\nPublic Values As {return_type}\nPublic Property Get Entries() As {return_type}\nEnd Property\nPublic Function Create() As {return_type}\nEnd Function\nPublic Property Get OptionalEntries(Optional ByVal optionValue As Long = 0) As {return_type}\nEnd Property\nPublic Function NeedsArg(ByVal required As Long) As {return_type}\nEnd Function\nPublic Property Get Dynamic() As Object\nEnd Property\n"
+            );
+            fs::write(fixture.path().join("Holder.cls"), &holder).unwrap();
+            let mut service =
+                FirstSliceService::new_durable(2, paths.state_dir(), &deadline()).unwrap();
+            let receipt = service
+                .index_repository(fixture.path(), &deadline())
+                .unwrap();
+            assert_eq!(
+                service
+                    .index_repository(fixture.path(), &deadline())
+                    .unwrap(),
+                receipt
+            );
+            drop(service);
+            let service =
+                FirstSliceService::new_durable(2, paths.state_dir(), &deadline()).unwrap();
+            let snapshot = service
+                .loaded_generation_snapshot(receipt.generation)
+                .unwrap();
+            let document = snapshot.document();
+            let file = document
+                .files
+                .iter()
+                .find(|file| file.path == "Client.bas")
+                .unwrap();
+            for (expression, expected) in &cases {
+                let expected = expected.filter(|name| *name != "Fetch" || return_type == "Lookup");
+                let start =
+                    u64::try_from(client.find(&format!("{expression}\n")).unwrap()).unwrap();
+                let site = document
+                    .occurrences
+                    .iter()
+                    .find(|site| {
+                        site.file == file.id
+                            && site.syntax_kind == "vba.application.reference"
+                            && site.source.span().start_byte() == start
+                            && site.source.span().end_byte()
+                                == start + u64::try_from(expression.len()).unwrap()
+                    })
+                    .unwrap();
+                let name = if let OccurrenceTarget::Resolved { symbol } = site.target {
+                    document
+                        .entities
+                        .iter()
+                        .find(|entity| entity.id == symbol)
+                        .map(|entity| entity.canonical_name.as_str())
+                } else {
+                    None
+                };
+                assert_eq!(name, expected, "{return_type}: {expression}");
+                assert_eq!(
+                    document
+                        .skipped_regions
+                        .iter()
+                        .any(|gap| gap.source == site.source
+                            && gap.detail == "vba-call-or-index-target-unavailable"),
+                    expected.is_none()
+                );
+                assert_eq!(
+                    document
+                        .relations
+                        .iter()
+                        .filter(|edge| edge.subject == RelationEndpoint::Occurrence(site.id)
+                            && edge.predicate == RelationPredicate::Calls)
+                        .count(),
+                    usize::from(expected == Some("Fetch"))
+                );
+                if expected == Some("Fetch") {
+                    let callee_name = expression.split_once('(').unwrap().0;
+                    let callee = document
+                        .occurrences
+                        .iter()
+                        .find(|occurrence| {
+                            occurrence.file == file.id
+                                && occurrence.syntax_kind == "vba.invoked_get_member.reference"
+                                && occurrence.source.span().start_byte() == start
+                                && occurrence.source.span().end_byte()
+                                    == start + u64::try_from(callee_name.len()).unwrap()
+                        })
+                        .unwrap();
+                    let OccurrenceTarget::Resolved { symbol } = callee.target else {
+                        panic!("the authored member must retain its original target");
+                    };
+                    let owner = document
+                        .entities
+                        .iter()
+                        .find(|entity| entity.id == symbol)
+                        .unwrap();
+                    assert_eq!(
+                        owner.canonical_name,
+                        callee_name.strip_prefix("holder.").unwrap()
+                    );
+                    assert_eq!(
+                        document
+                            .relations
+                            .iter()
+                            .filter(|edge| {
+                                edge.subject == RelationEndpoint::Occurrence(callee.id)
+                                    && edge.predicate == RelationPredicate::Calls
+                                    && edge.object == RelationEndpoint::Entity(symbol)
+                            })
+                            .count(),
+                        usize::from(owner.canonical_name != "Values")
+                    );
+                    let provenance = document
+                        .provenance
+                        .iter()
+                        .find(|record| record.id == site.provenance)
+                        .unwrap();
+                    assert_eq!(
+                        provenance.rule.as_deref(),
+                        Some("classic-project-default-member-v1.indexed_snapshot")
+                    );
+                    assert!(
+                        provenance
+                            .evidence_sources
+                            .contains(owner.evidence.source.as_ref().unwrap())
+                    );
+                    for (path, source_text, expected_text) in [
+                        ("Client.bas", client.as_str(), "Holder"),
+                        ("Holder.cls", holder.as_str(), "Lookup"),
+                        ("Lookup.cls", lookup, "Attribute Fetch.VB_UserMemId = 0"),
+                    ] {
+                        let source_file = document
+                            .files
+                            .iter()
+                            .find(|file| file.path == path)
+                            .unwrap();
+                        assert!(
+                            provenance.evidence_sources.iter().any(|source| {
+                                source.span().file() == source_file.id
+                                    && source_text.get(
+                                        usize::try_from(source.span().start_byte()).unwrap()
+                                            ..usize::try_from(source.span().end_byte()).unwrap(),
+                                    ) == Some(expected_text)
+                            }),
+                            "missing {path}: {expected_text} for {expression}"
+                        );
+                    }
+                }
+                if let Some(offset) = expression.find("offset:=") {
+                    let label = document
+                        .occurrences
+                        .iter()
+                        .find(|occurrence| {
+                            occurrence.file == file.id
+                                && occurrence.syntax_kind == "vba.nonvalue_identifier.reference"
+                                && occurrence.source.span().start_byte()
+                                    == start + u64::try_from(offset).unwrap()
+                        })
+                        .unwrap();
+                    let getter = document
+                        .entities
+                        .iter()
+                        .find(|entity| entity.canonical_name == "Fetch")
+                        .unwrap();
+                    let parameter = document
+                        .entities
+                        .iter()
+                        .find(|entity| {
+                            entity.canonical_name == "offset"
+                                && entity.container == Some(ContainerRef::Entity(getter.id))
+                        })
+                        .unwrap();
+                    assert_eq!(
+                        label.target
+                            == OccurrenceTarget::Resolved {
+                                symbol: parameter.id
+                            },
+                        expected == Some("Fetch")
+                    );
+                }
             }
         }
     }

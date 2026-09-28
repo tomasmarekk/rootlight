@@ -1435,12 +1435,35 @@ impl<'a> ClassicIndex<'a> {
             work.consume()?;
             let span = occurrence.source.span();
             let Some(member) = member else {
-                if let Some((callee, false)) =
-                    calls.callee(occurrence, &sources, cancellation, work)?
-                    && callee.syntax_kind == "vba.invoked_get_identifier.reference"
-                    && let OccurrenceTarget::Resolved { symbol } = callee.target
+                calls.resolve(&mut result, occurrence, &sources, cancellation, work)?;
+                if result.proof(occurrence).is_none()
+                    && let Some((callee, false)) =
+                        calls.callee(occurrence, &sources, cancellation, work)?
+                    && matches!(
+                        callee.syntax_kind.as_str(),
+                        "vba.invoked_get_identifier.reference" | "vba.invoked_get_member.reference"
+                    )
+                    && let Some(symbol) = match callee.target {
+                        OccurrenceTarget::Resolved { symbol } => Some(symbol),
+                        _ => result.proof(callee).map(|proof| proof.target.id),
+                    }
                     && let Some((owner, class, context, type_source)) =
                         value_types.get(&symbol).and_then(Option::as_ref)
+                    && (matches!(
+                        owner.kind,
+                        EntityKind::Variable | EntityKind::Parameter | EntityKind::Field
+                    ) || (matches!(
+                        procedure_kind(owner, &sources, cancellation, work)?,
+                        Some(
+                            rootlight_vba::ProcedureKind::Function
+                                | rootlight_vba::ProcedureKind::PropertyGet
+                        )
+                    ) && calls.has_empty_parameter_list(
+                        owner,
+                        &sources,
+                        cancellation,
+                        work,
+                    )?))
                     && let Some(default) = default_members.get(class).and_then(Option::as_ref)
                 {
                     let key = (*class, default.name.clone());
@@ -1459,6 +1482,13 @@ impl<'a> ClassicIndex<'a> {
                             )
                         )
                     {
+                        let mut evidence = default.sources.clone();
+                        evidence.extend(owner.evidence.source.iter().cloned());
+                        if let Some(proof) = result.proof(callee)
+                            && let Some((_, source)) = &proof.receiver
+                        {
+                            evidence.push(source.clone());
+                        }
                         calls.resolve_bound(
                             &mut result,
                             occurrence,
@@ -1472,7 +1502,7 @@ impl<'a> ClassicIndex<'a> {
                                     rule: ResolutionRule::ClassicProjectDefaultMember,
                                     property_call: true,
                                 },
-                                sources: &default.sources,
+                                sources: &evidence,
                             },
                             &sources,
                             cancellation,
@@ -1480,7 +1510,6 @@ impl<'a> ClassicIndex<'a> {
                         )?;
                     }
                 }
-                calls.resolve(&mut result, occurrence, &sources, cancellation, work)?;
                 if result.proof(occurrence).is_some() {
                     resolved_members
                         .entry(span)
