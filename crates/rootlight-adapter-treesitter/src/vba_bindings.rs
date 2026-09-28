@@ -90,6 +90,7 @@ pub(super) struct VbaBindings<'a> {
     member_references: BTreeMap<u64, u64>,
     callable_scopes: BTreeMap<SymbolId, u64>,
     named_parameters: BTreeMap<u64, BTreeMap<String, Option<SymbolId>>>,
+    parameters: BTreeMap<u64, Vec<(&'a SyntaxFact, &'a SyntaxFact, SymbolId)>>,
     property_value_symbols: BTreeSet<SymbolId>,
     incomplete_parameter_scopes: BTreeSet<u64>,
     bindings: BTreeMap<u64, BTreeMap<String, Option<Binding>>>,
@@ -138,6 +139,7 @@ impl<'a> VbaBindings<'a> {
             member_references: BTreeMap::new(),
             callable_scopes: BTreeMap::new(),
             named_parameters: BTreeMap::new(),
+            parameters: BTreeMap::new(),
             property_value_symbols: BTreeSet::new(),
             incomplete_parameter_scopes: BTreeSet::new(),
             bindings: BTreeMap::new(),
@@ -407,6 +409,11 @@ impl<'a> VbaBindings<'a> {
                 if let (Some(name), Some(parameter)) =
                     (name.as_deref().filter(|name| name.is_ascii()), parameter)
                 {
+                    result.parameters.entry(owner).or_default().push((
+                        declaration,
+                        fact,
+                        parameter,
+                    ));
                     // A setter's final parameter is supplied by the assignment
                     // RHS, not by named arguments in the indexed property target.
                     if property_value_parameters
@@ -560,6 +567,9 @@ impl<'a> VbaBindings<'a> {
             result.insert(owner, name.as_deref(), symbol);
         }
         result.collect_declared_types(facts, source, symbols, cancellation)?;
+        for parameters in result.parameters.values_mut() {
+            parameters.sort_unstable_by_key(|(declaration, _, _)| declaration.span().start_byte());
+        }
         for fact in facts {
             cancellation.check()?;
             let mut visibility = match fact.syntax_kind().as_str() {
@@ -1148,6 +1158,264 @@ impl<'a> VbaBindings<'a> {
         Ok((!binding.is_call && self.array_symbols.contains(&binding.symbol)).then_some(binding))
     }
 
+    fn procedure_application(
+        &self,
+        fact: &SyntaxFact,
+        text: &str,
+        cancellation: &Cancellation,
+    ) -> Result<Option<ResolvedBinding>, AdapterError> {
+        let mut check = || cancellation.check().map_err(AdapterError::from);
+        let mut start = fact.span().start_byte();
+        let mut prefix = text.as_bytes();
+        let mut explicit_call = false;
+        if prefix
+            .get(..4)
+            .is_some_and(|word| word.eq_ignore_ascii_case(b"Call"))
+            && prefix
+                .get(4)
+                .is_some_and(|byte| matches!(byte, b' ' | b'\t'))
+        {
+            let suffix = prefix.get(4..).ok_or_else(invalid_capture)?;
+            let whitespace = rootlight_vba::logical_whitespace_len(suffix, &mut check)?;
+            if whitespace == 0 {
+                return Ok(None);
+            }
+            let offset = 4 + whitespace;
+            start += u64::try_from(offset).map_err(|_| invalid_capture())?;
+            prefix = prefix.get(offset..).ok_or_else(invalid_capture)?;
+            explicit_call = true;
+        }
+        if self.applications.get(&start).is_some_and(|applications| {
+            applications
+                .iter()
+                .any(|inner| inner.span().end_byte() < fact.span().end_byte())
+        }) {
+            // A completed inner call cannot prove dispatch through its return value.
+            return Ok(None);
+        }
+        let Some((&position, candidates)) = self
+            .invocations
+            .range(start..=fact.span().end_byte())
+            .next()
+        else {
+            return Ok(None);
+        };
+        if position != start {
+            let receiver_length =
+                usize::try_from(position - start).map_err(|_| invalid_capture())?;
+            let receiver = prefix.get(..receiver_length).ok_or_else(invalid_capture)?;
+            if !candidates
+                .iter()
+                .all(|callee| is_self_array_invocation(callee))
+                || !receiver
+                    .iter()
+                    .copied()
+                    .filter(|byte| !byte.is_ascii_whitespace() && *byte != b'_')
+                    .map(|byte| byte.to_ascii_lowercase())
+                    .eq(b"me.".iter().copied())
+            {
+                return Ok(None);
+            }
+        }
+        let mut invocations = candidates
+            .iter()
+            .filter(|callee| callee.span().end_byte() <= fact.span().end_byte());
+        let Some(callee) = invocations.next() else {
+            return Ok(None);
+        };
+        if invocations.next().is_some() {
+            return Ok(None);
+        }
+        let callee_start =
+            usize::try_from(callee.span().start_byte()).map_err(|_| invalid_capture())?;
+        let callee_end =
+            usize::try_from(callee.span().end_byte()).map_err(|_| invalid_capture())?;
+        let Some(callee_text) = self
+            .source
+            .get(callee_start..callee_end)
+            .and_then(|bytes| std::str::from_utf8(bytes).ok())
+        else {
+            return Ok(None);
+        };
+        let Some(binding) = self
+            .resolve(callee, callee_text, cancellation)?
+            .filter(|binding| binding.is_call)
+        else {
+            return Ok(None);
+        };
+        let Some(&scope) = self.callable_scopes.get(&binding.symbol) else {
+            return Ok(None);
+        };
+        if self.incomplete_parameter_scopes.contains(&scope) {
+            return Ok(None);
+        }
+        // Setters take their value from assignment, not the application argument list.
+        if !matches!(
+            self.fact(scope)?.syntax_kind().as_str(),
+            "vba.sub_function.scope" | "vba.function.scope" | "vba.get_property.scope"
+        ) {
+            return Ok(None);
+        }
+        let callee_length =
+            usize::try_from(callee.span().end_byte() - start).map_err(|_| invalid_capture())?;
+        let suffix = prefix.get(callee_length..).ok_or_else(invalid_capture)?;
+        let leading = rootlight_vba::logical_whitespace_len(suffix, &mut check)?;
+        let suffix = suffix.get(leading..).ok_or_else(invalid_capture)?;
+        let statement = matches!(
+            callee.syntax_kind().as_str(),
+            "vba.invoked_identifier.reference" | "vba.self_invoked_member.reference"
+        );
+        let arguments = if suffix.first() == Some(&b'(') && (explicit_call || !statement) {
+            let Some(end) = rootlight_vba::parenthesized_expression_end(suffix, &mut check)? else {
+                return Ok(None);
+            };
+            let tail = suffix.get(end..).ok_or_else(invalid_capture)?;
+            if rootlight_vba::logical_whitespace_len(tail, &mut check)? != tail.len() {
+                return Ok(None);
+            }
+            suffix.get(1..end - 1).ok_or_else(invalid_capture)?
+        } else {
+            if !suffix.is_empty() && leading == 0 && suffix.first() != Some(&b'(') {
+                return Ok(None);
+            }
+            suffix
+        };
+        let Some(arguments) =
+            rootlight_vba::argument_list(arguments, self.maximum_name_bytes, &mut check)?
+        else {
+            return Ok(None);
+        };
+        if !self.procedure_arguments_match(scope, &arguments, cancellation)? {
+            return Ok(None);
+        }
+        // The callee occurrence already owns the Calls edge. The enclosing
+        // application adds exact expression provenance, not a second invocation.
+        Ok(Some(ResolvedBinding {
+            symbol: binding.symbol,
+            is_call: false,
+        }))
+    }
+
+    fn procedure_arguments_match(
+        &self,
+        scope: u64,
+        arguments: &[rootlight_vba::Argument<'_>],
+        cancellation: &Cancellation,
+    ) -> Result<bool, AdapterError> {
+        let mut check = || cancellation.check().map_err(AdapterError::from);
+        let parameters = self
+            .parameters
+            .get(&scope)
+            .map(Vec::as_slice)
+            .unwrap_or_default();
+        let scope_fact = self.fact(scope)?;
+        let scope_start =
+            usize::try_from(scope_fact.span().start_byte()).map_err(|_| invalid_capture())?;
+        let remaining = self.source.get(scope_start..).ok_or_else(invalid_capture)?;
+        let source = remaining
+            .get(..remaining.len().min(self.maximum_name_bytes))
+            .ok_or_else(invalid_capture)?;
+        let Some(header) = rootlight_vba::procedure_header(source, &mut check)? else {
+            return Ok(false);
+        };
+        let tail = source
+            .get(header.name_span().end..)
+            .ok_or_else(invalid_capture)?;
+        let leading = rootlight_vba::logical_whitespace_len(tail, &mut check)?;
+        let tail = tail.get(leading..).ok_or_else(invalid_capture)?;
+        let Some(end) = rootlight_vba::parenthesized_expression_end(tail, &mut check)? else {
+            return Ok(false);
+        };
+        let Some(written) = rootlight_vba::argument_list(
+            tail.get(1..end - 1).ok_or_else(invalid_capture)?,
+            self.maximum_name_bytes,
+            &mut check,
+        )?
+        else {
+            return Ok(false);
+        };
+        if written.len() != parameters.len() {
+            return Ok(false);
+        }
+        for (written, (declaration, definition, _)) in written.iter().zip(parameters) {
+            cancellation.check()?;
+            let start =
+                usize::try_from(declaration.span().start_byte()).map_err(|_| invalid_capture())?;
+            let end =
+                usize::try_from(declaration.span().end_byte()).map_err(|_| invalid_capture())?;
+            if self.source.get(start..end).map(<[u8]>::trim_ascii)
+                != Some(written.expression().trim_ascii())
+            {
+                return Ok(false);
+            }
+            let name_start =
+                usize::try_from(definition.span().start_byte()).map_err(|_| invalid_capture())?;
+            let modifiers = self
+                .source
+                .get(start..name_start)
+                .ok_or_else(invalid_capture)?;
+            // ParamArray needs variadic element mapping, not Optional semantics.
+            if modifiers
+                .split(u8::is_ascii_whitespace)
+                .any(|word| word.eq_ignore_ascii_case(b"ParamArray"))
+            {
+                return Ok(false);
+            }
+        }
+        let mut supplied = BTreeSet::new();
+        for (index, argument) in arguments.iter().enumerate() {
+            cancellation.check()?;
+            // Explicit ByVal is only legal for external procedures, which are
+            // excluded above until their separate calling contract is modeled.
+            if argument
+                .expression()
+                .get(..5)
+                .is_some_and(|word| word.eq_ignore_ascii_case(b"ByVal"))
+                && argument
+                    .expression()
+                    .get(5)
+                    .is_some_and(u8::is_ascii_whitespace)
+            {
+                return Ok(false);
+            }
+            let parameter = if let Some(name) = argument.name() {
+                let Some(name) = std::str::from_utf8(name).ok() else {
+                    return Ok(false);
+                };
+                let Some(symbol) = self
+                    .named_parameters
+                    .get(&scope)
+                    .and_then(|names| names.get(&name.to_ascii_lowercase()))
+                    .copied()
+                    .flatten()
+                else {
+                    return Ok(false);
+                };
+                parameters.iter().find(|(_, _, id)| *id == symbol)
+            } else {
+                parameters.get(index)
+            };
+            let Some((declaration, _, symbol)) = parameter else {
+                return Ok(false);
+            };
+            if !supplied.insert(*symbol) {
+                return Ok(false);
+            }
+            if argument.expression().is_empty()
+                && declaration.syntax_kind().as_str() != "vba.omittable_parameter.declaration"
+            {
+                return Ok(false);
+            }
+        }
+        if parameters.iter().any(|(declaration, _, symbol)| {
+            declaration.syntax_kind().as_str() == "vba.parameter.declaration"
+                && !supplied.contains(symbol)
+        }) {
+            return Ok(false);
+        }
+        Ok(true)
+    }
+
     fn enum_member_precedes_initializer(
         &self,
         fact: &SyntaxFact,
@@ -1411,7 +1679,10 @@ impl<'a> VbaBindings<'a> {
             return self.procedure_pointer(fact, text, cancellation);
         }
         if fact.syntax_kind().as_str() == "vba.application.reference" {
-            return self.array_application(fact, cancellation);
+            if let Some(binding) = self.array_application(fact, cancellation)? {
+                return Ok(Some(binding));
+            }
+            return self.procedure_application(fact, text, cancellation);
         }
         if matches!(
             fact.syntax_kind().as_str(),

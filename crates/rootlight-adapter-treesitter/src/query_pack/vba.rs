@@ -142,7 +142,7 @@ pub(super) fn retain_capture(node: Node<'_>, role: StructuralRole, source: &[u8]
         });
     }
     // Keep application evidence even when its named procedure can be bound:
-    // argument compatibility and dispatch through returned values are separate.
+    // its argument mapping and dispatch through returned values need separate proof.
     if role != StructuralRole::Reference || !matches!(node.kind(), "identifier" | "bang_identifier")
     {
         return true;
@@ -199,7 +199,11 @@ pub(super) fn syntax(node: Node<'_>, role: StructuralRole) -> Option<&'static st
         "identifier" | "bang_identifier" => "vba.identifier",
         "qualified_member_expression" | "implicit_member_expression" => "vba.member",
         "call_expression" | "call_statement" if role == StructuralRole::Reference => {
-            "vba.application"
+            if node.has_error() {
+                "vba.incomplete_application"
+            } else {
+                "vba.application"
+            }
         }
         "new_expression" if role == StructuralRole::Reference => "vba.construction",
         "comment" => "vba.comment",

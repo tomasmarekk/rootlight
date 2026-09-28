@@ -71,7 +71,7 @@ pub fn parenthesized_expression_end<E>(
     Ok(None)
 }
 
-fn quoted_end<E>(
+pub(crate) fn quoted_end<E>(
     source: &[u8],
     start: usize,
     opening: u8,

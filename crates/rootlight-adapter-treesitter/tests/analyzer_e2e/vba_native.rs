@@ -2452,6 +2452,182 @@ fn vba_nested_index_argument_does_not_call_shadowed_function() {
 }
 
 #[test]
+fn vba_local_applications_bind_complete_argument_lists() {
+    for (parameters, arguments) in [
+        ("ByVal value As Long", "1"),
+        ("ByVal value As Long, ByVal other As Long", "Inner(1, 2), 3"),
+        ("ByVal value As Long, Optional other As Long = 0", "1"),
+        (
+            "ByVal value As Long, Optional other As Long = 0",
+            "other:=2, value:=1",
+        ),
+        (
+            "Optional first As Long = 0, Optional last As Long = 0",
+            ", 2",
+        ),
+        ("ByVal value As Long", " _\r\n 1"),
+    ] {
+        for (declaration, expression) in [
+            (
+                format!("Sub Accept({parameters})\nEnd Sub"),
+                format!("Accept {arguments}"),
+            ),
+            (
+                format!("Function Accept({parameters}) As Long\nEnd Function"),
+                format!("result = Accept({arguments})"),
+            ),
+        ] {
+            let source =
+                format!("{declaration}\nSub Run()\nDim result As Long\n{expression}\nEnd Sub\n");
+            let result = output(&source);
+            let document = result.document();
+            let target = document
+                .entities
+                .iter()
+                .find(|entity| entity.canonical_name == "Accept")
+                .unwrap();
+            let start = u64::try_from(source.rfind("Accept").unwrap()).unwrap();
+            let site = document
+                .occurrences
+                .iter()
+                .find(|site| {
+                    site.syntax_kind == "vba.application.reference"
+                        && site.source.span().start_byte() == start
+                })
+                .unwrap();
+            assert_eq!(
+                site.target,
+                OccurrenceTarget::Resolved { symbol: target.id },
+                "{source}"
+            );
+            assert_eq!(site.role, OccurrenceRole::Reference);
+            assert!(
+                document
+                    .relations
+                    .iter()
+                    .any(|edge| edge.subject == RelationEndpoint::Occurrence(site.id)
+                        && edge.predicate == RelationPredicate::RefersTo
+                        && edge.object == RelationEndpoint::Entity(target.id))
+            );
+            assert!(
+                !document
+                    .skipped_regions
+                    .iter()
+                    .any(|gap| gap.source == site.source
+                        && gap.detail == "vba-call-or-index-target-unavailable")
+            );
+        }
+    }
+}
+
+#[test]
+fn vba_local_applications_reject_argument_and_dispatch_ambiguity() {
+    for (declaration, invocation) in [
+        ("Sub Accept(ByVal value As Long)\nEnd Sub", "Accept"),
+        ("Sub Accept(ByVal value As Long)\nEnd Sub", "Accept 1, 2"),
+        (
+            "Sub Accept(ByVal value As Long, Optional other As Long = 0)\nEnd Sub",
+            "Accept , 2",
+        ),
+        (
+            "Sub Accept(ByVal value As Long)\nEnd Sub",
+            "Accept value:=1, value:=2",
+        ),
+        (
+            "Sub Accept(ByVal value As Long)\nEnd Sub",
+            "Accept 1, value:=2",
+        ),
+        (
+            "Sub Accept(ByVal value As Long)\nEnd Sub",
+            "Accept missing:=1",
+        ),
+        ("Sub Accept(ByVal value As Long)\nEnd Sub", "Accept ByVal 1"),
+        (
+            "Sub Accept(ByVal value As Long, ByVal VALUE As Long)\nEnd Sub",
+            "Accept 1, 2",
+        ),
+        (
+            "Sub Accept(ByVal value As Long)\nEnd Sub\nSub Accept(ByVal value As Long)\nEnd Sub",
+            "Accept 1",
+        ),
+        (
+            "Function Accept() As Object\nEnd Function",
+            "result = Accept()(1)",
+        ),
+        (
+            "Sub Accept(ByVal value As Long)\nEnd Sub",
+            "Dim Accept As Object\nAccept 1",
+        ),
+    ] {
+        let source =
+            format!("{declaration}\nSub Run()\nDim result As Variant\n{invocation}\nEnd Sub\n");
+        let result = output(&source);
+        let document = result.document();
+        let start = u64::try_from(source.rfind("Accept").unwrap()).unwrap();
+        let application = document
+            .occurrences
+            .iter()
+            .filter(|site| {
+                site.syntax_kind == "vba.application.reference"
+                    && site.source.span().start_byte() == start
+            })
+            .max_by_key(|site| site.source.span().end_byte())
+            .unwrap();
+        assert!(
+            matches!(application.target, OccurrenceTarget::Unresolved { .. }),
+            "{source}"
+        );
+        assert!(
+            document
+                .skipped_regions
+                .iter()
+                .any(|gap| gap.source == application.source
+                    && gap.detail == "vba-call-or-index-target-unavailable"),
+            "{source}"
+        );
+    }
+}
+
+#[test]
+fn vba_explicit_calls_and_call_prefixed_names_keep_exact_application_sources() {
+    for invocation in [
+        "Call Callback(1)",
+        "Callback 1",
+        "Callback _\n value:=1",
+        "Call _\r\n Callback(value:=1)",
+    ] {
+        let source = format!(
+            "Sub Callback(ByVal value As Long)\nEnd Sub\nSub Run()\n{invocation}\nEnd Sub\n"
+        );
+        let result = output(&source);
+        let document = result.document();
+        let symbol = document
+            .entities
+            .iter()
+            .find(|entity| entity.canonical_name == "Callback")
+            .unwrap()
+            .id;
+        let start = u64::try_from(source.find(invocation).unwrap()).unwrap();
+        let end = start + u64::try_from(invocation.len()).unwrap();
+        let application = document
+            .occurrences
+            .iter()
+            .find(|site| {
+                site.syntax_kind == "vba.application.reference"
+                    && site.source.span().start_byte() == start
+                    && site.source.span().end_byte() == end
+            })
+            .unwrap();
+        assert_eq!(
+            application.target,
+            OccurrenceTarget::Resolved { symbol },
+            "{source}"
+        );
+        assert_eq!(application.role, OccurrenceRole::Reference);
+    }
+}
+
+#[test]
 fn vba_declared_array_application_binds_without_guessing_object_defaults() {
     let source = "Sub Run()\nDim values(2) As Long\nDim dynamic() As Long\nDim objectValue As Object\nDim output As Long\nReDim dynamic(2)\nvalues(0) = Len(\"x\")\noutput = values(1)\noutput = dynamic(1)\noutput = objectValue(1)\nEnd Sub\n";
     let result = output(source);
@@ -5330,11 +5506,31 @@ fn vba_statement_named_arguments_bind_without_parentheses() {
                 gap.source == label.source && gap.detail == "vba-nonvalue-target-unavailable"
             }));
         }
+        let start = u64::try_from(source.find(invocation).unwrap()).unwrap();
+        let application = document
+            .occurrences
+            .iter()
+            .find(|site| {
+                site.syntax_kind == "vba.application.reference"
+                    && site.source.span().start_byte() == start
+            })
+            .unwrap();
+        let target = document
+            .entities
+            .iter()
+            .find(|entity| entity.canonical_name == "Visit")
+            .unwrap();
+        assert_eq!(
+            application.target,
+            OccurrenceTarget::Resolved { symbol: target.id },
+            "{invocation}"
+        );
         assert!(
-            document
+            !document
                 .skipped_regions
                 .iter()
-                .any(|gap| { gap.detail == "vba-call-or-index-target-unavailable" })
+                .any(|gap| gap.source == application.source
+                    && gap.detail == "vba-call-or-index-target-unavailable")
         );
     }
 }
