@@ -112,6 +112,7 @@ fn declaration_syntax(kind: &str) -> Option<&'static str> {
         "parameter" => "vba.parameter",
         "variable_declarator" => "vba.variable",
         "const_declarator" => "vba.constant",
+        "preprocessor_const" => "vba.compilation_constant",
         "label_statement" => "vba.statement_label",
         _ => return None,
     })
@@ -406,12 +407,33 @@ pub(super) fn reference_syntax(
                 },
             );
         }
+        if kind == "preprocessor_const" {
+            return Ok("vba.compilation_identifier");
+        }
+        if matches!(
+            kind,
+            "preprocessor_if"
+                | "preprocessor_elseif"
+                | "type_preprocessor_if"
+                | "type_preprocessor_elseif"
+                | "conditional_sub_declaration"
+                | "conditional_function_declaration"
+                | "conditional_property_declaration"
+        ) {
+            // Conditional procedure headers may have several condition fields.
+            let mut cursor = parent.walk();
+            for condition in parent.children_by_field_name("condition", &mut cursor) {
+                cancellation.check()?;
+                if condition == child {
+                    return Ok("vba.compilation_identifier");
+                }
+            }
+        }
         if matches!(
             kind,
             "type_expression"
                 | "dotted_type_expression"
                 | "implements_statement"
-                | "preprocessor_const"
                 | "goto_statement"
                 | "gosub_statement"
                 | "on_error_statement"
@@ -420,13 +442,6 @@ pub(super) fn reference_syntax(
             || (kind == "named_argument" && parent.child_by_field_name("name") == Some(child))
             || (kind == "on_goto_statement"
                 && parent.child_by_field_name("selector") != Some(child))
-            || (matches!(
-                kind,
-                "preprocessor_if"
-                    | "preprocessor_elseif"
-                    | "type_preprocessor_if"
-                    | "type_preprocessor_elseif"
-            ) && parent.child_by_field_name("condition") == Some(child))
         {
             return Ok("vba.nonvalue_identifier");
         }

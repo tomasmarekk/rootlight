@@ -1064,6 +1064,19 @@ impl<'a> ClassicIndex<'a> {
         for entity in entities.values() {
             cancellation.check()?;
             work.consume()?;
+            // Compiler constants are module-private but never runtime members,
+            // including when their spelling matches a module qualifier.
+            if entity.kind == EntityKind::Constant
+                && entity.evidence.source.as_ref().is_some_and(|source| {
+                    let span = source.span();
+                    usize::try_from(span.start_byte())
+                        .ok()
+                        .and_then(|start| sources.get(&span.file())?.get(start))
+                        == Some(&b'#')
+                })
+            {
+                continue;
+            }
             if entity.kind == EntityKind::Parameter
                 && let Some(ContainerRef::Entity(owner)) = entity.container
                 && entities

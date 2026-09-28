@@ -26,6 +26,7 @@
 (parameter name: (_) @definition) @declaration
 (variable_declarator name: (_) @definition) @declaration
 (const_declarator name: (_) @definition) @declaration
+(preprocessor_const name: (_) @definition) @declaration
 (label_statement name: (_) @definition) @declaration
 (line_number_prefix (line_number_literal) @definition @declaration)
 (line_number_statement number: (line_number_literal) @definition @declaration)

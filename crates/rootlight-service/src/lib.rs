@@ -219,8 +219,8 @@ const PROJECT_FACTS_TRUNCATED_CODE: &str = "project-adapter-facts-truncated";
 const PROJECT_FACTS_TRUNCATED_MESSAGE: &str =
     "additional project semantic facts were omitted by aggregate resource limits";
 const AGGREGATE_DIAGNOSTICS_TRUNCATED_CODE: &str = "aggregate-diagnostics-truncated";
-const ANALYZER_BINARY_SEED: &[u8] = b"rootlight.first-slice.treesitter-structural/164";
-const RESOLVER_BINARY_SEED: &[u8] = b"rootlight.first-slice.resolve/43";
+const ANALYZER_BINARY_SEED: &[u8] = b"rootlight.first-slice.treesitter-structural/165";
+const RESOLVER_BINARY_SEED: &[u8] = b"rootlight.first-slice.resolve/44";
 const INCREMENTAL_PROVIDER_SEED: &[u8] = b"rootlight.first-slice.incremental-provider/1";
 const LANGUAGE_DISPOSITION_PROVIDER_SEED: &[u8] = b"rootlight.first-slice.language-disposition/5";
 const SOURCE_FILE_FALLBACK_PROVIDER_SEED: &[u8] = b"rootlight.source-file-fallback/4";
@@ -29786,6 +29786,162 @@ mod tests {
                 assert!(document.entities.is_empty());
                 assert!(hits.data.hits.iter().all(|hit| hit.symbol.is_none()));
             }
+        }
+    }
+
+    #[test]
+    fn vba_compilation_constants_do_not_shadow_project_members() {
+        let fixture = durable_test_tempdir();
+        fs::write(
+            fixture.path().join("project.vbp"),
+            "Type=OleDll\nName=\"Primary\"\nModule=Client; Client.bas\nModule=Catalog; Catalog.bas\n",
+        )
+        .unwrap();
+        let client = "Attribute VB_Name = \"Client\"\nPrivate Declare PtrSafe Function Clock Lib \"clock\" () As LongPtr\n#Const Catalog = True\nSub Run()\nDim value As Long\nvalue = Catalog.Enabled\nvalue = Catalog.CompilerOnly\nEnd Sub\n";
+        fs::write(fixture.path().join("Client.bas"), client).unwrap();
+        fs::write(
+            fixture.path().join("Catalog.bas"),
+            "Attribute VB_Name = \"Catalog\"\nPrivate Declare PtrSafe Function Clock Lib \"clock\" () As LongPtr\n#Const Enabled = True\n#Const CompilerOnly = True\nPublic Const Enabled = 7\n",
+        )
+        .unwrap();
+        let mut service = FirstSliceService::new(2).unwrap();
+        let receipt = service
+            .index_repository(fixture.path(), &deadline())
+            .unwrap();
+        let snapshot = service
+            .loaded_generation_snapshot(receipt.generation)
+            .unwrap();
+        let document = snapshot.document();
+        let file = document
+            .files
+            .iter()
+            .find(|file| file.path == "Client.bas")
+            .unwrap();
+        for (text, resolved) in [("Catalog.Enabled", true), ("Catalog.CompilerOnly", false)] {
+            let start = u64::try_from(client.find(text).unwrap()).unwrap();
+            let site = document
+                .occurrences
+                .iter()
+                .find(|site| {
+                    site.file == file.id
+                        && site.syntax_kind == "vba.member.reference"
+                        && site.source.span().start_byte() == start
+                })
+                .unwrap();
+            assert_eq!(
+                matches!(site.target, OccurrenceTarget::Resolved { .. }),
+                resolved,
+                "{text}"
+            );
+            if let OccurrenceTarget::Resolved { symbol } = site.target {
+                let target = document
+                    .entities
+                    .iter()
+                    .find(|entity| entity.id == symbol)
+                    .unwrap();
+                assert_eq!(target.canonical_name, "Enabled");
+                assert_eq!(target.visibility, rootlight_ir::EntityVisibility::Public);
+            }
+        }
+    }
+
+    #[test]
+    fn vba_compilation_constants_follow_rename_and_restart() {
+        let storage = durable_test_tempdir();
+        let paths = RuntimePaths::new(storage.path().join("state"), storage.path().join("runtime"))
+            .unwrap();
+        paths.prepare_owner().unwrap();
+        let fixture = durable_test_tempdir();
+        let mut previous = None;
+        for (name, resolved) in [("Enabled", true), ("Other", false), ("Enabled", true)] {
+            let source = format!(
+                "Attribute VB_Name = \"Options\"\nPrivate Declare PtrSafe Function Clock Lib \"clock\" () As LongPtr\n#Const {name} = True\nSub Run()\n#If ENABLED Then\nDim item As Long\nitem = 1\n#End If\nEnd Sub\n"
+            );
+            fs::write(fixture.path().join("options.bas"), &source).unwrap();
+            let mut service =
+                FirstSliceService::new_durable(2, paths.state_dir(), &deadline()).unwrap();
+            let receipt = service
+                .index_repository(fixture.path(), &deadline())
+                .unwrap();
+            assert_eq!(
+                service
+                    .index_repository(fixture.path(), &deadline())
+                    .unwrap(),
+                receipt
+            );
+            assert_ne!(previous, Some(receipt.generation));
+            previous = Some(receipt.generation);
+            drop(service);
+            let service =
+                FirstSliceService::new_durable(2, paths.state_dir(), &deadline()).unwrap();
+            let snapshot = service
+                .loaded_generation_snapshot(receipt.generation)
+                .unwrap();
+            let document = snapshot.document();
+            let reference = document
+                .occurrences
+                .iter()
+                .find(|site| site.syntax_kind == "vba.compilation_identifier.reference")
+                .unwrap();
+            assert_eq!(
+                matches!(reference.target, OccurrenceTarget::Resolved { .. }),
+                resolved
+            );
+            if let OccurrenceTarget::Resolved { symbol } = reference.target {
+                let entity = document
+                    .entities
+                    .iter()
+                    .find(|entity| entity.id == symbol)
+                    .unwrap();
+                assert_eq!(entity.canonical_name, name);
+                assert_eq!(entity.visibility, rootlight_ir::EntityVisibility::Private);
+                let relationships = service
+                    .symbol_relationships(
+                        receipt.generation,
+                        BTreeSet::from([symbol]),
+                        vec![RelationFamily::References],
+                        Some(RelationDirection::Inbound),
+                        0,
+                        10,
+                        0,
+                        &deadline(),
+                    )
+                    .unwrap();
+                assert!(
+                    relationships
+                        .data
+                        .groups
+                        .iter()
+                        .flat_map(|group| &group.items)
+                        .flat_map(|edge| &edge.source_refs)
+                        .any(|source| source == &reference.source)
+                );
+            }
+            assert_eq!(
+                document.skipped_regions.iter().any(|gap| {
+                    gap.source == reference.source
+                        && gap.detail == "vba-compilation-constant-target-unavailable"
+                }),
+                !resolved
+            );
+            assert!(
+                document.skipped_regions.iter().any(|gap| {
+                    gap.detail == "vba-conditional-compilation-evaluation-unavailable"
+                })
+            );
+            assert_eq!(reference.source.generation(), receipt.generation);
+            let read = service
+                .source_read_with_options_and_budget(
+                    receipt.generation,
+                    vec![reference.source.clone()],
+                    SourceReadOptions::new()
+                        .with_context_lines_before(0)
+                        .with_context_lines_after(0),
+                    FirstSliceBudget::default(),
+                    &deadline(),
+                )
+                .unwrap();
+            assert_eq!(read.data.chunks[0].bytes, b"ENABLED");
         }
     }
 

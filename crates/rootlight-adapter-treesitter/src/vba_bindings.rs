@@ -93,6 +93,8 @@ pub(super) struct VbaBindings<'a> {
     property_value_symbols: BTreeSet<SymbolId>,
     incomplete_parameter_scopes: BTreeSet<u64>,
     bindings: BTreeMap<u64, BTreeMap<String, Option<Binding>>>,
+    compilation_constants: BTreeMap<u64, BTreeMap<String, Option<SymbolId>>>,
+    foreign_compilation_scopes: BTreeSet<u64>,
     // MS-VBAL 5.2.4.3 permits events to share names with ordinary members.
     // Their ambiguity and foreign-name barriers must not cross namespaces.
     events: BTreeMap<u64, BTreeMap<String, Option<SymbolId>>>,
@@ -139,6 +141,8 @@ impl<'a> VbaBindings<'a> {
             property_value_symbols: BTreeSet::new(),
             incomplete_parameter_scopes: BTreeSet::new(),
             bindings: BTreeMap::new(),
+            compilation_constants: BTreeMap::new(),
+            foreign_compilation_scopes: BTreeSet::new(),
             events: BTreeMap::new(),
             foreign_event_scopes: BTreeSet::new(),
             statement_labels: BTreeMap::new(),
@@ -299,6 +303,28 @@ impl<'a> VbaBindings<'a> {
             let text = std::str::from_utf8(source.get(start..end).ok_or_else(invalid_capture)?)
                 .map_err(|_| invalid_capture())?;
             let name = structural_captured_name_for_fact("vba", fact, text, maximum_name_bytes);
+            if declaration.syntax_kind().as_str() == "vba.compilation_constant.declaration" {
+                result
+                    .visibilities
+                    .insert(declaration.local_id(), EntityVisibility::Private);
+                if let Some(module) = result.compilation_scope(fact.parent(), cancellation)? {
+                    if let Some(name) = name.as_deref().filter(|name| name.is_ascii()) {
+                        // Every #Const is module-scoped, including excluded branches.
+                        // Duplicate names are invalid rather than last-write-wins
+                        // (MS-VBAL 3.4.1); runtime bindings use a separate namespace.
+                        result
+                            .compilation_constants
+                            .entry(module)
+                            .or_default()
+                            .entry(name.to_ascii_lowercase())
+                            .and_modify(|symbol| *symbol = None)
+                            .or_insert_with(|| symbols.get(&fact.local_id()).copied());
+                    } else {
+                        result.foreign_compilation_scopes.insert(module);
+                    }
+                }
+                continue;
+            }
             if declaration.syntax_kind().as_str() == "vba.statement_label.declaration" {
                 // Labels belong to the procedure, independently of ordinary
                 // names and nested executable blocks (MS-VBAL 5.4.1.1).
@@ -1361,6 +1387,32 @@ impl<'a> VbaBindings<'a> {
         if fact.syntax_kind().as_str() == "vba.nonvalue_identifier.reference" {
             return self.named_argument(fact, text, cancellation);
         }
+        if fact.syntax_kind().as_str() == "vba.compilation_identifier.reference" {
+            let Some(module) = self.compilation_scope(fact.parent(), cancellation)? else {
+                return Ok(None);
+            };
+            if self.foreign_compilation_scopes.contains(&module)
+                || text.ends_with(['$', '%', '&', '#', '@', '^', '!'])
+            {
+                return Ok(None);
+            }
+            let Some(name) =
+                structural_captured_name_for_fact("vba", fact, text, self.maximum_name_bytes)
+                    .filter(|name| name.is_ascii())
+            else {
+                return Ok(None);
+            };
+            return Ok(self
+                .compilation_constants
+                .get(&module)
+                .and_then(|constants| constants.get(&name.to_ascii_lowercase()))
+                .copied()
+                .flatten()
+                .map(|symbol| ResolvedBinding {
+                    symbol,
+                    is_call: false,
+                }));
+        }
         if fact.syntax_kind().as_str() == "vba.event_identifier.reference" {
             return self.event_reference(fact, text, cancellation);
         }
@@ -1993,6 +2045,23 @@ impl<'a> VbaBindings<'a> {
                         conditional || kind.starts_with("vba.conditional_"),
                     )));
                 }
+            }
+            parent = fact.parent();
+        }
+        Err(invalid_capture())
+    }
+
+    fn compilation_scope(
+        &self,
+        mut parent: Option<u64>,
+        cancellation: &Cancellation,
+    ) -> Result<Option<u64>, AdapterError> {
+        for _ in 0..self.facts.len() {
+            cancellation.check()?;
+            let Some(id) = parent else { return Ok(None) };
+            let fact = self.fact(id)?;
+            if fact.syntax_kind().as_str() == "vba.file.scope" {
+                return Ok(Some(id));
             }
             parent = fact.parent();
         }

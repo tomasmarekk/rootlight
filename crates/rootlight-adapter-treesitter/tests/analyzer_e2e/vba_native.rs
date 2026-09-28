@@ -40,6 +40,136 @@ fn output_with_native_kind(
 }
 
 #[test]
+fn vba_compilation_constants_use_a_separate_module_namespace() {
+    let source = "Attribute VB_Name = \"Options\"\n#Const Enabled = True\nConst Enabled = 7\nSub Run(ByVal Enabled As Long)\n#If eNaBlEd Then\nDim value As Long\nvalue = Enabled\n#End If\nEnd Sub\n";
+    let result = output(source);
+    let document = result.document();
+    let start = u64::try_from(source.find("#Const Enabled").unwrap() + 7).unwrap();
+    let definition = document
+        .occurrences
+        .iter()
+        .find(|site| {
+            site.role == OccurrenceRole::Definition && site.source.span().start_byte() == start
+        })
+        .expect("compiler constant definition");
+    let condition = document
+        .occurrences
+        .iter()
+        .find(|site| {
+            site.syntax_kind == "vba.compilation_identifier.reference"
+                && site.source.span().start_byte()
+                    == u64::try_from(source.find("eNaBlEd Then").unwrap()).unwrap()
+        })
+        .unwrap();
+    assert_eq!(condition.target, definition.target);
+    assert!(matches!(
+        condition.target,
+        OccurrenceTarget::Resolved { .. }
+    ));
+    let runtime = reference_at(document, source, "Enabled\n#End");
+    assert_ne!(runtime.target, condition.target);
+    assert!(matches!(runtime.target, OccurrenceTarget::Resolved { .. }));
+    assert!(
+        document
+            .skipped_regions
+            .iter()
+            .any(|gap| { gap.detail == "vba-conditional-compilation-evaluation-unavailable" })
+    );
+}
+
+#[test]
+fn vba_compilation_constants_include_all_directives_without_selecting_branches() {
+    for source in [
+        "#Const Enabled = True\n#If ENABLED Then\n#End If\n",
+        "#If ENABLED Then\n#End If\n#Const Enabled = True\n",
+        "#If Unknown Then\n#Const Enabled = True\n#End If\n#If ENABLED Then\n#End If\n",
+        "Sub Setup()\n#Const Enabled = True\nEnd Sub\n#If ENABLED Then\n#End If\n",
+        "#Const Enabled% = True\n#If ENABLED Then\n#End If\n",
+        "#Const Enabled = True\n#Const Other = ENABLED\n",
+        "#Const Enabled = True\n#If ENABLED Then\nSub Run(ByVal value As Long)\n#Else\nSub Run(ByVal value As Integer)\n#End If\nEnd Sub\n",
+        "#Const Enabled = True\n#If Unknown Then\nSub Run(ByVal value As Long)\n#ElseIf ENABLED Then\nSub Run(ByVal value As Integer)\n#End If\nEnd Sub\n",
+    ] {
+        let result = output(source);
+        let document = result.document();
+        let reference = document
+            .occurrences
+            .iter()
+            .find(|site| {
+                site.syntax_kind == "vba.compilation_identifier.reference"
+                    && site.source.span().start_byte()
+                        == u64::try_from(source.find("ENABLED").unwrap()).unwrap()
+            })
+            .unwrap();
+        let OccurrenceTarget::Resolved { symbol } = reference.target else {
+            panic!("{source}")
+        };
+        let entity = document
+            .entities
+            .iter()
+            .find(|entity| entity.id == symbol)
+            .unwrap();
+        assert_eq!(entity.kind, EntityKind::Constant);
+        assert_eq!(entity.visibility, rootlight_ir::EntityVisibility::Private);
+        if let Some(ContainerRef::Entity(owner)) = entity.container {
+            assert!(
+                document
+                    .entities
+                    .iter()
+                    .any(|entity| entity.id == owner && entity.kind == EntityKind::Module)
+            );
+        }
+        assert!(document.relations.iter().any(|edge| {
+            edge.predicate == RelationPredicate::RefersTo
+                && edge.object == RelationEndpoint::Entity(symbol)
+                && edge.evidence.source.as_ref() == Some(&reference.source)
+        }));
+        assert!(
+            document
+                .skipped_regions
+                .iter()
+                .any(|gap| { gap.detail == "vba-conditional-compilation-evaluation-unavailable" })
+        );
+    }
+}
+
+#[test]
+fn vba_compilation_constants_do_not_bind_runtime_or_duplicate_names() {
+    for source in [
+        "Const Enabled = True\n#If ENABLED Then\n#End If\n",
+        "#If ENABLED Then\n#End If\n",
+        "#Const Enabled = True\n#Const enabled = False\n#If ENABLED Then\n#End If\n",
+        "#If Unknown Then\n#Const Enabled = True\n#Else\n#Const Enabled = False\n#End If\n#If ENABLED Then\n#End If\n",
+    ] {
+        let result = output(source);
+        let reference = result
+            .document()
+            .occurrences
+            .iter()
+            .find(|site| {
+                site.syntax_kind == "vba.compilation_identifier.reference"
+                    && site.source.span().start_byte()
+                        == u64::try_from(source.find("ENABLED").unwrap()).unwrap()
+            })
+            .unwrap();
+        assert!(
+            matches!(reference.target, OccurrenceTarget::Unresolved { .. }),
+            "{source}"
+        );
+        assert!(result.document().skipped_regions.iter().any(|gap| {
+            gap.source == reference.source
+                && gap.detail == "vba-compilation-constant-target-unavailable"
+        }));
+    }
+    let source =
+        "#Const Enabled = True\nSub Run()\nDim output As Long\noutput = Enabled\nEnd Sub\n";
+    let result = output(source);
+    assert!(matches!(
+        reference_at(result.document(), source, "Enabled\nEnd").target,
+        OccurrenceTarget::Unresolved { .. }
+    ));
+}
+
+#[test]
 fn vba_procedure_pointers_bind_without_calling_or_reading_locals() {
     // MS-VBAL 5.6.10 skips the procedure-local tier in pointer context.
     for (declaration, body, target_name) in [
@@ -5521,9 +5651,19 @@ fn vba_conditional_header_conditions_do_not_bind_runtime_variables() {
         .iter()
         .find(|site| site.source.span().start_byte() == start)
         .unwrap();
-    assert_eq!(condition.syntax_kind, "vba.nonvalue_identifier.reference");
+    assert_eq!(
+        condition.syntax_kind,
+        "vba.compilation_identifier.reference"
+    );
     assert!(matches!(
         condition.target,
         OccurrenceTarget::Unresolved { .. }
     ));
+    assert!(
+        result
+            .document()
+            .skipped_regions
+            .iter()
+            .any(|gap| { gap.detail == "vba-conditional-compilation-evaluation-unavailable" })
+    );
 }

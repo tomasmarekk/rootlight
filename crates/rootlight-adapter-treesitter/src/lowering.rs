@@ -2865,6 +2865,18 @@ impl<'context, 'source> Lowering<'context, 'source> {
             let mut parent_scope = fact
                 .parent()
                 .and_then(|parent| nearest_scope_ancestor.get(&parent).cloned().flatten());
+            if fact.syntax_kind().as_str() == "vba.compilation_constant.declaration" {
+                // Compiler constants belong to their source module even when
+                // written inside a procedure or an excluded conditional branch.
+                while let Some(parent) = parent_entity.and_then(|id| drafts.get(&id)) {
+                    cancellation.check()?;
+                    if matches!(parent.kind, EntityKind::Module | EntityKind::Class) {
+                        break;
+                    }
+                    parent_entity = parent.parent_entity;
+                }
+                parent_scope = None;
+            }
             if let Some(binding) = infer_bindings.get(&fact.local_id()) {
                 // Nested signatures contribute to the conditional's binding, not
                 // an independent parameter in the signature where infer is written.
@@ -3263,6 +3275,17 @@ impl<'context, 'source> Lowering<'context, 'source> {
                     "json.property",
                     position,
                 ))
+            } else if fact.syntax_kind().as_str() == "vba.compilation_constant.declaration" {
+                // Keep compiler constants distinct from same-named runtime constants.
+                let label = fact.syntax_kind().as_str();
+                let position = written_declarations
+                    .entry((parent_entity, label.to_owned(), name.to_string()))
+                    .or_default();
+                let ordinal = *position;
+                *position = position
+                    .checked_add(1)
+                    .ok_or(SinkError::AccountingOverflow)?;
+                Some(written_source_identity("vba", None, label, ordinal))
             } else if self.language_for_fact(fact) == "sql" && kind != EntityKind::Module {
                 // Source DDL is not a final live catalog. Separate repeated
                 // declarations and object categories without body/offset hashes.
@@ -4225,6 +4248,14 @@ fn equivalent_entity_projection(left: &EntityRecord, right: &EntityRecord) -> bo
 
 fn source_coverage_gap(fact: &SyntaxFact) -> Option<(FactDomain, &'static str)> {
     match fact.syntax_kind().as_str() {
+        "vba.compilation_constant.declaration"
+        | "vba.preprocessor.scope"
+        | "vba.conditional_sub_function.declaration"
+        | "vba.conditional_function.declaration"
+        | "vba.conditional_property.declaration" => Some((
+            FactDomain::Relations,
+            "vba-conditional-compilation-evaluation-unavailable",
+        )),
         "groovy.invalid_callable.scope" => {
             Some((FactDomain::Entities, "groovy-callable-identity-unavailable"))
         }
@@ -5474,6 +5505,9 @@ fn source_reference_gap(fact: &SyntaxFact) -> Option<&'static str> {
         | "vba.unsupported_automatic_type_identifier.reference"
         | "vba.type_identifier.reference" => Some("vba-type-target-unavailable"),
         "vba.instance.reference" => Some("vba-instance-owner-unavailable"),
+        "vba.compilation_identifier.reference" => {
+            Some("vba-compilation-constant-target-unavailable")
+        }
         "vba.construction.reference" => Some("vba-construction-semantics-unavailable"),
         "vba.module_name.reference" => Some("vba-module-name-unavailable"),
         "vba.identifier.reference"
