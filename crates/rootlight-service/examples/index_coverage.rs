@@ -1,6 +1,7 @@
-//! Audits a fresh durable index through public service and source APIs.
+//! Audits fresh or resumed durable indexing through public service and source APIs.
 //! Explicit configuration and default detection are separate invocations; counts
 //! describe recorded evidence, not an independent semantic completeness oracle.
+//! Resume measures an update after reopening the service, not warm-cache reuse.
 
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -20,6 +21,12 @@ use rootlight_service::{
 };
 use rootlight_source::{SourceEncoding, SourceReadOptions};
 use serde_json::json;
+
+#[derive(Clone, Copy)]
+enum StateMode {
+    Fresh,
+    Resume,
+}
 
 fn deadline() -> Result<Cancellation, Box<dyn Error>> {
     let end = Instant::now()
@@ -56,8 +63,14 @@ fn read_live_file(repository: &Path, file: &FileRecord) -> Result<Vec<u8>, Box<d
 
 fn main() -> Result<(), Box<dyn Error>> {
     let args: Vec<_> = std::env::args_os().skip(1).collect();
+    let (mode, args) = match args.split_first() {
+        Some((flag, tail)) if flag == "--resume" => (StateMode::Resume, tail),
+        _ => (StateMode::Fresh, args.as_slice()),
+    };
     if !(2..=3).contains(&args.len()) {
-        return Err("usage: index_coverage REPOSITORY NEW_STATE_DIRECTORY [CONFIG_FILE]".into());
+        return Err(
+            "usage: index_coverage [--resume] REPOSITORY STATE_DIRECTORY [CONFIG_FILE]".into(),
+        );
     }
     let repository = PathBuf::from(&args[0]);
     let state = PathBuf::from(&args[1]);
@@ -70,7 +83,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             )?)?)
         })
         .transpose()?;
-    let report = inspect(&repository, &state, config.as_deref())?;
+    let report = inspect(&repository, &state, config.as_deref(), mode)?;
     println!("{}", serde_json::to_string_pretty(&report)?);
     Ok(())
 }
@@ -79,19 +92,41 @@ fn inspect(
     repository: &Path,
     state: &Path,
     config: Option<&str>,
+    mode: StateMode,
 ) -> Result<serde_json::Value, Box<dyn Error>> {
     let repository = fs::canonicalize(repository)?;
     let policy = FirstSliceStoragePolicy::resolve_user_config(config, 2)?;
-    // Refuse existing state so a previous generation cannot masquerade as a cold run.
-    fs::create_dir(state)?;
+    match mode {
+        // A previous generation must not masquerade as a cold run.
+        StateMode::Fresh => fs::create_dir(state)?,
+        StateMode::Resume if !state.join("state").is_dir() => {
+            return Err("resume requires an existing durable state directory".into());
+        }
+        StateMode::Resume => {}
+    }
     let paths = RuntimePaths::new(state.join("state"), state.join("runtime"))?;
     paths.prepare_owner()?;
+    let opened = Instant::now();
     let mut service =
         FirstSliceService::new_durable_with_policy(policy, paths.state_dir(), &deadline()?)?;
+    let open_wall_micros = opened.elapsed().as_micros();
+    let previous_generation = match mode {
+        StateMode::Fresh => None,
+        StateMode::Resume => {
+            let registered = service
+                .registered_repository_for_root(&repository, &deadline()?)?
+                .ok_or("resume repository is not registered in this state")?;
+            Some(
+                service
+                    .repository_status(registered, None)?
+                    .resolved_generation,
+            )
+        }
+    };
     let (cold, cold_timing) = index_with_timing(&mut service, &repository)?;
     let (no_op, no_op_timing) = index_with_timing(&mut service, &repository)?;
-    if cold.generation != no_op.generation {
-        return Err("unchanged repository produced a different generation".into());
+    if cold != no_op {
+        return Err("unchanged repository produced a different receipt".into());
     }
     let status = service.repository_status(cold.repository, Some(cold.generation))?;
     let (rows, configuration_hash) = service.inspect_generation(
@@ -105,11 +140,11 @@ fn inspect(
             ))
         },
     )??;
-    Ok(json!({
+    let mut report = json!({
         "schema":"rootlight-index-coverage-diagnostic/4", "explicit_configuration":config.is_some(),
         "configuration_input_hash":rootlight_ids::content_hash(config.unwrap_or("").as_bytes()).to_string(),
         "configuration_hash":configuration_hash,
-        "cold":cold,"cold_wall_micros":cold_timing["wall_micros"],"cold_timing":cold_timing,
+        "open_wall_micros":open_wall_micros,
         "no_op_same_generation":true,"no_op_wall_micros":no_op_timing["wall_micros"],"no_op_timing":no_op_timing,
         "generation_inspection_method":"local_identity_verified_snapshot",
         "shared_bundle_roundtrip":false,
@@ -117,7 +152,24 @@ fn inspect(
             "discovered_files":entry.discovered_files,"tier":entry.tier,"status":entry.status})).collect::<Vec<_>>(),
         "files":rows,"full_semantic_completeness_proven":false,
         "installed_mcp_qualified":false
-    }))
+    });
+    match mode {
+        StateMode::Fresh => {
+            report["service_lifetime"] = json!("fresh");
+            report["cold"] = serde_json::to_value(cold)?;
+            report["cold_wall_micros"] = cold_timing["wall_micros"].clone();
+            report["cold_timing"] = cold_timing;
+        }
+        StateMode::Resume => {
+            report["schema"] = json!("rootlight-index-update-diagnostic/1");
+            report["service_lifetime"] = json!("reopened");
+            report["previous_generation"] = serde_json::to_value(previous_generation)?;
+            report["update"] = serde_json::to_value(cold)?;
+            report["update_wall_micros"] = cold_timing["wall_micros"].clone();
+            report["update_timing"] = cold_timing;
+        }
+    }
+    Ok(report)
 }
 
 fn index_with_timing(
@@ -136,7 +188,7 @@ fn index_with_timing(
         },
     )?;
     let prepared_at = Instant::now();
-    let receipt = service.publish_prepared(prepared, &cancellation)?;
+    let commit = service.publish_prepared_with_metrics(prepared, &cancellation)?;
     let published_at = Instant::now();
     let mut previous_event = started;
     let mut previous_completed = started;
@@ -167,8 +219,9 @@ fn index_with_timing(
             completed = progress.completed;
         }
     }
+    let evidence = commit.evidence();
     Ok((
-        receipt,
+        commit.receipt().clone(),
         json!({
             "wall_micros":published_at.duration_since(started).as_micros(),
             "prepare_micros":prepared_at.duration_since(started).as_micros(),
@@ -176,6 +229,17 @@ fn index_with_timing(
             "after_last_progress_micros":prepared_at.duration_since(previous_completed).as_micros(),
             "completed_stages":stages,
             "progress_events":events,
+            "operation":{
+                "strategy":format!("{:?}", evidence.strategy),
+                "fallback_reason":evidence.fallback_reason.as_ref().map(|reason| format!("{reason:?}")),
+                "invalidated_units":evidence.invalidated_units,"changed_inputs":evidence.changed_inputs,
+                "changed_files":evidence.changed_files,"reused_files":evidence.reused_files,
+                "rebuilt_files":evidence.rebuilt_files,"reused_facts":evidence.reused_facts,
+                "rebuilt_facts":evidence.rebuilt_facts,"referenced_bytes":evidence.referenced_bytes,
+                "newly_written_bytes":evidence.newly_written_bytes,"reserved_memory_bytes":evidence.reserved_memory_bytes,
+                "owned_memory_bytes":evidence.owned_memory_bytes,"retained_durable_bytes":evidence.retained_durable_bytes,
+                "planned_fact_work":evidence.planned_fact_work,"normalized_fact_work":evidence.normalized_fact_work,
+            },
         }),
     ))
 }
@@ -361,6 +425,113 @@ mod tests {
     use super::*;
 
     #[test]
+    fn resumed_diagnostic_tracks_body_edits_and_source_restoration() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = fs::canonicalize(directory.path()).unwrap();
+        let repository = root.join("repository");
+        let state = root.join("state");
+        fs::create_dir(&repository).unwrap();
+        let original = "pub fn value() -> i32 { 1 }\n";
+        let modified = "pub fn value() -> i32 { 2 }\n";
+        let file = repository.join("value.rs");
+        fs::write(&file, original).unwrap();
+        fs::write(repository.join("other.rs"), "pub fn other() -> i32 { 3 }\n").unwrap();
+        assert!(inspect(&repository, &state, None, StateMode::Resume).is_err());
+        assert!(!state.exists());
+        let cold = inspect(&repository, &state, None, StateMode::Fresh).unwrap();
+        assert_eq!(cold["cold_timing"]["operation"]["strategy"], "Initial");
+        assert_eq!(cold["cold_timing"]["operation"]["rebuilt_files"], 2);
+        let retained = inspect(&repository, &state, None, StateMode::Resume).unwrap();
+        assert_eq!(retained["update"]["generation"], cold["cold"]["generation"]);
+        assert_eq!(
+            retained["update_timing"]["operation"]["strategy"],
+            "RetainedGeneration"
+        );
+        fs::write(&file, modified).unwrap();
+        let changed = inspect(&repository, &state, None, StateMode::Resume).unwrap();
+        assert_eq!(changed["schema"], "rootlight-index-update-diagnostic/1");
+        assert_eq!(changed["service_lifetime"], "reopened");
+        assert!(changed.get("cold").is_none());
+        assert_eq!(changed["previous_generation"], cold["cold"]["generation"]);
+        assert_eq!(changed["update"]["parent"], cold["cold"]["generation"]);
+        assert_ne!(changed["update"]["generation"], cold["cold"]["generation"]);
+        let work = &changed["update_timing"]["operation"];
+        assert_eq!(work["changed_files"], 1);
+        // Reopening does not restore the optional in-memory parser cache.
+        // Account for actual work without requiring that cache to survive.
+        assert_eq!(
+            work["rebuilt_files"].as_u64().unwrap() + work["reused_files"].as_u64().unwrap(),
+            2
+        );
+        assert_eq!(
+            work["rebuilt_facts"].as_u64().unwrap() + work["reused_facts"].as_u64().unwrap(),
+            cold["cold_timing"]["operation"]["rebuilt_facts"]
+                .as_u64()
+                .unwrap()
+        );
+        assert!(!work["normalized_fact_work"].as_array().unwrap().is_empty());
+        assert_eq!(changed["no_op_timing"]["operation"]["changed_files"], 0);
+        assert_eq!(changed["no_op_timing"]["operation"]["rebuilt_facts"], 0);
+        assert_eq!(fs::read(&file).unwrap(), modified.as_bytes());
+        fs::write(&file, original).unwrap();
+        let restored = inspect(&repository, &state, None, StateMode::Resume).unwrap();
+        assert_eq!(
+            restored["previous_generation"],
+            changed["update"]["generation"]
+        );
+        for report in [&cold, &retained, &changed, &restored] {
+            assert_eq!(report["no_op_same_generation"], true);
+            assert!(report["open_wall_micros"].as_u64().is_some());
+            assert!(
+                report["files"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .all(|row| row["source_read_exact"] == true)
+            );
+        }
+        assert_eq!(fs::read(&file).unwrap(), original.as_bytes());
+        let other = root.join("unregistered");
+        fs::create_dir(&other).unwrap();
+        assert!(inspect(&other, &state, None, StateMode::Resume).is_err());
+    }
+
+    #[test]
+    fn timing_reports_actual_warm_parser_and_fact_reuse() {
+        let directory = tempfile::tempdir().unwrap();
+        let repository = directory.path().join("repository");
+        fs::create_dir(&repository).unwrap();
+        let file = repository.join("value.rs");
+        fs::write(&file, "pub fn value() -> i32 { 1 }\n").unwrap();
+        fs::write(repository.join("other.rs"), "pub fn other() -> i32 { 3 }\n").unwrap();
+        let paths = RuntimePaths::new(
+            directory.path().join("state"),
+            directory.path().join("runtime"),
+        )
+        .unwrap();
+        paths.prepare_owner().unwrap();
+        let mut service =
+            FirstSliceService::new_durable(2, paths.state_dir(), &deadline().unwrap()).unwrap();
+        let (cold, _) = index_with_timing(&mut service, &repository).unwrap();
+        fs::write(&file, "pub fn value() -> i32 { 2 }\n").unwrap();
+        let (changed, timing) = index_with_timing(&mut service, &repository).unwrap();
+        assert_eq!(changed.parent, Some(cold.generation));
+        let work = &timing["operation"];
+        assert_eq!(work["strategy"], "DependencyDirected");
+        assert!(work["fallback_reason"].is_null());
+        assert_eq!(work["changed_files"], 1);
+        assert_eq!(work["rebuilt_files"], 1);
+        assert_eq!(work["reused_files"], 1);
+        assert!(work["reused_facts"].as_u64().unwrap() > 0);
+        assert!(work["rebuilt_facts"].as_u64().unwrap() > 0);
+        let (no_op, timing) = index_with_timing(&mut service, &repository).unwrap();
+        assert_eq!(no_op, changed);
+        assert_eq!(timing["operation"]["strategy"], "RetainedGeneration");
+        assert_eq!(timing["operation"]["rebuilt_files"], 0);
+        assert_eq!(timing["operation"]["rebuilt_facts"], 0);
+    }
+
+    #[test]
     fn bounded_reads_reject_oversized_and_missing_files() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("input");
@@ -410,7 +581,7 @@ mod tests {
                 .collect::<Vec<_>>();
             fs::write(repository.join(name), bytes).unwrap();
         }
-        let report = inspect(&repository, &root.join("state"), None).unwrap();
+        let report = inspect(&repository, &root.join("state"), None, StateMode::Fresh).unwrap();
         let files = report["files"].as_array().unwrap();
         assert_eq!(files.len(), 2);
         assert!(files.iter().all(|file| file["source_exact"] == true));
@@ -453,7 +624,7 @@ mod tests {
         let configured = "version='1.3'\n[extensions.source-languages]\nversion='1.0'\ncritical=true\n[extensions.source-languages.data.extensions]\nbas='vba'\n";
         for (mode, config) in [("default", None), ("configured", Some(configured))] {
             let state = root.join(mode);
-            let report = inspect(&repository, &state, config).unwrap();
+            let report = inspect(&repository, &state, config, StateMode::Fresh).unwrap();
             assert_eq!(report["schema"], "rootlight-index-coverage-diagnostic/4");
             assert_eq!(report["explicit_configuration"], config.is_some());
             assert_eq!(report["no_op_same_generation"], true);
@@ -501,7 +672,7 @@ mod tests {
                     "visual-basic-classic"
                 }
             );
-            assert!(inspect(&repository, &state, config).is_err());
+            assert!(inspect(&repository, &state, config, StateMode::Fresh).is_err());
         }
     }
 }
