@@ -3893,6 +3893,193 @@ fn vba_procedural_module_qualifier_resolves_own_member_without_hiding_a_local() 
 }
 
 #[test]
+fn vba_module_qualified_applications_bind_exact_arguments() {
+    for (statement, application) in [
+        (
+            "result = Utility.Measure(value:=1)",
+            "Utility.Measure(value:=1)",
+        ),
+        (
+            "Call Utility.Measure(value:=1)",
+            "Call Utility.Measure(value:=1)",
+        ),
+        ("Utility.Measure value:=1", "Utility.Measure value:=1"),
+        (
+            "Call [Utility].Measure _\n ([VALUE]:=1)",
+            "Call [Utility].Measure _\n ([VALUE]:=1)",
+        ),
+        (
+            "result = Utility.Measure(value:=Utility.Measure(value:=2))",
+            "Utility.Measure(value:=Utility.Measure(value:=2))",
+        ),
+    ] {
+        let source = format!(
+            "Attribute VB_Name = \"Utility\"\nPublic Function Measure(ByVal value As Long) As Long\nMeasure = value\nEnd Function\nPublic Sub Run(ByVal value As Long)\nDim result As Long\n{statement}\nEnd Sub\n"
+        );
+        let output = output(&source);
+        let document = output.document();
+        let target = document
+            .entities
+            .iter()
+            .find(|entity| {
+                entity.kind == EntityKind::Function && entity.canonical_name == "Measure"
+            })
+            .unwrap();
+        let parameter = document
+            .entities
+            .iter()
+            .find(|entity| {
+                entity.kind == EntityKind::Parameter
+                    && entity.canonical_name == "value"
+                    && entity.container == Some(ContainerRef::Entity(target.id))
+            })
+            .unwrap();
+        let start = u64::try_from(source.find(application).unwrap()).unwrap();
+        let site = document
+            .occurrences
+            .iter()
+            .find(|site| {
+                site.syntax_kind == "vba.application.reference"
+                    && site.source.span().start_byte() == start
+                    && site.source.span().end_byte()
+                        == start + u64::try_from(application.len()).unwrap()
+            })
+            .unwrap_or_else(|| panic!("missing application: {statement}"));
+        assert_eq!(
+            site.target,
+            OccurrenceTarget::Resolved { symbol: target.id },
+            "{statement}"
+        );
+        assert_eq!(site.role, OccurrenceRole::Reference);
+        assert!(!document.skipped_regions.iter().any(|gap| {
+            gap.source == site.source && gap.detail == "vba-call-or-index-target-unavailable"
+        }));
+        let labels: Vec<_> = document
+            .occurrences
+            .iter()
+            .filter(|site| site.syntax_kind == "vba.nonvalue_identifier.reference")
+            .collect();
+        assert_eq!(labels.len(), statement.matches(":=").count(), "{statement}");
+        for label in labels {
+            assert_eq!(
+                label.target,
+                OccurrenceTarget::Resolved {
+                    symbol: parameter.id
+                },
+                "{statement}"
+            );
+            assert_eq!(label.role, OccurrenceRole::Reference);
+            assert!(document.relations.iter().any(|edge| {
+                edge.predicate == RelationPredicate::RefersTo
+                    && edge.object == RelationEndpoint::Entity(parameter.id)
+                    && edge.evidence.source.as_ref() == Some(&label.source)
+            }));
+            assert!(!document.skipped_regions.iter().any(|gap| {
+                gap.source == label.source && gap.detail == "vba-nonvalue-target-unavailable"
+            }));
+        }
+        assert!(!document.relations.iter().any(|edge| {
+            edge.predicate == RelationPredicate::Calls
+                && edge.subject == RelationEndpoint::Occurrence(site.id)
+        }));
+    }
+}
+
+#[test]
+fn vba_module_qualified_applications_reject_unproven_contracts() {
+    for (shadow, arguments) in [
+        ("", "value:=1, value:=2"),
+        ("", "value:=1, missing:=2"),
+        ("", ""),
+        ("", "value:=1, 2"),
+        ("Dim Utility As Variant\n", "value:=1"),
+        (
+            "#If FEATURE Then\nDim Utility As Variant\n#End If\n",
+            "value:=1",
+        ),
+    ] {
+        let invocation = format!("Utility.Measure({arguments})");
+        let source = format!(
+            "Attribute VB_Name = \"Utility\"\nPublic Function Measure(ByVal value As Long) As Long\nMeasure = value\nEnd Function\nPublic Sub Run()\n{shadow}Dim result As Long\nresult = {invocation}\nEnd Sub\n"
+        );
+        let output = output(&source);
+        let document = output.document();
+        let start = u64::try_from(source.find(&invocation).unwrap()).unwrap();
+        let application = document
+            .occurrences
+            .iter()
+            .find(|site| {
+                site.syntax_kind == "vba.application.reference"
+                    && site.source.span().start_byte() == start
+            })
+            .unwrap();
+        for site in std::iter::once(application).chain(
+            document
+                .occurrences
+                .iter()
+                .filter(|site| site.syntax_kind == "vba.nonvalue_identifier.reference"),
+        ) {
+            assert!(
+                matches!(site.target, OccurrenceTarget::Unresolved { .. }),
+                "{invocation}: {shadow}: {site:?}"
+            );
+            assert!(
+                document
+                    .skipped_regions
+                    .iter()
+                    .any(|gap| gap.source == site.source)
+            );
+        }
+    }
+}
+
+#[test]
+fn vba_module_qualified_return_fields_require_complete_applications() {
+    for (arguments, proven) in [
+        ("value:=1", true),
+        ("1", true),
+        ("", false),
+        ("missing:=1", false),
+        ("value:=1, value:=2", false),
+    ] {
+        let expression = format!("Utility.Measure({arguments}).X");
+        let source = format!(
+            "Attribute VB_Name = \"Utility\"\nPrivate Type Coordinate\nX As Long\nEnd Type\nPublic Function Measure(ByVal value As Long) As Coordinate\nEnd Function\nPublic Sub Run()\nDim result As Long\nresult = {expression}\nEnd Sub\n"
+        );
+        let output = output(&source);
+        let document = output.document();
+        let field = document
+            .entities
+            .iter()
+            .find(|entity| entity.kind == EntityKind::Field && entity.canonical_name == "X")
+            .unwrap();
+        let start = u64::try_from(source.find(&expression).unwrap()).unwrap();
+        let site = document
+            .occurrences
+            .iter()
+            .find(|site| {
+                site.syntax_kind == "vba.get_member.reference"
+                    && site.source.span().start_byte() == start
+                    && site.source.span().end_byte()
+                        == start + u64::try_from(expression.len()).unwrap()
+            })
+            .unwrap();
+        if proven {
+            assert_eq!(
+                site.target,
+                OccurrenceTarget::Resolved { symbol: field.id },
+                "{expression}"
+            );
+        } else {
+            assert!(
+                matches!(site.target, OccurrenceTarget::Unresolved { .. }),
+                "{expression}"
+            );
+        }
+    }
+}
+
+#[test]
 fn vba_procedural_module_qualifier_requires_an_unambiguous_header_and_member() {
     for (prefix, target) in [
         ("Attribute VB_Name = \"Invalid.Name\"\n", "Measure"),

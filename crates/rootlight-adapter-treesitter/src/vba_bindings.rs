@@ -210,6 +210,16 @@ impl<'a> VbaBindings<'a> {
                         .entry(fact.span().start_byte())
                         .and_modify(|end| *end = (*end).max(fact.span().end_byte()))
                         .or_insert(fact.span().end_byte());
+                    if matches!(
+                        fact.syntax_kind().as_str(),
+                        "vba.invoked_member.reference" | "vba.invoked_get_member.reference"
+                    ) {
+                        result
+                            .invocations
+                            .entry(fact.span().start_byte())
+                            .or_default()
+                            .push(fact);
+                    }
                 }
                 _ => {}
             }
@@ -1000,6 +1010,15 @@ impl<'a> VbaBindings<'a> {
         if invocations.next().is_some() {
             return Ok(None);
         }
+        if matches!(
+            invocation.syntax_kind().as_str(),
+            "vba.invoked_member.reference" | "vba.invoked_get_member.reference"
+        ) && self
+            .procedure_application(application, application_text, cancellation)?
+            .is_none()
+        {
+            return Ok(None);
+        }
         let invocation_bytes =
             usize::try_from(invocation.span().end_byte() - start).map_err(|_| invalid_capture())?;
         let Some(invocation_text) = application_text.get(..invocation_bytes) else {
@@ -1273,7 +1292,9 @@ impl<'a> VbaBindings<'a> {
         let suffix = suffix.get(leading..).ok_or_else(invalid_capture)?;
         let statement = matches!(
             callee.syntax_kind().as_str(),
-            "vba.invoked_identifier.reference" | "vba.self_invoked_member.reference"
+            "vba.invoked_identifier.reference"
+                | "vba.self_invoked_member.reference"
+                | "vba.invoked_member.reference"
         );
         let arguments = if suffix.first() == Some(&b'(') && (explicit_call || !statement) {
             let Some(end) = rootlight_vba::parenthesized_expression_end(suffix, &mut check)? else {
@@ -1510,10 +1531,7 @@ impl<'a> VbaBindings<'a> {
         {
             return Ok(None);
         }
-        let Some(name) =
-            structural_captured_name_for_fact("vba", fact, text, self.maximum_name_bytes)
-                .filter(|name| name.is_ascii())
-        else {
+        let Some(name) = member_key(text) else {
             return Ok(None);
         };
         let Some(application) = self.containing_application(fact, cancellation)? else {
@@ -1566,6 +1584,30 @@ impl<'a> VbaBindings<'a> {
         let Some(callee) = callee else {
             return Ok(None);
         };
+        if matches!(
+            callee.syntax_kind().as_str(),
+            "vba.invoked_member.reference" | "vba.invoked_get_member.reference"
+        ) {
+            // A qualified label needs the same complete call contract as its
+            // application; a known member name alone cannot prove its arguments.
+            let start =
+                usize::try_from(application.span().start_byte()).map_err(|_| invalid_capture())?;
+            let end =
+                usize::try_from(application.span().end_byte()).map_err(|_| invalid_capture())?;
+            let Some(text) = self
+                .source
+                .get(start..end)
+                .and_then(|bytes| std::str::from_utf8(bytes).ok())
+            else {
+                return Ok(None);
+            };
+            if self
+                .procedure_application(application, text, cancellation)?
+                .is_none()
+            {
+                return Ok(None);
+            }
+        }
         let start = usize::try_from(callee.span().start_byte()).map_err(|_| invalid_capture())?;
         let end = usize::try_from(callee.span().end_byte()).map_err(|_| invalid_capture())?;
         let Some(callee_text) = self
@@ -1591,7 +1633,7 @@ impl<'a> VbaBindings<'a> {
         Ok(self
             .named_parameters
             .get(&scope)
-            .and_then(|parameters| parameters.get(&name.to_ascii_lowercase()))
+            .and_then(|parameters| parameters.get(&name))
             .copied()
             .flatten()
             .filter(|symbol| !self.property_value_symbols.contains(symbol))
