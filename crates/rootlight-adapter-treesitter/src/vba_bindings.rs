@@ -1113,11 +1113,10 @@ impl<'a> VbaBindings<'a> {
             invocation.syntax_kind().as_str(),
             "vba.invoked_identifier.reference" | "vba.self_invoked_member.reference"
         );
-        if !self
-            .source
-            .get(callee_end..application_end)
-            .is_some_and(|suffix| complete_array_application_suffix(suffix, statement_assignment))
-        {
+        let Some(suffix) = self.source.get(callee_end..application_end) else {
+            return Ok(None);
+        };
+        if !complete_array_application_suffix(suffix, statement_assignment, cancellation)? {
             return Ok(None);
         }
         let Some(callee) = self
@@ -2246,57 +2245,32 @@ fn is_self_array_invocation(fact: &SyntaxFact) -> bool {
     )
 }
 
-fn complete_array_application_suffix(suffix: &[u8], statement_assignment: bool) -> bool {
-    let suffix = suffix.trim_ascii_start();
-    if suffix.first() != Some(&b'(') {
-        return false;
+fn complete_array_application_suffix(
+    suffix: &[u8],
+    statement_assignment: bool,
+    cancellation: &Cancellation,
+) -> Result<bool, AdapterError> {
+    let mut check = || cancellation.check().map_err(AdapterError::from);
+    let leading = rootlight_vba::logical_whitespace_len(suffix, &mut check)?;
+    let suffix = suffix.get(leading..).ok_or_else(invalid_capture)?;
+    let Some(end) = rootlight_vba::parenthesized_expression_end(suffix, &mut check)? else {
+        return Ok(false);
+    };
+    let tail = suffix.get(end..).ok_or_else(invalid_capture)?;
+    let whitespace = rootlight_vba::logical_whitespace_len(tail, &mut check)?;
+    let tail = tail.get(whitespace..).ok_or_else(invalid_capture)?;
+    if tail.is_empty() {
+        return Ok(true);
     }
-    let mut depth = 0_usize;
-    let mut quoted = false;
-    let mut index = 0_usize;
-    while let Some(&byte) = suffix.get(index) {
-        if quoted {
-            if byte == b'"' {
-                if suffix.get(index + 1) == Some(&b'"') {
-                    index += 2;
-                    continue;
-                }
-                quoted = false;
-            }
-        } else {
-            match byte {
-                b'"' => quoted = true,
-                b'(' => depth += 1,
-                b')' => {
-                    let Some(outer_depth) = depth.checked_sub(1) else {
-                        return false;
-                    };
-                    depth = outer_depth;
-                    if depth == 0 {
-                        let Some(tail) = suffix.get(index + 1..) else {
-                            return false;
-                        };
-                        let tail = tail.trim_ascii();
-                        // Native call statements can represent an indexed assignment
-                        // as a comparison argument. Only a proven array may resolve
-                        // that reading; the occurrence retains the entire statement
-                        // and the right-hand expression keeps its own binding gaps.
-                        return tail.is_empty()
-                            || (statement_assignment
-                                && tail.strip_prefix(b"=").is_some_and(|value| {
-                                    let value = value.trim_ascii_start();
-                                    !value.is_empty()
-                                        && !matches!(value.first(), Some(b'=' | b'\''))
-                                }));
-                    }
-                }
-                b'\'' => return false,
-                _ => {}
-            }
-        }
-        index += 1;
-    }
-    false
+    // Native call statements can represent an indexed assignment as a comparison
+    // argument. Only an independently proven array may resolve that reading;
+    // the right-hand expression keeps its own binding gaps.
+    let Some(value) = tail.strip_prefix(b"=").filter(|_| statement_assignment) else {
+        return Ok(false);
+    };
+    let whitespace = rootlight_vba::logical_whitespace_len(value, &mut check)?;
+    let value = value.get(whitespace..).ok_or_else(invalid_capture)?;
+    Ok(!value.is_empty() && !matches!(value.first(), Some(b'=' | b'\'' | b'\r' | b'\n' | b':')))
 }
 
 fn invalid_capture() -> AdapterError {
@@ -2364,7 +2338,9 @@ mod tests {
     #[test]
     fn array_application_suffix_requires_closed_indices_and_statement_context() {
         for suffix in [b"(1)".as_slice(), b" (Inner(\"(\")) ", b"(\"x\"\"y\")"] {
-            assert!(complete_array_application_suffix(suffix, false));
+            assert!(
+                complete_array_application_suffix(suffix, false, &Cancellation::new()).unwrap()
+            );
         }
         for suffix in [
             b"(1) = Len(\"x\")".as_slice(),
@@ -2372,9 +2348,14 @@ mod tests {
             b"(\"unterminated)",
             b"(1) ' comment",
         ] {
-            assert!(!complete_array_application_suffix(suffix, false));
+            assert!(
+                !complete_array_application_suffix(suffix, false, &Cancellation::new()).unwrap()
+            );
         }
-        assert!(complete_array_application_suffix(b"(1) = Len(\"x\")", true));
+        assert!(
+            complete_array_application_suffix(b"(1) = Len(\"x\")", true, &Cancellation::new())
+                .unwrap()
+        );
         for suffix in [
             b"(1) =".as_slice(),
             b"(1) == value",
@@ -2382,8 +2363,49 @@ mod tests {
             b"(1)(2) = value",
             b"(1) + value",
         ] {
-            assert!(!complete_array_application_suffix(suffix, true));
+            assert!(
+                !complete_array_application_suffix(suffix, true, &Cancellation::new()).unwrap()
+            );
         }
+    }
+
+    #[test]
+    fn array_suffixes_keep_logical_boundaries_and_propagate_cancellation() {
+        for source in [
+            " _\n (0)",
+            " _\r\n (0)",
+            "(0) _\n = _\n first",
+            "(\"continued _\n , first)",
+        ] {
+            assert!(
+                complete_array_application_suffix(source.as_bytes(), true, &Cancellation::new())
+                    .unwrap(),
+                "{source:?}"
+            );
+        }
+        for source in [
+            "\n(0)",
+            "(0\n)",
+            "(\"text\n\")",
+            "(0)\n = first",
+            "(0) =\n first",
+            "(0) = : next",
+            "(0) = _\n ' comment",
+        ] {
+            assert!(
+                !complete_array_application_suffix(source.as_bytes(), true, &Cancellation::new())
+                    .unwrap(),
+                "{source:?}"
+            );
+        }
+        let cancellation = Cancellation::new();
+        cancellation.cancel(CancellationReason::ClientRequest);
+        assert!(matches!(
+            complete_array_application_suffix(b"(0)", false, &cancellation),
+            Err(AdapterError::Cancelled {
+                reason: CancellationReason::ClientRequest
+            })
+        ));
     }
 
     fn fact(

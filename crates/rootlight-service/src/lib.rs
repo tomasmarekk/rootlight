@@ -219,7 +219,7 @@ const PROJECT_FACTS_TRUNCATED_CODE: &str = "project-adapter-facts-truncated";
 const PROJECT_FACTS_TRUNCATED_MESSAGE: &str =
     "additional project semantic facts were omitted by aggregate resource limits";
 const AGGREGATE_DIAGNOSTICS_TRUNCATED_CODE: &str = "aggregate-diagnostics-truncated";
-const ANALYZER_BINARY_SEED: &[u8] = b"rootlight.first-slice.treesitter-structural/165";
+const ANALYZER_BINARY_SEED: &[u8] = b"rootlight.first-slice.treesitter-structural/166";
 const RESOLVER_BINARY_SEED: &[u8] = b"rootlight.first-slice.resolve/45";
 const INCREMENTAL_PROVIDER_SEED: &[u8] = b"rootlight.first-slice.incremental-provider/1";
 const LANGUAGE_DISPOSITION_PROVIDER_SEED: &[u8] = b"rootlight.first-slice.language-disposition/5";
@@ -30075,6 +30075,17 @@ mod tests {
 
     #[test]
     fn vba_array_references_follow_mutation_and_restart() {
+        assert_vba_array_references_follow_mutation_and_restart("");
+    }
+
+    #[test]
+    fn vba_continued_array_references_follow_mutation_and_restart() {
+        for separator in [" _\n ", " _\r\n "] {
+            assert_vba_array_references_follow_mutation_and_restart(separator);
+        }
+    }
+
+    fn assert_vba_array_references_follow_mutation_and_restart(separator: &str) {
         let storage = durable_test_tempdir();
         let paths = RuntimePaths::new(storage.path().join("state"), storage.path().join("runtime"))
             .unwrap();
@@ -30105,10 +30116,11 @@ mod tests {
             } else {
                 declaration
             };
+            let callee = format!("items{separator}(0)");
             let expression = if self_field {
-                "Me.items(0)"
+                format!("Me.{callee}")
             } else {
-                "items(0)"
+                callee.clone()
             };
             let statement = match write_prefix {
                 Some(prefix) => format!("{prefix}{expression} = first"),
@@ -30154,8 +30166,8 @@ mod tests {
                         && entity.canonical_name == "items"
                 })
                 .unwrap();
-            let start = u64::try_from(source.find(expression).unwrap()).unwrap();
-            let callee_start = u64::try_from(source.find("items(0)").unwrap()).unwrap();
+            let start = u64::try_from(source.find(&expression).unwrap()).unwrap();
+            let callee_start = u64::try_from(source.find(&callee).unwrap()).unwrap();
             let expression_end = start + u64::try_from(expression.len()).unwrap();
             let statement_end = expression_end
                 + if write_prefix.is_some() {
