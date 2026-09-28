@@ -1,13 +1,14 @@
 //! Audits fresh or resumed durable indexing through public service and source APIs.
 //! Explicit configuration and default detection are separate invocations; counts
 //! describe recorded evidence, not an independent semantic completeness oracle.
-//! Resume measures an update after reopening the service, not warm-cache reuse.
+//! Resume measures a reopened service; warm sequences keep one service alive and
+//! wait for external source edits between newline-delimited reports.
 
 use std::{
     collections::{BTreeMap, BTreeSet},
     error::Error,
     fs,
-    io::Read,
+    io::{BufRead, Read, Write},
     path::{Path, PathBuf},
     time::{Duration, Instant},
 };
@@ -26,6 +27,21 @@ use serde_json::json;
 enum StateMode {
     Fresh,
     Resume,
+}
+
+#[derive(Clone, Copy)]
+enum ServiceLifetime {
+    Fresh,
+    Reopened,
+    Warm,
+}
+
+struct DiagnosticSession {
+    service: FirstSliceService,
+    repository: PathBuf,
+    config: Option<String>,
+    open_wall_micros: u128,
+    lifetime: ServiceLifetime,
 }
 
 fn deadline() -> Result<Cancellation, Box<dyn Error>> {
@@ -63,13 +79,14 @@ fn read_live_file(repository: &Path, file: &FileRecord) -> Result<Vec<u8>, Box<d
 
 fn main() -> Result<(), Box<dyn Error>> {
     let args: Vec<_> = std::env::args_os().skip(1).collect();
-    let (mode, args) = match args.split_first() {
-        Some((flag, tail)) if flag == "--resume" => (StateMode::Resume, tail),
-        _ => (StateMode::Fresh, args.as_slice()),
+    let (mode, sequence, args) = match args.split_first() {
+        Some((flag, tail)) if flag == "--resume" => (StateMode::Resume, false, tail),
+        Some((flag, tail)) if flag == "--warm-sequence" => (StateMode::Fresh, true, tail),
+        _ => (StateMode::Fresh, false, args.as_slice()),
     };
     if !(2..=3).contains(&args.len()) {
         return Err(
-            "usage: index_coverage [--resume] REPOSITORY STATE_DIRECTORY [CONFIG_FILE]".into(),
+            "usage: index_coverage [--resume | --warm-sequence] REPOSITORY STATE_DIRECTORY [CONFIG_FILE]".into(),
         );
     }
     let repository = PathBuf::from(&args[0]);
@@ -83,9 +100,39 @@ fn main() -> Result<(), Box<dyn Error>> {
             )?)?)
         })
         .transpose()?;
-    let report = inspect(&repository, &state, config.as_deref(), mode)?;
-    println!("{}", serde_json::to_string_pretty(&report)?);
+    if sequence {
+        let mut session = DiagnosticSession::open(&repository, &state, config.as_deref(), mode)?;
+        run_sequence(
+            &mut session,
+            &mut std::io::stdin().lock(),
+            &mut std::io::stdout().lock(),
+        )?;
+    } else {
+        let report = inspect(&repository, &state, config.as_deref(), mode)?;
+        println!("{}", serde_json::to_string_pretty(&report)?);
+    }
     Ok(())
+}
+
+// The harness owns source edits. Flushing a full report is the handoff point;
+// waiting for its next command is outside every recorded index duration.
+fn run_sequence(
+    session: &mut DiagnosticSession,
+    input: &mut impl BufRead,
+    output: &mut impl Write,
+) -> Result<(), Box<dyn Error>> {
+    loop {
+        serde_json::to_writer(&mut *output, &session.inspect()?)?;
+        output.write_all(b"\n")?;
+        output.flush()?;
+        let mut command = Vec::new();
+        (&mut *input).take(16).read_until(b'\n', &mut command)?;
+        match command.as_slice() {
+            b"index\n" | b"index\r\n" => {}
+            b"quit\n" | b"quit\r\n" | b"" => return Ok(()),
+            _ => return Err("expected index or quit followed by a newline".into()),
+        }
+    }
 }
 
 fn inspect(
@@ -94,82 +141,120 @@ fn inspect(
     config: Option<&str>,
     mode: StateMode,
 ) -> Result<serde_json::Value, Box<dyn Error>> {
-    let repository = fs::canonicalize(repository)?;
-    let policy = FirstSliceStoragePolicy::resolve_user_config(config, 2)?;
-    match mode {
-        // A previous generation must not masquerade as a cold run.
-        StateMode::Fresh => fs::create_dir(state)?,
-        StateMode::Resume if !state.join("state").is_dir() => {
-            return Err("resume requires an existing durable state directory".into());
+    DiagnosticSession::open(repository, state, config, mode)?.inspect()
+}
+
+impl DiagnosticSession {
+    fn open(
+        repository: &Path,
+        state: &Path,
+        config: Option<&str>,
+        mode: StateMode,
+    ) -> Result<Self, Box<dyn Error>> {
+        let repository = fs::canonicalize(repository)?;
+        let policy = FirstSliceStoragePolicy::resolve_user_config(config, 2)?;
+        match mode {
+            // A previous generation must not masquerade as a cold run.
+            StateMode::Fresh => fs::create_dir(state)?,
+            StateMode::Resume if !state.join("state").is_dir() => {
+                return Err("resume requires an existing durable state directory".into());
+            }
+            StateMode::Resume => {}
         }
-        StateMode::Resume => {}
+        let paths = RuntimePaths::new(state.join("state"), state.join("runtime"))?;
+        paths.prepare_owner()?;
+        let opened = Instant::now();
+        let service =
+            FirstSliceService::new_durable_with_policy(policy, paths.state_dir(), &deadline()?)?;
+        let open_wall_micros = opened.elapsed().as_micros();
+        Ok(Self {
+            service,
+            repository,
+            config: config.map(str::to_owned),
+            open_wall_micros,
+            lifetime: match mode {
+                StateMode::Fresh => ServiceLifetime::Fresh,
+                StateMode::Resume => ServiceLifetime::Reopened,
+            },
+        })
     }
-    let paths = RuntimePaths::new(state.join("state"), state.join("runtime"))?;
-    paths.prepare_owner()?;
-    let opened = Instant::now();
-    let mut service =
-        FirstSliceService::new_durable_with_policy(policy, paths.state_dir(), &deadline()?)?;
-    let open_wall_micros = opened.elapsed().as_micros();
-    let previous_generation = match mode {
-        StateMode::Fresh => None,
-        StateMode::Resume => {
-            let registered = service
-                .registered_repository_for_root(&repository, &deadline()?)?
-                .ok_or("resume repository is not registered in this state")?;
-            Some(
-                service
-                    .repository_status(registered, None)?
-                    .resolved_generation,
-            )
+
+    fn inspect(&mut self) -> Result<serde_json::Value, Box<dyn Error>> {
+        let Self {
+            service,
+            repository,
+            config,
+            open_wall_micros,
+            lifetime,
+        } = self;
+        let previous_generation = match lifetime {
+            ServiceLifetime::Fresh => None,
+            ServiceLifetime::Reopened | ServiceLifetime::Warm => {
+                let registered = service
+                    .registered_repository_for_root(repository, &deadline()?)?
+                    .ok_or("resume repository is not registered in this state")?;
+                Some(
+                    service
+                        .repository_status(registered, None)?
+                        .resolved_generation,
+                )
+            }
+        };
+        let (cold, cold_timing) = index_with_timing(service, repository)?;
+        let (no_op, no_op_timing) = index_with_timing(service, repository)?;
+        if cold != no_op {
+            return Err("unchanged repository produced a different receipt".into());
         }
-    };
-    let (cold, cold_timing) = index_with_timing(&mut service, &repository)?;
-    let (no_op, no_op_timing) = index_with_timing(&mut service, &repository)?;
-    if cold != no_op {
-        return Err("unchanged repository produced a different receipt".into());
+        let status = service.repository_status(cold.repository, Some(cold.generation))?;
+        let (rows, configuration_hash) = service.inspect_generation(
+            cold.repository,
+            Some(cold.generation),
+            &deadline()?,
+            |snapshot| -> Result<_, Box<dyn Error>> {
+                Ok((
+                    inspect_files(snapshot, service, repository, cold.generation)?,
+                    snapshot.metadata().configuration_hash(),
+                ))
+            },
+        )??;
+        let mut report = json!({
+            "schema":"rootlight-index-coverage-diagnostic/4", "explicit_configuration":config.is_some(),
+            "configuration_input_hash":rootlight_ids::content_hash(config.as_deref().unwrap_or("").as_bytes()).to_string(),
+            "configuration_hash":configuration_hash,
+            "open_wall_micros":open_wall_micros,
+            "process_id":std::process::id(),
+            "no_op_same_generation":true,"no_op_wall_micros":no_op_timing["wall_micros"],"no_op_timing":no_op_timing,
+            "generation_inspection_method":"local_identity_verified_snapshot",
+            "shared_bundle_roundtrip":false,
+            "coverage":status.coverage.iter().map(|entry| json!({"language":entry.language,"indexed_files":entry.indexed_files,
+                "discovered_files":entry.discovered_files,"tier":entry.tier,"status":entry.status})).collect::<Vec<_>>(),
+            "files":rows,"full_semantic_completeness_proven":false,
+            "installed_mcp_qualified":false
+        });
+        match lifetime {
+            ServiceLifetime::Fresh => {
+                report["service_lifetime"] = json!("fresh");
+                report["cold"] = serde_json::to_value(cold)?;
+                report["cold_wall_micros"] = cold_timing["wall_micros"].clone();
+                report["cold_timing"] = cold_timing;
+            }
+            ServiceLifetime::Reopened | ServiceLifetime::Warm => {
+                report["schema"] = json!("rootlight-index-update-diagnostic/1");
+                report["service_lifetime"] = json!("reopened");
+                if matches!(lifetime, ServiceLifetime::Warm) {
+                    report["schema"] = json!("rootlight-index-warm-update-diagnostic/1");
+                    report["service_lifetime"] = json!("warm");
+                    report["open_wall_micros"] = serde_json::Value::Null;
+                }
+                report["previous_generation"] = serde_json::to_value(previous_generation)?;
+                report["update"] = serde_json::to_value(cold)?;
+                report["update_wall_micros"] = cold_timing["wall_micros"].clone();
+                report["update_timing"] = cold_timing;
+            }
+        }
+        *lifetime = ServiceLifetime::Warm;
+        Ok(report)
     }
-    let status = service.repository_status(cold.repository, Some(cold.generation))?;
-    let (rows, configuration_hash) = service.inspect_generation(
-        cold.repository,
-        Some(cold.generation),
-        &deadline()?,
-        |snapshot| -> Result<_, Box<dyn Error>> {
-            Ok((
-                inspect_files(snapshot, &service, &repository, cold.generation)?,
-                snapshot.metadata().configuration_hash(),
-            ))
-        },
-    )??;
-    let mut report = json!({
-        "schema":"rootlight-index-coverage-diagnostic/4", "explicit_configuration":config.is_some(),
-        "configuration_input_hash":rootlight_ids::content_hash(config.unwrap_or("").as_bytes()).to_string(),
-        "configuration_hash":configuration_hash,
-        "open_wall_micros":open_wall_micros,
-        "no_op_same_generation":true,"no_op_wall_micros":no_op_timing["wall_micros"],"no_op_timing":no_op_timing,
-        "generation_inspection_method":"local_identity_verified_snapshot",
-        "shared_bundle_roundtrip":false,
-        "coverage":status.coverage.iter().map(|entry| json!({"language":entry.language,"indexed_files":entry.indexed_files,
-            "discovered_files":entry.discovered_files,"tier":entry.tier,"status":entry.status})).collect::<Vec<_>>(),
-        "files":rows,"full_semantic_completeness_proven":false,
-        "installed_mcp_qualified":false
-    });
-    match mode {
-        StateMode::Fresh => {
-            report["service_lifetime"] = json!("fresh");
-            report["cold"] = serde_json::to_value(cold)?;
-            report["cold_wall_micros"] = cold_timing["wall_micros"].clone();
-            report["cold_timing"] = cold_timing;
-        }
-        StateMode::Resume => {
-            report["schema"] = json!("rootlight-index-update-diagnostic/1");
-            report["service_lifetime"] = json!("reopened");
-            report["previous_generation"] = serde_json::to_value(previous_generation)?;
-            report["update"] = serde_json::to_value(cold)?;
-            report["update_wall_micros"] = cold_timing["wall_micros"].clone();
-            report["update_timing"] = cold_timing;
-        }
-    }
-    Ok(report)
 }
 
 fn index_with_timing(
@@ -423,6 +508,105 @@ fn chunk_end(text: &str, start: usize) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn warm_reports_keep_one_session_through_edits_and_restoration() {
+        let directory = tempfile::tempdir().unwrap();
+        let repository = directory.path().join("repository");
+        fs::create_dir(&repository).unwrap();
+        let file = repository.join("value.rs");
+        let original = "pub fn value() -> i32 { 1 }\n";
+        fs::write(&file, original).unwrap();
+        fs::write(repository.join("other.rs"), "pub fn other() -> i32 { 3 }\n").unwrap();
+        let state = directory.path().join("state");
+        let mut session =
+            DiagnosticSession::open(&repository, &state, None, StateMode::Fresh).unwrap();
+        let cold = session.inspect().unwrap();
+        let mut previous = cold["cold"]["generation"].clone();
+        for source in ["pub fn value() -> i32 { 2 }\n", original] {
+            fs::write(&file, source).unwrap();
+            let report = session.inspect().unwrap();
+            assert_eq!(report["schema"], "rootlight-index-warm-update-diagnostic/1");
+            assert_eq!(report["service_lifetime"], "warm");
+            assert_eq!(report["process_id"], cold["process_id"]);
+            assert!(report["open_wall_micros"].is_null());
+            assert!(report.get("cold").is_none());
+            assert_eq!(report["previous_generation"], previous);
+            assert_eq!(report["update"]["parent"], previous);
+            assert_ne!(report["update"]["generation"], previous);
+            previous = report["update"]["generation"].clone();
+            let work = &report["update_timing"]["operation"];
+            assert_eq!(work["rebuilt_files"], 1);
+            assert_eq!(work["reused_files"], 1);
+            assert!(work["reused_facts"].as_u64().unwrap() > 0);
+            assert_eq!(
+                work["rebuilt_facts"].as_u64().unwrap() + work["reused_facts"].as_u64().unwrap(),
+                cold["cold_timing"]["operation"]["rebuilt_facts"]
+                    .as_u64()
+                    .unwrap()
+            );
+            assert_eq!(report["no_op_timing"]["operation"]["rebuilt_files"], 0);
+            assert_eq!(report["no_op_timing"]["operation"]["rebuilt_facts"], 0);
+            assert!(
+                report["files"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .all(|row| row["source_read_exact"] == true)
+            );
+        }
+        assert_eq!(fs::read(&file).unwrap(), original.as_bytes());
+    }
+
+    #[test]
+    fn sequence_protocol_emits_complete_reports_and_bounds_commands() {
+        let directory = tempfile::tempdir().unwrap();
+        let repository = directory.path().join("repository");
+        fs::create_dir(&repository).unwrap();
+        fs::write(repository.join("value.rs"), "pub fn value() {}\n").unwrap();
+        for (ordinal, command, count, valid) in [
+            (0, "index\nindex\r\nquit\n", 3, true),
+            (1, "", 1, true),
+            (2, "unknown\n", 1, false),
+            (3, "index", 1, false),
+            (4, "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\n", 1, false),
+        ] {
+            let mut session = DiagnosticSession::open(
+                &repository,
+                &directory.path().join(format!("state-{ordinal}")),
+                None,
+                StateMode::Fresh,
+            )
+            .unwrap();
+            let mut input = std::io::Cursor::new(command.as_bytes());
+            let mut output = Vec::new();
+            assert_eq!(
+                run_sequence(&mut session, &mut input, &mut output).is_ok(),
+                valid
+            );
+            let reports: Vec<serde_json::Value> = output
+                .split(|byte| *byte == b'\n')
+                .filter(|line| !line.is_empty())
+                .map(|line| serde_json::from_slice(line).unwrap())
+                .collect();
+            assert_eq!(reports.len(), count);
+            assert_eq!(reports[0]["service_lifetime"], "fresh");
+            for report in reports.iter().skip(1) {
+                assert_eq!(report["service_lifetime"], "warm");
+                assert_eq!(
+                    report["update"]["generation"],
+                    reports[0]["cold"]["generation"]
+                );
+                assert_eq!(
+                    report["update_timing"]["operation"]["strategy"],
+                    "RetainedGeneration"
+                );
+            }
+            if ordinal == 4 {
+                assert_eq!(input.position(), 16);
+            }
+        }
+    }
 
     #[test]
     fn resumed_diagnostic_tracks_body_edits_and_source_restoration() {
