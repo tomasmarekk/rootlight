@@ -5344,6 +5344,104 @@ fn vba_conditional_local_declarations_block_outer_fallthrough() {
 }
 
 #[test]
+fn vba_conditional_bindings_reject_possible_coexisting_declarations() {
+    for declarations in [
+        "#If First Then\nDim payload As Long\npayload = 1\n#End If\n#If Second Then\nDim payload As String\n#End If\n",
+        "#If First Then\nDim payload As Long\npayload = 1\n#If Second Then\nDim payload As String\n#End If\n#End If\n",
+        "#If First Then\n#If Second Then\nDim payload As String\n#End If\nDim payload As Long\npayload = 1\n#End If\n",
+    ] {
+        let source = format!("Sub Update()\n{declarations}End Sub\n");
+        let result = output(&source);
+        let site = reference_at(result.document(), &source, "payload = 1");
+        assert!(
+            matches!(site.target, OccurrenceTarget::Unresolved { .. }),
+            "{source}"
+        );
+        assert!(result.document().skipped_regions.iter().any(|gap| {
+            gap.source.span() == site.source.span()
+                && gap.detail == "vba-binding-target-unavailable"
+        }));
+    }
+}
+
+#[test]
+fn vba_conditional_procedure_calls_bind_only_in_the_declaring_branch() {
+    let source = "#If Enabled Then\nPrivate Sub Visit(ByVal value As Long)\nEnd Sub\nPrivate Sub Run()\nCall Visit(value:=1)\nEnd Sub\n#Else\nPrivate Sub Visit(ByVal value As String)\nEnd Sub\nPrivate Sub Run()\nCall Visit(value:=\"text\")\nEnd Sub\n#End If\nSub Outside()\nCall Visit(2)\nEnd Sub\n";
+    let result = output(source);
+    let document = result.document();
+    for (definition, marker) in [
+        ("Visit(ByVal value As Long)", "Visit(value:=1)"),
+        ("Visit(ByVal value As String)", "Visit(value:=\"text\")"),
+    ] {
+        let start = u64::try_from(source.find(definition).unwrap()).unwrap();
+        let target = document
+            .occurrences
+            .iter()
+            .find(|site| {
+                site.role == OccurrenceRole::Definition && site.source.span().start_byte() == start
+            })
+            .unwrap();
+        let OccurrenceTarget::Resolved { symbol } = target.target else {
+            panic!("definition")
+        };
+        let call = document
+            .occurrences
+            .iter()
+            .find(|site| {
+                site.syntax_kind == "vba.invoked_identifier.reference"
+                    && site.source.span().start_byte()
+                        == u64::try_from(source.find(marker).unwrap()).unwrap()
+            })
+            .unwrap();
+        assert_eq!(call.target, target.target, "{marker}");
+        assert_eq!(call.role, OccurrenceRole::CallSite);
+        assert!(
+            document
+                .relations
+                .iter()
+                .any(|edge| edge.predicate == RelationPredicate::Calls
+                    && edge.subject == RelationEndpoint::Occurrence(call.id)
+                    && edge.object == RelationEndpoint::Entity(symbol))
+        );
+        let application = document
+            .occurrences
+            .iter()
+            .find(|site| {
+                site.syntax_kind == "vba.application.reference"
+                    && site.source.span().start_byte() + 5 == call.source.span().start_byte()
+            })
+            .unwrap();
+        assert_eq!(application.target, target.target);
+        assert!(
+            !document
+                .skipped_regions
+                .iter()
+                .any(|gap| gap.domain == FactDomain::Relations
+                    && gap.source.span() == application.source.span())
+        );
+    }
+    assert!(matches!(
+        document
+            .occurrences
+            .iter()
+            .find(|site| {
+                site.syntax_kind == "vba.invoked_identifier.reference"
+                    && site.source.span().start_byte()
+                        == u64::try_from(source.find("Visit(2)").unwrap()).unwrap()
+            })
+            .unwrap()
+            .target,
+        OccurrenceTarget::Unresolved { .. }
+    ));
+    assert!(
+        document
+            .skipped_regions
+            .iter()
+            .any(|gap| gap.detail == "vba-conditional-compilation-evaluation-unavailable")
+    );
+}
+
+#[test]
 fn vba_conditional_local_values_resolve_within_their_branch() {
     let source = "Public Sub Update()\n#If Enabled Then\nDim payload As Long\npayload = 1\n#End If\nEnd Sub\n";
     let result = output(source);
@@ -5358,6 +5456,103 @@ fn vba_conditional_local_values_resolve_within_their_branch() {
     assert!(!document.skipped_regions.iter().any(|gap| {
         gap.source.span() == site.source.span() && gap.detail == "vba-binding-target-unavailable"
     }));
+}
+
+#[test]
+fn vba_conditional_calls_preserve_ambiguity_and_argument_barriers() {
+    for (source, callee_resolves) in [
+        (
+            "#If Enabled Then\nSub Visit(ByVal value As Long)\nEnd Sub\nSub Run()\nCall VISIT()\nEnd Sub\n#End If\n",
+            true,
+        ),
+        (
+            "#If Enabled Then\nSub Visit(ByVal value As Long)\nEnd Sub\nSub Run()\nCall VISIT(other:=1)\nEnd Sub\n#End If\n",
+            true,
+        ),
+        (
+            "Sub Visit()\nEnd Sub\n#If Enabled Then\nSub Visit()\nEnd Sub\nSub Run()\nCall VISIT()\nEnd Sub\n#End If\n",
+            false,
+        ),
+        (
+            "#If Enabled Then\nSub Visit()\nEnd Sub\nSub Run()\nCall VISIT()\nEnd Sub\n#If Extra Then\nSub Visit()\nEnd Sub\n#End If\n#End If\n",
+            false,
+        ),
+        (
+            "#If Enabled Then\nSub Visit()\nEnd Sub\nSub Run()\nCall VISIT()\nEnd Sub\n#End If\n#If Extra Then\nSub Visit()\nEnd Sub\n#End If\n",
+            false,
+        ),
+        (
+            "#If Enabled Then\nSub Visit()\nEnd Sub\n#End If\n#If Enabled Then\nSub Run()\nCall VISIT()\nEnd Sub\n#End If\n",
+            false,
+        ),
+    ] {
+        let result = output(source);
+        let document = result.document();
+        let start = u64::try_from(source.find("VISIT(").unwrap()).unwrap();
+        let callee = document
+            .occurrences
+            .iter()
+            .find(|site| {
+                site.syntax_kind == "vba.invoked_identifier.reference"
+                    && site.source.span().start_byte() == start
+            })
+            .unwrap();
+        assert_eq!(
+            matches!(callee.target, OccurrenceTarget::Resolved { .. }),
+            callee_resolves,
+            "{source}"
+        );
+        let application = document
+            .occurrences
+            .iter()
+            .find(|site| {
+                site.syntax_kind == "vba.application.reference"
+                    && site.source.span().start_byte() + 5 == start
+            })
+            .unwrap();
+        assert!(
+            matches!(application.target, OccurrenceTarget::Unresolved { .. }),
+            "{source}"
+        );
+        assert!(
+            document
+                .skipped_regions
+                .iter()
+                .any(|gap| gap.source.span() == application.source.span()
+                    && gap.detail == "vba-call-or-index-target-unavailable")
+        );
+    }
+}
+
+#[test]
+fn vba_conditional_functions_and_getters_bind_without_selecting_a_platform() {
+    for (header, end) in [
+        ("Function Measure() As Long", "Function"),
+        ("Property Get Measure() As Long", "Property"),
+    ] {
+        let source = format!(
+            "#If Enabled Then\n{header}\nMeasure = 1\nEnd {end}\nSub Run()\nDim result As Long\nresult = Measure\nEnd Sub\n#End If\n"
+        );
+        let result = output(&source);
+        let document = result.document();
+        let target = document
+            .entities
+            .iter()
+            .find(|entity| entity.canonical_name == "Measure")
+            .unwrap();
+        let site = reference_at(document, &source, "Measure\nEnd Sub");
+        assert_eq!(
+            site.target,
+            OccurrenceTarget::Resolved { symbol: target.id }
+        );
+        assert_eq!(site.role, OccurrenceRole::CallSite);
+        assert!(
+            document
+                .skipped_regions
+                .iter()
+                .any(|gap| gap.detail == "vba-conditional-compilation-evaluation-unavailable")
+        );
+    }
 }
 
 #[test]
