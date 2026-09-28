@@ -2459,6 +2459,83 @@ fn vba_nested_index_argument_does_not_call_shadowed_function() {
 }
 
 #[test]
+fn vba_variadic_applications_validate_the_complete_parameter_list() {
+    for (parameters, arguments, expected) in [
+        ("ParamArray items()", "", true),
+        ("ParamArray items() As Variant", "1, 2, 3", true),
+        ("ParamArray _\r\n items() As Variant", "1, 2", true),
+        ("ParamArray items() As [Variant]", "1,, 3", true),
+        ("ByVal first As Long, ParamArray items()", "1", true),
+        (
+            "ByVal first As Long, ParamArray items()",
+            "1, 2, 3, 4",
+            true,
+        ),
+        ("ByVal first As Long, ParamArray items()", "", false),
+        ("ByVal first As Long, ParamArray items()", ", 2", false),
+        ("ByVal first As Long, ParamArray items()", "first:=1", false),
+        ("ParamArray items()", "items:=1", false),
+        ("ParamArray items()", "ByVal 1", false),
+        ("ParamArray items() As Long", "1, 2", false),
+        ("ParamArray items", "1", false),
+        ("ByVal first As Long, ParamArray FIRST()", "1, 2", false),
+        ("ParamArray items(), ByVal last As Long", "1, 2", false),
+        (
+            "Optional first As Long = 0, ParamArray items()",
+            "1, 2",
+            false,
+        ),
+    ] {
+        let source = format!(
+            "Function Gather({parameters}) As Long\nEnd Function\nSub Run()\nDim result As Long\nresult = Gather({arguments})\nEnd Sub\n"
+        );
+        let result = output(&source);
+        let document = result.document();
+        let start = u64::try_from(source.rfind("Gather(").unwrap()).unwrap();
+        let site = document
+            .occurrences
+            .iter()
+            .find(|site| {
+                site.syntax_kind == "vba.application.reference"
+                    && site.source.span().start_byte() == start
+            })
+            .unwrap();
+        let target = document
+            .entities
+            .iter()
+            .find(|entity| entity.canonical_name == "Gather")
+            .unwrap();
+        assert_eq!(
+            site.target == OccurrenceTarget::Resolved { symbol: target.id },
+            expected,
+            "{source}"
+        );
+        assert_eq!(
+            document
+                .skipped_regions
+                .iter()
+                .any(|gap| gap.source == site.source
+                    && gap.detail == "vba-call-or-index-target-unavailable"),
+            !expected,
+            "{source}"
+        );
+        if arguments.contains(":=") {
+            assert!(
+                document
+                    .occurrences
+                    .iter()
+                    .filter(
+                        |site| site.syntax_kind == "vba.nonvalue_identifier.reference"
+                            && site.source.span().start_byte() > start
+                    )
+                    .all(|site| matches!(site.target, OccurrenceTarget::Unresolved { .. })),
+                "{source}"
+            );
+        }
+    }
+}
+
+#[test]
 fn vba_local_applications_bind_complete_argument_lists() {
     for (parameters, arguments) in [
         ("ByVal value As Long", "1"),

@@ -11,6 +11,7 @@ mod group;
 mod member_attribute;
 mod parameter;
 mod procedure;
+mod variadic;
 mod with_blocks;
 
 pub use arguments::{Argument, argument_list};
@@ -22,6 +23,7 @@ pub use group::parenthesized_expression_end;
 pub use member_attribute::{MemberDispatchAttribute, member_dispatch_attribute};
 pub use parameter::array_parameter_modifiers;
 pub use procedure::{ProcedureHeader, ProcedureKind, procedure_header, scalar_return_type};
+pub use variadic::{param_array_parameter, variadic_arguments_match};
 pub use with_blocks::{WithBlock, with_blocks};
 
 /// A syntactically valid pointer path borrowing its original source bytes.

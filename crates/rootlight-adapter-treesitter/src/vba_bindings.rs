@@ -1392,7 +1392,10 @@ impl<'a> VbaBindings<'a> {
         if written.len() != parameters.len() {
             return Ok(false);
         }
-        for (written, (declaration, definition, _)) in written.iter().zip(parameters) {
+        let mut variadic = None;
+        for (position, (written, (declaration, definition, _))) in
+            written.iter().zip(parameters).enumerate()
+        {
             cancellation.check()?;
             let start =
                 usize::try_from(declaration.span().start_byte()).map_err(|_| invalid_capture())?;
@@ -1409,13 +1412,44 @@ impl<'a> VbaBindings<'a> {
                 .source
                 .get(start..name_start)
                 .ok_or_else(invalid_capture)?;
-            // ParamArray needs variadic element mapping, not Optional semantics.
+            if let Some(name) =
+                rootlight_vba::param_array_parameter(written.expression(), &mut check)?
+            {
+                let name_end =
+                    usize::try_from(definition.span().end_byte()).map_err(|_| invalid_capture())?;
+                let Some(written_name) = self.source.get(name_start..name_end) else {
+                    return Ok(false);
+                };
+                let expected_name = written_name
+                    .strip_prefix(b"[")
+                    .and_then(|name| name.strip_suffix(b"]"))
+                    .unwrap_or(written_name);
+                if position + 1 != parameters.len()
+                    || parameters.iter().take(position).any(|(declaration, _, _)| {
+                        declaration.syntax_kind().as_str() == "vba.omittable_parameter.declaration"
+                    })
+                    || !name.eq_ignore_ascii_case(expected_name)
+                    || matches!(
+                        header.kind(),
+                        rootlight_vba::ProcedureKind::PropertyLet
+                            | rootlight_vba::ProcedureKind::PropertySet
+                    )
+                {
+                    return Ok(false);
+                }
+                variadic = Some(position);
+                continue;
+            }
+            // Malformed variadic declarations cannot fall back to fixed arity.
             if modifiers
                 .split(u8::is_ascii_whitespace)
                 .any(|word| word.eq_ignore_ascii_case(b"ParamArray"))
             {
                 return Ok(false);
             }
+        }
+        if let Some(required) = variadic {
+            return rootlight_vba::variadic_arguments_match(arguments, required, &mut check);
         }
         let mut supplied = BTreeSet::new();
         for (index, argument) in arguments.iter().enumerate() {
@@ -1653,6 +1687,22 @@ impl<'a> VbaBindings<'a> {
         };
         if self.incomplete_parameter_scopes.contains(&scope) {
             return Ok(None);
+        }
+        for (parameter, _, _) in self.parameters.get(&scope).into_iter().flatten() {
+            cancellation.check()?;
+            let start =
+                usize::try_from(parameter.span().start_byte()).map_err(|_| invalid_capture())?;
+            let end =
+                usize::try_from(parameter.span().end_byte()).map_err(|_| invalid_capture())?;
+            let Some(source) = self.source.get(start..end) else {
+                return Ok(None);
+            };
+            // VBA forbids named arguments anywhere in a ParamArray call,
+            // including names of required parameters before the array.
+            if rootlight_vba::param_array_parameter(source, &mut || cancellation.check())?.is_some()
+            {
+                return Ok(None);
+            }
         }
         Ok(self
             .named_parameters

@@ -22,6 +22,7 @@ struct Contract<'a> {
     parameters: Arc<Vec<&'a EntityRecord>>,
     optional: Vec<bool>,
     names: BTreeMap<String, usize>,
+    variadic: bool,
 }
 
 struct NamedArgument {
@@ -264,6 +265,7 @@ impl<'a, 'o> CallIndex<'a, 'o> {
             explicit,
             &contract.optional,
             &contract.names,
+            contract.variadic,
             &mut check,
         )?
         else {
@@ -493,6 +495,7 @@ fn contract<'a>(
     });
     let mut optional = Vec::new();
     let mut names = BTreeMap::new();
+    let mut variadic = false;
     for (position, (parameter, written)) in parameters.iter().zip(written).enumerate() {
         check()?;
         let Some(declaration) = parameter.evidence.source.as_ref() else {
@@ -539,8 +542,25 @@ fn contract<'a>(
         let Some(prefix) = raw.get(..name_offset) else {
             return Ok(None);
         };
-        let Some(is_optional) = parameter_modifiers(prefix, check)? else {
-            return Ok(None);
+        let is_optional = if let Some(name) = rootlight_vba::param_array_parameter(raw, check)? {
+            if position + 1 != parameters.len()
+                || optional.iter().any(|optional| *optional)
+                || !name.eq_ignore_ascii_case(parameter.canonical_name.as_bytes())
+                || matches!(
+                    header.kind(),
+                    rootlight_vba::ProcedureKind::PropertyLet
+                        | rootlight_vba::ProcedureKind::PropertySet
+                )
+            {
+                return Ok(None);
+            }
+            variadic = true;
+            true
+        } else {
+            let Some(optional) = parameter_modifiers(prefix, check)? else {
+                return Ok(None);
+            };
+            optional
         };
         if names
             .insert(parameter.canonical_name.to_ascii_lowercase(), position)
@@ -554,6 +574,7 @@ fn contract<'a>(
         parameters: Arc::new(parameters),
         optional,
         names,
+        variadic,
     }))
 }
 
@@ -583,7 +604,7 @@ fn parameter_modifiers(
         {
             passing = true;
         } else {
-            // ParamArray requires a separate variadic argument contract.
+            // ParamArray is validated from its complete declaration, not a prefix.
             return Ok(None);
         }
         bytes = bytes.get(length..).unwrap_or_default();
@@ -598,6 +619,7 @@ fn arguments_match(
     explicit: bool,
     optional_parameters: &[bool],
     names: &BTreeMap<String, usize>,
+    variadic: bool,
     check: &mut impl FnMut() -> Result<(), ResolutionError>,
 ) -> Result<Option<Vec<NamedArgument>>, ResolutionError> {
     let leading = rootlight_vba::logical_whitespace_len(tail, check)?;
@@ -623,11 +645,24 @@ fn arguments_match(
         }
         (tail, leading)
     };
-    let Some(arguments) =
-        rootlight_vba::argument_list(arguments, optional_parameters.len(), check)?
-    else {
+    // Variadic element count is bounded by the authored input and work budget,
+    // not by the number of formal parameters.
+    let maximum = if variadic {
+        arguments.len()
+    } else {
+        optional_parameters.len()
+    };
+    let Some(arguments) = rootlight_vba::argument_list(arguments, maximum, check)? else {
         return Ok(None);
     };
+    if variadic {
+        let Some(required) = optional_parameters.len().checked_sub(1) else {
+            return Ok(None);
+        };
+        return Ok(
+            rootlight_vba::variadic_arguments_match(&arguments, required, check)?.then(Vec::new),
+        );
+    }
     let mut supplied = BTreeSet::new();
     let mut named = Vec::new();
     for (position, argument) in arguments.iter().enumerate() {
@@ -685,12 +720,16 @@ mod tests {
             "(extra:=Nested(value:=1), [VALUE] := 2)",
             " extra:=Nested(value:=1), [VALUE] _\r\n := 2",
         ] {
-            let bindings =
-                arguments_match(tail.as_bytes(), false, &[false, true], &names, &mut || {
-                    Ok(())
-                })
-                .unwrap()
-                .unwrap();
+            let bindings = arguments_match(
+                tail.as_bytes(),
+                false,
+                &[false, true],
+                &names,
+                false,
+                &mut || Ok(()),
+            )
+            .unwrap()
+            .unwrap();
             let actual: Vec<_> = bindings
                 .iter()
                 .map(|binding| (&tail[binding.span.clone()], binding.parameter))
@@ -730,6 +769,7 @@ mod tests {
                     explicit,
                     &[false, true],
                     &names,
+                    false,
                     &mut check
                 )
                 .unwrap()
@@ -739,12 +779,12 @@ mod tests {
             );
         }
         assert!(
-            arguments_match(b" , 2", false, &[true, true], &names, &mut || Ok(()))
+            arguments_match(b" , 2", false, &[true, true], &names, false, &mut || Ok(()))
                 .unwrap()
                 .is_some()
         );
         assert!(
-            arguments_match(b"()", true, &[], &BTreeMap::new(), &mut || Ok(()))
+            arguments_match(b"()", true, &[], &BTreeMap::new(), false, &mut || Ok(()))
                 .unwrap()
                 .is_some()
         );
@@ -780,8 +820,9 @@ mod tests {
         ));
         let mut work = ResolutionWorkBudget::new(0);
         assert!(matches!(
-            arguments_match(b" 1", false, &[false], &BTreeMap::new(), &mut || work
-                .consume()),
+            arguments_match(b" 1", false, &[false], &BTreeMap::new(), false, &mut || {
+                work.consume()
+            }),
             Err(ResolutionError::WorkLimit { .. })
         ));
     }
