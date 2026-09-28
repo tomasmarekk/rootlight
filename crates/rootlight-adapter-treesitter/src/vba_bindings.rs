@@ -1184,10 +1184,7 @@ impl<'a> VbaBindings<'a> {
         let Some(tail) = self.source.get(end..) else {
             return Ok(None);
         };
-        let separator = tail
-            .iter()
-            .take_while(|byte| matches!(byte, b' ' | b'\t'))
-            .count();
+        let separator = rootlight_vba::logical_whitespace_len(tail, &mut || cancellation.check())?;
         if !tail
             .get(separator..)
             .is_some_and(|tail| tail.starts_with(b":="))
@@ -1203,15 +1200,16 @@ impl<'a> VbaBindings<'a> {
         let Some(application) = self.containing_application(fact, cancellation)? else {
             return Ok(None);
         };
-        let Some(open) = self.argument_open(application, fact, cancellation)? else {
-            return Ok(None);
-        };
+        let open = self.argument_open(application, fact, cancellation)?;
+        let argument_start =
+            usize::try_from(fact.span().start_byte()).map_err(|_| invalid_capture())?;
+        let boundary = open.unwrap_or(argument_start);
         let mut callee = None;
         for invocations in self
             .invocations
             .range(
                 application.span().start_byte()
-                    ..u64::try_from(open).map_err(|_| invalid_capture())?,
+                    ..u64::try_from(boundary).map_err(|_| invalid_capture())?,
             )
             .map(|(_, invocations)| invocations)
         {
@@ -1219,14 +1217,27 @@ impl<'a> VbaBindings<'a> {
                 cancellation.check()?;
                 let invocation_end =
                     usize::try_from(invocation.span().end_byte()).map_err(|_| invalid_capture())?;
-                // An identifier preceding a receiver application is not the
-                // callee of this argument list, even if both spans overlap.
-                if !self
-                    .source
-                    .get(invocation_end..open)
-                    .is_some_and(|separator| separator.iter().all(u8::is_ascii_whitespace))
-                {
+                let Some(separator) = self.source.get(invocation_end..boundary) else {
                     continue;
+                };
+                let whitespace =
+                    rootlight_vba::logical_whitespace_len(separator, &mut || cancellation.check())?;
+                if open.is_some() {
+                    // A receiver's earlier invocation cannot own this argument
+                    // list just because its source span overlaps it.
+                    if whitespace != separator.len() {
+                        continue;
+                    }
+                } else {
+                    // MS-VBAL 5.4.2.1 also permits an unparenthesized argument
+                    // list. Only its initial callee owns top-level labels;
+                    // completed nested calls must not steal subsequent labels.
+                    if whitespace == 0
+                        || self.array_invocation_start(invocation)?
+                            != Some(application.span().start_byte())
+                    {
+                        continue;
+                    }
                 }
                 if callee.replace(*invocation).is_some() {
                     return Ok(None);

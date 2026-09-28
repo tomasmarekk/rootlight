@@ -1,6 +1,6 @@
-//! Reads source-written VBA procedure-pointer names independently of native AST splits.
-//! Only identifier paths and logical-line trivia are admitted; argument boundaries
-//! are retained so a partial name cannot become an exact procedure reference.
+//! Reads source-written VBA names and logical-line separators without a parser runtime.
+//! Identifier paths retain their argument boundaries so a partial name cannot become
+//! an exact procedure reference; trivia never crosses an uncontinued physical line.
 
 #![forbid(unsafe_code)]
 
@@ -137,6 +137,24 @@ fn name<'a, E>(
     Ok(name)
 }
 
+/// Returns the byte length of leading spaces, tabs and explicit line continuations.
+///
+/// A continuation requires separating whitespace, an underscore and an LF or CRLF
+/// line ending. Bare line endings, comments and other tokens are not consumed.
+/// Empty input returns zero. No allocation or character decoding is performed.
+/// The callback runs before scanning and periodically during long whitespace runs.
+///
+/// # Errors
+/// Returns the caller's error unchanged when its cancellation/work callback fails.
+pub fn logical_whitespace_len<E>(
+    source: &[u8],
+    check: &mut impl FnMut() -> Result<(), E>,
+) -> Result<usize, E> {
+    let mut cursor = 0;
+    trivia(source, &mut cursor, check)?;
+    Ok(cursor)
+}
+
 fn trivia<E>(
     source: &[u8],
     cursor: &mut usize,
@@ -178,6 +196,36 @@ fn trivia<E>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn logical_whitespace_preserves_tokens_and_physical_line_boundaries() {
+        for (source, expected) in [
+            ("", ""),
+            (" \tlabel", " \t"),
+            (" _\r\n \t_ \n :", " _\r\n \t_ \n "),
+            ("\nlabel", ""),
+            (" \r\nlabel", " "),
+            ("_\nlabel", ""),
+            (" _ :", " "),
+            (" _\rlabel", " "),
+            (" 'comment", " "),
+        ] {
+            let length =
+                logical_whitespace_len(source.as_bytes(), &mut || Ok::<(), ()>(())).unwrap();
+            assert_eq!(source.get(..length), Some(expected), "{source:?}");
+        }
+        let long = vec![b' '; 4096];
+        for input in [long, b" _\n".repeat(1024)] {
+            let mut calls = 0;
+            assert_eq!(
+                logical_whitespace_len(&input, &mut || {
+                    calls += 1;
+                    if calls == 3 { Err("cancelled") } else { Ok(()) }
+                }),
+                Err("cancelled")
+            );
+        }
+    }
 
     #[test]
     fn paths_keep_boundaries_quoting_and_logical_line_continuations() {

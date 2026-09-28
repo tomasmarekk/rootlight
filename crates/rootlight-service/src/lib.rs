@@ -219,7 +219,7 @@ const PROJECT_FACTS_TRUNCATED_CODE: &str = "project-adapter-facts-truncated";
 const PROJECT_FACTS_TRUNCATED_MESSAGE: &str =
     "additional project semantic facts were omitted by aggregate resource limits";
 const AGGREGATE_DIAGNOSTICS_TRUNCATED_CODE: &str = "aggregate-diagnostics-truncated";
-const ANALYZER_BINARY_SEED: &[u8] = b"rootlight.first-slice.treesitter-structural/163";
+const ANALYZER_BINARY_SEED: &[u8] = b"rootlight.first-slice.treesitter-structural/164";
 const RESOLVER_BINARY_SEED: &[u8] = b"rootlight.first-slice.resolve/43";
 const INCREMENTAL_PROVIDER_SEED: &[u8] = b"rootlight.first-slice.incremental-provider/1";
 const LANGUAGE_DISPOSITION_PROVIDER_SEED: &[u8] = b"rootlight.first-slice.language-disposition/5";
@@ -29791,6 +29791,17 @@ mod tests {
 
     #[test]
     fn vba_self_named_arguments_follow_parameter_renames_and_restart() {
+        vba_named_arguments_follow_parameter_renames_and_restart("Call Me.Visit(size:=size)");
+    }
+
+    #[test]
+    fn vba_statement_named_arguments_follow_parameter_renames_and_restart() {
+        for invocation in ["Me.Visit size:=size", "Me.Visit _\r\n size:=size"] {
+            vba_named_arguments_follow_parameter_renames_and_restart(invocation);
+        }
+    }
+
+    fn vba_named_arguments_follow_parameter_renames_and_restart(invocation: &str) {
         let storage = durable_test_tempdir();
         let paths = RuntimePaths::new(storage.path().join("state"), storage.path().join("runtime"))
             .unwrap();
@@ -29799,7 +29810,7 @@ mod tests {
         let mut previous_generation = None;
         for (parameter_name, resolved) in [("size", true), ("other", false), ("size", true)] {
             let source = format!(
-                "VERSION 1.0 CLASS\nAttribute VB_Name = \"Receiver\"\nPrivate Declare PtrSafe Function ReadClock Lib \"clock\" () As LongPtr\nPublic Sub Visit(ByVal {parameter_name} As Long)\nEnd Sub\nPublic Sub Run(ByVal size As Long, ByVal Visit As Object)\nCall Me.Visit(size:=size)\nEnd Sub\n"
+                "VERSION 1.0 CLASS\nAttribute VB_Name = \"Receiver\"\nPrivate Declare PtrSafe Function ReadClock Lib \"clock\" () As LongPtr\nPublic Sub Visit(ByVal {parameter_name} As Long)\nEnd Sub\nPublic Sub Run(ByVal size As Long, ByVal Visit As Object)\n{invocation}\nEnd Sub\n"
             );
             fs::write(fixture.path().join("receiver.bas"), &source).unwrap();
             let mut service =

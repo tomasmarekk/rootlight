@@ -5001,6 +5001,83 @@ fn label_reference_at<'a>(
 }
 
 #[test]
+fn vba_statement_named_arguments_bind_without_parentheses() {
+    for invocation in [
+        "Visit size:=size",
+        "Visit size:=Inner(value:=size), label:=size",
+        "Visit Inner(value:=size), label:=size",
+        "Visit (size), label:=size",
+        "Visit _\n size:=size",
+        "Visit _\r\n size:=size",
+        "Visit size _\n :=size",
+        "Me.Visit size:=size",
+        "Me.Visit _\r\n size:=size",
+        "Me.Visit Inner(value:=size), label:=size",
+        "Call Visit _\n (size:=size)",
+        "Call Me.Visit _\n (size:=size)",
+    ] {
+        let source = format!(
+            "VERSION 1.0 CLASS\nAttribute VB_Name = \"Visitor\"\nPublic Function Inner(ByVal value As Long) As Long\nInner = value\nEnd Function\nPublic Sub Visit(ByVal size As Long, Optional label As Long = 0)\nEnd Sub\nPublic Sub Run(ByVal size As Long)\n{invocation}\nEnd Sub\n"
+        );
+        let result = output(&source);
+        let document = result.document();
+        for (marker, owner_name, parameter_name) in [
+            ("size:=", "Visit", "size"),
+            ("size _\n :=", "Visit", "size"),
+            ("label:=", "Visit", "label"),
+            ("value:=", "Inner", "value"),
+        ] {
+            let Some(start) = source.find(marker) else {
+                continue;
+            };
+            let owner = document
+                .entities
+                .iter()
+                .find(|entity| entity.canonical_name == owner_name)
+                .unwrap();
+            let parameter = document
+                .entities
+                .iter()
+                .find(|entity| {
+                    entity.kind == EntityKind::Parameter
+                        && entity.canonical_name == parameter_name
+                        && entity.container == Some(ContainerRef::Entity(owner.id))
+                })
+                .unwrap();
+            let label = document
+                .occurrences
+                .iter()
+                .find(|site| {
+                    site.syntax_kind == "vba.nonvalue_identifier.reference"
+                        && site.source.span().start_byte() == u64::try_from(start).unwrap()
+                })
+                .unwrap_or_else(|| panic!("missing named label: {invocation}: {marker}"));
+            assert_eq!(
+                label.target,
+                OccurrenceTarget::Resolved {
+                    symbol: parameter.id
+                },
+                "{invocation}: {marker}"
+            );
+            assert!(document.relations.iter().any(|edge| {
+                edge.predicate == RelationPredicate::RefersTo
+                    && edge.object == RelationEndpoint::Entity(parameter.id)
+                    && edge.evidence.source.as_ref() == Some(&label.source)
+            }));
+            assert!(!document.skipped_regions.iter().any(|gap| {
+                gap.source == label.source && gap.detail == "vba-nonvalue-target-unavailable"
+            }));
+        }
+        assert!(
+            document
+                .skipped_regions
+                .iter()
+                .any(|gap| { gap.detail == "vba-call-or-index-target-unavailable" })
+        );
+    }
+}
+
+#[test]
 fn vba_named_arguments_bind_only_to_the_called_procedure_parameters() {
     let source = "Public Sub Visit(ByVal size As Long)\nEnd Sub\nPublic Sub Run(ByVal size As Long)\nCall Visit(size:=size)\nCall Visit(missing:=size)\nEnd Sub\n";
     let result = output(source);
@@ -5360,6 +5437,11 @@ fn vba_named_arguments_do_not_guess_ambiguous_or_receiver_callees() {
     for source in [
         "Public Sub Visit(ByVal size As Long)\nEnd Sub\nPublic Sub Visit(ByVal size As Long)\nEnd Sub\nPublic Sub Run()\nCall Visit(size:=1)\nEnd Sub\n",
         "Public Function Factory(ByVal size As Long) As Object\nEnd Function\nPublic Sub Run()\nCall Factory().Visit(size:=1)\nEnd Sub\n",
+        "Public Sub Visit(ByVal size As Long)\nEnd Sub\nPublic Sub Visit(ByVal size As Long)\nEnd Sub\nPublic Sub Run()\nVisit size:=1\nEnd Sub\n",
+        "Public Sub Visit(ByVal size As Long)\nEnd Sub\nPublic Sub Run(ByVal Visit As Object)\nVisit size:=1\nEnd Sub\n",
+        "Public Function Factory(ByVal size As Long) As Object\nEnd Function\nPublic Sub Run()\nFactory().Visit size:=1\nEnd Sub\n",
+        "Public Sub Visit(ByVal size As Long)\nEnd Sub\nPublic Sub Run(ByVal receiver As Object)\nreceiver.Visit size:=1\nEnd Sub\n",
+        "Public Sub Visit(ByVal size As Long)\nEnd Sub\nPublic Sub Run(ByVal receiver As Object)\nVisit receiver.Visit(size:=1)\nEnd Sub\n",
     ] {
         let result = output(source);
         let start = u64::try_from(source.find("size:=1").unwrap()).unwrap();
@@ -5376,6 +5458,9 @@ fn vba_named_arguments_do_not_guess_ambiguous_or_receiver_callees() {
             matches!(label.target, OccurrenceTarget::Unresolved { .. }),
             "{source}"
         );
+        assert!(result.document().skipped_regions.iter().any(|gap| {
+            gap.source == label.source && gap.detail == "vba-nonvalue-target-unavailable"
+        }));
     }
 }
 
