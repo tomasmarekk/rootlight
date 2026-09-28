@@ -220,7 +220,7 @@ const PROJECT_FACTS_TRUNCATED_MESSAGE: &str =
     "additional project semantic facts were omitted by aggregate resource limits";
 const AGGREGATE_DIAGNOSTICS_TRUNCATED_CODE: &str = "aggregate-diagnostics-truncated";
 const ANALYZER_BINARY_SEED: &[u8] = b"rootlight.first-slice.treesitter-structural/174";
-const RESOLVER_BINARY_SEED: &[u8] = b"rootlight.first-slice.resolve/51";
+const RESOLVER_BINARY_SEED: &[u8] = b"rootlight.first-slice.resolve/52";
 const INCREMENTAL_PROVIDER_SEED: &[u8] = b"rootlight.first-slice.incremental-provider/1";
 const LANGUAGE_DISPOSITION_PROVIDER_SEED: &[u8] = b"rootlight.first-slice.language-disposition/5";
 const SOURCE_FILE_FALLBACK_PROVIDER_SEED: &[u8] = b"rootlight.source-file-fallback/4";
@@ -40058,6 +40058,214 @@ mod tests {
                     )
                     .unwrap();
                 assert_eq!(read.data.chunks[0].bytes, text.as_bytes());
+            }
+        }
+    }
+
+    #[test]
+    fn classic_named_arguments_follow_exact_callees_after_signature_changes_and_restart() {
+        let fixture = durable_test_tempdir();
+        let storage = durable_test_tempdir();
+        let paths = RuntimePaths::new(storage.path().join("state"), storage.path().join("runtime"))
+            .unwrap();
+        paths.prepare_owner().unwrap();
+        fs::write(
+            fixture.path().join("project.vbp"),
+            "Type=OleDll\nName=\"Primary\"\nClass=Worker; Worker.cls\nModule=Client; Client.bas\n",
+        )
+        .unwrap();
+        let cases = [
+            (
+                "worker.Act value:=worker.Entry(value:=1), extra:=2",
+                vec![
+                    ("value", 0, "Act", true),
+                    ("value", 1, "Entry", true),
+                    ("extra", 0, "Act", true),
+                ],
+            ),
+            (
+                "Call worker.Act(extra:=2, [VALUE]:=1)",
+                vec![("extra", 0, "Act", true), ("[VALUE]", 0, "Act", true)],
+            ),
+            (
+                "worker.Act value:=1, value:=2",
+                vec![("value", 0, "Act", false), ("value", 1, "Act", false)],
+            ),
+            ("worker.Act extra:=2", vec![("extra", 0, "Act", false)]),
+            ("worker.Act unknown:=1", vec![("unknown", 0, "Act", false)]),
+            (
+                "worker.Act value:=dynamic.Entry(value:=1)",
+                vec![("value", 0, "Act", true), ("value", 1, "Entry", false)],
+            ),
+            (
+                "With worker\n.Act value:=3\nEnd With",
+                vec![("value", 0, "Act", true)],
+            ),
+        ];
+        let mut client = "Attribute VB_Name = \"Client\"\nSub Run(ByVal worker As Worker, ByVal dynamic As Object)\n".to_owned();
+        for (statement, _) in &cases {
+            client.push_str(statement);
+            client.push('\n');
+        }
+        client.push_str("End Sub\n");
+        fs::write(fixture.path().join("Client.bas"), &client).unwrap();
+        for (access, parameter, getter_parameter) in [
+            ("Public", "value", "value"),
+            ("Private", "value", "value"),
+            ("Public", "renamed", "value"),
+            ("Public", "value", "renamed"),
+            ("Public", "value", "value"),
+        ] {
+            fs::write(fixture.path().join("Worker.cls"), format!("VERSION 1.0 CLASS\nAttribute VB_Name = \"Worker\"\n{access} Sub Act(ByVal {parameter} As Long, Optional ByVal extra As Long = 0)\nEnd Sub\nPublic Property Get Entry(ByVal {getter_parameter} As Long) As Long\nEnd Property\n")).unwrap();
+            let mut service =
+                FirstSliceService::new_durable(2, paths.state_dir(), &deadline()).unwrap();
+            let receipt = service
+                .index_repository(fixture.path(), &deadline())
+                .unwrap();
+            assert_eq!(
+                service
+                    .index_repository(fixture.path(), &deadline())
+                    .unwrap(),
+                receipt
+            );
+            drop(service);
+            let service =
+                FirstSliceService::new_durable(2, paths.state_dir(), &deadline()).unwrap();
+            let snapshot = service
+                .loaded_generation_snapshot(receipt.generation)
+                .unwrap();
+            let document = snapshot.document();
+            let file = document
+                .files
+                .iter()
+                .find(|file| file.path == "Client.bas")
+                .unwrap();
+            for (statement, arguments) in &cases {
+                for &(label, ordinal, owner, valid) in arguments {
+                    let expected = valid
+                        && if owner == "Act" {
+                            access == "Public" && parameter == "value"
+                        } else {
+                            getter_parameter == "value"
+                        };
+                    let start = u64::try_from(
+                        client.find(statement).unwrap()
+                            + statement.match_indices(label).nth(ordinal).unwrap().0,
+                    )
+                    .unwrap();
+                    let site = document
+                        .occurrences
+                        .iter()
+                        .find(|site| {
+                            site.file == file.id
+                                && site.syntax_kind == "vba.nonvalue_identifier.reference"
+                                && site.source.span().start_byte() == start
+                                && site.source.span().end_byte()
+                                    == start + u64::try_from(label.len()).unwrap()
+                        })
+                        .unwrap();
+                    assert_eq!(
+                        matches!(site.target, OccurrenceTarget::Resolved { .. }),
+                        expected,
+                        "{statement}: {label}/{ordinal}, {access}/{parameter}/{getter_parameter}"
+                    );
+                    assert_eq!(
+                        document
+                            .skipped_regions
+                            .iter()
+                            .any(|gap| gap.source == site.source
+                                && gap.detail == "vba-nonvalue-target-unavailable"),
+                        !expected
+                    );
+                    assert_eq!(site.role, OccurrenceRole::Reference);
+                    assert!(
+                        !document
+                            .relations
+                            .iter()
+                            .any(|edge| edge.subject == RelationEndpoint::Occurrence(site.id)
+                                && edge.predicate == RelationPredicate::Calls)
+                    );
+                    if expected {
+                        let procedure = document
+                            .entities
+                            .iter()
+                            .find(|entity| {
+                                entity.canonical_name == owner
+                                    && matches!(
+                                        entity.kind,
+                                        EntityKind::Method | EntityKind::Property
+                                    )
+                            })
+                            .unwrap();
+                        let parameter = document
+                            .entities
+                            .iter()
+                            .find(|entity| {
+                                entity.kind == EntityKind::Parameter
+                                    && entity.container == Some(ContainerRef::Entity(procedure.id))
+                                    && entity
+                                        .canonical_name
+                                        .eq_ignore_ascii_case(label.trim_matches(['[', ']']))
+                            })
+                            .unwrap();
+                        assert_eq!(
+                            site.target,
+                            OccurrenceTarget::Resolved {
+                                symbol: parameter.id
+                            }
+                        );
+                        let evidence = document
+                            .provenance
+                            .iter()
+                            .find(|record| record.id == site.provenance)
+                            .unwrap();
+                        assert!(
+                            evidence
+                                .derivation_parents
+                                .contains(&FactRef::Entity(procedure.id))
+                        );
+                        assert!(
+                            evidence
+                                .derivation_parents
+                                .contains(&FactRef::Entity(parameter.id))
+                        );
+                        let relationships = service
+                            .symbol_relationships(
+                                receipt.generation,
+                                BTreeSet::from([parameter.id]),
+                                vec![RelationFamily::References],
+                                Some(RelationDirection::Inbound),
+                                0,
+                                32,
+                                0,
+                                &deadline(),
+                            )
+                            .unwrap();
+                        assert!(!relationships.data.truncated);
+                        assert!(
+                            relationships
+                                .data
+                                .groups
+                                .iter()
+                                .flat_map(|group| &group.items)
+                                .flat_map(|item| &item.source_refs)
+                                .any(|source| source == &site.source)
+                        );
+                        let read = service
+                            .source_read_with_options_and_budget(
+                                receipt.generation,
+                                vec![site.source.clone()],
+                                SourceReadOptions::new()
+                                    .with_context_lines_before(0)
+                                    .with_context_lines_after(0)
+                                    .with_encoding(SourceEncoding::Bytes),
+                                FirstSliceBudget::default(),
+                                &deadline(),
+                            )
+                            .unwrap();
+                        assert_eq!(read.data.chunks[0].bytes, label.as_bytes());
+                    }
+                }
             }
         }
     }

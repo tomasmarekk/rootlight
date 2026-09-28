@@ -258,6 +258,8 @@ pub enum ResolutionRule {
     ElmLocalType,
     /// A native receiver's project-owned declared type selects one accessible member.
     ClassicProjectMember,
+    /// A source-exact named label selects a parameter of an argument-validated project call.
+    ClassicProjectArgument,
     /// A unique accessible procedural callback in the same verified project.
     ClassicProjectPointer,
     /// A verified project module qualifies a member expression without lexical shadowing.

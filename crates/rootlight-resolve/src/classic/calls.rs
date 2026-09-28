@@ -24,10 +24,16 @@ struct Contract<'a> {
     names: BTreeMap<String, usize>,
 }
 
+struct NamedArgument {
+    span: std::ops::Range<usize>,
+    parameter: usize,
+}
+
 pub(super) struct CallIndex<'a, 'o> {
     parameters: BTreeMap<SymbolId, Vec<&'a EntityRecord>>,
     definitions: BTreeMap<SymbolId, Option<&'o SourceRef>>,
     callees: BTreeMap<(FileId, u64, u64), Option<&'o OccurrenceRecord>>,
+    labels: BTreeMap<(FileId, u64, u64), Option<&'o OccurrenceRecord>>,
     applications: BTreeMap<(FileId, u64), BTreeSet<u64>>,
     contracts: BTreeMap<SymbolId, Option<Contract<'a>>>,
 }
@@ -51,6 +57,7 @@ impl<'a, 'o> CallIndex<'a, 'o> {
         }
         let mut definitions = BTreeMap::new();
         let mut callees = BTreeMap::new();
+        let mut labels = BTreeMap::new();
         let mut applications: BTreeMap<_, BTreeSet<_>> = BTreeMap::new();
         for site in occurrences {
             cancellation.check()?;
@@ -64,6 +71,15 @@ impl<'a, 'o> CallIndex<'a, 'o> {
                     .or_insert(Some(&site.source));
             }
             let key = (site.file, site.source.span().start_byte());
+            if site.syntax_kind == "vba.nonvalue_identifier.reference"
+                && site.role == OccurrenceRole::Reference
+                && matches!(site.target, OccurrenceTarget::Unresolved { .. })
+            {
+                labels
+                    .entry((key.0, key.1, site.source.span().end_byte()))
+                    .and_modify(|prior| *prior = None)
+                    .or_insert(Some(site));
+            }
             if site.syntax_kind == "vba.application.reference" {
                 let end = site.source.span().end_byte();
                 applications.entry(key).or_default().insert(end);
@@ -79,6 +95,7 @@ impl<'a, 'o> CallIndex<'a, 'o> {
             parameters,
             definitions,
             callees,
+            labels,
             applications,
             contracts: BTreeMap::new(),
         })
@@ -196,15 +213,16 @@ impl<'a, 'o> CallIndex<'a, 'o> {
         else {
             return Ok(());
         };
-        if !arguments_match(
+        let Some(named_arguments) = arguments_match(
             tail,
             explicit,
             &contract.optional,
             &contract.names,
             &mut check,
-        )? {
+        )?
+        else {
             return Ok(());
-        }
+        };
         let application_proof = Proof {
             target: proof.target,
             context: Arc::clone(&proof.context),
@@ -222,6 +240,63 @@ impl<'a, 'o> CallIndex<'a, 'o> {
         } else {
             Arc::clone(&contract.parameters)
         };
+        let label_sources = if named_arguments.is_empty() {
+            None
+        } else {
+            let mut evidence = BTreeSet::from([callee.source.clone(), site.source.clone()]);
+            evidence.extend(application_proof.target.evidence.source.iter().cloned());
+            if let Some((_, source)) = &application_proof.receiver {
+                evidence.insert(source.clone());
+            }
+            if let Some(inherited) = result.receiver_sources.get(&callee.id) {
+                for source in inherited.iter() {
+                    check()?;
+                    evidence.insert(source.clone());
+                }
+            }
+            Some(Arc::new(evidence.into_iter().collect()))
+        };
+        for named in named_arguments {
+            check()?;
+            let Some(start) = u64::try_from(named.span.start)
+                .ok()
+                .and_then(|offset| callee.source.span().end_byte().checked_add(offset))
+            else {
+                continue;
+            };
+            let Some(end) = u64::try_from(named.span.end)
+                .ok()
+                .and_then(|offset| callee.source.span().end_byte().checked_add(offset))
+            else {
+                continue;
+            };
+            let Some(label) = self.labels.get(&(site.file, start, end)).copied().flatten() else {
+                continue;
+            };
+            let Some(parameter) = contract.parameters.get(named.parameter).copied() else {
+                continue;
+            };
+            // Only top-level authored labels from this complete argument list
+            // can inherit its callee. Nested calls own their labels independently.
+            if let Some(sources) = &label_sources {
+                result
+                    .receiver_sources
+                    .insert(label.id, Arc::clone(sources));
+            }
+            result
+                .application_parameters
+                .insert(label.id, Arc::clone(&parameters));
+            result.proofs.insert(
+                label.id,
+                Proof {
+                    target: parameter,
+                    context: Arc::clone(&application_proof.context),
+                    receiver: Some((application_proof.target, site.source.clone())),
+                    rule: ResolutionRule::ClassicProjectArgument,
+                    property_call: false,
+                },
+            );
+        }
         result.application_parameters.insert(site.id, parameters);
         if let Some(sources) = result.receiver_sources.get(&callee.id).cloned() {
             result.receiver_sources.insert(site.id, sources);
@@ -450,36 +525,37 @@ fn arguments_match(
     optional_parameters: &[bool],
     names: &BTreeMap<String, usize>,
     check: &mut impl FnMut() -> Result<(), ResolutionError>,
-) -> Result<bool, ResolutionError> {
+) -> Result<Option<Vec<NamedArgument>>, ResolutionError> {
     let leading = rootlight_vba::logical_whitespace_len(tail, check)?;
     let tail = tail.get(leading..).unwrap_or_default();
-    let arguments = if tail.first() == Some(&b'(') {
+    let (arguments, offset) = if tail.first() == Some(&b'(') {
         let Some(end) = rootlight_vba::parenthesized_expression_end(tail, check)? else {
-            return Ok(false);
+            return Ok(None);
         };
         let rest = tail.get(end..).unwrap_or_default();
         if rootlight_vba::logical_whitespace_len(rest, check)? == rest.len() {
-            tail.get(1..end - 1).unwrap_or_default()
+            (tail.get(1..end - 1).unwrap_or_default(), leading + 1)
         } else {
             if explicit || leading == 0 {
-                return Ok(false);
+                return Ok(None);
             }
             // A statement argument can begin with a grouped expression, then
             // continue with an operator or further comma-delimited arguments.
-            tail
+            (tail, leading)
         }
     } else {
         if (explicit || leading == 0) && !tail.is_empty() {
-            return Ok(false);
+            return Ok(None);
         }
-        tail
+        (tail, leading)
     };
     let Some(arguments) =
         rootlight_vba::argument_list(arguments, optional_parameters.len(), check)?
     else {
-        return Ok(false);
+        return Ok(None);
     };
     let mut supplied = BTreeSet::new();
+    let mut named = Vec::new();
     for (position, argument) in arguments.iter().enumerate() {
         check()?;
         if argument
@@ -491,35 +567,63 @@ fn arguments_match(
                 .get(5)
                 .is_some_and(u8::is_ascii_whitespace)
         {
-            return Ok(false);
+            return Ok(None);
         }
         let position = if let Some(name) = argument.name() {
             let Ok(name) = std::str::from_utf8(name) else {
-                return Ok(false);
+                return Ok(None);
             };
             let Some(position) = names.get(&name.to_ascii_lowercase()) else {
-                return Ok(false);
+                return Ok(None);
             };
             *position
         } else {
             position
         };
         let Some(optional) = optional_parameters.get(position) else {
-            return Ok(false);
+            return Ok(None);
         };
         if !supplied.insert(position) || (argument.expression().is_empty() && !optional) {
-            return Ok(false);
+            return Ok(None);
+        }
+        if let Some(span) = argument.name_span() {
+            named.push(NamedArgument {
+                span: offset + span.start..offset + span.end,
+                parameter: position,
+            });
         }
     }
     Ok(optional_parameters
         .iter()
         .enumerate()
-        .all(|(position, optional)| *optional || supplied.contains(&position)))
+        .all(|(position, optional)| *optional || supplied.contains(&position))
+        .then_some(named))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn named_mapping_keeps_authored_spans_and_excludes_nested_labels() {
+        let names = BTreeMap::from([("value".to_owned(), 0), ("extra".to_owned(), 1)]);
+        for tail in [
+            "(extra:=Nested(value:=1), [VALUE] := 2)",
+            " extra:=Nested(value:=1), [VALUE] _\r\n := 2",
+        ] {
+            let bindings =
+                arguments_match(tail.as_bytes(), false, &[false, true], &names, &mut || {
+                    Ok(())
+                })
+                .unwrap()
+                .unwrap();
+            let actual: Vec<_> = bindings
+                .iter()
+                .map(|binding| (&tail[binding.span.clone()], binding.parameter))
+                .collect();
+            assert_eq!(actual, [("extra", 1), ("[VALUE]", 0)], "{tail}");
+        }
+    }
 
     #[test]
     fn argument_mapping_preserves_required_optional_and_named_slots() {
@@ -554,13 +658,22 @@ mod tests {
                     &names,
                     &mut check
                 )
-                .unwrap(),
+                .unwrap()
+                .is_some(),
                 expected,
                 "{tail:?} explicit={explicit}"
             );
         }
-        assert!(arguments_match(b" , 2", false, &[true, true], &names, &mut || Ok(())).unwrap());
-        assert!(arguments_match(b"()", true, &[], &BTreeMap::new(), &mut || Ok(())).unwrap());
+        assert!(
+            arguments_match(b" , 2", false, &[true, true], &names, &mut || Ok(()))
+                .unwrap()
+                .is_some()
+        );
+        assert!(
+            arguments_match(b"()", true, &[], &BTreeMap::new(), &mut || Ok(()))
+                .unwrap()
+                .is_some()
+        );
     }
 
     #[test]

@@ -8,6 +8,7 @@ use super::{group::quoted_end, logical_whitespace_len, name, parenthesized_expre
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Argument<'a> {
     name: Option<&'a [u8]>,
+    name_span: Option<(usize, usize)>,
     expression: &'a [u8],
 }
 
@@ -16,6 +17,14 @@ impl<'a> Argument<'a> {
     #[must_use]
     pub const fn name(self) -> Option<&'a [u8]> {
         self.name
+    }
+
+    /// Exact named-label range relative to the input argument list, including brackets.
+    ///
+    /// Positional arguments return None. Logical whitespace and `:=` are excluded.
+    #[must_use]
+    pub fn name_span(self) -> Option<std::ops::Range<usize>> {
+        self.name_span.map(|(start, end)| start..end)
     }
 
     /// Expression bytes after leading logical whitespace; empty means omitted.
@@ -113,27 +122,36 @@ pub fn argument_list<'a, E>(
         }
         let mut end = 0;
         let candidate = name(raw, &mut end, check)?;
+        let name_end = end;
         end += logical_whitespace_len(raw.get(end..).unwrap_or_default(), check)?;
-        let (name, expression) = if let Some(name) = candidate
+        let (name, name_span, expression) = if let Some(name) = candidate
             && let Some(expression) = raw.get(end..).and_then(|tail| tail.strip_prefix(b":="))
         {
             named = true;
-            let leading = logical_whitespace_len(expression, check)?;
-            let expression = expression.get(leading..).unwrap_or_default();
+            let expression_leading = logical_whitespace_len(expression, check)?;
+            let expression = expression.get(expression_leading..).unwrap_or_default();
             if expression.is_empty() {
                 return Ok(None);
             }
-            (Some(name), expression)
+            (
+                Some(name),
+                Some((start + leading, start + leading + name_end)),
+                expression,
+            )
         } else {
             if named {
                 return Ok(None);
             }
-            (None, raw)
+            (None, None, raw)
         };
         if result.len() == maximum_arguments {
             return Ok(None);
         }
-        result.push(Argument { name, expression });
+        result.push(Argument {
+            name,
+            name_span,
+            expression,
+        });
         if source.get(cursor).is_none() {
             return Ok(Some(result));
         }
@@ -158,6 +176,12 @@ mod tests {
         assert_eq!(args[2].expression(), b"\"a,\"\"b\"");
         assert_eq!(args[3].expression(), b"#1/2/2000 10:30#");
         assert_eq!(args[4].name(), Some(b"last".as_slice()));
+        assert_eq!(&source[args[4].name_span().unwrap()], b"[last]");
+        assert!(
+            args[..4]
+                .iter()
+                .all(|argument| argument.name_span().is_none())
+        );
         assert_eq!(args[4].expression(), b"4");
         assert!(
             argument_list(source, 4, &mut || Ok::<(), ()>(()))
@@ -194,6 +218,41 @@ mod tests {
                     .is_none(),
                 "{source}"
             );
+        }
+    }
+
+    #[test]
+    fn named_label_spans_preserve_brackets_continuations_and_byte_offsets() {
+        let source = b"\"\xc3\xa9\", inner([value]:=1), _\r\n [value] _\r\n := 2, extra:=\"x\"";
+        let arguments = argument_list(source, 4, &mut || Ok::<(), ()>(()))
+            .unwrap()
+            .unwrap();
+        assert_eq!(arguments.len(), 4);
+        assert!(arguments[0].name_span().is_none());
+        assert!(arguments[1].name_span().is_none());
+        for (argument, expected) in [
+            (arguments[2], b"[value]".as_slice()),
+            (arguments[3], b"extra".as_slice()),
+        ] {
+            assert_eq!(&source[argument.name_span().unwrap()], expected);
+        }
+        for end in 0..=source.len() {
+            if let Some(arguments) =
+                argument_list(&source[..end], 4, &mut || Ok::<(), ()>(())).unwrap()
+            {
+                for argument in arguments {
+                    if let Some(span) = argument.name_span() {
+                        assert!(span.start < span.end && span.end <= end);
+                        let authored = &source[span];
+                        let name = if authored.starts_with(b"[") {
+                            &authored[1..authored.len() - 1]
+                        } else {
+                            authored
+                        };
+                        assert_eq!(argument.name(), Some(name));
+                    }
+                }
+            }
         }
     }
 
