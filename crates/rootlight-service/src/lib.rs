@@ -220,7 +220,7 @@ const PROJECT_FACTS_TRUNCATED_MESSAGE: &str =
     "additional project semantic facts were omitted by aggregate resource limits";
 const AGGREGATE_DIAGNOSTICS_TRUNCATED_CODE: &str = "aggregate-diagnostics-truncated";
 const ANALYZER_BINARY_SEED: &[u8] = b"rootlight.first-slice.treesitter-structural/165";
-const RESOLVER_BINARY_SEED: &[u8] = b"rootlight.first-slice.resolve/44";
+const RESOLVER_BINARY_SEED: &[u8] = b"rootlight.first-slice.resolve/45";
 const INCREMENTAL_PROVIDER_SEED: &[u8] = b"rootlight.first-slice.incremental-provider/1";
 const LANGUAGE_DISPOSITION_PROVIDER_SEED: &[u8] = b"rootlight.first-slice.language-disposition/5";
 const SOURCE_FILE_FALLBACK_PROVIDER_SEED: &[u8] = b"rootlight.source-file-fallback/4";
@@ -37196,11 +37196,20 @@ mod tests {
         let mut previous = None;
         for (declaration, resolved) in [
             ("Public Sub Notify()\nEnd Sub\n", true),
+            ("Public _\r\nStatic _\r\nSub Notify()\nEnd Sub\n", true),
             ("Private Sub Notify()\nEnd Sub\n", false),
             ("Public Function Notify() As Long\nEnd Function\n", true),
             (
                 "Public Property Get Notify() As Long\nEnd Property\n",
                 getter,
+            ),
+            (
+                "Public Static Property _\nGet Notify() As Long\nEnd Property\n",
+                getter,
+            ),
+            (
+                "Public Static Property _\nLet Notify(ByVal value As Long)\nEnd Property\n",
+                false,
             ),
             (
                 "Public Declare PtrSafe Sub Notify Lib \"callbacks\" ()\n",

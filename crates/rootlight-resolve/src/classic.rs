@@ -130,44 +130,54 @@ enum PropertyAccessorKind {
     Set,
 }
 
+fn procedure_kind(
+    entity: &EntityRecord,
+    sources: &BTreeMap<FileId, &[u8]>,
+    cancellation: &Cancellation,
+    work: &mut ResolutionWorkBudget,
+) -> Result<Option<rootlight_vba::ProcedureKind>, ResolutionError> {
+    // Category and spelling must agree with the immutable declaration evidence;
+    // a shared property name alone cannot identify the corresponding accessor.
+    let declaration = entity.evidence.source.as_ref().and_then(|source| {
+        let span = source.span();
+        sources
+            .get(&span.file())?
+            .get(usize::try_from(span.start_byte()).ok()?..usize::try_from(span.end_byte()).ok()?)
+    });
+    let Some(declaration) = declaration else {
+        return Ok(None);
+    };
+    let header = rootlight_vba::procedure_header(declaration, &mut || {
+        cancellation.check()?;
+        work.consume()
+    })?;
+    Ok(header
+        .filter(|header| {
+            header
+                .name()
+                .eq_ignore_ascii_case(entity.canonical_name.as_bytes())
+        })
+        .map(rootlight_vba::ProcedureHeader::kind))
+}
+
 fn property_accessor_kind(
     entity: &EntityRecord,
     sources: &BTreeMap<FileId, &[u8]>,
-) -> Option<PropertyAccessorKind> {
-    // The shared property name cannot identify an accessor; require its exact
-    // retained declaration header before selecting one across project files.
-    let span = entity.evidence.source.as_ref()?.span();
-    let start = usize::try_from(span.start_byte()).ok()?;
-    let end = usize::try_from(span.end_byte()).ok()?;
-    let declaration = sources.get(&span.file())?.get(start..end)?;
-    let header = declaration
-        .split(|byte| matches!(byte, b'\r' | b'\n'))
-        .next()?;
-    let mut words = header
-        .split(|byte| byte.is_ascii_whitespace())
-        .filter(|word| !word.is_empty());
-    let first = words.next()?;
-    let property = if first.eq_ignore_ascii_case(b"Public")
-        || first.eq_ignore_ascii_case(b"Private")
-        || first.eq_ignore_ascii_case(b"Friend")
-    {
-        words.next()?
-    } else {
-        first
-    };
-    if !property.eq_ignore_ascii_case(b"Property") {
-        return None;
-    }
-    let access = words.next()?;
-    if access.eq_ignore_ascii_case(b"Get") {
-        Some(PropertyAccessorKind::Get)
-    } else if access.eq_ignore_ascii_case(b"Let") {
-        Some(PropertyAccessorKind::Let)
-    } else if access.eq_ignore_ascii_case(b"Set") {
-        Some(PropertyAccessorKind::Set)
-    } else {
-        None
-    }
+    cancellation: &Cancellation,
+    work: &mut ResolutionWorkBudget,
+) -> Result<Option<PropertyAccessorKind>, ResolutionError> {
+    Ok(match procedure_kind(entity, sources, cancellation, work)? {
+        Some(rootlight_vba::ProcedureKind::PropertyGet) => Some(PropertyAccessorKind::Get),
+        Some(rootlight_vba::ProcedureKind::PropertyLet) => Some(PropertyAccessorKind::Let),
+        Some(rootlight_vba::ProcedureKind::PropertySet) => Some(PropertyAccessorKind::Set),
+        Some(
+            rootlight_vba::ProcedureKind::Sub
+            | rootlight_vba::ProcedureKind::Function
+            | rootlight_vba::ProcedureKind::ExternalSub
+            | rootlight_vba::ProcedureKind::ExternalFunction,
+        )
+        | None => None,
+    })
 }
 
 struct ResolvedProject {
@@ -183,38 +193,28 @@ struct ResolvedProject {
 // Procedure-pointer lookup excludes variables and setter-only properties
 // (MS-VBAL 5.6.10). DLL declarations occupy the tier but cannot be AddressOf
 // targets; retain them as barriers instead of falling through.
-fn pointer_callable(entity: &EntityRecord, sources: &BTreeMap<FileId, &[u8]>) -> Option<bool> {
+fn pointer_callable(
+    entity: &EntityRecord,
+    sources: &BTreeMap<FileId, &[u8]>,
+    cancellation: &Cancellation,
+    work: &mut ResolutionWorkBudget,
+) -> Result<Option<bool>, ResolutionError> {
     if entity.kind == EntityKind::Property {
-        return match property_accessor_kind(entity, sources) {
-            Some(PropertyAccessorKind::Get) => Some(true),
-            Some(PropertyAccessorKind::Let | PropertyAccessorKind::Set) => None,
-            None => Some(false),
-        };
+        return Ok(
+            match property_accessor_kind(entity, sources, cancellation, work)? {
+                Some(PropertyAccessorKind::Get) => Some(true),
+                Some(PropertyAccessorKind::Let | PropertyAccessorKind::Set) => None,
+                None => Some(false),
+            },
+        );
     }
     if !matches!(entity.kind, EntityKind::Function | EntityKind::Method) {
-        return None;
+        return Ok(None);
     }
-    let header = entity.evidence.source.as_ref().and_then(|source| {
-        let span = source.span();
-        sources
-            .get(&span.file())?
-            .get(usize::try_from(span.start_byte()).ok()?..usize::try_from(span.end_byte()).ok()?)
-    });
-    let body = header.unwrap_or_default();
-    let mut words = body
-        .split(u8::is_ascii_whitespace)
-        .filter(|word| !word.is_empty());
-    let mut word = words.next().unwrap_or_default();
-    if [b"Public".as_slice(), b"Private", b"Friend"]
-        .iter()
-        .any(|access| word.eq_ignore_ascii_case(access))
-    {
-        word = words.next().unwrap_or_default();
-    }
-    if word.eq_ignore_ascii_case(b"Static") {
-        word = words.next().unwrap_or_default();
-    }
-    Some(word.eq_ignore_ascii_case(b"Sub") || word.eq_ignore_ascii_case(b"Function"))
+    Ok(Some(matches!(
+        procedure_kind(entity, sources, cancellation, work)?,
+        Some(rootlight_vba::ProcedureKind::Sub | rootlight_vba::ProcedureKind::Function)
+    )))
 }
 
 enum MemberLocation {
@@ -823,7 +823,8 @@ impl<'a> ClassicIndex<'a> {
                     if entity.container != Some(ContainerRef::Entity(*module)) {
                         continue;
                     }
-                    let Some(eligible) = pointer_callable(entity, &sources) else {
+                    let Some(eligible) = pointer_callable(entity, &sources, cancellation, work)?
+                    else {
                         continue;
                     };
                     let Some(name) = identifier(&entity.canonical_name) else {
@@ -1095,7 +1096,7 @@ impl<'a> ClassicIndex<'a> {
                             ..PropertyAccessors::default()
                         }
                     });
-                    match property_accessor_kind(entity, &sources) {
+                    match property_accessor_kind(entity, &sources, cancellation, work)? {
                         Some(PropertyAccessorKind::Get) if accessors.get.is_none() => {
                             accessors.get = Some(*entity);
                         }

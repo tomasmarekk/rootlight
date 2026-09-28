@@ -1,8 +1,12 @@
-//! Reads source-written VBA names and logical-line separators without a parser runtime.
-//! Identifier paths retain their argument boundaries so a partial name cannot become
-//! an exact procedure reference; trivia never crosses an uncontinued physical line.
+//! Reads source-written VBA names, procedure prefixes and logical-line separators.
+//! No parser runtime is required. Identifier paths retain argument boundaries;
+//! procedure categories come from source, never from an uncontinued following line.
 
 #![forbid(unsafe_code)]
+
+mod procedure;
+
+pub use procedure::{ProcedureHeader, ProcedureKind, procedure_header};
 
 /// A syntactically valid pointer path borrowing its original source bytes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
