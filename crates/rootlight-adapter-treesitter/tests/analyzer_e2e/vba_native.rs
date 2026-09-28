@@ -3751,6 +3751,132 @@ fn vba_procedural_module_qualifier_requires_an_unambiguous_header_and_member() {
 }
 
 #[test]
+fn vba_member_paths_preserve_logical_continuations() {
+    for separator in [".", " _\n.", ". _\r\n ", " _\r\n. _\n "] {
+        let call = format!("Utility{separator}[Measure]");
+        let field = format!("item{separator}nested{separator}[Value]");
+        let constant = format!("Phase{separator}[Ready]");
+        let source = format!(
+            "Attribute VB_Name = \"Utility\"\nPrivate Type Inner\nValue As Long\nEnd Type\nPrivate Type Outer\nnested As Inner\nEnd Type\nPrivate Enum Phase\nReady = 1\nEnd Enum\nFunction Measure() As Long\nMeasure = 1\nEnd Function\nSub Run()\nDim item As Outer\nDim result As Long\nresult = {call}()\nresult = {field}\nresult = {constant}\nEnd Sub\n"
+        );
+        let result = output(&source);
+        let document = result.document();
+        for (text, name, role) in [
+            ("Utility", "Utility", OccurrenceRole::Reference),
+            (call.as_str(), "Measure", OccurrenceRole::CallSite),
+            (field.as_str(), "Value", OccurrenceRole::Reference),
+            (constant.as_str(), "Ready", OccurrenceRole::Reference),
+        ] {
+            let start = u64::try_from(source.rfind(text).unwrap()).unwrap();
+            let end = start + u64::try_from(text.len()).unwrap();
+            let site = document
+                .occurrences
+                .iter()
+                .find(|site| {
+                    site.source.span().start_byte() == start
+                        && site.source.span().end_byte() == end
+                        && matches!(
+                            site.syntax_kind.as_str(),
+                            "vba.member.reference"
+                                | "vba.invoked_member.reference"
+                                | "vba.value_identifier.reference"
+                        )
+                })
+                .expect("complete authored member path");
+            let entity = document
+                .entities
+                .iter()
+                .find(|entity| entity.canonical_name == name)
+                .unwrap();
+            assert_eq!(
+                site.target,
+                OccurrenceTarget::Resolved { symbol: entity.id },
+                "{text:?}"
+            );
+            assert_eq!(site.role, role, "{text:?}");
+            assert!(
+                !document.skipped_regions.iter().any(|gap| {
+                    gap.source == site.source && gap.detail == "vba-member-target-unavailable"
+                }),
+                "{text:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn vba_continued_self_field_paths_bypass_local_receivers() {
+    let text = "Me _\n.item. _\r\n [Value]";
+    let source = format!(
+        "VERSION 1.0 CLASS\nAttribute VB_Name = \"Reader\"\nPrivate Type Data\nValue As Long\nEnd Type\nPrivate item As Data\nSub Run(ByVal item As Object)\nDim result As Long\nresult = {text}\nEnd Sub\n"
+    );
+    let result = output(&source);
+    let document = result.document();
+    let start = u64::try_from(source.find(text).unwrap()).unwrap();
+    let end = start + u64::try_from(text.len()).unwrap();
+    let site = document
+        .occurrences
+        .iter()
+        .find(|site| {
+            site.source.span().start_byte() == start && site.source.span().end_byte() == end
+        })
+        .unwrap();
+    let field = document
+        .entities
+        .iter()
+        .find(|entity| entity.canonical_name == "Value")
+        .unwrap();
+    assert_eq!(site.target, OccurrenceTarget::Resolved { symbol: field.id });
+    assert_eq!(site.role, OccurrenceRole::Reference);
+}
+
+#[test]
+fn vba_continued_member_paths_preserve_shadowing_and_unknown_targets() {
+    for (prefix, local, path) in [
+        ("", "Dim Utility As Object\n", "Utility _\n.Measure"),
+        ("", "", "Unknown _\n.Measure"),
+        ("", "", "Utility. _\n Missing"),
+        ("", "Dim item As Object\n", "item _\n.Value"),
+        ("", "Dim item As Data\n", "item _\n.Missing"),
+        ("#If Enabled Then\n", "", "Utility _\n.Measure"),
+    ] {
+        let conditional_end = if prefix.is_empty() { "" } else { "#End If\n" };
+        let source = format!(
+            "Attribute VB_Name = \"Utility\"\nPrivate Type Data\nValue As Long\nEnd Type\n{prefix}Function Measure() As Long\nEnd Function\n{conditional_end}Sub Run()\n{local}Dim result As Variant\nresult = {path}(0)\nEnd Sub\n"
+        );
+        let result = output(&source);
+        let start = u64::try_from(source.find(path).unwrap()).unwrap();
+        let members: Vec<_> = result
+            .document()
+            .occurrences
+            .iter()
+            .filter(|site| {
+                site.source.span().start_byte() == start
+                    && matches!(
+                        site.syntax_kind.as_str(),
+                        "vba.member.reference" | "vba.invoked_member.reference"
+                    )
+            })
+            .collect();
+        assert!(!members.is_empty(), "{path}");
+        assert!(
+            members
+                .iter()
+                .all(|site| matches!(site.target, OccurrenceTarget::Unresolved { .. })),
+            "{path}"
+        );
+        assert!(
+            result
+                .document()
+                .skipped_regions
+                .iter()
+                .any(|gap| gap.source.span().start_byte() == start),
+            "{path}"
+        );
+    }
+}
+
+#[test]
 fn vba_exported_module_header_uses_last_attribute_not_body_attributes() {
     let source = "Attribute VB_Name = \"OldName\"\nAttribute vb_name = \"CurrentName\"\nSub Run()\nAttribute Run.VB_Name = \"NotModule\"\nEnd Sub\nAttribute VB_Name = \"AfterBody\"\n";
     let result = output(source);

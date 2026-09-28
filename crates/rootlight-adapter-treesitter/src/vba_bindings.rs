@@ -768,17 +768,28 @@ impl<'a> VbaBindings<'a> {
         if text.contains('(') {
             return self.returned_udt_field_reference(fact, text, cancellation);
         }
+        let Some(path) = rootlight_vba::procedure_pointer_path(text.as_bytes(), &mut || {
+            cancellation.check().map_err(AdapterError::from)
+        })?
+        else {
+            return Ok(None);
+        };
+        if path.end() != text.len() {
+            return Ok(None);
+        }
         // A written dot-chain can select enum constants or declared UDT fields.
         // Indexing and default-member dispatch need separate application evidence.
+        // Validate the complete logical path before stripping continuation trivia:
+        // ordinary whitespace before a dot must not join separate expressions.
         let mut components = text.split('.');
-        let Some(receiver_text) = components.next() else {
+        let Some(receiver_text) = member_component(components.next(), cancellation)? else {
             return Ok(None);
         };
         // Me bypasses procedure locals, while escaped [Me] is an ordinary
         // identifier. Only the source class's own variable can start this chain.
         let instance = receiver_text.trim().eq_ignore_ascii_case("Me");
         let receiver_text = if instance {
-            let Some(component) = components.next() else {
+            let Some(component) = member_component(components.next(), cancellation)? else {
                 return Ok(None);
             };
             component
@@ -836,7 +847,9 @@ impl<'a> VbaBindings<'a> {
             if instance || self.foreign_scopes.contains(&scope) {
                 return Ok(None);
             }
-            let Some(name) = components.next().and_then(member_key) else {
+            let Some(name) =
+                member_component(components.next(), cancellation)?.and_then(member_key)
+            else {
                 return Ok(None);
             };
             if components.next().is_some() {
@@ -860,7 +873,9 @@ impl<'a> VbaBindings<'a> {
             && !instance
             && let Some((_, scope)) = self.local_procedural_module(fact, &receiver, cancellation)?
         {
-            let Some(name) = components.next().and_then(member_key) else {
+            let Some(name) =
+                member_component(components.next(), cancellation)?.and_then(member_key)
+            else {
                 return Ok(None);
             };
             if components.next().is_some() {
@@ -897,7 +912,8 @@ impl<'a> VbaBindings<'a> {
         let mut member_count = 0_usize;
         for component in components {
             cancellation.check()?;
-            let Some(name) = member_key(component) else {
+            let Some(name) = member_component(Some(component), cancellation)?.and_then(member_key)
+            else {
                 return Ok(None);
             };
             let Some(scope) = self.value_types.get(&symbol) else {
@@ -1348,14 +1364,34 @@ impl<'a> VbaBindings<'a> {
         Err(invalid_capture())
     }
 
-    fn is_member_receiver(&self, fact: &SyntaxFact) -> bool {
-        self.source
-            .get(usize::try_from(fact.span().end_byte()).unwrap_or(usize::MAX))
-            == Some(&b'.')
-            && self
-                .member_references
-                .get(&fact.span().start_byte())
-                .is_some_and(|end| *end > fact.span().end_byte())
+    fn is_member_receiver(
+        &self,
+        fact: &SyntaxFact,
+        cancellation: &Cancellation,
+    ) -> Result<bool, AdapterError> {
+        let span = fact.span();
+        let Some(&end) = self.member_references.get(&span.start_byte()) else {
+            return Ok(false);
+        };
+        if end <= span.end_byte() {
+            return Ok(false);
+        }
+        let (Ok(start), Ok(end)) = (usize::try_from(span.end_byte()), usize::try_from(end)) else {
+            return Ok(false);
+        };
+        let Some(source) = self.source.get(start..end) else {
+            return Ok(false);
+        };
+        let whitespace = rootlight_vba::logical_whitespace_len(source, &mut || {
+            cancellation.check().map_err(AdapterError::from)
+        })?;
+        // Only the prefix proves this qualifier. A later call or indexed
+        // receiver must not invalidate the module's independent identity.
+        Ok(source.get(whitespace) == Some(&b'.')
+            && (whitespace == 0
+                || source
+                    .get(..whitespace)
+                    .is_some_and(|trivia| trivia.contains(&b'\n'))))
     }
 
     pub(super) fn resolve(
@@ -1689,7 +1725,7 @@ impl<'a> VbaBindings<'a> {
             }
             if scope.syntax_kind().as_str() == "vba.file.scope" {
                 if fact.syntax_kind().as_str() == "vba.value_identifier.reference"
-                    && self.is_member_receiver(fact)
+                    && self.is_member_receiver(fact, cancellation)?
                     && let Some((symbol, _)) =
                         self.local_procedural_module(fact, &key, cancellation)?
                 {
@@ -2189,6 +2225,31 @@ fn member_key(text: &str) -> Option<String> {
     Some(name.to_ascii_lowercase())
 }
 
+fn member_component<'a>(
+    text: Option<&'a str>,
+    cancellation: &Cancellation,
+) -> Result<Option<&'a str>, AdapterError> {
+    let Some(text) = text else {
+        return Ok(None);
+    };
+    let mut check = || cancellation.check().map_err(AdapterError::from);
+    let start = rootlight_vba::logical_whitespace_len(text.as_bytes(), &mut check)?;
+    let Some(text) = text.get(start..) else {
+        return Ok(None);
+    };
+    let Some(path) = rootlight_vba::procedure_pointer_path(text.as_bytes(), &mut check)? else {
+        return Ok(None);
+    };
+    if path.components() != 1 {
+        return Ok(None);
+    }
+    let suffix = text.get(path.end()..).ok_or_else(invalid_capture)?;
+    if rootlight_vba::logical_whitespace_len(suffix.as_bytes(), &mut check)? != suffix.len() {
+        return Ok(None);
+    }
+    Ok(text.get(..path.end()))
+}
+
 fn declaration_has_array_designator(
     declaration: &SyntaxFact,
     name: &SyntaxFact,
@@ -2281,6 +2342,40 @@ fn invalid_capture() -> AdapterError {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn member_components_strip_only_valid_logical_trivia() {
+        for (text, expected) in [
+            ("name_", "name_"),
+            ("_name", "_name"),
+            ("[Me] _\r\n", "[Me]"),
+            (" _\n [Field] _\r\n ", "[Field]"),
+        ] {
+            assert_eq!(
+                super::member_component(Some(text), &rootlight_cancel::Cancellation::new())
+                    .unwrap(),
+                Some(expected)
+            );
+        }
+        for text in [
+            "name\n",
+            "name,",
+            "name ' comment",
+            "name.other",
+            "name _",
+            "name _\r",
+        ] {
+            assert_eq!(
+                super::member_component(Some(text), &rootlight_cancel::Cancellation::new())
+                    .unwrap(),
+                None,
+                "{text:?}"
+            );
+        }
+        let cancellation = rootlight_cancel::Cancellation::new();
+        cancellation.cancel(rootlight_cancel::CancellationReason::ClientRequest);
+        assert!(super::member_component(Some("name"), &cancellation).is_err());
+    }
+
     #[test]
     fn statement_label_keys_compare_integer_values_and_reject_invalid_labels() {
         for (text, expected) in [

@@ -219,7 +219,7 @@ const PROJECT_FACTS_TRUNCATED_CODE: &str = "project-adapter-facts-truncated";
 const PROJECT_FACTS_TRUNCATED_MESSAGE: &str =
     "additional project semantic facts were omitted by aggregate resource limits";
 const AGGREGATE_DIAGNOSTICS_TRUNCATED_CODE: &str = "aggregate-diagnostics-truncated";
-const ANALYZER_BINARY_SEED: &[u8] = b"rootlight.first-slice.treesitter-structural/168";
+const ANALYZER_BINARY_SEED: &[u8] = b"rootlight.first-slice.treesitter-structural/169";
 const RESOLVER_BINARY_SEED: &[u8] = b"rootlight.first-slice.resolve/46";
 const INCREMENTAL_PROVIDER_SEED: &[u8] = b"rootlight.first-slice.incremental-provider/1";
 const LANGUAGE_DISPOSITION_PROVIDER_SEED: &[u8] = b"rootlight.first-slice.language-disposition/5";
@@ -30093,6 +30093,122 @@ mod tests {
                 )
                 .unwrap();
             assert_eq!(read.data.chunks[0].bytes, b"size");
+        }
+    }
+
+    #[test]
+    fn vba_continued_member_paths_follow_mutation_and_restart() {
+        let storage = durable_test_tempdir();
+        let paths = RuntimePaths::new(storage.path().join("state"), storage.path().join("runtime"))
+            .unwrap();
+        paths.prepare_owner().unwrap();
+        let fixture = durable_test_tempdir();
+        let mut previous_generation = None;
+        for (local, item_type, resolved) in [
+            ("", "Data", true),
+            ("Dim Utility As Object\n", "Object", false),
+            ("", "Data", true),
+        ] {
+            let call = "Utility _\r\n.[Measure]";
+            let field = "item. _\n [Value]";
+            let source = format!(
+                "Attribute VB_Name = \"Utility\"\nPrivate Declare PtrSafe Function ReadClock Lib \"clock\" () As LongPtr\nPrivate Type Data\nValue As Long\nEnd Type\nFunction Measure() As Long\nMeasure = 1\nEnd Function\nSub Run()\n{local}Dim item As {item_type}\nDim result As Long\nresult = {call}()\nresult = {field}\nEnd Sub\n"
+            );
+            fs::write(fixture.path().join("module.bas"), &source).unwrap();
+            let mut service =
+                FirstSliceService::new_durable(2, paths.state_dir(), &deadline()).unwrap();
+            let receipt = service
+                .index_repository(fixture.path(), &deadline())
+                .unwrap();
+            assert_eq!(receipt.indexed_files, 1);
+            assert_eq!(
+                service
+                    .index_repository(fixture.path(), &deadline())
+                    .unwrap(),
+                receipt
+            );
+            if let Some(previous) = previous_generation {
+                assert_ne!(receipt.generation, previous);
+            }
+            previous_generation = Some(receipt.generation);
+            drop(service);
+            let service =
+                FirstSliceService::new_durable(2, paths.state_dir(), &deadline()).unwrap();
+            let snapshot = service
+                .loaded_generation_snapshot(receipt.generation)
+                .unwrap();
+            let document = snapshot.document();
+            for (text, name, family) in [
+                (call, "Measure", RelationFamily::Calls),
+                (field, "Value", RelationFamily::References),
+            ] {
+                let target = document
+                    .entities
+                    .iter()
+                    .find(|entity| entity.canonical_name == name)
+                    .unwrap();
+                let start = u64::try_from(source.find(text).unwrap()).unwrap();
+                let end = start + u64::try_from(text.len()).unwrap();
+                let site = document
+                    .occurrences
+                    .iter()
+                    .find(|site| {
+                        site.source.span().start_byte() == start
+                            && site.source.span().end_byte() == end
+                            && matches!(
+                                site.syntax_kind.as_str(),
+                                "vba.member.reference" | "vba.invoked_member.reference"
+                            )
+                    })
+                    .unwrap();
+                assert_eq!(
+                    site.target == OccurrenceTarget::Resolved { symbol: target.id },
+                    resolved
+                );
+                assert_eq!(
+                    document
+                        .skipped_regions
+                        .iter()
+                        .any(|gap| gap.source == site.source
+                            && gap.detail == "vba-member-target-unavailable"),
+                    !resolved
+                );
+                let relationships = service
+                    .symbol_relationships(
+                        receipt.generation,
+                        BTreeSet::from([target.id]),
+                        vec![family],
+                        Some(RelationDirection::Inbound),
+                        0,
+                        10,
+                        0,
+                        &deadline(),
+                    )
+                    .unwrap();
+                assert_eq!(
+                    relationships
+                        .data
+                        .groups
+                        .iter()
+                        .flat_map(|group| &group.items)
+                        .flat_map(|edge| &edge.source_refs)
+                        .any(|reference| reference == &site.source),
+                    resolved
+                );
+                assert_eq!(site.source.generation(), receipt.generation);
+                let read = service
+                    .source_read_with_options_and_budget(
+                        receipt.generation,
+                        vec![site.source.clone()],
+                        SourceReadOptions::new()
+                            .with_context_lines_before(0)
+                            .with_context_lines_after(0),
+                        FirstSliceBudget::default(),
+                        &deadline(),
+                    )
+                    .unwrap();
+                assert_eq!(read.data.chunks[0].bytes, text.as_bytes());
+            }
         }
     }
 
