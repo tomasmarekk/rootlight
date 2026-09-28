@@ -986,6 +986,7 @@ fn derive_fact_id_map(
         clear_fact_records(&mut scratch);
         let new_id = rebind_node(
             location.node(document),
+            TypedFactIdentity::Derive,
             document.repository,
             generation,
             &ids,
@@ -1052,6 +1053,7 @@ fn rebind_document_with_map(
     for (_, location) in fact_locations(&document, &mut checkpoint)? {
         rebind_node(
             location.node(&document),
+            TypedFactIdentity::Derive,
             document.repository,
             generation,
             &ids,
@@ -1082,8 +1084,29 @@ fn rebind_document_with_map(
     Ok((rebound, ids))
 }
 
+// The neutral projection first derives every ID in dependency order. Its second
+// pass remaps the same immutable records for hashing, so typed recipes can reuse
+// that local proof instead of allocating and serializing each recipe again.
+enum TypedFactIdentity {
+    Derive,
+    Reuse(FactId),
+}
+
+impl TypedFactIdentity {
+    fn resolve(
+        self,
+        derive: impl FnOnce() -> Result<FactId, crate::FactIdentityRecipeError>,
+    ) -> Result<FactId, NormalizedRebindError> {
+        match self {
+            Self::Derive => derive().map_err(|_| NormalizedRebindError::IdentityRecipe),
+            Self::Reuse(id) => Ok(id),
+        }
+    }
+}
+
 fn rebind_node(
     node: FactNode,
+    identity: TypedFactIdentity,
     repository: rootlight_ids::RepositoryId,
     generation: GenerationId,
     ids: &FactIdMap,
@@ -1097,8 +1120,7 @@ fn rebind_node(
             record.source = rebind_source(record.source, generation);
             record.provenance = remap_id(record.provenance, ids)?;
             record.evidence = rebind_evidence(record.evidence, generation, ids, checkpoint)?;
-            record.id = derive_occurrence_record_id(&record)
-                .map_err(|_| NormalizedRebindError::IdentityRecipe)?;
+            record.id = identity.resolve(|| derive_occurrence_record_id(&record))?;
             let id = record.id;
             target.occurrences.push(record);
             Ok(id)
@@ -1109,8 +1131,7 @@ fn rebind_node(
             record.object = rebind_endpoint(record.object, ids)?;
             record.provenance = remap_id(record.provenance, ids)?;
             record.evidence = rebind_evidence(record.evidence, generation, ids, checkpoint)?;
-            record.id = derive_relation_record_id(&record)
-                .map_err(|_| NormalizedRebindError::IdentityRecipe)?;
+            record.id = identity.resolve(|| derive_relation_record_id(&record))?;
             let id = record.id;
             target.relations.push(record);
             Ok(id)
@@ -1133,8 +1154,7 @@ fn rebind_node(
             record.derivation_parents.sort_unstable();
             ensure_projection_continues(checkpoint)?;
             record.derivation_parents.dedup();
-            record.id = derive_provenance_record_id(&record)
-                .map_err(|_| NormalizedRebindError::IdentityRecipe)?;
+            record.id = identity.resolve(|| derive_provenance_record_id(&record))?;
             let id = record.id;
             target.provenance.push(record);
             Ok(id)
@@ -1145,8 +1165,7 @@ fn rebind_node(
             record.to = rebind_source(record.to, generation);
             record.provenance = remap_id(record.provenance, ids)?;
             record.evidence = rebind_evidence(record.evidence, generation, ids, checkpoint)?;
-            record.id = derive_source_mapping_record_id(&record)
-                .map_err(|_| NormalizedRebindError::IdentityRecipe)?;
+            record.id = identity.resolve(|| derive_source_mapping_record_id(&record))?;
             let id = record.id;
             target.source_mappings.push(record);
             Ok(id)
@@ -1155,8 +1174,7 @@ fn rebind_node(
             record.generation = generation;
             record.provenance = remap_id(record.provenance, ids)?;
             record.evidence = rebind_evidence(record.evidence, generation, ids, checkpoint)?;
-            record.id = derive_coverage_record_id(&record)
-                .map_err(|_| NormalizedRebindError::IdentityRecipe)?;
+            record.id = identity.resolve(|| derive_coverage_record_id(&record))?;
             let id = record.id;
             target.coverage_records.push(record);
             Ok(id)
@@ -1166,8 +1184,7 @@ fn rebind_node(
             record.source = rebind_source(record.source, generation);
             record.provenance = remap_id(record.provenance, ids)?;
             record.evidence = rebind_evidence(record.evidence, generation, ids, checkpoint)?;
-            record.id = derive_skipped_region_id(&record)
-                .map_err(|_| NormalizedRebindError::IdentityRecipe)?;
+            record.id = identity.resolve(|| derive_skipped_region_id(&record))?;
             let id = record.id;
             target.skipped_regions.push(record);
             Ok(id)
@@ -1179,8 +1196,7 @@ fn rebind_node(
                 .map(|source| rebind_source(source, generation));
             record.provenance = remap_id(record.provenance, ids)?;
             record.evidence = rebind_evidence(record.evidence, generation, ids, checkpoint)?;
-            record.id = derive_diagnostic_record_id(&record)
-                .map_err(|_| NormalizedRebindError::IdentityRecipe)?;
+            record.id = identity.resolve(|| derive_diagnostic_record_id(&record))?;
             let id = record.id;
             target.diagnostics.push(record);
             Ok(id)
@@ -1206,8 +1222,12 @@ fn hash_rebound_fact(
 ) -> Result<(), NormalizedRebindError> {
     ensure_projection_continues(checkpoint)?;
     clear_fact_records(scratch);
+    let mapped_id = ids
+        .get(location.id(document))
+        .ok_or(NormalizedRebindError::IdentityRecipe)?;
     let id = rebind_node(
         location.node(document),
+        TypedFactIdentity::Reuse(mapped_id),
         document.repository,
         GENERATION_NEUTRAL_ID,
         ids,
@@ -2374,6 +2394,108 @@ mod tests {
             Err(NormalizedRebindError::Interrupted)
         ));
         assert_eq!(workspace_checkpoints, 2);
+    }
+
+    #[test]
+    fn mapped_projection_matches_fresh_recipes_for_every_fact_category() {
+        let mut exercised = [false; 8];
+        for document in [
+            fixture_with_lexical_extension(),
+            fixture_with_identity_extensions().0,
+        ] {
+            for generation in [GENERATION_NEUTRAL_ID, GenerationId::from_bytes([91; 20])] {
+                let ids = derive_fact_id_map(&document, generation, || true).unwrap();
+                let mut derived = NormalizedIrDocument::empty(document.repository, generation);
+                let mut reused = NormalizedIrDocument::empty(document.repository, generation);
+                for (_, location) in fact_locations(&document, &mut || true).unwrap() {
+                    let mapped_id = ids.get(location.id(&document)).unwrap();
+                    let derived_id = rebind_node(
+                        location.node(&document),
+                        TypedFactIdentity::Derive,
+                        document.repository,
+                        generation,
+                        &ids,
+                        &mut derived,
+                        &mut || true,
+                    )
+                    .unwrap();
+                    let reused_id = rebind_node(
+                        location.node(&document),
+                        TypedFactIdentity::Reuse(mapped_id),
+                        document.repository,
+                        generation,
+                        &ids,
+                        &mut reused,
+                        &mut || true,
+                    )
+                    .unwrap();
+                    assert_eq!(derived_id, mapped_id);
+                    assert_eq!(reused_id, derived_id);
+                }
+                assert_eq!(reused, derived);
+                let counts = [
+                    reused.occurrences.len(),
+                    reused.relations.len(),
+                    reused.provenance.len(),
+                    reused.source_mappings.len(),
+                    reused.coverage_records.len(),
+                    reused.skipped_regions.len(),
+                    reused.diagnostics.len(),
+                    reused.extensions.len(),
+                ];
+                for (seen, count) in exercised.iter_mut().zip(counts) {
+                    *seen |= count > 0;
+                }
+            }
+        }
+        assert!(
+            exercised.into_iter().all(|seen| seen),
+            "every fact category must be exercised"
+        );
+    }
+
+    #[test]
+    fn mapped_identity_avoids_reencoding_and_requires_a_complete_map() {
+        let id = FactId::from_bytes([31; 20]);
+        let mut called = false;
+        assert_eq!(
+            TypedFactIdentity::Reuse(id)
+                .resolve(|| {
+                    called = true;
+                    Err(crate::FactIdentityRecipeError)
+                })
+                .unwrap(),
+            id
+        );
+        assert!(!called);
+        let document = fixture_with_lexical_extension();
+        let locations = fact_locations(&document, &mut || true).unwrap();
+        let missing_ids = FactIdMap::new(&locations).unwrap();
+        let mut scratch = NormalizedIrDocument::empty(document.repository, GENERATION_NEUTRAL_ID);
+        assert!(matches!(
+            hash_rebound_fact(
+                FactLocation::Occurrence(0),
+                &document,
+                &missing_ids,
+                &mut scratch,
+                &mut LogicalProjectionHashers::new(),
+                &mut || true,
+            ),
+            Err(NormalizedRebindError::IdentityRecipe)
+        ));
+        let ids = derive_fact_id_map(&document, GENERATION_NEUTRAL_ID, || true).unwrap();
+        assert!(matches!(
+            hash_rebound_fact(
+                FactLocation::Occurrence(0),
+                &document,
+                &ids,
+                &mut scratch,
+                &mut LogicalProjectionHashers::new(),
+                &mut || false,
+            ),
+            Err(NormalizedRebindError::Interrupted)
+        ));
+        assert!(scratch.occurrences.is_empty());
     }
 
     #[test]
