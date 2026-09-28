@@ -220,7 +220,7 @@ const PROJECT_FACTS_TRUNCATED_MESSAGE: &str =
     "additional project semantic facts were omitted by aggregate resource limits";
 const AGGREGATE_DIAGNOSTICS_TRUNCATED_CODE: &str = "aggregate-diagnostics-truncated";
 const ANALYZER_BINARY_SEED: &[u8] = b"rootlight.first-slice.treesitter-structural/176";
-const RESOLVER_BINARY_SEED: &[u8] = b"rootlight.first-slice.resolve/52";
+const RESOLVER_BINARY_SEED: &[u8] = b"rootlight.first-slice.resolve/53";
 const INCREMENTAL_PROVIDER_SEED: &[u8] = b"rootlight.first-slice.incremental-provider/1";
 const LANGUAGE_DISPOSITION_PROVIDER_SEED: &[u8] = b"rootlight.first-slice.language-disposition/5";
 const SOURCE_FILE_FALLBACK_PROVIDER_SEED: &[u8] = b"rootlight.source-file-fallback/4";
@@ -40058,6 +40058,205 @@ mod tests {
                     )
                     .unwrap();
                 assert_eq!(read.data.chunks[0].bytes, text.as_bytes());
+            }
+        }
+    }
+
+    #[test]
+    fn classic_default_members_follow_source_attributes_after_restart() {
+        let fixture = durable_test_tempdir();
+        let storage = durable_test_tempdir();
+        let paths = RuntimePaths::new(storage.path().join("state"), storage.path().join("runtime"))
+            .unwrap();
+        paths.prepare_owner().unwrap();
+        fs::write(
+            fixture.path().join("project.vbp"),
+            "Type=OleDll\nName=\"Primary\"\nClass=Lookup; Lookup.cls\nModule=Client; Client.bas\n",
+        )
+        .unwrap();
+        let cases = [
+            ("items(2)", true),
+            ("items(offset:=2)", true),
+            ("items()", false),
+            ("items(2, 3)", false),
+            ("items(unknown:=2)", false),
+            ("items(offset:=2, offset:=3)", false),
+            ("items(ByVal 2)", false),
+            ("dynamic(2)", false),
+            ("items(2)(3)", false),
+            ("arrayItems(2)", false),
+        ];
+        let mut client = "Attribute VB_Name = \"Client\"\nSub Run(ByVal items As Lookup, ByVal dynamic As Object)\nDim result As Long\nDim arrayItems(1, 2) As Lookup\n".to_owned();
+        for (expression, _) in cases {
+            client.push_str(&format!("result = {expression}\n"));
+        }
+        client.push_str("End Sub\n");
+        fs::write(fixture.path().join("Client.bas"), &client).unwrap();
+        for (access, attribute, extra, available) in [
+            ("Public", "Attribute Fetch.VB_UserMemId = 0\n", "", true),
+            ("Public", "Attribute Fetch.VB_UserMemId = 1\n", "", false),
+            ("Private", "Attribute Fetch.VB_UserMemId = 0\n", "", false),
+            (
+                "Public",
+                "Attribute Fetch.VB_UserMemId = 0\nAttribute Fetch.VB_UserMemId = 1\n",
+                "",
+                false,
+            ),
+            ("Public", "Attribute Other.VB_UserMemId = 0\n", "", false),
+            (
+                "Public",
+                "Attribute Fetch.VB_UserMemId = 0\n",
+                "Public Function Other() As Long\nAttribute Other.VB_UserMemId = 0\nEnd Function\n",
+                false,
+            ),
+            ("Public", "", "", false),
+            (
+                "Public",
+                "Attribute Fetch.VB_UserMemId = 0\n",
+                "Public other As Long\nAttribute other.VB_VarUserMemId = 0\n",
+                false,
+            ),
+            ("Public", "Attribute Fetch.VB_UserMemId = 0\n", "", true),
+        ] {
+            fs::write(fixture.path().join("Lookup.cls"), format!("VERSION 1.0 CLASS\nAttribute VB_Name = \"Lookup\"\n{access} Property Get Fetch(ByVal offset As Long) As Long\n{attribute}Fetch = offset\nEnd Property\n{extra}")).unwrap();
+            let mut service =
+                FirstSliceService::new_durable(2, paths.state_dir(), &deadline()).unwrap();
+            let receipt = service
+                .index_repository(fixture.path(), &deadline())
+                .unwrap();
+            assert_eq!(
+                service
+                    .index_repository(fixture.path(), &deadline())
+                    .unwrap(),
+                receipt
+            );
+            drop(service);
+            let service =
+                FirstSliceService::new_durable(2, paths.state_dir(), &deadline()).unwrap();
+            let snapshot = service
+                .loaded_generation_snapshot(receipt.generation)
+                .unwrap();
+            let document = snapshot.document();
+            let file = document
+                .files
+                .iter()
+                .find(|file| file.path == "Client.bas")
+                .unwrap();
+            for (expression, valid) in cases {
+                let expected = available && valid;
+                let start =
+                    u64::try_from(client.find(&format!("{expression}\n")).unwrap()).unwrap();
+                let site = document
+                    .occurrences
+                    .iter()
+                    .find(|site| {
+                        site.file == file.id
+                            && site.syntax_kind == "vba.application.reference"
+                            && site.source.span().start_byte() == start
+                            && site.source.span().end_byte()
+                                == start + u64::try_from(expression.len()).unwrap()
+                    })
+                    .unwrap();
+                let target = document
+                    .entities
+                    .iter()
+                    .find(|entity| entity.canonical_name == "Fetch")
+                    .unwrap();
+                assert_eq!(
+                    site.target == OccurrenceTarget::Resolved { symbol: target.id },
+                    expected,
+                    "{access}/{attribute}/{expression}: {site:?}"
+                );
+                assert_eq!(
+                    document
+                        .skipped_regions
+                        .iter()
+                        .any(|gap| gap.source == site.source
+                            && gap.detail == "vba-call-or-index-target-unavailable"),
+                    !expected
+                );
+                assert_eq!(
+                    document
+                        .relations
+                        .iter()
+                        .filter(|edge| edge.subject == RelationEndpoint::Occurrence(site.id)
+                            && edge.predicate == RelationPredicate::Calls)
+                        .count(),
+                    usize::from(expected)
+                );
+                if expected {
+                    let provenance = document
+                        .provenance
+                        .iter()
+                        .find(|record| record.id == site.provenance)
+                        .unwrap();
+                    assert_eq!(
+                        provenance.rule.as_deref(),
+                        Some("classic-project-default-member-v1.indexed_snapshot")
+                    );
+                    let class_file = document
+                        .files
+                        .iter()
+                        .find(|file| file.path == "Lookup.cls")
+                        .unwrap();
+                    let class_source = fs::read(fixture.path().join("Lookup.cls")).unwrap();
+                    assert!(provenance.evidence_sources.iter().any(|source| {
+                        source.span().file() == class_file.id
+                            && class_source.get(
+                                usize::try_from(source.span().start_byte()).unwrap()
+                                    ..usize::try_from(source.span().end_byte()).unwrap(),
+                            ) == Some(b"Attribute Fetch.VB_UserMemId = 0".as_slice())
+                    }));
+                    let callee = document
+                        .occurrences
+                        .iter()
+                        .find(|occurrence| {
+                            occurrence.file == file.id
+                                && occurrence.source.span().start_byte() == start
+                                && occurrence.syntax_kind == "vba.invoked_get_identifier.reference"
+                        })
+                        .unwrap();
+                    let OccurrenceTarget::Resolved { symbol } = callee.target else {
+                        panic!("the lexical receiver must remain resolved");
+                    };
+                    assert!(
+                        !document
+                            .skipped_regions
+                            .iter()
+                            .any(|gap| gap.source == callee.source
+                                && gap.detail == "vba-call-or-index-target-unavailable")
+                    );
+                    assert!(document.entities.iter().any(|entity| entity.id == symbol
+                        && entity.kind == EntityKind::Parameter
+                        && entity.canonical_name == "items"));
+                }
+                if expression == "items(offset:=2)" {
+                    let label = document
+                        .occurrences
+                        .iter()
+                        .find(|occurrence| {
+                            occurrence.file == file.id
+                                && occurrence.syntax_kind == "vba.nonvalue_identifier.reference"
+                                && occurrence.source.span().start_byte() == start + 6
+                        })
+                        .unwrap();
+                    let parameter = document
+                        .entities
+                        .iter()
+                        .find(|entity| {
+                            entity.kind == EntityKind::Parameter
+                                && entity.canonical_name == "offset"
+                                && entity.container == Some(ContainerRef::Entity(target.id))
+                        })
+                        .unwrap();
+                    assert_eq!(
+                        label.target
+                            == OccurrenceTarget::Resolved {
+                                symbol: parameter.id
+                            },
+                        expected
+                    );
+                }
             }
         }
     }

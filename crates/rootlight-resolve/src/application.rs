@@ -632,6 +632,10 @@ fn reconcile_vba_target_gaps(
                 ],
                 "vba-type-target-unavailable",
             ),
+            Some("classic-project-default-member-v1.indexed_snapshot") => (
+                &["vba.application.reference"],
+                "vba-call-or-index-target-unavailable",
+            ),
             Some("classic-project-member-v1.indexed_snapshot") => (
                 &[
                     "vba.member.reference",
@@ -664,9 +668,43 @@ fn reconcile_vba_target_gaps(
         return Ok(());
     }
     let mut resolved = BTreeMap::new();
+    let mut default_receivers = BTreeSet::new();
+    if producers.values().any(|(_, record)| {
+        record.rule.as_deref() == Some("classic-project-default-member-v1.indexed_snapshot")
+    }) {
+        for site in &document.occurrences {
+            cancellation.check()?;
+            if site.syntax_kind == "vba.invoked_get_identifier.reference"
+                && matches!(site.target, OccurrenceTarget::Resolved { .. })
+            {
+                default_receivers.insert(&site.source);
+            }
+        }
+    }
     let mut value_source_counts = BTreeMap::new();
     for site in &document.occurrences {
         cancellation.check()?;
+        if site.syntax_kind == "vba.application.reference"
+            && matches!(site.target, OccurrenceTarget::Resolved { .. })
+            && let Some((_, record)) = producers.get(&site.provenance)
+            && record.rule.as_deref() == Some("classic-project-default-member-v1.indexed_snapshot")
+        {
+            // The receiver keeps its lexical variable identity. Only its
+            // dispatch gap is discharged by the enclosing default-member proof.
+            for source in &record.evidence_sources {
+                cancellation.check()?;
+                if source.span().file() == site.file
+                    && source.span().start_byte() == site.source.span().start_byte()
+                    && source.span().end_byte() < site.source.span().end_byte()
+                    && default_receivers.contains(source)
+                {
+                    resolved.insert(
+                        (source.clone(), "vba-call-or-index-target-unavailable"),
+                        site.provenance,
+                    );
+                }
+            }
+        }
         if site.syntax_kind == "vba.application.reference"
             && matches!(site.target, OccurrenceTarget::Resolved { .. })
             && producers.get(&site.provenance).is_some_and(|(_, record)| {
@@ -1461,6 +1499,7 @@ fn build_provenance(
         decision.explanation.rule,
         ResolutionRule::ClassicProjectType
             | ResolutionRule::ClassicProjectMember
+            | ResolutionRule::ClassicProjectDefaultMember
             | ResolutionRule::ClassicProjectArgument
             | ResolutionRule::ClassicProjectPointer
             | ResolutionRule::ClassicProjectModule
@@ -1609,6 +1648,9 @@ fn build_provenance(
         ResolutionRule::ElmModuleImport => "elm-module-import-v1.indexed_snapshot",
         ResolutionRule::ElmLocalType => "elm-local-type-v1.indexed_snapshot",
         ResolutionRule::ClassicProjectMember => "classic-project-member-v1.indexed_snapshot",
+        ResolutionRule::ClassicProjectDefaultMember => {
+            "classic-project-default-member-v1.indexed_snapshot"
+        }
         ResolutionRule::ClassicProjectArgument => "classic-project-argument-v1.indexed_snapshot",
         ResolutionRule::ClassicProjectPointer => "classic-project-pointer-v1.indexed_snapshot",
         ResolutionRule::GroovyStaticImport => "groovy-static-import-v1.indexed_snapshot",

@@ -6,6 +6,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 mod calls;
+mod default_members;
 mod dependencies;
 mod with_members;
 
@@ -1371,6 +1372,19 @@ impl<'a> ClassicIndex<'a> {
                     .or_insert(Some(symbol));
             }
         }
+        let project_classes = projects
+            .iter()
+            .flatten()
+            .flat_map(|project| project.member_modules.values())
+            .copied()
+            .filter(|id| {
+                entities
+                    .get(id)
+                    .is_some_and(|entity| entity.kind == EntityKind::Class)
+            })
+            .collect();
+        let default_members =
+            default_members::inventory(entities, &project_classes, &sources, cancellation, work)?;
         let mut module_qualifiers = BTreeMap::new();
         let mut member_occurrences = Vec::new();
         let mut read_receivers = BTreeSet::new();
@@ -1421,6 +1435,51 @@ impl<'a> ClassicIndex<'a> {
             work.consume()?;
             let span = occurrence.source.span();
             let Some(member) = member else {
+                if let Some((callee, false)) =
+                    calls.callee(occurrence, &sources, cancellation, work)?
+                    && callee.syntax_kind == "vba.invoked_get_identifier.reference"
+                    && let OccurrenceTarget::Resolved { symbol } = callee.target
+                    && let Some((owner, class, context, type_source)) =
+                        value_types.get(&symbol).and_then(Option::as_ref)
+                    && let Some(default) = default_members.get(class).and_then(Option::as_ref)
+                {
+                    let key = (*class, default.name.clone());
+                    let target = if let Some(accessors) = property_accessors.get(&key) {
+                        (!accessors.invalid).then_some(accessors.get).flatten()
+                    } else {
+                        members.get(&key).copied().flatten()
+                    };
+                    if let Some(target) =
+                        target.filter(|target| target.visibility == EntityVisibility::Public)
+                        && matches!(
+                            procedure_kind(target, &sources, cancellation, work)?,
+                            Some(
+                                rootlight_vba::ProcedureKind::Function
+                                    | rootlight_vba::ProcedureKind::PropertyGet
+                            )
+                        )
+                    {
+                        calls.resolve_bound(
+                            &mut result,
+                            occurrence,
+                            calls::BoundCall {
+                                callee,
+                                explicit: false,
+                                proof: Proof {
+                                    target,
+                                    context: Arc::clone(context),
+                                    receiver: Some((*owner, type_source.clone())),
+                                    rule: ResolutionRule::ClassicProjectDefaultMember,
+                                    property_call: true,
+                                },
+                                sources: &default.sources,
+                            },
+                            &sources,
+                            cancellation,
+                            work,
+                        )?;
+                    }
+                }
                 calls.resolve(&mut result, occurrence, &sources, cancellation, work)?;
                 if result.proof(occurrence).is_some() {
                     resolved_members

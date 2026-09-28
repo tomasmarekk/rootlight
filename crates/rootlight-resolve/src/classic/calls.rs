@@ -29,6 +29,13 @@ struct NamedArgument {
     parameter: usize,
 }
 
+pub(super) struct BoundCall<'a, 'o> {
+    pub(super) callee: &'o OccurrenceRecord,
+    pub(super) explicit: bool,
+    pub(super) proof: Proof<'a>,
+    pub(super) sources: &'o [SourceRef],
+}
+
 pub(super) struct CallIndex<'a, 'o> {
     parameters: BTreeMap<SymbolId, Vec<&'a EntityRecord>>,
     definitions: BTreeMap<SymbolId, Option<&'o SourceRef>>,
@@ -84,7 +91,9 @@ impl<'a, 'o> CallIndex<'a, 'o> {
                 let end = site.source.span().end_byte();
                 applications.entry(key).or_default().insert(end);
             }
-            if super::is_invoked_member(&site.syntax_kind) {
+            if super::is_invoked_member(&site.syntax_kind)
+                || site.syntax_kind == "vba.invoked_get_identifier.reference"
+            {
                 callees
                     .entry((key.0, key.1, site.source.span().end_byte()))
                     .and_modify(|prior| *prior = None)
@@ -183,15 +192,52 @@ impl<'a, 'o> CallIndex<'a, 'o> {
         {
             return Ok(());
         }
+        let Some(proof) = result.proof(callee) else {
+            return Ok(());
+        };
+        let proof = Proof {
+            target: proof.target,
+            context: Arc::clone(&proof.context),
+            receiver: proof.receiver.clone(),
+            rule: ResolutionRule::ClassicProjectMember,
+            property_call: false,
+        };
+        self.resolve_bound(
+            result,
+            site,
+            BoundCall {
+                callee,
+                explicit,
+                proof,
+                sources: &[],
+            },
+            sources,
+            cancellation,
+            work,
+        )
+    }
+
+    pub(super) fn resolve_bound(
+        &mut self,
+        result: &mut ClassicIndex<'a>,
+        site: &OccurrenceRecord,
+        call: BoundCall<'a, '_>,
+        sources: &BTreeMap<FileId, &[u8]>,
+        cancellation: &Cancellation,
+        work: &mut ResolutionWorkBudget,
+    ) -> Result<(), ResolutionError> {
+        let BoundCall {
+            callee,
+            explicit,
+            proof: application_proof,
+            sources: additional_sources,
+        } = call;
         let Some(bytes) = source_bytes(&site.source, sources) else {
             return Ok(());
         };
         let mut check = || {
             cancellation.check()?;
             work.consume()
-        };
-        let Some(proof) = result.proof(callee) else {
-            return Ok(());
         };
         let Some(relative_end) = callee
             .source
@@ -205,10 +251,10 @@ impl<'a, 'o> CallIndex<'a, 'o> {
         let Some(tail) = bytes.get(relative_end..) else {
             return Ok(());
         };
-        self.ensure_contract(proof.target, sources, &mut check)?;
+        self.ensure_contract(application_proof.target, sources, &mut check)?;
         let Some(contract) = self
             .contracts
-            .get(&proof.target.id)
+            .get(&application_proof.target.id)
             .and_then(Option::as_ref)
         else {
             return Ok(());
@@ -222,13 +268,6 @@ impl<'a, 'o> CallIndex<'a, 'o> {
         )?
         else {
             return Ok(());
-        };
-        let application_proof = Proof {
-            target: proof.target,
-            context: Arc::clone(&proof.context),
-            receiver: proof.receiver.clone(),
-            rule: ResolutionRule::ClassicProjectMember,
-            property_call: false,
         };
         let parameters = if let Some(inherited) = result.application_parameters.get(&callee.id) {
             let mut combined = BTreeMap::new();
@@ -244,6 +283,7 @@ impl<'a, 'o> CallIndex<'a, 'o> {
             None
         } else {
             let mut evidence = BTreeSet::from([callee.source.clone(), site.source.clone()]);
+            evidence.extend(additional_sources.iter().cloned());
             evidence.extend(application_proof.target.evidence.source.iter().cloned());
             if let Some((_, source)) = &application_proof.receiver {
                 evidence.insert(source.clone());
@@ -298,8 +338,21 @@ impl<'a, 'o> CallIndex<'a, 'o> {
             );
         }
         result.application_parameters.insert(site.id, parameters);
-        if let Some(sources) = result.receiver_sources.get(&callee.id).cloned() {
-            result.receiver_sources.insert(site.id, sources);
+        if additional_sources.is_empty() {
+            if let Some(sources) = result.receiver_sources.get(&callee.id).cloned() {
+                result.receiver_sources.insert(site.id, sources);
+            }
+        } else {
+            let mut evidence: BTreeSet<_> = additional_sources.iter().cloned().collect();
+            if application_proof.rule == ResolutionRule::ClassicProjectDefaultMember {
+                evidence.insert(callee.source.clone());
+            }
+            if let Some(sources) = result.receiver_sources.get(&callee.id) {
+                evidence.extend(sources.iter().cloned());
+            }
+            result
+                .receiver_sources
+                .insert(site.id, Arc::new(evidence.into_iter().collect()));
         }
         result.proofs.insert(site.id, application_proof);
         Ok(())

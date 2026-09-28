@@ -8,6 +8,7 @@ mod arguments;
 mod call_chain;
 mod compilation;
 mod group;
+mod member_attribute;
 mod parameter;
 mod procedure;
 mod with_blocks;
@@ -18,6 +19,7 @@ pub use call_chain::{
 };
 pub use compilation::{CompilationConstantHeader, compilation_constant_header};
 pub use group::parenthesized_expression_end;
+pub use member_attribute::{MemberDispatchAttribute, member_dispatch_attribute};
 pub use parameter::array_parameter_modifiers;
 pub use procedure::{ProcedureHeader, ProcedureKind, procedure_header, scalar_return_type};
 pub use with_blocks::{WithBlock, with_blocks};
