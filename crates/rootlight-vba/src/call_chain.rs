@@ -9,9 +9,7 @@ use super::{group::quoted_end, name, trivia};
 /// Syntax evidence within a complete, source-written call statement.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CallChainRole {
-    /// An ordinary lexical read.
-    Identifier,
-    /// A lexical read in an argument expression, including property-get context.
+    /// A lexical value read, including receiver and property-get contexts.
     ValueIdentifier,
     /// A lexical name used as an application target.
     InvokedValueIdentifier,
@@ -224,10 +222,9 @@ impl Reader<'_> {
     fn invoke(&mut self, part: Option<usize>) {
         if let Some(part) = part.and_then(|index| self.parts.get_mut(index)) {
             part.role = match part.role {
-                CallChainRole::Identifier => CallChainRole::InvokedValueIdentifier,
+                CallChainRole::ValueIdentifier => CallChainRole::InvokedValueIdentifier,
                 CallChainRole::Member => CallChainRole::InvokedMember,
-                unchanged @ (CallChainRole::ValueIdentifier
-                | CallChainRole::InvokedValueIdentifier
+                unchanged @ (CallChainRole::InvokedValueIdentifier
                 | CallChainRole::InvokedMember
                 | CallChainRole::Application
                 | CallChainRole::ArgumentName) => unchanged,
@@ -254,7 +251,10 @@ impl Reader<'_> {
                 part = Some(self.parts.len());
                 self.parts.push(CallChainPart {
                     span: first.span.clone(),
-                    role: CallChainRole::Identifier,
+                    // Both arguments and member receivers evaluate a value.
+                    // This context also permits authored enum/module roots and
+                    // property getters; a plain lexical name loses that proof.
+                    role: CallChainRole::ValueIdentifier,
                 });
             }
             Kind::Dot => {
@@ -364,14 +364,9 @@ impl Reader<'_> {
                 check()?;
                 cursor += 1;
             }
-            let Some((next, part, _)) = self.atom(cursor, range.end, check)? else {
+            let Some((next, _, _)) = self.atom(cursor, range.end, check)? else {
                 return Ok(false);
             };
-            if let Some(part) = part.and_then(|index| self.parts.get_mut(index))
-                && part.role == CallChainRole::Identifier
-            {
-                part.role = CallChainRole::ValueIdentifier;
-            }
             cursor = next;
             if cursor == range.end {
                 return Ok(true);

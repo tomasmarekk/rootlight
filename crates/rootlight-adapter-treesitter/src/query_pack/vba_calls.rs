@@ -71,7 +71,6 @@ impl Calls {
                                 *captures += 1;
                                 let span = part.span();
                                 let syntax = match part.role() {
-                                    CallChainRole::Identifier => "vba.identifier",
                                     CallChainRole::ValueIdentifier => "vba.value_identifier",
                                     CallChainRole::InvokedValueIdentifier => {
                                         "vba.invoked_get_identifier"
@@ -186,6 +185,7 @@ mod tests {
             .unwrap();
         assert!(extraction.limit.is_none());
         for (text, syntax) in [
+            (b"factory".as_slice(), "vba.value_identifier"),
             (
                 b"factory.Make().Save First(1) + Second(2), \"note\"".as_slice(),
                 "vba.application",

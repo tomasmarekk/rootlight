@@ -219,7 +219,7 @@ const PROJECT_FACTS_TRUNCATED_CODE: &str = "project-adapter-facts-truncated";
 const PROJECT_FACTS_TRUNCATED_MESSAGE: &str =
     "additional project semantic facts were omitted by aggregate resource limits";
 const AGGREGATE_DIAGNOSTICS_TRUNCATED_CODE: &str = "aggregate-diagnostics-truncated";
-const ANALYZER_BINARY_SEED: &[u8] = b"rootlight.first-slice.treesitter-structural/172";
+const ANALYZER_BINARY_SEED: &[u8] = b"rootlight.first-slice.treesitter-structural/173";
 const RESOLVER_BINARY_SEED: &[u8] = b"rootlight.first-slice.resolve/50";
 const INCREMENTAL_PROVIDER_SEED: &[u8] = b"rootlight.first-slice.incremental-provider/1";
 const LANGUAGE_DISPOSITION_PROVIDER_SEED: &[u8] = b"rootlight.first-slice.language-disposition/5";
@@ -39334,9 +39334,9 @@ mod tests {
         paths.prepare_owner().unwrap();
         fs::write(fixture.path().join("project.vbp"), "Type=OleDll\nName=\"Primary\"\nClass=Factory; Factory.cls\nClass=Product; Product.cls\nModule=Helpers; Helpers.bas\nModule=Client; Client.bas\n").unwrap();
         fs::write(fixture.path().join("Factory.cls"), "VERSION 1.0 CLASS\nAttribute VB_Name = \"Factory\"\nPublic Function Make(ByVal count As Long) As Product\nEnd Function\n").unwrap();
-        fs::write(fixture.path().join("Helpers.bas"), "Attribute VB_Name = \"Helpers\"\nPublic Function Clamp(ByVal input As Long) As Long\nEnd Function\nPublic Function Low(ByVal input As Long) As Long\nEnd Function\nPublic Function High(ByVal input As Long) As Long\nEnd Function\n").unwrap();
+        fs::write(fixture.path().join("Helpers.bas"), "Attribute VB_Name = \"Helpers\"\nPublic Enum Tone\nDark = 1\nEnd Enum\nPublic Function Clamp(ByVal input As Long) As Long\nEnd Function\nPublic Function Low(ByVal input As Long) As Long\nEnd Function\nPublic Function High(ByVal input As Long) As Long\nEnd Function\n").unwrap();
         let expression =
-            ".Make(count:=Helpers.Clamp(1)).Save limit:=Helpers.Low(2) + Helpers.High(3)";
+            ".Make(count:=Helpers.Clamp(1)).Save limit:=Helpers.Low(Tone.Dark) + Helpers.High(3)";
         let client = format!(
             "Attribute VB_Name = \"Client\"\nSub Run(ByVal factory As Factory)\nWith factory\n{expression}\nEnd With\nEnd Sub\n"
         );
@@ -39370,7 +39370,7 @@ mod tests {
                 (expression, expected),
                 (".Make(count:=Helpers.Clamp(1))", true),
                 ("Helpers.Clamp(1)", true),
-                ("Helpers.Low(2)", true),
+                ("Helpers.Low(Tone.Dark)", true),
                 ("Helpers.High(3)", true),
             ] {
                 let start = u64::try_from(client.find(application).unwrap()).unwrap();
@@ -39447,6 +39447,44 @@ mod tests {
                     1,
                     "{callee}"
                 );
+            }
+            for root in ["Tone", "Helpers"] {
+                let start = u64::try_from(client.find(root).unwrap()).unwrap();
+                let site = document
+                    .occurrences
+                    .iter()
+                    .find(|site| {
+                        site.file == file.id
+                            && site.syntax_kind == "vba.value_identifier.reference"
+                            && site.source.span().start_byte() == start
+                            && site.source.span().end_byte()
+                                == start + u64::try_from(root.len()).unwrap()
+                    })
+                    .unwrap();
+                assert!(
+                    matches!(site.target, OccurrenceTarget::Resolved { .. }),
+                    "{root}"
+                );
+                assert!(
+                    !document
+                        .skipped_regions
+                        .iter()
+                        .any(|gap| gap.source == site.source),
+                    "{root}"
+                );
+                if root == "Tone" {
+                    let target = document
+                        .entities
+                        .iter()
+                        .find(|entity| {
+                            entity.kind == EntityKind::Enum && entity.canonical_name == root
+                        })
+                        .unwrap();
+                    assert_eq!(
+                        site.target,
+                        OccurrenceTarget::Resolved { symbol: target.id }
+                    );
+                }
             }
         }
     }
