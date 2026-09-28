@@ -18,6 +18,7 @@ pub use procedure::{ProcedureHeader, ProcedureKind, procedure_header};
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ProcedurePath<'a> {
     end: usize,
+    receiver_end: Option<usize>,
     components: usize,
     first: &'a [u8],
     last: &'a [u8],
@@ -28,6 +29,16 @@ impl<'a> ProcedurePath<'a> {
     #[must_use]
     pub const fn end(self) -> usize {
         self.end
+    }
+
+    /// Exclusive end of the receiver before the final dot, or None for a simple name.
+    ///
+    /// The offset is relative to the supplied input and excludes trivia before
+    /// the final dot. Earlier continuations and authored brackets remain inside
+    /// the receiver range, allowing exact source-identity lookup without rewriting.
+    #[must_use]
+    pub const fn receiver_end(self) -> Option<usize> {
+        self.receiver_end
     }
 
     /// Number of identifiers, including the final target name.
@@ -82,6 +93,7 @@ pub fn procedure_pointer_path<'a, E>(
     };
     let mut result = ProcedurePath {
         end: cursor,
+        receiver_end: None,
         components: 1,
         first,
         last: first,
@@ -101,6 +113,7 @@ pub fn procedure_pointer_path<'a, E>(
                 let Some(last) = name(source, &mut cursor, check)? else {
                     return Ok(None);
                 };
+                result.receiver_end = Some(result.end);
                 result.end = cursor;
                 // Each component consumes at least one byte of the input.
                 result.components += 1;
@@ -206,6 +219,32 @@ fn trivia<E>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn path_receivers_exclude_only_final_separator_trivia() {
+        for (source, receiver, last) in [
+            ("Name", None, "Name"),
+            ("[Owner].[Value]", Some("[Owner]"), "Value"),
+            ("item _\n.Child", Some("item"), "Child"),
+            ("item. _\r\n Child", Some("item"), "Child"),
+            (
+                "item _\n.[Child] _\r\n. _\n Value",
+                Some("item _\n.[Child]"),
+                "Value",
+            ),
+            ("item.Child, next", Some("item"), "Child"),
+        ] {
+            let path = procedure_pointer_path(source.as_bytes(), &mut || Ok::<(), ()>(()))
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                path.receiver_end().and_then(|end| source.get(..end)),
+                receiver,
+                "{source}"
+            );
+            assert_eq!(path.last(), last.as_bytes());
+        }
+    }
 
     #[test]
     fn logical_whitespace_preserves_tokens_and_physical_line_boundaries() {

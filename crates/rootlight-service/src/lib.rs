@@ -220,7 +220,7 @@ const PROJECT_FACTS_TRUNCATED_MESSAGE: &str =
     "additional project semantic facts were omitted by aggregate resource limits";
 const AGGREGATE_DIAGNOSTICS_TRUNCATED_CODE: &str = "aggregate-diagnostics-truncated";
 const ANALYZER_BINARY_SEED: &[u8] = b"rootlight.first-slice.treesitter-structural/169";
-const RESOLVER_BINARY_SEED: &[u8] = b"rootlight.first-slice.resolve/46";
+const RESOLVER_BINARY_SEED: &[u8] = b"rootlight.first-slice.resolve/47";
 const INCREMENTAL_PROVIDER_SEED: &[u8] = b"rootlight.first-slice.incremental-provider/1";
 const LANGUAGE_DISPOSITION_PROVIDER_SEED: &[u8] = b"rootlight.first-slice.language-disposition/5";
 const SOURCE_FILE_FALLBACK_PROVIDER_SEED: &[u8] = b"rootlight.source-file-fallback/4";
@@ -38920,8 +38920,192 @@ mod tests {
     }
 
     #[test]
+    fn classic_project_continued_modules_follow_membership_after_restart() {
+        let storage = durable_test_tempdir();
+        let fixture = durable_test_tempdir();
+        let paths = RuntimePaths::new(storage.path().join("state"), storage.path().join("runtime"))
+            .unwrap();
+        paths.prepare_owner().unwrap();
+        let call = "Utility _\r\n.[Apply]";
+        let constant = "Phase. _\n [Ready]";
+        let client = format!(
+            "Attribute VB_Name = \"Client\"\nSub Run()\n{call}\nDim result As Long\nresult = {constant}\nEnd Sub\n"
+        );
+        fs::write(fixture.path().join("Client.bas"), &client).unwrap();
+        fs::write(
+            fixture.path().join("Utility.bas"),
+            "Attribute VB_Name = \"Utility\"\nPublic Sub Apply()\nEnd Sub\n",
+        )
+        .unwrap();
+        fs::write(
+            fixture.path().join("Types.bas"),
+            "Attribute VB_Name = \"Types\"\nPublic Enum Phase\nReady = 1\nEnd Enum\n",
+        )
+        .unwrap();
+        let mut previous = None;
+        for listed in [true, false, true] {
+            let members = if listed {
+                "Module=Utility; Utility.bas\nModule=Types; Types.bas\n"
+            } else {
+                ""
+            };
+            fs::write(
+                fixture.path().join("project.vbp"),
+                format!("Type=OleDll\nName=\"Primary\"\nModule=Client; Client.bas\n{members}"),
+            )
+            .unwrap();
+            let mut service =
+                FirstSliceService::new_durable(4, paths.state_dir(), &deadline()).unwrap();
+            let receipt = service
+                .index_repository(fixture.path(), &deadline())
+                .unwrap();
+            assert_eq!(
+                service
+                    .index_repository(fixture.path(), &deadline())
+                    .unwrap(),
+                receipt
+            );
+            assert_ne!(Some(receipt.generation), previous);
+            previous = Some(receipt.generation);
+            drop(service);
+            let service =
+                FirstSliceService::new_durable(4, paths.state_dir(), &deadline()).unwrap();
+            let snapshot = service
+                .loaded_generation_snapshot(receipt.generation)
+                .unwrap();
+            let document = snapshot.document();
+            let file = document
+                .files
+                .iter()
+                .find(|file| file.path == "Client.bas")
+                .unwrap();
+            for (text, name, syntax, family) in [
+                (
+                    "Utility",
+                    "Utility",
+                    "vba.value_identifier.reference",
+                    RelationFamily::References,
+                ),
+                (
+                    call,
+                    "Apply",
+                    "vba.invoked_member.reference",
+                    RelationFamily::Calls,
+                ),
+                (
+                    "Phase",
+                    "Phase",
+                    "vba.value_identifier.reference",
+                    RelationFamily::References,
+                ),
+                (
+                    constant,
+                    "Ready",
+                    "vba.member.reference",
+                    RelationFamily::References,
+                ),
+            ] {
+                let target = document
+                    .entities
+                    .iter()
+                    .find(|entity| entity.canonical_name == name)
+                    .unwrap();
+                let start = u64::try_from(client.find(text).unwrap()).unwrap();
+                let end = start + u64::try_from(text.len()).unwrap();
+                let site = document
+                    .occurrences
+                    .iter()
+                    .find(|site| {
+                        site.file == file.id
+                            && site.syntax_kind == syntax
+                            && site.source.span().start_byte() == start
+                            && site.source.span().end_byte() == end
+                    })
+                    .unwrap();
+                if listed {
+                    assert_eq!(
+                        site.target,
+                        OccurrenceTarget::Resolved { symbol: target.id },
+                        "{text}"
+                    );
+                } else {
+                    assert!(
+                        matches!(site.target, OccurrenceTarget::Unresolved { .. }),
+                        "{text}"
+                    );
+                }
+                let gap_kind = if syntax == "vba.value_identifier.reference" {
+                    "vba-binding-target-unavailable"
+                } else {
+                    "vba-member-target-unavailable"
+                };
+                assert_eq!(
+                    document
+                        .skipped_regions
+                        .iter()
+                        .any(|gap| gap.source == site.source && gap.detail == gap_kind),
+                    !listed,
+                    "{text}"
+                );
+                let relationships = service
+                    .symbol_relationships(
+                        receipt.generation,
+                        BTreeSet::from([target.id]),
+                        vec![family],
+                        Some(RelationDirection::Inbound),
+                        0,
+                        10,
+                        0,
+                        &deadline(),
+                    )
+                    .unwrap();
+                assert_eq!(
+                    relationships
+                        .data
+                        .groups
+                        .iter()
+                        .flat_map(|group| &group.items)
+                        .flat_map(|edge| &edge.source_refs)
+                        .any(|reference| reference == &site.source),
+                    listed,
+                    "{text}"
+                );
+                assert_eq!(site.source.generation(), receipt.generation);
+                let read = service
+                    .source_read_with_options_and_budget(
+                        receipt.generation,
+                        vec![site.source.clone()],
+                        SourceReadOptions::new()
+                            .with_context_lines_before(0)
+                            .with_context_lines_after(0)
+                            .with_encoding(SourceEncoding::Bytes),
+                        FirstSliceBudget::default(),
+                        &deadline(),
+                    )
+                    .unwrap();
+                assert_eq!(read.data.chunks[0].bytes, text.as_bytes());
+            }
+        }
+    }
+
+    #[test]
     fn classic_project_property_results_resolve_nested_members() {
-        let client = "Attribute VB_Name = \"Client\"\nPublic Sub Run(ByVal value As Owner)\nvalue.Child.Apply\nSet value.Child = New Result\nEnd Sub\n";
+        assert_classic_project_property_members(".");
+    }
+
+    #[test]
+    fn classic_project_continued_property_results_resolve_nested_members() {
+        for separator in [" _\n.", ". _\r\n ", " _\r\n. _\n "] {
+            assert_classic_project_property_members(separator);
+        }
+    }
+
+    fn assert_classic_project_property_members(separator: &str) {
+        let child = format!("value{separator}Child");
+        let application = format!("{child}{separator}Apply");
+        let client = format!(
+            "Attribute VB_Name = \"Client\"\nPublic Sub Run(ByVal value As Owner)\n{application}\nSet {child} = New Result\nEnd Sub\n"
+        );
         for (
             access,
             listed_result,
@@ -38984,7 +39168,7 @@ mod tests {
                 "VERSION 1.0 CLASS\nAttribute VB_Name = \"Result\"\nPublic Sub Apply()\nEnd Sub\n",
             )
             .unwrap();
-            fs::write(fixture.path().join("Client.bas"), client).unwrap();
+            fs::write(fixture.path().join("Client.bas"), &client).unwrap();
             let mut service =
                 FirstSliceService::new_durable(4, paths.state_dir(), &deadline()).unwrap();
             let receipt = service
@@ -39009,11 +39193,16 @@ mod tests {
                 .find(|file| file.path == "Client.bas")
                 .unwrap();
             let owner_source = fs::read(fixture.path().join("Owner.cls")).unwrap();
-            let start = u64::try_from(client.find("value.Child.Apply").unwrap()).unwrap();
+            let start = u64::try_from(client.find(&application).unwrap()).unwrap();
             for (text, name, kind, expected) in [
-                ("value.Child", "Child", EntityKind::Property, expected_child),
                 (
-                    "value.Child.Apply",
+                    child.as_str(),
+                    "Child",
+                    EntityKind::Property,
+                    expected_child,
+                ),
+                (
+                    application.as_str(),
                     "Apply",
                     EntityKind::Method,
                     expected_apply,
@@ -39087,6 +39276,32 @@ mod tests {
                         site.role == OccurrenceRole::CallSite,
                         name == "Apply" || !indexed
                     );
+                    let family = if name == "Apply" || !indexed {
+                        RelationFamily::Calls
+                    } else {
+                        RelationFamily::References
+                    };
+                    let relationships = service
+                        .symbol_relationships(
+                            receipt.generation,
+                            BTreeSet::from([target.id]),
+                            vec![family],
+                            Some(RelationDirection::Inbound),
+                            0,
+                            10,
+                            0,
+                            &deadline(),
+                        )
+                        .unwrap();
+                    assert!(
+                        relationships
+                            .data
+                            .groups
+                            .iter()
+                            .flat_map(|group| &group.items)
+                            .flat_map(|edge| &edge.source_refs)
+                            .any(|source| source == &site.source)
+                    );
                 } else {
                     assert!(matches!(site.target, OccurrenceTarget::Unresolved { .. }));
                 }
@@ -39099,7 +39314,8 @@ mod tests {
                 );
             }
             if paired {
-                let start = u64::try_from(client.find("Set value.Child").unwrap() + 4).unwrap();
+                let start =
+                    u64::try_from(client.find(&format!("Set {child}")).unwrap() + 4).unwrap();
                 let write = document
                     .occurrences
                     .iter()
@@ -39107,7 +39323,7 @@ mod tests {
                         site.file == file.id
                             && site.source.span().start_byte() == start
                             && site.source.span().end_byte()
-                                == start + u64::try_from("value.Child".len()).unwrap()
+                                == start + u64::try_from(child.len()).unwrap()
                             && site.syntax_kind == "vba.member.reference"
                     })
                     .unwrap();

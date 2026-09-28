@@ -250,6 +250,31 @@ fn identifier(text: &str) -> Option<String> {
     Some(text.to_ascii_lowercase())
 }
 
+fn member_access_parts<'a>(
+    text: &'a [u8],
+    cancellation: &Cancellation,
+    work: &mut ResolutionWorkBudget,
+) -> Result<Option<(&'a str, &'a str)>, ResolutionError> {
+    cancellation.check()?;
+    work.consume_many(text.len().div_ceil(64).max(1))?;
+    let Some(path) = rootlight_vba::procedure_pointer_path(text, &mut || {
+        cancellation.check()?;
+        work.consume()
+    })?
+    else {
+        return Ok(None);
+    };
+    if path.end() != text.len() {
+        return Ok(None);
+    }
+    let Some(receiver) = path.receiver_end().and_then(|end| text.get(..end)) else {
+        return Ok(None);
+    };
+    Ok(std::str::from_utf8(receiver)
+        .ok()
+        .zip(std::str::from_utf8(path.last()).ok()))
+}
+
 fn member_path(manifest: &str, value: &str) -> Option<String> {
     if value.len() > MAX_PATH_BYTES || value.contains([':', '\0']) {
         return None;
@@ -1281,55 +1306,47 @@ impl<'a> ClassicIndex<'a> {
                     usize::try_from(span.start_byte()),
                     usize::try_from(span.end_byte()),
                 )
-                && let Some(receiver) = bytes.get(start..end).and_then(|text| {
-                    text.iter()
-                        .rposition(|byte| *byte == b'.')
-                        .map(|dot| &text[..dot])
-                })
-                && receiver.contains(&b'.')
-                && let Some(receiver_end) = span.start_byte().checked_add(
-                    u64::try_from(receiver.len()).map_err(|_| ResolutionError::CountOverflow)?,
-                )
-                && let Ok(receiver_span) =
-                    rootlight_ir::SourceSpan::new(occurrence.file, span.start_byte(), receiver_end)
+                && let Some(text) = bytes.get(start..end)
+                && let Some((receiver, name)) = member_access_parts(text, cancellation, work)?
             {
-                // Only an exact prefix used as another member's receiver
-                // proves a getter read without assignment-context syntax.
-                read_receivers.insert(receiver_span);
+                if receiver.contains('.') {
+                    let receiver_end = span
+                        .start_byte()
+                        .checked_add(
+                            u64::try_from(receiver.len())
+                                .map_err(|_| ResolutionError::CountOverflow)?,
+                        )
+                        .ok_or(ResolutionError::CountOverflow)?;
+                    let receiver_span = rootlight_ir::SourceSpan::new(
+                        occurrence.file,
+                        span.start_byte(),
+                        receiver_end,
+                    )
+                    .map_err(ResolutionError::InvalidProducer)?;
+                    // Only the exact receiver span proves a getter read. The
+                    // logical separator must not become part of that identity.
+                    read_receivers.insert(receiver_span);
+                }
+                if matches!(occurrence.target, OccurrenceTarget::Unresolved { .. }) {
+                    member_occurrences.push((occurrence, receiver, name));
+                    continue;
+                }
             }
-            if member && matches!(occurrence.target, OccurrenceTarget::Unresolved { .. }) {
-                member_occurrences.push(occurrence);
-            } else {
-                // Keep the original per-occurrence work charge even when a
-                // record cannot participate in project member resolution.
-                work.consume()?;
-            }
+            // Keep the per-occurrence charge even for records that cannot
+            // participate; lexical scans have their own bounded work charges.
+            work.consume()?;
         }
         // Inner member expressions have shorter source spans than their
         // enclosing chains, independent of the normalized record order.
-        member_occurrences.sort_unstable_by_key(|occurrence| {
+        member_occurrences.sort_unstable_by_key(|(occurrence, ..)| {
             let span = occurrence.source.span();
             (span.end_byte() - span.start_byte(), span)
         });
         let mut resolved_members = BTreeMap::new();
-        for occurrence in member_occurrences {
+        for (occurrence, receiver, member) in member_occurrences {
             cancellation.check()?;
             work.consume()?;
             let span = occurrence.source.span();
-            let start =
-                usize::try_from(span.start_byte()).map_err(|_| ResolutionError::CountOverflow)?;
-            let end =
-                usize::try_from(span.end_byte()).map_err(|_| ResolutionError::CountOverflow)?;
-            let Some(text) = sources
-                .get(&occurrence.file)
-                .and_then(|bytes| bytes.get(start..end))
-                .and_then(|bytes| std::str::from_utf8(bytes).ok())
-            else {
-                continue;
-            };
-            let Some((receiver, member)) = text.rsplit_once('.') else {
-                continue;
-            };
             let Some(name) = identifier(member) else {
                 continue;
             };
@@ -1660,6 +1677,70 @@ impl<'a> ClassicIndex<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn member_paths_preserve_exact_receivers_and_share_work_limits() {
+        let source = b"[Owner] _\n.[Child] _\r\n. _\n [Value]";
+        let mut work = ResolutionWorkBudget::new(1024);
+        assert_eq!(
+            member_access_parts(source, &Cancellation::new(), &mut work).unwrap(),
+            Some(("[Owner] _\n.[Child]", "Value"))
+        );
+        let consumed = work.consumed();
+        assert!(consumed > 1);
+        assert!(
+            member_access_parts(
+                source,
+                &Cancellation::new(),
+                &mut ResolutionWorkBudget::new(consumed)
+            )
+            .unwrap()
+            .is_some()
+        );
+        assert!(matches!(
+            member_access_parts(
+                source,
+                &Cancellation::new(),
+                &mut ResolutionWorkBudget::new(consumed - 1)
+            ),
+            Err(ResolutionError::WorkLimit { .. })
+        ));
+        let cancelled = Cancellation::new();
+        cancelled.cancel(rootlight_cancel::CancellationReason::ClientRequest);
+        let mut unused = ResolutionWorkBudget::new(1024);
+        assert!(matches!(
+            member_access_parts(source, &cancelled, &mut unused),
+            Err(ResolutionError::Cancelled(_))
+        ));
+        assert_eq!(unused.consumed(), 0);
+    }
+
+    #[test]
+    fn member_paths_do_not_join_uncontinued_or_partial_expressions() {
+        for source in [
+            "Owner .Value",
+            "Owner\n.Value",
+            "Owner _\r.Value",
+            "Owner.Value, next",
+            "Owner.Value(0)",
+            "Owner.Value'comment",
+            "Owner",
+            "Owner..Value",
+            "[Owner.Value]",
+            "Owner.[",
+        ] {
+            assert_eq!(
+                member_access_parts(
+                    source.as_bytes(),
+                    &Cancellation::new(),
+                    &mut ResolutionWorkBudget::new(1024)
+                )
+                .unwrap(),
+                None,
+                "{source:?}"
+            );
+        }
+    }
 
     fn parse(
         path: &str,
