@@ -17,6 +17,8 @@ pub enum CallChainRole {
     Member,
     /// A member used as an application target.
     InvokedMember,
+    /// A member application evaluated as a value, allowing property-get selection.
+    InvokedValueMember,
     /// An application including its arguments; call versus index is unresolved.
     Application,
     /// A named argument label, not a lexical value read.
@@ -116,6 +118,13 @@ struct Reader<'a> {
     jobs: Vec<Job>,
 }
 
+struct Atom {
+    next: usize,
+    member: Option<usize>,
+    invocation: Option<usize>,
+    chained: bool,
+}
+
 /// Reads one chain call from its first token, independently of parser nodes.
 ///
 /// The main callee must contain an application followed by a dot member.
@@ -164,12 +173,13 @@ pub fn call_chain_statement<E>(
     {
         return Ok(CallChainRead::Unsupported);
     }
-    let Some((cursor, final_part, chained)) = reader.atom(start, tokens.len(), check)? else {
+    let Some(atom) = reader.atom(start, tokens.len(), check)? else {
         return Ok(CallChainRead::Unsupported);
     };
-    if !chained {
+    if !atom.chained {
         return Ok(CallChainRead::Unsupported);
     }
+    let cursor = atom.next;
     if cursor < tokens.len() {
         // Bare statement arguments need separation from the complete callee.
         // Operators at this boundary are assignments/ambiguous continuations,
@@ -187,7 +197,15 @@ pub fn call_chain_statement<E>(
             kind: JobKind::Arguments,
         });
     }
-    reader.invoke(final_part);
+    reader.invoke(atom.member);
+    if let Some(part) = atom
+        .member
+        .or(atom.invocation)
+        .and_then(|index| reader.parts.get_mut(index))
+        && part.role == CallChainRole::InvokedValueMember
+    {
+        part.role = CallChainRole::InvokedMember;
+    }
     // An explicit Call prefix belongs to the whole application, but never to
     // the receiver/member spans needed for source-identity joins.
     if let Some(application) = reader.parts.iter_mut().find(|part| {
@@ -223,9 +241,10 @@ impl Reader<'_> {
         if let Some(part) = part.and_then(|index| self.parts.get_mut(index)) {
             part.role = match part.role {
                 CallChainRole::ValueIdentifier => CallChainRole::InvokedValueIdentifier,
-                CallChainRole::Member => CallChainRole::InvokedMember,
+                CallChainRole::Member => CallChainRole::InvokedValueMember,
                 unchanged @ (CallChainRole::InvokedValueIdentifier
                 | CallChainRole::InvokedMember
+                | CallChainRole::InvokedValueMember
                 | CallChainRole::Application
                 | CallChainRole::ArgumentName) => unchanged,
             };
@@ -237,13 +256,14 @@ impl Reader<'_> {
         start: usize,
         end: usize,
         check: &mut impl FnMut() -> Result<(), E>,
-    ) -> Result<Option<(usize, Option<usize>, bool)>, E> {
+    ) -> Result<Option<Atom>, E> {
         let Some(first) = self.tokens.get(start).filter(|_| start < end) else {
             return Ok(None);
         };
         let source_start = first.span.start;
         let mut cursor = start + 1;
         let mut part = None;
+        let mut invocation = None;
         let mut applied = false;
         let mut chained = false;
         match first.kind {
@@ -279,7 +299,14 @@ impl Reader<'_> {
                 });
                 cursor = close + 1;
             }
-            Kind::Literal => return Ok(Some((cursor, None, false))),
+            Kind::Literal => {
+                return Ok(Some(Atom {
+                    next: cursor,
+                    member: None,
+                    invocation: None,
+                    chained: false,
+                }));
+            }
             Kind::Open(_)
             | Kind::Close
             | Kind::Comma
@@ -309,6 +336,7 @@ impl Reader<'_> {
                     };
                     chained |= applied;
                     part = Some(self.parts.len());
+                    invocation = None;
                     self.parts.push(CallChainPart {
                         span: source_start..member.span.end,
                         role: CallChainRole::Member,
@@ -317,6 +345,7 @@ impl Reader<'_> {
                 }
                 Kind::Open(close) if close < end => {
                     self.invoke(part);
+                    invocation = part;
                     self.jobs.push(Job {
                         range: cursor + 1..close,
                         kind: JobKind::Arguments,
@@ -344,7 +373,12 @@ impl Reader<'_> {
                 | Kind::Call => break,
             }
         }
-        Ok(Some((cursor, part, chained)))
+        Ok(Some(Atom {
+            next: cursor,
+            member: part,
+            invocation,
+            chained,
+        }))
     }
 
     fn expression<E>(
@@ -364,10 +398,10 @@ impl Reader<'_> {
                 check()?;
                 cursor += 1;
             }
-            let Some((next, _, _)) = self.atom(cursor, range.end, check)? else {
+            let Some(atom) = self.atom(cursor, range.end, check)? else {
                 return Ok(false);
             };
-            cursor = next;
+            cursor = atom.next;
             if cursor == range.end {
                 return Ok(true);
             }
@@ -619,7 +653,7 @@ mod tests {
             .map(|p| (&source[p.span()], p.role()))
             .collect::<Vec<_>>();
         for expected in [
-            (b".Create".as_slice(), CallChainRole::InvokedMember),
+            (b".Create".as_slice(), CallChainRole::InvokedValueMember),
             (
                 b".Create(Codec.Trim(text))".as_slice(),
                 CallChainRole::Application,
@@ -628,7 +662,7 @@ mod tests {
                 b".Create(Codec.Trim(text)).Store".as_slice(),
                 CallChainRole::InvokedMember,
             ),
-            (b"Codec.Trim".as_slice(), CallChainRole::InvokedMember),
+            (b"Codec.Trim".as_slice(), CallChainRole::InvokedValueMember),
             (b"Codec.Trim(text)".as_slice(), CallChainRole::Application),
             (b"text".as_slice(), CallChainRole::ValueIdentifier),
             (b"Low(1)".as_slice(), CallChainRole::Application),
@@ -642,6 +676,39 @@ mod tests {
             &source[..chain.end()],
             b".Create(Codec.Trim(text)).Store limit:=Low(1) + High(2), note:=\"a,\"\"b\""
         );
+    }
+
+    #[test]
+    fn terminal_calls_do_not_change_receiver_or_argument_value_roles() {
+        for (source, terminal) in [
+            ("maker.Create().Store Codec.Read(1)", "maker.Create().Store"),
+            (
+                "Call maker.Create().Store(Codec.Read(1))",
+                "maker.Create().Store",
+            ),
+            ("maker.Create().Store()(Codec.Read(1))", ""),
+        ] {
+            let CallChainRead::Parsed(chain) = read(source.as_bytes()) else {
+                panic!("complete chain: {source}");
+            };
+            for text in ["maker.Create", "maker.Create().Store", "Codec.Read"] {
+                let parts: Vec<_> = chain
+                    .parts()
+                    .iter()
+                    .filter(|part| source.get(part.span()) == Some(text))
+                    .collect();
+                assert_eq!(parts.len(), 1, "{source}: {text}");
+                assert_eq!(
+                    parts[0].role(),
+                    if text == terminal {
+                        CallChainRole::InvokedMember
+                    } else {
+                        CallChainRole::InvokedValueMember
+                    },
+                    "{source}: {text}"
+                );
+            }
+        }
     }
 
     #[test]

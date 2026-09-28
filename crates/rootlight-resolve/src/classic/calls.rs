@@ -68,7 +68,7 @@ impl<'a, 'o> CallIndex<'a, 'o> {
                 let end = site.source.span().end_byte();
                 applications.entry(key).or_default().insert(end);
             }
-            if site.syntax_kind == "vba.invoked_member.reference" {
+            if super::is_invoked_member(&site.syntax_kind) {
                 callees
                     .entry((key.0, key.1, site.source.span().end_byte()))
                     .and_modify(|prior| *prior = None)
@@ -156,7 +156,14 @@ impl<'a, 'o> CallIndex<'a, 'o> {
         let Some((callee, explicit)) = self.callee(site, sources, cancellation, work)? else {
             return Ok(());
         };
-        if !result.is_call(callee) {
+        // Setter index parentheses exclude the assigned value. They cannot
+        // establish the complete assignment's argument contract on their own.
+        if !result.is_call(callee)
+            || matches!(
+                super::member_property_access(&callee.syntax_kind),
+                Some(super::PropertyAccessorKind::Let | super::PropertyAccessorKind::Set)
+            )
+        {
             return Ok(());
         }
         let Some(bytes) = source_bytes(&site.source, sources) else {
@@ -181,18 +188,7 @@ impl<'a, 'o> CallIndex<'a, 'o> {
         let Some(tail) = bytes.get(relative_end..) else {
             return Ok(());
         };
-        if let std::collections::btree_map::Entry::Vacant(entry) =
-            self.contracts.entry(proof.target.id)
-        {
-            let owned = self.parameters.remove(&proof.target.id).unwrap_or_default();
-            entry.insert(contract(
-                proof.target,
-                owned,
-                &self.definitions,
-                sources,
-                &mut check,
-            )?);
-        }
+        self.ensure_contract(proof.target, sources, &mut check)?;
         let Some(contract) = self
             .contracts
             .get(&proof.target.id)
@@ -214,7 +210,7 @@ impl<'a, 'o> CallIndex<'a, 'o> {
             context: Arc::clone(&proof.context),
             receiver: proof.receiver.clone(),
             rule: ResolutionRule::ClassicProjectMember,
-            getter_read: false,
+            property_call: false,
         };
         let parameters = if let Some(inherited) = result.application_parameters.get(&callee.id) {
             let mut combined = BTreeMap::new();
@@ -232,6 +228,57 @@ impl<'a, 'o> CallIndex<'a, 'o> {
         }
         result.proofs.insert(site.id, application_proof);
         Ok(())
+    }
+
+    fn ensure_contract(
+        &mut self,
+        target: &'a EntityRecord,
+        sources: &BTreeMap<FileId, &[u8]>,
+        check: &mut impl FnMut() -> Result<(), ResolutionError>,
+    ) -> Result<(), ResolutionError> {
+        if let std::collections::btree_map::Entry::Vacant(entry) = self.contracts.entry(target.id) {
+            let owned = self.parameters.remove(&target.id).unwrap_or_default();
+            entry.insert(contract(target, owned, &self.definitions, sources, check)?);
+        }
+        Ok(())
+    }
+
+    pub(super) fn implicit_property_parameters(
+        &mut self,
+        target: &'a EntityRecord,
+        setter: bool,
+        sources: &BTreeMap<FileId, &[u8]>,
+        cancellation: &Cancellation,
+        work: &mut ResolutionWorkBudget,
+    ) -> Result<Option<Arc<Vec<&'a EntityRecord>>>, ResolutionError> {
+        let mut check = || {
+            cancellation.check()?;
+            work.consume()
+        };
+        self.ensure_contract(target, sources, &mut check)?;
+        let Some(contract) = self.contracts.get(&target.id).and_then(Option::as_ref) else {
+            return Ok(None);
+        };
+        // A bare setter supplies its last (assigned-value) parameter. Every
+        // omitted index must be optional; getters receive no implicit argument.
+        let omitted = if setter {
+            let Some((value, indices)) = contract.optional.split_last() else {
+                return Ok(None);
+            };
+            if *value {
+                return Ok(None);
+            }
+            indices
+        } else {
+            &contract.optional
+        };
+        for optional in omitted {
+            check()?;
+            if !optional {
+                return Ok(None);
+            }
+        }
+        Ok(Some(Arc::clone(&contract.parameters)))
     }
 }
 
@@ -260,7 +307,11 @@ fn contract<'a>(
     };
     if !matches!(
         header.kind(),
-        rootlight_vba::ProcedureKind::Sub | rootlight_vba::ProcedureKind::Function
+        rootlight_vba::ProcedureKind::Sub
+            | rootlight_vba::ProcedureKind::Function
+            | rootlight_vba::ProcedureKind::PropertyGet
+            | rootlight_vba::ProcedureKind::PropertyLet
+            | rootlight_vba::ProcedureKind::PropertySet
     ) || !header
         .name()
         .eq_ignore_ascii_case(target.canonical_name.as_bytes())

@@ -197,7 +197,14 @@ impl<'a> VbaBindings<'a> {
                         .or_default()
                         .push(fact);
                 }
-                "vba.member.reference" | "vba.invoked_member.reference" => {
+                "vba.member.reference"
+                | "vba.invoked_member.reference"
+                | "vba.get_member.reference"
+                | "vba.let_member.reference"
+                | "vba.set_member.reference"
+                | "vba.invoked_get_member.reference"
+                | "vba.invoked_let_member.reference"
+                | "vba.invoked_set_member.reference" => {
                     result
                         .member_references
                         .entry(fact.span().start_byte())
@@ -891,7 +898,10 @@ impl<'a> VbaBindings<'a> {
             if components.next().is_some() {
                 return Ok(None);
             }
-            let invoked = fact.syntax_kind().as_str() == "vba.invoked_member.reference";
+            let invoked = matches!(
+                fact.syntax_kind().as_str(),
+                "vba.invoked_member.reference" | "vba.invoked_get_member.reference"
+            );
             return Ok(
                 match self.bindings.get(&scope).and_then(|names| names.get(&name)) {
                     Some(Some(Binding::Procedure(symbol) | Binding::ExternalProcedure(symbol)))
@@ -1686,7 +1696,14 @@ impl<'a> VbaBindings<'a> {
         }
         if matches!(
             fact.syntax_kind().as_str(),
-            "vba.member.reference" | "vba.invoked_member.reference"
+            "vba.member.reference"
+                | "vba.invoked_member.reference"
+                | "vba.get_member.reference"
+                | "vba.let_member.reference"
+                | "vba.set_member.reference"
+                | "vba.invoked_get_member.reference"
+                | "vba.invoked_let_member.reference"
+                | "vba.invoked_set_member.reference"
         ) {
             return self.field_reference(fact, text, cancellation);
         }

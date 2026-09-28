@@ -713,7 +713,7 @@ pub(super) fn member_syntax(
     // Invocation position alone cannot distinguish a procedure from a field or
     // default-member dispatch. Keep it as a reference until binding supplies a target.
     Ok(match reference_syntax(node, source, cancellation)? {
-        "vba.invoked_identifier" | "vba.invoked_get_identifier"
+        "vba.invoked_identifier"
             if matches!(
                 node.kind(),
                 "qualified_member_expression" | "implicit_member_expression"
@@ -721,6 +721,12 @@ pub(super) fn member_syntax(
         {
             "vba.invoked_member"
         }
+        "vba.value_identifier" => "vba.get_member",
+        "vba.let_identifier" => "vba.let_member",
+        "vba.set_identifier" => "vba.set_member",
+        "vba.invoked_get_identifier" => "vba.invoked_get_member",
+        "vba.invoked_let_identifier" => "vba.invoked_let_member",
+        "vba.invoked_set_identifier" => "vba.invoked_set_member",
         "vba.unsupported_constructed_type_identifier" => {
             "vba.unsupported_constructed_type_identifier"
         }
@@ -770,6 +776,10 @@ fn property_access(mut expression: Node<'_>) -> Option<PropertyAccess> {
             | "argument_list"
             | "unparenthesized_argument_list"
     ) || parent.child_by_field_name("condition") == Some(expression)
+        || (matches!(
+            parent.kind(),
+            "named_argument" | "with_statement" | "inline_with_statement"
+        ) && parent.child_by_field_name("value") == Some(expression))
         || (parent.kind() == "qualified_member_expression"
             && parent.child_by_field_name("receiver") == Some(expression))
     {
@@ -798,6 +808,58 @@ pub(super) fn header_end(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn member_access_modes_follow_value_and_assignment_contexts() {
+        for (statement, expected) in [
+            ("a = holder.Value", "vba.get_member"),
+            ("holder.Value = 1", "vba.let_member"),
+            ("Let holder.Value = 1", "vba.let_member"),
+            ("Set holder.Value = other", "vba.set_member"),
+            ("a = holder.Value(1)", "vba.invoked_get_member"),
+            ("Use value:=holder.Value", "vba.get_member"),
+            ("With holder.Value\nEnd With", "vba.get_member"),
+            ("holder.Value", "vba.invoked_member"),
+            ("ReDim holder.Value(1)", "vba.member"),
+        ] {
+            let source = format!("Sub Run()\n{statement}\nEnd Sub\n");
+            let mut parser = tree_sitter::Parser::new();
+            parser
+                .set_language(&tree_sitter_vba::LANGUAGE.into())
+                .unwrap();
+            let tree = parser.parse(&source, None).unwrap();
+            let family = super::super::GrammarFamily::Vba;
+            let pack =
+                super::super::QueryPack::compile(family, include_str!("../../queries/vba.scm"))
+                    .unwrap();
+            let extraction = pack
+                .extract(
+                    family,
+                    &tree,
+                    source.as_bytes(),
+                    1024,
+                    1024,
+                    &Cancellation::new(),
+                )
+                .unwrap();
+            let labels: Vec<_> = extraction
+                .candidates
+                .iter()
+                .filter(|candidate| {
+                    candidate.role == StructuralRole::Reference
+                        && candidate.syntax != "vba.application"
+                        && source.get(candidate.start..candidate.end) == Some("holder.Value")
+                })
+                .map(|candidate| candidate.syntax)
+                .collect();
+            assert_eq!(
+                labels,
+                [expected],
+                "{statement}: {}",
+                tree.root_node().to_sexp()
+            );
+        }
+    }
 
     #[test]
     fn procedure_pointer_capture_retains_the_complete_qualified_target() {

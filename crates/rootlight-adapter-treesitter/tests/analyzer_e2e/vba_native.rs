@@ -1028,18 +1028,18 @@ fn vba_member_invocation_context_does_not_prove_a_call() {
         "{}",
         tree.root_node().to_sexp()
     );
-    for (text, invoked, ordinal) in [
-        ("worker.Apply", true, 0),
-        ("worker.Apply", true, 1),
-        ("worker.Compute", true, 0),
-        ("worker.Item", false, 0),
-        ("worker.Item", false, 1),
-        ("worker.Item", false, 2),
-        ("worker.[Apply]", true, 0),
-        ("worker.Check", true, 0),
-        ("worker.Check", true, 1),
-        ("worker.Check", true, 2),
-        ("worker.Item", false, 3),
+    for (text, syntax, ordinal) in [
+        ("worker.Apply", "vba.invoked_member.reference", 0),
+        ("worker.Apply", "vba.invoked_member.reference", 1),
+        ("worker.Compute", "vba.invoked_get_member.reference", 0),
+        ("worker.Item", "vba.member.reference", 0),
+        ("worker.Item", "vba.invoked_set_member.reference", 1),
+        ("worker.Item", "vba.get_member.reference", 2),
+        ("worker.[Apply]", "vba.invoked_member.reference", 0),
+        ("worker.Check", "vba.invoked_member.reference", 0),
+        ("worker.Check", "vba.invoked_member.reference", 1),
+        ("worker.Check", "vba.invoked_member.reference", 2),
+        ("worker.Item", "vba.member.reference", 3),
     ] {
         let start = source.match_indices(text).nth(ordinal).unwrap().0;
         let site = result
@@ -1054,11 +1054,7 @@ fn vba_member_invocation_context_does_not_prove_a_call() {
             .unwrap();
         assert_eq!(
             site.syntax_kind,
-            if invoked {
-                "vba.invoked_member.reference"
-            } else {
-                "vba.member.reference"
-            },
+            syntax,
             "{text} at {start}: {}",
             tree.root_node().to_sexp()
         );
@@ -1139,7 +1135,12 @@ fn vba_instance_udt_fields_follow_class_ownership() {
             .occurrences
             .iter()
             .find(|site| {
-                site.syntax_kind == "vba.member.reference"
+                site.syntax_kind
+                    == if expression.ends_with(".X") {
+                        "vba.let_member.reference"
+                    } else {
+                        "vba.get_member.reference"
+                    }
                     && site.source.span().start_byte() == start
                     && site.source.span().end_byte()
                         == start + u64::try_from(expression.len()).unwrap()
@@ -1192,7 +1193,7 @@ fn vba_instance_udt_fields_preserve_unproven_receiver_barriers() {
             .occurrences
             .iter()
             .find(|site| {
-                site.syntax_kind == "vba.member.reference"
+                site.syntax_kind == "vba.let_member.reference"
                     && site.source.span().start_byte() == start
                     && site.source.span().end_byte()
                         == start + u64::try_from(expression.len()).unwrap()
@@ -1233,7 +1234,12 @@ fn vba_declared_udt_fields_follow_local_types_and_nested_fields() {
             .occurrences
             .iter()
             .find(|site| {
-                site.syntax_kind == "vba.member.reference"
+                site.syntax_kind
+                    == if expression == "snapshot.X" {
+                        "vba.let_member.reference"
+                    } else {
+                        "vba.get_member.reference"
+                    }
                     && site.source.span().start_byte() == start
                     && site.source.span().end_byte()
                         == start + u64::try_from(expression.len()).unwrap()
@@ -1313,7 +1319,7 @@ fn vba_type_tests_reference_udts_without_declaring_function_return_types() {
     let member = document
         .occurrences
         .iter()
-        .find(|site| site.syntax_kind == "vba.member.reference")
+        .find(|site| site.syntax_kind == "vba.let_member.reference")
         .unwrap();
     assert!(matches!(member.target, OccurrenceTarget::Unresolved { .. }));
 }
@@ -1359,7 +1365,8 @@ fn vba_construction_types_never_bind_to_values_or_udts() {
             !document
                 .occurrences
                 .iter()
-                .any(|site| site.syntax_kind == "vba.member.reference"),
+                .any(|site| site.syntax_kind == "vba.member.reference"
+                    || site.syntax_kind.ends_with("_member.reference")),
             "{}",
             parser.parse(&source, None).unwrap().root_node().to_sexp()
         );
@@ -1463,7 +1470,7 @@ fn vba_declared_udt_members_preserve_ambiguous_dynamic_and_array_barriers() {
             .occurrences
             .iter()
             .find(|site| {
-                site.syntax_kind == "vba.member.reference"
+                site.syntax_kind == "vba.let_member.reference"
                     && site.source.span().start_byte() == start
                     && site.source.span().end_byte() == end
             })
@@ -1537,7 +1544,7 @@ fn vba_declared_udt_types_and_fields_survive_generation_replay() {
         .document()
         .occurrences
         .iter()
-        .find(|site| site.syntax_kind == "vba.member.reference")
+        .find(|site| site.syntax_kind == "vba.let_member.reference")
         .unwrap();
     assert_eq!(site.target, OccurrenceTarget::Resolved { symbol: field.id });
     let changed = fixture.next_generation();
@@ -1588,7 +1595,7 @@ fn vba_declared_udt_fields_do_not_rebind_instance_keywords() {
             .occurrences
             .iter()
             .find(|site| {
-                site.syntax_kind == "vba.member.reference"
+                site.syntax_kind == "vba.let_member.reference"
                     && site.source.span().start_byte() == start
                     && site.source.span().end_byte() == end
             })
@@ -1642,7 +1649,7 @@ fn vba_declared_udt_fields_remain_unresolved_when_capture_budget_is_clipped() {
         .document()
         .occurrences
         .iter()
-        .filter(|site| site.syntax_kind == "vba.member.reference")
+        .filter(|site| site.syntax_kind == "vba.let_member.reference")
         .collect();
     assert!(!members.is_empty());
     assert!(
@@ -3850,7 +3857,7 @@ fn vba_procedural_module_qualifier_resolves_own_member_without_hiding_a_local() 
             .find(|site| {
                 site.source.span().start_byte() == start
                     && site.source.span().end_byte() == start + 15
-                    && site.syntax_kind == "vba.invoked_member.reference"
+                    && site.syntax_kind == "vba.invoked_get_member.reference"
             })
             .unwrap();
         if shadow.is_empty() {
@@ -3907,7 +3914,7 @@ fn vba_procedural_module_qualifier_requires_an_unambiguous_header_and_member() {
             .find(|site| {
                 site.source.span().start_byte() == start
                     && site.source.span().end_byte() == start + 15
-                    && site.syntax_kind == "vba.invoked_member.reference"
+                    && site.syntax_kind == "vba.invoked_get_member.reference"
             })
             .unwrap();
         assert!(matches!(member.target, OccurrenceTarget::Unresolved { .. }));
@@ -3953,8 +3960,8 @@ fn vba_member_paths_preserve_logical_continuations() {
                         && site.source.span().end_byte() == end
                         && matches!(
                             site.syntax_kind.as_str(),
-                            "vba.member.reference"
-                                | "vba.invoked_member.reference"
+                            "vba.get_member.reference"
+                                | "vba.invoked_get_member.reference"
                                 | "vba.value_identifier.reference"
                         )
                 })
@@ -4030,7 +4037,7 @@ fn vba_continued_member_paths_preserve_shadowing_and_unknown_targets() {
                 site.source.span().start_byte() == start
                     && matches!(
                         site.syntax_kind.as_str(),
-                        "vba.member.reference" | "vba.invoked_member.reference"
+                        "vba.invoked_get_member.reference"
                     )
             })
             .collect();

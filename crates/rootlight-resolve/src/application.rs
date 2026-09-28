@@ -633,7 +633,16 @@ fn reconcile_vba_target_gaps(
                 "vba-type-target-unavailable",
             ),
             Some("classic-project-member-v1.indexed_snapshot") => (
-                &["vba.member.reference", "vba.invoked_member.reference"],
+                &[
+                    "vba.member.reference",
+                    "vba.invoked_member.reference",
+                    "vba.get_member.reference",
+                    "vba.let_member.reference",
+                    "vba.set_member.reference",
+                    "vba.invoked_get_member.reference",
+                    "vba.invoked_let_member.reference",
+                    "vba.invoked_set_member.reference",
+                ],
                 "vba-member-target-unavailable",
             ),
             Some("classic-project-pointer-v1.indexed_snapshot") => (

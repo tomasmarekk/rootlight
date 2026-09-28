@@ -27,10 +27,7 @@ pub(super) fn inventory<'s>(
     for site in occurrences {
         cancellation.check()?;
         work.consume()?;
-        if matches!(
-            site.syntax_kind.as_str(),
-            "vba.member.reference" | "vba.invoked_member.reference"
-        ) {
+        if super::is_member(&site.syntax_kind) {
             sites.entry(site.file).or_default().push(site);
         }
     }

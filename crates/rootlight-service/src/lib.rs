@@ -219,8 +219,8 @@ const PROJECT_FACTS_TRUNCATED_CODE: &str = "project-adapter-facts-truncated";
 const PROJECT_FACTS_TRUNCATED_MESSAGE: &str =
     "additional project semantic facts were omitted by aggregate resource limits";
 const AGGREGATE_DIAGNOSTICS_TRUNCATED_CODE: &str = "aggregate-diagnostics-truncated";
-const ANALYZER_BINARY_SEED: &[u8] = b"rootlight.first-slice.treesitter-structural/173";
-const RESOLVER_BINARY_SEED: &[u8] = b"rootlight.first-slice.resolve/50";
+const ANALYZER_BINARY_SEED: &[u8] = b"rootlight.first-slice.treesitter-structural/174";
+const RESOLVER_BINARY_SEED: &[u8] = b"rootlight.first-slice.resolve/51";
 const INCREMENTAL_PROVIDER_SEED: &[u8] = b"rootlight.first-slice.incremental-provider/1";
 const LANGUAGE_DISPOSITION_PROVIDER_SEED: &[u8] = b"rootlight.first-slice.language-disposition/5";
 const SOURCE_FILE_FALLBACK_PROVIDER_SEED: &[u8] = b"rootlight.source-file-fallback/4";
@@ -29847,7 +29847,7 @@ mod tests {
                 .iter()
                 .find(|site| {
                     site.file == file.id
-                        && site.syntax_kind == "vba.member.reference"
+                        && site.syntax_kind == "vba.get_member.reference"
                         && site.source.span().start_byte() == start
                 })
                 .unwrap();
@@ -30275,7 +30275,7 @@ mod tests {
                             && site.source.span().end_byte() == end
                             && matches!(
                                 site.syntax_kind.as_str(),
-                                "vba.member.reference" | "vba.invoked_member.reference"
+                                "vba.get_member.reference" | "vba.invoked_get_member.reference"
                             )
                     })
                     .unwrap();
@@ -38372,7 +38372,7 @@ mod tests {
                 .iter()
                 .find(|site| {
                     site.file == file.id
-                        && site.syntax_kind == "vba.member.reference"
+                        && site.syntax_kind == "vba.get_member.reference"
                         && site.source.span().start_byte()
                             == u64::try_from(client.find("state.Ready").unwrap()).unwrap()
                 })
@@ -38386,7 +38386,7 @@ mod tests {
                 .iter()
                 .find(|site| {
                     site.file == file.id
-                        && site.syntax_kind == "vba.member.reference"
+                        && site.syntax_kind == "vba.get_member.reference"
                         && site.source.span().start_byte()
                             == u64::try_from(client.find("data.Count").unwrap()).unwrap()
                 })
@@ -38493,7 +38493,7 @@ mod tests {
                 .iter()
                 .find(|site| {
                     site.file == client_file.id
-                        && site.syntax_kind == "vba.member.reference"
+                        && site.syntax_kind == "vba.get_member.reference"
                         && site.source.span().start_byte()
                             == u64::try_from(client.find("data.Count").unwrap()).unwrap()
                 })
@@ -38554,7 +38554,7 @@ mod tests {
                 .iter()
                 .find(|site| {
                     site.file == client_file.id
-                        && site.syntax_kind == "vba.member.reference"
+                        && site.syntax_kind == "vba.get_member.reference"
                         && site.source.span().start_byte() == u64::try_from(source).unwrap()
                         && site.source.span().end_byte()
                             == u64::try_from(source + expression.len()).unwrap()
@@ -38617,7 +38617,7 @@ mod tests {
             .iter()
             .find(|site| {
                 site.file == client_id
-                    && site.syntax_kind == "vba.member.reference"
+                    && site.syntax_kind == "vba.get_member.reference"
                     && site.source.span().end_byte()
                         == u64::try_from(
                             client.find("data.Inner.Middle.Count").unwrap()
@@ -38688,7 +38688,7 @@ mod tests {
                 .iter()
                 .find(|site| {
                     site.file == file.id
-                        && site.syntax_kind == "vba.member.reference"
+                        && site.syntax_kind == "vba.get_member.reference"
                         && site.source.span().start_byte() == start
                         && site.source.span().end_byte() == end
                 })
@@ -39415,12 +39415,15 @@ mod tests {
                     .unwrap();
                 assert_eq!(read.data.chunks[0].bytes, application.as_bytes());
             }
-            for callee in [
-                ".Make",
-                ".Make(count:=Helpers.Clamp(1)).Save",
-                "Helpers.Clamp",
-                "Helpers.Low",
-                "Helpers.High",
+            for (callee, syntax) in [
+                (".Make", "vba.invoked_get_member.reference"),
+                (
+                    ".Make(count:=Helpers.Clamp(1)).Save",
+                    "vba.invoked_member.reference",
+                ),
+                ("Helpers.Clamp", "vba.invoked_get_member.reference"),
+                ("Helpers.Low", "vba.invoked_get_member.reference"),
+                ("Helpers.High", "vba.invoked_get_member.reference"),
             ] {
                 let start = u64::try_from(client.find(callee).unwrap()).unwrap();
                 let end = start + u64::try_from(callee.len()).unwrap();
@@ -39429,7 +39432,7 @@ mod tests {
                     .iter()
                     .filter(|site| {
                         site.file == file.id
-                            && site.syntax_kind == "vba.invoked_member.reference"
+                            && site.syntax_kind == syntax
                             && site.source.span().start_byte() == start
                             && site.source.span().end_byte() == end
                     })
@@ -39534,7 +39537,7 @@ mod tests {
                 .iter()
                 .find(|site| {
                     site.file == file.id
-                        && site.syntax_kind == "vba.member.reference"
+                        && site.syntax_kind == "vba.get_member.reference"
                         && site.source.span().start_byte() == start
                         && site.source.span().end_byte() == end
                 })
@@ -39622,7 +39625,7 @@ mod tests {
                 .iter()
                 .find(|site| {
                     site.file == file.id
-                        && site.syntax_kind == "vba.invoked_member.reference"
+                        && site.syntax_kind == "vba.invoked_get_member.reference"
                         && site.source.span().start_byte() == start
                         && site.source.span().end_byte() == start + 5
                 })
@@ -39700,7 +39703,7 @@ mod tests {
                 .iter()
                 .find(|site| {
                     site.file == file.id
-                        && site.syntax_kind == "vba.member.reference"
+                        && site.syntax_kind == "vba.get_member.reference"
                         && site.source.span().start_byte() == start
                         && site.source.span().end_byte() == end
                 })
@@ -39755,7 +39758,7 @@ mod tests {
                 .iter()
                 .find(|site| {
                     site.file == file.id
-                        && site.syntax_kind == "vba.member.reference"
+                        && site.syntax_kind == "vba.get_member.reference"
                         && site.source.span().start_byte() == with_start
                 })
                 .unwrap();
@@ -39837,7 +39840,7 @@ mod tests {
                 .iter()
                 .find(|site| {
                     site.file == file.id
-                        && site.syntax_kind == "vba.member.reference"
+                        && site.syntax_kind == "vba.get_member.reference"
                         && site.source.span().start_byte() == start
                         && site.source.span().end_byte() == end
                 })
@@ -39972,7 +39975,7 @@ mod tests {
                 (
                     constant,
                     "Ready",
-                    "vba.member.reference",
+                    "vba.get_member.reference",
                     RelationFamily::References,
                 ),
             ] {
@@ -40060,6 +40063,304 @@ mod tests {
     }
 
     #[test]
+    fn classic_property_access_modes_survive_return_type_changes_and_restart() {
+        let fixture = durable_test_tempdir();
+        let storage = durable_test_tempdir();
+        let paths = RuntimePaths::new(storage.path().join("state"), storage.path().join("runtime"))
+            .unwrap();
+        paths.prepare_owner().unwrap();
+        fs::write(
+            fixture.path().join("project.vbp"),
+            "Type=OleDll\nName=\"Primary\"\nClass=Holder; Holder.cls\nModule=Client; Client.bas\n",
+        )
+        .unwrap();
+        let client = "Attribute VB_Name = \"Client\"\nSub Run(ByVal holder As Holder, ByVal item As Object)\na = holder.Value\nholder.Value = 1\nSet holder.Value = item\na = holder.Value.Missing\na = holder.Entry(index:=1)\nWith holder\nb = .Value\n.Value = 2\nSet .Value = item\nEnd With\nEnd Sub\n";
+        fs::write(fixture.path().join("Client.bas"), client).unwrap();
+        for (returned, access, parameter, duplicate, expected_get, expected_entry) in [
+            ("Variant", "Public", "index", false, true, true),
+            ("String", "Public", "index", false, true, true),
+            ("Object", "Public", "renamed", false, true, false),
+            ("MissingType", "Public", "index", false, true, true),
+            ("Variant", "Private", "index", false, false, true),
+            ("Variant", "Public", "index", true, false, true),
+            ("Variant", "Public", "index", false, true, true),
+        ] {
+            let has_let = matches!(returned, "Variant" | "String");
+            let has_set = matches!(returned, "Variant" | "Object");
+            let setters = format!(
+                "{}{}",
+                if has_let {
+                    format!(
+                        "Public Property Let Value(ByVal assigned As {returned})\nEnd Property\n"
+                    )
+                } else {
+                    String::new()
+                },
+                if has_set {
+                    format!(
+                        "Public Property Set Value(ByVal assigned As {returned})\nEnd Property\n"
+                    )
+                } else {
+                    String::new()
+                }
+            );
+            let holder = format!(
+                "VERSION 1.0 CLASS\nAttribute VB_Name = \"Holder\"\n{access} Property Get Value() As {returned}\nEnd Property\n{setters}Public Property Get Entry(ByVal {parameter} As Long) As String\nEnd Property\n{}",
+                if duplicate {
+                    "Public Property Get Value(ByVal index As Long) As Variant\nEnd Property\n"
+                } else {
+                    ""
+                }
+            );
+            fs::write(fixture.path().join("Holder.cls"), &holder).unwrap();
+            let mut service =
+                FirstSliceService::new_durable(3, paths.state_dir(), &deadline()).unwrap();
+            let receipt = service
+                .index_repository(fixture.path(), &deadline())
+                .unwrap();
+            assert_eq!(
+                service
+                    .index_repository(fixture.path(), &deadline())
+                    .unwrap(),
+                receipt
+            );
+            drop(service);
+            let service =
+                FirstSliceService::new_durable(3, paths.state_dir(), &deadline()).unwrap();
+            let snapshot = service
+                .loaded_generation_snapshot(receipt.generation)
+                .unwrap();
+            let document = snapshot.document();
+            let file = document
+                .files
+                .iter()
+                .find(|file| file.path == "Client.bas")
+                .unwrap();
+            for (marker, expression, kind, expected) in [
+                ("a = holder.Value\n", "holder.Value", "Get", expected_get),
+                (
+                    "holder.Value = 1",
+                    "holder.Value",
+                    "Let",
+                    has_let && !duplicate,
+                ),
+                (
+                    "Set holder.Value",
+                    "holder.Value",
+                    "Set",
+                    has_set && !duplicate,
+                ),
+                ("b = .Value", ".Value", "Get", expected_get),
+                (".Value = 2", ".Value", "Let", has_let && !duplicate),
+                ("Set .Value", ".Value", "Set", has_set && !duplicate),
+            ] {
+                let start = client.find(marker).unwrap() + marker.find(expression).unwrap();
+                let site = document
+                    .occurrences
+                    .iter()
+                    .find(|site| {
+                        site.file == file.id
+                            && site.source.span().start_byte() == u64::try_from(start).unwrap()
+                            && site.source.span().end_byte()
+                                == u64::try_from(start + expression.len()).unwrap()
+                            && site.syntax_kind != "vba.application.reference"
+                    })
+                    .unwrap();
+                assert_eq!(
+                    matches!(site.target, OccurrenceTarget::Resolved { .. }),
+                    expected,
+                    "{marker}: {returned}, {access}, duplicate={duplicate}"
+                );
+                assert_eq!(
+                    document
+                        .skipped_regions
+                        .iter()
+                        .any(|gap| gap.source == site.source
+                            && gap.detail == "vba-member-target-unavailable"),
+                    !expected
+                );
+                if expected {
+                    let target = document
+                        .entities
+                        .iter()
+                        .find(|entity| {
+                            entity.kind == EntityKind::Property
+                                && entity.canonical_name == "Value"
+                                && entity.evidence.source.as_ref().is_some_and(|source| {
+                                    holder
+                                        .get(
+                                            usize::try_from(source.span().start_byte()).unwrap()
+                                                ..usize::try_from(source.span().end_byte())
+                                                    .unwrap(),
+                                        )
+                                        .is_some_and(|text| {
+                                            text.contains(&format!("Property {kind} Value("))
+                                        })
+                                })
+                        })
+                        .unwrap();
+                    assert_eq!(
+                        site.target,
+                        OccurrenceTarget::Resolved { symbol: target.id }
+                    );
+                    assert_eq!(site.role, OccurrenceRole::CallSite);
+                    assert_eq!(
+                        document
+                            .relations
+                            .iter()
+                            .filter(|edge| edge.predicate == RelationPredicate::Calls
+                                && edge.subject == RelationEndpoint::Occurrence(site.id)
+                                && edge.object == RelationEndpoint::Entity(target.id))
+                            .count(),
+                        1
+                    );
+                    let read = service
+                        .source_read_with_options_and_budget(
+                            receipt.generation,
+                            vec![site.source.clone()],
+                            SourceReadOptions::new()
+                                .with_context_lines_before(0)
+                                .with_context_lines_after(0)
+                                .with_encoding(SourceEncoding::Bytes),
+                            FirstSliceBudget::default(),
+                            &deadline(),
+                        )
+                        .unwrap();
+                    assert_eq!(read.data.chunks[0].bytes, expression.as_bytes());
+                }
+            }
+            for (expression, expected) in [
+                ("holder.Value.Missing", false),
+                ("holder.Entry(index:=1)", expected_entry),
+            ] {
+                let start = u64::try_from(client.find(expression).unwrap()).unwrap();
+                let site = document
+                    .occurrences
+                    .iter()
+                    .find(|site| {
+                        site.file == file.id
+                            && site.source.span().start_byte() == start
+                            && site.source.span().end_byte()
+                                == start + u64::try_from(expression.len()).unwrap()
+                            && (expression.ends_with(')')
+                                == (site.syntax_kind == "vba.application.reference"))
+                    })
+                    .unwrap();
+                assert_eq!(
+                    matches!(site.target, OccurrenceTarget::Resolved { .. }),
+                    expected,
+                    "{expression}: {returned}, {parameter}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn classic_property_getter_chains_require_scalar_returns_and_satisfied_arguments() {
+        let fixture = durable_test_tempdir();
+        fs::write(fixture.path().join("project.vbp"), "Type=OleDll\nName=\"Primary\"\nClass=Holder; Holder.cls\nClass=Item; Item.cls\nModule=Client; Client.bas\n").unwrap();
+        fs::write(
+            fixture.path().join("Item.cls"),
+            "VERSION 1.0 CLASS\nAttribute VB_Name = \"Item\"\nPublic Value As Long\n",
+        )
+        .unwrap();
+        let client = "Attribute VB_Name = \"Client\"\nSub Run(ByVal holder As Holder)\na = holder.Entry.Value\nb = holder.Entry(1).Value\nWith holder.Entry\nc = .Value\nEnd With\nEnd Sub\n";
+        fs::write(fixture.path().join("Client.bas"), client).unwrap();
+        for (parameters, returned, implicit_call, scalar) in [
+            ("", "Item", true, true),
+            ("Optional ByVal index As Long = 0", "Item", true, true),
+            ("ByVal index As Long", "Item", false, true),
+            ("Optional ByVal index As Long = 0", "Item()", true, false),
+            ("Optional ByVal index As Long = 0", "Object", true, false),
+        ] {
+            fs::write(fixture.path().join("Holder.cls"), format!("VERSION 1.0 CLASS\nAttribute VB_Name = \"Holder\"\nPublic Property Get Entry({parameters}) As {returned}\nEnd Property\n")).unwrap();
+            let mut service = FirstSliceService::new(3).unwrap();
+            let receipt = service
+                .index_repository(fixture.path(), &deadline())
+                .unwrap();
+            let snapshot = service
+                .loaded_generation_snapshot(receipt.generation)
+                .unwrap();
+            let document = snapshot.document();
+            let file = document
+                .files
+                .iter()
+                .find(|file| file.path == "Client.bas")
+                .unwrap();
+            for (expression, expected) in [
+                ("holder.Entry.Value", implicit_call && scalar),
+                ("holder.Entry(1).Value", !parameters.is_empty() && scalar),
+                (".Value\nEnd With", implicit_call && scalar),
+            ] {
+                let start = u64::try_from(client.find(expression).unwrap()).unwrap();
+                let length = if expression.starts_with('.') {
+                    ".Value".len()
+                } else {
+                    expression.len()
+                };
+                let site = document
+                    .occurrences
+                    .iter()
+                    .find(|site| {
+                        site.file == file.id
+                            && site.syntax_kind == "vba.get_member.reference"
+                            && site.source.span().start_byte() == start
+                            && site.source.span().end_byte()
+                                == start + u64::try_from(length).unwrap()
+                    })
+                    .unwrap();
+                assert_eq!(
+                    matches!(site.target, OccurrenceTarget::Resolved { .. }),
+                    expected,
+                    "{expression}: {parameters} -> {returned}"
+                );
+                assert_eq!(
+                    document
+                        .skipped_regions
+                        .iter()
+                        .any(|gap| gap.source == site.source
+                            && gap.detail == "vba-member-target-unavailable"),
+                    !expected
+                );
+            }
+            let entry_start = u64::try_from(client.find("holder.Entry").unwrap()).unwrap();
+            let entry = document
+                .occurrences
+                .iter()
+                .find(|site| {
+                    site.file == file.id
+                        && site.source.span().start_byte() == entry_start
+                        && site.source.span().end_byte() == entry_start + 12
+                })
+                .unwrap();
+            assert!(
+                matches!(entry.target, OccurrenceTarget::Resolved { .. }),
+                "identity: {parameters} -> {returned}"
+            );
+            assert_eq!(entry.role == OccurrenceRole::CallSite, implicit_call);
+            if implicit_call && !parameters.is_empty() {
+                let provenance = document
+                    .provenance
+                    .iter()
+                    .find(|record| record.id == entry.provenance)
+                    .unwrap();
+                let parameter = document
+                    .entities
+                    .iter()
+                    .find(|entity| {
+                        entity.kind == EntityKind::Parameter && entity.canonical_name == "index"
+                    })
+                    .unwrap();
+                assert!(
+                    provenance
+                        .derivation_parents
+                        .contains(&FactRef::Entity(parameter.id))
+                );
+            }
+        }
+    }
+
+    #[test]
     fn classic_project_property_results_resolve_nested_members() {
         assert_classic_project_property_members(".");
     }
@@ -40091,7 +40392,7 @@ mod tests {
             ("Public", true, true, true, false, false, true, true),
             ("Public", true, true, false, true, false, false, false),
             ("Private", true, true, false, false, false, false, false),
-            ("Public", false, true, false, false, false, false, false),
+            ("Public", false, true, false, false, false, true, false),
             ("Public", true, false, false, false, false, false, false),
             ("Public", true, true, false, false, true, true, false),
         ] {
@@ -40295,11 +40596,33 @@ mod tests {
                             && site.source.span().start_byte() == start
                             && site.source.span().end_byte()
                                 == start + u64::try_from(child.len()).unwrap()
-                            && site.syntax_kind == "vba.member.reference"
+                            && site.syntax_kind == "vba.set_member.reference"
                     })
                     .unwrap();
-                assert!(matches!(write.target, OccurrenceTarget::Unresolved { .. }));
-                assert!(document.skipped_regions.iter().any(|gap| {
+                let setter = document
+                    .entities
+                    .iter()
+                    .find(|entity| {
+                        entity.kind == EntityKind::Property
+                            && entity.canonical_name == "Child"
+                            && entity.evidence.source.as_ref().is_some_and(|source| {
+                                owner_source
+                                    .get(
+                                        usize::try_from(source.span().start_byte()).unwrap()
+                                            ..usize::try_from(source.span().end_byte()).unwrap(),
+                                    )
+                                    .is_some_and(|text| {
+                                        text.starts_with(b"Public Property Set Child")
+                                    })
+                            })
+                    })
+                    .unwrap();
+                assert_eq!(
+                    write.target,
+                    OccurrenceTarget::Resolved { symbol: setter.id }
+                );
+                assert_eq!(write.role, OccurrenceRole::CallSite);
+                assert!(!document.skipped_regions.iter().any(|gap| {
                     gap.source == write.source && gap.detail == "vba-member-target-unavailable"
                 }));
             }
@@ -40882,7 +41205,7 @@ mod tests {
                 .occurrences
                 .iter()
                 .find(|site| {
-                    if site.syntax_kind != "vba.member.reference" {
+                    if site.syntax_kind != "vba.get_member.reference" {
                         return false;
                     }
                     let span = site.source.span();
@@ -40965,7 +41288,7 @@ mod tests {
                 .occurrences
                 .iter()
                 .find(|site| {
-                    if site.syntax_kind != "vba.member.reference" {
+                    if site.syntax_kind != "vba.get_member.reference" {
                         return false;
                     }
                     let span = site.source.span();

@@ -1269,7 +1269,9 @@ fn markdown_udt_fields_stay_bound_to_each_example_type() {
             .document()
             .occurrences
             .iter()
-            .find(|site| site.syntax_kind == "vba.member.reference" && local(site.source.span()))
+            .find(|site| {
+                site.syntax_kind == "vba.let_member.reference" && local(site.source.span())
+            })
             .unwrap();
         assert_eq!(site.target, OccurrenceTarget::Resolved { symbol: field.id });
         assert_eq!(site.source.content_hash(), content_hash(source.as_bytes()));

@@ -105,7 +105,7 @@ pub(crate) struct Proof<'a> {
     pub(crate) context: Arc<ProjectEvidence>,
     pub(crate) receiver: Option<(&'a EntityRecord, SourceRef)>,
     rule: ResolutionRule,
-    getter_read: bool,
+    property_call: bool,
 }
 
 pub(crate) struct ProjectEvidence {
@@ -125,15 +125,55 @@ struct Member {
 #[derive(Default)]
 struct PropertyAccessors<'a> {
     get: Option<&'a EntityRecord>,
-    let_value: bool,
-    set_value: bool,
+    let_value: Option<&'a EntityRecord>,
+    set_value: Option<&'a EntityRecord>,
     invalid: bool,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
 enum PropertyAccessorKind {
     Get,
     Let,
     Set,
+}
+
+fn is_member(syntax: &str) -> bool {
+    matches!(
+        syntax,
+        "vba.member.reference"
+            | "vba.invoked_member.reference"
+            | "vba.get_member.reference"
+            | "vba.let_member.reference"
+            | "vba.set_member.reference"
+            | "vba.invoked_get_member.reference"
+            | "vba.invoked_let_member.reference"
+            | "vba.invoked_set_member.reference"
+    )
+}
+
+fn is_invoked_member(syntax: &str) -> bool {
+    matches!(
+        syntax,
+        "vba.invoked_member.reference"
+            | "vba.invoked_get_member.reference"
+            | "vba.invoked_let_member.reference"
+            | "vba.invoked_set_member.reference"
+    )
+}
+
+fn member_property_access(syntax: &str) -> Option<PropertyAccessorKind> {
+    match syntax {
+        "vba.get_member.reference" | "vba.invoked_get_member.reference" => {
+            Some(PropertyAccessorKind::Get)
+        }
+        "vba.let_member.reference" | "vba.invoked_let_member.reference" => {
+            Some(PropertyAccessorKind::Let)
+        }
+        "vba.set_member.reference" | "vba.invoked_set_member.reference" => {
+            Some(PropertyAccessorKind::Set)
+        }
+        _ => None,
+    }
 }
 
 fn procedure_kind(
@@ -166,16 +206,17 @@ fn procedure_kind(
         .map(rootlight_vba::ProcedureHeader::kind))
 }
 
-fn scalar_function_return_matches(
+fn scalar_procedure_return_matches(
     entity: &EntityRecord,
     occurrence: &OccurrenceRecord,
     sources: &BTreeMap<FileId, &[u8]>,
     cancellation: &Cancellation,
     work: &mut ResolutionWorkBudget,
 ) -> Result<bool, ResolutionError> {
-    if procedure_kind(entity, sources, cancellation, work)?
-        != Some(rootlight_vba::ProcedureKind::Function)
-    {
+    if !matches!(
+        procedure_kind(entity, sources, cancellation, work)?,
+        Some(rootlight_vba::ProcedureKind::Function | rootlight_vba::ProcedureKind::PropertyGet)
+    ) {
         return Ok(false);
     }
     let Some(source) = entity.evidence.source.as_ref() else {
@@ -1037,7 +1078,7 @@ impl<'a> ClassicIndex<'a> {
                         context: Arc::clone(&project.evidence),
                         receiver,
                         rule: ResolutionRule::ClassicProjectPointer,
-                        getter_read: false,
+                        property_call: false,
                     },
                 );
             }
@@ -1129,7 +1170,7 @@ impl<'a> ClassicIndex<'a> {
                     context: Arc::clone(&project.evidence),
                     receiver: None,
                     rule: ResolutionRule::ClassicProjectType,
-                    getter_read: false,
+                    property_call: false,
                 },
             );
         }
@@ -1140,7 +1181,6 @@ impl<'a> ClassicIndex<'a> {
         let mut receivers = BTreeMap::new();
         let mut members = BTreeMap::new();
         let mut property_accessors = BTreeMap::new();
-        let mut parameterized_properties = BTreeSet::new();
         let mut field_definitions = BTreeMap::new();
         let mut unconditional_udts = BTreeMap::new();
         for entity in entities.values() {
@@ -1159,14 +1199,6 @@ impl<'a> ClassicIndex<'a> {
             {
                 continue;
             }
-            if entity.kind == EntityKind::Parameter
-                && let Some(ContainerRef::Entity(owner)) = entity.container
-                && entities
-                    .get(&owner)
-                    .is_some_and(|owner| owner.kind == EntityKind::Property)
-            {
-                parameterized_properties.insert(owner);
-            }
             if let Some(ContainerRef::Entity(owner)) = entity.container {
                 let key = (owner, entity.canonical_name.to_ascii_lowercase());
                 if entity.kind == EntityKind::Property {
@@ -1181,11 +1213,11 @@ impl<'a> ClassicIndex<'a> {
                         Some(PropertyAccessorKind::Get) if accessors.get.is_none() => {
                             accessors.get = Some(*entity);
                         }
-                        Some(PropertyAccessorKind::Let) if !accessors.let_value => {
-                            accessors.let_value = true;
+                        Some(PropertyAccessorKind::Let) if accessors.let_value.is_none() => {
+                            accessors.let_value = Some(*entity);
                         }
-                        Some(PropertyAccessorKind::Set) if !accessors.set_value => {
-                            accessors.set_value = true;
+                        Some(PropertyAccessorKind::Set) if accessors.set_value.is_none() => {
+                            accessors.set_value = Some(*entity);
                         }
                         _ => accessors.invalid = true,
                     }
@@ -1249,15 +1281,16 @@ impl<'a> ClassicIndex<'a> {
                     | "vba.automatic_type_identifier.reference"
                     | "vba.type_identifier.reference")
             {
-                if matches!(owner.kind, EntityKind::Function | EntityKind::Method)
-                    && !scalar_function_return_matches(
-                        owner,
-                        occurrence,
-                        &sources,
-                        cancellation,
-                        work,
-                    )?
-                {
+                if matches!(
+                    owner.kind,
+                    EntityKind::Function | EntityKind::Method | EntityKind::Property
+                ) && !scalar_procedure_return_matches(
+                    owner,
+                    occurrence,
+                    &sources,
+                    cancellation,
+                    work,
+                )? {
                     continue;
                 }
                 let typed = result
@@ -1361,10 +1394,8 @@ impl<'a> ClassicIndex<'a> {
                     .and_modify(|prior| *prior = None)
                     .or_insert(Some(occurrence));
             }
-            let member = matches!(
-                occurrence.syntax_kind.as_str(),
-                "vba.member.reference" | "vba.invoked_member.reference"
-            ) && occurrence.role == OccurrenceRole::Reference;
+            let member =
+                is_member(&occurrence.syntax_kind) && occurrence.role == OccurrenceRole::Reference;
             if member && let Some(member) = parsed_members.remove(&occurrence.id) {
                 if member.receiver.contains('.') {
                     // Only the exact receiver span proves a getter read. The
@@ -1539,7 +1570,7 @@ impl<'a> ClassicIndex<'a> {
                                 context: Arc::clone(context),
                                 receiver: None,
                                 rule: ResolutionRule::ClassicProjectModule,
-                                getter_read: false,
+                                property_call: false,
                             });
                         }
                         module
@@ -1576,14 +1607,28 @@ impl<'a> ClassicIndex<'a> {
                 continue;
             };
             let key = (class, name);
-            let target = members.get(&key).copied().flatten().or_else(|| {
+            let access = member_property_access(&occurrence.syntax_kind).or_else(|| {
                 read_receivers
                     .contains(&span)
-                    .then_some(())
-                    .and_then(|()| property_accessors.get(&key))
-                    .filter(|accessors: &&PropertyAccessors<'_>| !accessors.invalid)
-                    .and_then(|accessors| accessors.get)
+                    .then_some(PropertyAccessorKind::Get)
             });
+            // Accessor identity is independent of the returned value's type.
+            // Unknown access and conflicting declarations cannot select a getter
+            // merely because it is the only accessor with a known return type.
+            let target = if let Some(accessors) = property_accessors.get(&key) {
+                if accessors.invalid {
+                    None
+                } else {
+                    match access {
+                        Some(PropertyAccessorKind::Get) => accessors.get,
+                        Some(PropertyAccessorKind::Let) => accessors.let_value,
+                        Some(PropertyAccessorKind::Set) => accessors.set_value,
+                        None => None,
+                    }
+                }
+            } else {
+                members.get(&key).copied().flatten()
+            };
             let Some(target) = target else {
                 continue;
             };
@@ -1631,14 +1676,13 @@ impl<'a> ClassicIndex<'a> {
                             | EntityKind::Variable
                             | EntityKind::Field
                             | EntityKind::Constant
+                            | EntityKind::Property
                     ),
                     _ => {
-                        matches!(target.kind, EntityKind::Method | EntityKind::Field)
-                            || (target.kind == EntityKind::Property
-                                && value_types
-                                    .get(&target.id)
-                                    .and_then(Option::as_ref)
-                                    .is_some())
+                        matches!(
+                            target.kind,
+                            EntityKind::Method | EntityKind::Field | EntityKind::Property
+                        )
                     }
                 }
             };
@@ -1685,9 +1729,43 @@ impl<'a> ClassicIndex<'a> {
                     context: Arc::clone(&context),
                     receiver: None,
                     rule: ResolutionRule::ClassicProjectEnum,
-                    getter_read: false,
+                    property_call: false,
                 });
             }
+            let implicit_parameters = if target.kind == EntityKind::Property
+                && !is_invoked_member(&occurrence.syntax_kind)
+            {
+                calls.implicit_property_parameters(
+                    target,
+                    access != Some(PropertyAccessorKind::Get),
+                    &sources,
+                    cancellation,
+                    work,
+                )?
+            } else {
+                None
+            };
+            if let Some(parameters) = &implicit_parameters {
+                if let Some(inherited) = result.application_parameters.get(&occurrence.id) {
+                    if !parameters.is_empty() {
+                        let mut combined = BTreeMap::new();
+                        for parameter in inherited.iter().chain(parameters.iter()) {
+                            cancellation.check()?;
+                            work.consume()?;
+                            combined.insert(parameter.id, *parameter);
+                        }
+                        result
+                            .application_parameters
+                            .insert(occurrence.id, Arc::new(combined.into_values().collect()));
+                    }
+                } else if !parameters.is_empty() {
+                    result
+                        .application_parameters
+                        .insert(occurrence.id, Arc::clone(parameters));
+                }
+            }
+            let property_call = target.kind == EntityKind::Property
+                && (implicit_parameters.is_some() || is_invoked_member(&occurrence.syntax_kind));
             result.proofs.insert(
                 occurrence.id,
                 Proof {
@@ -1695,22 +1773,16 @@ impl<'a> ClassicIndex<'a> {
                     context,
                     receiver: Some((owner, type_source)),
                     rule: ResolutionRule::ClassicProjectMember,
-                    getter_read: occurrence.syntax_kind == "vba.member.reference"
-                        && read_receivers.contains(&span)
-                        && !parameterized_properties.contains(&target.id)
-                        && property_accessors
-                            .get(&key)
-                            .filter(|accessors: &&PropertyAccessors<'_>| !accessors.invalid)
-                            .and_then(|accessors| accessors.get)
-                            .is_some_and(|getter| getter.id == target.id),
+                    property_call,
                 },
             );
             // Without arity evidence, a bare parameterized getter cannot be
             // used as the receiver for another member.
-            if occurrence.syntax_kind == "vba.member.reference"
+            if !is_invoked_member(&occurrence.syntax_kind)
                 && (target.kind == EntityKind::Field
                     || (target.kind == EntityKind::Property
-                        && !parameterized_properties.contains(&target.id)))
+                        && access == Some(PropertyAccessorKind::Get)
+                        && property_call))
             {
                 resolved_members
                     .entry(span)
@@ -1742,9 +1814,11 @@ impl<'a> ClassicIndex<'a> {
 
     pub(crate) fn is_call(&self, occurrence: &OccurrenceRecord) -> bool {
         self.proof(occurrence).is_some_and(|proof| {
-            proof.getter_read
-                || (occurrence.syntax_kind == "vba.invoked_member.reference"
-                    && matches!(proof.target.kind, EntityKind::Method | EntityKind::Function))
+            proof.property_call
+                || (matches!(
+                    occurrence.syntax_kind.as_str(),
+                    "vba.invoked_member.reference" | "vba.invoked_get_member.reference"
+                ) && matches!(proof.target.kind, EntityKind::Method | EntityKind::Function))
         })
     }
 

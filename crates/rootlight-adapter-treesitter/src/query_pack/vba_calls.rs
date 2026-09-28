@@ -75,8 +75,9 @@ impl Calls {
                                     CallChainRole::InvokedValueIdentifier => {
                                         "vba.invoked_get_identifier"
                                     }
-                                    CallChainRole::Member => "vba.member",
+                                    CallChainRole::Member => "vba.get_member",
                                     CallChainRole::InvokedMember => "vba.invoked_member",
+                                    CallChainRole::InvokedValueMember => "vba.invoked_get_member",
                                     CallChainRole::Application => "vba.application",
                                     CallChainRole::ArgumentName => "vba.nonvalue_identifier",
                                 };

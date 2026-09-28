@@ -2371,7 +2371,7 @@ fn native_project_resolution_survives_duplicate_private_types_in_conditional_bra
         .iter()
         .find(|site| {
             if site.file != client_source.span().file()
-                || site.syntax_kind != "vba.invoked_member.reference"
+                || site.syntax_kind != "vba.invoked_get_member.reference"
             {
                 return false;
             }
@@ -2626,7 +2626,8 @@ fn native_project_module_calls_require_public_targets_and_unshadowed_names() {
             .occurrences
             .iter()
             .find(|site| {
-                if site.file != client_file.id || site.syntax_kind != "vba.invoked_member.reference"
+                if site.file != client_file.id
+                    || site.syntax_kind != "vba.invoked_get_member.reference"
                 {
                     return false;
                 }
@@ -2827,7 +2828,7 @@ fn native_project_enum_qualification_requires_public_unshadowed_members() {
             })
             .unwrap();
         for (syntax_kind, text, target) in [
-            ("vba.member.reference", "Phase.Ready", member.id),
+            ("vba.get_member.reference", "Phase.Ready", member.id),
             ("vba.value_identifier.reference", "Phase", enumeration.id),
         ] {
             let site = document
