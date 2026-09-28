@@ -40,6 +40,12 @@ enum ConditionalBinding<'a> {
     Ambiguous,
 }
 
+#[derive(Clone, Copy)]
+enum ArrayRank {
+    Unspecified,
+    Fixed(usize),
+}
+
 #[derive(Clone, Copy, Default)]
 struct PropertyAccessors {
     get: Option<SymbolId>,
@@ -108,7 +114,7 @@ pub(super) struct VbaBindings<'a> {
     unconditional_names: BTreeMap<u64, BTreeSet<String>>,
     foreign_scopes: BTreeSet<u64>,
     constant_symbols: BTreeSet<SymbolId>,
-    array_symbols: BTreeSet<SymbolId>,
+    array_symbols: BTreeMap<SymbolId, ArrayRank>,
     class_module: Option<&'a SyntaxFact>,
     class_symbol: Option<SymbolId>,
     procedural_module: Option<(String, SymbolId)>,
@@ -153,7 +159,7 @@ impl<'a> VbaBindings<'a> {
             unconditional_names: BTreeMap::new(),
             foreign_scopes: BTreeSet::new(),
             constant_symbols: BTreeSet::new(),
-            array_symbols: BTreeSet::new(),
+            array_symbols: BTreeMap::new(),
             class_module: None,
             class_symbol: None,
             procedural_module: None,
@@ -410,9 +416,15 @@ impl<'a> VbaBindings<'a> {
             // Only the declaration's array designator proves indexed identity;
             // a later ReDim or runtime Variant value cannot supply this proof.
             if let Some(Binding::Value(symbol)) = candidate
-                && declaration_has_array_designator(declaration, fact, source, cancellation)?
+                && let Some(rank) = declaration_array_rank(
+                    declaration,
+                    fact,
+                    source,
+                    maximum_name_bytes,
+                    cancellation,
+                )?
             {
-                result.array_symbols.insert(symbol);
+                result.array_symbols.insert(symbol, rank);
             }
             let mut symbol = if conditional { None } else { candidate };
             if matches!(
@@ -1069,7 +1081,7 @@ impl<'a> VbaBindings<'a> {
         let Some(start) = self.array_invocation_start(fact)? else {
             return Ok(false);
         };
-        if !self.array_symbols.contains(&target)
+        if !self.array_symbols.contains_key(&target)
             || !self
                 .array_invocations_at(start)
                 .any(|candidate| candidate.local_id() == fact.local_id())
@@ -1171,9 +1183,11 @@ impl<'a> VbaBindings<'a> {
         let Some(suffix) = self.source.get(callee_end..application_end) else {
             return Ok(None);
         };
-        if !complete_array_application_suffix(suffix, statement_assignment, cancellation)? {
+        let Some(index_count) =
+            array_application_index_count(suffix, statement_assignment, cancellation)?
+        else {
             return Ok(None);
-        }
+        };
         let Some(callee) = self
             .source
             .get(callee_start..callee_end)
@@ -1184,7 +1198,17 @@ impl<'a> VbaBindings<'a> {
         let Some(binding) = self.resolve(invocation, callee, cancellation)? else {
             return Ok(None);
         };
-        Ok((!binding.is_call && self.array_symbols.contains(&binding.symbol)).then_some(binding))
+        let Some(rank) = self.array_symbols.get(&binding.symbol) else {
+            return Ok(None);
+        };
+        // Empty parentheses refer to the whole array. A dynamic declaration
+        // proves array identity but does not establish a runtime rank.
+        let compatible = index_count == 0
+            || match rank {
+                ArrayRank::Unspecified => true,
+                ArrayRank::Fixed(rank) => index_count == *rank,
+            };
+        Ok((!binding.is_call && compatible).then_some(binding))
     }
 
     fn procedure_application(
@@ -2580,19 +2604,20 @@ fn member_component<'a>(
     Ok(text.get(..path.end()))
 }
 
-fn declaration_has_array_designator(
+fn declaration_array_rank(
     declaration: &SyntaxFact,
     name: &SyntaxFact,
     source: &[u8],
+    maximum_name_bytes: usize,
     cancellation: &Cancellation,
-) -> Result<bool, AdapterError> {
+) -> Result<Option<ArrayRank>, AdapterError> {
     let mut check = || cancellation.check().map_err(AdapterError::from);
     let parameter = matches!(
         declaration.syntax_kind().as_str(),
         "vba.parameter.declaration" | "vba.omittable_parameter.declaration"
     );
     if !parameter && declaration.syntax_kind().as_str() != "vba.variable.declaration" {
-        return Ok(false);
+        return Ok(None);
     }
     let name_end = usize::try_from(name.span().end_byte()).map_err(|_| invalid_capture())?;
     let declaration_end =
@@ -2602,20 +2627,33 @@ fn declaration_has_array_designator(
         .ok_or_else(invalid_capture)?;
     let whitespace = rootlight_vba::logical_whitespace_len(suffix, &mut check)?;
     let suffix = suffix.get(whitespace..).ok_or_else(invalid_capture)?;
-    let Some(bounds) = suffix.strip_prefix(b"(") else {
-        return Ok(false);
+    let bounded = suffix
+        .get(..suffix.len().min(maximum_name_bytes))
+        .ok_or_else(invalid_capture)?;
+    let Some(end) = rootlight_vba::parenthesized_expression_end(bounded, &mut check)? else {
+        return Ok(None);
     };
+    let bounds = bounded.get(1..end - 1).ok_or_else(invalid_capture)?;
+    let Some(dimensions) = rootlight_vba::argument_list(bounds, bounds.len(), &mut check)? else {
+        return Ok(None);
+    };
+    for dimension in &dimensions {
+        cancellation.check()?;
+        if dimension.name().is_some() || dimension.expression().is_empty() {
+            return Ok(None);
+        }
+    }
     if !parameter {
-        return Ok(true);
+        return Ok(Some(if dimensions.is_empty() {
+            ArrayRank::Unspecified
+        } else {
+            ArrayRank::Fixed(dimensions.len())
+        }));
     }
     // Parameters require an empty designator and cannot pass arrays ByVal
     // (MS-VBAL 5.3.1.5), even when the native parser accepts that syntax.
-    let whitespace = rootlight_vba::logical_whitespace_len(bounds, &mut check)?;
-    if !bounds
-        .get(whitespace..)
-        .is_some_and(|tail| tail.starts_with(b")"))
-    {
-        return Ok(false);
+    if !dimensions.is_empty() {
+        return Ok(None);
     }
     let declaration_start =
         usize::try_from(declaration.span().start_byte()).map_err(|_| invalid_capture())?;
@@ -2623,7 +2661,10 @@ fn declaration_has_array_designator(
     let prefix = source
         .get(declaration_start..name_start)
         .ok_or_else(invalid_capture)?;
-    rootlight_vba::array_parameter_modifiers(prefix, &mut check)
+    Ok(
+        rootlight_vba::array_parameter_modifiers(prefix, &mut check)?
+            .then_some(ArrayRank::Unspecified),
+    )
 }
 
 fn is_self_array_invocation(fact: &SyntaxFact) -> bool {
@@ -2636,32 +2677,64 @@ fn is_self_array_invocation(fact: &SyntaxFact) -> bool {
     )
 }
 
-fn complete_array_application_suffix(
+fn array_application_index_count(
     suffix: &[u8],
     statement_assignment: bool,
     cancellation: &Cancellation,
-) -> Result<bool, AdapterError> {
+) -> Result<Option<usize>, AdapterError> {
     let mut check = || cancellation.check().map_err(AdapterError::from);
     let leading = rootlight_vba::logical_whitespace_len(suffix, &mut check)?;
     let suffix = suffix.get(leading..).ok_or_else(invalid_capture)?;
     let Some(end) = rootlight_vba::parenthesized_expression_end(suffix, &mut check)? else {
-        return Ok(false);
+        return Ok(None);
     };
+    let indices = suffix.get(1..end - 1).ok_or_else(invalid_capture)?;
+    // MS-VBAL 5.6.13 permits empty or positional array index lists, not
+    // procedure parameter names, omitted slots, or explicit ByVal passing.
+    // The caller has already admitted the complete application's byte length.
+    let Some(arguments) = rootlight_vba::argument_list(indices, indices.len(), &mut check)? else {
+        return Ok(None);
+    };
+    for argument in &arguments {
+        cancellation.check()?;
+        let expression = argument.expression();
+        if argument.name().is_some()
+            || expression.is_empty()
+            || (expression
+                .get(..5)
+                .is_some_and(|word| word.eq_ignore_ascii_case(b"ByVal"))
+                && expression.get(5).is_some_and(u8::is_ascii_whitespace))
+        {
+            return Ok(None);
+        }
+    }
     let tail = suffix.get(end..).ok_or_else(invalid_capture)?;
     let whitespace = rootlight_vba::logical_whitespace_len(tail, &mut check)?;
     let tail = tail.get(whitespace..).ok_or_else(invalid_capture)?;
     if tail.is_empty() {
-        return Ok(true);
+        return Ok(Some(arguments.len()));
     }
     // Native call statements can represent an indexed assignment as a comparison
     // argument. Only an independently proven array may resolve that reading;
     // the right-hand expression keeps its own binding gaps.
     let Some(value) = tail.strip_prefix(b"=").filter(|_| statement_assignment) else {
-        return Ok(false);
+        return Ok(None);
     };
     let whitespace = rootlight_vba::logical_whitespace_len(value, &mut check)?;
     let value = value.get(whitespace..).ok_or_else(invalid_capture)?;
-    Ok(!value.is_empty() && !matches!(value.first(), Some(b'=' | b'\'' | b'\r' | b'\n' | b':')))
+    Ok(
+        (!value.is_empty() && !matches!(value.first(), Some(b'=' | b'\'' | b'\r' | b'\n' | b':')))
+            .then_some(arguments.len()),
+    )
+}
+
+#[cfg(test)]
+fn complete_array_application_suffix(
+    suffix: &[u8],
+    statement_assignment: bool,
+    cancellation: &Cancellation,
+) -> Result<bool, AdapterError> {
+    Ok(array_application_index_count(suffix, statement_assignment, cancellation)?.is_some())
 }
 
 fn invalid_capture() -> AdapterError {
@@ -2791,6 +2864,49 @@ mod tests {
             assert!(
                 !complete_array_application_suffix(suffix, true, &Cancellation::new()).unwrap()
             );
+        }
+    }
+
+    #[test]
+    fn array_indices_distinguish_top_level_slots_from_nested_call_arguments() {
+        for suffix in [
+            "()",
+            "( _\r\n )",
+            "(0, 1)",
+            "(Inner(value:=0), 1)",
+            "(\"slot:=0,\")",
+            "([ByVal])",
+            "(ByValue)",
+            "( _\n 0, _\n 1)",
+        ] {
+            assert!(
+                complete_array_application_suffix(suffix.as_bytes(), false, &Cancellation::new())
+                    .unwrap(),
+                "{suffix}"
+            );
+        }
+        for suffix in [
+            "(slot:=0)",
+            "([slot]:=0)",
+            "(slot _\n :=0)",
+            "(,0)",
+            "(0,,1)",
+            "(0, _\n ,1)",
+            "(0,)",
+            "(ByVal 0)",
+            "(bYvAl _\n 0)",
+        ] {
+            for assignment in [false, true] {
+                assert!(
+                    !complete_array_application_suffix(
+                        suffix.as_bytes(),
+                        assignment,
+                        &Cancellation::new()
+                    )
+                    .unwrap(),
+                    "{suffix}"
+                );
+            }
         }
     }
 

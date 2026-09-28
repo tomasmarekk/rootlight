@@ -2740,6 +2740,116 @@ fn vba_declared_array_application_binds_without_guessing_object_defaults() {
 }
 
 #[test]
+fn vba_array_applications_reject_procedure_argument_syntax() {
+    for indices in ["slot:=0", "[slot]:=0", ", 0", "0, , 1", "ByVal 0"] {
+        for receiver in ["items", "Me.items"] {
+            for statement in [
+                format!("result = {receiver}({indices})"),
+                format!("{receiver}({indices}) = 1"),
+            ] {
+                let source = format!(
+                    "VERSION 1.0 CLASS\nAttribute VB_Name = \"Holder\"\nPrivate items(2) As Long\nSub Run()\nDim result As Long\n{statement}\nEnd Sub\n"
+                );
+                let result = output(&source);
+                let document = result.document();
+                let start =
+                    u64::try_from(source.find(&format!("{receiver}({indices})")).unwrap()).unwrap();
+                let applications: Vec<_> = document
+                    .occurrences
+                    .iter()
+                    .filter(|site| {
+                        site.syntax_kind == "vba.application.reference"
+                            && site.source.span().start_byte() == start
+                    })
+                    .collect();
+                assert!(!applications.is_empty(), "missing application: {statement}");
+                for application in applications {
+                    assert!(
+                        matches!(application.target, OccurrenceTarget::Unresolved { .. }),
+                        "invalid array application resolved: {statement}: {application:?}"
+                    );
+                    assert!(document.skipped_regions.iter().any(|gap| {
+                        gap.source == application.source
+                            && gap.detail == "vba-call-or-index-target-unavailable"
+                    }));
+                }
+                assert!(!document.relations.iter().any(|edge| {
+                    edge.predicate == RelationPredicate::Calls
+                        && edge.evidence.source.as_ref().is_some_and(|reference| {
+                            reference.span().start_byte() >= start
+                                && reference.span().end_byte()
+                                    <= start + u64::try_from(statement.len()).unwrap()
+                        })
+                }));
+            }
+        }
+    }
+}
+
+#[test]
+fn vba_fixed_array_applications_require_the_declared_rank() {
+    for (bounds, indices, proven) in [
+        ("2", "0", true),
+        ("2", "0, 1", false),
+        ("0 To 2, 1 To 3", "0, 1", true),
+        ("0 To 2, 1 To 3", "0", false),
+        ("0 To 2, 1 To 3", "", true),
+        ("", "0, 1", true),
+    ] {
+        for receiver in ["items", "Me.items"] {
+            for write in [false, true] {
+                let expression = format!("{receiver}({indices})");
+                let statement = if write {
+                    format!("{expression} = 1")
+                } else {
+                    format!("result = {expression}")
+                };
+                let source = format!(
+                    "VERSION 1.0 CLASS\nAttribute VB_Name = \"Holder\"\nPrivate items({bounds}) As Long\nSub Run()\nDim result As Variant\n{statement}\nEnd Sub\n"
+                );
+                let result = output(&source);
+                let document = result.document();
+                let start = u64::try_from(source.find(&expression).unwrap()).unwrap();
+                let application = document
+                    .occurrences
+                    .iter()
+                    .find(|site| {
+                        site.syntax_kind == "vba.application.reference"
+                            && site.source.span().start_byte() == start
+                            && (site.source.span().end_byte()
+                                == start + u64::try_from(expression.len()).unwrap()
+                                || (write
+                                    && site.source.span().end_byte()
+                                        == start + u64::try_from(statement.len()).unwrap()))
+                    })
+                    .unwrap();
+                let array = document
+                    .entities
+                    .iter()
+                    .find(|entity| entity.canonical_name == "items")
+                    .unwrap();
+                assert_eq!(
+                    application.target == OccurrenceTarget::Resolved { symbol: array.id },
+                    proven,
+                    "{bounds}: {expression}: {application:?}"
+                );
+                assert_eq!(
+                    document.skipped_regions.iter().any(|gap| {
+                        gap.source == application.source
+                            && gap.detail == "vba-call-or-index-target-unavailable"
+                    }),
+                    !proven
+                );
+                assert!(!document.relations.iter().any(|edge| {
+                    edge.predicate == RelationPredicate::Calls
+                        && edge.subject == RelationEndpoint::Occurrence(application.id)
+                }));
+            }
+        }
+    }
+}
+
+#[test]
 fn vba_array_writes_bind_exact_local_and_self_targets_without_calls() {
     for prefix in ["", "Let ", "Set "] {
         for receiver in ["items", "Me.items"] {
