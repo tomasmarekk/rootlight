@@ -84,23 +84,22 @@ impl<'a, 'o> CallIndex<'a, 'o> {
         })
     }
 
-    pub(super) fn resolve(
-        &mut self,
-        result: &mut ClassicIndex<'a>,
+    pub(super) fn callee(
+        &self,
         site: &OccurrenceRecord,
         sources: &BTreeMap<FileId, &[u8]>,
         cancellation: &Cancellation,
         work: &mut ResolutionWorkBudget,
-    ) -> Result<(), ResolutionError> {
+    ) -> Result<Option<(&'o OccurrenceRecord, bool)>, ResolutionError> {
         cancellation.check()?;
         work.consume()?;
         if site.syntax_kind != "vba.application.reference"
             || !matches!(site.target, OccurrenceTarget::Unresolved { .. })
         {
-            return Ok(());
+            return Ok(None);
         }
         let Some(bytes) = source_bytes(&site.source, sources) else {
-            return Ok(());
+            return Ok(None);
         };
         work.consume_many(bytes.len().div_ceil(64).max(1))?;
         let mut check = || {
@@ -123,7 +122,7 @@ impl<'a, 'o> CallIndex<'a, 'o> {
             .ok()
             .and_then(|n| site.source.span().start_byte().checked_add(n))
         else {
-            return Ok(());
+            return Ok(None);
         };
         let key = (site.file, start);
         let Some(callee) = self
@@ -132,19 +131,41 @@ impl<'a, 'o> CallIndex<'a, 'o> {
             .next_back()
             .and_then(|(_, site)| *site)
         else {
-            return Ok(());
+            return Ok(None);
         };
         // An intervening application dispatches on a returned object, not on
         // this callee. Earlier receiver calls may precede a later named callee.
-        if !result.is_call(callee)
-            || self.applications.get(&key).is_some_and(|ends| {
-                ends.range(callee.source.span().end_byte()..site.source.span().end_byte())
-                    .next()
-                    .is_some()
-            })
-        {
+        if self.applications.get(&key).is_some_and(|ends| {
+            ends.range(callee.source.span().end_byte()..site.source.span().end_byte())
+                .next()
+                .is_some()
+        }) {
+            return Ok(None);
+        }
+        Ok(Some((callee, explicit)))
+    }
+
+    pub(super) fn resolve(
+        &mut self,
+        result: &mut ClassicIndex<'a>,
+        site: &OccurrenceRecord,
+        sources: &BTreeMap<FileId, &[u8]>,
+        cancellation: &Cancellation,
+        work: &mut ResolutionWorkBudget,
+    ) -> Result<(), ResolutionError> {
+        let Some((callee, explicit)) = self.callee(site, sources, cancellation, work)? else {
+            return Ok(());
+        };
+        if !result.is_call(callee) {
             return Ok(());
         }
+        let Some(bytes) = source_bytes(&site.source, sources) else {
+            return Ok(());
+        };
+        let mut check = || {
+            cancellation.check()?;
+            work.consume()
+        };
         let Some(proof) = result.proof(callee) else {
             return Ok(());
         };
@@ -206,6 +227,9 @@ impl<'a, 'o> CallIndex<'a, 'o> {
             Arc::clone(&contract.parameters)
         };
         result.application_parameters.insert(site.id, parameters);
+        if let Some(sources) = result.receiver_sources.get(&callee.id).cloned() {
+            result.receiver_sources.insert(site.id, sources);
+        }
         result.proofs.insert(site.id, application_proof);
         Ok(())
     }

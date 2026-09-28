@@ -6,6 +6,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 mod calls;
+mod dependencies;
+mod with_members;
 
 use rootlight_cancel::Cancellation;
 use rootlight_ids::{ContentHash, FactId, FileId, SymbolId, content_hash};
@@ -95,6 +97,7 @@ pub enum NativeClassicMemberKind {
 pub(crate) struct ClassicIndex<'a> {
     proofs: BTreeMap<FactId, Proof<'a>>,
     application_parameters: BTreeMap<FactId, Arc<Vec<&'a EntityRecord>>>,
+    receiver_sources: BTreeMap<FactId, Arc<Vec<SourceRef>>>,
 }
 
 pub(crate) struct Proof<'a> {
@@ -1323,8 +1326,10 @@ impl<'a> ClassicIndex<'a> {
                     }
                 }
             }
-            if occurrence.syntax_kind == "vba.value_identifier.reference"
-                && occurrence.role == OccurrenceRole::Reference
+            if matches!(
+                occurrence.syntax_kind.as_str(),
+                "vba.value_identifier.reference" | "vba.identifier.reference"
+            ) && occurrence.role == OccurrenceRole::Reference
                 && let OccurrenceTarget::Resolved { symbol } = occurrence.target
             {
                 receivers
@@ -1337,6 +1342,8 @@ impl<'a> ClassicIndex<'a> {
         let mut member_occurrences = Vec::new();
         let mut read_receivers = BTreeSet::new();
         let mut calls = calls::CallIndex::build(index, occurrences, cancellation, work)?;
+        let mut parsed_members =
+            with_members::inventory(occurrences, &sources, cancellation, work)?;
         for occurrence in occurrences {
             cancellation.check()?;
             if occurrence.syntax_kind == "vba.application.reference"
@@ -1358,36 +1365,14 @@ impl<'a> ClassicIndex<'a> {
                 occurrence.syntax_kind.as_str(),
                 "vba.member.reference" | "vba.invoked_member.reference"
             ) && occurrence.role == OccurrenceRole::Reference;
-            let span = occurrence.source.span();
-            if member
-                && let Some(bytes) = sources.get(&occurrence.file)
-                && let (Ok(start), Ok(end)) = (
-                    usize::try_from(span.start_byte()),
-                    usize::try_from(span.end_byte()),
-                )
-                && let Some(text) = bytes.get(start..end)
-                && let Some((receiver, name)) = member_access_parts(text, cancellation, work)?
-            {
-                if receiver.contains('.') {
-                    let receiver_end = span
-                        .start_byte()
-                        .checked_add(
-                            u64::try_from(receiver.len())
-                                .map_err(|_| ResolutionError::CountOverflow)?,
-                        )
-                        .ok_or(ResolutionError::CountOverflow)?;
-                    let receiver_span = rootlight_ir::SourceSpan::new(
-                        occurrence.file,
-                        span.start_byte(),
-                        receiver_end,
-                    )
-                    .map_err(ResolutionError::InvalidProducer)?;
+            if member && let Some(member) = parsed_members.remove(&occurrence.id) {
+                if member.receiver.contains('.') {
                     // Only the exact receiver span proves a getter read. The
                     // logical separator must not become part of that identity.
-                    read_receivers.insert(receiver_span);
+                    read_receivers.insert(member.span);
                 }
                 if matches!(occurrence.target, OccurrenceTarget::Unresolved { .. }) {
-                    member_occurrences.push((occurrence, Some((receiver, name))));
+                    member_occurrences.push((occurrence, Some(member)));
                     continue;
                 }
             }
@@ -1395,19 +1380,16 @@ impl<'a> ClassicIndex<'a> {
             // participate; lexical scans have their own bounded work charges.
             work.consume()?;
         }
-        // Resolve receivers before enclosing members/applications, independent
-        // of record order. A bare callee and application may share a span;
-        // member selection must precede argument validation in that case.
-        member_occurrences.sort_unstable_by_key(|(occurrence, member)| {
-            let span = occurrence.source.span();
-            (span.end_byte() - span.start_byte(), span, member.is_none())
-        });
+        let order = dependencies::order(&member_occurrences, &calls, &sources, cancellation, work)?;
         let mut resolved_members = BTreeMap::new();
-        for (occurrence, member) in member_occurrences {
+        for i in order {
+            let Some((occurrence, member)) = member_occurrences.get(i) else {
+                continue;
+            };
             cancellation.check()?;
             work.consume()?;
             let span = occurrence.source.span();
-            let Some((receiver, member)) = member else {
+            let Some(member) = member else {
                 calls.resolve(&mut result, occurrence, &sources, cancellation, work)?;
                 if result.proof(occurrence).is_some() {
                     resolved_members
@@ -1417,18 +1399,11 @@ impl<'a> ClassicIndex<'a> {
                 }
                 continue;
             };
-            let Some(name) = identifier(member) else {
+            let receiver = member.receiver;
+            let Some(name) = identifier(member.name) else {
                 continue;
             };
-            let receiver_end = span
-                .start_byte()
-                .checked_add(
-                    u64::try_from(receiver.len()).map_err(|_| ResolutionError::CountOverflow)?,
-                )
-                .ok_or(ResolutionError::CountOverflow)?;
-            let receiver_span =
-                rootlight_ir::SourceSpan::new(occurrence.file, span.start_byte(), receiver_end)
-                    .map_err(ResolutionError::InvalidProducer)?;
+            let receiver_span = member.span;
             let binding = if let Some(value) = receivers.get(&receiver_span) {
                 value
                     .and_then(|value| value_types.get(&value))
@@ -1615,6 +1590,11 @@ impl<'a> ClassicIndex<'a> {
             let Some(receiver_type) = entities.get(&class).copied() else {
                 continue;
             };
+            if member.implicit_root
+                && !matches!(receiver_type.kind, EntityKind::Class | EntityKind::Struct)
+            {
+                continue;
+            }
             let accessible = if receiver_type.kind == EntityKind::Enum {
                 target.kind == EntityKind::Constant
                     && target.container == Some(ContainerRef::Entity(class))
@@ -1664,6 +1644,27 @@ impl<'a> ClassicIndex<'a> {
             };
             if !accessible {
                 continue;
+            }
+            let mut evidence = BTreeSet::new();
+            if let Some(id) = resolved_members.get(&receiver_span).and_then(|id| *id) {
+                if let Some(sources) = result.receiver_sources.get(&id) {
+                    for source in sources.iter() {
+                        work.consume()?;
+                        evidence.insert(source.clone());
+                    }
+                }
+                if let Some(proof) = result.proofs.get(&id) {
+                    evidence.extend(proof.target.evidence.source.iter().cloned());
+                    if let Some((_, source)) = &proof.receiver {
+                        evidence.insert(source.clone());
+                    }
+                }
+            }
+            evidence.extend(member.boundaries.iter().cloned());
+            if !evidence.is_empty() {
+                result
+                    .receiver_sources
+                    .insert(occurrence.id, Arc::new(evidence.into_iter().collect()));
             }
             if let Some(parameters) = resolved_members
                 .get(&receiver_span)
@@ -1731,6 +1732,12 @@ impl<'a> ClassicIndex<'a> {
         self.application_parameters
             .get(&occurrence.id)
             .map_or(&[], |parameters| parameters.as_slice())
+    }
+
+    pub(crate) fn receiver_sources(&self, occurrence: &OccurrenceRecord) -> &[SourceRef] {
+        self.receiver_sources
+            .get(&occurrence.id)
+            .map_or(&[], |sources| sources.as_slice())
     }
 
     pub(crate) fn is_call(&self, occurrence: &OccurrenceRecord) -> bool {

@@ -714,7 +714,10 @@ pub(super) fn member_syntax(
     // default-member dispatch. Keep it as a reference until binding supplies a target.
     Ok(match reference_syntax(node, source, cancellation)? {
         "vba.invoked_identifier" | "vba.invoked_get_identifier"
-            if node.kind() == "qualified_member_expression" =>
+            if matches!(
+                node.kind(),
+                "qualified_member_expression" | "implicit_member_expression"
+            ) =>
         {
             "vba.invoked_member"
         }

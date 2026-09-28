@@ -1473,6 +1473,7 @@ fn build_provenance(
                 .ok_or(ResolutionError::UnsupportedIdentityRemap)?;
             context_digests.push(provenance.build_context.digest());
         }
+        sources.extend(lookup.classic.receiver_sources(occurrence).iter().cloned());
     }
 
     for candidate in &decision.explanation.candidates {

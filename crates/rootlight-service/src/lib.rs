@@ -219,8 +219,8 @@ const PROJECT_FACTS_TRUNCATED_CODE: &str = "project-adapter-facts-truncated";
 const PROJECT_FACTS_TRUNCATED_MESSAGE: &str =
     "additional project semantic facts were omitted by aggregate resource limits";
 const AGGREGATE_DIAGNOSTICS_TRUNCATED_CODE: &str = "aggregate-diagnostics-truncated";
-const ANALYZER_BINARY_SEED: &[u8] = b"rootlight.first-slice.treesitter-structural/170";
-const RESOLVER_BINARY_SEED: &[u8] = b"rootlight.first-slice.resolve/49";
+const ANALYZER_BINARY_SEED: &[u8] = b"rootlight.first-slice.treesitter-structural/171";
+const RESOLVER_BINARY_SEED: &[u8] = b"rootlight.first-slice.resolve/50";
 const INCREMENTAL_PROVIDER_SEED: &[u8] = b"rootlight.first-slice.incremental-provider/1";
 const LANGUAGE_DISPOSITION_PROVIDER_SEED: &[u8] = b"rootlight.first-slice.language-disposition/5";
 const SOURCE_FILE_FALLBACK_PROVIDER_SEED: &[u8] = b"rootlight.source-file-fallback/4";
@@ -39326,6 +39326,157 @@ mod tests {
     }
 
     #[test]
+    fn classic_project_with_members_follow_nested_receivers_and_call_results() {
+        let fixture = durable_test_tempdir();
+        fs::write(fixture.path().join("project.vbp"), "Type=OleDll\nName=\"Primary\"\nClass=Factory; Factory.cls\nClass=Product; Product.cls\nModule=Client; Client.bas\n").unwrap();
+        fs::write(fixture.path().join("Factory.cls"), "VERSION 1.0 CLASS\nAttribute VB_Name = \"Factory\"\nPublic Function Build(ByVal value As Long) As Product\nEnd Function\n").unwrap();
+        fs::write(fixture.path().join("Product.cls"), "VERSION 1.0 CLASS\nAttribute VB_Name = \"Product\"\nPublic Value As Long\nPublic Function Grow(ByVal step As Long) As Product\nEnd Function\n").unwrap();
+        let client = "Attribute VB_Name = \"Client\"\nSub Run(ByVal factory As Factory, ByVal product As Product, ByVal dynamic As Object)\nWith factory.Build(value:=1)\na = .Value\nWith .Grow(step:=2)\nb = .Value\nEnd With\nc = .Grow(step:=3).Value\nWith dynamic\nd = .Value\nEnd With\ne = .Value\nEnd With\nWith product\nf = .Value\nEnd With\ng = .Value\nEnd Sub\n";
+        fs::write(fixture.path().join("Client.bas"), client).unwrap();
+        let mut service = FirstSliceService::new(2).unwrap();
+        let receipt = service
+            .index_repository(fixture.path(), &deadline())
+            .unwrap();
+        let snapshot = service
+            .loaded_generation_snapshot(receipt.generation)
+            .unwrap();
+        let document = snapshot.document();
+        let file = document
+            .files
+            .iter()
+            .find(|file| file.path == "Client.bas")
+            .unwrap();
+        let target = document
+            .entities
+            .iter()
+            .find(|entity| entity.kind == EntityKind::Field && entity.canonical_name == "Value")
+            .unwrap();
+        for (label, expression, expected) in [
+            ("a", ".Value", true),
+            ("b", ".Value", true),
+            ("c", ".Grow(step:=3).Value", true),
+            ("d", ".Value", false),
+            ("e", ".Value", true),
+            ("f", ".Value", true),
+            ("g", ".Value", false),
+        ] {
+            let start = u64::try_from(
+                client.find(&format!("{label} = {expression}")).unwrap() + label.len() + 3,
+            )
+            .unwrap();
+            let end = start + u64::try_from(expression.len()).unwrap();
+            let site = document
+                .occurrences
+                .iter()
+                .find(|site| {
+                    site.file == file.id
+                        && site.syntax_kind == "vba.member.reference"
+                        && site.source.span().start_byte() == start
+                        && site.source.span().end_byte() == end
+                })
+                .unwrap();
+            if expected {
+                assert_eq!(
+                    site.target,
+                    OccurrenceTarget::Resolved { symbol: target.id },
+                    "{label}"
+                );
+                let evidence = document
+                    .provenance
+                    .iter()
+                    .find(|record| record.id == site.provenance)
+                    .unwrap();
+                assert!(
+                    evidence.input_sources.iter().any(|source| {
+                        let span = source.span();
+                        span.file() == file.id
+                            && client
+                                .get(
+                                    usize::try_from(span.start_byte()).unwrap()
+                                        ..usize::try_from(span.end_byte()).unwrap(),
+                                )
+                                .is_some_and(|text| text.starts_with("With "))
+                    }),
+                    "{label}: with header evidence"
+                );
+            } else {
+                assert!(
+                    matches!(site.target, OccurrenceTarget::Unresolved { .. }),
+                    "{label}"
+                );
+            }
+            assert_eq!(
+                document
+                    .skipped_regions
+                    .iter()
+                    .any(|gap| gap.source == site.source
+                        && gap.detail == "vba-member-target-unavailable"),
+                !expected,
+                "{label}"
+            );
+        }
+        for expression in [".Grow(step:=2)", ".Grow(step:=3)"] {
+            let start = u64::try_from(client.find(expression).unwrap()).unwrap();
+            let end = start + u64::try_from(expression.len()).unwrap();
+            let site = document
+                .occurrences
+                .iter()
+                .find(|site| {
+                    site.file == file.id
+                        && site.syntax_kind == "vba.application.reference"
+                        && site.source.span().start_byte() == start
+                        && site.source.span().end_byte() == end
+                })
+                .unwrap();
+            assert!(
+                matches!(site.target, OccurrenceTarget::Resolved { .. }),
+                "{expression}"
+            );
+            assert_eq!(site.role, OccurrenceRole::Reference);
+            let evidence = document
+                .provenance
+                .iter()
+                .find(|record| record.id == site.provenance)
+                .unwrap();
+            for name in ["value", "step"] {
+                let parameter = document
+                    .entities
+                    .iter()
+                    .find(|entity| {
+                        entity.kind == EntityKind::Parameter && entity.canonical_name == name
+                    })
+                    .unwrap();
+                assert!(
+                    evidence
+                        .derivation_parents
+                        .contains(&FactRef::Entity(parameter.id)),
+                    "{expression}: {name}"
+                );
+            }
+            let callee = document
+                .occurrences
+                .iter()
+                .find(|site| {
+                    site.file == file.id
+                        && site.syntax_kind == "vba.invoked_member.reference"
+                        && site.source.span().start_byte() == start
+                        && site.source.span().end_byte() == start + 5
+                })
+                .unwrap();
+            assert_eq!(callee.role, OccurrenceRole::CallSite);
+            assert_eq!(
+                document
+                    .relations
+                    .iter()
+                    .filter(|relation| relation.predicate == RelationPredicate::Calls
+                        && relation.subject == RelationEndpoint::Occurrence(callee.id))
+                    .count(),
+                1
+            );
+        }
+    }
+
+    #[test]
     fn classic_project_call_results_follow_return_types_and_arguments_after_restart() {
         let fixture = durable_test_tempdir();
         let storage = durable_test_tempdir();
@@ -39340,7 +39491,7 @@ mod tests {
         .unwrap();
         let expression = "factory.Build(value:=1).Value";
         let client = format!(
-            "Attribute VB_Name = \"Client\"\nSub Run(ByVal factory As Factory)\nanswer = {expression}\nEnd Sub\n"
+            "Attribute VB_Name = \"Client\"\nSub Run(ByVal factory As Factory)\nanswer = {expression}\nWith factory.Build(value:=1)\nanswer = .Value\nEnd With\nEnd Sub\n"
         );
         fs::write(fixture.path().join("Client.bas"), &client).unwrap();
         let mut previous = None;
@@ -39433,10 +39584,35 @@ mod tests {
                     .any(|source| source == &site.source),
                 expected
             );
+            let with_start =
+                u64::try_from(client.find("answer = .Value").unwrap() + "answer = ".len()).unwrap();
+            let with_site = document
+                .occurrences
+                .iter()
+                .find(|site| {
+                    site.file == file.id
+                        && site.syntax_kind == "vba.member.reference"
+                        && site.source.span().start_byte() == with_start
+                })
+                .unwrap();
+            assert_eq!(
+                matches!(with_site.target, OccurrenceTarget::Resolved { symbol } if symbol == target.id),
+                expected
+            );
+            assert_eq!(
+                relationships
+                    .data
+                    .groups
+                    .iter()
+                    .flat_map(|group| &group.items)
+                    .flat_map(|edge| &edge.source_refs)
+                    .any(|source| source == &with_site.source),
+                expected
+            );
             let read = service
                 .source_read_with_options_and_budget(
                     receipt.generation,
-                    vec![site.source.clone()],
+                    vec![site.source.clone(), with_site.source.clone()],
                     SourceReadOptions::new()
                         .with_context_lines_before(0)
                         .with_context_lines_after(0)
@@ -39446,6 +39622,7 @@ mod tests {
                 )
                 .unwrap();
             assert_eq!(read.data.chunks[0].bytes, expression.as_bytes());
+            assert_eq!(read.data.chunks[1].bytes, b".Value");
         }
     }
 

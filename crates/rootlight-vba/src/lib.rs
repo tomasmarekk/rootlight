@@ -9,12 +9,14 @@ mod compilation;
 mod group;
 mod parameter;
 mod procedure;
+mod with_blocks;
 
 pub use arguments::{Argument, argument_list};
 pub use compilation::{CompilationConstantHeader, compilation_constant_header};
 pub use group::parenthesized_expression_end;
 pub use parameter::array_parameter_modifiers;
 pub use procedure::{ProcedureHeader, ProcedureKind, procedure_header, scalar_return_type};
+pub use with_blocks::{WithBlock, with_blocks};
 
 /// A syntactically valid pointer path borrowing its original source bytes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
