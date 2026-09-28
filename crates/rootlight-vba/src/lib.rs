@@ -4,10 +4,12 @@
 
 #![forbid(unsafe_code)]
 
+mod compilation;
 mod group;
 mod parameter;
 mod procedure;
 
+pub use compilation::{CompilationConstantHeader, compilation_constant_header};
 pub use group::parenthesized_expression_end;
 pub use parameter::array_parameter_modifiers;
 pub use procedure::{ProcedureHeader, ProcedureKind, procedure_header};

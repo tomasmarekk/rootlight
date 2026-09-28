@@ -808,14 +808,28 @@ impl<'a> ClassicIndex<'a> {
                     blocked_sources.insert(*file);
                     continue;
                 };
-                // Without a selected compilation profile, conditional declarations
-                // can change both the local barrier and project-wide uniqueness.
-                for line in bytes.split(|byte| matches!(byte, b'\r' | b'\n')) {
+                // Branch directives can change local and project-wide uniqueness.
+                // A #Const alone only defines a separate compiler-constant name;
+                // it cannot remove or introduce runtime declarations (MS-VBAL 3.4).
+                let mut remaining = *bytes;
+                while let Some(line) = remaining
+                    .split_inclusive(|byte| matches!(byte, b'\r' | b'\n'))
+                    .next()
+                {
                     cancellation.check()?;
                     work.consume_many(line.len().div_ceil(64).max(1))?;
-                    if line.trim_ascii_start().starts_with(b"#") {
+                    if line.trim_ascii_start().starts_with(b"#")
+                        && rootlight_vba::compilation_constant_header(remaining, &mut || {
+                            cancellation.check()?;
+                            work.consume()
+                        })?
+                        .is_none()
+                    {
                         source_complete = false;
                     }
+                    remaining = remaining
+                        .get(line.len()..)
+                        .ok_or(ResolutionError::ClassicSourceIdentity)?;
                 }
                 for entity in declarations.get(file).into_iter().flatten() {
                     cancellation.check()?;
