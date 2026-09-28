@@ -24,64 +24,83 @@ struct Contract<'a> {
     names: BTreeMap<String, usize>,
 }
 
-pub(super) fn extend<'a>(
-    result: &mut ClassicIndex<'a>,
-    index: &CandidateIndex<'a>,
-    occurrences: &[OccurrenceRecord],
-    sources: &BTreeMap<FileId, &[u8]>,
-    cancellation: &Cancellation,
-    work: &mut ResolutionWorkBudget,
-) -> Result<(), ResolutionError> {
-    let mut parameters: BTreeMap<SymbolId, Vec<&EntityRecord>> = BTreeMap::new();
-    for entity in index.entities.values() {
-        cancellation.check()?;
-        work.consume()?;
-        if entity.kind == EntityKind::Parameter
-            && let Some(ContainerRef::Entity(owner)) = entity.container
-        {
-            parameters.entry(owner).or_default().push(entity);
+pub(super) struct CallIndex<'a, 'o> {
+    parameters: BTreeMap<SymbolId, Vec<&'a EntityRecord>>,
+    definitions: BTreeMap<SymbolId, Option<&'o SourceRef>>,
+    callees: BTreeMap<(FileId, u64, u64), Option<&'o OccurrenceRecord>>,
+    applications: BTreeMap<(FileId, u64), BTreeSet<u64>>,
+    contracts: BTreeMap<SymbolId, Option<Contract<'a>>>,
+}
+
+impl<'a, 'o> CallIndex<'a, 'o> {
+    pub(super) fn build(
+        index: &CandidateIndex<'a>,
+        occurrences: &'o [OccurrenceRecord],
+        cancellation: &Cancellation,
+        work: &mut ResolutionWorkBudget,
+    ) -> Result<Self, ResolutionError> {
+        let mut parameters: BTreeMap<SymbolId, Vec<&EntityRecord>> = BTreeMap::new();
+        for entity in index.entities.values() {
+            cancellation.check()?;
+            work.consume()?;
+            if entity.kind == EntityKind::Parameter
+                && let Some(ContainerRef::Entity(owner)) = entity.container
+            {
+                parameters.entry(owner).or_default().push(entity);
+            }
         }
+        let mut definitions = BTreeMap::new();
+        let mut callees = BTreeMap::new();
+        let mut applications: BTreeMap<_, BTreeSet<_>> = BTreeMap::new();
+        for site in occurrences {
+            cancellation.check()?;
+            work.consume()?;
+            if site.role == OccurrenceRole::Definition
+                && let OccurrenceTarget::Resolved { symbol } = site.target
+            {
+                definitions
+                    .entry(symbol)
+                    .and_modify(|prior| *prior = None)
+                    .or_insert(Some(&site.source));
+            }
+            let key = (site.file, site.source.span().start_byte());
+            if site.syntax_kind == "vba.application.reference" {
+                let end = site.source.span().end_byte();
+                applications.entry(key).or_default().insert(end);
+            }
+            if site.syntax_kind == "vba.invoked_member.reference" {
+                callees
+                    .entry((key.0, key.1, site.source.span().end_byte()))
+                    .and_modify(|prior| *prior = None)
+                    .or_insert(Some(site));
+            }
+        }
+        Ok(Self {
+            parameters,
+            definitions,
+            callees,
+            applications,
+            contracts: BTreeMap::new(),
+        })
     }
-    let mut definitions = BTreeMap::new();
-    let mut callees = BTreeMap::new();
-    let mut first_applications = BTreeMap::new();
-    for site in occurrences {
-        cancellation.check()?;
-        work.consume()?;
-        if site.role == OccurrenceRole::Definition
-            && let OccurrenceTarget::Resolved { symbol } = site.target
-        {
-            definitions
-                .entry(symbol)
-                .and_modify(|prior| *prior = None)
-                .or_insert(Some(&site.source));
-        }
-        let key = (site.file, site.source.span().start_byte());
-        if site.syntax_kind == "vba.application.reference" {
-            let end = site.source.span().end_byte();
-            first_applications
-                .entry(key)
-                .and_modify(|prior: &mut u64| *prior = (*prior).min(end))
-                .or_insert(end);
-        }
-        if site.syntax_kind == "vba.invoked_member.reference" && result.is_call(site) {
-            callees
-                .entry(key)
-                .and_modify(|prior| *prior = None)
-                .or_insert(Some(site));
-        }
-    }
-    let mut contracts = BTreeMap::new();
-    for site in occurrences {
+
+    pub(super) fn resolve(
+        &mut self,
+        result: &mut ClassicIndex<'a>,
+        site: &OccurrenceRecord,
+        sources: &BTreeMap<FileId, &[u8]>,
+        cancellation: &Cancellation,
+        work: &mut ResolutionWorkBudget,
+    ) -> Result<(), ResolutionError> {
         cancellation.check()?;
         work.consume()?;
         if site.syntax_kind != "vba.application.reference"
             || !matches!(site.target, OccurrenceTarget::Unresolved { .. })
         {
-            continue;
+            return Ok(());
         }
         let Some(bytes) = source_bytes(&site.source, sources) else {
-            continue;
+            return Ok(());
         };
         work.consume_many(bytes.len().div_ceil(64).max(1))?;
         let mut check = || {
@@ -104,22 +123,30 @@ pub(super) fn extend<'a>(
             .ok()
             .and_then(|n| site.source.span().start_byte().checked_add(n))
         else {
-            continue;
+            return Ok(());
         };
         let key = (site.file, start);
-        // An outer application may dispatch on the inner call's returned object,
-        // rather than invoke the source-defined procedure a second time.
-        if first_applications
-            .get(&key)
-            .is_some_and(|end| *end < site.source.span().end_byte())
-        {
-            continue;
-        }
-        let Some(callee) = callees.get(&key).copied().flatten() else {
-            continue;
+        let Some(callee) = self
+            .callees
+            .range((key.0, key.1, 0)..=(key.0, key.1, site.source.span().end_byte()))
+            .next_back()
+            .and_then(|(_, site)| *site)
+        else {
+            return Ok(());
         };
+        // An intervening application dispatches on a returned object, not on
+        // this callee. Earlier receiver calls may precede a later named callee.
+        if !result.is_call(callee)
+            || self.applications.get(&key).is_some_and(|ends| {
+                ends.range(callee.source.span().end_byte()..site.source.span().end_byte())
+                    .next()
+                    .is_some()
+            })
+        {
+            return Ok(());
+        }
         let Some(proof) = result.proof(callee) else {
-            continue;
+            return Ok(());
         };
         let Some(relative_end) = callee
             .source
@@ -128,24 +155,29 @@ pub(super) fn extend<'a>(
             .checked_sub(site.source.span().start_byte())
             .and_then(|end| usize::try_from(end).ok())
         else {
-            continue;
+            return Ok(());
         };
         let Some(tail) = bytes.get(relative_end..) else {
-            continue;
+            return Ok(());
         };
-        if let std::collections::btree_map::Entry::Vacant(entry) = contracts.entry(proof.target.id)
+        if let std::collections::btree_map::Entry::Vacant(entry) =
+            self.contracts.entry(proof.target.id)
         {
-            let owned = parameters.remove(&proof.target.id).unwrap_or_default();
+            let owned = self.parameters.remove(&proof.target.id).unwrap_or_default();
             entry.insert(contract(
                 proof.target,
                 owned,
-                &definitions,
+                &self.definitions,
                 sources,
                 &mut check,
             )?);
         }
-        let Some(contract) = contracts.get(&proof.target.id).and_then(Option::as_ref) else {
-            continue;
+        let Some(contract) = self
+            .contracts
+            .get(&proof.target.id)
+            .and_then(Option::as_ref)
+        else {
+            return Ok(());
         };
         if !arguments_match(
             tail,
@@ -154,7 +186,7 @@ pub(super) fn extend<'a>(
             &contract.names,
             &mut check,
         )? {
-            continue;
+            return Ok(());
         }
         let application_proof = Proof {
             target: proof.target,
@@ -163,12 +195,20 @@ pub(super) fn extend<'a>(
             rule: ResolutionRule::ClassicProjectMember,
             getter_read: false,
         };
-        result
-            .application_parameters
-            .insert(site.id, Arc::clone(&contract.parameters));
+        let parameters = if let Some(inherited) = result.application_parameters.get(&callee.id) {
+            let mut combined = BTreeMap::new();
+            for parameter in inherited.iter().chain(contract.parameters.iter()) {
+                check()?;
+                combined.insert(parameter.id, *parameter);
+            }
+            Arc::new(combined.into_values().collect())
+        } else {
+            Arc::clone(&contract.parameters)
+        };
+        result.application_parameters.insert(site.id, parameters);
         result.proofs.insert(site.id, application_proof);
+        Ok(())
     }
-    Ok(())
 }
 
 fn source_bytes<'s>(source: &SourceRef, sources: &BTreeMap<FileId, &'s [u8]>) -> Option<&'s [u8]> {

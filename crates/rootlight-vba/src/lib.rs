@@ -14,7 +14,7 @@ pub use arguments::{Argument, argument_list};
 pub use compilation::{CompilationConstantHeader, compilation_constant_header};
 pub use group::parenthesized_expression_end;
 pub use parameter::array_parameter_modifiers;
-pub use procedure::{ProcedureHeader, ProcedureKind, procedure_header};
+pub use procedure::{ProcedureHeader, ProcedureKind, procedure_header, scalar_return_type};
 
 /// A syntactically valid pointer path borrowing its original source bytes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -122,6 +122,60 @@ pub fn procedure_pointer_path<'a, E>(
                 result.last = last;
             }
             None | Some(b',' | b')' | b'\r' | b'\n' | b':' | b'\'') => return Ok(Some(result)),
+            _ => return Ok(None),
+        }
+    }
+}
+
+/// Reads the final member and exact receiver end of a complete dot/application chain.
+///
+/// Names and balanced application groups are checked without evaluating expressions.
+/// The receiver retains authored brackets, arguments and logical continuations;
+/// its end excludes trivia before the final dot. Leading implicit dots, bang
+/// dispatch, incomplete groups and nonmember suffixes return None. Callers must
+/// independently prove every receiver binding, invocation and return type.
+/// No allocation or recursive parsing occurs. The callback bounds all scans.
+///
+/// # Errors
+/// Propagates the caller's cancellation/work error unchanged.
+pub fn member_access_receiver<'a, E>(
+    source: &'a [u8],
+    check: &mut impl FnMut() -> Result<(), E>,
+) -> Result<Option<(usize, &'a [u8])>, E> {
+    check()?;
+    let mut cursor = 0;
+    if name(source, &mut cursor, check)?.is_none() {
+        return Ok(None);
+    }
+    let mut expression_end = cursor;
+    let mut member = None;
+    loop {
+        let before_trivia = cursor;
+        let continued = trivia(source, &mut cursor, check)?;
+        match source.get(cursor) {
+            Some(b'.') => {
+                if cursor != before_trivia && !continued {
+                    return Ok(None);
+                }
+                cursor += 1;
+                trivia(source, &mut cursor, check)?;
+                let Some(last) = name(source, &mut cursor, check)? else {
+                    return Ok(None);
+                };
+                member = Some((expression_end, last));
+                expression_end = cursor;
+            }
+            Some(b'(') => {
+                let Some(end) =
+                    parenthesized_expression_end(source.get(cursor..).unwrap_or_default(), check)?
+                else {
+                    return Ok(None);
+                };
+                cursor += end;
+                expression_end = cursor;
+                member = None;
+            }
+            None if cursor == before_trivia => return Ok(member),
             _ => return Ok(None),
         }
     }
@@ -245,6 +299,78 @@ mod tests {
                 "{source}"
             );
             assert_eq!(path.last(), last.as_bytes());
+        }
+    }
+
+    #[test]
+    fn member_receivers_preserve_nested_application_boundaries() {
+        for (text, receiver, member) in [
+            ("factory.Build(1).Value", "factory.Build(1)", "Value"),
+            (
+                "[factory].Build(other(1, 2), \".)\").[Value]",
+                "[factory].Build(other(1, 2), \".)\")",
+                "Value",
+            ),
+            (
+                "factory.Build (1) _\r\n. _\nValue",
+                "factory.Build (1)",
+                "Value",
+            ),
+            (
+                "factory.Build().Next(2).Value",
+                "factory.Build().Next(2)",
+                "Value",
+            ),
+            ("data.Field", "data", "Field"),
+        ] {
+            let (end, name) = member_access_receiver(text.as_bytes(), &mut || Ok::<(), ()>(()))
+                .unwrap()
+                .unwrap();
+            assert_eq!(text.get(..end), Some(receiver));
+            assert_eq!(name, member.as_bytes());
+        }
+        for text in [
+            "factory.Build(1",
+            "factory.Build() .Value",
+            "factory.Build()\n.Value",
+            ".Value",
+            "factory!Value",
+            "factory.Build().Value()",
+            "factory.Build().Value ",
+            "factory.Build().Value + 1",
+        ] {
+            assert!(
+                member_access_receiver(text.as_bytes(), &mut || Ok::<(), ()>(()))
+                    .unwrap()
+                    .is_none(),
+                "{text}"
+            );
+        }
+    }
+
+    #[test]
+    fn member_receiver_scans_cancel_and_preserve_arbitrary_byte_bounds() {
+        let long = format!("factory.Build(\"{}\").Value", "x".repeat(8192));
+        let mut calls = 0;
+        assert_eq!(
+            member_access_receiver(long.as_bytes(), &mut || {
+                calls += 1;
+                if calls == 4 { Err("cancelled") } else { Ok(()) }
+            }),
+            Err("cancelled")
+        );
+        for byte in 0..=u8::MAX {
+            let bytes = [b'x', b'(', byte, b')', b'.', b'y'];
+            for end in 0..=bytes.len() {
+                let input = bytes.get(..end).unwrap();
+                if let Some((receiver, member)) =
+                    member_access_receiver(input, &mut || Ok::<(), ()>(())).unwrap()
+                {
+                    assert!(receiver < input.len());
+                    assert!(!member.is_empty());
+                    assert!(member.len() <= input.len() - receiver);
+                }
+            }
         }
     }
 

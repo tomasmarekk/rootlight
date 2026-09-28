@@ -168,6 +168,57 @@ pub fn procedure_header<'a, E>(
     }))
 }
 
+/// Returns the exact scalar return-type range in a Function or Property Get header.
+///
+/// Requires a complete parameter group and an explicit As clause. Arrays, type
+/// suffixes, construction modifiers and malformed clauses return None. The range
+/// is relative to the supplied declaration, preserving qualified names. This is
+/// spelling evidence only; the caller proves the type's identity and visibility.
+///
+/// # Errors
+/// Propagates the caller's cancellation/work error unchanged.
+pub fn scalar_return_type<E>(
+    source: &[u8],
+    check: &mut impl FnMut() -> Result<(), E>,
+) -> Result<Option<Range<usize>>, E> {
+    let Some(header) = procedure_header(source, check)? else {
+        return Ok(None);
+    };
+    if !matches!(
+        header.kind(),
+        ProcedureKind::Function | ProcedureKind::PropertyGet
+    ) || source
+        .get(header.name_span().end.saturating_sub(1))
+        .is_some_and(|byte| b"%&^!#@$".contains(byte))
+    {
+        return Ok(None);
+    }
+    let mut cursor = header.name_span().end;
+    cursor += logical_whitespace_len(source.get(cursor..).unwrap_or_default(), check)?;
+    let Some(end) =
+        super::parenthesized_expression_end(source.get(cursor..).unwrap_or_default(), check)?
+    else {
+        return Ok(None);
+    };
+    cursor += end;
+    if logical_whitespace_len(source.get(cursor..).unwrap_or_default(), check)? == 0 {
+        return Ok(None);
+    }
+    if !next_word(source, &mut cursor, check)?.eq_ignore_ascii_case(b"As") {
+        return Ok(None);
+    }
+    let separator = logical_whitespace_len(source.get(cursor..).unwrap_or_default(), check)?;
+    if separator == 0 {
+        return Ok(None);
+    }
+    cursor += separator;
+    let Some(ty) = super::procedure_pointer_path(source.get(cursor..).unwrap_or_default(), check)?
+    else {
+        return Ok(None);
+    };
+    Ok(Some(cursor..cursor + ty.end()))
+}
+
 fn next_word<'a, E>(
     source: &'a [u8],
     cursor: &mut usize,
@@ -190,6 +241,48 @@ fn next_word<'a, E>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn scalar_return_ranges_exclude_arrays_and_body_type_mentions() {
+        for (source, expected) in [
+            (
+                "Public Function Build(value As Long) As Product\nEnd Function",
+                Some("Product"),
+            ),
+            (
+                "Function Build() _\r\n As _\n [Module].[Product] ' note\nEnd Function",
+                Some("[Module].[Product]"),
+            ),
+            (
+                "Property Get Item() As Product: End Property",
+                Some("Product"),
+            ),
+            ("Function Build() As Product()\nEnd Function", None),
+            ("Function Build()\nDim item As Product\nEnd Function", None),
+            ("Function Build() As New Product\nEnd Function", None),
+            ("Function Build$() As Product\nEnd Function", None),
+            ("Sub Build() As Product\nEnd Sub", None),
+            ("Function Build( As Product", None),
+        ] {
+            let range = scalar_return_type(source.as_bytes(), &mut || Ok::<(), ()>(())).unwrap();
+            assert_eq!(
+                range.and_then(|range| source.get(range)),
+                expected,
+                "{source}"
+            );
+        }
+        let source = b"Function Build() As Product";
+        assert_eq!(
+            scalar_return_type(source, &mut || Err("cancelled")),
+            Err("cancelled")
+        );
+        for end in 0..=source.len() {
+            let input = source.get(..end).unwrap();
+            if let Some(range) = scalar_return_type(input, &mut || Ok::<(), ()>(())).unwrap() {
+                assert!(range.start < range.end && range.end <= input.len());
+            }
+        }
+    }
 
     #[test]
     fn prefixes_preserve_category_name_and_source_boundaries() {

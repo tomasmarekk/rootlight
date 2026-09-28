@@ -163,6 +163,45 @@ fn procedure_kind(
         .map(rootlight_vba::ProcedureHeader::kind))
 }
 
+fn scalar_function_return_matches(
+    entity: &EntityRecord,
+    occurrence: &OccurrenceRecord,
+    sources: &BTreeMap<FileId, &[u8]>,
+    cancellation: &Cancellation,
+    work: &mut ResolutionWorkBudget,
+) -> Result<bool, ResolutionError> {
+    if procedure_kind(entity, sources, cancellation, work)?
+        != Some(rootlight_vba::ProcedureKind::Function)
+    {
+        return Ok(false);
+    }
+    let Some(source) = entity.evidence.source.as_ref() else {
+        return Ok(false);
+    };
+    let span = source.span();
+    let Some(bytes) = sources.get(&span.file()).and_then(|bytes| {
+        bytes.get(usize::try_from(span.start_byte()).ok()?..usize::try_from(span.end_byte()).ok()?)
+    }) else {
+        return Ok(false);
+    };
+    let Some(ty) = rootlight_vba::scalar_return_type(bytes, &mut || {
+        cancellation.check()?;
+        work.consume()
+    })?
+    else {
+        return Ok(false);
+    };
+    Ok(occurrence.file == span.file()
+        && u64::try_from(ty.start)
+            .ok()
+            .and_then(|offset| span.start_byte().checked_add(offset))
+            == Some(occurrence.source.span().start_byte())
+        && u64::try_from(ty.end)
+            .ok()
+            .and_then(|offset| span.start_byte().checked_add(offset))
+            == Some(occurrence.source.span().end_byte()))
+}
+
 fn property_accessor_kind(
     entity: &EntityRecord,
     sources: &BTreeMap<FileId, &[u8]>,
@@ -260,22 +299,19 @@ fn member_access_parts<'a>(
 ) -> Result<Option<(&'a str, &'a str)>, ResolutionError> {
     cancellation.check()?;
     work.consume_many(text.len().div_ceil(64).max(1))?;
-    let Some(path) = rootlight_vba::procedure_pointer_path(text, &mut || {
+    let Some((receiver_end, member)) = rootlight_vba::member_access_receiver(text, &mut || {
         cancellation.check()?;
         work.consume()
     })?
     else {
         return Ok(None);
     };
-    if path.end() != text.len() {
-        return Ok(None);
-    }
-    let Some(receiver) = path.receiver_end().and_then(|end| text.get(..end)) else {
+    let Some(receiver) = text.get(..receiver_end) else {
         return Ok(None);
     };
     Ok(std::str::from_utf8(receiver)
         .ok()
-        .zip(std::str::from_utf8(path.last()).ok()))
+        .zip(std::str::from_utf8(member).ok()))
 }
 
 fn member_path(manifest: &str, value: &str) -> Option<String> {
@@ -1200,14 +1236,27 @@ impl<'a> ClassicIndex<'a> {
                         | EntityKind::Variable
                         | EntityKind::Field
                         | EntityKind::Property
+                        | EntityKind::Function
+                        | EntityKind::Method
                 )
-                // Expression-side type uses do not declare an enclosing
-                // property's return type or an assignment receiver's type.
+                // Expression-side type uses do not declare a procedure's
+                // return type or an assignment receiver's type.
                 && matches!(occurrence.syntax_kind.as_str(),
                     "vba.direct_type_identifier.reference"
                     | "vba.automatic_type_identifier.reference"
                     | "vba.type_identifier.reference")
             {
+                if matches!(owner.kind, EntityKind::Function | EntityKind::Method)
+                    && !scalar_function_return_matches(
+                        owner,
+                        occurrence,
+                        &sources,
+                        cancellation,
+                        work,
+                    )?
+                {
+                    continue;
+                }
                 let typed = result
                     .proof(occurrence)
                     .map(|proof| (proof.target, Arc::clone(&proof.context)))
@@ -1287,8 +1336,15 @@ impl<'a> ClassicIndex<'a> {
         let mut module_qualifiers = BTreeMap::new();
         let mut member_occurrences = Vec::new();
         let mut read_receivers = BTreeSet::new();
+        let mut calls = calls::CallIndex::build(index, occurrences, cancellation, work)?;
         for occurrence in occurrences {
             cancellation.check()?;
+            if occurrence.syntax_kind == "vba.application.reference"
+                && matches!(occurrence.target, OccurrenceTarget::Unresolved { .. })
+            {
+                member_occurrences.push((occurrence, None));
+                continue;
+            }
             if occurrence.syntax_kind == "vba.value_identifier.reference"
                 && occurrence.role == OccurrenceRole::Reference
                 && matches!(occurrence.target, OccurrenceTarget::Unresolved { .. })
@@ -1331,7 +1387,7 @@ impl<'a> ClassicIndex<'a> {
                     read_receivers.insert(receiver_span);
                 }
                 if matches!(occurrence.target, OccurrenceTarget::Unresolved { .. }) {
-                    member_occurrences.push((occurrence, receiver, name));
+                    member_occurrences.push((occurrence, Some((receiver, name))));
                     continue;
                 }
             }
@@ -1339,17 +1395,28 @@ impl<'a> ClassicIndex<'a> {
             // participate; lexical scans have their own bounded work charges.
             work.consume()?;
         }
-        // Inner member expressions have shorter source spans than their
-        // enclosing chains, independent of the normalized record order.
-        member_occurrences.sort_unstable_by_key(|(occurrence, ..)| {
+        // Resolve receivers before enclosing members/applications, independent
+        // of record order. A bare callee and application may share a span;
+        // member selection must precede argument validation in that case.
+        member_occurrences.sort_unstable_by_key(|(occurrence, member)| {
             let span = occurrence.source.span();
-            (span.end_byte() - span.start_byte(), span)
+            (span.end_byte() - span.start_byte(), span, member.is_none())
         });
         let mut resolved_members = BTreeMap::new();
-        for (occurrence, receiver, member) in member_occurrences {
+        for (occurrence, member) in member_occurrences {
             cancellation.check()?;
             work.consume()?;
             let span = occurrence.source.span();
+            let Some((receiver, member)) = member else {
+                calls.resolve(&mut result, occurrence, &sources, cancellation, work)?;
+                if result.proof(occurrence).is_some() {
+                    resolved_members
+                        .entry(span)
+                        .and_modify(|prior| *prior = None)
+                        .or_insert(Some(occurrence.id));
+                }
+                continue;
+            };
             let Some(name) = identifier(member) else {
                 continue;
             };
@@ -1371,13 +1438,19 @@ impl<'a> ClassicIndex<'a> {
                     })
             } else if receiver.contains('.') {
                 // A qualified receiver requires the shorter exact expression:
-                // a declared UDT field or a project-typed property result.
+                // a field, property result or argument-validated function result.
                 resolved_members
                     .get(&receiver_span)
                     .and_then(|id: &Option<FactId>| *id)
                     .and_then(|id| result.proofs.get(&id))
                     .filter(|proof| {
-                        matches!(proof.target.kind, EntityKind::Field | EntityKind::Property)
+                        matches!(
+                            proof.target.kind,
+                            EntityKind::Field
+                                | EntityKind::Property
+                                | EntityKind::Function
+                                | EntityKind::Method
+                        )
                     })
                     .and_then(|proof| value_types.get(&proof.target.id))
                     .and_then(Option::as_ref)
@@ -1388,6 +1461,10 @@ impl<'a> ClassicIndex<'a> {
                                 (EntityKind::Field, EntityKind::Struct)
                                     | (
                                         EntityKind::Property,
+                                        EntityKind::Class | EntityKind::Struct
+                                    )
+                                    | (
+                                        EntityKind::Function | EntityKind::Method,
                                         EntityKind::Class | EntityKind::Struct
                                     )
                             )
@@ -1588,6 +1665,16 @@ impl<'a> ClassicIndex<'a> {
             if !accessible {
                 continue;
             }
+            if let Some(parameters) = resolved_members
+                .get(&receiver_span)
+                .and_then(|id| *id)
+                .and_then(|id| result.application_parameters.get(&id))
+                .cloned()
+            {
+                result
+                    .application_parameters
+                    .insert(occurrence.id, parameters);
+            }
             if receiver_type.kind == EntityKind::Enum
                 && let Some(qualifier) =
                     module_qualifiers.get(&receiver_span).and_then(|site| *site)
@@ -1630,14 +1717,6 @@ impl<'a> ClassicIndex<'a> {
                     .or_insert(Some(occurrence.id));
             }
         }
-        calls::extend(
-            &mut result,
-            index,
-            occurrences,
-            &sources,
-            cancellation,
-            work,
-        )?;
         Ok(result)
     }
 
