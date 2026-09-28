@@ -219,7 +219,7 @@ const PROJECT_FACTS_TRUNCATED_CODE: &str = "project-adapter-facts-truncated";
 const PROJECT_FACTS_TRUNCATED_MESSAGE: &str =
     "additional project semantic facts were omitted by aggregate resource limits";
 const AGGREGATE_DIAGNOSTICS_TRUNCATED_CODE: &str = "aggregate-diagnostics-truncated";
-const ANALYZER_BINARY_SEED: &[u8] = b"rootlight.first-slice.treesitter-structural/167";
+const ANALYZER_BINARY_SEED: &[u8] = b"rootlight.first-slice.treesitter-structural/168";
 const RESOLVER_BINARY_SEED: &[u8] = b"rootlight.first-slice.resolve/46";
 const INCREMENTAL_PROVIDER_SEED: &[u8] = b"rootlight.first-slice.incremental-provider/1";
 const LANGUAGE_DISPOSITION_PROVIDER_SEED: &[u8] = b"rootlight.first-slice.language-disposition/5";
@@ -19578,12 +19578,31 @@ fn compact_lexical_summaries(
             .or_default()
             .push(extension);
     }
-    for entries in grouped.into_values() {
+    for mut entries in grouped.into_values() {
+        // Fact IDs change with the generation. Partition by source location so
+        // clean rebuilds pack the same logical summaries into the same batches.
+        entries.sort_unstable_by_key(lexical_summary_span);
         let mut offset = 0;
         while offset < entries.len() {
             let mut count =
                 (entries.len() - offset).min(rootlight_ir::MAX_LEXICAL_SUMMARY_BATCH_ENTRIES);
             let batch = loop {
+                // Co-located summaries can refer to different generation-bound
+                // facts. Never let their incidental ID order choose membership
+                // on opposite sides of a batch or payload-size boundary.
+                while count > 0
+                    && offset + count < entries.len()
+                    && lexical_summary_span(&entries[offset + count - 1])
+                        == lexical_summary_span(&entries[offset + count])
+                {
+                    count -= 1;
+                }
+                if count == 0 {
+                    let span = lexical_summary_span(&entries[offset]);
+                    count = entries[offset..]
+                        .partition_point(|entry| lexical_summary_span(entry) == span);
+                    break None;
+                }
                 if count < 8 {
                     break None;
                 }
@@ -19609,6 +19628,10 @@ fn compact_lexical_summaries(
     }
     source.extensions = retained;
     Ok(())
+}
+
+fn lexical_summary_span(extension: &ExtensionEnvelope) -> Option<SourceSpan> {
+    extension.evidence.source.as_ref().map(SourceRef::span)
 }
 
 fn previous_optional_extension(
@@ -50045,6 +50068,95 @@ mod tests {
     }
 
     #[test]
+    fn summary_partitions_preserve_colocated_evidence_across_generations() {
+        let mut boundary_spans = (0..96).collect::<Vec<u64>>();
+        boundary_spans.extend(std::iter::repeat_n(96, 64));
+        boundary_spans.extend(97..145);
+        let mut oversized_spans = vec![0; rootlight_ir::MAX_LEXICAL_SUMMARY_BATCH_ENTRIES + 1];
+        oversized_spans.extend(1..50);
+        let default_payload_limit = IrLimits::default().max_extension_payload_bytes;
+        for (spans, payload_limit) in [
+            (boundary_spans.clone(), default_payload_limit),
+            (oversized_spans, default_payload_limit),
+            (boundary_spans, 4 * 1024),
+        ] {
+            let mut partitions = Vec::new();
+            for generation_byte in [61, 62] {
+                let repository = derive_repository(b"summary-partition-fixture").id();
+                let generation = GenerationId::from_bytes([generation_byte; 20]);
+                let file = FileId::from_bytes([63; 20]);
+                let provenance = FactId::from_bytes([generation_byte; 20]);
+                let mut document = NormalizedIrDocument::empty(repository, generation);
+                for (index, &start) in spans.iter().enumerate() {
+                    let subject = rootlight_ids::derive_fact(
+                        "summary-fixture-subject",
+                        format!("{generation_byte}:{index}").as_bytes(),
+                    )
+                    .id();
+                    let evidence = rootlight_ir::LexicalEvidenceV1::from_complete_text(
+                        rootlight_ir::LexicalEvidenceKind::CommentSummary,
+                        FactRef::Fact(subject),
+                        rootlight_ir::LexicalEvidenceFormat::PlainText,
+                        &format!("summary {index}"),
+                    )
+                    .unwrap();
+                    let source = SourceRef::new(
+                        repository,
+                        generation,
+                        SourceSpan::new(file, start, start + 1).unwrap(),
+                        content_hash(b"fixture"),
+                        None,
+                    );
+                    document.extensions.push(
+                        rootlight_ir::new_lexical_evidence_envelope(
+                            repository, generation, provenance, source, &evidence,
+                        )
+                        .unwrap(),
+                    );
+                }
+                document.extensions.sort_unstable_by_key(|entry| entry.id);
+                let original = document.extensions.clone();
+                if generation_byte == 62 {
+                    document.extensions.reverse();
+                }
+                let mut limits = IrLimits::default();
+                limits.max_extension_payload_bytes = payload_limit;
+                compact_lexical_summaries(&mut document, &limits).unwrap();
+                let mut reconstructed = Vec::new();
+                let mut groups = Vec::new();
+                for envelope in document.extensions {
+                    let children =
+                        if envelope.version == rootlight_ir::LEXICAL_SUMMARY_BATCH_VERSION {
+                            assert!(envelope.payload.len() <= payload_limit);
+                            rootlight_ir::decode_lexical_summary_batch_envelope(&envelope).unwrap()
+                        } else {
+                            vec![envelope]
+                        };
+                    let mut group = children
+                        .iter()
+                        .map(|child| {
+                            let evidence =
+                                rootlight_ir::decode_lexical_evidence_envelope(child).unwrap();
+                            (lexical_summary_span(child), evidence.text().to_owned())
+                        })
+                        .collect::<Vec<_>>();
+                    group.sort_unstable();
+                    groups.push(group);
+                    reconstructed.extend(children);
+                }
+                reconstructed.sort_unstable_by_key(|entry| entry.id);
+                assert_eq!(
+                    reconstructed, original,
+                    "every source, subject and payload must survive packing"
+                );
+                groups.sort_unstable();
+                partitions.push(groups);
+            }
+            assert_eq!(partitions[0], partitions[1]);
+        }
+    }
+
+    #[test]
     fn evicted_summary_batch_charges_each_logical_extension() {
         let repository = derive_repository(b"optional-summary-batch-eviction").id();
         let generation = GenerationId::from_bytes([51; 20]);
@@ -50411,6 +50523,54 @@ mod tests {
             work.cause() != FirstSliceFactWorkCause::CompleteDependencyMatch
                 && work.cause() != FirstSliceFactWorkCause::UserRequestedCleanRebuild
         }));
+    }
+
+    #[test]
+    fn clean_rebuild_preserves_multi_batch_summary_identity() {
+        let fixture = TempDir::new().unwrap();
+        let source = (0..(rootlight_ir::MAX_LEXICAL_SUMMARY_BATCH_ENTRIES * 2 + 17))
+            .map(|index| format!("// Description {index}\nfn item_{index}() {{}}\n"))
+            .collect::<String>();
+        let path = fixture.path().join("lib.rs");
+        fs::write(&path, &source).unwrap();
+        let cancellation = deadline();
+        let mut service = FirstSliceService::new(4).unwrap();
+        let first = service
+            .index_repository(fixture.path(), &cancellation)
+            .unwrap();
+        let snapshot = service
+            .loaded_generation_snapshot(first.generation)
+            .unwrap();
+        let batches = snapshot
+            .document()
+            .extensions
+            .iter()
+            .filter(|extension| {
+                extension.namespace == LEXICAL_EXTENSION_NAMESPACE
+                    && extension.version == rootlight_ir::LEXICAL_SUMMARY_BATCH_VERSION
+            })
+            .count();
+        assert!(batches > 1, "fixture must cross a summary batch boundary");
+        drop(snapshot);
+        let rebuilt = service
+            .index_repository_with_options(
+                fixture.path(),
+                FirstSliceIndexOptions::clean_rebuild(FirstSliceIndexMode::Structural),
+                &cancellation,
+            )
+            .unwrap();
+        assert_ne!(first.generation, rebuilt.generation);
+        assert_eq!(first.logical_snapshot, rebuilt.logical_snapshot);
+        fs::write(&path, source.replacen("{}", "{ let value = 1; }", 1)).unwrap();
+        let changed = service
+            .index_repository(fixture.path(), &deadline())
+            .unwrap();
+        assert_ne!(changed.logical_snapshot, first.logical_snapshot);
+        fs::write(&path, &source).unwrap();
+        let restored = service
+            .index_repository(fixture.path(), &deadline())
+            .unwrap();
+        assert_eq!(restored.logical_snapshot, first.logical_snapshot);
     }
 
     #[test]
