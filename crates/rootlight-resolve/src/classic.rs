@@ -5,6 +5,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
+mod calls;
+
 use rootlight_cancel::Cancellation;
 use rootlight_ids::{ContentHash, FactId, FileId, SymbolId, content_hash};
 use rootlight_ir::{
@@ -92,6 +94,7 @@ pub enum NativeClassicMemberKind {
 #[derive(Default)]
 pub(crate) struct ClassicIndex<'a> {
     proofs: BTreeMap<FactId, Proof<'a>>,
+    application_parameters: BTreeMap<FactId, Arc<Vec<&'a EntityRecord>>>,
 }
 
 pub(crate) struct Proof<'a> {
@@ -1627,11 +1630,28 @@ impl<'a> ClassicIndex<'a> {
                     .or_insert(Some(occurrence.id));
             }
         }
+        calls::extend(
+            &mut result,
+            index,
+            occurrences,
+            &sources,
+            cancellation,
+            work,
+        )?;
         Ok(result)
     }
 
     pub(crate) fn proof(&self, occurrence: &OccurrenceRecord) -> Option<&Proof<'a>> {
         self.proofs.get(&occurrence.id)
+    }
+
+    pub(crate) fn application_parameters(
+        &self,
+        occurrence: &OccurrenceRecord,
+    ) -> &[&'a EntityRecord] {
+        self.application_parameters
+            .get(&occurrence.id)
+            .map_or(&[], |parameters| parameters.as_slice())
     }
 
     pub(crate) fn is_call(&self, occurrence: &OccurrenceRecord) -> bool {

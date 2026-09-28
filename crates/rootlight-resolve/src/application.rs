@@ -654,6 +654,17 @@ fn reconcile_vba_target_gaps(
     let mut value_source_counts = BTreeMap::new();
     for site in &document.occurrences {
         cancellation.check()?;
+        if site.syntax_kind == "vba.application.reference"
+            && matches!(site.target, OccurrenceTarget::Resolved { .. })
+            && producers.get(&site.provenance).is_some_and(|(_, record)| {
+                record.rule.as_deref() == Some("classic-project-member-v1.indexed_snapshot")
+            })
+        {
+            resolved.insert(
+                (site.source.clone(), "vba-call-or-index-target-unavailable"),
+                site.provenance,
+            );
+        }
         if let Some(((syntax, detail), _)) = producers.get(&site.provenance)
             && syntax.contains(&site.syntax_kind.as_str())
             && matches!(site.target, OccurrenceTarget::Resolved { .. })
@@ -1451,6 +1462,16 @@ fn build_provenance(
         if let Some((owner, source)) = &proof.receiver {
             derivation_parents.push(FactRef::Entity(owner.id));
             sources.push(source.clone());
+        }
+        for parameter in lookup.classic.application_parameters(occurrence) {
+            derivation_parents.push(FactRef::Entity(parameter.id));
+            sources.extend(parameter.evidence.source.iter().cloned());
+            tier = lower_tier(tier, parameter.tier);
+            let provenance = lookup
+                .provenance
+                .get(&parameter.provenance)
+                .ok_or(ResolutionError::UnsupportedIdentityRemap)?;
+            context_digests.push(provenance.build_context.digest());
         }
     }
 
