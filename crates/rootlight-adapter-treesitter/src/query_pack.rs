@@ -31,6 +31,7 @@ mod r;
 mod scala;
 mod sql;
 pub(super) mod vba;
+mod vba_calls;
 mod yaml;
 
 const QUERY_CURSOR_MATCH_LIMIT: u32 = 4096;
@@ -305,6 +306,7 @@ struct QueryInput<'a> {
     tree: &'a tree_sitter::Tree,
     source: &'a [u8],
     cancellation: &'a Cancellation,
+    normalize_calls: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -492,6 +494,7 @@ impl QueryPack {
                 tree,
                 source,
                 cancellation,
+                normalize_calls: true,
             },
             QueryScanLimits {
                 matches: optional_max_matches,
@@ -549,6 +552,7 @@ impl QueryPack {
                 tree,
                 source,
                 cancellation,
+                normalize_calls: false,
             },
             limits,
             |mut candidate| {
@@ -580,6 +584,21 @@ impl QueryPack {
         limits: QueryScanLimits,
         mut retain: impl FnMut(QueryCandidate) -> Result<(), AdapterError>,
     ) -> Result<Option<QueryLimit>, AdapterError> {
+        let mut match_count = 0usize;
+        let mut capture_count = 0usize;
+        let mut vba_calls = vba_calls::Calls::default();
+        if input.normalize_calls && input.family.is_classic_basic() {
+            let limit = vba_calls.discover(
+                input,
+                limits,
+                &mut match_count,
+                &mut capture_count,
+                &mut retain,
+            )?;
+            if limit.is_some() {
+                return Ok(limit);
+            }
+        }
         let scala_package_prefix_end = if input.family == GrammarFamily::Scala {
             scala::leading_package_end(input.tree.root_node(), input.cancellation)?
         } else {
@@ -604,8 +623,6 @@ impl QueryPack {
         let options = QueryCursorOptions::new().progress_callback(&mut progress);
         let mut matches =
             cursor.matches_with_options(query, input.tree.root_node(), input.source, options);
-        let mut match_count = 0usize;
-        let mut capture_count = 0usize;
         let mut limit = None;
         let mut objective_c_parameters = objective_c::TypeParameterCaptures::default();
         let mut groovy_members = groovy::MemberKinds::default();
@@ -631,6 +648,11 @@ impl QueryPack {
                 let role = self
                     .role_for_capture(capture.index)
                     .ok_or_else(|| query_failure("query-capture-role"))?;
+                if role == StructuralRole::Reference
+                    && vba_calls.contains(capture.node.byte_range())
+                {
+                    continue;
+                }
                 if input.family == GrammarFamily::Lua
                     && role == StructuralRole::Reference
                     && lua_nonlexical_identifier(capture.node)

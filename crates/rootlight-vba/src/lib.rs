@@ -5,6 +5,7 @@
 #![forbid(unsafe_code)]
 
 mod arguments;
+mod call_chain;
 mod compilation;
 mod group;
 mod parameter;
@@ -12,6 +13,9 @@ mod procedure;
 mod with_blocks;
 
 pub use arguments::{Argument, argument_list};
+pub use call_chain::{
+    CallChain, CallChainPart, CallChainRead, CallChainRole, call_chain_statement,
+};
 pub use compilation::{CompilationConstantHeader, compilation_constant_header};
 pub use group::parenthesized_expression_end;
 pub use parameter::array_parameter_modifiers;

@@ -219,7 +219,7 @@ const PROJECT_FACTS_TRUNCATED_CODE: &str = "project-adapter-facts-truncated";
 const PROJECT_FACTS_TRUNCATED_MESSAGE: &str =
     "additional project semantic facts were omitted by aggregate resource limits";
 const AGGREGATE_DIAGNOSTICS_TRUNCATED_CODE: &str = "aggregate-diagnostics-truncated";
-const ANALYZER_BINARY_SEED: &[u8] = b"rootlight.first-slice.treesitter-structural/171";
+const ANALYZER_BINARY_SEED: &[u8] = b"rootlight.first-slice.treesitter-structural/172";
 const RESOLVER_BINARY_SEED: &[u8] = b"rootlight.first-slice.resolve/50";
 const INCREMENTAL_PROVIDER_SEED: &[u8] = b"rootlight.first-slice.incremental-provider/1";
 const LANGUAGE_DISPOSITION_PROVIDER_SEED: &[u8] = b"rootlight.first-slice.language-disposition/5";
@@ -39322,6 +39322,132 @@ mod tests {
                     .any(|relation| relation.predicate == RelationPredicate::Calls
                         && relation.subject == RelationEndpoint::Occurrence(site.id))
             );
+        }
+    }
+
+    #[test]
+    fn classic_chain_statements_keep_nested_calls_after_signature_changes_and_restart() {
+        let fixture = durable_test_tempdir();
+        let storage = durable_test_tempdir();
+        let paths = RuntimePaths::new(storage.path().join("state"), storage.path().join("runtime"))
+            .unwrap();
+        paths.prepare_owner().unwrap();
+        fs::write(fixture.path().join("project.vbp"), "Type=OleDll\nName=\"Primary\"\nClass=Factory; Factory.cls\nClass=Product; Product.cls\nModule=Helpers; Helpers.bas\nModule=Client; Client.bas\n").unwrap();
+        fs::write(fixture.path().join("Factory.cls"), "VERSION 1.0 CLASS\nAttribute VB_Name = \"Factory\"\nPublic Function Make(ByVal count As Long) As Product\nEnd Function\n").unwrap();
+        fs::write(fixture.path().join("Helpers.bas"), "Attribute VB_Name = \"Helpers\"\nPublic Function Clamp(ByVal input As Long) As Long\nEnd Function\nPublic Function Low(ByVal input As Long) As Long\nEnd Function\nPublic Function High(ByVal input As Long) As Long\nEnd Function\n").unwrap();
+        let expression =
+            ".Make(count:=Helpers.Clamp(1)).Save limit:=Helpers.Low(2) + Helpers.High(3)";
+        let client = format!(
+            "Attribute VB_Name = \"Client\"\nSub Run(ByVal factory As Factory)\nWith factory\n{expression}\nEnd With\nEnd Sub\n"
+        );
+        fs::write(fixture.path().join("Client.bas"), &client).unwrap();
+        for (parameter, expected) in [("limit", true), ("renamed", false), ("limit", true)] {
+            fs::write(fixture.path().join("Product.cls"), format!("VERSION 1.0 CLASS\nAttribute VB_Name = \"Product\"\nPublic Sub Save(ByVal {parameter} As Long)\nEnd Sub\n")).unwrap();
+            let mut service =
+                FirstSliceService::new_durable(3, paths.state_dir(), &deadline()).unwrap();
+            let receipt = service
+                .index_repository(fixture.path(), &deadline())
+                .unwrap();
+            assert_eq!(
+                service
+                    .index_repository(fixture.path(), &deadline())
+                    .unwrap(),
+                receipt
+            );
+            drop(service);
+            let service =
+                FirstSliceService::new_durable(3, paths.state_dir(), &deadline()).unwrap();
+            let snapshot = service
+                .loaded_generation_snapshot(receipt.generation)
+                .unwrap();
+            let document = snapshot.document();
+            let file = document
+                .files
+                .iter()
+                .find(|file| file.path == "Client.bas")
+                .unwrap();
+            for (application, bound) in [
+                (expression, expected),
+                (".Make(count:=Helpers.Clamp(1))", true),
+                ("Helpers.Clamp(1)", true),
+                ("Helpers.Low(2)", true),
+                ("Helpers.High(3)", true),
+            ] {
+                let start = u64::try_from(client.find(application).unwrap()).unwrap();
+                let end = start + u64::try_from(application.len()).unwrap();
+                let sites = document
+                    .occurrences
+                    .iter()
+                    .filter(|site| {
+                        site.file == file.id
+                            && site.syntax_kind == "vba.application.reference"
+                            && site.source.span().start_byte() == start
+                            && site.source.span().end_byte() == end
+                    })
+                    .collect::<Vec<_>>();
+                assert_eq!(sites.len(), 1, "{application}");
+                let site = sites[0];
+                assert_eq!(
+                    matches!(site.target, OccurrenceTarget::Resolved { .. }),
+                    bound,
+                    "{application}: {parameter}"
+                );
+                assert_eq!(
+                    document
+                        .skipped_regions
+                        .iter()
+                        .any(|gap| gap.source == site.source
+                            && gap.detail == "vba-call-or-index-target-unavailable"),
+                    !bound,
+                    "{application}"
+                );
+                let read = service
+                    .source_read_with_options_and_budget(
+                        receipt.generation,
+                        vec![site.source.clone()],
+                        SourceReadOptions::new()
+                            .with_context_lines_before(0)
+                            .with_context_lines_after(0)
+                            .with_encoding(SourceEncoding::Bytes),
+                        FirstSliceBudget::default(),
+                        &deadline(),
+                    )
+                    .unwrap();
+                assert_eq!(read.data.chunks[0].bytes, application.as_bytes());
+            }
+            for callee in [
+                ".Make",
+                ".Make(count:=Helpers.Clamp(1)).Save",
+                "Helpers.Clamp",
+                "Helpers.Low",
+                "Helpers.High",
+            ] {
+                let start = u64::try_from(client.find(callee).unwrap()).unwrap();
+                let end = start + u64::try_from(callee.len()).unwrap();
+                let sites = document
+                    .occurrences
+                    .iter()
+                    .filter(|site| {
+                        site.file == file.id
+                            && site.syntax_kind == "vba.invoked_member.reference"
+                            && site.source.span().start_byte() == start
+                            && site.source.span().end_byte() == end
+                    })
+                    .collect::<Vec<_>>();
+                assert_eq!(sites.len(), 1, "{callee}");
+                let site = sites[0];
+                assert_eq!(site.role, OccurrenceRole::CallSite, "{callee}");
+                assert_eq!(
+                    document
+                        .relations
+                        .iter()
+                        .filter(|edge| edge.predicate == RelationPredicate::Calls
+                            && edge.subject == RelationEndpoint::Occurrence(site.id))
+                        .count(),
+                    1,
+                    "{callee}"
+                );
+            }
         }
     }
 
