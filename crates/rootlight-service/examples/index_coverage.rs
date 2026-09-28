@@ -3,6 +3,7 @@
 //! describe recorded evidence, not an independent semantic completeness oracle.
 //! Resume measures a reopened service; warm sequences keep one service alive and
 //! wait for external source edits between newline-delimited reports.
+//! Gap matches identify exact-span occurrences, not the semantic owner of a gap.
 
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -456,6 +457,7 @@ fn inspect_files(
             .into());
         }
         let mut occurrences = BTreeMap::<String, usize>::new();
+        let mut sites_by_span = BTreeMap::<_, Vec<_>>::new();
         for site in &document.occurrences {
             if site.source.span().file() != file.id {
                 continue;
@@ -468,12 +470,42 @@ fn inspect_files(
             *occurrences
                 .entry(format!("{}:{resolution}", site.syntax_kind))
                 .or_default() += 1;
+            sites_by_span
+                .entry(site.source.span())
+                .or_default()
+                .push(site);
         }
-        let gaps: Vec<_> = document
+        for sites in sites_by_span.values_mut() {
+            sites.sort_by_key(|site| (&site.syntax_kind, site.id));
+        }
+        let gaps = document
             .skipped_regions
             .iter()
             .filter(|gap| gap.source.span().file() == file.id)
-            .collect();
+            .map(|gap| {
+                let mut value = serde_json::to_value(gap)?;
+                // A callee and its application can share a span but disagree on
+                // resolution. Retain all matches instead of guessing gap ownership.
+                let matching: Vec<_> = sites_by_span
+                    .get(&gap.source.span())
+                    .into_iter()
+                    .flatten()
+                    .filter(|site| {
+                        site.source.repository() == gap.source.repository()
+                            && site.source.generation() == gap.source.generation()
+                            && site.source.content_hash() == gap.source.content_hash()
+                    })
+                    .map(|site| {
+                        json!({
+                            "id":site.id, "syntax_kind":site.syntax_kind,
+                            "role":site.role, "target":site.target,
+                        })
+                    })
+                    .collect();
+                value["matching_occurrences"] = json!(matching);
+                Ok(value)
+            })
+            .collect::<Result<Vec<_>, serde_json::Error>>()?;
         let container_path = origin.and_then(|reference| {
             snapshot
                 .find_file(reference.span().file())
@@ -508,6 +540,92 @@ fn chunk_end(text: &str, start: usize) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn gap_evidence_distinguishes_callees_applications_and_shared_spans() {
+        let directory = tempfile::tempdir().unwrap();
+        let repository = directory.path().join("repository");
+        fs::create_dir(&repository).unwrap();
+        let source = "Attribute VB_Name = \"Module\"\nSub Visit(ByVal required As Long)\nEnd Sub\nSub Run()\nDim result As Long\nresult = Missing(1)\nOther\nVisit\nEnd Sub\n";
+        fs::write(repository.join("Module.bas"), source).unwrap();
+        let report = inspect(
+            &repository,
+            &directory.path().join("state"),
+            None,
+            StateMode::Fresh,
+        )
+        .unwrap();
+        let row = &report["files"][0];
+        for (text, kinds) in [
+            ("Missing", vec!["vba.invoked_get_identifier.reference"]),
+            ("Missing(1)", vec!["vba.application.reference"]),
+            (
+                "Other",
+                vec![
+                    "vba.application.reference",
+                    "vba.invoked_identifier.reference",
+                ],
+            ),
+        ] {
+            let start = u64::try_from(source.find(text).unwrap()).unwrap();
+            let end = start + u64::try_from(text.len()).unwrap();
+            let gaps: Vec<_> = row["gaps"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter(|gap| {
+                    gap["source"]["span"]["start_byte"] == start
+                        && gap["source"]["span"]["end_byte"] == end
+                })
+                .collect();
+            assert!(!gaps.is_empty(), "missing gap: {text}: {row}");
+            for gap in gaps {
+                let matches = gap["matching_occurrences"]
+                    .as_array()
+                    .expect("exact-span occurrence evidence");
+                let observed: Vec<_> = matches
+                    .iter()
+                    .map(|site| site["syntax_kind"].as_str().unwrap())
+                    .collect();
+                assert_eq!(observed, kinds, "{text}");
+                assert!(
+                    matches
+                        .iter()
+                        .all(|site| site["target"]["kind"] == "unresolved")
+                );
+            }
+        }
+        let start = u64::try_from(source.rfind("Visit").unwrap()).unwrap();
+        let gap = row["gaps"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|gap| {
+                gap["source"]["span"]["start_byte"] == start
+                    && gap["source"]["span"]["end_byte"] == start + 5
+            })
+            .unwrap();
+        let matching = gap["matching_occurrences"].as_array().unwrap();
+        assert_eq!(matching.len(), 2);
+        assert_eq!(matching[0]["syntax_kind"], "vba.application.reference");
+        assert_eq!(matching[0]["target"]["kind"], "unresolved");
+        assert_eq!(
+            matching[1]["syntax_kind"],
+            "vba.invoked_identifier.reference"
+        );
+        assert_eq!(matching[1]["target"]["kind"], "resolved");
+        assert_eq!(matching[1]["role"], "call_site");
+        assert_eq!(row["source_read_exact"], true);
+        assert_eq!(report["no_op_same_generation"], true);
+        let restored = inspect(
+            &repository,
+            &directory.path().join("state"),
+            None,
+            StateMode::Resume,
+        )
+        .unwrap();
+        assert_eq!(restored["files"], report["files"]);
+    }
 
     #[test]
     fn warm_reports_keep_one_session_through_edits_and_restoration() {
