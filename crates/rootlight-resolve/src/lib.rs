@@ -16,6 +16,7 @@ mod quality;
 
 pub use classic::{
     ClassicProjectSource, NativeClassicMember, NativeClassicMemberKind, NativeClassicProject,
+    NativeClassicReference, NativeClassicReferenceField,
 };
 pub use engine::ResolutionEngine;
 pub use foreign::{

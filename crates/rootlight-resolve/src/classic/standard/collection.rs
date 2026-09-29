@@ -108,7 +108,7 @@ pub(in crate::classic) fn type_target<'a>(
         || project.modules.contains_key(root)
         // VBA is the mandatory standard-library qualifier (MS-VBAL 2.7.1,
         // 4.1); a retained reference bearing that name is not a shadow.
-        || (path.components() == 1 && project.reference_names.contains(root))
+        || (path.components() == 1 && project.references.may_declare_name(root))
         || local_types.contains_key(&(site.file, root.to_owned()))
     {
         return Ok(None);

@@ -428,7 +428,7 @@ pub(super) fn bind<'a>(
             || project.modules.contains_key(&root)
             || project.value_names.contains(&root)
             || (rule == ResolutionRule::VbaStandardImplicitConstant
-                && project.reference_names.contains(&root))
+                && project.references.may_declare_name(&root))
         {
             continue;
         }

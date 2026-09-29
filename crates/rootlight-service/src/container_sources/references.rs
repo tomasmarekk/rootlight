@@ -28,22 +28,76 @@ struct DeclaredName {
     range: std::ops::Range<usize>,
 }
 
-pub(super) fn declared_names(
+pub(super) fn inventory(
+    project: &VbaProject<'_, '_>,
     references: &[DeclaredReference],
     owner: FileId,
+    file: Option<FileId>,
     cancellation: &Cancellation,
-) -> Result<Vec<String>, FirstSliceError> {
-    let mut names = Vec::new();
-    for reference in references {
+) -> Result<Vec<rootlight_resolve::NativeClassicReference>, FirstSliceError> {
+    let mut inventory = Vec::new();
+    inventory
+        .try_reserve_exact(project.references().len())
+        .map_err(|_| FirstSliceError::Limits)?;
+    let mut fields = references.iter().peekable();
+    for record in project.references() {
         check_cancellation(cancellation)?;
-        if reference.owner == owner
-            && let Some(name) = &reference.name
-        {
-            names.try_reserve(1).map_err(|_| FirstSliceError::Limits)?;
-            names.push(name.text.clone());
+        let range = record.range();
+        let mut entry = rootlight_resolve::NativeClassicReference {
+            source: file
+                .map(|file| source_span(file, range.clone()))
+                .transpose()?,
+            fields: Vec::new(),
+        };
+        while let Some(field) = fields.peek() {
+            if field.range.start >= range.end {
+                break;
+            }
+            check_cancellation(cancellation)?;
+            if Some(field.file) != file
+                || field.owner != owner
+                || field.range.start < range.start
+                || field.range.end > range.end
+            {
+                return Err(FirstSliceError::Identity);
+            }
+            entry
+                .fields
+                .try_reserve(1)
+                .map_err(|_| FirstSliceError::Limits)?;
+            entry
+                .fields
+                .push(rootlight_resolve::NativeClassicReferenceField {
+                    source: source_span(field.file, field.evidence_range())?,
+                    name: field.name.as_ref().map(|name| name.text.clone()),
+                    identity: (!field.uninterpreted).then(|| field.identity.clone()),
+                });
+            fields.next();
         }
+        inventory.push(entry);
     }
-    Ok(names)
+    if fields.next().is_some() {
+        return Err(FirstSliceError::Identity);
+    }
+    Ok(inventory)
+}
+
+fn source_span(file: FileId, range: std::ops::Range<usize>) -> Result<SourceSpan, FirstSliceError> {
+    SourceSpan::new(
+        file,
+        u64::try_from(range.start).map_err(|_| FirstSliceError::Limits)?,
+        u64::try_from(range.end).map_err(|_| FirstSliceError::Limits)?,
+    )
+    .map_err(|_| FirstSliceError::Identity)
+}
+
+impl DeclaredReference {
+    fn evidence_range(&self) -> std::ops::Range<usize> {
+        self.name.as_ref().map_or_else(
+            || self.range.clone(),
+            |name| self.range.start.min(name.range.start)..self.range.end.max(name.range.end),
+        )
+    }
 }
 
 pub(super) fn prepare(
@@ -54,25 +108,27 @@ pub(super) fn prepare(
     prepared: &mut PreparedSources,
     snapshots: &mut Vec<SourceSnapshot>,
     cancellation: &Cancellation,
-) -> Result<(), FirstSliceError> {
+) -> Result<Option<FileId>, FirstSliceError> {
     if project.references().is_empty() {
-        return Ok(());
+        return Ok(None);
     }
     let bytes = project.decoded_directory().bytes();
     if budget.files == 0 || bytes.len() > budget.bytes {
-        return prepared.issue(
+        prepared.issue(
             input.file,
             "vba reference metadata admission exhausted".to_owned(),
-        );
+        )?;
+        return Ok(None);
     }
     let path = match RelativePath::parse(Path::new(&format!("{}/@vba/references.bin", input.path)))
     {
         Ok(path) => path,
         Err(_) => {
-            return prepared.issue(
+            prepared.issue(
                 input.file,
                 "vba reference metadata path exceeds canonical path limits".to_owned(),
-            );
+            )?;
+            return Ok(None);
         }
     };
     let file = derive_file(rootlight_ids::FileIdentity {
@@ -383,7 +439,7 @@ pub(super) fn prepare(
             });
         }
     }
-    Ok(())
+    Ok(Some(file))
 }
 
 fn retain_uninterpreted(
@@ -582,12 +638,7 @@ pub(super) fn append(
         if !files.contains_key(&reference.owner) {
             return Err(FirstSliceError::Identity);
         }
-        let evidence_range = reference.name.as_ref().map_or_else(
-            || reference.range.clone(),
-            |name| {
-                reference.range.start.min(name.range.start)..reference.range.end.max(name.range.end)
-            },
-        );
+        let evidence_range = reference.evidence_range();
         let source = SourceRef::new(
             document.repository,
             document.generation,

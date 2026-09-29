@@ -15,7 +15,7 @@ use rootlight_source::{
     vba_text::TextLimits,
 };
 
-pub(super) const REVISION: &[u8] = b"rootlight.container-sources/8";
+pub(super) const REVISION: &[u8] = b"rootlight.container-sources/9";
 
 mod references;
 
@@ -408,7 +408,7 @@ fn prepare_office(
             .and_then(|m| m.identity().name().ok())
             .map(str::to_owned),
         members: Vec::new(),
-        reference_names: Vec::new(),
+        references: Vec::new(),
         inventory_complete: membership.as_ref().is_some_and(|m| {
             m.project_records().iter().all(|r| r.outcome().is_ok())
                 && m.directory_records().len() == project.modules().len()
@@ -622,7 +622,7 @@ fn prepare_office(
         .try_reserve(1)
         .map_err(|_| FirstSliceError::Limits)?;
     let first_reference = prepared.references.len();
-    references::prepare(
+    let reference_file = references::prepare(
         input,
         project,
         repository,
@@ -631,9 +631,11 @@ fn prepare_office(
         snapshots,
         cancellation,
     )?;
-    native_project.reference_names = references::declared_names(
+    native_project.references = references::inventory(
+        project,
         &prepared.references[first_reference..],
         input.file,
+        reference_file,
         cancellation,
     )?;
     prepared.native_projects.push(native_project);

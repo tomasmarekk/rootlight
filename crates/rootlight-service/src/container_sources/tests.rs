@@ -1507,12 +1507,178 @@ fn declared_vba_references_survive_restart_with_exact_binary_evidence_and_import
 }
 
 #[test]
+fn nameless_native_reference_does_not_prove_standard_name_uniqueness() {
+    let root = tempdir();
+    let identifier =
+        b"*\\G{01234567-89AB-CDEF-1032-547698BADCFE}#1.0#409#C:\\unavailable.tlb#Library";
+    let mut records = Vec::new();
+    records.extend(0x000du16.to_le_bytes());
+    records.extend(0u32.to_le_bytes());
+    records.extend(u32::try_from(identifier.len()).unwrap().to_le_bytes());
+    records.extend(identifier);
+    records.extend([0; 6]);
+    let code = b"Attribute VB_Name = \"Client\"\r\nSub Inspect()\r\nDim first As Collection\r\nDim second As VBA.Collection\r\nDim text As String\r\ntext = vbTab\r\ntext = VBA.Constants.vbTab\r\nEnd Sub\r\n";
+    let storage = tempdir();
+    let paths = rootlight_runtime::RuntimePaths::new(
+        storage.path().join("state"),
+        storage.path().join("runtime"),
+    )
+    .unwrap();
+    paths.prepare_owner().unwrap();
+    let mut service = FirstSliceService::new_durable(4, paths.state_dir(), &deadline()).unwrap();
+    let mut previous = None;
+    for (records, no_references) in [
+        (records.as_slice(), false),
+        ([].as_slice(), true),
+        (records.as_slice(), false),
+    ] {
+        fs::write(
+            root.path().join("book.xlsm"),
+            fixture::native_book_with_references(
+                &[("Client", code, ProjectModuleKind::Procedural)],
+                "\"Project\"",
+                records,
+            ),
+        )
+        .unwrap();
+        let receipt = service.index_repository(root.path(), &deadline()).unwrap();
+        assert_ne!(previous, Some(receipt.generation));
+        previous = Some(receipt.generation);
+        for restart in [false, true] {
+            if restart {
+                drop(service);
+                service =
+                    FirstSliceService::new_durable(4, paths.state_dir(), &deadline()).unwrap();
+            }
+            assert_eq!(
+                service.index_repository(root.path(), &deadline()).unwrap(),
+                receipt
+            );
+            read_module(
+                &service,
+                receipt.generation,
+                derived_path("book.xlsm", "Client", ModuleKind::Procedural)
+                    .unwrap()
+                    .as_str(),
+                code,
+            );
+            let snapshot = service
+                .loaded_generation_snapshot(receipt.generation)
+                .unwrap();
+            let document = snapshot.document();
+            for (rule, expected) in [
+                (
+                    "vba-standard-implicit-constant-v1.indexed_snapshot",
+                    usize::from(no_references),
+                ),
+                ("vba-standard-constant-v1.indexed_snapshot", 1),
+                (
+                    "vba-collection-type-v1.indexed_snapshot",
+                    1 + usize::from(no_references),
+                ),
+            ] {
+                assert_eq!(
+                    document
+                        .occurrences
+                        .iter()
+                        .filter(|site| document
+                            .provenance
+                            .iter()
+                            .any(|proof| proof.id == site.provenance
+                                && proof.rule.as_deref() == Some(rule)))
+                        .count(),
+                    expected,
+                    "{rule}"
+                );
+            }
+            for detail in [
+                "vba-binding-target-unavailable",
+                "vba-type-target-unavailable",
+            ] {
+                assert_eq!(
+                    document
+                        .skipped_regions
+                        .iter()
+                        .any(|gap| gap.detail == detail),
+                    !no_references,
+                    "{detail}"
+                );
+            }
+        }
+        let prepared = service
+            .prepare_repository_with_options(
+                root.path(),
+                FirstSliceIndexOptions::clean_rebuild(FirstSliceIndexMode::Structural),
+                &deadline(),
+            )
+            .unwrap();
+        let rebuilt = service.publish_prepared(prepared, &deadline()).unwrap();
+        assert!(receipt.logical_snapshot.is_some());
+        assert_eq!(rebuilt.logical_snapshot, receipt.logical_snapshot);
+    }
+}
+
+#[test]
+fn native_reference_inventory_keeps_slots_fields_and_unknown_names() {
+    let (book, _) = reference_book_with_names(1, None, Some((b"ExtendedApi", "ExtendedApi")));
+    let (prepared, snapshots) = prepared_fixture(&book, 100, 128 * 1024 * 1024, &deadline());
+    let references = &prepared.native_projects[0].references;
+    assert_eq!(references.len(), 5);
+    assert_eq!(
+        references
+            .iter()
+            .map(|r| r.fields.len())
+            .collect::<Vec<_>>(),
+        [1, 1, 1, 1, 2]
+    );
+    let mut previous_end = 0;
+    for (ordinal, reference) in references.iter().enumerate() {
+        let span = reference.source.unwrap();
+        assert!(span.start_byte() >= previous_end);
+        previous_end = span.end_byte();
+        let metadata = &snapshots[&span.file()];
+        assert_eq!(metadata.path().as_str(), "book.xlsm/@vba/references.bin");
+        for (index, field) in reference.fields.iter().enumerate() {
+            assert_eq!(field.source.file(), span.file());
+            assert!(field.source.start_byte() >= span.start_byte());
+            assert!(field.source.end_byte() <= span.end_byte());
+            assert_eq!(
+                field.name.as_deref(),
+                (ordinal == 4 && index == 1).then_some("ExtendedApi")
+            );
+            assert_eq!(field.identity.is_none(), ordinal == 2);
+            let bytes = &metadata.content()[usize::try_from(field.source.start_byte()).unwrap()
+                ..usize::try_from(field.source.end_byte()).unwrap()];
+            if ordinal == 2 {
+                assert_eq!(bytes, b"malformed-library");
+            }
+            if ordinal == 4 && index == 1 {
+                assert!(
+                    bytes
+                        .windows(b"ExtendedApi".len())
+                        .any(|part| part == b"ExtendedApi")
+                );
+            }
+        }
+    }
+    let (again, _) = prepared_fixture(&book, 100, 128 * 1024 * 1024, &deadline());
+    assert_eq!(*references, again.native_projects[0].references);
+}
+
+#[test]
 fn reference_admission_does_not_displace_source_modules() {
     let (book, _) = reference_book(1);
     let (prepared, snapshots) = prepared_fixture(&book, 1, 1_000_000, &deadline());
     assert_eq!(prepared.inputs.len(), 1);
     assert_eq!(snapshots.len(), 2);
     assert!(prepared.references.is_empty());
+    let references = &prepared.native_projects[0].references;
+    assert_eq!(references.len(), 5);
+    assert!(
+        references
+            .iter()
+            .all(|reference| reference.source.is_none() && reference.fields.is_empty())
+    );
     assert!(prepared.inputs[0].path.ends_with(".bas"));
     assert!(
         prepared
@@ -5273,7 +5439,7 @@ fn native_project_resolution_checks_identity_and_charges_preparation_work() {
         content_hash: container.content_hash,
         name: Some("Project".to_owned()),
         members: Vec::new(),
-        reference_names: Vec::new(),
+        references: Vec::new(),
         inventory_complete: true,
     };
     let mut inputs = Vec::new();
