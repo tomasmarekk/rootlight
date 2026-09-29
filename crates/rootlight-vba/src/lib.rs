@@ -5,7 +5,6 @@
 #![forbid(unsafe_code)]
 
 mod arguments;
-mod assignment_reads;
 mod call_chain;
 mod compilation;
 mod condition;
@@ -15,11 +14,11 @@ mod lifecycle;
 mod member_attribute;
 mod parameter;
 mod procedure;
+mod value_reads;
 mod variadic;
 mod with_blocks;
 
 pub use arguments::{Argument, argument_list, argument_passing_matches};
-pub use assignment_reads::{AssignmentRead, assignment_value_reads};
 pub use call_chain::{
     CallChain, CallChainPart, CallChainRead, CallChainRole, assigned_value_end,
     call_chain_statement, indexed_assignment_arguments_end, value_application_expression,
@@ -36,6 +35,7 @@ pub use procedure::{
     ProcedureHeader, ProcedureKind, parameterless_sub, procedure_header, procedure_parameter_range,
     scalar_return_type,
 };
+pub use value_reads::{AssignmentRead, ValueRead, assignment_value_reads, statement_value_reads};
 pub use variadic::{param_array_parameter, variadic_arguments_match};
 pub use with_blocks::{WithBlock, with_blocks};
 

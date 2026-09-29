@@ -158,7 +158,13 @@ pub fn call_chain_statement<E>(
     check: &mut impl FnMut() -> Result<(), E>,
 ) -> Result<CallChainRead, E> {
     check()?;
-    let tokens = match tokenize(source, maximum_tokens, false, check)? {
+    let tokens = match tokenize(
+        source,
+        maximum_tokens,
+        false,
+        ExpressionBoundary::Statement,
+        check,
+    )? {
         Ok(tokens) => tokens,
         Err(result) => return Ok(result),
     };
@@ -375,8 +381,30 @@ pub(crate) fn value_expression<E>(
     require_application: bool,
     check: &mut impl FnMut() -> Result<(), E>,
 ) -> Result<CallChainRead, E> {
+    bounded_value_expression(
+        source,
+        maximum_tokens,
+        require_application,
+        ExpressionBoundary::Statement,
+        check,
+    )
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ExpressionBoundary {
+    Statement,
+    Then,
+}
+
+pub(crate) fn bounded_value_expression<E>(
+    source: &[u8],
+    maximum_tokens: usize,
+    require_application: bool,
+    boundary: ExpressionBoundary,
+    check: &mut impl FnMut() -> Result<(), E>,
+) -> Result<CallChainRead, E> {
     check()?;
-    let tokens = match tokenize(source, maximum_tokens, true, check)? {
+    let tokens = match tokenize(source, maximum_tokens, true, boundary, check)? {
         Ok(tokens) => tokens,
         Err(result) => return Ok(result),
     };
@@ -695,6 +723,7 @@ fn tokenize<E>(
     source: &[u8],
     maximum: usize,
     allow_instance: bool,
+    boundary: ExpressionBoundary,
     check: &mut impl FnMut() -> Result<(), E>,
 ) -> Result<Result<Vec<Token>, CallChainRead>, E> {
     let mut tokens: Vec<Token> = Vec::new();
@@ -720,6 +749,16 @@ fn tokenize<E>(
                 let Some(word) = name(source, &mut cursor, check)? else {
                     return Ok(Err(CallChainRead::Unsupported));
                 };
+                // A member or quoted identifier named Then is part of the
+                // expression, not the boundary introducing an If body.
+                if boundary == ExpressionBoundary::Then
+                    && byte != b'['
+                    && word.eq_ignore_ascii_case(b"Then")
+                    && opens.is_empty()
+                    && tokens.last().is_none_or(|token| token.kind != Kind::Dot)
+                {
+                    break;
+                }
                 if byte == b'[' {
                     Kind::Name
                 } else if word.eq_ignore_ascii_case(b"Call") {

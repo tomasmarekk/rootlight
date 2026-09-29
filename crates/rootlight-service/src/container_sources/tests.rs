@@ -1816,7 +1816,7 @@ fn automatic_value_calls_preserve_storage_targets_after_reopen() {
         ] {
             let modifier = if automatic { " New" } else { "" };
             let client = format!(
-                "Attribute VB_Name = \"Client\"\r\nPrivate cached As{modifier} Worker\r\nPrivate Type Holder\r\nChild As{modifier} Worker\r\nEnd Type\r\nPublic Sub Run()\r\nDim local As{modifier} Worker\r\nDim plain As Worker\r\nDim holder As Holder\r\nDim flag As Boolean\r\ncached.Touch\r\nlocal.Touch\r\nSet local = Nothing\r\nlocal.Touch\r\nholder.Child.Touch\r\nplain.Touch\r\nSet cached = Nothing\r\nWith cached\r\n.Touch\r\n.Touch\r\nEnd With\r\nSet plain = local\r\nSet plain = holder.Child\r\nflag = cached Is Nothing\r\nSet plain = Echo(local)\r\nEnd Sub\r\nPrivate Function Echo(ByRef value As Worker) As Worker\r\nSet Echo = Nothing\r\nEnd Function\r\n"
+                "Attribute VB_Name = \"Client\"\r\nPrivate cached As{modifier} Worker\r\nPrivate Type Holder\r\nChild As{modifier} Worker\r\nEnd Type\r\nPublic Sub Run()\r\nDim local As{modifier} Worker\r\nDim plain As Worker\r\nDim holder As Holder\r\nDim flag As Boolean\r\ncached.Touch\r\nlocal.Touch\r\nSet local = Nothing\r\nlocal.Touch\r\nholder.Child.Touch\r\nplain.Touch\r\nSet cached = Nothing\r\nWith cached\r\n.Touch\r\n.Touch\r\nEnd With\r\nSet plain = local\r\nSet plain = holder.Child\r\nflag = cached Is Nothing\r\nSet plain = Echo(local)\r\nIf cached Is Nothing Then\r\nElseIf local Is Nothing Then\r\nEnd If\r\nIf holder.Child Is Nothing Then flag = True\r\nWhile cached Is Nothing\r\nWend\r\nDo While local Is Nothing\r\nLoop\r\nDo\r\nLoop Until cached Is Nothing\r\nDo Until holder.Child Is Nothing\r\nLoop\r\nDo\r\nLoop While local Is Nothing\r\nIf Echo(local) Is Nothing Then\r\nEnd If\r\nEnd Sub\r\nPrivate Function Echo(ByRef value As Worker) As Worker\r\nSet Echo = Nothing\r\nEnd Function\r\n"
             );
             let worker = format!(
                 "Attribute VB_Name = \"Worker\"\r\nPrivate Sub Class_Initialize({parameters})\r\nEnd Sub\r\nPublic Sub Touch()\r\nEnd Sub\r\n"
@@ -1868,7 +1868,7 @@ fn automatic_value_calls_preserve_storage_targets_after_reopen() {
             let expected = automatic && parameters.is_empty();
             assert_eq!(
                 calls.len(),
-                if expected { 8 } else { 0 },
+                if expected { 16 } else { 0 },
                 "native={native} automatic={automatic} parameters={parameters}"
             );
             for edge in &calls {
@@ -1946,7 +1946,7 @@ fn automatic_value_calls_preserve_storage_targets_after_reopen() {
                     )
                     .unwrap();
                 assert!(!relationships.data.truncated);
-                assert_eq!(relationships.data.returned_edges, 8);
+                assert_eq!(relationships.data.returned_edges, 16);
                 let read = service
                     .source_read_with_options_and_budget(
                         receipt.generation,
@@ -1977,15 +1977,23 @@ fn automatic_value_calls_preserve_storage_targets_after_reopen() {
                         b"cached".to_vec(),
                         b"cached".to_vec(),
                         b"cached".to_vec(),
+                        b"cached".to_vec(),
+                        b"cached".to_vec(),
+                        b"cached".to_vec(),
                         b"holder.Child".to_vec(),
                         b"holder.Child".to_vec(),
+                        b"holder.Child".to_vec(),
+                        b"holder.Child".to_vec(),
+                        b"local".to_vec(),
+                        b"local".to_vec(),
+                        b"local".to_vec(),
                         b"local".to_vec(),
                         b"local".to_vec(),
                         b"local".to_vec()
                     ]
                 );
             }
-            // Receiver proofs do not establish all other reads or runtime state.
+            // Supported value reads do not establish complete lifetime semantics.
             assert_eq!(
                 document
                     .skipped_regions

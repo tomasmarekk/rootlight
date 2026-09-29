@@ -2218,7 +2218,7 @@ impl<'a> ClassicIndex<'a> {
             return Ok(result);
         }
         let mut pending_automatic = Vec::new();
-        let mut assignment_files = BTreeSet::new();
+        let mut value_read_files = BTreeSet::new();
         for site in occurrences {
             cancellation.check()?;
             work.consume()?;
@@ -2246,7 +2246,7 @@ impl<'a> ClassicIndex<'a> {
             else {
                 continue;
             };
-            assignment_files.insert(site.file);
+            value_read_files.insert(site.file);
             pending_automatic.push((
                 site,
                 AutomaticInitialization {
@@ -2259,7 +2259,7 @@ impl<'a> ClassicIndex<'a> {
                 },
             ));
         }
-        for file in assignment_files {
+        for file in value_read_files {
             cancellation.check()?;
             work.consume()?;
             let Some((source, bytes)) = index
@@ -2270,7 +2270,7 @@ impl<'a> ClassicIndex<'a> {
             else {
                 continue;
             };
-            let Some(reads) = rootlight_vba::assignment_value_reads(
+            let Some(reads) = rootlight_vba::statement_value_reads(
                 bytes,
                 crate::MAX_RESOLUTION_WORK_LIMIT,
                 crate::MAX_RESOLUTION_WORK_LIMIT,
