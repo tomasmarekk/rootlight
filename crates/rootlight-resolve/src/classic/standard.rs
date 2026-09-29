@@ -3,6 +3,7 @@
 //! lexical barriers are required before a source occurrence can name one.
 
 use super::*;
+mod arguments;
 mod err;
 mod functions;
 use crate::ResolverFactContext;
@@ -472,6 +473,7 @@ pub(super) fn bind<'a>(
             },
         );
     }
+    let mut argument_cache = arguments::Cache::default();
     for (site, member) in member_sites {
         cancellation.check()?;
         work.consume()?;
@@ -547,10 +549,20 @@ pub(super) fn bind<'a>(
         let Some(tail) = bytes.get(offset..) else {
             continue;
         };
-        if !calls::standard_arguments_match(tail, explicit, parameters, kind, &mut || {
-            cancellation.check()?;
-            work.consume()
-        })? {
+        if !argument_cache.matches(
+            arguments::Key {
+                target: proof.target.id,
+                source_hash: site.syntactic_text_hash,
+                explicit,
+            },
+            tail,
+            parameters,
+            kind,
+            &mut || {
+                cancellation.check()?;
+                work.consume()
+            },
+        )? {
             continue;
         }
         let proof = Proof {
