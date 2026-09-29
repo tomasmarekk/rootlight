@@ -20,6 +20,7 @@ pub(super) struct DeclaredReference {
     identity: String,
     display: String,
     name: Option<DeclaredName>,
+    uninterpreted: bool,
 }
 
 struct DeclaredName {
@@ -158,109 +159,44 @@ pub(super) fn prepare(
             }
         };
         for field in fields {
-            let reserved = budget.reserve();
-            let mut limits = TextLimits::default();
-            limits.input_bytes = reserved;
-            limits.output_bytes = reserved;
-            let identifier =
-                match project.reference_identifier(ordinal, *field, limits, cancellation) {
-                    Ok(identifier) => identifier,
-                    Err(error) => {
-                        check_cancellation(cancellation)?;
-                        prepared.issue(file, reference_error(ordinal, *field, &error))?;
-                        continue;
-                    }
-                };
-            let used = identifier
-                .path()
-                .len()
-                .checked_add(identifier.display_name().map_or(0, str::len))
-                .and_then(|n| n.checked_add(128))
-                .ok_or(FirstSliceError::Limits)?;
-            budget.settle(reserved, used.min(reserved))?;
-            let (identity, range) = match identifier.identity() {
-                ReferenceIdentity::Library {
-                    platform,
-                    guid,
-                    major,
-                    minor,
-                    lcid,
-                } => {
-                    if absent_twiddled(*field, identifier.original_bytes()) {
-                        continue;
-                    }
-                    use std::fmt::Write as _;
-                    let mut guid_text = String::new();
-                    guid_text
-                        .try_reserve_exact(32)
-                        .map_err(|_| FirstSliceError::Limits)?;
-                    for byte in guid {
-                        write!(guid_text, "{byte:02x}").map_err(|_| FirstSliceError::Limits)?;
-                    }
-                    let platform = match platform {
-                        rootlight_source::vba_reference::ReferencePlatform::Windows => "windows",
-                        rootlight_source::vba_reference::ReferencePlatform::Macintosh => {
-                            "macintosh"
-                        }
-                    };
-                    (
-                        format!("vba-library:{platform}:{guid_text}:{major:x}.{minor:x}:{lcid:x}"),
-                        identifier.source_range(),
-                    )
+            let uninterpreted_range = match (field, reference.payload()) {
+                (ReferenceField::Registered, ReferencePayload::Registered { libid }) => {
+                    libid.clone()
                 }
-                ReferenceIdentity::Project { .. } => {
-                    // One project record has two path representations, not two
-                    // independent dependencies. Retain both in its exact source.
-                    let reserved = budget.reserve();
-                    limits.input_bytes = reserved;
-                    limits.output_bytes = reserved;
-                    let relative = match project.reference_identifier(
-                        ordinal,
-                        ReferenceField::ProjectRelative,
-                        limits,
-                        cancellation,
-                    ) {
-                        Ok(relative) => relative,
-                        Err(error) => {
-                            check_cancellation(cancellation)?;
-                            prepared.issue(
-                                file,
-                                reference_error(ordinal, ReferenceField::ProjectRelative, &error),
-                            )?;
-                            continue;
-                        }
-                    };
-                    budget.settle(
-                        reserved,
-                        relative.path().len().saturating_add(3).min(reserved),
-                    )?;
-                    if relative.identity() != identifier.identity() {
-                        prepared.issue(
-                            file,
-                            format!("vba reference {ordinal} conflicting project reference kinds"),
-                        )?;
-                        continue;
-                    }
-                    let range = reference.range();
-                    let raw = bytes.get(range.clone()).ok_or(FirstSliceError::Identity)?;
-                    (
-                        format!("vba-project-reference:{}", content_hash(raw)),
-                        range,
-                    )
+                (ReferenceField::ProjectAbsolute, ReferencePayload::Project { .. }) => {
+                    reference.range()
                 }
-                _ => {
-                    prepared.issue(
-                        file,
-                        format!("vba reference {ordinal} unsupported identifier kind"),
-                    )?;
-                    continue;
-                }
+                (
+                    ReferenceField::ControlOriginal,
+                    ReferencePayload::Control {
+                        original_libid: Some(range),
+                        ..
+                    },
+                ) => range.clone(),
+                (
+                    ReferenceField::ControlTwiddled,
+                    ReferencePayload::Control { twiddled_libid, .. },
+                ) => twiddled_libid.clone(),
+                (
+                    ReferenceField::ControlExtended,
+                    ReferencePayload::Control { extended_libid, .. },
+                ) => extended_libid.clone(),
+                _ => return Err(FirstSliceError::Identity),
             };
-            let display = identifier
-                .display_name()
-                .filter(|name| !name.is_empty())
-                .unwrap_or(&identity)
-                .to_owned();
+            let raw = bytes
+                .get(uninterpreted_range.clone())
+                .ok_or(FirstSliceError::Identity)?;
+            if absent_twiddled(*field, raw) {
+                continue;
+            }
+            let uninterpreted_range = if uninterpreted_range.is_empty() {
+                reference.range()
+            } else {
+                uninterpreted_range
+            };
+            // A valid declaration name remains a namespace barrier even when
+            // its library identifier cannot be interpreted.
+            let mut limits = TextLimits::default();
             // A control's extended library has its own name. Never infer it
             // from the leading name of the original/twiddled library.
             let name = match (field, reference.payload()) {
@@ -301,6 +237,137 @@ pub(super) fn prepare(
             } else {
                 None
             };
+            let reserved = budget.reserve();
+            limits.input_bytes = reserved;
+            limits.output_bytes = reserved;
+            let identifier =
+                match project.reference_identifier(ordinal, *field, limits, cancellation) {
+                    Ok(identifier) => identifier,
+                    Err(error) => {
+                        check_cancellation(cancellation)?;
+                        prepared.issue(file, reference_error(ordinal, *field, &error))?;
+                        retain_uninterpreted(
+                            prepared,
+                            file,
+                            input.file,
+                            bytes,
+                            uninterpreted_range,
+                            name,
+                        )?;
+                        continue;
+                    }
+                };
+            let used = identifier
+                .path()
+                .len()
+                .checked_add(identifier.display_name().map_or(0, str::len))
+                .and_then(|n| n.checked_add(128))
+                .ok_or(FirstSliceError::Limits)?;
+            budget.settle(reserved, used.min(reserved))?;
+            let (identity, range) = match identifier.identity() {
+                ReferenceIdentity::Library {
+                    platform,
+                    guid,
+                    major,
+                    minor,
+                    lcid,
+                } => {
+                    use std::fmt::Write as _;
+                    let mut guid_text = String::new();
+                    guid_text
+                        .try_reserve_exact(32)
+                        .map_err(|_| FirstSliceError::Limits)?;
+                    for byte in guid {
+                        write!(guid_text, "{byte:02x}").map_err(|_| FirstSliceError::Limits)?;
+                    }
+                    let platform = match platform {
+                        rootlight_source::vba_reference::ReferencePlatform::Windows => "windows",
+                        rootlight_source::vba_reference::ReferencePlatform::Macintosh => {
+                            "macintosh"
+                        }
+                    };
+                    (
+                        format!("vba-library:{platform}:{guid_text}:{major:x}.{minor:x}:{lcid:x}"),
+                        identifier.source_range(),
+                    )
+                }
+                ReferenceIdentity::Project { .. } => {
+                    // One project record has two path representations, not two
+                    // independent dependencies. Retain both in its exact source.
+                    let reserved = budget.reserve();
+                    limits.input_bytes = reserved;
+                    limits.output_bytes = reserved;
+                    let relative = match project.reference_identifier(
+                        ordinal,
+                        ReferenceField::ProjectRelative,
+                        limits,
+                        cancellation,
+                    ) {
+                        Ok(relative) => relative,
+                        Err(error) => {
+                            check_cancellation(cancellation)?;
+                            prepared.issue(
+                                file,
+                                reference_error(ordinal, ReferenceField::ProjectRelative, &error),
+                            )?;
+                            retain_uninterpreted(
+                                prepared,
+                                file,
+                                input.file,
+                                bytes,
+                                uninterpreted_range,
+                                name,
+                            )?;
+                            continue;
+                        }
+                    };
+                    budget.settle(
+                        reserved,
+                        relative.path().len().saturating_add(3).min(reserved),
+                    )?;
+                    if relative.identity() != identifier.identity() {
+                        prepared.issue(
+                            file,
+                            format!("vba reference {ordinal} conflicting project reference kinds"),
+                        )?;
+                        retain_uninterpreted(
+                            prepared,
+                            file,
+                            input.file,
+                            bytes,
+                            uninterpreted_range,
+                            name,
+                        )?;
+                        continue;
+                    }
+                    let range = reference.range();
+                    let raw = bytes.get(range.clone()).ok_or(FirstSliceError::Identity)?;
+                    (
+                        format!("vba-project-reference:{}", content_hash(raw)),
+                        range,
+                    )
+                }
+                _ => {
+                    prepared.issue(
+                        file,
+                        format!("vba reference {ordinal} unsupported identifier kind"),
+                    )?;
+                    retain_uninterpreted(
+                        prepared,
+                        file,
+                        input.file,
+                        bytes,
+                        uninterpreted_range,
+                        name,
+                    )?;
+                    continue;
+                }
+            };
+            let display = identifier
+                .display_name()
+                .filter(|name| !name.is_empty())
+                .unwrap_or(&identity)
+                .to_owned();
             prepared
                 .references
                 .try_reserve(1)
@@ -312,9 +379,38 @@ pub(super) fn prepare(
                 identity,
                 display,
                 name,
+                uninterpreted: false,
             });
         }
     }
+    Ok(())
+}
+
+fn retain_uninterpreted(
+    prepared: &mut PreparedSources,
+    file: FileId,
+    owner: FileId,
+    bytes: &[u8],
+    range: std::ops::Range<usize>,
+    name: Option<DeclaredName>,
+) -> Result<(), FirstSliceError> {
+    let raw = bytes.get(range.clone()).ok_or(FirstSliceError::Identity)?;
+    // This identity describes uninterpreted source bytes, never a library GUID
+    // or a resolved namespace. The declaration offset keeps repeats distinct.
+    let identity = format!("vba-uninterpreted-reference:{}", content_hash(raw));
+    prepared
+        .references
+        .try_reserve(1)
+        .map_err(|_| FirstSliceError::Limits)?;
+    prepared.references.push(DeclaredReference {
+        file,
+        owner,
+        range,
+        display: "uninterpreted VBA reference".to_owned(),
+        identity,
+        name,
+        uninterpreted: true,
+    });
     Ok(())
 }
 
@@ -530,7 +626,14 @@ pub(super) fn append(
             input_sources: vec![inventory_source.clone()],
             evidence_sources: vec![source.clone()],
             derivation_parents: Vec::new(),
-            rule: Some("declared-vba-reference-unresolved".to_owned()),
+            rule: Some(
+                if reference.uninterpreted {
+                    "declared-vba-reference-uninterpreted"
+                } else {
+                    "declared-vba-reference-unresolved"
+                }
+                .to_owned(),
+            ),
         };
         provenance.id =
             derive_provenance_record_id(&provenance).map_err(|_| FirstSliceError::Identity)?;

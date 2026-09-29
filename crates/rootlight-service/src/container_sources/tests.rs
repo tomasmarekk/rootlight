@@ -747,6 +747,183 @@ fn reference_book(major: u16) -> (Vec<u8>, Vec<Vec<u8>>) {
     reference_book_with_names(major, None, None)
 }
 
+#[test]
+fn rejected_reference_identity_retains_its_name_and_blocks_standard_fallback() {
+    let root = tempdir();
+    let mut records = Vec::new();
+    fn counted(out: &mut Vec<u8>, bytes: &[u8]) {
+        out.extend(u32::try_from(bytes.len()).unwrap().to_le_bytes());
+        out.extend(bytes);
+    }
+    records.extend(0x0016u16.to_le_bytes());
+    counted(&mut records, b"vbTab");
+    records.extend(0x003eu16.to_le_bytes());
+    counted(
+        &mut records,
+        &"vbTab"
+            .encode_utf16()
+            .flat_map(u16::to_le_bytes)
+            .collect::<Vec<_>>(),
+    );
+    records.extend(0x000du16.to_le_bytes());
+    records.extend(0u32.to_le_bytes());
+    counted(&mut records, b"invalid-library");
+    records.extend([0; 6]);
+    let code = b"Attribute VB_Name = \"Client\"\r\nSub Inspect()\r\nDim result As String\r\nresult = vbTab\r\nresult = VBA.Constants.vbTab\r\nEnd Sub\r\n";
+    fs::write(
+        root.path().join("book.xlsm"),
+        fixture::native_book_with_references(
+            &[("Client", code, ProjectModuleKind::Procedural)],
+            "\"Project\"",
+            &records,
+        ),
+    )
+    .unwrap();
+    let mut service = FirstSliceService::new(4).unwrap();
+    let receipt = service.index_repository(root.path(), &deadline()).unwrap();
+    let snapshot = service
+        .loaded_generation_snapshot(receipt.generation)
+        .unwrap();
+    let document = snapshot.document();
+    assert!(document.entities.iter().any(|e| e.qualified_name == "vbTab"
+        && e.canonical_name.starts_with("vba-uninterpreted-reference:")
+        && e.evidence.source.is_some()));
+    for (rule, expected) in [
+        ("vba-standard-implicit-constant-v1.indexed_snapshot", 0),
+        ("vba-standard-constant-v1.indexed_snapshot", 1),
+    ] {
+        assert_eq!(
+            document
+                .occurrences
+                .iter()
+                .filter(|site| document
+                    .provenance
+                    .iter()
+                    .any(|p| p.id == site.provenance && p.rule.as_deref() == Some(rule)))
+                .count(),
+            expected,
+            "{rule}"
+        );
+    }
+}
+
+#[test]
+fn uninterpreted_vba_reference_fields_keep_distinct_source_declarations() {
+    fn text(out: &mut Vec<u8>, value: &[u8]) {
+        out.extend(u32::try_from(value.len()).unwrap().to_le_bytes());
+        out.extend(value);
+    }
+    fn marker(out: &mut Vec<u8>, id: u16) {
+        out.extend(id.to_le_bytes());
+        out.extend(0u32.to_le_bytes());
+    }
+    let mut records = Vec::new();
+    let mut expected = Vec::new();
+    for identifier in [b"invalid".as_slice(), b"invalid", b""] {
+        let start = records.len();
+        marker(&mut records, 0x000d);
+        text(&mut records, identifier);
+        records.extend([0; 6]);
+        expected.push(if identifier.is_empty() {
+            records[start..].to_vec()
+        } else {
+            identifier.to_vec()
+        });
+    }
+    let library = b"*\\G{01234567-89AB-CDEF-1032-547698BADCFE}#1.0#409#C:\\missing.tlb#Library";
+    for (absolute, relative) in [
+        (b"invalid".as_slice(), b"*\\C../missing.xlsm".as_slice()),
+        (b"*\\CC:\\missing.xlsm".as_slice(), b"invalid".as_slice()),
+        (b"*\\CC:\\missing.xlsm".as_slice(), library.as_slice()),
+    ] {
+        let start = records.len();
+        marker(&mut records, 0x000e);
+        text(&mut records, absolute);
+        text(&mut records, relative);
+        records.extend(1u32.to_le_bytes());
+        records.extend(0u16.to_le_bytes());
+        expected.push(records[start..].to_vec());
+    }
+    let control_start = records.len();
+    records.extend(0x0033u16.to_le_bytes());
+    text(&mut records, b"invalid-original");
+    marker(&mut records, 0x002f);
+    text(&mut records, b"invalid-twiddled");
+    records.extend([0; 12]);
+    text(&mut records, b"");
+    records.extend([0; 26]);
+    expected.extend([
+        b"invalid-original".to_vec(),
+        b"invalid-twiddled".to_vec(),
+        records[control_start..].to_vec(),
+    ]);
+    let root = tempdir();
+    fs::write(
+        root.path().join("book.xlsm"),
+        fixture::native_book_with_references(
+            &[("Alpha", FIRST, ProjectModuleKind::Procedural)],
+            "\"Project\"",
+            &records,
+        ),
+    )
+    .unwrap();
+    let mut service = FirstSliceService::new(4).unwrap();
+    let receipt = service.index_repository(root.path(), &deadline()).unwrap();
+    let snapshot = service
+        .loaded_generation_snapshot(receipt.generation)
+        .unwrap();
+    let document = snapshot.document();
+    let entities: Vec<_> = document
+        .entities
+        .iter()
+        .filter(|entity| {
+            entity.kind == EntityKind::ExternalSymbol
+                && entity
+                    .canonical_name
+                    .starts_with("vba-uninterpreted-reference:")
+        })
+        .collect();
+    assert_eq!(entities.len(), 9);
+    assert_eq!(
+        entities
+            .iter()
+            .map(|entity| entity.id)
+            .collect::<BTreeSet<_>>()
+            .len(),
+        9
+    );
+    let mut actual = Vec::new();
+    for entity in entities {
+        let source = entity.evidence.source.clone().unwrap();
+        let proof = document
+            .provenance
+            .iter()
+            .find(|proof| proof.id == entity.provenance)
+            .unwrap();
+        assert_eq!(
+            proof.rule.as_deref(),
+            Some("declared-vba-reference-uninterpreted")
+        );
+        assert!(proof.evidence_sources.contains(&source));
+        let read = service
+            .source_read_with_options_and_budget(
+                receipt.generation,
+                vec![source],
+                SourceReadOptions::new()
+                    .with_context_lines_before(0)
+                    .with_context_lines_after(0)
+                    .with_encoding(SourceEncoding::Bytes),
+                FirstSliceBudget::default(),
+                &deadline(),
+            )
+            .unwrap();
+        actual.push(read.data.chunks[0].bytes.clone());
+    }
+    actual.sort();
+    expected.sort();
+    assert_eq!(actual, expected);
+}
+
 fn reference_book_with_names(
     major: u16,
     leading: Option<(&[u8], &str)>,
@@ -815,7 +992,14 @@ fn reference_book_with_names(
     );
     (
         book,
-        vec![first.clone(), second.clone(), project_record, first, second],
+        vec![
+            first.clone(),
+            second.clone(),
+            b"malformed-library".to_vec(),
+            project_record,
+            first,
+            second,
+        ],
     )
 }
 
@@ -856,17 +1040,17 @@ fn declared_vba_reference_names_are_searchable_and_source_bound_after_restart() 
             .iter()
             .filter(|entity| entity.kind == EntityKind::ExternalSymbol)
             .collect();
-        assert_eq!(entities.len(), 5);
+        assert_eq!(entities.len(), 6);
         assert_eq!(
             entities
                 .iter()
                 .map(|entity| entity.id)
                 .collect::<BTreeSet<_>>()
                 .len(),
-            5
+            6
         );
         let mut sources = Vec::new();
-        for (query, count) in [("Café", 4), ("ExtendedApi", 1), ("LibraryShared", 4)] {
+        for (query, count) in [("Café", 5), ("ExtendedApi", 1), ("LibraryShared", 4)] {
             let located = service
                 .code_locate_with_languages_and_budget(
                     receipt.generation,
@@ -950,7 +1134,7 @@ fn declared_vba_reference_names_are_searchable_and_source_bound_after_restart() 
     fs::write(root.path().join("book.xlsm"), changed).unwrap();
     let updated = service.index_repository(root.path(), &deadline()).unwrap();
     assert_ne!(receipt.generation, updated.generation);
-    for (query, count) in [("Café", 0), ("ExtendedApi", 0), ("RenamedApi", 4)] {
+    for (query, count) in [("Café", 0), ("ExtendedApi", 0), ("RenamedApi", 5)] {
         let located = service
             .code_locate_with_languages_and_budget(
                 updated.generation,
@@ -1000,13 +1184,13 @@ fn inconsistent_vba_reference_names_do_not_hide_valid_library_declarations() {
             Some((b"ExtendedApi", "ExtendedApi")),
         );
         let (prepared, _) = prepared_fixture(&book, 100, 128 * 1024 * 1024, &deadline());
-        assert_eq!(prepared.references.len(), 5);
+        assert_eq!(prepared.references.len(), 6);
         let name_issues: Vec<_> = prepared
             .issues
             .iter()
             .filter(|(_, message)| message.ends_with("name rejected"))
             .collect();
-        assert_eq!(name_issues.len(), 4, "{unicode}");
+        assert_eq!(name_issues.len(), 5, "{unicode}");
         assert!(
             name_issues
                 .iter()
@@ -1032,7 +1216,7 @@ fn conflicting_reference_name_is_not_an_indexed_alias() {
             .iter()
             .filter(|diagnostic| diagnostic.message.ends_with("name rejected"))
             .count(),
-        4
+        5
     );
     let snapshot = service
         .loaded_generation_snapshot(receipt.generation)
@@ -1043,13 +1227,13 @@ fn conflicting_reference_name_is_not_an_indexed_alias() {
         .iter()
         .filter(|entity| entity.kind == EntityKind::ExternalSymbol)
         .collect();
-    assert_eq!(references.len(), 5);
+    assert_eq!(references.len(), 6);
     assert_eq!(
         references
             .iter()
             .filter(|entity| entity.qualified_name == entity.canonical_name)
             .count(),
-        4
+        5
     );
     for (query, count) in [
         ("FalseAlias", 0),
@@ -1131,6 +1315,26 @@ fn declared_vba_references_survive_restart_with_exact_binary_evidence_and_import
             assert_eq!(entity.kind, EntityKind::ExternalSymbol);
             assert!(entity.flags.contains(&rootlight_ir::EntityFlag::External));
             assert!(entity.flags.contains(&rootlight_ir::EntityFlag::Synthetic));
+            let uninterpreted = expected == b"malformed-library";
+            assert_eq!(
+                entity
+                    .canonical_name
+                    .starts_with("vba-uninterpreted-reference:"),
+                uninterpreted
+            );
+            let proof = document
+                .provenance
+                .iter()
+                .find(|proof| proof.id == entity.provenance)
+                .unwrap();
+            assert_eq!(
+                proof.rule.as_deref(),
+                Some(if uninterpreted {
+                    "declared-vba-reference-uninterpreted"
+                } else {
+                    "declared-vba-reference-unresolved"
+                })
+            );
             let source = entity.evidence.source.clone().unwrap();
             assert_eq!(source.span().file(), metadata.id);
             assert_eq!(source.generation(), receipt.generation);
