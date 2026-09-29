@@ -44,6 +44,124 @@ pub(super) const FUNCTIONS: &[Function] = &[
         signature: "Function MidB$(String As Variant, Start As Long, Optional Length As Variant) As String",
         parameters: &[("string", false), ("start", false), ("length", true)],
     },
+    // MS-VBAL 6.1.2.11.1.17-21, 23-24 and 30-42 define these string contracts.
+    // Omitted declaration types mean Variant; dollar variants change only the result.
+    // https://learn.microsoft.com/en-us/openspecs/microsoft_general_purpose_programming_languages/ms-vbal/f87cc0fb-f0ca-4875-9691-34d80e2933b0
+    Function {
+        name: "LCase",
+        signature: "Function LCase(String As Variant) As Variant",
+        parameters: &[("string", false)],
+    },
+    Function {
+        name: "LCase$",
+        signature: "Function LCase$(String As Variant) As String",
+        parameters: &[("string", false)],
+    },
+    Function {
+        name: "UCase",
+        signature: "Function UCase(String As Variant) As Variant",
+        parameters: &[("string", false)],
+    },
+    Function {
+        name: "UCase$",
+        signature: "Function UCase$(String As Variant) As String",
+        parameters: &[("string", false)],
+    },
+    Function {
+        name: "Left",
+        signature: "Function Left(String As Variant, Length As Long) As Variant",
+        parameters: &[("string", false), ("length", false)],
+    },
+    Function {
+        name: "LeftB",
+        signature: "Function LeftB(String As Variant, Length As Long) As Variant",
+        parameters: &[("string", false), ("length", false)],
+    },
+    Function {
+        name: "Left$",
+        signature: "Function Left$(String As Variant, Length As Long) As String",
+        parameters: &[("string", false), ("length", false)],
+    },
+    Function {
+        name: "LeftB$",
+        signature: "Function LeftB$(String As Variant, Length As Long) As String",
+        parameters: &[("string", false), ("length", false)],
+    },
+    Function {
+        name: "Right",
+        signature: "Function Right(String As Variant, Length As Long) As Variant",
+        parameters: &[("string", false), ("length", false)],
+    },
+    Function {
+        name: "RightB",
+        signature: "Function RightB(String As Variant, Length As Long) As Variant",
+        parameters: &[("string", false), ("length", false)],
+    },
+    Function {
+        name: "Right$",
+        signature: "Function Right$(String As Variant, Length As Long) As String",
+        parameters: &[("string", false), ("length", false)],
+    },
+    Function {
+        name: "RightB$",
+        signature: "Function RightB$(String As Variant, Length As Long) As String",
+        parameters: &[("string", false), ("length", false)],
+    },
+    Function {
+        name: "LTrim",
+        signature: "Function LTrim(String As Variant) As Variant",
+        parameters: &[("string", false)],
+    },
+    Function {
+        name: "LTrim$",
+        signature: "Function LTrim$(String As Variant) As String",
+        parameters: &[("string", false)],
+    },
+    Function {
+        name: "RTrim",
+        signature: "Function RTrim(String As Variant) As Variant",
+        parameters: &[("string", false)],
+    },
+    Function {
+        name: "RTrim$",
+        signature: "Function RTrim$(String As Variant) As String",
+        parameters: &[("string", false)],
+    },
+    Function {
+        name: "Trim",
+        signature: "Function Trim(String As Variant) As Variant",
+        parameters: &[("string", false)],
+    },
+    Function {
+        name: "Trim$",
+        signature: "Function Trim$(String As Variant) As String",
+        parameters: &[("string", false)],
+    },
+    Function {
+        name: "Space",
+        signature: "Function Space(Number As Long) As Variant",
+        parameters: &[("number", false)],
+    },
+    Function {
+        name: "Space$",
+        signature: "Function Space$(Number As Long) As String",
+        parameters: &[("number", false)],
+    },
+    Function {
+        name: "String",
+        signature: "Function String(Number As Long, Character As Variant) As Variant",
+        parameters: &[("number", false), ("character", false)],
+    },
+    Function {
+        name: "String$",
+        signature: "Function String$(Number As Long, Character As Variant) As String",
+        parameters: &[("number", false), ("character", false)],
+    },
+    Function {
+        name: "StrReverse",
+        signature: "Function StrReverse(Expression As String) As String",
+        parameters: &[("expression", false)],
+    },
 ];
 
 pub(super) fn find(name: &str) -> Option<&'static Function> {

@@ -185,6 +185,34 @@ fn standard_function_calls_verify_arguments_and_survive_reopen() {
         "VBA.Mid(Length:=2, String:=\"abc\", Start:=1)",
         "Call VBA.Mid(\"abc\", 1)",
         "VBA.Len(VBA.Mid$(\"abc\", 1))",
+        "VBA.LCase(\"Ab\")",
+        "VBA.LCase$(\"Ab\")",
+        "VBA.UCase(\"Ab\")",
+        "VBA.UCase$(\"Ab\")",
+        "VBA.Left(\"abc\", 2)",
+        "VBA.LeftB(\"abc\", 2)",
+        "VBA.Left$(\"abc\", 2)",
+        "VBA.LeftB$(\"abc\", 2)",
+        "VBA.Right(\"abc\", 2)",
+        "VBA.RightB(\"abc\", 2)",
+        "VBA.Right$(\"abc\", 2)",
+        "VBA.RightB$(\"abc\", 2)",
+        "VBA.LTrim(\" ab \" )",
+        "VBA.LTrim$(\" ab \" )",
+        "VBA.RTrim(\" ab \" )",
+        "VBA.RTrim$(\" ab \" )",
+        "VBA.Trim(\" ab \" )",
+        "VBA.Trim$(\" ab \" )",
+        "VBA.Space(2)",
+        "VBA.Space$(2)",
+        "VBA.String(2, \"a\")",
+        "VBA.String$(2, \"a\")",
+        "VBA.StrReverse(\"abc\")",
+        "VBA.Left$(Length:=2, String:=\"abc\")",
+        "VBA.String$(Character:=\"a\", Number:=2)",
+        "VBA.StrReverse(Expression:=\"abc\")",
+        "vba.lcase$(String:=\"ABC\")",
+        "[vBa].Left$(\"sample\", 1)",
     ];
     let invalid = [
         "VBA.Mid$(\"abc\", 1,)",
@@ -196,6 +224,17 @@ fn standard_function_calls_verify_arguments_and_survive_reopen() {
         "VBA.Mid(String:=\"abc\", String:=\"def\", Start:=1)",
         "VBA.Len$(\"abc\")",
         "VBA.Mid%(\"abc\", 1)",
+        "VBA.Left(\"abc\")",
+        "VBA.RightB$(Length:=2)",
+        "VBA.Space()",
+        "VBA.Space(Number:=2, Number:=3)",
+        "VBA.String(2)",
+        "VBA.String$(Character:=\"a\", 2)",
+        "VBA.LCase$(Expression:=\"abc\")",
+        "VBA.StrReverse(String:=\"abc\")",
+        "VBA.Trim$(\"abc\", 1)",
+        "VBA.UCase%(\"abc\")",
+        "VBA.StrReverse$(\"abc\")",
     ];
     for shadow in [false, true, false] {
         let parameter = if shadow { "ByVal VBA As Object" } else { "" };
@@ -245,14 +284,24 @@ fn standard_function_calls_verify_arguments_and_survive_reopen() {
             assert!(target.evidence.source.is_none());
             symbols.insert(symbol);
             let span = site.source.span();
-            calls.push(
-                text.get(
+            let expression = text
+                .get(
                     usize::try_from(span.start_byte()).unwrap()
                         ..usize::try_from(span.end_byte()).unwrap(),
                 )
+                .unwrap();
+            let callee = expression
+                .strip_prefix("Call ")
+                .unwrap_or(expression)
+                .split_once('(')
                 .unwrap()
-                .to_owned(),
+                .0
+                .replace(['[', ']'], "");
+            assert!(
+                target.qualified_name.eq_ignore_ascii_case(&callee),
+                "{expression}"
             );
+            calls.push(expression.to_owned());
             assert_eq!(
                 document
                     .relations
@@ -268,6 +317,7 @@ fn standard_function_calls_verify_arguments_and_survive_reopen() {
         let mut expected = valid.map(str::to_owned).to_vec();
         expected.push("VBA.Mid$(\"abc\", 1)".to_owned());
         expected.sort();
+        let expected_call_count = expected.len();
         assert_eq!(calls, if shadow { Vec::new() } else { expected });
         for expression in invalid {
             let start = u64::try_from(text.find(expression).unwrap()).unwrap();
@@ -285,7 +335,7 @@ fn standard_function_calls_verify_arguments_and_survive_reopen() {
         if !shadow {
             assert_eq!(
                 symbols.len(),
-                6,
+                29,
                 "String-returning variants must retain distinct identities"
             );
             let relationships = service
@@ -295,12 +345,15 @@ fn standard_function_calls_verify_arguments_and_survive_reopen() {
                     vec![RelationFamily::Calls],
                     Some(RelationDirection::Inbound),
                     0,
-                    25,
+                    64,
                     0,
                     &deadline(),
                 )
                 .unwrap();
-            assert_eq!(relationships.data.returned_edges, 10);
+            assert_eq!(
+                usize::try_from(relationships.data.returned_edges).unwrap(),
+                expected_call_count
+            );
             assert!(!relationships.data.truncated);
         }
         let prepared = service
@@ -321,7 +374,7 @@ fn typed_standard_members_keep_qualifiers_and_unproven_type_constraints() {
     for shadow in [false, true] {
         let parameter = if shadow { "ByVal VBA As Object" } else { "" };
         let text = format!(
-            "Attribute VB_Name = \"Client\"\r\nPublic Sub Run({parameter})\r\nDim value As Variant\r\nvalue = VBA.Unknown$(\"sample\", 1)\r\nvalue = [vBa].Left$(\"sample\", 1)\r\nvalue = VBA.Constants.vbTab$\r\nvalue = VBA$.vbTab\r\nEnd Sub\r\n"
+            "Attribute VB_Name = \"Client\"\r\nPublic Sub Run({parameter})\r\nDim value As Variant\r\nvalue = VBA.Unknown$(\"sample\", 1)\r\nvalue = [vBa].Unknown$(\"sample\", 1)\r\nvalue = VBA.Constants.vbTab$\r\nvalue = VBA$.vbTab\r\nEnd Sub\r\n"
         );
         fs::write(
             root.path().join("book.xlsm"),
@@ -379,7 +432,7 @@ fn typed_standard_members_keep_qualifiers_and_unproven_type_constraints() {
         );
         for spelling in [
             "VBA.Unknown$",
-            "[vBa].Left$",
+            "[vBa].Unknown$",
             "VBA.Constants.vbTab$",
             "VBA$.vbTab",
         ] {
