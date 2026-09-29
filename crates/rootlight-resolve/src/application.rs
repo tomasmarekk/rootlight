@@ -438,6 +438,59 @@ impl ResolutionEngine {
                 cancellation,
             )?;
         }
+        if !lookup.classic.automatic_initializers.is_empty() {
+            let original_ids: BTreeMap<_, _> = occurrence_remap
+                .iter()
+                .map(|(old, new)| (*new, *old))
+                .collect();
+            for occurrence in &document.occurrences {
+                cancellation.check()?;
+                let original = original_ids
+                    .get(&occurrence.id)
+                    .copied()
+                    .unwrap_or(occurrence.id);
+                let Some(proof) = lookup.classic.automatic_initializers.get(&original) else {
+                    continue;
+                };
+                // A bounded pass may not have applied the type/member proof. Do not
+                // publish a lifecycle edge until storage and project identities exist.
+                let Some(&project_root) = project_roots.get(&proof.context.manifest) else {
+                    continue;
+                };
+                if occurrence.target
+                    != (OccurrenceTarget::Resolved {
+                        symbol: proof.variable.id,
+                    })
+                {
+                    continue;
+                }
+                let provenance = automatic_initializer_provenance(
+                    &lookup,
+                    occurrence,
+                    proof,
+                    &producer,
+                    context,
+                    project_root,
+                )?;
+                let mut relation = pending_relation(
+                    occurrence,
+                    proof.initializer.id,
+                    RelationPredicate::Calls,
+                    occurrence.confidence,
+                    ResolutionRule::ClassicProjectConstruction,
+                )
+                .into_record()?;
+                relation.provenance = provenance.id;
+                relation.id =
+                    derive_relation_record_id(&relation).map_err(ResolutionError::FactIdentity)?;
+                if known_provenance.insert(provenance.id) {
+                    output_budget.reserve_provenance()?;
+                    new_provenance.push(provenance);
+                }
+                output_budget.reserve_relation()?;
+                document.relations.push(relation);
+            }
+        }
         drop(lookup);
         document.provenance.append(&mut new_provenance);
 
@@ -1701,6 +1754,65 @@ fn build_provenance(
         derivation_parents,
         rule: Some(rule.to_owned()),
     };
+    record.id = derive_provenance_record_id(&record).map_err(ResolutionError::FactIdentity)?;
+    Ok(record)
+}
+
+fn automatic_initializer_provenance(
+    lookup: &CandidateIndex<'_>,
+    occurrence: &OccurrenceRecord,
+    proof: &crate::classic::AutomaticInitialization<'_>,
+    producer: &ProducerIdentity,
+    context: ResolverFactContext,
+    project_root: FactId,
+) -> Result<ProvenanceRecord, ResolutionError> {
+    let file = lookup
+        .files
+        .get(&occurrence.file)
+        .ok_or(ResolutionError::UnsupportedIdentityRemap)?;
+    let parent = lookup
+        .provenance
+        .get(&file.provenance)
+        .ok_or(ResolutionError::UnsupportedIdentityRemap)?;
+    let mut record = (**parent).clone();
+    record.producer_kind = ProducerKind::Rule;
+    record.producer = producer.clone();
+    record.binary_digest = context.binary_digest();
+    record.frontend_version = Some(RESOLVER_PROVIDER_VERSION.to_owned());
+    record.language = "vba".to_owned();
+    record.input_sources = vec![occurrence.source.clone(), proof.type_source.clone()];
+    record
+        .input_sources
+        .extend(proof.read_sources.iter().cloned());
+    record.derivation_parents = vec![FactRef::Fact(project_root), FactRef::Fact(occurrence.id)];
+    let mut contexts = vec![parent.build_context.digest()];
+    for entity in [proof.variable, proof.class, proof.initializer] {
+        record
+            .input_sources
+            .extend(entity.evidence.source.iter().cloned());
+        record.derivation_parents.push(FactRef::Entity(entity.id));
+        record.tier = lower_tier(record.tier, entity.tier);
+        let provenance = lookup
+            .provenance
+            .get(&entity.provenance)
+            .ok_or(ResolutionError::UnsupportedIdentityRemap)?;
+        contexts.push(provenance.build_context.digest());
+    }
+    contexts.sort_unstable();
+    contexts.dedup();
+    let bytes: Vec<_> = contexts
+        .iter()
+        .flat_map(|hash| hash.as_bytes().iter().copied())
+        .collect();
+    record.build_context = BuildContextIdentity::new(content_hash(&bytes));
+    record.input_sources.sort_unstable();
+    record.input_sources.dedup();
+    record.evidence_sources = record.input_sources.clone();
+    record.derivation_parents.sort_unstable();
+    record.derivation_parents.dedup();
+    // Calls describes a possible static dependency, not an unconditional runtime
+    // event. Keep the Nothing guard explicit and preserve the storage target.
+    record.rule = Some("classic-automatic-initialization-v1.when_nothing".to_owned());
     record.id = derive_provenance_record_id(&record).map_err(ResolutionError::FactIdentity)?;
     Ok(record)
 }

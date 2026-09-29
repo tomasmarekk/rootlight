@@ -15,7 +15,10 @@ use std::{
 };
 
 use rootlight_cancel::Cancellation;
-use rootlight_ir::{FileRecord, OccurrenceTarget, SourceMappingKind, SourceRef, SourceSpan};
+use rootlight_ir::{
+    FileRecord, NormalizedIrDocument, OccurrenceTarget, RelationEndpoint, RelationPredicate,
+    SourceMappingKind, SourceRef, SourceSpan,
+};
 use rootlight_runtime::RuntimePaths;
 use rootlight_service::{
     FirstSliceBudget, FirstSliceIndexMode, FirstSliceIndexProgress, FirstSliceService,
@@ -347,6 +350,7 @@ fn inspect_files(
             return Err("extracted source has multiple container origins".into());
         }
     }
+    let mut supplemental_calls = supplemental_call_evidence(document)?;
     let mut verified_containers = BTreeSet::new();
     let mut rows = Vec::new();
     for file in document.files.iter().chain(
@@ -520,13 +524,62 @@ fn inspect_files(
             "container_live_exact":origin.map(|_| true),
             "extraction_independently_verified":origin.map(|_| false),
             "occurrences":occurrences,
-            "gaps":gaps
+            "gaps":gaps,
+            "supplemental_calls":supplemental_calls.remove(&file.id).unwrap_or_default()
         }));
     }
     if rows.len() != snapshot.file_count() {
         return Err("inspection omitted a retained file record".into());
     }
     Ok(rows)
+}
+
+fn supplemental_call_evidence(
+    document: &NormalizedIrDocument,
+) -> Result<BTreeMap<rootlight_ids::FileId, Vec<serde_json::Value>>, Box<dyn Error>> {
+    let occurrences: BTreeMap<_, _> = document
+        .occurrences
+        .iter()
+        .map(|site| (site.id, site))
+        .collect();
+    let entities: BTreeMap<_, _> = document
+        .entities
+        .iter()
+        .map(|entity| (entity.id, entity))
+        .collect();
+    let provenance: BTreeMap<_, _> = document
+        .provenance
+        .iter()
+        .map(|proof| (proof.id, proof))
+        .collect();
+    let mut result: BTreeMap<_, Vec<_>> = BTreeMap::new();
+    for relation in &document.relations {
+        if relation.predicate != RelationPredicate::Calls {
+            continue;
+        }
+        let (RelationEndpoint::Occurrence(id), RelationEndpoint::Entity(target)) =
+            (relation.subject, relation.object)
+        else {
+            continue;
+        };
+        let site = occurrences.get(&id).ok_or("call has no occurrence")?;
+        if site.target == (OccurrenceTarget::Resolved { symbol: target }) {
+            continue;
+        }
+        // Additional effects can call a different symbol than the occurrence's
+        // lexical target. Counts alone cannot audit either identity or its proof.
+        result.entry(site.file).or_default().push(json!({
+            "relation":relation,
+            "occurrence":site,
+            "lexical_target":match site.target {
+                OccurrenceTarget::Resolved { symbol } => entities.get(&symbol).copied(),
+                _ => None,
+            },
+            "target":entities.get(&target).ok_or("call has no target entity")?,
+            "provenance":provenance.get(&relation.provenance).ok_or("call has no provenance")?,
+        }));
+    }
+    Ok(result)
 }
 
 fn chunk_end(text: &str, start: usize) -> usize {
@@ -540,6 +593,46 @@ fn chunk_end(text: &str, start: usize) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn supplemental_calls_preserve_distinct_targets_and_conditions_after_reopen() {
+        let directory = tempfile::tempdir().unwrap();
+        let repository = directory.path().join("repository");
+        fs::create_dir(&repository).unwrap();
+        fs::write(
+            repository.join("project.vbp"),
+            "Type=Exe\nName=\"Project\"\nModule=Client; Client.bas\nClass=Worker; Worker.cls\n",
+        )
+        .unwrap();
+        fs::write(repository.join("Client.bas"), "Attribute VB_Name = \"Client\"\nSub Run()\nDim item As New Worker\nitem.Touch\nEnd Sub\n").unwrap();
+        fs::write(repository.join("Worker.cls"), "VERSION 1.0 CLASS\nAttribute VB_Name = \"Worker\"\nPrivate Sub Class_Initialize()\nEnd Sub\nPublic Sub Touch()\nEnd Sub\n").unwrap();
+        let state = directory.path().join("state");
+        let report = inspect(&repository, &state, None, StateMode::Fresh).unwrap();
+        let calls: Vec<_> = report["files"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .flat_map(|row| row["supplemental_calls"].as_array().unwrap())
+            .collect();
+        assert_eq!(calls.len(), 1);
+        let call = calls[0];
+        assert_eq!(call["target"]["canonical_name"], "Class_Initialize");
+        assert_eq!(call["lexical_target"]["canonical_name"], "item");
+        assert_eq!(
+            call["lexical_target"]["id"],
+            call["occurrence"]["target"]["symbol"]
+        );
+        assert_eq!(call["occurrence"]["target"]["kind"], "resolved");
+        assert_ne!(call["occurrence"]["target"]["symbol"], call["target"]["id"]);
+        assert_eq!(call["relation"]["predicate"], "calls");
+        assert_eq!(
+            call["provenance"]["rule"],
+            "classic-automatic-initialization-v1.when_nothing"
+        );
+        assert_eq!(call["relation"]["provenance"], call["provenance"]["id"]);
+        let restored = inspect(&repository, &state, None, StateMode::Resume).unwrap();
+        assert_eq!(report["files"], restored["files"]);
+    }
 
     #[test]
     fn gap_evidence_distinguishes_callees_applications_and_shared_spans() {

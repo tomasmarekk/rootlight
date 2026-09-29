@@ -100,6 +100,16 @@ pub(crate) struct ClassicIndex<'a> {
     application_parameters: BTreeMap<FactId, Arc<Vec<&'a EntityRecord>>>,
     receiver_sources: BTreeMap<FactId, Arc<Vec<SourceRef>>>,
     initializers: BTreeMap<FactId, &'a EntityRecord>,
+    pub(crate) automatic_initializers: BTreeMap<FactId, AutomaticInitialization<'a>>,
+}
+
+pub(crate) struct AutomaticInitialization<'a> {
+    pub(crate) variable: &'a EntityRecord,
+    pub(crate) class: &'a EntityRecord,
+    pub(crate) initializer: &'a EntityRecord,
+    pub(crate) context: Arc<ProjectEvidence>,
+    pub(crate) type_source: SourceRef,
+    pub(crate) read_sources: Vec<SourceRef>,
 }
 
 pub(crate) struct Proof<'a> {
@@ -1236,6 +1246,7 @@ impl<'a> ClassicIndex<'a> {
         // getter's result type can establish the next receiver in a chain.
         // Enum values do not establish an instance member environment.
         let mut value_types = BTreeMap::new();
+        let mut automatic_types = BTreeSet::new();
         let mut receivers = BTreeMap::new();
         let mut native_results = BTreeMap::new();
         let mut members = BTreeMap::new();
@@ -1406,6 +1417,11 @@ impl<'a> ClassicIndex<'a> {
                         true
                     };
                     if safe {
+                        if occurrence.syntax_kind == "vba.automatic_type_identifier.reference"
+                            && matches!(owner.kind, EntityKind::Variable | EntityKind::Field)
+                        {
+                            automatic_types.insert((owner.id, occurrence.source.clone()));
+                        }
                         value_types
                             .entry(owner.id)
                             .and_modify(|prior| *prior = None)
@@ -1475,9 +1491,20 @@ impl<'a> ClassicIndex<'a> {
         let mut module_qualifiers = BTreeMap::new();
         let mut member_occurrences = Vec::new();
         let mut read_receivers: BTreeMap<_, Vec<SourceRef>> = BTreeMap::new();
+        let mut automatic_reads = BTreeMap::new();
         let mut calls = calls::CallIndex::build(index, occurrences, cancellation, work)?;
         let mut constructed_types = BTreeMap::new();
         let mut constructed_classes = BTreeSet::new();
+        for (owner, source) in &automatic_types {
+            cancellation.check()?;
+            work.consume()?;
+            if let Some((_, class, _, type_source)) =
+                value_types.get(owner).and_then(Option::as_ref)
+                && source == type_source
+            {
+                constructed_classes.insert(*class);
+            }
+        }
         for site in occurrences {
             cancellation.check()?;
             work.consume()?;
@@ -1655,6 +1682,20 @@ impl<'a> ClassicIndex<'a> {
                     .entry(member.span)
                     .or_default()
                     .push(occurrence.source.clone());
+                if !automatic_types.is_empty() {
+                    let mut evidence = vec![occurrence.source.clone()];
+                    evidence.extend(member.boundaries.iter().cloned());
+                    // Multiple With-body reads share one evaluated receiver. Select
+                    // its witness by source order, not generation-dependent fact IDs.
+                    automatic_reads
+                        .entry(member.span)
+                        .and_modify(|prior: &mut Vec<SourceRef>| {
+                            if evidence < *prior {
+                                *prior = evidence.clone();
+                            }
+                        })
+                        .or_insert(evidence);
+                }
                 if matches!(occurrence.target, OccurrenceTarget::Unresolved { .. }) {
                     member_occurrences.push((occurrence, Some(member)));
                     continue;
@@ -2172,6 +2213,61 @@ impl<'a> ClassicIndex<'a> {
                     .and_modify(|prior| *prior = None)
                     .or_insert(Some(occurrence.id));
             }
+        }
+        if automatic_reads.is_empty() {
+            return Ok(result);
+        }
+        for site in occurrences {
+            cancellation.check()?;
+            work.consume()?;
+            if site.role != OccurrenceRole::Reference {
+                continue;
+            }
+            let Some(reads) = automatic_reads.get(&site.source.span()) else {
+                continue;
+            };
+            let symbol = match site.target {
+                OccurrenceTarget::Resolved { symbol } => Some(symbol),
+                OccurrenceTarget::Unresolved { .. } => {
+                    result.proof(site).map(|proof| proof.target.id)
+                }
+                _ => None,
+            };
+            let Some((variable, class, context, type_source)) = symbol
+                .and_then(|symbol| value_types.get(&symbol))
+                .and_then(Option::as_ref)
+            else {
+                continue;
+            };
+            if !automatic_types.contains(&(variable.id, type_source.clone())) {
+                continue;
+            }
+            let (Some(Some(Some(initializer))), Some(class)) =
+                (initializers.get(class), entities.get(class))
+            else {
+                continue;
+            };
+            let mut read_sources = Vec::new();
+            for source in reads {
+                cancellation.check()?;
+                work.consume()?;
+                read_sources.push(source.clone());
+            }
+            read_sources.sort_unstable();
+            read_sources.dedup();
+            // This proves a conditional call at a receiver read, never eager
+            // declaration-time construction or the variable's runtime value.
+            result.automatic_initializers.insert(
+                site.id,
+                AutomaticInitialization {
+                    variable,
+                    class,
+                    initializer,
+                    context: Arc::clone(context),
+                    type_source: type_source.clone(),
+                    read_sources,
+                },
+            );
         }
         Ok(result)
     }

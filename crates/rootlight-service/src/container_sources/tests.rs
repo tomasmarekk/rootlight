@@ -1798,6 +1798,214 @@ fn automatic_instantiation_gaps_survive_type_binding_and_source_reopen() {
 }
 
 #[test]
+fn automatic_receiver_calls_preserve_storage_targets_after_reopen() {
+    for native in [false, true] {
+        let root = tempdir();
+        let storage = tempdir();
+        let paths = rootlight_runtime::RuntimePaths::new(
+            storage.path().join("state"),
+            storage.path().join("runtime"),
+        )
+        .unwrap();
+        paths.prepare_owner().unwrap();
+        for (automatic, parameters) in [
+            (true, ""),
+            (false, ""),
+            (true, "ByVal x As Long"),
+            (true, ""),
+        ] {
+            let modifier = if automatic { " New" } else { "" };
+            let client = format!(
+                "Attribute VB_Name = \"Client\"\r\nPrivate cached As{modifier} Worker\r\nPrivate Type Holder\r\nChild As{modifier} Worker\r\nEnd Type\r\nPublic Sub Run()\r\nDim local As{modifier} Worker\r\nDim plain As Worker\r\nDim holder As Holder\r\ncached.Touch\r\nlocal.Touch\r\nSet local = Nothing\r\nlocal.Touch\r\nholder.Child.Touch\r\nplain.Touch\r\nSet cached = Nothing\r\nWith cached\r\n.Touch\r\n.Touch\r\nEnd With\r\nEnd Sub\r\n"
+            );
+            let worker = format!(
+                "Attribute VB_Name = \"Worker\"\r\nPrivate Sub Class_Initialize({parameters})\r\nEnd Sub\r\nPublic Sub Touch()\r\nEnd Sub\r\n"
+            );
+            if native {
+                fs::write(
+                    root.path().join("book.xlsm"),
+                    fixture::typed_book(&[
+                        ("Client", client.as_bytes(), false),
+                        ("Worker", worker.as_bytes(), true),
+                    ]),
+                )
+                .unwrap();
+            } else {
+                fs::write(root.path().join("Client.bas"), &client).unwrap();
+                fs::write(
+                    root.path().join("Worker.cls"),
+                    format!("VERSION 1.0 CLASS\r\n{worker}"),
+                )
+                .unwrap();
+                fs::write(root.path().join("project.vbp"), "Type=Exe\nName=\"Project\"\nModule=Client; Client.bas\nClass=Worker; Worker.cls\n").unwrap();
+            }
+            let mut service =
+                FirstSliceService::new_durable(4, paths.state_dir(), &deadline()).unwrap();
+            let receipt = service.index_repository(root.path(), &deadline()).unwrap();
+            assert_eq!(
+                receipt,
+                service.index_repository(root.path(), &deadline()).unwrap()
+            );
+            drop(service);
+            let mut service =
+                FirstSliceService::new_durable(4, paths.state_dir(), &deadline()).unwrap();
+            let snapshot = service
+                .loaded_generation_snapshot(receipt.generation)
+                .unwrap();
+            let document = snapshot.document();
+            let calls: Vec<_> = document
+                .relations
+                .iter()
+                .filter(|edge| {
+                    edge.predicate == RelationPredicate::Calls
+                        && document.provenance.iter().any(|proof| {
+                            proof.id == edge.provenance
+                                && proof.rule.as_deref()
+                                    == Some("classic-automatic-initialization-v1.when_nothing")
+                        })
+                })
+                .collect();
+            let expected = automatic && parameters.is_empty();
+            assert_eq!(
+                calls.len(),
+                if expected { 5 } else { 0 },
+                "native={native} automatic={automatic} parameters={parameters}"
+            );
+            for edge in &calls {
+                let RelationEndpoint::Occurrence(id) = edge.subject else {
+                    panic!("initializer must retain its use-site occurrence");
+                };
+                let site = document
+                    .occurrences
+                    .iter()
+                    .find(|site| site.id == id)
+                    .unwrap();
+                let OccurrenceTarget::Resolved { symbol } = site.target else {
+                    panic!("storage target must stay resolved");
+                };
+                let storage = document
+                    .entities
+                    .iter()
+                    .find(|entity| entity.id == symbol)
+                    .unwrap();
+                assert!(matches!(
+                    storage.kind,
+                    EntityKind::Variable | EntityKind::Field
+                ));
+                assert!(matches!(
+                    storage.canonical_name.as_str(),
+                    "cached" | "local" | "Child"
+                ));
+                assert_eq!(site.role, OccurrenceRole::Reference);
+                assert_eq!(edge.evidence.source.as_ref(), Some(&site.source));
+                let initializer = document
+                    .entities
+                    .iter()
+                    .find(|entity| edge.object == RelationEndpoint::Entity(entity.id))
+                    .unwrap();
+                assert_eq!(initializer.canonical_name, "Class_Initialize");
+                assert_eq!(
+                    document
+                        .relations
+                        .iter()
+                        .filter(|relation| relation.subject == edge.subject
+                            && relation.predicate == RelationPredicate::RefersTo
+                            && relation.object == RelationEndpoint::Entity(symbol))
+                        .count(),
+                    1
+                );
+                let proof = document
+                    .provenance
+                    .iter()
+                    .find(|proof| proof.id == edge.provenance)
+                    .unwrap();
+                assert!(proof.derivation_parents.contains(&FactRef::Entity(symbol)));
+                assert!(
+                    proof
+                        .derivation_parents
+                        .contains(&FactRef::Entity(initializer.id))
+                );
+                assert!(proof.evidence_sources.contains(&site.source));
+            }
+            if expected {
+                let initializer = document
+                    .entities
+                    .iter()
+                    .find(|entity| entity.canonical_name == "Class_Initialize")
+                    .unwrap();
+                let relationships = service
+                    .symbol_relationships(
+                        receipt.generation,
+                        BTreeSet::from([initializer.id]),
+                        vec![RelationFamily::Calls],
+                        Some(RelationDirection::Inbound),
+                        0,
+                        25,
+                        0,
+                        &deadline(),
+                    )
+                    .unwrap();
+                assert!(!relationships.data.truncated);
+                assert_eq!(relationships.data.returned_edges, 5);
+                let read = service
+                    .source_read_with_options_and_budget(
+                        receipt.generation,
+                        calls
+                            .iter()
+                            .map(|edge| edge.evidence.source.clone().unwrap())
+                            .collect(),
+                        SourceReadOptions::new()
+                            .with_context_lines_before(0)
+                            .with_context_lines_after(0),
+                        FirstSliceBudget::default(),
+                        &deadline(),
+                    )
+                    .unwrap();
+                let mut values: Vec<_> = read
+                    .data
+                    .chunks
+                    .iter()
+                    .map(|chunk| {
+                        assert_eq!(chunk.extracted_from.is_some(), native);
+                        chunk.bytes.clone()
+                    })
+                    .collect();
+                values.sort();
+                assert_eq!(
+                    values,
+                    [
+                        b"cached".to_vec(),
+                        b"cached".to_vec(),
+                        b"holder.Child".to_vec(),
+                        b"local".to_vec(),
+                        b"local".to_vec()
+                    ]
+                );
+            }
+            // Receiver proofs do not establish all other reads or runtime state.
+            assert_eq!(
+                document
+                    .skipped_regions
+                    .iter()
+                    .filter(|gap| gap.detail == "vba-automatic-instantiation-semantics-unavailable")
+                    .count(),
+                if automatic { 3 } else { 0 }
+            );
+            let prepared = service
+                .prepare_repository_with_options(
+                    root.path(),
+                    FirstSliceIndexOptions::clean_rebuild(FirstSliceIndexMode::Structural),
+                    &deadline(),
+                )
+                .unwrap();
+            let rebuilt = service.publish_prepared(prepared, &deadline()).unwrap();
+            assert!(receipt.logical_snapshot.is_some());
+            assert_eq!(receipt.logical_snapshot, rebuilt.logical_snapshot);
+        }
+    }
+}
+
+#[test]
 fn expression_type_uses_do_not_declare_property_return_types() {
     for body in [
         "Set Item = New Worker",
