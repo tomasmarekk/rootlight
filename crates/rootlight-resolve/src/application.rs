@@ -1622,6 +1622,7 @@ fn build_provenance(
     if matches!(
         decision.explanation.rule,
         ResolutionRule::ClassicProjectType
+            | ResolutionRule::ClassicReferencedType
             | ResolutionRule::ClassicProjectConstruction
             | ResolutionRule::ClassicProjectMember
             | ResolutionRule::ClassicProjectDefaultMember
@@ -1791,6 +1792,7 @@ fn build_provenance(
             "matlab-primary-function-v1.indexed_snapshot"
         }
         ResolutionRule::ClassicProjectType => "classic-project-type-v1.indexed_snapshot",
+        ResolutionRule::ClassicReferencedType => "classic-referenced-type-v1.indexed_snapshot",
         ResolutionRule::ClassicProjectConstruction => {
             "classic-project-construction-v1.indexed_snapshot"
         }

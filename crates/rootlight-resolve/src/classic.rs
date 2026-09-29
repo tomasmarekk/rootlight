@@ -8,6 +8,7 @@ use std::sync::Arc;
 mod calls;
 mod default_members;
 mod dependencies;
+mod project_references;
 mod references;
 pub(crate) mod standard;
 mod with_members;
@@ -67,6 +68,9 @@ pub struct NativeClassicProject {
     pub content_hash: ContentHash,
     /// Reconciled project name, absent when either metadata identity is invalid.
     pub name: Option<String>,
+    /// Declared PROJECTVERSION major/minor pair from this verified container.
+    /// Missing versions prevent reference-target matching, not local analysis.
+    pub version: Option<(u32, u16)>,
     /// All directory declarations, including modules not admitted for analysis.
     pub members: Vec<NativeClassicMember>,
     /// All native reference records in physical declaration order, including
@@ -90,6 +94,9 @@ pub struct NativeClassicMember {
     /// UTF-8 range of the effective True VB_PredeclaredId literal in verified source.
     /// None denotes the False default or an explicit False; only class members may set it.
     pub predeclared_id: Option<std::ops::Range<usize>>,
+    /// Effective True VB_Exposed literal in an ordinary class's verified UTF-8 header.
+    /// Missing or False values do not expose the class to referencing projects.
+    pub exposed: Option<std::ops::Range<usize>>,
 }
 
 /// Native categories whose project lookup matches the classic BASIC resolver.
@@ -131,6 +138,7 @@ pub(crate) struct Proof<'a> {
     property_call: bool,
 }
 
+#[derive(Clone)]
 pub(crate) struct ProjectEvidence {
     pub(crate) manifest: FileId,
     pub(crate) native: bool,
@@ -144,6 +152,7 @@ struct Member {
     class: bool,
     instantiable: bool,
     predeclared_id: Option<std::ops::Range<usize>>,
+    exposed: Option<std::ops::Range<usize>>,
 }
 
 #[derive(Default)]
@@ -299,6 +308,8 @@ struct ResolvedProject {
     instantiable: BTreeSet<SymbolId>,
     value_names: BTreeSet<String>,
     references: references::ReferenceInventory,
+    reference_projects: BTreeMap<String, usize>,
+    exposed_classes: BTreeSet<SymbolId>,
     member_modules: BTreeMap<FileId, SymbolId>,
     pointer_names: BTreeMap<String, Option<FileId>>,
     evidence: Arc<ProjectEvidence>,
@@ -511,6 +522,7 @@ fn parse_project(
                 class: key.eq_ignore_ascii_case("Class"),
                 instantiable: key.eq_ignore_ascii_case("Class"),
                 predeclared_id: None,
+                exposed: None,
             });
         } else if [
             "Form",
@@ -664,6 +676,7 @@ impl<'a> ClassicIndex<'a> {
                     name: name.unwrap_or_default(),
                     location: MemberLocation::Indexed(member.file),
                     predeclared_id: member.predeclared_id.clone(),
+                    exposed: member.exposed.clone(),
                     instantiable: member.kind == Some(NativeClassicMemberKind::Class),
                     // Extension source declarations belong to their named class
                     // (MS-VBAL 4.2.1/5.2.4). Host members are not inferred here.
@@ -712,6 +725,7 @@ impl<'a> ClassicIndex<'a> {
             let mut member_modules = BTreeMap::new();
             let mut modules = BTreeMap::from([(project.name.clone(), None)]);
             let mut default_instances = BTreeMap::new();
+            let mut exposed_classes = BTreeSet::new();
             let mut instantiable = BTreeSet::new();
             let mut value_names = BTreeSet::new();
             let mut name_shadowed = false;
@@ -821,6 +835,20 @@ impl<'a> ClassicIndex<'a> {
                         ),
                     );
                 }
+                if let Some(range) = member.exposed {
+                    cancellation.check()?;
+                    work.consume()?;
+                    if !native
+                        || !member.instantiable
+                        || !sources
+                            .get(&file.id)
+                            .and_then(|bytes| bytes.get(range.clone()))
+                            .is_some_and(|text| text.eq_ignore_ascii_case(b"True"))
+                    {
+                        return Err(ResolutionError::ClassicSourceIdentity);
+                    }
+                    exposed_classes.insert(named[0].id);
+                }
                 work.consume()?;
                 member_modules.insert(file.id, named[0].id);
                 if member.instantiable {
@@ -915,11 +943,14 @@ impl<'a> ClassicIndex<'a> {
                 instantiable,
                 value_names,
                 references: native_references.remove(&manifest.id).unwrap_or_default(),
+                reference_projects: BTreeMap::new(),
+                exposed_classes,
                 member_modules,
                 pointer_names,
                 evidence: Arc::new(evidence),
             }));
         }
+        project_references::link(&mut projects, native, &paths, files, cancellation, work)?;
         let mut pointer_sites = BTreeMap::<usize, Vec<&OccurrenceRecord>>::new();
         for occurrence in occurrences {
             cancellation.check()?;
@@ -1220,6 +1251,8 @@ impl<'a> ClassicIndex<'a> {
                 );
                 continue;
             }
+            let mut type_project = project;
+            let mut referenced = false;
             let (name, qualified) = if implementation || text.contains(&b'.') {
                 let Some(path) = rootlight_vba::procedure_pointer_path(text, &mut || {
                     cancellation.check()?;
@@ -1232,12 +1265,34 @@ impl<'a> ClassicIndex<'a> {
                     continue;
                 }
                 let qualified = path.components() == 2;
-                if qualified
-                    && (project.name_shadowed
-                        || !path.first().eq_ignore_ascii_case(project.name.as_bytes())
-                        || local_types.contains_key(&(occurrence.file, project.name.clone())))
-                {
-                    continue;
+                if qualified {
+                    let Some(root) = std::str::from_utf8(path.first()).ok().and_then(identifier)
+                    else {
+                        continue;
+                    };
+                    if local_types.contains_key(&(occurrence.file, root.clone())) {
+                        continue;
+                    }
+                    if root == project.name {
+                        if project.name_shadowed {
+                            continue;
+                        }
+                    } else {
+                        if project.types.contains_key(&root) || project.modules.contains_key(&root)
+                        {
+                            continue;
+                        }
+                        let Some(target_project) = project
+                            .reference_projects
+                            .get(&root)
+                            .and_then(|index| projects.get(*index))
+                            .and_then(Option::as_ref)
+                        else {
+                            continue;
+                        };
+                        type_project = target_project;
+                        referenced = true;
+                    }
                 }
                 (
                     std::str::from_utf8(path.last()).ok().and_then(identifier),
@@ -1252,7 +1307,7 @@ impl<'a> ClassicIndex<'a> {
             if !qualified && local_types.contains_key(&(occurrence.file, name.clone())) {
                 continue;
             }
-            let Some(target) = project
+            let Some(target) = type_project
                 .types
                 .get(&name)
                 .copied()
@@ -1262,6 +1317,16 @@ impl<'a> ClassicIndex<'a> {
             else {
                 continue;
             };
+            if referenced
+                && (!type_project.exposed_classes.contains(&target.id)
+                    || matches!(
+                        occurrence.syntax_kind.as_str(),
+                        "vba.automatic_type_identifier.reference"
+                            | "vba.constructed_type_identifier.reference"
+                    ))
+            {
+                continue;
+            }
             // Construction and Implements require classes, not UDTs/enums
             // that happen to occupy the same type lookup tier.
             if matches!(
@@ -1282,7 +1347,11 @@ impl<'a> ClassicIndex<'a> {
                     target,
                     context: Arc::clone(&project.evidence),
                     receiver: None,
-                    rule: ResolutionRule::ClassicProjectType,
+                    rule: if referenced {
+                        ResolutionRule::ClassicReferencedType
+                    } else {
+                        ResolutionRule::ClassicProjectType
+                    },
                     property_call: false,
                 },
             );

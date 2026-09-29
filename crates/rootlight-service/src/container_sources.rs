@@ -15,7 +15,7 @@ use rootlight_source::{
     vba_text::TextLimits,
 };
 
-pub(super) const REVISION: &[u8] = b"rootlight.container-sources/10";
+pub(super) const REVISION: &[u8] = b"rootlight.container-sources/11";
 
 mod references;
 
@@ -407,6 +407,7 @@ fn prepare_office(
             .as_ref()
             .and_then(|m| m.identity().name().ok())
             .map(str::to_owned),
+        version: Some((project.version().major(), project.version().minor())),
         members: Vec::new(),
         references: Vec::new(),
         inventory_complete: membership.as_ref().is_some_and(|m| {
@@ -442,6 +443,7 @@ fn prepare_office(
                 name: record.and_then(|r| r.name()).map(str::to_owned),
                 kind,
                 predeclared_id: None,
+                exposed: None,
             });
     }
     for (ordinal, descriptor) in project.modules().iter().enumerate() {
@@ -586,6 +588,13 @@ fn prepare_office(
                 .and_then(HeaderName::predeclared_id)
                 .filter(|attribute| attribute.value())
                 .map(|attribute| attribute.utf8_range());
+            if member.kind == Some(rootlight_resolve::NativeClassicMemberKind::Class) {
+                member.exposed = header
+                    .as_ref()
+                    .and_then(HeaderName::exposed)
+                    .filter(|attribute| attribute.value())
+                    .map(|attribute| attribute.utf8_range());
+            }
         }
         native_project.inventory_complete &= verified;
         if verified

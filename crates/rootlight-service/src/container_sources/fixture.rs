@@ -45,11 +45,12 @@ fn scalar(bytes: &mut Vec<u8>, id: u16, value: u32) {
     dword(bytes, value);
 }
 
-fn directory(modules: &[(&str, u32, bool)]) -> Vec<u8> {
-    directory_with_code_page(modules, 1252)
-}
-
-fn directory_with_code_page(modules: &[(&str, u32, bool)], code_page: u16) -> Vec<u8> {
+fn directory_values(
+    modules: &[(&str, u32, bool)],
+    code_page: u16,
+    name: &str,
+    version: (u32, u16),
+) -> Vec<u8> {
     let mut bytes = Vec::new();
     scalar(&mut bytes, 1, 1);
     scalar(&mut bytes, 2, 0x409);
@@ -57,7 +58,7 @@ fn directory_with_code_page(modules: &[(&str, u32, bool)], code_page: u16) -> Ve
     header(&mut bytes, 3, 2);
     word(&mut bytes, code_page);
     word(&mut bytes, 4);
-    text(&mut bytes, b"Project");
+    text(&mut bytes, name.as_bytes());
     pair(&mut bytes, 5, "");
     word(&mut bytes, 6);
     text(&mut bytes, b"");
@@ -65,8 +66,8 @@ fn directory_with_code_page(modules: &[(&str, u32, bool)], code_page: u16) -> Ve
     text(&mut bytes, b"");
     scalar(&mut bytes, 7, 0);
     scalar(&mut bytes, 8, 0);
-    scalar(&mut bytes, 9, 1);
-    word(&mut bytes, 0);
+    scalar(&mut bytes, 9, version.0);
+    word(&mut bytes, version.1);
     header(&mut bytes, 15, 2);
     word(&mut bytes, u16::try_from(modules.len()).unwrap());
     header(&mut bytes, 19, 2);
@@ -411,6 +412,20 @@ pub(super) fn native_book_with_references(
     value: &str,
     references: &[u8],
 ) -> Vec<u8> {
+    native_book_with_directory_values(modules, value, "Project", (1, 0), references)
+}
+
+pub(super) fn native_book_with_directory_values(
+    modules: &[(
+        &str,
+        &[u8],
+        rootlight_source::vba_project::ProjectModuleKind,
+    )],
+    value: &str,
+    directory_name: &str,
+    version: (u32, u16),
+    references: &[u8],
+) -> Vec<u8> {
     use rootlight_source::vba_project::ProjectModuleKind;
     let declarations = modules
         .iter()
@@ -440,7 +455,7 @@ pub(super) fn native_book_with_references(
         inside: true,
     });
     let mut entries = package_entries();
-    let mut metadata = directory(&declarations);
+    let mut metadata = directory_values(&declarations, 1252, directory_name, version);
     let insertion = rootlight_source::vba_dir::ProjectDirectory::parse(
         &metadata,
         rootlight_source::vba_dir::DirectoryLimits::default(),

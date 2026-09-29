@@ -14,6 +14,61 @@ fn parse<'a>(text: &'a DecodedText<'_>, kind: ModuleKind) -> Result<HeaderName<'
 }
 
 #[test]
+fn exposed_classes_keep_the_effective_literal_and_original_coordinates() {
+    let input = b"Attribute VB_Name = \"Caf\xe9\"\r\nAttribute VB_Exposed = False\r\nAttribute vb_exposed _\r\n = tRuE\r\nSub Work()\r\nAttribute VB_Exposed = False\r\nEnd Sub\r\n";
+    let text = decode(input, 1252);
+    let header = parse(&text, ModuleKind::Object).unwrap();
+    let exposed = header.exposed().unwrap();
+    assert!(exposed.value());
+    assert_eq!(&input[exposed.original_range()], b"tRuE");
+    assert_eq!(&text.text()[exposed.utf8_range()], "tRuE");
+    assert_eq!(
+        exposed.utf8_range().start,
+        exposed.original_range().start + 1
+    );
+    for (attributes, expected) in [
+        ("", None),
+        ("Attribute VB_Exposed = True\n", Some(true)),
+        (
+            "Attribute VB_Exposed = True\nAttribute VB_Exposed = False\n",
+            Some(false),
+        ),
+        ("Attribute VB_Description = \"VB_Exposed = True\"\n", None),
+    ] {
+        let input = format!("Attribute VB_Name = \"Object\"\n{attributes}");
+        let text = decode(input.as_bytes(), 65001);
+        let header = parse(&text, ModuleKind::Object).unwrap();
+        assert_eq!(header.exposed().map(HeaderBoolean::value), expected);
+        assert!(
+            parse(&text, ModuleKind::Procedural)
+                .unwrap()
+                .exposed()
+                .is_none()
+        );
+    }
+    for value in [
+        "1",
+        "-1",
+        "\"True\"",
+        "TrueX",
+        "True:False",
+        "True ' comment",
+        "Tr _\nue",
+        "",
+    ] {
+        let input = format!("Attribute VB_Name = \"Object\"\nAttribute VB_Exposed = {value}\n");
+        let text = decode(input.as_bytes(), 65001);
+        assert!(
+            matches!(
+                parse(&text, ModuleKind::Object),
+                Err(HeaderError::Invalid { .. })
+            ),
+            "{value}"
+        );
+    }
+}
+
+#[test]
 fn predeclared_id_uses_last_explicit_literal_and_exact_coordinates() {
     let input = b"Attribute VB_Name = \"Caf\xe9\"\r\nAttribute VB_PredeclaredId = False\r\nAttribute vb_predeclaredid _\r\n = _\r\n tRuE\r\nSub Work()\r\nAttribute VB_PredeclaredId = False\r\nEnd Sub\r\n";
     let text = decode(input, 1252);

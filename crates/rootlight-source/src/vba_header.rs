@@ -1,4 +1,4 @@
-//! Reads effective identity and predeclared-instance attributes from native headers.
+//! Reads effective identity and class-accessibility attributes from native headers.
 //! Names borrow decoded text and retain original module-byte coordinates; this
 //! is not designer-preamble parsing or validation of the module's program body.
 
@@ -63,6 +63,7 @@ pub struct HeaderName<'a> {
     declarations: usize,
     kind: ModuleKind,
     predeclared_id: Option<HeaderBoolean>,
+    exposed: Option<HeaderBoolean>,
 }
 
 /// One effective boolean attribute with exact decoded and original value ranges.
@@ -101,6 +102,7 @@ impl fmt::Debug for HeaderName<'_> {
             .field("declarations", &self.declarations)
             .field("kind", &self.kind)
             .field("predeclared_id", &self.predeclared_id)
+            .field("exposed", &self.exposed)
             .finish()
     }
 }
@@ -111,7 +113,7 @@ impl<'a> HeaderName<'a> {
     /// Stops at the first non-attribute line; never searches comments, procedures,
     /// designer preambles or string payloads for a later name. Physical newlines
     /// and explicit continuations follow MS-VBAL 3.2. Attributes other than
-    /// VB_Name and VB_PredeclaredId remain opaque. Class headers use the last
+    /// VB_Name, VB_PredeclaredId and VB_Exposed remain opaque. Class headers use the last
     /// value for each recognized attribute (MS-VBAL 4.2); procedural
     /// headers reject repeated names. EOF may terminate the final physical line.
     /// Names are bounded, unescaped non-whitespace spellings, not proof of every
@@ -139,6 +141,7 @@ impl<'a> HeaderName<'a> {
         let mut declarations = 0;
         let mut selected = None;
         let mut predeclared_id = None;
+        let mut exposed = None;
         while position < input.len() {
             cancellation.check()?;
             let start = position;
@@ -202,6 +205,20 @@ impl<'a> HeaderName<'a> {
                         original_range,
                     });
                 }
+                Attribute::Exposed(value, utf8_range) => {
+                    if kind == ModuleKind::Object {
+                        let original_range = text.original_range(utf8_range.clone()).ok_or(
+                            HeaderError::Invalid {
+                                offset: utf8_range.start,
+                            },
+                        )?;
+                        exposed = Some(HeaderBoolean {
+                            value,
+                            utf8_range,
+                            original_range,
+                        });
+                    }
+                }
                 Attribute::Other => {}
             }
             position = next;
@@ -220,6 +237,7 @@ impl<'a> HeaderName<'a> {
             declarations,
             kind,
             predeclared_id,
+            exposed,
         })
     }
 
@@ -254,6 +272,13 @@ impl<'a> HeaderName<'a> {
     #[must_use]
     pub const fn predeclared_id(&self) -> Option<&HeaderBoolean> {
         self.predeclared_id.as_ref()
+    }
+
+    /// Returns the last explicit class VB_Exposed literal and its exact ranges.
+    /// Absence has the False default; procedural modules do not gain class accessibility.
+    #[must_use]
+    pub const fn exposed(&self) -> Option<&HeaderBoolean> {
+        self.exposed.as_ref()
     }
 }
 
@@ -325,6 +350,7 @@ fn logical_line(
 enum Attribute<'a> {
     Name(&'a str, Range<usize>),
     Predeclared(bool, Range<usize>),
+    Exposed(bool, Range<usize>),
     Other,
 }
 
@@ -355,7 +381,7 @@ fn attribute<'a>(
     if cursor.position == line.len() {
         return Err(invalid());
     }
-    if key.eq_ignore_ascii_case("VB_PredeclaredId") {
+    if key.eq_ignore_ascii_case("VB_PredeclaredId") || key.eq_ignore_ascii_case("VB_Exposed") {
         let begin = cursor.position;
         while let Some(c) = cursor.peek().filter(|c| c.is_ascii_alphabetic()) {
             cursor.advance(c.len_utf8())?;
@@ -373,10 +399,12 @@ fn attribute<'a>(
         if cursor.position != line.len() {
             return Err(invalid());
         }
-        return Ok(Attribute::Predeclared(
-            value,
-            offset + begin..offset + finish,
-        ));
+        let range = offset + begin..offset + finish;
+        return Ok(if key.eq_ignore_ascii_case("VB_PredeclaredId") {
+            Attribute::Predeclared(value, range)
+        } else {
+            Attribute::Exposed(value, range)
+        });
     }
     if !key.eq_ignore_ascii_case("VB_Name") {
         return Ok(Attribute::Other);

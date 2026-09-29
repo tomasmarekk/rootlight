@@ -225,6 +225,22 @@ fn validate_project(
 }
 
 impl ReferenceInventory {
+    pub(super) fn project_fields(&self) -> impl Iterator<Item = &NativeClassicReferenceField> {
+        self.declarations
+            .iter()
+            .flat_map(|record| &record.fields)
+            .filter(|field| {
+                !self.unknown_names
+                    && field.project.is_some()
+                    && field
+                        .name
+                        .as_deref()
+                        .and_then(identifier)
+                        .and_then(|name| self.names.get(&name))
+                        .is_some_and(|slots| slots.len() == 1)
+            })
+    }
+
     pub(super) fn may_shadow_standard_name(&self, name: &str) -> bool {
         // Labels cover the project-name tier, not the contents or precedence
         // of referenced namespaces. Even a differently named library can
@@ -299,6 +315,7 @@ mod tests {
             container: container.id,
             content_hash: container.content_hash,
             name: Some("Project".to_owned()),
+            version: None,
             members: Vec::new(),
             references,
             inventory_complete: true,
@@ -370,6 +387,23 @@ mod tests {
                 .unwrap();
                 assert_eq!(work.consumed(), 5);
                 assert_eq!(inventory.declarations, project.references);
+                assert_eq!(inventory.project_fields().count(), 1);
+                let mut nameless = inventory.declarations.clone();
+                nameless[0].fields[0].name = None;
+                let blocked = prepare(
+                    &NativeClassicProject {
+                        references: nameless,
+                        ..project.clone()
+                    },
+                    &container,
+                    &files,
+                    &sources,
+                    &Cancellation::new(),
+                    &mut ResolutionWorkBudget::new(100),
+                )
+                .unwrap()
+                .unwrap();
+                assert_eq!(blocked.project_fields().count(), 0);
                 assert!(inventory.may_shadow_standard_name("collection"));
                 assert!(!inventory.may_declare_name("collection"));
                 for budget in 2..5 {
@@ -454,6 +488,7 @@ mod tests {
         let (container, metadata, project) = fixture();
         let inventory = run(&project, &container, &metadata).unwrap().unwrap();
         assert_eq!(inventory.declarations, project.references);
+        assert_eq!(inventory.project_fields().count(), 0);
         assert_eq!(inventory.names["alias"], [(0, 0), (2, 0)]);
         assert_eq!(
             inventory.declared_name("alias"),

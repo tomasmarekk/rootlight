@@ -1642,6 +1642,236 @@ fn opaque_native_references_do_not_prove_standard_uniqueness() {
 }
 
 #[test]
+fn native_project_references_resolve_exposed_class_types_after_restart() {
+    fn counted(out: &mut Vec<u8>, value: &[u8]) {
+        out.extend(u32::try_from(value.len()).unwrap().to_le_bytes());
+        out.extend(value);
+    }
+    let root = tempdir();
+    fs::create_dir(root.path().join("clients")).unwrap();
+    let storage = tempdir();
+    let paths = rootlight_runtime::RuntimePaths::new(
+        storage.path().join("state"),
+        storage.path().join("runtime"),
+    )
+    .unwrap();
+    paths.prepare_owner().unwrap();
+    let client = b"Attribute VB_Name = \"Client\"\r\nSub Inspect()\r\nDim entry As Library.Widget\r\nDim created As New Library.Widget\r\nDim value As Long\r\nvalue = entry.Value\r\nvalue = entry.Hidden\r\nEnd Sub\r\n";
+    let mut references = Vec::new();
+    references.extend(0x0016u16.to_le_bytes());
+    counted(&mut references, b"Library");
+    references.extend(0x003eu16.to_le_bytes());
+    counted(
+        &mut references,
+        &"Library"
+            .encode_utf16()
+            .flat_map(u16::to_le_bytes)
+            .collect::<Vec<_>>(),
+    );
+    references.extend(0x000eu16.to_le_bytes());
+    references.extend(0u32.to_le_bytes());
+    counted(&mut references, b"*\\CC:\\libraries\\library.xlsm");
+    counted(&mut references, b"*\\C../library.xlsm");
+    references.extend(1u32.to_le_bytes());
+    references.extend(0u16.to_le_bytes());
+    fs::write(
+        root.path().join("clients/client.xlsm"),
+        fixture::native_book_with_references(
+            &[("Client", client, ProjectModuleKind::Procedural)],
+            "\"Project\"",
+            &references,
+        ),
+    )
+    .unwrap();
+    let mut service = FirstSliceService::new_durable(4, paths.state_dir(), &deadline()).unwrap();
+    for (exposed, version, expected) in [
+        (true, (1, 0), true),
+        (false, (1, 0), false),
+        (true, (2, 0), false),
+        (true, (1, 1), false),
+        (true, (1, 0), true),
+    ] {
+        let code = format!(
+            "Attribute VB_Name = \"Widget\"\r\nAttribute VB_Exposed = {exposed}\r\nPublic Value As Long\r\nPrivate Hidden As Long\r\n"
+        );
+        fs::write(
+            root.path().join("library.xlsm"),
+            fixture::native_book_with_directory_values(
+                &[("Widget", code.as_bytes(), ProjectModuleKind::Class)],
+                "\"Library\"",
+                "Library",
+                version,
+                &[],
+            ),
+        )
+        .unwrap();
+        let receipt = service.index_repository(root.path(), &deadline()).unwrap();
+        for restart in [false, true] {
+            if restart {
+                drop(service);
+                service =
+                    FirstSliceService::new_durable(4, paths.state_dir(), &deadline()).unwrap();
+            }
+            assert_eq!(
+                receipt,
+                service.index_repository(root.path(), &deadline()).unwrap()
+            );
+            let snapshot = service
+                .loaded_generation_snapshot(receipt.generation)
+                .unwrap();
+            let document = snapshot.document();
+            let path =
+                derived_path("clients/client.xlsm", "Client", ModuleKind::Procedural).unwrap();
+            let file = document
+                .files
+                .iter()
+                .find(|file| file.path == path.as_str())
+                .unwrap();
+            let site = document
+                .occurrences
+                .iter()
+                .find(|site| {
+                    site.file == file.id
+                        && site.role == OccurrenceRole::TypeUse
+                        && site.syntax_kind == "vba.direct_type_identifier.reference"
+                        && site.source.span().end_byte() - site.source.span().start_byte() == 14
+                })
+                .unwrap();
+            let resolved = matches!(site.target, OccurrenceTarget::Resolved { .. });
+            assert_eq!(
+                resolved, expected,
+                "exposed={exposed}, version={version:?}, restart={restart}"
+            );
+            if let OccurrenceTarget::Resolved { symbol } = site.target {
+                let target = document
+                    .entities
+                    .iter()
+                    .find(|entity| entity.id == symbol)
+                    .unwrap();
+                assert_eq!(target.canonical_name, "Widget");
+                assert_eq!(target.kind, EntityKind::Class);
+                let proof = document
+                    .provenance
+                    .iter()
+                    .find(|proof| proof.id == site.provenance)
+                    .unwrap();
+                assert_eq!(
+                    proof.rule.as_deref(),
+                    Some("classic-referenced-type-v1.indexed_snapshot")
+                );
+                let mut pending = vec![site.provenance];
+                let mut visited = BTreeSet::new();
+                let mut sources = BTreeSet::new();
+                while let Some(id) = pending.pop() {
+                    if !visited.insert(id) {
+                        continue;
+                    }
+                    if let Some(record) = document.provenance.iter().find(|record| record.id == id)
+                    {
+                        sources.extend(record.evidence_sources.iter().cloned());
+                        pending.extend(record.derivation_parents.iter().filter_map(|parent| {
+                            if let FactRef::Fact(id) = parent {
+                                Some(*id)
+                            } else {
+                                None
+                            }
+                        }));
+                    }
+                }
+                for path in ["clients/client.xlsm/@vba/references.bin", "library.xlsm"] {
+                    let witness_file = document
+                        .files
+                        .iter()
+                        .find(|file| file.path == path)
+                        .unwrap();
+                    let witness = sources
+                        .iter()
+                        .find(|source| source.span().file() == witness_file.id)
+                        .unwrap();
+                    assert_eq!(witness.generation(), receipt.generation);
+                    assert_eq!(witness.content_hash(), witness_file.content_hash);
+                    let read = service
+                        .source_read_with_options_and_budget(
+                            receipt.generation,
+                            vec![witness.clone()],
+                            SourceReadOptions::new()
+                                .with_context_lines_before(0)
+                                .with_context_lines_after(0)
+                                .with_encoding(SourceEncoding::Bytes),
+                            FirstSliceBudget::default(),
+                            &deadline(),
+                        )
+                        .unwrap();
+                    assert_eq!(
+                        u64::try_from(read.data.chunks[0].bytes.len()).unwrap(),
+                        witness.span().end_byte() - witness.span().start_byte()
+                    );
+                }
+            }
+            for (needle, resolved) in [
+                (b"entry.Value".as_slice(), expected),
+                (b"entry.Hidden".as_slice(), false),
+            ] {
+                let start = u64::try_from(
+                    client
+                        .windows(needle.len())
+                        .position(|bytes| bytes == needle)
+                        .unwrap(),
+                )
+                .unwrap();
+                let member = document
+                    .occurrences
+                    .iter()
+                    .find(|site| {
+                        site.file == file.id
+                            && site.source.span().start_byte() == start
+                            && site.source.span().end_byte()
+                                == start + u64::try_from(needle.len()).unwrap()
+                            && site.syntax_kind == "vba.get_member.reference"
+                    })
+                    .unwrap();
+                assert_eq!(
+                    matches!(member.target, OccurrenceTarget::Resolved { .. }),
+                    resolved,
+                    "{needle:?}"
+                );
+            }
+            let automatic_types = document
+                .occurrences
+                .iter()
+                .filter(|site| {
+                    site.file == file.id
+                        && site.syntax_kind == "vba.automatic_type_identifier.reference"
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(automatic_types.len(), 1);
+            assert!(
+                automatic_types
+                    .iter()
+                    .all(|site| !matches!(site.target, OccurrenceTarget::Resolved { .. }))
+            );
+            read_module(
+                &service,
+                receipt.generation,
+                derived_path("library.xlsm", "Widget", ModuleKind::Object)
+                    .unwrap()
+                    .as_str(),
+                code.as_bytes(),
+            );
+        }
+        let prepared = service
+            .prepare_repository_with_options(
+                root.path(),
+                FirstSliceIndexOptions::clean_rebuild(FirstSliceIndexMode::Structural),
+                &deadline(),
+            )
+            .unwrap();
+        let rebuilt = service.publish_prepared(prepared, &deadline()).unwrap();
+        assert_eq!(rebuilt.logical_snapshot, receipt.logical_snapshot);
+    }
+}
+
+#[test]
 fn native_project_reference_inventory_keeps_typed_locators_and_versions() {
     use rootlight_resolve::NativeClassicProjectReferenceKind as Kind;
 
@@ -5528,6 +5758,7 @@ fn native_project_resolution_checks_identity_and_charges_preparation_work() {
         container: container.id,
         content_hash: container.content_hash,
         name: Some("Project".to_owned()),
+        version: None,
         members: Vec::new(),
         references: Vec::new(),
         inventory_complete: true,
@@ -5545,6 +5776,7 @@ fn native_project_resolution_checks_identity_and_charges_preparation_work() {
             name: Some(name.to_owned()),
             kind: Some(NativeClassicMemberKind::Procedural),
             predeclared_id: None,
+            exposed: None,
         });
         inputs.push(ClassicProjectSource::new(file.id, body));
     }

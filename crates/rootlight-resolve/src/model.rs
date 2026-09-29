@@ -316,6 +316,8 @@ pub enum ResolutionRule {
     VbaCollectionCall,
     /// Declarative classic BASIC project membership selects one native class type.
     ClassicProjectType,
+    /// A version-matched native project reference exposes one source-declared class.
+    ClassicReferencedType,
     /// Instantiation of a project-owned ordinary class and its source initializer.
     ClassicProjectConstruction,
     /// Native static import or call context selects one member or namespace declaration.
