@@ -5,9 +5,14 @@
 use super::{calls::CallIndex, with_members::Member};
 use crate::{ResolutionError, engine::ResolutionWorkBudget};
 use rootlight_cancel::Cancellation;
-use rootlight_ids::FileId;
+use rootlight_ids::{FactId, FileId};
 use rootlight_ir::{OccurrenceRecord, SourceSpan};
 use std::collections::{BTreeMap, BTreeSet};
+
+pub(super) struct Ordered<'o> {
+    pub(super) sites: Vec<usize>,
+    pub(super) callees: BTreeMap<FactId, (&'o OccurrenceRecord, bool)>,
+}
 
 pub(super) fn order<'o, 's>(
     events: &[(&'o OccurrenceRecord, Option<Member<'s>>)],
@@ -15,7 +20,7 @@ pub(super) fn order<'o, 's>(
     sources: &BTreeMap<FileId, &[u8]>,
     cancellation: &Cancellation,
     work: &mut ResolutionWorkBudget,
-) -> Result<Vec<usize>, ResolutionError> {
+) -> Result<Ordered<'o>, ResolutionError> {
     let mut members: BTreeMap<SourceSpan, Vec<usize>> = BTreeMap::new();
     let mut applications: BTreeMap<SourceSpan, Vec<usize>> = BTreeMap::new();
     for (i, (site, member)) in events.iter().enumerate() {
@@ -31,6 +36,7 @@ pub(super) fn order<'o, 's>(
     let mut incoming = vec![0_usize; events.len()];
     let mut consumers: Vec<Vec<usize>> = vec![Vec::new(); events.len()];
     let mut ready = BTreeSet::new();
+    let mut callees = BTreeMap::new();
     for (i, (site, member)) in events.iter().enumerate() {
         cancellation.check()?;
         work.consume()?;
@@ -38,7 +44,8 @@ pub(super) fn order<'o, 's>(
             applications
                 .get(&member.span)
                 .or_else(|| members.get(&member.span))
-        } else if let Some((callee, _)) = calls.callee(site, sources, cancellation, work)? {
+        } else if let Some((callee, explicit)) = calls.callee(site, sources, cancellation, work)? {
+            callees.insert(site.id, (callee, explicit));
             members.get(&callee.source.span())
         } else {
             calls
@@ -73,5 +80,8 @@ pub(super) fn order<'o, 's>(
             }
         }
     }
-    Ok(ordered)
+    Ok(Ordered {
+        sites: ordered,
+        callees,
+    })
 }

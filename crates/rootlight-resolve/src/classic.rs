@@ -1708,8 +1708,8 @@ impl<'a> ClassicIndex<'a> {
         }
         let order = dependencies::order(&member_occurrences, &calls, &sources, cancellation, work)?;
         let mut resolved_members = BTreeMap::new();
-        let mut selected_callees = BTreeMap::new();
-        for i in order {
+        let selected_callees = order.callees;
+        for i in order.sites {
             let Some((occurrence, member)) = member_occurrences.get(i) else {
                 continue;
             };
@@ -1717,11 +1717,14 @@ impl<'a> ClassicIndex<'a> {
             work.consume()?;
             let span = occurrence.source.span();
             let Some(member) = member else {
-                let selected =
-                    calls.resolve(&mut result, occurrence, &sources, cancellation, work)?;
-                if let Some(selected) = selected {
-                    selected_callees.insert(occurrence.id, selected);
-                }
+                let selected = calls.resolve(
+                    &mut result,
+                    occurrence,
+                    selected_callees.get(&occurrence.id).copied(),
+                    &sources,
+                    cancellation,
+                    work,
+                )?;
                 let callee = if result.proof(occurrence).is_none() {
                     // Semantic failure does not change the immutable callee index.
                     // Reuse its selection instead of charging and scanning the same

@@ -227,11 +227,15 @@ impl<'a, 'o> CallIndex<'a, 'o> {
         &mut self,
         result: &mut ClassicIndex<'a>,
         site: &OccurrenceRecord,
+        selected: Option<(&'o OccurrenceRecord, bool)>,
         sources: &BTreeMap<FileId, &[u8]>,
         cancellation: &Cancellation,
         work: &mut ResolutionWorkBudget,
     ) -> Result<Option<(&'o OccurrenceRecord, bool)>, ResolutionError> {
-        let Some((callee, explicit)) = self.callee(site, sources, cancellation, work)? else {
+        cancellation.check()?;
+        // Dependency ordering already selected the callee against this exact
+        // source inventory. Only the semantic contract depends on prior proofs.
+        let Some((callee, explicit)) = selected else {
             return Ok(None);
         };
         // Setter index parentheses exclude the assigned value. They cannot
@@ -890,15 +894,16 @@ mod tests {
             let sources = BTreeMap::from([(file, bytes)]);
             let cancellation = Cancellation::new();
             let mut measured = ResolutionWorkBudget::new(1024);
-            index
+            let selected = index
                 .callee(&application, &sources, &cancellation, &mut measured)
                 .unwrap();
-            let mut exact = ResolutionWorkBudget::new(measured.consumed());
+            let mut exact = ResolutionWorkBudget::new(0);
             let mut result = ClassicIndex::default();
             let selected = index
                 .resolve(
                     &mut result,
                     &application,
+                    selected,
                     &sources,
                     &cancellation,
                     &mut exact,
@@ -911,13 +916,7 @@ mod tests {
 
             let mut insufficient = ResolutionWorkBudget::new(measured.consumed() - 1);
             assert!(matches!(
-                index.resolve(
-                    &mut result,
-                    &application,
-                    &sources,
-                    &cancellation,
-                    &mut insufficient
-                ),
+                index.callee(&application, &sources, &cancellation, &mut insufficient),
                 Err(ResolutionError::WorkLimit { .. })
             ));
             cancellation.cancel(rootlight_cancel::CancellationReason::ClientRequest);
@@ -925,6 +924,7 @@ mod tests {
                 index.resolve(
                     &mut result,
                     &application,
+                    Some(selected),
                     &sources,
                     &cancellation,
                     &mut measured
