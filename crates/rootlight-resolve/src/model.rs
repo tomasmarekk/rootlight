@@ -292,6 +292,8 @@ pub enum ResolutionRule {
     VbaStandardNamespace,
     /// A read explicitly qualified by VBA names a specified standard constant.
     VbaStandardConstant,
+    /// An unshadowed value use names a public constant of a standard global module.
+    VbaStandardImplicitConstant,
     /// An explicit standard-library member names a specified function declaration.
     VbaStandardFunction,
     /// A complete argument list matches a source-qualified standard function.

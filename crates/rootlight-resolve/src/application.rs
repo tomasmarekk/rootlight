@@ -1606,6 +1606,7 @@ fn build_provenance(
             | ResolutionRule::ClassicProjectEnum
             | ResolutionRule::VbaStandardNamespace
             | ResolutionRule::VbaStandardConstant
+            | ResolutionRule::VbaStandardImplicitConstant
             | ResolutionRule::VbaStandardFunction
             | ResolutionRule::VbaStandardCall
             | ResolutionRule::VbaErrInstance
@@ -1768,6 +1769,9 @@ fn build_provenance(
         ResolutionRule::ClassicProjectEnum => "classic-project-enum-v1.indexed_snapshot",
         ResolutionRule::VbaStandardNamespace => "vba-standard-namespace-v1.indexed_snapshot",
         ResolutionRule::VbaStandardConstant => "vba-standard-constant-v1.indexed_snapshot",
+        ResolutionRule::VbaStandardImplicitConstant => {
+            "vba-standard-implicit-constant-v1.indexed_snapshot"
+        }
         ResolutionRule::VbaStandardFunction => "vba-standard-function-v1.indexed_snapshot",
         ResolutionRule::VbaStandardCall => "vba-standard-call-v1.indexed_snapshot",
         ResolutionRule::VbaErrInstance => "vba-err-instance-v1.indexed_snapshot",

@@ -408,6 +408,7 @@ fn prepare_office(
             .and_then(|m| m.identity().name().ok())
             .map(str::to_owned),
         members: Vec::new(),
+        reference_names: Vec::new(),
         inventory_complete: membership.as_ref().is_some_and(|m| {
             m.project_records().iter().all(|r| r.outcome().is_ok())
                 && m.directory_records().len() == project.modules().len()
@@ -620,7 +621,7 @@ fn prepare_office(
         .native_projects
         .try_reserve(1)
         .map_err(|_| FirstSliceError::Limits)?;
-    prepared.native_projects.push(native_project);
+    let first_reference = prepared.references.len();
     references::prepare(
         input,
         project,
@@ -630,6 +631,12 @@ fn prepare_office(
         snapshots,
         cancellation,
     )?;
+    native_project.reference_names = references::declared_names(
+        &prepared.references[first_reference..],
+        input.file,
+        cancellation,
+    )?;
+    prepared.native_projects.push(native_project);
     Ok(())
 }
 

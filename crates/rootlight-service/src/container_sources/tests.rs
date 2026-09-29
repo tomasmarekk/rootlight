@@ -11,6 +11,9 @@ mod fixture;
 #[path = "err_tests.rs"]
 mod err_tests;
 
+#[path = "constant_tests.rs"]
+mod constant_tests;
+
 fn tempdir() -> tempfile::TempDir {
     #[cfg(target_os = "macos")]
     {
@@ -128,7 +131,7 @@ fn standard_constants_keep_external_identity_and_follow_shadowing_after_reopen()
                     &deadline(),
                 )
                 .unwrap();
-            assert_eq!(result.data.returned_edges, 2);
+            assert_eq!(result.data.returned_edges, 3);
             assert!(!result.data.truncated);
             let read = service
                 .source_read_with_options_and_budget(
@@ -4932,6 +4935,7 @@ fn native_project_resolution_checks_identity_and_charges_preparation_work() {
         content_hash: container.content_hash,
         name: Some("Project".to_owned()),
         members: Vec::new(),
+        reference_names: Vec::new(),
         inventory_complete: true,
     };
     let mut inputs = Vec::new();

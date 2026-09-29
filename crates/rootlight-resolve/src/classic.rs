@@ -63,6 +63,9 @@ pub struct NativeClassicProject {
     pub name: Option<String>,
     /// All directory declarations, including modules not admitted for analysis.
     pub members: Vec<NativeClassicMember>,
+    /// Decoded source-declared reference labels, used only as namespace barriers.
+    /// These names do not establish external library contents or resolved targets.
+    pub reference_names: Vec<String>,
     /// Both metadata inventories and all retained source headers were reconciled.
     /// Missing member fields independently prevent resolution even when this is true.
     pub inventory_complete: bool,
@@ -288,6 +291,7 @@ struct ResolvedProject {
     default_instances: BTreeMap<SymbolId, SourceRef>,
     instantiable: BTreeSet<SymbolId>,
     value_names: BTreeSet<String>,
+    reference_names: BTreeSet<String>,
     member_modules: BTreeMap<FileId, SymbolId>,
     pointer_names: BTreeMap<String, Option<FileId>>,
     evidence: Arc<ProjectEvidence>,
@@ -616,6 +620,7 @@ impl<'a> ClassicIndex<'a> {
             inventories.push((*manifest, project, false));
         }
         let mut native_containers = BTreeSet::new();
+        let mut native_reference_names = BTreeMap::new();
         for project in native {
             cancellation.check()?;
             work.consume()?;
@@ -628,9 +633,20 @@ impl<'a> ClassicIndex<'a> {
                     file.content_hash == project.content_hash && file.language == "office-open-xml"
                 })
                 .ok_or(ResolutionError::ClassicSourceIdentity)?;
-            if project.members.len() > MAX_MANIFEST_ITEMS {
+            if project.members.len() > MAX_MANIFEST_ITEMS
+                || project.reference_names.len() > MAX_MANIFEST_ITEMS
+            {
                 return Ok(result);
             }
+            let mut reference_names = BTreeSet::new();
+            for name in &project.reference_names {
+                cancellation.check()?;
+                work.consume()?;
+                if let Some(name) = identifier(name) {
+                    reference_names.insert(name);
+                }
+            }
+            native_reference_names.insert(project.container, reference_names);
             let name = project.name.as_deref().and_then(identifier);
             let mut complete =
                 project.inventory_complete && name.is_some() && !project.members.is_empty();
@@ -886,18 +902,23 @@ impl<'a> ClassicIndex<'a> {
             evidence.sources.dedup();
             evidence.facts.sort_unstable();
             evidence.facts.dedup();
-            projects.push(complete.then_some(ResolvedProject {
-                name: project.name,
-                name_shadowed,
-                types,
-                modules,
-                default_instances,
-                instantiable,
-                value_names,
-                member_modules,
-                pointer_names,
-                evidence: Arc::new(evidence),
-            }));
+            projects.push(
+                complete.then_some(ResolvedProject {
+                    name: project.name,
+                    name_shadowed,
+                    types,
+                    modules,
+                    default_instances,
+                    instantiable,
+                    value_names,
+                    reference_names: native_reference_names
+                        .remove(&manifest.id)
+                        .unwrap_or_default(),
+                    member_modules,
+                    pointer_names,
+                    evidence: Arc::new(evidence),
+                }),
+            );
         }
         let mut pointer_sites = BTreeMap::<usize, Vec<&OccurrenceRecord>>::new();
         for occurrence in occurrences {

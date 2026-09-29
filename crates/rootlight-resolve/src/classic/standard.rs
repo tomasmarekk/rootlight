@@ -1,4 +1,4 @@
-//! Source-qualified VBA standard-library identities, not library implementations.
+//! Source-grounded VBA standard-library identities, not library implementations.
 //! External entities have no repository definition; complete project evidence and
 //! lexical barriers are required before a source occurrence can name one.
 
@@ -28,6 +28,14 @@ const CONSTANTS: &[&str] = &[
     "vbNullString",
     "vbObjectError",
 ];
+
+fn constant(text: &[u8]) -> Option<&'static str> {
+    let name = identifier(std::str::from_utf8(text).ok()?)?;
+    CONSTANTS
+        .iter()
+        .copied()
+        .find(|value| value.eq_ignore_ascii_case(&name))
+}
 
 fn claim(repository: rootlight_ids::RepositoryId, name: &str) -> SymbolIdentityClaim {
     let mut signature = CATALOG_RULE.as_bytes().to_vec();
@@ -74,6 +82,7 @@ pub(crate) fn materialize(
                 [b"VBA".as_slice(), b"[VBA]", b"Err", b"[Err]"]
                     .iter()
                     .any(|name| text.eq_ignore_ascii_case(name))
+                    || constant(text).is_some()
             })
         {
             requested.insert(site.file);
@@ -215,6 +224,27 @@ pub(super) fn bind<'a>(
     // Receiver syntax and spans were already checked by the shared member pass.
     // Reuse that inventory rather than traversing every expression a second time.
     let mut candidates = BTreeMap::new();
+    // MS-VBAL 5.6.10 and 6.1.2 permit simple-name access to public constants
+    // of global modules. Reuse the exact unambiguous value-use inventory;
+    // assignments, calls, type uses and compiler constants are different sites.
+    for site in qualifiers.values().flatten() {
+        cancellation.check()?;
+        work.consume()?;
+        if receiver_sources.contains_key(&site.source.span()) {
+            continue;
+        }
+        if let Some(name) = site_bytes(site, sources).and_then(constant) {
+            candidates.insert(
+                site.id,
+                (
+                    *site,
+                    format!("VBA.Constants.{name}"),
+                    ResolutionRule::VbaStandardImplicitConstant,
+                    name,
+                ),
+            );
+        }
+    }
     for (site, member) in member_sites {
         cancellation.check()?;
         work.consume()?;
@@ -375,19 +405,22 @@ pub(super) fn bind<'a>(
         else {
             continue;
         };
+        let root = root.to_ascii_lowercase();
         // Project/module names and all lexical declarations remain barriers,
         // including unresolved or conditional declarations. A referenced-library
         // label in retained container metadata is never used as a target proof.
         if project.name == root
-            || project.types.contains_key(root)
-            || project.modules.contains_key(root)
-            || project.value_names.contains(root)
+            || project.types.contains_key(&root)
+            || project.modules.contains_key(&root)
+            || project.value_names.contains(&root)
+            || (rule == ResolutionRule::VbaStandardImplicitConstant
+                && project.reference_names.contains(&root))
         {
             continue;
         }
         // Declarations cannot change during this pass. Repeated uses in the
         // same file/scope/root share a lexical barrier proof, never a target.
-        let key = (site.file, site.enclosing, root);
+        let key = (site.file, site.enclosing, root.clone());
         let unshadowed = if let Some(&unshadowed) = lexical_barriers.get(&key) {
             unshadowed
         } else {
@@ -399,7 +432,7 @@ pub(super) fn bind<'a>(
                 let Some(owner) = scope.and_then(|id| index.entities.get(&id)) else {
                     break;
                 };
-                if members.contains_key(&(owner.id, root.to_owned())) {
+                if members.contains_key(&(owner.id, root.clone())) {
                     break;
                 }
                 match owner.container {

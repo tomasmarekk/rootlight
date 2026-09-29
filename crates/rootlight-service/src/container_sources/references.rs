@@ -27,6 +27,24 @@ struct DeclaredName {
     range: std::ops::Range<usize>,
 }
 
+pub(super) fn declared_names(
+    references: &[DeclaredReference],
+    owner: FileId,
+    cancellation: &Cancellation,
+) -> Result<Vec<String>, FirstSliceError> {
+    let mut names = Vec::new();
+    for reference in references {
+        check_cancellation(cancellation)?;
+        if reference.owner == owner
+            && let Some(name) = &reference.name
+        {
+            names.try_reserve(1).map_err(|_| FirstSliceError::Limits)?;
+            names.push(name.text.clone());
+        }
+    }
+    Ok(names)
+}
+
 pub(super) fn prepare(
     input: &ManifestInput,
     project: &VbaProject<'_, '_>,
