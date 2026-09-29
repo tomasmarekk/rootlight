@@ -717,6 +717,33 @@ fn parameter_modifiers(
     }
 }
 
+pub(super) fn standard_arguments_match(
+    tail: &[u8],
+    explicit: bool,
+    parameters: &[(&str, bool)],
+    check: &mut impl FnMut() -> Result<(), ResolutionError>,
+) -> Result<bool, ResolutionError> {
+    let optional = parameters
+        .iter()
+        .map(|(_, optional)| *optional)
+        .collect::<Vec<_>>();
+    let names = parameters
+        .iter()
+        .enumerate()
+        .map(|(i, (name, _))| ((*name).to_owned(), i))
+        .collect();
+    Ok(arguments_match(
+        tail,
+        explicit,
+        &optional,
+        &names,
+        false,
+        rootlight_vba::ProcedureKind::Function,
+        check,
+    )?
+    .is_some())
+}
+
 fn arguments_match(
     tail: &[u8],
     explicit: bool,

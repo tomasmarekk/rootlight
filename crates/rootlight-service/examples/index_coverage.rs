@@ -632,7 +632,10 @@ fn external_binding_evidence(
     for edge in &document.relations {
         if let (RelationEndpoint::Occurrence(site), RelationEndpoint::Entity(symbol)) =
             (edge.subject, edge.object)
-            && edge.predicate == RelationPredicate::RefersTo
+            && matches!(
+                edge.predicate,
+                RelationPredicate::RefersTo | RelationPredicate::Calls
+            )
             && external.contains_key(&symbol)
         {
             relations.entry((site, symbol)).or_default().push(edge);
@@ -661,6 +664,14 @@ fn external_binding_evidence(
         let [edge] = edges else {
             return Err("external binding has no unique reference edge".into());
         };
+        let expected = if site.role == rootlight_ir::OccurrenceRole::CallSite {
+            RelationPredicate::Calls
+        } else {
+            RelationPredicate::RefersTo
+        };
+        if edge.predicate != expected {
+            return Err("external binding edge does not match occurrence role".into());
+        }
         records.entry(site.file).or_default().push(json!({
             "occurrence":site, "target":target, "relation":edge,
             "provenance":proof(site.provenance)?, "target_provenance":proof(target.provenance)?
@@ -680,6 +691,48 @@ fn chunk_end(text: &str, start: usize) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn external_function_evidence_distinguishes_references_and_calls() {
+        let directory = tempfile::tempdir().unwrap();
+        let repository = directory.path().join("repository");
+        fs::create_dir(&repository).unwrap();
+        fs::write(repository.join("book.xlsm"), fixture::book(&[("Client",
+            b"Attribute VB_Name = \"Client\"\r\nSub Run()\r\nDim value As Variant\r\nvalue = VBA.Mid$(\"sample\", 1)\r\nEnd Sub\r\n")])).unwrap();
+        let report = inspect(
+            &repository,
+            &directory.path().join("state"),
+            None,
+            StateMode::Fresh,
+        )
+        .unwrap();
+        let records: Vec<_> = report["files"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .flat_map(|file| file["external_bindings"].as_array().unwrap())
+            .collect();
+        assert_eq!(records.len(), 3);
+        assert_eq!(
+            records
+                .iter()
+                .filter(|r| r["relation"]["predicate"] == "refers_to")
+                .count(),
+            2
+        );
+        let calls: Vec<_> = records
+            .iter()
+            .filter(|r| r["relation"]["predicate"] == "calls")
+            .collect();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0]["occurrence"]["role"], "call_site");
+        assert_eq!(calls[0]["target"]["qualified_name"], "VBA.Mid$");
+        assert!(calls[0]["target"]["evidence"]["source"].is_null());
+        assert_eq!(
+            calls[0]["relation"]["evidence"]["source"],
+            calls[0]["occurrence"]["source"]
+        );
+    }
 
     #[test]
     fn external_bindings_export_exact_uses_without_repository_definitions() {

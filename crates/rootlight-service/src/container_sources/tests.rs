@@ -167,12 +167,161 @@ fn standard_constants_keep_external_identity_and_follow_shadowing_after_reopen()
 }
 
 #[test]
+fn standard_function_calls_verify_arguments_and_survive_reopen() {
+    let root = tempdir();
+    let storage = tempdir();
+    let state = storage.path().join("state");
+    rootlight_runtime::RuntimePaths::new(state.clone(), storage.path().join("runtime"))
+        .unwrap()
+        .prepare_owner()
+        .unwrap();
+    let valid = [
+        "VBA.Len(\"ab\")",
+        "VBA.LenB(\"ab\")",
+        "VBA.Mid(\"abc\", 1)",
+        "VBA.MidB(\"abc\", 1, 2)",
+        "VBA.Mid$(\"abc\", 1)",
+        "VBA.MidB$(\"abc\", 1)",
+        "VBA.Mid(Length:=2, String:=\"abc\", Start:=1)",
+        "Call VBA.Mid(\"abc\", 1)",
+        "VBA.Len(VBA.Mid$(\"abc\", 1))",
+    ];
+    let invalid = [
+        "VBA.Mid$(\"abc\", 1,)",
+        "VBA.Len(ByVal 1)",
+        "VBA.Mid(\"abc\")",
+        "VBA.Len()",
+        "VBA.Len(1, 2)",
+        "VBA.Mid(Unknown:=1, Start:=1)",
+        "VBA.Mid(String:=\"abc\", String:=\"def\", Start:=1)",
+        "VBA.Len$(\"abc\")",
+        "VBA.Mid%(\"abc\", 1)",
+    ];
+    for shadow in [false, true, false] {
+        let parameter = if shadow { "ByVal VBA As Object" } else { "" };
+        let mut text = format!(
+            "Attribute VB_Name = \"Client\"\r\nPublic Sub Run({parameter})\r\nDim value As Variant\r\n"
+        );
+        for expression in valid.iter().chain(&invalid) {
+            if !expression.starts_with("Call ") {
+                text.push_str("value = ");
+            }
+            text.push_str(expression);
+            text.push_str("\r\n");
+        }
+        text.push_str("End Sub\r\n");
+        fs::write(
+            root.path().join("book.xlsm"),
+            fixture::book(&[("Client", text.as_bytes())]),
+        )
+        .unwrap();
+        let mut service = FirstSliceService::new_durable(4, &state, &deadline()).unwrap();
+        let receipt = service.index_repository(root.path(), &deadline()).unwrap();
+        assert_eq!(
+            receipt,
+            service.index_repository(root.path(), &deadline()).unwrap()
+        );
+        drop(service);
+        let mut service = FirstSliceService::new_durable(4, &state, &deadline()).unwrap();
+        let snapshot = service
+            .loaded_generation_snapshot(receipt.generation)
+            .unwrap();
+        let document = snapshot.document();
+        let mut calls = Vec::new();
+        let mut symbols = BTreeSet::new();
+        for site in &document.occurrences {
+            if !document.provenance.iter().any(|p| {
+                p.id == site.provenance
+                    && p.rule.as_deref() == Some("vba-standard-call-v1.indexed_snapshot")
+            }) {
+                continue;
+            }
+            assert_eq!(site.role, rootlight_ir::OccurrenceRole::CallSite);
+            let OccurrenceTarget::Resolved { symbol } = site.target else {
+                panic!("proved call must resolve")
+            };
+            let target = document.entities.iter().find(|e| e.id == symbol).unwrap();
+            assert_eq!(target.kind, EntityKind::ExternalSymbol);
+            assert!(target.evidence.source.is_none());
+            symbols.insert(symbol);
+            let span = site.source.span();
+            calls.push(
+                text.get(
+                    usize::try_from(span.start_byte()).unwrap()
+                        ..usize::try_from(span.end_byte()).unwrap(),
+                )
+                .unwrap()
+                .to_owned(),
+            );
+            assert_eq!(
+                document
+                    .relations
+                    .iter()
+                    .filter(|edge| edge.subject == RelationEndpoint::Occurrence(site.id)
+                        && edge.object == RelationEndpoint::Entity(symbol)
+                        && edge.predicate == RelationPredicate::Calls)
+                    .count(),
+                1
+            );
+        }
+        calls.sort();
+        let mut expected = valid.map(str::to_owned).to_vec();
+        expected.push("VBA.Mid$(\"abc\", 1)".to_owned());
+        expected.sort();
+        assert_eq!(calls, if shadow { Vec::new() } else { expected });
+        for expression in invalid {
+            let start = u64::try_from(text.find(expression).unwrap()).unwrap();
+            let end = start + u64::try_from(expression.len()).unwrap();
+            assert!(
+                document
+                    .skipped_regions
+                    .iter()
+                    .any(|gap| gap.detail == "vba-call-or-index-target-unavailable"
+                        && gap.source.span().start_byte() == start
+                        && gap.source.span().end_byte() == end),
+                "{expression}"
+            );
+        }
+        if !shadow {
+            assert_eq!(
+                symbols.len(),
+                6,
+                "String-returning variants must retain distinct identities"
+            );
+            let relationships = service
+                .symbol_relationships(
+                    receipt.generation,
+                    symbols,
+                    vec![RelationFamily::Calls],
+                    Some(RelationDirection::Inbound),
+                    0,
+                    25,
+                    0,
+                    &deadline(),
+                )
+                .unwrap();
+            assert_eq!(relationships.data.returned_edges, 10);
+            assert!(!relationships.data.truncated);
+        }
+        let prepared = service
+            .prepare_repository_with_options(
+                root.path(),
+                FirstSliceIndexOptions::clean_rebuild(FirstSliceIndexMode::Structural),
+                &deadline(),
+            )
+            .unwrap();
+        let rebuilt = service.publish_prepared(prepared, &deadline()).unwrap();
+        assert_eq!(receipt.logical_snapshot, rebuilt.logical_snapshot);
+    }
+}
+
+#[test]
 fn typed_standard_members_keep_qualifiers_and_unproven_type_constraints() {
     let root = tempdir();
     for shadow in [false, true] {
         let parameter = if shadow { "ByVal VBA As Object" } else { "" };
         let text = format!(
-            "Attribute VB_Name = \"Client\"\r\nPublic Sub Run({parameter})\r\nDim value As Variant\r\nvalue = VBA.Mid$(\"sample\", 1)\r\nvalue = [vBa].Left$(\"sample\", 1)\r\nvalue = VBA.Constants.vbTab$\r\nvalue = VBA$.vbTab\r\nEnd Sub\r\n"
+            "Attribute VB_Name = \"Client\"\r\nPublic Sub Run({parameter})\r\nDim value As Variant\r\nvalue = VBA.Unknown$(\"sample\", 1)\r\nvalue = [vBa].Left$(\"sample\", 1)\r\nvalue = VBA.Constants.vbTab$\r\nvalue = VBA$.vbTab\r\nEnd Sub\r\n"
         );
         fs::write(
             root.path().join("book.xlsm"),
@@ -229,7 +378,7 @@ fn typed_standard_members_keep_qualifiers_and_unproven_type_constraints() {
             }
         );
         for spelling in [
-            "VBA.Mid$",
+            "VBA.Unknown$",
             "[vBa].Left$",
             "VBA.Constants.vbTab$",
             "VBA$.vbTab",

@@ -425,8 +425,8 @@ impl ResolutionEngine {
             let semantics = relation_semantics(occurrence, &decision, &lookup);
             let old_id = occurrence.id;
             if lookup.classic.is_call(occurrence) {
-                // A project-owned method invocation or proven parameterless
-                // getter read establishes a call; indexed and unknown writes do not.
+                // Only a proved invocation establishes a call; a named function,
+                // indexed expression or unknown write alone does not.
                 occurrence.role = OccurrenceRole::CallSite;
             }
             apply_target(occurrence, &decision);
@@ -716,6 +716,19 @@ fn reconcile_vba_target_gaps(
             | Some("vba-standard-namespace-v1.indexed_snapshot") => (
                 &["vba.member.reference", "vba.get_member.reference"],
                 "vba-member-target-unavailable",
+            ),
+            Some("vba-standard-function-v1.indexed_snapshot") => (
+                &[
+                    "vba.member.reference",
+                    "vba.get_member.reference",
+                    "vba.invoked_member.reference",
+                    "vba.invoked_get_member.reference",
+                ],
+                "vba-member-target-unavailable",
+            ),
+            Some("vba-standard-call-v1.indexed_snapshot") => (
+                &["vba.application.reference"],
+                "vba-call-or-index-target-unavailable",
             ),
             Some("classic-project-pointer-v1.indexed_snapshot") => (
                 &[
@@ -1580,6 +1593,8 @@ fn build_provenance(
             | ResolutionRule::ClassicProjectEnum
             | ResolutionRule::VbaStandardNamespace
             | ResolutionRule::VbaStandardConstant
+            | ResolutionRule::VbaStandardFunction
+            | ResolutionRule::VbaStandardCall
     ) {
         let proof = lookup
             .classic
@@ -1736,6 +1751,8 @@ fn build_provenance(
         ResolutionRule::ClassicProjectEnum => "classic-project-enum-v1.indexed_snapshot",
         ResolutionRule::VbaStandardNamespace => "vba-standard-namespace-v1.indexed_snapshot",
         ResolutionRule::VbaStandardConstant => "vba-standard-constant-v1.indexed_snapshot",
+        ResolutionRule::VbaStandardFunction => "vba-standard-function-v1.indexed_snapshot",
+        ResolutionRule::VbaStandardCall => "vba-standard-call-v1.indexed_snapshot",
         ResolutionRule::ElmModuleImport => "elm-module-import-v1.indexed_snapshot",
         ResolutionRule::ElmLocalType => "elm-local-type-v1.indexed_snapshot",
         ResolutionRule::ClassicProjectMember => "classic-project-member-v1.indexed_snapshot",

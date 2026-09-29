@@ -292,6 +292,10 @@ pub enum ResolutionRule {
     VbaStandardNamespace,
     /// A read explicitly qualified by VBA names a specified standard constant.
     VbaStandardConstant,
+    /// An explicit standard-library member names a specified function declaration.
+    VbaStandardFunction,
+    /// A complete argument list matches a source-qualified standard function.
+    VbaStandardCall,
     /// Declarative classic BASIC project membership selects one native class type.
     ClassicProjectType,
     /// Instantiation of a project-owned ordinary class and its source initializer.

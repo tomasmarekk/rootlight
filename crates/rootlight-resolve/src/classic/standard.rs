@@ -3,6 +3,7 @@
 //! lexical barriers are required before a source occurrence can name one.
 
 use super::*;
+mod functions;
 use crate::ResolverFactContext;
 use rootlight_ir::{
     AnalysisTier, BuildContextIdentity, EntityFlag, FactEvidence, NormalizedIrDocument,
@@ -28,6 +29,11 @@ const CONSTANTS: &[&str] = &[
 ];
 
 fn claim(repository: rootlight_ids::RepositoryId, name: &str) -> SymbolIdentityClaim {
+    let mut signature = CATALOG_RULE.as_bytes().to_vec();
+    if let Some(function) = functions::qualified(name) {
+        signature.push(0);
+        signature.extend_from_slice(function.signature.as_bytes());
+    }
     let mut claim = SymbolIdentityClaim {
         symbol: SymbolId::from_bytes([0; 20]),
         repository,
@@ -36,7 +42,7 @@ fn claim(repository: rootlight_ids::RepositoryId, name: &str) -> SymbolIdentityC
         container: None,
         container_identity: Vec::new(),
         declared_identity: name.to_owned(),
-        signature_discriminator: CATALOG_RULE.as_bytes().to_vec(),
+        signature_discriminator: signature,
         build_context_discriminator: content_hash(CATALOG_RULE.as_bytes()).as_bytes().to_vec(),
     };
     claim.symbol = claim.derived_symbol();
@@ -86,7 +92,7 @@ pub(crate) fn materialize(
         producer: ProducerIdentity::new(RESOLVER_PROVIDER_NAME, RESOLVER_PROVIDER_VERSION, digest)
             .map_err(ResolutionError::InvalidProducer)?,
         binary_digest: context.binary_digest(),
-        frontend_version: Some("MS-VBAL-6.1.2.2".to_owned()),
+        frontend_version: Some("MS-VBAL-6.1.2".to_owned()),
         language: "vba".to_owned(),
         tier: AnalysisTier::TierC,
         build_context: BuildContextIdentity::new(digest),
@@ -100,7 +106,12 @@ pub(crate) fn materialize(
     let existing: BTreeSet<_> = document.entities.iter().map(|entity| entity.id).collect();
     let names = ["VBA".to_owned(), "VBA.Constants".to_owned()]
         .into_iter()
-        .chain(CONSTANTS.iter().map(|name| format!("VBA.Constants.{name}")));
+        .chain(CONSTANTS.iter().map(|name| format!("VBA.Constants.{name}")))
+        .chain(
+            functions::FUNCTIONS
+                .iter()
+                .map(|function| format!("VBA.{}", function.name)),
+        );
     let mut added = false;
     for name in names {
         cancellation.check()?;
@@ -163,6 +174,8 @@ pub(super) fn bind<'a>(
     memberships: &BTreeMap<FileId, Option<usize>>,
     projects: &[Option<ResolvedProject>],
     members: &BTreeMap<(SymbolId, String), Option<&EntityRecord>>,
+    calls: &calls::CallIndex<'a, '_>,
+    sources: &BTreeMap<FileId, &[u8]>,
     cancellation: &Cancellation,
     work: &mut ResolutionWorkBudget,
 ) -> Result<(), ResolutionError> {
@@ -203,6 +216,26 @@ pub(super) fn bind<'a>(
             ));
         }
         let name = identifier(member.name);
+        if root
+            && matches!(
+                site.syntax_kind.as_str(),
+                "vba.member.reference"
+                    | "vba.get_member.reference"
+                    | "vba.invoked_member.reference"
+                    | "vba.invoked_get_member.reference"
+            )
+            && let Some(function) = functions::find(member.name)
+        {
+            candidates.insert(
+                site.id,
+                (
+                    *site,
+                    format!("VBA.{}", function.name),
+                    ResolutionRule::VbaStandardFunction,
+                ),
+            );
+            continue;
+        }
         let namespace = receiver_sources.contains_key(&site.source.span());
         if root
             && name.as_deref() == Some("constants")
@@ -321,6 +354,64 @@ pub(super) fn bind<'a>(
                 property_call: false,
             },
         );
+    }
+    for (site, member) in member_sites {
+        cancellation.check()?;
+        work.consume()?;
+        if member.is_some() || site.syntax_kind != "vba.application.reference" {
+            continue;
+        }
+        let Some(bytes) = site_bytes(site, sources) else {
+            continue;
+        };
+        // All candidates require an authored VBA qualifier. Avoid reparsing
+        // unrelated application expressions; callee lookup proves the full prefix.
+        if !starts_with_namespace(bytes)
+            && !bytes
+                .get(..4)
+                .is_some_and(|prefix| prefix.eq_ignore_ascii_case(b"Call"))
+        {
+            continue;
+        }
+        let Some((callee, explicit)) = calls.callee(site, sources, cancellation, work)? else {
+            continue;
+        };
+        let Some(proof) = result
+            .proofs
+            .get(&callee.id)
+            .filter(|proof| proof.rule == ResolutionRule::VbaStandardFunction)
+        else {
+            continue;
+        };
+        let Some(function) = functions::qualified(&proof.target.canonical_name) else {
+            continue;
+        };
+        let Some(offset) = callee
+            .source
+            .span()
+            .end_byte()
+            .checked_sub(site.source.span().start_byte())
+            .and_then(|offset| usize::try_from(offset).ok())
+        else {
+            continue;
+        };
+        let Some(tail) = bytes.get(offset..) else {
+            continue;
+        };
+        if !calls::standard_arguments_match(tail, explicit, function.parameters, &mut || {
+            cancellation.check()?;
+            work.consume()
+        })? {
+            continue;
+        }
+        let proof = Proof {
+            target: proof.target,
+            context: Arc::clone(&proof.context),
+            receiver: Some((proof.target, callee.source.clone())),
+            rule: ResolutionRule::VbaStandardCall,
+            property_call: true,
+        };
+        result.proofs.insert(site.id, proof);
     }
     Ok(())
 }

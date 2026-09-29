@@ -2224,6 +2224,8 @@ impl<'a> ClassicIndex<'a> {
             &memberships,
             &projects,
             &members,
+            &calls,
+            &sources,
             cancellation,
             work,
         )?;
