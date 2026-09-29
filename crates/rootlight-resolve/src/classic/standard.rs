@@ -157,8 +157,9 @@ pub(crate) fn materialize(
 pub(super) fn bind<'a>(
     result: &mut ClassicIndex<'a>,
     index: &CandidateIndex<'a>,
-    occurrences: &[OccurrenceRecord],
-    sources: &BTreeMap<FileId, &[u8]>,
+    qualifiers: &BTreeMap<rootlight_ir::SourceSpan, Option<&OccurrenceRecord>>,
+    member_sites: &[(&OccurrenceRecord, Option<with_members::Member<'_>>)],
+    receiver_sources: &BTreeMap<rootlight_ir::SourceSpan, Vec<SourceRef>>,
     memberships: &BTreeMap<FileId, Option<usize>>,
     projects: &[Option<ResolvedProject>],
     members: &BTreeMap<(SymbolId, String), Option<&EntityRecord>>,
@@ -181,46 +182,78 @@ pub(super) fn bind<'a>(
     {
         return Ok(());
     }
-    let mut qualifiers = BTreeSet::new();
-    for site in occurrences {
+    // Receiver syntax and spans were already checked by the shared member pass.
+    // Reuse that inventory rather than traversing every expression a second time.
+    let mut candidates = BTreeMap::new();
+    for (site, member) in member_sites {
         cancellation.check()?;
         work.consume()?;
-        if !is_member(&site.syntax_kind) {
-            continue;
-        }
-        let Some(bytes) = site_bytes(site, sources) else {
+        let Some(member) = member else {
             continue;
         };
-        if !starts_with_namespace(bytes) {
+        if member.implicit_root || !starts_with_namespace(member.receiver.as_bytes()) {
             continue;
         }
-        if let Some((receiver, _)) = member_access_parts(bytes, cancellation, work)? {
-            qualifiers.insert((
-                site.file,
-                site.source.span().start_byte(),
-                site.source
-                    .span()
-                    .start_byte()
-                    .checked_add(
-                        u64::try_from(receiver.len())
-                            .map_err(|_| ResolutionError::CountOverflow)?,
-                    )
-                    .ok_or(ResolutionError::CountOverflow)?,
+        let root = identifier(member.receiver).as_deref() == Some("vba");
+        if root && let Some(qualifier) = qualifiers.get(&member.span).and_then(|site| *site) {
+            candidates.entry(qualifier.id).or_insert((
+                qualifier,
+                "VBA".to_owned(),
+                ResolutionRule::VbaStandardNamespace,
             ));
         }
+        let name = identifier(member.name);
+        let namespace = receiver_sources.contains_key(&site.source.span());
+        if root
+            && name.as_deref() == Some("constants")
+            && namespace
+            && matches!(
+                site.syntax_kind.as_str(),
+                "vba.member.reference" | "vba.get_member.reference"
+            )
+        {
+            candidates.insert(
+                site.id,
+                (
+                    *site,
+                    "VBA.Constants".to_owned(),
+                    ResolutionRule::VbaStandardNamespace,
+                ),
+            );
+            continue;
+        }
+        if site.syntax_kind != "vba.get_member.reference" || namespace {
+            continue;
+        }
+        let Some(name) = CONSTANTS.iter().find(|candidate| {
+            name.as_deref()
+                .is_some_and(|name| candidate.eq_ignore_ascii_case(name))
+        }) else {
+            continue;
+        };
+        let constants =
+            root || member_access_parts(member.receiver.as_bytes(), cancellation, work)?
+                .is_some_and(|(root, module)| {
+                    identifier(root).as_deref() == Some("vba")
+                        && identifier(module).as_deref() == Some("constants")
+                });
+        if constants {
+            candidates.insert(
+                site.id,
+                (
+                    *site,
+                    format!("VBA.Constants.{name}"),
+                    ResolutionRule::VbaStandardConstant,
+                ),
+            );
+        }
     }
-    for site in occurrences {
+    for (site, name, rule) in candidates.into_values() {
         cancellation.check()?;
         work.consume()?;
         if site.role != OccurrenceRole::Reference
             || !matches!(site.target, OccurrenceTarget::Unresolved { .. })
             || result.proofs.contains_key(&site.id)
-            || !matches!(
-                site.syntax_kind.as_str(),
-                "vba.value_identifier.reference"
-                    | "vba.member.reference"
-                    | "vba.get_member.reference"
-            )
         {
             continue;
         }
@@ -232,56 +265,6 @@ pub(super) fn bind<'a>(
             .and_then(Option::as_ref)
             .filter(|project| project.evidence.native)
         else {
-            continue;
-        };
-        let Some(bytes) = site_bytes(site, sources) else {
-            continue;
-        };
-        if !starts_with_namespace(bytes) {
-            continue;
-        }
-        let Some(text) = std::str::from_utf8(bytes).ok() else {
-            continue;
-        };
-        let namespace = qualifiers.contains(&(
-            site.file,
-            site.source.span().start_byte(),
-            site.source.span().end_byte(),
-        ));
-        let name = if identifier(text).as_deref() == Some("vba") && namespace {
-            Some("VBA".to_owned())
-        } else if let Some((receiver, member)) = member_access_parts(bytes, cancellation, work)? {
-            let receiver_is_vba = identifier(receiver).as_deref() == Some("vba");
-            let member = identifier(member);
-            if receiver_is_vba && member.as_deref() == Some("constants") && namespace {
-                Some("VBA.Constants".to_owned())
-            } else if site.syntax_kind == "vba.get_member.reference" && !namespace {
-                let qualified_constants = if receiver_is_vba {
-                    true
-                } else {
-                    member_access_parts(receiver.as_bytes(), cancellation, work)?.is_some_and(
-                        |(root, module)| {
-                            identifier(root).as_deref() == Some("vba")
-                                && identifier(module).as_deref() == Some("constants")
-                        },
-                    )
-                };
-                CONSTANTS
-                    .iter()
-                    .find(|name| {
-                        qualified_constants
-                            && member
-                                .as_deref()
-                                .is_some_and(|member| name.eq_ignore_ascii_case(member))
-                    })
-                    .map(|name| format!("VBA.Constants.{name}"))
-            } else {
-                None
-            }
-        } else {
-            None
-        };
-        let Some(name) = name else {
             continue;
         };
         // Project/module names and all lexical declarations remain barriers,
@@ -334,11 +317,7 @@ pub(super) fn bind<'a>(
                 target,
                 context: Arc::clone(&project.evidence),
                 receiver: None,
-                rule: if namespace {
-                    ResolutionRule::VbaStandardNamespace
-                } else {
-                    ResolutionRule::VbaStandardConstant
-                },
+                rule,
                 property_call: false,
             },
         );

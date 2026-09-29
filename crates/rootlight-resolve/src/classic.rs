@@ -2218,8 +2218,9 @@ impl<'a> ClassicIndex<'a> {
         standard::bind(
             &mut result,
             index,
-            occurrences,
-            &sources,
+            &module_qualifiers,
+            &member_occurrences,
+            &read_receivers,
             &memberships,
             &projects,
             &members,
