@@ -4,6 +4,7 @@
 //! Resume measures a reopened service; warm sequences keep one service alive and
 //! wait for external source edits between newline-delimited reports.
 //! Gap matches identify exact-span occurrences, not the semantic owner of a gap.
+//! Bounded gap text comes from verified source reads; omissions carry reasons.
 
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -26,6 +27,9 @@ use rootlight_service::{
 };
 use rootlight_source::{SourceEncoding, SourceReadOptions};
 use serde_json::json;
+
+#[path = "index_coverage/gap_text.rs"]
+mod gap_text;
 
 #[derive(Clone, Copy)]
 enum StateMode {
@@ -399,6 +403,25 @@ fn inspect_files(
             SourceEncoding::Bytes
         };
         let file_length = usize::try_from(file.byte_length)?;
+        let gap_spans = document
+            .skipped_regions
+            .iter()
+            .filter(|gap| gap.source.span().file() == file.id)
+            .map(|gap| {
+                if gap.source.repository() != file.repository
+                    || gap.source.generation() != generation
+                    || gap.source.content_hash() != file.content_hash
+                {
+                    return Err("gap source identity differs from indexed file".into());
+                }
+                Ok((
+                    usize::try_from(gap.source.span().start_byte())?,
+                    usize::try_from(gap.source.span().end_byte())?,
+                ))
+            })
+            .collect::<Result<Vec<_>, Box<dyn Error>>>()?;
+        let mut gap_text =
+            gap_text::GapTexts::new(file_length, file.encoding == "utf-8", gap_spans)?;
         let mut returned_hasher = blake3::Hasher::new();
         let mut start = 0_usize;
         loop {
@@ -446,6 +469,7 @@ fn inspect_files(
                     file.path, chunk.start_byte, chunk.end_byte, chunk.bytes.len()).into());
             }
             returned_hasher.update(&chunk.bytes);
+            gap_text.capture(start, &chunk.bytes)?;
             if end == file_length {
                 break;
             }
@@ -507,9 +531,13 @@ fn inspect_files(
                     })
                     .collect();
                 value["matching_occurrences"] = json!(matching);
+                value["source_text"] = gap_text.evidence(
+                    usize::try_from(gap.source.span().start_byte())?,
+                    usize::try_from(gap.source.span().end_byte())?,
+                )?;
                 Ok(value)
             })
-            .collect::<Result<Vec<_>, serde_json::Error>>()?;
+            .collect::<Result<Vec<_>, Box<dyn Error>>>()?;
         let container_path = origin.and_then(|reference| {
             snapshot
                 .find_file(reference.span().file())
@@ -673,6 +701,8 @@ mod tests {
                 .collect();
             assert!(!gaps.is_empty(), "missing gap: {text}: {row}");
             for gap in gaps {
+                assert_eq!(gap["source_text"]["status"], "complete");
+                assert_eq!(gap["source_text"]["text"], text);
                 let matches = gap["matching_occurrences"]
                     .as_array()
                     .expect("exact-span occurrence evidence");
