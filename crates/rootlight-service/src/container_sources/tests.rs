@@ -14,6 +14,9 @@ mod err_tests;
 #[path = "constant_tests.rs"]
 mod constant_tests;
 
+#[path = "collection_tests.rs"]
+mod collection_tests;
+
 fn tempdir() -> tempfile::TempDir {
     #[cfg(target_os = "macos")]
     {

@@ -4,6 +4,7 @@
 
 use super::*;
 mod arguments;
+pub(super) mod collection;
 mod err;
 mod functions;
 use crate::ResolverFactContext;
@@ -46,6 +47,11 @@ fn claim(repository: rootlight_ids::RepositoryId, name: &str) -> SymbolIdentityC
     } else if let Some(member) = err::qualified(name) {
         signature.push(0);
         signature.extend_from_slice(member.signature.as_bytes());
+    } else if let Some(member) = collection::qualified(name) {
+        signature.push(0);
+        signature.extend_from_slice(member.signature.as_bytes());
+    } else if name == "VBA.Collection" {
+        signature.extend_from_slice(b"\0Class Collection");
     } else if name == "VBA.Err" {
         signature.extend_from_slice(b"\0ErrClass default instance");
     }
@@ -78,13 +84,14 @@ pub(crate) fn materialize(
     let mut requested = BTreeSet::new();
     for site in &document.occurrences {
         cancellation.check()?;
-        if site.syntax_kind == "vba.value_identifier.reference"
-            && site_bytes(site, &inputs).is_some_and(|text| {
-                [b"VBA".as_slice(), b"[VBA]", b"Err", b"[Err]"]
-                    .iter()
-                    .any(|name| text.eq_ignore_ascii_case(name))
-                    || constant(text).is_some()
-            })
+        if (site.role == OccurrenceRole::TypeUse && site.syntax_kind.starts_with("vba."))
+            || (site.syntax_kind == "vba.value_identifier.reference"
+                && site_bytes(site, &inputs).is_some_and(|text| {
+                    [b"VBA".as_slice(), b"[VBA]", b"Err", b"[Err]"]
+                        .iter()
+                        .any(|name| text.eq_ignore_ascii_case(name))
+                        || constant(text).is_some()
+                }))
         {
             requested.insert(site.file);
         }
@@ -110,7 +117,7 @@ pub(crate) fn materialize(
         producer: ProducerIdentity::new(RESOLVER_PROVIDER_NAME, RESOLVER_PROVIDER_VERSION, digest)
             .map_err(ResolutionError::InvalidProducer)?,
         binary_digest: context.binary_digest(),
-        frontend_version: Some("MS-VBAL-6.1.2/6.1.3.2".to_owned()),
+        frontend_version: Some("MS-VBAL-6.1.2/6.1.3".to_owned()),
         language: "vba".to_owned(),
         tier: AnalysisTier::TierC,
         build_context: BuildContextIdentity::new(digest),
@@ -126,6 +133,7 @@ pub(crate) fn materialize(
         "VBA".to_owned(),
         "VBA.Constants".to_owned(),
         "VBA.Err".to_owned(),
+        "VBA.Collection".to_owned(),
     ]
     .into_iter()
     .chain(CONSTANTS.iter().map(|name| format!("VBA.Constants.{name}")))
@@ -133,6 +141,11 @@ pub(crate) fn materialize(
         functions::FUNCTIONS
             .iter()
             .map(|function| format!("VBA.{}", function.name)),
+    )
+    .chain(
+        collection::MEMBERS
+            .iter()
+            .map(|member| format!("VBA.Collection.{}", member.name)),
     )
     .chain(
         err::MEMBERS

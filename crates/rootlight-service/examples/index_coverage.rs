@@ -634,7 +634,9 @@ fn external_binding_evidence(
             (edge.subject, edge.object)
             && matches!(
                 edge.predicate,
-                RelationPredicate::RefersTo | RelationPredicate::Calls
+                RelationPredicate::RefersTo
+                    | RelationPredicate::Calls
+                    | RelationPredicate::UsesType
             )
             && external.contains_key(&symbol)
         {
@@ -664,10 +666,10 @@ fn external_binding_evidence(
         let [edge] = edges else {
             return Err("external binding has no unique reference edge".into());
         };
-        let expected = if site.role == rootlight_ir::OccurrenceRole::CallSite {
-            RelationPredicate::Calls
-        } else {
-            RelationPredicate::RefersTo
+        let expected = match site.role {
+            rootlight_ir::OccurrenceRole::CallSite => RelationPredicate::Calls,
+            rootlight_ir::OccurrenceRole::TypeUse => RelationPredicate::UsesType,
+            _ => RelationPredicate::RefersTo,
         };
         if edge.predicate != expected {
             return Err("external binding edge does not match occurrence role".into());
@@ -772,6 +774,49 @@ mod tests {
                 "vba-standard-library-catalog-v1"
             );
         }
+    }
+
+    #[test]
+    fn external_class_evidence_preserves_type_reference_and_call_roles() {
+        let directory = tempfile::tempdir().unwrap();
+        let repository = directory.path().join("repository");
+        fs::create_dir(&repository).unwrap();
+        fs::write(repository.join("book.xlsm"), fixture::book(&[("Client",
+            b"Attribute VB_Name = \"Client\"\r\nSub Inspect()\r\nDim items As Collection\r\nDim count As Long\r\nSet items = New Collection\r\ncount = items.Count\r\nEnd Sub\r\n")])).unwrap();
+        let report = inspect(
+            &repository,
+            &directory.path().join("state"),
+            None,
+            StateMode::Fresh,
+        )
+        .unwrap();
+        let records: Vec<_> = report["files"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .flat_map(|file| file["external_bindings"].as_array().unwrap())
+            .collect();
+        let mut roles = BTreeMap::new();
+        for record in records {
+            let role = record["occurrence"]["role"].as_str().unwrap();
+            let expected = match role {
+                "type_use" => "uses_type",
+                "call_site" => "calls",
+                "reference" => "refers_to",
+                _ => panic!("unexpected role"),
+            };
+            assert_eq!(record["relation"]["predicate"], expected);
+            assert_eq!(
+                record["relation"]["evidence"]["source"],
+                record["occurrence"]["source"]
+            );
+            assert!(record["target"]["evidence"]["source"].is_null());
+            *roles.entry(role).or_insert(0) += 1;
+        }
+        assert_eq!(
+            roles,
+            BTreeMap::from([("type_use", 2), ("reference", 1), ("call_site", 1)])
+        );
     }
 
     #[test]

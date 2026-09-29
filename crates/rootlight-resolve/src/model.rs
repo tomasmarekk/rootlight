@@ -306,6 +306,14 @@ pub enum ResolutionRule {
     VbaErrMethod,
     /// A complete argument list matches a standard Err method declaration.
     VbaErrCall,
+    /// An unshadowed native type use names the standard Collection class.
+    VbaCollectionType,
+    /// A source-exact New expression constructs the standard Collection class.
+    VbaCollectionConstruction,
+    /// A project-proven Collection receiver selects a standard member contract.
+    VbaCollectionMember,
+    /// A Collection member or default Item call has a complete valid argument list.
+    VbaCollectionCall,
     /// Declarative classic BASIC project membership selects one native class type.
     ClassicProjectType,
     /// Instantiation of a project-owned ordinary class and its source initializer.

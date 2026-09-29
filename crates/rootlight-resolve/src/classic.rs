@@ -1197,6 +1197,29 @@ impl<'a> ClassicIndex<'a> {
             let Some(text) = bytes.get(start..end) else {
                 continue;
             };
+            if let Some(target) = standard::collection::type_target(
+                index,
+                project,
+                occurrence,
+                text,
+                &local_types,
+                &mut || {
+                    cancellation.check()?;
+                    work.consume()
+                },
+            )? {
+                result.proofs.insert(
+                    occurrence.id,
+                    Proof {
+                        target,
+                        context: Arc::clone(&project.evidence),
+                        receiver: None,
+                        rule: ResolutionRule::VbaCollectionType,
+                        property_call: false,
+                    },
+                );
+                continue;
+            }
             let (name, qualified) = if implementation || text.contains(&b'.') {
                 let Some(path) = rootlight_vba::procedure_pointer_path(text, &mut || {
                     cancellation.check()?;
@@ -1426,6 +1449,7 @@ impl<'a> ClassicIndex<'a> {
                     });
                 if let Some((target, context)) = typed.filter(|(target, _)| {
                     matches!(target.kind, EntityKind::Class | EntityKind::Struct)
+                        || standard::collection::is_class(target)
                 }) {
                     let safe = if target.kind == EntityKind::Struct {
                         if let Some(&safe) = unconditional_udts.get(&target.id) {
@@ -1651,14 +1675,24 @@ impl<'a> ClassicIndex<'a> {
             let Some(proof) = result.proof(type_site) else {
                 continue;
             };
-            let Some(initializer) = initializers.get(&proof.target.id).copied().flatten() else {
+            let collection = standard::collection::is_class(proof.target);
+            let Some(initializer) = initializers
+                .get(&proof.target.id)
+                .copied()
+                .flatten()
+                .or_else(|| collection.then_some(None))
+            else {
                 continue;
             };
             let proof = Proof {
                 target: proof.target,
                 context: Arc::clone(&proof.context),
                 receiver: Some((proof.target, type_site.source.clone())),
-                rule: ResolutionRule::ClassicProjectConstruction,
+                rule: if collection {
+                    ResolutionRule::VbaCollectionConstruction
+                } else {
+                    ResolutionRule::ClassicProjectConstruction
+                },
                 property_call: false,
             };
             result.proofs.insert(site.id, proof);
@@ -1729,6 +1763,8 @@ impl<'a> ClassicIndex<'a> {
         }
         let order = dependencies::order(&member_occurrences, &calls, &sources, cancellation, work)?;
         let mut resolved_members = BTreeMap::new();
+        let mut collection_calls = standard::collection::Calls::default();
+        let mut collection_value_reads = standard::collection::ValueReads::default();
         let selected_callees = order.callees;
         for i in order.sites {
             let Some((occurrence, member)) = member_occurrences.get(i) else {
@@ -1738,6 +1774,28 @@ impl<'a> ClassicIndex<'a> {
             work.consume()?;
             let span = occurrence.source.span();
             let Some(member) = member else {
+                if let Some(&(callee, explicit)) = selected_callees.get(&occurrence.id)
+                    && let Some(proof) = result.proof(callee)
+                    && let Some(proof) = collection_calls.prove(
+                        occurrence,
+                        callee,
+                        explicit,
+                        proof,
+                        &sources,
+                        &mut || {
+                            cancellation.check()?;
+                            work.consume()
+                        },
+                    )?
+                {
+                    let mut evidence = result.receiver_sources(callee).to_vec();
+                    evidence.push(callee.source.clone());
+                    result
+                        .receiver_sources
+                        .insert(occurrence.id, Arc::new(evidence));
+                    result.proofs.insert(occurrence.id, proof);
+                    continue;
+                }
                 let selected = calls.resolve(
                     &mut result,
                     occurrence,
@@ -1752,15 +1810,97 @@ impl<'a> ClassicIndex<'a> {
                     // application again for the default-member fallback.
                     match selected {
                         Some((callee, false)) => Some(callee),
-                        None if read_receivers.contains_key(&span) => {
-                            calls.returned_receiver(occurrence, cancellation, work)?
-                        }
+                        None => calls.returned_receiver(occurrence, cancellation, work)?,
                         _ => None,
                     }
                 } else {
                     None
                 };
+                // Item is the standard class's default function, not an array
+                // access or a setter on its unknown Variant result.
                 if let Some(callee) = callee
+                    && matches!(
+                        callee.syntax_kind.as_str(),
+                        "vba.invoked_get_identifier.reference"
+                            | "vba.invoked_get_member.reference"
+                            | "vba.application.reference"
+                    )
+                    && let Some(symbol) = match callee.target {
+                        OccurrenceTarget::Resolved { symbol } => Some(symbol),
+                        _ => result.proof(callee).map(|proof| proof.target.id),
+                    }
+                    && let Some((owner, class, context, type_source)) =
+                        value_types.get(&symbol).and_then(Option::as_ref)
+                    && entities
+                        .get(class)
+                        .is_some_and(|entity| standard::collection::is_class(entity))
+                    && (matches!(
+                        owner.kind,
+                        EntityKind::Variable | EntityKind::Parameter | EntityKind::Field
+                    ) || (matches!(
+                        procedure_kind(owner, &sources, cancellation, work)?,
+                        Some(
+                            rootlight_vba::ProcedureKind::Function
+                                | rootlight_vba::ProcedureKind::PropertyGet
+                        )
+                    ) && (callee.syntax_kind == "vba.application.reference"
+                        || calls.has_empty_parameter_list(owner, &sources, cancellation, work)?)))
+                    && let Some(target) = standard::collection::target(
+                        index,
+                        occurrence.repository,
+                        "VBA.Collection.Item",
+                    )
+                {
+                    let value_witness = if callee.syntax_kind == "vba.application.reference"
+                        && !read_receivers.contains_key(&span)
+                    {
+                        let Some(witness) = collection_value_reads.witness(
+                            occurrence,
+                            index,
+                            &sources,
+                            &mut || {
+                                cancellation.check()?;
+                                work.consume()
+                            },
+                        )?
+                        else {
+                            continue;
+                        };
+                        Some(witness)
+                    } else {
+                        None
+                    };
+                    let member_proof = Proof {
+                        target,
+                        context: Arc::clone(context),
+                        receiver: Some((*owner, type_source.clone())),
+                        rule: ResolutionRule::VbaCollectionMember,
+                        property_call: false,
+                    };
+                    if let Some(proof) = collection_calls.prove(
+                        occurrence,
+                        callee,
+                        false,
+                        &member_proof,
+                        &sources,
+                        &mut || {
+                            cancellation.check()?;
+                            work.consume()
+                        },
+                    )? {
+                        let mut evidence = result.receiver_sources(callee).to_vec();
+                        evidence.push(callee.source.clone());
+                        evidence.extend(value_witness);
+                        result
+                            .receiver_sources
+                            .insert(occurrence.id, Arc::new(evidence));
+                        result.proofs.insert(occurrence.id, proof);
+                    }
+                    continue;
+                }
+                if let Some(callee) = callee
+                    && (callee.syntax_kind != "vba.application.reference"
+                        || read_receivers.contains_key(&span))
                     && let Some(access) = match callee.syntax_kind.as_str() {
                         "vba.application.reference"
                         | "vba.invoked_get_identifier.reference"
@@ -1918,18 +2058,26 @@ impl<'a> ClassicIndex<'a> {
                     .and_then(Option::as_ref)
                     .filter(|(owner, class, _, _)| {
                         entities.get(class).is_some_and(|entity| {
-                            matches!(
-                                (owner.kind, entity.kind),
-                                (EntityKind::Field, EntityKind::Struct)
-                                    | (
-                                        EntityKind::Property,
-                                        EntityKind::Class | EntityKind::Struct
-                                    )
-                                    | (
-                                        EntityKind::Function | EntityKind::Method,
-                                        EntityKind::Class | EntityKind::Struct
-                                    )
-                            )
+                            (standard::collection::is_class(entity)
+                                && matches!(
+                                    owner.kind,
+                                    EntityKind::Field
+                                        | EntityKind::Property
+                                        | EntityKind::Function
+                                        | EntityKind::Method
+                                ))
+                                || matches!(
+                                    (owner.kind, entity.kind),
+                                    (EntityKind::Field, EntityKind::Struct)
+                                        | (
+                                            EntityKind::Property,
+                                            EntityKind::Class | EntityKind::Struct
+                                        )
+                                        | (
+                                            EntityKind::Function | EntityKind::Method,
+                                            EntityKind::Class | EntityKind::Struct
+                                        )
+                                )
                         })
                     })
                     .map(|(owner, class, context, source)| {
@@ -2062,6 +2210,10 @@ impl<'a> ClassicIndex<'a> {
             let Some((owner, class, context, type_source)) = binding else {
                 continue;
             };
+            let collection_member = entities
+                .get(&class)
+                .filter(|entity| standard::collection::is_class(entity))
+                .and_then(|_| standard::collection::member_target(index, occurrence, &name));
             let key = (class, name);
             let access = member_property_access(&occurrence.syntax_kind).or_else(|| {
                 read_receivers
@@ -2071,7 +2223,9 @@ impl<'a> ClassicIndex<'a> {
             // Accessor identity is independent of the returned value's type.
             // Unknown access and conflicting declarations cannot select a getter
             // merely because it is the only accessor with a known return type.
-            let target = if let Some(accessors) = property_accessors.get(&key) {
+            let target = if let Some((target, _)) = collection_member {
+                Some(target)
+            } else if let Some(accessors) = property_accessors.get(&key) {
                 if accessors.invalid {
                     None
                 } else {
@@ -2093,10 +2247,13 @@ impl<'a> ClassicIndex<'a> {
             };
             if member.implicit_root
                 && !matches!(receiver_type.kind, EntityKind::Class | EntityKind::Struct)
+                && !standard::collection::is_class(receiver_type)
             {
                 continue;
             }
-            let accessible = if receiver_type.kind == EntityKind::Enum {
+            let accessible = if standard::collection::is_class(receiver_type) {
+                collection_member.is_some()
+            } else if receiver_type.kind == EntityKind::Enum {
                 target.kind == EntityKind::Constant
                     && target.container == Some(ContainerRef::Entity(class))
                     && target.visibility != EntityVisibility::Private
@@ -2188,6 +2345,23 @@ impl<'a> ClassicIndex<'a> {
                     rule: ResolutionRule::ClassicProjectEnum,
                     property_call: false,
                 });
+            }
+            if let Some((target, bare_call)) = collection_member {
+                result.proofs.insert(
+                    occurrence.id,
+                    Proof {
+                        target,
+                        context,
+                        receiver: Some((owner, type_source)),
+                        rule: if bare_call {
+                            ResolutionRule::VbaCollectionCall
+                        } else {
+                            ResolutionRule::VbaCollectionMember
+                        },
+                        property_call: bare_call,
+                    },
+                );
+                continue;
             }
             let implicit_parameters = if target.kind == EntityKind::Property
                 && !is_invoked_member(&occurrence.syntax_kind)

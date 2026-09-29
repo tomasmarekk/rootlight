@@ -680,7 +680,8 @@ fn reconcile_vba_target_gaps(
     for record in &document.provenance {
         cancellation.check()?;
         let selection: (&[&str], &str) = match record.rule.as_deref() {
-            Some("classic-project-type-v1.indexed_snapshot") => (
+            Some("classic-project-type-v1.indexed_snapshot")
+            | Some("vba-collection-type-v1.indexed_snapshot") => (
                 &[
                     "vba.direct_type_identifier.reference",
                     "vba.implemented_type.reference",
@@ -695,7 +696,8 @@ fn reconcile_vba_target_gaps(
                 &["vba.application.reference"],
                 "vba-call-or-index-target-unavailable",
             ),
-            Some("classic-project-construction-v1.indexed_snapshot") => (
+            Some("classic-project-construction-v1.indexed_snapshot")
+            | Some("vba-collection-construction-v1.indexed_snapshot") => (
                 &["vba.construction.reference"],
                 "vba-construction-semantics-unavailable",
             ),
@@ -717,7 +719,8 @@ fn reconcile_vba_target_gaps(
                 &["vba.member.reference", "vba.get_member.reference"],
                 "vba-member-target-unavailable",
             ),
-            Some("vba-standard-function-v1.indexed_snapshot") => (
+            Some("vba-standard-function-v1.indexed_snapshot")
+            | Some("vba-collection-member-v1.indexed_snapshot") => (
                 &[
                     "vba.member.reference",
                     "vba.get_member.reference",
@@ -732,6 +735,10 @@ fn reconcile_vba_target_gaps(
             ),
             Some("vba-err-property-v1.indexed_snapshot") => (
                 &["vba.get_member.reference", "vba.let_member.reference"],
+                "vba-member-target-unavailable",
+            ),
+            Some("vba-collection-call-v1.indexed_snapshot") => (
+                &["vba.get_member.reference"],
                 "vba-member-target-unavailable",
             ),
             Some("vba-err-method-v1.indexed_snapshot") => (
@@ -764,7 +771,13 @@ fn reconcile_vba_target_gaps(
     let mut resolved = BTreeMap::new();
     let mut default_receivers = BTreeSet::new();
     if producers.values().any(|(_, record)| {
-        record.rule.as_deref() == Some("classic-project-default-member-v1.indexed_snapshot")
+        matches!(
+            record.rule.as_deref(),
+            Some(
+                "classic-project-default-member-v1.indexed_snapshot"
+                    | "vba-collection-call-v1.indexed_snapshot"
+            )
+        )
     }) {
         for site in &document.occurrences {
             cancellation.check()?;
@@ -786,7 +799,13 @@ fn reconcile_vba_target_gaps(
         if site.syntax_kind == "vba.application.reference"
             && matches!(site.target, OccurrenceTarget::Resolved { .. })
             && let Some((_, record)) = producers.get(&site.provenance)
-            && record.rule.as_deref() == Some("classic-project-default-member-v1.indexed_snapshot")
+            && matches!(
+                record.rule.as_deref(),
+                Some(
+                    "classic-project-default-member-v1.indexed_snapshot"
+                        | "vba-collection-call-v1.indexed_snapshot"
+                )
+            )
         {
             // The receiver keeps its lexical variable identity. Only its
             // dispatch gap is discharged by the enclosing default-member proof.
@@ -807,7 +826,13 @@ fn reconcile_vba_target_gaps(
         if site.syntax_kind == "vba.application.reference"
             && matches!(site.target, OccurrenceTarget::Resolved { .. })
             && producers.get(&site.provenance).is_some_and(|(_, record)| {
-                record.rule.as_deref() == Some("classic-project-member-v1.indexed_snapshot")
+                matches!(
+                    record.rule.as_deref(),
+                    Some(
+                        "classic-project-member-v1.indexed_snapshot"
+                            | "vba-collection-call-v1.indexed_snapshot"
+                    )
+                )
             })
         {
             resolved.insert(
@@ -1613,6 +1638,10 @@ fn build_provenance(
             | ResolutionRule::VbaErrProperty
             | ResolutionRule::VbaErrMethod
             | ResolutionRule::VbaErrCall
+            | ResolutionRule::VbaCollectionType
+            | ResolutionRule::VbaCollectionConstruction
+            | ResolutionRule::VbaCollectionMember
+            | ResolutionRule::VbaCollectionCall
     ) {
         let proof = lookup
             .classic
@@ -1778,6 +1807,12 @@ fn build_provenance(
         ResolutionRule::VbaErrProperty => "vba-err-property-v1.indexed_snapshot",
         ResolutionRule::VbaErrMethod => "vba-err-method-v1.indexed_snapshot",
         ResolutionRule::VbaErrCall => "vba-err-call-v1.indexed_snapshot",
+        ResolutionRule::VbaCollectionType => "vba-collection-type-v1.indexed_snapshot",
+        ResolutionRule::VbaCollectionConstruction => {
+            "vba-collection-construction-v1.indexed_snapshot"
+        }
+        ResolutionRule::VbaCollectionMember => "vba-collection-member-v1.indexed_snapshot",
+        ResolutionRule::VbaCollectionCall => "vba-collection-call-v1.indexed_snapshot",
         ResolutionRule::ElmModuleImport => "elm-module-import-v1.indexed_snapshot",
         ResolutionRule::ElmLocalType => "elm-local-type-v1.indexed_snapshot",
         ResolutionRule::ClassicProjectMember => "classic-project-member-v1.indexed_snapshot",

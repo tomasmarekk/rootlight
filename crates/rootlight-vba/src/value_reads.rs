@@ -88,10 +88,36 @@ pub fn statement_value_reads<E>(
     )
 }
 
+/// Inventories outermost application results consumed by assignments or conditions.
+///
+/// Returns the same statement witnesses and bounded expression subset as
+/// [`statement_value_reads`], but selects complete applications instead of
+/// lexical names. Nested arguments remain excluded because their passing mode
+/// is unknown. This proves a value context, not a callable target or signature.
+/// Malformed boundaries or exhausted token/read limits return None atomically.
+///
+/// # Errors
+/// Propagates the caller's cancellation/work error unchanged.
+pub fn statement_application_reads<E>(
+    source: &[u8],
+    maximum_tokens: usize,
+    maximum_reads: usize,
+    check: &mut impl FnMut() -> Result<(), E>,
+) -> Result<Option<Vec<ValueRead>>, E> {
+    inventory(
+        source,
+        maximum_tokens,
+        maximum_reads,
+        InventoryKind::Applications,
+        check,
+    )
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum InventoryKind {
     Assignments,
     Statements,
+    Applications,
 }
 
 fn inventory<E>(
@@ -113,7 +139,7 @@ fn inventory<E>(
         };
         cursor = next;
         let text = source.get(statement.clone()).unwrap_or_default();
-        let context = if kind == InventoryKind::Statements {
+        let context = if kind != InventoryKind::Assignments {
             condition_start(text, check)?
         } else {
             None
@@ -173,14 +199,18 @@ fn inventory<E>(
                     application_end = application_end.max(app.end);
                 }
             }
-            if span.end <= application_end
-                || !matches!(
-                    part.role(),
-                    CallChainRole::ValueIdentifier
-                        | CallChainRole::Member
-                        | CallChainRole::SelfMember
-                )
-            {
+            let selected = if kind == InventoryKind::Applications {
+                part.role() == CallChainRole::Application && span.end == application_end
+            } else {
+                span.end > application_end
+                    && matches!(
+                        part.role(),
+                        CallChainRole::ValueIdentifier
+                            | CallChainRole::Member
+                            | CallChainRole::SelfMember
+                    )
+            };
+            if !selected {
                 continue;
             }
             if reads.len() >= maximum_reads {
@@ -270,6 +300,50 @@ fn value_start<E>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn application_reads_separate_returned_values_from_assignments_and_arguments() {
+        for (source, expected) in [
+            ("value = Create(7)(1)", vec!["Create(7)(1)"]),
+            ("If Create(7)(1) Then", vec!["Create(7)(1)"]),
+            ("value = Outer(Create(7)(1))", vec!["Outer(Create(7)(1))"]),
+            ("Set Create(7)(1) = value", vec![]),
+            ("Create(7)(1) = value", vec![]),
+            ("Call Consume(Create(7)(1))", vec![]),
+            (
+                "value = First(1) + Second(2)",
+                vec!["First(1)", "Second(2)"],
+            ),
+            ("value = \"Create(7)(1)\" ' ignored", vec![]),
+        ] {
+            let reads =
+                statement_application_reads(source.as_bytes(), 256, 32, &mut || Ok::<(), ()>(()))
+                    .unwrap()
+                    .unwrap();
+            assert_eq!(
+                reads
+                    .iter()
+                    .map(|read| &source[read.value()])
+                    .collect::<Vec<_>>(),
+                expected,
+                "{source}"
+            );
+        }
+        assert!(
+            statement_application_reads(b"a = F(1) + G(2)", 256, 1, &mut || Ok::<(), ()>(()))
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            statement_application_reads(b"a = F(1)", 1, 32, &mut || Ok::<(), ()>(()))
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(
+            statement_application_reads(b"a = F(1)", 256, 32, &mut || Err("cancelled")),
+            Err("cancelled")
+        );
+    }
 
     fn read(source: &str) -> Vec<String> {
         assignment_value_reads(source.as_bytes(), 256, 64, &mut || Ok::<(), ()>(()))

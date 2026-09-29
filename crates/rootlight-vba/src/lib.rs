@@ -35,7 +35,10 @@ pub use procedure::{
     ProcedureHeader, ProcedureKind, parameterless_sub, procedure_header, procedure_parameter_range,
     scalar_return_type,
 };
-pub use value_reads::{AssignmentRead, ValueRead, assignment_value_reads, statement_value_reads};
+pub use value_reads::{
+    AssignmentRead, ValueRead, assignment_value_reads, statement_application_reads,
+    statement_value_reads,
+};
 pub use variadic::{param_array_parameter, variadic_arguments_match};
 pub use with_blocks::{WithBlock, with_blocks};
 
