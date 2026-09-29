@@ -130,11 +130,13 @@ struct Atom {
     member: Option<usize>,
     invocation: Option<usize>,
     chained: bool,
+    indexed_result: bool,
 }
 
 /// Reads one chain call from its first token, independently of parser nodes.
 ///
-/// The main callee must contain an application followed by a dot member.
+/// The main callee must contain an application followed by a dot member,
+/// or an explicit `Call` must apply another argument list to a returned value.
 /// Arguments admit names, dot/application chains, grouped expressions, decimal
 /// integers, strings, dates, Boolean/null literals and ordinary unary/binary
 /// operators. Named and omitted arguments retain their authored boundaries.
@@ -183,7 +185,7 @@ pub fn call_chain_statement<E>(
     let Some(atom) = reader.atom(start, tokens.len(), check)? else {
         return Ok(CallChainRead::Unsupported);
     };
-    if !atom.chained {
+    if !atom.chained && !(explicit && atom.indexed_result) {
         return Ok(CallChainRead::Unsupported);
     }
     let cursor = atom.next;
@@ -451,6 +453,7 @@ impl Reader<'_> {
         let mut invocation = None;
         let mut applied = false;
         let mut chained = false;
+        let mut indexed_result = false;
         match first.kind {
             Kind::Instance => {
                 self.parts.push(CallChainPart {
@@ -496,6 +499,7 @@ impl Reader<'_> {
                     member: None,
                     invocation: None,
                     chained: false,
+                    indexed_result: false,
                 }));
             }
             Kind::Open(_)
@@ -547,6 +551,7 @@ impl Reader<'_> {
                     if first.kind == Kind::Instance && cursor == start + 1 {
                         return Ok(None);
                     }
+                    indexed_result |= applied && part.is_none();
                     self.invoke(part);
                     invocation = part;
                     self.jobs.push(Job {
@@ -582,6 +587,7 @@ impl Reader<'_> {
             member: part,
             invocation,
             chained,
+            indexed_result,
         }))
     }
 
@@ -892,6 +898,76 @@ mod tests {
     }
     fn read(source: &[u8]) -> CallChainRead {
         call_chain_statement(source, 4096, &mut || Ok::<(), Infallible>(())).unwrap()
+    }
+
+    #[test]
+    fn explicit_returned_index_calls_preserve_inner_value_roles() {
+        for (source, callee, role) in [
+            (
+                "Call holder.Value(1)(2)",
+                "holder.Value",
+                CallChainRole::InvokedValueMember,
+            ),
+            (
+                "Call Build()(2)(3)",
+                "Build",
+                CallChainRole::InvokedValueIdentifier,
+            ),
+            (
+                "Call holder.Value(1) _\n (2)",
+                "holder.Value",
+                CallChainRole::InvokedValueMember,
+            ),
+        ] {
+            let CallChainRead::Parsed(chain) = read(source.as_bytes()) else {
+                panic!("{source}");
+            };
+            assert_eq!(chain.end(), source.len());
+            assert_eq!(
+                chain
+                    .parts()
+                    .iter()
+                    .filter(|part| {
+                        source.get(part.span()) == Some(callee) && part.role() == role
+                    })
+                    .count(),
+                1
+            );
+            assert_eq!(
+                chain
+                    .parts()
+                    .iter()
+                    .filter(|part| {
+                        part.role() == CallChainRole::Application
+                            && part.span() == (0..source.len())
+                    })
+                    .count(),
+                1
+            );
+            assert!(matches!(
+                call_chain_statement(source.as_bytes(), 2, &mut || Ok::<(), ()>(())).unwrap(),
+                CallChainRead::TokenLimit
+            ));
+            let mut checks = 0;
+            assert_eq!(
+                call_chain_statement(source.as_bytes(), 128, &mut || {
+                    checks += 1;
+                    if checks == 8 {
+                        Err("cancelled")
+                    } else {
+                        Ok(())
+                    }
+                }),
+                Err("cancelled")
+            );
+        }
+        for source in [
+            b"Call holder.Value(1)(".as_slice(),
+            b"Call holder.Value(1)(2) extra",
+            b"holder.Value(1)(2)",
+        ] {
+            assert_eq!(read(source), CallChainRead::Unsupported);
+        }
     }
 
     #[test]

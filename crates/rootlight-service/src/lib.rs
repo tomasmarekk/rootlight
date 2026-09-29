@@ -219,7 +219,7 @@ const PROJECT_FACTS_TRUNCATED_CODE: &str = "project-adapter-facts-truncated";
 const PROJECT_FACTS_TRUNCATED_MESSAGE: &str =
     "additional project semantic facts were omitted by aggregate resource limits";
 const AGGREGATE_DIAGNOSTICS_TRUNCATED_CODE: &str = "aggregate-diagnostics-truncated";
-const ANALYZER_BINARY_SEED: &[u8] = b"rootlight.first-slice.treesitter-structural/184";
+const ANALYZER_BINARY_SEED: &[u8] = b"rootlight.first-slice.treesitter-structural/185";
 const RESOLVER_BINARY_SEED: &[u8] = b"rootlight.first-slice.resolve/58";
 const INCREMENTAL_PROVIDER_SEED: &[u8] = b"rootlight.first-slice.incremental-provider/1";
 const LANGUAGE_DISPOSITION_PROVIDER_SEED: &[u8] = b"rootlight.first-slice.language-disposition/5";
@@ -41564,6 +41564,72 @@ mod tests {
                             },
                         expected == Some("Fetch")
                     );
+                }
+                if *expression == "holder.Entries(2)(3)" {
+                    let inner_text = "holder.Entries(2)";
+                    let inner = document
+                        .occurrences
+                        .iter()
+                        .find(|candidate| {
+                            candidate.file == file.id
+                                && candidate.syntax_kind == "vba.application.reference"
+                                && candidate.source.span().start_byte() == start
+                                && candidate.source.span().end_byte()
+                                    == start + u64::try_from(inner_text.len()).unwrap()
+                        })
+                        .unwrap();
+                    let getter = document
+                        .entities
+                        .iter()
+                        .find(|entity| entity.canonical_name == "Fetch")
+                        .unwrap();
+                    assert_eq!(
+                        inner.target == OccurrenceTarget::Resolved { symbol: getter.id },
+                        return_type == "Lookup"
+                    );
+                    assert_eq!(
+                        document.skipped_regions.iter().any(|gap| {
+                            gap.source == inner.source
+                                && gap.detail == "vba-call-or-index-target-unavailable"
+                        }),
+                        return_type != "Lookup"
+                    );
+                    let relationships = service
+                        .symbol_relationships(
+                            receipt.generation,
+                            BTreeSet::from([getter.id]),
+                            vec![RelationFamily::Calls],
+                            Some(RelationDirection::Inbound),
+                            0,
+                            50,
+                            0,
+                            &deadline(),
+                        )
+                        .unwrap();
+                    assert_eq!(
+                        relationships
+                            .data
+                            .groups
+                            .iter()
+                            .flat_map(|group| &group.items)
+                            .flat_map(|edge| &edge.source_refs)
+                            .any(|reference| reference == &inner.source),
+                        return_type == "Lookup"
+                    );
+                    let read = service
+                        .source_read_with_options_and_budget(
+                            receipt.generation,
+                            vec![inner.source.clone()],
+                            SourceReadOptions::new()
+                                .with_context_lines_before(0)
+                                .with_context_lines_after(0)
+                                .with_encoding(SourceEncoding::Bytes),
+                            FirstSliceBudget::default(),
+                            &deadline(),
+                        )
+                        .unwrap();
+                    assert_eq!(inner.source.generation(), receipt.generation);
+                    assert_eq!(read.data.chunks[0].bytes, inner_text.as_bytes());
                 }
             }
         }

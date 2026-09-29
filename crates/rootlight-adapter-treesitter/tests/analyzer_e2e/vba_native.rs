@@ -1434,6 +1434,83 @@ fn vba_conditional_types_and_fields_require_implied_unique_declarations() {
 }
 
 #[test]
+fn vba_returned_index_receivers_read_getters_without_selecting_setters() {
+    for statement in [
+        "result = Values(1)(2)",
+        "Values(1)(2) = 3",
+        "Set Values(1)(2) = other",
+        "Call Values(1)(2)",
+        "Use value:=Values(1)(2)",
+    ] {
+        let source = format!(
+            "Private Property Get Values(ByVal index As Long) As Object\nEnd Property\nPrivate Property Let Values(ByVal index As Long, ByVal value As Variant)\nEnd Property\nPrivate Property Set Values(ByVal index As Long, ByVal value As Object)\nEnd Property\nSub Run()\nDim result As Variant\nDim other As Object\n{statement}\nEnd Sub\n"
+        );
+        let result = output(&source);
+        let document = result.document();
+        let start = u64::try_from(source.rfind("Values(1)(2)").unwrap()).unwrap();
+        let callee = document
+            .occurrences
+            .iter()
+            .find(|site| {
+                site.source.span().start_byte() == start
+                    && site.source.span().end_byte() == start + 6
+            })
+            .unwrap();
+        assert_eq!(
+            callee.syntax_kind, "vba.invoked_get_identifier.reference",
+            "{statement}"
+        );
+        let OccurrenceTarget::Resolved { symbol } = callee.target else {
+            panic!("getter must be resolved: {statement}");
+        };
+        let target = document
+            .entities
+            .iter()
+            .find(|entity| entity.id == symbol)
+            .unwrap();
+        let span = target.evidence.source.as_ref().unwrap().span();
+        assert!(
+            source
+                .get(
+                    usize::try_from(span.start_byte()).unwrap()
+                        ..usize::try_from(span.end_byte()).unwrap()
+                )
+                .unwrap()
+                .contains("Property Get Values")
+        );
+        assert_eq!(
+            document
+                .relations
+                .iter()
+                .filter(|edge| {
+                    edge.subject == RelationEndpoint::Occurrence(callee.id)
+                        && edge.predicate == RelationPredicate::Calls
+                        && edge.object == RelationEndpoint::Entity(symbol)
+                })
+                .count(),
+            1,
+            "{statement}"
+        );
+        let outer = document
+            .occurrences
+            .iter()
+            .find(|site| {
+                site.syntax_kind == "vba.application.reference"
+                    && site.source.span().end_byte() == start + 12
+                    && site.source.span().start_byte() <= start
+            })
+            .unwrap();
+        assert!(
+            matches!(outer.target, OccurrenceTarget::Unresolved { .. }),
+            "{statement}"
+        );
+        assert!(document.skipped_regions.iter().any(|gap| {
+            gap.source == outer.source && gap.detail == "vba-call-or-index-target-unavailable"
+        }));
+    }
+}
+
+#[test]
 fn vba_conditional_udt_fields_require_implied_unique_declarations() {
     for (fields, between, guard, target) in [
         (

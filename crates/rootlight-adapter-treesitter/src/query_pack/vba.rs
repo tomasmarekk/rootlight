@@ -777,6 +777,15 @@ fn property_access(mut expression: Node<'_>) -> Option<PropertyAccess> {
     {
         expression = parent;
         parent = expression.parent()?;
+        // A subsequent index consumes this application's result. Its outer
+        // assignment/call context must not select a setter on the inner callee.
+        if (parent.kind() == "call_expression"
+            && parent.child_by_field_name("function") == Some(expression))
+            || (parent.kind() == "call_statement"
+                && parent.child_by_field_name("callee") == Some(expression))
+        {
+            return Some(PropertyAccess::Get);
+        }
     }
     if matches!(
         parent.kind(),
@@ -847,6 +856,10 @@ mod tests {
             ("Let holder.Value = 1", "vba.let_member"),
             ("Set holder.Value = other", "vba.set_member"),
             ("a = holder.Value(1)", "vba.invoked_get_member"),
+            ("a = holder.Value(1)(2)", "vba.invoked_get_member"),
+            ("holder.Value(1)(2) = 3", "vba.invoked_get_member"),
+            ("Set holder.Value(1)(2) = other", "vba.invoked_get_member"),
+            ("Call holder.Value(1)(2)", "vba.invoked_get_member"),
             ("Use value:=holder.Value", "vba.get_member"),
             ("With holder.Value\nEnd With", "vba.get_member"),
             ("holder.Value", "vba.invoked_member"),
