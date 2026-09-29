@@ -191,7 +191,7 @@ pub(super) fn bind<'a>(
     memberships: &BTreeMap<FileId, Option<usize>>,
     projects: &[Option<ResolvedProject>],
     members: &BTreeMap<(SymbolId, String), Option<&EntityRecord>>,
-    calls: &calls::CallIndex<'a, '_>,
+    callees: &BTreeMap<FactId, (&OccurrenceRecord, bool)>,
     sources: &BTreeMap<FileId, &[u8]>,
     cancellation: &Cancellation,
     work: &mut ResolutionWorkBudget,
@@ -355,6 +355,7 @@ pub(super) fn bind<'a>(
             );
         }
     }
+    let mut lexical_barriers = BTreeMap::new();
     for (site, name, rule, root) in candidates.into_values() {
         cancellation.check()?;
         work.consume()?;
@@ -384,26 +385,35 @@ pub(super) fn bind<'a>(
         {
             continue;
         }
-        let mut scope = site.enclosing;
-        let mut unshadowed = false;
-        for _ in 0..index.entities.len() {
-            cancellation.check()?;
-            work.consume()?;
-            let Some(owner) = scope.and_then(|id| index.entities.get(&id)) else {
-                break;
-            };
-            if members.contains_key(&(owner.id, root.to_owned())) {
-                break;
-            }
-            match owner.container {
-                Some(ContainerRef::Entity(parent)) => scope = Some(parent),
-                Some(ContainerRef::File(file)) if file == site.file => {
-                    unshadowed = true;
+        // Declarations cannot change during this pass. Repeated uses in the
+        // same file/scope/root share a lexical barrier proof, never a target.
+        let key = (site.file, site.enclosing, root);
+        let unshadowed = if let Some(&unshadowed) = lexical_barriers.get(&key) {
+            unshadowed
+        } else {
+            let mut scope = site.enclosing;
+            let mut unshadowed = false;
+            for _ in 0..index.entities.len() {
+                cancellation.check()?;
+                work.consume()?;
+                let Some(owner) = scope.and_then(|id| index.entities.get(&id)) else {
+                    break;
+                };
+                if members.contains_key(&(owner.id, root.to_owned())) {
                     break;
                 }
-                _ => break,
+                match owner.container {
+                    Some(ContainerRef::Entity(parent)) => scope = Some(parent),
+                    Some(ContainerRef::File(file)) if file == site.file => {
+                        unshadowed = true;
+                        break;
+                    }
+                    _ => break,
+                }
             }
-        }
+            lexical_barriers.insert(key, unshadowed);
+            unshadowed
+        };
         if !unshadowed {
             continue;
         }
@@ -452,7 +462,9 @@ pub(super) fn bind<'a>(
         {
             continue;
         }
-        let Some((callee, explicit)) = calls.callee(site, sources, cancellation, work)? else {
+        // The project pass selected callees against the same immutable source
+        // and syntax inventory. Semantic failure cannot change that selection.
+        let Some(&(callee, explicit)) = callees.get(&site.id) else {
             continue;
         };
         let Some(proof) = result.proofs.get(&callee.id).filter(|proof| {

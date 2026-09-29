@@ -263,7 +263,7 @@ fn standard_err_model_respects_project_and_conditional_declarations() {
         ("", "Err", 0),
     ] {
         let text = format!(
-            "Attribute VB_Name = \"Client\"\r\n{header}Public Sub Run()\r\nErr.Clear\r\nEnd Sub\r\n"
+            "Attribute VB_Name = \"Client\"\r\n{header}Public Sub Run()\r\nErr.Clear\r\nEnd Sub\r\nPublic Sub Local(ByVal Err As Object)\r\nErr.Clear\r\nEnd Sub\r\n"
         );
         let other =
             format!("Attribute VB_Name = \"{sibling}\"\r\nPublic Sub Empty()\r\nEnd Sub\r\n");

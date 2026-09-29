@@ -1708,6 +1708,7 @@ impl<'a> ClassicIndex<'a> {
         }
         let order = dependencies::order(&member_occurrences, &calls, &sources, cancellation, work)?;
         let mut resolved_members = BTreeMap::new();
+        let mut selected_callees = BTreeMap::new();
         for i in order {
             let Some((occurrence, member)) = member_occurrences.get(i) else {
                 continue;
@@ -1718,6 +1719,9 @@ impl<'a> ClassicIndex<'a> {
             let Some(member) = member else {
                 let selected =
                     calls.resolve(&mut result, occurrence, &sources, cancellation, work)?;
+                if let Some(selected) = selected {
+                    selected_callees.insert(occurrence.id, selected);
+                }
                 let callee = if result.proof(occurrence).is_none() {
                     // Semantic failure does not change the immutable callee index.
                     // Reuse its selection instead of charging and scanning the same
@@ -2228,7 +2232,7 @@ impl<'a> ClassicIndex<'a> {
             &memberships,
             &projects,
             &members,
-            &calls,
+            &selected_callees,
             &sources,
             cancellation,
             work,
