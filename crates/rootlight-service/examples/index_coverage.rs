@@ -31,6 +31,9 @@ use serde_json::json;
 #[path = "index_coverage/gap_text.rs"]
 mod gap_text;
 
+#[path = "index_coverage/binding_proofs.rs"]
+mod binding_proofs;
+
 #[cfg(test)]
 #[path = "../src/container_sources/fixture.rs"]
 mod fixture;
@@ -218,17 +221,19 @@ impl DiagnosticSession {
             return Err("unchanged repository produced a different receipt".into());
         }
         let status = service.repository_status(cold.repository, Some(cold.generation))?;
-        let (rows, configuration_hash) = service.inspect_generation(
-            cold.repository,
-            Some(cold.generation),
-            &deadline()?,
-            |snapshot| -> Result<_, Box<dyn Error>> {
-                Ok((
-                    inspect_files(snapshot, service, repository, cold.generation)?,
-                    snapshot.metadata().configuration_hash(),
-                ))
-            },
-        )??;
+        let (rows, configuration_hash, (exported_provenance, exported_fact_identities)) = service
+            .inspect_generation(
+                cold.repository,
+                Some(cold.generation),
+                &deadline()?,
+                |snapshot| -> Result<_, Box<dyn Error>> {
+                    Ok((
+                        inspect_files(snapshot, service, repository, cold.generation)?,
+                        snapshot.metadata().configuration_hash(),
+                        binding_proofs::export_external_binding_proofs(snapshot.document())?,
+                    ))
+                },
+            )??;
         let mut report = json!({
             "schema":"rootlight-index-coverage-diagnostic/4", "explicit_configuration":config.is_some(),
             "configuration_input_hash":rootlight_ids::content_hash(config.as_deref().unwrap_or("").as_bytes()).to_string(),
@@ -241,6 +246,9 @@ impl DiagnosticSession {
             "coverage":status.coverage.iter().map(|entry| json!({"language":entry.language,"indexed_files":entry.indexed_files,
                 "discovered_files":entry.discovered_files,"tier":entry.tier,"status":entry.status})).collect::<Vec<_>>(),
             "files":rows,"full_semantic_completeness_proven":false,
+            "exported_provenance":exported_provenance,
+            "exported_fact_identities":exported_fact_identities,
+            "exported_fact_identity_scope":"terminal_source_witnesses_not_semantic_records",
             "installed_mcp_qualified":false
         });
         match lifetime {
@@ -733,6 +741,179 @@ mod tests {
         assert_eq!(
             calls[0]["relation"]["evidence"]["source"],
             calls[0]["occurrence"]["source"]
+        );
+        let proofs: BTreeMap<_, _> = report["exported_provenance"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|proof| (proof["id"].as_str().unwrap(), proof))
+            .collect();
+        assert_eq!(
+            proofs.len(),
+            report["exported_provenance"].as_array().unwrap().len()
+        );
+        let identities: BTreeMap<_, _> = report["exported_fact_identities"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|identity| {
+                (
+                    (
+                        identity["kind"].as_str().unwrap(),
+                        identity["id"].as_str().unwrap(),
+                    ),
+                    identity,
+                )
+            })
+            .collect();
+        assert_eq!(
+            identities.len(),
+            report["exported_fact_identities"].as_array().unwrap().len()
+        );
+        for record in &records {
+            for root in ["provenance", "target_provenance"] {
+                assert_eq!(proofs[record[root]["id"].as_str().unwrap()], &record[root]);
+            }
+            assert!(proofs.contains_key(record["relation"]["provenance"].as_str().unwrap()));
+        }
+        for proof in proofs.values() {
+            for parent in proof["derivation_parents"].as_array().unwrap() {
+                let kind = parent["kind"].as_str().unwrap();
+                let id = parent["id"].as_str().unwrap();
+                assert!(
+                    (kind == "fact" && proofs.contains_key(id))
+                        || identities.contains_key(&(kind, id))
+                );
+            }
+            for source in proof["input_sources"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .chain(proof["evidence_sources"].as_array().unwrap())
+            {
+                assert!(
+                    identities.contains_key(&("file", source["span"]["file"].as_str().unwrap()))
+                );
+            }
+        }
+        let callee = records
+            .iter()
+            .find(|record| {
+                record["target"]["qualified_name"] == "VBA.Mid$"
+                    && record["occurrence"]["role"] != "call_site"
+            })
+            .unwrap();
+        let call_root = calls[0]["provenance"]["id"].as_str().unwrap();
+        let callee_root = callee["provenance"]["id"].as_str().unwrap();
+        assert_eq!(callee["occurrence"]["role"], "reference");
+        assert_eq!(callee["target"]["id"], calls[0]["target"]["id"]);
+        assert_eq!(callee["relation"]["predicate"], "refers_to");
+        assert_eq!(callee["relation"]["object"]["id"], calls[0]["target"]["id"]);
+        assert_eq!(
+            callee["provenance"]["rule"],
+            "vba-standard-function-v1.indexed_snapshot"
+        );
+        assert!(
+            proofs[call_root]["evidence_sources"]
+                .as_array()
+                .unwrap()
+                .contains(&callee["occurrence"]["source"])
+        );
+        // Application retains the callee span directly, not its resolver root
+        // as a causal parent. Both independently exported branches share context.
+        let mut branches = Vec::new();
+        for root in [call_root, callee_root] {
+            let mut pending = BTreeSet::from([root]);
+            let mut reached = BTreeSet::new();
+            while let Some(id) = pending.pop_first() {
+                if !reached.insert(id) {
+                    continue;
+                }
+                for parent in proofs[id]["derivation_parents"].as_array().unwrap() {
+                    if parent["kind"] == "fact"
+                        && proofs.contains_key(parent["id"].as_str().unwrap())
+                    {
+                        pending.insert(parent["id"].as_str().unwrap());
+                    }
+                }
+            }
+            branches.push(reached);
+        }
+        assert!(branches[0].intersection(&branches[1]).any(|id| {
+            proofs[id]["rule"]
+                .as_str()
+                .unwrap()
+                .starts_with("native-classic-project-membership-v1.")
+        }));
+        assert_eq!(
+            report["exported_fact_identity_scope"],
+            "terminal_source_witnesses_not_semantic_records"
+        );
+    }
+
+    #[test]
+    fn external_binding_proof_export_rejects_missing_ancestors_and_duplicate_ids() {
+        let directory = tempfile::tempdir().unwrap();
+        let repository = directory.path().join("repository");
+        fs::create_dir(&repository).unwrap();
+        fs::write(repository.join("book.xlsm"), fixture::book(&[("Client",
+            b"Attribute VB_Name = \"Client\"\r\nSub Run()\r\nDim value As Variant\r\nvalue = VBA.Mid$(\"sample\", 1)\r\nEnd Sub\r\n")])).unwrap();
+        let mut session = DiagnosticSession::open(
+            &repository,
+            &directory.path().join("state"),
+            None,
+            StateMode::Fresh,
+        )
+        .unwrap();
+        let (receipt, _) = index_with_timing(&mut session.service, &session.repository).unwrap();
+        let mut document = session
+            .service
+            .inspect_generation(
+                receipt.repository,
+                Some(receipt.generation),
+                &deadline().unwrap(),
+                |snapshot| snapshot.document().clone(),
+            )
+            .unwrap();
+        let call_proof = document
+            .occurrences
+            .iter()
+            .find(|site| {
+                site.role == rootlight_ir::OccurrenceRole::CallSite
+                    && matches!(site.target, OccurrenceTarget::Resolved { .. })
+            })
+            .unwrap()
+            .provenance;
+        let missing = rootlight_ids::derive_fact("diagnostic-missing-parent", b"missing").id();
+        document
+            .provenance
+            .iter_mut()
+            .find(|proof| proof.id == call_proof)
+            .unwrap()
+            .derivation_parents
+            .push(rootlight_ir::FactRef::Fact(missing));
+        let failure = binding_proofs::export_external_binding_proofs(&document)
+            .err()
+            .unwrap();
+        assert_eq!(
+            failure.to_string(),
+            "external binding proof has a missing parent"
+        );
+        document
+            .provenance
+            .iter_mut()
+            .find(|proof| proof.id == call_proof)
+            .unwrap()
+            .derivation_parents
+            .retain(|parent| *parent != rootlight_ir::FactRef::Fact(missing));
+        let duplicate = document.occurrences.first().unwrap().clone();
+        document.occurrences.push(duplicate);
+        let failure = binding_proofs::export_external_binding_proofs(&document)
+            .err()
+            .unwrap();
+        assert_eq!(
+            failure.to_string(),
+            "external binding proof has a duplicate identity"
         );
     }
 
