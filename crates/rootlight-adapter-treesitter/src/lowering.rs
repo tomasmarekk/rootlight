@@ -984,6 +984,10 @@ fn preflight_lowering_limits(
                 skipped_candidates = checked_add(skipped_candidates, 1)?;
                 account_string(&mut string_bytes, detail.len(), limits)?;
             }
+            if let Some(detail) = automatic_instantiation_gap(fact) {
+                skipped_candidates = checked_add(skipped_candidates, 1)?;
+                account_string(&mut string_bytes, detail.len(), limits)?;
+            }
             if request.language().as_str() == "markdown"
                 && crate::markdown_bindings::is_reference(fact)
             {
@@ -2404,6 +2408,17 @@ impl<'context, 'source> Lowering<'context, 'source> {
                         ) && occurrence.role != OccurrenceRole::CallSite
                             && !vba_array_invocation_proven))
                 {
+                    let region = skipped_region(
+                        self.full_source,
+                        fact.span(),
+                        FactDomain::Relations,
+                        SkippedRegionReason::UnsupportedConstruct,
+                        detail,
+                        provenance_id,
+                    )?;
+                    skipped.insert(region.id, region);
+                }
+                if let Some(detail) = automatic_instantiation_gap(fact) {
                     let region = skipped_region(
                         self.full_source,
                         fact.span(),
@@ -5485,6 +5500,18 @@ fn comment_text(text: &str) -> Option<&str> {
         .trim_start_matches('#')
         .trim();
     (!text.is_empty()).then_some(text)
+}
+
+fn automatic_instantiation_gap(fact: &SyntaxFact) -> Option<&'static str> {
+    // As New establishes a declared type, not a declaration-time call. Its
+    // lazy creation on a Nothing-valued read needs separate use-site evidence
+    // (MS-VBAL 5.3.1.10); resolving the type must not erase that missing analysis.
+    matches!(
+        fact.syntax_kind().as_str(),
+        "vba.automatic_type_identifier.reference"
+            | "vba.unsupported_automatic_type_identifier.reference"
+    )
+    .then_some("vba-automatic-instantiation-semantics-unavailable")
 }
 
 fn source_reference_gap(fact: &SyntaxFact) -> Option<&'static str> {

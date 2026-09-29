@@ -938,6 +938,57 @@ fn missing_java_field_definition_is_reserved_in_preflight_quotas() {
 }
 
 #[test]
+fn automatic_instantiation_reserves_a_separate_semantic_gap() {
+    const SOURCE: &str = "Dim item As New Worker\n";
+    let (_temporary, snapshot, source) =
+        source_fixture_for(SOURCE, "src/Client.bas", b"automatic-instantiation-fixture");
+    for syntax in [
+        "vba.automatic_type_identifier.reference",
+        "vba.unsupported_automatic_type_identifier.reference",
+    ] {
+        let facts = vec![
+            SyntaxFact::new(
+                1,
+                None,
+                SyntaxFactKind::Root,
+                source.span(),
+                0,
+                label("vba.source.root"),
+            ),
+            SyntaxFact::new(
+                2,
+                Some(1),
+                SyntaxFactKind::Occurrence,
+                span_in(SOURCE, &source, "Worker", 0),
+                1,
+                label(syntax),
+            ),
+        ];
+        let mut ir = IrLimits::default();
+        ir.max_skipped_regions = 1;
+        let error = analyze_custom(
+            &snapshot,
+            &source,
+            LanguageId::new("vba").unwrap(),
+            &limits(ir),
+            facts,
+        )
+        .expect_err("type binding cannot consume the lazy-instantiation gap reservation");
+        assert!(
+            matches!(
+                error,
+                AdapterError::Sink(SinkError::StreamLimit {
+                    resource: rootlight_adapter_sdk::ResourceKind::Records,
+                    observed: 2,
+                    limit: 1,
+                })
+            ),
+            "{error:?}"
+        );
+    }
+}
+
+#[test]
 fn markdown_reference_edges_are_reserved_before_ir_materialization() {
     const MARKDOWN: &str = "[ref]: target.md\n\n[ref]\n";
     let (_temporary, snapshot, source) = source_fixture_for(

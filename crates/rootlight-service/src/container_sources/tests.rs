@@ -1622,6 +1622,182 @@ fn construction_lifecycle_and_receivers_follow_source_mutations_after_reopen() {
 }
 
 #[test]
+fn automatic_instantiation_gaps_survive_type_binding_and_source_reopen() {
+    use rootlight_ir::FactDomain;
+    for native in [false, true] {
+        let root = tempdir();
+        let storage = tempdir();
+        let paths = rootlight_runtime::RuntimePaths::new(
+            storage.path().join("state"),
+            storage.path().join("runtime"),
+        )
+        .unwrap();
+        paths.prepare_owner().unwrap();
+        let worker = b"Attribute VB_Name = \"Worker\"\r\nPrivate Sub Class_Initialize()\r\nEnd Sub\r\nPublic Sub Touch()\r\nEnd Sub\r\n";
+        for automatic in [true, false, true] {
+            let modifier = if automatic { " New" } else { "" };
+            let client = format!(
+                "Attribute VB_Name = \"Client\"\r\nPrivate cached As{modifier} Worker\r\nPrivate Type Holder\r\nChild As{modifier} Worker\r\nEnd Type\r\nPublic Sub Run()\r\nDim local As{modifier} Worker\r\nDim items(1) As{modifier} Worker\r\nDim plain As Worker\r\ncached.Touch\r\nSet local = Nothing\r\nlocal.Touch\r\nSet plain = New Worker\r\nEnd Sub\r\n"
+            );
+            if native {
+                fs::write(
+                    root.path().join("book.xlsm"),
+                    fixture::typed_book(&[
+                        ("Client", client.as_bytes(), false),
+                        ("Worker", worker, true),
+                    ]),
+                )
+                .unwrap();
+            } else {
+                fs::write(root.path().join("Client.bas"), &client).unwrap();
+                fs::write(
+                    root.path().join("Worker.cls"),
+                    [b"VERSION 1.0 CLASS\r\n".as_slice(), worker].concat(),
+                )
+                .unwrap();
+                fs::write(root.path().join("project.vbp"), "Type=Exe\nName=\"Project\"\nModule=Client; Client.bas\nClass=Worker; Worker.cls\n").unwrap();
+            }
+            let mut service =
+                FirstSliceService::new_durable(4, paths.state_dir(), &deadline()).unwrap();
+            let receipt = service.index_repository(root.path(), &deadline()).unwrap();
+            assert_eq!(
+                receipt,
+                service.index_repository(root.path(), &deadline()).unwrap()
+            );
+            drop(service);
+            let mut service =
+                FirstSliceService::new_durable(4, paths.state_dir(), &deadline()).unwrap();
+            let snapshot = service
+                .loaded_generation_snapshot(receipt.generation)
+                .unwrap();
+            let document = snapshot.document();
+            let gaps: Vec<_> = document
+                .skipped_regions
+                .iter()
+                .filter(|gap| gap.detail == "vba-automatic-instantiation-semantics-unavailable")
+                .collect();
+            assert_eq!(
+                gaps.len(),
+                if automatic { 4 } else { 0 },
+                "native={native} automatic={automatic}"
+            );
+            let class = document
+                .entities
+                .iter()
+                .find(|entity| {
+                    entity.kind == EntityKind::Class && entity.canonical_name == "Worker"
+                })
+                .unwrap();
+            let initializer = document
+                .entities
+                .iter()
+                .find(|entity| entity.canonical_name == "Class_Initialize")
+                .unwrap();
+            let sites: Vec<_> = document
+                .occurrences
+                .iter()
+                .filter(|site| {
+                    matches!(
+                        site.syntax_kind.as_str(),
+                        "vba.automatic_type_identifier.reference"
+                            | "vba.unsupported_automatic_type_identifier.reference"
+                    )
+                })
+                .collect();
+            assert_eq!(sites.len(), gaps.len());
+            for site in &sites {
+                let gap = gaps.iter().find(|gap| gap.source == site.source).unwrap();
+                assert_eq!(gap.domain, FactDomain::Relations);
+                assert_eq!(gap.reason, SkippedRegionReason::UnsupportedConstruct);
+                assert_eq!(gap.source.generation(), receipt.generation);
+                if site.syntax_kind == "vba.automatic_type_identifier.reference" {
+                    assert_eq!(site.target, OccurrenceTarget::Resolved { symbol: class.id });
+                    assert!(
+                        !document
+                            .skipped_regions
+                            .iter()
+                            .any(|gap| gap.source == site.source
+                                && gap.detail == "vba-type-target-unavailable")
+                    );
+                    assert!(
+                        document
+                            .relations
+                            .iter()
+                            .any(|edge| edge.predicate == RelationPredicate::UsesType
+                                && edge.object == RelationEndpoint::Entity(class.id)
+                                && edge.evidence.source.as_ref() == Some(&site.source))
+                    );
+                }
+                assert!(
+                    !document
+                        .relations
+                        .iter()
+                        .any(|edge| edge.predicate == RelationPredicate::Calls
+                            && edge.evidence.source.as_ref() == Some(&site.source))
+                );
+                let coverage = document
+                    .coverage_records
+                    .iter()
+                    .find(|record| {
+                        record.scope == CoverageScope::File(site.file)
+                            && record.domain == FactDomain::Relations
+                    })
+                    .unwrap();
+                assert_eq!(coverage.status, CoverageStatus::Bounded);
+                assert!(coverage.skipped > 0);
+                assert_eq!(coverage.discovered, coverage.indexed + coverage.skipped);
+            }
+            let construction = document
+                .occurrences
+                .iter()
+                .find(|site| site.syntax_kind == "vba.construction.reference")
+                .unwrap();
+            assert_eq!(
+                construction.target,
+                OccurrenceTarget::Resolved { symbol: class.id }
+            );
+            assert!(
+                document
+                    .relations
+                    .iter()
+                    .any(|edge| edge.predicate == RelationPredicate::Calls
+                        && edge.object == RelationEndpoint::Entity(initializer.id)
+                        && edge.evidence.source.as_ref() == Some(&construction.source))
+            );
+            assert!(!gaps.iter().any(|gap| gap.source == construction.source));
+            if automatic {
+                let read = service
+                    .source_read_with_options_and_budget(
+                        receipt.generation,
+                        sites.iter().map(|site| site.source.clone()).collect(),
+                        SourceReadOptions::new()
+                            .with_context_lines_before(0)
+                            .with_context_lines_after(0),
+                        FirstSliceBudget::default(),
+                        &deadline(),
+                    )
+                    .unwrap();
+                assert_eq!(read.data.chunks.len(), 4);
+                for chunk in &read.data.chunks {
+                    assert_eq!(chunk.bytes, b"Worker");
+                    assert_eq!(chunk.extracted_from.is_some(), native);
+                }
+            }
+            let prepared = service
+                .prepare_repository_with_options(
+                    root.path(),
+                    FirstSliceIndexOptions::clean_rebuild(FirstSliceIndexMode::Structural),
+                    &deadline(),
+                )
+                .unwrap();
+            let rebuilt = service.publish_prepared(prepared, &deadline()).unwrap();
+            assert!(receipt.logical_snapshot.is_some());
+            assert_eq!(rebuilt.logical_snapshot, receipt.logical_snapshot);
+        }
+    }
+}
+
+#[test]
 fn expression_type_uses_do_not_declare_property_return_types() {
     for body in [
         "Set Item = New Worker",
