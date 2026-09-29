@@ -219,7 +219,7 @@ const PROJECT_FACTS_TRUNCATED_CODE: &str = "project-adapter-facts-truncated";
 const PROJECT_FACTS_TRUNCATED_MESSAGE: &str =
     "additional project semantic facts were omitted by aggregate resource limits";
 const AGGREGATE_DIAGNOSTICS_TRUNCATED_CODE: &str = "aggregate-diagnostics-truncated";
-const ANALYZER_BINARY_SEED: &[u8] = b"rootlight.first-slice.treesitter-structural/180";
+const ANALYZER_BINARY_SEED: &[u8] = b"rootlight.first-slice.treesitter-structural/181";
 const RESOLVER_BINARY_SEED: &[u8] = b"rootlight.first-slice.resolve/57";
 const INCREMENTAL_PROVIDER_SEED: &[u8] = b"rootlight.first-slice.incremental-provider/1";
 const LANGUAGE_DISPOSITION_PROVIDER_SEED: &[u8] = b"rootlight.first-slice.language-disposition/5";
@@ -29971,6 +29971,206 @@ mod tests {
     #[test]
     fn vba_self_named_arguments_follow_parameter_renames_and_restart() {
         vba_named_arguments_follow_parameter_renames_and_restart("Call Me.Visit(size:=size)");
+    }
+
+    #[test]
+    fn vba_external_applications_follow_declared_signatures_after_restart() {
+        let storage = durable_test_tempdir();
+        let fixture = durable_test_tempdir();
+        let paths = RuntimePaths::new(storage.path().join("state"), storage.path().join("runtime"))
+            .unwrap();
+        paths.prepare_owner().unwrap();
+        let mut previous = None;
+        for (header, expression, resolved) in [
+            (
+                "Function Fetch Lib \"unloaded\" (ByVal value As Long) As Long",
+                "Fetch(1)",
+                true,
+            ),
+            (
+                "Function Fetch Lib \"unloaded\" (ByVal value As Long, ByVal other As Long) As Long",
+                "Fetch(1)",
+                false,
+            ),
+            (
+                "Function Fetch Lib \"unloaded\" Alias \"FetchW\" (ByVal value As Long, Optional other As Long = 0) As Long",
+                "Fetch(1)",
+                true,
+            ),
+            (
+                "Function Fetch Lib \"unloaded\" (value As Any) As Long",
+                "Fetch(ByVal 1)",
+                true,
+            ),
+            (
+                "Function Fetch Lib \"unloaded\" (value As Any) As Long",
+                "Fetch(ByVal(1))",
+                true,
+            ),
+            (
+                "Function Fetch Lib \"unloaded\" (value As Any) As Long",
+                "Fetch(ByVal _\r\n (1 + 2))",
+                true,
+            ),
+            (
+                "Function Fetch Lib \"unloaded\" (ByVal value As Long) As Long",
+                "Fetch(value:=1)",
+                true,
+            ),
+            (
+                "Function Fetch Lib \"unloaded\" (ByVal renamed As Long) As Long",
+                "Fetch(value:=1)",
+                false,
+            ),
+            (
+                "Function Fetch Lib \"unloaded\" () As Long",
+                "Fetch()",
+                true,
+            ),
+            (
+                "Function Fetch Lib \"unloaded\" () As Long",
+                "Fetch(1)",
+                false,
+            ),
+            ("Function Fetch Lib \"unloaded\" As Long", "Fetch(1)", false),
+            (
+                "Function Fetch Lib \"unloaded\" (ByVal value As Long) As Long",
+                "Fetch()",
+                false,
+            ),
+            (
+                "Function Fetch Lib \"unloaded\" (ByVal value As Long) As Long",
+                "Fetch(1, 2)",
+                false,
+            ),
+            (
+                "Sub Fetch Lib \"unloaded\" Alias \"FetchW\" (value As Any)",
+                "Call Fetch(ByVal 1)",
+                true,
+            ),
+            (
+                "Sub Fetch Lib \"unloaded\" (ByVal value As Long)",
+                "Fetch 1",
+                true,
+            ),
+            (
+                "Sub Fetch Lib \"unloaded\" (ByVal value As Long)",
+                "Fetch 1, 2",
+                false,
+            ),
+            (
+                "Function Fetch _\r\n Lib _\r\n \"unloaded\" _\r\n Alias \"FetchW\" _\r\n (ByVal value As Long) As Long",
+                "Fetch(1)",
+                true,
+            ),
+        ] {
+            let statement = if header.starts_with("Sub") {
+                expression.to_owned()
+            } else {
+                format!("result = {expression}")
+            };
+            let source = format!(
+                "Attribute VB_Name = \"Calls\"\nPrivate Declare PtrSafe {header}\nSub Run()\nDim result As Long\n{statement}\nEnd Sub\n"
+            );
+            fs::write(fixture.path().join("calls.bas"), &source).unwrap();
+            let mut service =
+                FirstSliceService::new_durable(2, paths.state_dir(), &deadline()).unwrap();
+            let receipt = service
+                .index_repository(fixture.path(), &deadline())
+                .unwrap();
+            assert_ne!(Some(receipt.generation), previous);
+            previous = Some(receipt.generation);
+            assert_eq!(
+                service
+                    .index_repository(fixture.path(), &deadline())
+                    .unwrap(),
+                receipt
+            );
+            drop(service);
+            let service =
+                FirstSliceService::new_durable(2, paths.state_dir(), &deadline()).unwrap();
+            let snapshot = service
+                .loaded_generation_snapshot(receipt.generation)
+                .unwrap();
+            let document = snapshot.document();
+            let target = document
+                .entities
+                .iter()
+                .find(|entity| entity.canonical_name == "Fetch")
+                .unwrap();
+            let start = u64::try_from(source.rfind(expression).unwrap()).unwrap();
+            let end = start + u64::try_from(expression.len()).unwrap();
+            let site = document
+                .occurrences
+                .iter()
+                .find(|site| {
+                    site.syntax_kind == "vba.application.reference"
+                        && site.source.span().start_byte() == start
+                        && site.source.span().end_byte() == end
+                })
+                .unwrap_or_else(|| panic!("missing application: {header}: {expression}"));
+            if resolved {
+                assert_eq!(site.syntax_kind, "vba.application.reference");
+                assert_eq!(
+                    site.target,
+                    OccurrenceTarget::Resolved { symbol: target.id },
+                    "{header}: {expression}"
+                );
+                assert_eq!(site.role, OccurrenceRole::Reference);
+            } else {
+                assert!(
+                    matches!(site.target, OccurrenceTarget::Unresolved { .. }),
+                    "{header}: {expression}"
+                );
+            }
+            assert_eq!(
+                document.skipped_regions.iter().any(|gap| {
+                    gap.source == site.source
+                        && gap.detail == "vba-call-or-index-target-unavailable"
+                }),
+                !resolved,
+                "{header}: {expression}"
+            );
+            for family in [RelationFamily::References, RelationFamily::Calls] {
+                let relationships = service
+                    .symbol_relationships(
+                        receipt.generation,
+                        BTreeSet::from([target.id]),
+                        vec![family],
+                        Some(RelationDirection::Inbound),
+                        0,
+                        20,
+                        0,
+                        &deadline(),
+                    )
+                    .unwrap();
+                assert_eq!(
+                    relationships
+                        .data
+                        .groups
+                        .iter()
+                        .flat_map(|group| &group.items)
+                        .flat_map(|edge| &edge.source_refs)
+                        .any(|reference| reference == &site.source),
+                    resolved && family == RelationFamily::References,
+                    "{header}: {expression}: {family:?}"
+                );
+            }
+            assert_eq!(site.source.generation(), receipt.generation);
+            let read = service
+                .source_read_with_options_and_budget(
+                    receipt.generation,
+                    vec![site.source.clone()],
+                    SourceReadOptions::new()
+                        .with_context_lines_before(0)
+                        .with_context_lines_after(0)
+                        .with_encoding(SourceEncoding::Bytes),
+                    FirstSliceBudget::default(),
+                    &deadline(),
+                )
+                .unwrap();
+            assert_eq!(read.data.chunks[0].bytes, expression.as_bytes());
+        }
     }
 
     #[test]

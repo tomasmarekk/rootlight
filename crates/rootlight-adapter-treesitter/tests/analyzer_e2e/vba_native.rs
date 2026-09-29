@@ -2536,6 +2536,104 @@ fn vba_variadic_applications_validate_the_complete_parameter_list() {
 }
 
 #[test]
+fn vba_external_applications_preserve_binding_and_signature_barriers() {
+    for (declaration, invocation) in [
+        (
+            "Private Declare Sub Accept Lib \"host\" (value As Long)",
+            "result = Accept(1)",
+        ),
+        (
+            "Private Declare Function Accept Lib \"host\" (value As Long) As Long",
+            "Dim Accept As Object\nresult = Accept(1)",
+        ),
+        (
+            "Private Declare Function Accept Lib \"host\" (value As Long, VALUE As Long) As Long",
+            "result = Accept(1, 2)",
+        ),
+        (
+            "Private Declare Function Accept Lib \"host\" (value As Long) As Long\nPrivate Declare Function Accept Lib \"other\" (value As Long) As Long",
+            "result = Accept(1)",
+        ),
+        (
+            "Private Declare Function Accept Lib \"host\" (value As Long) As Long",
+            "result = Accept(value:=1, value:=2)",
+        ),
+        (
+            "Private Declare Function Accept Lib \"host\" (value As Long) As Long",
+            "result = Accept(1, value:=2)",
+        ),
+        (
+            "Private Declare Function Accept Lib \"host\" (value As Long) As Long",
+            "result = Me.Accept(1)",
+        ),
+        (
+            "Private Declare Function Accept Lib \"host\" (value As Long) As Long",
+            "result = Accept(1)(2)",
+        ),
+        (
+            "Function Accept(value As Long) As Long\nEnd Function",
+            "result = Accept(ByVal(1))",
+        ),
+    ] {
+        let source =
+            format!("{declaration}\nSub Run()\nDim result As Variant\n{invocation}\nEnd Sub\n");
+        let result = output(&source);
+        let document = result.document();
+        let start = u64::try_from(source.rfind("Accept").unwrap()).unwrap();
+        let application = document
+            .occurrences
+            .iter()
+            .filter(|site| {
+                site.syntax_kind == "vba.application.reference"
+                    && site.source.span().start_byte() <= start
+                    && site.source.span().end_byte() > start
+            })
+            .max_by_key(|site| site.source.span().end_byte())
+            .unwrap();
+        assert!(
+            matches!(application.target, OccurrenceTarget::Unresolved { .. }),
+            "{source}"
+        );
+        assert!(
+            document
+                .skipped_regions
+                .iter()
+                .any(|gap| gap.source == application.source
+                    && gap.detail == "vba-call-or-index-target-unavailable"),
+            "{source}"
+        );
+    }
+}
+
+#[test]
+fn vba_external_malformed_arguments_retain_errors_without_complete_bindings() {
+    for arguments in ["ByVal", "ByVal _\n", "ByVal AddressOf Handler"] {
+        let expression = format!("Accept({arguments})");
+        let source = format!(
+            "Private Declare Function Accept Lib \"host\" (value As Any) As Long\nSub Handler()\nEnd Sub\nSub Run()\nDim result As Long\nresult = {expression}\nEnd Sub\n"
+        );
+        let result = output(&source);
+        let document = result.document();
+        let start = u64::try_from(source.rfind(&expression).unwrap()).unwrap();
+        let end = start + u64::try_from(expression.len()).unwrap();
+        assert!(
+            !document.occurrences.iter().any(|site| {
+                site.source.span().start_byte() == start
+                    && site.source.span().end_byte() == end
+                    && matches!(site.target, OccurrenceTarget::Resolved { .. })
+            }),
+            "{source}"
+        );
+        assert!(
+            document.skipped_regions.iter().any(|gap| {
+                gap.source.span().start_byte() < end && gap.source.span().end_byte() > start
+            }),
+            "{source}"
+        );
+    }
+}
+
+#[test]
 fn vba_local_applications_bind_complete_argument_lists() {
     for (parameters, arguments) in [
         ("ByVal value As Long", "1"),

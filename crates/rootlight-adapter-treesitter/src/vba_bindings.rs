@@ -560,11 +560,14 @@ impl<'a> VbaBindings<'a> {
                 declaration.syntax_kind().as_str(),
                 "vba.sub_function.declaration"
                     | "vba.function.declaration"
+                    | "vba.external_sub_function.declaration"
+                    | "vba.external_function.declaration"
                     | "vba.get_property.declaration"
                     | "vba.let_property.declaration"
                     | "vba.set_property.declaration"
             ) && let Some(symbol) = candidate.and_then(|binding| match binding {
                 Binding::Procedure(symbol)
+                | Binding::ExternalProcedure(symbol)
                 | Binding::Function { symbol, .. }
                 | Binding::Property(PropertyAccessors {
                     get: Some(symbol), ..
@@ -1336,7 +1339,11 @@ impl<'a> VbaBindings<'a> {
         // Setters take their value from assignment, not the application argument list.
         if !matches!(
             self.fact(scope)?.syntax_kind().as_str(),
-            "vba.sub_function.scope" | "vba.function.scope" | "vba.get_property.scope"
+            "vba.sub_function.scope"
+                | "vba.function.scope"
+                | "vba.get_property.scope"
+                | "vba.external_sub_function.scope"
+                | "vba.external_function.scope"
         ) {
             return Ok(None);
         }
@@ -1351,6 +1358,12 @@ impl<'a> VbaBindings<'a> {
                 | "vba.self_invoked_member.reference"
                 | "vba.invoked_member.reference"
         );
+        if self.fact(scope)?.syntax_kind().as_str() == "vba.external_sub_function.scope"
+            && !statement
+            && !explicit_call
+        {
+            return Ok(None);
+        }
         let arguments = if suffix.first() == Some(&b'(') && (explicit_call || !statement) {
             let Some(end) = rootlight_vba::parenthesized_expression_end(suffix, &mut check)? else {
                 return Ok(None);
@@ -1404,16 +1417,16 @@ impl<'a> VbaBindings<'a> {
         let Some(header) = rootlight_vba::procedure_header(source, &mut check)? else {
             return Ok(false);
         };
-        let tail = source
-            .get(header.name_span().end..)
-            .ok_or_else(invalid_capture)?;
-        let leading = rootlight_vba::logical_whitespace_len(tail, &mut check)?;
-        let tail = tail.get(leading..).ok_or_else(invalid_capture)?;
-        let Some(end) = rootlight_vba::parenthesized_expression_end(tail, &mut check)? else {
+        let external = matches!(
+            header.kind(),
+            rootlight_vba::ProcedureKind::ExternalSub
+                | rootlight_vba::ProcedureKind::ExternalFunction
+        );
+        let Some(range) = rootlight_vba::procedure_parameter_range(source, &mut check)? else {
             return Ok(false);
         };
         let Some(written) = rootlight_vba::argument_list(
-            tail.get(1..end - 1).ok_or_else(invalid_capture)?,
+            source.get(range).ok_or_else(invalid_capture)?,
             self.maximum_name_bytes,
             &mut check,
         )?
@@ -1485,8 +1498,8 @@ impl<'a> VbaBindings<'a> {
         let mut supplied = BTreeSet::new();
         for (index, argument) in arguments.iter().enumerate() {
             cancellation.check()?;
-            // Explicit ByVal is only legal for external procedures, which are
-            // excluded above until their separate calling contract is modeled.
+            // Call-site ByVal is external-only (MS-VBAL 5.6.13.1). Its operand
+            // must be an expression, not the separate AddressOf argument form.
             if argument
                 .expression()
                 .get(..5)
@@ -1494,9 +1507,27 @@ impl<'a> VbaBindings<'a> {
                 && argument
                     .expression()
                     .get(5)
-                    .is_some_and(u8::is_ascii_whitespace)
+                    .is_none_or(|byte| byte.is_ascii_whitespace() || *byte == b'(')
             {
-                return Ok(false);
+                let tail = argument.expression().get(5..).ok_or_else(invalid_capture)?;
+                if !external {
+                    return Ok(false);
+                }
+                let leading = rootlight_vba::logical_whitespace_len(tail, &mut check)?;
+                let value = tail.get(leading..).ok_or_else(invalid_capture)?;
+                let Some(end) = rootlight_vba::value_expression_end(
+                    value,
+                    self.maximum_name_bytes,
+                    &mut check,
+                )?
+                else {
+                    return Ok(false);
+                };
+                let remainder = value.get(end..).ok_or_else(invalid_capture)?;
+                if rootlight_vba::logical_whitespace_len(remainder, &mut check)? != remainder.len()
+                {
+                    return Ok(false);
+                }
             }
             let parameter = if let Some(name) = argument.name() {
                 let Some(name) = std::str::from_utf8(name).ok() else {

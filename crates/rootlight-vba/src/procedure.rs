@@ -168,6 +168,68 @@ pub fn procedure_header<'a, E>(
     }))
 }
 
+/// Returns the source range inside an explicitly written procedure parameter group.
+///
+/// Reads ordinary procedure headers and Declare headers with mandatory Lib and
+/// optional Alias string tokens. Strings and logical continuations cannot supply
+/// false parentheses. Missing groups return None, not an assumed zero-arity list.
+/// The range excludes parentheses and may be empty. This proves boundaries only;
+/// callers validate parameters, return types and declaration accessibility. It
+/// neither loads libraries nor establishes an external implementation's identity.
+/// Scanning is allocation-free, linear in the supplied source and cancellable.
+///
+/// # Errors
+/// Propagates the caller's cancellation/work error unchanged.
+pub fn procedure_parameter_range<E>(
+    source: &[u8],
+    check: &mut impl FnMut() -> Result<(), E>,
+) -> Result<Option<Range<usize>>, E> {
+    let Some(header) = procedure_header(source, check)? else {
+        return Ok(None);
+    };
+    let mut cursor = header.name_span().end;
+    if matches!(
+        header.kind(),
+        ProcedureKind::ExternalSub | ProcedureKind::ExternalFunction
+    ) {
+        if logical_whitespace_len(source.get(cursor..).unwrap_or_default(), check)? == 0
+            || !next_word(source, &mut cursor, check)?.eq_ignore_ascii_case(b"Lib")
+        {
+            return Ok(None);
+        }
+        cursor += logical_whitespace_len(source.get(cursor..).unwrap_or_default(), check)?;
+        if source.get(cursor) != Some(&b'"') {
+            return Ok(None);
+        }
+        let Some(end) = super::group::quoted_end(source, cursor, b'"', check)? else {
+            return Ok(None);
+        };
+        cursor = end;
+        cursor += logical_whitespace_len(source.get(cursor..).unwrap_or_default(), check)?;
+        if source.get(cursor) != Some(&b'(') {
+            if !next_word(source, &mut cursor, check)?.eq_ignore_ascii_case(b"Alias") {
+                return Ok(None);
+            }
+            cursor += logical_whitespace_len(source.get(cursor..).unwrap_or_default(), check)?;
+            if source.get(cursor) != Some(&b'"') {
+                return Ok(None);
+            }
+            let Some(end) = super::group::quoted_end(source, cursor, b'"', check)? else {
+                return Ok(None);
+            };
+            cursor = end;
+        }
+    }
+    cursor += logical_whitespace_len(source.get(cursor..).unwrap_or_default(), check)?;
+    let Some(end) =
+        super::parenthesized_expression_end(source.get(cursor..).unwrap_or_default(), check)?
+    else {
+        return Ok(None);
+    };
+    // The scanner consumed both parentheses within the source, bounding each sum.
+    Ok(Some(cursor + 1..cursor + end - 1))
+}
+
 /// Returns the exact scalar return-type range in a Function or Property Get header.
 ///
 /// Requires a complete parameter group and an explicit As clause. Arrays, type
@@ -241,6 +303,104 @@ fn next_word<'a, E>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parameter_ranges_preserve_external_headers_and_written_groups() {
+        for (source, expected) in [
+            ("Sub Send(value As Long)\nEnd Sub", "value As Long"),
+            ("Property Get Item() As Long", ""),
+            ("Private Declare Sub Send Lib \"host\"()", ""),
+            (
+                "Declare PtrSafe Function [Fetch] Lib \"host\" Alias \"FetchW\"(ByVal value As Long) As Long",
+                "ByVal value As Long",
+            ),
+            (
+                "Declare Function Fetch% Lib \"host(\" Alias \"x\"\"y)\" (value As Any)",
+                "value As Any",
+            ),
+            (
+                "Public Declare _\r\n PtrSafe Function Fetch _\n Lib _\n \"host\" _\n Alias _\n \"FetchW\" _\n (value As Long, _\n other As Long)",
+                "value As Long, _\n other As Long",
+            ),
+            (
+                "Declare Sub Send Lib \"host _\n (value As Long)",
+                "value As Long",
+            ),
+        ] {
+            let range = procedure_parameter_range(source.as_bytes(), &mut || Ok::<(), ()>(()))
+                .unwrap()
+                .unwrap();
+            assert_eq!(source.get(range), Some(expected), "{source}");
+        }
+        for source in [
+            "Declare Sub Send ()",
+            "Declare Sub Send Library \"host\" ()",
+            "Declare Sub Send Lib host ()",
+            "Declare Sub Send Lib \"host\" Alias ()",
+            "Declare Sub Send Lib \"host\" Alias \"entry\" Alias \"other\" ()",
+            "Declare Sub Send Lib \"host\"\n()",
+            "Declare Sub Send Lib \"host\" ' ()",
+            "Declare Sub Send Lib \"host\": ()",
+            "Declare Sub Send Lib \"host\"",
+            "Declare Function Fetch Lib \"host\" As Long",
+            "Declare Sub Send Lib \"unterminated ()",
+            "Declare Sub Send Lib \"host\" (value As Long",
+            "Declare Sub Send Lib \"host\" (value As Long\n)",
+        ] {
+            assert_eq!(
+                procedure_parameter_range(source.as_bytes(), &mut || Ok::<(), ()>(())).unwrap(),
+                None,
+                "{source}"
+            );
+        }
+    }
+
+    #[test]
+    fn parameter_ranges_cancel_in_library_strings_and_keep_offsets_in_bounds() {
+        for input in [
+            format!("Declare Sub Send Lib \"{}\" ()", "x".repeat(8192)),
+            format!(
+                "Declare Sub Send Lib \"host\" Alias \"x{}\" ()",
+                "\"\"".repeat(8192)
+            ),
+            format!("Declare Sub Send Lib \"host\"{}()", " _\n".repeat(8192)),
+            format!("Declare Sub Send Lib \"host\" ({})", "x".repeat(8192)),
+        ] {
+            for limit in [1, 8, 16] {
+                let mut calls = 0;
+                assert_eq!(
+                    procedure_parameter_range(input.as_bytes(), &mut || {
+                        calls += 1;
+                        if calls == limit {
+                            Err("cancelled")
+                        } else {
+                            Ok(())
+                        }
+                    }),
+                    Err("cancelled")
+                );
+                assert_eq!(calls, limit);
+            }
+        }
+        for byte in 0..=u8::MAX {
+            let input = [
+                b"Declare Sub Send Lib \"".as_slice(),
+                &[byte],
+                b"\" (x As Long)",
+            ]
+            .concat();
+            for end in 0..=input.len() {
+                let prefix = &input[..end];
+                if let Some(range) =
+                    procedure_parameter_range(prefix, &mut || Ok::<(), ()>(())).unwrap()
+                {
+                    assert!(range.start > 0 && range.start <= range.end && range.end < end);
+                    assert_eq!(prefix[range.start - 1], b'(');
+                    assert_eq!(prefix[range.end], b')');
+                }
+            }
+        }
+    }
 
     #[test]
     fn scalar_return_ranges_exclude_arrays_and_body_type_mentions() {

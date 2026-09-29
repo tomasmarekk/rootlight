@@ -264,6 +264,29 @@ pub fn value_application_expression<E>(
     value_expression(source, maximum_tokens, true, check)
 }
 
+/// Returns the exclusive end of one supported value expression.
+///
+/// Uses the bounded, nonrecursive expression subset of
+/// [`value_application_expression`] without requiring an application. Input must
+/// start at the value. Unsupported syntax, including AddressOf and ByVal prefixes,
+/// returns None; consumers must inspect the remaining bytes to require a complete
+/// expression. This proves syntax only, not binding or type compatibility.
+///
+/// # Errors
+/// Propagates the caller's cancellation/work error unchanged.
+pub fn value_expression_end<E>(
+    source: &[u8],
+    maximum_tokens: usize,
+    check: &mut impl FnMut() -> Result<(), E>,
+) -> Result<Option<usize>, E> {
+    Ok(
+        match value_expression(source, maximum_tokens, false, check)? {
+            CallChainRead::Parsed(value) => Some(value.end()),
+            CallChainRead::Unsupported | CallChainRead::TokenLimit => None,
+        },
+    )
+}
+
 /// Reads an assignment's `=` and complete value through its logical-line boundary.
 ///
 /// Input begins immediately after the left-hand expression. Only logical trivia
@@ -821,6 +844,52 @@ mod tests {
     use super::*;
     use std::convert::Infallible;
 
+    #[test]
+    fn value_expression_ends_do_not_admit_argument_prefixes_or_partial_operands() {
+        for source in [
+            "1",
+            "(1)",
+            "value + 1",
+            "Me.Value",
+            "Fetch(1)",
+            "\"x\"",
+            "1 + _\n 2",
+        ] {
+            assert_eq!(
+                value_expression_end(source.as_bytes(), 64, &mut || Ok::<(), ()>(())).unwrap(),
+                Some(source.len()),
+                "{source}"
+            );
+        }
+        for source in [
+            "",
+            "ByVal 1",
+            "AddressOf Handler",
+            "(AddressOf Handler)",
+            "1 +",
+            "value other",
+            "(1",
+            "ByVal(1)",
+        ] {
+            assert_eq!(
+                value_expression_end(source.as_bytes(), 64, &mut || Ok::<(), ()>(())).unwrap(),
+                None,
+                "{source}"
+            );
+        }
+        assert_eq!(
+            value_expression_end(b"1 + 2", 2, &mut || Ok::<(), ()>(())).unwrap(),
+            None
+        );
+        assert_eq!(
+            value_expression_end(b"1", 64, &mut || Err("cancelled")),
+            Err("cancelled")
+        );
+        assert_eq!(
+            value_expression_end(b"1 ' comment", 64, &mut || Ok::<(), ()>(())).unwrap(),
+            Some(1)
+        );
+    }
     fn read(source: &[u8]) -> CallChainRead {
         call_chain_statement(source, 4096, &mut || Ok::<(), Infallible>(())).unwrap()
     }
