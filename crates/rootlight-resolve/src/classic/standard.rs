@@ -3,6 +3,7 @@
 //! lexical barriers are required before a source occurrence can name one.
 
 use super::*;
+mod err;
 mod functions;
 use crate::ResolverFactContext;
 use rootlight_ir::{
@@ -33,6 +34,11 @@ fn claim(repository: rootlight_ids::RepositoryId, name: &str) -> SymbolIdentityC
     if let Some(function) = functions::qualified(name) {
         signature.push(0);
         signature.extend_from_slice(function.signature.as_bytes());
+    } else if let Some(member) = err::qualified(name) {
+        signature.push(0);
+        signature.extend_from_slice(member.signature.as_bytes());
+    } else if name == "VBA.Err" {
+        signature.extend_from_slice(b"\0ErrClass default instance");
     }
     let mut claim = SymbolIdentityClaim {
         symbol: SymbolId::from_bytes([0; 20]),
@@ -65,7 +71,9 @@ pub(crate) fn materialize(
         cancellation.check()?;
         if site.syntax_kind == "vba.value_identifier.reference"
             && site_bytes(site, &inputs).is_some_and(|text| {
-                text.eq_ignore_ascii_case(b"VBA") || text.eq_ignore_ascii_case(b"[VBA]")
+                [b"VBA".as_slice(), b"[VBA]", b"Err", b"[Err]"]
+                    .iter()
+                    .any(|name| text.eq_ignore_ascii_case(name))
             })
         {
             requested.insert(site.file);
@@ -92,7 +100,7 @@ pub(crate) fn materialize(
         producer: ProducerIdentity::new(RESOLVER_PROVIDER_NAME, RESOLVER_PROVIDER_VERSION, digest)
             .map_err(ResolutionError::InvalidProducer)?,
         binary_digest: context.binary_digest(),
-        frontend_version: Some("MS-VBAL-6.1.2".to_owned()),
+        frontend_version: Some("MS-VBAL-6.1.2/6.1.3.2".to_owned()),
         language: "vba".to_owned(),
         tier: AnalysisTier::TierC,
         build_context: BuildContextIdentity::new(digest),
@@ -104,14 +112,23 @@ pub(crate) fn materialize(
     provenance.id =
         derive_provenance_record_id(&provenance).map_err(ResolutionError::FactIdentity)?;
     let existing: BTreeSet<_> = document.entities.iter().map(|entity| entity.id).collect();
-    let names = ["VBA".to_owned(), "VBA.Constants".to_owned()]
-        .into_iter()
-        .chain(CONSTANTS.iter().map(|name| format!("VBA.Constants.{name}")))
-        .chain(
-            functions::FUNCTIONS
-                .iter()
-                .map(|function| format!("VBA.{}", function.name)),
-        );
+    let names = [
+        "VBA".to_owned(),
+        "VBA.Constants".to_owned(),
+        "VBA.Err".to_owned(),
+    ]
+    .into_iter()
+    .chain(CONSTANTS.iter().map(|name| format!("VBA.Constants.{name}")))
+    .chain(
+        functions::FUNCTIONS
+            .iter()
+            .map(|function| format!("VBA.{}", function.name)),
+    )
+    .chain(
+        err::MEMBERS
+            .iter()
+            .map(|member| format!("VBA.Err.{}", member.name)),
+    );
     let mut added = false;
     for name in names {
         cancellation.check()?;
@@ -204,7 +221,41 @@ pub(super) fn bind<'a>(
         let Some(member) = member else {
             continue;
         };
-        if member.implicit_root || !starts_with_namespace(member.receiver.as_bytes()) {
+        if member.implicit_root {
+            continue;
+        }
+        if let Some(root) = err::receiver_root(member.receiver, cancellation, work)? {
+            if root == "err"
+                && let Some(qualifier) = qualifiers.get(&member.span).and_then(|site| *site)
+            {
+                candidates.entry(qualifier.id).or_insert((
+                    qualifier,
+                    "VBA.Err".to_owned(),
+                    ResolutionRule::VbaErrInstance,
+                    root,
+                ));
+            }
+            if let Some(contract) = err::find(member.name) {
+                let rule = match (&contract.kind, site.syntax_kind.as_str()) {
+                    (err::Kind::Property { .. }, "vba.get_member.reference")
+                    | (err::Kind::Property { writable: true }, "vba.let_member.reference") => {
+                        Some(ResolutionRule::VbaErrProperty)
+                    }
+                    (err::Kind::Method { .. }, "vba.invoked_member.reference") => {
+                        Some(ResolutionRule::VbaErrMethod)
+                    }
+                    _ => None,
+                };
+                if let Some(rule) = rule {
+                    candidates.insert(
+                        site.id,
+                        (*site, format!("VBA.Err.{}", contract.name), rule, root),
+                    );
+                }
+            }
+            continue;
+        }
+        if !starts_with_namespace(member.receiver.as_bytes()) {
             continue;
         }
         let root = identifier(member.receiver).as_deref() == Some("vba");
@@ -213,9 +264,29 @@ pub(super) fn bind<'a>(
                 qualifier,
                 "VBA".to_owned(),
                 ResolutionRule::VbaStandardNamespace,
+                "vba",
             ));
         }
         let name = identifier(member.name);
+        if root
+            && name.as_deref() == Some("err")
+            && receiver_sources.contains_key(&site.source.span())
+            && matches!(
+                site.syntax_kind.as_str(),
+                "vba.member.reference" | "vba.get_member.reference"
+            )
+        {
+            candidates.insert(
+                site.id,
+                (
+                    *site,
+                    "VBA.Err".to_owned(),
+                    ResolutionRule::VbaErrInstance,
+                    "vba",
+                ),
+            );
+            continue;
+        }
         if root
             && matches!(
                 site.syntax_kind.as_str(),
@@ -232,6 +303,7 @@ pub(super) fn bind<'a>(
                     *site,
                     format!("VBA.{}", function.name),
                     ResolutionRule::VbaStandardFunction,
+                    "vba",
                 ),
             );
             continue;
@@ -251,6 +323,7 @@ pub(super) fn bind<'a>(
                     *site,
                     "VBA.Constants".to_owned(),
                     ResolutionRule::VbaStandardNamespace,
+                    "vba",
                 ),
             );
             continue;
@@ -277,11 +350,12 @@ pub(super) fn bind<'a>(
                     *site,
                     format!("VBA.Constants.{name}"),
                     ResolutionRule::VbaStandardConstant,
+                    "vba",
                 ),
             );
         }
     }
-    for (site, name, rule) in candidates.into_values() {
+    for (site, name, rule, root) in candidates.into_values() {
         cancellation.check()?;
         work.consume()?;
         if site.role != OccurrenceRole::Reference
@@ -303,10 +377,10 @@ pub(super) fn bind<'a>(
         // Project/module names and all lexical declarations remain barriers,
         // including unresolved or conditional declarations. A referenced-library
         // label in retained container metadata is never used as a target proof.
-        if project.name == "vba"
-            || project.types.contains_key("vba")
-            || project.modules.contains_key("vba")
-            || project.value_names.contains("vba")
+        if project.name == root
+            || project.types.contains_key(root)
+            || project.modules.contains_key(root)
+            || project.value_names.contains(root)
         {
             continue;
         }
@@ -318,7 +392,7 @@ pub(super) fn bind<'a>(
             let Some(owner) = scope.and_then(|id| index.entities.get(&id)) else {
                 break;
             };
-            if members.contains_key(&(owner.id, "vba".to_owned())) {
+            if members.contains_key(&(owner.id, root.to_owned())) {
                 break;
             }
             match owner.container {
@@ -364,9 +438,14 @@ pub(super) fn bind<'a>(
         let Some(bytes) = site_bytes(site, sources) else {
             continue;
         };
-        // All candidates require an authored VBA qualifier. Avoid reparsing
+        // Candidates require an authored VBA or Err qualifier. Avoid reparsing
         // unrelated application expressions; callee lookup proves the full prefix.
         if !starts_with_namespace(bytes)
+            && ![b"Err".as_slice(), b"[Err]"].iter().any(|prefix| {
+                bytes
+                    .get(..prefix.len())
+                    .is_some_and(|text| text.eq_ignore_ascii_case(prefix))
+            })
             && !bytes
                 .get(..4)
                 .is_some_and(|prefix| prefix.eq_ignore_ascii_case(b"Call"))
@@ -376,15 +455,40 @@ pub(super) fn bind<'a>(
         let Some((callee, explicit)) = calls.callee(site, sources, cancellation, work)? else {
             continue;
         };
-        let Some(proof) = result
-            .proofs
-            .get(&callee.id)
-            .filter(|proof| proof.rule == ResolutionRule::VbaStandardFunction)
-        else {
+        let Some(proof) = result.proofs.get(&callee.id).filter(|proof| {
+            matches!(
+                proof.rule,
+                ResolutionRule::VbaStandardFunction | ResolutionRule::VbaErrMethod
+            )
+        }) else {
             continue;
         };
-        let Some(function) = functions::qualified(&proof.target.canonical_name) else {
-            continue;
+        let (parameters, kind, rule) = match proof.rule {
+            ResolutionRule::VbaStandardFunction => {
+                let Some(function) = functions::qualified(&proof.target.canonical_name) else {
+                    continue;
+                };
+                (
+                    function.parameters,
+                    rootlight_vba::ProcedureKind::Function,
+                    ResolutionRule::VbaStandardCall,
+                )
+            }
+            ResolutionRule::VbaErrMethod => {
+                let Some(err::Member {
+                    kind: err::Kind::Method { parameters },
+                    ..
+                }) = err::qualified(&proof.target.canonical_name)
+                else {
+                    continue;
+                };
+                (
+                    *parameters,
+                    rootlight_vba::ProcedureKind::Sub,
+                    ResolutionRule::VbaErrCall,
+                )
+            }
+            _ => continue,
         };
         let Some(offset) = callee
             .source
@@ -398,7 +502,7 @@ pub(super) fn bind<'a>(
         let Some(tail) = bytes.get(offset..) else {
             continue;
         };
-        if !calls::standard_arguments_match(tail, explicit, function.parameters, &mut || {
+        if !calls::standard_arguments_match(tail, explicit, parameters, kind, &mut || {
             cancellation.check()?;
             work.consume()
         })? {
@@ -408,7 +512,7 @@ pub(super) fn bind<'a>(
             target: proof.target,
             context: Arc::clone(&proof.context),
             receiver: Some((proof.target, callee.source.clone())),
-            rule: ResolutionRule::VbaStandardCall,
+            rule,
             property_call: true,
         };
         result.proofs.insert(site.id, proof);

@@ -8,6 +8,9 @@ use std::fs;
 #[path = "fixture.rs"]
 mod fixture;
 
+#[path = "err_tests.rs"]
+mod err_tests;
+
 fn tempdir() -> tempfile::TempDir {
     #[cfg(target_os = "macos")]
     {

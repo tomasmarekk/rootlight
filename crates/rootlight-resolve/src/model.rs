@@ -296,6 +296,14 @@ pub enum ResolutionRule {
     VbaStandardFunction,
     /// A complete argument list matches a source-qualified standard function.
     VbaStandardCall,
+    /// An unshadowed explicit receiver names the standard Err default instance.
+    VbaErrInstance,
+    /// An explicit Err member matches a readable or writable property contract.
+    VbaErrProperty,
+    /// A statement callee names one of the standard Err object's methods.
+    VbaErrMethod,
+    /// A complete argument list matches a standard Err method declaration.
+    VbaErrCall,
     /// Declarative classic BASIC project membership selects one native class type.
     ClassicProjectType,
     /// Instantiation of a project-owned ordinary class and its source initializer.

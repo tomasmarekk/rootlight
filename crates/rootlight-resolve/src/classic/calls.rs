@@ -722,6 +722,7 @@ pub(super) fn standard_arguments_match(
     tail: &[u8],
     explicit: bool,
     parameters: &[(&str, bool)],
+    procedure: rootlight_vba::ProcedureKind,
     check: &mut impl FnMut() -> Result<(), ResolutionError>,
 ) -> Result<bool, ResolutionError> {
     let optional = parameters
@@ -733,16 +734,7 @@ pub(super) fn standard_arguments_match(
         .enumerate()
         .map(|(i, (name, _))| ((*name).to_owned(), i))
         .collect();
-    Ok(arguments_match(
-        tail,
-        explicit,
-        &optional,
-        &names,
-        false,
-        rootlight_vba::ProcedureKind::Function,
-        check,
-    )?
-    .is_some())
+    Ok(arguments_match(tail, explicit, &optional, &names, false, procedure, check)?.is_some())
 }
 
 fn arguments_match(

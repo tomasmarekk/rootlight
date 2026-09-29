@@ -726,7 +726,20 @@ fn reconcile_vba_target_gaps(
                 ],
                 "vba-member-target-unavailable",
             ),
-            Some("vba-standard-call-v1.indexed_snapshot") => (
+            Some("vba-err-instance-v1.indexed_snapshot") => (
+                &["vba.member.reference", "vba.get_member.reference"],
+                "vba-member-target-unavailable",
+            ),
+            Some("vba-err-property-v1.indexed_snapshot") => (
+                &["vba.get_member.reference", "vba.let_member.reference"],
+                "vba-member-target-unavailable",
+            ),
+            Some("vba-err-method-v1.indexed_snapshot") => (
+                &["vba.invoked_member.reference"],
+                "vba-member-target-unavailable",
+            ),
+            Some("vba-standard-call-v1.indexed_snapshot")
+            | Some("vba-err-call-v1.indexed_snapshot") => (
                 &["vba.application.reference"],
                 "vba-call-or-index-target-unavailable",
             ),
@@ -1595,6 +1608,10 @@ fn build_provenance(
             | ResolutionRule::VbaStandardConstant
             | ResolutionRule::VbaStandardFunction
             | ResolutionRule::VbaStandardCall
+            | ResolutionRule::VbaErrInstance
+            | ResolutionRule::VbaErrProperty
+            | ResolutionRule::VbaErrMethod
+            | ResolutionRule::VbaErrCall
     ) {
         let proof = lookup
             .classic
@@ -1753,6 +1770,10 @@ fn build_provenance(
         ResolutionRule::VbaStandardConstant => "vba-standard-constant-v1.indexed_snapshot",
         ResolutionRule::VbaStandardFunction => "vba-standard-function-v1.indexed_snapshot",
         ResolutionRule::VbaStandardCall => "vba-standard-call-v1.indexed_snapshot",
+        ResolutionRule::VbaErrInstance => "vba-err-instance-v1.indexed_snapshot",
+        ResolutionRule::VbaErrProperty => "vba-err-property-v1.indexed_snapshot",
+        ResolutionRule::VbaErrMethod => "vba-err-method-v1.indexed_snapshot",
+        ResolutionRule::VbaErrCall => "vba-err-call-v1.indexed_snapshot",
         ResolutionRule::ElmModuleImport => "elm-module-import-v1.indexed_snapshot",
         ResolutionRule::ElmLocalType => "elm-local-type-v1.indexed_snapshot",
         ResolutionRule::ClassicProjectMember => "classic-project-member-v1.indexed_snapshot",
