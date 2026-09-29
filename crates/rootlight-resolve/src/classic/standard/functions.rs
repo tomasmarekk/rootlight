@@ -186,6 +186,137 @@ pub(super) const FUNCTIONS: &[Function] = &[
         signature: "Function StrReverse(Expression As String) As String",
         parameters: &[("expression", false)],
     },
+    // MS-VBAL 6.1.2.11 specifies character, formatting and localized-name calls.
+    // These declarations do not evaluate code pages, calendar settings or locale values.
+    // https://learn.microsoft.com/en-us/openspecs/microsoft_general_purpose_programming_languages/ms-vbal/f87cc0fb-f0ca-4875-9691-34d80e2933b0
+    Function {
+        name: "Asc",
+        signature: "Function Asc(StringValue As String) As Integer",
+        parameters: &[("stringvalue", false)],
+    },
+    Function {
+        name: "AscB",
+        signature: "Function AscB(StringValue As String) As Integer",
+        parameters: &[("stringvalue", false)],
+    },
+    Function {
+        name: "AscW",
+        signature: "Function AscW(StringValue As String) As Integer",
+        parameters: &[("stringvalue", false)],
+    },
+    Function {
+        name: "Chr",
+        signature: "Function Chr(CharCode As Long) As Variant",
+        parameters: &[("charcode", false)],
+    },
+    Function {
+        name: "Chr$",
+        signature: "Function Chr$(CharCode As Long) As String",
+        parameters: &[("charcode", false)],
+    },
+    Function {
+        name: "ChrB",
+        signature: "Function ChrB(CharCode As Long) As Variant",
+        parameters: &[("charcode", false)],
+    },
+    Function {
+        name: "ChrB$",
+        signature: "Function ChrB$(CharCode As Long) As String",
+        parameters: &[("charcode", false)],
+    },
+    Function {
+        name: "ChrW",
+        signature: "Function ChrW(CharCode As Long) As Variant",
+        parameters: &[("charcode", false)],
+    },
+    Function {
+        name: "ChrW$",
+        signature: "Function ChrW$(CharCode As Long) As String",
+        parameters: &[("charcode", false)],
+    },
+    Function {
+        name: "Format",
+        signature: "Function Format(Expression As Variant, Optional Format As Variant, Optional FirstDayOfWeek As VbDayOfWeek = vbSunday, Optional FirstWeekOfYear As VbFirstWeekOfYear = vbFirstJan1) As Variant",
+        parameters: &[
+            ("expression", false),
+            ("format", true),
+            ("firstdayofweek", true),
+            ("firstweekofyear", true),
+        ],
+    },
+    Function {
+        name: "Format$",
+        signature: "Function Format$(Expression As Variant, Optional Format As Variant, Optional FirstDayOfWeek As VbDayOfWeek = vbSunday, Optional FirstWeekOfYear As VbFirstWeekOfYear = vbFirstJan1) As String",
+        parameters: &[
+            ("expression", false),
+            ("format", true),
+            ("firstdayofweek", true),
+            ("firstweekofyear", true),
+        ],
+    },
+    Function {
+        name: "FormatCurrency",
+        signature: "Function FormatCurrency(Expression As Variant, Optional NumDigitsAfterDecimal As Long = -1, Optional IncludeLeadingDigit As VbTriState = vbUseDefault, Optional UseParensForNegativeNumbers As VbTriState = vbUseDefault, Optional GroupDigits As VbTriState = vbUseDefault) As String",
+        parameters: &[
+            ("expression", false),
+            ("numdigitsafterdecimal", true),
+            ("includeleadingdigit", true),
+            ("useparensfornegativenumbers", true),
+            ("groupdigits", true),
+        ],
+    },
+    Function {
+        name: "FormatNumber",
+        signature: "Function FormatNumber(Expression As Variant, Optional NumDigitsAfterDecimal As Long = -1, Optional IncludeLeadingDigit As VbTriState = vbUseDefault, Optional UseParensForNegativeNumbers As VbTriState = vbUseDefault, Optional GroupDigits As VbTriState = vbUseDefault) As String",
+        parameters: &[
+            ("expression", false),
+            ("numdigitsafterdecimal", true),
+            ("includeleadingdigit", true),
+            ("useparensfornegativenumbers", true),
+            ("groupdigits", true),
+        ],
+    },
+    Function {
+        name: "FormatPercent",
+        signature: "Function FormatPercent(Expression As Variant, Optional NumDigitsAfterDecimal As Long = -1, Optional IncludeLeadingDigit As VbTriState = vbUseDefault, Optional UseParensForNegativeNumbers As VbTriState = vbUseDefault, Optional GroupDigits As VbTriState = vbUseDefault) As String",
+        parameters: &[
+            ("expression", false),
+            ("numdigitsafterdecimal", true),
+            ("includeleadingdigit", true),
+            ("useparensfornegativenumbers", true),
+            ("groupdigits", true),
+        ],
+    },
+    // The formal declaration omits Optional, but the same section's semantics
+    // and Office contract permit NamedFormat omission with vbGeneralDate.
+    // https://learn.microsoft.com/en-us/openspecs/microsoft_general_purpose_programming_languages/ms-vbal/dc56ab7e-dc09-4b50-90ae-d994460c99a6
+    Function {
+        name: "FormatDateTime",
+        signature: "Function FormatDateTime(Expression As Variant, Optional NamedFormat As VbDateTimeFormat = vbGeneralDate) As String",
+        parameters: &[("expression", false), ("namedformat", true)],
+    },
+    Function {
+        name: "MonthName",
+        signature: "Function MonthName(Month As Long, Optional Abbreviate As Boolean = False) As String",
+        parameters: &[("month", false), ("abbreviate", true)],
+    },
+    // Office explicitly defines the named optional LCID, unlike the formal
+    // specification's required LocaleID. Its system default is not a fixed value.
+    // https://learn.microsoft.com/en-us/office/vba/language/reference/user-interface-help/strconv-function
+    Function {
+        name: "StrConv",
+        signature: "Function StrConv(String As Variant, Conversion As VbStrConv, Optional LCID As Long) As Variant",
+        parameters: &[("string", false), ("conversion", false), ("lcid", true)],
+    },
+    Function {
+        name: "WeekdayName",
+        signature: "Function WeekdayName(Weekday As Long, Optional Abbreviate As Boolean = False, Optional FirstDayOfWeek As VbDayOfWeek = vbUseSystemDayOfWeek) As String",
+        parameters: &[
+            ("weekday", false),
+            ("abbreviate", true),
+            ("firstdayofweek", true),
+        ],
+    },
     // MS-VBAL 6.1.2.11.1 defines these search, replacement and array contracts.
     // Optional argument values and element coercions remain runtime concerns.
     // https://learn.microsoft.com/en-us/openspecs/microsoft_general_purpose_programming_languages/ms-vbal/6af9457c-70ea-4691-80d6-3dca9f152aee
@@ -441,4 +572,150 @@ pub(super) fn find(name: &str) -> Option<&'static Function> {
 
 pub(super) fn qualified(name: &str) -> Option<&'static Function> {
     find(name.strip_prefix("VBA.")?)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::BTreeSet;
+
+    #[test]
+    fn string_extension_preserves_declared_types_and_defaults() {
+        let contracts: &[(&[&str], &str, &str)] = &[
+            (&["Asc", "AscB", "AscW"], "StringValue As String", "Integer"),
+            (&["Chr", "ChrB", "ChrW"], "CharCode As Long", "Variant"),
+            (&["Chr$", "ChrB$", "ChrW$"], "CharCode As Long", "String"),
+            (
+                &["Format"],
+                "Expression As Variant, Optional Format As Variant, Optional FirstDayOfWeek As VbDayOfWeek = vbSunday, Optional FirstWeekOfYear As VbFirstWeekOfYear = vbFirstJan1",
+                "Variant",
+            ),
+            (
+                &["Format$"],
+                "Expression As Variant, Optional Format As Variant, Optional FirstDayOfWeek As VbDayOfWeek = vbSunday, Optional FirstWeekOfYear As VbFirstWeekOfYear = vbFirstJan1",
+                "String",
+            ),
+            (
+                &["FormatCurrency", "FormatNumber", "FormatPercent"],
+                "Expression As Variant, Optional NumDigitsAfterDecimal As Long = -1, Optional IncludeLeadingDigit As VbTriState = vbUseDefault, Optional UseParensForNegativeNumbers As VbTriState = vbUseDefault, Optional GroupDigits As VbTriState = vbUseDefault",
+                "String",
+            ),
+            (
+                &["FormatDateTime"],
+                "Expression As Variant, Optional NamedFormat As VbDateTimeFormat = vbGeneralDate",
+                "String",
+            ),
+            (
+                &["MonthName"],
+                "Month As Long, Optional Abbreviate As Boolean = False",
+                "String",
+            ),
+            (
+                &["WeekdayName"],
+                "Weekday As Long, Optional Abbreviate As Boolean = False, Optional FirstDayOfWeek As VbDayOfWeek = vbUseSystemDayOfWeek",
+                "String",
+            ),
+            (
+                &["StrConv"],
+                "String As Variant, Conversion As VbStrConv, Optional LCID As Long",
+                "Variant",
+            ),
+        ];
+        let mut checked = 0;
+        for &(names, parameters, result) in contracts {
+            for &name in names {
+                assert_eq!(
+                    find(name).unwrap().signature,
+                    format!("Function {name}({parameters}) As {result}")
+                );
+                checked += 1;
+            }
+        }
+        assert_eq!(checked, 18);
+    }
+
+    #[test]
+    fn string_declarations_are_complete_and_parameter_models_agree() {
+        let strings = [
+            "Asc",
+            "AscB",
+            "AscW",
+            "Chr",
+            "Chr$",
+            "ChrB",
+            "ChrB$",
+            "ChrW",
+            "ChrW$",
+            "Filter",
+            "Format",
+            "Format$",
+            "FormatCurrency",
+            "FormatDateTime",
+            "FormatNumber",
+            "FormatPercent",
+            "InStr",
+            "InStrB",
+            "InStrRev",
+            "Join",
+            "LCase",
+            "LCase$",
+            "Left",
+            "Left$",
+            "LeftB",
+            "LeftB$",
+            "Len",
+            "LenB",
+            "LTrim",
+            "LTrim$",
+            "Mid",
+            "Mid$",
+            "MidB",
+            "MidB$",
+            "MonthName",
+            "Replace",
+            "Right",
+            "Right$",
+            "RightB",
+            "RightB$",
+            "RTrim",
+            "RTrim$",
+            "Space",
+            "Space$",
+            "Split",
+            "StrComp",
+            "StrConv",
+            "String",
+            "String$",
+            "StrReverse",
+            "Trim",
+            "Trim$",
+            "UCase",
+            "UCase$",
+            "WeekdayName",
+        ];
+        assert_eq!(strings.len(), 55);
+        for name in strings {
+            assert_eq!(find(name).unwrap().name, name);
+        }
+        let mut names = BTreeSet::new();
+        for function in FUNCTIONS {
+            assert!(names.insert(function.name.to_ascii_lowercase()));
+            let signature = function.signature.to_ascii_lowercase().replace("()", "");
+            let mut parameters = BTreeSet::new();
+            for &(name, optional) in function.parameters {
+                assert!(parameters.insert(name));
+                assert!(
+                    signature.contains(&format!("{name} as ")),
+                    "{}.{name}",
+                    function.name
+                );
+                assert_eq!(
+                    signature.contains(&format!("optional {name} as ")),
+                    optional,
+                    "{}.{name}",
+                    function.name
+                );
+            }
+        }
+    }
 }
