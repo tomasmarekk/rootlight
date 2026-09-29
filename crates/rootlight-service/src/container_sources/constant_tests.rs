@@ -250,13 +250,13 @@ fn implicit_constants_require_read_syntax_and_unshadowed_namespaces() {
 }
 
 #[test]
-fn implicit_constants_respect_source_declared_reference_aliases() {
+fn implicit_constants_require_referenced_namespace_evidence() {
     fn text(out: &mut Vec<u8>, value: &[u8]) {
         out.extend(u32::try_from(value.len()).unwrap().to_le_bytes());
         out.extend(value);
     }
     let root = tempdir();
-    for (alias, expected) in [("Other", 1), ("vBtAb", 0)] {
+    for alias in ["Other", "vBtAb"] {
         let mut records = Vec::new();
         records.extend(0x0016u16.to_le_bytes());
         text(&mut records, alias.as_bytes());
@@ -314,7 +314,7 @@ fn implicit_constants_respect_source_declared_reference_aliases() {
                     .iter()
                     .any(|p| p.id == site.provenance && p.rule.as_deref() == Some(RULE)))
                 .count(),
-            expected + 1,
+            1,
             "alias={alias}"
         );
     }

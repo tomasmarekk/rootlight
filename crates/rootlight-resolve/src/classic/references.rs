@@ -109,6 +109,13 @@ pub(super) fn prepare(
 }
 
 impl ReferenceInventory {
+    pub(super) fn may_shadow_standard_name(&self, name: &str) -> bool {
+        // Labels cover the project-name tier, not the contents or precedence
+        // of referenced namespaces. Even a differently named library can
+        // expose a competing module, type, or member before the standard one.
+        self.may_declare_name(name) || !self.declarations.is_empty()
+    }
+
     pub(super) fn may_declare_name(&self, name: &str) -> bool {
         // An unavailable label can occupy the project-name tier before a
         // standard member/type. Known labels still prove no library contents.
@@ -216,6 +223,11 @@ mod tests {
         let inventory = run(&named, &container, &metadata).unwrap().unwrap();
         assert!(inventory.may_declare_name("alias"));
         assert!(!inventory.may_declare_name("missing"));
+        assert!(inventory.may_shadow_standard_name("missing"));
+        named.references.clear();
+        let empty = run(&named, &container, &metadata).unwrap().unwrap();
+        assert!(!empty.may_shadow_standard_name("alias"));
+        assert!(!empty.may_shadow_standard_name("missing"));
         let mut work = ResolutionWorkBudget::new(100);
         prepare(
             &project,

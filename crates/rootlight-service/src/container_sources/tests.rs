@@ -1507,7 +1507,7 @@ fn declared_vba_references_survive_restart_with_exact_binary_evidence_and_import
 }
 
 #[test]
-fn nameless_native_reference_does_not_prove_standard_name_uniqueness() {
+fn opaque_native_references_do_not_prove_standard_uniqueness() {
     let root = tempdir();
     let identifier =
         b"*\\G{01234567-89AB-CDEF-1032-547698BADCFE}#1.0#409#C:\\unavailable.tlb#Library";
@@ -1517,7 +1517,15 @@ fn nameless_native_reference_does_not_prove_standard_name_uniqueness() {
     records.extend(u32::try_from(identifier.len()).unwrap().to_le_bytes());
     records.extend(identifier);
     records.extend([0; 6]);
-    let code = b"Attribute VB_Name = \"Client\"\r\nSub Inspect()\r\nDim first As Collection\r\nDim second As VBA.Collection\r\nDim text As String\r\ntext = vbTab\r\ntext = VBA.Constants.vbTab\r\nEnd Sub\r\n";
+    let mut named = Vec::new();
+    named.extend(0x0016u16.to_le_bytes());
+    named.extend(5u32.to_le_bytes());
+    named.extend(b"Other");
+    named.extend(0x003eu16.to_le_bytes());
+    named.extend(10u32.to_le_bytes());
+    named.extend("Other".encode_utf16().flat_map(u16::to_le_bytes));
+    named.extend(&records);
+    let code = b"Attribute VB_Name = \"Client\"\r\nSub Inspect()\r\nConst own As Long = 7\r\nDim first As Collection\r\nDim second As VBA.Collection\r\nDim text As String\r\ntext = own\r\ntext = vbTab\r\ntext = VBA.Constants.vbTab\r\ntext = Err.Number\r\ntext = VBA.Err.Number\r\nErr.Clear\r\nVBA.Err.Clear\r\nEnd Sub\r\n";
     let storage = tempdir();
     let paths = rootlight_runtime::RuntimePaths::new(
         storage.path().join("state"),
@@ -1528,7 +1536,7 @@ fn nameless_native_reference_does_not_prove_standard_name_uniqueness() {
     let mut service = FirstSliceService::new_durable(4, paths.state_dir(), &deadline()).unwrap();
     let mut previous = None;
     for (records, no_references) in [
-        (records.as_slice(), false),
+        (named.as_slice(), false),
         ([].as_slice(), true),
         (records.as_slice(), false),
     ] {
@@ -1576,6 +1584,14 @@ fn nameless_native_reference_does_not_prove_standard_name_uniqueness() {
                     "vba-collection-type-v1.indexed_snapshot",
                     1 + usize::from(no_references),
                 ),
+                (
+                    "vba-err-property-v1.indexed_snapshot",
+                    1 + usize::from(no_references),
+                ),
+                (
+                    "vba-err-call-v1.indexed_snapshot",
+                    1 + usize::from(no_references),
+                ),
             ] {
                 assert_eq!(
                     document
@@ -1591,6 +1607,13 @@ fn nameless_native_reference_does_not_prove_standard_name_uniqueness() {
                     "{rule}"
                 );
             }
+            let local = document
+                .entities
+                .iter()
+                .find(|entity| entity.canonical_name == "own")
+                .unwrap();
+            assert!(document.occurrences.iter().any(|site| site.role == OccurrenceRole::Reference
+                && matches!(site.target, OccurrenceTarget::Resolved { symbol } if symbol == local.id)));
             for detail in [
                 "vba-binding-target-unavailable",
                 "vba-type-target-unavailable",

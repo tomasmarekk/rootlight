@@ -5,14 +5,14 @@
 use super::*;
 
 #[test]
-fn standard_collection_qualification_distinguishes_reference_labels() {
+fn standard_collection_requires_namespace_evidence_for_unqualified_types() {
     fn counted(out: &mut Vec<u8>, text: &[u8]) {
         out.extend(u32::try_from(text.len()).unwrap().to_le_bytes());
         out.extend(text);
     }
     let root = tempdir();
     let source = b"Attribute VB_Name = \"Client\"\r\nPublic Sub Inspect(ByVal items As Collection, ByVal exact As VBA.Collection)\r\nDim value As Long\r\nvalue = items.Count\r\nvalue = exact.Count\r\nEnd Sub\r\n";
-    for (label, expected) in [("VBA", 2), ("Collection", 1), ("Other", 2)] {
+    for label in ["VBA", "Collection", "Other"] {
         let mut records = Vec::new();
         records.extend(0x0016_u16.to_le_bytes());
         counted(&mut records, label.as_bytes());
@@ -60,7 +60,7 @@ fn standard_collection_qualification_distinguishes_reference_labels() {
                         .iter()
                         .any(|p| p.id == site.provenance && p.rule.as_deref() == Some(rule)))
                     .count(),
-                expected,
+                1,
                 "label={label}; rule={rule}"
             );
         }

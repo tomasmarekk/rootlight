@@ -421,14 +421,13 @@ pub(super) fn bind<'a>(
         };
         let root = root.to_ascii_lowercase();
         // Project/module names and all lexical declarations remain barriers,
-        // including unresolved or conditional declarations. A referenced-library
-        // label in retained container metadata is never used as a target proof.
+        // including unresolved or conditional declarations. Only the reserved
+        // VBA qualifier bypasses opaque referenced-namespace uncertainty.
         if project.name == root
             || project.types.contains_key(&root)
             || project.modules.contains_key(&root)
             || project.value_names.contains(&root)
-            || (rule == ResolutionRule::VbaStandardImplicitConstant
-                && project.references.may_declare_name(&root))
+            || (root != "vba" && project.references.may_shadow_standard_name(&root))
         {
             continue;
         }
