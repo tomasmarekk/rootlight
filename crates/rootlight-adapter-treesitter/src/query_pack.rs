@@ -1166,7 +1166,10 @@ fn candidate_for_capture(
             } else if role == StructuralRole::Reference
                 && matches!(
                     capture.node.kind(),
-                    "identifier" | "bang_identifier" | "line_number_literal"
+                    "identifier"
+                        | "bang_identifier"
+                        | "line_number_literal"
+                        | "dotted_type_expression"
                 )
             {
                 vba::reference_syntax(capture.node, source, cancellation)?

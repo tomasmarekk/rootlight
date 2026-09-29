@@ -219,8 +219,8 @@ const PROJECT_FACTS_TRUNCATED_CODE: &str = "project-adapter-facts-truncated";
 const PROJECT_FACTS_TRUNCATED_MESSAGE: &str =
     "additional project semantic facts were omitted by aggregate resource limits";
 const AGGREGATE_DIAGNOSTICS_TRUNCATED_CODE: &str = "aggregate-diagnostics-truncated";
-const ANALYZER_BINARY_SEED: &[u8] = b"rootlight.first-slice.treesitter-structural/186";
-const RESOLVER_BINARY_SEED: &[u8] = b"rootlight.first-slice.resolve/60";
+const ANALYZER_BINARY_SEED: &[u8] = b"rootlight.first-slice.treesitter-structural/187";
+const RESOLVER_BINARY_SEED: &[u8] = b"rootlight.first-slice.resolve/61";
 const INCREMENTAL_PROVIDER_SEED: &[u8] = b"rootlight.first-slice.incremental-provider/1";
 const LANGUAGE_DISPOSITION_PROVIDER_SEED: &[u8] = b"rootlight.first-slice.language-disposition/5";
 const SOURCE_FILE_FALLBACK_PROVIDER_SEED: &[u8] = b"rootlight.source-file-fallback/4";
@@ -41352,6 +41352,362 @@ mod tests {
                                 .evidence_sources
                                 .contains(formal.evidence.source.as_ref().unwrap())
                         );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn classic_project_qualified_exports_follow_visibility_and_collisions() {
+        let fixture = durable_test_tempdir();
+        let storage = durable_test_tempdir();
+        let paths = RuntimePaths::new(storage.path().join("state"), storage.path().join("runtime"))
+            .unwrap();
+        paths.prepare_owner().unwrap();
+        let source = "Attribute VB_Name = \"Consumer\"\nSub Run(ByRef data As Primary.Payload, ByVal phase As Primary.Phase)\ndata.Count = 1\nEnd Sub\n";
+        fs::write(fixture.path().join("Consumer.bas"), source).unwrap();
+        for (access, collision, included, expected) in [
+            ("Public", "", true, true),
+            ("Private", "", true, false),
+            (
+                "Public",
+                "Public Type Primary\nValue As Long\nEnd Type\n",
+                true,
+                false,
+            ),
+            (
+                "Public",
+                "Public Type Payload\nValue As Long\nEnd Type\nPublic Enum Phase\nReady = 1\nEnd Enum\n",
+                true,
+                false,
+            ),
+            ("Public", "", false, false),
+            ("Public", "", true, true),
+        ] {
+            fs::write(fixture.path().join("Types.bas"), format!("Attribute VB_Name = \"Types\"\n{access} Type Payload\nCount As Long\nEnd Type\n{access} Enum Phase\nReady = 1\nEnd Enum\n")).unwrap();
+            fs::write(
+                fixture.path().join("Other.bas"),
+                format!("Attribute VB_Name = \"Other\"\n{collision}"),
+            )
+            .unwrap();
+            let target = if included {
+                "Module=Types; Types.bas\n"
+            } else {
+                ""
+            };
+            fs::write(fixture.path().join("project.vbp"), format!("Type=OleDll\nName=\"Primary\"\n{target}Module=Consumer; Consumer.bas\nModule=Other; Other.bas\n")).unwrap();
+            let mut service =
+                FirstSliceService::new_durable(2, paths.state_dir(), &deadline()).unwrap();
+            let receipt = service
+                .index_repository(fixture.path(), &deadline())
+                .unwrap();
+            assert_eq!(
+                receipt,
+                service
+                    .index_repository(fixture.path(), &deadline())
+                    .unwrap()
+            );
+            drop(service);
+            let service =
+                FirstSliceService::new_durable(2, paths.state_dir(), &deadline()).unwrap();
+            let snapshot = service
+                .loaded_generation_snapshot(receipt.generation)
+                .unwrap();
+            let document = snapshot.document();
+            let consumer = document
+                .files
+                .iter()
+                .find(|file| file.path == "Consumer.bas")
+                .unwrap();
+            let types = document
+                .files
+                .iter()
+                .find(|file| file.path == "Types.bas")
+                .unwrap();
+            for (name, kind) in [("Payload", EntityKind::Struct), ("Phase", EntityKind::Enum)] {
+                let path = format!("Primary.{name}");
+                let start = u64::try_from(source.find(&path).unwrap()).unwrap();
+                let site = document
+                    .occurrences
+                    .iter()
+                    .find(|site| {
+                        site.file == consumer.id
+                            && site.source.span().start_byte() == start
+                            && site.syntax_kind == "vba.direct_type_identifier.reference"
+                    })
+                    .unwrap();
+                let target = document
+                    .entities
+                    .iter()
+                    .find(|entity| {
+                        entity.kind == kind
+                            && entity.canonical_name == name
+                            && entity
+                                .evidence
+                                .source
+                                .as_ref()
+                                .is_some_and(|source| source.span().file() == types.id)
+                    })
+                    .unwrap();
+                assert_eq!(
+                    site.target == OccurrenceTarget::Resolved { symbol: target.id },
+                    expected,
+                    "{name}: {access} {collision} included={included}"
+                );
+                if !expected {
+                    assert!(matches!(site.target, OccurrenceTarget::Unresolved { .. }));
+                }
+                assert_eq!(
+                    document
+                        .skipped_regions
+                        .iter()
+                        .any(|gap| gap.source == site.source
+                            && gap.detail == "vba-type-target-unavailable"),
+                    !expected
+                );
+            }
+            let member = document
+                .occurrences
+                .iter()
+                .find(|site| {
+                    site.file == consumer.id && site.syntax_kind == "vba.let_member.reference"
+                })
+                .unwrap();
+            let field = document
+                .entities
+                .iter()
+                .find(|entity| {
+                    entity.kind == EntityKind::Field
+                        && entity.canonical_name == "Count"
+                        && entity
+                            .evidence
+                            .source
+                            .as_ref()
+                            .is_some_and(|source| source.span().file() == types.id)
+                })
+                .unwrap();
+            assert_eq!(
+                member.target == OccurrenceTarget::Resolved { symbol: field.id },
+                expected
+            );
+            if !expected {
+                assert!(matches!(member.target, OccurrenceTarget::Unresolved { .. }));
+            }
+        }
+    }
+
+    #[test]
+    fn classic_qualified_value_types_preserve_project_identity_after_restart() {
+        for (path, local_shadow, module_shadow, admitted) in [
+            ("Primary.Target", false, false, true),
+            ("[pRiMaRy].[tArGeT]", false, false, true),
+            ("Primary _\r\n .Target", false, false, true),
+            ("Foreign.Target", false, false, false),
+            ("Primary.Target.Extra", false, false, false),
+            ("Primary.Target", true, false, false),
+            ("Primary.Target", false, true, false),
+        ] {
+            let fixture = durable_test_tempdir();
+            let storage = durable_test_tempdir();
+            let paths =
+                RuntimePaths::new(storage.path().join("state"), storage.path().join("runtime"))
+                    .unwrap();
+            paths.prepare_owner().unwrap();
+            fs::write(
+                fixture.path().join("Target.cls"),
+                "VERSION 1.0 CLASS\nAttribute VB_Name = \"Target\"\nPublic Sub Touch()\nEnd Sub\n",
+            )
+            .unwrap();
+            fs::write(
+                fixture.path().join("Shadow.bas"),
+                "Attribute VB_Name = \"Primary\"\n",
+            )
+            .unwrap();
+            let shadow = if local_shadow {
+                "Private Type Primary\nValue As Long\nEnd Type\n"
+            } else {
+                ""
+            };
+            let source = format!(
+                "Attribute VB_Name = \"Consumer\"\nPrivate Type Target\nValue As Long\nEnd Type\n{shadow}Private automatic As New {path}\nPublic Function Make() As {path}\nEnd Function\nPublic Sub Run(ByVal item As {path}, ByVal items() As {path})\nitem.Touch\nautomatic.Touch\nMake().Touch\nConsumer.Make().Touch\nMake(1).Touch\nConsumer.Make(1).Touch\nitems(0).Touch\nIf TypeOf item Is {path} Then\nEnd If\nEnd Sub\n"
+            );
+            fs::write(fixture.path().join("Consumer.bas"), &source).unwrap();
+            for included in [true, false, true] {
+                let target = if included {
+                    "Class=Target; Target.cls\n"
+                } else {
+                    ""
+                };
+                let shadow = if module_shadow {
+                    "Module=Primary; Shadow.bas\n"
+                } else {
+                    ""
+                };
+                fs::write(fixture.path().join("project.vbp"), format!("Type=OleDll\nName=\"Primary\"\n{target}{shadow}Module=Consumer; Consumer.bas\n")).unwrap();
+                let mut service =
+                    FirstSliceService::new_durable(2, paths.state_dir(), &deadline()).unwrap();
+                let receipt = service
+                    .index_repository(fixture.path(), &deadline())
+                    .unwrap();
+                assert_eq!(
+                    receipt,
+                    service
+                        .index_repository(fixture.path(), &deadline())
+                        .unwrap()
+                );
+                drop(service);
+                let service =
+                    FirstSliceService::new_durable(2, paths.state_dir(), &deadline()).unwrap();
+                let snapshot = service
+                    .loaded_generation_snapshot(receipt.generation)
+                    .unwrap();
+                let document = snapshot.document();
+                let consumer = document
+                    .files
+                    .iter()
+                    .find(|file| file.path == "Consumer.bas")
+                    .unwrap();
+                let class = document
+                    .entities
+                    .iter()
+                    .find(|entity| {
+                        entity.kind == EntityKind::Class && entity.canonical_name == "Target"
+                    })
+                    .unwrap();
+                let method = document
+                    .entities
+                    .iter()
+                    .find(|entity| {
+                        entity.canonical_name == "Touch"
+                            && entity.container == Some(ContainerRef::Entity(class.id))
+                    })
+                    .unwrap();
+                for (ordinal, (start, _)) in source.match_indices(path).enumerate() {
+                    let site = document
+                        .occurrences
+                        .iter()
+                        .find(|site| {
+                            site.file == consumer.id
+                                && site.role == OccurrenceRole::TypeUse
+                                && site.source.span().start_byte() == u64::try_from(start).unwrap()
+                        })
+                        .unwrap();
+                    let expected = admitted && included && ordinal != 3;
+                    assert_eq!(
+                        site.target == OccurrenceTarget::Resolved { symbol: class.id },
+                        expected,
+                        "{path} local={local_shadow} module={module_shadow} included={included} ordinal={ordinal}"
+                    );
+                    if !expected {
+                        assert!(matches!(site.target, OccurrenceTarget::Unresolved { .. }));
+                    }
+                    assert_eq!(
+                        document
+                            .skipped_regions
+                            .iter()
+                            .any(|gap| gap.source == site.source
+                                && gap.detail == "vba-type-target-unavailable"),
+                        !expected
+                    );
+                    if expected {
+                        assert_eq!(
+                            site.source.span().end_byte(),
+                            u64::try_from(start + path.len()).unwrap()
+                        );
+                        let relationships = service
+                            .symbol_relationships(
+                                receipt.generation,
+                                BTreeSet::from([class.id]),
+                                vec![RelationFamily::Types],
+                                Some(RelationDirection::Inbound),
+                                0,
+                                25,
+                                0,
+                                &deadline(),
+                            )
+                            .unwrap();
+                        assert!(
+                            relationships
+                                .data
+                                .groups
+                                .iter()
+                                .flat_map(|group| &group.items)
+                                .any(|edge| edge.source_refs.contains(&site.source))
+                        );
+                        let provenance = document
+                            .provenance
+                            .iter()
+                            .find(|record| record.id == site.provenance)
+                            .unwrap();
+                        assert_eq!(
+                            provenance.rule.as_deref(),
+                            Some("classic-project-type-v1.indexed_snapshot")
+                        );
+                        assert!(
+                            provenance
+                                .evidence_sources
+                                .contains(class.evidence.source.as_ref().unwrap())
+                        );
+                        let read = service
+                            .source_read_with_options_and_budget(
+                                receipt.generation,
+                                vec![site.source.clone()],
+                                SourceReadOptions::new()
+                                    .with_context_lines_before(0)
+                                    .with_context_lines_after(0)
+                                    .with_encoding(SourceEncoding::Bytes),
+                                FirstSliceBudget::default(),
+                                &deadline(),
+                            )
+                            .unwrap();
+                        assert_eq!(site.source.generation(), receipt.generation);
+                        assert_eq!(read.data.chunks[0].bytes, path.as_bytes());
+                    }
+                }
+                let members: Vec<_> = document
+                    .occurrences
+                    .iter()
+                    .filter(|site| {
+                        site.file == consumer.id
+                            && site.syntax_kind.ends_with("_member.reference")
+                            && source
+                                .get(
+                                    usize::try_from(site.source.span().start_byte()).unwrap()
+                                        ..usize::try_from(site.source.span().end_byte()).unwrap(),
+                                )
+                                .is_some_and(|text| text.ends_with(".Touch"))
+                    })
+                    .collect();
+                assert_eq!(members.len(), 7, "{path}");
+                for member in members {
+                    let start = usize::try_from(member.source.span().start_byte()).unwrap();
+                    let end = usize::try_from(member.source.span().end_byte()).unwrap();
+                    let text = source.get(start..end).unwrap();
+                    let expected = admitted
+                        && included
+                        && !text.contains("(1)")
+                        && !text.starts_with("items(");
+                    assert_eq!(
+                        member.target == OccurrenceTarget::Resolved { symbol: method.id },
+                        expected,
+                        "{path}: {text}"
+                    );
+                    if !expected {
+                        assert!(matches!(member.target, OccurrenceTarget::Unresolved { .. }));
+                    } else if text.contains("Make()") {
+                        let receiver = text.strip_suffix(".Touch").unwrap();
+                        let provenance = document
+                            .provenance
+                            .iter()
+                            .find(|record| record.id == member.provenance)
+                            .unwrap();
+                        assert!(provenance.evidence_sources.iter().any(
+                            |source| source.span().file() == consumer.id
+                                && source.span().start_byte() == u64::try_from(start).unwrap()
+                                && source.span().end_byte()
+                                    == u64::try_from(start + receiver.len()).unwrap()
+                        ));
                     }
                 }
             }

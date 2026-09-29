@@ -5,6 +5,8 @@
 (source_file) @reference
 (source_file) @signature
 (implements_statement name: (_) @reference)
+(as_type_clause (type_expression (dotted_type_expression) @reference))
+(type_of_expression type: (type_expression (dotted_type_expression) @reference))
 (preprocessor_if) @scope
 (preprocessor_block) @scope
 (type_preprocessor_if) @scope

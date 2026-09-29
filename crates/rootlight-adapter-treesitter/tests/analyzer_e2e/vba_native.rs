@@ -1434,6 +1434,65 @@ fn vba_conditional_types_and_fields_require_implied_unique_declarations() {
 }
 
 #[test]
+fn vba_qualified_types_retain_one_path_without_local_name_fallback() {
+    for (declaration, syntax) in [
+        (
+            "Sub Run(ByVal item As Primary.Target)\nEnd Sub\n",
+            "vba.direct_type_identifier.reference",
+        ),
+        (
+            "Private item As New Primary.Target\n",
+            "vba.automatic_type_identifier.reference",
+        ),
+        (
+            "Function Make() As Primary.Target\nEnd Function\n",
+            "vba.type_identifier.reference",
+        ),
+        (
+            "Sub Run(ByVal item As Object)\nIf TypeOf item Is Primary.Target Then\nEnd If\nEnd Sub\n",
+            "vba.tested_type_identifier.reference",
+        ),
+        (
+            "Sub Run(ByVal item() As Primary.Target)\nEnd Sub\n",
+            "vba.type_identifier.reference",
+        ),
+    ] {
+        for path in [
+            "Primary.Target",
+            "[Primary].[Target]",
+            "Primary _\r\n .Target",
+            "Foreign.Target",
+        ] {
+            let source = format!(
+                "Attribute VB_Name = \"Consumer\"\nPrivate Type Target\nValue As Long\nEnd Type\n{}",
+                declaration.replace("Primary.Target", path)
+            );
+            let result = output(&source);
+            let start = u64::try_from(source.find(path).unwrap()).unwrap();
+            let end = start + u64::try_from(path.len()).unwrap();
+            let sites: Vec<_> = result
+                .document()
+                .occurrences
+                .iter()
+                .filter(|site| {
+                    site.source.span().start_byte() >= start && site.source.span().end_byte() <= end
+                })
+                .collect();
+            assert_eq!(sites.len(), 1, "{source}: {sites:?}");
+            let site = sites[0];
+            assert_eq!(site.source.span().start_byte(), start);
+            assert_eq!(site.source.span().end_byte(), end);
+            assert_eq!(site.syntax_kind, syntax, "{source}");
+            assert_eq!(site.role, OccurrenceRole::TypeUse);
+            assert!(matches!(site.target, OccurrenceTarget::Unresolved { .. }));
+            assert!(result.document().skipped_regions.iter().any(
+                |gap| gap.source == site.source && gap.detail == "vba-type-target-unavailable"
+            ));
+        }
+    }
+}
+
+#[test]
 fn vba_implemented_types_retain_whole_names_without_runtime_bindings() {
     for name in ["Contract", "Primary.Contract", "[Primary].[Contract]"] {
         let source = format!(

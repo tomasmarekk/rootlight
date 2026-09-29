@@ -406,6 +406,10 @@ mod tests {
     fn scalar_return_ranges_exclude_arrays_and_body_type_mentions() {
         for (source, expected) in [
             (
+                "Public Function Make() As Primary.Target\nEnd Function",
+                Some("Primary.Target"),
+            ),
+            (
                 "Public Function Build(value As Long) As Product\nEnd Function",
                 Some("Product"),
             ),

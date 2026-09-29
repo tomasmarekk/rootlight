@@ -269,6 +269,7 @@ fn property_accessor_kind(
 
 struct ResolvedProject {
     name: String,
+    name_shadowed: bool,
     types: BTreeMap<String, Option<SymbolId>>,
     modules: BTreeMap<String, Option<SymbolId>>,
     default_instances: BTreeMap<SymbolId, SourceRef>,
@@ -676,6 +677,7 @@ impl<'a> ClassicIndex<'a> {
             let mut modules = BTreeMap::from([(project.name.clone(), None)]);
             let mut default_instances = BTreeMap::new();
             let mut value_names = BTreeSet::new();
+            let mut name_shadowed = false;
             work.consume_many(members.len())?;
             let member_files: Vec<_> = members
                 .iter()
@@ -685,6 +687,7 @@ impl<'a> ClassicIndex<'a> {
             for member in members {
                 cancellation.check()?;
                 work.consume_many(5)?;
+                name_shadowed |= member.name == project.name;
                 let Some(file) = member_file(&member) else {
                     complete = false;
                     break;
@@ -831,6 +834,7 @@ impl<'a> ClassicIndex<'a> {
                     // A private sibling module does not compete with an export,
                     // but duplicate types inside the exporting module do.
                     let name = entity.canonical_name.to_ascii_lowercase();
+                    name_shadowed |= name == project.name;
                     let target = (entity.visibility == EntityVisibility::Public
                         && entity.container == Some(ContainerRef::Entity(named[0].id))
                         && local_types.get(&(file.id, name.clone())) == Some(&true))
@@ -864,6 +868,7 @@ impl<'a> ClassicIndex<'a> {
             evidence.facts.dedup();
             projects.push(complete.then_some(ResolvedProject {
                 name: project.name,
+                name_shadowed,
                 types,
                 modules,
                 default_instances,
@@ -1150,7 +1155,7 @@ impl<'a> ClassicIndex<'a> {
             let Some(text) = bytes.get(start..end) else {
                 continue;
             };
-            let (name, qualified) = if implementation {
+            let (name, qualified) = if implementation || text.contains(&b'.') {
                 let Some(path) = rootlight_vba::procedure_pointer_path(text, &mut || {
                     cancellation.check()?;
                     work.consume()
@@ -1163,7 +1168,8 @@ impl<'a> ClassicIndex<'a> {
                 }
                 let qualified = path.components() == 2;
                 if qualified
-                    && (!path.first().eq_ignore_ascii_case(project.name.as_bytes())
+                    && (project.name_shadowed
+                        || !path.first().eq_ignore_ascii_case(project.name.as_bytes())
                         || local_types.contains_key(&(occurrence.file, project.name.clone())))
                 {
                     continue;
@@ -1221,6 +1227,7 @@ impl<'a> ClassicIndex<'a> {
         // Enum values do not establish an instance member environment.
         let mut value_types = BTreeMap::new();
         let mut receivers = BTreeMap::new();
+        let mut native_results = BTreeMap::new();
         let mut members = BTreeMap::new();
         let mut property_accessors = BTreeMap::new();
         let mut field_definitions = BTreeMap::new();
@@ -1411,6 +1418,35 @@ impl<'a> ClassicIndex<'a> {
                     .entry(occurrence.source.span())
                     .and_modify(|prior| *prior = None)
                     .or_insert(Some(symbol));
+            }
+            if occurrence.syntax_kind == "vba.application.reference"
+                && let OccurrenceTarget::Resolved { symbol } = occurrence.target
+                && let Some(target) = entities.get(&symbol).copied()
+                && matches!(
+                    target.kind,
+                    EntityKind::Function | EntityKind::Method | EntityKind::Property
+                )
+                && target
+                    .evidence
+                    .source
+                    .as_ref()
+                    .is_some_and(|source| source.span().file() == occurrence.file)
+                && matches!(
+                    procedure_kind(target, &sources, cancellation, work)?,
+                    Some(
+                        rootlight_vba::ProcedureKind::Function
+                            | rootlight_vba::ProcedureKind::PropertyGet
+                    )
+                )
+            {
+                // Native analysis already checked this entire same-file call.
+                // Its result may acquire a project-owned type in this pass;
+                // array applications cannot supply this callable return proof.
+                receivers
+                    .entry(occurrence.source.span())
+                    .and_modify(|prior| *prior = None)
+                    .or_insert(Some(symbol));
+                native_results.insert(occurrence.source.span(), occurrence.source.clone());
             }
         }
         let project_classes = projects
@@ -1870,6 +1906,7 @@ impl<'a> ClassicIndex<'a> {
                 continue;
             }
             let mut evidence = BTreeSet::new();
+            evidence.extend(native_results.get(&receiver_span).cloned());
             if let Some(id) = resolved_members.get(&receiver_span).and_then(|id| *id) {
                 if let Some(sources) = result.receiver_sources.get(&id) {
                     for source in sources.iter() {

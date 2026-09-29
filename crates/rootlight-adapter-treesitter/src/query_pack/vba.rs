@@ -150,17 +150,16 @@ pub(super) fn retain_capture(node: Node<'_>, role: StructuralRole, source: &[u8]
     let Some(parent) = node.parent() else {
         return true;
     };
-    let ty = if parent.kind() == "dotted_type_expression" {
-        parent.parent()
-    } else {
-        Some(parent)
-    };
-    if ty.is_some_and(|ty| {
-        ty.kind() == "type_expression"
-            && ty
-                .parent()
-                .is_some_and(|owner| owner.kind() == "implements_statement")
-    }) {
+    if parent.kind() == "dotted_type_expression" {
+        // A qualified type has one lookup context; its individual names cannot
+        // independently bind to runtime values or unrelated module-local types.
+        return false;
+    }
+    if parent.kind() == "type_expression"
+        && parent
+            .parent()
+            .is_some_and(|owner| owner.kind() == "implements_statement")
+    {
         // The complete type path owns the implementation reference. Retaining
         // its identifier pieces would fabricate independent runtime reads.
         return false;
@@ -366,6 +365,17 @@ pub(super) fn reference_syntax(
         .parent()
         .filter(|node| node.kind() == "type_expression")
     {
+        if child.kind() == "dotted_type_expression" {
+            let tail = source.get(child.end_byte()..).unwrap_or_default();
+            let trivia = rootlight_vba::logical_whitespace_len(tail, &mut || {
+                cancellation.check().map_err(AdapterError::from)
+            })?;
+            // Native recovery can split another qualifier into a new statement.
+            // The retained prefix must not prove the type of the whole name.
+            if child.has_error() || matches!(tail.get(trivia), Some(b'.' | b'!')) {
+                return Ok("vba.unsupported_type_identifier");
+            }
+        }
         if ty.parent().is_some_and(|parent| {
             parent.kind() == "type_of_expression" && parent.child_by_field_name("type") == Some(ty)
         }) {
