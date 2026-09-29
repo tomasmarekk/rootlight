@@ -378,6 +378,41 @@ fn standard_text_calls_preserve_omitted_arguments_and_eager_branch_dependencies(
     );
 }
 
+#[test]
+fn standard_search_calls_use_declared_names_and_preserve_runtime_uncertainty() {
+    let valid = [
+        "VBA.InStr(\"sample\", \"amp\")",
+        "VBA.InStr(2, \"sample\", \"amp\")",
+        "VBA.InStr(1, \"sample\", \"AMP\", 1)",
+        "VBA.InStrB(\"sample\", \"amp\")",
+        "VBA.InStrB(2, \"sample\", \"amp\")",
+        "VBA.InStrB(1, \"sample\", \"AMP\", 1)",
+        "VBA.InStr(Arg2:=\"amp\", Arg1:=\"sample\")",
+        "VBA.InStrB(Arg3:=\"amp\", Arg2:=\"sample\", Arg1:=1, Compare:=0)",
+        "[vBa].[iNsTr](1, \"sample\", \"amp\")",
+        "Call VBA.InStr(\"sample\", \"amp\")",
+        "VBA.InStr(1, VBA.InStrB(\"sample\", \"amp\"), \"1\")",
+        // Optional declaration arguments may still fail at runtime. A Calls
+        // edge proves the dependency, not successful evaluation or coercion.
+        "VBA.InStr()",
+        "VBA.InStrB()",
+        "VBA.InStr(, \"sample\", \"amp\")",
+        "VBA.InStrB(Arg3:=\"amp\")",
+        "VBA.InStr(Null, \"sample\", \"amp\")",
+    ];
+    let invalid = [
+        "VBA.InStr(1, 2, 3, 4, 5)",
+        "VBA.InStrB(1, 2, 3, 4, 5)",
+        "VBA.InStr(Start:=1, String1:=\"sample\", String2:=\"amp\")",
+        "VBA.InStrB(Unknown:=1)",
+        "VBA.InStr(Arg1:=1, arg1:=2)",
+        "VBA.InStrB(Arg1:=1, 2)",
+        "VBA.InStr(1,)",
+        "VBA.InStrB(ByVal 1, 2)",
+    ];
+    assert_standard_function_calls(&valid, &invalid, &["VBA.InStrB(\"sample\", \"amp\")"], 2);
+}
+
 fn assert_standard_function_calls(
     valid: &[&str],
     invalid: &[&str],

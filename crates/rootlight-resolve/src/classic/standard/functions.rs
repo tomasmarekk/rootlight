@@ -8,12 +8,36 @@ pub(super) struct Function {
     pub(super) parameters: &'static [(&'static str, bool)],
 }
 
-// MS-VBAL 6.1.2.11.1.22 and 6.1.2.11.1.25 specify these parameter contracts.
+// MS-VBAL 6.1.2.11.1.22 and 6.1.2.11.1.25 specify the Len/Mid contracts.
 // https://learn.microsoft.com/en-us/openspecs/microsoft_general_purpose_programming_languages/ms-vbal/a4d9985a-e2cb-489c-a20a-5da09d77a59e
 // https://learn.microsoft.com/en-us/openspecs/microsoft_general_purpose_programming_languages/ms-vbal/4a65ee4e-b6b9-45d3-a3f6-576fed4bb227
 // Dollar variants have the same call syntax but return String rather than Variant.
 // https://learn.microsoft.com/en-us/office/vba/language/concepts/getting-started/returning-strings-from-functions
 pub(super) const FUNCTIONS: &[Function] = &[
+    // MS-VBAL declares four optional parameters, not two overloads named
+    // Start/String1/String2. Presence-dependent meanings and runtime errors do
+    // not change the static declaration or prove a successful search.
+    // https://learn.microsoft.com/en-us/openspecs/microsoft_general_purpose_programming_languages/ms-vbal/33e81067-4b43-4c45-a501-0acf1616f2f9
+    Function {
+        name: "InStr",
+        signature: "Function InStr(Optional Arg1 As Variant, Optional Arg2 As Variant, Optional Arg3 As Variant, Optional Compare As VbCompareMethod = vbBinaryCompare) As Variant",
+        parameters: &[
+            ("arg1", true),
+            ("arg2", true),
+            ("arg3", true),
+            ("compare", true),
+        ],
+    },
+    Function {
+        name: "InStrB",
+        signature: "Function InStrB(Optional Arg1 As Variant, Optional Arg2 As Variant, Optional Arg3 As Variant, Optional Compare As VbCompareMethod = vbBinaryCompare) As Variant",
+        parameters: &[
+            ("arg1", true),
+            ("arg2", true),
+            ("arg3", true),
+            ("compare", true),
+        ],
+    },
     Function {
         name: "Len",
         signature: "Function Len(Expression As Variant) As Variant",
