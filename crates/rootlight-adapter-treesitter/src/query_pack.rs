@@ -2457,4 +2457,40 @@ mod tests {
                 > 1
         );
     }
+
+    #[test]
+    fn vba_compilation_headers_survive_optional_capture_pressure() {
+        let source = b"#If First Then\nSub One()\nEnd Sub\n#ElseIf Second Then\n#Else\nSub Two()\nEnd Sub\n#End If\n";
+        let mut parser = tree_sitter::Parser::new();
+        parser
+            .set_language(&language_for(GrammarFamily::Vba))
+            .unwrap();
+        let tree = parser.parse(source, None).unwrap();
+        let registry = QueryPackRegistry::audited().unwrap();
+        let extraction = registry
+            .get(GrammarFamily::Vba)
+            .unwrap()
+            .extract(
+                GrammarFamily::Vba,
+                &tree,
+                source,
+                10_000,
+                1,
+                &Cancellation::new(),
+            )
+            .unwrap();
+        for syntax in [
+            "vba.compilation_if",
+            "vba.compilation_elseif",
+            "vba.compilation_else",
+        ] {
+            let headers: Vec<_> = extraction
+                .candidates
+                .iter()
+                .filter(|candidate| candidate.syntax == syntax)
+                .collect();
+            assert!(!headers.is_empty(), "{syntax}");
+            assert!(headers.iter().any(|header| header.required), "{syntax}");
+        }
+    }
 }

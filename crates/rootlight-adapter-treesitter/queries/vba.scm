@@ -8,6 +8,13 @@
 (preprocessor_block) @scope
 (type_preprocessor_if) @scope
 (type_preprocessor_block) @scope
+; Complete branch headers are identity evidence, not optional runtime references.
+(preprocessor_if condition: (_) @signature)
+(preprocessor_elseif condition: (_) @signature)
+(preprocessor_else) @signature
+(type_preprocessor_if condition: (_) @signature)
+(type_preprocessor_elseif condition: (_) @signature)
+(type_preprocessor_else) @signature
 (sub_declaration name: (_) @definition) @declaration @scope @signature
 (function_declaration name: (_) @definition) @declaration @scope @signature
 (conditional_sub_declaration name: (_) @definition) @declaration @scope @signature

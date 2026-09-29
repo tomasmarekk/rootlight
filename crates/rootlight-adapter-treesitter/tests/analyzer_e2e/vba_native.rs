@@ -5482,7 +5482,7 @@ fn vba_conditional_calls_preserve_ambiguity_and_argument_barriers() {
             false,
         ),
         (
-            "#If Enabled Then\nSub Visit()\nEnd Sub\n#End If\n#If Enabled Then\nSub Run()\nCall VISIT()\nEnd Sub\n#End If\n",
+            "#If Enabled Then\nSub Visit()\nEnd Sub\n#End If\n#If Other Then\nSub Run()\nCall VISIT()\nEnd Sub\n#End If\n",
             false,
         ),
     ] {
@@ -5553,6 +5553,182 @@ fn vba_conditional_functions_and_getters_bind_without_selecting_a_platform() {
                 .any(|gap| gap.detail == "vba-conditional-compilation-evaluation-unavailable")
         );
     }
+}
+
+#[test]
+fn vba_repeated_conditions_require_matching_branch_and_constant_environment() {
+    for (definition_guard, reference_guard, between, resolved) in [
+        ("#If Enabled Then\n", "#If Enabled Then\n", "", true),
+        (
+            "#If Enabled Or Not Legacy Then\n",
+            "#If eNaBlEd Or Not [Legacy] Then\n",
+            "",
+            true,
+        ),
+        (
+            "#If Enabled Or Not Legacy Then\n",
+            "#If Enabled And Not Legacy Then\n",
+            "",
+            false,
+        ),
+        (
+            "#If Enabled Then\n#Else\n",
+            "#If Enabled Then\n#Else\n",
+            "",
+            true,
+        ),
+        ("#If Enabled Then\n", "#If Enabled Then\n#Else\n", "", false),
+        (
+            "#If First Then\n#ElseIf Second Then\n",
+            "#If First Then\n#ElseIf Second Then\n",
+            "",
+            true,
+        ),
+        (
+            "#If First Then\n#ElseIf Second Then\n",
+            "#If Other Then\n#ElseIf Second Then\n",
+            "",
+            false,
+        ),
+        (
+            "#If First Then\n#ElseIf Second Then\n#Else\n",
+            "#If First Then\n#ElseIf Second Then\n#Else\n",
+            "",
+            true,
+        ),
+        (
+            "#If First Then\n#ElseIf Second Then\n#Else\n",
+            "#If First Then\n#Else\n",
+            "",
+            false,
+        ),
+        (
+            "#If Enabled Then\n",
+            "#If Enabled Then\n",
+            "#Const Enabled = True\n",
+            false,
+        ),
+        (
+            "#If Enabled Then\n",
+            "#If Enabled Then\n",
+            "#Const Other = False\n",
+            false,
+        ),
+        (
+            "#If Enabled Then\n",
+            "#If Enabled Then\n",
+            "' #Const marker remains conservative\n",
+            false,
+        ),
+        (
+            "#If Version >= 7 Then\n",
+            "#If Version >= 7 Then\n",
+            "",
+            false,
+        ),
+    ] {
+        let source = format!(
+            "{definition_guard}Sub Visit(ByVal item As Long)\nEnd Sub\n#End If\n{between}{reference_guard}Sub Run()\nCall VISIT(item:=1)\nEnd Sub\n#End If\n"
+        );
+        let result = output(&source);
+        let document = result.document();
+        let target = document
+            .entities
+            .iter()
+            .find(|entity| entity.canonical_name == "Visit")
+            .unwrap();
+        for (kind, marker) in [
+            ("vba.invoked_identifier.reference", "VISIT("),
+            ("vba.application.reference", "Call VISIT("),
+        ] {
+            let start = u64::try_from(source.find(marker).unwrap()).unwrap();
+            let site = document
+                .occurrences
+                .iter()
+                .find(|site| site.syntax_kind == kind && site.source.span().start_byte() == start)
+                .unwrap();
+            assert_eq!(
+                site.target == OccurrenceTarget::Resolved { symbol: target.id },
+                resolved,
+                "{kind}: {source}"
+            );
+            assert_eq!(
+                document
+                    .skipped_regions
+                    .iter()
+                    .any(|gap| gap.source.span() == site.source.span()
+                        && gap.detail == "vba-call-or-index-target-unavailable"),
+                !resolved,
+                "{kind}: {source}"
+            );
+        }
+        assert!(
+            document
+                .skipped_regions
+                .iter()
+                .any(|gap| gap.detail == "vba-conditional-compilation-evaluation-unavailable")
+        );
+    }
+}
+
+#[test]
+fn vba_repeated_conditions_keep_duplicate_declarations_ambiguous() {
+    for prefix in ["", "#Const Enabled = True\n#Const ENABLED = False\n"] {
+        let source = format!(
+            "{prefix}#If Enabled Then\nSub Visit()\nEnd Sub\n#End If\n#If Enabled Then\nSub Visit()\nEnd Sub\nSub Run()\nCall VISIT()\nEnd Sub\n#End If\n"
+        );
+        let result = output(&source);
+        let start = u64::try_from(source.find("VISIT()").unwrap()).unwrap();
+        let site = result
+            .document()
+            .occurrences
+            .iter()
+            .find(|site| {
+                site.syntax_kind == "vba.invoked_identifier.reference"
+                    && site.source.span().start_byte() == start
+            })
+            .unwrap();
+        assert!(matches!(site.target, OccurrenceTarget::Unresolved { .. }));
+    }
+}
+
+#[test]
+fn vba_repeated_conditions_bind_labels_without_activating_the_branch() {
+    let source = "Sub Run()\n#If Enabled Then\nFinish:\n#End If\n#If ENABLED Then\nGoTo Finish\n#End If\nEnd Sub\n";
+    let result = output(source);
+    let target = result
+        .document()
+        .entities
+        .iter()
+        .find(|entity| entity.kind == EntityKind::StatementLabel)
+        .unwrap();
+    let site = result
+        .document()
+        .occurrences
+        .iter()
+        .find(|site| site.syntax_kind == "vba.statement_label.reference")
+        .unwrap();
+    assert_eq!(
+        site.target,
+        OccurrenceTarget::Resolved { symbol: target.id }
+    );
+}
+
+#[test]
+fn vba_repeated_conditions_do_not_use_recovered_directive_groups() {
+    let source = "#If Enabled Then\nSub Visit()\nEnd Sub\nDim broken As\n#End If\n#If Enabled Then\nSub Run()\nCall VISIT()\nEnd Sub\n#End If\n";
+    let result = output(source);
+    let start = u64::try_from(source.find("VISIT()").unwrap()).unwrap();
+    let site = result
+        .document()
+        .occurrences
+        .iter()
+        .find(|site| {
+            site.syntax_kind == "vba.invoked_identifier.reference"
+                && site.source.span().start_byte() == start
+        })
+        .unwrap();
+    assert!(matches!(site.target, OccurrenceTarget::Unresolved { .. }));
 }
 
 #[test]
@@ -5930,7 +6106,7 @@ fn vba_statement_labels_resolve_only_within_compatible_compile_branches() {
 fn vba_statement_labels_do_not_guess_independent_or_nested_compile_conditions() {
     for body in [
         "#If Enabled Then\nFinish:\n#Else\nGoTo Finish\n#End If\n",
-        "#If Enabled Then\nFinish:\n#End If\n#If Enabled Then\nGoTo Finish\n#End If\n",
+        "#If Enabled Then\nFinish:\n#End If\n#If Other Then\nGoTo Finish\n#End If\n",
         "Finish:\n#If Enabled Then\nFinish:\nGoTo Finish\n#End If\n",
         "#If Enabled Then\nFinish:\n#If Trace Then\nFinish:\n#End If\nGoTo Finish\n#End If\n",
         "#If Enabled Then\nFinish:\n#If Trace Then\nFinish:\nGoTo Finish\n#End If\n#End If\n",

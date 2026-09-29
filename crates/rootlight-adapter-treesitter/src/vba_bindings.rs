@@ -114,6 +114,8 @@ pub(super) struct VbaBindings<'a> {
     statement_labels: BTreeMap<u64, BTreeMap<String, Vec<StatementLabel>>>,
     foreign_label_scopes: BTreeSet<u64>,
     conditional_declarations: BTreeMap<u64, BTreeMap<String, Vec<ConditionalDeclaration>>>,
+    compilation_branches: BTreeMap<u64, (u64, usize)>,
+    compilation_groups: BTreeMap<u64, Vec<Option<usize>>>,
     // A shared None also represents conditional shadowing, so it cannot tell
     // whether a same-named unconditional declaration makes a branch ambiguous.
     unconditional_names: BTreeMap<u64, BTreeSet<String>>,
@@ -161,6 +163,8 @@ impl<'a> VbaBindings<'a> {
             statement_labels: BTreeMap::new(),
             foreign_label_scopes: BTreeSet::new(),
             conditional_declarations: BTreeMap::new(),
+            compilation_branches: BTreeMap::new(),
+            compilation_groups: BTreeMap::new(),
             unconditional_names: BTreeMap::new(),
             foreign_scopes: BTreeSet::new(),
             constant_symbols: BTreeSet::new(),
@@ -598,6 +602,7 @@ impl<'a> VbaBindings<'a> {
             cancellation.check()?;
             result.insert(owner, name.as_deref(), symbol);
         }
+        result.collect_compilation_predicates(facts, cancellation)?;
         result.collect_declared_types(facts, source, symbols, cancellation)?;
         for parameters in result.parameters.values_mut() {
             parameters.sort_unstable_by_key(|(declaration, _, _)| declaration.span().start_byte());
@@ -2331,11 +2336,7 @@ impl<'a> VbaBindings<'a> {
             cancellation.check()?;
             let conditions =
                 self.branch_conditions(self.fact(label.definition)?.parent(), owner, cancellation)?;
-            if conditions.iter().any(|(group, branch)| {
-                reference_conditions
-                    .get(group)
-                    .is_some_and(|other| other != branch)
-            }) {
+            if self.conditions_exclude(&conditions, &reference_conditions, cancellation)? {
                 continue;
             }
             // MS-VBAL 3.4 removes excluded branches before name resolution.
@@ -2343,9 +2344,7 @@ impl<'a> VbaBindings<'a> {
             // a possible coexisting duplicate is ambiguous, not a shadowing label.
             if matched.is_some()
                 || label.symbol.is_none()
-                || conditions
-                    .iter()
-                    .any(|(group, branch)| reference_conditions.get(group) != Some(branch))
+                || !self.conditions_imply(&reference_conditions, &conditions, cancellation)?
             {
                 return Ok(None);
             }
@@ -2412,11 +2411,11 @@ impl<'a> VbaBindings<'a> {
         let mut matched = None;
         for declaration in declarations {
             cancellation.check()?;
-            if declaration.conditions.iter().any(|(group, branch)| {
-                reference_conditions
-                    .get(group)
-                    .is_some_and(|other| other != branch)
-            }) {
+            if self.conditions_exclude(
+                &declaration.conditions,
+                &reference_conditions,
+                cancellation,
+            )? {
                 continue;
             }
             // A branch does not create a lexical namespace. Every declaration
@@ -2428,16 +2427,242 @@ impl<'a> VbaBindings<'a> {
                     .unconditional_names
                     .get(&owner)
                     .is_some_and(|names| names.contains(name))
-                || declaration
-                    .conditions
-                    .iter()
-                    .any(|(group, branch)| reference_conditions.get(group) != Some(branch))
+                || !self.conditions_imply(
+                    &reference_conditions,
+                    &declaration.conditions,
+                    cancellation,
+                )?
             {
                 return Ok(ConditionalBinding::Ambiguous);
             }
             matched = Some(&declaration.binding);
         }
         Ok(matched.map_or(ConditionalBinding::Absent, ConditionalBinding::Value))
+    }
+
+    fn collect_compilation_predicates(
+        &mut self,
+        facts: &[SyntaxFact],
+        cancellation: &Cancellation,
+    ) -> Result<(), AdapterError> {
+        if !self.foreign_compilation_scopes.is_empty()
+            || self
+                .compilation_constants
+                .values()
+                .any(|names| names.values().any(Option::is_none))
+        {
+            return Ok(());
+        }
+        // Even a marker in an unsupported directive or recovered syntax stops
+        // equivalence across compiler-constant changes. False positives in
+        // comments/strings are conservative barriers, never additional proofs.
+        let mut constants = Vec::new();
+        for (start, byte) in self.source.iter().enumerate() {
+            if start % 4096 == 0 {
+                cancellation.check()?;
+            }
+            if *byte != b'#' {
+                continue;
+            }
+            let tail = self.source.get(start + 1..).ok_or_else(invalid_capture)?;
+            let whitespace = rootlight_vba::logical_whitespace_len(tail, &mut || {
+                cancellation.check().map_err(AdapterError::from)
+            })?;
+            if tail
+                .get(whitespace..whitespace.saturating_add(5))
+                .is_some_and(|word| word.eq_ignore_ascii_case(b"Const"))
+            {
+                constants.push(u64::try_from(start).map_err(|_| invalid_capture())?);
+            }
+        }
+        let mut headers = BTreeMap::<u64, Vec<&SyntaxFact>>::new();
+        let mut branches = Vec::new();
+        for fact in facts {
+            cancellation.check()?;
+            match fact.syntax_kind().as_str() {
+                "vba.compilation_if.signature"
+                | "vba.compilation_elseif.signature"
+                | "vba.compilation_else.signature"
+                | "vba.compilation_unknown.signature" => {
+                    if let Some(owner) = self.preprocessor_scope(fact.parent(), cancellation)? {
+                        headers.entry(owner).or_default().push(fact);
+                    }
+                }
+                "vba.preprocessor_branch.scope" => branches.push(fact),
+                _ => {}
+            }
+        }
+        for group in headers.values_mut() {
+            group.sort_unstable_by_key(|fact| fact.span().start_byte());
+        }
+        let mut interned = BTreeMap::<(usize, Vec<u8>), usize>::new();
+        let mut predicates = BTreeMap::<u64, Option<usize>>::new();
+        for header in headers.values().flatten() {
+            cancellation.check()?;
+            if matches!(
+                header.syntax_kind().as_str(),
+                "vba.compilation_else.signature" | "vba.compilation_unknown.signature"
+            ) {
+                continue;
+            }
+            let start =
+                usize::try_from(header.span().start_byte()).map_err(|_| invalid_capture())?;
+            let end = usize::try_from(header.span().end_byte()).map_err(|_| invalid_capture())?;
+            let key = rootlight_vba::compilation_condition_key(
+                self.source.get(start..end).ok_or_else(invalid_capture)?,
+                self.maximum_name_bytes,
+                &mut || cancellation.check().map_err(AdapterError::from),
+            )?;
+            let predicate = key.map(|key| {
+                let epoch =
+                    constants.partition_point(|offset| *offset < header.span().start_byte());
+                let next = interned.len();
+                *interned.entry((epoch, key)).or_insert(next)
+            });
+            predicates.insert(header.local_id(), predicate);
+        }
+        let mut valid_prefixes = BTreeMap::new();
+        for (owner, group) in &headers {
+            let mut conditions = Vec::new();
+            let mut first_invalid = group.len();
+            let mut saw_else = false;
+            for (position, header) in group.iter().enumerate() {
+                cancellation.check()?;
+                let kind = header.syntax_kind().as_str();
+                let predicate = predicates.get(&header.local_id()).copied().flatten();
+                if saw_else
+                    || (position == 0 && kind != "vba.compilation_if.signature")
+                    || (position != 0 && kind == "vba.compilation_if.signature")
+                    || (kind != "vba.compilation_else.signature" && predicate.is_none())
+                {
+                    first_invalid = first_invalid.min(position);
+                }
+                saw_else |= kind == "vba.compilation_else.signature";
+                conditions.push(predicate);
+            }
+            valid_prefixes.insert(*owner, first_invalid);
+            self.compilation_groups.insert(*owner, conditions);
+        }
+        for branch in branches {
+            cancellation.check()?;
+            let Some(owner) = self.preprocessor_scope(branch.parent(), cancellation)? else {
+                continue;
+            };
+            let Some(group) = headers.get(&owner) else {
+                continue;
+            };
+            let count = group
+                .partition_point(|header| header.span().start_byte() < branch.span().start_byte());
+            if count == 0
+                || !valid_prefixes
+                    .get(&owner)
+                    .is_some_and(|valid| count <= *valid)
+            {
+                continue;
+            }
+            // Share the preceding ElseIf conditions instead of copying every
+            // prefix: a long directive chain must consume linear storage.
+            self.compilation_branches
+                .insert(branch.local_id(), (owner, count));
+        }
+        Ok(())
+    }
+
+    fn preprocessor_scope(
+        &self,
+        mut parent: Option<u64>,
+        cancellation: &Cancellation,
+    ) -> Result<Option<u64>, AdapterError> {
+        for _ in 0..self.facts.len() {
+            cancellation.check()?;
+            let Some(id) = parent else { return Ok(None) };
+            let fact = self.fact(id)?;
+            if fact.syntax_kind().as_str() == "vba.preprocessor.scope" {
+                return Ok(Some(id));
+            }
+            parent = fact.parent();
+        }
+        Err(invalid_capture())
+    }
+
+    fn conditions_imply(
+        &self,
+        reference: &BTreeMap<u64, u64>,
+        declaration: &BTreeMap<u64, u64>,
+        cancellation: &Cancellation,
+    ) -> Result<bool, AdapterError> {
+        for (group, branch) in declaration {
+            cancellation.check()?;
+            if reference.get(group) == Some(branch) {
+                continue;
+            }
+            if !self.compilation_branches.contains_key(branch) {
+                return Ok(false);
+            }
+            for term in self.compilation_terms(*branch) {
+                cancellation.check()?;
+                if !self.contains_compilation_term(reference, term, cancellation)? {
+                    return Ok(false);
+                }
+            }
+        }
+        Ok(true)
+    }
+
+    fn conditions_exclude(
+        &self,
+        left: &BTreeMap<u64, u64>,
+        right: &BTreeMap<u64, u64>,
+        cancellation: &Cancellation,
+    ) -> Result<bool, AdapterError> {
+        for (group, branch) in left {
+            cancellation.check()?;
+            if right.get(group).is_some_and(|other| other != branch) {
+                return Ok(true);
+            }
+            for (predicate, value) in self.compilation_terms(*branch) {
+                cancellation.check()?;
+                if self.contains_compilation_term(right, (predicate, !value), cancellation)? {
+                    return Ok(true);
+                }
+            }
+        }
+        Ok(false)
+    }
+
+    fn compilation_terms(&self, branch: u64) -> impl Iterator<Item = (usize, bool)> + '_ {
+        self.compilation_branches
+            .get(&branch)
+            .into_iter()
+            .flat_map(|(group, count)| {
+                self.compilation_groups
+                    .get(group)
+                    .into_iter()
+                    .flatten()
+                    .take(*count)
+                    .enumerate()
+                    .filter_map(move |(position, predicate)| {
+                        predicate.map(|id| (id, position + 1 == *count))
+                    })
+            })
+    }
+
+    fn contains_compilation_term(
+        &self,
+        conditions: &BTreeMap<u64, u64>,
+        term: (usize, bool),
+        cancellation: &Cancellation,
+    ) -> Result<bool, AdapterError> {
+        for branch in conditions.values() {
+            cancellation.check()?;
+            for other in self.compilation_terms(*branch) {
+                cancellation.check()?;
+                if other == term {
+                    return Ok(true);
+                }
+            }
+        }
+        Ok(false)
     }
 
     fn scope(

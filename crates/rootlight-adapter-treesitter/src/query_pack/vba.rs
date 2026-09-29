@@ -166,6 +166,36 @@ pub(super) fn retain_capture(node: Node<'_>, role: StructuralRole, source: &[u8]
 }
 
 pub(super) fn syntax(node: Node<'_>, role: StructuralRole) -> Option<&'static str> {
+    if role == StructuralRole::Signature {
+        if matches!(node.kind(), "preprocessor_else" | "type_preprocessor_else") {
+            return Some(if node.has_error() {
+                "vba.compilation_unknown"
+            } else {
+                "vba.compilation_else"
+            });
+        }
+        if let Some(parent) = node.parent()
+            && parent.child_by_field_name("condition") == Some(node)
+        {
+            if matches!(
+                parent.kind(),
+                "preprocessor_if"
+                    | "type_preprocessor_if"
+                    | "preprocessor_elseif"
+                    | "type_preprocessor_elseif"
+            ) && parent.has_error()
+            {
+                return Some("vba.compilation_unknown");
+            }
+            match parent.kind() {
+                "preprocessor_if" | "type_preprocessor_if" => return Some("vba.compilation_if"),
+                "preprocessor_elseif" | "type_preprocessor_elseif" => {
+                    return Some("vba.compilation_elseif");
+                }
+                _ => {}
+            }
+        }
+    }
     if node.kind() == "line_number_literal"
         && matches!(
             role,

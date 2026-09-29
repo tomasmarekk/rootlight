@@ -5427,6 +5427,7 @@ fn is_signature_capture(fact: &SyntaxFact) -> bool {
     // callable header. Associating them would make the real signature ambiguous.
     fact.kind() == SyntaxFactKind::Signature
         && fact.syntax_kind().as_str().ends_with(".signature")
+        && !fact.syntax_kind().as_str().starts_with("vba.compilation_")
         && !fact.syntax_kind().as_str().contains(".default_export_")
         && !fact.syntax_kind().as_str().contains(".export_")
         && !fact.syntax_kind().as_str().contains(".hoisted_binding.")
