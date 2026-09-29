@@ -14,6 +14,7 @@ use rootlight_ir::{
     SourceRef,
 };
 use std::{
+    borrow::Cow,
     collections::{BTreeMap, BTreeSet},
     sync::Arc,
 };
@@ -23,6 +24,7 @@ struct Contract<'a> {
     optional: Vec<bool>,
     names: BTreeMap<String, usize>,
     variadic: bool,
+    setter: bool,
 }
 
 struct NamedArgument {
@@ -93,7 +95,12 @@ impl<'a, 'o> CallIndex<'a, 'o> {
                 applications.entry(key).or_default().insert(end);
             }
             if super::is_invoked_member(&site.syntax_kind)
-                || site.syntax_kind == "vba.invoked_get_identifier.reference"
+                || matches!(
+                    site.syntax_kind.as_str(),
+                    "vba.invoked_get_identifier.reference"
+                        | "vba.invoked_let_identifier.reference"
+                        | "vba.invoked_set_identifier.reference"
+                )
             {
                 callees
                     .entry((key.0, key.1, site.source.span().end_byte()))
@@ -260,10 +267,23 @@ impl<'a, 'o> CallIndex<'a, 'o> {
         else {
             return Ok(());
         };
+        let mut additional_sources = Cow::Borrowed(additional_sources);
+        let optional = if contract.setter {
+            let Some((false, indices)) = contract.optional.split_last() else {
+                return Ok(());
+            };
+            let Some(source) = assignment_source(site, sources, &mut check)? else {
+                return Ok(());
+            };
+            additional_sources.to_mut().push(source);
+            indices
+        } else {
+            &contract.optional
+        };
         let Some(named_arguments) = arguments_match(
             tail,
             explicit,
-            &contract.optional,
+            optional,
             &contract.names,
             contract.variadic,
             &mut check,
@@ -575,7 +595,43 @@ fn contract<'a>(
         optional,
         names,
         variadic,
+        setter: matches!(
+            header.kind(),
+            rootlight_vba::ProcedureKind::PropertyLet | rootlight_vba::ProcedureKind::PropertySet
+        ),
     }))
+}
+
+fn assignment_source(
+    site: &OccurrenceRecord,
+    sources: &BTreeMap<FileId, &[u8]>,
+    check: &mut impl FnMut() -> Result<(), ResolutionError>,
+) -> Result<Option<SourceRef>, ResolutionError> {
+    let span = site.source.span();
+    let Some(tail) = usize::try_from(span.end_byte())
+        .ok()
+        .and_then(|end| sources.get(&site.file)?.get(end..))
+    else {
+        return Ok(None);
+    };
+    // The assigned value supplies the setter's final formal parameter, outside
+    // the index parentheses. Preserve this separate syntax proof in provenance.
+    let Some(length) = rootlight_vba::assigned_value_end(tail, tail.len(), check)? else {
+        return Ok(None);
+    };
+    let end = u64::try_from(length)
+        .ok()
+        .and_then(|length| span.end_byte().checked_add(length))
+        .ok_or(ResolutionError::CountOverflow)?;
+    let span = rootlight_ir::SourceSpan::new(site.file, span.start_byte(), end)
+        .map_err(ResolutionError::InvalidProducer)?;
+    Ok(Some(SourceRef::new(
+        site.source.repository(),
+        site.source.generation(),
+        span,
+        site.source.content_hash(),
+        None,
+    )))
 }
 
 fn parameter_modifiers(

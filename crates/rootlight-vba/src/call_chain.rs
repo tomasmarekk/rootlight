@@ -261,6 +261,51 @@ pub fn value_application_expression<E>(
     maximum_tokens: usize,
     check: &mut impl FnMut() -> Result<(), E>,
 ) -> Result<CallChainRead, E> {
+    value_expression(source, maximum_tokens, true, check)
+}
+
+/// Reads an assignment's `=` and complete value through its logical-line boundary.
+///
+/// Input begins immediately after the left-hand expression. Only logical trivia
+/// may precede `=` or the value. The admitted value subset is the same as
+/// [`value_application_expression`], but an application is not required. The
+/// returned end excludes trailing trivia and comments. Unsupported, incomplete
+/// or token-limited input returns `None`; a bare newline is never crossed.
+/// This establishes syntax only, not assignability or value-type compatibility.
+///
+/// # Errors
+/// Propagates the caller's cancellation/work error unchanged.
+pub fn assigned_value_end<E>(
+    source: &[u8],
+    maximum_tokens: usize,
+    check: &mut impl FnMut() -> Result<(), E>,
+) -> Result<Option<usize>, E> {
+    check()?;
+    let mut cursor = 0;
+    trivia(source, &mut cursor, check)?;
+    if source.get(cursor) != Some(&b'=') {
+        return Ok(None);
+    }
+    cursor += 1;
+    trivia(source, &mut cursor, check)?;
+    let CallChainRead::Parsed(value) = value_expression(
+        source.get(cursor..).unwrap_or_default(),
+        maximum_tokens,
+        false,
+        check,
+    )?
+    else {
+        return Ok(None);
+    };
+    Ok(cursor.checked_add(value.end()))
+}
+
+fn value_expression<E>(
+    source: &[u8],
+    maximum_tokens: usize,
+    require_application: bool,
+    check: &mut impl FnMut() -> Result<(), E>,
+) -> Result<CallChainRead, E> {
     check()?;
     let tokens = match tokenize(source, maximum_tokens, true, check)? {
         Ok(tokens) => tokens,
@@ -292,10 +337,11 @@ pub fn value_application_expression<E>(
             return Ok(CallChainRead::Unsupported);
         }
     }
-    if !reader
-        .parts
-        .iter()
-        .any(|part| part.role == CallChainRole::Application)
+    if require_application
+        && !reader
+            .parts
+            .iter()
+            .any(|part| part.role == CallChainRole::Application)
     {
         return Ok(CallChainRead::Unsupported);
     }
@@ -733,6 +779,82 @@ mod tests {
 
     fn read(source: &[u8]) -> CallChainRead {
         call_chain_statement(source, 4096, &mut || Ok::<(), Infallible>(())).unwrap()
+    }
+
+    #[test]
+    fn assignment_values_require_complete_bounded_expressions() {
+        for (source, prefix) in [
+            (" = 7\nNextLine", " = 7"),
+            (" = Nothing ' note", " = Nothing"),
+            (
+                " _\r\n = _\r\n Me.Entry(offset:=1) + 2: next",
+                " _\r\n = _\r\n Me.Entry(offset:=1) + 2",
+            ),
+            ("=\"a=b\"", "=\"a=b\""),
+            ("=value = other", "=value = other"),
+        ] {
+            let end = assigned_value_end(source.as_bytes(), 128, &mut || Ok::<(), Infallible>(()))
+                .unwrap()
+                .unwrap();
+            assert_eq!(&source[..end], prefix);
+        }
+        for source in [
+            "",
+            " =",
+            "=\nvalue",
+            "\n=value",
+            "=value +",
+            "=Call Run()",
+            "==1",
+            "=one two",
+            "=f(1",
+            "=other!Item",
+            "=New Item",
+            "=Me()",
+        ] {
+            assert_eq!(
+                assigned_value_end(source.as_bytes(), 128, &mut || Ok::<(), Infallible>(()))
+                    .unwrap(),
+                None,
+                "{source}"
+            );
+        }
+        assert_eq!(
+            assigned_value_end(b"=value", 0, &mut || Ok::<(), Infallible>(())).unwrap(),
+            None
+        );
+        assert_eq!(
+            assigned_value_end(b"=value", 128, &mut || Err("cancelled")),
+            Err("cancelled")
+        );
+        let deep = format!("={}1{}", "(".repeat(1024), ")".repeat(1024));
+        assert_eq!(
+            assigned_value_end(
+                deep.as_bytes(),
+                deep.len(),
+                &mut || Ok::<(), Infallible>(())
+            )
+            .unwrap(),
+            Some(deep.len())
+        );
+        let mut checks = 0;
+        assert_eq!(
+            assigned_value_end(deep.as_bytes(), deep.len(), &mut || {
+                checks += 1;
+                if checks == 12 {
+                    Err("work exhausted")
+                } else {
+                    Ok(())
+                }
+            }),
+            Err("work exhausted")
+        );
+        for byte in 0..=u8::MAX {
+            let source = [b'=', byte, b'(', b'1', b')'];
+            for end in 0..=source.len() {
+                assigned_value_end(&source[..end], 64, &mut || Ok::<(), Infallible>(())).unwrap();
+            }
+        }
     }
 
     #[test]

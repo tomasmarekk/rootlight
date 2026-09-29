@@ -1439,10 +1439,15 @@ impl<'a> ClassicIndex<'a> {
                 if result.proof(occurrence).is_none()
                     && let Some((callee, false)) =
                         calls.callee(occurrence, &sources, cancellation, work)?
-                    && matches!(
-                        callee.syntax_kind.as_str(),
-                        "vba.invoked_get_identifier.reference" | "vba.invoked_get_member.reference"
-                    )
+                    && let Some(access) = match callee.syntax_kind.as_str() {
+                        "vba.invoked_get_identifier.reference"
+                        | "vba.invoked_get_member.reference" => Some(PropertyAccessorKind::Get),
+                        "vba.invoked_let_identifier.reference"
+                        | "vba.invoked_let_member.reference" => Some(PropertyAccessorKind::Let),
+                        "vba.invoked_set_identifier.reference"
+                        | "vba.invoked_set_member.reference" => Some(PropertyAccessorKind::Set),
+                        _ => None,
+                    }
                     && let Some(symbol) = match callee.target {
                         OccurrenceTarget::Resolved { symbol } => Some(symbol),
                         _ => result.proof(callee).map(|proof| proof.target.id),
@@ -1468,17 +1473,35 @@ impl<'a> ClassicIndex<'a> {
                 {
                     let key = (*class, default.name.clone());
                     let target = if let Some(accessors) = property_accessors.get(&key) {
-                        (!accessors.invalid).then_some(accessors.get).flatten()
+                        (!accessors.invalid)
+                            .then_some(match access {
+                                PropertyAccessorKind::Get => accessors.get,
+                                PropertyAccessorKind::Let => accessors.let_value,
+                                PropertyAccessorKind::Set => accessors.set_value,
+                            })
+                            .flatten()
                     } else {
                         members.get(&key).copied().flatten()
                     };
                     if let Some(target) =
                         target.filter(|target| target.visibility == EntityVisibility::Public)
                         && matches!(
-                            procedure_kind(target, &sources, cancellation, work)?,
-                            Some(
-                                rootlight_vba::ProcedureKind::Function
-                                    | rootlight_vba::ProcedureKind::PropertyGet
+                            (
+                                access,
+                                procedure_kind(target, &sources, cancellation, work)?
+                            ),
+                            (
+                                PropertyAccessorKind::Get,
+                                Some(
+                                    rootlight_vba::ProcedureKind::Function
+                                        | rootlight_vba::ProcedureKind::PropertyGet
+                                )
+                            ) | (
+                                PropertyAccessorKind::Let,
+                                Some(rootlight_vba::ProcedureKind::PropertyLet)
+                            ) | (
+                                PropertyAccessorKind::Set,
+                                Some(rootlight_vba::ProcedureKind::PropertySet)
                             )
                         )
                     {

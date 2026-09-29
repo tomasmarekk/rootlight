@@ -674,8 +674,12 @@ fn reconcile_vba_target_gaps(
     }) {
         for site in &document.occurrences {
             cancellation.check()?;
-            if site.syntax_kind == "vba.invoked_get_identifier.reference"
-                && matches!(site.target, OccurrenceTarget::Resolved { .. })
+            if matches!(
+                site.syntax_kind.as_str(),
+                "vba.invoked_get_identifier.reference"
+                    | "vba.invoked_let_identifier.reference"
+                    | "vba.invoked_set_identifier.reference"
+            ) && matches!(site.target, OccurrenceTarget::Resolved { .. })
             {
                 default_receivers.insert(&site.source);
             }
