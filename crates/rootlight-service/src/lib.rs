@@ -219,7 +219,7 @@ const PROJECT_FACTS_TRUNCATED_CODE: &str = "project-adapter-facts-truncated";
 const PROJECT_FACTS_TRUNCATED_MESSAGE: &str =
     "additional project semantic facts were omitted by aggregate resource limits";
 const AGGREGATE_DIAGNOSTICS_TRUNCATED_CODE: &str = "aggregate-diagnostics-truncated";
-const ANALYZER_BINARY_SEED: &[u8] = b"rootlight.first-slice.treesitter-structural/187";
+const ANALYZER_BINARY_SEED: &[u8] = b"rootlight.first-slice.treesitter-structural/188";
 const RESOLVER_BINARY_SEED: &[u8] = b"rootlight.first-slice.resolve/61";
 const INCREMENTAL_PROVIDER_SEED: &[u8] = b"rootlight.first-slice.incremental-provider/1";
 const LANGUAGE_DISPOSITION_PROVIDER_SEED: &[u8] = b"rootlight.first-slice.language-disposition/5";
@@ -41493,6 +41493,170 @@ mod tests {
             );
             if !expected {
                 assert!(matches!(member.target, OccurrenceTarget::Unresolved { .. }));
+            }
+        }
+    }
+
+    #[test]
+    fn classic_new_type_paths_preserve_project_identity_after_restart() {
+        for (path, admitted) in [
+            ("Target", true),
+            ("Primary.Target", true),
+            ("[pRiMaRy].[tArGeT]", true),
+            ("Primary _\r\n .Target", true),
+            ("Foreign.Target", false),
+            ("Primary.Target.Extra", false),
+        ] {
+            let fixture = durable_test_tempdir();
+            let storage = durable_test_tempdir();
+            let paths =
+                RuntimePaths::new(storage.path().join("state"), storage.path().join("runtime"))
+                    .unwrap();
+            paths.prepare_owner().unwrap();
+            fs::write(fixture.path().join("Target.cls"), "VERSION 1.0 CLASS\nAttribute VB_Name = \"Target\"\nPrivate Sub Class_Initialize()\nEnd Sub\n").unwrap();
+            let source = format!(
+                "Attribute VB_Name = \"Consumer\"\nPublic Sub Run()\nDim item As Object\nSet item = New {path}\nEnd Sub\n"
+            );
+            fs::write(fixture.path().join("Consumer.bas"), &source).unwrap();
+            for included in [true, false, true] {
+                let target = if included {
+                    "Class=Target; Target.cls\n"
+                } else {
+                    ""
+                };
+                fs::write(
+                    fixture.path().join("project.vbp"),
+                    format!(
+                        "Type=OleDll\nName=\"Primary\"\n{target}Module=Consumer; Consumer.bas\n"
+                    ),
+                )
+                .unwrap();
+                let mut service =
+                    FirstSliceService::new_durable(2, paths.state_dir(), &deadline()).unwrap();
+                let receipt = service
+                    .index_repository(fixture.path(), &deadline())
+                    .unwrap();
+                assert_eq!(
+                    receipt,
+                    service
+                        .index_repository(fixture.path(), &deadline())
+                        .unwrap()
+                );
+                drop(service);
+                let service =
+                    FirstSliceService::new_durable(2, paths.state_dir(), &deadline()).unwrap();
+                let snapshot = service
+                    .loaded_generation_snapshot(receipt.generation)
+                    .unwrap();
+                let document = snapshot.document();
+                let file = document
+                    .files
+                    .iter()
+                    .find(|file| file.path == "Consumer.bas")
+                    .unwrap();
+                let class = document
+                    .entities
+                    .iter()
+                    .find(|entity| {
+                        entity.kind == EntityKind::Class && entity.canonical_name == "Target"
+                    })
+                    .unwrap();
+                let start = source.find("New ").unwrap() + 4;
+                let sites: Vec<_> = document
+                    .occurrences
+                    .iter()
+                    .filter(|site| {
+                        site.file == file.id
+                            && site.role == OccurrenceRole::TypeUse
+                            && site.source.span().start_byte() == u64::try_from(start).unwrap()
+                    })
+                    .collect();
+                assert_eq!(sites.len(), 1, "{path}");
+                let site = sites[0];
+                assert_eq!(
+                    site.source.span().end_byte(),
+                    u64::try_from(start + path.len()).unwrap(),
+                    "{path}"
+                );
+                assert_eq!(
+                    site.syntax_kind,
+                    "vba.constructed_type_identifier.reference"
+                );
+                let expected = included && admitted;
+                assert_eq!(
+                    site.target == OccurrenceTarget::Resolved { symbol: class.id },
+                    expected,
+                    "{path}: included={included}"
+                );
+                if !expected {
+                    assert!(matches!(site.target, OccurrenceTarget::Unresolved { .. }));
+                }
+                assert_eq!(
+                    document
+                        .skipped_regions
+                        .iter()
+                        .any(|gap| gap.source == site.source
+                            && gap.detail == "vba-type-target-unavailable"),
+                    !expected
+                );
+                let construction = document
+                    .occurrences
+                    .iter()
+                    .find(|site| {
+                        site.file == file.id && site.syntax_kind == "vba.construction.reference"
+                    })
+                    .unwrap();
+                assert_eq!(
+                    construction.source.span().start_byte(),
+                    u64::try_from(start - 4).unwrap()
+                );
+                assert_eq!(
+                    construction.source.span().end_byte(),
+                    site.source.span().end_byte()
+                );
+                assert!(
+                    document
+                        .skipped_regions
+                        .iter()
+                        .any(|gap| gap.source == construction.source
+                            && gap.detail == "vba-construction-semantics-unavailable")
+                );
+                let read = service
+                    .source_read_with_options_and_budget(
+                        receipt.generation,
+                        vec![site.source.clone(), construction.source.clone()],
+                        SourceReadOptions::new()
+                            .with_context_lines_before(0)
+                            .with_context_lines_after(0)
+                            .with_encoding(SourceEncoding::Bytes),
+                        FirstSliceBudget::default(),
+                        &deadline(),
+                    )
+                    .unwrap();
+                assert_eq!(read.data.chunks[0].bytes, path.as_bytes());
+                assert_eq!(read.data.chunks[1].bytes, format!("New {path}").as_bytes());
+                if expected {
+                    let relationships = service
+                        .symbol_relationships(
+                            receipt.generation,
+                            BTreeSet::from([class.id]),
+                            vec![RelationFamily::Types],
+                            Some(RelationDirection::Inbound),
+                            0,
+                            25,
+                            0,
+                            &deadline(),
+                        )
+                        .unwrap();
+                    assert!(
+                        relationships
+                            .data
+                            .groups
+                            .iter()
+                            .flat_map(|group| &group.items)
+                            .any(|edge| edge.source_refs.contains(&site.source))
+                    );
+                }
             }
         }
     }

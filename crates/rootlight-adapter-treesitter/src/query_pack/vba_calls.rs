@@ -1,5 +1,5 @@
-//! Adapts first-party call-chain evidence before optional fact retention.
-//! Native trees locate statement starts and assignment values. Complete source
+//! Adapts first-party call-chain and construction evidence before optional retention.
+//! Native trees locate expression starts and assignment values. Complete source
 //! spans replace reference fragments inside admitted ranges before query retention.
 
 use std::{collections::BTreeMap, ops::Range};
@@ -59,6 +59,42 @@ impl Calls {
             loop {
                 check()?;
                 let node = cursor.node();
+                if node.kind() == "new_expression"
+                    && !node.has_error()
+                    && !self.contains(node.byte_range())
+                    && let Some(range) = rootlight_vba::constructed_type_range(
+                        input.source.get(node.start_byte()..).unwrap_or_default(),
+                        &mut check,
+                    )?
+                {
+                    let start = node.start_byte();
+                    let end = start + range.end;
+                    if end >= node.end_byte() {
+                        if limits.captures.saturating_sub(*captures) < 2 {
+                            return Ok(Some(QueryLimit::Capture));
+                        }
+                        // The class path can extend past the native New node
+                        // into a recovered member statement. Own both pieces,
+                        // but keep lifecycle semantics separate from type lookup.
+                        self.intervals.insert(start, end);
+                        for (start, syntax) in [
+                            (start, "vba.construction"),
+                            (start + range.start, "vba.constructed_type_identifier"),
+                        ] {
+                            check()?;
+                            *captures += 1;
+                            retain(QueryCandidate {
+                                start,
+                                end,
+                                role: StructuralRole::Reference,
+                                syntax,
+                                required: false,
+                                native_depth: 0,
+                            })
+                            .map_err(ScanError::Adapter)?;
+                        }
+                    }
+                }
                 let mut value = matches!(
                     node.kind(),
                     "assignment_statement" | "let_statement" | "set_statement"
@@ -196,6 +232,138 @@ fn statement_boundary<E>(
 mod tests {
     use super::*;
     use std::convert::Infallible;
+
+    #[test]
+    fn construction_capture_owns_the_full_type_path_without_reference_fragments() {
+        use super::super::QueryPackRegistry;
+        use crate::{GrammarFamily, registry::language_for};
+        use rootlight_cancel::Cancellation;
+
+        let registry = QueryPackRegistry::audited().unwrap();
+        let pack = registry.get(GrammarFamily::Vba).unwrap();
+        for expression in [
+            "New Target",
+            "New[Target]",
+            "New Primary.Target",
+            "New [Primary].[Target]",
+            "New _\r\n Primary _\r\n .Target",
+            "New Primary.Target.Extra",
+        ] {
+            for body in [
+                format!("Set item = {expression}"),
+                format!("With {expression}\n.Touch\nEnd With"),
+                format!("If {expression} Is Nothing Then\nEnd If"),
+            ] {
+                let source = format!("Sub Run()\n{body}\nEnd Sub\n");
+                let mut parser = tree_sitter::Parser::new();
+                parser
+                    .set_language(&language_for(GrammarFamily::Vba))
+                    .unwrap();
+                let tree = parser.parse(&source, None).unwrap();
+                let extraction = pack
+                    .extract(
+                        GrammarFamily::Vba,
+                        &tree,
+                        source.as_bytes(),
+                        10_000,
+                        1024,
+                        &Cancellation::new(),
+                    )
+                    .unwrap();
+                assert!(extraction.limit.is_none());
+                let start = source.find(expression).unwrap();
+                let range =
+                    rootlight_vba::constructed_type_range(expression.as_bytes(), &mut || {
+                        Ok::<_, Infallible>(())
+                    })
+                    .unwrap()
+                    .unwrap();
+                let references: Vec<_> = extraction
+                    .candidates
+                    .iter()
+                    .filter(|part| {
+                        part.role == StructuralRole::Reference
+                            && part.start >= start
+                            && part.start < start + expression.len()
+                    })
+                    .collect();
+                assert_eq!(references.len(), 2, "{source}: {references:?}");
+                for (syntax, begin) in [
+                    ("vba.construction", start),
+                    ("vba.constructed_type_identifier", start + range.start),
+                ] {
+                    assert!(
+                        references.iter().any(|part| part.syntax == syntax
+                            && part.start == begin
+                            && part.end == start + expression.len()),
+                        "{source}: {references:?}"
+                    );
+                }
+                let limited = pack
+                    .extract(
+                        GrammarFamily::Vba,
+                        &tree,
+                        source.as_bytes(),
+                        10_000,
+                        1,
+                        &Cancellation::new(),
+                    )
+                    .unwrap();
+                assert!(limited.limit.is_some());
+                assert!(
+                    !limited
+                        .candidates
+                        .iter()
+                        .any(|part| part.syntax == "vba.constructed_type_identifier")
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn malformed_constructions_never_publish_a_valid_type_prefix() {
+        use super::super::QueryPackRegistry;
+        use crate::{GrammarFamily, registry::language_for};
+        use rootlight_cancel::Cancellation;
+
+        let registry = QueryPackRegistry::audited().unwrap();
+        let pack = registry.get(GrammarFamily::Vba).unwrap();
+        for expression in [
+            "New Target()",
+            "New Target(1)",
+            "New Target!Member",
+            "New Primary.",
+            "New Primary .Target",
+            "New Target$",
+            "New Target&",
+            "New Primary _\n .",
+        ] {
+            let source = format!("Sub Run()\nSet item = {expression}\nEnd Sub\n");
+            let mut parser = tree_sitter::Parser::new();
+            parser
+                .set_language(&language_for(GrammarFamily::Vba))
+                .unwrap();
+            let tree = parser.parse(&source, None).unwrap();
+            let extraction = pack
+                .extract(
+                    GrammarFamily::Vba,
+                    &tree,
+                    source.as_bytes(),
+                    10_000,
+                    1024,
+                    &Cancellation::new(),
+                )
+                .unwrap();
+            assert!(extraction.limit.is_none());
+            assert!(
+                !extraction
+                    .candidates
+                    .iter()
+                    .any(|part| part.syntax == "vba.constructed_type_identifier"),
+                "{source}"
+            );
+        }
+    }
 
     #[test]
     fn extraction_retains_one_whole_call_and_obeys_the_optional_fact_budget() {

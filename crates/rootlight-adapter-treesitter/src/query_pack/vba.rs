@@ -444,9 +444,15 @@ pub(super) fn reference_syntax(
         }
         let kind = parent.kind();
         if kind == "new_expression" {
+            let complete = rootlight_vba::constructed_type_range(
+                source.get(parent.start_byte()..).unwrap_or_default(),
+                &mut || cancellation.check(),
+            )?
+            .is_some_and(|range| parent.start_byte() + range.end == parent.end_byte());
             return Ok(
                 if child.kind() == "identifier"
                     && parent.child_by_field_name("type") == Some(child)
+                    && complete
                     && !parent.parent().is_some_and(|statement| {
                         split_construction_type(statement, source).is_some()
                     })
