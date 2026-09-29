@@ -44,7 +44,7 @@ pub(super) struct CallIndex<'a, 'o> {
     definitions: BTreeMap<SymbolId, Option<&'o SourceRef>>,
     callees: BTreeMap<(FileId, u64, u64), Option<&'o OccurrenceRecord>>,
     labels: BTreeMap<(FileId, u64, u64), Option<&'o OccurrenceRecord>>,
-    applications: BTreeMap<(FileId, u64), BTreeSet<u64>>,
+    applications: BTreeMap<(FileId, u64, u64), Option<&'o OccurrenceRecord>>,
     contracts: BTreeMap<SymbolId, Option<Contract<'a>>>,
 }
 
@@ -68,7 +68,7 @@ impl<'a, 'o> CallIndex<'a, 'o> {
         let mut definitions = BTreeMap::new();
         let mut callees = BTreeMap::new();
         let mut labels = BTreeMap::new();
-        let mut applications: BTreeMap<_, BTreeSet<_>> = BTreeMap::new();
+        let mut applications = BTreeMap::new();
         for site in occurrences {
             cancellation.check()?;
             work.consume()?;
@@ -92,7 +92,10 @@ impl<'a, 'o> CallIndex<'a, 'o> {
             }
             if site.syntax_kind == "vba.application.reference" {
                 let end = site.source.span().end_byte();
-                applications.entry(key).or_default().insert(end);
+                applications
+                    .entry((key.0, key.1, end))
+                    .and_modify(|prior| *prior = None)
+                    .or_insert(Some(site));
             }
             if super::is_invoked_member(&site.syntax_kind)
                 || matches!(
@@ -171,14 +174,53 @@ impl<'a, 'o> CallIndex<'a, 'o> {
         };
         // An intervening application dispatches on a returned object, not on
         // this callee. Earlier receiver calls may precede a later named callee.
-        if self.applications.get(&key).is_some_and(|ends| {
-            ends.range(callee.source.span().end_byte()..site.source.span().end_byte())
-                .next()
-                .is_some()
-        }) {
+        if self
+            .applications
+            .range(
+                (key.0, key.1, callee.source.span().end_byte())
+                    ..(key.0, key.1, site.source.span().end_byte()),
+            )
+            .next()
+            .is_some()
+        {
             return Ok(None);
         }
         Ok(Some((callee, explicit)))
+    }
+
+    pub(super) fn returned_receiver(
+        &self,
+        site: &OccurrenceRecord,
+        cancellation: &Cancellation,
+        work: &mut ResolutionWorkBudget,
+    ) -> Result<Option<&'o OccurrenceRecord>, ResolutionError> {
+        cancellation.check()?;
+        work.consume()?;
+        if site.syntax_kind != "vba.application.reference" {
+            return Ok(None);
+        }
+        let span = site.source.span();
+        let start = (site.file, span.start_byte(), 0);
+        let end = (site.file, span.start_byte(), span.end_byte());
+        let Some(receiver) = self
+            .applications
+            .range(start..end)
+            .next_back()
+            .and_then(|(_, site)| *site)
+        else {
+            return Ok(None);
+        };
+        // A later named callee consumes its own arguments. Only consecutive
+        // applications can dispatch through this earlier application's result.
+        if self
+            .callees
+            .range(start..end)
+            .next_back()
+            .is_some_and(|(key, _)| key.2 > receiver.source.span().end_byte())
+        {
+            return Ok(None);
+        }
+        Ok(Some(receiver))
     }
 
     pub(super) fn resolve(

@@ -1387,7 +1387,7 @@ impl<'a> ClassicIndex<'a> {
             default_members::inventory(entities, &project_classes, &sources, cancellation, work)?;
         let mut module_qualifiers = BTreeMap::new();
         let mut member_occurrences = Vec::new();
-        let mut read_receivers = BTreeSet::new();
+        let mut read_receivers: BTreeMap<_, Vec<SourceRef>> = BTreeMap::new();
         let mut calls = calls::CallIndex::build(index, occurrences, cancellation, work)?;
         let mut parsed_members =
             with_members::inventory(occurrences, &sources, cancellation, work)?;
@@ -1396,6 +1396,12 @@ impl<'a> ClassicIndex<'a> {
             if occurrence.syntax_kind == "vba.application.reference"
                 && matches!(occurrence.target, OccurrenceTarget::Unresolved { .. })
             {
+                if let Some(receiver) = calls.returned_receiver(occurrence, cancellation, work)? {
+                    read_receivers
+                        .entry(receiver.source.span())
+                        .or_default()
+                        .push(occurrence.source.clone());
+                }
                 member_occurrences.push((occurrence, None));
                 continue;
             }
@@ -1411,11 +1417,12 @@ impl<'a> ClassicIndex<'a> {
             let member =
                 is_member(&occurrence.syntax_kind) && occurrence.role == OccurrenceRole::Reference;
             if member && let Some(member) = parsed_members.remove(&occurrence.id) {
-                if member.receiver.contains('.') {
-                    // Only the exact receiver span proves a getter read. The
-                    // logical separator must not become part of that identity.
-                    read_receivers.insert(member.span);
-                }
+                // Only the exact receiver span proves a getter read. The
+                // logical separator must not become part of that identity.
+                read_receivers
+                    .entry(member.span)
+                    .or_default()
+                    .push(occurrence.source.clone());
                 if matches!(occurrence.target, OccurrenceTarget::Unresolved { .. }) {
                     member_occurrences.push((occurrence, Some(member)));
                     continue;
@@ -1436,11 +1443,21 @@ impl<'a> ClassicIndex<'a> {
             let span = occurrence.source.span();
             let Some(member) = member else {
                 calls.resolve(&mut result, occurrence, &sources, cancellation, work)?;
-                if result.proof(occurrence).is_none()
-                    && let Some((callee, false)) =
-                        calls.callee(occurrence, &sources, cancellation, work)?
+                let callee = if result.proof(occurrence).is_none() {
+                    match calls.callee(occurrence, &sources, cancellation, work)? {
+                        Some((callee, false)) => Some(callee),
+                        None if read_receivers.contains_key(&span) => {
+                            calls.returned_receiver(occurrence, cancellation, work)?
+                        }
+                        _ => None,
+                    }
+                } else {
+                    None
+                };
+                if let Some(callee) = callee
                     && let Some(access) = match callee.syntax_kind.as_str() {
-                        "vba.invoked_get_identifier.reference"
+                        "vba.application.reference"
+                        | "vba.invoked_get_identifier.reference"
                         | "vba.invoked_get_member.reference" => Some(PropertyAccessorKind::Get),
                         "vba.invoked_let_identifier.reference"
                         | "vba.invoked_let_member.reference" => Some(PropertyAccessorKind::Let),
@@ -1474,12 +1491,8 @@ impl<'a> ClassicIndex<'a> {
                             rootlight_vba::ProcedureKind::Function
                                 | rootlight_vba::ProcedureKind::PropertyGet
                         )
-                    ) && calls.has_empty_parameter_list(
-                        owner,
-                        &sources,
-                        cancellation,
-                        work,
-                    )?))
+                    ) && (callee.syntax_kind == "vba.application.reference"
+                        || calls.has_empty_parameter_list(owner, &sources, cancellation, work)?)))
                     && let Some(default) = default_members.get(class).and_then(Option::as_ref)
                 {
                     let key = (*class, default.name.clone());
@@ -1518,6 +1531,10 @@ impl<'a> ClassicIndex<'a> {
                     {
                         let mut evidence = default.sources.clone();
                         evidence.extend(owner.evidence.source.iter().cloned());
+                        if callee.syntax_kind == "vba.application.reference" {
+                            evidence
+                                .extend(read_receivers.get(&span).into_iter().flatten().cloned());
+                        }
                         if let Some(proof) = result.proof(callee)
                             && let Some((_, source)) = &proof.receiver
                         {
@@ -1564,8 +1581,8 @@ impl<'a> ClassicIndex<'a> {
                     .map(|(owner, class, context, source)| {
                         (*owner, *class, Arc::clone(context), source.clone())
                     })
-            } else if receiver.contains('.') {
-                // A qualified receiver requires the shorter exact expression:
+            } else if receiver.contains('.') || resolved_members.contains_key(&receiver_span) {
+                // A composed receiver requires the shorter exact expression:
                 // a field, property result or argument-validated function result.
                 resolved_members
                     .get(&receiver_span)
@@ -1731,7 +1748,7 @@ impl<'a> ClassicIndex<'a> {
             let key = (class, name);
             let access = member_property_access(&occurrence.syntax_kind).or_else(|| {
                 read_receivers
-                    .contains(&span)
+                    .contains_key(&span)
                     .then_some(PropertyAccessorKind::Get)
             });
             // Accessor identity is independent of the returned value's type.

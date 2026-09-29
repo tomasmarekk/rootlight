@@ -220,7 +220,7 @@ const PROJECT_FACTS_TRUNCATED_MESSAGE: &str =
     "additional project semantic facts were omitted by aggregate resource limits";
 const AGGREGATE_DIAGNOSTICS_TRUNCATED_CODE: &str = "aggregate-diagnostics-truncated";
 const ANALYZER_BINARY_SEED: &[u8] = b"rootlight.first-slice.treesitter-structural/185";
-const RESOLVER_BINARY_SEED: &[u8] = b"rootlight.first-slice.resolve/58";
+const RESOLVER_BINARY_SEED: &[u8] = b"rootlight.first-slice.resolve/59";
 const INCREMENTAL_PROVIDER_SEED: &[u8] = b"rootlight.first-slice.incremental-provider/1";
 const LANGUAGE_DISPOSITION_PROVIDER_SEED: &[u8] = b"rootlight.first-slice.language-disposition/5";
 const SOURCE_FILE_FALLBACK_PROVIDER_SEED: &[u8] = b"rootlight.source-file-fallback/4";
@@ -41347,6 +41347,304 @@ mod tests {
                         entity.kind == EntityKind::Parameter
                             && entity.container == Some(ContainerRef::Entity(target.id))
                     }) {
+                        assert!(
+                            provenance
+                                .evidence_sources
+                                .contains(formal.evidence.source.as_ref().unwrap())
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn classic_returned_default_indices_require_read_context_and_complete_contracts() {
+        let fixture = durable_test_tempdir();
+        let storage = durable_test_tempdir();
+        let paths = RuntimePaths::new(storage.path().join("state"), storage.path().join("runtime"))
+            .unwrap();
+        paths.prepare_owner().unwrap();
+        fs::write(fixture.path().join("project.vbp"), "Type=OleDll\nName=\"Primary\"\nClass=Lookup; Lookup.cls\nClass=Entry; Entry.cls\nModule=Client; Client.bas\n").unwrap();
+        let entry = "VERSION 1.0 CLASS\nAttribute VB_Name = \"Entry\"\nPublic Name As String\nPublic Property Get Item(ByVal key As Long) As Entry\nAttribute Item.VB_UserMemId = 0\nEnd Property\nPublic Property Let Item(ByVal key As Long, ByVal value As Variant)\nEnd Property\nPublic Property Set Item(ByVal key As Long, ByVal value As Entry)\nEnd Property\n";
+        fs::write(fixture.path().join("Entry.cls"), entry).unwrap();
+        let cases = [
+            ("result = items(1)(2).Name", "items(1)(2)", true),
+            ("result = Make(1)(2).Name", "Make(1)(2)", true),
+            ("result = Make(1)(2)(3).Name", "Make(1)(2)(3)", true),
+            ("result = Make()(2).Name", "Make()(2)", false),
+            ("result = items(1)(key:=2).Name", "items(1)(key:=2)", true),
+            ("result = items(1)(2)(3).Name", "items(1)(2)(3)", true),
+            ("items(1)(2).Name = result", "items(1)(2)", true),
+            (
+                "result = items(1)(wrong:=2).Name",
+                "items(1)(wrong:=2)",
+                false,
+            ),
+            ("result = items(1)(2, 3).Name", "items(1)(2, 3)", false),
+            (
+                "result = items(1)(key:=2, key:=3).Name",
+                "items(1)(key:=2, key:=3)",
+                false,
+            ),
+            (
+                "result = items(1)(ByVal 2).Name",
+                "items(1)(ByVal 2)",
+                false,
+            ),
+            ("result = items(1)()(3).Name", "items(1)()(3)", false),
+            ("result = items()(2).Name", "items()(2)", false),
+            ("result = items(1)(2)", "items(1)(2)", false),
+            ("items(1)(2) = result", "items(1)(2)", false),
+            ("Set items(1)(2) = other", "items(1)(2)", false),
+            ("Call items(1)(2)", "Call items(1)(2)", false),
+        ];
+        let mut client = "Attribute VB_Name = \"Client\"\nSub Run(ByVal items As Lookup, ByVal other As Entry)\nDim result As Variant\n".to_owned();
+        let mut sites = Vec::new();
+        for (statement, expression, expected) in cases {
+            let start = client.len() + statement.find(expression).unwrap();
+            sites.push((start, expression, expected));
+            client.push_str(statement);
+            client.push('\n');
+        }
+        client
+            .push_str("End Sub\nFunction Make(ByVal number As Long) As ReturnType\nEnd Function\n");
+        for (return_type, default_value) in [
+            ("Entry", "0"),
+            ("Object", "0"),
+            ("Variant", "0"),
+            ("Entry", "1"),
+            ("Entry", "0"),
+        ] {
+            let client = client.replace("ReturnType", return_type);
+            fs::write(fixture.path().join("Client.bas"), &client).unwrap();
+            let entry = entry.replace(
+                "VB_UserMemId = 0",
+                &format!("VB_UserMemId = {default_value}"),
+            );
+            fs::write(fixture.path().join("Entry.cls"), &entry).unwrap();
+            let lookup = format!(
+                "VERSION 1.0 CLASS\nAttribute VB_Name = \"Lookup\"\nPublic Property Get Fetch(ByVal offset As Long) As {return_type}\nAttribute Fetch.VB_UserMemId = 0\nEnd Property\n"
+            );
+            fs::write(fixture.path().join("Lookup.cls"), &lookup).unwrap();
+            let mut service =
+                FirstSliceService::new_durable(2, paths.state_dir(), &deadline()).unwrap();
+            let receipt = service
+                .index_repository(fixture.path(), &deadline())
+                .unwrap();
+            assert_eq!(
+                service
+                    .index_repository(fixture.path(), &deadline())
+                    .unwrap(),
+                receipt
+            );
+            drop(service);
+            let service =
+                FirstSliceService::new_durable(2, paths.state_dir(), &deadline()).unwrap();
+            let snapshot = service
+                .loaded_generation_snapshot(receipt.generation)
+                .unwrap();
+            let document = snapshot.document();
+            let file = document
+                .files
+                .iter()
+                .find(|file| file.path == "Client.bas")
+                .unwrap();
+            let getter = document
+                .entities
+                .iter()
+                .find(|entity| {
+                    entity.canonical_name == "Item"
+                        && entity.evidence.source.as_ref().is_some_and(|source| {
+                            entry
+                                .get(
+                                    usize::try_from(source.span().start_byte()).unwrap()
+                                        ..usize::try_from(source.span().end_byte()).unwrap(),
+                                )
+                                .is_some_and(|text| text.starts_with("Public Property Get"))
+                        })
+                })
+                .unwrap();
+            for &(start, expression, admitted) in &sites {
+                let expected = admitted && return_type == "Entry" && default_value == "0";
+                let start = u64::try_from(start).unwrap();
+                let end = start + u64::try_from(expression.len()).unwrap();
+                let site = document
+                    .occurrences
+                    .iter()
+                    .find(|site| {
+                        site.file == file.id
+                            && site.syntax_kind == "vba.application.reference"
+                            && site.source.span().start_byte() == start
+                            && site.source.span().end_byte() == end
+                    })
+                    .unwrap();
+                assert_eq!(
+                    site.target == OccurrenceTarget::Resolved { symbol: getter.id },
+                    expected,
+                    "{return_type}: {expression} at {start}"
+                );
+                if !expected {
+                    assert!(matches!(site.target, OccurrenceTarget::Unresolved { .. }));
+                }
+                assert_eq!(
+                    document
+                        .skipped_regions
+                        .iter()
+                        .any(|gap| gap.source == site.source
+                            && gap.detail == "vba-call-or-index-target-unavailable"),
+                    !expected
+                );
+                assert_eq!(
+                    document
+                        .relations
+                        .iter()
+                        .filter(|edge| edge.subject == RelationEndpoint::Occurrence(site.id)
+                            && edge.predicate == RelationPredicate::Calls)
+                        .count(),
+                    usize::from(expected)
+                );
+                let read = service
+                    .source_read_with_options_and_budget(
+                        receipt.generation,
+                        vec![site.source.clone()],
+                        SourceReadOptions::new()
+                            .with_context_lines_before(0)
+                            .with_context_lines_after(0)
+                            .with_encoding(SourceEncoding::Bytes),
+                        FirstSliceBudget::default(),
+                        &deadline(),
+                    )
+                    .unwrap();
+                assert_eq!(site.source.generation(), receipt.generation);
+                assert_eq!(read.data.chunks[0].bytes, expression.as_bytes());
+                let relationships = service
+                    .symbol_relationships(
+                        receipt.generation,
+                        BTreeSet::from([getter.id]),
+                        vec![RelationFamily::Calls],
+                        Some(RelationDirection::Inbound),
+                        0,
+                        100,
+                        0,
+                        &deadline(),
+                    )
+                    .unwrap();
+                assert_eq!(
+                    relationships
+                        .data
+                        .groups
+                        .iter()
+                        .flat_map(|group| &group.items)
+                        .flat_map(|edge| &edge.source_refs)
+                        .any(|source| source == &site.source),
+                    expected
+                );
+                if client
+                    .get(usize::try_from(end).unwrap()..)
+                    .unwrap()
+                    .starts_with(".Name")
+                {
+                    let member = document
+                        .occurrences
+                        .iter()
+                        .find(|member| {
+                            member.file == file.id
+                                && member.source.span().start_byte() == start
+                                && member.source.span().end_byte() == end + 5
+                        })
+                        .unwrap();
+                    let target = document
+                        .entities
+                        .iter()
+                        .find(|entity| entity.canonical_name == "Name")
+                        .unwrap();
+                    assert_eq!(
+                        member.target == OccurrenceTarget::Resolved { symbol: target.id },
+                        expected,
+                        "member after {expression}"
+                    );
+                }
+                if expected {
+                    let provenance = document
+                        .provenance
+                        .iter()
+                        .find(|record| record.id == site.provenance)
+                        .unwrap();
+                    assert_eq!(
+                        provenance.rule.as_deref(),
+                        Some("classic-project-default-member-v1.indexed_snapshot")
+                    );
+                    let receiver_sources = if expression.starts_with("Make") {
+                        vec![
+                            ("Client.bas", client.as_str(), "Entry"),
+                            ("Client.bas", client.as_str(), "Make(1)"),
+                        ]
+                    } else {
+                        vec![
+                            ("Client.bas", client.as_str(), "Lookup"),
+                            ("Lookup.cls", lookup.as_str(), "Entry"),
+                            (
+                                "Lookup.cls",
+                                lookup.as_str(),
+                                "Attribute Fetch.VB_UserMemId = 0",
+                            ),
+                            ("Client.bas", client.as_str(), "items(1)"),
+                        ]
+                    };
+                    for (path, source_text, text) in receiver_sources.into_iter().chain([(
+                        "Entry.cls",
+                        entry.as_str(),
+                        "Attribute Item.VB_UserMemId = 0",
+                    )]) {
+                        let file = document
+                            .files
+                            .iter()
+                            .find(|file| file.path == path)
+                            .unwrap();
+                        assert!(
+                            provenance.evidence_sources.iter().any(|source| {
+                                source.span().file() == file.id
+                                    && source.generation() == receipt.generation
+                                    && source_text.get(
+                                        usize::try_from(source.span().start_byte()).unwrap()
+                                            ..usize::try_from(source.span().end_byte()).unwrap(),
+                                    ) == Some(text)
+                            }),
+                            "missing {path}: {text} for {expression}"
+                        );
+                    }
+                    assert!(
+                        provenance.evidence_sources.iter().any(|source| {
+                            source.span().file() == file.id
+                                && source.span().start_byte() == start
+                                && source.span().end_byte() == end + 5
+                        }),
+                        "the member must prove a read of {expression}"
+                    );
+                    if let Some(offset) = expression.find("key:=") {
+                        let label = document
+                            .occurrences
+                            .iter()
+                            .find(|label| {
+                                label.file == file.id
+                                    && label.syntax_kind == "vba.nonvalue_identifier.reference"
+                                    && label.source.span().start_byte()
+                                        == start + u64::try_from(offset).unwrap()
+                            })
+                            .unwrap();
+                        let formal = document
+                            .entities
+                            .iter()
+                            .find(|entity| {
+                                entity.canonical_name == "key"
+                                    && entity.container == Some(ContainerRef::Entity(getter.id))
+                            })
+                            .unwrap();
+                        assert_eq!(
+                            label.target,
+                            OccurrenceTarget::Resolved { symbol: formal.id }
+                        );
                         assert!(
                             provenance
                                 .evidence_sources

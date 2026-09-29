@@ -38,10 +38,12 @@ pub(super) fn order<'o, 's>(
             applications
                 .get(&member.span)
                 .or_else(|| members.get(&member.span))
+        } else if let Some((callee, _)) = calls.callee(site, sources, cancellation, work)? {
+            members.get(&callee.source.span())
         } else {
             calls
-                .callee(site, sources, cancellation, work)?
-                .and_then(|(callee, _)| members.get(&callee.source.span()))
+                .returned_receiver(site, cancellation, work)?
+                .and_then(|receiver| applications.get(&receiver.source.span()))
         };
         for &dependency in dependencies.into_iter().flatten() {
             work.consume()?;
