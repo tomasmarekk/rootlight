@@ -1289,6 +1289,220 @@ fn vba_declared_type_references_ignore_value_namespace_shadowing() {
 }
 
 #[test]
+fn vba_conditional_types_and_fields_require_implied_unique_declarations() {
+    for (definition, between, guard, resolves) in [
+        (
+            "#If Enabled Then\n{type}#End If\n",
+            "",
+            "#If ENABLED Then\n{body}#End If\n",
+            true,
+        ),
+        (
+            "#If Enabled Then\n#Else\n{type}#End If\n",
+            "",
+            "#If Enabled Then\n#Else\n{body}#End If\n",
+            true,
+        ),
+        (
+            "#If Enabled Then\n{type}#Else\n{type}#End If\n",
+            "",
+            "#If Enabled Then\n{body}#End If\n",
+            true,
+        ),
+        (
+            "#If Enabled Then\n{type}#End If\n",
+            "",
+            "#If Other Then\n{body}#End If\n",
+            false,
+        ),
+        ("#If Enabled Then\n{type}#End If\n", "", "{body}", false),
+        (
+            "#If Enabled Then\n{type}#End If\n",
+            "",
+            "#If Enabled Then\n#Else\n{body}#End If\n",
+            false,
+        ),
+        (
+            "#If Enabled Then\n{type}{type}#End If\n",
+            "",
+            "#If Enabled Then\n{body}#End If\n",
+            false,
+        ),
+        (
+            "{type}#If Enabled Then\n{type}#End If\n",
+            "",
+            "#If Enabled Then\n{body}#End If\n",
+            false,
+        ),
+        (
+            "{type}#If Enabled Then\n{type}#End If\n",
+            "",
+            "#If Enabled Then\n#Else\n{body}#End If\n",
+            true,
+        ),
+        (
+            "#If Enabled Then\n#If Other Then\n{type}#End If\n#End If\n",
+            "",
+            "#If Enabled Then\n{body}#End If\n",
+            false,
+        ),
+        (
+            "#If Enabled Then\n{type}#End If\n",
+            "#Const Enabled = False\n",
+            "#If Enabled Then\n{body}#End If\n",
+            false,
+        ),
+        (
+            "#If Version >= 7 Then\n{type}#End If\n",
+            "",
+            "#If Version >= 7 Then\n{body}#End If\n",
+            false,
+        ),
+        ("#If Version >= 7 Then\n{type}{body}#End If\n", "", "", true),
+    ] {
+        let body =
+            "Sub Run(ByVal Record As Long)\nDim item As Record\nitem.Value = Record\nEnd Sub\n";
+        let source = format!(
+            "{}{between}{}",
+            definition
+                .replace("{type}", "Private Type Record\nValue As Long\nEnd Type\n")
+                .replace("{body}", body),
+            guard.replace("{body}", body),
+        );
+        let result = output(&source);
+        let document = result.document();
+        for (marker, offset, name, role, gap) in [
+            (
+                "As Record",
+                3,
+                "Record",
+                OccurrenceRole::TypeUse,
+                "vba-type-target-unavailable",
+            ),
+            (
+                "item.Value",
+                0,
+                "Value",
+                OccurrenceRole::Reference,
+                "vba-member-target-unavailable",
+            ),
+        ] {
+            let start = u64::try_from(source.find(marker).unwrap() + offset).unwrap();
+            let end = start + u64::try_from(marker.len() - offset).unwrap();
+            let site = document
+                .occurrences
+                .iter()
+                .find(|site| {
+                    site.source.span().start_byte() == start
+                        && site.source.span().end_byte() == end
+                        && site.role == role
+                })
+                .unwrap();
+            assert_eq!(
+                matches!(site.target, OccurrenceTarget::Resolved { .. }),
+                resolves,
+                "{marker}: {source}"
+            );
+            if let OccurrenceTarget::Resolved { symbol } = site.target {
+                let target = document
+                    .entities
+                    .iter()
+                    .find(|entity| entity.id == symbol)
+                    .unwrap();
+                assert_eq!(target.canonical_name, name);
+                // The positive branch selects the first definition, not its sibling.
+                assert!(
+                    target.evidence.source.as_ref().unwrap().span().start_byte()
+                        < u64::try_from(source.find("End Type").unwrap()).unwrap()
+                );
+            }
+            assert_eq!(
+                document
+                    .skipped_regions
+                    .iter()
+                    .any(|region| region.source == site.source && region.detail == gap),
+                !resolves
+            );
+        }
+        assert!(
+            document
+                .skipped_regions
+                .iter()
+                .any(|gap| gap.detail == "vba-conditional-compilation-evaluation-unavailable")
+        );
+    }
+}
+
+#[test]
+fn vba_conditional_type_fields_follow_local_and_returned_receivers() {
+    let source = "#If Enabled Then\nPrivate Type Inner\nValue As Long\nEnd Type\nPrivate Type Record\nNested As Inner\nEnd Type\nFunction Create() As Record\nEnd Function\n#End If\nSub Run()\n#If Enabled Then\nDim item As Record\nitem.Nested.Value = Create().Nested.Value\n#Else\nDim item As Variant\nitem.Nested.Value = 0\n#End If\nEnd Sub\n";
+    let result = output(source);
+    let document = result.document();
+    let target = document
+        .entities
+        .iter()
+        .find(|entity| entity.kind == EntityKind::Field && entity.canonical_name == "Value")
+        .unwrap();
+    for expression in ["item.Nested.Value", "Create().Nested.Value"] {
+        let start = u64::try_from(source.find(expression).unwrap()).unwrap();
+        let end = start + u64::try_from(expression.len()).unwrap();
+        let site = document
+            .occurrences
+            .iter()
+            .find(|site| {
+                site.source.span().start_byte() == start && site.source.span().end_byte() == end
+            })
+            .unwrap();
+        assert_eq!(
+            site.target,
+            OccurrenceTarget::Resolved { symbol: target.id },
+            "{expression}"
+        );
+    }
+    let start = u64::try_from(source.rfind("item.Nested.Value").unwrap()).unwrap();
+    let site = document
+        .occurrences
+        .iter()
+        .find(|site| {
+            site.source.span().start_byte() == start && site.source.span().end_byte() == start + 17
+        })
+        .unwrap();
+    assert!(matches!(site.target, OccurrenceTarget::Unresolved { .. }));
+}
+
+#[test]
+fn vba_conditional_enum_types_keep_the_type_and_value_namespaces_separate() {
+    for (other, resolves) in [
+        ("", true),
+        ("Private Type Mode\nValue As Long\nEnd Type\n", false),
+    ] {
+        let source = format!(
+            "#If Enabled Then\nPrivate Enum Mode\nReady = 1\nEnd Enum\n{other}#End If\n#If Enabled Then\nSub Run(ByVal Mode As Long)\nDim choice As Mode\nEnd Sub\n#End If\n"
+        );
+        let result = output(&source);
+        let document = result.document();
+        let start = u64::try_from(source.find("choice As Mode").unwrap() + 10).unwrap();
+        let site = document
+            .occurrences
+            .iter()
+            .find(|site| {
+                site.source.span().start_byte() == start && site.role == OccurrenceRole::TypeUse
+            })
+            .unwrap();
+        let target = document
+            .entities
+            .iter()
+            .find(|entity| entity.kind == EntityKind::Enum && entity.canonical_name == "Mode")
+            .unwrap();
+        assert_eq!(
+            site.target == OccurrenceTarget::Resolved { symbol: target.id },
+            resolves
+        );
+        assert_eq!(document.skipped_regions.iter().any(|gap| gap.source == site.source && gap.detail == "vba-type-target-unavailable"), !resolves);
+    }
+}
+
+#[test]
 fn vba_type_tests_reference_udts_without_declaring_function_return_types() {
     let source = "Private Type Shape\nX As Long\nEnd Type\nPrivate candidate As Variant\nFunction Item() As Object\nIf TypeOf candidate Is Shape Then\nEnd If\nEnd Function\nSub Run()\nItem().X = 1\nEnd Sub\n";
     let result = output(source);

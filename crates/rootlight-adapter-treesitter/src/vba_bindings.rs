@@ -108,6 +108,11 @@ struct DeclaredType {
     field_scope: Option<u64>,
 }
 
+struct TypeDeclaration {
+    conditions: BTreeMap<u64, u64>,
+    target: Option<DeclaredType>,
+}
+
 struct StatementLabel {
     definition: u64,
     symbol: Option<SymbolId>,
@@ -147,7 +152,7 @@ pub(super) struct VbaBindings<'a> {
     class_symbol: Option<SymbolId>,
     procedural_module: Option<(String, SymbolId)>,
     maximum_name_bytes: usize,
-    types: BTreeMap<u64, BTreeMap<String, Option<DeclaredType>>>,
+    types: BTreeMap<u64, BTreeMap<String, Vec<TypeDeclaration>>>,
     foreign_type_scopes: BTreeSet<u64>,
     fields: BTreeMap<u64, BTreeMap<String, Option<SymbolId>>>,
     foreign_field_scopes: BTreeSet<u64>,
@@ -694,16 +699,12 @@ impl<'a> VbaBindings<'a> {
             let Some((owner, conditional)) = self.scope(fact.parent(), cancellation)? else {
                 continue;
             };
-            let symbol = symbols
-                .get(&fact.local_id())
-                .copied()
-                .filter(|_| !conditional);
+            let symbol = symbols.get(&fact.local_id()).copied();
             let name = self.source_name(fact, source)?;
             declarations.insert(declaration.local_id(), symbol.filter(|_| name.is_some()));
             match declaration.syntax_kind().as_str() {
                 "vba.struct.declaration" | "vba.enum.declaration" => {
-                    let Some((module, outer_conditional)) =
-                        self.scope(self.fact(owner)?.parent(), cancellation)?
+                    let Some((module, _)) = self.scope(self.fact(owner)?.parent(), cancellation)?
                     else {
                         continue;
                     };
@@ -714,20 +715,22 @@ impl<'a> VbaBindings<'a> {
                         self.foreign_type_scopes.insert(module);
                         continue;
                     };
-                    let ty = symbol
-                        .filter(|_| !outer_conditional)
-                        .map(|symbol| DeclaredType {
-                            symbol,
-                            field_scope: (declaration.syntax_kind().as_str()
-                                == "vba.struct.declaration")
-                                .then_some(owner),
-                        });
+                    let ty = symbol.map(|symbol| DeclaredType {
+                        symbol,
+                        field_scope: (declaration.syntax_kind().as_str()
+                            == "vba.struct.declaration")
+                            .then_some(owner),
+                    });
+                    let conditions = self.branch_conditions(fact.parent(), module, cancellation)?;
                     self.types
                         .entry(module)
                         .or_default()
                         .entry(name)
-                        .and_modify(|value| *value = None)
-                        .or_insert(ty);
+                        .or_default()
+                        .push(TypeDeclaration {
+                            conditions,
+                            target: ty,
+                        });
                 }
                 "vba.field.declaration" => {
                     let Some(name) = name else {
@@ -739,7 +742,7 @@ impl<'a> VbaBindings<'a> {
                         .or_default()
                         .entry(name)
                         .and_modify(|value| *value = None)
-                        .or_insert(symbol);
+                        .or_insert(symbol.filter(|_| !conditional));
                 }
                 _ => {}
             }
@@ -820,12 +823,32 @@ impl<'a> VbaBindings<'a> {
                 if self.foreign_type_scopes.contains(&owner) {
                     return Ok(None);
                 }
-                return Ok(self
-                    .types
-                    .get(&owner)
-                    .and_then(|names| names.get(name))
-                    .copied()
-                    .flatten());
+                let Some(declarations) = self.types.get(&owner).and_then(|names| names.get(name))
+                else {
+                    return Ok(None);
+                };
+                let reference = self.branch_conditions(fact.parent(), owner, cancellation)?;
+                let mut matched = None;
+                // Type names have their own namespace, but every declaration
+                // that could coexist still participates in uniqueness.
+                for declaration in declarations {
+                    cancellation.check()?;
+                    if self.conditions_exclude(&declaration.conditions, &reference, cancellation)? {
+                        continue;
+                    }
+                    if matched.is_some()
+                        || declaration.target.is_none()
+                        || !self.conditions_imply(
+                            &reference,
+                            &declaration.conditions,
+                            cancellation,
+                        )?
+                    {
+                        return Ok(None);
+                    }
+                    matched = declaration.target;
+                }
+                return Ok(matched);
             }
             parent = scope.parent();
         }
@@ -903,11 +926,17 @@ impl<'a> VbaBindings<'a> {
             if self.foreign_scopes.contains(&owner) {
                 return Ok(None);
             }
-            if let Some(binding) = self
-                .bindings
-                .get(&owner)
-                .and_then(|names| names.get(&receiver))
-            {
+            let conditional =
+                self.conditional_binding(fact.parent(), owner, &receiver, cancellation)?;
+            let binding = match &conditional {
+                ConditionalBinding::Absent => self
+                    .bindings
+                    .get(&owner)
+                    .and_then(|names| names.get(&receiver)),
+                ConditionalBinding::Value(binding) => Some(binding),
+                ConditionalBinding::Ambiguous => return Ok(None),
+            };
+            if let Some(binding) = binding {
                 receiver_binding = *binding;
                 break;
             }
