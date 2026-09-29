@@ -1417,11 +1417,6 @@ impl<'a> VbaBindings<'a> {
         let Some(header) = rootlight_vba::procedure_header(source, &mut check)? else {
             return Ok(false);
         };
-        let external = matches!(
-            header.kind(),
-            rootlight_vba::ProcedureKind::ExternalSub
-                | rootlight_vba::ProcedureKind::ExternalFunction
-        );
         let Some(range) = rootlight_vba::procedure_parameter_range(source, &mut check)? else {
             return Ok(false);
         };
@@ -1498,36 +1493,13 @@ impl<'a> VbaBindings<'a> {
         let mut supplied = BTreeSet::new();
         for (index, argument) in arguments.iter().enumerate() {
             cancellation.check()?;
-            // Call-site ByVal is external-only (MS-VBAL 5.6.13.1). Its operand
-            // must be an expression, not the separate AddressOf argument form.
-            if argument
-                .expression()
-                .get(..5)
-                .is_some_and(|word| word.eq_ignore_ascii_case(b"ByVal"))
-                && argument
-                    .expression()
-                    .get(5)
-                    .is_none_or(|byte| byte.is_ascii_whitespace() || *byte == b'(')
-            {
-                let tail = argument.expression().get(5..).ok_or_else(invalid_capture)?;
-                if !external {
-                    return Ok(false);
-                }
-                let leading = rootlight_vba::logical_whitespace_len(tail, &mut check)?;
-                let value = tail.get(leading..).ok_or_else(invalid_capture)?;
-                let Some(end) = rootlight_vba::value_expression_end(
-                    value,
-                    self.maximum_name_bytes,
-                    &mut check,
-                )?
-                else {
-                    return Ok(false);
-                };
-                let remainder = value.get(end..).ok_or_else(invalid_capture)?;
-                if rootlight_vba::logical_whitespace_len(remainder, &mut check)? != remainder.len()
-                {
-                    return Ok(false);
-                }
+            if !rootlight_vba::argument_passing_matches(
+                argument.expression(),
+                header.kind(),
+                self.maximum_name_bytes,
+                &mut check,
+            )? {
+                return Ok(false);
             }
             let parameter = if let Some(name) = argument.name() {
                 let Some(name) = std::str::from_utf8(name).ok() else {

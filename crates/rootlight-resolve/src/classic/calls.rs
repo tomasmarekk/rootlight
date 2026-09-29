@@ -24,7 +24,7 @@ struct Contract<'a> {
     optional: Vec<bool>,
     names: BTreeMap<String, usize>,
     variadic: bool,
-    setter: bool,
+    kind: rootlight_vba::ProcedureKind,
 }
 
 struct NamedArgument {
@@ -270,7 +270,15 @@ impl<'a, 'o> CallIndex<'a, 'o> {
             return Ok(());
         };
         let mut additional_sources = Cow::Borrowed(additional_sources);
-        let (arguments, optional) = if contract.setter {
+        if contract.kind == rootlight_vba::ProcedureKind::ExternalSub
+            && callee.syntax_kind == "vba.invoked_get_member.reference"
+        {
+            return Ok(());
+        }
+        let (arguments, optional) = if matches!(
+            contract.kind,
+            rootlight_vba::ProcedureKind::PropertyLet | rootlight_vba::ProcedureKind::PropertySet
+        ) {
             let Some((false, indices)) = contract.optional.split_last() else {
                 return Ok(());
             };
@@ -295,6 +303,7 @@ impl<'a, 'o> CallIndex<'a, 'o> {
             optional,
             &contract.names,
             contract.variadic,
+            contract.kind,
             &mut check,
         )?
         else {
@@ -485,27 +494,17 @@ fn contract<'a>(
     let Some(header) = rootlight_vba::procedure_header(bytes, check)? else {
         return Ok(None);
     };
-    if !matches!(
-        header.kind(),
-        rootlight_vba::ProcedureKind::Sub
-            | rootlight_vba::ProcedureKind::Function
-            | rootlight_vba::ProcedureKind::PropertyGet
-            | rootlight_vba::ProcedureKind::PropertyLet
-            | rootlight_vba::ProcedureKind::PropertySet
-    ) || !header
+    if !header
         .name()
         .eq_ignore_ascii_case(target.canonical_name.as_bytes())
     {
         return Ok(None);
     }
-    let tail = bytes.get(header.name_span().end..).unwrap_or_default();
-    let leading = rootlight_vba::logical_whitespace_len(tail, check)?;
-    let tail = tail.get(leading..).unwrap_or_default();
-    let Some(end) = rootlight_vba::parenthesized_expression_end(tail, check)? else {
+    let Some(range) = rootlight_vba::procedure_parameter_range(bytes, check)? else {
         return Ok(None);
     };
     let Some(written) = rootlight_vba::argument_list(
-        tail.get(1..end - 1).unwrap_or_default(),
+        bytes.get(range).unwrap_or_default(),
         parameters.len(),
         check,
     )?
@@ -604,10 +603,7 @@ fn contract<'a>(
         optional,
         names,
         variadic,
-        setter: matches!(
-            header.kind(),
-            rootlight_vba::ProcedureKind::PropertyLet | rootlight_vba::ProcedureKind::PropertySet
-        ),
+        kind: header.kind(),
     }))
 }
 
@@ -685,6 +681,7 @@ fn arguments_match(
     optional_parameters: &[bool],
     names: &BTreeMap<String, usize>,
     variadic: bool,
+    procedure: rootlight_vba::ProcedureKind,
     check: &mut impl FnMut() -> Result<(), ResolutionError>,
 ) -> Result<Option<Vec<NamedArgument>>, ResolutionError> {
     let leading = rootlight_vba::logical_whitespace_len(tail, check)?;
@@ -732,15 +729,12 @@ fn arguments_match(
     let mut named = Vec::new();
     for (position, argument) in arguments.iter().enumerate() {
         check()?;
-        if argument
-            .expression()
-            .get(..5)
-            .is_some_and(|word| word.eq_ignore_ascii_case(b"ByVal"))
-            && argument
-                .expression()
-                .get(5)
-                .is_some_and(u8::is_ascii_whitespace)
-        {
+        if !rootlight_vba::argument_passing_matches(
+            argument.expression(),
+            procedure,
+            argument.expression().len(),
+            check,
+        )? {
             return Ok(None);
         }
         let position = if let Some(name) = argument.name() {
@@ -791,6 +785,7 @@ mod tests {
                 &[false, true],
                 &names,
                 false,
+                rootlight_vba::ProcedureKind::Function,
                 &mut || Ok(()),
             )
             .unwrap()
@@ -835,6 +830,7 @@ mod tests {
                     &[false, true],
                     &names,
                     false,
+                    rootlight_vba::ProcedureKind::Function,
                     &mut check
                 )
                 .unwrap()
@@ -844,14 +840,30 @@ mod tests {
             );
         }
         assert!(
-            arguments_match(b" , 2", false, &[true, true], &names, false, &mut || Ok(()))
-                .unwrap()
-                .is_some()
+            arguments_match(
+                b" , 2",
+                false,
+                &[true, true],
+                &names,
+                false,
+                rootlight_vba::ProcedureKind::Function,
+                &mut || Ok(())
+            )
+            .unwrap()
+            .is_some()
         );
         assert!(
-            arguments_match(b"()", true, &[], &BTreeMap::new(), false, &mut || Ok(()))
-                .unwrap()
-                .is_some()
+            arguments_match(
+                b"()",
+                true,
+                &[],
+                &BTreeMap::new(),
+                false,
+                rootlight_vba::ProcedureKind::Function,
+                &mut || Ok(())
+            )
+            .unwrap()
+            .is_some()
         );
     }
 
@@ -885,9 +897,15 @@ mod tests {
         ));
         let mut work = ResolutionWorkBudget::new(0);
         assert!(matches!(
-            arguments_match(b" 1", false, &[false], &BTreeMap::new(), false, &mut || {
-                work.consume()
-            }),
+            arguments_match(
+                b" 1",
+                false,
+                &[false],
+                &BTreeMap::new(),
+                false,
+                rootlight_vba::ProcedureKind::Function,
+                &mut || { work.consume() }
+            ),
             Err(ResolutionError::WorkLimit { .. })
         ));
     }

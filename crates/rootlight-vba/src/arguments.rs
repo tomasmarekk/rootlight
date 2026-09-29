@@ -2,7 +2,9 @@
 //! Delimiters inside strings, dates, names and nested applications do not create
 //! arguments; callers must separately prove expression validity and parameter binding.
 
-use super::{group::quoted_end, logical_whitespace_len, name, parenthesized_expression_end};
+use super::{
+    ProcedureKind, group::quoted_end, logical_whitespace_len, name, parenthesized_expression_end,
+};
 
 /// One argument borrowing its original expression and optional unbracketed name.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -35,6 +37,50 @@ impl<'a> Argument<'a> {
     pub const fn expression(self) -> &'a [u8] {
         self.expression
     }
+}
+
+/// Checks whether an argument's explicit passing modifier fits its procedure.
+///
+/// Input is an expression slice returned by [`argument_list`], without leading
+/// logical whitespace. Non-ByVal arguments pass this check without expression
+/// validation. Call-site ByVal is external-only (MS-VBAL 5.6.13.1) and requires a
+/// complete value in the subset supported by [`super::value_expression_end`].
+/// AddressOf is a separate argument form, not a valid ByVal operand. Unsupported,
+/// incomplete or token-limited ByVal operands return false. This checks passing
+/// syntax only, not arity, parameter types or callable identity.
+///
+/// # Errors
+/// Propagates the caller's cancellation/work error unchanged.
+pub fn argument_passing_matches<E>(
+    expression: &[u8],
+    procedure: ProcedureKind,
+    maximum_tokens: usize,
+    check: &mut impl FnMut() -> Result<(), E>,
+) -> Result<bool, E> {
+    check()?;
+    if !expression
+        .get(..5)
+        .is_some_and(|word| word.eq_ignore_ascii_case(b"ByVal"))
+        || !expression
+            .get(5)
+            .is_none_or(|byte| byte.is_ascii_whitespace() || *byte == b'(')
+    {
+        return Ok(true);
+    }
+    if !matches!(
+        procedure,
+        ProcedureKind::ExternalSub | ProcedureKind::ExternalFunction
+    ) {
+        return Ok(false);
+    }
+    let tail = expression.get(5..).unwrap_or_default();
+    let leading = logical_whitespace_len(tail, check)?;
+    let value = tail.get(leading..).unwrap_or_default();
+    let Some(end) = super::value_expression_end(value, maximum_tokens, check)? else {
+        return Ok(false);
+    };
+    let remainder = value.get(end..).unwrap_or_default();
+    Ok(logical_whitespace_len(remainder, check)? == remainder.len())
 }
 
 /// Reads a complete VBA argument list, excluding its enclosing parentheses.
@@ -163,6 +209,105 @@ pub fn argument_list<'a, E>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn passing_modifiers_require_external_procedures_and_complete_values() {
+        for kind in [
+            ProcedureKind::Sub,
+            ProcedureKind::Function,
+            ProcedureKind::PropertyGet,
+            ProcedureKind::PropertyLet,
+            ProcedureKind::PropertySet,
+            ProcedureKind::ExternalSub,
+            ProcedureKind::ExternalFunction,
+        ] {
+            let external = matches!(
+                kind,
+                ProcedureKind::ExternalSub | ProcedureKind::ExternalFunction
+            );
+            for expression in [
+                "ByVal 1",
+                "ByVal(1)",
+                "bYvAl _\r\n value + 2",
+                "ByVal Fetch(1)",
+                "ByVal \"x\" ",
+            ] {
+                assert_eq!(
+                    argument_passing_matches(
+                        expression.as_bytes(),
+                        kind,
+                        64,
+                        &mut || Ok::<(), ()>(())
+                    )
+                    .unwrap(),
+                    external,
+                    "{kind:?}: {expression}"
+                );
+            }
+            for expression in [
+                "ByVal",
+                "ByVal _\n",
+                "ByVal()",
+                "ByVal AddressOf Handler",
+                "ByVal (AddressOf Handler)",
+                "ByVal ByVal 1",
+                "ByVal 1 +",
+                "ByVal 1: Other()",
+                "ByVal 1 ' comment",
+            ] {
+                assert!(
+                    !argument_passing_matches(
+                        expression.as_bytes(),
+                        kind,
+                        64,
+                        &mut || Ok::<(), ()>(())
+                    )
+                    .unwrap(),
+                    "{kind:?}: {expression}"
+                );
+            }
+            for expression in ["1", "value", "ByValue", "[ByVal]", "AddressOf Handler", ""] {
+                assert!(
+                    argument_passing_matches(
+                        expression.as_bytes(),
+                        kind,
+                        64,
+                        &mut || Ok::<(), ()>(())
+                    )
+                    .unwrap(),
+                    "{kind:?}: {expression}"
+                );
+            }
+        }
+        assert!(
+            !argument_passing_matches(b"ByVal 1 + 2", ProcedureKind::ExternalSub, 2, &mut || Ok::<
+                (),
+                (),
+            >(
+                ()
+            ))
+            .unwrap()
+        );
+        assert_eq!(
+            argument_passing_matches(b"value", ProcedureKind::Sub, 64, &mut || Err("cancelled")),
+            Err("cancelled")
+        );
+        let input = format!("ByVal {}", "value + ".repeat(4096));
+        let mut calls = 0;
+        assert_eq!(
+            argument_passing_matches(
+                input.as_bytes(),
+                ProcedureKind::ExternalFunction,
+                input.len(),
+                &mut || {
+                    calls += 1;
+                    if calls == 20 { Err("budget") } else { Ok(()) }
+                }
+            ),
+            Err("budget")
+        );
+        assert_eq!(calls, 20);
+    }
 
     #[test]
     fn arguments_preserve_nested_regions_omissions_names_and_boundaries() {

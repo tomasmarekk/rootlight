@@ -15,7 +15,7 @@ mod procedure;
 mod variadic;
 mod with_blocks;
 
-pub use arguments::{Argument, argument_list};
+pub use arguments::{Argument, argument_list, argument_passing_matches};
 pub use call_chain::{
     CallChain, CallChainPart, CallChainRead, CallChainRole, assigned_value_end,
     call_chain_statement, indexed_assignment_arguments_end, value_application_expression,
