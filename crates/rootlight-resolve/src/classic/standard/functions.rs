@@ -162,6 +162,78 @@ pub(super) const FUNCTIONS: &[Function] = &[
         signature: "Function StrReverse(Expression As String) As String",
         parameters: &[("expression", false)],
     },
+    // MS-VBAL 6.1.2.11.1 defines these search, replacement and array contracts.
+    // Optional argument values and element coercions remain runtime concerns.
+    // https://learn.microsoft.com/en-us/openspecs/microsoft_general_purpose_programming_languages/ms-vbal/6af9457c-70ea-4691-80d6-3dca9f152aee
+    // https://learn.microsoft.com/en-us/openspecs/microsoft_general_purpose_programming_languages/ms-vbal/d9c2417c-2d36-45b1-b3d7-1876064e6085
+    Function {
+        name: "Replace",
+        signature: "Function Replace(Expression As String, Find As String, Replace As String, Optional Start As Long = 1, Optional Count As Long = -1, Optional Compare As VbCompareMethod = vbBinaryCompare) As String",
+        parameters: &[
+            ("expression", false),
+            ("find", false),
+            ("replace", false),
+            ("start", true),
+            ("count", true),
+            ("compare", true),
+        ],
+    },
+    Function {
+        name: "Split",
+        signature: "Function Split(Expression As String, Optional Delimiter As Variant, Optional Limit As Long = -1, Optional Compare As VbCompareMethod = vbBinaryCompare) As Variant",
+        parameters: &[
+            ("expression", false),
+            ("delimiter", true),
+            ("limit", true),
+            ("compare", true),
+        ],
+    },
+    // https://learn.microsoft.com/en-us/openspecs/microsoft_general_purpose_programming_languages/ms-vbal/1c276c6f-c3b0-4de7-ade5-7803f99eea44
+    Function {
+        name: "Join",
+        signature: "Function Join(SourceArray() As Variant, Optional Delimiter As Variant) As String",
+        parameters: &[("sourcearray", false), ("delimiter", true)],
+    },
+    // https://learn.microsoft.com/en-us/openspecs/microsoft_general_purpose_programming_languages/ms-vbal/22ca3cbf-f56b-4795-8f9c-f0a59414eaad
+    Function {
+        name: "Filter",
+        signature: "Function Filter(SourceArray() As Variant, Match As String, Optional Include As Boolean = True, Optional Compare As VbCompareMethod = vbBinaryCompare) As Variant",
+        parameters: &[
+            ("sourcearray", false),
+            ("match", false),
+            ("include", true),
+            ("compare", true),
+        ],
+    },
+    // https://learn.microsoft.com/en-us/openspecs/microsoft_general_purpose_programming_languages/ms-vbal/9d45a100-3a6d-4cb6-aa09-772ccffe9706
+    Function {
+        name: "InStrRev",
+        signature: "Function InStrRev(StringCheck As String, StringMatch As String, Optional Start As Long = -1, Optional Compare As VbCompareMethod = vbBinaryCompare) As Long",
+        parameters: &[
+            ("stringcheck", false),
+            ("stringmatch", false),
+            ("start", true),
+            ("compare", true),
+        ],
+    },
+    // https://learn.microsoft.com/en-us/openspecs/microsoft_general_purpose_programming_languages/ms-vbal/9541f02a-e173-47a7-8c0f-4d91813c1c88
+    Function {
+        name: "StrComp",
+        signature: "Function StrComp(String1 As Variant, String2 As Variant, Optional Compare As VbCompareMethod = vbBinaryCompare) As Variant",
+        parameters: &[("string1", false), ("string2", false), ("compare", true)],
+    },
+    // IIf is a function, not a short-circuit branch: both argument expressions
+    // retain their dependencies regardless of the condition's apparent value.
+    // https://learn.microsoft.com/en-us/openspecs/microsoft_general_purpose_programming_languages/ms-vbal/3593c073-c770-4060-8416-aaf7545ea5fe
+    Function {
+        name: "IIf",
+        signature: "Function IIf(Expression As Variant, TruePart As Variant, FalsePart As Variant) As Variant",
+        parameters: &[
+            ("expression", false),
+            ("truepart", false),
+            ("falsepart", false),
+        ],
+    },
     // MS-VBAL 6.1.2.3.1 and 6.1.2.7.1 distinguish conversion and inspection contracts.
     // The model does not assume an implementation's LongLong/LongPtr availability.
     // https://learn.microsoft.com/en-us/openspecs/microsoft_general_purpose_programming_languages/ms-vbal/1951c2a7-7527-4d8d-b4a5-3b212d2442d5

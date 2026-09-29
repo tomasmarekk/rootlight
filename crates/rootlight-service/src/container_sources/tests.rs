@@ -308,6 +308,73 @@ fn standard_value_calls_preserve_named_contracts_and_source_lifecycles() {
     assert_standard_function_calls(&valid, &invalid, &["VBA.Hex$(16)"], 34);
 }
 
+#[test]
+fn standard_text_calls_preserve_omitted_arguments_and_eager_branch_dependencies() {
+    let valid = [
+        "VBA.Replace(\"abca\", \"a\", \"x\")",
+        "VBA.Replace(\"abca\", \"a\", \"x\", 2, 1, 0)",
+        "VBA.Replace(\"abca\", \"a\", \"x\", , , 1)",
+        "VBA.Replace(Replace:=\"x\", Expression:=\"abca\", Find:=\"a\", Count:=1)",
+        "Call VBA.Replace(\"a\", \"a\", \"b\")",
+        "[vBa].[Replace](\"a\", \"a\", \"b\")",
+        "VBA.Split(\"a b\")",
+        "VBA.Split(\"a,b\", \",\", 2, 1)",
+        "VBA.Split(\"a b\", , , 0)",
+        "VBA.Split(Expression:=\"a b\", Compare:=1)",
+        "VBA.Join(value)",
+        "VBA.Join(SourceArray:=value, Delimiter:=\",\")",
+        "VBA.Filter(value, \"a\")",
+        "VBA.Filter(value, \"a\", , 1)",
+        "VBA.Filter(Match:=\"a\", SourceArray:=value, Include:=False)",
+        "VBA.InStrRev(\"abcba\", \"b\")",
+        "VBA.InStrRev(\"abcba\", \"b\", , 1)",
+        "VBA.InStrRev(StringMatch:=\"b\", StringCheck:=\"abcba\", Compare:=1)",
+        "VBA.StrComp(\"a\", \"b\")",
+        "VBA.StrComp(String2:=\"b\", Compare:=1, String1:=\"a\")",
+        "VBA.IIf(True, 1, 2)",
+        "VBA.IIf(FalsePart:=2, Expression:=True, TruePart:=1)",
+        "VBA.IIf(False, VBA.Len(\"left\"), VBA.Len(\"right\"))",
+        "VBA.Join(VBA.Filter(VBA.Split(\"a,b\", \",\"), \"a\"), \";\")",
+    ];
+    let invalid = [
+        "VBA.Replace(\"a\", \"b\")",
+        "VBA.Replace(\"a\", , \"b\")",
+        "VBA.Replace(\"a\", \"b\", \"c\", 1, 2, 0, 3)",
+        "VBA.Replace(Expression:=\"a\", Find:=\"a\", Replacement:=\"b\")",
+        "VBA.Replace(\"a\", \"b\", \"c\", Count:=1, count:=2)",
+        "VBA.Replace$(\"a\", \"b\", \"c\")",
+        "VBA.Split()",
+        "VBA.Split(\"a\",)",
+        "VBA.Split(String:=\"a\")",
+        "VBA.Split(\"a\", \" \", 2, 1, 0)",
+        "VBA.Join()",
+        "VBA.Join(Delimiter:=\",\")",
+        "VBA.Join(value, \",\", 1)",
+        "VBA.Filter(value)",
+        "VBA.Filter(value, , False)",
+        "VBA.Filter(value, \"a\", Include:=True, \"b\")",
+        "VBA.InStrRev(\"a\")",
+        "VBA.InStrRev(String1:=\"a\", String2:=\"b\")",
+        "VBA.StrComp(\"a\", , 1)",
+        "VBA.StrComp(\"a\", \"b\", 1, 2)",
+        "VBA.IIf(True, 1)",
+        "VBA.IIf(True, , 2)",
+        "VBA.IIf(Expression:=True, TruePart:=1, TruePart:=2)",
+        "VBA.IIf(ByVal True, 1, 2)",
+    ];
+    assert_standard_function_calls(
+        &valid,
+        &invalid,
+        &[
+            "VBA.Len(\"left\")",
+            "VBA.Len(\"right\")",
+            "VBA.Filter(VBA.Split(\"a,b\", \",\"), \"a\")",
+            "VBA.Split(\"a,b\", \",\")",
+        ],
+        8,
+    );
+}
+
 fn assert_standard_function_calls(
     valid: &[&str],
     invalid: &[&str],
@@ -353,6 +420,7 @@ fn assert_standard_function_calls(
         let document = snapshot.document();
         let mut calls = Vec::new();
         let mut symbols = BTreeSet::new();
+        let mut sources = Vec::new();
         for site in &document.occurrences {
             if !document.provenance.iter().any(|p| {
                 p.id == site.provenance
@@ -387,6 +455,7 @@ fn assert_standard_function_calls(
                 "{expression}"
             );
             calls.push(expression.to_owned());
+            sources.push(site.source.clone());
             assert_eq!(
                 document
                     .relations
@@ -443,6 +512,33 @@ fn assert_standard_function_calls(
                 expected_call_count
             );
             assert!(!relationships.data.truncated);
+            // Cover every call without widening the per-request source budget.
+            let mut actual_bytes = Vec::new();
+            for batch in sources.chunks(16) {
+                let read = service
+                    .source_read_with_options_and_budget(
+                        receipt.generation,
+                        batch.to_vec(),
+                        SourceReadOptions::new()
+                            .with_context_lines_before(0)
+                            .with_context_lines_after(0),
+                        FirstSliceBudget::default(),
+                        &deadline(),
+                    )
+                    .unwrap();
+                actual_bytes.extend(read.data.chunks.iter().map(|chunk| {
+                    assert!(chunk.extracted_from.is_some());
+                    chunk.bytes.clone()
+                }));
+            }
+            actual_bytes.sort();
+            assert_eq!(
+                actual_bytes,
+                calls
+                    .iter()
+                    .map(|call| call.as_bytes().to_vec())
+                    .collect::<Vec<_>>()
+            );
         }
         let prepared = service
             .prepare_repository_with_options(
