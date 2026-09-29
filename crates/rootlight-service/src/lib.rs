@@ -219,7 +219,7 @@ const PROJECT_FACTS_TRUNCATED_CODE: &str = "project-adapter-facts-truncated";
 const PROJECT_FACTS_TRUNCATED_MESSAGE: &str =
     "additional project semantic facts were omitted by aggregate resource limits";
 const AGGREGATE_DIAGNOSTICS_TRUNCATED_CODE: &str = "aggregate-diagnostics-truncated";
-const ANALYZER_BINARY_SEED: &[u8] = b"rootlight.first-slice.treesitter-structural/183";
+const ANALYZER_BINARY_SEED: &[u8] = b"rootlight.first-slice.treesitter-structural/184";
 const RESOLVER_BINARY_SEED: &[u8] = b"rootlight.first-slice.resolve/58";
 const INCREMENTAL_PROVIDER_SEED: &[u8] = b"rootlight.first-slice.incremental-provider/1";
 const LANGUAGE_DISPOSITION_PROVIDER_SEED: &[u8] = b"rootlight.first-slice.language-disposition/5";
@@ -40532,6 +40532,145 @@ mod tests {
                     .unwrap();
                 assert_eq!(read.data.chunks[0].bytes, text.as_bytes());
             }
+        }
+    }
+
+    #[test]
+    fn vba_conditional_udt_fields_follow_edits_after_restart() {
+        let fixture = durable_test_tempdir();
+        let storage = durable_test_tempdir();
+        let paths = RuntimePaths::new(storage.path().join("state"), storage.path().join("runtime"))
+            .unwrap();
+        paths.prepare_owner().unwrap();
+        let mut previous = None;
+        for (extra, between, guard, expected) in [
+            ("", "", "#If Enabled Then\n", Some("Value As Long")),
+            ("", "", "#If Enabled Then\n#Else\n", Some("Value As String")),
+            ("", "", "#If Other Then\n", None),
+            ("", "", "#If Not Enabled Then\n", None),
+            ("", "", "#If Enabled Then\n", Some("Value As Long")),
+            ("Value As Byte\n", "", "#If Enabled Then\n", None),
+            ("", "", "#If Enabled Then\n", Some("Value As Long")),
+            ("", "#Const Enabled = False\n", "#If Enabled Then\n", None),
+            ("", "", "#If Enabled Then\n", Some("Value As Long")),
+        ] {
+            let expression = "item.Value";
+            let source = format!(
+                "Attribute VB_Name = \"Client\"\nPrivate Type Record\n{extra}#If Enabled Then\nValue As Long\n#Else\nValue As String\n#End If\nEnd Type\n{between}Sub Run(ByRef item As Record)\n{guard}{expression} = 1\n#End If\nEnd Sub\n"
+            );
+            fs::write(fixture.path().join("Client.bas"), &source).unwrap();
+            let mut service =
+                FirstSliceService::new_durable(2, paths.state_dir(), &deadline()).unwrap();
+            let receipt = service
+                .index_repository(fixture.path(), &deadline())
+                .unwrap();
+            assert_ne!(Some(receipt.generation), previous);
+            previous = Some(receipt.generation);
+            assert_eq!(
+                service
+                    .index_repository(fixture.path(), &deadline())
+                    .unwrap(),
+                receipt
+            );
+            drop(service);
+            let service =
+                FirstSliceService::new_durable(2, paths.state_dir(), &deadline()).unwrap();
+            let snapshot = service
+                .loaded_generation_snapshot(receipt.generation)
+                .unwrap();
+            let document = snapshot.document();
+            let start = u64::try_from(source.find(expression).unwrap()).unwrap();
+            let end = start + u64::try_from(expression.len()).unwrap();
+            let site = document
+                .occurrences
+                .iter()
+                .find(|site| {
+                    site.syntax_kind == "vba.let_member.reference"
+                        && site.source.span().start_byte() == start
+                        && site.source.span().end_byte() == end
+                })
+                .unwrap();
+            let targets = ["Value As Long", "Value As String"].map(|marker| {
+                let start = u64::try_from(source.find(marker).unwrap()).unwrap();
+                document
+                    .occurrences
+                    .iter()
+                    .find(|site| {
+                        site.role == OccurrenceRole::Definition
+                            && site.source.span().start_byte() == start
+                    })
+                    .unwrap()
+            });
+            if let Some(marker) = expected {
+                let target = targets[usize::from(marker == "Value As String")];
+                assert_eq!(site.target, target.target, "{source}");
+                assert!(matches!(site.target, OccurrenceTarget::Resolved { .. }));
+            } else {
+                assert!(
+                    matches!(site.target, OccurrenceTarget::Unresolved { .. }),
+                    "{source}"
+                );
+            }
+            for (target, marker) in targets
+                .into_iter()
+                .zip(["Value As Long", "Value As String"])
+            {
+                let OccurrenceTarget::Resolved { symbol } = target.target else {
+                    panic!("definition must retain its identity")
+                };
+                let relationships = service
+                    .symbol_relationships(
+                        receipt.generation,
+                        BTreeSet::from([symbol]),
+                        vec![RelationFamily::References],
+                        Some(RelationDirection::Inbound),
+                        0,
+                        20,
+                        0,
+                        &deadline(),
+                    )
+                    .unwrap();
+                assert_eq!(
+                    relationships
+                        .data
+                        .groups
+                        .iter()
+                        .flat_map(|group| &group.items)
+                        .flat_map(|edge| &edge.source_refs)
+                        .any(|reference| reference == &site.source),
+                    expected == Some(marker),
+                    "{marker}: {source}"
+                );
+            }
+            assert_eq!(
+                document.skipped_regions.iter().any(|gap| {
+                    gap.source == site.source && gap.detail == "vba-member-target-unavailable"
+                }),
+                expected.is_none()
+            );
+            assert!(!document.relations.iter().any(|relation| {
+                relation.predicate == RelationPredicate::Calls
+                    && relation.subject == RelationEndpoint::Occurrence(site.id)
+            }));
+            let read = service
+                .source_read_with_options_and_budget(
+                    receipt.generation,
+                    vec![site.source.clone()],
+                    SourceReadOptions::new()
+                        .with_context_lines_before(0)
+                        .with_context_lines_after(0)
+                        .with_encoding(SourceEncoding::Bytes),
+                    FirstSliceBudget::default(),
+                    &deadline(),
+                )
+                .unwrap();
+            assert_eq!(site.source.generation(), receipt.generation);
+            assert_eq!(read.data.chunks[0].bytes, expression.as_bytes());
+            assert!(
+                document.skipped_regions.iter().any(|gap| {
+                    gap.detail == "vba-conditional-compilation-evaluation-unavailable"
+                })
+            );
         }
     }
 

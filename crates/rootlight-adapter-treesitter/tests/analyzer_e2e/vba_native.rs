@@ -1434,6 +1434,201 @@ fn vba_conditional_types_and_fields_require_implied_unique_declarations() {
 }
 
 #[test]
+fn vba_conditional_udt_fields_require_implied_unique_declarations() {
+    for (fields, between, guard, target) in [
+        (
+            "#If Enabled Then\nValue As Long\n#End If\n",
+            "",
+            "#If ENABLED Then\n{body}#End If\n",
+            Some("Value As Long"),
+        ),
+        (
+            "#If Enabled Then\nValue As Long\n#Else\nValue As String\n#End If\n",
+            "",
+            "#If Enabled Then\n{body}#End If\n",
+            Some("Value As Long"),
+        ),
+        (
+            "#If Enabled Then\nValue As Long\n#Else\nValue As String\n#End If\n",
+            "",
+            "#If Enabled Then\n#Else\n{body}#End If\n",
+            Some("Value As String"),
+        ),
+        (
+            "#If Enabled Then\nValue As Long\n#End If\n",
+            "",
+            "{body}",
+            None,
+        ),
+        (
+            "#If Enabled Then\nValue As Long\n#End If\n",
+            "",
+            "#If Other Then\n{body}#End If\n",
+            None,
+        ),
+        (
+            "#If Enabled Then\nValue As Long\n#End If\n",
+            "",
+            "#If Enabled Then\n#Else\n{body}#End If\n",
+            None,
+        ),
+        (
+            "Value As String\n#If Enabled Then\nValue As Long\n#End If\n",
+            "",
+            "#If Enabled Then\n{body}#End If\n",
+            None,
+        ),
+        (
+            "Value As String\n#If Enabled Then\nValue As Long\n#End If\n",
+            "",
+            "#If Enabled Then\n#Else\n{body}#End If\n",
+            Some("Value As String"),
+        ),
+        (
+            "#If Enabled Then\nValue As Long\nValue As String\n#End If\n",
+            "",
+            "#If Enabled Then\n{body}#End If\n",
+            None,
+        ),
+        (
+            "#If Enabled Then\n#If Other Then\nValue As Long\n#End If\n#End If\n",
+            "",
+            "#If Enabled Then\n{body}#End If\n",
+            None,
+        ),
+        (
+            "#If Enabled Then\n#If Other Then\nValue As Long\n#End If\n#End If\n",
+            "",
+            "#If Enabled Then\n#If Other Then\n{body}#End If\n#End If\n",
+            Some("Value As Long"),
+        ),
+        (
+            "#If Enabled Then\nValue As Long\n#End If\n",
+            "#Const Enabled = False\n",
+            "#If Enabled Then\n{body}#End If\n",
+            None,
+        ),
+        (
+            "#If Version >= 7 Then\nValue As Long\n#End If\n",
+            "",
+            "#If Version >= 7 Then\n{body}#End If\n",
+            None,
+        ),
+    ] {
+        let expression = "item.[vAlUe]";
+        let source = format!(
+            "Private Type Record\nAnchor As Long\n{fields}End Type\n{between}Sub Run(ByRef item As Record)\n{}End Sub\n",
+            guard.replace("{body}", &format!("{expression} = 1\n")),
+        );
+        let result = output(&source);
+        let document = result.document();
+        let start = u64::try_from(source.find(expression).unwrap()).unwrap();
+        let end = start + u64::try_from(expression.len()).unwrap();
+        let site = document
+            .occurrences
+            .iter()
+            .find(|site| {
+                site.source.span().start_byte() == start && site.source.span().end_byte() == end
+            })
+            .unwrap();
+        if let Some(definition) = target {
+            let definition_start = u64::try_from(source.find(definition).unwrap()).unwrap();
+            let target = document
+                .occurrences
+                .iter()
+                .find(|site| {
+                    site.role == OccurrenceRole::Definition
+                        && site.source.span().start_byte() == definition_start
+                })
+                .unwrap();
+            assert!(
+                matches!(site.target, OccurrenceTarget::Resolved { .. }),
+                "{source}"
+            );
+            assert_eq!(site.target, target.target, "{source}");
+        } else {
+            assert!(
+                matches!(site.target, OccurrenceTarget::Unresolved { .. }),
+                "{source}"
+            );
+        }
+        assert_eq!(
+            document.skipped_regions.iter().any(|gap| {
+                gap.source == site.source && gap.detail == "vba-member-target-unavailable"
+            }),
+            target.is_none(),
+            "{source}"
+        );
+        assert_ne!(site.role, OccurrenceRole::CallSite);
+        assert!(
+            document
+                .skipped_regions
+                .iter()
+                .any(|gap| { gap.detail == "vba-conditional-compilation-evaluation-unavailable" })
+        );
+    }
+}
+
+#[test]
+fn vba_conditional_udt_fields_follow_nested_and_result_receivers() {
+    for (procedure, terminator) in [("Function", "Function"), ("Property Get", "Property")] {
+        for (condition, array, resolves) in [
+            ("Enabled", "", true),
+            ("Other", "", false),
+            ("Enabled", "()", false),
+        ] {
+            let source = format!(
+                "Private Type Inner\n#If Enabled Then\nValue As Long\n#Else\nValue As String\n#End If\nEnd Type\nPrivate Type Record\n#If Enabled Then\nNested{array} As Inner\n#Else\nNested As Variant\n#End If\nEnd Type\nPrivate {procedure} Build() As Record\n#If {condition} Then\nBuild.Nested.Value = 1\n#End If\nEnd {terminator}\nSub Run(ByRef item As Record)\n#If {condition} Then\nitem.Nested.Value = Build().Nested.Value\n#End If\nEnd Sub\n"
+            );
+            let result = output(&source);
+            let document = result.document();
+            let definition_start = u64::try_from(source.find("Value As Long").unwrap()).unwrap();
+            let target = document
+                .occurrences
+                .iter()
+                .find(|site| {
+                    site.role == OccurrenceRole::Definition
+                        && site.source.span().start_byte() == definition_start
+                })
+                .unwrap();
+            for expression in [
+                "Build.Nested.Value",
+                "item.Nested.Value",
+                "Build().Nested.Value",
+            ] {
+                let start = u64::try_from(source.find(expression).unwrap()).unwrap();
+                let end = start + u64::try_from(expression.len()).unwrap();
+                let site = document
+                    .occurrences
+                    .iter()
+                    .find(|site| {
+                        site.source.span().start_byte() == start
+                            && site.source.span().end_byte() == end
+                    })
+                    .unwrap();
+                if resolves {
+                    assert_eq!(site.target, target.target, "{expression}: {source}");
+                    assert!(matches!(site.target, OccurrenceTarget::Resolved { .. }));
+                } else {
+                    assert!(
+                        matches!(site.target, OccurrenceTarget::Unresolved { .. }),
+                        "{expression}: {source}"
+                    );
+                }
+                assert_eq!(
+                    document.skipped_regions.iter().any(|gap| {
+                        gap.source == site.source && gap.detail == "vba-member-target-unavailable"
+                    }),
+                    !resolves,
+                    "{expression}: {source}"
+                );
+                assert_ne!(site.role, OccurrenceRole::CallSite);
+            }
+        }
+    }
+}
+
+#[test]
 fn vba_conditional_type_fields_follow_local_and_returned_receivers() {
     let source = "#If Enabled Then\nPrivate Type Inner\nValue As Long\nEnd Type\nPrivate Type Record\nNested As Inner\nEnd Type\nFunction Create() As Record\nEnd Function\n#End If\nSub Run()\n#If Enabled Then\nDim item As Record\nitem.Nested.Value = Create().Nested.Value\n#Else\nDim item As Variant\nitem.Nested.Value = 0\n#End If\nEnd Sub\n";
     let result = output(source);

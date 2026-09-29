@@ -113,6 +113,11 @@ struct TypeDeclaration {
     target: Option<DeclaredType>,
 }
 
+struct FieldDeclaration {
+    conditions: BTreeMap<u64, u64>,
+    symbol: Option<SymbolId>,
+}
+
 struct StatementLabel {
     definition: u64,
     symbol: Option<SymbolId>,
@@ -154,7 +159,7 @@ pub(super) struct VbaBindings<'a> {
     maximum_name_bytes: usize,
     types: BTreeMap<u64, BTreeMap<String, Vec<TypeDeclaration>>>,
     foreign_type_scopes: BTreeSet<u64>,
-    fields: BTreeMap<u64, BTreeMap<String, Option<SymbolId>>>,
+    fields: BTreeMap<u64, BTreeMap<String, Vec<FieldDeclaration>>>,
     foreign_field_scopes: BTreeSet<u64>,
     value_types: HashMap<SymbolId, u64>,
     visibilities: BTreeMap<u64, EntityVisibility>,
@@ -696,7 +701,7 @@ impl<'a> VbaBindings<'a> {
             let Some(declaration) = self.declaration(fact.parent(), cancellation)? else {
                 continue;
             };
-            let Some((owner, conditional)) = self.scope(fact.parent(), cancellation)? else {
+            let Some((owner, _)) = self.scope(fact.parent(), cancellation)? else {
                 continue;
             };
             let symbol = symbols.get(&fact.local_id()).copied();
@@ -737,12 +742,18 @@ impl<'a> VbaBindings<'a> {
                         self.foreign_field_scopes.insert(owner);
                         continue;
                     };
+                    let Some(module) = self.compilation_scope(fact.parent(), cancellation)? else {
+                        continue;
+                    };
+                    // Field uses are outside the UDT scope. Compare both sides
+                    // in the module's compilation environment, including outer guards.
+                    let conditions = self.branch_conditions(fact.parent(), module, cancellation)?;
                     self.fields
                         .entry(owner)
                         .or_default()
                         .entry(name)
-                        .and_modify(|value| *value = None)
-                        .or_insert(symbol.filter(|_| !conditional));
+                        .or_default()
+                        .push(FieldDeclaration { conditions, symbol });
                 }
                 _ => {}
             }
@@ -873,6 +884,45 @@ impl<'a> VbaBindings<'a> {
             parent = scope.parent();
         }
         Err(invalid_capture())
+    }
+
+    fn declared_field(
+        &self,
+        fact: &SyntaxFact,
+        scope: u64,
+        name: &str,
+        cancellation: &Cancellation,
+    ) -> Result<Option<SymbolId>, AdapterError> {
+        if self.foreign_field_scopes.contains(&scope) {
+            return Ok(None);
+        }
+        let Some(declarations) = self.fields.get(&scope).and_then(|fields| fields.get(name)) else {
+            return Ok(None);
+        };
+        if let [declaration] = declarations.as_slice()
+            && declaration.conditions.is_empty()
+        {
+            return Ok(declaration.symbol);
+        }
+        let Some(module) = self.compilation_scope(fact.parent(), cancellation)? else {
+            return Ok(None);
+        };
+        let reference = self.branch_conditions(fact.parent(), module, cancellation)?;
+        let mut matched = None;
+        for declaration in declarations {
+            cancellation.check()?;
+            if self.conditions_exclude(&declaration.conditions, &reference, cancellation)? {
+                continue;
+            }
+            if matched.is_some()
+                || declaration.symbol.is_none()
+                || !self.conditions_imply(&reference, &declaration.conditions, cancellation)?
+            {
+                return Ok(None);
+            }
+            matched = declaration.symbol;
+        }
+        Ok(matched)
     }
 
     fn field_reference(
@@ -1051,14 +1101,10 @@ impl<'a> VbaBindings<'a> {
             let Some(scope) = self.value_types.get(&symbol) else {
                 return Ok(None);
             };
-            if self.foreign_field_scopes.contains(scope) {
-                return Ok(None);
-            }
-            let Some(Some(field)) = self.fields.get(scope).and_then(|fields| fields.get(&name))
-            else {
+            let Some(field) = self.declared_field(fact, *scope, &name, cancellation)? else {
                 return Ok(None);
             };
-            symbol = *field;
+            symbol = field;
             member_count = member_count.checked_add(1).ok_or_else(invalid_capture)?;
         }
         Ok((member_count > 0).then_some(ResolvedBinding {
@@ -1141,14 +1187,10 @@ impl<'a> VbaBindings<'a> {
             let Some(scope) = self.value_types.get(&symbol) else {
                 return Ok(None);
             };
-            if self.foreign_field_scopes.contains(scope) {
-                return Ok(None);
-            }
-            let Some(Some(field)) = self.fields.get(scope).and_then(|fields| fields.get(&name))
-            else {
+            let Some(field) = self.declared_field(fact, *scope, &name, cancellation)? else {
                 return Ok(None);
             };
-            symbol = *field;
+            symbol = field;
         }
         Ok(Some(ResolvedBinding {
             symbol,
