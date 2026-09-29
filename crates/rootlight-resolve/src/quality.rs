@@ -3,7 +3,11 @@
 //! Reports separate unique-edge precision from candidate recall so an
 //! ambiguity-preserving result cannot be rewarded as an exact prediction.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    error::Error,
+    fmt,
+};
 
 use rootlight_ids::{FactId, SymbolId};
 
@@ -104,18 +108,29 @@ pub struct ResolutionQualityReport {
 }
 
 /// Semantic quality corpus or arithmetic failure.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum QualityError {
     /// More than one expectation named the same occurrence.
-    #[error("resolution quality corpus contains a duplicate expectation")]
     DuplicateExpectation,
     /// More than one decision named the same occurrence.
-    #[error("resolution batch contains a duplicate decision")]
     DuplicateDecision,
     /// A scorecard counter exceeded its fixed representation.
-    #[error("resolution quality counter overflowed")]
     CountOverflow,
 }
+
+impl fmt::Display for QualityError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::DuplicateExpectation => {
+                "resolution quality corpus contains a duplicate expectation"
+            }
+            Self::DuplicateDecision => "resolution batch contains a duplicate decision",
+            Self::CountOverflow => "resolution quality counter overflowed",
+        })
+    }
+}
+
+impl Error for QualityError {}
 
 /// Evaluates one resolution batch against reviewed ground truth.
 ///

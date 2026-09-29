@@ -3,7 +3,7 @@
 //! Names alone never create a relation: every group carries a typed namespace,
 //! normalized protocol-key hash, immutable source, provenance, and confidence.
 
-use std::collections::BTreeMap;
+use std::{collections::BTreeMap, error::Error, fmt};
 
 use rootlight_cancel::Cancellation;
 use rootlight_ids::{ContentHash, FactId, SymbolId, content_hash};
@@ -77,9 +77,16 @@ impl Default for ForeignLinkLimits {
 }
 
 /// Invalid foreign-link resource limits.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
-#[error("foreign-link limits exceed the supported bounded range")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ForeignLinkLimitError;
+
+impl fmt::Display for ForeignLinkLimitError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("foreign-link limits exceed the supported bounded range")
+    }
+}
+
+impl Error for ForeignLinkLimitError {}
 
 /// Typed evidence namespace preventing name-only cross-language matches.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -252,16 +259,27 @@ impl ForeignLinkInput {
 }
 
 /// Invalid typed foreign-link candidate.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum ForeignLinkInputError {
     /// Predicate and evidence namespace are incompatible.
-    #[error("foreign-link predicate is incompatible with its evidence namespace")]
     PredicateMismatch,
     /// Zero-confidence evidence cannot justify a candidate.
-    #[error("foreign-link confidence must be greater than zero")]
     ZeroConfidence,
 }
+
+impl fmt::Display for ForeignLinkInputError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::PredicateMismatch => {
+                "foreign-link predicate is incompatible with its evidence namespace"
+            }
+            Self::ZeroConfidence => "foreign-link confidence must be greater than zero",
+        })
+    }
+}
+
+impl Error for ForeignLinkInputError {}
 
 /// Exact, candidate, or unresolved foreign-link result.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -488,38 +506,75 @@ struct LinkGroupKey {
 }
 
 /// Foreign-link application failure.
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug)]
 pub enum ForeignLinkError {
     /// The normalized input or output document failed validation.
-    #[error("foreign-link document is invalid")]
-    InvalidDocument(#[source] rootlight_ir::IrDocumentValidationError),
+    InvalidDocument(rootlight_ir::IrDocumentValidationError),
     /// A caller bypassed the checked constructor with an incompatible input.
-    #[error("foreign-link input violates its typed evidence contract")]
     InvalidInput,
     /// Cooperative cancellation stopped linking.
-    #[error(transparent)]
-    Cancelled(#[from] rootlight_cancel::Cancelled),
+    Cancelled(rootlight_cancel::Cancelled),
     /// A subject, target, source file, or provenance record was absent.
-    #[error("foreign-link evidence references an unknown fact")]
     UnknownEvidence,
     /// Source ownership, generation, or content identity differed.
-    #[error("foreign-link source does not match the normalized generation")]
     SourceMismatch,
     /// A checked group unexpectedly contained no candidates.
-    #[error("foreign-link candidate group is empty")]
     EmptyGroup,
     /// Typed evidence exceeded an operation or candidate materialization bound.
-    #[error("foreign-link evidence exceeds its resource limit")]
     ResourceLimit,
     /// A candidate count was not representable in the normalized count domain.
-    #[error("foreign-link candidate count is not representable")]
     CountOverflow,
     /// Derived producer metadata was invalid.
-    #[error("foreign-link producer identity is invalid")]
-    InvalidProducer(#[source] rootlight_ir::IrValidationError),
+    InvalidProducer(rootlight_ir::IrValidationError),
     /// A derived provenance or relation identity could not be created.
-    #[error("foreign-link fact identity could not be derived")]
-    FactIdentity(#[source] rootlight_ir::FactIdentityRecipeError),
+    FactIdentity(rootlight_ir::FactIdentityRecipeError),
+}
+
+impl fmt::Display for ForeignLinkError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::InvalidDocument(_) => f.write_str("foreign-link document is invalid"),
+            Self::InvalidInput => {
+                f.write_str("foreign-link input violates its typed evidence contract")
+            }
+            Self::Cancelled(error) => fmt::Display::fmt(error, f),
+            Self::UnknownEvidence => {
+                f.write_str("foreign-link evidence references an unknown fact")
+            }
+            Self::SourceMismatch => {
+                f.write_str("foreign-link source does not match the normalized generation")
+            }
+            Self::EmptyGroup => f.write_str("foreign-link candidate group is empty"),
+            Self::ResourceLimit => f.write_str("foreign-link evidence exceeds its resource limit"),
+            Self::CountOverflow => f.write_str("foreign-link candidate count is not representable"),
+            Self::InvalidProducer(_) => f.write_str("foreign-link producer identity is invalid"),
+            Self::FactIdentity(_) => f.write_str("foreign-link fact identity could not be derived"),
+        }
+    }
+}
+
+impl Error for ForeignLinkError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match self {
+            Self::InvalidDocument(error) => Some(error),
+            Self::InvalidProducer(error) => Some(error),
+            Self::FactIdentity(error) => Some(error),
+            // Cancellation is a transparent wrapper, not an extra cause layer.
+            Self::Cancelled(error) => error.source(),
+            Self::InvalidInput
+            | Self::UnknownEvidence
+            | Self::SourceMismatch
+            | Self::EmptyGroup
+            | Self::ResourceLimit
+            | Self::CountOverflow => None,
+        }
+    }
+}
+
+impl From<rootlight_cancel::Cancelled> for ForeignLinkError {
+    fn from(error: rootlight_cancel::Cancelled) -> Self {
+        Self::Cancelled(error)
+    }
 }
 
 fn validate_input(

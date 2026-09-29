@@ -2098,7 +2098,6 @@ dependencies = [
  "rootlight-ids",
  "rootlight-ir",
  "rootlight-vba",
- "thiserror 2.0.18",
 ]
 
 [[package]]

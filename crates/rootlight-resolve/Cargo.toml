@@ -12,7 +12,6 @@ rootlight-cancel = { path = "../rootlight-cancel" }
 rootlight-ids = { path = "../rootlight-ids" }
 rootlight-ir = { path = "../rootlight-ir" }
 rootlight-vba = { path = "../rootlight-vba" }
-thiserror.workspace = true
 
 [lints]
 workspace = true

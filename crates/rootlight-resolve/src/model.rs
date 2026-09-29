@@ -3,7 +3,7 @@
 //! Explanations retain deterministic scoring evidence while candidate lists and
 //! rejection details remain bounded by the same per-site resource ceiling.
 
-use std::collections::BTreeMap;
+use std::{collections::BTreeMap, error::Error, fmt};
 
 use rootlight_cancel::Cancelled;
 use rootlight_ids::{ContentHash, FactId, GenerationId, RepositoryId, SymbolId};
@@ -120,9 +120,16 @@ impl Default for ResolutionLimits {
 }
 
 /// Invalid resolver resource limits.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
-#[error("resolver limits exceed their checked ceilings")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ResolutionLimitError;
+
+impl fmt::Display for ResolutionLimitError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("resolver limits exceed their checked ceilings")
+    }
+}
+
+impl Error for ResolutionLimitError {}
 
 /// Minimum measured dynamic-call precision required for exact promotion.
 pub const MIN_DYNAMIC_CALL_PRECISION_BASIS_POINTS: u16 = 9_000;
@@ -194,22 +201,35 @@ impl DynamicCallCalibration {
 }
 
 /// Invalid evidence for dynamic-call exact promotion.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum DynamicCallCalibrationError {
     /// The language is not one of the reviewed dynamic adapters.
-    #[error("dynamic call calibration language is unsupported")]
     UnsupportedLanguage,
     /// Precision is outside 0..=10,000 or below the 90 percent quality floor.
-    #[error("dynamic call precision must be between 9000 and 10000 basis points")]
     PrecisionBelowFloor,
     /// An empty corpus cannot justify exact promotion.
-    #[error("dynamic call calibration corpus must not be empty")]
     EmptyCorpus,
     /// The evaluation hid at least one ambiguous call behind an exact binding.
-    #[error("dynamic call calibration must not contain hidden exact bindings")]
     HiddenExactBinding,
 }
+
+impl fmt::Display for DynamicCallCalibrationError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::UnsupportedLanguage => "dynamic call calibration language is unsupported",
+            Self::PrecisionBelowFloor => {
+                "dynamic call precision must be between 9000 and 10000 basis points"
+            }
+            Self::EmptyCorpus => "dynamic call calibration corpus must not be empty",
+            Self::HiddenExactBinding => {
+                "dynamic call calibration must not contain hidden exact bindings"
+            }
+        })
+    }
+}
+
+impl Error for DynamicCallCalibrationError {}
 
 /// Conservative policy controlling evidence-dependent exact promotion.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -512,36 +532,70 @@ pub struct AppliedResolution {
 }
 
 /// Semantic resolution failure.
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug)]
 pub enum ResolutionError {
     /// Classic source bytes or native container identity are stale or duplicated.
-    #[error("classic project source identity differs from the indexed generation")]
     ClassicSourceIdentity,
     /// The normalized input failed validation.
-    #[error("resolver input document is invalid")]
-    InvalidDocument(#[source] IrDocumentValidationError),
+    InvalidDocument(IrDocumentValidationError),
     /// Cooperative cancellation stopped resolution.
-    #[error(transparent)]
-    Cancelled(#[from] Cancelled),
+    Cancelled(Cancelled),
     /// A bounded collection length could not be represented in the IR count domain.
-    #[error("resolver result count is not representable")]
     CountOverflow,
     /// Resolution exhausted its operation-wide project, occurrence and candidate work.
-    #[error("resolver work exceeds {maximum} units")]
     WorkLimit {
         /// Maximum project evidence, occurrence and candidate work allowed.
         maximum: usize,
     },
     /// An internal score escaped the documented confidence range.
-    #[error("resolver score escaped the confidence range")]
     InvalidScore,
     /// Resolver producer metadata violated normalized-IR label constraints.
-    #[error("resolver producer identity is invalid")]
-    InvalidProducer(#[source] IrValidationError),
+    InvalidProducer(IrValidationError),
     /// A typed resolver fact identity could not be derived.
-    #[error("resolver fact identity could not be derived")]
-    FactIdentity(#[source] FactIdentityRecipeError),
+    FactIdentity(FactIdentityRecipeError),
     /// Applying a changed fact would require an unsupported dependent identity cascade.
-    #[error("resolver application requires an unsupported dependent identity remap")]
     UnsupportedIdentityRemap,
+}
+
+impl fmt::Display for ResolutionError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::ClassicSourceIdentity => {
+                f.write_str("classic project source identity differs from the indexed generation")
+            }
+            Self::InvalidDocument(_) => f.write_str("resolver input document is invalid"),
+            Self::Cancelled(error) => fmt::Display::fmt(error, f),
+            Self::CountOverflow => f.write_str("resolver result count is not representable"),
+            Self::WorkLimit { maximum } => write!(f, "resolver work exceeds {maximum} units"),
+            Self::InvalidScore => f.write_str("resolver score escaped the confidence range"),
+            Self::InvalidProducer(_) => f.write_str("resolver producer identity is invalid"),
+            Self::FactIdentity(_) => f.write_str("resolver fact identity could not be derived"),
+            Self::UnsupportedIdentityRemap => {
+                f.write_str("resolver application requires an unsupported dependent identity remap")
+            }
+        }
+    }
+}
+
+impl Error for ResolutionError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match self {
+            Self::InvalidDocument(error) => Some(error),
+            Self::InvalidProducer(error) => Some(error),
+            Self::FactIdentity(error) => Some(error),
+            // Cancellation is a transparent wrapper, not an extra cause layer.
+            Self::Cancelled(error) => error.source(),
+            Self::ClassicSourceIdentity
+            | Self::CountOverflow
+            | Self::WorkLimit { .. }
+            | Self::InvalidScore
+            | Self::UnsupportedIdentityRemap => None,
+        }
+    }
+}
+
+impl From<Cancelled> for ResolutionError {
+    fn from(error: Cancelled) -> Self {
+        Self::Cancelled(error)
+    }
 }
