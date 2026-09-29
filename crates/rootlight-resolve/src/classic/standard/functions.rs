@@ -162,6 +162,179 @@ pub(super) const FUNCTIONS: &[Function] = &[
         signature: "Function StrReverse(Expression As String) As String",
         parameters: &[("expression", false)],
     },
+    // MS-VBAL 6.1.2.3.1 and 6.1.2.7.1 distinguish conversion and inspection contracts.
+    // The model does not assume an implementation's LongLong/LongPtr availability.
+    // https://learn.microsoft.com/en-us/openspecs/microsoft_general_purpose_programming_languages/ms-vbal/1951c2a7-7527-4d8d-b4a5-3b212d2442d5
+    Function {
+        name: "CBool",
+        signature: "Function CBool(Expression As Variant) As Boolean",
+        parameters: &[("expression", false)],
+    },
+    Function {
+        name: "CByte",
+        signature: "Function CByte(Expression As Variant) As Byte",
+        parameters: &[("expression", false)],
+    },
+    Function {
+        name: "CCur",
+        signature: "Function CCur(Expression As Variant) As Currency",
+        parameters: &[("expression", false)],
+    },
+    Function {
+        name: "CDate",
+        signature: "Function CDate(Expression As Variant) As Date",
+        parameters: &[("expression", false)],
+    },
+    Function {
+        name: "CVDate",
+        signature: "Function CVDate(Expression As Variant) As Variant",
+        parameters: &[("expression", false)],
+    },
+    Function {
+        name: "CDbl",
+        signature: "Function CDbl(Expression As Variant) As Double",
+        parameters: &[("expression", false)],
+    },
+    Function {
+        name: "CDec",
+        signature: "Function CDec(Expression As Variant) As Variant",
+        parameters: &[("expression", false)],
+    },
+    Function {
+        name: "CInt",
+        signature: "Function CInt(Expression As Variant) As Integer",
+        parameters: &[("expression", false)],
+    },
+    Function {
+        name: "CLng",
+        signature: "Function CLng(Expression As Variant) As Long",
+        parameters: &[("expression", false)],
+    },
+    Function {
+        name: "CSng",
+        signature: "Function CSng(Expression As Variant) As Single",
+        parameters: &[("expression", false)],
+    },
+    Function {
+        name: "CStr",
+        signature: "Function CStr(Expression As Variant) As String",
+        parameters: &[("expression", false)],
+    },
+    Function {
+        name: "CVar",
+        signature: "Function CVar(Expression As Variant) As Variant",
+        parameters: &[("expression", false)],
+    },
+    Function {
+        name: "CVErr",
+        signature: "Function CVErr(Expression As Variant) As Variant",
+        parameters: &[("expression", false)],
+    },
+    Function {
+        name: "Error",
+        signature: "Function Error(Optional ErrorNumber As Variant) As Variant",
+        parameters: &[("errornumber", true)],
+    },
+    Function {
+        name: "Error$",
+        signature: "Function Error$(Optional ErrorNumber As Variant) As String",
+        parameters: &[("errornumber", true)],
+    },
+    Function {
+        name: "Fix",
+        signature: "Function Fix(Number As Variant) As Variant",
+        parameters: &[("number", false)],
+    },
+    Function {
+        name: "Hex",
+        signature: "Function Hex(Number As Variant) As Variant",
+        parameters: &[("number", false)],
+    },
+    Function {
+        name: "Hex$",
+        signature: "Function Hex$(Number As Variant) As String",
+        parameters: &[("number", false)],
+    },
+    Function {
+        name: "Int",
+        signature: "Function Int(Number As Variant) As Variant",
+        parameters: &[("number", false)],
+    },
+    Function {
+        name: "Oct",
+        signature: "Function Oct(Number As Variant) As Variant",
+        parameters: &[("number", false)],
+    },
+    Function {
+        name: "Oct$",
+        signature: "Function Oct$(Number As Variant) As String",
+        parameters: &[("number", false)],
+    },
+    Function {
+        name: "Str",
+        signature: "Function Str(Number As Variant) As Variant",
+        parameters: &[("number", false)],
+    },
+    Function {
+        name: "Str$",
+        signature: "Function Str$(Number As Variant) As String",
+        parameters: &[("number", false)],
+    },
+    Function {
+        name: "Val",
+        signature: "Function Val(Value As String) As Double",
+        parameters: &[("value", false)],
+    },
+    Function {
+        name: "IsArray",
+        signature: "Function IsArray(Arg As Variant) As Boolean",
+        parameters: &[("arg", false)],
+    },
+    Function {
+        name: "IsDate",
+        signature: "Function IsDate(Arg As Variant) As Boolean",
+        parameters: &[("arg", false)],
+    },
+    Function {
+        name: "IsEmpty",
+        signature: "Function IsEmpty(Arg As Variant) As Boolean",
+        parameters: &[("arg", false)],
+    },
+    Function {
+        name: "IsError",
+        signature: "Function IsError(Arg As Variant) As Boolean",
+        parameters: &[("arg", false)],
+    },
+    Function {
+        name: "IsMissing",
+        signature: "Function IsMissing(Arg As Variant) As Boolean",
+        parameters: &[("arg", false)],
+    },
+    Function {
+        name: "IsNull",
+        signature: "Function IsNull(Arg As Variant) As Boolean",
+        parameters: &[("arg", false)],
+    },
+    Function {
+        name: "IsNumeric",
+        signature: "Function IsNumeric(Arg As Variant) As Boolean",
+        parameters: &[("arg", false)],
+    },
+    Function {
+        name: "IsObject",
+        signature: "Function IsObject(Arg As Variant) As Boolean",
+        parameters: &[("arg", false)],
+    },
+    Function {
+        name: "TypeName",
+        signature: "Function TypeName(Arg As Variant) As String",
+        parameters: &[("arg", false)],
+    },
+    Function {
+        name: "VarType",
+        signature: "Function VarType(VarName As Variant) As VbVarType",
+        parameters: &[("varname", false)],
+    },
 ];
 
 pub(super) fn find(name: &str) -> Option<&'static Function> {

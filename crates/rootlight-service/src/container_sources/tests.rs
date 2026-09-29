@@ -168,13 +168,6 @@ fn standard_constants_keep_external_identity_and_follow_shadowing_after_reopen()
 
 #[test]
 fn standard_function_calls_verify_arguments_and_survive_reopen() {
-    let root = tempdir();
-    let storage = tempdir();
-    let state = storage.path().join("state");
-    rootlight_runtime::RuntimePaths::new(state.clone(), storage.path().join("runtime"))
-        .unwrap()
-        .prepare_owner()
-        .unwrap();
     let valid = [
         "VBA.Len(\"ab\")",
         "VBA.LenB(\"ab\")",
@@ -236,12 +229,98 @@ fn standard_function_calls_verify_arguments_and_survive_reopen() {
         "VBA.UCase%(\"abc\")",
         "VBA.StrReverse$(\"abc\")",
     ];
+    assert_standard_function_calls(&valid, &invalid, &["VBA.Mid$(\"abc\", 1)"], 29);
+}
+
+#[test]
+fn standard_value_calls_preserve_named_contracts_and_source_lifecycles() {
+    let valid = [
+        "VBA.CBool(1)",
+        "VBA.CByte(1)",
+        "VBA.CCur(1)",
+        "VBA.CDate(1)",
+        "VBA.CVDate(1)",
+        "VBA.CDbl(1)",
+        "VBA.CDec(1)",
+        "VBA.CInt(1)",
+        "VBA.CLng(1)",
+        "VBA.CSng(1)",
+        "VBA.CStr(1)",
+        "VBA.CVar(1)",
+        "VBA.CVErr(5)",
+        "VBA.Error()",
+        "VBA.Error$()",
+        "VBA.Fix(1.5)",
+        "VBA.Hex(16)",
+        "VBA.Hex$(16)",
+        "VBA.Int(1.5)",
+        "VBA.Oct(8)",
+        "VBA.Oct$(8)",
+        "VBA.Str(1)",
+        "VBA.Str$(1)",
+        "VBA.Val(\"2.5\")",
+        "VBA.IsArray(value)",
+        "VBA.IsDate(value)",
+        "VBA.IsEmpty(value)",
+        "VBA.IsError(value)",
+        "VBA.IsMissing(value)",
+        "VBA.IsNull(value)",
+        "VBA.IsNumeric(value)",
+        "VBA.IsObject(value)",
+        "VBA.TypeName(value)",
+        "VBA.VarType(value)",
+        "VBA.CInt(Expression:=1)",
+        "VBA.Hex$(Number:=16)",
+        "VBA.Error$(ErrorNumber:=5)",
+        "VBA.Val(Value:=\"2.5\")",
+        "VBA.IsNumeric(Arg:=value)",
+        "VBA.TypeName(Arg:=value)",
+        "VBA.VarType(VarName:=value)",
+        "Call VBA.CStr(1)",
+        "VBA.CStr(VBA.Hex$(16))",
+    ];
+    let invalid = [
+        "VBA.CBool()",
+        "VBA.CInt(1, 2)",
+        "VBA.CInt(Value:=1)",
+        "VBA.CStr$(1)",
+        "VBA.CLngLng(1)",
+        "VBA.CLngPtr(1)",
+        "VBA.Error$(5,)",
+        "VBA.Error$(Number:=5)",
+        "VBA.Error(5, 6)",
+        "VBA.Hex$(Expression:=16)",
+        "VBA.Int()",
+        "VBA.Val(String:=\"1\")",
+        "VBA.IsNumeric(Expression:=value)",
+        "VBA.TypeName(VarName:=value)",
+        "VBA.VarType(Arg:=value)",
+        "VBA.IsObject$(value)",
+        "VBA.CByte(ByVal 1)",
+        "VBA.CCur(Expression:=1, Expression:=2)",
+    ];
+    assert_standard_function_calls(&valid, &invalid, &["VBA.Hex$(16)"], 34);
+}
+
+fn assert_standard_function_calls(
+    valid: &[&str],
+    invalid: &[&str],
+    nested: &[&str],
+    distinct_targets: usize,
+) {
+    let root = tempdir();
+    let storage = tempdir();
+    let state = storage.path().join("state");
+    rootlight_runtime::RuntimePaths::new(state.clone(), storage.path().join("runtime"))
+        .unwrap()
+        .prepare_owner()
+        .unwrap();
     for shadow in [false, true, false] {
         let parameter = if shadow { "ByVal VBA As Object" } else { "" };
         let mut text = format!(
             "Attribute VB_Name = \"Client\"\r\nPublic Sub Run({parameter})\r\nDim value As Variant\r\n"
         );
-        for expression in valid.iter().chain(&invalid) {
+        for expression in valid.iter().chain(invalid) {
             if !expression.starts_with("Call ") {
                 text.push_str("value = ");
             }
@@ -314,12 +393,15 @@ fn standard_function_calls_verify_arguments_and_survive_reopen() {
             );
         }
         calls.sort();
-        let mut expected = valid.map(str::to_owned).to_vec();
-        expected.push("VBA.Mid$(\"abc\", 1)".to_owned());
+        let mut expected = valid
+            .iter()
+            .chain(nested)
+            .map(|s| (*s).to_owned())
+            .collect::<Vec<_>>();
         expected.sort();
         let expected_call_count = expected.len();
         assert_eq!(calls, if shadow { Vec::new() } else { expected });
-        for expression in invalid {
+        for &expression in invalid {
             let start = u64::try_from(text.find(expression).unwrap()).unwrap();
             let end = start + u64::try_from(expression.len()).unwrap();
             assert!(
@@ -335,8 +417,8 @@ fn standard_function_calls_verify_arguments_and_survive_reopen() {
         if !shadow {
             assert_eq!(
                 symbols.len(),
-                29,
-                "String-returning variants must retain distinct identities"
+                distinct_targets,
+                "standard declarations must retain distinct identities"
             );
             let relationships = service
                 .symbol_relationships(
