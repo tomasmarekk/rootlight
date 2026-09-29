@@ -191,6 +191,9 @@ pub(super) fn bind<'a>(
         let Some(bytes) = site_bytes(site, sources) else {
             continue;
         };
+        if !starts_with_namespace(bytes) {
+            continue;
+        }
         if let Some((receiver, _)) = member_access_parts(bytes, cancellation, work)? {
             qualifiers.insert((
                 site.file,
@@ -234,6 +237,9 @@ pub(super) fn bind<'a>(
         let Some(bytes) = site_bytes(site, sources) else {
             continue;
         };
+        if !starts_with_namespace(bytes) {
+            continue;
+        }
         let Some(text) = std::str::from_utf8(bytes).ok() else {
             continue;
         };
@@ -348,4 +354,15 @@ fn site_bytes<'a>(
     sources
         .get(&site.file)?
         .get(usize::try_from(span.start_byte()).ok()?..usize::try_from(span.end_byte()).ok()?)
+}
+
+fn starts_with_namespace(bytes: &[u8]) -> bool {
+    // Reject unrelated receivers before tokenizing their potentially large
+    // call/member chains. The full parser still proves syntax and boundaries.
+    bytes
+        .get(..3)
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case(b"VBA"))
+        || bytes
+            .get(..5)
+            .is_some_and(|prefix| prefix.eq_ignore_ascii_case(b"[VBA]"))
 }
