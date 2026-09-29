@@ -5556,6 +5556,239 @@ fn vba_conditional_functions_and_getters_bind_without_selecting_a_platform() {
 }
 
 #[test]
+fn vba_conditional_property_accessors_share_the_name_not_the_target() {
+    let get = "Property Get Payload() As Variant\nEnd Property\n";
+    let put = "Property Let Payload(ByVal value As Variant)\nEnd Property\n";
+    let set = "Property Set Payload(ByVal value As Variant)\nEnd Property\n";
+    for declarations in [
+        format!("#If Enabled Then\n{get}{put}{set}#End If\n"),
+        format!("{get}#If Enabled Then\n{put}{set}#End If\n"),
+        format!("#If Enabled Then\n{get}#End If\n{put}{set}"),
+        format!("#If Enabled Then\n{set}#End If\n#If ENABLED Then\n{get}{put}#End If\n"),
+    ] {
+        for qualifier in ["", "Me."] {
+            let source = format!(
+                "Attribute VB_Name = \"Container\"\n{declarations}#If Enabled Then\nSub Run()\nDim result As Variant\nDim instance As Object\nresult = {qualifier}PAYLOAD\n{qualifier}PAYLOAD = 1\nSet {qualifier}PAYLOAD = instance\nEnd Sub\n#End If\n"
+            );
+            let result = output_with_native_kind(
+                &source,
+                Some(rootlight_adapter_sdk::NativeVbaModuleKind::Object),
+            );
+            let document = result.document();
+            for (header, marker) in [
+                ("Get Payload", "PAYLOAD\n"),
+                ("Let Payload", "PAYLOAD = 1"),
+                ("Set Payload", "PAYLOAD = instance"),
+            ] {
+                let definition_start = u64::try_from(source.find(header).unwrap() + 4).unwrap();
+                let definition = document
+                    .occurrences
+                    .iter()
+                    .find(|site| {
+                        site.role == OccurrenceRole::Definition
+                            && site.source.span().start_byte() == definition_start
+                    })
+                    .unwrap();
+                let start = u64::try_from(source.find(marker).unwrap()).unwrap();
+                let site = document
+                    .occurrences
+                    .iter()
+                    .find(|site| {
+                        site.source.span().start_byte() == start
+                            && site.syntax_kind != "vba.application.reference"
+                    })
+                    .unwrap();
+                assert_eq!(site.target, definition.target, "{source}\n{marker}");
+                assert_eq!(site.role, OccurrenceRole::CallSite);
+                let OccurrenceTarget::Resolved { symbol } = definition.target else {
+                    panic!("definition")
+                };
+                assert!(document.relations.iter().any(|edge| {
+                    edge.predicate == RelationPredicate::Calls
+                        && edge.subject == RelationEndpoint::Occurrence(site.id)
+                        && edge.object == RelationEndpoint::Entity(symbol)
+                }));
+            }
+            assert!(
+                document.skipped_regions.iter().any(|gap| {
+                    gap.detail == "vba-conditional-compilation-evaluation-unavailable"
+                })
+            );
+        }
+    }
+}
+
+#[test]
+fn vba_conditional_properties_keep_duplicate_and_presence_barriers() {
+    let get = "Property Get Payload() As Variant\nEnd Property\n";
+    let put = "Property Let Payload(ByVal value As Variant)\nEnd Property\n";
+    for (declarations, guard, resolves) in [
+        (
+            format!("#If Enabled Then\n{get}{get}{put}#End If\n"),
+            "Enabled",
+            false,
+        ),
+        (
+            format!("{get}#If Enabled Then\n{get}{put}#End If\n"),
+            "Enabled",
+            false,
+        ),
+        (
+            format!("#If Enabled Then\n{get}{put}{put}#End If\n"),
+            "Enabled",
+            false,
+        ),
+        (
+            format!("Dim Payload As Variant\n#If Enabled Then\n{get}{put}#End If\n"),
+            "Enabled",
+            false,
+        ),
+        (
+            format!("#If Enabled Then\n{get}{put}Sub Payload()\nEnd Sub\n#End If\n"),
+            "Enabled",
+            false,
+        ),
+        (
+            format!("#If Enabled Then\n{get}{put}#End If\n"),
+            "Other",
+            false,
+        ),
+        (
+            format!("#If Enabled Then\n{get}{put}#If Extra Then\n{get}#End If\n#End If\n"),
+            "Enabled",
+            false,
+        ),
+        (
+            format!("#If Enabled Then\n{get}{put}#Else\n{get}{put}#End If\n"),
+            "Enabled",
+            true,
+        ),
+        (
+            format!("#If Enabled Then\n{get}#End If\n#If Other Then\n{put}#End If\n"),
+            "Enabled",
+            false,
+        ),
+    ] {
+        for qualifier in ["", "Me."] {
+            let source = format!(
+                "Attribute VB_Name = \"Container\"\n{declarations}#If {guard} Then\nSub Run()\nDim result As Variant\nresult = {qualifier}PAYLOAD\nEnd Sub\n#End If\n"
+            );
+            let result = output_with_native_kind(
+                &source,
+                Some(rootlight_adapter_sdk::NativeVbaModuleKind::Object),
+            );
+            let document = result.document();
+            let start = u64::try_from(source.find("PAYLOAD\n").unwrap()).unwrap();
+            let site = document
+                .occurrences
+                .iter()
+                .find(|site| site.source.span().start_byte() == start)
+                .unwrap();
+            assert_eq!(
+                matches!(site.target, OccurrenceTarget::Resolved { .. }),
+                resolves,
+                "{source}"
+            );
+        }
+    }
+}
+
+#[test]
+fn vba_conditional_indexed_getters_validate_arguments_after_accessor_merging() {
+    for qualifier in ["", "Me."] {
+        for (arguments, resolves) in [
+            ("1", true),
+            ("index:=1", true),
+            ("", false),
+            ("other:=1", false),
+            ("1, 2", false),
+        ] {
+            let source = format!(
+                "Attribute VB_Name = \"Container\"\n#If Enabled Then\nProperty Get Payload(ByVal index As Long) As Variant\nEnd Property\nProperty Let Payload(ByVal index As Long, ByVal value As Variant)\nEnd Property\n#End If\n#If Enabled Then\nSub Run()\nDim result As Variant\nresult = {qualifier}PAYLOAD({arguments})\nEnd Sub\n#End If\n"
+            );
+            let result = output_with_native_kind(
+                &source,
+                Some(rootlight_adapter_sdk::NativeVbaModuleKind::Object),
+            );
+            let document = result.document();
+            let start =
+                u64::try_from(source.find(&format!("{qualifier}PAYLOAD(")).unwrap()).unwrap();
+            let site = document
+                .occurrences
+                .iter()
+                .find(|site| {
+                    site.syntax_kind == "vba.application.reference"
+                        && site.source.span().start_byte() == start
+                })
+                .unwrap_or_else(|| {
+                    let mut parser = tree_sitter::Parser::new();
+                    parser
+                        .set_language(&tree_sitter_vba::LANGUAGE.into())
+                        .unwrap();
+                    panic!(
+                        "missing application at {start}: {source}; {}",
+                        parser.parse(&source, None).unwrap().root_node().to_sexp()
+                    );
+                });
+            assert_eq!(
+                matches!(site.target, OccurrenceTarget::Resolved { .. }),
+                resolves,
+                "{source}"
+            );
+            assert_eq!(
+                document
+                    .skipped_regions
+                    .iter()
+                    .any(|gap| gap.source == site.source
+                        && gap.detail == "vba-call-or-index-target-unavailable"),
+                !resolves
+            );
+        }
+    }
+}
+
+#[test]
+fn vba_conditional_instance_lookup_preserves_constant_and_local_namespaces() {
+    let source = "Attribute VB_Name = \"Container\"\n#If Enabled Then\nPrivate Const Limit = 7\nProperty Get Payload() As Variant\nEnd Property\nProperty Let Payload(ByVal value As Variant)\nEnd Property\nSub Run()\nDim Payload As Variant\nDim result As Variant\nresult = PAYLOAD\nresult = Me.PAYLOAD\nresult = Me.LIMIT\nEnd Sub\n#End If\n";
+    let result = output_with_native_kind(
+        source,
+        Some(rootlight_adapter_sdk::NativeVbaModuleKind::Object),
+    );
+    let document = result.document();
+    for (marker, definition) in [
+        ("PAYLOAD\n", "Payload As Variant"),
+        ("PAYLOAD\nresult = Me.LIMIT", "Payload() As Variant"),
+    ] {
+        let start = u64::try_from(source.find(marker).unwrap()).unwrap();
+        let definition_start = u64::try_from(source.find(definition).unwrap()).unwrap();
+        let site = document
+            .occurrences
+            .iter()
+            .find(|site| site.source.span().start_byte() == start)
+            .unwrap();
+        let target = document
+            .occurrences
+            .iter()
+            .find(|site| {
+                site.role == OccurrenceRole::Definition
+                    && site.source.span().start_byte() == definition_start
+            })
+            .unwrap();
+        assert_eq!(site.target, target.target);
+    }
+    let start = u64::try_from(source.find("LIMIT\n").unwrap()).unwrap();
+    assert!(matches!(
+        document
+            .occurrences
+            .iter()
+            .find(|site| site.source.span().start_byte() == start)
+            .unwrap()
+            .target,
+        OccurrenceTarget::Unresolved { .. }
+    ));
+}
+
+#[test]
 fn vba_repeated_conditions_require_matching_branch_and_constant_environment() {
     for (definition_guard, reference_guard, between, resolved) in [
         ("#If Enabled Then\n", "#If Enabled Then\n", "", true),

@@ -1,11 +1,13 @@
 //! Adapts first-party call-chain evidence before optional fact retention.
-//! Native trees locate statement starts only. Complete source spans replace all
-//! reference fragments inside admitted statements, independent of query order.
+//! Native trees locate statement starts and assignment values. Complete source
+//! spans replace reference fragments inside admitted ranges before query retention.
 
 use std::{collections::BTreeMap, ops::Range};
 
 use rootlight_adapter_sdk::AdapterError;
-use rootlight_vba::{CallChainRead, CallChainRole, call_chain_statement};
+use rootlight_vba::{
+    CallChainRead, CallChainRole, call_chain_statement, value_application_expression,
+};
 
 use super::{QueryCandidate, QueryInput, QueryLimit, QueryScanLimits, StructuralRole};
 
@@ -17,6 +19,12 @@ pub(super) struct Calls {
 enum ScanError {
     Adapter(AdapterError),
     Limit,
+}
+
+#[derive(Clone, Copy)]
+enum ReadKind {
+    Statement,
+    SplitValue,
 }
 
 impl Calls {
@@ -51,15 +59,35 @@ impl Calls {
             loop {
                 check()?;
                 let node = cursor.node();
-                if node.kind() == "call_statement"
+                let mut value = matches!(
+                    node.kind(),
+                    "assignment_statement" | "let_statement" | "set_statement"
+                )
+                .then(|| node.child_by_field_name("right"))
+                .flatten();
+                if let Some(right) = value {
+                    let suffix = input.source.get(right.end_byte()..).unwrap_or_default();
+                    let trivia = rootlight_vba::logical_whitespace_len(suffix, &mut check)?;
+                    if suffix.get(trivia) != Some(&b'(') {
+                        value = None;
+                    }
+                }
+                if (node.kind() == "call_statement" || value.is_some())
                     && !node.has_error()
                     && !self.contains(node.byte_range())
                     && statement_boundary(input.source, node.start_byte(), &mut check)?
                 {
                     let remaining = limits.captures.saturating_sub(*captures);
+                    let native = value.unwrap_or(node).byte_range();
+                    let start = native.start;
                     match self.consider(
                         input.source,
-                        node.byte_range(),
+                        native,
+                        if value.is_some() {
+                            ReadKind::SplitValue
+                        } else {
+                            ReadKind::Statement
+                        },
                         remaining / 2,
                         &mut check,
                     )? {
@@ -80,10 +108,15 @@ impl Calls {
                                     CallChainRole::InvokedValueMember => "vba.invoked_get_member",
                                     CallChainRole::Application => "vba.application",
                                     CallChainRole::ArgumentName => "vba.nonvalue_identifier",
+                                    CallChainRole::Instance => "vba.instance",
+                                    CallChainRole::SelfMember => "vba.self_get_member",
+                                    CallChainRole::InvokedSelfMember => {
+                                        "vba.self_invoked_get_member"
+                                    }
                                 };
                                 retain(QueryCandidate {
-                                    start: node.start_byte() + span.start,
-                                    end: node.start_byte() + span.end,
+                                    start: start + span.start,
+                                    end: start + span.end,
                                     role: StructuralRole::Reference,
                                     syntax,
                                     required: false,
@@ -116,18 +149,23 @@ impl Calls {
         &mut self,
         source: &[u8],
         native: Range<usize>,
+        kind: ReadKind,
         maximum_tokens: usize,
         check: &mut impl FnMut() -> Result<(), E>,
     ) -> Result<CallChainRead, E> {
         let Some(tail) = source.get(native.start..) else {
             return Ok(CallChainRead::Unsupported);
         };
-        let result = call_chain_statement(tail, maximum_tokens, check)?;
+        let result = match kind {
+            ReadKind::Statement => call_chain_statement(tail, maximum_tokens, check)?,
+            ReadKind::SplitValue => value_application_expression(tail, maximum_tokens, check)?,
+        };
         if let CallChainRead::Parsed(chain) = &result {
             let end = native.start + chain.end();
             // Never suppress a native statement extending beyond the source
-            // reader's complete boundary, even if its prefix looks callable.
-            if end < native.end {
+            // reader's complete boundary. Value recovery must add missing bytes;
+            // already complete native expressions keep their original evidence.
+            if end < native.end || (matches!(kind, ReadKind::SplitValue) && end == native.end) {
                 return Ok(CallChainRead::Unsupported);
             }
             self.intervals.insert(native.start, end);
@@ -246,12 +284,18 @@ mod tests {
         let mut complete = Calls::default();
         let mut split = Calls::default();
         let whole = complete
-            .consider(source, 0..source.len(), 256, &mut || {
-                Ok::<(), Infallible>(())
-            })
+            .consider(
+                source,
+                0..source.len(),
+                ReadKind::Statement,
+                256,
+                &mut || Ok::<(), Infallible>(()),
+            )
             .unwrap();
         let fragmented = split
-            .consider(source, 0..14, 256, &mut || Ok::<(), Infallible>(()))
+            .consider(source, 0..14, ReadKind::Statement, 256, &mut || {
+                Ok::<(), Infallible>(())
+            })
             .unwrap();
         assert!(matches!(whole, CallChainRead::Parsed(_)));
         assert_eq!(whole, fragmented);
@@ -263,6 +307,35 @@ mod tests {
     }
 
     #[test]
+    fn split_values_extend_only_within_the_same_logical_statement() {
+        for (source, end) in [
+            (b"Pick(1)\nOther(2)".as_slice(), Some(7)),
+            (b"Pick( _\n 1): Other(2)".as_slice(), Some(11)),
+            (b"Pick\n(1)".as_slice(), None),
+            (b"Pick: (1)".as_slice(), None),
+            (b"Pick(1) Other(2)".as_slice(), None),
+        ] {
+            let mut calls = Calls::default();
+            let result = calls
+                .consider(source, 0..4, ReadKind::SplitValue, 128, &mut || {
+                    Ok::<(), Infallible>(())
+                })
+                .unwrap();
+            if let Some(end) = end {
+                let CallChainRead::Parsed(expression) = result else {
+                    panic!("{source:?}")
+                };
+                assert_eq!(expression.end(), end);
+                assert!(calls.contains(0..end));
+                assert!(!calls.contains(end..source.len()));
+            } else {
+                assert_eq!(result, CallChainRead::Unsupported);
+                assert!(calls.intervals.is_empty());
+            }
+        }
+    }
+
+    #[test]
     fn unsupported_or_limited_statements_never_suppress_native_evidence() {
         for (source, limit) in [
             (b"factory.Make().Save AddressOf Handler".as_slice(), 256),
@@ -271,9 +344,13 @@ mod tests {
         ] {
             let mut calls = Calls::default();
             let result = calls
-                .consider(source, 0..source.len(), limit, &mut || {
-                    Ok::<(), Infallible>(())
-                })
+                .consider(
+                    source,
+                    0..source.len(),
+                    ReadKind::Statement,
+                    limit,
+                    &mut || Ok::<(), Infallible>(()),
+                )
                 .unwrap();
             assert!(!matches!(result, CallChainRead::Parsed(_)));
             assert!(calls.intervals.is_empty());

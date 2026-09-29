@@ -1,4 +1,4 @@
-//! Source-owned boundaries for statement calls through application results.
+//! Source-owned boundaries for call statements and value applications.
 //! Syntax evidence is independent of native statement partitioning. It does not
 //! establish target identity, argument compatibility, or return types.
 
@@ -6,7 +6,7 @@ use std::ops::Range;
 
 use super::{group::quoted_end, name, trivia};
 
-/// Syntax evidence within a complete, source-written call statement.
+/// Syntax evidence within a complete, source-written statement or value expression.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CallChainRole {
     /// A lexical value read, including receiver and property-get contexts.
@@ -23,9 +23,15 @@ pub enum CallChainRole {
     Application,
     /// A named argument label, not a lexical value read.
     ArgumentName,
+    /// The unbracketed instance keyword, distinct from an ordinary identifier.
+    Instance,
+    /// A direct instance member, excluding the `Me.` prefix from its span.
+    SelfMember,
+    /// A direct instance member used as a value application target.
+    InvokedSelfMember,
 }
 
-/// One exact source span, relative to the supplied statement prefix.
+/// One exact source span, relative to the supplied source prefix.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CallChainPart {
     span: Range<usize>,
@@ -46,7 +52,7 @@ impl CallChainPart {
     }
 }
 
-/// A statement containing a member access on an application result.
+/// Complete syntax evidence for an admitted statement or value expression.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CallChain {
     end: usize,
@@ -60,7 +66,7 @@ impl CallChain {
         self.end
     }
 
-    /// Returns complete reference/application evidence for the admitted statement.
+    /// Returns complete reference/application evidence for the admitted source.
     #[must_use]
     pub fn parts(&self) -> &[CallChainPart] {
         &self.parts
@@ -70,7 +76,7 @@ impl CallChain {
 /// Distinguishes unsupported syntax from exhaustion of the caller's token budget.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CallChainRead {
-    /// Syntax outside this reader's admitted expression subset, or not a chain.
+    /// Syntax outside the selected reader's admitted expression subset.
     Unsupported,
     /// The statement requires more tokens than the caller permits.
     TokenLimit,
@@ -81,6 +87,7 @@ pub enum CallChainRead {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Kind {
     Name,
+    Instance,
     Literal,
     Dot,
     Open(usize),
@@ -149,7 +156,7 @@ pub fn call_chain_statement<E>(
     check: &mut impl FnMut() -> Result<(), E>,
 ) -> Result<CallChainRead, E> {
     check()?;
-    let tokens = match tokenize(source, maximum_tokens, check)? {
+    let tokens = match tokenize(source, maximum_tokens, false, check)? {
         Ok(tokens) => tokens,
         Err(result) => return Ok(result),
     };
@@ -236,17 +243,82 @@ pub fn call_chain_statement<E>(
     }))
 }
 
+/// Reads an application-containing value expression through its logical line end.
+///
+/// Uses the expression subset and nonrecursive, two-parts-per-token bounds of
+/// [`call_chain_statement`], additionally admitting `Me` and direct instance
+/// members without requiring a terminal member call. Names and
+/// argument labels keep their exact spans; neither target identity nor call/index
+/// semantics are inferred. Expressions without an application, unsupported syntax
+/// and malformed input return `Unsupported` with no partial evidence. A bare
+/// newline, comment or statement separator ends the input; continuations do not.
+/// Callers must charge emitted parts to their fact budget.
+///
+/// # Errors
+/// Propagates cancellation/work callback errors unchanged.
+pub fn value_application_expression<E>(
+    source: &[u8],
+    maximum_tokens: usize,
+    check: &mut impl FnMut() -> Result<(), E>,
+) -> Result<CallChainRead, E> {
+    check()?;
+    let tokens = match tokenize(source, maximum_tokens, true, check)? {
+        Ok(tokens) => tokens,
+        Err(result) => return Ok(result),
+    };
+    let Some(last) = tokens.last() else {
+        return Ok(CallChainRead::Unsupported);
+    };
+    if tokens.first().is_none_or(|token| token.span.start != 0) {
+        return Ok(CallChainRead::Unsupported);
+    }
+    let end = last.span.end;
+    let mut reader = Reader {
+        tokens: &tokens,
+        parts: Vec::new(),
+        jobs: Vec::new(),
+    };
+    reader.jobs.push(Job {
+        range: 0..tokens.len(),
+        kind: JobKind::Expression,
+    });
+    while let Some(job) = reader.jobs.pop() {
+        check()?;
+        let valid = match job.kind {
+            JobKind::Arguments => reader.arguments(job.range, check)?,
+            JobKind::Expression => reader.expression(job.range, check)?,
+        };
+        if !valid {
+            return Ok(CallChainRead::Unsupported);
+        }
+    }
+    if !reader
+        .parts
+        .iter()
+        .any(|part| part.role == CallChainRole::Application)
+    {
+        return Ok(CallChainRead::Unsupported);
+    }
+    Ok(CallChainRead::Parsed(CallChain {
+        end,
+        parts: reader.parts,
+    }))
+}
+
 impl Reader<'_> {
     fn invoke(&mut self, part: Option<usize>) {
         if let Some(part) = part.and_then(|index| self.parts.get_mut(index)) {
             part.role = match part.role {
                 CallChainRole::ValueIdentifier => CallChainRole::InvokedValueIdentifier,
                 CallChainRole::Member => CallChainRole::InvokedValueMember,
+                CallChainRole::SelfMember => CallChainRole::InvokedSelfMember,
                 unchanged @ (CallChainRole::InvokedValueIdentifier
                 | CallChainRole::InvokedMember
                 | CallChainRole::InvokedValueMember
                 | CallChainRole::Application
-                | CallChainRole::ArgumentName) => unchanged,
+                | CallChainRole::ArgumentName
+                | CallChainRole::Instance
+                | CallChainRole::InvokedSelfMember) => unchanged,
             };
         }
     }
@@ -267,6 +339,12 @@ impl Reader<'_> {
         let mut applied = false;
         let mut chained = false;
         match first.kind {
+            Kind::Instance => {
+                self.parts.push(CallChainPart {
+                    span: first.span.clone(),
+                    role: CallChainRole::Instance,
+                });
+            }
             Kind::Name => {
                 part = Some(self.parts.len());
                 self.parts.push(CallChainPart {
@@ -337,13 +415,25 @@ impl Reader<'_> {
                     chained |= applied;
                     part = Some(self.parts.len());
                     invocation = None;
+                    let direct_self = first.kind == Kind::Instance && cursor == start + 1;
                     self.parts.push(CallChainPart {
-                        span: source_start..member.span.end,
-                        role: CallChainRole::Member,
+                        span: if direct_self {
+                            member.span.clone()
+                        } else {
+                            source_start..member.span.end
+                        },
+                        role: if direct_self {
+                            CallChainRole::SelfMember
+                        } else {
+                            CallChainRole::Member
+                        },
                     });
                     cursor += 2;
                 }
                 Kind::Open(close) if close < end => {
+                    if first.kind == Kind::Instance && cursor == start + 1 {
+                        return Ok(None);
+                    }
                     self.invoke(part);
                     invocation = part;
                     self.jobs.push(Job {
@@ -362,6 +452,7 @@ impl Reader<'_> {
                     applied = true;
                 }
                 Kind::Name
+                | Kind::Instance
                 | Kind::Literal
                 | Kind::Open(_)
                 | Kind::Close
@@ -484,6 +575,7 @@ impl Reader<'_> {
 fn tokenize<E>(
     source: &[u8],
     maximum: usize,
+    allow_instance: bool,
     check: &mut impl FnMut() -> Result<(), E>,
 ) -> Result<Result<Vec<Token>, CallChainRead>, E> {
     let mut tokens: Vec<Token> = Vec::new();
@@ -515,6 +607,8 @@ fn tokenize<E>(
                     Kind::Call
                 } else if word.eq_ignore_ascii_case(b"Not") {
                     Kind::Not
+                } else if allow_instance && word.eq_ignore_ascii_case(b"Me") {
+                    Kind::Instance
                 } else if [
                     b"And".as_slice(),
                     b"Or",
@@ -639,6 +733,113 @@ mod tests {
 
     fn read(source: &[u8]) -> CallChainRead {
         call_chain_statement(source, 4096, &mut || Ok::<(), Infallible>(())).unwrap()
+    }
+
+    #[test]
+    fn value_applications_preserve_instance_and_argument_roles() {
+        let source = b"Me.[Item](index:=Other(1)) + values(2) ' note\nNextLine(3)";
+        let CallChainRead::Parsed(expression) =
+            value_application_expression(source, 128, &mut || Ok::<(), Infallible>(())).unwrap()
+        else {
+            panic!("complete expression")
+        };
+        assert_eq!(
+            source.get(..expression.end()),
+            Some(b"Me.[Item](index:=Other(1)) + values(2)".as_slice())
+        );
+        for (text, role) in [
+            (b"Me".as_slice(), CallChainRole::Instance),
+            (b"[Item]".as_slice(), CallChainRole::InvokedSelfMember),
+            (
+                b"Me.[Item](index:=Other(1))".as_slice(),
+                CallChainRole::Application,
+            ),
+            (b"index".as_slice(), CallChainRole::ArgumentName),
+            (b"Other".as_slice(), CallChainRole::InvokedValueIdentifier),
+            (b"Other(1)".as_slice(), CallChainRole::Application),
+            (b"values".as_slice(), CallChainRole::InvokedValueIdentifier),
+            (b"values(2)".as_slice(), CallChainRole::Application),
+        ] {
+            assert_eq!(
+                expression
+                    .parts()
+                    .iter()
+                    .filter(|part| part.role() == role && source.get(part.span()) == Some(text))
+                    .count(),
+                1,
+                "{text:?}"
+            );
+        }
+        for source in [
+            b"Pick( _\r\n 1)".as_slice(),
+            b"Me.Factory().Name",
+            b"Pick(Me)",
+            b"[Me](1)",
+        ] {
+            assert!(
+                matches!(
+                    value_application_expression(source, 128, &mut || Ok::<(), Infallible>(()))
+                        .unwrap(),
+                    CallChainRead::Parsed(_)
+                ),
+                "{source:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn value_applications_reject_partial_syntax_and_obey_limits() {
+        for source in [
+            b"Pick\n(1)".as_slice(),
+            b"Pick: (1)",
+            b"Pick(1) Other(2)",
+            b"Pick(1",
+            b"Me(1)",
+            b"Pick(AddressOf Handler)",
+            b"Pick!Key(1)",
+            b"Pick(1) +",
+        ] {
+            assert_eq!(
+                value_application_expression(source, 128, &mut || Ok::<(), Infallible>(()))
+                    .unwrap(),
+                CallChainRead::Unsupported,
+                "{source:?}"
+            );
+        }
+        assert_eq!(
+            value_application_expression(b"Pick(1)", 2, &mut || Ok::<(), Infallible>(())).unwrap(),
+            CallChainRead::TokenLimit
+        );
+        let mut work = 0;
+        assert_eq!(
+            value_application_expression(b"Pick(1) + Other(2)", 128, &mut || {
+                work += 1;
+                if work == 5 { Err("cancelled") } else { Ok(()) }
+            }),
+            Err("cancelled")
+        );
+        for byte in 0..=u8::MAX {
+            let source = [b'F', b'(', byte, b')'];
+            for end in 0..=source.len() {
+                if let CallChainRead::Parsed(expression) = value_application_expression(
+                    &source[..end],
+                    8,
+                    &mut || Ok::<(), Infallible>(()),
+                )
+                .unwrap()
+                {
+                    assert!(expression.parts().len() <= 16);
+                    assert!(expression.end() <= end);
+                    assert!(
+                        expression
+                            .parts()
+                            .iter()
+                            .all(|part| part.span().start < part.span().end
+                                && part.span().end <= expression.end())
+                    );
+                }
+            }
+        }
     }
 
     #[test]

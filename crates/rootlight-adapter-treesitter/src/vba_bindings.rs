@@ -34,15 +34,36 @@ enum Binding {
     Property(PropertyAccessors),
 }
 
-enum ConditionalBinding<'a> {
+enum ConditionalBinding {
     Absent,
-    Value(&'a Option<Binding>),
+    Value(Option<Binding>),
     Ambiguous,
 }
 
 struct ConditionalDeclaration {
     conditions: BTreeMap<u64, u64>,
     binding: Option<Binding>,
+}
+
+fn merge_bindings(left: Option<Binding>, right: Option<Binding>) -> Option<Binding> {
+    match (left, right) {
+        (
+            Some(left @ Binding::EnumType { defined_at: a, .. }),
+            Some(right @ Binding::EnumMember { defined_at: b, .. }),
+        )
+        | (
+            Some(left @ Binding::EnumMember { defined_at: a, .. }),
+            Some(right @ Binding::EnumType { defined_at: b, .. }),
+        ) => {
+            // Only this enum type/member collision uses declaration order;
+            // other repeated declarations remain ambiguous.
+            Some(if a < b { left } else { right })
+        }
+        (Some(Binding::Property(left)), Some(Binding::Property(right))) => {
+            left.merge(right).map(Binding::Property)
+        }
+        _ => None,
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -116,9 +137,9 @@ pub(super) struct VbaBindings<'a> {
     conditional_declarations: BTreeMap<u64, BTreeMap<String, Vec<ConditionalDeclaration>>>,
     compilation_branches: BTreeMap<u64, (u64, usize)>,
     compilation_groups: BTreeMap<u64, Vec<Option<usize>>>,
-    // A shared None also represents conditional shadowing, so it cannot tell
-    // whether a same-named unconditional declaration makes a branch ambiguous.
-    unconditional_names: BTreeMap<u64, BTreeSet<String>>,
+    // Conditional shadowing erases the ordinary tier's candidates. Retain the
+    // unconditional tier separately to merge complementary property accessors.
+    unconditional_bindings: BTreeMap<u64, BTreeMap<String, Option<Binding>>>,
     foreign_scopes: BTreeSet<u64>,
     constant_symbols: BTreeSet<SymbolId>,
     array_symbols: BTreeMap<SymbolId, ArrayRank>,
@@ -165,7 +186,7 @@ impl<'a> VbaBindings<'a> {
             conditional_declarations: BTreeMap::new(),
             compilation_branches: BTreeMap::new(),
             compilation_groups: BTreeMap::new(),
-            unconditional_names: BTreeMap::new(),
+            unconditional_bindings: BTreeMap::new(),
             foreign_scopes: BTreeSet::new(),
             constant_symbols: BTreeSet::new(),
             array_symbols: BTreeMap::new(),
@@ -474,7 +495,7 @@ impl<'a> VbaBindings<'a> {
                 }
             }
             if declaration.syntax_kind().as_str() == "vba.constant.declaration"
-                && let Some(Binding::Value(symbol)) = symbol
+                && let Some(Binding::Value(symbol)) = candidate
             {
                 result.constant_symbols.insert(symbol);
             }
@@ -584,10 +605,12 @@ impl<'a> VbaBindings<'a> {
             }
             if !conditional && let Some(name) = name.as_deref().filter(|name| name.is_ascii()) {
                 result
-                    .unconditional_names
+                    .unconditional_bindings
                     .entry(owner)
                     .or_default()
-                    .insert(name.to_ascii_lowercase());
+                    .entry(name.to_ascii_lowercase())
+                    .and_modify(|prior| *prior = merge_bindings(*prior, symbol))
+                    .or_insert(symbol);
             }
             if enum_member || declaration.syntax_kind().as_str() == "vba.enum.declaration" {
                 enum_module_bindings.push((declaration.span().start_byte(), owner, name, symbol));
@@ -2018,16 +2041,13 @@ impl<'a> VbaBindings<'a> {
             if self.foreign_scopes.contains(&owner) {
                 return Ok(None);
             }
-            let conditional = if self_member
-                || instance
-                || default_constant
-                || self.conditional_declarations.is_empty()
-            {
-                ConditionalBinding::Absent
-            } else {
-                self.conditional_binding(fact.parent(), owner, &key, cancellation)?
-            };
-            let binding = match conditional {
+            let conditional =
+                if instance || default_constant || self.conditional_declarations.is_empty() {
+                    ConditionalBinding::Absent
+                } else {
+                    self.conditional_binding(fact.parent(), owner, &key, cancellation)?
+                };
+            let binding = match &conditional {
                 ConditionalBinding::Absent => {
                     self.bindings.get(&owner).and_then(|names| names.get(&key))
                 }
@@ -2294,24 +2314,7 @@ impl<'a> VbaBindings<'a> {
             .or_default()
             .entry(name.to_ascii_lowercase())
             .and_modify(|existing| {
-                *existing = match (*existing, symbol) {
-                    (
-                        Some(left @ Binding::EnumType { defined_at: a, .. }),
-                        Some(right @ Binding::EnumMember { defined_at: b, .. }),
-                    )
-                    | (
-                        Some(left @ Binding::EnumMember { defined_at: a, .. }),
-                        Some(right @ Binding::EnumType { defined_at: b, .. }),
-                    ) => {
-                        // The earlier declaration wins only this specific
-                        // type/member collision; all other duplicates stay ambiguous.
-                        Some(if a < b { left } else { right })
-                    }
-                    (Some(Binding::Property(left)), Some(Binding::Property(right))) => {
-                        left.merge(right).map(Binding::Property)
-                    }
-                    _ => None,
-                };
+                *existing = merge_bindings(*existing, symbol);
             })
             .or_insert(symbol);
     }
@@ -2393,13 +2396,13 @@ impl<'a> VbaBindings<'a> {
         Err(invalid_capture())
     }
 
-    fn conditional_binding<'b>(
-        &'b self,
+    fn conditional_binding(
+        &self,
         parent: Option<u64>,
         owner: u64,
         name: &str,
         cancellation: &Cancellation,
-    ) -> Result<ConditionalBinding<'b>, AdapterError> {
+    ) -> Result<ConditionalBinding, AdapterError> {
         let Some(declarations) = self
             .conditional_declarations
             .get(&owner)
@@ -2408,7 +2411,11 @@ impl<'a> VbaBindings<'a> {
             return Ok(ConditionalBinding::Absent);
         };
         let reference_conditions = self.branch_conditions(parent, owner, cancellation)?;
-        let mut matched = None;
+        let mut matched = self
+            .unconditional_bindings
+            .get(&owner)
+            .and_then(|names| names.get(name))
+            .copied();
         for declaration in declarations {
             cancellation.check()?;
             if self.conditions_exclude(
@@ -2421,12 +2428,7 @@ impl<'a> VbaBindings<'a> {
             // A branch does not create a lexical namespace. Every declaration
             // that could coexist must participate, including ones nested below
             // the use or in another directive block (MS-VBAL 3.4, 5.6.10).
-            if matched.is_some()
-                || declaration.binding.is_none()
-                || self
-                    .unconditional_names
-                    .get(&owner)
-                    .is_some_and(|names| names.contains(name))
+            if declaration.binding.is_none()
                 || !self.conditions_imply(
                     &reference_conditions,
                     &declaration.conditions,
@@ -2435,7 +2437,13 @@ impl<'a> VbaBindings<'a> {
             {
                 return Ok(ConditionalBinding::Ambiguous);
             }
-            matched = Some(&declaration.binding);
+            matched = Some(match matched {
+                Some(previous) => merge_bindings(previous, declaration.binding),
+                None => declaration.binding,
+            });
+            if matches!(matched, Some(None)) {
+                return Ok(ConditionalBinding::Ambiguous);
+            }
         }
         Ok(matched.map_or(ConditionalBinding::Absent, ConditionalBinding::Value))
     }
