@@ -1160,6 +1160,9 @@ fn candidate_for_capture(
                 && vba::class_header(capture.node, source, cancellation)?.is_some()
             {
                 "vba.class"
+            } else if role == StructuralRole::Reference && capture.node.kind() == "type_expression"
+            {
+                vba::implemented_type_syntax(capture.node, source, cancellation)?
             } else if role == StructuralRole::Reference
                 && matches!(
                     capture.node.kind(),

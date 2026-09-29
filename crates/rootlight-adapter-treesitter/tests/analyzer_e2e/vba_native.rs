@@ -1434,6 +1434,81 @@ fn vba_conditional_types_and_fields_require_implied_unique_declarations() {
 }
 
 #[test]
+fn vba_implemented_types_retain_whole_names_without_runtime_bindings() {
+    for name in ["Contract", "Primary.Contract", "[Primary].[Contract]"] {
+        let source = format!(
+            "VERSION 1.0 CLASS\nAttribute VB_Name = \"Worker\"\nImplements {name}\nPrivate Sub Contract_Run()\nEnd Sub\n"
+        );
+        let result = output(&source);
+        let document = result.document();
+        let start = u64::try_from(source.find(name).unwrap()).unwrap();
+        let end = start + u64::try_from(name.len()).unwrap();
+        let sites: Vec<_> = document
+            .occurrences
+            .iter()
+            .filter(|site| {
+                site.source.span().start_byte() >= start && site.source.span().end_byte() <= end
+            })
+            .collect();
+        assert_eq!(sites.len(), 1, "{name}");
+        let site = sites[0];
+        assert_eq!(site.syntax_kind, "vba.implemented_type.reference");
+        assert_eq!(site.role, OccurrenceRole::ImplementationUse);
+        assert_eq!(site.source.span().start_byte(), start);
+        assert_eq!(site.source.span().end_byte(), end);
+        assert!(matches!(site.target, OccurrenceTarget::Unresolved { .. }));
+        let owner = document
+            .entities
+            .iter()
+            .find(|entity| Some(entity.id) == site.enclosing)
+            .unwrap();
+        assert_eq!(owner.kind, EntityKind::Class);
+        assert_eq!(owner.canonical_name, "Worker");
+        assert!(document.skipped_regions.iter().any(|gap| gap.source == site.source && gap.detail == "vba-type-target-unavailable"));
+    }
+}
+
+#[test]
+fn vba_implementation_recovery_never_admits_a_prefix_contract() {
+    for statement in [
+        "Implements Contract()",
+        "Implements Contract Extra",
+        "Implements Primary.Contract()",
+        "Implements Primary.Contract.Extra",
+        "#If Enabled Then\nImplements Contract\n#End If",
+    ] {
+        let source = format!("VERSION 1.0 CLASS\nAttribute VB_Name = \"Worker\"\n{statement}\n");
+        let result = output(&source);
+        let sites: Vec<_> = result
+            .document()
+            .occurrences
+            .iter()
+            .filter(|site| site.role == OccurrenceRole::ImplementationUse)
+            .collect();
+        if statement.starts_with("#If") {
+            assert!(sites.is_empty());
+            assert!(
+                result
+                    .document()
+                    .skipped_regions
+                    .iter()
+                    .any(|gap| gap.detail == "vba-conditional-compilation-evaluation-unavailable")
+            );
+            continue;
+        }
+        assert_eq!(sites.len(), 1, "{statement}");
+        assert_eq!(
+            sites[0].syntax_kind, "vba.unsupported_implemented_type.reference",
+            "{statement}"
+        );
+        assert!(matches!(
+            sites[0].target,
+            OccurrenceTarget::Unresolved { .. }
+        ));
+    }
+}
+
+#[test]
 fn vba_returned_index_receivers_read_getters_without_selecting_setters() {
     for statement in [
         "result = Values(1)(2)",

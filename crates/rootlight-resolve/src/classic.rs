@@ -268,6 +268,7 @@ fn property_accessor_kind(
 }
 
 struct ResolvedProject {
+    name: String,
     types: BTreeMap<String, Option<SymbolId>>,
     modules: BTreeMap<String, Option<SymbolId>>,
     default_instances: BTreeMap<SymbolId, SourceRef>,
@@ -672,7 +673,7 @@ impl<'a> ClassicIndex<'a> {
             let mut types = BTreeMap::from([(project.name.clone(), None)]);
             let mut pointer_names = BTreeMap::from([(project.name.clone(), None)]);
             let mut member_modules = BTreeMap::new();
-            let mut modules = BTreeMap::from([(project.name, None)]);
+            let mut modules = BTreeMap::from([(project.name.clone(), None)]);
             let mut default_instances = BTreeMap::new();
             let mut value_names = BTreeSet::new();
             work.consume_many(members.len())?;
@@ -862,6 +863,7 @@ impl<'a> ClassicIndex<'a> {
             evidence.facts.sort_unstable();
             evidence.facts.dedup();
             projects.push(complete.then_some(ResolvedProject {
+                name: project.name,
                 types,
                 modules,
                 default_instances,
@@ -1087,10 +1089,13 @@ impl<'a> ClassicIndex<'a> {
         for occurrence in occurrences {
             cancellation.check()?;
             work.consume()?;
-            if occurrence.role != OccurrenceRole::TypeUse
+            let implementation = occurrence.role == OccurrenceRole::ImplementationUse
+                && occurrence.syntax_kind == "vba.implemented_type.reference";
+            if (!implementation && occurrence.role != OccurrenceRole::TypeUse)
                 || !matches!(
                     occurrence.syntax_kind.as_str(),
                     "vba.direct_type_identifier.reference"
+                        | "vba.implemented_type.reference"
                         | "vba.type_identifier.reference"
                         | "vba.automatic_type_identifier.reference"
                         | "vba.constructed_type_identifier.reference"
@@ -1127,21 +1132,53 @@ impl<'a> ClassicIndex<'a> {
             let Some(bytes) = sources.get(&occurrence.file) else {
                 continue;
             };
+            if implementation
+                && !occurrence.enclosing.is_some_and(|id| {
+                    project.member_modules.get(&occurrence.file) == Some(&id)
+                        && entities
+                            .get(&id)
+                            .is_some_and(|owner| owner.kind == EntityKind::Class)
+                })
+            {
+                continue;
+            }
             let span = occurrence.source.span();
             let start =
                 usize::try_from(span.start_byte()).map_err(|_| ResolutionError::CountOverflow)?;
             let end =
                 usize::try_from(span.end_byte()).map_err(|_| ResolutionError::CountOverflow)?;
-            let Some(name) = bytes
-                .get(start..end)
-                .and_then(|s| std::str::from_utf8(s).ok())
-                .and_then(identifier)
-            else {
+            let Some(text) = bytes.get(start..end) else {
                 continue;
             };
+            let (name, qualified) = if implementation {
+                let Some(path) = rootlight_vba::procedure_pointer_path(text, &mut || {
+                    cancellation.check()?;
+                    work.consume()
+                })?
+                else {
+                    continue;
+                };
+                if path.end() != text.len() || path.components() > 2 {
+                    continue;
+                }
+                let qualified = path.components() == 2;
+                if qualified
+                    && (!path.first().eq_ignore_ascii_case(project.name.as_bytes())
+                        || local_types.contains_key(&(occurrence.file, project.name.clone())))
+                {
+                    continue;
+                }
+                (
+                    std::str::from_utf8(path.last()).ok().and_then(identifier),
+                    qualified,
+                )
+            } else {
+                (std::str::from_utf8(text).ok().and_then(identifier), false)
+            };
+            let Some(name) = name else { continue };
             // Local UDT/enum type declarations have their own lookup tier, even
             // when native analysis could not safely select one of them.
-            if local_types.contains_key(&(occurrence.file, name.clone())) {
+            if !qualified && local_types.contains_key(&(occurrence.file, name.clone())) {
                 continue;
             }
             let Some(target) = project
@@ -1154,14 +1191,18 @@ impl<'a> ClassicIndex<'a> {
             else {
                 continue;
             };
-            // As New and New name classes (MS-VBAL 5.2.3.1.4 / 5.6.8), not
-            // UDTs/enums that happen to occupy the same type lookup tier.
+            // Construction and Implements require classes, not UDTs/enums
+            // that happen to occupy the same type lookup tier.
             if matches!(
                 occurrence.syntax_kind.as_str(),
                 "vba.automatic_type_identifier.reference"
                     | "vba.constructed_type_identifier.reference"
+                    | "vba.implemented_type.reference"
             ) && target.kind != EntityKind::Class
             {
+                continue;
+            }
+            if implementation && occurrence.enclosing == Some(target.id) {
                 continue;
             }
             result.proofs.insert(

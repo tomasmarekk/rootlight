@@ -219,8 +219,8 @@ const PROJECT_FACTS_TRUNCATED_CODE: &str = "project-adapter-facts-truncated";
 const PROJECT_FACTS_TRUNCATED_MESSAGE: &str =
     "additional project semantic facts were omitted by aggregate resource limits";
 const AGGREGATE_DIAGNOSTICS_TRUNCATED_CODE: &str = "aggregate-diagnostics-truncated";
-const ANALYZER_BINARY_SEED: &[u8] = b"rootlight.first-slice.treesitter-structural/185";
-const RESOLVER_BINARY_SEED: &[u8] = b"rootlight.first-slice.resolve/59";
+const ANALYZER_BINARY_SEED: &[u8] = b"rootlight.first-slice.treesitter-structural/186";
+const RESOLVER_BINARY_SEED: &[u8] = b"rootlight.first-slice.resolve/60";
 const INCREMENTAL_PROVIDER_SEED: &[u8] = b"rootlight.first-slice.incremental-provider/1";
 const LANGUAGE_DISPOSITION_PROVIDER_SEED: &[u8] = b"rootlight.first-slice.language-disposition/5";
 const SOURCE_FILE_FALLBACK_PROVIDER_SEED: &[u8] = b"rootlight.source-file-fallback/4";
@@ -41354,6 +41354,220 @@ mod tests {
                         );
                     }
                 }
+            }
+        }
+    }
+
+    #[test]
+    fn classic_implements_edges_follow_project_identity_after_restart() {
+        for (name, prefix, suffix, class, admitted) in [
+            ("Contract", "", "", true, true),
+            ("Primary.Contract", "", "", true, true),
+            ("[pRiMaRy].[cOnTrAcT]", "", " ' contract", true, true),
+            ("External.Contract", "", "", true, false),
+            ("Primary.Contract.Extra", "", "", true, false),
+            ("Worker", "", "", true, false),
+            ("Data", "", "", true, false),
+            ("Contract", "", "", false, false),
+            ("Contract", "#If Enabled Then\n", "\n#End If", true, false),
+            (
+                "Contract",
+                "Private Type Contract\nvalue As Long\nEnd Type\n",
+                "",
+                true,
+                false,
+            ),
+            (
+                "Primary.Contract",
+                "Private Type Contract\nvalue As Long\nEnd Type\n",
+                "",
+                true,
+                true,
+            ),
+        ] {
+            let fixture = durable_test_tempdir();
+            let storage = durable_test_tempdir();
+            let paths =
+                RuntimePaths::new(storage.path().join("state"), storage.path().join("runtime"))
+                    .unwrap();
+            paths.prepare_owner().unwrap();
+            let contract =
+                "VERSION 1.0 CLASS\nAttribute VB_Name = \"Contract\"\nPublic Sub Run()\nEnd Sub\n";
+            fs::write(fixture.path().join("Contract.cls"), contract).unwrap();
+            fs::write(
+                fixture.path().join("Types.bas"),
+                "Attribute VB_Name = \"Types\"\nPublic Type Data\nvalue As Long\nEnd Type\n",
+            )
+            .unwrap();
+            let header = if class { "VERSION 1.0 CLASS\n" } else { "" };
+            let source = format!(
+                "{header}Attribute VB_Name = \"Worker\"\n{prefix}Implements {name}{suffix}\nPrivate Sub Contract_Run()\nEnd Sub\n"
+            );
+            fs::write(fixture.path().join("Worker.cls"), &source).unwrap();
+            for included in [true, false, true] {
+                let target = if included {
+                    "Class=Contract; Contract.cls\n"
+                } else {
+                    ""
+                };
+                let worker = if class { "Class" } else { "Module" };
+                let manifest = format!(
+                    "Type=OleDll\nName=\"Primary\"\n{target}{worker}=Worker; Worker.cls\nModule=Types; Types.bas\n"
+                );
+                fs::write(fixture.path().join("project.vbp"), &manifest).unwrap();
+                let mut service =
+                    FirstSliceService::new_durable(2, paths.state_dir(), &deadline()).unwrap();
+                let receipt = service
+                    .index_repository(fixture.path(), &deadline())
+                    .unwrap();
+                assert_eq!(
+                    service
+                        .index_repository(fixture.path(), &deadline())
+                        .unwrap(),
+                    receipt
+                );
+                drop(service);
+                let service =
+                    FirstSliceService::new_durable(2, paths.state_dir(), &deadline()).unwrap();
+                let snapshot = service
+                    .loaded_generation_snapshot(receipt.generation)
+                    .unwrap();
+                let document = snapshot.document();
+                let site = document
+                    .occurrences
+                    .iter()
+                    .find(|site| site.role == OccurrenceRole::ImplementationUse);
+                if prefix.starts_with("#If") {
+                    assert!(site.is_none());
+                    assert!(
+                        document.skipped_regions.iter().any(|gap| gap.detail
+                            == "vba-conditional-compilation-evaluation-unavailable")
+                    );
+                    assert!(
+                        !document
+                            .relations
+                            .iter()
+                            .any(|relation| relation.predicate == RelationPredicate::Implements)
+                    );
+                    continue;
+                }
+                let site = site.unwrap();
+                let expected = included && admitted;
+                let interface = document
+                    .entities
+                    .iter()
+                    .find(|entity| {
+                        entity.kind == EntityKind::Class && entity.canonical_name == "Contract"
+                    })
+                    .unwrap();
+                let owner = document
+                    .entities
+                    .iter()
+                    .find(|entity| Some(entity.id) == site.enclosing)
+                    .unwrap();
+                assert_eq!(
+                    site.target
+                        == OccurrenceTarget::Resolved {
+                            symbol: interface.id
+                        },
+                    expected,
+                    "{source}: included={included}"
+                );
+                if !expected {
+                    assert!(matches!(site.target, OccurrenceTarget::Unresolved { .. }));
+                }
+                let edges: Vec<_> = document
+                    .relations
+                    .iter()
+                    .filter(|edge| edge.predicate == RelationPredicate::Implements)
+                    .collect();
+                assert_eq!(edges.len(), usize::from(expected));
+                assert_eq!(
+                    document
+                        .skipped_regions
+                        .iter()
+                        .any(|gap| gap.source == site.source
+                            && gap.detail == "vba-type-target-unavailable"),
+                    !expected
+                );
+                if expected {
+                    assert_eq!(edges[0].subject, RelationEndpoint::Entity(owner.id));
+                    assert_eq!(edges[0].object, RelationEndpoint::Entity(interface.id));
+                    assert_eq!(owner.canonical_name, "Worker");
+                    let provenance = document
+                        .provenance
+                        .iter()
+                        .find(|record| record.id == site.provenance)
+                        .unwrap();
+                    assert_eq!(
+                        provenance.rule.as_deref(),
+                        Some("classic-project-type-v1.indexed_snapshot")
+                    );
+                    assert!(
+                        provenance
+                            .evidence_sources
+                            .contains(interface.evidence.source.as_ref().unwrap())
+                    );
+                    let project = document
+                        .files
+                        .iter()
+                        .find(|file| file.path == "project.vbp")
+                        .unwrap();
+                    assert!(document.provenance.iter().any(|record| {
+                        record.rule.as_deref() == Some("classic-project-membership-v1.leaf")
+                            && provenance
+                                .derivation_parents
+                                .contains(&rootlight_ir::FactRef::Fact(record.id))
+                            && record
+                                .evidence_sources
+                                .contains(project.evidence.source.as_ref().unwrap())
+                    }));
+                }
+                let relationships = service
+                    .symbol_relationships(
+                        receipt.generation,
+                        BTreeSet::from([interface.id]),
+                        vec![RelationFamily::Implements],
+                        Some(RelationDirection::Inbound),
+                        0,
+                        25,
+                        0,
+                        &deadline(),
+                    )
+                    .unwrap();
+                assert_eq!(
+                    relationships
+                        .data
+                        .groups
+                        .iter()
+                        .flat_map(|group| &group.items)
+                        .flat_map(|edge| &edge.source_refs)
+                        .any(|reference| reference == &site.source),
+                    expected
+                );
+                let read = service
+                    .source_read_with_options_and_budget(
+                        receipt.generation,
+                        vec![site.source.clone()],
+                        SourceReadOptions::new()
+                            .with_context_lines_before(0)
+                            .with_context_lines_after(0)
+                            .with_encoding(SourceEncoding::Bytes),
+                        FirstSliceBudget::default(),
+                        &deadline(),
+                    )
+                    .unwrap();
+                assert_eq!(site.source.generation(), receipt.generation);
+                let retained_name = if name == "Primary.Contract.Extra" {
+                    assert_eq!(
+                        site.syntax_kind,
+                        "vba.unsupported_implemented_type.reference"
+                    );
+                    "Primary.Contract"
+                } else {
+                    name
+                };
+                assert_eq!(read.data.chunks[0].bytes, retained_name.as_bytes());
             }
         }
     }

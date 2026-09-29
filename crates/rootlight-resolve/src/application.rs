@@ -625,6 +625,7 @@ fn reconcile_vba_target_gaps(
             Some("classic-project-type-v1.indexed_snapshot") => (
                 &[
                     "vba.direct_type_identifier.reference",
+                    "vba.implemented_type.reference",
                     "vba.type_identifier.reference",
                     "vba.automatic_type_identifier.reference",
                     "vba.constructed_type_identifier.reference",

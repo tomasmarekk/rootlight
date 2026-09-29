@@ -4,6 +4,7 @@
 (source_file) @definition
 (source_file) @reference
 (source_file) @signature
+(implements_statement name: (_) @reference)
 (preprocessor_if) @scope
 (preprocessor_block) @scope
 (type_preprocessor_if) @scope

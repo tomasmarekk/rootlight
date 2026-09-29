@@ -150,6 +150,21 @@ pub(super) fn retain_capture(node: Node<'_>, role: StructuralRole, source: &[u8]
     let Some(parent) = node.parent() else {
         return true;
     };
+    let ty = if parent.kind() == "dotted_type_expression" {
+        parent.parent()
+    } else {
+        Some(parent)
+    };
+    if ty.is_some_and(|ty| {
+        ty.kind() == "type_expression"
+            && ty
+                .parent()
+                .is_some_and(|owner| owner.kind() == "implements_statement")
+    }) {
+        // The complete type path owns the implementation reference. Retaining
+        // its identifier pieces would fabricate independent runtime reads.
+        return false;
+    }
     if parent.kind() == "bang_identifier" {
         return false;
     }
@@ -240,6 +255,37 @@ pub(super) fn syntax(node: Node<'_>, role: StructuralRole) -> Option<&'static st
         "string_literal" => "vba.string",
         _ => return None,
     })
+}
+
+pub(super) fn implemented_type_syntax(
+    node: Node<'_>,
+    source: &[u8],
+    cancellation: &Cancellation,
+) -> Result<&'static str, AdapterError> {
+    // A conditional or recovered directive cannot establish an unconditional
+    // class-wide interface contract.
+    let supported = node.parent().is_some_and(|statement| {
+        statement.kind() == "implements_statement"
+            && !statement.has_error()
+            && statement
+                .parent()
+                .is_some_and(|owner| owner.kind() == "source_file")
+    }) && crate::vba_pointer::parse(
+        source.get(node.start_byte()..).unwrap_or_default(),
+        cancellation,
+    )?
+    .is_some_and(|path| path.end() == node.end_byte() - node.start_byte());
+    let tail = source.get(node.end_byte()..).unwrap_or_default();
+    let whitespace = rootlight_vba::logical_whitespace_len(tail, &mut || {
+        cancellation.check().map_err(AdapterError::from)
+    })?;
+    Ok(
+        if supported && matches!(tail.get(whitespace), None | Some(b'\r' | b'\n' | b'\'')) {
+            "vba.implemented_type"
+        } else {
+            "vba.unsupported_implemented_type"
+        },
+    )
 }
 
 pub(super) fn declared_visibility(

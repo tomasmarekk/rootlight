@@ -5499,6 +5499,8 @@ fn source_reference_gap(fact: &SyntaxFact) -> Option<&'static str> {
         | "vba.error_label.reference"
         | "vba.resume_label.reference" => Some("vba-statement-label-target-unavailable"),
         "vba.direct_type_identifier.reference"
+        | "vba.implemented_type.reference"
+        | "vba.unsupported_implemented_type.reference"
         | "vba.constructed_type_identifier.reference"
         | "vba.tested_type_identifier.reference"
         | "vba.unsupported_constructed_type_identifier.reference"
@@ -5606,7 +5608,12 @@ fn occurrence_role(fact: &SyntaxFact) -> Option<OccurrenceRole> {
             Some(OccurrenceRole::InheritanceUse)
         }
         SyntaxFactKind::Occurrence
-            if fact.syntax_kind().as_str() == "groovy.implements_type.reference" =>
+            if matches!(
+                fact.syntax_kind().as_str(),
+                "groovy.implements_type.reference"
+                    | "vba.implemented_type.reference"
+                    | "vba.unsupported_implemented_type.reference"
+            ) =>
         {
             Some(OccurrenceRole::ImplementationUse)
         }
