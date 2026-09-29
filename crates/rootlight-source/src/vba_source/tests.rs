@@ -294,6 +294,55 @@ fn parse(bytes: &[u8]) -> CompoundFile<'_> {
 }
 
 #[test]
+fn project_version_is_source_bound_and_independent_of_performance_caches() {
+    let cancel = Cancellation::new();
+    let body = b"Sub Inspect()\r\nEnd Sub\r\n";
+    for (major, minor) in [(0_u32, 0_u16), (0x89ab_cdef, 0x8123), (u32::MAX, u16::MAX)] {
+        let mut decoded = directory(&[("Module", 0)]);
+        let range = ProjectDirectory::parse(&decoded, DirectoryLimits::default(), &cancel)
+            .unwrap()
+            .version()
+            .range();
+        decoded[range.start..range.start + 4].copy_from_slice(&major.to_le_bytes());
+        decoded[range.start + 4..range.end].copy_from_slice(&minor.to_le_bytes());
+        let input = compound(&[
+            Stream {
+                name: "dir",
+                bytes: compress_literals(&decoded),
+                inside: true,
+            },
+            Stream {
+                name: "_VBA_PROJECT",
+                bytes: vec![0xff; 31],
+                inside: true,
+            },
+            stream("Module", body),
+        ]);
+        for _ in 0..2 {
+            let file = parse(&input);
+            let project =
+                VbaProject::open(&file, 1, ProjectReadLimits::default(), &cancel).unwrap();
+            assert_eq!(
+                (project.version().major(), project.version().minor()),
+                (major, minor)
+            );
+            assert_eq!(project.version().range(), range);
+            assert_eq!(
+                &project.decoded_directory().bytes()[range.clone()],
+                &decoded[range.clone()]
+            );
+            assert_eq!(
+                project
+                    .read_module(0, ModuleReadLimits::default(), &cancel)
+                    .unwrap()
+                    .bytes(),
+                body
+            );
+        }
+    }
+}
+
+#[test]
 fn project_retains_reference_fields_with_original_directory_provenance() {
     use crate::vba_dir::ReferencePayload;
 
@@ -337,6 +386,15 @@ fn project_retains_reference_fields_with_original_directory_provenance() {
     let file = parse(&input);
     let project = VbaProject::open(&file, 1, ProjectReadLimits::default(), &cancel).unwrap();
     let expected = ProjectDirectory::parse(&decoded, DirectoryLimits::default(), &cancel).unwrap();
+    assert_eq!(project.version(), expected.version());
+    assert_eq!(
+        (project.version().major(), project.version().minor()),
+        (1, 0)
+    );
+    assert_eq!(
+        &project.decoded_directory().bytes()[project.version().range()],
+        &[1, 0, 0, 0, 0, 0]
+    );
     assert_eq!(project.references().len(), 3);
     assert_eq!(project.decoded_directory().bytes(), decoded);
     for (actual, expected) in project.references().iter().zip(expected.references()) {

@@ -300,12 +300,44 @@ impl ReferenceRecord {
     }
 }
 
+/// A native project's declared version with exact decompressed source coordinates.
+/// Equality includes the source range; matching numeric versions alone does not
+/// establish project identity, reference precedence or binary compatibility.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProjectVersionRecord {
+    major: u32,
+    minor: u16,
+    range: Range<usize>,
+}
+
+impl ProjectVersionRecord {
+    /// Returns the full unsigned major version from PROJECTVERSION.
+    #[must_use]
+    pub const fn major(&self) -> u32 {
+        self.major
+    }
+
+    /// Returns the full unsigned minor version from PROJECTVERSION.
+    #[must_use]
+    pub const fn minor(&self) -> u16 {
+        self.minor
+    }
+
+    /// Returns the six little-endian payload bytes in the decompressed directory.
+    /// The record identifier and reader-ignored reserved word are excluded.
+    #[must_use]
+    pub fn range(&self) -> Range<usize> {
+        self.range.clone()
+    }
+}
+
 /// Structurally parsed directory with complete ordered module declarations.
 pub struct ProjectDirectory<'a> {
     bytes: &'a [u8],
     information_range: Range<usize>,
     code_page: u16,
     name: TextField<'a>,
+    version: ProjectVersionRecord,
     references: Vec<ReferenceRecord>,
     modules: Vec<ModuleRecord<'a>>,
 }
@@ -364,6 +396,13 @@ impl<'a> ProjectDirectory<'a> {
     #[must_use]
     pub fn name(&self) -> &TextField<'a> {
         &self.name
+    }
+
+    /// Returns this project's declared version, not a referenced project's version
+    /// or the implementation-specific performance-cache format version.
+    #[must_use]
+    pub const fn version(&self) -> &ProjectVersionRecord {
+        &self.version
     }
     /// Returns references in their original order, never resolved or executed.
     #[must_use]

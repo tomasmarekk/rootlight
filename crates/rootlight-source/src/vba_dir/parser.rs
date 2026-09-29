@@ -4,7 +4,7 @@
 
 use super::{
     Cancellation, DirectoryError, DirectoryLimits, ModuleKind, ModuleRecord, ProjectDirectory,
-    ReferenceName, ReferencePayload, ReferenceRecord, TextField,
+    ProjectVersionRecord, ReferenceName, ReferencePayload, ReferenceRecord, TextField,
 };
 
 pub(super) fn parse<'a>(
@@ -26,7 +26,7 @@ pub(super) fn parse<'a>(
         position: 0,
         cancellation,
     };
-    let (code_page, name) = reader.information()?;
+    let (code_page, name, version) = reader.information()?;
     let information_range = 0..reader.position;
     let mut references = Vec::new();
     while reader.peek()? != 0x000f {
@@ -52,6 +52,7 @@ pub(super) fn parse<'a>(
         information_range,
         code_page,
         name,
+        version,
         references,
         modules,
     })
@@ -206,7 +207,9 @@ impl<'a> Reader<'a, '_> {
         Ok((mbcs, self.unicode()?))
     }
 
-    fn information(&mut self) -> Result<(u16, TextField<'a>), DirectoryError> {
+    fn information(
+        &mut self,
+    ) -> Result<(u16, TextField<'a>, ProjectVersionRecord), DirectoryError> {
         self.header(1, 4)?;
         if self.u32()? > 3 {
             return Err(self.invalid());
@@ -240,11 +243,18 @@ impl<'a> Reader<'a, '_> {
         // PROJECTVERSION's reserved word is NOT a generic TLV length. The
         // following major/minor pair occupies six bytes regardless of its value.
         self.marker(9)?;
-        self.take(6)?;
+        let version_start = self.position;
+        let major = self.u32()?;
+        let minor = self.u16()?;
+        let version = ProjectVersionRecord {
+            major,
+            minor,
+            range: version_start..self.position,
+        };
         if self.peek()? == 0x000c {
             self.pair(0x000c, 1015)?;
         }
-        Ok((code_page, name))
+        Ok((code_page, name, version))
     }
 
     fn reference(&mut self) -> Result<ReferenceRecord, DirectoryError> {

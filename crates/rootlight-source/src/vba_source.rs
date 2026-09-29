@@ -13,7 +13,9 @@ use rootlight_cancel::{Cancellation, Cancelled};
 use crate::{
     compound::{CompoundEntry, CompoundEntryKind, CompoundError, CompoundFile, CompoundStream},
     vba_compression::{self, DecompressedContainer, DecompressionError, DecompressionLimits},
-    vba_dir::{DirectoryError, DirectoryLimits, ProjectDirectory, ReferenceRecord},
+    vba_dir::{
+        DirectoryError, DirectoryLimits, ProjectDirectory, ProjectVersionRecord, ReferenceRecord,
+    },
 };
 
 pub mod root;
@@ -236,6 +238,7 @@ pub struct VbaProject<'container, 'input> {
     encoded_directory: CompoundStream,
     decoded_directory: DecompressedContainer,
     code_page: u16,
+    version: ProjectVersionRecord,
     references: Vec<ReferenceRecord>,
     modules: Vec<ModuleDescriptor>,
 }
@@ -307,6 +310,7 @@ impl<'container, 'input> VbaProject<'container, 'input> {
         let metadata =
             ProjectDirectory::parse(decoded_directory.bytes(), limits.directory, cancellation)?;
         let code_page = metadata.code_page();
+        let version = metadata.version().clone();
         let mut modules = Vec::new();
         let mut first_use = BTreeSet::new();
         let mut reused = BTreeSet::new();
@@ -348,6 +352,7 @@ impl<'container, 'input> VbaProject<'container, 'input> {
             encoded_directory,
             decoded_directory,
             code_page,
+            version,
             references,
             modules,
         })
@@ -357,6 +362,14 @@ impl<'container, 'input> VbaProject<'container, 'input> {
     #[must_use]
     pub fn modules(&self) -> &[ModuleDescriptor] {
         &self.modules
+    }
+
+    /// Returns the project's own declared version with its decompressed byte range.
+    /// This is not a library version or a performance-cache format version, and
+    /// it does not by itself prove that a reference identifies this project.
+    #[must_use]
+    pub const fn version(&self) -> &ProjectVersionRecord {
+        &self.version
     }
     /// Returns untrusted reference metadata in declaration order, without loading it.
     /// All field ranges address [`Self::decoded_directory`]'s bytes; they do not

@@ -138,6 +138,47 @@ fn parse(bytes: &[u8]) -> Result<ProjectDirectory<'_>, DirectoryError> {
 }
 
 #[test]
+fn project_version_preserves_full_width_values_and_exact_payload() {
+    for (major, minor) in [(0, 0), (0x89ab_cdef, 0x8123), (u32::MAX, u16::MAX)] {
+        for optional in [false, true] {
+            let mut input = Vec::new();
+            information(&mut input, optional, 1252);
+            module_header(&mut input, 0);
+            marker(&mut input, 0x0010);
+            let original = parse(&input).unwrap();
+            assert_eq!(
+                (original.version().major(), original.version().minor()),
+                (123, 45)
+            );
+            let range = original.version().range();
+            assert_eq!(range.len(), 6);
+            assert_eq!(&input[range.clone()], &[123, 0, 0, 0, 45, 0]);
+            input[range.start..range.start + 4].copy_from_slice(&major.to_le_bytes());
+            input[range.start + 4..range.end].copy_from_slice(&minor.to_le_bytes());
+            let parsed = parse(&input).unwrap();
+            assert_eq!(parsed.version().major(), major);
+            assert_eq!(parsed.version().minor(), minor);
+            assert_eq!(parsed.version().range(), range);
+            assert!(range.end <= parsed.information_range().end);
+            assert_eq!(
+                &input[range.clone()],
+                &[
+                    major.to_le_bytes().as_slice(),
+                    minor.to_le_bytes().as_slice()
+                ]
+                .concat()
+            );
+            for end in range.start..range.end {
+                assert!(matches!(
+                    parse(&input[..end]),
+                    Err(DirectoryError::Truncated { .. })
+                ));
+            }
+        }
+    }
+}
+
+#[test]
 fn ordered_metadata_retains_all_reference_variants_and_exact_module_ranges() {
     let mut input = Vec::new();
     information(&mut input, true, 932);
