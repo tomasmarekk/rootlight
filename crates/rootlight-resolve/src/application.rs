@@ -637,6 +637,10 @@ fn reconcile_vba_target_gaps(
                 &["vba.application.reference"],
                 "vba-call-or-index-target-unavailable",
             ),
+            Some("classic-project-construction-v1.indexed_snapshot") => (
+                &["vba.construction.reference"],
+                "vba-construction-semantics-unavailable",
+            ),
             Some("classic-project-member-v1.indexed_snapshot") => (
                 &[
                     "vba.member.reference",
@@ -1504,6 +1508,7 @@ fn build_provenance(
     if matches!(
         decision.explanation.rule,
         ResolutionRule::ClassicProjectType
+            | ResolutionRule::ClassicProjectConstruction
             | ResolutionRule::ClassicProjectMember
             | ResolutionRule::ClassicProjectDefaultMember
             | ResolutionRule::ClassicProjectArgument
@@ -1533,6 +1538,16 @@ fn build_provenance(
             context_digests.push(provenance.build_context.digest());
         }
         sources.extend(lookup.classic.receiver_sources(occurrence).iter().cloned());
+        if let Some(initializer) = lookup.classic.initializer(occurrence) {
+            derivation_parents.push(FactRef::Entity(initializer.id));
+            sources.extend(initializer.evidence.source.iter().cloned());
+            tier = lower_tier(tier, initializer.tier);
+            let provenance = lookup
+                .provenance
+                .get(&initializer.provenance)
+                .ok_or(ResolutionError::UnsupportedIdentityRemap)?;
+            context_digests.push(provenance.build_context.digest());
+        }
     }
 
     for candidate in &decision.explanation.candidates {
@@ -1649,6 +1664,9 @@ fn build_provenance(
             "matlab-primary-function-v1.indexed_snapshot"
         }
         ResolutionRule::ClassicProjectType => "classic-project-type-v1.indexed_snapshot",
+        ResolutionRule::ClassicProjectConstruction => {
+            "classic-project-construction-v1.indexed_snapshot"
+        }
         ResolutionRule::ClassicProjectModule => "classic-project-module-v1.indexed_snapshot",
         ResolutionRule::ClassicProjectEnum => "classic-project-enum-v1.indexed_snapshot",
         ResolutionRule::ElmModuleImport => "elm-module-import-v1.indexed_snapshot",
@@ -1717,6 +1735,7 @@ fn apply_target(occurrence: &mut OccurrenceRecord, decision: &ResolutionDecision
 enum RelationSemantics {
     RoleOnly,
     ImplicitAccessor,
+    Initializer(SymbolId),
 }
 
 fn relation_semantics(
@@ -1727,6 +1746,12 @@ fn relation_semantics(
     let ResolutionOutcome::Resolved { symbol, .. } = decision.outcome else {
         return RelationSemantics::RoleOnly;
     };
+    if occurrence.id == decision.occurrence
+        && decision.explanation.rule == ResolutionRule::ClassicProjectConstruction
+        && let Some(initializer) = lookup.classic.initializer(occurrence)
+    {
+        return RelationSemantics::Initializer(initializer.id);
+    }
     // Selection belongs to the original occurrence identity, before application
     // remaps it. A method name or a common-IR target alone cannot prove a call.
     if occurrence.id == decision.occurrence
@@ -1779,6 +1804,15 @@ fn append_relation_specs(
                 append(pending_relation(
                     occurrence,
                     *symbol,
+                    RelationPredicate::Calls,
+                    *confidence,
+                    decision.explanation.rule,
+                ))?;
+            }
+            if let RelationSemantics::Initializer(initializer) = semantics {
+                append(pending_relation(
+                    occurrence,
+                    initializer,
                     RelationPredicate::Calls,
                     *confidence,
                     decision.explanation.rule,

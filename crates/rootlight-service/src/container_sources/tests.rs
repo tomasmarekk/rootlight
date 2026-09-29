@@ -1192,12 +1192,23 @@ fn expression_types_follow_project_sources_without_inventing_value_types() {
             .iter()
             .find(|site| site.syntax_kind == "vba.construction.reference")
             .unwrap();
+        assert_eq!(
+            construction.target,
+            OccurrenceTarget::Resolved { symbol: target.id }
+        );
         assert!(
-            document
+            !document
                 .skipped_regions
                 .iter()
                 .any(|gap| gap.source == construction.source
                     && gap.detail == "vba-construction-semantics-unavailable")
+        );
+        assert!(
+            !document
+                .relations
+                .iter()
+                .any(|edge| edge.predicate == RelationPredicate::Calls
+                    && edge.evidence.source.as_ref() == Some(&construction.source))
         );
         let member = document
             .occurrences
@@ -1232,6 +1243,381 @@ fn expression_types_follow_project_sources_without_inventing_value_types() {
         let rebuilt = service.publish_prepared(prepared, &deadline()).unwrap();
         assert!(receipt.logical_snapshot.is_some());
         assert_eq!(rebuilt.logical_snapshot, receipt.logical_snapshot);
+    }
+}
+
+#[test]
+fn construction_lifecycle_and_receivers_follow_source_mutations_after_reopen() {
+    use rootlight_source::vba_project::ProjectModuleKind;
+
+    for native in [false, true] {
+        let root = tempdir();
+        let storage = tempdir();
+        let paths = rootlight_runtime::RuntimePaths::new(
+            storage.path().join("state"),
+            storage.path().join("runtime"),
+        )
+        .unwrap();
+        paths.prepare_owner().unwrap();
+        let client = b"Attribute VB_Name = \"Client\"\r\nPublic Sub Run()\r\nDim item As Object\r\nSet item = New Worker\r\nWith New Worker\r\n.Touch\r\nEnd With\r\nitem.Touch\r\nEnd Sub\r\n";
+        let mut previous = None;
+        for (body, kind, expected, calls) in [
+            ("", ProjectModuleKind::Class, true, false),
+            (
+                "Private Sub Class_Initialize()\r\nEnd Sub\r\n",
+                ProjectModuleKind::Class,
+                true,
+                true,
+            ),
+            (
+                "Private Sub Class_Initialize()\r\nDim value As Long\r\nvalue = 2\r\nEnd Sub\r\n",
+                ProjectModuleKind::Class,
+                true,
+                true,
+            ),
+            (
+                "Private Sub Class_Initialize\r\nEnd Sub\r\n",
+                ProjectModuleKind::Class,
+                true,
+                true,
+            ),
+            (
+                "Private Sub cLaSs_InItIaLiZe _\r\n ( _\r\n )\r\nEnd Sub\r\n",
+                ProjectModuleKind::Class,
+                true,
+                true,
+            ),
+            (
+                "Private Sub Class_Terminate()\r\nEnd Sub\r\n",
+                ProjectModuleKind::Class,
+                true,
+                false,
+            ),
+            (
+                "#If Choice Then\r\nSub Other()\r\nEnd Sub\r\n#End If\r\n",
+                ProjectModuleKind::Class,
+                true,
+                false,
+            ),
+            (
+                "#If Choice Then\r\nSub Other()\r\nEnd Sub\r\n#End If\r\nPrivate Sub Class_Initialize()\r\n#If Choice Then\r\nDim value As Long\r\n#End If\r\nEnd Sub\r\n",
+                ProjectModuleKind::Class,
+                true,
+                true,
+            ),
+            (
+                "Private Sub Other()\r\n' Sub Class_Initialize()\r\nDim text As String\r\ntext = \"Sub Class_Initialize()\"\r\nEnd Sub\r\n",
+                ProjectModuleKind::Class,
+                true,
+                false,
+            ),
+            (
+                "Private Sub Class_Initialize(value As Long)\r\nEnd Sub\r\n",
+                ProjectModuleKind::Class,
+                false,
+                false,
+            ),
+            (
+                "Private Sub Class_Initialize(Optional value As Long = 0)\r\nEnd Sub\r\n",
+                ProjectModuleKind::Class,
+                false,
+                false,
+            ),
+            (
+                "Private Sub Class_Initialize(ParamArray values())\r\nEnd Sub\r\n",
+                ProjectModuleKind::Class,
+                false,
+                false,
+            ),
+            (
+                "Private Function Class_Initialize() As Long\r\nEnd Function\r\n",
+                ProjectModuleKind::Class,
+                false,
+                false,
+            ),
+            (
+                "Private Property Get Class_Initialize() As Long\r\nEnd Property\r\n",
+                ProjectModuleKind::Class,
+                false,
+                false,
+            ),
+            (
+                "Private Class_Initialize As Long\r\n",
+                ProjectModuleKind::Class,
+                false,
+                false,
+            ),
+            (
+                "Private Sub Class_Initialize()\r\nEnd Sub\r\nPrivate Sub Class_Initialize()\r\nEnd Sub\r\n",
+                ProjectModuleKind::Class,
+                false,
+                false,
+            ),
+            (
+                "#If HostChoice Then\r\nPrivate Sub Class_Initialize()\r\nEnd Sub\r\n#End If\r\n",
+                ProjectModuleKind::Class,
+                false,
+                false,
+            ),
+            (
+                "Private Sub Class_Initialize()\r\nEnd Sub\r\n",
+                ProjectModuleKind::Document {
+                    automation_version: 0,
+                },
+                false,
+                false,
+            ),
+            (
+                "Private Sub Class_Initialize()\r\nEnd Sub\r\n",
+                ProjectModuleKind::Designer,
+                false,
+                false,
+            ),
+            (
+                "Private Sub Class_Initialize()\r\nEnd Sub\r\n",
+                ProjectModuleKind::Procedural,
+                false,
+                false,
+            ),
+            (
+                "Private Sub Class_Initialize()\r\nEnd Sub\r\n",
+                ProjectModuleKind::Class,
+                true,
+                true,
+            ),
+        ] {
+            if !native
+                && matches!(
+                    kind,
+                    ProjectModuleKind::Document { .. } | ProjectModuleKind::Designer
+                )
+            {
+                continue;
+            }
+            let worker = format!(
+                "Attribute VB_Name = \"Worker\"\r\n{body}Public Sub Touch()\r\nEnd Sub\r\n"
+            );
+            if native {
+                fs::write(
+                    root.path().join("book.xlsm"),
+                    fixture::native_book(
+                        &[
+                            ("Client", client, ProjectModuleKind::Procedural),
+                            ("Worker", worker.as_bytes(), kind),
+                        ],
+                        "\"Project\"",
+                    ),
+                )
+                .unwrap();
+            } else {
+                fs::write(root.path().join("Client.bas"), client).unwrap();
+                let class = kind == ProjectModuleKind::Class;
+                fs::write(
+                    root.path().join("Worker.cls"),
+                    format!(
+                        "{}{worker}",
+                        if class { "VERSION 1.0 CLASS\r\n" } else { "" }
+                    ),
+                )
+                .unwrap();
+                fs::write(root.path().join("project.vbp"), format!(
+                    "Type=Exe\nName=\"Project\"\nModule=Client; Client.bas\n{}=Worker; Worker.cls\n",
+                    if class { "Class" } else { "Module" },
+                )).unwrap();
+            }
+            let mut service =
+                FirstSliceService::new_durable(4, paths.state_dir(), &deadline()).unwrap();
+            let receipt = service.index_repository(root.path(), &deadline()).unwrap();
+            assert_ne!(Some(receipt.generation), previous);
+            previous = Some(receipt.generation);
+            assert_eq!(
+                service.index_repository(root.path(), &deadline()).unwrap(),
+                receipt
+            );
+            drop(service);
+            let mut service =
+                FirstSliceService::new_durable(4, paths.state_dir(), &deadline()).unwrap();
+            let snapshot = service
+                .loaded_generation_snapshot(receipt.generation)
+                .unwrap();
+            let document = snapshot.document();
+            let class = document
+                .entities
+                .iter()
+                .find(|entity| {
+                    entity.canonical_name == "Worker"
+                        && matches!(entity.kind, EntityKind::Class | EntityKind::Module)
+                })
+                .unwrap();
+            let sites: Vec<_> = document
+                .occurrences
+                .iter()
+                .filter(|site| site.syntax_kind == "vba.construction.reference")
+                .collect();
+            assert_eq!(sites.len(), 2);
+            for site in &sites {
+                assert_eq!(
+                    site.target == OccurrenceTarget::Resolved { symbol: class.id },
+                    expected,
+                    "native={native} kind={kind:?} body={body:?}"
+                );
+                if !expected {
+                    assert!(matches!(site.target, OccurrenceTarget::Unresolved { .. }));
+                }
+                assert_eq!(
+                    document
+                        .skipped_regions
+                        .iter()
+                        .any(|gap| gap.source == site.source
+                            && gap.detail == "vba-construction-semantics-unavailable"),
+                    !expected
+                );
+                let edges: Vec<_> = document
+                    .relations
+                    .iter()
+                    .filter(|edge| edge.evidence.source.as_ref() == Some(&site.source))
+                    .collect();
+                assert_eq!(
+                    edges
+                        .iter()
+                        .filter(|edge| edge.predicate == RelationPredicate::RefersTo
+                            && edge.object == RelationEndpoint::Entity(class.id))
+                        .count(),
+                    usize::from(expected)
+                );
+                let initializations: Vec<_> = edges
+                    .iter()
+                    .filter(|edge| edge.predicate == RelationPredicate::Calls)
+                    .collect();
+                assert_eq!(
+                    initializations.len(),
+                    usize::from(calls),
+                    "native={native} body={body:?}"
+                );
+                if calls {
+                    let initializer = document
+                        .entities
+                        .iter()
+                        .find(|entity| {
+                            entity
+                                .canonical_name
+                                .eq_ignore_ascii_case("Class_Initialize")
+                                && entity.container == Some(ContainerRef::Entity(class.id))
+                        })
+                        .unwrap();
+                    assert_eq!(
+                        initializations[0].object,
+                        RelationEndpoint::Entity(initializer.id)
+                    );
+                    let provenance = document
+                        .provenance
+                        .iter()
+                        .find(|record| record.id == site.provenance)
+                        .unwrap();
+                    assert_eq!(
+                        provenance.rule.as_deref(),
+                        Some("classic-project-construction-v1.indexed_snapshot")
+                    );
+                    assert!(
+                        provenance
+                            .derivation_parents
+                            .contains(&FactRef::Entity(initializer.id))
+                    );
+                    assert!(
+                        provenance
+                            .evidence_sources
+                            .contains(initializer.evidence.source.as_ref().unwrap())
+                    );
+                }
+            }
+            let method = document
+                .entities
+                .iter()
+                .find(|entity| {
+                    entity.canonical_name == "Touch"
+                        && entity.container == Some(ContainerRef::Entity(class.id))
+                })
+                .unwrap();
+            if calls {
+                let initializer = document
+                    .entities
+                    .iter()
+                    .find(|entity| {
+                        entity
+                            .canonical_name
+                            .eq_ignore_ascii_case("Class_Initialize")
+                            && entity.container == Some(ContainerRef::Entity(class.id))
+                    })
+                    .unwrap();
+                let relationships = service
+                    .symbol_relationships(
+                        receipt.generation,
+                        BTreeSet::from([initializer.id]),
+                        vec![RelationFamily::Calls],
+                        Some(RelationDirection::Inbound),
+                        0,
+                        25,
+                        0,
+                        &deadline(),
+                    )
+                    .unwrap();
+                assert!(!relationships.data.truncated);
+                for site in &sites {
+                    assert!(
+                        relationships
+                            .data
+                            .groups
+                            .iter()
+                            .flat_map(|group| &group.items)
+                            .any(|edge| edge.source_refs.contains(&site.source))
+                    );
+                }
+            }
+            let members: Vec<_> = document
+                .occurrences
+                .iter()
+                .filter(|site| site.syntax_kind == "vba.invoked_member.reference")
+                .collect();
+            assert_eq!(members.len(), 2);
+            let with_start = client
+                .windows(b".Touch".len())
+                .position(|part| part == b".Touch")
+                .unwrap();
+            for site in members {
+                let with = site.source.span().start_byte() == u64::try_from(with_start).unwrap();
+                assert_eq!(
+                    site.target == OccurrenceTarget::Resolved { symbol: method.id },
+                    with && expected,
+                    "native={native} body={body:?} site={site:?}"
+                );
+            }
+            let read = service
+                .source_read_with_options_and_budget(
+                    receipt.generation,
+                    sites.iter().map(|site| site.source.clone()).collect(),
+                    SourceReadOptions::new()
+                        .with_context_lines_before(0)
+                        .with_context_lines_after(0),
+                    FirstSliceBudget::default(),
+                    &deadline(),
+                )
+                .unwrap();
+            assert_eq!(read.data.chunks.len(), 2);
+            for chunk in &read.data.chunks {
+                assert_eq!(chunk.bytes, b"New Worker");
+                assert_eq!(chunk.extracted_from.is_some(), native);
+            }
+            let prepared = service
+                .prepare_repository_with_options(
+                    root.path(),
+                    FirstSliceIndexOptions::clean_rebuild(FirstSliceIndexMode::Structural),
+                    &deadline(),
+                )
+                .unwrap();
+            let rebuilt = service.publish_prepared(prepared, &deadline()).unwrap();
+            assert!(receipt.logical_snapshot.is_some());
+            assert_eq!(rebuilt.logical_snapshot, receipt.logical_snapshot);
+        }
     }
 }
 

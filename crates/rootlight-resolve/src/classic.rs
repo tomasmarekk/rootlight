@@ -99,6 +99,7 @@ pub(crate) struct ClassicIndex<'a> {
     proofs: BTreeMap<FactId, Proof<'a>>,
     application_parameters: BTreeMap<FactId, Arc<Vec<&'a EntityRecord>>>,
     receiver_sources: BTreeMap<FactId, Arc<Vec<SourceRef>>>,
+    initializers: BTreeMap<FactId, &'a EntityRecord>,
 }
 
 pub(crate) struct Proof<'a> {
@@ -120,6 +121,7 @@ struct Member {
     name: String,
     location: MemberLocation,
     class: bool,
+    instantiable: bool,
     predeclared_id: Option<std::ops::Range<usize>>,
 }
 
@@ -273,6 +275,7 @@ struct ResolvedProject {
     types: BTreeMap<String, Option<SymbolId>>,
     modules: BTreeMap<String, Option<SymbolId>>,
     default_instances: BTreeMap<SymbolId, SourceRef>,
+    instantiable: BTreeSet<SymbolId>,
     value_names: BTreeSet<String>,
     member_modules: BTreeMap<FileId, SymbolId>,
     pointer_names: BTreeMap<String, Option<FileId>>,
@@ -484,6 +487,7 @@ fn parse_project(
                 name,
                 location: MemberLocation::Path(path),
                 class: key.eq_ignore_ascii_case("Class"),
+                instantiable: key.eq_ignore_ascii_case("Class"),
                 predeclared_id: None,
             });
         } else if [
@@ -629,6 +633,7 @@ impl<'a> ClassicIndex<'a> {
                     name: name.unwrap_or_default(),
                     location: MemberLocation::Indexed(member.file),
                     predeclared_id: member.predeclared_id.clone(),
+                    instantiable: member.kind == Some(NativeClassicMemberKind::Class),
                     // Extension source declarations belong to their named class
                     // (MS-VBAL 4.2.1/5.2.4). Host members are not inferred here.
                     class: matches!(
@@ -676,6 +681,7 @@ impl<'a> ClassicIndex<'a> {
             let mut member_modules = BTreeMap::new();
             let mut modules = BTreeMap::from([(project.name.clone(), None)]);
             let mut default_instances = BTreeMap::new();
+            let mut instantiable = BTreeSet::new();
             let mut value_names = BTreeSet::new();
             let mut name_shadowed = false;
             work.consume_many(members.len())?;
@@ -786,6 +792,9 @@ impl<'a> ClassicIndex<'a> {
                 }
                 work.consume()?;
                 member_modules.insert(file.id, named[0].id);
+                if member.instantiable {
+                    instantiable.insert(named[0].id);
+                }
                 if !member.class {
                     work.consume()?;
                     pointer_names
@@ -872,6 +881,7 @@ impl<'a> ClassicIndex<'a> {
                 types,
                 modules,
                 default_instances,
+                instantiable,
                 value_names,
                 member_modules,
                 pointer_names,
@@ -1466,6 +1476,151 @@ impl<'a> ClassicIndex<'a> {
         let mut member_occurrences = Vec::new();
         let mut read_receivers: BTreeMap<_, Vec<SourceRef>> = BTreeMap::new();
         let mut calls = calls::CallIndex::build(index, occurrences, cancellation, work)?;
+        let mut constructed_types = BTreeMap::new();
+        let mut constructed_classes = BTreeSet::new();
+        for site in occurrences {
+            cancellation.check()?;
+            work.consume()?;
+            if site.role == OccurrenceRole::TypeUse
+                && site.syntax_kind == "vba.constructed_type_identifier.reference"
+            {
+                constructed_types
+                    .entry(site.source.span())
+                    .and_modify(|prior| *prior = None)
+                    .or_insert(Some(site));
+                if let Some(proof) = result.proof(site) {
+                    constructed_classes.insert(proof.target.id);
+                }
+            }
+        }
+        // Type lookup alone cannot establish construction: host documents are
+        // not ordinary creatable classes, and lifecycle signatures must agree
+        // with both the source inventory and complete project-owned member facts.
+        let mut initializers = BTreeMap::new();
+        for class in projects
+            .iter()
+            .flatten()
+            .flat_map(|project| &project.instantiable)
+        {
+            cancellation.check()?;
+            work.consume()?;
+            if !constructed_classes.contains(class) {
+                continue;
+            }
+            let class_source = entities
+                .get(class)
+                .and_then(|entity| entity.evidence.source.as_ref());
+            let declaration = class_source.and_then(|source| sources.get(&source.span().file()));
+            let inventory = if let Some(bytes) = declaration {
+                rootlight_vba::class_initializer(bytes, &mut || {
+                    cancellation.check()?;
+                    work.consume()
+                })?
+            } else {
+                rootlight_vba::ClassInitializer::Unproven
+            };
+            let initializer = match (
+                inventory,
+                members.get(&(*class, "class_initialize".to_owned())),
+            ) {
+                (rootlight_vba::ClassInitializer::Absent, None) => Some(None),
+                (rootlight_vba::ClassInitializer::Header(header), Some(Some(entity)))
+                    if matches!(entity.kind, EntityKind::Function | EntityKind::Method) =>
+                {
+                    let declaration = entity.evidence.source.as_ref().and_then(|source| {
+                        let span = source.span();
+                        sources.get(&span.file())?.get(
+                            usize::try_from(span.start_byte()).ok()?
+                                ..usize::try_from(span.end_byte()).ok()?,
+                        )
+                    });
+                    let matches_header = entity.evidence.source.as_ref().is_some_and(|source| {
+                        class_source.is_some_and(|class_source| {
+                            source.span().file() == class_source.span().file()
+                        }) && Some(source.span().start_byte()) == u64::try_from(header.start).ok()
+                            && u64::try_from(header.end)
+                                .ok()
+                                .is_some_and(|end| end <= source.span().end_byte())
+                    });
+                    let valid = if let Some(declaration) = declaration.filter(|_| matches_header) {
+                        rootlight_vba::parameterless_sub(declaration, &mut || {
+                            cancellation.check()?;
+                            work.consume()
+                        })? && procedure_kind(entity, &sources, cancellation, work)?
+                            == Some(rootlight_vba::ProcedureKind::Sub)
+                    } else {
+                        false
+                    };
+                    valid.then_some(Some(*entity))
+                }
+                _ => None,
+            };
+            initializers.insert(*class, initializer);
+        }
+        let mut constructed_receivers = BTreeMap::new();
+        for site in occurrences {
+            cancellation.check()?;
+            work.consume()?;
+            if site.role != OccurrenceRole::Reference
+                || site.syntax_kind != "vba.construction.reference"
+                || !matches!(site.target, OccurrenceTarget::Unresolved { .. })
+            {
+                continue;
+            }
+            let span = site.source.span();
+            let Some(bytes) = sources.get(&site.file).and_then(|bytes| {
+                bytes.get(
+                    usize::try_from(span.start_byte()).ok()?
+                        ..usize::try_from(span.end_byte()).ok()?,
+                )
+            }) else {
+                continue;
+            };
+            let Some(range) = rootlight_vba::constructed_type_range(bytes, &mut || {
+                cancellation.check()?;
+                work.consume()
+            })?
+            else {
+                continue;
+            };
+            if range.end != bytes.len() {
+                continue;
+            }
+            let type_span = rootlight_ir::SourceSpan::new(
+                site.file,
+                span.start_byte()
+                    .checked_add(
+                        u64::try_from(range.start).map_err(|_| ResolutionError::CountOverflow)?,
+                    )
+                    .ok_or(ResolutionError::CountOverflow)?,
+                span.end_byte(),
+            )
+            .map_err(ResolutionError::InvalidProducer)?;
+            let Some(type_site) = constructed_types.get(&type_span).and_then(|site| *site) else {
+                continue;
+            };
+            let Some(proof) = result.proof(type_site) else {
+                continue;
+            };
+            let Some(initializer) = initializers.get(&proof.target.id).copied().flatten() else {
+                continue;
+            };
+            let proof = Proof {
+                target: proof.target,
+                context: Arc::clone(&proof.context),
+                receiver: Some((proof.target, type_site.source.clone())),
+                rule: ResolutionRule::ClassicProjectConstruction,
+                property_call: false,
+            };
+            result.proofs.insert(site.id, proof);
+            if let Some(initializer) = initializer {
+                result.initializers.insert(site.id, initializer);
+            }
+            constructed_receivers
+                .entry(span)
+                .and_modify(|prior| *prior = None)
+                .or_insert(Some(site));
+        }
         let mut parsed_members =
             with_members::inventory(occurrences, &sources, cancellation, work)?;
         for occurrence in occurrences {
@@ -1651,7 +1806,18 @@ impl<'a> ClassicIndex<'a> {
                 continue;
             };
             let receiver_span = member.span;
-            let binding = if let Some(value) = receivers.get(&receiver_span) {
+            let binding = if let Some(site) = constructed_receivers.get(&receiver_span) {
+                site.and_then(|site| {
+                    result.proof(site).map(|proof| {
+                        (
+                            proof.target,
+                            proof.target.id,
+                            Arc::clone(&proof.context),
+                            site.source.clone(),
+                        )
+                    })
+                })
+            } else if let Some(value) = receivers.get(&receiver_span) {
                 value
                     .and_then(|value| value_types.get(&value))
                     .and_then(Option::as_ref)
@@ -2012,6 +2178,10 @@ impl<'a> ClassicIndex<'a> {
 
     pub(crate) fn proof(&self, occurrence: &OccurrenceRecord) -> Option<&Proof<'a>> {
         self.proofs.get(&occurrence.id)
+    }
+
+    pub(crate) fn initializer(&self, occurrence: &OccurrenceRecord) -> Option<&'a EntityRecord> {
+        self.initializers.get(&occurrence.id).copied()
     }
 
     pub(crate) fn application_parameters(

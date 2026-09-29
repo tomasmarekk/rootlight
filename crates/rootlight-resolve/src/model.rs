@@ -290,6 +290,8 @@ pub enum ResolutionRule {
     ClassicProjectEnum,
     /// Declarative classic BASIC project membership selects one native class type.
     ClassicProjectType,
+    /// Instantiation of a project-owned ordinary class and its source initializer.
+    ClassicProjectConstruction,
     /// Native static import or call context selects one member or namespace declaration.
     GroovyStaticImport,
     /// Native fully qualified Groovy parent type with source-owned lexical context.

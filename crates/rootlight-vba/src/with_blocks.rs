@@ -64,7 +64,7 @@ pub fn with_blocks<E>(
     let mut cursor = 0;
     while cursor < source.len() {
         check()?;
-        let Some((range, next)) = statement(source, cursor, check)? else {
+        let Some((range, next)) = statement(source, cursor, true, check)? else {
             return Ok(None);
         };
         cursor = next;
@@ -138,9 +138,10 @@ fn word(source: &[u8]) -> (&[u8], &[u8]) {
     source.split_at(end)
 }
 
-fn statement<E>(
+pub(crate) fn statement<E>(
     source: &[u8],
     start: usize,
+    reject_inline_with: bool,
     check: &mut impl FnMut() -> Result<(), E>,
 ) -> Result<Option<(Range<usize>, usize)>, E> {
     let mut cursor = start;
@@ -258,7 +259,8 @@ fn statement<E>(
                 }
                 // An inline control statement must not close an outer block
                 // after hiding an unrecognized With opener in its body.
-                if token.eq_ignore_ascii_case(b"With")
+                if reject_inline_with
+                    && token.eq_ignore_ascii_case(b"With")
                     && begin != first
                     && source.get(begin.wrapping_sub(1)) != Some(&b'.')
                     && !source

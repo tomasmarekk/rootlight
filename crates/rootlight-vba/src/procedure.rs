@@ -87,49 +87,7 @@ pub fn procedure_header<'a, E>(
 ) -> Result<Option<ProcedureHeader<'a>>, E> {
     check()?;
     let mut cursor = 0;
-    let mut word = next_word(source, &mut cursor, check)?;
-    let friend = word.eq_ignore_ascii_case(b"Friend");
-    if friend || word.eq_ignore_ascii_case(b"Public") || word.eq_ignore_ascii_case(b"Private") {
-        word = next_word(source, &mut cursor, check)?;
-    }
-    let static_storage = word.eq_ignore_ascii_case(b"Static");
-    if static_storage {
-        word = next_word(source, &mut cursor, check)?;
-    }
-    let external = word.eq_ignore_ascii_case(b"Declare");
-    if external {
-        if friend || static_storage {
-            return Ok(None);
-        }
-        word = next_word(source, &mut cursor, check)?;
-        if word.eq_ignore_ascii_case(b"PtrSafe") {
-            word = next_word(source, &mut cursor, check)?;
-        }
-    }
-    let kind = if word.eq_ignore_ascii_case(b"Sub") {
-        if external {
-            ProcedureKind::ExternalSub
-        } else {
-            ProcedureKind::Sub
-        }
-    } else if word.eq_ignore_ascii_case(b"Function") {
-        if external {
-            ProcedureKind::ExternalFunction
-        } else {
-            ProcedureKind::Function
-        }
-    } else if !external && word.eq_ignore_ascii_case(b"Property") {
-        let accessor = next_word(source, &mut cursor, check)?;
-        if accessor.eq_ignore_ascii_case(b"Get") {
-            ProcedureKind::PropertyGet
-        } else if accessor.eq_ignore_ascii_case(b"Let") {
-            ProcedureKind::PropertyLet
-        } else if accessor.eq_ignore_ascii_case(b"Set") {
-            ProcedureKind::PropertySet
-        } else {
-            return Ok(None);
-        }
-    } else {
+    let Some(kind) = prefix_kind(source, &mut cursor, check)? else {
         return Ok(None);
     };
     let separator = logical_whitespace_len(source.get(cursor..).unwrap_or_default(), check)?;
@@ -166,6 +124,59 @@ pub fn procedure_header<'a, E>(
         start,
         end: cursor,
     }))
+}
+
+pub(crate) fn prefix_kind<E>(
+    source: &[u8],
+    cursor: &mut usize,
+    check: &mut impl FnMut() -> Result<(), E>,
+) -> Result<Option<ProcedureKind>, E> {
+    let mut word = next_word(source, cursor, check)?;
+    let friend = word.eq_ignore_ascii_case(b"Friend");
+    if friend || word.eq_ignore_ascii_case(b"Public") || word.eq_ignore_ascii_case(b"Private") {
+        word = next_word(source, cursor, check)?;
+    }
+    let static_storage = word.eq_ignore_ascii_case(b"Static");
+    if static_storage {
+        word = next_word(source, cursor, check)?;
+    }
+    let external = word.eq_ignore_ascii_case(b"Declare");
+    if external {
+        if friend || static_storage {
+            return Ok(None);
+        }
+        word = next_word(source, cursor, check)?;
+        if word.eq_ignore_ascii_case(b"PtrSafe") {
+            word = next_word(source, cursor, check)?;
+        }
+    }
+    let kind = if word.eq_ignore_ascii_case(b"Sub") {
+        if external {
+            ProcedureKind::ExternalSub
+        } else {
+            ProcedureKind::Sub
+        }
+    } else if word.eq_ignore_ascii_case(b"Function") {
+        if external {
+            ProcedureKind::ExternalFunction
+        } else {
+            ProcedureKind::Function
+        }
+    } else if !external && word.eq_ignore_ascii_case(b"Property") {
+        let accessor = next_word(source, cursor, check)?;
+        if accessor.eq_ignore_ascii_case(b"Get") {
+            ProcedureKind::PropertyGet
+        } else if accessor.eq_ignore_ascii_case(b"Let") {
+            ProcedureKind::PropertyLet
+        } else if accessor.eq_ignore_ascii_case(b"Set") {
+            ProcedureKind::PropertySet
+        } else {
+            return Ok(None);
+        }
+    } else {
+        return Ok(None);
+    };
+    Ok(Some(kind))
 }
 
 /// Returns the source range inside an explicitly written procedure parameter group.
@@ -228,6 +239,51 @@ pub fn procedure_parameter_range<E>(
     };
     // The scanner consumed both parentheses within the source, bounding each sum.
     Ok(Some(cursor + 1..cursor + end - 1))
+}
+
+/// Checks whether a source-defined Sub has an absent or empty parameter list.
+///
+/// Requires a complete header through its statement boundary; a parameter,
+/// return clause or malformed suffix is not silently treated as zero arity.
+/// This validates the written signature only, not the body, name uniqueness or
+/// class membership. The scan is allocation-free and cancellable.
+///
+/// # Errors
+/// Propagates the caller's cancellation/work error unchanged.
+pub fn parameterless_sub<E>(
+    source: &[u8],
+    check: &mut impl FnMut() -> Result<(), E>,
+) -> Result<bool, E> {
+    let Some(header) = procedure_header(source, check)? else {
+        return Ok(false);
+    };
+    if header.kind() != ProcedureKind::Sub {
+        return Ok(false);
+    }
+    let mut cursor = header.name_span().end;
+    let mut separator = logical_whitespace_len(source.get(cursor..).unwrap_or_default(), check)?;
+    cursor += separator;
+    if source.get(cursor) == Some(&b'(') {
+        cursor += 1;
+        cursor += logical_whitespace_len(source.get(cursor..).unwrap_or_default(), check)?;
+        if source.get(cursor) != Some(&b')') {
+            return Ok(false);
+        }
+        cursor += 1;
+        separator = logical_whitespace_len(source.get(cursor..).unwrap_or_default(), check)?;
+        cursor += separator;
+    }
+    Ok(matches!(
+        source.get(cursor),
+        None | Some(b'\r' | b'\n' | b':' | b'\'')
+    ) || (separator != 0
+        && source
+            .get(cursor..cursor.saturating_add(3))
+            .is_some_and(|word| word.eq_ignore_ascii_case(b"Rem"))
+        && matches!(
+            source.get(cursor.saturating_add(3)),
+            None | Some(b' ' | b'\t' | b'\r' | b'\n')
+        )))
 }
 
 /// Returns the exact scalar return-type range in a Function or Property Get header.
@@ -444,6 +500,76 @@ mod tests {
             let input = source.get(..end).unwrap();
             if let Some(range) = scalar_return_type(input, &mut || Ok::<(), ()>(())).unwrap() {
                 assert!(range.start < range.end && range.end <= input.len());
+            }
+        }
+    }
+
+    #[test]
+    fn parameterless_sub_requires_a_complete_source_signature() {
+        for source in [
+            "Private Sub Class_Initialize()\nEnd Sub",
+            "Sub [Class_Initialize]\r\nEnd Sub",
+            "Public _\nStatic Sub Initialize _\r\n ( _\n ) ' note\nEnd Sub",
+            "Sub Initialize(): End Sub",
+            "Sub Initialize Rem note\nEnd Sub",
+            "Sub Initialize() Rem note\nEnd Sub",
+            "Sub Initialize",
+        ] {
+            assert!(
+                parameterless_sub(source.as_bytes(), &mut || Ok::<(), ()>(())).unwrap(),
+                "{source}"
+            );
+        }
+        for source in [
+            "Function Class_Initialize()\nEnd Function",
+            "Property Get Class_Initialize()\nEnd Property",
+            "Declare Sub Class_Initialize Lib \"host\" ()",
+            "Sub Class_Initialize(value As Long)\nEnd Sub",
+            "Sub Class_Initialize(Optional value As Long = 0)\nEnd Sub",
+            "Sub Class_Initialize(ParamArray values())\nEnd Sub",
+            "Sub Class_Initialize() As Long\nEnd Sub",
+            "Sub Class_Initialize()junk\nEnd Sub",
+            "Sub Class_Initialize()Reminder\nEnd Sub",
+            "Sub Class_Initialize()Rem note\nEnd Sub",
+            "Sub Class_Initialize(\n)\nEnd Sub",
+            "Sub Class_Initialize( ' note\n)\nEnd Sub",
+            "Sub Class_Initialize(",
+            "Sub Class_Initialize)",
+            "Sub Class_Initialize$()",
+            "#If Choice Then\nSub Class_Initialize()\nEnd Sub\n#End If",
+        ] {
+            assert!(
+                !parameterless_sub(source.as_bytes(), &mut || Ok::<(), ()>(())).unwrap(),
+                "{source}"
+            );
+        }
+    }
+
+    #[test]
+    fn parameterless_sub_checks_long_trivia_and_arbitrary_suffixes() {
+        for input in [
+            format!("{}Sub Initialize()", " _\n".repeat(8192)),
+            format!("Sub Initialize({})", " _\n".repeat(8192)),
+            format!("Sub Initialize(){}\nEnd Sub", " _\n".repeat(8192)),
+        ] {
+            let mut calls = 0;
+            assert_eq!(
+                parameterless_sub(input.as_bytes(), &mut || {
+                    calls += 1;
+                    if calls == 16 {
+                        Err("cancelled")
+                    } else {
+                        Ok(())
+                    }
+                }),
+                Err("cancelled")
+            );
+            assert_eq!(calls, 16);
+        }
+        for byte in 0..=u8::MAX {
+            let input = [b"Sub Initialize()".as_slice(), &[byte]].concat();
+            for end in 0..=input.len() {
+                let _ = parameterless_sub(&input[..end], &mut || Ok::<(), ()>(())).unwrap();
             }
         }
     }

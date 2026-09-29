@@ -10,6 +10,7 @@ mod compilation;
 mod condition;
 mod construction;
 mod group;
+mod lifecycle;
 mod member_attribute;
 mod parameter;
 mod procedure;
@@ -26,10 +27,12 @@ pub use compilation::{CompilationConstantHeader, compilation_constant_header};
 pub use condition::compilation_condition_key;
 pub use construction::constructed_type_range;
 pub use group::parenthesized_expression_end;
+pub use lifecycle::{ClassInitializer, class_initializer};
 pub use member_attribute::{MemberDispatchAttribute, member_dispatch_attribute};
 pub use parameter::array_parameter_modifiers;
 pub use procedure::{
-    ProcedureHeader, ProcedureKind, procedure_header, procedure_parameter_range, scalar_return_type,
+    ProcedureHeader, ProcedureKind, parameterless_sub, procedure_header, procedure_parameter_range,
+    scalar_return_type,
 };
 pub use variadic::{param_array_parameter, variadic_arguments_match};
 pub use with_blocks::{WithBlock, with_blocks};
