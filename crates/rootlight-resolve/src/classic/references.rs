@@ -27,6 +27,69 @@ pub struct NativeClassicReferenceField {
     /// Interpreted library/project identifier, never a resolved namespace.
     /// None preserves a malformed or unsupported identifier without guessing.
     pub identity: Option<String>,
+    /// Decoded project-reference fields, absent for libraries or opaque records.
+    /// These are locators, not evidence that an indexed target has been found.
+    pub project: Option<NativeClassicProjectReference>,
+}
+
+/// The project form and path syntax declared by both ProjectReference fields.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NativeClassicProjectReferenceKind {
+    /// Standalone project using Windows path syntax (A).
+    WindowsStandalone,
+    /// Standalone project using Macintosh path syntax (B).
+    MacintoshStandalone,
+    /// Host-embedded project using Windows path syntax (C).
+    WindowsEmbedded,
+    /// Host-embedded project using Macintosh path syntax (D).
+    MacintoshEmbedded,
+}
+
+impl NativeClassicProjectReferenceKind {
+    fn tag(self) -> u8 {
+        match self {
+            Self::WindowsStandalone => b'A',
+            Self::MacintoshStandalone => b'B',
+            Self::WindowsEmbedded => b'C',
+            Self::MacintoshEmbedded => b'D',
+        }
+    }
+}
+
+/// One host-decoded locator, without normalization or filesystem authority.
+#[derive(Clone, PartialEq, Eq)]
+pub struct NativeClassicProjectLocator {
+    /// Complete original ProjectReference identifier, including its three-byte prefix.
+    pub source: SourceSpan,
+    /// Exact losslessly decoded path, excluding the prefix; empty paths stay empty.
+    pub path: String,
+}
+
+impl std::fmt::Debug for NativeClassicProjectLocator {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("NativeClassicProjectLocator")
+            .field("source", &self.source)
+            .finish_non_exhaustive()
+    }
+}
+
+/// One source-declared project dependency with both locators and expected version.
+/// Host decoding establishes text/kind agreement. Resolver preparation checks
+/// the retained coordinates, kind tags and version bytes, not target identity.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NativeClassicProjectReference {
+    /// Shared declared path syntax and standalone/embedded form.
+    pub kind: NativeClassicProjectReferenceKind,
+    /// Locator from LibidAbsolute; its path has not been validated as absolute.
+    pub absolute: NativeClassicProjectLocator,
+    /// Locator from LibidRelative; its path has not been validated as relative.
+    pub relative: NativeClassicProjectLocator,
+    /// Expected major version, not a compatibility guarantee.
+    pub major_version: u32,
+    /// Expected minor version, not a compatibility guarantee.
+    pub minor_version: u16,
+    /// Exact six-byte little-endian major/minor payload in the same record.
+    pub version_source: SourceSpan,
 }
 
 #[derive(Default)]
@@ -99,6 +162,12 @@ pub(super) fn prepare(
             } else {
                 unknown_names = true;
             }
+            if let Some(project) = &field.project {
+                if field.identity.is_none() {
+                    return Err(ResolutionError::ClassicSourceIdentity);
+                }
+                validate_project(project, field.source, sources, cancellation, work)?;
+            }
         }
     }
     Ok(Some(ReferenceInventory {
@@ -106,6 +175,53 @@ pub(super) fn prepare(
         names,
         unknown_names,
     }))
+}
+
+fn validate_project(
+    project: &NativeClassicProjectReference,
+    owner: SourceSpan,
+    sources: &BTreeMap<FileId, &[u8]>,
+    cancellation: &Cancellation,
+    work: &mut ResolutionWorkBudget,
+) -> Result<(), ResolutionError> {
+    let mut previous_end = owner.start_byte();
+    for (span, prefix) in [
+        (project.absolute.source, Some(project.kind.tag())),
+        (project.relative.source, Some(project.kind.tag())),
+        (project.version_source, None),
+    ] {
+        cancellation.check()?;
+        work.consume()?;
+        if span.file() != owner.file()
+            || span.start_byte() < previous_end
+            || span.start_byte() >= span.end_byte()
+            || span.end_byte() > owner.end_byte()
+        {
+            return Err(ResolutionError::ClassicSourceIdentity);
+        }
+        let start = usize::try_from(span.start_byte())
+            .map_err(|_| ResolutionError::ClassicSourceIdentity)?;
+        let end =
+            usize::try_from(span.end_byte()).map_err(|_| ResolutionError::ClassicSourceIdentity)?;
+        let bytes = sources
+            .get(&span.file())
+            .and_then(|bytes| bytes.get(start..end))
+            .ok_or(ResolutionError::ClassicSourceIdentity)?;
+        if let Some(tag) = prefix {
+            if !bytes.starts_with(&[b'*', b'\\', tag]) {
+                return Err(ResolutionError::ClassicSourceIdentity);
+            }
+        } else {
+            let mut expected = [0; 6];
+            expected[..4].copy_from_slice(&project.major_version.to_le_bytes());
+            expected[4..].copy_from_slice(&project.minor_version.to_le_bytes());
+            if bytes != expected {
+                return Err(ResolutionError::ClassicSourceIdentity);
+            }
+        }
+        previous_end = span.end_byte();
+    }
+    Ok(())
 }
 
 impl ReferenceInventory {
@@ -170,6 +286,7 @@ mod tests {
                         name: (index != 1)
                             .then(|| if index == 0 { "Alias" } else { "ALIAS" }.to_owned()),
                         identity: None,
+                        project: None,
                     }],
                 }
             })
@@ -202,6 +319,134 @@ mod tests {
             &Cancellation::new(),
             &mut ResolutionWorkBudget::new(100),
         )
+    }
+
+    #[test]
+    fn project_reference_locators_retain_kind_version_and_namespace_barriers() {
+        for kind in [
+            NativeClassicProjectReferenceKind::WindowsStandalone,
+            NativeClassicProjectReferenceKind::MacintoshStandalone,
+            NativeClassicProjectReferenceKind::WindowsEmbedded,
+            NativeClassicProjectReferenceKind::MacintoshEmbedded,
+        ] {
+            for empty in [false, true] {
+                let (container, mut metadata, mut project) = fixture();
+                project.references.truncate(1);
+                let mut bytes = [0; 128];
+                let length = if empty { 3 } else { 4 };
+                bytes[..4].copy_from_slice(&[b'*', b'\\', kind.tag(), b'x']);
+                bytes[8..12].copy_from_slice(&[b'*', b'\\', kind.tag(), b'y']);
+                bytes[16..20].copy_from_slice(&u32::MAX.to_le_bytes());
+                bytes[20..22].copy_from_slice(&u16::MAX.to_le_bytes());
+                metadata.content_hash = content_hash(&bytes);
+                let field = &mut project.references[0].fields[0];
+                field.identity = Some("project declaration".to_owned());
+                field.project = Some(NativeClassicProjectReference {
+                    kind,
+                    absolute: NativeClassicProjectLocator {
+                        source: SourceSpan::new(metadata.id, 0, length).unwrap(),
+                        path: if empty { "" } else { "x" }.to_owned(),
+                    },
+                    relative: NativeClassicProjectLocator {
+                        source: SourceSpan::new(metadata.id, 8, 8 + length).unwrap(),
+                        path: if empty { "" } else { "y" }.to_owned(),
+                    },
+                    major_version: u32::MAX,
+                    minor_version: u16::MAX,
+                    version_source: SourceSpan::new(metadata.id, 16, 22).unwrap(),
+                });
+                let files = BTreeMap::from([(metadata.id, &metadata)]);
+                let sources = BTreeMap::from([(metadata.id, bytes.as_slice())]);
+                let mut work = ResolutionWorkBudget::new(5);
+                let inventory = prepare(
+                    &project,
+                    &container,
+                    &files,
+                    &sources,
+                    &Cancellation::new(),
+                    &mut work,
+                )
+                .unwrap()
+                .unwrap();
+                assert_eq!(work.consumed(), 5);
+                assert_eq!(inventory.declarations, project.references);
+                assert!(inventory.may_shadow_standard_name("collection"));
+                assert!(!inventory.may_declare_name("collection"));
+                for budget in 2..5 {
+                    assert!(matches!(
+                        prepare(
+                            &project,
+                            &container,
+                            &files,
+                            &sources,
+                            &Cancellation::new(),
+                            &mut ResolutionWorkBudget::new(budget)
+                        ),
+                        Err(ResolutionError::WorkLimit { .. })
+                    ));
+                }
+                for case in 0..9 {
+                    let mut invalid = project.clone();
+                    let field = &mut invalid.references[0].fields[0];
+                    let descriptor = field.project.as_mut().unwrap();
+                    match case {
+                        0 => {
+                            descriptor.kind =
+                                if kind == NativeClassicProjectReferenceKind::WindowsEmbedded {
+                                    NativeClassicProjectReferenceKind::MacintoshEmbedded
+                                } else {
+                                    NativeClassicProjectReferenceKind::WindowsEmbedded
+                                }
+                        }
+                        1 => descriptor.major_version = 0,
+                        2 => descriptor.minor_version = 0,
+                        3 => descriptor.relative.source = descriptor.absolute.source,
+                        4 => {
+                            descriptor.absolute.source =
+                                SourceSpan::new(container.id, 0, length).unwrap()
+                        }
+                        5 => {
+                            descriptor.version_source =
+                                SourceSpan::new(metadata.id, 16, 33).unwrap()
+                        }
+                        6 => {
+                            descriptor.version_source =
+                                SourceSpan::new(metadata.id, 16, 21).unwrap()
+                        }
+                        7 => {
+                            descriptor.absolute.source = SourceSpan::new(metadata.id, 0, 2).unwrap()
+                        }
+                        8 => field.identity = None,
+                        _ => unreachable!(),
+                    }
+                    assert!(
+                        matches!(
+                            prepare(
+                                &invalid,
+                                &container,
+                                &files,
+                                &sources,
+                                &Cancellation::new(),
+                                &mut ResolutionWorkBudget::new(100)
+                            ),
+                            Err(ResolutionError::ClassicSourceIdentity)
+                        ),
+                        "case {case}"
+                    );
+                }
+                assert!(matches!(
+                    prepare(
+                        &project,
+                        &container,
+                        &files,
+                        &BTreeMap::from([(metadata.id, &bytes[..21])]),
+                        &Cancellation::new(),
+                        &mut ResolutionWorkBudget::new(100)
+                    ),
+                    Err(ResolutionError::ClassicSourceIdentity)
+                ));
+            }
+        }
     }
 
     #[test]

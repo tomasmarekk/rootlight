@@ -1642,6 +1642,73 @@ fn opaque_native_references_do_not_prove_standard_uniqueness() {
 }
 
 #[test]
+fn native_project_reference_inventory_keeps_typed_locators_and_versions() {
+    use rootlight_resolve::NativeClassicProjectReferenceKind as Kind;
+
+    fn counted(out: &mut Vec<u8>, value: &[u8]) {
+        out.extend(u32::try_from(value.len()).unwrap().to_le_bytes());
+        out.extend(value);
+    }
+    for (tag, kind) in [
+        (b'A', Kind::WindowsStandalone),
+        (b'B', Kind::MacintoshStandalone),
+        (b'C', Kind::WindowsEmbedded),
+        (b'D', Kind::MacintoshEmbedded),
+    ] {
+        let mut absolute = vec![b'*', b'\\', tag];
+        absolute.extend(b"opaque/caf\xe9/project");
+        let mut relative = vec![b'*', b'\\', tag];
+        relative.extend(b"../caf\xe9/project");
+        let mut records = Vec::new();
+        records.extend(0x000eu16.to_le_bytes());
+        records.extend(0u32.to_le_bytes());
+        counted(&mut records, &absolute);
+        counted(&mut records, &relative);
+        records.extend(0x89ab_cdefu32.to_le_bytes());
+        records.extend(0x8123u16.to_le_bytes());
+        let book = fixture::native_book_with_references(
+            &[(
+                "Client",
+                b"Attribute VB_Name = \"Client\"\r\n",
+                ProjectModuleKind::Procedural,
+            )],
+            "\"Project\"",
+            &records,
+        );
+        let (prepared, snapshots) = prepared_fixture(&book, 100, 128 * 1024 * 1024, &deadline());
+        assert_eq!(prepared.native_projects[0].references.len(), 1);
+        let field = &prepared.native_projects[0].references[0].fields[0];
+        let descriptor = field.project.as_ref().unwrap();
+        assert_eq!(descriptor.kind, kind);
+        assert_eq!(descriptor.absolute.path, "opaque/caf\u{e9}/project");
+        assert_eq!(descriptor.relative.path, "../caf\u{e9}/project");
+        assert_eq!(
+            (descriptor.major_version, descriptor.minor_version),
+            (0x89ab_cdef, 0x8123)
+        );
+        let bytes = snapshots[&field.source.file()].content();
+        for (span, expected) in [
+            (descriptor.absolute.source, absolute.as_slice()),
+            (descriptor.relative.source, relative.as_slice()),
+            (
+                descriptor.version_source,
+                [0xef, 0xcd, 0xab, 0x89, 0x23, 0x81].as_slice(),
+            ),
+        ] {
+            assert_eq!(span.file(), field.source.file());
+            assert!(span.start_byte() >= field.source.start_byte());
+            assert!(span.end_byte() <= field.source.end_byte());
+            assert_eq!(
+                &bytes[usize::try_from(span.start_byte()).unwrap()
+                    ..usize::try_from(span.end_byte()).unwrap()],
+                expected
+            );
+        }
+        assert!(!format!("{descriptor:?}").contains("opaque/"));
+    }
+}
+
+#[test]
 fn native_reference_inventory_keeps_slots_fields_and_unknown_names() {
     let (book, _) = reference_book_with_names(1, None, Some((b"ExtendedApi", "ExtendedApi")));
     let (prepared, snapshots) = prepared_fixture(&book, 100, 128 * 1024 * 1024, &deadline());

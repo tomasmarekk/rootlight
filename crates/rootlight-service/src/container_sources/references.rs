@@ -9,7 +9,7 @@ use rootlight_ir::{
 };
 use rootlight_source::{
     vba_dir::ReferencePayload,
-    vba_reference::{ReferenceField, ReferenceIdentity},
+    vba_reference::{ProjectReferenceKind, ReferenceField, ReferenceIdentity, ReferencePlatform},
     vba_source::VbaProject,
 };
 
@@ -20,6 +20,7 @@ pub(super) struct DeclaredReference {
     identity: String,
     display: String,
     name: Option<DeclaredName>,
+    project: Option<rootlight_resolve::NativeClassicProjectReference>,
     uninterpreted: bool,
 }
 
@@ -71,6 +72,7 @@ pub(super) fn inventory(
                     source: source_span(field.file, field.evidence_range())?,
                     name: field.name.as_ref().map(|name| name.text.clone()),
                     identity: (!field.uninterpreted).then(|| field.identity.clone()),
+                    project: field.project.clone(),
                 });
             fields.next();
         }
@@ -320,7 +322,7 @@ pub(super) fn prepare(
                 .and_then(|n| n.checked_add(128))
                 .ok_or(FirstSliceError::Limits)?;
             budget.settle(reserved, used.min(reserved))?;
-            let (identity, range) = match identifier.identity() {
+            let (identity, range, project_reference) = match identifier.identity() {
                 ReferenceIdentity::Library {
                     platform,
                     guid,
@@ -345,9 +347,10 @@ pub(super) fn prepare(
                     (
                         format!("vba-library:{platform}:{guid_text}:{major:x}.{minor:x}:{lcid:x}"),
                         identifier.source_range(),
+                        None,
                     )
                 }
-                ReferenceIdentity::Project { .. } => {
+                ReferenceIdentity::Project { platform, kind } => {
                     // One project record has two path representations, not two
                     // independent dependencies. Retain both in its exact source.
                     let reserved = budget.reserve();
@@ -398,9 +401,50 @@ pub(super) fn prepare(
                     }
                     let range = reference.range();
                     let raw = bytes.get(range.clone()).ok_or(FirstSliceError::Identity)?;
+                    let ReferencePayload::Project {
+                        major_version,
+                        minor_version,
+                        version_range,
+                        ..
+                    } = reference.payload()
+                    else {
+                        return Err(FirstSliceError::Identity);
+                    };
+                    use rootlight_resolve::{
+                        NativeClassicProjectLocator, NativeClassicProjectReference,
+                        NativeClassicProjectReferenceKind as Kind,
+                    };
+                    let kind = match (platform, kind) {
+                        (ReferencePlatform::Windows, ProjectReferenceKind::Standalone) => {
+                            Kind::WindowsStandalone
+                        }
+                        (ReferencePlatform::Macintosh, ProjectReferenceKind::Standalone) => {
+                            Kind::MacintoshStandalone
+                        }
+                        (ReferencePlatform::Windows, ProjectReferenceKind::Embedded) => {
+                            Kind::WindowsEmbedded
+                        }
+                        (ReferencePlatform::Macintosh, ProjectReferenceKind::Embedded) => {
+                            Kind::MacintoshEmbedded
+                        }
+                    };
                     (
                         format!("vba-project-reference:{}", content_hash(raw)),
                         range,
+                        Some(NativeClassicProjectReference {
+                            kind,
+                            absolute: NativeClassicProjectLocator {
+                                source: source_span(file, identifier.source_range())?,
+                                path: identifier.path().to_owned(),
+                            },
+                            relative: NativeClassicProjectLocator {
+                                source: source_span(file, relative.source_range())?,
+                                path: relative.path().to_owned(),
+                            },
+                            major_version: *major_version,
+                            minor_version: *minor_version,
+                            version_source: source_span(file, version_range.clone())?,
+                        }),
                     )
                 }
                 _ => {
@@ -435,6 +479,7 @@ pub(super) fn prepare(
                 identity,
                 display,
                 name,
+                project: project_reference,
                 uninterpreted: false,
             });
         }
@@ -465,6 +510,7 @@ fn retain_uninterpreted(
         display: "uninterpreted VBA reference".to_owned(),
         identity,
         name,
+        project: None,
         uninterpreted: true,
     });
     Ok(())

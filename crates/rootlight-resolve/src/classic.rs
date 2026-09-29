@@ -27,7 +27,10 @@ use crate::{
     engine::{CandidateIndex, ResolutionWorkBudget},
 };
 
-pub use references::{NativeClassicReference, NativeClassicReferenceField};
+pub use references::{
+    NativeClassicProjectLocator, NativeClassicProjectReference, NativeClassicProjectReferenceKind,
+    NativeClassicReference, NativeClassicReferenceField,
+};
 
 const MAX_MANIFEST_BYTES: usize = 1024 * 1024;
 const MAX_MANIFEST_ITEMS: usize = 8192;
