@@ -31,6 +31,10 @@ use serde_json::json;
 #[path = "index_coverage/gap_text.rs"]
 mod gap_text;
 
+#[cfg(test)]
+#[path = "../src/container_sources/fixture.rs"]
+mod fixture;
+
 #[derive(Clone, Copy)]
 enum StateMode {
     Fresh,
@@ -355,6 +359,7 @@ fn inspect_files(
         }
     }
     let mut supplemental_calls = supplemental_call_evidence(document)?;
+    let mut external_bindings = external_binding_evidence(document)?;
     let mut verified_containers = BTreeSet::new();
     let mut rows = Vec::new();
     for file in document.files.iter().chain(
@@ -553,7 +558,8 @@ fn inspect_files(
             "extraction_independently_verified":origin.map(|_| false),
             "occurrences":occurrences,
             "gaps":gaps,
-            "supplemental_calls":supplemental_calls.remove(&file.id).unwrap_or_default()
+            "supplemental_calls":supplemental_calls.remove(&file.id).unwrap_or_default(),
+            "external_bindings":external_bindings.remove(&file.id).unwrap_or_default()
         }));
     }
     if rows.len() != snapshot.file_count() {
@@ -610,6 +616,59 @@ fn supplemental_call_evidence(
     Ok(result)
 }
 
+fn external_binding_evidence(
+    document: &NormalizedIrDocument,
+) -> Result<BTreeMap<rootlight_ids::FileId, Vec<serde_json::Value>>, Box<dyn Error>> {
+    let external: BTreeMap<_, _> = document
+        .entities
+        .iter()
+        .filter(|entity| {
+            entity.kind == rootlight_ir::EntityKind::ExternalSymbol
+                && entity.evidence.source.is_none()
+        })
+        .map(|entity| (entity.id, entity))
+        .collect();
+    let mut relations: BTreeMap<_, Vec<_>> = BTreeMap::new();
+    for edge in &document.relations {
+        if let (RelationEndpoint::Occurrence(site), RelationEndpoint::Entity(symbol)) =
+            (edge.subject, edge.object)
+            && edge.predicate == RelationPredicate::RefersTo
+            && external.contains_key(&symbol)
+        {
+            relations.entry((site, symbol)).or_default().push(edge);
+        }
+    }
+    let mut records: BTreeMap<_, Vec<_>> = BTreeMap::new();
+    for site in &document.occurrences {
+        let OccurrenceTarget::Resolved { symbol } = site.target else {
+            continue;
+        };
+        let Some(target) = external.get(&symbol) else {
+            continue;
+        };
+        let proof = |id| {
+            document
+                .provenance
+                .binary_search_by_key(&id, |proof| proof.id)
+                .ok()
+                .and_then(|i| document.provenance.get(i))
+                .ok_or("external binding has no provenance")
+        };
+        let edges = relations
+            .get(&(site.id, symbol))
+            .map(Vec::as_slice)
+            .unwrap_or_default();
+        let [edge] = edges else {
+            return Err("external binding has no unique reference edge".into());
+        };
+        records.entry(site.file).or_default().push(json!({
+            "occurrence":site, "target":target, "relation":edge,
+            "provenance":proof(site.provenance)?, "target_provenance":proof(target.provenance)?
+        }));
+    }
+    Ok(records)
+}
+
 fn chunk_end(text: &str, start: usize) -> usize {
     let mut end = start.saturating_add(16 * 1024).min(text.len());
     while !text.is_char_boundary(end) {
@@ -621,6 +680,46 @@ fn chunk_end(text: &str, start: usize) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn external_bindings_export_exact_uses_without_repository_definitions() {
+        let directory = tempfile::tempdir().unwrap();
+        let repository = directory.path().join("repository");
+        fs::create_dir(&repository).unwrap();
+        fs::write(repository.join("book.xlsm"), fixture::book(&[("Client",
+            b"Attribute VB_Name = \"Client\"\r\nSub Run()\r\nDim text As String\r\ntext = VBA.vbTab\r\nEnd Sub\r\n")])).unwrap();
+        let report = inspect(
+            &repository,
+            &directory.path().join("state"),
+            None,
+            StateMode::Fresh,
+        )
+        .unwrap();
+        let records: Vec<_> = report["files"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .flat_map(|file| file["external_bindings"].as_array().unwrap())
+            .collect();
+        assert_eq!(records.len(), 2);
+        for record in records {
+            assert!(record["target"]["evidence"]["source"].is_null());
+            assert_eq!(record["target"]["kind"], "external_symbol");
+            assert_eq!(
+                record["occurrence"]["target"]["symbol"],
+                record["target"]["id"]
+            );
+            assert_eq!(record["relation"]["predicate"], "refers_to");
+            assert_eq!(
+                record["relation"]["evidence"]["source"],
+                record["occurrence"]["source"]
+            );
+            assert_eq!(
+                record["target_provenance"]["rule"],
+                "vba-standard-library-catalog-v1"
+            );
+        }
+    }
 
     #[test]
     fn supplemental_calls_preserve_distinct_targets_and_conditions_after_reopen() {

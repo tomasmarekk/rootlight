@@ -288,6 +288,10 @@ pub enum ResolutionRule {
     ClassicProjectModule,
     /// A verified public project enum qualifies one of its declared constants.
     ClassicProjectEnum,
+    /// An unshadowed explicit qualifier names the mandatory VBA standard library.
+    VbaStandardNamespace,
+    /// A read explicitly qualified by VBA names a specified standard constant.
+    VbaStandardConstant,
     /// Declarative classic BASIC project membership selects one native class type.
     ClassicProjectType,
     /// Instantiation of a project-owned ordinary class and its source initializer.

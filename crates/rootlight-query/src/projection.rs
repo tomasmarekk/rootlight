@@ -42,7 +42,7 @@ impl<'generation> LexicalProjectionBuilder<'generation> {
     /// # Errors
     ///
     /// Returns [`QueryError`] for invalid construction budgets, cancellation,
-    /// missing direct entity source identity, generation drift, exceeded
+    /// missing direct non-external entity source identity, generation drift, exceeded
     /// bounds, or allocation failure.
     pub fn new(
         generation: &'generation GenerationSnapshot,
@@ -113,6 +113,15 @@ impl<'generation> LexicalProjectionBuilder<'generation> {
             cancellation
                 .check()
                 .map_err(|cancelled| QueryError::Cancelled(cancelled.reason()))?;
+            // External models remain graph endpoints but have no repository
+            // definition to publish as a lexical source hit.
+            if entity.kind == EntityKind::ExternalSymbol
+                && entity.flags.contains(&EntityFlag::External)
+                && entity.flags.contains(&EntityFlag::Synthetic)
+                && entity.evidence.source.is_none()
+            {
+                continue;
+            }
             let (entity, next_text_bytes) =
                 project_entity_document(document, entity, text_bytes, budget)?;
             projected.push(entity);

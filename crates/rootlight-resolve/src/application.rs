@@ -233,6 +233,11 @@ impl ResolutionEngine {
         validate_ir_document(&document, &ir_limits, &ExtensionSupport::default())
             .map_err(ResolutionError::InvalidDocument)?;
         self.invalidate_perl_package_targets(&mut document, context, cancellation)?;
+        if !native.is_empty() {
+            crate::classic::standard::materialize(&mut document, context, sources, cancellation)?;
+            validate_ir_document(&document, &ir_limits, &ExtensionSupport::default())
+                .map_err(ResolutionError::InvalidDocument)?;
+        }
         let mut output_budget = OutputRecordBudget::from_document(&document, &ir_limits);
 
         let mut lookup = CandidateIndex::build(
@@ -705,6 +710,11 @@ fn reconcile_vba_target_gaps(
                     "vba.invoked_let_member.reference",
                     "vba.invoked_set_member.reference",
                 ],
+                "vba-member-target-unavailable",
+            ),
+            Some("vba-standard-constant-v1.indexed_snapshot")
+            | Some("vba-standard-namespace-v1.indexed_snapshot") => (
+                &["vba.member.reference", "vba.get_member.reference"],
                 "vba-member-target-unavailable",
             ),
             Some("classic-project-pointer-v1.indexed_snapshot") => (
@@ -1568,6 +1578,8 @@ fn build_provenance(
             | ResolutionRule::ClassicProjectPointer
             | ResolutionRule::ClassicProjectModule
             | ResolutionRule::ClassicProjectEnum
+            | ResolutionRule::VbaStandardNamespace
+            | ResolutionRule::VbaStandardConstant
     ) {
         let proof = lookup
             .classic
@@ -1722,6 +1734,8 @@ fn build_provenance(
         }
         ResolutionRule::ClassicProjectModule => "classic-project-module-v1.indexed_snapshot",
         ResolutionRule::ClassicProjectEnum => "classic-project-enum-v1.indexed_snapshot",
+        ResolutionRule::VbaStandardNamespace => "vba-standard-namespace-v1.indexed_snapshot",
+        ResolutionRule::VbaStandardConstant => "vba-standard-constant-v1.indexed_snapshot",
         ResolutionRule::ElmModuleImport => "elm-module-import-v1.indexed_snapshot",
         ResolutionRule::ElmLocalType => "elm-local-type-v1.indexed_snapshot",
         ResolutionRule::ClassicProjectMember => "classic-project-member-v1.indexed_snapshot",

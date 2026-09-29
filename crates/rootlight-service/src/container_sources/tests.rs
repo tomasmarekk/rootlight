@@ -2,7 +2,7 @@
 //! These fixtures are authored, not copied from a diagnostic repository.
 
 use super::*;
-use rootlight_ir::{ContainerRef, OccurrenceTarget};
+use rootlight_ir::{ContainerRef, EntityFlag, OccurrenceTarget};
 use std::fs;
 
 #[path = "fixture.rs"]
@@ -21,6 +21,221 @@ fn tempdir() -> tempfile::TempDir {
 
 const FIRST: &[u8] = b"Attribute VB_Name = \"Alpha\"\r\nPublic Function Compute() As Long\r\n Compute = 1\r\nEnd Function\r\n";
 const SECOND: &[u8] = b"Attribute VB_Name = \"Beta\"\r\nPublic Sub Dispatch()\r\nEnd Sub\r\n";
+
+#[test]
+fn standard_constants_keep_external_identity_and_follow_shadowing_after_reopen() {
+    let root = tempdir();
+    let storage = tempdir();
+    let state = storage.path().join("state");
+    rootlight_runtime::RuntimePaths::new(state.clone(), storage.path().join("runtime"))
+        .unwrap()
+        .prepare_owner()
+        .unwrap();
+    for shadow in [false, true, false] {
+        let parameter = if shadow { "ByVal VBA As Object" } else { "" };
+        let text = format!(
+            "Attribute VB_Name = \"Client\"\r\nPublic Sub Run({parameter})\r\nDim value As String\r\nvalue = VBA.vbCrLf\r\nvalue = vBa.Constants.vbTab\r\nvalue = VBA.UnknownMember\r\nVBA.vbCrLf = value\r\nvalue = vbTab\r\nEnd Sub\r\n"
+        );
+        fs::write(
+            root.path().join("book.xlsm"),
+            fixture::typed_book(&[("Client", text.as_bytes(), false)]),
+        )
+        .unwrap();
+        let mut service = FirstSliceService::new_durable(4, &state, &deadline()).unwrap();
+        let receipt = service.index_repository(root.path(), &deadline()).unwrap();
+        assert_eq!(
+            receipt,
+            service.index_repository(root.path(), &deadline()).unwrap()
+        );
+        drop(service);
+        let mut service = FirstSliceService::new_durable(4, &state, &deadline()).unwrap();
+        let snapshot = service
+            .loaded_generation_snapshot(receipt.generation)
+            .unwrap();
+        let document = snapshot.document();
+        let bindings: Vec<_> = document
+            .occurrences
+            .iter()
+            .filter(|site| {
+                document.provenance.iter().any(|proof| {
+                    proof.id == site.provenance
+                        && proof.rule.as_deref()
+                            == Some("vba-standard-constant-v1.indexed_snapshot")
+                })
+            })
+            .collect();
+        assert_eq!(
+            bindings.len(),
+            if shadow { 0 } else { 2 },
+            "shadow={shadow}"
+        );
+        let sources: Vec<_> = bindings.iter().map(|site| site.source.clone()).collect();
+        let mut symbols = BTreeSet::new();
+        for site in bindings {
+            let OccurrenceTarget::Resolved { symbol } = site.target else {
+                panic!("constant must resolve");
+            };
+            let target = document
+                .entities
+                .iter()
+                .find(|entity| entity.id == symbol)
+                .unwrap();
+            assert_eq!(target.kind, EntityKind::ExternalSymbol);
+            assert!(target.flags.contains(&EntityFlag::External));
+            assert!(target.flags.contains(&EntityFlag::Synthetic));
+            assert!(
+                target.evidence.source.is_none(),
+                "an intrinsic has no repository definition"
+            );
+            assert!(target.qualified_name.starts_with("VBA.Constants."));
+            symbols.insert(symbol);
+            assert_eq!(site.role, rootlight_ir::OccurrenceRole::Reference);
+            assert!(
+                document
+                    .relations
+                    .iter()
+                    .any(|edge| edge.subject == RelationEndpoint::Occurrence(site.id)
+                        && edge.predicate == RelationPredicate::RefersTo
+                        && edge.object == RelationEndpoint::Entity(symbol))
+            );
+            assert!(
+                !document
+                    .skipped_regions
+                    .iter()
+                    .any(|gap| gap.source == site.source
+                        && gap.detail == "vba-member-target-unavailable")
+            );
+        }
+        assert!(
+            document
+                .skipped_regions
+                .iter()
+                .any(|gap| gap.detail == "vba-member-target-unavailable")
+        );
+        if !shadow {
+            let result = service
+                .symbol_relationships(
+                    receipt.generation,
+                    symbols,
+                    vec![RelationFamily::References],
+                    Some(RelationDirection::Inbound),
+                    0,
+                    25,
+                    0,
+                    &deadline(),
+                )
+                .unwrap();
+            assert_eq!(result.data.returned_edges, 2);
+            assert!(!result.data.truncated);
+            let read = service
+                .source_read_with_options_and_budget(
+                    receipt.generation,
+                    sources,
+                    SourceReadOptions::new()
+                        .with_context_lines_before(0)
+                        .with_context_lines_after(0),
+                    FirstSliceBudget::default(),
+                    &deadline(),
+                )
+                .unwrap();
+            let mut bytes: Vec<_> = read
+                .data
+                .chunks
+                .iter()
+                .map(|chunk| {
+                    assert!(chunk.extracted_from.is_some());
+                    chunk.bytes.clone()
+                })
+                .collect();
+            bytes.sort();
+            assert_eq!(
+                bytes,
+                [b"VBA.vbCrLf".to_vec(), b"vBa.Constants.vbTab".to_vec()]
+            );
+        }
+        let prepared = service
+            .prepare_repository_with_options(
+                root.path(),
+                FirstSliceIndexOptions::clean_rebuild(FirstSliceIndexMode::Structural),
+                &deadline(),
+            )
+            .unwrap();
+        let rebuilt = service.publish_prepared(prepared, &deadline()).unwrap();
+        assert!(receipt.logical_snapshot.is_some());
+        assert_eq!(receipt.logical_snapshot, rebuilt.logical_snapshot);
+    }
+}
+
+#[test]
+fn standard_constant_catalog_preserves_project_and_expression_barriers() {
+    let root = tempdir();
+    let constants = [
+        "vbBack",
+        "vbCr",
+        "vbCrLf",
+        "vbFormFeed",
+        "vbLf",
+        "vbNewLine",
+        "vbNullChar",
+        "vbTab",
+        "vbVerticalTab",
+        "vbNullString",
+        "vbObjectError",
+    ];
+    let statements = constants
+        .iter()
+        .map(|name| format!("value = VBA.{name}\r\nvalue = [vBa] _\r\n.Constants.{name}\r\n"))
+        .collect::<String>();
+    for (header, sibling, expected) in [
+        ("", "Other", 22),
+        ("Private VBA As Object\r\n", "Other", 0),
+        (
+            "#If Unknown Then\r\nPrivate VBA As Object\r\n#End If\r\n",
+            "Other",
+            0,
+        ),
+        ("", "VBA", 0),
+        ("", "Other", 22),
+    ] {
+        let text = format!(
+            "Attribute VB_Name = \"Client\"\r\n{header}Public Sub Run()\r\nDim value As Variant\r\n{statements}value = VBA\r\nvalue = VBA.vbTab(0)\r\nCall VBA.vbTab\r\nSet VBA.vbTab = value\r\nVBA.vbTab = value\r\nvalue = VBA.vbTab.Unknown\r\nEnd Sub\r\n"
+        );
+        let other =
+            format!("Attribute VB_Name = \"{sibling}\"\r\nPublic Sub Empty()\r\nEnd Sub\r\n");
+        fs::write(
+            root.path().join("book.xlsm"),
+            fixture::typed_book(&[
+                ("Client", text.as_bytes(), false),
+                (sibling, other.as_bytes(), false),
+            ]),
+        )
+        .unwrap();
+        let mut service = FirstSliceService::new(4).unwrap();
+        let receipt = service.index_repository(root.path(), &deadline()).unwrap();
+        let snapshot = service
+            .loaded_generation_snapshot(receipt.generation)
+            .unwrap();
+        let document = snapshot.document();
+        let count = document
+            .occurrences
+            .iter()
+            .filter(|site| {
+                document.provenance.iter().any(|proof| {
+                    proof.id == site.provenance
+                        && proof.rule.as_deref()
+                            == Some("vba-standard-constant-v1.indexed_snapshot")
+                })
+            })
+            .count();
+        assert_eq!(count, expected, "header={header} sibling={sibling}");
+        assert!(
+            document
+                .skipped_regions
+                .iter()
+                .any(|gap| gap.detail == "vba-call-or-index-target-unavailable")
+        );
+    }
+}
 
 fn reference_book(major: u16) -> (Vec<u8>, Vec<Vec<u8>>) {
     reference_book_with_names(major, None, None)

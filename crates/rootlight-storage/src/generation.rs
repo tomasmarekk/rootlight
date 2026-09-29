@@ -1675,7 +1675,7 @@ fn verify_snapshot_identities(
             || claim.kind != entity.kind
             || claim.container != entity.container
             || claim.declared_identity != entity.canonical_name
-            || entity.evidence.source.as_ref() != Some(claim_source)
+            || !symbol_claim_source_matches(entity, provenance, claim_source)
             || claim.build_context_discriminator
                 != provenance.build_context.digest().as_bytes().as_slice()
             || claim.derived_symbol() != entity.id
@@ -1690,6 +1690,34 @@ fn verify_snapshot_identities(
     }
 
     verify_fact_ids(document, context)
+}
+
+fn symbol_claim_source_matches(
+    entity: &rootlight_ir::EntityRecord,
+    provenance: &rootlight_ir::ProvenanceRecord,
+    claim_source: &SourceRef,
+) -> bool {
+    if let Some(source) = &entity.evidence.source {
+        return source == claim_source;
+    }
+    // A rule-derived external model has no repository definition. Its claim
+    // must instead witness a retained input to the exact producer derivation;
+    // ordinary entities may never substitute that anchor for a definition.
+    entity.kind == rootlight_ir::EntityKind::ExternalSymbol
+        && entity.flags.contains(&rootlight_ir::EntityFlag::External)
+        && entity.flags.contains(&rootlight_ir::EntityFlag::Synthetic)
+        && entity.container.is_none()
+        && entity.evidence.derivation == [rootlight_ir::FactRef::Fact(provenance.id)]
+        && provenance.producer_kind == rootlight_ir::ProducerKind::Rule
+        && provenance
+            .rule
+            .as_ref()
+            .is_some_and(|rule| !rule.is_empty())
+        && provenance.evidence_sources.is_empty()
+        && provenance.input_sources.contains(claim_source)
+        && provenance
+            .derivation_parents
+            .contains(&rootlight_ir::FactRef::File(claim_source.span().file()))
 }
 
 fn map_claim_error(
@@ -2899,6 +2927,124 @@ mod tests {
                 ))
             );
         }
+    }
+
+    #[test]
+    fn derived_external_symbols_require_exact_model_input_claims() {
+        use rootlight_ir::{
+            EntityFlag, EntityKind, EntityRecord, EntityVisibility, FactRef, SymbolIdentityClaim,
+            new_symbol_identity_claim_envelope,
+        };
+        let (metadata, mut document, catalog) = file_only_generation(true);
+        let source = document.files[0].evidence.source.clone().unwrap();
+        let mut provenance = document.provenance[0].clone();
+        provenance.producer_kind = ProducerKind::Rule;
+        provenance.rule = Some("language-standard-library-model-v1".to_owned());
+        provenance.input_sources = vec![source.clone()];
+        provenance.evidence_sources.clear();
+        provenance.derivation_parents = vec![FactRef::File(source.span().file())];
+        provenance.id = derive_provenance_record_id(&provenance).unwrap();
+        let mut claim = SymbolIdentityClaim {
+            symbol: rootlight_ids::SymbolId::from_bytes([0; 20]),
+            repository: document.repository,
+            language: provenance.language.clone(),
+            kind: EntityKind::ExternalSymbol,
+            container: None,
+            container_identity: Vec::new(),
+            declared_identity: "standard.constant".to_owned(),
+            signature_discriminator: b"standard-v1".to_vec(),
+            build_context_discriminator: provenance.build_context.digest().as_bytes().to_vec(),
+        };
+        claim.symbol = claim.derived_symbol();
+        let entity = EntityRecord {
+            id: claim.symbol,
+            repository: document.repository,
+            generation: document.generation,
+            kind: claim.kind,
+            language: claim.language.clone(),
+            tier: provenance.tier,
+            canonical_name: claim.declared_identity.clone(),
+            display_name: claim.declared_identity.clone(),
+            qualified_name: claim.declared_identity.clone(),
+            container: None,
+            visibility: EntityVisibility::Public,
+            flags: vec![EntityFlag::External, EntityFlag::Synthetic],
+            provenance: provenance.id,
+            evidence: FactEvidence {
+                source: None,
+                derivation: vec![FactRef::Fact(provenance.id)],
+            },
+        };
+        document.entities.push(entity.clone());
+        document.extensions.push(
+            new_symbol_identity_claim_envelope(
+                &claim,
+                document.generation,
+                provenance.id,
+                source.clone(),
+            )
+            .unwrap(),
+        );
+        document.provenance.push(provenance.clone());
+        let cancellation = Cancellation::new();
+        let context = GenerationContext::new(&cancellation, GenerationBudget::default());
+        IdentityVerifiedGeneration::verify_with_source_files(
+            metadata,
+            document,
+            catalog,
+            &IrLimits::default(),
+            &ExtensionSupport::default(),
+            &context,
+        )
+        .unwrap();
+        for mutate in [
+            |e: &mut EntityRecord| e.kind = EntityKind::Constant,
+            |e: &mut EntityRecord| e.flags.retain(|flag| *flag != EntityFlag::External),
+            |e: &mut EntityRecord| e.flags.retain(|flag| *flag != EntityFlag::Synthetic),
+            |e: &mut EntityRecord| e.evidence.derivation.clear(),
+            |e: &mut EntityRecord| {
+                e.container = Some(rootlight_ir::ContainerRef::File(
+                    rootlight_ids::FileId::from_bytes([9; 20]),
+                ))
+            },
+        ] {
+            let mut invalid = entity.clone();
+            mutate(&mut invalid);
+            assert!(!symbol_claim_source_matches(&invalid, &provenance, &source));
+        }
+        for mutate in [
+            |p: &mut ProvenanceRecord| p.producer_kind = ProducerKind::Parser,
+            |p: &mut ProvenanceRecord| p.rule = None,
+            |p: &mut ProvenanceRecord| p.rule = Some(String::new()),
+            |p: &mut ProvenanceRecord| p.derivation_parents.clear(),
+            |p: &mut ProvenanceRecord| p.input_sources.clear(),
+            |p: &mut ProvenanceRecord| p.evidence_sources = p.input_sources.clone(),
+        ] {
+            let mut invalid = provenance.clone();
+            mutate(&mut invalid);
+            assert!(!symbol_claim_source_matches(&entity, &invalid, &source));
+        }
+        let mut ordinary = entity;
+        ordinary.kind = EntityKind::Constant;
+        ordinary.flags.clear();
+        ordinary.evidence.source = Some(source.clone());
+        assert!(symbol_claim_source_matches(&ordinary, &provenance, &source));
+        ordinary.evidence.source = Some(document_source_at(&source, 1));
+        assert!(!symbol_claim_source_matches(
+            &ordinary,
+            &provenance,
+            &source
+        ));
+    }
+
+    fn document_source_at(source: &SourceRef, start: u64) -> SourceRef {
+        SourceRef::new(
+            source.repository(),
+            source.generation(),
+            SourceSpan::new(source.span().file(), start, source.span().end_byte()).unwrap(),
+            source.content_hash(),
+            None,
+        )
     }
 
     #[test]

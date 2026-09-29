@@ -8,6 +8,7 @@ use std::sync::Arc;
 mod calls;
 mod default_members;
 mod dependencies;
+pub(crate) mod standard;
 mod with_members;
 
 use rootlight_cancel::Cancellation;
@@ -2214,6 +2215,17 @@ impl<'a> ClassicIndex<'a> {
                     .or_insert(Some(occurrence.id));
             }
         }
+        standard::bind(
+            &mut result,
+            index,
+            occurrences,
+            &sources,
+            &memberships,
+            &projects,
+            &members,
+            cancellation,
+            work,
+        )?;
         if automatic_types.is_empty() {
             return Ok(result);
         }

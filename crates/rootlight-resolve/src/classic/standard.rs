@@ -1,0 +1,351 @@
+//! Source-qualified VBA standard-library identities, not library implementations.
+//! External entities have no repository definition; complete project evidence and
+//! lexical barriers are required before a source occurrence can name one.
+
+use super::*;
+use crate::ResolverFactContext;
+use rootlight_ir::{
+    AnalysisTier, BuildContextIdentity, EntityFlag, FactEvidence, NormalizedIrDocument,
+    ProducerIdentity, ProvenanceRecord, SymbolIdentityClaim, derive_provenance_record_id,
+    new_symbol_identity_claim_envelope,
+};
+
+const CATALOG_RULE: &str = "vba-standard-library-catalog-v1";
+// MS-VBAL 6.1.2.2. Platform-dependent values are deliberately not evaluated.
+// https://learn.microsoft.com/en-us/openspecs/microsoft_general_purpose_programming_languages/ms-vbal/52c853c1-fda2-4853-8069-172e515310f9
+const CONSTANTS: &[&str] = &[
+    "vbBack",
+    "vbCr",
+    "vbCrLf",
+    "vbFormFeed",
+    "vbLf",
+    "vbNewLine",
+    "vbNullChar",
+    "vbTab",
+    "vbVerticalTab",
+    "vbNullString",
+    "vbObjectError",
+];
+
+fn claim(repository: rootlight_ids::RepositoryId, name: &str) -> SymbolIdentityClaim {
+    let mut claim = SymbolIdentityClaim {
+        symbol: SymbolId::from_bytes([0; 20]),
+        repository,
+        language: "vba".to_owned(),
+        kind: EntityKind::ExternalSymbol,
+        container: None,
+        container_identity: Vec::new(),
+        declared_identity: name.to_owned(),
+        signature_discriminator: CATALOG_RULE.as_bytes().to_vec(),
+        build_context_discriminator: content_hash(CATALOG_RULE.as_bytes()).as_bytes().to_vec(),
+    };
+    claim.symbol = claim.derived_symbol();
+    claim
+}
+
+pub(crate) fn materialize(
+    document: &mut NormalizedIrDocument,
+    context: ResolverFactContext,
+    sources: &[ClassicProjectSource<'_>],
+    cancellation: &Cancellation,
+) -> Result<(), ResolutionError> {
+    let mut inputs = BTreeMap::new();
+    for source in sources {
+        cancellation.check()?;
+        inputs.insert(source.file, source.bytes);
+    }
+    let mut requested = BTreeSet::new();
+    for site in &document.occurrences {
+        cancellation.check()?;
+        if site.syntax_kind == "vba.value_identifier.reference"
+            && site_bytes(site, &inputs).is_some_and(|text| {
+                text.eq_ignore_ascii_case(b"VBA") || text.eq_ignore_ascii_case(b"[VBA]")
+            })
+        {
+            requested.insert(site.file);
+        }
+    }
+    let Some(file) = document
+        .files
+        .iter()
+        .filter(|file| file.language == "vba" && requested.contains(&file.id))
+        .min_by(|a, b| a.path.cmp(&b.path))
+    else {
+        return Ok(());
+    };
+    let Some(source) = file.evidence.source.clone() else {
+        return Ok(());
+    };
+    let file_id = file.id;
+    let digest = content_hash(CATALOG_RULE.as_bytes());
+    let mut provenance = ProvenanceRecord {
+        id: FactId::from_bytes([0; 20]),
+        repository: document.repository,
+        generation: document.generation,
+        producer_kind: ProducerKind::Rule,
+        producer: ProducerIdentity::new(RESOLVER_PROVIDER_NAME, RESOLVER_PROVIDER_VERSION, digest)
+            .map_err(ResolutionError::InvalidProducer)?,
+        binary_digest: context.binary_digest(),
+        frontend_version: Some("MS-VBAL-6.1.2.2".to_owned()),
+        language: "vba".to_owned(),
+        tier: AnalysisTier::TierC,
+        build_context: BuildContextIdentity::new(digest),
+        input_sources: vec![source.clone()],
+        evidence_sources: Vec::new(),
+        derivation_parents: vec![FactRef::File(file_id)],
+        rule: Some(CATALOG_RULE.to_owned()),
+    };
+    provenance.id =
+        derive_provenance_record_id(&provenance).map_err(ResolutionError::FactIdentity)?;
+    let existing: BTreeSet<_> = document.entities.iter().map(|entity| entity.id).collect();
+    let names = ["VBA".to_owned(), "VBA.Constants".to_owned()]
+        .into_iter()
+        .chain(CONSTANTS.iter().map(|name| format!("VBA.Constants.{name}")));
+    let mut added = false;
+    for name in names {
+        cancellation.check()?;
+        let claim = claim(document.repository, &name);
+        if existing.contains(&claim.symbol) {
+            continue;
+        }
+        document.entities.push(EntityRecord {
+            id: claim.symbol,
+            repository: document.repository,
+            generation: document.generation,
+            kind: EntityKind::ExternalSymbol,
+            language: "vba".to_owned(),
+            tier: AnalysisTier::TierC,
+            canonical_name: name.clone(),
+            display_name: name.clone(),
+            qualified_name: name,
+            container: None,
+            visibility: EntityVisibility::Public,
+            flags: vec![EntityFlag::External, EntityFlag::Synthetic],
+            provenance: provenance.id,
+            evidence: FactEvidence {
+                source: None,
+                derivation: vec![FactRef::Fact(provenance.id)],
+            },
+        });
+        // This envelope witnesses model availability, not a source definition.
+        document.extensions.push(
+            new_symbol_identity_claim_envelope(
+                &claim,
+                document.generation,
+                provenance.id,
+                source.clone(),
+            )
+            .map_err(|_| ResolutionError::UnsupportedIdentityRemap)?,
+        );
+        added = true;
+    }
+    if added
+        && !document
+            .provenance
+            .iter()
+            .any(|record| record.id == provenance.id)
+    {
+        document.provenance.push(provenance);
+    }
+    Ok(())
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "borrows the already bounded project and lexical inventories"
+)]
+pub(super) fn bind<'a>(
+    result: &mut ClassicIndex<'a>,
+    index: &CandidateIndex<'a>,
+    occurrences: &[OccurrenceRecord],
+    sources: &BTreeMap<FileId, &[u8]>,
+    memberships: &BTreeMap<FileId, Option<usize>>,
+    projects: &[Option<ResolvedProject>],
+    members: &BTreeMap<(SymbolId, String), Option<&EntityRecord>>,
+    cancellation: &Cancellation,
+    work: &mut ResolutionWorkBudget,
+) -> Result<(), ResolutionError> {
+    let Some(project) = projects
+        .iter()
+        .flatten()
+        .find(|project| project.evidence.native)
+    else {
+        return Ok(());
+    };
+    let Some(file) = index.files.get(&project.evidence.manifest) else {
+        return Ok(());
+    };
+    if !index
+        .entities
+        .contains_key(&claim(file.repository, "VBA").symbol)
+    {
+        return Ok(());
+    }
+    let mut qualifiers = BTreeSet::new();
+    for site in occurrences {
+        cancellation.check()?;
+        work.consume()?;
+        if !is_member(&site.syntax_kind) {
+            continue;
+        }
+        let Some(bytes) = site_bytes(site, sources) else {
+            continue;
+        };
+        if let Some((receiver, _)) = member_access_parts(bytes, cancellation, work)? {
+            qualifiers.insert((
+                site.file,
+                site.source.span().start_byte(),
+                site.source
+                    .span()
+                    .start_byte()
+                    .checked_add(
+                        u64::try_from(receiver.len())
+                            .map_err(|_| ResolutionError::CountOverflow)?,
+                    )
+                    .ok_or(ResolutionError::CountOverflow)?,
+            ));
+        }
+    }
+    for site in occurrences {
+        cancellation.check()?;
+        work.consume()?;
+        if site.role != OccurrenceRole::Reference
+            || !matches!(site.target, OccurrenceTarget::Unresolved { .. })
+            || result.proofs.contains_key(&site.id)
+            || !matches!(
+                site.syntax_kind.as_str(),
+                "vba.value_identifier.reference"
+                    | "vba.member.reference"
+                    | "vba.get_member.reference"
+            )
+        {
+            continue;
+        }
+        let Some(project) = memberships
+            .get(&site.file)
+            .copied()
+            .flatten()
+            .and_then(|i| projects.get(i))
+            .and_then(Option::as_ref)
+            .filter(|project| project.evidence.native)
+        else {
+            continue;
+        };
+        let Some(bytes) = site_bytes(site, sources) else {
+            continue;
+        };
+        let Some(text) = std::str::from_utf8(bytes).ok() else {
+            continue;
+        };
+        let namespace = qualifiers.contains(&(
+            site.file,
+            site.source.span().start_byte(),
+            site.source.span().end_byte(),
+        ));
+        let name = if identifier(text).as_deref() == Some("vba") && namespace {
+            Some("VBA".to_owned())
+        } else if let Some((receiver, member)) = member_access_parts(bytes, cancellation, work)? {
+            let receiver_is_vba = identifier(receiver).as_deref() == Some("vba");
+            let member = identifier(member);
+            if receiver_is_vba && member.as_deref() == Some("constants") && namespace {
+                Some("VBA.Constants".to_owned())
+            } else if site.syntax_kind == "vba.get_member.reference" && !namespace {
+                let qualified_constants = if receiver_is_vba {
+                    true
+                } else {
+                    member_access_parts(receiver.as_bytes(), cancellation, work)?.is_some_and(
+                        |(root, module)| {
+                            identifier(root).as_deref() == Some("vba")
+                                && identifier(module).as_deref() == Some("constants")
+                        },
+                    )
+                };
+                CONSTANTS
+                    .iter()
+                    .find(|name| {
+                        qualified_constants
+                            && member
+                                .as_deref()
+                                .is_some_and(|member| name.eq_ignore_ascii_case(member))
+                    })
+                    .map(|name| format!("VBA.Constants.{name}"))
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+        let Some(name) = name else {
+            continue;
+        };
+        // Project/module names and all lexical declarations remain barriers,
+        // including unresolved or conditional declarations. A referenced-library
+        // label in retained container metadata is never used as a target proof.
+        if project.name == "vba"
+            || project.types.contains_key("vba")
+            || project.modules.contains_key("vba")
+            || project.value_names.contains("vba")
+        {
+            continue;
+        }
+        let mut scope = site.enclosing;
+        let mut unshadowed = false;
+        for _ in 0..index.entities.len() {
+            cancellation.check()?;
+            work.consume()?;
+            let Some(owner) = scope.and_then(|id| index.entities.get(&id)) else {
+                break;
+            };
+            if members.contains_key(&(owner.id, "vba".to_owned())) {
+                break;
+            }
+            match owner.container {
+                Some(ContainerRef::Entity(parent)) => scope = Some(parent),
+                Some(ContainerRef::File(file)) if file == site.file => {
+                    unshadowed = true;
+                    break;
+                }
+                _ => break,
+            }
+        }
+        if !unshadowed {
+            continue;
+        }
+        let target_id = claim(site.repository, &name).symbol;
+        let Some(target) = index.entities.get(&target_id).copied().filter(|target| {
+            target.kind == EntityKind::ExternalSymbol
+                && target.evidence.source.is_none()
+                && index
+                    .provenance
+                    .get(&target.provenance)
+                    .is_some_and(|p| p.rule.as_deref() == Some(CATALOG_RULE))
+        }) else {
+            continue;
+        };
+        result.proofs.insert(
+            site.id,
+            Proof {
+                target,
+                context: Arc::clone(&project.evidence),
+                receiver: None,
+                rule: if namespace {
+                    ResolutionRule::VbaStandardNamespace
+                } else {
+                    ResolutionRule::VbaStandardConstant
+                },
+                property_call: false,
+            },
+        );
+    }
+    Ok(())
+}
+
+fn site_bytes<'a>(
+    site: &OccurrenceRecord,
+    sources: &BTreeMap<FileId, &'a [u8]>,
+) -> Option<&'a [u8]> {
+    let span = site.source.span();
+    sources
+        .get(&site.file)?
+        .get(usize::try_from(span.start_byte()).ok()?..usize::try_from(span.end_byte()).ok()?)
+}
