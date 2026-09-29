@@ -1798,7 +1798,7 @@ fn automatic_instantiation_gaps_survive_type_binding_and_source_reopen() {
 }
 
 #[test]
-fn automatic_receiver_calls_preserve_storage_targets_after_reopen() {
+fn automatic_value_calls_preserve_storage_targets_after_reopen() {
     for native in [false, true] {
         let root = tempdir();
         let storage = tempdir();
@@ -1816,7 +1816,7 @@ fn automatic_receiver_calls_preserve_storage_targets_after_reopen() {
         ] {
             let modifier = if automatic { " New" } else { "" };
             let client = format!(
-                "Attribute VB_Name = \"Client\"\r\nPrivate cached As{modifier} Worker\r\nPrivate Type Holder\r\nChild As{modifier} Worker\r\nEnd Type\r\nPublic Sub Run()\r\nDim local As{modifier} Worker\r\nDim plain As Worker\r\nDim holder As Holder\r\ncached.Touch\r\nlocal.Touch\r\nSet local = Nothing\r\nlocal.Touch\r\nholder.Child.Touch\r\nplain.Touch\r\nSet cached = Nothing\r\nWith cached\r\n.Touch\r\n.Touch\r\nEnd With\r\nEnd Sub\r\n"
+                "Attribute VB_Name = \"Client\"\r\nPrivate cached As{modifier} Worker\r\nPrivate Type Holder\r\nChild As{modifier} Worker\r\nEnd Type\r\nPublic Sub Run()\r\nDim local As{modifier} Worker\r\nDim plain As Worker\r\nDim holder As Holder\r\nDim flag As Boolean\r\ncached.Touch\r\nlocal.Touch\r\nSet local = Nothing\r\nlocal.Touch\r\nholder.Child.Touch\r\nplain.Touch\r\nSet cached = Nothing\r\nWith cached\r\n.Touch\r\n.Touch\r\nEnd With\r\nSet plain = local\r\nSet plain = holder.Child\r\nflag = cached Is Nothing\r\nSet plain = Echo(local)\r\nEnd Sub\r\nPrivate Function Echo(ByRef value As Worker) As Worker\r\nSet Echo = Nothing\r\nEnd Function\r\n"
             );
             let worker = format!(
                 "Attribute VB_Name = \"Worker\"\r\nPrivate Sub Class_Initialize({parameters})\r\nEnd Sub\r\nPublic Sub Touch()\r\nEnd Sub\r\n"
@@ -1868,7 +1868,7 @@ fn automatic_receiver_calls_preserve_storage_targets_after_reopen() {
             let expected = automatic && parameters.is_empty();
             assert_eq!(
                 calls.len(),
-                if expected { 5 } else { 0 },
+                if expected { 8 } else { 0 },
                 "native={native} automatic={automatic} parameters={parameters}"
             );
             for edge in &calls {
@@ -1946,7 +1946,7 @@ fn automatic_receiver_calls_preserve_storage_targets_after_reopen() {
                     )
                     .unwrap();
                 assert!(!relationships.data.truncated);
-                assert_eq!(relationships.data.returned_edges, 5);
+                assert_eq!(relationships.data.returned_edges, 8);
                 let read = service
                     .source_read_with_options_and_budget(
                         receipt.generation,
@@ -1976,7 +1976,10 @@ fn automatic_receiver_calls_preserve_storage_targets_after_reopen() {
                     [
                         b"cached".to_vec(),
                         b"cached".to_vec(),
+                        b"cached".to_vec(),
                         b"holder.Child".to_vec(),
+                        b"holder.Child".to_vec(),
+                        b"local".to_vec(),
                         b"local".to_vec(),
                         b"local".to_vec()
                     ]

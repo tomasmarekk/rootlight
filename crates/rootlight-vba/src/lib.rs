@@ -5,6 +5,7 @@
 #![forbid(unsafe_code)]
 
 mod arguments;
+mod assignment_reads;
 mod call_chain;
 mod compilation;
 mod condition;
@@ -18,6 +19,7 @@ mod variadic;
 mod with_blocks;
 
 pub use arguments::{Argument, argument_list, argument_passing_matches};
+pub use assignment_reads::{AssignmentRead, assignment_value_reads};
 pub use call_chain::{
     CallChain, CallChainPart, CallChainRead, CallChainRole, assigned_value_end,
     call_chain_statement, indexed_assignment_arguments_end, value_application_expression,

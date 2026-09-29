@@ -149,7 +149,7 @@ pub(super) fn inventory<'s>(
     Ok(result)
 }
 
-fn source_ref(
+pub(super) fn source_ref(
     source: &SourceRef,
     range: std::ops::Range<usize>,
 ) -> Result<SourceRef, ResolutionError> {

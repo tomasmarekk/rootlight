@@ -369,7 +369,7 @@ pub fn indexed_assignment_arguments_end<E>(
     Ok((super::logical_whitespace_len(rest, check)? == rest.len()).then_some(arguments_end))
 }
 
-fn value_expression<E>(
+pub(crate) fn value_expression<E>(
     source: &[u8],
     maximum_tokens: usize,
     require_application: bool,

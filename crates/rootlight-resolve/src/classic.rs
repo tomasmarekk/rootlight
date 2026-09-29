@@ -2214,18 +2214,17 @@ impl<'a> ClassicIndex<'a> {
                     .or_insert(Some(occurrence.id));
             }
         }
-        if automatic_reads.is_empty() {
+        if automatic_types.is_empty() {
             return Ok(result);
         }
+        let mut pending_automatic = Vec::new();
+        let mut assignment_files = BTreeSet::new();
         for site in occurrences {
             cancellation.check()?;
             work.consume()?;
             if site.role != OccurrenceRole::Reference {
                 continue;
             }
-            let Some(reads) = automatic_reads.get(&site.source.span()) else {
-                continue;
-            };
             let symbol = match site.target {
                 OccurrenceTarget::Resolved { symbol } => Some(symbol),
                 OccurrenceTarget::Unresolved { .. } => {
@@ -2247,27 +2246,68 @@ impl<'a> ClassicIndex<'a> {
             else {
                 continue;
             };
-            let mut read_sources = Vec::new();
-            for source in reads {
-                cancellation.check()?;
-                work.consume()?;
-                read_sources.push(source.clone());
-            }
-            read_sources.sort_unstable();
-            read_sources.dedup();
-            // This proves a conditional call at a receiver read, never eager
-            // declaration-time construction or the variable's runtime value.
-            result.automatic_initializers.insert(
-                site.id,
+            assignment_files.insert(site.file);
+            pending_automatic.push((
+                site,
                 AutomaticInitialization {
                     variable,
                     class,
                     initializer,
                     context: Arc::clone(context),
                     type_source: type_source.clone(),
-                    read_sources,
+                    read_sources: Vec::new(),
                 },
-            );
+            ));
+        }
+        for file in assignment_files {
+            cancellation.check()?;
+            work.consume()?;
+            let Some((source, bytes)) = index
+                .files
+                .get(&file)
+                .and_then(|file| file.evidence.source.as_ref())
+                .zip(sources.get(&file))
+            else {
+                continue;
+            };
+            let Some(reads) = rootlight_vba::assignment_value_reads(
+                bytes,
+                crate::MAX_RESOLUTION_WORK_LIMIT,
+                crate::MAX_RESOLUTION_WORK_LIMIT,
+                &mut || {
+                    cancellation.check()?;
+                    work.consume()
+                },
+            )?
+            else {
+                continue;
+            };
+            for read in reads {
+                cancellation.check()?;
+                work.consume()?;
+                let value = with_members::source_ref(source, read.value())?;
+                let statement = with_members::source_ref(source, read.statement())?;
+                automatic_reads
+                    .entry(value.span())
+                    .or_insert_with(|| vec![statement]);
+            }
+        }
+        for (site, mut proof) in pending_automatic {
+            cancellation.check()?;
+            work.consume()?;
+            let Some(reads) = automatic_reads.get(&site.source.span()) else {
+                continue;
+            };
+            for source in reads {
+                cancellation.check()?;
+                work.consume()?;
+                proof.read_sources.push(source.clone());
+            }
+            proof.read_sources.sort_unstable();
+            proof.read_sources.dedup();
+            // This proves a conditional call at a value read, never eager
+            // declaration-time construction or the variable's runtime value.
+            result.automatic_initializers.insert(site.id, proof);
         }
         Ok(result)
     }
