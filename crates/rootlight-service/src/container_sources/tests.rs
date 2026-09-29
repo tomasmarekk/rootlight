@@ -167,6 +167,88 @@ fn standard_constants_keep_external_identity_and_follow_shadowing_after_reopen()
 }
 
 #[test]
+fn typed_standard_members_keep_qualifiers_and_unproven_type_constraints() {
+    let root = tempdir();
+    for shadow in [false, true] {
+        let parameter = if shadow { "ByVal VBA As Object" } else { "" };
+        let text = format!(
+            "Attribute VB_Name = \"Client\"\r\nPublic Sub Run({parameter})\r\nDim value As Variant\r\nvalue = VBA.Mid$(\"sample\", 1)\r\nvalue = [vBa].Left$(\"sample\", 1)\r\nvalue = VBA.Constants.vbTab$\r\nvalue = VBA$.vbTab\r\nEnd Sub\r\n"
+        );
+        fs::write(
+            root.path().join("book.xlsm"),
+            fixture::book(&[("Client", text.as_bytes())]),
+        )
+        .unwrap();
+        let mut service = FirstSliceService::new(4).unwrap();
+        let receipt = service.index_repository(root.path(), &deadline()).unwrap();
+        let snapshot = service
+            .loaded_generation_snapshot(receipt.generation)
+            .unwrap();
+        let document = snapshot.document();
+        let mut namespace_uses = Vec::new();
+        for site in &document.occurrences {
+            let proof = document
+                .provenance
+                .iter()
+                .find(|proof| proof.id == site.provenance)
+                .unwrap();
+            assert_ne!(
+                proof.rule.as_deref(),
+                Some("vba-standard-constant-v1.indexed_snapshot")
+            );
+            if proof.rule.as_deref() == Some("vba-standard-namespace-v1.indexed_snapshot") {
+                let span = site.source.span();
+                let source = text
+                    .get(
+                        usize::try_from(span.start_byte()).unwrap()
+                            ..usize::try_from(span.end_byte()).unwrap(),
+                    )
+                    .unwrap();
+                namespace_uses.push(source.to_owned());
+                let OccurrenceTarget::Resolved { symbol } = site.target else {
+                    panic!("namespace must resolve")
+                };
+                let entity = document
+                    .entities
+                    .iter()
+                    .find(|entity| entity.id == symbol)
+                    .unwrap();
+                assert!(entity.evidence.source.is_none());
+                assert_eq!(entity.kind, EntityKind::ExternalSymbol);
+            }
+        }
+        namespace_uses.sort();
+        assert_eq!(
+            namespace_uses,
+            if shadow {
+                Vec::<String>::new()
+            } else {
+                ["VBA", "VBA", "VBA.Constants", "[vBa]"]
+                    .map(str::to_owned)
+                    .to_vec()
+            }
+        );
+        for spelling in [
+            "VBA.Mid$",
+            "[vBa].Left$",
+            "VBA.Constants.vbTab$",
+            "VBA$.vbTab",
+        ] {
+            let start = u64::try_from(text.find(spelling).unwrap()).unwrap();
+            let end = start + u64::try_from(spelling.len()).unwrap();
+            assert!(
+                document.skipped_regions.iter().any(|gap| {
+                    gap.detail == "vba-member-target-unavailable"
+                        && gap.source.span().start_byte() == start
+                        && gap.source.span().end_byte() == end
+                }),
+                "{spelling} must not lose its unproven member binding"
+            );
+        }
+    }
+}
+
+#[test]
 fn standard_constant_catalog_preserves_project_and_expression_barriers() {
     let root = tempdir();
     let constants = [

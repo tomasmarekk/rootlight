@@ -157,6 +157,8 @@ pub fn procedure_pointer_path<'a, E>(
 /// its end excludes trivia before the final dot. Leading implicit dots, bang
 /// dispatch, incomplete groups and nonmember suffixes return None. Callers must
 /// independently prove every receiver binding, invocation and return type.
+/// The returned member excludes brackets but retains any type character; callers
+/// must check that character against the member's declared type before binding.
 /// No allocation or recursive parsing occurs. The callback bounds all scans.
 ///
 /// # Errors
@@ -167,7 +169,7 @@ pub fn member_access_receiver<'a, E>(
 ) -> Result<Option<(usize, &'a [u8])>, E> {
     check()?;
     let mut cursor = 0;
-    if name(source, &mut cursor, check)?.is_none() {
+    if expression_name(source, &mut cursor, check)?.is_none() {
         return Ok(None);
     }
     let mut expression_end = cursor;
@@ -182,7 +184,7 @@ pub fn member_access_receiver<'a, E>(
                 }
                 cursor += 1;
                 trivia(source, &mut cursor, check)?;
-                let Some(last) = name(source, &mut cursor, check)? else {
+                let Some(last) = expression_name(source, &mut cursor, check)? else {
                     return Ok(None);
                 };
                 member = Some((expression_end, last));
@@ -202,6 +204,28 @@ pub fn member_access_receiver<'a, E>(
             _ => return Ok(None),
         }
     }
+}
+
+fn expression_name<'a, E>(
+    source: &'a [u8],
+    cursor: &mut usize,
+    check: &mut impl FnMut() -> Result<(), E>,
+) -> Result<Option<&'a [u8]>, E> {
+    let start = *cursor;
+    let Some(parsed) = name(source, cursor, check)? else {
+        return Ok(None);
+    };
+    if source.get(start) != Some(&b'[')
+        && matches!(
+            source.get(*cursor),
+            Some(b'%' | b'&' | b'^' | b'!' | b'#' | b'@' | b'$')
+        )
+    {
+        *cursor += 1;
+        // Preserve the type constraint: dropping it could bind a different type.
+        return Ok(source.get(start..*cursor));
+    }
+    Ok(Some(parsed))
 }
 
 fn name<'a, E>(
@@ -361,6 +385,47 @@ mod tests {
             "factory.Build().Value()",
             "factory.Build().Value ",
             "factory.Build().Value + 1",
+        ] {
+            assert!(
+                member_access_receiver(text.as_bytes(), &mut || Ok::<(), ()>(()))
+                    .unwrap()
+                    .is_none(),
+                "{text}"
+            );
+        }
+    }
+
+    #[test]
+    fn member_receivers_preserve_type_characters_without_validating_types() {
+        for suffix in ['%', '&', '^', '!', '#', '@', '$'] {
+            let text = format!("[library].Value{suffix}");
+            let (end, member) = member_access_receiver(text.as_bytes(), &mut || Ok::<(), ()>(()))
+                .unwrap()
+                .unwrap();
+            assert_eq!(text.get(..end), Some("[library]"));
+            assert_eq!(member, format!("Value{suffix}").as_bytes());
+        }
+        for (text, receiver, member) in [
+            ("factory$.Build().Value%", "factory$.Build()", "Value%"),
+            ("factory.Build$(1).Value", "factory.Build$(1)", "Value"),
+            ("library _\r\n. _\r\nValue$", "library", "Value$"),
+        ] {
+            let (end, name) = member_access_receiver(text.as_bytes(), &mut || Ok::<(), ()>(()))
+                .unwrap()
+                .unwrap();
+            assert_eq!(text.get(..end), Some(receiver));
+            assert_eq!(name, member.as_bytes());
+        }
+        for text in [
+            "library.Value$$",
+            "library.Value$tail",
+            "library.Value $",
+            "library.[Value]$",
+            "library.[Value$]",
+            "library.Value$()",
+            "library!Value",
+            "library.Value!Other",
+            "library.Value$\n.Other",
         ] {
             assert!(
                 member_access_receiver(text.as_bytes(), &mut || Ok::<(), ()>(()))
