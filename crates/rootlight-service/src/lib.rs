@@ -219,7 +219,7 @@ const PROJECT_FACTS_TRUNCATED_CODE: &str = "project-adapter-facts-truncated";
 const PROJECT_FACTS_TRUNCATED_MESSAGE: &str =
     "additional project semantic facts were omitted by aggregate resource limits";
 const AGGREGATE_DIAGNOSTICS_TRUNCATED_CODE: &str = "aggregate-diagnostics-truncated";
-const ANALYZER_BINARY_SEED: &[u8] = b"rootlight.first-slice.treesitter-structural/182";
+const ANALYZER_BINARY_SEED: &[u8] = b"rootlight.first-slice.treesitter-structural/183";
 const RESOLVER_BINARY_SEED: &[u8] = b"rootlight.first-slice.resolve/58";
 const INCREMENTAL_PROVIDER_SEED: &[u8] = b"rootlight.first-slice.incremental-provider/1";
 const LANGUAGE_DISPOSITION_PROVIDER_SEED: &[u8] = b"rootlight.first-slice.language-disposition/5";
@@ -40532,6 +40532,152 @@ mod tests {
                     .unwrap();
                 assert_eq!(read.data.chunks[0].bytes, text.as_bytes());
             }
+        }
+    }
+
+    #[test]
+    fn vba_result_fields_follow_return_edits_after_restart() {
+        let fixture = durable_test_tempdir();
+        let storage = durable_test_tempdir();
+        let paths = RuntimePaths::new(storage.path().join("state"), storage.path().join("runtime"))
+            .unwrap();
+        paths.prepare_owner().unwrap();
+        let mut previous = None;
+        for (procedure, terminator, return_type, field_name, local, resolves) in [
+            ("Function", "Function", "Record", "Value", "", true),
+            ("Function", "Function", "Variant", "Value", "", false),
+            ("Function", "Function", "Record", "Value", "", true),
+            ("Function", "Function", "Record", "Changed", "", false),
+            ("Function", "Function", "Record()", "Value", "", false),
+            (
+                "Function",
+                "Function",
+                "Record",
+                "Value",
+                "Dim Build As Record\n",
+                false,
+            ),
+            ("Function", "Function", "Record", "Value", "", true),
+            ("Property Get", "Property", "Record", "Value", "", true),
+            ("Property Get", "Property", "Object", "Value", "", false),
+            ("Property Get", "Property", "Record", "Value", "", true),
+        ] {
+            let expression = "[bUiLd].Value";
+            let source = format!(
+                "Attribute VB_Name = \"Client\"\n#If Enabled Then\nPrivate Type Record\n{field_name} As Long\nEnd Type\nPrivate {procedure} Build(ByVal seed As Long) As {return_type}\n{local}{expression} = seed\nEnd {terminator}\n#End If\n"
+            );
+            fs::write(fixture.path().join("Client.bas"), &source).unwrap();
+            let mut service =
+                FirstSliceService::new_durable(2, paths.state_dir(), &deadline()).unwrap();
+            let receipt = service
+                .index_repository(fixture.path(), &deadline())
+                .unwrap();
+            assert_ne!(Some(receipt.generation), previous);
+            previous = Some(receipt.generation);
+            assert_eq!(
+                service
+                    .index_repository(fixture.path(), &deadline())
+                    .unwrap(),
+                receipt
+            );
+            drop(service);
+            let service =
+                FirstSliceService::new_durable(2, paths.state_dir(), &deadline()).unwrap();
+            let snapshot = service
+                .loaded_generation_snapshot(receipt.generation)
+                .unwrap();
+            let document = snapshot.document();
+            let start = u64::try_from(source.find(expression).unwrap()).unwrap();
+            let end = start + u64::try_from(expression.len()).unwrap();
+            let site = document
+                .occurrences
+                .iter()
+                .find(|site| {
+                    site.syntax_kind == "vba.let_member.reference"
+                        && site.source.span().start_byte() == start
+                        && site.source.span().end_byte() == end
+                })
+                .unwrap();
+            let target = document
+                .entities
+                .iter()
+                .find(|entity| {
+                    entity.kind == EntityKind::Field && entity.canonical_name == field_name
+                })
+                .unwrap();
+            if resolves {
+                assert_eq!(
+                    site.target,
+                    OccurrenceTarget::Resolved { symbol: target.id }
+                );
+            } else {
+                assert!(
+                    matches!(site.target, OccurrenceTarget::Unresolved { .. }),
+                    "{source}"
+                );
+            }
+            assert_eq!(
+                document
+                    .skipped_regions
+                    .iter()
+                    .any(|gap| gap.source == site.source
+                        && gap.detail == "vba-member-target-unavailable"),
+                !resolves
+            );
+            for part in document.occurrences.iter().filter(|part| {
+                part.source.span().start_byte() >= start && part.source.span().end_byte() <= end
+            }) {
+                assert_ne!(part.role, OccurrenceRole::CallSite);
+                assert!(
+                    !document
+                        .relations
+                        .iter()
+                        .any(|relation| relation.predicate == RelationPredicate::Calls
+                            && relation.subject == RelationEndpoint::Occurrence(part.id))
+                );
+            }
+            let relationships = service
+                .symbol_relationships(
+                    receipt.generation,
+                    BTreeSet::from([target.id]),
+                    vec![RelationFamily::References],
+                    Some(RelationDirection::Inbound),
+                    0,
+                    20,
+                    0,
+                    &deadline(),
+                )
+                .unwrap();
+            assert_eq!(
+                relationships
+                    .data
+                    .groups
+                    .iter()
+                    .flat_map(|group| &group.items)
+                    .flat_map(|edge| &edge.source_refs)
+                    .any(|reference| reference == &site.source),
+                resolves
+            );
+            let read = service
+                .source_read_with_options_and_budget(
+                    receipt.generation,
+                    vec![site.source.clone()],
+                    SourceReadOptions::new()
+                        .with_context_lines_before(0)
+                        .with_context_lines_after(0)
+                        .with_encoding(SourceEncoding::Bytes),
+                    FirstSliceBudget::default(),
+                    &deadline(),
+                )
+                .unwrap();
+            assert_eq!(site.source.generation(), receipt.generation);
+            assert_eq!(read.data.chunks[0].bytes, expression.as_bytes());
+            assert!(
+                document
+                    .skipped_regions
+                    .iter()
+                    .any(|gap| gap.detail == "vba-conditional-compilation-evaluation-unavailable")
+            );
         }
     }
 

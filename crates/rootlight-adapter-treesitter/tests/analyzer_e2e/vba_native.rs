@@ -2290,6 +2290,131 @@ fn vba_result_references_keep_type_scope_and_index_barriers() {
 }
 
 #[test]
+fn vba_result_fields_bind_the_enclosing_udt_without_recursive_calls() {
+    for (header, end) in [
+        ("Function Build(ByVal seed As Long) As Record", "Function"),
+        (
+            "Property Get Build(ByVal seed As Long) As Record",
+            "Property",
+        ),
+    ] {
+        for conditional in [false, true] {
+            let body = format!(
+                "{header}\nDim value As Long\n[bUiLd].Nested.Value = seed\nvalue = Build.Nested.Value\nSet Build.Link = Nothing\nEnd {end}\n"
+            );
+            let types = "Private Type Inner\nValue As Long\nEnd Type\nPrivate Type Record\nNested As Inner\nLink As Object\nEnd Type\n";
+            let source = if conditional {
+                format!("#If Enabled Then\n{types}{body}#End If\n")
+            } else {
+                format!("{types}{body}")
+            };
+            let result = output(&source);
+            let document = result.document();
+            for (expression, field) in [
+                ("[bUiLd].Nested.Value", "Value"),
+                ("Build.Nested.Value", "Value"),
+                ("Build.Link", "Link"),
+            ] {
+                let start = u64::try_from(source.find(expression).unwrap()).unwrap();
+                let end = start + u64::try_from(expression.len()).unwrap();
+                let site = document
+                    .occurrences
+                    .iter()
+                    .find(|site| {
+                        site.source.span().start_byte() == start
+                            && site.source.span().end_byte() == end
+                    })
+                    .unwrap();
+                let target = document
+                    .entities
+                    .iter()
+                    .find(|entity| {
+                        entity.kind == EntityKind::Field && entity.canonical_name == field
+                    })
+                    .unwrap();
+                assert_eq!(
+                    site.target,
+                    OccurrenceTarget::Resolved { symbol: target.id },
+                    "{source}: {expression}"
+                );
+                assert_eq!(site.role, OccurrenceRole::Reference);
+                assert!(
+                    !document
+                        .skipped_regions
+                        .iter()
+                        .any(|gap| gap.source == site.source
+                            && gap.detail == "vba-member-target-unavailable")
+                );
+                for part in document.occurrences.iter().filter(|part| {
+                    part.source.span().start_byte() >= start && part.source.span().end_byte() <= end
+                }) {
+                    assert_ne!(part.role, OccurrenceRole::CallSite);
+                    assert!(
+                        !document
+                            .relations
+                            .iter()
+                            .any(|edge| edge.predicate == RelationPredicate::Calls
+                                && edge.subject == RelationEndpoint::Occurrence(part.id))
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn vba_result_fields_preserve_return_shape_and_scope_barriers() {
+    for (return_type, local, expression, after, resolves) in [
+        ("Record", "", "Build.Value", "", true),
+        ("Variant", "", "Build.Value", "", false),
+        ("Object", "", "Build.Value", "", false),
+        ("Missing", "", "Build.Value", "", false),
+        ("Record()", "", "Build.Value", "", false),
+        ("Record()", "", "Build(1).Value", "", false),
+        ("Record", "Dim Build As Record\n", "Build.Value", "", false),
+        ("Record", "", "Build$.Value", "", false),
+        (
+            "Record",
+            "",
+            "Build.Value",
+            "End Function\nSub Other()\n",
+            false,
+        ),
+    ] {
+        let source = format!(
+            "Private Type Record\nValue As Long\nEnd Type\nFunction Build(ByVal seed As Long) As {return_type}\n{local}{after}Dim result As Long\nresult = {expression}\nEnd {}\n",
+            if after.is_empty() { "Function" } else { "Sub" }
+        );
+        let result = output(&source);
+        let document = result.document();
+        let start = u64::try_from(source.find(expression).unwrap()).unwrap();
+        let end = start + u64::try_from(expression.len()).unwrap();
+        let site = document
+            .occurrences
+            .iter()
+            .find(|site| {
+                site.syntax_kind == "vba.get_member.reference"
+                    && site.source.span().start_byte() == start
+                    && site.source.span().end_byte() == end
+            })
+            .unwrap();
+        assert_eq!(
+            matches!(site.target, OccurrenceTarget::Resolved { .. }),
+            resolves,
+            "{source}"
+        );
+        assert_eq!(
+            document
+                .skipped_regions
+                .iter()
+                .any(|gap| gap.source == site.source
+                    && gap.detail == "vba-member-target-unavailable"),
+            !resolves
+        );
+    }
+}
+
+#[test]
 fn vba_conditional_procedure_results_bind_within_their_body() {
     for (header, end, kind) in [
         (

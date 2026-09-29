@@ -768,6 +768,26 @@ impl<'a> VbaBindings<'a> {
             if !declared_value_type {
                 continue;
             }
+            if fact.syntax_kind().as_str() == "vba.type_identifier.reference" {
+                let start = usize::try_from(declaration.span().start_byte())
+                    .map_err(|_| invalid_capture())?;
+                let end = usize::try_from(declaration.span().end_byte())
+                    .map_err(|_| invalid_capture())?;
+                let bytes = source.get(start..end).ok_or_else(invalid_capture)?;
+                let Some(range) = rootlight_vba::scalar_return_type(bytes, &mut || {
+                    cancellation.check().map_err(AdapterError::from)
+                })?
+                else {
+                    continue;
+                };
+                // A captured type name also occurs in array return clauses;
+                // only the complete scalar header proves a direct UDT receiver.
+                if u64::try_from(start + range.start).ok() != Some(fact.span().start_byte())
+                    || u64::try_from(start + range.end).ok() != Some(fact.span().end_byte())
+                {
+                    continue;
+                }
+            }
             let Some(&Some(symbol)) = declarations.get(&declaration.local_id()) else {
                 continue;
             };
@@ -1011,7 +1031,14 @@ impl<'a> VbaBindings<'a> {
                 },
             );
         }
-        let Some(Binding::Value(mut symbol)) = receiver_binding else {
+        // A bare enclosing Function/Get name denotes its result, not a call
+        // (MS-VBAL 5.6.2.1). Only that local binding may supply this UDT receiver.
+        let Some(
+            Binding::Value(mut symbol)
+            | Binding::FunctionResult(mut symbol)
+            | Binding::PropertyResult(mut symbol),
+        ) = receiver_binding
+        else {
             return Ok(None);
         };
         let mut member_count = 0_usize;
