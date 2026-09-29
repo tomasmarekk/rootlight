@@ -230,9 +230,9 @@ impl<'a, 'o> CallIndex<'a, 'o> {
         sources: &BTreeMap<FileId, &[u8]>,
         cancellation: &Cancellation,
         work: &mut ResolutionWorkBudget,
-    ) -> Result<(), ResolutionError> {
+    ) -> Result<Option<(&'o OccurrenceRecord, bool)>, ResolutionError> {
         let Some((callee, explicit)) = self.callee(site, sources, cancellation, work)? else {
-            return Ok(());
+            return Ok(None);
         };
         // Setter index parentheses exclude the assigned value. They cannot
         // establish the complete assignment's argument contract on their own.
@@ -242,10 +242,10 @@ impl<'a, 'o> CallIndex<'a, 'o> {
                 Some(super::PropertyAccessorKind::Let | super::PropertyAccessorKind::Set)
             )
         {
-            return Ok(());
+            return Ok(Some((callee, explicit)));
         }
         let Some(proof) = result.proof(callee) else {
-            return Ok(());
+            return Ok(Some((callee, explicit)));
         };
         let proof = Proof {
             target: proof.target,
@@ -266,7 +266,8 @@ impl<'a, 'o> CallIndex<'a, 'o> {
             sources,
             cancellation,
             work,
-        )
+        )?;
+        Ok(Some((callee, explicit)))
     }
 
     pub(super) fn resolve_bound(
@@ -840,6 +841,106 @@ fn arguments_match(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn unresolved_calls_return_the_selected_callee_without_repeating_work() {
+        use rootlight_ids::{FactId, GenerationId, RepositoryId, content_hash};
+        use rootlight_ir::{Confidence, FactEvidence, SourceSpan};
+
+        for (bytes, start, explicit) in [
+            (b"Worker(1)".as_slice(), 0, false),
+            (b"Call Worker(1)".as_slice(), 5, true),
+        ] {
+            let repository = RepositoryId::from_bytes([1; 16]);
+            let generation = GenerationId::from_bytes([2; 20]);
+            let file = FileId::from_bytes([3; 20]);
+            let source = |start, end| {
+                SourceRef::new(
+                    repository,
+                    generation,
+                    SourceSpan::new(file, start, end).unwrap(),
+                    content_hash(bytes),
+                    None,
+                )
+            };
+            let callee = OccurrenceRecord {
+                id: FactId::from_bytes([4; 20]),
+                repository,
+                generation,
+                file,
+                source: source(start, start + 6),
+                role: OccurrenceRole::Reference,
+                enclosing: None,
+                target: OccurrenceTarget::Unresolved {
+                    text_hash: content_hash(b"Worker"),
+                },
+                syntactic_text_hash: content_hash(b"Worker"),
+                syntax_kind: "vba.invoked_identifier.reference".to_owned(),
+                provenance: FactId::from_bytes([5; 20]),
+                confidence: Confidence::new(0).unwrap(),
+                evidence: FactEvidence {
+                    source: None,
+                    derivation: Vec::new(),
+                },
+            };
+            let mut application = callee.clone();
+            application.id = FactId::from_bytes([6; 20]);
+            application.source = source(0, u64::try_from(bytes.len()).unwrap());
+            application.syntax_kind = "vba.application.reference".to_owned();
+            let mut index = CallIndex {
+                parameters: BTreeMap::new(),
+                definitions: BTreeMap::new(),
+                callees: BTreeMap::from([((file, start, start + 6), Some(&callee))]),
+                labels: BTreeMap::new(),
+                applications: BTreeMap::new(),
+                contracts: BTreeMap::new(),
+            };
+            let sources = BTreeMap::from([(file, bytes)]);
+            let cancellation = Cancellation::new();
+            let mut measured = ResolutionWorkBudget::new(1024);
+            index
+                .callee(&application, &sources, &cancellation, &mut measured)
+                .unwrap();
+            let mut exact = ResolutionWorkBudget::new(measured.consumed());
+            let mut result = ClassicIndex::default();
+            let selected = index
+                .resolve(
+                    &mut result,
+                    &application,
+                    &sources,
+                    &cancellation,
+                    &mut exact,
+                )
+                .unwrap()
+                .unwrap();
+            assert_eq!((selected.0.id, selected.1), (callee.id, explicit));
+            assert_eq!(exact.remaining(), 0);
+            assert!(result.proof(&application).is_none());
+
+            let mut insufficient = ResolutionWorkBudget::new(measured.consumed() - 1);
+            assert!(matches!(
+                index.resolve(
+                    &mut result,
+                    &application,
+                    &sources,
+                    &cancellation,
+                    &mut insufficient
+                ),
+                Err(ResolutionError::WorkLimit { .. })
+            ));
+            cancellation.cancel(rootlight_cancel::CancellationReason::ClientRequest);
+            assert!(matches!(
+                index.resolve(
+                    &mut result,
+                    &application,
+                    &sources,
+                    &cancellation,
+                    &mut measured
+                ),
+                Err(ResolutionError::Cancelled(_))
+            ));
+        }
+    }
 
     #[test]
     fn named_mapping_keeps_authored_spans_and_excludes_nested_labels() {

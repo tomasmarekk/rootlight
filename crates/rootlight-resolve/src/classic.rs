@@ -1716,9 +1716,13 @@ impl<'a> ClassicIndex<'a> {
             work.consume()?;
             let span = occurrence.source.span();
             let Some(member) = member else {
-                calls.resolve(&mut result, occurrence, &sources, cancellation, work)?;
+                let selected =
+                    calls.resolve(&mut result, occurrence, &sources, cancellation, work)?;
                 let callee = if result.proof(occurrence).is_none() {
-                    match calls.callee(occurrence, &sources, cancellation, work)? {
+                    // Semantic failure does not change the immutable callee index.
+                    // Reuse its selection instead of charging and scanning the same
+                    // application again for the default-member fallback.
+                    match selected {
                         Some((callee, false)) => Some(callee),
                         None if read_receivers.contains_key(&span) => {
                             calls.returned_receiver(occurrence, cancellation, work)?
