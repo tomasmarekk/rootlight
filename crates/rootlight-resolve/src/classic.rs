@@ -1446,6 +1446,12 @@ impl<'a> ClassicIndex<'a> {
                         | "vba.invoked_let_member.reference" => Some(PropertyAccessorKind::Let),
                         "vba.invoked_set_identifier.reference"
                         | "vba.invoked_set_member.reference" => Some(PropertyAccessorKind::Set),
+                        // Native GLR statement syntax also admits a call whose
+                        // argument is a comparison. Only a typed storage receiver
+                        // and an argument-validated default setter prove assignment.
+                        "vba.invoked_identifier.reference"
+                        | "vba.invoked_member.reference"
+                        | "vba.member.reference" => Some(PropertyAccessorKind::Let),
                         _ => None,
                     }
                     && let Some(symbol) = match callee.target {
@@ -1457,7 +1463,12 @@ impl<'a> ClassicIndex<'a> {
                     && (matches!(
                         owner.kind,
                         EntityKind::Variable | EntityKind::Parameter | EntityKind::Field
-                    ) || (matches!(
+                    ) || (!matches!(
+                        callee.syntax_kind.as_str(),
+                        "vba.invoked_identifier.reference"
+                            | "vba.invoked_member.reference"
+                            | "vba.member.reference"
+                    ) && matches!(
                         procedure_kind(owner, &sources, cancellation, work)?,
                         Some(
                             rootlight_vba::ProcedureKind::Function

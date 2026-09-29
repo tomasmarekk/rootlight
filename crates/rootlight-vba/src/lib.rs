@@ -18,7 +18,7 @@ mod with_blocks;
 pub use arguments::{Argument, argument_list};
 pub use call_chain::{
     CallChain, CallChainPart, CallChainRead, CallChainRole, assigned_value_end,
-    call_chain_statement, value_application_expression,
+    call_chain_statement, indexed_assignment_arguments_end, value_application_expression,
 };
 pub use compilation::{CompilationConstantHeader, compilation_constant_header};
 pub use condition::compilation_condition_key;

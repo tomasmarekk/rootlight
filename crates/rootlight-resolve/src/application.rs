@@ -679,6 +679,7 @@ fn reconcile_vba_target_gaps(
                 "vba.invoked_get_identifier.reference"
                     | "vba.invoked_let_identifier.reference"
                     | "vba.invoked_set_identifier.reference"
+                    | "vba.invoked_identifier.reference"
             ) && matches!(site.target, OccurrenceTarget::Resolved { .. })
             {
                 default_receivers.insert(&site.source);

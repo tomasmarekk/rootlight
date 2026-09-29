@@ -300,6 +300,50 @@ pub fn assigned_value_end<E>(
     Ok(cursor.checked_add(value.end()))
 }
 
+/// Finds the argument-list end in a complete possible indexed assignment tail.
+///
+/// Input begins immediately after the receiver and must contain `(indices) = value`,
+/// with only logical trivia after the value. The returned end includes the closing
+/// parenthesis and any leading trivia. RHS syntax is bounded by `maximum_tokens`.
+/// `None` means incomplete, unsupported, or token-limited input. This does not
+/// distinguish assignment from a call receiving a comparison expression: callers
+/// must prove a receiver whose declared type has the corresponding setter.
+/// Index expressions are only delimited here; their argument contract must also
+/// be validated by the caller.
+///
+/// # Errors
+/// Propagates the caller's cancellation/work error unchanged.
+pub fn indexed_assignment_arguments_end<E>(
+    source: &[u8],
+    maximum_tokens: usize,
+    check: &mut impl FnMut() -> Result<(), E>,
+) -> Result<Option<usize>, E> {
+    let leading = super::logical_whitespace_len(source, check)?;
+    let Some(group_end) =
+        super::parenthesized_expression_end(source.get(leading..).unwrap_or_default(), check)?
+    else {
+        return Ok(None);
+    };
+    let Some(arguments_end) = leading.checked_add(group_end) else {
+        return Ok(None);
+    };
+    let Some(value_end) = assigned_value_end(
+        source.get(arguments_end..).unwrap_or_default(),
+        maximum_tokens,
+        check,
+    )?
+    else {
+        return Ok(None);
+    };
+    let Some(end) = arguments_end.checked_add(value_end) else {
+        return Ok(None);
+    };
+    let Some(rest) = source.get(end..) else {
+        return Ok(None);
+    };
+    Ok((super::logical_whitespace_len(rest, check)? == rest.len()).then_some(arguments_end))
+}
+
 fn value_expression<E>(
     source: &[u8],
     maximum_tokens: usize,
@@ -779,6 +823,90 @@ mod tests {
 
     fn read(source: &[u8]) -> CallChainRead {
         call_chain_statement(source, 4096, &mut || Ok::<(), Infallible>(())).unwrap()
+    }
+
+    #[test]
+    fn indexed_assignment_tails_preserve_indices_and_require_a_complete_value() {
+        for (source, indices) in [
+            ("(2) = 3", "(2)"),
+            (" (key:=Pick(1)) = value", " (key:=Pick(1))"),
+            (" _\r\n (\"=\") _\r\n = Fetch(2) + 3 ", " _\r\n (\"=\")"),
+            ("(1, 2) = left = right", "(1, 2)"),
+            ("() = Nothing", "()"),
+        ] {
+            let end = indexed_assignment_arguments_end(source.as_bytes(), 128, &mut || {
+                Ok::<(), Infallible>(())
+            })
+            .unwrap()
+            .unwrap();
+            assert_eq!(&source[..end], indices);
+        }
+        for source in [
+            "(1)",
+            "(1) =",
+            "(1) == 2",
+            "(1) = 2 +",
+            "(1) = New Item",
+            "(1)(2) = 3",
+            "(1)\n=2",
+            "(1) =\n2",
+            "(1) = 2\nNext",
+            "(1) = 2: Next",
+            "(1) + 2",
+            "(1) = 2, 3",
+        ] {
+            assert_eq!(
+                indexed_assignment_arguments_end(source.as_bytes(), 128, &mut || {
+                    Ok::<(), Infallible>(())
+                })
+                .unwrap(),
+                None,
+                "{source}"
+            );
+        }
+        assert_eq!(
+            indexed_assignment_arguments_end(
+                b"(1) = Fetch(2)",
+                1,
+                &mut || Ok::<(), Infallible>(())
+            )
+            .unwrap(),
+            None
+        );
+        assert_eq!(
+            indexed_assignment_arguments_end(b"(1) = 2", 128, &mut || Err("cancelled")),
+            Err("cancelled")
+        );
+    }
+
+    #[test]
+    fn indexed_assignment_scans_bound_arbitrary_bytes_and_cancel_inside_groups() {
+        for byte in 0..=u8::MAX {
+            let source = [b'(', byte, b')', b'=', byte];
+            for end in 0..=source.len() {
+                if let Some(offset) =
+                    indexed_assignment_arguments_end(&source[..end], 64, &mut || {
+                        Ok::<(), Infallible>(())
+                    })
+                    .unwrap()
+                {
+                    assert!(offset <= end);
+                }
+            }
+        }
+        let source = format!("({}) = 1", "key,".repeat(2048));
+        let mut checks = 0;
+        assert_eq!(
+            indexed_assignment_arguments_end(source.as_bytes(), source.len(), &mut || {
+                checks += 1;
+                if checks == 12 {
+                    Err("work exhausted")
+                } else {
+                    Ok(())
+                }
+            }),
+            Err("work exhausted")
+        );
     }
 
     #[test]

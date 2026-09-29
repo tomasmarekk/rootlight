@@ -220,7 +220,7 @@ const PROJECT_FACTS_TRUNCATED_MESSAGE: &str =
     "additional project semantic facts were omitted by aggregate resource limits";
 const AGGREGATE_DIAGNOSTICS_TRUNCATED_CODE: &str = "aggregate-diagnostics-truncated";
 const ANALYZER_BINARY_SEED: &[u8] = b"rootlight.first-slice.treesitter-structural/180";
-const RESOLVER_BINARY_SEED: &[u8] = b"rootlight.first-slice.resolve/56";
+const RESOLVER_BINARY_SEED: &[u8] = b"rootlight.first-slice.resolve/57";
 const INCREMENTAL_PROVIDER_SEED: &[u8] = b"rootlight.first-slice.incremental-provider/1";
 const LANGUAGE_DISPOSITION_PROVIDER_SEED: &[u8] = b"rootlight.first-slice.language-disposition/5";
 const SOURCE_FILE_FALLBACK_PROVIDER_SEED: &[u8] = b"rootlight.source-file-fallback/4";
@@ -40886,17 +40886,24 @@ mod tests {
             ),
             ("Set items(13) = New Slot", "items(13)", "Set", false),
             ("Let items(14) = 7 _\n + 8", "items(14)", "Let", true),
+            ("items(21) = 3", "items(21) = 3", "Let", true),
+            ("items(22, 23) = 4", "items(22, 23)", "Let", false),
+            ("automatic(24) = 5", "automatic(24) = 5", "Let", true),
+            ("items.child(25) = 6", "items.child(25) = 6", "Let", true),
+            ("arrayItems(26) = 7", "arrayItems(26) = 7", "Let", false),
+            ("items (27) = 9", "items (27) = 9", "Let", true),
+            ("items(28) <> 2", "items(28) <> 2", "Let", false),
         ];
-        let mut client = "Attribute VB_Name = \"Client\"\nSub Run(ByVal items As Slot, ByVal other As Object, ByVal dynamic As Object)\nDim automatic As New Slot\n".to_owned();
+        let mut client = "Attribute VB_Name = \"Client\"\nSub Run(ByVal items As Slot, ByVal other As Object, ByVal dynamic As Object)\nDim automatic As New Slot\nDim arrayItems(1) As Slot\n".to_owned();
         for (statement, ..) in cases {
             client.push_str(statement);
             client.push('\n');
         }
-        client.push_str("End Sub\n");
+        client.push_str("Accept (1) = 1\nEnd Sub\nSub Accept(ByVal value As Boolean)\nEnd Sub\n");
         fs::write(fixture.path().join("Client.bas"), &client).unwrap();
         for (attribute, access) in [(0, "Public"), (1, "Public"), (0, "Private"), (0, "Public")] {
             let class_source = format!(
-                "VERSION 1.0 CLASS\nAttribute VB_Name = \"Slot\"\nPublic Property Get Entry(ByVal offset As Long) As Variant\nAttribute Entry.VB_UserMemId = {attribute}\nEnd Property\n{access} Property Let Entry(ByVal offset As Long, ByVal value As Variant)\nEnd Property\n{access} Property Set Entry(ByVal offset As Long, ByVal value As Object)\nEnd Property\n"
+                "VERSION 1.0 CLASS\nAttribute VB_Name = \"Slot\"\nPublic child As Slot\nPublic Property Get Entry(ByVal offset As Long) As Variant\nAttribute Entry.VB_UserMemId = {attribute}\nEnd Property\n{access} Property Let Entry(ByVal offset As Long, ByVal value As Variant)\nEnd Property\n{access} Property Set Entry(ByVal offset As Long, ByVal value As Object)\nEnd Property\n"
             );
             fs::write(fixture.path().join("Slot.cls"), &class_source).unwrap();
             let mut service =
@@ -40924,6 +40931,7 @@ mod tests {
                 .unwrap();
             for (statement, expression, accessor, valid) in cases {
                 let expected = attribute == 0 && access == "Public" && valid;
+                let array = expression == "arrayItems(26) = 7";
                 let start = u64::try_from(
                     client.find(statement).unwrap() + statement.find(expression).unwrap(),
                 )
@@ -40962,13 +40970,24 @@ mod tests {
                     expected,
                     "{statement}: {site:?}"
                 );
+                if array {
+                    let target = document
+                        .entities
+                        .iter()
+                        .find(|entity| entity.canonical_name == "arrayItems")
+                        .unwrap();
+                    assert_eq!(
+                        site.target,
+                        OccurrenceTarget::Resolved { symbol: target.id }
+                    );
+                }
                 assert_eq!(
                     document
                         .skipped_regions
                         .iter()
                         .any(|gap| gap.source == site.source
                             && gap.detail == "vba-call-or-index-target-unavailable"),
-                    !expected,
+                    !expected && !array,
                     "{statement}"
                 );
                 assert_eq!(
@@ -40991,6 +41010,8 @@ mod tests {
                                 callee.syntax_kind.as_str(),
                                 "vba.invoked_let_identifier.reference"
                                     | "vba.invoked_set_identifier.reference"
+                                    | "vba.invoked_identifier.reference"
+                                    | "vba.member.reference"
                             )
                     })
                     .unwrap();
@@ -41007,15 +41028,21 @@ mod tests {
                         .iter()
                         .any(|gap| gap.source == callee.source
                             && gap.detail == "vba-call-or-index-target-unavailable"),
-                    !expected,
+                    !expected && !array && callee.syntax_kind != "vba.member.reference",
                     "receiver: {statement}"
                 );
-                for label in document.occurrences.iter().filter(|label| {
-                    label.file == file.id
-                        && label.syntax_kind == "vba.nonvalue_identifier.reference"
-                        && label.source.span().start_byte() > start
-                        && label.source.span().end_byte() < site.source.span().end_byte()
-                }) {
+                let labels: Vec<_> = document
+                    .occurrences
+                    .iter()
+                    .filter(|label| {
+                        label.file == file.id
+                            && label.syntax_kind == "vba.nonvalue_identifier.reference"
+                            && label.source.span().start_byte() > start
+                            && label.source.span().end_byte() < site.source.span().end_byte()
+                    })
+                    .collect();
+                assert_eq!(labels.len(), expression.matches(":=").count());
+                for label in labels {
                     if expected {
                         let parameter = document
                             .entities
@@ -41063,6 +41090,47 @@ mod tests {
                     );
                 }
             }
+            let start = u64::try_from(client.find("Accept (1) = 1").unwrap()).unwrap();
+            let callee = document
+                .occurrences
+                .iter()
+                .find(|site| {
+                    site.file == file.id
+                        && site.source.span().start_byte() == start
+                        && site.syntax_kind == "vba.invoked_identifier.reference"
+                })
+                .unwrap();
+            let procedure = document
+                .entities
+                .iter()
+                .find(|entity| entity.canonical_name == "Accept")
+                .unwrap();
+            assert_eq!(
+                callee.target,
+                OccurrenceTarget::Resolved {
+                    symbol: procedure.id
+                }
+            );
+            assert!(document.relations.iter().any(|edge| edge.subject
+                == RelationEndpoint::Occurrence(callee.id)
+                && edge.predicate == RelationPredicate::Calls));
+            let application = document
+                .occurrences
+                .iter()
+                .find(|site| {
+                    site.file == file.id
+                        && site.source.span().start_byte() == start
+                        && site.syntax_kind == "vba.application.reference"
+                })
+                .unwrap();
+            assert!(
+                !document
+                    .provenance
+                    .iter()
+                    .any(|record| record.id == application.provenance
+                        && record.rule.as_deref()
+                            == Some("classic-project-default-member-v1.indexed_snapshot"))
+            );
         }
     }
 

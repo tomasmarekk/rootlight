@@ -100,6 +100,8 @@ impl<'a, 'o> CallIndex<'a, 'o> {
                     "vba.invoked_get_identifier.reference"
                         | "vba.invoked_let_identifier.reference"
                         | "vba.invoked_set_identifier.reference"
+                        | "vba.invoked_identifier.reference"
+                        | "vba.member.reference"
                 )
             {
                 callees
@@ -268,20 +270,27 @@ impl<'a, 'o> CallIndex<'a, 'o> {
             return Ok(());
         };
         let mut additional_sources = Cow::Borrowed(additional_sources);
-        let optional = if contract.setter {
+        let (arguments, optional) = if contract.setter {
             let Some((false, indices)) = contract.optional.split_last() else {
                 return Ok(());
             };
-            let Some(source) = assignment_source(site, sources, &mut check)? else {
-                return Ok(());
-            };
-            additional_sources.to_mut().push(source);
-            indices
+            if let Some(end) =
+                rootlight_vba::indexed_assignment_arguments_end(tail, tail.len(), &mut check)?
+            {
+                additional_sources.to_mut().push(site.source.clone());
+                (tail.get(..end).unwrap_or_default(), indices)
+            } else {
+                let Some(source) = assignment_source(site, sources, &mut check)? else {
+                    return Ok(());
+                };
+                additional_sources.to_mut().push(source);
+                (tail, indices)
+            }
         } else {
-            &contract.optional
+            (tail, contract.optional.as_slice())
         };
         let Some(named_arguments) = arguments_match(
-            tail,
+            arguments,
             explicit,
             optional,
             &contract.names,
