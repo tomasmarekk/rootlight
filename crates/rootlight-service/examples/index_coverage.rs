@@ -16,10 +16,7 @@ use std::{
 };
 
 use rootlight_cancel::Cancellation;
-use rootlight_ir::{
-    FileRecord, NormalizedIrDocument, OccurrenceTarget, RelationEndpoint, RelationPredicate,
-    SourceMappingKind, SourceRef, SourceSpan,
-};
+use rootlight_ir::{FileRecord, OccurrenceTarget, SourceMappingKind, SourceRef, SourceSpan};
 use rootlight_runtime::RuntimePaths;
 use rootlight_service::{
     FirstSliceBudget, FirstSliceIndexMode, FirstSliceIndexProgress, FirstSliceService,
@@ -227,10 +224,17 @@ impl DiagnosticSession {
                 Some(cold.generation),
                 &deadline()?,
                 |snapshot| -> Result<_, Box<dyn Error>> {
+                    let mut evidence = binding_proofs::export_binding_proofs(snapshot.document())?;
                     Ok((
-                        inspect_files(snapshot, service, repository, cold.generation)?,
+                        inspect_files(
+                            snapshot,
+                            service,
+                            repository,
+                            cold.generation,
+                            &mut evidence,
+                        )?,
                         snapshot.metadata().configuration_hash(),
-                        binding_proofs::export_external_binding_proofs(snapshot.document())?,
+                        (evidence.provenance, evidence.fact_identities),
                     ))
                 },
             )??;
@@ -354,6 +358,7 @@ fn inspect_files(
     service: &FirstSliceService,
     repository: &Path,
     generation: rootlight_ids::GenerationId,
+    evidence: &mut binding_proofs::BindingEvidence,
 ) -> Result<Vec<serde_json::Value>, Box<dyn Error>> {
     let document = snapshot.document();
     let mut origins = BTreeMap::new();
@@ -366,8 +371,6 @@ fn inspect_files(
             return Err("extracted source has multiple container origins".into());
         }
     }
-    let mut supplemental_calls = supplemental_call_evidence(document)?;
-    let mut external_bindings = external_binding_evidence(document)?;
     let mut verified_containers = BTreeSet::new();
     let mut rows = Vec::new();
     for file in document.files.iter().chain(
@@ -566,128 +569,17 @@ fn inspect_files(
             "extraction_independently_verified":origin.map(|_| false),
             "occurrences":occurrences,
             "gaps":gaps,
-            "supplemental_calls":supplemental_calls.remove(&file.id).unwrap_or_default(),
-            "external_bindings":external_bindings.remove(&file.id).unwrap_or_default()
+            "supplemental_calls":evidence.supplemental_calls.remove(&file.id).unwrap_or_default(),
+            "external_bindings":evidence.external_bindings.remove(&file.id).unwrap_or_default()
         }));
     }
     if rows.len() != snapshot.file_count() {
         return Err("inspection omitted a retained file record".into());
     }
+    if !evidence.external_bindings.is_empty() || !evidence.supplemental_calls.is_empty() {
+        return Err("binding evidence has no inspected file".into());
+    }
     Ok(rows)
-}
-
-fn supplemental_call_evidence(
-    document: &NormalizedIrDocument,
-) -> Result<BTreeMap<rootlight_ids::FileId, Vec<serde_json::Value>>, Box<dyn Error>> {
-    let occurrences: BTreeMap<_, _> = document
-        .occurrences
-        .iter()
-        .map(|site| (site.id, site))
-        .collect();
-    let entities: BTreeMap<_, _> = document
-        .entities
-        .iter()
-        .map(|entity| (entity.id, entity))
-        .collect();
-    let provenance: BTreeMap<_, _> = document
-        .provenance
-        .iter()
-        .map(|proof| (proof.id, proof))
-        .collect();
-    let mut result: BTreeMap<_, Vec<_>> = BTreeMap::new();
-    for relation in &document.relations {
-        if relation.predicate != RelationPredicate::Calls {
-            continue;
-        }
-        let (RelationEndpoint::Occurrence(id), RelationEndpoint::Entity(target)) =
-            (relation.subject, relation.object)
-        else {
-            continue;
-        };
-        let site = occurrences.get(&id).ok_or("call has no occurrence")?;
-        if site.target == (OccurrenceTarget::Resolved { symbol: target }) {
-            continue;
-        }
-        // Additional effects can call a different symbol than the occurrence's
-        // lexical target. Counts alone cannot audit either identity or its proof.
-        result.entry(site.file).or_default().push(json!({
-            "relation":relation,
-            "occurrence":site,
-            "lexical_target":match site.target {
-                OccurrenceTarget::Resolved { symbol } => entities.get(&symbol).copied(),
-                _ => None,
-            },
-            "target":entities.get(&target).ok_or("call has no target entity")?,
-            "provenance":provenance.get(&relation.provenance).ok_or("call has no provenance")?,
-        }));
-    }
-    Ok(result)
-}
-
-fn external_binding_evidence(
-    document: &NormalizedIrDocument,
-) -> Result<BTreeMap<rootlight_ids::FileId, Vec<serde_json::Value>>, Box<dyn Error>> {
-    let external: BTreeMap<_, _> = document
-        .entities
-        .iter()
-        .filter(|entity| {
-            entity.kind == rootlight_ir::EntityKind::ExternalSymbol
-                && entity.evidence.source.is_none()
-        })
-        .map(|entity| (entity.id, entity))
-        .collect();
-    let mut relations: BTreeMap<_, Vec<_>> = BTreeMap::new();
-    for edge in &document.relations {
-        if let (RelationEndpoint::Occurrence(site), RelationEndpoint::Entity(symbol)) =
-            (edge.subject, edge.object)
-            && matches!(
-                edge.predicate,
-                RelationPredicate::RefersTo
-                    | RelationPredicate::Calls
-                    | RelationPredicate::UsesType
-            )
-            && external.contains_key(&symbol)
-        {
-            relations.entry((site, symbol)).or_default().push(edge);
-        }
-    }
-    let mut records: BTreeMap<_, Vec<_>> = BTreeMap::new();
-    for site in &document.occurrences {
-        let OccurrenceTarget::Resolved { symbol } = site.target else {
-            continue;
-        };
-        let Some(target) = external.get(&symbol) else {
-            continue;
-        };
-        let proof = |id| {
-            document
-                .provenance
-                .binary_search_by_key(&id, |proof| proof.id)
-                .ok()
-                .and_then(|i| document.provenance.get(i))
-                .ok_or("external binding has no provenance")
-        };
-        let edges = relations
-            .get(&(site.id, symbol))
-            .map(Vec::as_slice)
-            .unwrap_or_default();
-        let [edge] = edges else {
-            return Err("external binding has no unique reference edge".into());
-        };
-        let expected = match site.role {
-            rootlight_ir::OccurrenceRole::CallSite => RelationPredicate::Calls,
-            rootlight_ir::OccurrenceRole::TypeUse => RelationPredicate::UsesType,
-            _ => RelationPredicate::RefersTo,
-        };
-        if edge.predicate != expected {
-            return Err("external binding edge does not match occurrence role".into());
-        }
-        records.entry(site.file).or_default().push(json!({
-            "occurrence":site, "target":target, "relation":edge,
-            "provenance":proof(site.provenance)?, "target_provenance":proof(target.provenance)?
-        }));
-    }
-    Ok(records)
 }
 
 fn chunk_end(text: &str, start: usize) -> usize {
@@ -892,7 +784,7 @@ mod tests {
             .unwrap()
             .derivation_parents
             .push(rootlight_ir::FactRef::Fact(missing));
-        let failure = binding_proofs::export_external_binding_proofs(&document)
+        let failure = binding_proofs::export_binding_proofs(&document)
             .err()
             .unwrap();
         assert_eq!(
@@ -908,7 +800,7 @@ mod tests {
             .retain(|parent| *parent != rootlight_ir::FactRef::Fact(missing));
         let duplicate = document.occurrences.first().unwrap().clone();
         document.occurrences.push(duplicate);
-        let failure = binding_proofs::export_external_binding_proofs(&document)
+        let failure = binding_proofs::export_binding_proofs(&document)
             .err()
             .unwrap();
         assert_eq!(
@@ -1038,6 +930,187 @@ mod tests {
         assert_eq!(call["relation"]["provenance"], call["provenance"]["id"]);
         let restored = inspect(&repository, &state, None, StateMode::Resume).unwrap();
         assert_eq!(report["files"], restored["files"]);
+    }
+
+    #[test]
+    fn internal_only_initializer_exports_exact_roots_and_complete_source_closure() {
+        let directory = tempfile::tempdir().unwrap();
+        let repository = directory.path().join("repository");
+        fs::create_dir(&repository).unwrap();
+        fs::write(
+            repository.join("project.vbp"),
+            "Type=Exe\nName=\"Project\"\nModule=Client; Client.bas\nClass=Worker; Worker.cls\n",
+        )
+        .unwrap();
+        fs::write(repository.join("Client.bas"), "Attribute VB_Name = \"Client\"\nSub Run()\nDim item As New Worker\nDim target As Worker\nSet target = item\nEnd Sub\n").unwrap();
+        fs::write(repository.join("Worker.cls"), "VERSION 1.0 CLASS\nAttribute VB_Name = \"Worker\"\nPrivate Sub Class_Initialize()\nEnd Sub\n").unwrap();
+        let state = directory.path().join("state");
+        let report = inspect(&repository, &state, None, StateMode::Fresh).unwrap();
+        assert_eq!(
+            report["files"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .flat_map(|row| row["external_bindings"].as_array().unwrap())
+                .count(),
+            0
+        );
+        let calls: Vec<_> = report["files"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .flat_map(|row| row["supplemental_calls"].as_array().unwrap())
+            .collect();
+        assert_eq!(calls.len(), 1);
+        let call = calls[0];
+        assert_eq!(call["target"]["canonical_name"], "Class_Initialize");
+        assert_eq!(call["lexical_target"]["canonical_name"], "item");
+        assert_ne!(call["target"]["id"], call["lexical_target"]["id"]);
+
+        let session =
+            DiagnosticSession::open(&repository, &state, None, StateMode::Resume).unwrap();
+        let registered = session
+            .service
+            .registered_repository_for_root(&repository, &deadline().unwrap())
+            .unwrap()
+            .unwrap();
+        let generation = session
+            .service
+            .repository_status(registered, None)
+            .unwrap()
+            .resolved_generation;
+        let document = session
+            .service
+            .inspect_generation(
+                registered,
+                Some(generation),
+                &deadline().unwrap(),
+                |snapshot| snapshot.document().clone(),
+            )
+            .unwrap();
+        let expected_proofs: BTreeMap<_, _> = document
+            .provenance
+            .iter()
+            .map(|proof| (proof.id.to_string(), serde_json::to_value(proof).unwrap()))
+            .collect();
+        let proofs: BTreeMap<_, _> = report["exported_provenance"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|proof| (proof["id"].as_str().unwrap().to_owned(), proof))
+            .collect();
+        let identities: BTreeMap<_, _> = report["exported_fact_identities"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|identity| {
+                (
+                    (
+                        identity["kind"].as_str().unwrap().to_owned(),
+                        identity["id"].as_str().unwrap().to_owned(),
+                    ),
+                    identity,
+                )
+            })
+            .collect();
+        assert_eq!(
+            proofs.len(),
+            report["exported_provenance"].as_array().unwrap().len()
+        );
+        assert_eq!(
+            identities.len(),
+            report["exported_fact_identities"].as_array().unwrap().len()
+        );
+        assert_eq!(
+            proofs[call["provenance"]["id"].as_str().unwrap()],
+            &call["provenance"]
+        );
+        let mut pending = BTreeSet::new();
+        for (name, kind, subtype) in [
+            ("occurrence", "fact", Some("occurrence")),
+            ("relation", "fact", Some("relation")),
+            ("target", "entity", None),
+            ("lexical_target", "entity", None),
+        ] {
+            let record = &call[name];
+            let key = (kind.to_owned(), record["id"].as_str().unwrap().to_owned());
+            let mut expected = json!({
+                "kind":kind, "id":record["id"], "repository":record["repository"],
+                "generation":record["generation"], "source":if name == "occurrence" { &record["source"] } else { &record["evidence"]["source"] },
+            });
+            if let Some(subtype) = subtype {
+                expected["subtype"] = json!(subtype);
+            }
+            assert_eq!(identities[&key], &expected, "embedded root {name}");
+            pending.insert(key);
+            let id = record["provenance"].as_str().unwrap();
+            assert_eq!(proofs[id], &expected_proofs[id], "root provenance {name}");
+            pending.insert(("fact".to_owned(), id.to_owned()));
+        }
+        let mut visited = BTreeSet::new();
+        while let Some(key) = pending.pop_first() {
+            if !visited.insert(key.clone()) {
+                continue;
+            }
+            if key.0 == "fact"
+                && let Some(proof) = proofs.get(&key.1)
+            {
+                assert_eq!(*proof, &expected_proofs[&key.1]);
+                for parent in proof["derivation_parents"].as_array().unwrap() {
+                    pending.insert((
+                        parent["kind"].as_str().unwrap().to_owned(),
+                        parent["id"].as_str().unwrap().to_owned(),
+                    ));
+                }
+                for source in proof["input_sources"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .chain(proof["evidence_sources"].as_array().unwrap())
+                {
+                    pending.insert((
+                        "file".to_owned(),
+                        source["span"]["file"].as_str().unwrap().to_owned(),
+                    ));
+                }
+            } else {
+                let identity = identities
+                    .get(&key)
+                    .expect("every terminal parent and source file is exported");
+                let source = &identity["source"];
+                if !source.is_null() {
+                    pending.insert((
+                        "file".to_owned(),
+                        source["span"]["file"].as_str().unwrap().to_owned(),
+                    ));
+                }
+            }
+        }
+        let exported: BTreeSet<_> = identities
+            .keys()
+            .cloned()
+            .chain(proofs.keys().map(|id| ("fact".to_owned(), id.clone())))
+            .collect();
+        assert_eq!(
+            visited, exported,
+            "export contains exactly the closure of emitted roots"
+        );
+        assert_eq!(
+            report["exported_fact_identity_scope"],
+            "terminal_source_witnesses_not_semantic_records"
+        );
+        assert_eq!(report["full_semantic_completeness_proven"], false);
+        assert_eq!(report["installed_mcp_qualified"], false);
+        let restored = inspect(&repository, &state, None, StateMode::Resume).unwrap();
+        assert_eq!(report["files"], restored["files"]);
+        assert_eq!(
+            report["exported_provenance"],
+            restored["exported_provenance"]
+        );
+        assert_eq!(
+            report["exported_fact_identities"],
+            restored["exported_fact_identities"]
+        );
     }
 
     #[test]

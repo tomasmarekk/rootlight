@@ -1,4 +1,4 @@
-//! Exports one deduplicated provenance closure for external binding diagnostics.
+//! Selects report bindings and exports their deduplicated provenance closure.
 //! Base fact identities are terminal source witnesses, not copies of their
 //! semantic records; complete proof records retain their derivation parents.
 
@@ -7,9 +7,9 @@ use std::{
     error::Error,
 };
 
-use rootlight_ids::{GenerationId, RepositoryId};
+use rootlight_ids::{FileId, GenerationId, RepositoryId};
 use rootlight_ir::{
-    EntityKind, FactRef, NormalizedIrDocument, OccurrenceTarget, ProvenanceRecord,
+    EntityKind, FactRef, NormalizedIrDocument, OccurrenceRole, OccurrenceTarget, ProvenanceRecord,
     RelationEndpoint, RelationPredicate, SourceRef,
 };
 use serde_json::{Value, json};
@@ -26,22 +26,49 @@ enum Node<'a> {
     Proof(&'a ProvenanceRecord),
 }
 
-/// Returns complete reachable proofs and compact terminal base identities.
+/// Exact admitted report records and their complete reachable proof closure.
+///
+/// Base identities remain terminal source witnesses, not semantic records.
+pub(super) struct BindingEvidence {
+    pub(super) external_bindings: BTreeMap<FileId, Vec<Value>>,
+    pub(super) supplemental_calls: BTreeMap<FileId, Vec<Value>>,
+    pub(super) provenance: Vec<Value>,
+    pub(super) fact_identities: Vec<Value>,
+}
+
+struct SelectedBindings {
+    external_bindings: BTreeMap<FileId, Vec<Value>>,
+    supplemental_calls: BTreeMap<FileId, Vec<Value>>,
+    roots: BTreeSet<FactRef>,
+}
+
+/// Returns admitted external bindings and supplemental calls with their proofs.
+///
+/// Record selection and proof roots share one pass. Reachable provenance is
+/// complete; base identities remain compact terminal source witnesses.
 ///
 /// # Errors
 /// Rejects duplicate identities, missing parents, foreign owners, and sources
 /// whose identity or byte range differs from the inspected generation.
-pub(super) fn export_external_binding_proofs(
+pub(super) fn export_binding_proofs(
     document: &NormalizedIrDocument,
-) -> Result<(Vec<Value>, Vec<Value>), Box<dyn Error>> {
-    let mut pending = external_binding_roots(document);
+) -> Result<BindingEvidence, Box<dyn Error>> {
+    let SelectedBindings {
+        external_bindings,
+        supplemental_calls,
+        roots: mut pending,
+    } = select_bindings(document)?;
+    let mut evidence = BindingEvidence {
+        external_bindings,
+        supplemental_calls,
+        provenance: Vec::new(),
+        fact_identities: Vec::new(),
+    };
     if pending.is_empty() {
-        return Ok((Vec::new(), Vec::new()));
+        return Ok(evidence);
     }
     let nodes = index_nodes(document)?;
     let mut visited = BTreeSet::new();
-    let mut proofs = Vec::new();
-    let mut identities = Vec::new();
     // Each typed snapshot identity is admitted once. Cyclic or shared input
     // references cannot grow the walk beyond the finite inspected snapshot.
     while let Some(reference) = pending.pop_first() {
@@ -59,7 +86,7 @@ pub(super) fn export_external_binding_proofs(
                     check_source(document, source)?;
                     pending.insert(FactRef::File(source.span().file()));
                 }
-                proofs.push(serde_json::to_value(proof)?);
+                evidence.provenance.push(serde_json::to_value(proof)?);
             }
             Node::Identity(identity) => {
                 check_owner(document, identity.repository, identity.generation)?;
@@ -74,56 +101,154 @@ pub(super) fn export_external_binding_proofs(
                 if let Some(subtype) = identity.subtype {
                     value["subtype"] = json!(subtype);
                 }
-                identities.push(value);
+                evidence.fact_identities.push(value);
             }
         }
     }
-    Ok((proofs, identities))
+    Ok(evidence)
 }
 
-fn external_binding_roots(document: &NormalizedIrDocument) -> BTreeSet<FactRef> {
-    let external: BTreeSet<_> = document
+fn select_bindings(document: &NormalizedIrDocument) -> Result<SelectedBindings, Box<dyn Error>> {
+    let entities: BTreeMap<_, _> = document
+        .entities
+        .iter()
+        .map(|entity| (entity.id, entity))
+        .collect();
+    let occurrences: BTreeMap<_, _> = document
+        .occurrences
+        .iter()
+        .map(|site| (site.id, site))
+        .collect();
+    let provenance: BTreeMap<_, _> = document
+        .provenance
+        .iter()
+        .map(|proof| (proof.id, proof))
+        .collect();
+    let external: BTreeMap<_, _> = document
         .entities
         .iter()
         .filter(|entity| {
             entity.kind == EntityKind::ExternalSymbol && entity.evidence.source.is_none()
         })
-        .map(|entity| entity.id)
+        .map(|entity| (entity.id, entity))
         .collect();
-    let mut roots = BTreeSet::new();
-    let mut bindings = BTreeSet::new();
-    for site in &document.occurrences {
-        if let OccurrenceTarget::Resolved { symbol } = site.target
-            && external.contains(&symbol)
-        {
-            bindings.insert((site.id, symbol));
-            roots.extend([
-                FactRef::Fact(site.id),
-                FactRef::Fact(site.provenance),
-                FactRef::Entity(symbol),
-            ]);
-        }
-    }
-    for target in &document.entities {
-        if roots.contains(&FactRef::Entity(target.id)) {
-            roots.insert(FactRef::Fact(target.provenance));
-        }
-    }
+    let mut relations: BTreeMap<_, Vec<_>> = BTreeMap::new();
     for edge in &document.relations {
         if let (RelationEndpoint::Occurrence(site), RelationEndpoint::Entity(symbol)) =
             (edge.subject, edge.object)
-            && bindings.contains(&(site, symbol))
             && matches!(
                 edge.predicate,
                 RelationPredicate::RefersTo
                     | RelationPredicate::Calls
                     | RelationPredicate::UsesType
             )
+            && external.contains_key(&symbol)
         {
-            roots.extend([FactRef::Fact(edge.id), FactRef::Fact(edge.provenance)]);
+            relations.entry((site, symbol)).or_default().push(edge);
         }
     }
-    roots
+    let mut selected = SelectedBindings {
+        external_bindings: BTreeMap::new(),
+        supplemental_calls: BTreeMap::new(),
+        roots: BTreeSet::new(),
+    };
+    for site in &document.occurrences {
+        let OccurrenceTarget::Resolved { symbol } = site.target else {
+            continue;
+        };
+        let Some(target) = external.get(&symbol) else {
+            continue;
+        };
+        let edges = relations
+            .get(&(site.id, symbol))
+            .map(Vec::as_slice)
+            .unwrap_or_default();
+        let [edge] = edges else {
+            return Err("external binding has no unique reference edge".into());
+        };
+        let expected = match site.role {
+            OccurrenceRole::CallSite => RelationPredicate::Calls,
+            OccurrenceRole::TypeUse => RelationPredicate::UsesType,
+            _ => RelationPredicate::RefersTo,
+        };
+        if edge.predicate != expected {
+            return Err("external binding edge does not match occurrence role".into());
+        }
+        selected.external_bindings.entry(site.file).or_default().push(json!({
+            "occurrence":site, "target":target, "relation":edge,
+            "provenance":provenance.get(&site.provenance).ok_or("external binding has no provenance")?,
+            "target_provenance":provenance.get(&target.provenance).ok_or("external binding has no provenance")?,
+        }));
+        selected.roots.extend([
+            FactRef::Fact(site.id),
+            FactRef::Fact(site.provenance),
+            FactRef::Entity(target.id),
+            FactRef::Fact(target.provenance),
+            FactRef::Fact(edge.id),
+            FactRef::Fact(edge.provenance),
+        ]);
+    }
+    for relation in &document.relations {
+        if relation.predicate != RelationPredicate::Calls {
+            continue;
+        }
+        let (RelationEndpoint::Occurrence(id), RelationEndpoint::Entity(target)) =
+            (relation.subject, relation.object)
+        else {
+            continue;
+        };
+        let site = occurrences.get(&id).ok_or("call has no occurrence")?;
+        if site.target == (OccurrenceTarget::Resolved { symbol: target }) {
+            continue;
+        }
+        let target = entities.get(&target).ok_or("call has no target entity")?;
+        let lexical_target = match site.target {
+            OccurrenceTarget::Resolved { symbol } => Some(
+                *entities
+                    .get(&symbol)
+                    .ok_or("call has no lexical target entity")?,
+            ),
+            _ => None,
+        };
+        provenance
+            .get(&site.provenance)
+            .ok_or("call occurrence has no provenance")?;
+        provenance
+            .get(&target.provenance)
+            .ok_or("call target has no provenance")?;
+        if let Some(lexical_target) = lexical_target {
+            provenance
+                .get(&lexical_target.provenance)
+                .ok_or("call lexical target has no provenance")?;
+        }
+        // Supplemental effects have different callable and lexical targets.
+        // Selecting and rooting the same record prevents either proof branch
+        // from disappearing when no external symbol happens to seed the walk.
+        selected
+            .supplemental_calls
+            .entry(site.file)
+            .or_default()
+            .push(json!({
+                "relation":relation, "occurrence":site, "lexical_target":lexical_target,
+                "target":target,
+                "provenance":provenance.get(&relation.provenance).ok_or("call has no provenance")?,
+            }));
+        selected.roots.extend([
+            FactRef::Fact(site.id),
+            FactRef::Fact(site.provenance),
+            FactRef::Fact(relation.id),
+            FactRef::Fact(relation.provenance),
+            FactRef::Entity(target.id),
+            FactRef::Fact(target.provenance),
+        ]);
+        if let Some(lexical_target) = lexical_target {
+            selected.roots.extend([
+                FactRef::Entity(lexical_target.id),
+                FactRef::Fact(lexical_target.provenance),
+            ]);
+        }
+    }
+    Ok(selected)
 }
 
 fn index_nodes(
