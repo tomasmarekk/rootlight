@@ -104,6 +104,11 @@ pub(super) struct ResolvedBinding {
     pub(super) is_call: bool,
 }
 
+pub(super) struct ProcedureApplicationEvidence<'a> {
+    pub(super) scope: &'a SyntaxFact,
+    pub(super) parameters: &'a [(&'a SyntaxFact, &'a SyntaxFact, SymbolId)],
+}
+
 #[derive(Clone, Copy)]
 struct DeclaredType {
     symbol: SymbolId,
@@ -1373,6 +1378,17 @@ impl<'a> VbaBindings<'a> {
         text: &str,
         cancellation: &Cancellation,
     ) -> Result<Option<ResolvedBinding>, AdapterError> {
+        Ok(self
+            .procedure_application_with_evidence(fact, text, cancellation)?
+            .map(|(binding, _)| binding))
+    }
+
+    fn procedure_application_with_evidence(
+        &self,
+        fact: &SyntaxFact,
+        text: &str,
+        cancellation: &Cancellation,
+    ) -> Result<Option<(ResolvedBinding, ProcedureApplicationEvidence<'_>)>, AdapterError> {
         let mut check = || cancellation.check().map_err(AdapterError::from);
         let mut start = fact.span().start_byte();
         let mut prefix = text.as_bytes();
@@ -1511,10 +1527,20 @@ impl<'a> VbaBindings<'a> {
         }
         // The callee occurrence already owns the Calls edge. The enclosing
         // application adds exact expression provenance, not a second invocation.
-        Ok(Some(ResolvedBinding {
-            symbol: binding.symbol,
-            is_call: false,
-        }))
+        Ok(Some((
+            ResolvedBinding {
+                symbol: binding.symbol,
+                is_call: false,
+            },
+            ProcedureApplicationEvidence {
+                scope: self.fact(scope)?,
+                parameters: self
+                    .parameters
+                    .get(&scope)
+                    .map(Vec::as_slice)
+                    .unwrap_or_default(),
+            },
+        )))
     }
 
     fn procedure_arguments_match(
@@ -1944,19 +1970,51 @@ impl<'a> VbaBindings<'a> {
                     .is_some_and(|trivia| trivia.contains(&b'\n'))))
     }
 
+    fn reference_admitted(
+        &self,
+        fact: &SyntaxFact,
+        text: &str,
+        cancellation: &Cancellation,
+    ) -> Result<bool, AdapterError> {
+        cancellation.check()?;
+        if fact.syntax_kind().as_str() != "vba.compilation_identifier.reference"
+            && self.compilation_activity(fact) == VbaCompilationActivity::Inactive
+        {
+            return Ok(false);
+        }
+        Ok(text.len() <= self.maximum_name_bytes)
+    }
+
+    pub(super) fn resolve_with_application_evidence(
+        &self,
+        fact: &SyntaxFact,
+        text: &str,
+        cancellation: &Cancellation,
+    ) -> Result<Option<(ResolvedBinding, Option<ProcedureApplicationEvidence<'_>>)>, AdapterError>
+    {
+        if fact.syntax_kind().as_str() != "vba.application.reference" {
+            return Ok(self
+                .resolve(fact, text, cancellation)?
+                .map(|binding| (binding, None)));
+        }
+        if !self.reference_admitted(fact, text, cancellation)? {
+            return Ok(None);
+        }
+        if let Some(binding) = self.array_application(fact, cancellation)? {
+            return Ok(Some((binding, None)));
+        }
+        Ok(self
+            .procedure_application_with_evidence(fact, text, cancellation)?
+            .map(|(binding, evidence)| (binding, Some(evidence))))
+    }
+
     pub(super) fn resolve(
         &self,
         fact: &SyntaxFact,
         text: &str,
         cancellation: &Cancellation,
     ) -> Result<Option<ResolvedBinding>, AdapterError> {
-        cancellation.check()?;
-        if fact.syntax_kind().as_str() != "vba.compilation_identifier.reference"
-            && self.compilation_activity(fact) == VbaCompilationActivity::Inactive
-        {
-            return Ok(None);
-        }
-        if text.len() > self.maximum_name_bytes {
+        if !self.reference_admitted(fact, text, cancellation)? {
             return Ok(None);
         }
         if matches!(
@@ -3427,6 +3485,158 @@ mod tests {
                 17,
             ),
         ]
+    }
+
+    #[test]
+    fn procedure_application_evidence_requires_complete_materialized_parameter_definitions() {
+        let source = "Sub Accept(value As Long)\nEnd Sub\nSub Run()\nCall Accept(1)\nEnd Sub\n";
+        let end = u64::try_from(source.len()).unwrap();
+        let run = u64::try_from(source.find("Sub Run").unwrap()).unwrap();
+        let first_end = run - 1;
+        let call = u64::try_from(source.find("Call Accept").unwrap()).unwrap();
+        let call_end = call + u64::try_from("Call Accept(1)".len()).unwrap();
+        let original = vec![
+            fact(1, None, SyntaxFactKind::Scope, "vba.file.scope", 0, end),
+            fact(
+                2,
+                Some(1),
+                SyntaxFactKind::Scope,
+                "vba.sub_function.scope",
+                0,
+                first_end,
+            ),
+            fact(
+                3,
+                Some(2),
+                SyntaxFactKind::Declaration,
+                "vba.sub_function.declaration",
+                0,
+                first_end,
+            ),
+            fact(
+                4,
+                Some(3),
+                SyntaxFactKind::Occurrence,
+                "vba.identifier.definition",
+                4,
+                10,
+            ),
+            fact(
+                5,
+                Some(2),
+                SyntaxFactKind::Declaration,
+                "vba.parameter.declaration",
+                11,
+                24,
+            ),
+            fact(
+                6,
+                Some(5),
+                SyntaxFactKind::Occurrence,
+                "vba.identifier.definition",
+                11,
+                16,
+            ),
+            fact(
+                7,
+                Some(1),
+                SyntaxFactKind::Scope,
+                "vba.sub_function.scope",
+                run,
+                end,
+            ),
+            fact(
+                8,
+                Some(7),
+                SyntaxFactKind::Declaration,
+                "vba.sub_function.declaration",
+                run,
+                end,
+            ),
+            fact(
+                9,
+                Some(8),
+                SyntaxFactKind::Occurrence,
+                "vba.identifier.definition",
+                run + 4,
+                run + 7,
+            ),
+            fact(
+                10,
+                Some(7),
+                SyntaxFactKind::Occurrence,
+                "vba.application.reference",
+                call,
+                call_end,
+            ),
+            fact(
+                11,
+                Some(10),
+                SyntaxFactKind::Occurrence,
+                "vba.invoked_identifier.reference",
+                call + 5,
+                call + 11,
+            ),
+        ];
+        let target = SymbolId::from_bytes([1; 20]);
+        let parameter = SymbolId::from_bytes([2; 20]);
+        let symbols = HashMap::from([
+            (4, target),
+            (6, parameter),
+            (9, SymbolId::from_bytes([3; 20])),
+        ]);
+        let cancellation = Cancellation::new();
+        let bindings =
+            VbaBindings::new(&original, source.as_bytes(), &symbols, 4096, &cancellation).unwrap();
+        let (binding, evidence) = bindings
+            .resolve_with_application_evidence(&original[9], "Call Accept(1)", &cancellation)
+            .unwrap()
+            .unwrap();
+        assert_eq!(binding.symbol, target);
+        assert!(!binding.is_call);
+        let evidence = evidence.unwrap();
+        assert_eq!(evidence.scope.local_id(), 2);
+        assert_eq!(evidence.parameters.len(), 1);
+        assert_eq!(evidence.parameters[0].0.local_id(), 5);
+        assert_eq!(evidence.parameters[0].1.local_id(), 6);
+        assert_eq!(evidence.parameters[0].2, parameter);
+        for mode in [
+            "missing-definition",
+            "unmaterialized-definition",
+            "duplicate-definition",
+        ] {
+            let mut facts = original.clone();
+            let mut available = symbols.clone();
+            match mode {
+                "missing-definition" => facts.retain(|fact| fact.local_id() != 6),
+                "unmaterialized-definition" => {
+                    available.remove(&6);
+                }
+                "duplicate-definition" => {
+                    facts.push(fact(
+                        12,
+                        Some(5),
+                        SyntaxFactKind::Occurrence,
+                        "vba.identifier.definition",
+                        11,
+                        16,
+                    ));
+                    available.insert(12, parameter);
+                }
+                _ => unreachable!(),
+            }
+            let bindings =
+                VbaBindings::new(&facts, source.as_bytes(), &available, 4096, &cancellation)
+                    .unwrap();
+            let application = facts.iter().find(|fact| fact.local_id() == 10).unwrap();
+            assert!(
+                bindings
+                    .resolve_with_application_evidence(application, "Call Accept(1)", &cancellation)
+                    .unwrap()
+                    .is_none(),
+                "{mode}"
+            );
+        }
     }
 
     #[test]

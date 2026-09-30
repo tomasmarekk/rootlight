@@ -2,7 +2,328 @@
 //! Source-bound identities are distinct from later project and runtime resolution.
 
 use super::*;
-use rootlight_ir::ContainerRef;
+use rootlight_ir::{ContainerRef, FactRef};
+
+fn application_proof_output(
+    source: &str,
+    language: &'static str,
+    ir: IrLimits,
+    cancellation: &Cancellation,
+) -> Result<AnalysisOutput, AdapterError> {
+    let provider = Arc::new(provider());
+    let case = LanguageCase {
+        name: language,
+        ..VBA
+    };
+    let fixture = Fixture::new(case, source.as_bytes());
+    let base = limits();
+    let budget = AnalysisLimits::new(
+        base.max_source_bytes(),
+        base.max_syntax_nodes(),
+        base.max_syntax_depth(),
+        base.max_embedded_ranges(),
+        base.max_reported_memory_bytes(),
+        base.syntax_stream().clone(),
+        base.ir_stream().clone(),
+        ir,
+    )
+    .unwrap();
+    let request = request(&fixture.snapshot, &fixture.source, case, &budget);
+    execute_analysis(
+        &analyzer(&provider, case),
+        &request,
+        ExtensionSupport::default(),
+        MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
+        cancellation,
+    )
+}
+
+#[test]
+fn vba_application_proofs_retain_exact_materialized_formals_and_parser_parent() {
+    const RULE: &str = "vba-procedure-application-v1.source";
+    for language in ["vba", "visual-basic-classic"] {
+        for native in [false, true] {
+            for (parameters, arguments, clauses) in [
+                ("", "", Vec::<&str>::new()),
+                ("ByVal value As Long", "1", vec!["ByVal value As Long"]),
+                (
+                    "ByVal value As Long, ByRef other As Long",
+                    "1, local",
+                    vec!["ByVal value As Long", "ByRef other As Long"],
+                ),
+            ] {
+                let body = if native {
+                    "local = 1 + 2\n"
+                } else {
+                    "local = 2\n"
+                };
+                let source = format!(
+                    "Sub Accept({parameters})\nEnd Sub\nSub Run()\nDim local As Long\n{body}Call Accept({arguments})\nCall Accept({arguments})\nEnd Sub\n"
+                );
+                let result =
+                    application_proof_output(&source, language, IrLimits::default(), &deadline())
+                        .unwrap();
+                let document = result.document();
+                let target = document
+                    .entities
+                    .iter()
+                    .find(|entity| entity.canonical_name == "Accept")
+                    .unwrap();
+                let parser = document
+                    .provenance
+                    .iter()
+                    .find(|proof| proof.id == document.files[0].provenance)
+                    .unwrap();
+                assert_eq!(parser.rule, None);
+                assert!(parser.derivation_parents.is_empty());
+                let applications: Vec<_> = document.occurrences.iter().filter(|site|
+                    site.syntax_kind == "vba.application.reference"
+                    && matches!(site.target, OccurrenceTarget::Resolved { symbol } if symbol == target.id)
+                ).collect();
+                assert_eq!(applications.len(), 2, "{language}: {source}");
+                let mut proof_ids = BTreeSet::new();
+                for application in applications {
+                    let proof = document
+                        .provenance
+                        .iter()
+                        .find(|proof| proof.id == application.provenance)
+                        .unwrap();
+                    assert!(proof_ids.insert(proof.id));
+                    assert_eq!(proof.rule.as_deref(), Some(RULE));
+                    assert_eq!(proof.producer_kind, ProducerKind::Parser);
+                    assert_eq!(proof.producer, parser.producer);
+                    assert_eq!(proof.binary_digest, parser.binary_digest);
+                    assert_eq!(proof.frontend_version, parser.frontend_version);
+                    assert_eq!(proof.build_context, parser.build_context);
+                    assert_eq!(proof.tier, parser.tier);
+                    assert_eq!(proof.language, parser.language);
+                    assert!(proof.derivation_parents.contains(&FactRef::Fact(parser.id)));
+                    assert!(
+                        proof
+                            .derivation_parents
+                            .contains(&FactRef::Entity(target.id))
+                    );
+                    assert!(proof.input_sources.contains(&parser.input_sources[0]));
+                    assert!(proof.evidence_sources.contains(&application.source));
+                    assert_eq!(proof.derivation_parents.len(), 2 + clauses.len());
+                    for clause in &clauses {
+                        let start = u64::try_from(source.find(clause).unwrap()).unwrap();
+                        let end = start + u64::try_from(clause.len()).unwrap();
+                        let formal = document
+                            .entities
+                            .iter()
+                            .find(|entity| {
+                                entity.kind == EntityKind::Parameter
+                                    && entity.container == Some(ContainerRef::Entity(target.id))
+                                    && entity.evidence.source.as_ref().is_some_and(|reference| {
+                                        reference.span().start_byte() == start
+                                            && reference.span().end_byte() == end
+                                    })
+                            })
+                            .unwrap();
+                        assert!(
+                            proof
+                                .derivation_parents
+                                .contains(&FactRef::Entity(formal.id))
+                        );
+                        let clause_source = formal.evidence.source.as_ref().unwrap();
+                        assert!(proof.input_sources.contains(clause_source));
+                        assert!(proof.evidence_sources.contains(clause_source));
+                        let definition = document.occurrences.iter().find(|site| site.role == OccurrenceRole::Definition
+                            && matches!(site.target, OccurrenceTarget::Resolved { symbol } if symbol == formal.id)).unwrap();
+                        assert!(proof.evidence_sources.contains(&definition.source));
+                    }
+                    for reference in proof.input_sources.iter().chain(&proof.evidence_sources) {
+                        assert_eq!(reference.repository(), application.source.repository());
+                        assert_eq!(reference.generation(), application.source.generation());
+                        assert_eq!(reference.content_hash(), content_hash(source.as_bytes()));
+                        assert_eq!(reference.span().file(), application.source.span().file());
+                    }
+                    let relation = document
+                        .relations
+                        .iter()
+                        .find(|edge| {
+                            edge.subject == RelationEndpoint::Occurrence(application.id)
+                                && edge.predicate == RelationPredicate::RefersTo
+                                && edge.object == RelationEndpoint::Entity(target.id)
+                        })
+                        .unwrap();
+                    assert_eq!(relation.provenance, proof.id);
+                    assert!(!document.relations.iter().any(|edge| edge.subject
+                        == RelationEndpoint::Occurrence(application.id)
+                        && edge.predicate == RelationPredicate::Calls));
+                }
+                let calls: Vec<_> = document.occurrences.iter().filter(|site| site.role == OccurrenceRole::CallSite
+                    && matches!(site.target, OccurrenceTarget::Resolved { symbol } if symbol == target.id)).collect();
+                assert_eq!(calls.len(), 2);
+                assert!(calls.iter().all(|site| site.provenance == parser.id));
+                assert_eq!(document.provenance.len(), 3);
+                let coverage = result
+                    .report()
+                    .coverage()
+                    .domains()
+                    .iter()
+                    .find(|entry| entry.domain() == FactDomain::Provenance)
+                    .unwrap();
+                assert_eq!(coverage.discovered(), 3);
+                assert_eq!(coverage.indexed(), 3);
+                assert_eq!(coverage.skipped(), 0);
+            }
+        }
+    }
+}
+
+#[test]
+fn vba_application_proofs_do_not_attribute_wrong_arity_arrays_or_other_references() {
+    for language in ["vba", "visual-basic-classic"] {
+        for invocation in ["Call Accept()", "Call Accept(1)", "Call Accept(1, 2, 3)"] {
+            let source = format!(
+                "Sub Accept(ByVal first As Long, ByVal second As Long)\nEnd Sub\nSub Run()\n{invocation}\nEnd Sub\n"
+            );
+            let result =
+                application_proof_output(&source, language, IrLimits::default(), &deadline())
+                    .unwrap();
+            assert_eq!(result.document().provenance.len(), 1);
+            let application = result
+                .document()
+                .occurrences
+                .iter()
+                .find(|site| site.syntax_kind == "vba.application.reference")
+                .unwrap();
+            assert!(matches!(
+                application.target,
+                OccurrenceTarget::Unresolved { .. }
+            ));
+            assert_eq!(
+                application.provenance,
+                result.document().files[0].provenance
+            );
+        }
+        for source in [
+            "Sub Accept(ByVal value As Long, ByVal VALUE As Long)\nEnd Sub\nSub Run()\nCall Accept(1, 2)\nEnd Sub\n",
+            "Sub Run()\nDim values(0) As Long\nDim value As Long\nvalue = values(0)\nEnd Sub\n",
+            "Sub Accept(ByVal value As Long)\nEnd Sub\nSub Run()\nDim value As Long\nvalue = 1\nEnd Sub\n",
+        ] {
+            let result =
+                application_proof_output(source, language, IrLimits::default(), &deadline())
+                    .unwrap();
+            assert_eq!(result.document().provenance.len(), 1, "{source}");
+            assert!(
+                result
+                    .document()
+                    .occurrences
+                    .iter()
+                    .all(|site| site.provenance == result.document().files[0].provenance)
+            );
+        }
+    }
+}
+
+#[test]
+fn vba_application_proofs_obey_provenance_nested_and_cancellation_limits() {
+    use rootlight_adapter_sdk::{ResourceKind, SinkError};
+    use rootlight_cancel::CancellationReason;
+    let source = "Sub Accept(ByVal first As Long, ByVal second As Long)\nEnd Sub\nSub Run()\nCall Accept(1, 2)\nCall Accept(3, 4)\nEnd Sub\n";
+    for language in ["vba", "visual-basic-classic"] {
+        let mut exact = IrLimits::default();
+        exact.max_provenance_records = 3;
+        let result = application_proof_output(source, language, exact, &deadline()).unwrap();
+        assert_eq!(result.document().provenance.len(), 3);
+        for maximum in [1, 2] {
+            let mut short = IrLimits::default();
+            short.max_provenance_records = maximum;
+            assert!(
+                matches!(application_proof_output(source, language, short, &deadline()),
+                Err(AdapterError::Sink(SinkError::StreamLimit { resource: ResourceKind::Records, observed, limit }))
+                if observed == maximum + 1 && limit == maximum)
+            );
+        }
+        let mut short = IrLimits::default();
+        short.max_nested_items_per_record = 5;
+        assert!(matches!(
+            application_proof_output(source, language, short, &deadline()),
+            Err(AdapterError::Sink(SinkError::StreamLimit {
+                resource: ResourceKind::NestedItems,
+                observed: 6,
+                limit: 5
+            }))
+        ));
+        let cancelled = deadline();
+        cancelled.cancel(CancellationReason::ClientRequest);
+        assert!(matches!(
+            application_proof_output(source, language, IrLimits::default(), &cancelled),
+            Err(AdapterError::Cancelled {
+                reason: CancellationReason::ClientRequest
+            })
+        ));
+    }
+}
+
+#[test]
+fn vba_application_proofs_preserve_the_matched_getter_after_accessor_merging() {
+    let source = "Property Let Item(ByVal index As Long, ByVal value As Long)\nEnd Property\nProperty Get Item(ByVal index As Long) As Long\nItem = index\nEnd Property\nSub Run()\nDim result As Long\nresult = Item(1)\nEnd Sub\n";
+    for language in ["vba", "visual-basic-classic"] {
+        let result =
+            application_proof_output(source, language, IrLimits::default(), &deadline()).unwrap();
+        let document = result.document();
+        let start = u64::try_from(source.rfind("Item(1)").unwrap()).unwrap();
+        let application = document
+            .occurrences
+            .iter()
+            .find(|site| {
+                site.syntax_kind == "vba.application.reference"
+                    && site.source.span().start_byte() == start
+            })
+            .unwrap();
+        let OccurrenceTarget::Resolved { symbol } = application.target else {
+            panic!("complete getter application must resolve")
+        };
+        let proof = document
+            .provenance
+            .iter()
+            .find(|proof| proof.id == application.provenance)
+            .unwrap();
+        assert_eq!(
+            proof.rule.as_deref(),
+            Some("vba-procedure-application-v1.source")
+        );
+        assert!(proof.derivation_parents.contains(&FactRef::Entity(symbol)));
+        let getter_start = u64::try_from(source.find("Property Get").unwrap()).unwrap();
+        let getter_end = getter_start
+            + u64::try_from(
+                source[source.find("Property Get").unwrap()..]
+                    .find("End Property")
+                    .unwrap()
+                    + "End Property".len(),
+            )
+            .unwrap();
+        assert!(
+            proof
+                .evidence_sources
+                .iter()
+                .any(|reference| reference.span().start_byte() == getter_start
+                    && reference.span().end_byte() == getter_end)
+        );
+        let clause_start = u64::try_from(source.rfind("ByVal index As Long").unwrap()).unwrap();
+        let clause_end = clause_start + u64::try_from("ByVal index As Long".len()).unwrap();
+        let clause = proof
+            .input_sources
+            .iter()
+            .find(|reference| {
+                reference.span().start_byte() == clause_start
+                    && reference.span().end_byte() == clause_end
+            })
+            .unwrap();
+        assert!(proof.evidence_sources.contains(clause));
+        assert!(
+            !proof
+                .input_sources
+                .iter()
+                .any(|reference| reference.span().start_byte()
+                    == u64::try_from(source.find("ByVal value").unwrap()).unwrap())
+        );
+    }
+}
 
 pub(super) const VBA: LanguageCase = LanguageCase {
     name: "vba",

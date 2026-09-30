@@ -59,6 +59,7 @@ const ENTITY_IDENTITY_GUARD_CONTEXT: &str = "rootlight/treesitter-entity-identit
 const STABLE_SCOPE_IDENTITY_UNAVAILABLE: &str = "stable-scope-identity-unavailable";
 const VBA_CONDITIONAL_EVALUATION_UNAVAILABLE: &str =
     "vba-conditional-compilation-evaluation-unavailable";
+type ApplicationProofKey = (u64, u64, SymbolId, u64, u64);
 
 /// Tree-sitter syntax analyzer backed by an injected parser-independent provider.
 #[derive(Clone)]
@@ -816,13 +817,19 @@ fn memory_policy_for(enforcement: MemoryEnforcement) -> MemoryAdmissionPolicy {
     }
 }
 
+struct LoweringBudget {
+    string_bytes: usize,
+    records: usize,
+    nested_items: usize,
+}
+
 fn preflight_lowering_limits(
     request: &AnalysisRequest<'_>,
     parse_output: &ParseOutput,
     producer: &ProducerIdentity,
     frontend_version: &str,
     cancellation: &Cancellation,
-) -> Result<usize, AdapterError> {
+) -> Result<LoweringBudget, AdapterError> {
     let limits = request.limits().ir();
     require_resource_limit(ResourceKind::Records, 1, limits.max_files)?;
     require_resource_limit(ResourceKind::Records, 1, limits.max_provenance_records)?;
@@ -1169,7 +1176,11 @@ fn preflight_lowering_limits(
         nested_items,
         limits.max_total_nested_items,
     )?;
-    Ok(string_bytes)
+    Ok(LoweringBudget {
+        string_bytes,
+        records: total_records,
+        nested_items,
+    })
 }
 
 struct Lowering<'context, 'source> {
@@ -1217,13 +1228,14 @@ impl<'context, 'source> Lowering<'context, 'source> {
     }
 
     fn lower(mut self, cancellation: &Cancellation) -> Result<LoweredOutput, AdapterError> {
-        let mut total_string_bytes = preflight_lowering_limits(
+        let mut budget = preflight_lowering_limits(
             self.request,
             self.parse_output,
             self.analyzer.descriptor.identity(),
             &self.analyzer.frontend_version,
             cancellation,
         )?;
+        let mut total_string_bytes = budget.string_bytes;
         validate_fact_graph(
             self.parse_output.facts(),
             self.request.included_ranges(),
@@ -1360,6 +1372,8 @@ impl<'context, 'source> Lowering<'context, 'source> {
         let syntax_confidence = confidence(SYNTAX_CONFIDENCE)?;
         let containment_confidence = confidence(CONTAINMENT_CONFIDENCE)?;
         let mut occurrences = BTreeMap::<FactId, OccurrenceRecord>::new();
+        let mut application_proofs = Vec::<ProvenanceRecord>::new();
+        let mut application_proof_ids = HashMap::<ApplicationProofKey, FactId>::new();
         let mut relations = BTreeMap::<FactId, RelationRecord>::new();
         let mut extensions = BTreeMap::<FactId, ExtensionEnvelope>::new();
         let mut extension_bytes = 0_usize;
@@ -2203,7 +2217,8 @@ impl<'context, 'source> Lowering<'context, 'source> {
                 }
                 let mut vba_array_invocation_proven = false;
                 if let Some(bindings) = &vba_bindings
-                    && let Some(binding) = bindings.resolve(fact, text, cancellation)?
+                    && let Some((binding, application_evidence)) =
+                        bindings.resolve_with_application_evidence(fact, text, cancellation)?
                 {
                     if fact.syntax_kind().as_str() == "vba.event_identifier.reference" {
                         // A declared event is a static reference target. Its
@@ -2221,6 +2236,20 @@ impl<'context, 'source> Lowering<'context, 'source> {
                     occurrence.target = OccurrenceTarget::Resolved {
                         symbol: binding.symbol,
                     };
+                    if let Some(evidence) = application_evidence {
+                        occurrence.provenance = self.application_provenance(
+                            fact,
+                            binding.symbol,
+                            evidence,
+                            &entities,
+                            &provenance,
+                            &mut application_proofs,
+                            &mut application_proof_ids,
+                            &mut budget,
+                            &mut total_string_bytes,
+                            cancellation,
+                        )?;
+                    }
                     if binding.is_call {
                         occurrence.role = OccurrenceRole::CallSite;
                     } else {
@@ -2742,10 +2771,24 @@ impl<'context, 'source> Lowering<'context, 'source> {
         }
 
         cancellation.check()?;
+        sort_owned_cancellable_by(&mut application_proofs, cancellation, |left, right| {
+            left.id.cmp(&right.id)
+        })?;
+        for adjacent in application_proofs.windows(2) {
+            cancellation.check()?;
+            if let [left, right] = adjacent
+                && left.id == right.id
+                && left != right
+            {
+                return Err(provider_failure("vba-application-proof-collision"));
+            }
+        }
+        application_proofs.dedup_by(|left, right| left.id == right.id);
         let stats = DomainStats::new(
             entities.len(),
             occurrences.len(),
             relations.len(),
+            checked_add(1, application_proofs.len())?,
             diagnostics.len(),
             &skipped,
             extensions.len(),
@@ -2767,8 +2810,30 @@ impl<'context, 'source> Lowering<'context, 'source> {
         )?;
 
         let mut records = Vec::new();
+        let record_count = [
+            2,
+            application_proofs.len(),
+            entities.len(),
+            occurrences.len(),
+            relations.len(),
+            coverage_records.len(),
+            skipped.len(),
+            diagnostics.len(),
+            extensions.len(),
+        ]
+        .into_iter()
+        .try_fold(0, checked_add)?;
+        require_resource_limit(
+            ResourceKind::Records,
+            record_count,
+            self.request.limits().ir().max_total_records,
+        )?;
+        records
+            .try_reserve_exact(record_count)
+            .map_err(|_| SinkError::AllocationFailed)?;
         records.push(IrRecord::File(file));
         records.push(IrRecord::Provenance(provenance));
+        records.extend(application_proofs.into_iter().map(IrRecord::Provenance));
         records.extend(entities.into_values().map(IrRecord::Entity));
         records.extend(occurrences.into_values().map(IrRecord::Occurrence));
         records.extend(relations.into_values().map(IrRecord::Relation));
@@ -2787,6 +2852,189 @@ impl<'context, 'source> Lowering<'context, 'source> {
 
     fn provenance(&self) -> Result<ProvenanceRecord, AdapterError> {
         parser_provenance(self.analyzer, self.request, self.full_source)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn application_provenance(
+        &self,
+        application: &SyntaxFact,
+        target: SymbolId,
+        evidence: crate::vba_bindings::ProcedureApplicationEvidence<'_>,
+        entities: &BTreeMap<SymbolId, EntityRecord>,
+        parser: &ProvenanceRecord,
+        proofs: &mut Vec<ProvenanceRecord>,
+        proof_ids: &mut HashMap<ApplicationProofKey, FactId>,
+        budget: &mut LoweringBudget,
+        total_string_bytes: &mut usize,
+        cancellation: &Cancellation,
+    ) -> Result<FactId, AdapterError> {
+        const RULE: &str = "vba-procedure-application-v1.source";
+        cancellation.check()?;
+        let key = (
+            application.span().start_byte(),
+            application.span().end_byte(),
+            target,
+            evidence.scope.span().start_byte(),
+            evidence.scope.span().end_byte(),
+        );
+        if let Some(id) = proof_ids.get(&key) {
+            return Ok(*id);
+        }
+        let same_source = |source: &SourceRef| {
+            source.repository() == self.full_source.repository()
+                && source.generation() == self.full_source.generation()
+                && source.content_hash() == self.full_source.content_hash()
+                && span_contains(self.full_source.span(), source.span())
+        };
+        let target_entity = entities
+            .get(&target)
+            .ok_or_else(|| provider_failure("vba-application-proof-target"))?;
+        let target_source = target_entity
+            .evidence
+            .source
+            .as_ref()
+            .filter(|source| same_source(source))
+            .ok_or_else(|| provider_failure("vba-application-proof-target"))?;
+        if !span_contains(self.full_source.span(), application.span())
+            || !span_contains(self.full_source.span(), evidence.scope.span())
+            || parser.id != target_entity.provenance
+        {
+            return Err(provider_failure("vba-application-proof-source"));
+        }
+        for (declaration, definition, symbol) in evidence.parameters {
+            cancellation.check()?;
+            let parameter = entities
+                .get(symbol)
+                .ok_or_else(|| provider_failure("vba-application-proof-parameter"))?;
+            let source = parameter
+                .evidence
+                .source
+                .as_ref()
+                .ok_or_else(|| provider_failure("vba-application-proof-parameter"))?;
+            if parameter.kind != EntityKind::Parameter
+                || parameter.container != Some(ContainerRef::Entity(target))
+                || parameter.provenance != parser.id
+                || !same_source(source)
+                || !span_contains(evidence.scope.span(), declaration.span())
+                || !span_contains(declaration.span(), definition.span())
+                || !span_contains(declaration.span(), source.span())
+            {
+                return Err(provider_failure("vba-application-proof-parameter"));
+            }
+        }
+
+        let limits = self.request.limits().ir();
+        let scope_source = source_for_span(self.full_source, evidence.scope.span());
+        let distinct_target_source = *target_source != scope_source;
+        let evidence_count = checked_add(
+            checked_add(2, usize::from(distinct_target_source))?,
+            evidence
+                .parameters
+                .len()
+                .checked_mul(2)
+                .ok_or(SinkError::AccountingOverflow)?,
+        )?;
+        let parent_count = checked_add(2, evidence.parameters.len())?;
+        let input_count = checked_add(1, evidence.parameters.len())?;
+        let nested_count = checked_add(input_count, checked_add(evidence_count, parent_count)?)?;
+        for count in [input_count, evidence_count, parent_count] {
+            require_resource_limit(
+                ResourceKind::NestedItems,
+                count,
+                limits.max_nested_items_per_record,
+            )?;
+        }
+        require_resource_limit(
+            ResourceKind::Records,
+            checked_add(2, proofs.len())?,
+            limits.max_provenance_records,
+        )?;
+        let records = checked_add(budget.records, 1)?;
+        let nested_items = checked_add(budget.nested_items, nested_count)?;
+        require_resource_limit(ResourceKind::Records, records, limits.max_total_records)?;
+        require_resource_limit(
+            ResourceKind::NestedItems,
+            nested_items,
+            limits.max_total_nested_items,
+        )?;
+        for value in [
+            parser.producer.name(),
+            parser.producer.version(),
+            parser.language.as_str(),
+            RULE,
+        ] {
+            account_string(total_string_bytes, value.len(), limits)?;
+        }
+        if let Some(version) = &parser.frontend_version {
+            account_string(total_string_bytes, version.len(), limits)?;
+        }
+
+        // Charge the complete source/parent closure before reserving any per-call
+        // vectors: many calls to a large signature must not bypass IR admission.
+        cancellation.check()?;
+        let mut evidence_sources = Vec::new();
+        evidence_sources
+            .try_reserve_exact(evidence_count)
+            .map_err(|_| SinkError::AllocationFailed)?;
+        evidence_sources.push(source_for_span(self.full_source, application.span()));
+        evidence_sources.push(scope_source);
+        if distinct_target_source {
+            evidence_sources.push(target_source.clone());
+        }
+        let mut derivation_parents = Vec::new();
+        derivation_parents
+            .try_reserve_exact(parent_count)
+            .map_err(|_| SinkError::AllocationFailed)?;
+        derivation_parents.extend([FactRef::Fact(parser.id), FactRef::Entity(target)]);
+        let mut input_sources = Vec::new();
+        input_sources
+            .try_reserve_exact(input_count)
+            .map_err(|_| SinkError::AllocationFailed)?;
+        input_sources.push(self.full_source.clone());
+        for (declaration, definition, symbol) in evidence.parameters {
+            cancellation.check()?;
+            input_sources.push(source_for_span(self.full_source, declaration.span()));
+            evidence_sources.push(source_for_span(self.full_source, declaration.span()));
+            evidence_sources.push(source_for_span(self.full_source, definition.span()));
+            derivation_parents.push(FactRef::Entity(*symbol));
+        }
+        sort_owned_cancellable_by(&mut input_sources, cancellation, Ord::cmp)?;
+        input_sources.dedup();
+        sort_owned_cancellable_by(&mut evidence_sources, cancellation, Ord::cmp)?;
+        evidence_sources.dedup();
+        crate::runtime::sort_cancellable_by(&mut derivation_parents, cancellation, Ord::cmp)?;
+        derivation_parents.dedup();
+        let mut proof = ProvenanceRecord {
+            id: FactId::from_bytes([0; 20]),
+            repository: parser.repository,
+            generation: parser.generation,
+            producer_kind: parser.producer_kind,
+            producer: parser.producer.clone(),
+            binary_digest: parser.binary_digest,
+            frontend_version: parser.frontend_version.clone(),
+            language: parser.language.clone(),
+            tier: parser.tier,
+            build_context: parser.build_context,
+            input_sources,
+            evidence_sources,
+            derivation_parents,
+            rule: Some(RULE.to_owned()),
+        };
+        proof.id = derive_provenance_record_id(&proof)
+            .map_err(|_| provider_failure("treesitter-provenance-identity"))?;
+        cancellation.check()?;
+        proofs
+            .try_reserve(1)
+            .map_err(|_| SinkError::AllocationFailed)?;
+        proof_ids
+            .try_reserve(1)
+            .map_err(|_| SinkError::AllocationFailed)?;
+        let id = proof.id;
+        proofs.push(proof);
+        proof_ids.insert(key, id);
+        budget.records = records;
+        budget.nested_items = nested_items;
+        Ok(id)
     }
 
     fn file(&self, provenance: FactId) -> Result<FileRecord, AdapterError> {
@@ -5037,6 +5285,7 @@ struct DomainStats {
     entities_indexed: usize,
     occurrences_indexed: usize,
     relations_indexed: usize,
+    provenance_indexed: usize,
     diagnostics: usize,
     skipped_regions: usize,
     skipped_by_domain: BTreeMap<FactDomain, usize>,
@@ -5049,6 +5298,7 @@ impl DomainStats {
         entities_indexed: usize,
         occurrences_indexed: usize,
         relations_indexed: usize,
+        provenance_indexed: usize,
         diagnostics: usize,
         skipped_regions: &BTreeMap<FactId, SkippedRegion>,
         extensions: usize,
@@ -5067,6 +5317,7 @@ impl DomainStats {
             entities_indexed,
             occurrences_indexed,
             relations_indexed,
+            provenance_indexed,
             diagnostics,
             skipped_regions: skipped_regions.len(),
             skipped_by_domain,
@@ -5086,7 +5337,8 @@ impl DomainStats {
         let files_discovered = 1_usize
             .checked_add(file_skipped)
             .ok_or(SinkError::AccountingOverflow)?;
-        let provenance_discovered = 1_usize
+        let provenance_discovered = self
+            .provenance_indexed
             .checked_add(provenance_skipped)
             .ok_or(SinkError::AccountingOverflow)?;
         let source_mappings_discovered = source_mapping_skipped;
@@ -5136,7 +5388,7 @@ impl DomainStats {
             (
                 FactDomain::Provenance,
                 provenance_discovered,
-                1,
+                self.provenance_indexed,
                 provenance_skipped,
             ),
             (
@@ -5937,6 +6189,53 @@ fn check_periodically(index: usize, cancellation: &Cancellation) -> Result<(), A
     Ok(())
 }
 
+fn sort_owned_cancellable_by<T>(
+    values: &mut [T],
+    cancellation: &Cancellation,
+    compare: impl Fn(&T, &T) -> std::cmp::Ordering + Copy,
+) -> Result<(), AdapterError> {
+    cancellation.check()?;
+    let mut ordered = Vec::new();
+    ordered
+        .try_reserve_exact(values.len())
+        .map_err(|_| SinkError::AllocationFailed)?;
+    for index in 0..values.len() {
+        check_periodically(index, cancellation)?;
+        ordered.push(index);
+    }
+    crate::runtime::sort_cancellable_by(&mut ordered, cancellation, |left, right| {
+        // These indices are the complete original position set; sorting only
+        // permutes that set while the owned values remain immutably borrowed.
+        compare(&values[*left], &values[*right]).then_with(|| left.cmp(right))
+    })?;
+    cancellation.check()?;
+    let mut destination = Vec::new();
+    destination
+        .try_reserve_exact(values.len())
+        .map_err(|_| SinkError::AllocationFailed)?;
+    for index in 0..values.len() {
+        check_periodically(index, cancellation)?;
+        destination.push(0);
+    }
+    for (new_position, old_position) in ordered.into_iter().enumerate() {
+        check_periodically(new_position, cancellation)?;
+        destination[old_position] = new_position;
+    }
+    // Invert new→old ordering before swapping: using it directly would apply
+    // the inverse sort for cycles longer than two elements.
+    for position in 0..values.len() {
+        check_periodically(position, cancellation)?;
+        while destination[position] != position {
+            cancellation.check()?;
+            let target = destination[position];
+            values.swap(position, target);
+            destination.swap(position, target);
+        }
+    }
+    cancellation.check()?;
+    Ok(())
+}
+
 fn emit_records(
     records: Vec<IrRecord>,
     request: &AnalysisRequest<'_>,
@@ -6037,6 +6336,113 @@ mod tests {
             0,
             SyntaxKindLabel::new(label).expect("test label is valid"),
         )
+    }
+
+    #[test]
+    fn owned_lowering_sort_preserves_non_copy_payloads_and_stable_ties() {
+        struct Owned {
+            key: u64,
+            payload: String,
+        }
+        let mut values: Vec<_> = [(2, "two"), (0, "zero"), (1, "one-first"), (1, "one-second")]
+            .into_iter()
+            .map(|(key, payload)| Owned {
+                key,
+                payload: payload.to_owned(),
+            })
+            .collect();
+        sort_owned_cancellable_by(&mut values, &Cancellation::new(), |left, right| {
+            left.key.cmp(&right.key)
+        })
+        .unwrap();
+        assert_eq!(
+            values
+                .iter()
+                .map(|value| value.payload.as_str())
+                .collect::<Vec<_>>(),
+            ["zero", "one-first", "one-second", "two"]
+        );
+        let mut empty: Vec<Owned> = Vec::new();
+        sort_owned_cancellable_by(&mut empty, &Cancellation::new(), |left, right| {
+            left.key.cmp(&right.key)
+        })
+        .unwrap();
+        let mut singleton = vec![Owned {
+            key: 1,
+            payload: "only".to_owned(),
+        }];
+        let pointer = singleton[0].payload.as_ptr();
+        sort_owned_cancellable_by(&mut singleton, &Cancellation::new(), |left, right| {
+            left.key.cmp(&right.key)
+        })
+        .unwrap();
+        assert_eq!(singleton[0].payload.as_ptr(), pointer);
+    }
+
+    #[test]
+    fn owned_lowering_sort_moves_large_vectors_without_cloning_payloads() {
+        struct Owned {
+            key: usize,
+            payload: Box<usize>,
+        }
+        let count = 50_000;
+        let mut values: Vec<_> = (0..count)
+            .rev()
+            .map(|key| Owned {
+                key,
+                payload: Box::new(key),
+            })
+            .collect();
+        let pointers: BTreeMap<_, _> = values
+            .iter()
+            .map(|value| (value.key, std::ptr::from_ref(value.payload.as_ref())))
+            .collect();
+        let comparisons = std::cell::Cell::new(0_usize);
+        sort_owned_cancellable_by(&mut values, &Cancellation::new(), |left, right| {
+            comparisons.set(comparisons.get() + 1);
+            left.key.cmp(&right.key)
+        })
+        .unwrap();
+        for (position, value) in values.iter().enumerate() {
+            assert_eq!(value.key, position);
+            assert_eq!(*value.payload, position);
+            assert_eq!(
+                std::ptr::from_ref(value.payload.as_ref()),
+                pointers[&position]
+            );
+        }
+        assert!(comparisons.get() < count * 32);
+    }
+
+    #[test]
+    fn owned_lowering_sort_propagates_cancellation_without_losing_owned_values() {
+        use rootlight_cancel::CancellationReason;
+        let mut values: Vec<_> = (0..1024).rev().map(|key| format!("{key:04}")).collect();
+        let original = values.clone();
+        let cancellation = Cancellation::new();
+        let comparisons = std::cell::Cell::new(0);
+        assert!(matches!(
+            sort_owned_cancellable_by(&mut values, &cancellation, |left, right| {
+                comparisons.set(comparisons.get() + 1);
+                if comparisons.get() == 100 {
+                    cancellation.cancel(CancellationReason::ClientRequest);
+                }
+                left.cmp(right)
+            }),
+            Err(AdapterError::Cancelled {
+                reason: CancellationReason::ClientRequest
+            })
+        ));
+        assert_eq!(values, original);
+        assert!(comparisons.get() >= 100);
+        assert!(comparisons.get() < 1024);
+        assert!(matches!(
+            sort_owned_cancellable_by(&mut values, &cancellation, Ord::cmp),
+            Err(AdapterError::Cancelled {
+                reason: CancellationReason::ClientRequest
+            })
+        ));
+        assert_eq!(values, original);
     }
 
     #[test]
