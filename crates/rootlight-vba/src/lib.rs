@@ -42,8 +42,8 @@ pub use module::{
     ModuleProcedure, module_inventory,
 };
 pub use module_body::{
-    ModuleBodyStatement, ModuleLocalDeclaration, ModuleLocalKind, ModuleScalarAssignment,
-    ModuleScalarValue, ModuleScalarValueKind, ModuleZeroArgumentCall,
+    ModuleBodyStatement, ModuleCall, ModuleLocalDeclaration, ModuleLocalKind,
+    ModuleScalarAssignment, ModuleScalarValue, ModuleScalarValueKind, ModuleZeroArgumentCall,
 };
 pub use parameter::array_parameter_modifiers;
 pub use procedure::{

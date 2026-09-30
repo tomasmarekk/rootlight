@@ -13,13 +13,15 @@ pub struct ModuleLimits {
     max_statements: usize,
     max_procedures: usize,
     max_parameters: usize,
+    max_arguments: usize,
 }
 
 impl ModuleLimits {
     /// Creates source-byte, logical-statement and retained-procedure ceilings.
     /// Zero ceilings are valid and admit only inputs requiring no such resource.
-    /// The aggregate parameter ceiling defaults to the procedure ceiling; use
-    /// [`Self::with_max_parameters`] to admit a separately bounded comma list.
+    /// Aggregate parameter and argument ceilings default to the procedure ceiling;
+    /// use [`Self::with_max_parameters`] and [`Self::with_max_arguments`] to admit
+    /// separately bounded comma lists.
     #[must_use]
     pub const fn new(
         max_source_bytes: usize,
@@ -31,6 +33,7 @@ impl ModuleLimits {
             max_statements,
             max_procedures,
             max_parameters: max_procedures,
+            max_arguments: max_procedures,
         }
     }
 
@@ -40,6 +43,15 @@ impl ModuleLimits {
     #[must_use]
     pub const fn with_max_parameters(mut self, max_parameters: usize) -> Self {
         self.max_parameters = max_parameters;
+        self
+    }
+
+    /// Sets the aggregate retained-argument ceiling across every Call in the module.
+    /// A logical statement can contain many arguments, so this ceiling is separate
+    /// from statement count. Zero still admits bare and explicitly empty Calls.
+    #[must_use]
+    pub const fn with_max_arguments(mut self, max_arguments: usize) -> Self {
+        self.max_arguments = max_arguments;
         self
     }
 }
@@ -210,7 +222,9 @@ pub enum ModuleError<E> {
     ProcedureLimit,
     /// Retained parameters across all procedures exceed the parameter ceiling.
     ParameterLimit,
-    /// Fallible reservation of bounded procedure, parameter or body storage failed.
+    /// Retained Call arguments across the module exceed the argument ceiling.
+    ArgumentLimit,
+    /// Fallible reservation of bounded procedure, parameter, argument or body storage failed.
     AllocationFailed,
     /// The caller's cancellation or work callback failed.
     Cancelled(E),
@@ -224,6 +238,7 @@ impl<E> fmt::Display for ModuleError<E> {
             Self::StatementLimit => "module statement limit exceeded",
             Self::ProcedureLimit => "module procedure limit exceeded",
             Self::ParameterLimit => "module parameter limit exceeded",
+            Self::ArgumentLimit => "module argument limit exceeded",
             Self::AllocationFailed => "module inventory allocation failed",
             Self::Cancelled(_) => "module scan cancelled",
         })
@@ -253,8 +268,10 @@ impl<E: std::error::Error + 'static> std::error::Error for ModuleError<E> {
 /// Bodies admit one typed scalar Dim or Const per statement and simple scalar
 /// assignments with an optional Let prefix. Const values are unsigned decimal,
 /// physically closed doubled-quote strings or True/False; assignments additionally
-/// admit a simple name. Explicit Call statements admit only a simple name and
-/// optional empty parentheses, with space/tab-based logical trivia. Keyword-shaped
+/// admit a simple name. Explicit Call statements admit a simple callee and optional
+/// parentheses containing a complete positional list of these scalar atoms, with
+/// space/tab-based logical trivia. Named, omitted, ByVal and nonparenthesized
+/// arguments are unsupported. Keyword-shaped
 /// unbracketed names, other calls and operators are unsupported. Every body
 /// statement must be consumed completely.
 /// Bare `Name` callees stay outside this closed call subset; bracketed `[Name]` is admitted.
@@ -272,6 +289,8 @@ impl<E: std::error::Error + 'static> std::error::Error for ModuleError<E> {
 /// Across all procedures, retained body records cannot exceed the statement ceiling.
 /// Retained parameters across all procedures have a separate aggregate ceiling;
 /// their storage is reserved fallibly, never inferred from logical statement count.
+/// Retained Call arguments have their own aggregate ceiling across every procedure,
+/// with fallible storage; positional atoms do not establish parameter or type identity.
 /// This proves structure only, not type identity, visibility or name uniqueness.
 ///
 /// # Errors
@@ -310,6 +329,7 @@ pub fn module_inventory<E>(
     let mut attribute_header = true;
     let mut body_count = 0_usize;
     let mut parameter_count = 0_usize;
+    let mut argument_count = 0_usize;
     while cursor < source.len() {
         check().map_err(ModuleError::Cancelled)?;
         if inventory.statement_count >= limits.max_statements {
@@ -355,11 +375,26 @@ pub fn module_inventory<E>(
                     inventory.procedures.push(procedure);
                 }
             } else {
-                let Some(statement) = super::module_body::statement(source, range.clone(), check)
-                    .map_err(ModuleError::Cancelled)?
+                let remaining_arguments = limits
+                    .max_arguments
+                    .checked_sub(argument_count)
+                    .ok_or(ModuleError::ArgumentLimit)?;
+                let Some(statement) = super::module_body::statement(
+                    source,
+                    range.clone(),
+                    remaining_arguments,
+                    check,
+                )?
                 else {
                     return Err(ModuleError::Unsupported { range });
                 };
+                let retained_arguments = match &statement {
+                    ModuleBodyStatement::Call(call) => call.argument_values().len(),
+                    ModuleBodyStatement::Declaration(_) | ModuleBodyStatement::Assignment(_) => 0,
+                };
+                argument_count = argument_count
+                    .checked_add(retained_arguments)
+                    .ok_or(ModuleError::ArgumentLimit)?;
                 let maximum = limits.max_statements - body_count + procedure.statements.len();
                 super::module_body::reserve(&mut procedure.statements, maximum)?;
                 procedure.statements.push(statement);
@@ -824,6 +859,7 @@ fn word<'a, E>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ModuleScalarValueKind;
 
     fn parse(source: &[u8]) -> Result<ModuleInventory, ModuleError<()>> {
         module_inventory(
@@ -1441,6 +1477,221 @@ mod tests {
     }
 
     #[test]
+    fn scalar_call_lists_preserve_module_relative_ranges_and_procedure_ownership() {
+        for newline in ["\n", "\r\n"] {
+            let parentheses = format!(
+                "( _{newline} 007 _{newline}, _{newline} \"a,:='Rem End Sub \"\"quoted\"\"\", [local], FALSE _{newline} )"
+            );
+            let call_text = format!("Call _{newline} [Finish] _{newline} {parentheses}");
+            let source = format!(
+                "Attribute VB_Name = \"ArgumentModule\"{newline}Sub Run(){newline}  Dim local As Long{newline}  {call_text} ' header-looking End Sub{newline}  Call Finish:End Sub{newline}Sub Finish(){newline}  Call [Run](){newline}End Sub{newline}"
+            );
+            let inventory = parse(source.as_bytes()).unwrap();
+            assert_eq!(inventory.procedures().len(), 2);
+            let procedure = &inventory.procedures()[0];
+            assert_eq!(procedure.statements().len(), 3);
+            let ModuleBodyStatement::Call(call) = &procedure.statements()[1] else {
+                panic!("scalar call retained after the typed local");
+            };
+            assert_eq!(&source[call.statement()], call_text);
+            assert_eq!(&source[call.callee()], "[Finish]");
+            assert_eq!(&source[call.arguments().unwrap()], parentheses);
+            assert_eq!(call.argument_values().len(), 4);
+            for (value, (spelling, kind)) in call.argument_values().iter().zip([
+                ("007", ModuleScalarValueKind::UnsignedDecimal),
+                (
+                    "\"a,:='Rem End Sub \"\"quoted\"\"\"",
+                    ModuleScalarValueKind::String,
+                ),
+                ("[local]", ModuleScalarValueKind::Name),
+                ("FALSE", ModuleScalarValueKind::Boolean),
+            ]) {
+                assert_eq!(&source[value.span()], spelling);
+                assert_eq!(value.kind(), kind);
+                assert!(procedure.body().start <= value.span().start);
+                assert!(value.span().end <= procedure.body().end);
+                assert!(call.arguments().unwrap().start < value.span().start);
+                assert!(value.span().end < call.arguments().unwrap().end);
+            }
+            let ModuleBodyStatement::Call(bare) = &procedure.statements()[2] else {
+                panic!("bare Call remains retained");
+            };
+            assert!(bare.argument_values().is_empty());
+            assert!(bare.arguments().is_none());
+            let ModuleBodyStatement::Call(empty) = &inventory.procedures()[1].statements()[0]
+            else {
+                panic!("empty Call in the second procedure remains retained");
+            };
+            assert!(empty.argument_values().is_empty());
+            assert_eq!(&source[empty.arguments().unwrap()], "()");
+        }
+    }
+
+    #[test]
+    fn call_argument_quota_is_aggregate_across_lists_and_procedures() {
+        let source = b"Sub First():Call Finish(1,True):Call Finish:End Sub\nSub Second()\nCall Finish(value,\"text\",False)\nCall Finish()\nEnd Sub\n";
+        let expected = parse(source).unwrap();
+        assert_eq!(expected.statement_count(), 8);
+        assert_eq!(
+            module_inventory(
+                source,
+                ModuleLimits::new(source.len(), 8, 2).with_max_arguments(5),
+                &mut || Ok::<(), ()>(())
+            ),
+            Ok(expected)
+        );
+        for maximum in [0, 1, 2, 4] {
+            assert_eq!(
+                module_inventory(
+                    source,
+                    ModuleLimits::new(source.len(), 8, 2).with_max_arguments(maximum),
+                    &mut || Ok::<(), ()>(())
+                ),
+                Err(ModuleError::ArgumentLimit),
+                "aggregate quota {maximum}"
+            );
+        }
+        assert_eq!(
+            module_inventory(source, ModuleLimits::new(source.len(), 8, 2), &mut || Ok::<
+                (),
+                (),
+            >(
+                ()
+            )),
+            Err(ModuleError::ArgumentLimit)
+        );
+        for (limits, error) in [
+            (
+                ModuleLimits::new(source.len() - 1, 8, 2),
+                ModuleError::SourceLimit,
+            ),
+            (
+                ModuleLimits::new(source.len(), 7, 2),
+                ModuleError::StatementLimit,
+            ),
+            (
+                ModuleLimits::new(source.len(), 8, 1),
+                ModuleError::ProcedureLimit,
+            ),
+        ] {
+            assert_eq!(
+                module_inventory(source, limits.with_max_arguments(5), &mut || Ok::<(), ()>(
+                    ()
+                )),
+                Err(error)
+            );
+        }
+        let zero = b"Sub Run():Call Finish:Call Finish():End Sub\n";
+        let inventory = module_inventory(
+            zero,
+            ModuleLimits::new(zero.len(), 4, 1).with_max_arguments(0),
+            &mut || Ok::<(), ()>(()),
+        )
+        .unwrap();
+        assert_eq!(inventory.procedures()[0].statements().len(), 2);
+        let values = (0..128)
+            .map(|index| index.to_string())
+            .collect::<Vec<_>>()
+            .join(",");
+        let source = format!("Sub Run()\nCall Finish({values})\nEnd Sub\n");
+        for maximum in [128, usize::MAX] {
+            let inventory = module_inventory(
+                source.as_bytes(),
+                ModuleLimits::new(source.len(), 3, 1).with_max_arguments(maximum),
+                &mut || Ok::<(), ()>(()),
+            )
+            .unwrap();
+            let ModuleBodyStatement::Call(call) = &inventory.procedures()[0].statements()[0] else {
+                panic!("many scalar arguments retained");
+            };
+            assert_eq!(call.argument_values().len(), 128);
+            for (index, value) in call.argument_values().iter().enumerate() {
+                assert_eq!(&source[value.span()], index.to_string());
+            }
+        }
+        assert_eq!(
+            module_inventory(
+                source.as_bytes(),
+                ModuleLimits::new(source.len(), 3, 1).with_max_arguments(127),
+                &mut || Ok::<(), ()>(())
+            ),
+            Err(ModuleError::ArgumentLimit)
+        );
+    }
+
+    #[test]
+    fn unsupported_scalar_call_lists_reject_all_preceding_module_records() {
+        for body in [
+            "Call Finish(1,)",
+            "Call Finish(,1)",
+            "Call Finish(1,,2)",
+            "Call Finish(1,value:=2)",
+            "Call Finish(1,ByVal value)",
+            "Call Finish(1,target())",
+            "Call Finish(1,target.member)",
+            "Call Finish(1,(value))",
+            "Call Finish(1,-2)",
+            "Call Finish(1,2.0)",
+            "Call Finish(1,#1/1/2000#)",
+            "Call Finish(1,value$)",
+            "Call Finish(1) extra",
+            "Call Finish(1)()",
+            "Call Finish(1).member",
+            "Call Finish 1,2",
+            "Call Finish value",
+            "Call Name(1)",
+            "Call Finish(1,\"open",
+            "Call Finish(1,\"continued _\n",
+            "Call Finish(1, ' inline\n2)",
+            "Call Finish(1\n)",
+            "Call Finish(1,\0)",
+            "Call Finish(1,\r2)",
+        ] {
+            let source = format!(
+                "Sub Accepted()\nDim previous As Long\nCall Finish(1)\nEnd Sub\nSub Rejected()\nCall Finish(True)\n{body}\nEnd Sub\n"
+            );
+            assert!(
+                matches!(
+                    parse(source.as_bytes()),
+                    Err(ModuleError::Unsupported { .. })
+                ),
+                "{body:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn scalar_call_module_cancellation_never_publishes_a_partial_inventory() {
+        let source = b"Sub First(value As Long)\nDim local As Long\nCall Finish(1,local,\"a\"\"b\",False)\nEnd Sub\nSub Second()\nCall Finish(2,True)\nEnd Sub\n";
+        let limits = ModuleLimits::new(source.len(), 7, 2)
+            .with_max_parameters(1)
+            .with_max_arguments(6);
+        let mut successful_checks = 0;
+        let inventory = module_inventory(source, limits, &mut || {
+            successful_checks += 1;
+            Ok::<(), ()>(())
+        })
+        .unwrap();
+        assert_eq!(inventory.procedures().len(), 2);
+        for cancelled_at in 1..=successful_checks {
+            let mut calls = 0;
+            assert_eq!(
+                module_inventory(source, limits, &mut || {
+                    calls += 1;
+                    if calls == cancelled_at {
+                        Err("stop")
+                    } else {
+                        Ok(())
+                    }
+                }),
+                Err(ModuleError::Cancelled("stop")),
+                "checkpoint {cancelled_at}"
+            );
+            assert_eq!(calls, cancelled_at);
+        }
+    }
+
+    #[test]
     fn unsupported_call_statement_rejects_the_whole_module_without_prior_records() {
         for body in [
             "Call",
@@ -1448,7 +1699,7 @@ mod tests {
             "Call[Finish]",
             "Call\x0cFinish()",
             "Call\x0bFinish()",
-            "Call Finish(1)",
+            "Call Finish(1+2)",
             "Call Finish(value:=1)",
             "Call Finish(,)",
             "Call Finish(())",
@@ -1655,7 +1906,7 @@ mod tests {
             "Dim item As Product",
             "Dim values() As Long",
             "Dim value As Long=1",
-            "value=1\nCall Finish(1)",
+            "value=1\nCall Finish(1+2)",
             "value=Me",
             "value=Nothing",
             "value=Null",

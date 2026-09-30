@@ -44,7 +44,8 @@ pub(super) fn prepare(
         .max_source_bytes()
         .min(provider.config.max_source_bytes());
     let limits = ModuleLimits::new(maximum_source, maximum_nodes, maximum_nodes)
-        .with_max_parameters(maximum_nodes);
+        .with_max_parameters(maximum_nodes)
+        .with_max_arguments(maximum_nodes);
     let inventory =
         match rootlight_vba::module_inventory(request.source().bytes(), limits, &mut || {
             cancellation.check()
@@ -62,7 +63,8 @@ pub(super) fn prepare(
             Err(
                 ModuleError::StatementLimit
                 | ModuleError::ProcedureLimit
-                | ModuleError::ParameterLimit,
+                | ModuleError::ParameterLimit
+                | ModuleError::ArgumentLimit,
             ) => {
                 return Err(RequestError::ProviderLimit {
                     resource: ResourceKind::SyntaxNodes,
@@ -86,6 +88,14 @@ pub(super) fn prepare(
         processed_nodes = processed_nodes
             .checked_add(procedure.parameters().len())
             .ok_or_else(|| provider_failure("vba-procedural-node-accounting"))?;
+        for statement in procedure.statements() {
+            cancellation.check()?;
+            if let ModuleBodyStatement::Call(call) = statement {
+                processed_nodes = processed_nodes
+                    .checked_add(call.argument_values().len())
+                    .ok_or_else(|| provider_failure("vba-procedural-node-accounting"))?;
+            }
+        }
     }
     require_provider_limit(ResourceKind::SyntaxNodes, processed_nodes, maximum_nodes)?;
     cancellation.check()?;
@@ -518,6 +528,23 @@ fn body_candidates(
                 "vba.invoked_identifier",
                 false,
             )?;
+            for argument in call.argument_values() {
+                cancellation.check()?;
+                match argument.kind() {
+                    ModuleScalarValueKind::Name => push_body_candidate(
+                        output,
+                        maximum,
+                        cancellation,
+                        argument.span(),
+                        StructuralRole::Reference,
+                        "vba.value_identifier",
+                        false,
+                    )?,
+                    ModuleScalarValueKind::UnsignedDecimal
+                    | ModuleScalarValueKind::String
+                    | ModuleScalarValueKind::Boolean => {}
+                }
+            }
         }
         ModuleBodyStatement::Assignment(_) | ModuleBodyStatement::Call(_) => {}
     }
@@ -1487,6 +1514,346 @@ mod tests {
     }
 
     #[test]
+    fn first_party_vba_scalar_arguments_match_the_private_native_route() {
+        for source in [
+            "Sub Run()\nCall Target()\nEnd Sub\n",
+            "Sub Run()\nCall Target(1)\nEnd Sub\n",
+            "Sub Run()\nCall Target(007, False)\nEnd Sub\n",
+            "Sub Run()\nCall Target(value, 7, \"a,\"\"b\"\":()\", True, [value])\nEnd Sub\n",
+            "Sub Run()\nCall Target(value, value, [value])\nEnd Sub\n",
+            "Sub Run()\nCall [Name]([Rem], [Me], [True], [Name], [Sub])\nEnd Sub\n",
+            "Sub Run()\ncAlL\t[Target] ( \t[value], fAlSe, \"\" )\nEnd Sub\n",
+            "Attribute VB_Name = \"ModuleA\"\r\nOption Explicit\r\nPrivate Sub Run(ByVal value As Long) ' header\r\nCall Target(value, \"x\") ' call:\r\nEnd Sub ' terminator\r\n",
+            "Sub Run():Call Target(1, \"x:y\", True):Call Other(value):End Sub\n",
+            "Sub Run()\nCall _\r\n Target( _\n value, _\r\n \"x\", _\n False _\r\n )\nEnd Sub\n",
+            "Sub Accept(ByVal first As Long, ByRef second As String)\nfirst = first\nsecond = second\nEnd Sub\nSub Run()\nDim value As Long\nCall Accept(value, \"x\")\nEnd Sub\n",
+            "Function Result(item As Long) As Long\nCall Target(item, 1)\nResult = item\nEnd Function\n",
+        ] {
+            for language in ["vba", "visual-basic-classic"] {
+                compare_native(&Fixture::new(source), language, &[]);
+            }
+        }
+    }
+
+    #[test]
+    fn first_party_vba_argument_positions_never_gain_false_complete_admission() {
+        let mut unexpected_admissions = Vec::new();
+        for name in [
+            "Name",
+            "Line",
+            "Load",
+            "Unload",
+            "Input",
+            "Print",
+            "Close",
+            "Reset",
+            "Beep",
+            "DefBool",
+            "DefByte",
+            "DefInt",
+            "DefLng",
+            "DefLngLng",
+            "DefLngPtr",
+            "DefCur",
+            "DefSng",
+            "DefDbl",
+            "DefDate",
+            "DefStr",
+            "DefObj",
+            "DefVar",
+            "DefDec",
+        ] {
+            for arguments in [name.to_owned(), format!("1, {name}"), format!("[{name}]")] {
+                let source = format!("Sub Run()\nCall Target({arguments})\nEnd Sub\n");
+                for language in ["vba", "visual-basic-classic"] {
+                    let fixture = Fixture::new(&source);
+                    let request = fixture.request(language, &[]);
+                    let cancellation = Cancellation::new();
+                    let native = fixture
+                        .provider
+                        .prepare_tree(
+                            &request,
+                            None,
+                            &[],
+                            fixture.provider.config.default_settings(),
+                            &cancellation,
+                        )
+                        .unwrap();
+                    assert!(native.traversal.fully_traversed);
+                    let admitted = prepare(
+                        &fixture.provider,
+                        &request,
+                        None,
+                        &[],
+                        fixture.provider.config.default_settings(),
+                        &cancellation,
+                    )
+                    .unwrap()
+                    .is_some();
+                    if native.traversal.coverage == CoverageStatus::Unknown {
+                        if admitted {
+                            unexpected_admissions.push(format!("{language}:{arguments}"));
+                        }
+                    } else {
+                        assert_eq!(
+                            native.traversal.coverage,
+                            CoverageStatus::Complete,
+                            "the argument-position oracle must not be bounded: {language}, {arguments}"
+                        );
+                        assert!(
+                            admitted,
+                            "native-complete scalar argument names belong to the closed slice: {language}, {arguments}"
+                        );
+                        compare_native(&Fixture::new(&source), language, &[]);
+                    }
+                }
+            }
+        }
+        assert!(
+            unexpected_admissions.is_empty(),
+            "native-recovered argument positions retain whole-module fallback: {unexpected_admissions:?}"
+        );
+    }
+
+    #[test]
+    fn first_party_vba_unsupported_argument_lists_keep_whole_native_fallback() {
+        for call in [
+            "Call Target 1",
+            "Call Target value, 1",
+            "Call Target(1 + 2)",
+            "Call Target(Nested(1))",
+            "Call Target(holder.Value)",
+            "Call Target(value:=1)",
+            "Call Target(1, extra:=2)",
+            "Call Target(ByVal value)",
+            "Call Target(,1)",
+            "Call Target(1,)",
+            "Call Target(1,,2)",
+            "Call Target(1;2)",
+            "Call Target((1))",
+            "Call Target(-1)",
+            "Call Target(1.5)",
+            "Call Target(#1/2/2000#)",
+            "Call Target(1) extra",
+            "Call Target(1)(2)",
+            "Call Target(1))",
+            "Call Target(1",
+            "Call Target(\"unclosed)",
+            "Call Target(1,\n2)",
+        ] {
+            let source =
+                format!("Sub Valid()\nEnd Sub\nSub Run()\nCall Other(1)\n{call}\nEnd Sub\n");
+            for language in ["vba", "visual-basic-classic"] {
+                let fixture = Fixture::new(&source);
+                let request = fixture.request(language, &[]);
+                assert!(
+                    prepare(
+                        &fixture.provider,
+                        &request,
+                        None,
+                        &[],
+                        fixture.provider.config.default_settings(),
+                        &Cancellation::new(),
+                    )
+                    .unwrap()
+                    .is_none(),
+                    "an unsupported argument list cannot publish a supported prefix: {language}, {call}"
+                );
+                assert_eq!(fixture.provider.stats().pooled_parsers, 0);
+                assert_eq!(fixture.provider.stats().cache.entries, 0);
+            }
+        }
+    }
+
+    #[test]
+    fn first_party_vba_argument_nodes_and_candidate_ceilings_are_exact() {
+        let source = "Sub Run()\nCall Target(value, 7, \"x\", value, True)\nEnd Sub\n";
+        for language in ["vba", "visual-basic-classic"] {
+            let mut fixture = Fixture::new(source);
+            let cancellation = Cancellation::new();
+            let request = fixture.request(language, &[]);
+            let prepared = prepare(
+                &fixture.provider,
+                &request,
+                None,
+                &[],
+                fixture.provider.config.default_settings(),
+                &cancellation,
+            )
+            .unwrap()
+            .unwrap();
+            assert_eq!(prepared.processed_nodes, 10);
+            let ModuleBodyStatement::Call(call) =
+                &prepared.inventory.procedures()[0].statements()[0]
+            else {
+                panic!("the authored body contains a Call");
+            };
+            assert_eq!(call.argument_values().len(), 5);
+            for optional in [false, true] {
+                let all = candidates(
+                    &prepared.inventory,
+                    request.source().bytes(),
+                    optional,
+                    request.limits().max_syntax_nodes(),
+                    &cancellation,
+                )
+                .unwrap();
+                if optional {
+                    assert_eq!(
+                        all.iter()
+                            .filter(|candidate| candidate.syntax == "vba.string")
+                            .count(),
+                        1
+                    );
+                    assert_eq!(
+                        all.iter()
+                            .filter(|candidate| candidate.syntax == "vba.value_identifier")
+                            .count(),
+                        2
+                    );
+                } else {
+                    assert!(
+                        all.iter()
+                            .all(|candidate| candidate.role != StructuralRole::Reference)
+                    );
+                }
+                let exact = all.len();
+                assert_eq!(
+                    normalize_query_candidates(all, &request, usize::MAX, &cancellation)
+                        .unwrap()
+                        .required,
+                    7
+                );
+                assert_eq!(
+                    candidates(
+                        &prepared.inventory,
+                        request.source().bytes(),
+                        optional,
+                        exact,
+                        &cancellation
+                    )
+                    .unwrap()
+                    .len(),
+                    exact
+                );
+                assert_eq!(
+                    candidates(
+                        &prepared.inventory,
+                        request.source().bytes(),
+                        optional,
+                        exact - 1,
+                        &cancellation
+                    )
+                    .unwrap_err(),
+                    AdapterError::RejectedRequest(RequestError::ProviderLimit {
+                        resource: ResourceKind::SyntaxNodes,
+                        observed: exact,
+                        limit: exact - 1,
+                    })
+                );
+                assert_eq!(
+                    candidates(
+                        &prepared.inventory,
+                        request.source().bytes(),
+                        optional,
+                        0,
+                        &cancellation
+                    )
+                    .unwrap_err(),
+                    AdapterError::RejectedRequest(RequestError::ProviderLimit {
+                        resource: ResourceKind::SyntaxNodes,
+                        observed: 7,
+                        limit: 0,
+                    })
+                );
+            }
+            fixture.limits = with_maximum_nodes(&fixture.limits, prepared.processed_nodes);
+            let request = fixture.request(language, &[]);
+            assert_eq!(
+                prepare(
+                    &fixture.provider,
+                    &request,
+                    None,
+                    &[],
+                    fixture.provider.config.default_settings(),
+                    &cancellation
+                )
+                .unwrap()
+                .unwrap()
+                .processed_nodes,
+                prepared.processed_nodes
+            );
+            fixture.limits = with_maximum_nodes(&fixture.limits, prepared.processed_nodes - 1);
+            let request = fixture.request(language, &[]);
+            assert!(matches!(
+                prepare(
+                    &fixture.provider,
+                    &request,
+                    None,
+                    &[],
+                    fixture.provider.config.default_settings(),
+                    &cancellation
+                ),
+                Err(AdapterError::RejectedRequest(RequestError::ProviderLimit {
+                    resource: ResourceKind::SyntaxNodes,
+                    observed: 10,
+                    limit: 9,
+                }))
+            ));
+            assert!(cancellation.cancel(rootlight_cancel::CancellationReason::ClientRequest));
+            assert!(matches!(
+                candidates(
+                    &prepared.inventory,
+                    request.source().bytes(),
+                    true,
+                    100,
+                    &cancellation
+                ),
+                Err(AdapterError::Cancelled {
+                    reason: rootlight_cancel::CancellationReason::ClientRequest
+                })
+            ));
+            assert!(matches!(
+                prepare(
+                    &fixture.provider,
+                    &request,
+                    None,
+                    &[],
+                    fixture.provider.config.default_settings(),
+                    &cancellation
+                ),
+                Err(AdapterError::Cancelled {
+                    reason: rootlight_cancel::CancellationReason::ClientRequest
+                })
+            ));
+            assert_eq!(fixture.provider.stats().pooled_parsers, 0);
+            assert_eq!(fixture.provider.stats().cache.entries, 0);
+        }
+        for language in ["vba", "visual-basic-classic"] {
+            let mut fixture = Fixture::new("Sub Run()\nCall Target(1,2,3,4,5,6,7,8)\nEnd Sub\n");
+            fixture.limits = with_maximum_nodes(&fixture.limits, 7);
+            let request = fixture.request(language, &[]);
+            assert!(matches!(
+                prepare(
+                    &fixture.provider,
+                    &request,
+                    None,
+                    &[],
+                    fixture.provider.config.default_settings(),
+                    &Cancellation::new()
+                ),
+                Err(AdapterError::RejectedRequest(RequestError::ProviderLimit {
+                    resource: ResourceKind::SyntaxNodes,
+                    observed: 8,
+                    limit: 7,
+                }))
+            ));
+            assert_eq!(fixture.provider.stats().pooled_parsers, 0);
+            assert_eq!(fixture.provider.stats().cache.entries, 0);
+        }
+    }
+
+    #[test]
     fn first_party_vba_zero_argument_call_contextual_name_keeps_recovered_native_route() {
         for call in ["Call Name", "Call Name()", "Call nAmE ( )"] {
             let source = format!("Sub Run()\n{call}\nEnd Sub\n");
@@ -1554,7 +1921,7 @@ mod tests {
     #[test]
     fn first_party_vba_zero_argument_call_boundaries_keep_whole_native_fallback() {
         for call in [
-            "Call Target(1)",
+            "Call Target(1 + 2)",
             "Call Target value",
             "Call Target(value:=1)",
             "Call Target(,)",
@@ -1739,7 +2106,7 @@ mod tests {
     fn first_party_vba_scalar_body_boundaries_keep_whole_native_fallback() {
         for body in [
             "Dim value As Long\nvalue = 1 + 2",
-            "Dim value As Long\nCall Run(1)",
+            "Dim value As Long\nCall Run(Nested(1))",
             "Dim value As Long\nRun value",
             "Dim value As Long\nholder.Value = 1",
             "Dim values(1) As Long",
