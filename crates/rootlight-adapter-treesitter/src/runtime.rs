@@ -9,6 +9,7 @@ mod embedded;
 mod expression;
 mod markdown;
 mod perl;
+mod vba;
 
 #[cfg(test)]
 mod native_context_tests;
@@ -200,6 +201,16 @@ impl TreeSitterProvider {
         request: &ParseRequest<'_>,
         cancellation: &Cancellation,
     ) -> Result<usize, AdapterError> {
+        if let Some(prepared) = vba::prepare(
+            self,
+            request,
+            None,
+            &[],
+            self.config.default_settings(),
+            cancellation,
+        )? {
+            return vba::required_facts(prepared, request, cancellation);
+        }
         let mut prepared = self.prepare_tree(
             request,
             None,
@@ -295,6 +306,19 @@ impl TreeSitterProvider {
         sink: &mut dyn SyntaxFactSink,
         cancellation: &Cancellation,
     ) -> Result<RawParseWithPrevious, AdapterError> {
+        if let Some(prepared) =
+            vba::prepare(self, request, previous, edits, settings, cancellation)?
+        {
+            return vba::emit(
+                prepared,
+                request,
+                previous,
+                edits,
+                settings,
+                sink,
+                cancellation,
+            );
+        }
         let PreparedParse {
             family,
             identity,
@@ -369,46 +393,9 @@ impl TreeSitterProvider {
         settings: ParserSettings,
         cancellation: &Cancellation,
     ) -> Result<PreparedParse, AdapterError> {
-        cancellation.check()?;
-        if settings.input_chunk_bytes() > self.config.max_source_bytes() {
-            return Err(provider_failure("treesitter-settings"));
-        }
-        validate_edit_admission(previous, edits, &self.config, cancellation)?;
-        let family = self
-            .registry
-            .family_for_language(request.language())
-            .ok_or(RequestError::UnsupportedLanguage)?;
-        let native_family = native_family_for_source(family, request.source().path().as_str());
-        if request.encoding().as_str() != "utf-8" {
-            return Err(RequestError::UnsupportedEncoding.into());
-        }
+        let (family, native_family) =
+            self.admit_parse_input(request, previous, edits, settings, cancellation)?;
         let source_bytes = request.source().bytes();
-        require_provider_limit(
-            ResourceKind::SourceBytes,
-            source_bytes.len(),
-            self.config.max_source_bytes(),
-        )?;
-        require_provider_limit(
-            ResourceKind::SyntaxNodes,
-            request.limits().max_syntax_nodes(),
-            self.config.max_syntax_nodes(),
-        )?;
-        require_provider_limit(
-            ResourceKind::SyntaxDepth,
-            request.limits().max_syntax_depth(),
-            self.config.max_syntax_depth(),
-        )?;
-        require_provider_limit(
-            ResourceKind::IncludedRanges,
-            request.included_ranges().len(),
-            self.config.max_included_ranges(),
-        )?;
-        validate_utf8_cancellable(source_bytes, cancellation)?;
-        validate_included_range_languages(
-            request.included_ranges(),
-            request.language(),
-            cancellation,
-        )?;
         let descriptor = self
             .registry
             .get(native_family)
@@ -481,6 +468,58 @@ impl TreeSitterProvider {
             reuse_status,
             reuse_key,
         })
+    }
+
+    fn admit_parse_input(
+        &self,
+        request: &ParseRequest<'_>,
+        previous: Option<&PreviousParse>,
+        edits: &[SourceEdit],
+        settings: ParserSettings,
+        cancellation: &Cancellation,
+    ) -> Result<(GrammarFamily, GrammarFamily), AdapterError> {
+        cancellation.check()?;
+        if settings.input_chunk_bytes() > self.config.max_source_bytes() {
+            return Err(provider_failure("treesitter-settings"));
+        }
+        validate_edit_admission(previous, edits, &self.config, cancellation)?;
+        let family = self
+            .registry
+            .family_for_language(request.language())
+            .ok_or(RequestError::UnsupportedLanguage)?;
+        let native_family = native_family_for_source(family, request.source().path().as_str());
+        if request.encoding().as_str() != "utf-8" {
+            return Err(RequestError::UnsupportedEncoding.into());
+        }
+        let source_bytes = request.source().bytes();
+        require_provider_limit(
+            ResourceKind::SourceBytes,
+            source_bytes.len(),
+            self.config.max_source_bytes(),
+        )?;
+        require_provider_limit(
+            ResourceKind::SyntaxNodes,
+            request.limits().max_syntax_nodes(),
+            self.config.max_syntax_nodes(),
+        )?;
+        require_provider_limit(
+            ResourceKind::SyntaxDepth,
+            request.limits().max_syntax_depth(),
+            self.config.max_syntax_depth(),
+        )?;
+        require_provider_limit(
+            ResourceKind::IncludedRanges,
+            request.included_ranges().len(),
+            self.config.max_included_ranges(),
+        )?;
+        validate_utf8_cancellable(source_bytes, cancellation)?;
+        validate_included_range_languages(
+            request.included_ranges(),
+            request.language(),
+            cancellation,
+        )?;
+        cancellation.check()?;
+        Ok((family, native_family))
     }
 
     // The caller admits the full source and included ranges. Host and embedded

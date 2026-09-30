@@ -17,6 +17,8 @@ pub mod office_package;
 mod refinement;
 pub mod source_archive;
 #[cfg(test)]
+mod vba_first_party_tests;
+#[cfg(test)]
 mod version_merge_tests;
 
 use std::{
@@ -48,6 +50,7 @@ use rootlight_adapter_treesitter::{
     ADAPTER_VERSION as TREE_SITTER_ADAPTER_VERSION, GrammarDescriptor, GrammarFamily,
     GrammarRegistry, ParserSettings, RuntimeConfig, TREE_SITTER_RUNTIME_VERSION,
     TreeSitterAnalyzer, TreeSitterProvider, TreeSitterStructuralArtifact,
+    VBA_PROCEDURAL_FRONTEND_VERSION, vba_procedural_frontend_digest,
 };
 use rootlight_adapters::{
     AgdaParseProvider, AwkParseProvider, ElmParseProvider, ErlangParseProvider, IniParseProvider,
@@ -6261,8 +6264,14 @@ impl FirstSliceService {
                 )
             } else if descriptor.family() == GrammarFamily::Sql {
                 format!("tree-sitter-sequel-{}", descriptor.grammar_version())
-            } else if descriptor.family() == GrammarFamily::VisualBasicClassic {
-                format!("tree-sitter-vba-{}", descriptor.grammar_version())
+            } else if matches!(
+                descriptor.family(),
+                GrammarFamily::Vba | GrammarFamily::VisualBasicClassic
+            ) {
+                format!(
+                    "{VBA_PROCEDURAL_FRONTEND_VERSION}+tree-sitter-vba-{}",
+                    descriptor.grammar_version()
+                )
             } else {
                 format!(
                     "tree-sitter-{}-{}",
@@ -15751,6 +15760,13 @@ fn first_slice_grammar_revision_hash() -> Result<ContentHash, FirstSliceError> {
         hash_component(&mut hasher, descriptor.grammar_version().as_bytes())?;
         hash_component(&mut hasher, descriptor.grammar_source_sha256().as_bytes())?;
         hash_component(&mut hasher, descriptor.parser_sha256().as_bytes())?;
+        if matches!(
+            descriptor.family(),
+            GrammarFamily::Vba | GrammarFamily::VisualBasicClassic
+        ) {
+            hash_component(&mut hasher, VBA_PROCEDURAL_FRONTEND_VERSION.as_bytes())?;
+            hash_component(&mut hasher, vba_procedural_frontend_digest().as_bytes())?;
+        }
         match descriptor.scanner_sha256() {
             Some(scanner) => {
                 hash_component(&mut hasher, b"scanner")?;
@@ -15770,14 +15786,26 @@ fn first_slice_grammar_revision_hash() -> Result<ContentHash, FirstSliceError> {
 
 fn grammar_binary_digest(descriptor: &GrammarDescriptor) -> Result<ContentHash, FirstSliceError> {
     let scanner = descriptor.scanner_sha256().unwrap_or("no-scanner");
-    hash_static_components(&[
+    let legacy = hash_static_components(&[
         ANALYZER_BINARY_SEED,
         descriptor.language().as_str().as_bytes(),
         descriptor.grammar_version().as_bytes(),
         descriptor.grammar_source_sha256().as_bytes(),
         descriptor.parser_sha256().as_bytes(),
         scanner.as_bytes(),
-    ])
+    ])?;
+    if matches!(
+        descriptor.family(),
+        GrammarFamily::Vba | GrammarFamily::VisualBasicClassic
+    ) {
+        hash_static_components(&[
+            legacy.as_bytes(),
+            VBA_PROCEDURAL_FRONTEND_VERSION.as_bytes(),
+            vba_procedural_frontend_digest().as_bytes(),
+        ])
+    } else {
+        Ok(legacy)
+    }
 }
 
 fn first_slice_provider_set_hash() -> Result<ContentHash, FirstSliceError> {

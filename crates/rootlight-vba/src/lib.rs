@@ -1,6 +1,7 @@
 //! Reads source-written VBA names, declaration prefixes and expression boundaries.
 //! No parser runtime is required. Identifier paths retain argument boundaries;
 //! procedure categories come from source, never from an uncontinued following line.
+//! Closed whole-module inventories reject unsupported syntax without partial facts.
 
 #![forbid(unsafe_code)]
 
@@ -13,6 +14,7 @@ mod construction;
 mod group;
 mod lifecycle;
 mod member_attribute;
+mod module;
 mod parameter;
 mod procedure;
 mod value_reads;
@@ -34,6 +36,7 @@ pub use construction::constructed_type_range;
 pub use group::parenthesized_expression_end;
 pub use lifecycle::{ClassInitializer, class_initializer};
 pub use member_attribute::{MemberDispatchAttribute, member_dispatch_attribute};
+pub use module::{ModuleError, ModuleInventory, ModuleLimits, ModuleProcedure, module_inventory};
 pub use parameter::array_parameter_modifiers;
 pub use procedure::{
     ProcedureHeader, ProcedureKind, parameterless_sub, procedure_header, procedure_parameter_range,
