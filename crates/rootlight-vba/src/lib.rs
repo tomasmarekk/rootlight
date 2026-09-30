@@ -8,6 +8,7 @@ mod arguments;
 mod call_chain;
 mod compilation;
 mod condition;
+mod condition_value;
 mod construction;
 mod group;
 mod lifecycle;
@@ -26,6 +27,9 @@ pub use call_chain::{
 };
 pub use compilation::{CompilationConstantHeader, compilation_constant_header};
 pub use condition::compilation_condition_key;
+pub use condition_value::{
+    CompilationConditionLimits, CompilationConditionValue, compilation_condition_value,
+};
 pub use construction::constructed_type_range;
 pub use group::parenthesized_expression_end;
 pub use lifecycle::{ClassInitializer, class_initializer};
