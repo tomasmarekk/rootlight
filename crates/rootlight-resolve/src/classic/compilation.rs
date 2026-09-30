@@ -37,8 +37,7 @@ struct Inventory {
 // transaction. Compile intervals once so lookup is logarithmic in inventory size.
 struct ActivityIndex {
     inactive: Intervals,
-    unproven: Intervals,
-    gaps: Intervals,
+    uncertainty: Intervals,
 }
 
 #[derive(Default)]
@@ -134,39 +133,58 @@ impl ActivityIndex {
         work: &mut ResolutionWorkBudget,
     ) -> Result<Self, ResolutionError> {
         let mut inactive = Vec::new();
-        let mut unproven = Vec::new();
-        let mut gaps = Vec::new();
-        let mut current: Option<(SourceSpan, u64)> = None;
+        let mut uncertainty = Vec::new();
+        let mut current: Option<(SourceSpan, u64, usize, bool)> = None;
         for branch in &model.branches {
             cancellation.check()?;
             work.consume()?;
-            if let Some((group, end)) = current.filter(|(group, _)| *group != branch.group) {
-                gaps.push((end, group.end_byte()));
+            if let Some(group) = current.filter(|(group, _, _, _)| *group != branch.group) {
+                cancellation.check()?;
+                work.consume()?;
+                Self::finish_group(&mut uncertainty, group);
                 current = None;
             }
-            let preceding = current.map_or(branch.group.start_byte(), |(_, end)| end);
+            let (preceding, first_gap, has_active) = current.map_or(
+                (branch.group.start_byte(), uncertainty.len(), false),
+                |(_, end, first_gap, has_active)| (end, first_gap, has_active),
+            );
             // Empty gaps retain strict crossing barriers between adjacent bodies.
             // A span ending or starting at the barrier still belongs to its body.
-            gaps.push((preceding, branch.region.start_byte()));
-            current = Some((branch.group, branch.region.end_byte()));
-            match branch.activity {
-                VbaCompilationActivity::Inactive => {
-                    inactive.push((branch.region.start_byte(), branch.region.end_byte()));
-                }
-                VbaCompilationActivity::Unproven => {
-                    unproven.push((branch.region.start_byte(), branch.region.end_byte()));
-                }
-                VbaCompilationActivity::Active => {}
+            uncertainty.push((preceding, branch.region.start_byte()));
+            current = Some((
+                branch.group,
+                branch.region.end_byte(),
+                first_gap,
+                has_active || branch.activity == VbaCompilationActivity::Active,
+            ));
+            if branch.activity == VbaCompilationActivity::Inactive {
+                inactive.push((branch.region.start_byte(), branch.region.end_byte()));
             }
         }
-        if let Some((group, end)) = current {
-            gaps.push((end, group.end_byte()));
+        if let Some(group) = current {
+            cancellation.check()?;
+            work.consume()?;
+            Self::finish_group(&mut uncertainty, group);
         }
         Ok(Self {
             inactive: Intervals::build(inactive, cancellation, work)?,
-            unproven: Intervals::build(unproven, cancellation, work)?,
-            gaps: Intervals::build(gaps, cancellation, work)?,
+            uncertainty: Intervals::build(uncertainty, cancellation, work)?,
         })
+    }
+
+    fn finish_group(
+        uncertainty: &mut Vec<(u64, u64)>,
+        (group, end, first_gap, has_active): (SourceSpan, u64, usize, bool),
+    ) {
+        if has_active {
+            uncertainty.push((end, group.end_byte()));
+        } else {
+            // Admitted groups cannot mix Active and Unproven siblings. Without
+            // an Active arm, only whole-span inactive ownership can prove a
+            // decision; all other group overlap is unknown, including directives.
+            uncertainty.truncate(first_gap);
+            uncertainty.push((group.start_byte(), group.end_byte()));
+        }
     }
 
     fn activity<E>(
@@ -182,14 +200,14 @@ impl ActivityIndex {
         if self.inactive.contains(span, check)? {
             return Ok(VbaCompilationActivity::Inactive);
         }
-        if self.unproven.contains(span, check)? || self.gaps.overlaps(span, check)? {
+        if self.uncertainty.overlaps(span, check)? {
             return Ok(VbaCompilationActivity::Unproven);
         }
         Ok(VbaCompilationActivity::Active)
     }
 
     fn maximum_work(&self) -> usize {
-        self.inactive.maximum_work() + self.unproven.maximum_work() + self.gaps.maximum_work()
+        self.inactive.maximum_work() + self.uncertainty.maximum_work()
     }
 }
 
@@ -548,9 +566,18 @@ impl CompilationIndex {
         Ok(VbaCompilationActivity::Active)
     }
 
+    pub(super) fn support_cost(&self, source: &SourceRef) -> usize {
+        // Definition/header membership is already proved; full declaration
+        // context never searches its conditional body in support_active.
+        if self.declaration_sources.contains(source) {
+            return 1;
+        }
+        self.source_cost(source)
+    }
+
     pub(super) fn source_cost(&self, source: &SourceRef) -> usize {
-        // Pure proof/support lookups lack a work callback. Their callers reserve
-        // the binary-search bound; importer queries charge actual comparisons.
+        // Callback-free activity lookups reserve the binary-search bound;
+        // importer queries charge actual comparisons.
         self.files.get(&source.span().file()).map_or(1, |file| {
             file.maximum_activity_work + 2 * file.inventories.len() + 1
         })

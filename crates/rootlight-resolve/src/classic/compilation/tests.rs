@@ -358,6 +358,172 @@ fn broad_procedure_context_uses_a_written_header_not_its_conditional_body() {
 }
 
 #[test]
+fn declared_support_retention_charges_only_verified_definition_or_header_lookup() {
+    for header_only in [false, true] {
+        let mut fixture = Fixture::new();
+        if header_only {
+            fixture.occurrences.retain(|site| {
+                !(site.role == OccurrenceRole::Definition
+                    && site.target
+                        == (OccurrenceTarget::Resolved {
+                            symbol: fixture.entities[1].id,
+                        }))
+            });
+        }
+        let compilation = fixture.import(std::slice::from_ref(&fixture.envelope));
+        let declaration = fixture.entities[1].evidence.source.as_ref().unwrap();
+        let module = fixture.entities[0].evidence.source.as_ref().unwrap();
+        assert_eq!(
+            compilation.activity(declaration),
+            VbaCompilationActivity::Unproven
+        );
+        assert!(compilation.entity_active(fixture.entities[1].id));
+        assert!(compilation.support_active(declaration));
+        assert!(compilation.support_active(module));
+        assert_eq!(compilation.support_cost(declaration), 1);
+        assert_eq!(compilation.support_cost(module), 1);
+        let raw_reserved = compilation.source_cost(declaration);
+        let mut raw_work = ResolutionWorkBudget::new(raw_reserved);
+        assert_eq!(
+            compilation
+                .activity_with_work(declaration, &Cancellation::new(), &mut raw_work)
+                .unwrap(),
+            VbaCompilationActivity::Unproven,
+        );
+        assert!(raw_work.consumed() > compilation.support_cost(declaration));
+        assert!(raw_work.consumed() <= raw_reserved);
+        let site = fixture
+            .occurrences
+            .iter()
+            .find(|site| {
+                site.role == OccurrenceRole::Reference
+                    && site.syntactic_text_hash == content_hash(b"Selected")
+                    && compilation.use_active(site.id)
+            })
+            .unwrap();
+        let context = Arc::new(ProjectEvidence {
+            manifest: fixture.files[0].id,
+            native: true,
+            sources: Vec::new(),
+            facts: Vec::new(),
+        });
+        let build = || {
+            let mut classic = ClassicIndex {
+                compilation: fixture.import(std::slice::from_ref(&fixture.envelope)),
+                ..ClassicIndex::default()
+            };
+            classic.proofs.insert(
+                site.id,
+                Proof {
+                    target: &fixture.entities[2],
+                    context: Arc::clone(&context),
+                    receiver: Some((&fixture.entities[1], declaration.clone())),
+                    rule: ResolutionRule::ClassicProjectMember,
+                    property_call: false,
+                },
+            );
+            classic
+                .receiver_sources
+                .insert(site.id, Arc::new(vec![module.clone(), declaration.clone()]));
+            classic
+        };
+        let mut classic = build();
+        let mut exact = ResolutionWorkBudget::new(4);
+        classic
+            .retain_eligible(&Cancellation::new(), &mut exact)
+            .unwrap();
+        assert_eq!(exact.consumed(), 4);
+        assert!(classic.proof(site).is_some());
+        assert_eq!(classic.receiver_sources(site).len(), 2);
+        for maximum in [0, 3] {
+            let mut short = build();
+            assert!(matches!(
+                short.retain_eligible(
+                    &Cancellation::new(),
+                    &mut ResolutionWorkBudget::new(maximum),
+                ),
+                Err(ResolutionError::WorkLimit { maximum: actual }) if actual == maximum
+            ));
+            assert!(short.proof(site).is_some());
+            assert_eq!(short.receiver_sources(site).len(), 2);
+        }
+        let cancelled = Cancellation::new();
+        cancelled.cancel(rootlight_cancel::CancellationReason::ClientRequest);
+        let mut untouched = ResolutionWorkBudget::new(4);
+        assert!(matches!(
+            build().retain_eligible(&cancelled, &mut untouched),
+            Err(ResolutionError::Cancelled(_))
+        ));
+        assert_eq!(untouched.consumed(), 0);
+    }
+}
+
+#[test]
+fn declared_support_cost_preserves_exact_identity_and_unknown_barriers() {
+    let fixture = Fixture::new();
+    let compilation = fixture.import(std::slice::from_ref(&fixture.envelope));
+    let declaration = fixture.entities[1].evidence.source.as_ref().unwrap();
+    let altered_span = SourceSpan::new(
+        declaration.span().file(),
+        declaration.span().start_byte() + 1,
+        declaration.span().end_byte(),
+    )
+    .unwrap();
+    let nonhits = [
+        SourceRef::new(
+            declaration.repository(),
+            GenerationId::from_bytes([99; 20]),
+            declaration.span(),
+            declaration.content_hash(),
+            None,
+        ),
+        SourceRef::new(
+            declaration.repository(),
+            declaration.generation(),
+            declaration.span(),
+            content_hash(b"different retained source"),
+            None,
+        ),
+        SourceRef::new(
+            declaration.repository(),
+            declaration.generation(),
+            altered_span,
+            declaration.content_hash(),
+            None,
+        ),
+        fixture.entities[3].evidence.source.clone().unwrap(),
+        fixture.entities[4].evidence.source.clone().unwrap(),
+    ];
+    for source in nonhits {
+        assert!(!compilation.declaration_sources.contains(&source));
+        assert!(!compilation.support_active(&source));
+        let reserved = compilation.support_cost(&source);
+        assert!(reserved > 1);
+        let mut measured = ResolutionWorkBudget::new(reserved);
+        let activity = compilation
+            .activity_with_work(&source, &Cancellation::new(), &mut measured)
+            .unwrap();
+        assert_ne!(activity, VbaCompilationActivity::Active);
+        assert!(measured.consumed() <= reserved);
+    }
+    let mut incomplete = decode_vba_compilation_envelope(&fixture.envelope).unwrap();
+    incomplete.complete = false;
+    let incomplete = new_vba_compilation_envelope(
+        fixture.envelope.repository,
+        fixture.envelope.generation,
+        fixture.envelope.provenance,
+        fixture.envelope.evidence.source.clone().unwrap(),
+        incomplete,
+    )
+    .unwrap();
+    for closed in [fixture.import(&[]), fixture.import(&[incomplete])] {
+        assert!(!closed.declaration_sources.contains(declaration));
+        assert!(!closed.entity_active(fixture.entities[1].id));
+        assert!(!closed.support_active(declaration));
+    }
+}
+
+#[test]
 fn missing_incomplete_foreign_forged_and_overlapping_inventories_fail_closed() {
     let fixture = Fixture::new();
     assert!(!fixture.import(&[]).entity_active(fixture.entities[2].id));
@@ -496,8 +662,8 @@ fn final_retention_charges_each_parameter_and_support_source() {
     let mut classic = build();
     let expected = 1
         + 3
-        + 2 * classic.compilation.source_cost(&site.source)
-        + classic.compilation.source_cost(other_source);
+        + 2 * classic.compilation.support_cost(&site.source)
+        + classic.compilation.support_cost(other_source);
     let mut exact = ResolutionWorkBudget::new(expected);
     classic
         .retain_eligible(&Cancellation::new(), &mut exact)
@@ -667,6 +833,239 @@ fn indexed_comparisons_preserve_exact_callback_errors() {
         assert_eq!(result, Err(("cancelled comparison", fail_at)));
         assert_eq!(calls, fail_at);
     }
+}
+
+#[test]
+fn collapsed_groups_preserve_every_admitted_nested_and_empty_range() {
+    use VbaCompilationActivity::{Active, Inactive, Unproven};
+
+    let fixture = Fixture::new();
+    let file = fixture.files[0].id;
+    let choices = [
+        (Active, Inactive),
+        (Inactive, Active),
+        (Inactive, Inactive),
+        (Unproven, Unproven),
+        (Unproven, Inactive),
+        (Inactive, Unproven),
+    ];
+    for (outer, other) in choices {
+        for (inner, sibling) in choices {
+            for empty in [Active, Inactive, Unproven] {
+                for complete in [true, false] {
+                    let model = VbaCompilation {
+                        scope: span(file, 0, 64),
+                        complete,
+                        branches: vec![
+                            VbaCompilationBranch {
+                                group: span(file, 8, 48),
+                                region: span(file, 12, 28),
+                                activity: outer,
+                            },
+                            VbaCompilationBranch {
+                                group: span(file, 8, 48),
+                                region: span(file, 28, 44),
+                                activity: other,
+                            },
+                            VbaCompilationBranch {
+                                group: span(file, 16, 24),
+                                region: span(file, 18, 18),
+                                activity: inner,
+                            },
+                            VbaCompilationBranch {
+                                group: span(file, 16, 24),
+                                region: span(file, 18, 22),
+                                activity: sibling,
+                            },
+                            VbaCompilationBranch {
+                                group: span(file, 52, 62),
+                                region: span(file, 56, 56),
+                                activity: empty,
+                            },
+                        ],
+                    };
+                    let envelope = new_vba_compilation_envelope(
+                        fixture.files[0].repository,
+                        fixture.files[0].generation,
+                        fixture.files[0].provenance,
+                        source(
+                            fixture.files[0].repository,
+                            fixture.files[0].generation,
+                            file,
+                            0,
+                            64,
+                        ),
+                        model,
+                    )
+                    .unwrap();
+                    let model = decode_vba_compilation_envelope(&envelope).unwrap();
+                    let compiled = ActivityIndex::build(
+                        &model,
+                        &Cancellation::new(),
+                        &mut ResolutionWorkBudget::new(100_000),
+                    )
+                    .unwrap();
+                    for start in 0..=65 {
+                        for end in start..=66 {
+                            let written = span(file, start, end);
+                            let mut calls = 0;
+                            let actual = compiled
+                                .activity(&model, written, &mut || {
+                                    calls += 1;
+                                    Ok::<(), ()>(())
+                                })
+                                .unwrap();
+                            assert_eq!(
+                                actual,
+                                model.activity_at(written),
+                                "{model:?}: {written:?}"
+                            );
+                            assert!(calls <= compiled.maximum_work());
+                        }
+                    }
+                    let foreign = span(FileId::from_bytes([99; 20]), 18, 19);
+                    assert_eq!(
+                        compiled.activity(&model, foreign, &mut || Err("must not look up")),
+                        Ok(Unproven),
+                    );
+                }
+            }
+        }
+    }
+    for complete in [true, false] {
+        let model = VbaCompilation {
+            scope: span(file, 0, 64),
+            complete,
+            branches: Vec::new(),
+        };
+        let compiled = ActivityIndex::build(
+            &model,
+            &Cancellation::new(),
+            &mut ResolutionWorkBudget::new(0),
+        )
+        .unwrap();
+        assert_eq!(compiled.maximum_work(), 0);
+        for start in 0..=65 {
+            for end in start..=66 {
+                let written = span(file, start, end);
+                assert_eq!(
+                    compiled.activity(&model, written, &mut || Err("must not look up")),
+                    Ok(model.activity_at(written)),
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn collapsed_unknown_groups_fit_exact_indexed_work_and_preserve_errors() {
+    let fixture = Fixture::new();
+    let file = fixture.files[0].id;
+    let count = 128;
+    let mut text = String::from("Public Sub Run()\n");
+    let mut branches = Vec::new();
+    let mut queries = Vec::new();
+    for _ in 0..count {
+        let start = text.len();
+        text.push_str("#If HostChoice Then\n");
+        let first = text.len();
+        text.push_str("First()\n");
+        let first_end = text.len();
+        text.push_str("#Else\n");
+        let second = text.len();
+        text.push_str("Second()\n");
+        let second_end = text.len();
+        text.push_str("#End If\n");
+        let group = span(file, start, text.len());
+        for region in [span(file, first, first_end), span(file, second, second_end)] {
+            branches.push(VbaCompilationBranch {
+                group,
+                region,
+                activity: VbaCompilationActivity::Unproven,
+            });
+        }
+        queries.push(span(file, first, first + "First".len()));
+    }
+    text.push_str("End Sub\n");
+    let full = SourceRef::new(
+        fixture.files[0].repository,
+        fixture.files[0].generation,
+        span(file, 0, text.len()),
+        content_hash(text.as_bytes()),
+        None,
+    );
+    let envelope = new_vba_compilation_envelope(
+        full.repository(),
+        full.generation(),
+        fixture.files[0].provenance,
+        full.clone(),
+        VbaCompilation {
+            scope: full.span(),
+            complete: true,
+            branches,
+        },
+    )
+    .unwrap();
+    let model = decode_vba_compilation_envelope(&envelope).unwrap();
+    let mut measured = ResolutionWorkBudget::new(100_000);
+    let compiled = ActivityIndex::build(&model, &Cancellation::new(), &mut measured).unwrap();
+    assert_eq!(measured.consumed(), count * 5);
+    assert_eq!(compiled.maximum_work(), 9);
+    assert!(
+        ActivityIndex::build(
+            &model,
+            &Cancellation::new(),
+            &mut ResolutionWorkBudget::new(count * 5),
+        )
+        .is_ok()
+    );
+    assert!(matches!(
+        ActivityIndex::build(
+            &model,
+            &Cancellation::new(),
+            &mut ResolutionWorkBudget::new(count * 5 - 1),
+        ),
+        Err(ResolutionError::WorkLimit { maximum }) if maximum == count * 5 - 1
+    ));
+    for &query in &queries {
+        let mut exact = ResolutionWorkBudget::new(9);
+        let actual = compiled
+            .activity(&model, query, &mut || exact.consume())
+            .unwrap();
+        assert_eq!(actual, VbaCompilationActivity::Unproven);
+        assert_eq!(actual, model.activity_at(query));
+        assert!(exact.consumed() <= 9);
+    }
+    for maximum in [0, 8] {
+        let mut short = ResolutionWorkBudget::new(maximum);
+        assert!(matches!(
+            compiled.activity(&model, queries[0], &mut || short.consume()),
+            Err(ResolutionError::WorkLimit { maximum: actual }) if actual == maximum
+        ));
+    }
+    for stop_at in 1..=9 {
+        let mut calls = 0;
+        assert_eq!(
+            compiled.activity(&model, queries[0], &mut || {
+                calls += 1;
+                if calls == stop_at {
+                    Err(("cancelled comparison", stop_at))
+                } else {
+                    Ok(())
+                }
+            }),
+            Err(("cancelled comparison", stop_at)),
+        );
+        assert_eq!(calls, stop_at);
+    }
+    let cancelled = Cancellation::new();
+    cancelled.cancel(rootlight_cancel::CancellationReason::ClientRequest);
+    let mut untouched = ResolutionWorkBudget::new(count * 5);
+    assert!(matches!(
+        ActivityIndex::build(&model, &cancelled, &mut untouched),
+        Err(ResolutionError::Cancelled(_))
+    ));
+    assert_eq!(untouched.consumed(), 0);
 }
 
 #[test]

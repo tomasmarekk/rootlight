@@ -2613,7 +2613,7 @@ impl<'a> ClassicIndex<'a> {
                 continue;
             };
             cancellation.check()?;
-            work.consume_many(result.compilation.source_cost(type_source))?;
+            work.consume_many(result.compilation.support_cost(type_source))?;
             if !result.compilation.entity_active(variable.id)
                 || !result.compilation.entity_active(class.id)
                 || !result.compilation.entity_active(initializer.id)
@@ -2726,13 +2726,13 @@ impl<'a> ClassicIndex<'a> {
             }
             if let Some((_, source)) = &proof.receiver {
                 cancellation.check()?;
-                work.consume_many(self.compilation.source_cost(source))?;
+                work.consume_many(self.compilation.support_cost(source))?;
             }
             let mut sources_active = true;
             if let Some(sources) = self.receiver_sources.get(&id) {
                 for source in sources.iter() {
                     cancellation.check()?;
-                    work.consume_many(self.compilation.source_cost(source))?;
+                    work.consume_many(self.compilation.support_cost(source))?;
                     sources_active &= self.compilation.support_active(source);
                 }
             }
@@ -2767,7 +2767,7 @@ impl<'a> ClassicIndex<'a> {
                 .chain(std::iter::once(&proof.type_source))
             {
                 cancellation.check()?;
-                work.consume_many(self.compilation.source_cost(source))?;
+                work.consume_many(self.compilation.support_cost(source))?;
                 sources_active &= self.compilation.support_active(source);
             }
             if !self.compilation.use_active(id)
