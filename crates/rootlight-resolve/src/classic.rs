@@ -6,6 +6,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 mod calls;
+mod compilation;
 mod default_members;
 mod dependencies;
 mod project_references;
@@ -17,8 +18,8 @@ use rootlight_cancel::Cancellation;
 use rootlight_ids::{ContentHash, FactId, FileId, SymbolId, content_hash};
 use rootlight_ir::{
     Confidence, ContainerRef, CoverageRecord, CoverageScope, CoverageStatus, EntityKind,
-    EntityRecord, EntityVisibility, FactDomain, FactRef, OccurrenceRecord, OccurrenceRole,
-    OccurrenceTarget, ProducerKind, SourceRef,
+    EntityRecord, EntityVisibility, ExtensionEnvelope, FactDomain, FactRef, OccurrenceRecord,
+    OccurrenceRole, OccurrenceTarget, ProducerKind, SourceRef,
 };
 
 use crate::{
@@ -114,6 +115,7 @@ pub enum NativeClassicMemberKind {
 
 #[derive(Default)]
 pub(crate) struct ClassicIndex<'a> {
+    compilation: compilation::CompilationIndex,
     proofs: BTreeMap<FactId, Proof<'a>>,
     application_parameters: BTreeMap<FactId, Arc<Vec<&'a EntityRecord>>>,
     receiver_sources: BTreeMap<FactId, Arc<Vec<SourceRef>>>,
@@ -549,17 +551,21 @@ fn parse_project(
 }
 
 impl<'a> ClassicIndex<'a> {
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "occurrences, compilation extensions, source bytes and native inventories are verified separately"
+    )]
     pub(crate) fn build(
         index: &CandidateIndex<'a>,
         coverage: &[CoverageRecord],
         occurrences: &[OccurrenceRecord],
+        extensions: &[ExtensionEnvelope],
         inputs: &[ClassicProjectSource<'_>],
         native: &[NativeClassicProject],
         cancellation: &Cancellation,
         work: &mut ResolutionWorkBudget,
     ) -> Result<Self, ResolutionError> {
         let files = &index.files;
-        let entities = &index.entities;
         let provenance = &index.provenance;
         let mut result = Self::default();
         if native.is_empty() && !files.values().any(|file| is_manifest(&file.path)) {
@@ -584,6 +590,35 @@ impl<'a> ClassicIndex<'a> {
                 return Err(ResolutionError::ClassicSourceIdentity);
             }
         }
+        result.compilation = compilation::CompilationIndex::build(
+            index,
+            extensions,
+            occurrences,
+            &sources,
+            cancellation,
+            work,
+        )?;
+        let mut retained_entities = BTreeMap::new();
+        for (&id, &entity) in &index.entities {
+            cancellation.check()?;
+            work.consume()?;
+            if !result.compilation.entity_inactive(id) {
+                retained_entities.insert(id, entity);
+            }
+        }
+        let entities = &retained_entities;
+        let mut retained_occurrences = Vec::new();
+        for occurrence in occurrences {
+            cancellation.check()?;
+            work.consume()?;
+            let definition = occurrence.role == OccurrenceRole::Definition
+                && matches!(occurrence.target, OccurrenceTarget::Resolved { symbol }
+                    if !result.compilation.entity_inactive(symbol));
+            if definition || result.compilation.use_active(occurrence.id) {
+                retained_occurrences.push(occurrence.clone());
+            }
+        }
+        let occurrences = retained_occurrences.as_slice();
         let mut paths = BTreeMap::new();
         for file in files.values() {
             cancellation.check()?;
@@ -606,7 +641,7 @@ impl<'a> ClassicIndex<'a> {
         }
         let mut declarations: BTreeMap<FileId, Vec<&EntityRecord>> = BTreeMap::new();
         let mut local_types = BTreeMap::new();
-        for entity in entities.values() {
+        for entity in index.entities.values() {
             cancellation.check()?;
             work.consume()?;
             if let Some(source) = &entity.evidence.source {
@@ -614,14 +649,16 @@ impl<'a> ClassicIndex<'a> {
                     .entry(source.span().file())
                     .or_default()
                     .push(entity);
-                if matches!(entity.kind, EntityKind::Struct | EntityKind::Enum) {
+                if !result.compilation.entity_inactive(entity.id)
+                    && matches!(entity.kind, EntityKind::Struct | EntityKind::Enum)
+                {
                     local_types
                         .entry((
                             source.span().file(),
                             entity.canonical_name.to_ascii_lowercase(),
                         ))
                         .and_modify(|unique| *unique = false)
-                        .or_insert(true);
+                        .or_insert_with(|| result.compilation.entity_active(entity.id));
                 }
             }
         }
@@ -792,6 +829,12 @@ impl<'a> ClassicIndex<'a> {
                 if !complete {
                     break;
                 }
+                let retained_records: Vec<_> = records
+                    .iter()
+                    .copied()
+                    .filter(|entity| !result.compilation.entity_inactive(entity.id))
+                    .collect();
+                let records = retained_records.as_slice();
                 let named: Vec<_> = records
                     .iter()
                     .filter(|e| {
@@ -887,11 +930,17 @@ impl<'a> ClassicIndex<'a> {
                 modules
                     .entry(member.name.clone())
                     .and_modify(|prior| *prior = None)
-                    .or_insert((!member.class).then_some(named[0].id));
+                    .or_insert(
+                        (!member.class && result.compilation.entity_active(named[0].id))
+                            .then_some(named[0].id),
+                    );
                 types
                     .entry(member.name)
                     .and_modify(|prior| *prior = None)
-                    .or_insert(member.class.then_some(named[0].id));
+                    .or_insert(
+                        (member.class && result.compilation.entity_active(named[0].id))
+                            .then_some(named[0].id),
+                    );
                 for entity in records
                     .iter()
                     .filter(|entity| matches!(entity.kind, EntityKind::Struct | EntityKind::Enum))
@@ -905,7 +954,8 @@ impl<'a> ClassicIndex<'a> {
                     name_shadowed |= name == project.name;
                     let target = (entity.visibility == EntityVisibility::Public
                         && entity.container == Some(ContainerRef::Entity(named[0].id))
-                        && local_types.get(&(file.id, name.clone())) == Some(&true))
+                        && local_types.get(&(file.id, name.clone())) == Some(&true)
+                        && result.compilation.entity_active(entity.id))
                     .then_some(entity.id);
                     work.consume()?;
                     modules
@@ -918,6 +968,7 @@ impl<'a> ClassicIndex<'a> {
                         .or_insert(target);
                 }
                 evidence.facts.push(FactRef::File(file.id));
+                evidence.facts.extend(result.compilation.evidence(file.id));
                 if let Some(source) = &file.evidence.source {
                     evidence.sources.push(source.clone());
                 }
@@ -1021,6 +1072,9 @@ impl<'a> ClassicIndex<'a> {
                         .ok_or(ResolutionError::ClassicSourceIdentity)?;
                 }
                 for entity in declarations.get(file).into_iter().flatten() {
+                    if result.compilation.entity_inactive(entity.id) {
+                        continue;
+                    }
                     cancellation.check()?;
                     work.consume()?;
                     if entity.container != Some(ContainerRef::Entity(*module)) {
@@ -1036,6 +1090,7 @@ impl<'a> ClassicIndex<'a> {
                     };
                     let exported = procedural && entity.visibility != EntityVisibility::Private;
                     let target = (eligible
+                        && result.compilation.entity_active(entity.id)
                         && matches!(
                             entity.visibility,
                             EntityVisibility::Public | EntityVisibility::Restricted
@@ -1389,10 +1444,11 @@ impl<'a> ClassicIndex<'a> {
                     let prior_member = members.contains_key(&key);
                     let accessors = property_accessors.entry(key.clone()).or_insert_with(|| {
                         PropertyAccessors {
-                            invalid: prior_member,
+                            invalid: prior_member || !result.compilation.entity_active(entity.id),
                             ..PropertyAccessors::default()
                         }
                     });
+                    accessors.invalid |= !result.compilation.entity_active(entity.id);
                     match property_accessor_kind(entity, &sources, cancellation, work)? {
                         Some(PropertyAccessorKind::Get) if accessors.get.is_none() => {
                             accessors.get = Some(*entity);
@@ -1411,7 +1467,12 @@ impl<'a> ClassicIndex<'a> {
                 members
                     .entry(key)
                     .and_modify(|prior| *prior = None)
-                    .or_insert(Some(*entity));
+                    .or_insert_with(|| {
+                        result
+                            .compilation
+                            .entity_active(entity.id)
+                            .then_some(*entity)
+                    });
                 // Enum constants also occupy the enclosing module namespace
                 // (MS-VBAL 5.6.10), including private or ambiguous local enums.
                 if let Some(enumeration) =
@@ -1422,7 +1483,11 @@ impl<'a> ClassicIndex<'a> {
                     members
                         .entry((module, entity.canonical_name.to_ascii_lowercase()))
                         .and_modify(|prior| *prior = None)
-                        .or_insert(Some(*entity));
+                        .or_insert_with(|| {
+                            (result.compilation.entity_active(entity.id)
+                                && result.compilation.entity_active(enumeration.id))
+                            .then_some(*entity)
+                        });
                 }
             }
         }
@@ -1517,8 +1582,10 @@ impl<'a> ClassicIndex<'a> {
                         .then(|| (target, Arc::clone(&project.evidence)))
                     });
                 if let Some((target, context)) = typed.filter(|(target, _)| {
-                    matches!(target.kind, EntityKind::Class | EntityKind::Struct)
-                        || standard::collection::is_class(target)
+                    result.compilation.entity_active(owner.id)
+                        && result.compilation.entity_active(target.id)
+                        && (matches!(target.kind, EntityKind::Class | EntityKind::Struct)
+                            || standard::collection::is_class(target))
                 }) {
                     let safe = if target.kind == EntityKind::Struct {
                         if let Some(&safe) = unconditional_udts.get(&target.id) {
@@ -1554,6 +1621,7 @@ impl<'a> ClassicIndex<'a> {
                 "vba.value_identifier.reference" | "vba.identifier.reference"
             ) && occurrence.role == OccurrenceRole::Reference
                 && let OccurrenceTarget::Resolved { symbol } = occurrence.target
+                && result.compilation.entity_active(symbol)
             {
                 receivers
                     .entry(occurrence.source.span())
@@ -1563,6 +1631,7 @@ impl<'a> ClassicIndex<'a> {
             if occurrence.syntax_kind == "vba.application.reference"
                 && let OccurrenceTarget::Resolved { symbol } = occurrence.target
                 && let Some(target) = entities.get(&symbol).copied()
+                && result.compilation.entity_active(target.id)
                 && matches!(
                     target.kind,
                     EntityKind::Function | EntityKind::Method | EntityKind::Property
@@ -1601,13 +1670,19 @@ impl<'a> ClassicIndex<'a> {
                     .is_some_and(|entity| entity.kind == EntityKind::Class)
             })
             .collect();
-        let default_members =
-            default_members::inventory(entities, &project_classes, &sources, cancellation, work)?;
+        let default_members = default_members::inventory(
+            entities,
+            &project_classes,
+            &sources,
+            &result.compilation,
+            cancellation,
+            work,
+        )?;
         let mut module_qualifiers = BTreeMap::new();
         let mut member_occurrences = Vec::new();
         let mut read_receivers: BTreeMap<_, Vec<SourceRef>> = BTreeMap::new();
         let mut automatic_reads = BTreeMap::new();
-        let mut calls = calls::CallIndex::build(index, occurrences, cancellation, work)?;
+        let mut calls = calls::CallIndex::build(entities, occurrences, cancellation, work)?;
         let mut constructed_types = BTreeMap::new();
         let mut constructed_classes = BTreeSet::new();
         for (owner, source) in &automatic_types {
@@ -2113,7 +2188,7 @@ impl<'a> ClassicIndex<'a> {
                 resolved_members
                     .get(&receiver_span)
                     .and_then(|id: &Option<FactId>| *id)
-                    .and_then(|id| result.proofs.get(&id))
+                    .and_then(|id| result.proof_by_id(id))
                     .filter(|proof| {
                         matches!(
                             proof.target.kind,
@@ -2380,7 +2455,7 @@ impl<'a> ClassicIndex<'a> {
                         evidence.insert(source.clone());
                     }
                 }
-                if let Some(proof) = result.proofs.get(&id) {
+                if let Some(proof) = result.proof_by_id(id) {
                     evidence.extend(proof.target.evidence.source.iter().cloned());
                     if let Some((_, source)) = &proof.receiver {
                         evidence.insert(source.clone());
@@ -2504,6 +2579,7 @@ impl<'a> ClassicIndex<'a> {
             cancellation,
             work,
         )?;
+        result.retain_eligible(cancellation, work)?;
         if automatic_types.is_empty() {
             return Ok(result);
         }
@@ -2536,6 +2612,15 @@ impl<'a> ClassicIndex<'a> {
             else {
                 continue;
             };
+            cancellation.check()?;
+            work.consume_many(result.compilation.source_cost(type_source))?;
+            if !result.compilation.entity_active(variable.id)
+                || !result.compilation.entity_active(class.id)
+                || !result.compilation.entity_active(initializer.id)
+                || !result.compilation.support_active(type_source)
+            {
+                continue;
+            }
             value_read_files.insert(site.file);
             pending_automatic.push((
                 site,
@@ -2599,11 +2684,105 @@ impl<'a> ClassicIndex<'a> {
             // declaration-time construction or the variable's runtime value.
             result.automatic_initializers.insert(site.id, proof);
         }
+        result.retain_eligible(cancellation, work)?;
         Ok(result)
     }
 
     pub(crate) fn proof(&self, occurrence: &OccurrenceRecord) -> Option<&Proof<'a>> {
-        self.proofs.get(&occurrence.id)
+        self.proof_by_id(occurrence.id)
+    }
+
+    fn proof_by_id(&self, id: FactId) -> Option<&Proof<'a>> {
+        self.proofs
+            .get(&id)
+            .filter(|proof| self.proof_eligible(id, proof))
+    }
+
+    fn proof_eligible(&self, id: FactId, proof: &Proof<'_>) -> bool {
+        self.compilation.use_active(id)
+            && self.compilation.entity_active(proof.target.id)
+            && proof.receiver.as_ref().is_none_or(|(receiver, source)| {
+                self.compilation.entity_active(receiver.id)
+                    && self.compilation.support_active(source)
+            })
+    }
+
+    fn retain_eligible(
+        &mut self,
+        cancellation: &Cancellation,
+        work: &mut ResolutionWorkBudget,
+    ) -> Result<(), ResolutionError> {
+        let mut rejected = Vec::new();
+        for (&id, proof) in &self.proofs {
+            cancellation.check()?;
+            work.consume()?;
+            let mut parameters_active = true;
+            if let Some(parameters) = self.application_parameters.get(&id) {
+                for parameter in parameters.iter() {
+                    cancellation.check()?;
+                    work.consume()?;
+                    parameters_active &= self.compilation.entity_active(parameter.id);
+                }
+            }
+            if let Some((_, source)) = &proof.receiver {
+                cancellation.check()?;
+                work.consume_many(self.compilation.source_cost(source))?;
+            }
+            let mut sources_active = true;
+            if let Some(sources) = self.receiver_sources.get(&id) {
+                for source in sources.iter() {
+                    cancellation.check()?;
+                    work.consume_many(self.compilation.source_cost(source))?;
+                    sources_active &= self.compilation.support_active(source);
+                }
+            }
+            if !self.proof_eligible(id, proof)
+                || !parameters_active
+                || !sources_active
+                || self
+                    .initializers
+                    .get(&id)
+                    .is_some_and(|initializer| !self.compilation.entity_active(initializer.id))
+            {
+                rejected.push(id);
+            }
+        }
+        for id in rejected {
+            self.proofs.remove(&id);
+        }
+        self.application_parameters
+            .retain(|id, _| self.proofs.contains_key(id));
+        self.receiver_sources
+            .retain(|id, _| self.proofs.contains_key(id));
+        self.initializers
+            .retain(|id, _| self.proofs.contains_key(id));
+        let mut rejected = Vec::new();
+        for (&id, proof) in &self.automatic_initializers {
+            cancellation.check()?;
+            work.consume()?;
+            let mut sources_active = true;
+            for source in proof
+                .read_sources
+                .iter()
+                .chain(std::iter::once(&proof.type_source))
+            {
+                cancellation.check()?;
+                work.consume_many(self.compilation.source_cost(source))?;
+                sources_active &= self.compilation.support_active(source);
+            }
+            if !self.compilation.use_active(id)
+                || !self.compilation.entity_active(proof.variable.id)
+                || !self.compilation.entity_active(proof.class.id)
+                || !self.compilation.entity_active(proof.initializer.id)
+                || !sources_active
+            {
+                rejected.push(id);
+            }
+        }
+        for id in rejected {
+            self.automatic_initializers.remove(&id);
+        }
+        Ok(())
     }
 
     pub(crate) fn initializer(&self, occurrence: &OccurrenceRecord) -> Option<&'a EntityRecord> {

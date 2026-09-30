@@ -39,12 +39,12 @@ use rootlight_ir::{
     LEXICAL_EXTENSION_VERSION, LexicalEvidenceFormat, LexicalEvidenceKind, LexicalEvidenceV1,
     OccurrenceRecord, OccurrenceRole, OccurrenceTarget, ProducerIdentity, ProducerKind,
     ProvenanceRecord, RelationEndpoint, RelationPredicate, RelationRecord, SkippedRegion,
-    SkippedRegionReason, SourceRef, SourceSpan, SymbolIdentityClaim, canonical_rust_impl_scope,
-    canonical_symbol_signature, derive_coverage_record_id, derive_diagnostic_record_id,
-    derive_occurrence_record_id, derive_provenance_record_id, derive_relation_record_id,
-    derive_rust_impl_scope_identity, derive_skipped_region_id, entity_kind_identity_label,
-    new_file_identity_claim_envelope, new_lexical_evidence_envelope,
-    new_symbol_identity_claim_envelope,
+    SkippedRegionReason, SourceRef, SourceSpan, SymbolIdentityClaim, VBA_COMPILATION_NAMESPACE,
+    VBA_COMPILATION_VERSION, canonical_rust_impl_scope, canonical_symbol_signature,
+    derive_coverage_record_id, derive_diagnostic_record_id, derive_occurrence_record_id,
+    derive_provenance_record_id, derive_relation_record_id, derive_rust_impl_scope_identity,
+    derive_skipped_region_id, entity_kind_identity_label, new_file_identity_claim_envelope,
+    new_lexical_evidence_envelope, new_symbol_identity_claim_envelope,
 };
 
 const SYNTAX_FALLBACK_TIER: AnalysisTier = AnalysisTier::TierD;
@@ -57,6 +57,8 @@ const MAX_FRONTEND_VERSION_BYTES: usize = 128;
 const SCOPE_COLLISION_GUARD_CONTEXT: &str = "rootlight/treesitter-scope-collision-guard/v1";
 const ENTITY_IDENTITY_GUARD_CONTEXT: &str = "rootlight/treesitter-entity-identity-guard/v1";
 const STABLE_SCOPE_IDENTITY_UNAVAILABLE: &str = "stable-scope-identity-unavailable";
+const VBA_CONDITIONAL_EVALUATION_UNAVAILABLE: &str =
+    "vba-conditional-compilation-evaluation-unavailable";
 
 /// Tree-sitter syntax analyzer backed by an injected parser-independent provider.
 #[derive(Clone)]
@@ -835,6 +837,7 @@ fn preflight_lowering_limits(
     let mut occurrence_candidates = 0_usize;
     let mut lexical_relation_candidates = 0_usize;
     let mut extension_candidates = 0_usize;
+    let mut vba_compilation_candidates = 0_usize;
     let mut skipped_candidates = included_range_gap_count(
         request.source().source_ref().span(),
         request.included_ranges(),
@@ -863,6 +866,14 @@ fn preflight_lowering_limits(
     }
     for (index, fact) in parse_output.facts().iter().enumerate() {
         check_periodically(index, cancellation)?;
+        if parse_output.report().coverage().status() == CoverageStatus::Complete
+            && fact.syntax_kind().as_str() == "vba.file.scope"
+            && fact.span().start_byte() < fact.span().end_byte()
+        {
+            vba_compilation_candidates = checked_add(vba_compilation_candidates, 1)?;
+            account_string(&mut string_bytes, VBA_COMPILATION_NAMESPACE.len(), limits)?;
+            account_string(&mut string_bytes, VBA_COMPILATION_VERSION.len(), limits)?;
+        }
         if request.language().as_str() == "markdown" && is_classic_fence(fact) {
             skipped_candidates = checked_add(skipped_candidates, 1)?;
             account_string(
@@ -1088,7 +1099,10 @@ fn preflight_lowering_limits(
             account_string(&mut string_bytes, "outside-included-ranges".len(), limits)?;
         }
     }
-    let required_extension_candidates = checked_add(1, entity_candidates)?;
+    let required_extension_candidates = checked_add(
+        checked_add(1, entity_candidates)?,
+        vba_compilation_candidates,
+    )?;
     require_resource_limit(
         ResourceKind::Records,
         required_extension_candidates,
@@ -1146,7 +1160,10 @@ fn preflight_lowering_limits(
         total_records,
         limits.max_total_records,
     )?;
-    let nested_items = checked_add(2, diagnostic_derivations)?;
+    let nested_items = checked_add(
+        checked_add(2, diagnostic_derivations)?,
+        vba_compilation_candidates,
+    )?;
     require_resource_limit(
         ResourceKind::NestedItems,
         nested_items,
@@ -1412,12 +1429,12 @@ impl<'context, 'source> Lowering<'context, 'source> {
 
         let vba_bindings = if self.parse_output.report().coverage().status()
             == CoverageStatus::Complete
-            && self.parse_output.facts().iter().any(|fact| {
-                matches!(
-                    fact.syntax_kind().as_str(),
-                    "vba.file.module" | "vba.class.module"
-                )
-            }) {
+            && self
+                .parse_output
+                .facts()
+                .iter()
+                .any(|fact| fact.syntax_kind().as_str() == "vba.file.scope")
+        {
             let symbols = materialized
                 .values()
                 .filter_map(|entity| entity.definition_local_id.map(|id| (id, entity.record.id)))
@@ -1699,6 +1716,29 @@ impl<'context, 'source> Lowering<'context, 'source> {
             extensions.insert(envelope.id, envelope);
         }
 
+        if let Some(bindings) = &vba_bindings {
+            // An explicit zero-branch inventory distinguishes unguarded source
+            // from a missing or truncated plan at downstream resolver boundaries.
+            for compilation in bindings.compilations() {
+                cancellation.check()?;
+                let envelope = rootlight_ir::new_vba_compilation_envelope(
+                    self.full_source.repository(),
+                    self.full_source.generation(),
+                    provenance_id,
+                    source_for_span(self.full_source, compilation.scope),
+                    compilation.clone(),
+                )
+                .map_err(|_| provider_failure("vba-compilation-evidence"))?;
+                ensure_extension_budget(
+                    &envelope,
+                    extensions.len(),
+                    &mut extension_bytes,
+                    self.request.limits().ir(),
+                )?;
+                extensions.insert(envelope.id, envelope);
+            }
+        }
+
         for (index, fact) in self.parse_output.facts().iter().enumerate() {
             check_periodically(index, cancellation)?;
             let source = source_for_span(self.full_source, fact.span());
@@ -1736,6 +1776,13 @@ impl<'context, 'source> Lowering<'context, 'source> {
             if let Some((domain, detail)) = source_coverage_gap(fact)
                 && !(entity_plan.perl.owned_functions.contains(&fact.local_id())
                     && materialized.contains_key(&fact.local_id()))
+                && !(detail == VBA_CONDITIONAL_EVALUATION_UNAVAILABLE
+                    && match &vba_bindings {
+                        Some(bindings) => {
+                            bindings.compilation_evaluation_proven(fact, cancellation)?
+                        }
+                        None => false,
+                    })
             {
                 let reason = match fact.syntax_kind().as_str() {
                     "html.embedded_limit.signature"
@@ -4269,7 +4316,7 @@ fn source_coverage_gap(fact: &SyntaxFact) -> Option<(FactDomain, &'static str)> 
         | "vba.conditional_function.declaration"
         | "vba.conditional_property.declaration" => Some((
             FactDomain::Relations,
-            "vba-conditional-compilation-evaluation-unavailable",
+            VBA_CONDITIONAL_EVALUATION_UNAVAILABLE,
         )),
         "groovy.invalid_callable.scope" => {
             Some((FactDomain::Entities, "groovy-callable-identity-unavailable"))

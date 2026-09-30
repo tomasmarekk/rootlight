@@ -3,10 +3,7 @@
 //! application references never add a second call edge for the same invocation.
 
 use super::{ClassicIndex, Proof};
-use crate::{
-    ResolutionError, ResolutionRule,
-    engine::{CandidateIndex, ResolutionWorkBudget},
-};
+use crate::{ResolutionError, ResolutionRule, engine::ResolutionWorkBudget};
 use rootlight_cancel::Cancellation;
 use rootlight_ids::{FileId, SymbolId};
 use rootlight_ir::{
@@ -50,13 +47,13 @@ pub(super) struct CallIndex<'a, 'o> {
 
 impl<'a, 'o> CallIndex<'a, 'o> {
     pub(super) fn build(
-        index: &CandidateIndex<'a>,
+        entities: &BTreeMap<SymbolId, &'a EntityRecord>,
         occurrences: &'o [OccurrenceRecord],
         cancellation: &Cancellation,
         work: &mut ResolutionWorkBudget,
     ) -> Result<Self, ResolutionError> {
         let mut parameters: BTreeMap<SymbolId, Vec<&EntityRecord>> = BTreeMap::new();
-        for entity in index.entities.values() {
+        for entity in entities.values() {
             cancellation.check()?;
             work.consume()?;
             if entity.kind == EntityKind::Parameter

@@ -14,7 +14,7 @@ use rootlight_ir::{
     new_symbol_identity_claim_envelope,
 };
 
-const CATALOG_RULE: &str = "vba-standard-library-catalog-v1";
+pub(super) const CATALOG_RULE: &str = "vba-standard-library-catalog-v1";
 // MS-VBAL 6.1.2.2. Platform-dependent values are deliberately not evaluated.
 // https://learn.microsoft.com/en-us/openspecs/microsoft_general_purpose_programming_languages/ms-vbal/52c853c1-fda2-4853-8069-172e515310f9
 const CONSTANTS: &[&str] = &[

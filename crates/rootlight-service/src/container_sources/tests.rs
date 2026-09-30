@@ -23,6 +23,9 @@ mod string_tests;
 #[path = "namespace_tests.rs"]
 mod namespace_tests;
 
+#[path = "conditional_tests.rs"]
+mod conditional_tests;
+
 fn tempdir() -> tempfile::TempDir {
     #[cfg(target_os = "macos")]
     {

@@ -254,6 +254,7 @@ impl ResolutionEngine {
             &lookup,
             &document.coverage_records,
             &document.occurrences,
+            &document.extensions,
             sources,
             native,
             cancellation,

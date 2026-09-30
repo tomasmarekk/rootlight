@@ -219,8 +219,8 @@ const PROJECT_FACTS_TRUNCATED_CODE: &str = "project-adapter-facts-truncated";
 const PROJECT_FACTS_TRUNCATED_MESSAGE: &str =
     "additional project semantic facts were omitted by aggregate resource limits";
 const AGGREGATE_DIAGNOSTICS_TRUNCATED_CODE: &str = "aggregate-diagnostics-truncated";
-const ANALYZER_BINARY_SEED: &[u8] = b"rootlight.first-slice.treesitter-structural/189";
-const RESOLVER_BINARY_SEED: &[u8] = b"rootlight.first-slice.resolve/87";
+const ANALYZER_BINARY_SEED: &[u8] = b"rootlight.first-slice.treesitter-structural/190";
+const RESOLVER_BINARY_SEED: &[u8] = b"rootlight.first-slice.resolve/88";
 const INCREMENTAL_PROVIDER_SEED: &[u8] = b"rootlight.first-slice.incremental-provider/1";
 const LANGUAGE_DISPOSITION_PROVIDER_SEED: &[u8] = b"rootlight.first-slice.language-disposition/5";
 const SOURCE_FILE_FALLBACK_PROVIDER_SEED: &[u8] = b"rootlight.source-file-fallback/4";
@@ -29947,11 +29947,34 @@ mod tests {
                 }),
                 !resolved
             );
-            assert!(
-                document.skipped_regions.iter().any(|gap| {
-                    gap.detail == "vba-conditional-compilation-evaluation-unavailable"
-                })
+            let inventories: Vec<_> = document
+                .extensions
+                .iter()
+                .filter(|extension| extension.namespace == rootlight_ir::VBA_COMPILATION_NAMESPACE)
+                .map(|extension| rootlight_ir::decode_vba_compilation_envelope(extension).unwrap())
+                .collect();
+            assert_eq!(inventories.len(), 1);
+            let inventory = &inventories[0];
+            assert!(inventory.complete);
+            assert_eq!(inventory.branches.len(), 1);
+            let branch = &inventory.branches[0];
+            assert_eq!(
+                branch.activity,
+                if resolved {
+                    rootlight_ir::VbaCompilationActivity::Active
+                } else {
+                    rootlight_ir::VbaCompilationActivity::Unproven
+                }
             );
+            let evaluation_gaps: Vec<_> = document
+                .skipped_regions
+                .iter()
+                .filter(|gap| gap.detail == "vba-conditional-compilation-evaluation-unavailable")
+                .collect();
+            assert_eq!(evaluation_gaps.len(), usize::from(!resolved));
+            if !resolved {
+                assert_eq!(evaluation_gaps[0].source.span(), branch.group);
+            }
             assert_eq!(reference.source.generation(), receipt.generation);
             let read = service
                 .source_read_with_options_and_budget(

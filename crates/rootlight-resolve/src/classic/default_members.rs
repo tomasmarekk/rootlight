@@ -12,6 +12,7 @@ pub(super) fn inventory(
     entities: &BTreeMap<SymbolId, &EntityRecord>,
     classes: &BTreeSet<SymbolId>,
     sources: &BTreeMap<FileId, &[u8]>,
+    compilation: &compilation::CompilationIndex,
     cancellation: &Cancellation,
     work: &mut ResolutionWorkBudget,
 ) -> Result<BTreeMap<SymbolId, Option<DefaultMember>>, ResolutionError> {
@@ -144,6 +145,29 @@ pub(super) fn inventory(
                 .is_some_and(|word| word.eq_ignore_ascii_case(b"Attribute"))
                 && trimmed.get(9).is_some_and(u8::is_ascii_whitespace)
             {
+                let span = rootlight_ir::SourceSpan::new(
+                    file,
+                    u64::try_from(offset).map_err(|_| ResolutionError::CountOverflow)?,
+                    u64::try_from(offset + line.len())
+                        .map_err(|_| ResolutionError::CountOverflow)?,
+                )
+                .map_err(ResolutionError::InvalidProducer)?;
+                if let Some(source) = class.evidence.source.as_ref() {
+                    let source = SourceRef::new(
+                        source.repository(),
+                        source.generation(),
+                        span,
+                        source.content_hash(),
+                        None,
+                    );
+                    work.consume_many(compilation.source_cost(&source))?;
+                    if compilation.activity(&source)
+                        == rootlight_ir::VbaCompilationActivity::Inactive
+                    {
+                        offset += physical.len();
+                        continue;
+                    }
+                }
                 let left = trimmed
                     .split(|byte| *byte == b'=')
                     .next()

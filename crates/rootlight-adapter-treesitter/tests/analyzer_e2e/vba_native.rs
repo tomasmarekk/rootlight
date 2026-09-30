@@ -41,56 +41,456 @@ fn output_with_native_kind(
 
 #[test]
 fn vba_compilation_constants_use_a_separate_module_namespace() {
-    let source = "Attribute VB_Name = \"Options\"\n#Const Enabled = True\nConst Enabled = 7\nSub Run(ByVal Enabled As Long)\n#If eNaBlEd Then\nDim value As Long\nvalue = Enabled\n#End If\nEnd Sub\n";
-    let result = output(source);
-    let document = result.document();
-    let start = u64::try_from(source.find("#Const Enabled").unwrap() + 7).unwrap();
-    let definition = document
-        .occurrences
-        .iter()
-        .find(|site| {
-            site.role == OccurrenceRole::Definition && site.source.span().start_byte() == start
-        })
-        .expect("compiler constant definition");
-    let condition = document
-        .occurrences
-        .iter()
-        .find(|site| {
-            site.syntax_kind == "vba.compilation_identifier.reference"
-                && site.source.span().start_byte()
-                    == u64::try_from(source.find("eNaBlEd Then").unwrap()).unwrap()
-        })
-        .unwrap();
-    assert_eq!(condition.target, definition.target);
-    assert!(matches!(
-        condition.target,
-        OccurrenceTarget::Resolved { .. }
-    ));
-    let runtime = reference_at(document, source, "Enabled\n#End");
-    assert_ne!(runtime.target, condition.target);
-    assert!(matches!(runtime.target, OccurrenceTarget::Resolved { .. }));
-    assert!(
-        document
-            .skipped_regions
+    use rootlight_ir::{
+        VBA_COMPILATION_NAMESPACE, VbaCompilationActivity, VbaCompilationBranch,
+        decode_vba_compilation_envelope, new_vba_compilation_envelope,
+    };
+
+    for (initializer, selected) in [("True", 0), ("False", 1)] {
+        let source = format!(
+            "Attribute VB_Name = \"Options\"\n#Const Enabled = {initializer}\nConst Enabled = 7\nSub Run(ByVal Enabled As Long)\n#If eNaBlEd Then\nDim included As Long\nincluded = Enabled\n#Else\nDim excluded As Long\nexcluded = Enabled\n#End If\nEnd Sub\n"
+        );
+        let result = output(&source);
+        let document = result.document();
+        let envelopes: Vec<_> = document
+            .extensions
             .iter()
-            .any(|gap| { gap.detail == "vba-conditional-compilation-evaluation-unavailable" })
-    );
+            .filter(|envelope| envelope.namespace == VBA_COMPILATION_NAMESPACE)
+            .collect();
+        assert_eq!(envelopes.len(), 1);
+        let envelope = envelopes[0];
+        let inventory = decode_vba_compilation_envelope(envelope).unwrap();
+        let module_source = envelope.evidence.source.as_ref().unwrap();
+        assert_eq!(module_source.span().start_byte(), 0);
+        assert_eq!(
+            module_source.span().end_byte(),
+            u64::try_from(source.len()).unwrap()
+        );
+        assert_eq!(
+            module_source.content_hash(),
+            content_hash(source.as_bytes())
+        );
+        assert_eq!(inventory.scope, module_source.span());
+        assert!(inventory.complete);
+        assert_eq!(
+            new_vba_compilation_envelope(
+                envelope.repository,
+                envelope.generation,
+                envelope.provenance,
+                module_source.clone(),
+                inventory.clone()
+            )
+            .unwrap(),
+            *envelope
+        );
+        let parser = document
+            .provenance
+            .iter()
+            .find(|parser| parser.id == envelope.provenance)
+            .unwrap();
+        assert_eq!(parser.producer_kind, ProducerKind::Parser);
+        assert_eq!(
+            parser.input_sources.as_slice(),
+            std::slice::from_ref(module_source)
+        );
+        let source_at = |needle: &str| {
+            let start = u64::try_from(source.find(needle).unwrap()).unwrap();
+            SourceRef::new(
+                module_source.repository(),
+                module_source.generation(),
+                SourceSpan::new(
+                    module_source.span().file(),
+                    start,
+                    start + u64::try_from(needle.len()).unwrap(),
+                )
+                .unwrap(),
+                module_source.content_hash(),
+                None,
+            )
+        };
+        let group = source_at("#If eNaBlEd Then\nDim included As Long\nincluded = Enabled\n#Else\nDim excluded As Long\nexcluded = Enabled\n#End If").span();
+        let expected: Vec<_> = [
+            "Dim included As Long\nincluded = Enabled\n",
+            "Dim excluded As Long\nexcluded = Enabled\n",
+        ]
+        .into_iter()
+        .enumerate()
+        .map(|(index, body)| VbaCompilationBranch {
+            group,
+            region: source_at(body).span(),
+            activity: if index == selected {
+                VbaCompilationActivity::Active
+            } else {
+                VbaCompilationActivity::Inactive
+            },
+        })
+        .collect();
+        assert_eq!(inventory.branches, expected);
+        assert!(
+            document
+                .skipped_regions
+                .iter()
+                .all(|gap| gap.detail != "vba-conditional-compilation-evaluation-unavailable")
+        );
+
+        let compiler_name = source_at(&format!("#Const Enabled = {initializer}"));
+        let definition = document
+            .occurrences
+            .iter()
+            .find(|site| {
+                site.role == OccurrenceRole::Definition
+                    && site.source.span().start_byte() == compiler_name.span().start_byte() + 7
+            })
+            .unwrap();
+        assert_eq!(
+            definition.source.span().end_byte(),
+            definition.source.span().start_byte() + 7
+        );
+        let OccurrenceTarget::Resolved {
+            symbol: compiler_symbol,
+        } = definition.target
+        else {
+            panic!("compiler constant definition is retained")
+        };
+        let compiler = document
+            .entities
+            .iter()
+            .find(|entity| entity.id == compiler_symbol)
+            .unwrap();
+        assert_eq!(compiler.kind, EntityKind::Constant);
+        assert_eq!(compiler.evidence.source.as_ref(), Some(&compiler_name));
+        let condition_source = source_at("eNaBlEd");
+        let condition = document
+            .occurrences
+            .iter()
+            .find(|site| {
+                site.syntax_kind == "vba.compilation_identifier.reference"
+                    && site.source == condition_source
+            })
+            .unwrap();
+        assert_eq!(condition.target, definition.target);
+        assert_eq!(
+            inventory.activity_at(condition.source.span()),
+            VbaCompilationActivity::Unproven
+        );
+        assert!(document.relations.iter().any(|edge| edge.subject
+            == RelationEndpoint::Occurrence(condition.id)
+            && edge.predicate == RelationPredicate::RefersTo
+            && edge.object == RelationEndpoint::Entity(compiler_symbol)
+            && edge.evidence.source.as_ref() == Some(&condition.source)));
+        let parameter = document
+            .entities
+            .iter()
+            .find(|entity| {
+                entity.kind == EntityKind::Parameter && entity.canonical_name == "Enabled"
+            })
+            .unwrap();
+        assert_eq!(
+            parameter.evidence.source.as_ref(),
+            Some(&source_at("ByVal Enabled As Long"))
+        );
+        let runtime_constant = document
+            .entities
+            .iter()
+            .find(|entity| {
+                entity.kind == EntityKind::Constant
+                    && entity.evidence.source.as_ref() == Some(&source_at("Enabled = 7"))
+            })
+            .unwrap();
+        assert_ne!(runtime_constant.id, compiler_symbol);
+        assert_ne!(parameter.id, compiler_symbol);
+        assert_ne!(parameter.id, runtime_constant.id);
+        for (index, name, marker) in [
+            (0, "included", "Enabled\n#Else"),
+            (1, "excluded", "Enabled\n#End"),
+        ] {
+            let variable = document
+                .entities
+                .iter()
+                .find(|entity| entity.kind == EntityKind::Variable && entity.canonical_name == name)
+                .unwrap();
+            assert_eq!(
+                variable.evidence.source.as_ref(),
+                Some(&source_at(&format!("{name} As Long")))
+            );
+            let variable_definition = document
+                .occurrences
+                .iter()
+                .find(|site| {
+                    site.role == OccurrenceRole::Definition
+                        && site.source.span().start_byte()
+                            == source_at(&format!("{name} As Long")).span().start_byte()
+                })
+                .unwrap();
+            assert_eq!(
+                variable_definition.target,
+                OccurrenceTarget::Resolved {
+                    symbol: variable.id
+                }
+            );
+            for (site, symbol) in [
+                (
+                    reference_at(document, &source, &format!("{name} =")),
+                    variable.id,
+                ),
+                (reference_at(document, &source, marker), parameter.id),
+            ] {
+                let edges: Vec<_> = document
+                    .relations
+                    .iter()
+                    .filter(|edge| {
+                        edge.subject == RelationEndpoint::Occurrence(site.id)
+                            && edge.predicate == RelationPredicate::RefersTo
+                    })
+                    .collect();
+                if index == selected {
+                    assert_eq!(site.target, OccurrenceTarget::Resolved { symbol });
+                    assert_eq!(edges.len(), 1);
+                    assert_eq!(edges[0].object, RelationEndpoint::Entity(symbol));
+                    assert_eq!(edges[0].evidence.source.as_ref(), Some(&site.source));
+                    assert_eq!(
+                        inventory.activity_at(site.source.span()),
+                        VbaCompilationActivity::Active
+                    );
+                } else {
+                    assert!(matches!(site.target, OccurrenceTarget::Unresolved { .. }));
+                    assert!(edges.is_empty());
+                    assert_eq!(
+                        inventory.activity_at(site.source.span()),
+                        VbaCompilationActivity::Inactive
+                    );
+                }
+            }
+        }
+    }
 }
 
 #[test]
-fn vba_compilation_constants_include_all_directives_without_selecting_branches() {
-    for source in [
-        "#Const Enabled = True\n#If ENABLED Then\n#End If\n",
-        "#If ENABLED Then\n#End If\n#Const Enabled = True\n",
-        "#If Unknown Then\n#Const Enabled = True\n#End If\n#If ENABLED Then\n#End If\n",
-        "Sub Setup()\n#Const Enabled = True\nEnd Sub\n#If ENABLED Then\n#End If\n",
-        "#Const Enabled% = True\n#If ENABLED Then\n#End If\n",
-        "#Const Enabled = True\n#Const Other = ENABLED\n",
-        "#Const Enabled = True\n#If ENABLED Then\nSub Run(ByVal value As Long)\n#Else\nSub Run(ByVal value As Integer)\n#End If\nEnd Sub\n",
-        "#Const Enabled = True\n#If Unknown Then\nSub Run(ByVal value As Long)\n#ElseIf ENABLED Then\nSub Run(ByVal value As Integer)\n#End If\nEnd Sub\n",
+fn vba_compilation_constants_retain_all_sources_and_select_only_closed_branches() {
+    use rootlight_ir::{
+        VBA_COMPILATION_NAMESPACE,
+        VbaCompilationActivity::{Active, Inactive, Unproven},
+        VbaCompilationBranch, decode_vba_compilation_envelope, new_vba_compilation_envelope,
+    };
+
+    const EMPTY_GROUP: &str = "#If ENABLED Then\n#End If";
+    const SPLIT: &str = "#If ENABLED Then\nSub Run(ByVal value As Long)\n#Else\nSub Run(ByVal value As Integer)\n#End If\nEnd Sub";
+    const UNKNOWN_SPLIT: &str = "#If Unknown Then\nSub Run(ByVal value As Long)\n#ElseIf ENABLED Then\nSub Run(ByVal value As Integer)\n#End If\nEnd Sub";
+    const UNKNOWN_GROUP: &str = "#If Unknown Then\n#Const Enabled = True\n#End If";
+    const LATE_UNKNOWN: &str = "#If ENABLED Then\n#ElseIf Unknown Then\n#End If";
+    for (source, complete, branches, warnings) in [
+        (
+            "#Const Enabled = True\n#If ENABLED Then\n#End If\n",
+            true,
+            vec![(EMPTY_GROUP, "#End If", true, Active)],
+            vec![],
+        ),
+        (
+            "#If ENABLED Then\n#End If\n#Const Enabled = True\n",
+            true,
+            vec![(EMPTY_GROUP, "#End If", true, Unproven)],
+            vec![EMPTY_GROUP],
+        ),
+        (
+            "#If Unknown Then\n#Const Enabled = True\n#End If\n#If ENABLED Then\n#End If\n",
+            true,
+            vec![
+                (UNKNOWN_GROUP, "#Const Enabled = True\n", false, Unproven),
+                (EMPTY_GROUP, "#End If", true, Active),
+            ],
+            vec![UNKNOWN_GROUP],
+        ),
+        (
+            "Sub Setup()\n#Const Enabled = True\nEnd Sub\n#If ENABLED Then\n#End If\n",
+            true,
+            vec![(EMPTY_GROUP, "#End If", true, Active)],
+            vec![],
+        ),
+        (
+            "#Const Enabled% = True\n#If ENABLED Then\n#End If\n",
+            true,
+            vec![(EMPTY_GROUP, "#End If", true, Active)],
+            vec![],
+        ),
+        (
+            "#Const Enabled = True\n#Const Other = ENABLED\n",
+            true,
+            vec![],
+            vec!["#Const Enabled = True", "#Const Other = ENABLED"],
+        ),
+        (
+            "#Const Enabled = True\n#If ENABLED Then\nSub Run(ByVal value As Long)\n#Else\nSub Run(ByVal value As Integer)\n#End If\nEnd Sub\n",
+            false,
+            vec![],
+            vec![SPLIT],
+        ),
+        (
+            "#Const Enabled = True\n#If Unknown Then\nSub Run(ByVal value As Long)\n#ElseIf ENABLED Then\nSub Run(ByVal value As Integer)\n#End If\nEnd Sub\n",
+            false,
+            vec![],
+            vec![UNKNOWN_SPLIT],
+        ),
+        (
+            "#Const Enabled = False\n#If ENABLED Then\n#End If\n",
+            true,
+            vec![(EMPTY_GROUP, "#End If", true, Inactive)],
+            vec![],
+        ),
+        (
+            "#Const Enabled = HostChoice\n#If ENABLED Then\n#End If\n",
+            true,
+            vec![(EMPTY_GROUP, "#End If", true, Unproven)],
+            vec!["#Const Enabled = HostChoice", EMPTY_GROUP],
+        ),
+        (
+            "#Const Enabled = 1\n#If ENABLED Then\n#End If\n",
+            true,
+            vec![(EMPTY_GROUP, "#End If", true, Unproven)],
+            vec!["#Const Enabled = 1", EMPTY_GROUP],
+        ),
+        (
+            "#Const Enabled = True\n#If ENABLED Then\n#ElseIf Unknown Then\n#End If\n",
+            true,
+            vec![
+                (LATE_UNKNOWN, "#ElseIf", true, Unproven),
+                (LATE_UNKNOWN, "#End If", true, Unproven),
+            ],
+            vec![LATE_UNKNOWN],
+        ),
     ] {
         let result = output(source);
         let document = result.document();
+        let envelopes: Vec<_> = document
+            .extensions
+            .iter()
+            .filter(|envelope| envelope.namespace == VBA_COMPILATION_NAMESPACE)
+            .collect();
+        assert_eq!(envelopes.len(), 1, "{source}");
+        let envelope = envelopes[0];
+        let inventory = decode_vba_compilation_envelope(envelope).unwrap();
+        let module_source = envelope.evidence.source.as_ref().unwrap();
+        assert_eq!(module_source.span().start_byte(), 0);
+        assert_eq!(
+            module_source.span().end_byte(),
+            u64::try_from(source.len()).unwrap()
+        );
+        assert_eq!(
+            module_source.content_hash(),
+            content_hash(source.as_bytes())
+        );
+        assert_eq!(inventory.scope, module_source.span());
+        assert_eq!(inventory.complete, complete, "{source}");
+        assert_eq!(
+            new_vba_compilation_envelope(
+                envelope.repository,
+                envelope.generation,
+                envelope.provenance,
+                module_source.clone(),
+                inventory.clone()
+            )
+            .unwrap(),
+            *envelope
+        );
+        let parser = document
+            .provenance
+            .iter()
+            .find(|parser| parser.id == envelope.provenance)
+            .unwrap();
+        assert_eq!(parser.producer_kind, ProducerKind::Parser);
+        assert_eq!(
+            parser.input_sources.as_slice(),
+            std::slice::from_ref(module_source)
+        );
+        let source_range = |start: usize, length: usize| {
+            SourceRef::new(
+                module_source.repository(),
+                module_source.generation(),
+                SourceSpan::new(
+                    module_source.span().file(),
+                    u64::try_from(start).unwrap(),
+                    u64::try_from(start + length).unwrap(),
+                )
+                .unwrap(),
+                module_source.content_hash(),
+                None,
+            )
+        };
+        let source_at = |needle: &str| source_range(source.find(needle).unwrap(), needle.len());
+        let expected: Vec<_> = branches
+            .into_iter()
+            .map(|(group, region, empty, activity)| {
+                let start = source.find(group).unwrap() + group.find(region).unwrap();
+                VbaCompilationBranch {
+                    group: source_at(group).span(),
+                    region: source_range(start, if empty { 0 } else { region.len() }).span(),
+                    activity,
+                }
+            })
+            .collect();
+        assert_eq!(inventory.branches, expected, "{source}");
+        let mut actual_warnings: Vec<_> = document
+            .skipped_regions
+            .iter()
+            .filter(|gap| gap.detail == "vba-conditional-compilation-evaluation-unavailable")
+            .map(|gap| {
+                assert_eq!(gap.domain, FactDomain::Relations);
+                assert_eq!(gap.reason, SkippedRegionReason::UnsupportedConstruct);
+                gap.source.clone()
+            })
+            .collect();
+        let mut expected_warnings: Vec<_> = warnings.into_iter().map(source_at).collect();
+        actual_warnings.sort();
+        expected_warnings.sort();
+        assert_eq!(actual_warnings, expected_warnings, "{source}");
+        let mut offset = 0;
+        let mut compiler_symbols = BTreeSet::new();
+        for line in source.lines() {
+            if let Some(header) = line.strip_prefix("#Const ") {
+                let spelling = header.split_whitespace().next().unwrap();
+                let name = spelling.trim_end_matches('%');
+                let definition_source = source_range(offset + 7, spelling.len());
+                let definitions: Vec<_> = document
+                    .occurrences
+                    .iter()
+                    .filter(|site| {
+                        site.role == OccurrenceRole::Definition && site.source == definition_source
+                    })
+                    .collect();
+                assert_eq!(definitions.len(), 1, "{line}");
+                let OccurrenceTarget::Resolved { symbol } = definitions[0].target else {
+                    panic!("compiler constant declaration retains its identity: {line}")
+                };
+                assert!(compiler_symbols.insert(symbol));
+                let entity = document
+                    .entities
+                    .iter()
+                    .find(|entity| entity.id == symbol)
+                    .unwrap();
+                assert_eq!(entity.kind, EntityKind::Constant);
+                assert_eq!(entity.canonical_name, name);
+                assert_eq!(entity.visibility, rootlight_ir::EntityVisibility::Private);
+                assert_eq!(
+                    entity.evidence.source.as_ref(),
+                    Some(&source_range(offset, line.len()))
+                );
+                if let Some(ContainerRef::Entity(owner)) = entity.container {
+                    assert!(
+                        document
+                            .entities
+                            .iter()
+                            .any(|entity| entity.id == owner && entity.kind == EntityKind::Module)
+                    );
+                }
+            }
+            offset += line.len() + 1;
+        }
+        assert_eq!(
+            compiler_symbols.len(),
+            source
+                .lines()
+                .filter(|line| line.starts_with("#Const "))
+                .count()
+        );
         let reference = document
             .occurrences
             .iter()
@@ -110,6 +510,11 @@ fn vba_compilation_constants_include_all_directives_without_selecting_branches()
             .unwrap();
         assert_eq!(entity.kind, EntityKind::Constant);
         assert_eq!(entity.visibility, rootlight_ir::EntityVisibility::Private);
+        assert!(compiler_symbols.contains(&symbol));
+        assert_eq!(
+            reference.source,
+            source_range(source.find("ENABLED").unwrap(), "ENABLED".len())
+        );
         if let Some(ContainerRef::Entity(owner)) = entity.container {
             assert!(
                 document
@@ -120,15 +525,10 @@ fn vba_compilation_constants_include_all_directives_without_selecting_branches()
         }
         assert!(document.relations.iter().any(|edge| {
             edge.predicate == RelationPredicate::RefersTo
+                && edge.subject == RelationEndpoint::Occurrence(reference.id)
                 && edge.object == RelationEndpoint::Entity(symbol)
                 && edge.evidence.source.as_ref() == Some(&reference.source)
         }));
-        assert!(
-            document
-                .skipped_regions
-                .iter()
-                .any(|gap| { gap.detail == "vba-conditional-compilation-evaluation-unavailable" })
-        );
     }
 }
 

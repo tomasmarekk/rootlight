@@ -9,7 +9,9 @@ use rootlight_adapter_sdk::{
 };
 use rootlight_cancel::Cancellation;
 use rootlight_ids::SymbolId;
-use rootlight_ir::EntityVisibility;
+use rootlight_ir::{EntityVisibility, VbaCompilation, VbaCompilationActivity};
+
+mod compilation_values;
 
 #[derive(Clone, Copy)]
 enum Binding {
@@ -147,6 +149,9 @@ pub(super) struct VbaBindings<'a> {
     conditional_declarations: BTreeMap<u64, BTreeMap<String, Vec<ConditionalDeclaration>>>,
     compilation_branches: BTreeMap<u64, (u64, usize)>,
     compilation_groups: BTreeMap<u64, Vec<Option<usize>>>,
+    compilation_activities: BTreeMap<u64, VbaCompilationActivity>,
+    compilations: Vec<VbaCompilation>,
+    proven_compilation_facts: BTreeSet<u64>,
     // Conditional shadowing erases the ordinary tier's candidates. Retain the
     // unconditional tier separately to merge complementary property accessors.
     unconditional_bindings: BTreeMap<u64, BTreeMap<String, Option<Binding>>>,
@@ -196,6 +201,9 @@ impl<'a> VbaBindings<'a> {
             conditional_declarations: BTreeMap::new(),
             compilation_branches: BTreeMap::new(),
             compilation_groups: BTreeMap::new(),
+            compilation_activities: BTreeMap::new(),
+            compilations: Vec::new(),
+            proven_compilation_facts: BTreeSet::new(),
             unconditional_bindings: BTreeMap::new(),
             foreign_scopes: BTreeSet::new(),
             constant_symbols: BTreeSet::new(),
@@ -276,6 +284,7 @@ impl<'a> VbaBindings<'a> {
                 return Err(invalid_capture());
             }
         }
+        result.collect_compilation_values(facts, cancellation)?;
         for fact in facts {
             cancellation.check()?;
             if is_self_array_invocation(fact)
@@ -363,6 +372,17 @@ impl<'a> VbaBindings<'a> {
                 continue;
             };
             let declaration_scope = owner;
+            let activity = result.compilation_activity(fact);
+            if declaration.syntax_kind().as_str() != "vba.compilation_constant.declaration" {
+                if activity == VbaCompilationActivity::Inactive {
+                    // Excluded source remains in the IR, but cannot create a
+                    // semantic candidate or shadow an included declaration.
+                    continue;
+                }
+                if activity == VbaCompilationActivity::Active {
+                    conditional = false;
+                }
+            }
             let start = usize::try_from(fact.span().start_byte()).map_err(|_| invalid_capture())?;
             let end = usize::try_from(fact.span().end_byte()).map_err(|_| invalid_capture())?;
             let text = std::str::from_utf8(source.get(start..end).ok_or_else(invalid_capture)?)
@@ -521,7 +541,7 @@ impl<'a> VbaBindings<'a> {
                 else {
                     continue;
                 };
-                if parent_conditional {
+                if parent_conditional && activity != VbaCompilationActivity::Active {
                     symbol = None;
                     conditional = true;
                 }
@@ -596,14 +616,18 @@ impl<'a> VbaBindings<'a> {
             if conditional && let Some(name) = name.as_deref().filter(|name| name.is_ascii()) {
                 let conditions = result.branch_conditions(fact.parent(), owner, cancellation)?;
                 let binding = candidate.filter(|binding| {
-                    matches!(
-                        binding,
-                        Binding::Value(_)
-                            | Binding::Procedure(_)
-                            | Binding::Function { .. }
-                            | Binding::ExternalProcedure(_)
-                            | Binding::Property(_)
-                    )
+                    // Split procedure headers have no ordinary branch owner.
+                    // An empty condition map cannot make their alternatives
+                    // unconditional or choose a parameter from either header.
+                    !conditions.is_empty()
+                        && matches!(
+                            binding,
+                            Binding::Value(_)
+                                | Binding::Procedure(_)
+                                | Binding::Function { .. }
+                                | Binding::ExternalProcedure(_)
+                                | Binding::Property(_)
+                        )
                 });
                 result
                     .conditional_declarations
@@ -1927,6 +1951,11 @@ impl<'a> VbaBindings<'a> {
         cancellation: &Cancellation,
     ) -> Result<Option<ResolvedBinding>, AdapterError> {
         cancellation.check()?;
+        if fact.syntax_kind().as_str() != "vba.compilation_identifier.reference"
+            && self.compilation_activity(fact) == VbaCompilationActivity::Inactive
+        {
+            return Ok(None);
+        }
         if text.len() > self.maximum_name_bytes {
             return Ok(None);
         }
@@ -2702,6 +2731,12 @@ impl<'a> VbaBindings<'a> {
     ) -> Result<bool, AdapterError> {
         for (group, branch) in declaration {
             cancellation.check()?;
+            if self.compilation_activities.get(branch) == Some(&VbaCompilationActivity::Active) {
+                continue;
+            }
+            if self.compilation_activities.get(branch) == Some(&VbaCompilationActivity::Inactive) {
+                return Ok(false);
+            }
             if reference.get(group) == Some(branch) {
                 continue;
             }
@@ -2724,6 +2759,11 @@ impl<'a> VbaBindings<'a> {
         right: &BTreeMap<u64, u64>,
         cancellation: &Cancellation,
     ) -> Result<bool, AdapterError> {
+        if left.values().chain(right.values()).any(|branch| {
+            self.compilation_activities.get(branch) == Some(&VbaCompilationActivity::Inactive)
+        }) {
+            return Ok(true);
+        }
         for (group, branch) in left {
             cancellation.check()?;
             if right.get(group).is_some_and(|other| other != branch) {
