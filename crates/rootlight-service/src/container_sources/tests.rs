@@ -26,6 +26,9 @@ mod namespace_tests;
 #[path = "conditional_tests.rs"]
 mod conditional_tests;
 
+#[path = "../classic_lexical_cache_tests.rs"]
+mod lexical_cache_tests;
+
 fn tempdir() -> tempfile::TempDir {
     #[cfg(target_os = "macos")]
     {

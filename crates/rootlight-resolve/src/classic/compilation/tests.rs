@@ -725,6 +725,743 @@ fn prechecked_use_import_preserves_definitions_and_exact_active_multiset() {
     );
 }
 
+fn interval_witness_index(branches: Vec<VbaCompilationBranch>) -> CompilationIndex {
+    let fixture = Fixture::new();
+    let full = fixture.files[0].evidence.source.clone().unwrap();
+    let model = VbaCompilation {
+        scope: full.span(),
+        complete: true,
+        branches,
+    };
+    let envelope = compilation_envelope(&fixture, model);
+    let model = decode_vba_compilation_envelope(&envelope).unwrap();
+    let activity = ActivityIndex::build(
+        &model,
+        &Cancellation::new(),
+        &mut ResolutionWorkBudget::new(100_000),
+    )
+    .unwrap();
+    let maximum_activity_work = activity.maximum_work();
+    CompilationIndex {
+        files: BTreeMap::from([(
+            full.span().file(),
+            FileActivity {
+                source: full,
+                conditional: true,
+                blocked: false,
+                inventories: vec![Inventory {
+                    id: envelope.id,
+                    model,
+                    activity,
+                }],
+                maximum_activity_work,
+            },
+        )]),
+        declarations: BTreeMap::from([(fixture.entities[2].id, VbaCompilationActivity::Active)]),
+        ..CompilationIndex::default()
+    }
+}
+
+#[test]
+fn clean_enclosing_witnesses_require_whole_sources_not_active_headers() {
+    let fixture = Fixture::new();
+    let compilation = fixture.import(std::slice::from_ref(&fixture.envelope));
+    let selected = &fixture.entities[2];
+    let always = &fixture.entities[1];
+    let always_source = always.evidence.source.as_ref().unwrap();
+    assert!(compilation.entity_active(always.id));
+    assert!(compilation.support_active(always_source));
+    assert!(compilation.declaration_sources.contains(always_source));
+    assert!(!compilation.clean_enclosing_sources.contains_key(&always.id));
+    assert_eq!(
+        compilation.clean_enclosing_sources,
+        BTreeMap::from([(selected.id, selected.evidence.source.clone().unwrap())]),
+    );
+    let inventory = &compilation.files[&fixture.files[0].id].inventories[0];
+    assert!(
+        !inventory
+            .activity
+            .inactive
+            .contains(always_source.span(), &mut || Ok::<(), ()>(()))
+            .unwrap()
+    );
+    assert!(
+        inventory
+            .activity
+            .inactive
+            .overlaps(always_source.span(), &mut || Ok::<(), ()>(()))
+            .unwrap()
+    );
+
+    let mut owned = Fixture::new();
+    for (offset, kind, parent) in [
+        (50, EntityKind::Field, owned.entities[2].id),
+        (51, EntityKind::Struct, owned.entities[4].id),
+        (52, EntityKind::Enum, owned.entities[3].id),
+    ] {
+        let mut child = selected.clone();
+        child.id = SymbolId::from_bytes([offset; 20]);
+        child.kind = kind;
+        child.container = Some(ContainerRef::Entity(parent));
+        owned.entities.push(child);
+    }
+    let compilation = owned.import(std::slice::from_ref(&owned.envelope));
+    assert!(
+        compilation
+            .clean_enclosing_sources
+            .contains_key(&SymbolId::from_bytes([50; 20]))
+    );
+    for offset in [51, 52] {
+        assert!(!compilation.entity_active(SymbolId::from_bytes([offset; 20])));
+        assert!(
+            !compilation
+                .clean_enclosing_sources
+                .contains_key(&SymbolId::from_bytes([offset; 20]))
+        );
+    }
+}
+
+#[test]
+fn clean_enclosing_hits_and_misses_match_every_original_source_range() {
+    let fixture = Fixture::new();
+    let compilation = fixture.import(std::slice::from_ref(&fixture.envelope));
+    let witness = fixture.entities[2].evidence.source.as_ref().unwrap();
+    let mut site = fixture.occurrences[4].clone();
+    site.enclosing = Some(fixture.entities[2].id);
+    for start in 0..=SOURCE.len() + 1 {
+        for end in start..=SOURCE.len() + 1 {
+            site.source = source(
+                witness.repository(),
+                witness.generation(),
+                witness.span().file(),
+                start,
+                end,
+            );
+            let mut old_work = ResolutionWorkBudget::new(100);
+            let expected = original_occurrence_active_with_work(
+                &compilation,
+                &site,
+                &Cancellation::new(),
+                &mut old_work,
+            )
+            .unwrap();
+            let mut work = ResolutionWorkBudget::new(100);
+            assert_eq!(
+                compilation
+                    .occurrence_active_with_work(&site, &Cancellation::new(), &mut work)
+                    .unwrap(),
+                expected,
+                "{start}..{end}"
+            );
+            if contains(witness.span(), site.source.span()) {
+                assert!(expected);
+                assert_eq!(work.consumed(), 1);
+                assert!(old_work.consumed() > 1);
+            } else {
+                let mut fallback = ResolutionWorkBudget::new(100);
+                compilation
+                    .activity_with_work(&site.source, &Cancellation::new(), &mut fallback)
+                    .unwrap();
+                assert_eq!(work.consumed(), fallback.consumed());
+            }
+        }
+    }
+}
+
+#[test]
+fn clean_enclosing_hit_guards_preserve_identity_owner_target_and_cancellation() {
+    let fixture = Fixture::new();
+    let compilation = fixture.import(std::slice::from_ref(&fixture.envelope));
+    let witness = fixture.entities[2].evidence.source.as_ref().unwrap();
+    let mut hit = fixture.occurrences[4].clone();
+    hit.source = witness.clone();
+    hit.enclosing = Some(fixture.entities[2].id);
+    for target in [
+        OccurrenceTarget::Unresolved {
+            text_hash: content_hash(b"Selected"),
+        },
+        OccurrenceTarget::Candidates {
+            symbols: vec![
+                fixture.entities[3].id,
+                fixture.entities[4].id,
+                SymbolId::from_bytes([99; 20]),
+            ],
+            total_count: 3,
+            completeness: rootlight_ir::CoverageStatus::Complete,
+        },
+        OccurrenceTarget::Resolved {
+            symbol: fixture.entities[2].id,
+        },
+    ] {
+        hit.target = target;
+        let mut exact = ResolutionWorkBudget::new(1);
+        assert!(
+            compilation
+                .occurrence_active_with_work(&hit, &Cancellation::new(), &mut exact)
+                .unwrap()
+        );
+        assert_eq!(exact.consumed(), 1);
+        assert!(matches!(
+            compilation.occurrence_active_with_work(
+                &hit,
+                &Cancellation::new(),
+                &mut ResolutionWorkBudget::new(0)
+            ),
+            Err(ResolutionError::WorkLimit { maximum: 0 })
+        ));
+        let cancelled = Cancellation::new();
+        cancelled.cancel(rootlight_cancel::CancellationReason::ClientRequest);
+        let mut untouched = ResolutionWorkBudget::new(1);
+        assert!(matches!(
+            compilation.occurrence_active_with_work(&hit, &cancelled, &mut untouched),
+            Err(ResolutionError::Cancelled(_))
+        ));
+        assert_eq!(untouched.consumed(), 0);
+    }
+    let hinted = SourceRef::new(
+        witness.repository(),
+        witness.generation(),
+        witness.span(),
+        witness.content_hash(),
+        Some(rootlight_ir::LineRange::new(800, 801).unwrap()),
+    );
+    let variations = [
+        (hinted, true),
+        (
+            SourceRef::new(
+                RepositoryId::from_bytes([99; 16]),
+                witness.generation(),
+                witness.span(),
+                witness.content_hash(),
+                None,
+            ),
+            false,
+        ),
+        (
+            SourceRef::new(
+                witness.repository(),
+                GenerationId::from_bytes([99; 20]),
+                witness.span(),
+                witness.content_hash(),
+                None,
+            ),
+            false,
+        ),
+        (
+            SourceRef::new(
+                witness.repository(),
+                witness.generation(),
+                witness.span(),
+                content_hash(b"stale"),
+                None,
+            ),
+            false,
+        ),
+        (
+            SourceRef::new(
+                witness.repository(),
+                witness.generation(),
+                span(FileId::from_bytes([99; 20]), 0, 1),
+                witness.content_hash(),
+                None,
+            ),
+            false,
+        ),
+        (
+            SourceRef::new(
+                witness.repository(),
+                witness.generation(),
+                SourceSpan::new(
+                    witness.span().file(),
+                    witness.span().start_byte(),
+                    witness.span().start_byte(),
+                )
+                .unwrap(),
+                witness.content_hash(),
+                None,
+            ),
+            false,
+        ),
+    ];
+    for (query, expected) in variations {
+        hit.source = query;
+        let mut work = ResolutionWorkBudget::new(1);
+        assert_eq!(
+            compilation
+                .occurrence_active_with_work(&hit, &Cancellation::new(), &mut work)
+                .unwrap(),
+            expected
+        );
+        assert_eq!(work.consumed(), 1);
+    }
+    hit.source = witness.clone();
+    for enclosing in [
+        None,
+        Some(fixture.entities[1].id),
+        Some(SymbolId::from_bytes([99; 20])),
+    ] {
+        hit.enclosing = enclosing;
+        let mut actual = ResolutionWorkBudget::new(100);
+        let mut original = ResolutionWorkBudget::new(100);
+        assert_eq!(
+            compilation
+                .occurrence_active_with_work(&hit, &Cancellation::new(), &mut actual)
+                .unwrap(),
+            original_occurrence_active_with_work(
+                &compilation,
+                &hit,
+                &Cancellation::new(),
+                &mut original
+            )
+            .unwrap()
+        );
+        if enclosing != Some(SymbolId::from_bytes([99; 20])) {
+            let mut raw = ResolutionWorkBudget::new(100);
+            compilation
+                .activity_with_work(witness, &Cancellation::new(), &mut raw)
+                .unwrap();
+            assert_eq!(actual.consumed(), raw.consumed());
+            assert!(actual.consumed() > 1);
+        } else {
+            assert_eq!(actual.consumed(), 1);
+        }
+    }
+    hit.enclosing = Some(fixture.entities[2].id);
+    for target in [
+        fixture.entities[3].id,
+        fixture.entities[4].id,
+        SymbolId::from_bytes([99; 20]),
+    ] {
+        hit.target = OccurrenceTarget::Resolved { symbol: target };
+        let mut work = ResolutionWorkBudget::new(1);
+        assert!(
+            !compilation
+                .occurrence_active_with_work(&hit, &Cancellation::new(), &mut work)
+                .unwrap()
+        );
+        assert_eq!(work.consumed(), 1);
+    }
+}
+
+#[test]
+fn clean_enclosing_admission_preserves_exact_work_and_model_guards() {
+    let fixture = Fixture::new();
+    let id = fixture.entities[2].id;
+    let witness = fixture.entities[2].evidence.source.as_ref().unwrap();
+    let build = || {
+        let mut compilation = fixture.import(std::slice::from_ref(&fixture.envelope));
+        compilation.clean_enclosing_sources.clear();
+        compilation
+    };
+    let mut measured = ResolutionWorkBudget::new(100);
+    let mut compilation = build();
+    compilation
+        .admit_clean_enclosing_source(id, witness, &Cancellation::new(), &mut measured)
+        .unwrap();
+    assert_eq!(
+        compilation.clean_enclosing_sources,
+        BTreeMap::from([(id, witness.clone())])
+    );
+    let inventory = &compilation.files[&witness.span().file()].inventories[0];
+    let mut overlap_work = ResolutionWorkBudget::new(100);
+    assert!(
+        !inventory
+            .activity
+            .inactive
+            .overlaps(witness.span(), &mut || overlap_work.consume())
+            .unwrap()
+    );
+    assert!(
+        !inventory
+            .activity
+            .uncertainty
+            .overlaps(witness.span(), &mut || overlap_work.consume())
+            .unwrap()
+    );
+    let exact = overlap_work.consumed() + 2;
+    assert_eq!(measured.consumed(), exact);
+    let mut admitted = build();
+    let mut exact_work = ResolutionWorkBudget::new(exact);
+    admitted
+        .admit_clean_enclosing_source(id, witness, &Cancellation::new(), &mut exact_work)
+        .unwrap();
+    assert_eq!(exact_work.consumed(), exact);
+    for maximum in 0..exact {
+        let mut short = build();
+        assert!(
+            matches!(short.admit_clean_enclosing_source(id, witness, &Cancellation::new(), &mut ResolutionWorkBudget::new(maximum)), Err(ResolutionError::WorkLimit { maximum: actual }) if actual == maximum)
+        );
+        assert!(short.clean_enclosing_sources.is_empty());
+    }
+    let cancelled = Cancellation::new();
+    cancelled.cancel(rootlight_cancel::CancellationReason::ClientRequest);
+    let mut untouched = ResolutionWorkBudget::new(exact);
+    let mut unadmitted = build();
+    assert!(matches!(
+        unadmitted.admit_clean_enclosing_source(id, witness, &cancelled, &mut untouched),
+        Err(ResolutionError::Cancelled(_))
+    ));
+    assert_eq!(untouched.consumed(), 0);
+    assert!(unadmitted.clean_enclosing_sources.is_empty());
+    for shape in 0..6 {
+        let mut rejected = build();
+        let file = rejected.files.get_mut(&witness.span().file()).unwrap();
+        match shape {
+            0 => file.blocked = true,
+            1 => file.inventories[0].model.complete = false,
+            2 => file.inventories[0].model.branches.clear(),
+            3 => file.inventories[0].model.scope = span(witness.span().file(), 0, SOURCE.len() - 1),
+            4 => file.inventories.clear(),
+            5 => {
+                let model = file.inventories[0].model.clone();
+                let activity = ActivityIndex::build(
+                    &model,
+                    &Cancellation::new(),
+                    &mut ResolutionWorkBudget::new(100_000),
+                )
+                .unwrap();
+                file.inventories.push(Inventory {
+                    id: FactId::from_bytes([99; 20]),
+                    model,
+                    activity,
+                });
+            }
+            _ => unreachable!(),
+        }
+        let mut work = ResolutionWorkBudget::new(1);
+        rejected
+            .admit_clean_enclosing_source(id, witness, &Cancellation::new(), &mut work)
+            .unwrap();
+        assert_eq!(work.consumed(), 1);
+        assert!(rejected.clean_enclosing_sources.is_empty());
+        let mut site = fixture.occurrences[4].clone();
+        site.source = witness.clone();
+        site.enclosing = Some(id);
+        let mut actual = ResolutionWorkBudget::new(100);
+        let mut original = ResolutionWorkBudget::new(100);
+        assert_eq!(
+            rejected
+                .occurrence_active_with_work(&site, &Cancellation::new(), &mut actual)
+                .unwrap(),
+            original_occurrence_active_with_work(
+                &rejected,
+                &site,
+                &Cancellation::new(),
+                &mut original
+            )
+            .unwrap(),
+        );
+    }
+    let foreign = [
+        SourceRef::new(
+            RepositoryId::from_bytes([99; 16]),
+            witness.generation(),
+            witness.span(),
+            witness.content_hash(),
+            None,
+        ),
+        SourceRef::new(
+            witness.repository(),
+            GenerationId::from_bytes([99; 20]),
+            witness.span(),
+            witness.content_hash(),
+            None,
+        ),
+        SourceRef::new(
+            witness.repository(),
+            witness.generation(),
+            witness.span(),
+            content_hash(b"stale source"),
+            None,
+        ),
+        SourceRef::new(
+            witness.repository(),
+            witness.generation(),
+            span(FileId::from_bytes([99; 20]), 0, 1),
+            witness.content_hash(),
+            None,
+        ),
+        source(
+            witness.repository(),
+            witness.generation(),
+            witness.span().file(),
+            SOURCE.len(),
+            SOURCE.len(),
+        ),
+        source(
+            witness.repository(),
+            witness.generation(),
+            witness.span().file(),
+            SOURCE.len(),
+            SOURCE.len() + 1,
+        ),
+    ];
+    for query in foreign {
+        let mut rejected = build();
+        let mut work = ResolutionWorkBudget::new(1);
+        rejected
+            .admit_clean_enclosing_source(id, &query, &Cancellation::new(), &mut work)
+            .unwrap();
+        assert_eq!(work.consumed(), 1);
+        assert!(rejected.clean_enclosing_sources.is_empty());
+    }
+    for owner in [
+        fixture.entities[3].id,
+        fixture.entities[4].id,
+        SymbolId::from_bytes([99; 20]),
+    ] {
+        let mut rejected = build();
+        rejected
+            .admit_clean_enclosing_source(
+                owner,
+                witness,
+                &Cancellation::new(),
+                &mut ResolutionWorkBudget::new(1),
+            )
+            .unwrap();
+        assert!(rejected.clean_enclosing_sources.is_empty());
+    }
+}
+
+#[test]
+fn clean_enclosing_import_preserves_original_use_and_definition_inventory() {
+    let mut fixture = Fixture::new();
+    let selected = fixture.entities[2].id;
+    for target in [
+        OccurrenceTarget::Unresolved {
+            text_hash: content_hash(b"Selected"),
+        },
+        OccurrenceTarget::Candidates {
+            symbols: vec![fixture.entities[3].id, fixture.entities[4].id],
+            total_count: 2,
+            completeness: rootlight_ir::CoverageStatus::Complete,
+        },
+        OccurrenceTarget::Resolved { symbol: selected },
+        OccurrenceTarget::Resolved {
+            symbol: fixture.entities[3].id,
+        },
+        OccurrenceTarget::Resolved {
+            symbol: fixture.entities[4].id,
+        },
+    ] {
+        fixture.occurrence(
+            "Selected",
+            "Public Sub Selected()",
+            OccurrenceRole::Reference,
+            Some(selected),
+            target,
+        );
+    }
+    let index = fixture.index();
+    let sources = BTreeMap::from([(fixture.files[0].id, SOURCE.as_bytes())]);
+    let run = |work: &mut ResolutionWorkBudget, cancellation: &Cancellation| {
+        CompilationIndex::build(
+            &index,
+            std::slice::from_ref(&fixture.envelope),
+            &fixture.occurrences,
+            &sources,
+            cancellation,
+            work,
+        )
+    };
+    let mut measured = ResolutionWorkBudget::new(100_000);
+    let compilation = run(&mut measured, &Cancellation::new()).unwrap();
+    let mut expected = BTreeSet::new();
+    let mut hits = 0;
+    for site in &fixture.occurrences {
+        let expected_active = original_occurrence_active_with_work(
+            &compilation,
+            site,
+            &Cancellation::new(),
+            &mut ResolutionWorkBudget::new(100),
+        )
+        .unwrap();
+        if expected_active {
+            expected.insert(site.id);
+        }
+        if site.enclosing == Some(selected) && expected_active {
+            let mut work = ResolutionWorkBudget::new(1);
+            assert!(
+                compilation
+                    .occurrence_active_with_work(site, &Cancellation::new(), &mut work)
+                    .unwrap()
+            );
+            assert_eq!(work.consumed(), 1);
+            hits += 1;
+        }
+    }
+    assert_eq!(hits, 3);
+    assert_eq!(compilation.uses, expected);
+    for definition in fixture
+        .occurrences
+        .iter()
+        .filter(|site| site.role == OccurrenceRole::Definition)
+    {
+        let OccurrenceTarget::Resolved { symbol } = definition.target else {
+            panic!("fixture definitions have exact targets")
+        };
+        assert_eq!(
+            compilation.use_active(definition.id),
+            compilation.entity_active(symbol)
+        );
+    }
+    let exact = measured.consumed();
+    assert_eq!(
+        run(&mut ResolutionWorkBudget::new(exact), &Cancellation::new())
+            .unwrap()
+            .uses,
+        expected
+    );
+    for maximum in [0, exact - 1] {
+        assert!(
+            matches!(run(&mut ResolutionWorkBudget::new(maximum), &Cancellation::new()), Err(ResolutionError::WorkLimit { maximum: actual }) if actual == maximum)
+        );
+    }
+    let cancelled = Cancellation::new();
+    cancelled.cancel(rootlight_cancel::CancellationReason::ClientRequest);
+    let mut untouched = ResolutionWorkBudget::new(exact);
+    assert!(matches!(
+        run(&mut untouched, &cancelled),
+        Err(ResolutionError::Cancelled(_))
+    ));
+    assert_eq!(untouched.consumed(), 0);
+}
+
+#[test]
+fn clean_enclosing_overlap_rejects_nested_exclusion_and_interior_empty_barriers() {
+    let fixture = Fixture::new();
+    let file = fixture.files[0].id;
+    let id = fixture.entities[2].id;
+    let full = fixture.files[0].evidence.source.as_ref().unwrap();
+    let written = |start, end| source(full.repository(), full.generation(), file, start, end);
+    let endpoints = [
+        (10, 20, VbaCompilationActivity::Inactive),
+        (20, 30, VbaCompilationActivity::Active),
+        (30, 40, VbaCompilationActivity::Inactive),
+    ]
+    .map(|(start, end, activity)| VbaCompilationBranch {
+        group: span(file, 8, 42),
+        region: span(file, start, end),
+        activity,
+    });
+    let mut clean = interval_witness_index(endpoints.to_vec());
+    let witness = written(20, 30);
+    clean
+        .admit_clean_enclosing_source(
+            id,
+            &witness,
+            &Cancellation::new(),
+            &mut ResolutionWorkBudget::new(100),
+        )
+        .unwrap();
+    assert_eq!(clean.clean_enclosing_sources.get(&id), Some(&witness));
+    for start in 20..=30 {
+        for end in start..=30 {
+            let query = written(start, end);
+            let expected =
+                original_activity_checked(&clean, &query, &mut || Ok::<(), ()>(())).unwrap();
+            assert_eq!(
+                expected == VbaCompilationActivity::Active,
+                contains(witness.span(), query.span())
+            );
+            let mut site = fixture.occurrences[4].clone();
+            site.enclosing = Some(id);
+            site.source = query;
+            let mut work = ResolutionWorkBudget::new(1);
+            assert_eq!(
+                clean
+                    .occurrence_active_with_work(&site, &Cancellation::new(), &mut work)
+                    .unwrap(),
+                contains(witness.span(), site.source.span())
+            );
+            assert_eq!(work.consumed(), 1);
+        }
+    }
+    let uncertainty = &clean.files[&file].inventories[0].activity.uncertainty;
+    assert!(
+        !uncertainty
+            .overlaps(witness.span(), &mut || Ok::<(), ()>(()))
+            .unwrap()
+    );
+    for crossing in [written(19, 21), written(29, 31)] {
+        assert!(
+            uncertainty
+                .overlaps(crossing.span(), &mut || Ok::<(), ()>(()))
+                .unwrap()
+        );
+        assert_eq!(clean.activity(&crossing), VbaCompilationActivity::Unproven);
+        let mut rejected = interval_witness_index(endpoints.to_vec());
+        let mut admission = ResolutionWorkBudget::new(100);
+        rejected
+            .admit_clean_enclosing_source(id, &crossing, &Cancellation::new(), &mut admission)
+            .unwrap();
+        assert!(rejected.clean_enclosing_sources.is_empty());
+        assert!(admission.consumed() > 1);
+        let mut site = fixture.occurrences[4].clone();
+        site.enclosing = Some(id);
+        site.source = crossing;
+        let mut work = ResolutionWorkBudget::new(100);
+        assert!(
+            !clean
+                .occurrence_active_with_work(&site, &Cancellation::new(), &mut work)
+                .unwrap()
+        );
+        let mut original = ResolutionWorkBudget::new(100);
+        clean
+            .activity_with_work(&site.source, &Cancellation::new(), &mut original)
+            .unwrap();
+        assert_eq!(work.consumed(), original.consumed());
+    }
+    for empty in [written(20, 20), written(30, 30)] {
+        let mut rejected = interval_witness_index(endpoints.to_vec());
+        let mut work = ResolutionWorkBudget::new(1);
+        rejected
+            .admit_clean_enclosing_source(id, &empty, &Cancellation::new(), &mut work)
+            .unwrap();
+        assert!(rejected.clean_enclosing_sources.is_empty());
+        assert_eq!(work.consumed(), 1);
+    }
+    let witness = written(10, 40);
+    for branches in [
+        vec![
+            VbaCompilationBranch {
+                group: span(file, 8, 42),
+                region: span(file, 10, 40),
+                activity: VbaCompilationActivity::Active,
+            },
+            VbaCompilationBranch {
+                group: span(file, 18, 32),
+                region: span(file, 20, 30),
+                activity: VbaCompilationActivity::Active,
+            },
+        ],
+        vec![
+            VbaCompilationBranch {
+                group: span(file, 8, 42),
+                region: span(file, 10, 40),
+                activity: VbaCompilationActivity::Inactive,
+            },
+            VbaCompilationBranch {
+                group: span(file, 18, 32),
+                region: span(file, 20, 30),
+                activity: VbaCompilationActivity::Active,
+            },
+        ],
+    ] {
+        let mut rejected = interval_witness_index(branches);
+        rejected
+            .admit_clean_enclosing_source(
+                id,
+                &witness,
+                &Cancellation::new(),
+                &mut ResolutionWorkBudget::new(100),
+            )
+            .unwrap();
+        assert!(rejected.clean_enclosing_sources.is_empty());
+        assert_ne!(rejected.activity(&witness), VbaCompilationActivity::Active);
+    }
+}
+
 fn span(file: FileId, start: usize, end: usize) -> SourceSpan {
     SourceSpan::new(
         file,

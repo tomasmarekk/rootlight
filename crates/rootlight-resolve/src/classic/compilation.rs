@@ -17,6 +17,7 @@ pub(super) struct CompilationIndex {
     declarations: BTreeMap<SymbolId, VbaCompilationActivity>,
     uses: BTreeSet<FactId>,
     declaration_sources: BTreeSet<SourceRef>,
+    clean_enclosing_sources: BTreeMap<SymbolId, SourceRef>,
 }
 
 struct FileActivity {
@@ -473,6 +474,7 @@ impl CompilationIndex {
                 && let Some(source) = &entity.evidence.source
             {
                 result.declaration_sources.insert(source.clone());
+                result.admit_clean_enclosing_source(entity.id, source, cancellation, work)?;
             }
         }
         for occurrence in occurrences {
@@ -528,19 +530,82 @@ impl CompilationIndex {
         work: &mut ResolutionWorkBudget,
     ) -> Result<bool, ResolutionError> {
         cancellation.check()?;
+        // One fixed guarded operation covers immutable owner/target and exact
+        // witness admission. Misses retain the original guarded source lookup.
+        work.consume()?;
         // Ownership is immutable after declaration admission. Excluded or
         // unknown owners/targets cannot be rescued by a source interval lookup.
         if !occurrence.enclosing.is_none_or(|id| self.entity_active(id))
             || matches!(occurrence.target, OccurrenceTarget::Resolved { symbol }
                 if !self.entity_active(symbol))
         {
-            work.consume()?;
             return Ok(false);
         }
+        if let Some(source) = occurrence
+            .enclosing
+            .and_then(|id| self.clean_enclosing_sources.get(&id))
+            && same_identity(source, &occurrence.source)
+            && contains(source.span(), occurrence.source.span())
+        {
+            return Ok(true);
+        }
         Ok(
-            self.activity_with_work(&occurrence.source, cancellation, work)?
-                == VbaCompilationActivity::Active,
+            self.activity_after_initial_check(&occurrence.source, &mut || {
+                cancellation.check()?;
+                work.consume()
+            })? == VbaCompilationActivity::Active,
         )
+    }
+
+    fn admit_clean_enclosing_source(
+        &mut self,
+        id: SymbolId,
+        source: &SourceRef,
+        cancellation: &Cancellation,
+        work: &mut ResolutionWorkBudget,
+    ) -> Result<(), ResolutionError> {
+        cancellation.check()?;
+        work.consume()?;
+        let Some(file) = self.files.get(&source.span().file()) else {
+            return Ok(());
+        };
+        if !self.entity_active(id)
+            || file.blocked
+            || !same_identity(&file.source, source)
+            || !contains(file.source.span(), source.span())
+        {
+            return Ok(());
+        }
+        let [inventory] = file.inventories.as_slice() else {
+            return Ok(());
+        };
+        if !inventory.model.complete
+            || inventory.model.scope != file.source.span()
+            || inventory.model.branches.is_empty()
+        {
+            return Ok(());
+        }
+        // Header membership does not prove a clean body. Any excluded range
+        // or directive barrier inside the entire source defeats this witness.
+        let mut check = || {
+            cancellation.check()?;
+            work.consume()
+        };
+        if inventory
+            .activity
+            .inactive
+            .overlaps(source.span(), &mut check)?
+            || inventory
+                .activity
+                .uncertainty
+                .overlaps(source.span(), &mut check)?
+        {
+            return Ok(());
+        }
+        cancellation.check()?;
+        work.consume()?;
+        self.clean_enclosing_sources.insert(id, source.clone());
+        Ok(())
     }
 
     fn activity_checked<E>(
@@ -549,6 +614,14 @@ impl CompilationIndex {
         check: &mut impl FnMut() -> Result<(), E>,
     ) -> Result<VbaCompilationActivity, E> {
         check()?;
+        self.activity_after_initial_check(source, check)
+    }
+
+    fn activity_after_initial_check<E>(
+        &self,
+        source: &SourceRef,
+        check: &mut impl FnMut() -> Result<(), E>,
+    ) -> Result<VbaCompilationActivity, E> {
         let Some(file) = self.files.get(&source.span().file()) else {
             return Ok(VbaCompilationActivity::Unproven);
         };

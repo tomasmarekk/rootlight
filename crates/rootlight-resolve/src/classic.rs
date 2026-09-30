@@ -9,6 +9,7 @@ mod calls;
 mod compilation;
 mod default_members;
 mod dependencies;
+mod lexical_cache;
 mod occurrence_views;
 mod project_references;
 mod references;
@@ -593,6 +594,23 @@ impl<'a> ClassicIndex<'a> {
                 return Err(ResolutionError::ClassicSourceIdentity);
             }
         }
+        let repeated_sources = lexical_cache::RepeatedSources::build(
+            sources.iter().map(|(id, bytes)| {
+                (
+                    files
+                        .get(id)
+                        .expect("verified source files remain in the immutable index")
+                        .content_hash,
+                    *bytes,
+                )
+            }),
+            &mut || {
+                cancellation.check()?;
+                work.consume()
+            },
+        )?;
+        let mut initializer_cache = lexical_cache::LexicalCache::new(&repeated_sources);
+        let mut value_read_cache = lexical_cache::LexicalCache::new(&repeated_sources);
         result.compilation = compilation::CompilationIndex::build(
             index,
             extensions,
@@ -1742,17 +1760,28 @@ impl<'a> ClassicIndex<'a> {
             let class_source = entities
                 .get(class)
                 .and_then(|entity| entity.evidence.source.as_ref());
-            let declaration = class_source.and_then(|source| sources.get(&source.span().file()));
-            let inventory = if let Some(bytes) = declaration {
-                rootlight_vba::class_initializer(bytes, &mut || {
-                    cancellation.check()?;
-                    work.consume()
-                })?
+            let declaration = class_source.and_then(|source| {
+                sources
+                    .get(&source.span().file())
+                    .zip(files.get(&source.span().file()))
+            });
+            let inventory = if let Some((bytes, file)) = declaration {
+                initializer_cache.get_or_parse(
+                    file.content_hash,
+                    bytes,
+                    None,
+                    &mut || {
+                        cancellation.check()?;
+                        work.consume()
+                    },
+                    |check| rootlight_vba::class_initializer(bytes, check),
+                    lexical_cache::initializer_bytes,
+                )?
             } else {
-                rootlight_vba::ClassInitializer::Unproven
+                std::borrow::Cow::Owned(rootlight_vba::ClassInitializer::Unproven)
             };
             let initializer = match (
-                inventory,
+                inventory.as_ref(),
                 members.get(&(*class, "class_initialize".to_owned())),
             ) {
                 (rootlight_vba::ClassInitializer::Absent, None) => Some(None),
@@ -2656,24 +2685,34 @@ impl<'a> ClassicIndex<'a> {
         for file in value_read_files {
             cancellation.check()?;
             work.consume()?;
-            let Some((source, bytes)) = index
-                .files
-                .get(&file)
-                .and_then(|file| file.evidence.source.as_ref())
-                .zip(sources.get(&file))
-            else {
+            let Some((file, bytes)) = index.files.get(&file).zip(sources.get(&file)) else {
                 continue;
             };
-            let Some(reads) = rootlight_vba::statement_value_reads(
+            let Some(source) = file.evidence.source.as_ref() else {
+                continue;
+            };
+            let inventory = value_read_cache.get_or_parse(
+                file.content_hash,
                 bytes,
-                crate::MAX_RESOLUTION_WORK_LIMIT,
-                crate::MAX_RESOLUTION_WORK_LIMIT,
+                Some((
+                    crate::MAX_RESOLUTION_WORK_LIMIT,
+                    crate::MAX_RESOLUTION_WORK_LIMIT,
+                )),
                 &mut || {
                     cancellation.check()?;
                     work.consume()
                 },
-            )?
-            else {
+                |check| {
+                    rootlight_vba::statement_value_reads(
+                        bytes,
+                        crate::MAX_RESOLUTION_WORK_LIMIT,
+                        crate::MAX_RESOLUTION_WORK_LIMIT,
+                        check,
+                    )
+                },
+                lexical_cache::value_read_bytes,
+            )?;
+            let Some(reads) = inventory.as_ref() else {
                 continue;
             };
             for read in reads {
