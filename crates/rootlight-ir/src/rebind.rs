@@ -48,6 +48,9 @@ use crate::{
     new_groovy_value_lookup_envelope,
 };
 use crate::{PERL_BINDING_NAMESPACE, decode_perl_binding_envelope, new_perl_binding_envelope};
+use crate::{
+    VBA_COMPILATION_NAMESPACE, decode_vba_compilation_envelope, new_vba_compilation_envelope,
+};
 
 const GENERATION_NEUTRAL_ID: GenerationId = GenerationId::from_bytes([0; 20]);
 const CHUNK_DIGEST_DOMAIN: &str = "rootlight.normalized-file-chunk/v1";
@@ -779,6 +782,7 @@ fn require_supported_extensions_with_checkpoint(
                 | GROOVY_CALL_LOOKUP_NAMESPACE
                 | GROOVY_STATIC_IMPORT_NAMESPACE
                 | GROOVY_VALUE_LOOKUP_NAMESPACE
+                | VBA_COMPILATION_NAMESPACE
         ) {
             return Err(NormalizedRebindError::UnsupportedExtension);
         }
@@ -1371,6 +1375,12 @@ fn rebind_extension(
         .map(|source| rebind_source(source, generation))
         .ok_or(NormalizedRebindError::IdentityRecipe)?;
     match extension.namespace.as_str() {
+        VBA_COMPILATION_NAMESPACE => {
+            let evidence = decode_vba_compilation_envelope(&extension)
+                .map_err(|_| NormalizedRebindError::IdentityRecipe)?;
+            new_vba_compilation_envelope(repository, generation, provenance, source, evidence)
+                .map_err(|_| NormalizedRebindError::IdentityRecipe)
+        }
         GROOVY_VALUE_LOOKUP_NAMESPACE => {
             let evidence = decode_groovy_value_lookup_envelope(&extension)
                 .map_err(|_| NormalizedRebindError::IdentityRecipe)?;
@@ -2078,6 +2088,77 @@ mod tests {
             document.extensions[0].payload.push(' ');
             assert!(CanonicalNormalizedFileChunk::new(&document, &limits, &support).is_err());
         }
+    }
+
+    #[test]
+    fn vba_compilation_rebinds_sources_provenance_and_canonical_identity() {
+        let mut document = fixture_with_lexical_extension();
+        document.extensions.clear();
+        let file = &document.files[0];
+        let scope = crate::SourceSpan::new(file.id, 0, file.byte_length).unwrap();
+        let model = crate::VbaCompilation {
+            scope,
+            complete: true,
+            branches: vec![crate::VbaCompilationBranch {
+                group: scope,
+                region: crate::SourceSpan::new(file.id, 1, file.byte_length - 1).unwrap(),
+                activity: crate::VbaCompilationActivity::Active,
+            }],
+        };
+        let source = SourceRef::new(
+            document.repository,
+            document.generation,
+            scope,
+            file.content_hash,
+            None,
+        );
+        let original = new_vba_compilation_envelope(
+            document.repository,
+            document.generation,
+            file.provenance,
+            source,
+            model.clone(),
+        )
+        .unwrap();
+        document.extensions.push(original.clone());
+        let limits = IrLimits::default();
+        let support = ExtensionSupport::default();
+        let chunk = CanonicalNormalizedFileChunk::new(&document, &limits, &support).unwrap();
+        let original_digest =
+            canonical_generation_neutral_digests(&document, &limits, &support, || true).unwrap();
+        for generation in [
+            GenerationId::from_bytes([87; 20]),
+            GenerationId::from_bytes([88; 20]),
+        ] {
+            let rebound = chunk.rebind(generation, &limits, &support).unwrap();
+            let envelope = &rebound.extensions[0];
+            let rebound_source = envelope.evidence.source.as_ref().unwrap();
+            assert_eq!(decode_vba_compilation_envelope(envelope).unwrap(), model);
+            assert_eq!(envelope.generation, generation);
+            assert_eq!(rebound_source.generation(), generation);
+            assert_eq!(rebound_source.repository(), document.repository);
+            assert_eq!(rebound_source.span(), scope);
+            assert_eq!(envelope.provenance, rebound.files[0].provenance);
+            assert_ne!(envelope.provenance, original.provenance);
+            assert_ne!(envelope.id, original.id);
+            assert_eq!(
+                envelope.evidence.derivation,
+                vec![FactRef::File(scope.file())]
+            );
+            assert_eq!(
+                chunk.digest(),
+                CanonicalNormalizedFileChunk::new(&rebound, &limits, &support)
+                    .unwrap()
+                    .digest()
+            );
+            assert_eq!(
+                original_digest,
+                canonical_generation_neutral_digests(&rebound, &limits, &support, || true).unwrap()
+            );
+            validate_ir_document(&rebound, &limits, &support).unwrap();
+        }
+        document.extensions[0].payload.push(' ');
+        assert!(CanonicalNormalizedFileChunk::new(&document, &limits, &support).is_err());
     }
 
     #[test]

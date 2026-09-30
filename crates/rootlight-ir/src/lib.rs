@@ -26,6 +26,7 @@ mod perl_binding;
 mod rebind;
 mod source_projection;
 mod validation;
+mod vba_compilation;
 
 pub use groovy_binding::{
     GROOVY_BINDING_NAMESPACE, GroovyBindingError, GroovyImportedType,
@@ -115,6 +116,11 @@ pub use source_projection::{
 pub use validation::{
     ExtensionIdentifier, ExtensionSupport, IrDocumentValidationError, IrLimits,
     UnknownNoncriticalExtensionPolicy, canonicalize_ir_document, validate_ir_document,
+};
+pub use vba_compilation::{
+    MAX_VBA_COMPILATION_BRANCHES, MAX_VBA_COMPILATION_PAYLOAD_BYTES, VBA_COMPILATION_NAMESPACE,
+    VBA_COMPILATION_VERSION, VbaCompilation, VbaCompilationActivity, VbaCompilationBranch,
+    VbaCompilationError, decode_vba_compilation_envelope, new_vba_compilation_envelope,
 };
 
 use rootlight_ids::{ContentHash, FileId, GenerationId, RepositoryId};

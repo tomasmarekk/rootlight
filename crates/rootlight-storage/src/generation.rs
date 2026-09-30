@@ -1564,6 +1564,16 @@ fn verify_snapshot_identities(
                     .check()
                     .map_err(IdentityVerificationError::Control)?;
             }
+            rootlight_ir::VBA_COMPILATION_NAMESPACE => {
+                rootlight_ir::decode_vba_compilation_envelope(envelope).map_err(|_| {
+                    IdentityVerificationError::IdentityMismatch(
+                        IdentityMismatchComponent::ClaimEnvelope,
+                    )
+                })?;
+                context
+                    .check()
+                    .map_err(IdentityVerificationError::Control)?;
+            }
             _ => has_unsupported_extension = true,
         }
     }
@@ -2743,6 +2753,119 @@ mod tests {
             ),
             Err(IdentityVerificationError::ManifestMismatch)
         );
+    }
+
+    #[test]
+    fn vba_compilation_identity_is_verified_before_snapshot_admission() {
+        let (metadata, mut document, catalog) = file_only_generation(true);
+        let file = &document.files[0];
+        let scope = SourceSpan::new(file.id, 0, file.byte_length).unwrap();
+        let region = SourceSpan::new(file.id, 1, file.byte_length - 1).unwrap();
+        let source = SourceRef::new(
+            document.repository,
+            document.generation,
+            scope,
+            file.content_hash,
+            None,
+        );
+        let rule_provenance = file.provenance;
+        let mut parser = document.provenance[0].clone();
+        parser.producer_kind = ProducerKind::Parser;
+        parser.language = "vba".into();
+        parser.rule = None;
+        parser.id = derive_provenance_record_id(&parser).unwrap();
+        let parser_id = parser.id;
+        document.provenance.push(parser);
+        let cancellation = Cancellation::new();
+        let context = GenerationContext::new(&cancellation, GenerationBudget::default());
+        let preserved = ExtensionSupport::default();
+        let mut skipped = preserved.clone();
+        skipped.unknown_noncritical = rootlight_ir::UnknownNoncriticalExtensionPolicy::Skip;
+
+        for complete in [true, false] {
+            let compilation = rootlight_ir::VbaCompilation {
+                scope,
+                complete,
+                branches: vec![rootlight_ir::VbaCompilationBranch {
+                    group: scope,
+                    region,
+                    activity: rootlight_ir::VbaCompilationActivity::Active,
+                }],
+            };
+            let envelope = rootlight_ir::new_vba_compilation_envelope(
+                document.repository,
+                document.generation,
+                parser_id,
+                source.clone(),
+                compilation.clone(),
+            )
+            .unwrap();
+            let mut valid = document.clone();
+            valid.extensions.push(envelope.clone());
+            let verified = IdentityVerifiedGeneration::verify_with_source_files(
+                metadata,
+                valid.clone(),
+                catalog.clone(),
+                &IrLimits::default(),
+                &preserved,
+                &context,
+            )
+            .expect("canonical compilation identity verifies without asserting language semantics");
+            assert!(verified.document().extensions.contains(&envelope));
+
+            for mutate in [
+                |value: &mut rootlight_ir::ExtensionEnvelope| value.payload.push(' '),
+                |value: &mut rootlight_ir::ExtensionEnvelope| value.version = "2".into(),
+                |value: &mut rootlight_ir::ExtensionEnvelope| {
+                    value.id = FactId::from_bytes([99; 20])
+                },
+                |value: &mut rootlight_ir::ExtensionEnvelope| {
+                    value.criticality = rootlight_ir::ExtensionCriticality::Critical
+                },
+            ] {
+                let mut malformed = envelope.clone();
+                mutate(&mut malformed);
+                for support in [&preserved, &skipped] {
+                    let mut changed = document.clone();
+                    changed.extensions.push(malformed.clone());
+                    assert_eq!(
+                        IdentityVerifiedGeneration::verify_with_source_files(
+                            metadata,
+                            changed,
+                            catalog.clone(),
+                            &IrLimits::default(),
+                            support,
+                            &context,
+                        ),
+                        Err(IdentityVerificationError::InvalidGeneration)
+                    );
+                }
+            }
+
+            let unbound = rootlight_ir::new_vba_compilation_envelope(
+                document.repository,
+                document.generation,
+                rule_provenance,
+                source.clone(),
+                compilation,
+            )
+            .unwrap();
+            for support in [&preserved, &skipped] {
+                let mut changed = document.clone();
+                changed.extensions.push(unbound.clone());
+                assert_eq!(
+                    IdentityVerifiedGeneration::verify_with_source_files(
+                        metadata,
+                        changed,
+                        catalog.clone(),
+                        &IrLimits::default(),
+                        support,
+                        &context,
+                    ),
+                    Err(IdentityVerificationError::InvalidGeneration)
+                );
+            }
+        }
     }
 
     #[test]

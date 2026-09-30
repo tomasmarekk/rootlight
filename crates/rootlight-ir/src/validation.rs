@@ -168,6 +168,8 @@ pub(crate) fn validate_standalone_extension_envelope(
 
     if !valid_extension_namespace(&envelope.namespace)
         || !valid_extension_version(&envelope.version)
+        || (envelope.namespace == crate::VBA_COMPILATION_NAMESPACE
+            && crate::decode_vba_compilation_envelope(envelope).is_err())
     {
         return Err(StandaloneExtensionValidationError::Identity);
     }
@@ -850,6 +852,20 @@ fn validate_invariants(
         .collect();
     let provenance: BTreeSet<_> = document.provenance.iter().map(|record| record.id).collect();
     let facts: BTreeSet<_> = all_fact_ids(document).collect();
+    let mut compilation_scopes = BTreeSet::new();
+    let compilation_parsers: BTreeMap<_, _> = if document
+        .extensions
+        .iter()
+        .any(|extension| extension.namespace == crate::VBA_COMPILATION_NAMESPACE)
+    {
+        document
+            .provenance
+            .iter()
+            .map(|record| (record.id, record))
+            .collect()
+    } else {
+        BTreeMap::new()
+    };
 
     for file in &document.files {
         validate_owner(
@@ -1099,6 +1115,41 @@ fn validate_invariants(
             &entities,
             &facts,
         )?;
+        if extension.namespace == crate::VBA_COMPILATION_NAMESPACE {
+            let compilation = crate::decode_vba_compilation_envelope(extension)
+                .map_err(|_| IrDocumentValidationError::InvalidVbaCompilation(extension.id))?;
+            let source = extension.evidence.source.as_ref().ok_or(
+                IrDocumentValidationError::InvalidVbaCompilation(extension.id),
+            )?;
+            let parser = compilation_parsers.get(&extension.provenance).ok_or(
+                IrDocumentValidationError::InvalidVbaCompilation(extension.id),
+            )?;
+            if parser.producer_kind != crate::ProducerKind::Parser
+                || !parser.input_sources.iter().any(|input| {
+                    input.repository() == source.repository()
+                        && input.generation() == source.generation()
+                        && input.content_hash() == source.content_hash()
+                        && input.span().file() == source.span().file()
+                        && input.span().start_byte() <= compilation.scope.start_byte()
+                        && compilation.scope.end_byte() <= input.span().end_byte()
+                })
+                || !compilation_scopes.insert(compilation.scope)
+            {
+                return Err(IrDocumentValidationError::InvalidVbaCompilation(
+                    extension.id,
+                ));
+            }
+        }
+    }
+
+    let mut previous_scope = None;
+    for scope in compilation_scopes {
+        if previous_scope.is_some_and(|previous: crate::SourceSpan| {
+            previous.file() == scope.file() && previous.end_byte() > scope.start_byte()
+        }) {
+            return Err(IrDocumentValidationError::OverlappingVbaCompilationScopes);
+        }
+        previous_scope = Some(scope);
     }
 
     Ok(())
@@ -1657,6 +1708,12 @@ pub enum IrDocumentValidationError {
         /// Invalid namespace-specific version.
         version: String,
     },
+    /// A known VBA compilation envelope is malformed or lacks its parser input.
+    #[error("invalid vba compilation evidence {0}")]
+    InvalidVbaCompilation(FactId),
+    /// Two source-written VBA compilation scopes overlap in one source file.
+    #[error("vba compilation scopes overlap")]
+    OverlappingVbaCompilationScopes,
     /// A critical extension is not declared supported.
     #[error("unsupported critical extension {namespace}@{version}")]
     UnsupportedCriticalExtension {
