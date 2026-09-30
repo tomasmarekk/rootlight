@@ -107,7 +107,7 @@ pub use perl_binding::{
 };
 pub use rebind::{
     CanonicalGenerationNeutralDigests, CanonicalNormalizedFileChunk, CanonicalNormalizedIrDocument,
-    NormalizedRebindError, canonical_generation_neutral_digests,
+    GenerationNeutralFactIdIndex, NormalizedRebindError, canonical_generation_neutral_digests,
     generation_neutral_workspace_bytes,
 };
 pub use source_projection::{

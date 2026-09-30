@@ -11,7 +11,7 @@ use rootlight_ids::{ContentHash, FactId, FileId, GenerationId};
 use serde::Serialize;
 
 use crate::lexical::rebind_lexical_evidence_subject;
-use crate::validation::validate_canonical_ir_document;
+use crate::validation::{canonicalize_ir_document_ref, validate_canonical_ir_document};
 use crate::{
     CoverageRecord, DiagnosticRecord, ExtensionEnvelope, ExtensionSupport,
     FILE_IDENTITY_CLAIM_NAMESPACE, FactEvidence, FactRef, FileRecord, IrDocumentValidationError,
@@ -116,6 +116,58 @@ impl CanonicalNormalizedIrDocument {
         checkpoint: impl FnMut() -> bool,
     ) -> Result<CanonicalGenerationNeutralDigests, NormalizedRebindError> {
         canonical_generation_neutral_digests_for_prevalidated_document(&self.document, checkpoint)
+    }
+}
+
+/// Bounded lookup of complete generation-neutral identities for normalized facts.
+///
+/// The index uses the same identity recipes as canonical chunk rebinding, while
+/// accepting noncanonical producer order without modifying the source document.
+/// Equal neutral identities are possible for distinct source identities; they do
+/// not establish a contradiction or a one-to-one identity correspondence.
+#[derive(Debug)]
+pub struct GenerationNeutralFactIdIndex {
+    ids: FactIdMap,
+}
+
+impl GenerationNeutralFactIdIndex {
+    /// Validates a document and reconstructs every supported fact identity once.
+    ///
+    /// Typed producer collection, nested-item, and string quotas are checked
+    /// before the single canonical document clone. The encoded-document byte
+    /// quota belongs to wire decoding, not this typed-input API. Validation
+    /// and canonicalization are bounded atomic operations bracketed by caller
+    /// checkpoints; graph reconstruction checks throughout its traversal. Peak
+    /// workspace includes the canonical clone, compact fact/dependency buffers,
+    /// and one rebound record. All source extensions are preserved for identity
+    /// reconstruction, independently of noncritical display policy.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`NormalizedRebindError`] for invalid or oversized documents,
+    /// unsupported extension recipes, missing or cyclic dependencies, checked
+    /// allocation/accounting failures, or a caller checkpoint returning `false`.
+    pub fn new(
+        document: &NormalizedIrDocument,
+        limits: &IrLimits,
+        extensions: &ExtensionSupport,
+        mut checkpoint: impl FnMut() -> bool,
+    ) -> Result<Self, NormalizedRebindError> {
+        ensure_projection_continues(&mut checkpoint)?;
+        let mut preservation = extensions.clone();
+        preservation.unknown_noncritical = UnknownNoncriticalExtensionPolicy::Preserve;
+        let canonical = canonicalize_ir_document_ref(document, limits, &preservation)?;
+        ensure_projection_continues(&mut checkpoint)?;
+        require_supported_extensions_with_checkpoint(&canonical, &mut checkpoint)?;
+        let ids = derive_fact_id_map(&canonical, GENERATION_NEUTRAL_ID, &mut checkpoint)?;
+        ensure_projection_continues(&mut checkpoint)?;
+        Ok(Self { ids })
+    }
+
+    /// Returns the reconstructed neutral identity, or `None` for an absent fact.
+    #[must_use]
+    pub fn get(&self, original: FactId) -> Option<FactId> {
+        self.ids.get(original)
     }
 }
 
@@ -1810,6 +1862,264 @@ mod tests {
         )
         .expect("identity fixture canonicalizes");
         (document, file_claim, symbol_claim)
+    }
+
+    fn reverse_generation_neutral_fact_producer_order(document: &mut NormalizedIrDocument) {
+        document.files.reverse();
+        document.entities.reverse();
+        document.occurrences.reverse();
+        document.relations.reverse();
+        document.provenance.reverse();
+        document.source_mappings.reverse();
+        document.coverage_records.reverse();
+        document.skipped_regions.reverse();
+        document.diagnostics.reverse();
+        document.extensions.reverse();
+        for record in &mut document.provenance {
+            record.input_sources.reverse();
+            record.evidence_sources.reverse();
+            record.derivation_parents.reverse();
+        }
+    }
+
+    #[test]
+    fn generation_neutral_fact_index_matches_materialized_mapping_without_mutation() {
+        let limits = IrLimits::default();
+        let support = ExtensionSupport::default();
+        let mut exercised = [false; 8];
+        for mut document in [
+            fixture_with_lexical_extension(),
+            fixture_with_identity_extensions().0,
+        ] {
+            reverse_generation_neutral_fact_producer_order(&mut document);
+            document.provenance.push(document.provenance[0].clone());
+            let before = document.clone();
+            let index = GenerationNeutralFactIdIndex::new(&document, &limits, &support, || true)
+                .expect("noncanonical producer order builds an index");
+            let materialized =
+                CanonicalGenerationNeutralDocument::new(&document, &limits, &support)
+                    .expect("materialized neutral mapping builds");
+            let neutral_ids = fact_ids(&materialized.document);
+            for original in fact_ids(&document) {
+                let neutral = index.get(original).expect("every source fact is mapped");
+                assert_eq!(Some(neutral), materialized.rebind_fact_id(original));
+                assert!(neutral_ids.contains(&neutral));
+            }
+            assert_eq!(document, before);
+            assert_eq!(index.get(FactId::from_bytes([255; 20])), None);
+            for (seen, count) in exercised.iter_mut().zip([
+                document.occurrences.len(),
+                document.relations.len(),
+                document.provenance.len(),
+                document.source_mappings.len(),
+                document.coverage_records.len(),
+                document.skipped_regions.len(),
+                document.diagnostics.len(),
+                document.extensions.len(),
+            ]) {
+                *seen |= count != 0;
+            }
+        }
+        assert!(exercised.into_iter().all(|seen| seen));
+    }
+
+    #[test]
+    fn generation_neutral_fact_index_survives_actual_generation_and_order_flip() {
+        let (original, _, _) = fixture_with_identity_extensions();
+        let limits = IrLimits::default();
+        let support = ExtensionSupport::default();
+        let original_index =
+            GenerationNeutralFactIdIndex::new(&original, &limits, &support, || true).unwrap();
+        let original_order: Vec<_> = original
+            .extensions
+            .iter()
+            .map(|record| original_index.get(record.id).unwrap())
+            .collect();
+        let mut flipped = None;
+        for discriminator in 1..=u8::MAX {
+            let generation = GenerationId::from_bytes([discriminator; 20]);
+            if generation == original.generation {
+                continue;
+            }
+            let (candidate, rebound_ids) =
+                rebind_document_with_map(original.clone(), generation, &limits, &support).unwrap();
+            let index =
+                GenerationNeutralFactIdIndex::new(&candidate, &limits, &support, || true).unwrap();
+            let order: Vec<_> = candidate
+                .extensions
+                .iter()
+                .map(|record| index.get(record.id).unwrap())
+                .collect();
+            if order != original_order {
+                flipped = Some((candidate, rebound_ids));
+                break;
+            }
+        }
+        let (mut flipped, rebound_ids) = flipped.expect("actual generation-owned order flips");
+        reverse_generation_neutral_fact_producer_order(&mut flipped);
+        let before = flipped.clone();
+        let index =
+            GenerationNeutralFactIdIndex::new(&flipped, &limits, &support, || true).unwrap();
+        for original_id in fact_ids(&original) {
+            let rebound_id = rebound_ids.get(original_id).unwrap();
+            assert_ne!(original_id, rebound_id);
+            assert_eq!(index.get(rebound_id), original_index.get(original_id));
+        }
+        assert_eq!(flipped, before);
+    }
+
+    #[test]
+    fn generation_neutral_fact_index_preserves_distinct_equal_neutral_identities() {
+        let mut document = fixture_with_lexical_extension();
+        let original = document.provenance[0].id;
+        let mut equivalent = document.provenance[0].clone();
+        equivalent.id = FactId::from_bytes([254; 20]);
+        assert!(!fact_ids(&document).contains(&equivalent.id));
+        let distinct = equivalent.id;
+        document.provenance.push(equivalent);
+        let before = document.clone();
+        let index = GenerationNeutralFactIdIndex::new(
+            &document,
+            &IrLimits::default(),
+            &ExtensionSupport::default(),
+            || true,
+        )
+        .unwrap();
+        assert_ne!(original, distinct);
+        assert!(index.get(original).is_some());
+        assert_eq!(index.get(original), index.get(distinct));
+        assert_eq!(document, before);
+    }
+
+    #[test]
+    fn generation_neutral_fact_index_rejects_invalid_missing_and_cyclic_facts() {
+        let original = fixture_with_lexical_extension();
+        let limits = IrLimits::default();
+        let support = ExtensionSupport::default();
+        let mut invalid = original.clone();
+        invalid.files[0].byte_length = 0;
+        let mut missing = original.clone();
+        missing.occurrences[0].provenance = FactId::from_bytes([253; 20]);
+        assert!(!fact_ids(&original).contains(&missing.occurrences[0].provenance));
+        for document in [invalid, missing] {
+            let before = document.clone();
+            assert!(matches!(
+                GenerationNeutralFactIdIndex::new(&document, &limits, &support, || true),
+                Err(NormalizedRebindError::InvalidDocument)
+            ));
+            assert_eq!(document, before);
+        }
+        let mut cyclic = original;
+        let occurrence = cyclic.occurrences[0].id;
+        let relation = cyclic.relations[0].id;
+        cyclic.occurrences[0]
+            .evidence
+            .derivation
+            .push(FactRef::Fact(relation));
+        cyclic.relations[0]
+            .evidence
+            .derivation
+            .push(FactRef::Fact(occurrence));
+        let before = cyclic.clone();
+        assert!(matches!(
+            GenerationNeutralFactIdIndex::new(&cyclic, &limits, &support, || true),
+            Err(NormalizedRebindError::CyclicFactReferences)
+        ));
+        assert_eq!(cyclic, before);
+    }
+
+    #[test]
+    fn generation_neutral_fact_index_admits_limits_before_deduplication() {
+        let mut document = fixture_with_lexical_extension();
+        let original_provenance_count = document.provenance.len();
+        document.provenance.push(document.provenance[0].clone());
+        let before = document.clone();
+        for limits in [
+            IrLimits {
+                max_provenance_records: original_provenance_count,
+                ..IrLimits::default()
+            },
+            IrLimits {
+                max_total_records: 0,
+                ..IrLimits::default()
+            },
+        ] {
+            let mut checkpoints = 0;
+            assert!(matches!(
+                GenerationNeutralFactIdIndex::new(
+                    &document,
+                    &limits,
+                    &ExtensionSupport::default(),
+                    || {
+                        checkpoints += 1;
+                        true
+                    },
+                ),
+                Err(NormalizedRebindError::InvalidDocument)
+            ));
+            assert_eq!(checkpoints, 1);
+            assert_eq!(document, before);
+        }
+    }
+
+    #[test]
+    fn generation_neutral_fact_index_preserves_opaque_and_malformed_extension_failures() {
+        let limits = IrLimits::default();
+        let mut opaque = fixture_with_lexical_extension();
+        opaque.extensions[0].namespace = "dev.rootlight.opaque".to_owned();
+        let mut malformed = fixture_with_identity_extensions().0;
+        malformed
+            .extensions
+            .iter_mut()
+            .find(|envelope| envelope.namespace == FILE_IDENTITY_CLAIM_NAMESPACE)
+            .expect("file identity claim exists")
+            .payload
+            .clear();
+        for policy in [
+            UnknownNoncriticalExtensionPolicy::Preserve,
+            UnknownNoncriticalExtensionPolicy::Skip,
+        ] {
+            let support = ExtensionSupport {
+                unknown_noncritical: policy,
+                ..ExtensionSupport::default()
+            };
+            assert!(matches!(
+                GenerationNeutralFactIdIndex::new(&opaque, &limits, &support, || true),
+                Err(NormalizedRebindError::UnsupportedExtension)
+            ));
+            let result = GenerationNeutralFactIdIndex::new(&malformed, &limits, &support, || true);
+            assert!(
+                matches!(&result, Err(NormalizedRebindError::IdentityRecipe)),
+                "malformed file identity claim: {result:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn generation_neutral_fact_index_checks_interruption_before_and_through_reconstruction() {
+        let document = fixture_with_lexical_extension();
+        let before = document.clone();
+        let limits = IrLimits::default();
+        let support = ExtensionSupport::default();
+        let mut total = 0;
+        GenerationNeutralFactIdIndex::new(&document, &limits, &support, || {
+            total += 1;
+            true
+        })
+        .unwrap();
+        assert!(total > fact_ids(&document).len());
+        for stop_at in [1, 2, total / 2, total] {
+            let mut checkpoints = 0;
+            assert!(matches!(
+                GenerationNeutralFactIdIndex::new(&document, &limits, &support, || {
+                    checkpoints += 1;
+                    checkpoints < stop_at
+                }),
+                Err(NormalizedRebindError::Interrupted)
+            ));
+            assert_eq!(checkpoints, stop_at);
+            assert_eq!(document, before);
+        }
     }
 
     fn assert_evidence_rebound(

@@ -34,7 +34,7 @@
     },
     {
       "path": "crates/rootlight-ir/src/lib.rs",
-      "blake3": "e39cb95d547d74e699445396964d981dd276190db414ca5d20d79af062742d43"
+      "blake3": "972461a2a66ca33a2a17a62270215ee32bd1d1a3384f218cb515e6ab761a7ebd"
     },
     {
       "path": "crates/rootlight-ir/src/normalized.rs",
@@ -46,7 +46,7 @@
     },
     {
       "path": "crates/rootlight-ir/src/validation.rs",
-      "blake3": "b1255c912d970ebbd57a4adbb28786dddbecb82e5ba670888e550256c8b87a48"
+      "blake3": "d206c49fea2a5009a6b484f1cabe87493cc68b2cba377aecedcb701fba3daa9d"
     },
     {
       "path": "crates/rootlight-mcp-contract/src/change.rs",

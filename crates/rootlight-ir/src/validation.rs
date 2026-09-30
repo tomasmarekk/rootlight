@@ -230,8 +230,16 @@ pub fn validate_ir_document(
     limits: &IrLimits,
     extensions: &ExtensionSupport,
 ) -> Result<(), IrDocumentValidationError> {
+    canonicalize_ir_document_ref(document, limits, extensions).map(|_| ())
+}
+
+pub(crate) fn canonicalize_ir_document_ref(
+    document: &NormalizedIrDocument,
+    limits: &IrLimits,
+    extensions: &ExtensionSupport,
+) -> Result<NormalizedIrDocument, IrDocumentValidationError> {
     validate_limits(document, limits)?;
-    prepare_bounded_document(document.clone(), extensions).map(|_| ())
+    prepare_bounded_document(document.clone(), extensions)
 }
 
 pub(crate) fn validate_canonical_ir_document(
