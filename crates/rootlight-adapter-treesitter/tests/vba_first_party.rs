@@ -28,6 +28,7 @@ const SOURCE_LIMIT: usize = 1024 * 1024;
 const CLOSED_MODULE: &[u8] = b"Attribute VB_Name = \"Authored\"\r\nOption Explicit\r\nPublic Sub Run()\r\n' only authored trivia\r\nEnd Sub\r\nPrivate Function Count() As Long\r\nEnd Function\r\n";
 const SCALAR_MODULE: &[u8] = b"Attribute VB_Name = \"Authored\"\r\nOption Explicit\r\nSub Run()\r\nDim count As Long\r\nConst Limit As Long = 7\r\ncount = Limit\r\nLet count = 1\r\nEnd Sub\r\nFunction Value() As Long\r\nValue = 7\r\nEnd Function\r\n";
 const CALL_MODULE: &[u8] = b"Attribute VB_Name = \"Authored\"\r\nSub Notify()\r\nEnd Sub\r\nSub Run()\r\nCall Notify\r\nCall [Notify]( )\r\nEnd Sub\r\n";
+const PARAMETER_MODULE: &[u8] = b"Attribute VB_Name = \"Authored\"\r\nSub Accept(ByVal [value] As Long, ByRef text As String)\r\n[value] = [value]\r\ntext = text\r\nEnd Sub\r\nFunction Echo(item As Long) As Long\r\nEcho = item\r\nEnd Function\r\n";
 
 #[test]
 fn accepted_modules_preserve_exact_identity_without_native_pool_or_cache_work() {
@@ -185,6 +186,160 @@ fn explicit_calls_preserve_exact_application_and_callee_spans_without_native_wor
         }
         assert_eq!(provider.stats().pooled_parsers, 0);
         assert_eq!(provider.stats().cache.entries, 0);
+    }
+}
+
+#[test]
+fn intrinsic_parameters_preserve_exact_identity_and_mandatory_retention() {
+    let source = std::str::from_utf8(PARAMETER_MODULE).unwrap();
+    let parameters = [
+        ("ByVal [value] As Long", "[value]"),
+        ("ByRef text As String", "text"),
+        ("item As Long", "item"),
+    ];
+    for language in ["vba", "visual-basic-classic"] {
+        let fixture = Fixture::new(PARAMETER_MODULE);
+        let provider = provider();
+        let full_limits = limits(4096);
+        let request = fixture.request(&full_limits, language, Vec::new());
+        let required = provider
+            .required_syntax_fact_count(&request, &deadline())
+            .unwrap();
+        assert_eq!(required, 18);
+        let full = parse(&provider, &request);
+        assert_eq!(full.report().coverage().status(), CoverageStatus::Complete);
+        assert!(full.diagnostics().is_empty());
+        let exact_limits = limits(required);
+        let request = fixture.request(&exact_limits, language, Vec::new());
+        let exact = parse(&provider, &request);
+        for output in [&full, &exact] {
+            let declarations: Vec<_> = output
+                .facts()
+                .iter()
+                .filter(|fact| fact.syntax_kind().as_str() == "vba.parameter.declaration")
+                .collect();
+            assert_eq!(declarations.len(), parameters.len());
+            for ((clause, name), declaration) in parameters.iter().copied().zip(declarations) {
+                let start = source.find(clause).unwrap();
+                let name_start = start + clause.find(name).unwrap();
+                assert_eq!(
+                    bytes_at(PARAMETER_MODULE, declaration.span()),
+                    clause.as_bytes()
+                );
+                assert_eq!(
+                    declaration.span().start_byte(),
+                    u64::try_from(start).unwrap()
+                );
+                assert_eq!(
+                    declaration.span().end_byte(),
+                    u64::try_from(start + clause.len()).unwrap()
+                );
+                let definition = output
+                    .facts()
+                    .iter()
+                    .find(|fact| {
+                        fact.syntax_kind().as_str() == "vba.identifier.definition"
+                            && fact.parent() == Some(declaration.local_id())
+                            && fact.span().start_byte() == u64::try_from(name_start).unwrap()
+                    })
+                    .unwrap();
+                assert_eq!(
+                    bytes_at(PARAMETER_MODULE, definition.span()),
+                    name.as_bytes()
+                );
+                assert_eq!(
+                    definition.span().end_byte(),
+                    u64::try_from(name_start + name.len()).unwrap()
+                );
+                assert_eq!(definition.span().file(), fixture.source.span().file());
+                let parent = declaration.parent().unwrap();
+                assert!(output.facts().iter().any(|fact| {
+                    fact.local_id() == parent
+                        && matches!(
+                            fact.syntax_kind().as_str(),
+                            "vba.sub_function.declaration" | "vba.function.declaration"
+                        )
+                        && fact.span().start_byte() <= declaration.span().start_byte()
+                        && fact.span().end_byte() >= declaration.span().end_byte()
+                }));
+            }
+        }
+        assert_eq!(
+            full.facts(),
+            parse(
+                &provider,
+                &fixture.request(&full_limits, language, Vec::new())
+            )
+            .facts()
+        );
+        let stats = provider.stats();
+        assert_eq!(stats.pooled_parsers, 0);
+        assert_eq!(stats.checked_out_parsers, 0);
+        assert_eq!(stats.cache.entries, 0);
+    }
+}
+
+#[test]
+fn required_parameter_identity_fits_exact_and_rejects_one_short() {
+    for (parameters, expected) in [
+        ("ByVal value As Long", 9),
+        ("ByVal first As Long, ByRef second As String", 11),
+    ] {
+        let source = format!("Sub Run({parameters})\nEnd Sub\n");
+        for language in ["vba", "visual-basic-classic"] {
+            let fixture = Fixture::new(source.as_bytes());
+            let provider = provider();
+            let full_limits = limits(4096);
+            let request = fixture.request(&full_limits, language, Vec::new());
+            let required = provider
+                .required_syntax_fact_count(&request, &deadline())
+                .unwrap();
+            assert_eq!(required, expected);
+            let exact_limits = limits(required);
+            let request = fixture.request(&exact_limits, language, Vec::new());
+            let exact = parse(&provider, &request);
+            assert_eq!(exact.facts().len(), required);
+            assert_eq!(
+                exact
+                    .facts()
+                    .iter()
+                    .filter(|fact| fact.syntax_kind().as_str() == "vba.parameter.declaration")
+                    .count(),
+                (required - 7) / 2
+            );
+            let short_limits = limits(required - 1);
+            let request = fixture.request(&short_limits, language, Vec::new());
+            assert_eq!(
+                execute_parse(
+                    &provider,
+                    &request,
+                    MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
+                    &deadline()
+                )
+                .unwrap_err(),
+                AdapterError::Sink(SinkError::StreamLimit {
+                    resource: ResourceKind::RequiredSyntaxFacts,
+                    observed: required,
+                    limit: required - 1,
+                })
+            );
+            let cancelled = deadline();
+            assert!(cancelled.cancel(CancellationReason::ClientRequest));
+            assert!(matches!(
+                execute_parse(
+                    &provider,
+                    &request,
+                    MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
+                    &cancelled
+                ),
+                Err(AdapterError::Cancelled {
+                    reason: CancellationReason::ClientRequest
+                })
+            ));
+            assert_eq!(provider.stats().pooled_parsers, 0);
+            assert_eq!(provider.stats().checked_out_parsers, 0);
+            assert_eq!(provider.stats().cache.entries, 0);
+        }
     }
 }
 

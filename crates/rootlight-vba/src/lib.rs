@@ -37,7 +37,10 @@ pub use construction::constructed_type_range;
 pub use group::parenthesized_expression_end;
 pub use lifecycle::{ClassInitializer, class_initializer};
 pub use member_attribute::{MemberDispatchAttribute, member_dispatch_attribute};
-pub use module::{ModuleError, ModuleInventory, ModuleLimits, ModuleProcedure, module_inventory};
+pub use module::{
+    ModuleError, ModuleInventory, ModuleLimits, ModuleParameter, ModuleParameterPassingMode,
+    ModuleProcedure, module_inventory,
+};
 pub use module_body::{
     ModuleBodyStatement, ModuleLocalDeclaration, ModuleLocalKind, ModuleScalarAssignment,
     ModuleScalarValue, ModuleScalarValueKind, ModuleZeroArgumentCall,
