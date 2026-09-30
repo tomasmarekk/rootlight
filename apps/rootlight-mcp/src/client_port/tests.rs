@@ -34,9 +34,10 @@ use rootlight_mcp_contract::{
     ErrorCode, ExposureProfile, OperationStatusOutput, PublicError, RepoIndexOutput, ToolResponse,
     VerticalTool,
     change::{ChangeImpactOutput, TestsSelectOutput},
+    conditional_activity::{CodeLocateDataV1_10, SourceReadDataV1_2},
     vertical::{
-        AnalysisTier, CodeLocateOutput, OperationStatusToolResponse, OperationToolResponse,
-        SourceReadOutput, SymbolExplainOutput,
+        AnalysisTier, OperationStatusToolResponse, OperationToolResponse, ReadEnvelope,
+        SymbolExplainOutput,
     },
 };
 use serde::de::DeserializeOwned;
@@ -402,6 +403,7 @@ impl AsyncFirstSliceClient for FakeAsyncClient {
             let mut context = query_context(repository, generation, true);
             context.semantic_freshness = rootlight_client::QueryFreshness::Stale;
             Ok(CodeLocate {
+                conditional_activity: Vec::new(),
                 context,
                 hits: Vec::new(),
                 matched_candidates: 0,
@@ -515,6 +517,7 @@ impl AsyncFirstSliceClient for FakeAsyncClient {
                 files: 4,
             }];
             Ok(SourceRead {
+                conditional_activity: Vec::new(),
                 context,
                 chunks,
                 total_source_bytes: 0,
@@ -1077,7 +1080,7 @@ async fn native_port_maps_all_five_calls_without_blocking_adapters() {
     .await;
     assert!(matches!(status, OperationStatusToolResponse::Success(_)));
 
-    let locate: CodeLocateOutput = execute(
+    let locate: ToolResponse<ReadEnvelope<CodeLocateDataV1_10>> = execute(
         &executor,
         VerticalTool::CodeLocate,
         json!({
@@ -1129,7 +1132,7 @@ async fn native_port_maps_all_five_calls_without_blocking_adapters() {
     );
     assert!(explain.coverage.languages.is_empty());
 
-    let source: SourceReadOutput = execute(
+    let source: ToolResponse<ReadEnvelope<SourceReadDataV1_2>> = execute(
         &executor,
         VerticalTool::SourceRead,
         json!({
@@ -1543,7 +1546,7 @@ async fn source_read_resolves_an_advertised_symbol_selector_before_reading() {
     let executor =
         FirstSliceToolExecutor::new(native_port_with_client(fake)).expect("executor initializes");
 
-    let output: SourceReadOutput = execute(
+    let output: ToolResponse<ReadEnvelope<SourceReadDataV1_2>> = execute(
         &executor,
         VerticalTool::SourceRead,
         json!({
@@ -1686,6 +1689,7 @@ async fn unavailable_port_returns_transport_for_every_tool() {
 fn read_metadata_preserves_safe_non_rust_languages() {
     let context = query_context(repository(), GenerationSelector::Active, true);
     let locate = CodeLocate {
+        conditional_activity: Vec::new(),
         context: context.clone(),
         hits: vec![LocateHit {
             extracted_from: None,
@@ -1721,6 +1725,7 @@ fn read_metadata_preserves_safe_non_rust_languages() {
     )
     .expect("source reference validates");
     let read = SourceRead {
+        conditional_activity: Vec::new(),
         context,
         chunks: vec![SourceChunk {
             extracted_from: None,
@@ -1873,6 +1878,7 @@ fn every_partial_coverage_reason_has_a_stable_mcp_warning() {
 fn empty_results_do_not_invent_language_coverage() {
     let context = query_context(repository(), GenerationSelector::Active, true);
     let locate = CodeLocate {
+        conditional_activity: Vec::new(),
         context: context.clone(),
         hits: Vec::new(),
         matched_candidates: 0,

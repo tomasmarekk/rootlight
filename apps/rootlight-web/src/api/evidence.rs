@@ -1416,6 +1416,7 @@ mod tests {
                 let source_bytes = u64::try_from(SOURCE_TEXT.len())
                     .map_err(|_| ClientError::InvalidResponseCorrelation)?;
                 Ok(SourceRead {
+                    conditional_activity: Vec::new(),
                     context: query_context(repository, generation, 1, source_bytes),
                     chunks: vec![SourceChunk {
                         extracted_from: None,

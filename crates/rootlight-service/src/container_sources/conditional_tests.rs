@@ -1179,3 +1179,265 @@ fn conditional_inventory_preserves_bindings_under_default_work_pressure() {
         compilation_equivalence_diagnostics(&service, receipt.generation, rebuilt.generation)
     );
 }
+
+const ACTIVITY_QUERY_MODULE: &str = "Attribute VB_Name = \"Activity\"\r\n#If True Then\r\nPublic Sub Included()\r\nEnd Sub\r\n#Else\r\nPublic Sub Excluded()\r\nEnd Sub\r\n#End If\r\n#If HostChoice Then\r\nPublic Sub Uncertain()\r\nEnd Sub\r\n#End If\r\nPublic Sub Mixed()\r\n#If False Then\r\nDim unused As Long\r\n#End If\r\nEnd Sub\r\n";
+
+fn assert_durable_conditional_activity(service: &FirstSliceService, generation: GenerationId) {
+    use rootlight_query::{
+        ConditionalActivityBasis, ConditionalActivityReason, ConditionalActivityState,
+    };
+
+    let snapshot = service.loaded_generation_snapshot(generation).unwrap();
+    let document = snapshot.document();
+    let file = source_file(document, ACTIVITY_QUERY_MODULE);
+    let envelope = document
+        .extensions
+        .iter()
+        .find(|extension| {
+            extension.namespace == rootlight_ir::VBA_COMPILATION_NAMESPACE
+                && extension
+                    .evidence
+                    .source
+                    .as_ref()
+                    .is_some_and(|source| source.span().file() == file)
+        })
+        .expect("the authored native module retains its compilation inventory");
+    let compilation = rootlight_ir::decode_vba_compilation_envelope(envelope).unwrap();
+    assert!(compilation.complete);
+
+    for (name, expected) in [
+        ("Included", ConditionalActivityState::Active),
+        ("Excluded", ConditionalActivityState::Inactive),
+        ("Uncertain", ConditionalActivityState::Unproven),
+        ("Mixed", ConditionalActivityState::Active),
+    ] {
+        let marker = format!("Public Sub {name}");
+        let (site, entity) = definition(
+            document,
+            ACTIVITY_QUERY_MODULE,
+            &marker,
+            name,
+            EntityKind::Function,
+        );
+        let located = service
+            .code_locate(
+                generation,
+                name.to_owned(),
+                LocateMode::Exact,
+                20,
+                0,
+                &deadline(),
+            )
+            .unwrap();
+        assert!(!located.data.execution.is_truncated());
+        assert_eq!(
+            located.data.hits.len(),
+            2,
+            "{name}: {:?}",
+            located.data.hits
+        );
+        assert_eq!(located.data.conditional_activity.len(), 2);
+        let definition_index = located
+            .data
+            .hits
+            .iter()
+            .position(|hit| hit.symbol == Some(entity.id))
+            .expect("the exact authored function is returned alongside its source file");
+        let hit = &located.data.hits[definition_index];
+        assert_eq!(hit.source, entity.evidence.source);
+        assert!(hit.extracted_from.is_some());
+        let file_index = 1 - definition_index;
+        let file_hit = &located.data.hits[file_index];
+        assert_eq!(file_hit.symbol, None);
+        assert_eq!(file_hit.file, file);
+        let file_assessment = &located.data.conditional_activity[file_index];
+        assert_eq!(
+            file_assessment.result_index,
+            u32::try_from(file_index).unwrap()
+        );
+        assert_eq!(
+            file_assessment.basis,
+            ConditionalActivityBasis::ReturnedRange
+        );
+        assert_eq!(file_assessment.assessed_source_ref, file_hit.source);
+        assert_eq!(file_assessment.activity, ConditionalActivityState::Unproven);
+        assert_eq!(
+            file_assessment.reason,
+            Some(ConditionalActivityReason::MembershipUnproven)
+        );
+        assert_eq!(
+            file_assessment.inventory.as_ref().unwrap().fact_id,
+            envelope.id
+        );
+        let assessment = &located.data.conditional_activity[definition_index];
+        assert_eq!(
+            assessment.result_index,
+            u32::try_from(definition_index).unwrap()
+        );
+        assert_eq!(assessment.basis, ConditionalActivityBasis::DefinitionToken);
+        assert_eq!(assessment.activity, expected);
+        assert_eq!(assessment.assessed_source_ref.as_ref(), Some(&site.source));
+        let inventory = assessment.inventory.as_ref().unwrap();
+        assert_eq!(inventory.fact_id, envelope.id);
+        assert_eq!(inventory.parser_provenance_id, envelope.provenance);
+        assert_eq!(inventory.scope.start_byte, compilation.scope.start_byte());
+        assert_eq!(inventory.scope.end_byte, compilation.scope.end_byte());
+        assert!(inventory.complete);
+        assert_eq!(
+            assessment.reason,
+            (expected == ConditionalActivityState::Unproven)
+                .then_some(ConditionalActivityReason::MembershipUnproven)
+        );
+
+        let read = service
+            .source_read_with_options_and_budget(
+                generation,
+                vec![site.source.clone()],
+                SourceReadOptions::new()
+                    .with_context_lines_before(0)
+                    .with_context_lines_after(0),
+                FirstSliceBudget::default(),
+                &deadline(),
+            )
+            .unwrap();
+        assert_eq!(read.data.chunks.len(), 1);
+        assert_eq!(read.data.conditional_activity.len(), 1);
+        let chunk = &read.data.chunks[0];
+        assert_eq!(chunk.reference, site.source);
+        assert_eq!(chunk.bytes, name.as_bytes());
+        assert!(chunk.extracted_from.is_some());
+        let assessment = &read.data.conditional_activity[0];
+        assert_eq!(assessment.result_index, 0);
+        assert_eq!(assessment.basis, ConditionalActivityBasis::ReturnedRange);
+        assert_eq!(assessment.activity, expected);
+        let assessed = assessment.assessed_source_ref.as_ref().unwrap();
+        assert_eq!(assessed.repository(), document.repository);
+        assert_eq!(assessed.generation(), generation);
+        assert_eq!(
+            assessed.content_hash(),
+            content_hash(ACTIVITY_QUERY_MODULE.as_bytes())
+        );
+        assert_eq!(assessed.span().file(), file);
+        assert_eq!(assessed.span().start_byte(), chunk.start_byte);
+        assert_eq!(assessed.span().end_byte(), chunk.end_byte);
+        assert_eq!(assessment.inventory.as_ref().unwrap().fact_id, envelope.id);
+
+        if name == "Mixed" {
+            assert_eq!(
+                compilation.activity_at(entity.evidence.source.as_ref().unwrap().span()),
+                rootlight_ir::VbaCompilationActivity::Unproven,
+                "an active definition token does not make its conditional body uniformly active"
+            );
+        }
+        if name == "Excluded" {
+            let whole = entity.evidence.source.as_ref().unwrap();
+            let retained = service
+                .source_read_with_options_and_budget(
+                    generation,
+                    vec![whole.clone()],
+                    SourceReadOptions::new()
+                        .with_context_lines_before(0)
+                        .with_context_lines_after(0),
+                    FirstSliceBudget::default(),
+                    &deadline(),
+                )
+                .unwrap();
+            assert_eq!(retained.data.chunks.len(), 1);
+            assert_eq!(
+                retained.data.chunks[0].bytes,
+                ACTIVITY_QUERY_MODULE.as_bytes()[usize::try_from(whole.span().start_byte()).unwrap()
+                    ..usize::try_from(whole.span().end_byte()).unwrap()]
+            );
+            assert_eq!(
+                retained.data.conditional_activity[0].activity,
+                ConditionalActivityState::Inactive
+            );
+        }
+    }
+
+    let (included, _) = definition(
+        document,
+        ACTIVITY_QUERY_MODULE,
+        "Public Sub Included",
+        "Included",
+        EntityKind::Function,
+    );
+    let expanded = service
+        .source_read_with_options_and_budget(
+            generation,
+            vec![included.source.clone()],
+            SourceReadOptions::new()
+                .with_context_lines_before(2)
+                .with_context_lines_after(3),
+            FirstSliceBudget::default(),
+            &deadline(),
+        )
+        .unwrap();
+    assert!(!expanded.data.execution.is_truncated());
+    assert_eq!(expanded.data.chunks.len(), 1);
+    assert_eq!(expanded.data.conditional_activity.len(), 1);
+    let chunk = &expanded.data.chunks[0];
+    assert_eq!(chunk.reference, included.source);
+    assert!(chunk.start_byte < included.source.span().start_byte());
+    assert!(chunk.end_byte > included.source.span().end_byte());
+    assert_eq!(
+        chunk.bytes,
+        ACTIVITY_QUERY_MODULE.as_bytes()
+            [usize::try_from(chunk.start_byte).unwrap()..usize::try_from(chunk.end_byte).unwrap()]
+    );
+    let assessment = &expanded.data.conditional_activity[0];
+    assert_eq!(assessment.basis, ConditionalActivityBasis::ReturnedRange);
+    assert_eq!(assessment.activity, ConditionalActivityState::Unproven);
+    assert_eq!(
+        assessment.reason,
+        Some(ConditionalActivityReason::MembershipUnproven)
+    );
+    let assessed = assessment.assessed_source_ref.as_ref().unwrap();
+    assert_eq!(assessed.span().start_byte(), chunk.start_byte);
+    assert_eq!(assessed.span().end_byte(), chunk.end_byte);
+    assert_eq!(assessment.inventory.as_ref().unwrap().fact_id, envelope.id);
+}
+
+#[test]
+fn conditional_activity_queries_keep_source_identity_after_noop_reopen_and_rebuild() {
+    let root = tempdir();
+    let storage = tempdir();
+    let paths = rootlight_runtime::RuntimePaths::new(
+        storage.path().join("state"),
+        storage.path().join("runtime"),
+    )
+    .unwrap();
+    paths.prepare_owner().unwrap();
+    fs::write(
+        root.path().join("activity.xlsm"),
+        fixture::typed_book(&[("Activity", ACTIVITY_QUERY_MODULE.as_bytes(), false)]),
+    )
+    .unwrap();
+    let mut service = FirstSliceService::new_durable(4, paths.state_dir(), &deadline()).unwrap();
+    let cold = service.index_repository(root.path(), &deadline()).unwrap();
+    assert_durable_conditional_activity(&service, cold.generation);
+    assert_eq!(
+        cold,
+        service.index_repository(root.path(), &deadline()).unwrap()
+    );
+    assert_durable_conditional_activity(&service, cold.generation);
+    drop(service);
+
+    let mut service = FirstSliceService::new_durable(4, paths.state_dir(), &deadline()).unwrap();
+    assert_eq!(
+        cold,
+        service.index_repository(root.path(), &deadline()).unwrap()
+    );
+    assert_durable_conditional_activity(&service, cold.generation);
+    let prepared = service
+        .prepare_repository_with_options(
+            root.path(),
+            FirstSliceIndexOptions::clean_rebuild(FirstSliceIndexMode::Structural),
+            &deadline(),
+        )
+        .unwrap();
+    let rebuilt = service.publish_prepared(prepared, &deadline()).unwrap();
+    assert!(cold.logical_snapshot.is_some());
+    assert_eq!(cold.logical_snapshot, rebuilt.logical_snapshot);
+    assert_durable_conditional_activity(&service, rebuilt.generation);
+}

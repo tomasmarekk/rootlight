@@ -78,6 +78,12 @@ use rootlight_mcp_contract::{
         LimitingResource as ContractLimitingResource,
         LimitingResourceKind as ContractLimitingResourceKind, ResultCompleteness,
     },
+    conditional_activity::{
+        CodeLocateDataV1_10 as CodeLocateData, ConditionalActivityAssessment,
+        ConditionalActivityBasis, ConditionalActivityInventory, ConditionalActivityReason,
+        ConditionalActivityScope, ConditionalActivityState, SourceReadDataV1_2 as SourceReadData,
+        is_conditional_activity_language,
+    },
     context::{
         BatchOperationResult, BatchOperationStatus, BatchStatus, BatchTool, ColumnSchema,
         ColumnType, ContextPackData, ContextPackInput, PlanExplanation, QueryAdvancedData,
@@ -93,14 +99,13 @@ use rootlight_mcp_contract::{
         RepoStatusSchemaVersion, RepositoryEntry, RepositoryState,
     },
     vertical::{
-        ActiveGeneration, AnalysisTier, CacheStatus, CodeLocateData, CodeLocateInput,
-        ContinuationCursor, CoverageSummary, DetailHandle, Diagnostic, EntityKind, Freshness,
-        GenerationSummary, IndexMode, IndexPlanScope, IndexPlanSummary, LanguageCoverage,
-        LocateReason, LocatedItem, OperationAction, OperationAffectedAnalysisUnitIds,
-        OperationAffectedFileIds, OperationBuildStrategy,
-        OperationDetailV1_6 as CurrentOperationDetail, OperationFactWorkCause,
-        OperationFactWorkDisposition, OperationFallbackReason, OperationIncrementalEvidence,
-        OperationIncrementalFactWorkEvidence,
+        ActiveGeneration, AnalysisTier, CacheStatus, CodeLocateInput, ContinuationCursor,
+        CoverageSummary, DetailHandle, Diagnostic, EntityKind, Freshness, GenerationSummary,
+        IndexMode, IndexPlanScope, IndexPlanSummary, LanguageCoverage, LocateReason, LocatedItem,
+        OperationAction, OperationAffectedAnalysisUnitIds, OperationAffectedFileIds,
+        OperationBuildStrategy, OperationDetailV1_6 as CurrentOperationDetail,
+        OperationFactWorkCause, OperationFactWorkDisposition, OperationFallbackReason,
+        OperationIncrementalEvidence, OperationIncrementalFactWorkEvidence,
         OperationInvalidationTraceV1_1 as OperationInvalidationTrace,
         OperationNormalizedFactDomain, OperationNormalizedFactWorkCollection,
         OperationNormalizedFactWorkGroup, OperationPlannedFactDomain,
@@ -112,8 +117,8 @@ use rootlight_mcp_contract::{
         ReadEnvelope, RepoIndexDataV1_1 as RepoIndexData, RepoIndexSuccessV1_3 as RepoIndexSuccess,
         RequiredNullable, ResolvedRepository, ResponseBudget, ResponseProfile, ResponseWarning,
         ScopeSelector, SearchMode, SourceChunk, SourceElision, SourceEncoding,
-        SourceEncodingRequest, SourceReadData, SourceReadSelector, StaleSourceReference,
-        SymbolExplainData, SymbolExplanation, UsageSummary,
+        SourceEncodingRequest, SourceReadSelector, StaleSourceReference, SymbolExplainData,
+        SymbolExplanation, UsageSummary,
     },
 };
 use serde::{Serialize, de::DeserializeOwned};
@@ -4205,6 +4210,7 @@ where
     );
     let data = CodeLocateData {
         matches: Vec::new(),
+        conditional_activity: Vec::new(),
         query_interpretation: QueryInterpretation {
             tokens: Vec::new(),
             modes: BTreeSet::from([mode]),
@@ -4354,6 +4360,7 @@ where
     );
     let data = SourceReadData {
         chunks: Vec::new(),
+        conditional_activity: Vec::new(),
         stale_references: Vec::new(),
         elisions: Vec::new(),
         total_source_bytes: 0,
@@ -8066,7 +8073,7 @@ fn operation_status_error(
 }
 
 fn map_code_locate(
-    response: CodeLocatePortResponse,
+    mut response: CodeLocatePortResponse,
     request: &CodeLocatePortRequest,
     next_cursor: Option<ContinuationCursor>,
 ) -> Result<ReadEnvelope<CodeLocateData>, ToolExecutionError> {
@@ -8118,6 +8125,24 @@ fn map_code_locate(
         .try_reserve_exact(response.result.hits.len())
         .map_err(|_| internal(ToolExecutionFailure::Executor))?;
     let resolved_generation = response.result.context.generation;
+    let applicable_indices = response
+        .result
+        .hits
+        .iter()
+        .enumerate()
+        .filter(|(_, hit)| is_conditional_activity_language(&hit.language))
+        .map(|(index, _)| {
+            u32::try_from(index).map_err(|_| internal(ToolExecutionFailure::InvalidResponse))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let conditional_activity = map_conditional_activity(response.result.conditional_activity)?;
+    if conditional_activity
+        .iter()
+        .map(|assessment| assessment.result_index)
+        .ne(applicable_indices)
+    {
+        return Err(internal(ToolExecutionFailure::InvalidResponse));
+    }
     let mut seen_targets = BTreeSet::new();
     for hit in response.result.hits {
         if hit.identifier.is_empty()
@@ -8169,6 +8194,7 @@ fn map_code_locate(
     };
     let data = CodeLocateData {
         matches,
+        conditional_activity,
         query_interpretation: QueryInterpretation {
             tokens: response.query_tokens,
             modes: BTreeSet::from([mode]),
@@ -8177,6 +8203,34 @@ fn map_code_locate(
         suggested_next: Vec::new(),
         explanation: None,
     };
+    data.validate_conditional_activity()
+        .map_err(|_| internal(ToolExecutionFailure::InvalidResponse))?;
+    if data
+        .conditional_activity
+        .iter()
+        .any(|assessment| assessment.reason.0 == Some(ConditionalActivityReason::ScanIncomplete))
+        && (response.result.execution_completeness.state
+            != client::ResultCompletenessState::Truncated
+            || next_cursor.is_some()
+            || !response
+                .result
+                .execution_completeness
+                .limiting_resources
+                .iter()
+                .any(|resource| {
+                    matches!(
+                        resource.kind,
+                        client::LimitingResourceKind::Rows
+                            | client::LimitingResourceKind::MemoryBytes
+                    )
+                }))
+    {
+        return Err(internal(ToolExecutionFailure::InvalidResponse));
+    }
+    append_conditional_activity_warning(
+        &mut response.metadata.warnings,
+        &data.conditional_activity,
+    )?;
     map_read_envelope(
         response.result.context,
         response.metadata,
@@ -8355,7 +8409,7 @@ fn map_symbol_explain(
 }
 
 fn map_source_read(
-    response: SourceReadPortResponse,
+    mut response: SourceReadPortResponse,
     request: &SourceReadPortRequest,
 ) -> Result<ReadEnvelope<SourceReadData>, ToolExecutionError> {
     validate_query_context(
@@ -8363,7 +8417,32 @@ fn map_source_read(
         request.repository,
         request.generation,
     )?;
-    if response.result.chunks.len() > request.references.len()
+    let conditional_activity = map_conditional_activity(response.result.conditional_activity)?;
+    let metadata_partial = response.result.execution_completeness.state
+        == client::ResultCompletenessState::Truncated
+        && response
+            .result
+            .execution_completeness
+            .limiting_resources
+            .iter()
+            .any(|resource| {
+                matches!(
+                    resource.kind,
+                    client::LimitingResourceKind::Rows | client::LimitingResourceKind::MemoryBytes
+                )
+            })
+        && conditional_activity.iter().any(|assessment| {
+            assessment.reason.0 == Some(ConditionalActivityReason::ScanIncomplete)
+        });
+    if response.result.truncated
+        != (response.result.execution_completeness.state
+            == client::ResultCompletenessState::Truncated)
+        || (metadata_partial
+            && response.stale_references.is_empty()
+            && response.elisions.is_empty()
+            && !request.merge_overlaps
+            && response.result.chunks.len() != request.references.len())
+        || response.result.chunks.len() > request.references.len()
         || (!response.result.truncated
             && (!request.merge_overlaps
                 && response.result.chunks.len() != request.references.len()
@@ -8371,7 +8450,8 @@ fn map_source_read(
                 || !response.elisions.is_empty()))
         || (response.result.truncated
             && response.stale_references.is_empty()
-            && response.elisions.is_empty())
+            && response.elisions.is_empty()
+            && !metadata_partial)
         || response
             .stale_references
             .iter()
@@ -8491,11 +8571,26 @@ fn map_source_read(
         .map_err(|_| internal(ToolExecutionFailure::InvalidResponse))?;
     let data = SourceReadData {
         chunks,
+        conditional_activity,
         stale_references: response.stale_references,
         elisions: response.elisions,
         total_source_bytes,
         explanation: None,
     };
+    data.validate_conditional_activity()
+        .map_err(|_| internal(ToolExecutionFailure::InvalidResponse))?;
+    if data
+        .conditional_activity
+        .iter()
+        .any(|assessment| assessment.reason.0 == Some(ConditionalActivityReason::ScanIncomplete))
+        && !metadata_partial
+    {
+        return Err(internal(ToolExecutionFailure::InvalidResponse));
+    }
+    append_conditional_activity_warning(
+        &mut response.metadata.warnings,
+        &data.conditional_activity,
+    )?;
     map_read_envelope(
         response.result.context,
         response.metadata,
@@ -8503,6 +8598,119 @@ fn map_source_read(
         response.result.execution_completeness,
         None,
     )
+}
+
+fn map_conditional_activity(
+    values: Vec<client::ConditionalActivityAssessment>,
+) -> Result<Vec<ConditionalActivityAssessment>, ToolExecutionError> {
+    if values.len() > 200 {
+        return Err(internal(ToolExecutionFailure::InvalidResponse));
+    }
+    values
+        .into_iter()
+        .map(|value| {
+            let assessment = ConditionalActivityAssessment {
+                result_index: value.result_index,
+                basis: match value.basis {
+                    client::ConditionalActivityBasis::DefinitionToken => {
+                        ConditionalActivityBasis::DefinitionToken
+                    }
+                    client::ConditionalActivityBasis::ReturnedRange => {
+                        ConditionalActivityBasis::ReturnedRange
+                    }
+                },
+                activity: match value.activity {
+                    client::ConditionalActivityState::Active => ConditionalActivityState::Active,
+                    client::ConditionalActivityState::Inactive => {
+                        ConditionalActivityState::Inactive
+                    }
+                    client::ConditionalActivityState::Unproven => {
+                        ConditionalActivityState::Unproven
+                    }
+                },
+                assessed_source_ref: RequiredNullable(
+                    value
+                        .assessed_source_ref
+                        .as_ref()
+                        .map(client_source_ref)
+                        .transpose()?,
+                ),
+                inventory: RequiredNullable(value.inventory.map(|inventory| {
+                    ConditionalActivityInventory {
+                        fact_id: inventory.fact_id,
+                        parser_provenance_id: inventory.parser_provenance_id,
+                        scope: ConditionalActivityScope {
+                            start_byte: inventory.scope.start_byte,
+                            end_byte: inventory.scope.end_byte,
+                        },
+                        complete: inventory.complete,
+                    }
+                })),
+                reason: RequiredNullable(value.reason.map(|reason| match reason {
+                    client::ConditionalActivityReason::NoInventory => {
+                        ConditionalActivityReason::NoInventory
+                    }
+                    client::ConditionalActivityReason::IncompleteInventory => {
+                        ConditionalActivityReason::IncompleteInventory
+                    }
+                    client::ConditionalActivityReason::MissingDefinition => {
+                        ConditionalActivityReason::MissingDefinition
+                    }
+                    client::ConditionalActivityReason::AmbiguousDefinition => {
+                        ConditionalActivityReason::AmbiguousDefinition
+                    }
+                    client::ConditionalActivityReason::CrossScope => {
+                        ConditionalActivityReason::CrossScope
+                    }
+                    client::ConditionalActivityReason::EmptyRange => {
+                        ConditionalActivityReason::EmptyRange
+                    }
+                    client::ConditionalActivityReason::MembershipUnproven => {
+                        ConditionalActivityReason::MembershipUnproven
+                    }
+                    client::ConditionalActivityReason::ScanIncomplete => {
+                        ConditionalActivityReason::ScanIncomplete
+                    }
+                    client::ConditionalActivityReason::TransportUnavailable => {
+                        ConditionalActivityReason::TransportUnavailable
+                    }
+                })),
+            };
+            assessment
+                .validate()
+                .map_err(|_| internal(ToolExecutionFailure::InvalidResponse))?;
+            Ok(assessment)
+        })
+        .collect()
+}
+
+fn append_conditional_activity_warning(
+    warnings: &mut Vec<ResponseWarning>,
+    assessments: &[ConditionalActivityAssessment],
+) -> Result<(), ToolExecutionError> {
+    let affected = assessments
+        .iter()
+        .filter(|assessment| assessment.activity == ConditionalActivityState::Unproven)
+        .count();
+    let code = SafeLabel::parse("conditional_activity_unproven")
+        .map_err(|_| internal(ToolExecutionFailure::Executor))?;
+    // Only this mapper owns the count; incoming metadata cannot supply a stale summary.
+    if warnings.iter().any(|warning| warning.code == code) {
+        return Err(internal(ToolExecutionFailure::InvalidResponse));
+    }
+    if affected > 0 {
+        if warnings.len() >= 100 {
+            return Err(internal(ToolExecutionFailure::InvalidResponse));
+        }
+        warnings.push(ResponseWarning {
+            code,
+            message: SourceFreeMessage::parse(&format!(
+                "conditional activity unproven for {affected} returned items"
+            ))
+            .map_err(|_| internal(ToolExecutionFailure::Executor))?,
+        });
+    }
+    Ok(())
 }
 
 fn map_read_envelope<T>(

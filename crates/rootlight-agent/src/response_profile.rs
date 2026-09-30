@@ -12,6 +12,7 @@ use rootlight_mcp_contract::{
         ChangeImpactData, HistoryCompareData, PlanChangeData, TestCandidate, TestsSelectData,
     },
     completeness::ResultCompleteness,
+    conditional_activity::{CodeLocateDataV1_10, SourceReadDataV1_2},
     context::{BatchTool, ContextPackData},
     intent::{
         ArchitectureCyclesData, ArchitectureOverviewData, CodeDeadData, FlowTraceData,
@@ -740,7 +741,7 @@ pub fn shape_batch_child_data(
         }};
     }
     match tool {
-        BatchTool::CodeLocate => project!(CodeLocateData),
+        BatchTool::CodeLocate => project!(CodeLocateDataV1_10),
         BatchTool::SymbolExplain => project!(SymbolExplainData),
         BatchTool::SymbolRelationships => project!(SymbolRelationshipsData),
         BatchTool::FlowTrace => project!(FlowTraceData),
@@ -751,7 +752,7 @@ pub fn shape_batch_child_data(
         BatchTool::CodeDead => project!(CodeDeadData),
         BatchTool::PlanChange => project!(PlanChangeData),
         BatchTool::ContextPack => project!(ContextPackData),
-        BatchTool::SourceRead => project!(SourceReadData),
+        BatchTool::SourceRead => project!(SourceReadDataV1_2),
     }
 }
 
@@ -786,6 +787,31 @@ impl ProfileShape for CodeLocateData {
                 item.source_ref = None;
             } else if let Some(source_ref) = &mut item.source_ref {
                 shape_source_ref(source_ref, profile);
+            }
+        }
+    }
+}
+
+impl ProfileShape for CodeLocateDataV1_10 {
+    fn shape_with_limits(&mut self, profile: ResponseProfile, limits: ProfileLimits) {
+        for (index, item) in self.matches.iter_mut().enumerate() {
+            item.why
+                .truncate(usize::from(limits.rationale_items_per_result));
+            if !limits.optional_fields.signatures {
+                item.signature = None;
+            }
+            // Conditional evidence requires its returned-source ownership even
+            // when the compact profile ordinarily omits optional references.
+            let mandatory_source = self
+                .conditional_activity
+                .iter()
+                .any(|assessment| usize::try_from(assessment.result_index).ok() == Some(index));
+            if !mandatory_source {
+                if limits.evidence_references_per_result == 0 {
+                    item.source_ref = None;
+                } else if let Some(source) = &mut item.source_ref {
+                    shape_source_ref(source, profile);
+                }
             }
         }
     }
@@ -829,6 +855,24 @@ impl ProfileShape for SourceReadData {
             if matches!(profile, ResponseProfile::Compact) {
                 chunk.start_line = None;
                 chunk.end_line = None;
+            }
+        }
+    }
+}
+
+impl ProfileShape for SourceReadDataV1_2 {
+    fn shape_with_limits(&mut self, profile: ResponseProfile, _limits: ProfileLimits) {
+        for (index, chunk) in self.chunks.iter_mut().enumerate() {
+            let mandatory_source = self
+                .conditional_activity
+                .iter()
+                .any(|assessment| usize::try_from(assessment.result_index).ok() == Some(index));
+            if !mandatory_source {
+                shape_source_ref(&mut chunk.source_ref, profile);
+                if matches!(profile, ResponseProfile::Compact) {
+                    chunk.start_line = None;
+                    chunk.end_line = None;
+                }
             }
         }
     }
@@ -1144,6 +1188,7 @@ mod tests {
         fn assert_profile_shape<T: ProfileShape>() {}
 
         assert_profile_shape::<CodeLocateData>();
+        assert_profile_shape::<CodeLocateDataV1_10>();
         assert_profile_shape::<SymbolExplainData>();
         assert_profile_shape::<SymbolRelationshipsData>();
         assert_profile_shape::<FlowTraceData>();
@@ -1156,6 +1201,7 @@ mod tests {
         assert_profile_shape::<PlanChangeData>();
         assert_profile_shape::<ContextPackData>();
         assert_profile_shape::<SourceReadData>();
+        assert_profile_shape::<SourceReadDataV1_2>();
     }
 
     #[test]
@@ -1178,7 +1224,8 @@ mod tests {
             "canonical binding data must remain unchanged"
         );
 
-        let source_read = serde_json::to_value(SourceReadData {
+        let source_read = serde_json::to_value(SourceReadDataV1_2 {
+            conditional_activity: Vec::new(),
             chunks: vec![SourceChunk {
                 extracted_from: None,
                 source_ref: source_ref(1),
@@ -1209,7 +1256,7 @@ mod tests {
             let value = shape_batch_child_data(BatchTool::SourceRead, &source_read, profile)
                 .expect("advertised source-read profile should project");
             projected.push(
-                serde_json::from_value::<SourceReadData>(value)
+                serde_json::from_value::<SourceReadDataV1_2>(value)
                     .expect("projected source-read data should remain typed"),
             );
         }
@@ -1234,6 +1281,103 @@ mod tests {
         }
         assert_eq!(source_read["chunks"][0]["start_line"], 2);
         assert!(source_read["chunks"][0]["source_ref"]["line_hint"].is_object());
+    }
+
+    #[test]
+    fn conditional_metadata_and_ownership_survive_every_profile_and_batch_child() {
+        use rootlight_mcp_contract::conditional_activity::{
+            ConditionalActivityAssessment, ConditionalActivityBasis, ConditionalActivityReason,
+            ConditionalActivityState,
+        };
+        use rootlight_mcp_contract::vertical::RequiredNullable;
+        let source = source_ref(1);
+        let assessment = ConditionalActivityAssessment {
+            result_index: 0,
+            basis: ConditionalActivityBasis::ReturnedRange,
+            activity: ConditionalActivityState::Unproven,
+            assessed_source_ref: RequiredNullable(Some(source.clone())),
+            inventory: RequiredNullable(None),
+            reason: RequiredNullable(Some(ConditionalActivityReason::NoInventory)),
+        };
+        let read = SourceReadDataV1_2 {
+            chunks: vec![SourceChunk {
+                extracted_from: None,
+                source_ref: source.clone(),
+                path: "Module.bas".into(),
+                start_byte: 1,
+                end_byte: 9,
+                start_line: Some(2),
+                end_line: Some(3),
+                content: "abcdefgh".into(),
+                encoding: SourceEncoding::Utf8,
+                content_hash: ContentHash::from_bytes([4; 32]),
+                language: "vba".into(),
+                generated: false,
+                trust: TrustClassification::UntrustedRepositoryData,
+            }],
+            stale_references: vec![],
+            elisions: vec![],
+            total_source_bytes: 8,
+            explanation: None,
+            conditional_activity: vec![assessment.clone()],
+        };
+        let locate = CodeLocateDataV1_10 {
+            matches: vec![LocatedItem {
+                extracted_from: None,
+                symbol_id: None,
+                file_id: Some(source.span().file()),
+                kind: ContractEntityKind::File,
+                display_name: "Module.bas".into(),
+                signature: Some("optional".into()),
+                path: "Module.bas".into(),
+                score: 1000,
+                why: vec![LocateReason::Identifier, LocateReason::Path],
+                source_ref: Some(source.clone()),
+                trust: TrustClassification::UntrustedRepositoryData,
+            }],
+            query_interpretation: QueryInterpretation {
+                tokens: vec!["Module".into()],
+                modes: BTreeSet::from([SearchMode::Exact]),
+                semantic_available: false,
+            },
+            suggested_next: vec![],
+            explanation: None,
+            conditional_activity: vec![assessment],
+        };
+        let read_json = serde_json::to_value(&read).unwrap();
+        let locate_json = serde_json::to_value(&locate).unwrap();
+        for profile in [
+            ResponseProfile::Compact,
+            ResponseProfile::Standard,
+            ResponseProfile::Evidence,
+        ] {
+            let mut shaped = read.clone();
+            shape_data(&mut shaped, profile);
+            assert_eq!(shaped.conditional_activity, read.conditional_activity);
+            assert_eq!(shaped.chunks, read.chunks);
+            let mut shaped = locate.clone();
+            shape_data(&mut shaped, profile);
+            assert_eq!(shaped.conditional_activity, locate.conditional_activity);
+            assert_eq!(shaped.matches[0].source_ref, locate.matches[0].source_ref);
+            for (tool, canonical) in [
+                (BatchTool::CodeLocate, &locate_json),
+                (BatchTool::SourceRead, &read_json),
+            ] {
+                let shaped = shape_batch_child_data(tool, canonical, profile).unwrap();
+                assert_eq!(
+                    shaped["conditional_activity"],
+                    canonical["conditional_activity"]
+                );
+                let path = if tool == BatchTool::CodeLocate {
+                    "/matches/0/source_ref"
+                } else {
+                    "/chunks/0/source_ref"
+                };
+                assert_eq!(shaped.pointer(path), canonical.pointer(path));
+            }
+        }
+        assert_eq!(serde_json::to_value(read).unwrap(), read_json);
+        assert_eq!(serde_json::to_value(locate).unwrap(), locate_json);
     }
 
     #[test]

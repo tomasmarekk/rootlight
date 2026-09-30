@@ -23,6 +23,7 @@ use rootlight_source::{
 use rootlight_storage::GenerationSnapshot;
 use serde::Serialize;
 
+use crate::conditional_activity;
 use crate::model::{
     ADVANCED_MAX_DEPTH, AdvancedAggregateFunction, AdvancedAstNode, AdvancedColumnSchema,
     AdvancedColumnType, AdvancedCompleteness, AdvancedEntityKind, AdvancedPlanExplanation,
@@ -252,6 +253,7 @@ where
                 QueryOperator::GenerationPin,
                 QueryOperator::LexicalSearch,
                 QueryOperator::EntityHydration,
+                QueryOperator::ConditionalActivityProjection,
                 QueryOperator::CoverageProjection,
                 QueryOperator::OutputBudget,
             ],
@@ -460,6 +462,13 @@ where
                 }
             }
         }
+        let activity = conditional_activity::project_locate(
+            self.generation,
+            &located,
+            &mut tracker,
+            &control,
+            &mut limiting_resources,
+        )?;
         let (coverage, coverage_truncated) = collect_coverage_partial(
             CoverageView {
                 document: self.generation.document(),
@@ -473,7 +482,8 @@ where
             &mut limiting_resources,
         )?;
         let next_page_offset =
-            (has_more_matches && !coverage_truncated && !origins_truncated).then_some(returned_end);
+            (has_more_matches && !coverage_truncated && !origins_truncated && !activity.incomplete)
+                .then_some(returned_end);
         if next_page_offset.is_some() {
             record_limit(&mut limiting_resources, QueryResource::Results)?;
         }
@@ -481,6 +491,7 @@ where
         let data = CodeLocateResult {
             generation: self.generation.metadata().generation(),
             hits: located,
+            conditional_activity: activity.assessments,
             matched_candidates,
             coverage,
             truncated: execution.is_truncated(),
@@ -2548,11 +2559,22 @@ where
                 .checked_mul(mem::size_of::<SourceChunkResult>())
                 .ok_or(QueryError::MemoryUnavailable)?,
         )?;
-        // The query ceiling includes chunk metadata, so only the remaining
-        // memory can be delegated to source response materialization.
+        let activity_memory =
+            conditional_activity::source_reservation(self.generation, &references)?;
+        let reserved_memory = chunk_memory
+            .checked_add(activity_memory)
+            .ok_or(QueryError::MemoryUnavailable)?;
+        let reference_rows = checked_usize_to_u64(references.len())?;
+        if reference_rows > budget.max_rows {
+            return Err(QueryError::PlanRejected {
+                resource: QueryResource::Rows,
+            });
+        }
+        // Chunk metadata and mandatory fail-closed sidecars remain outside the
+        // source service's materialization allowance, even if its bytes fill it.
         let response_memory = budget
             .max_memory_bytes
-            .checked_sub(chunk_memory)
+            .checked_sub(reserved_memory)
             .filter(|remaining| *remaining > 0)
             .ok_or(QueryError::PlanRejected {
                 resource: QueryResource::MemoryBytes,
@@ -2564,31 +2586,43 @@ where
             usize::try_from(response_memory).map_err(|_| QueryError::MemoryUnavailable)?;
         let memory_bytes = checked_add(
             response_memory,
-            chunk_memory,
+            reserved_memory,
             QueryResource::MemoryBytes,
             u64::MAX,
         )?;
         let estimate = PlanEstimate {
-            rows: checked_usize_to_u64(references.len())?,
+            rows: if activity_memory == 0 {
+                reference_rows
+            } else {
+                budget.max_rows
+            },
             edges: 0,
             results: checked_usize_to_u64(references.len())?,
             source_bytes: checked_usize_to_u64(source_budget.max_source_bytes)?,
-            memory_bytes,
+            memory_bytes: if activity_memory == 0 {
+                memory_bytes
+            } else {
+                budget.max_memory_bytes
+            },
             json_bytes: budget.max_json_bytes,
             estimated_tokens: budget.max_tokens,
             duration_micros: duration_micros(budget.max_duration),
         };
         ensure_estimate(estimate, budget)?;
+        let mut operators = vec![
+            QueryOperator::GenerationPin,
+            QueryOperator::SourceResolve,
+            QueryOperator::VfsSnapshotRead,
+            QueryOperator::ContentHashVerify,
+        ];
+        if activity_memory != 0 {
+            operators.push(QueryOperator::ConditionalActivityProjection);
+        }
+        operators.push(QueryOperator::OutputBudget);
         let explanation = PlanExplanation {
             generation: self.generation.metadata().generation(),
             kind: PlanKind::SourceRead,
-            operators: vec![
-                QueryOperator::GenerationPin,
-                QueryOperator::SourceResolve,
-                QueryOperator::VfsSnapshotRead,
-                QueryOperator::ContentHashVerify,
-                QueryOperator::OutputBudget,
-            ],
+            operators,
             estimate,
         };
         Ok(SourceReadPlan {
@@ -2663,10 +2697,19 @@ where
                 trust: RepositoryDataTrust::UntrustedRepositoryData,
             });
         }
+        let mut limiting_resources = Vec::new();
+        let activity = conditional_activity::project_source(
+            self.generation,
+            &chunks,
+            &mut tracker,
+            &control,
+            &mut limiting_resources,
+        )?;
         let data = SourceReadQueryResult {
             generation: result.generation,
             chunks,
-            execution: ExecutionCompleteness::complete(),
+            conditional_activity: activity.assessments,
+            execution: authoritative_execution(&limiting_resources),
         };
         finish_response(plan.explanation.clone(), data, tracker, started, &control)
     }
@@ -10755,7 +10798,7 @@ fn unsupported_execution(limiting_resources: &[QueryResource]) -> ExecutionCompl
     ExecutionCompleteness::unsupported_partial(*primary, additional.iter().copied())
 }
 
-fn record_limit(
+pub(super) fn record_limit(
     limiting_resources: &mut Vec<QueryResource>,
     resource: QueryResource,
 ) -> Result<(), QueryError> {
@@ -10913,7 +10956,7 @@ fn serialized_response_size(
     })
 }
 
-struct UsageTracker {
+pub(super) struct UsageTracker {
     budget: QueryBudget,
     rows: u64,
     edges: u64,
@@ -10923,7 +10966,7 @@ struct UsageTracker {
 }
 
 impl UsageTracker {
-    const fn new(budget: QueryBudget) -> Self {
+    pub(super) const fn new(budget: QueryBudget) -> Self {
         Self {
             budget,
             rows: 0,
@@ -10934,7 +10977,7 @@ impl UsageTracker {
         }
     }
 
-    fn add_rows(&mut self, amount: u64) -> Result<(), QueryError> {
+    pub(super) fn add_rows(&mut self, amount: u64) -> Result<(), QueryError> {
         self.rows = checked_add(self.rows, amount, QueryResource::Rows, self.budget.max_rows)?;
         Ok(())
     }
@@ -10969,7 +11012,7 @@ impl UsageTracker {
         Ok(())
     }
 
-    fn add_memory(&mut self, amount: u64) -> Result<(), QueryError> {
+    pub(super) fn add_memory(&mut self, amount: u64) -> Result<(), QueryError> {
         self.memory_bytes = checked_add(
             self.memory_bytes,
             amount,
@@ -10997,7 +11040,7 @@ impl UsageTracker {
         }
     }
 
-    fn can_add(&self, resource: QueryResource, amount: u64) -> bool {
+    pub(super) fn can_add(&self, resource: QueryResource, amount: u64) -> bool {
         let (current, limit) = match resource {
             QueryResource::Rows => (self.rows, self.budget.max_rows),
             QueryResource::Edges => (self.edges, self.budget.max_edges),
@@ -11026,13 +11069,13 @@ impl UsageTracker {
     }
 }
 
-struct QueryControl<'a> {
+pub(super) struct QueryControl<'a> {
     cancellation: &'a Cancellation,
     deadline: Instant,
 }
 
 impl<'a> QueryControl<'a> {
-    fn new(cancellation: &'a Cancellation, duration: Duration) -> Self {
+    pub(super) fn new(cancellation: &'a Cancellation, duration: Duration) -> Self {
         let started = Instant::now();
         Self {
             cancellation,
@@ -11040,7 +11083,7 @@ impl<'a> QueryControl<'a> {
         }
     }
 
-    fn check(&self) -> Result<(), QueryError> {
+    pub(super) fn check(&self) -> Result<(), QueryError> {
         self.cancellation
             .check()
             .map_err(|cancelled| QueryError::Cancelled(cancelled.reason()))?;

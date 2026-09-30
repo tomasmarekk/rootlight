@@ -2500,7 +2500,12 @@ fn bounded_batch_warnings(warnings: &[ResponseWarning]) -> Vec<ResponseWarning> 
     bounded
 }
 
-fn admitted_parent_budget(requested: Option<&ResponseBudget>) -> ResponseBudget {
+/// Applies the authoritative aggregate batch defaults and caller-reduced ceilings.
+///
+/// This pure admission policy is shared by orchestration and the final publication
+/// boundary so omitted token controls cannot widen a batch response's budget.
+#[must_use]
+pub fn admitted_parent_budget(requested: Option<&ResponseBudget>) -> ResponseBudget {
     let mut admitted = requested.cloned().unwrap_or(ResponseBudget {
         max_results: None,
         max_tokens: None,

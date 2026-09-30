@@ -70,8 +70,7 @@ use rootlight_ir::{
     CoverageStatus as IrCoverage, EntityKind as IrEntityKind, LineRange, SourceRef, SourceSpan,
 };
 use rootlight_mcp_contract::{
-    CodeLocateOutput, ErrorCode, McpNextAction, OperationStatusOutput, RepoIndexOutput,
-    SourceReadOutput, ToolResponse,
+    ErrorCode, McpNextAction, OperationStatusOutput, RepoIndexOutput, ToolResponse,
     capability::{CapabilityStatus, capability_for, discovery_metadata},
     change::{
         ChangeClassification, ChangeImpactOutput, ChangeImpactOutputV1_1, HistoryCompareOutput,
@@ -98,6 +97,9 @@ use serde_json::{Map, Value, json};
 use tokio::sync::{Notify, watch};
 
 use super::*;
+
+type CodeLocateOutput = ToolResponse<ReadEnvelope<CodeLocateData>>;
+type SourceReadOutput = ToolResponse<ReadEnvelope<SourceReadData>>;
 
 #[test]
 fn source_declaration_kinds_preserve_their_exact_public_labels() {
@@ -1847,6 +1849,7 @@ fn clean_rebuild_fact_work() -> RepositoryIncrementalFactWorkEvidence {
 fn locate_response() -> CodeLocatePortResponse {
     CodeLocatePortResponse::new(
         client::CodeLocate {
+            conditional_activity: Vec::new(),
             context: context(1, 0),
             hits: vec![LocateHit {
                 extracted_from: None,
@@ -1870,6 +1873,246 @@ fn locate_response() -> CodeLocatePortResponse {
         metadata("trace-locate-1"),
         vec!["publish".to_owned()],
     )
+}
+
+fn conditional_locate_request() -> CodeLocatePortRequest {
+    normalize_code_locate(
+        decode_arguments(json!({
+            "repository": {"repository_id": repository()}, "query": "publish"
+        })),
+        &normalization_error(),
+        &normalization_error(),
+    )
+    .unwrap()
+}
+
+fn conditional_source_request() -> SourceReadPortRequest {
+    normalize_source_read(
+        decode_arguments(json!({
+            "repository": {"repository_id": repository()},
+            "references": [{"source_ref": wire_source_reference(4, 12, 2, 2)}],
+            "merge_overlaps": false, "include_line_numbers": true,
+        })),
+        &normalization_error(),
+        &normalization_error(),
+    )
+    .unwrap()
+}
+
+fn conditional_assessment(
+    basis: client::ConditionalActivityBasis,
+    activity: client::ConditionalActivityState,
+    source: Option<client::SourceReference>,
+) -> client::ConditionalActivityAssessment {
+    let proven = activity != client::ConditionalActivityState::Unproven;
+    client::ConditionalActivityAssessment {
+        result_index: 0,
+        basis,
+        activity,
+        assessed_source_ref: source,
+        inventory: proven.then(|| client::ConditionalActivityInventory {
+            fact_id: FactId::from_bytes([21; 20]),
+            parser_provenance_id: FactId::from_bytes([22; 20]),
+            scope: client::ConditionalActivityScope {
+                start_byte: 0,
+                end_byte: 40,
+            },
+            complete: true,
+        }),
+        reason: (!proven).then_some(client::ConditionalActivityReason::NoInventory),
+    }
+}
+
+#[test]
+fn maps_conditional_definition_tokens_without_claiming_whole_procedure_activity() {
+    for activity in [
+        client::ConditionalActivityState::Active,
+        client::ConditionalActivityState::Inactive,
+        client::ConditionalActivityState::Unproven,
+    ] {
+        let mut response = locate_response();
+        response.result.hits[0].language = "vba".into();
+        response.result.conditional_activity = vec![conditional_assessment(
+            client::ConditionalActivityBasis::DefinitionToken,
+            activity,
+            Some(source_reference(5, 6, 2, 2)),
+        )];
+        let output = map_code_locate(response, &conditional_locate_request(), None).unwrap();
+        assert_eq!(
+            output.data.matches[0]
+                .source_ref
+                .as_ref()
+                .unwrap()
+                .span()
+                .start_byte(),
+            4
+        );
+        assert_eq!(
+            output.data.conditional_activity[0]
+                .assessed_source_ref
+                .0
+                .as_ref()
+                .unwrap()
+                .span()
+                .start_byte(),
+            5
+        );
+        assert_eq!(
+            output.data.conditional_activity[0]
+                .assessed_source_ref
+                .0
+                .as_ref()
+                .unwrap()
+                .span()
+                .end_byte(),
+            6
+        );
+        assert_eq!(
+            output
+                .warnings
+                .iter()
+                .filter(|warning| warning.code.as_str() == "conditional_activity_unproven")
+                .count(),
+            usize::from(activity == client::ConditionalActivityState::Unproven)
+        );
+        if activity == client::ConditionalActivityState::Unproven {
+            let warning = output
+                .warnings
+                .iter()
+                .find(|warning| warning.code.as_str() == "conditional_activity_unproven")
+                .unwrap();
+            assert_eq!(
+                warning.message.as_str(),
+                "conditional activity unproven for 1 returned items"
+            );
+        }
+    }
+}
+
+#[test]
+fn locate_mapper_rejects_missing_extraneous_and_foreign_conditional_metadata() {
+    let mut missing = locate_response();
+    missing.result.hits[0].language = "vba".into();
+    assert!(map_code_locate(missing, &conditional_locate_request(), None).is_err());
+    let mut extra = locate_response();
+    extra.result.conditional_activity = vec![conditional_assessment(
+        client::ConditionalActivityBasis::DefinitionToken,
+        client::ConditionalActivityState::Active,
+        Some(source_reference(5, 6, 2, 2)),
+    )];
+    assert!(map_code_locate(extra, &conditional_locate_request(), None).is_err());
+    let mut bad = locate_response();
+    bad.result.hits[0].language = "vba".into();
+    bad.result.conditional_activity = vec![conditional_assessment(
+        client::ConditionalActivityBasis::DefinitionToken,
+        client::ConditionalActivityState::Active,
+        Some(
+            client::SourceReference::new(
+                repository(),
+                generation(),
+                FileId::from_bytes([55; 20]),
+                5..6,
+                content_hash(),
+                None,
+            )
+            .unwrap(),
+        ),
+    )];
+    assert!(map_code_locate(bad, &conditional_locate_request(), None).is_err());
+}
+
+#[test]
+fn source_metadata_only_partiality_keeps_exact_chunks_and_requires_row_or_memory_truth() {
+    for resource in [
+        client::LimitingResourceKind::Rows,
+        client::LimitingResourceKind::MemoryBytes,
+    ] {
+        let mut response = source_read_response(source_reference(4, 12, 2, 2));
+        response.result.chunks[0].language = "visual-basic-classic".into();
+        response.result.conditional_activity = vec![conditional_assessment(
+            client::ConditionalActivityBasis::ReturnedRange,
+            client::ConditionalActivityState::Unproven,
+            Some(source_reference(4, 12, 2, 2)),
+        )];
+        response.result.conditional_activity[0].reason =
+            Some(client::ConditionalActivityReason::ScanIncomplete);
+        response.result.truncated = true;
+        response.result.execution_completeness =
+            truncated_execution(resource, client::ContinuationGuidance::NarrowScope);
+        let original_chunks = response.result.chunks.clone();
+        let output = map_source_read(response.clone(), &conditional_source_request()).unwrap();
+        assert!(output.truncated);
+        assert_eq!(output.data.total_source_bytes, 8);
+        assert_eq!(
+            output.data.chunks[0].content.as_bytes(),
+            original_chunks[0].content
+        );
+        assert!(output.data.stale_references.is_empty());
+        assert!(output.data.elisions.is_empty());
+        assert_eq!(
+            output.data.conditional_activity[0].reason.0,
+            Some(ConditionalActivityReason::ScanIncomplete)
+        );
+        let missing_selector_request = normalize_source_read(
+            decode_arguments(json!({
+                "repository": {"repository_id": repository()},
+                "references": [
+                    {"source_ref": wire_source_reference(4, 12, 2, 2)},
+                    {"source_ref": wire_source_reference(20, 24, 3, 3)}
+                ],
+                "merge_overlaps": false, "include_line_numbers": true,
+            })),
+            &normalization_error(),
+            &normalization_error(),
+        )
+        .unwrap();
+        assert!(
+            map_source_read(response.clone(), &missing_selector_request).is_err(),
+            "metadata-only truncation cannot hide a missing verified source chunk"
+        );
+        response.result.execution_completeness = truncated_execution(
+            client::LimitingResourceKind::SourceBytes,
+            client::ContinuationGuidance::NarrowScope,
+        );
+        assert!(map_source_read(response.clone(), &conditional_source_request()).is_err());
+        response.result.execution_completeness = complete_execution();
+        response.result.truncated = false;
+        assert!(map_source_read(response, &conditional_source_request()).is_err());
+    }
+}
+
+#[test]
+fn source_activity_must_assess_the_expanded_chunk_not_the_selector() {
+    let mut request = conditional_source_request();
+    request.context_lines_before = 1;
+    request.context_lines_after = 1;
+    let mut response = source_read_response(source_reference(4, 12, 2, 2));
+    let chunk = &mut response.result.chunks[0];
+    chunk.language = "vba".into();
+    chunk.start_byte = 0;
+    chunk.end_byte = 15;
+    chunk.start_line = Some(1);
+    chunk.end_line = Some(3);
+    chunk.content = b"0123456789abcde".to_vec();
+    response.result.total_source_bytes = 15;
+    response.result.conditional_activity = vec![conditional_assessment(
+        client::ConditionalActivityBasis::ReturnedRange,
+        client::ConditionalActivityState::Unproven,
+        Some(source_reference(0, 15, 1, 3)),
+    )];
+    let output = map_source_read(response.clone(), &request).unwrap();
+    assert_eq!(
+        output.data.conditional_activity[0]
+            .assessed_source_ref
+            .0
+            .as_ref()
+            .unwrap()
+            .span(),
+        output.data.chunks[0].source_ref.span()
+    );
+    response.result.conditional_activity[0].assessed_source_ref =
+        Some(source_reference(4, 12, 2, 2));
+    assert!(map_source_read(response, &request).is_err());
 }
 
 fn locate_page(
@@ -3112,6 +3355,7 @@ fn source_read_response(source: client::SourceReference) -> SourceReadPortRespon
     assert_eq!(source.byte_range(), 4..12);
     SourceReadPortResponse::new(
         client::SourceRead {
+            conditional_activity: Vec::new(),
             context: context(1, 8),
             chunks: vec![ClientSourceChunk {
                 extracted_from: None,
@@ -10253,6 +10497,7 @@ async fn maps_expanded_source_range_as_the_returned_verified_reference() {
     let requested = source_reference(5, 10, 2, 2);
     let response = SourceReadPortResponse::new(
         client::SourceRead {
+            conditional_activity: Vec::new(),
             context: context(1, 15),
             chunks: vec![ClientSourceChunk {
                 extracted_from: None,
@@ -10440,6 +10685,7 @@ async fn maps_exact_binary_source_as_canonical_base64_without_line_metadata() {
     let requested = source_reference(4, 6, 2, 2);
     let response = SourceReadPortResponse::new(
         client::SourceRead {
+            conditional_activity: Vec::new(),
             context: context(1, 2),
             chunks: vec![ClientSourceChunk {
                 extracted_from: None,
@@ -11318,7 +11564,13 @@ async fn source_read_explain_returns_a_plan_without_retrieval() {
         "explain performs no retrieval"
     );
     let explanation = output.data.explanation.expect("explain returns a plan");
-    assert_eq!(explanation.operators, vec!["source_read".to_owned()]);
+    assert_eq!(
+        explanation.operators,
+        vec![
+            "source_read".to_owned(),
+            "conditional_activity_projection".to_owned()
+        ]
+    );
     assert_eq!(
         harness.call_count.load(Ordering::Relaxed),
         1,
@@ -11394,7 +11646,13 @@ async fn code_locate_explain_returns_a_plan_without_retrieval() {
         "explain performs no retrieval"
     );
     let explanation = output.data.explanation.expect("explain returns a plan");
-    assert_eq!(explanation.operators, vec!["lexical_scan".to_owned()]);
+    assert_eq!(
+        explanation.operators,
+        vec![
+            "lexical_scan".to_owned(),
+            "conditional_activity_projection".to_owned()
+        ]
+    );
     assert!(
         explanation.fingerprint.starts_with("plan1_"),
         "explain binds a stable plan fingerprint"

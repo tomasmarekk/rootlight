@@ -888,6 +888,58 @@ message CodeLocateResponse {
   bool truncated = 5;
   optional uint64 next_page_offset = 6;
   FirstSliceCompleteness completeness = 7;
+  repeated ConditionalActivityAssessment conditional_activity = 8;
+}
+
+// Wire defaults cannot assert compilation membership.
+enum ConditionalActivityState {
+  CONDITIONAL_ACTIVITY_STATE_UNSPECIFIED = 0;
+  CONDITIONAL_ACTIVITY_STATE_ACTIVE = 1;
+  CONDITIONAL_ACTIVITY_STATE_INACTIVE = 2;
+  CONDITIONAL_ACTIVITY_STATE_UNPROVEN = 3;
+}
+
+enum ConditionalActivityBasis {
+  CONDITIONAL_ACTIVITY_BASIS_UNSPECIFIED = 0;
+  CONDITIONAL_ACTIVITY_BASIS_DEFINITION_TOKEN = 1;
+  CONDITIONAL_ACTIVITY_BASIS_RETURNED_RANGE = 2;
+}
+
+enum ConditionalActivityReason {
+  CONDITIONAL_ACTIVITY_REASON_UNSPECIFIED = 0;
+  CONDITIONAL_ACTIVITY_REASON_NO_INVENTORY = 1;
+  CONDITIONAL_ACTIVITY_REASON_INCOMPLETE_INVENTORY = 2;
+  CONDITIONAL_ACTIVITY_REASON_MISSING_DEFINITION = 3;
+  CONDITIONAL_ACTIVITY_REASON_AMBIGUOUS_DEFINITION = 4;
+  CONDITIONAL_ACTIVITY_REASON_CROSS_SCOPE = 5;
+  CONDITIONAL_ACTIVITY_REASON_EMPTY_RANGE = 6;
+  CONDITIONAL_ACTIVITY_REASON_MEMBERSHIP_UNPROVEN = 7;
+  CONDITIONAL_ACTIVITY_REASON_SCAN_INCOMPLETE = 8;
+  CONDITIONAL_ACTIVITY_REASON_TRANSPORT_UNAVAILABLE = 9;
+}
+
+// Identity is inherited only from the assessment's exact source reference.
+message ConditionalActivityScope {
+  uint64 start_byte = 1;
+  uint64 end_byte = 2;
+}
+
+// One persisted parser inventory, not independent compiler/environment truth.
+message ConditionalActivityInventory {
+  rootlight.common.v1.AnalysisUnitId fact_id = 1;
+  rootlight.common.v1.AnalysisUnitId parser_provenance_id = 2;
+  ConditionalActivityScope scope = 3;
+  bool complete = 4;
+}
+
+// Correlates exactly one applicable returned hit/chunk by its result ordinal.
+message ConditionalActivityAssessment {
+  uint32 result_index = 1;
+  ConditionalActivityBasis basis = 2;
+  ConditionalActivityState activity = 3;
+  optional FirstSliceSourceRef assessed_source_ref = 4;
+  optional ConditionalActivityInventory inventory = 5;
+  optional ConditionalActivityReason reason = 6;
 }
 
 // Requests bounded explanations for stable symbols.
@@ -997,6 +1049,7 @@ message SourceReadResponse {
   uint64 total_source_bytes = 4;
   bool truncated = 5;
   FirstSliceCompleteness completeness = 6;
+  repeated ConditionalActivityAssessment conditional_activity = 7;
 }
 
 // Requests the bounded list of repositories known to this daemon process.

@@ -10,6 +10,20 @@
     ]
   },
   "output_projection": {
+    "conditional_activity_downgrade": {
+      "code.locate": {
+        "required_version": "1.10",
+        "retained_through": "1.9"
+      },
+      "empty_sidecar": "retain_existing_versions",
+      "nonempty_sidecar": "reject_lossy_downgrade",
+      "public_error": "PROTOCOL_MISMATCH",
+      "recovery": "select_supported_version",
+      "source.read": {
+        "required_version": "1.2",
+        "retained_through": "1.1"
+      }
+    },
     "evidence": [
       "retained_fixture_output_schema",
       "explicit_version_stdio_process"
@@ -33,7 +47,7 @@
         "tool": "operation.status"
       },
       {
-        "current_version": "1.9",
+        "current_version": "1.10",
         "projected_version": "1.0",
         "tool": "code.locate"
       },
@@ -88,7 +102,7 @@
         "tool": "context.pack"
       },
       {
-        "current_version": "1.1",
+        "current_version": "1.2",
         "projected_version": "1.0",
         "tool": "source.read"
       },
@@ -303,7 +317,7 @@
     },
     {
       "tool": "code.locate",
-      "version": "1.9"
+      "version": "1.10"
     },
     {
       "tool": "symbol.explain",
@@ -351,7 +365,7 @@
     },
     {
       "tool": "source.read",
-      "version": "1.1"
+      "version": "1.2"
     },
     {
       "tool": "query.advanced",

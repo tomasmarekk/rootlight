@@ -17,10 +17,41 @@ pub const EXPLAIN_VERSION: &str = "1.9";
 /// Contract revision for change results containing source entities.
 pub const CHANGE_VERSION: &str = "1.6";
 
-/// Contract revision for exact source entity kinds in locate results.
-pub const LOCATE_VERSION: &str = "1.9";
-/// Contract revision for source reads with explicit extracted-source origins.
-pub const SOURCE_READ_VERSION: &str = "1.1";
+/// Contract revision for source-bound conditional activity in locate results.
+pub const LOCATE_VERSION: &str = "1.10";
+/// Contract revision for source-bound conditional activity in source reads.
+pub const SOURCE_READ_VERSION: &str = "1.2";
+
+/// Exact version of conditional-activity-aware locate responses.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub enum ConditionalLocateVersion {
+    /// Locate contract 1.10.
+    #[serde(rename = "1.10")]
+    V1_10,
+}
+
+/// Exact version of conditional-activity-aware source responses.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub enum ConditionalSourceReadVersion {
+    /// Source read contract 1.2.
+    #[serde(rename = "1.2")]
+    V1_2,
+}
+
+/// Conditional-activity-aware `code.locate` success or domain error.
+pub type CodeLocateOutputV1_10 = EntityToolResponse<
+    EntityReadEnvelope<crate::conditional_activity::CodeLocateDataV1_10, ConditionalLocateVersion>,
+    ConditionalLocateVersion,
+>;
+
+/// Conditional-activity-aware `source.read` success or domain error.
+pub type SourceReadOutputV1_2 = EntityToolResponse<
+    EntityReadEnvelope<
+        crate::conditional_activity::SourceReadDataV1_2,
+        ConditionalSourceReadVersion,
+    >,
+    ConditionalSourceReadVersion,
+>;
 
 /// Exact version of statement-label-aware locate and explanation responses.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]

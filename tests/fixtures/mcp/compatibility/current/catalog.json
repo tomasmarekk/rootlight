@@ -6652,9 +6652,9 @@
             "batchEligible": true,
             "batchSharedBudget": false,
             "budget": "per_request",
-            "contractVersion": "1.9",
+            "contractVersion": "1.10",
             "explainSupported": true,
-            "fallbackSummary": "bounded exact-identifier or indexed lexical-text matching",
+            "fallbackSummary": "bounded exact-identifier or indexed lexical-text matching with source-bound conditional membership",
             "generation": "selects_generation",
             "inputShapeHash": "90a65c1183885a3b32e80bd953039c0aacd28f59e86d8d85d9d852d36d7f64a3",
             "limitations": [
@@ -6741,7 +6741,7 @@
           "openWorldHint": false,
           "readOnlyHint": true
         },
-        "description": "Use bounded exact-identifier or indexed lexical-text matching over normalized symbols in one selected generation with authenticated continuation; path, structural, semantic, and documentation modes are unsupported.",
+        "description": "Use bounded exact-identifier or indexed lexical-text matching with source-bound conditional membership for indexed symbols and files in one selected generation with authenticated continuation; conditional activity applies only to classic Visual Basic/VBA returned items, incomplete membership scans suppress continuation, and path, structural, semantic, and documentation modes are unsupported.",
         "execution": {
           "taskSupport": "forbidden"
         },
@@ -7263,7 +7263,7 @@
               "type": "object"
             }
           },
-          "$id": "https://rootlight.local/schema/mcp/code.locate/input/1.9",
+          "$id": "https://rootlight.local/schema/mcp/code.locate/input/1.10",
           "$schema": "https://json-schema.org/draft/2020-12/schema",
           "additionalProperties": false,
           "description": "Strict input for `code.locate`.",
@@ -7430,10 +7430,18 @@
                 }
               ]
             },
-            "CodeLocateData": {
+            "CodeLocateDataV1_10": {
               "additionalProperties": false,
-              "description": "`code.locate` result data.",
+              "description": "Current `code.locate` data with required conditional source metadata.",
               "properties": {
+                "conditional_activity": {
+                  "description": "One ordered assessment for each applicable returned item.",
+                  "items": {
+                    "$ref": "#/$defs/ConditionalActivityAssessment"
+                  },
+                  "maxItems": 200,
+                  "type": "array"
+                },
                 "explanation": {
                   "anyOf": [
                     {
@@ -7443,10 +7451,10 @@
                       "type": "null"
                     }
                   ],
-                  "description": "Bounded source-free plan present when explain was requested."
+                  "description": "Bounded source-free plan when requested."
                 },
                 "matches": {
-                  "description": "Deterministically ranked matches.",
+                  "description": "Deterministically ranked returned matches.",
                   "items": {
                     "$ref": "#/$defs/LocatedItem"
                   },
@@ -7469,7 +7477,8 @@
               "required": [
                 "matches",
                 "query_interpretation",
-                "suggested_next"
+                "suggested_next",
+                "conditional_activity"
               ],
               "type": "object"
             },
@@ -7494,6 +7503,196 @@
                 {
                   "const": "indeterminate",
                   "description": "The producer cannot establish what portion of the domain was evaluated.",
+                  "type": "string"
+                }
+              ]
+            },
+            "ConditionalActivityAssessment": {
+              "additionalProperties": false,
+              "description": "Correctness-bearing conditional metadata for one returned item ordinal.",
+              "properties": {
+                "activity": {
+                  "$ref": "#/$defs/ConditionalActivityState",
+                  "description": "Membership established by stored admitted evidence."
+                },
+                "assessed_source_ref": {
+                  "$ref": "#/$defs/RequiredNullable2",
+                  "description": "Exact token or returned range; null when no unique range was proven."
+                },
+                "basis": {
+                  "$ref": "#/$defs/ConditionalActivityBasis",
+                  "description": "Exact range-selection basis."
+                },
+                "inventory": {
+                  "$ref": "#/$defs/RequiredNullable3",
+                  "description": "Owning persisted inventory; null when none can safely be selected."
+                },
+                "reason": {
+                  "$ref": "#/$defs/RequiredNullable4",
+                  "description": "Unproven reason, required-nullable rather than a wire default."
+                },
+                "result_index": {
+                  "description": "Zero-based ordinal in the returned matches or chunks.",
+                  "format": "uint32",
+                  "minimum": 0,
+                  "type": "integer"
+                }
+              },
+              "required": [
+                "result_index",
+                "basis",
+                "activity",
+                "assessed_source_ref",
+                "inventory",
+                "reason"
+              ],
+              "type": "object"
+            },
+            "ConditionalActivityBasis": {
+              "description": "Source range selected for the conditional membership assessment.",
+              "oneOf": [
+                {
+                  "const": "definition_token",
+                  "description": "The unique source-backed definition token of a returned symbol.",
+                  "type": "string"
+                },
+                {
+                  "const": "returned_range",
+                  "description": "The actual returned file or expanded source chunk range.",
+                  "type": "string"
+                }
+              ]
+            },
+            "ConditionalActivityInventory": {
+              "additionalProperties": false,
+              "description": "Exact persisted inventory and parser provenance selected for an assessment.",
+              "properties": {
+                "complete": {
+                  "description": "Whether the branch inventory is complete, not whole-program validity.",
+                  "type": "boolean"
+                },
+                "fact_id": {
+                  "$ref": "#/$defs/FactId",
+                  "description": "Typed identity of the selected compilation envelope."
+                },
+                "parser_provenance_id": {
+                  "$ref": "#/$defs/FactId",
+                  "description": "Typed parser provenance identity carried by that envelope."
+                },
+                "scope": {
+                  "$ref": "#/$defs/ConditionalActivityScope",
+                  "description": "Owning interval in the assessed file, not another source identity."
+                }
+              },
+              "required": [
+                "fact_id",
+                "parser_provenance_id",
+                "scope",
+                "complete"
+              ],
+              "type": "object"
+            },
+            "ConditionalActivityReason": {
+              "description": "Source-free explanation of an unproven membership assessment.",
+              "oneOf": [
+                {
+                  "const": "no_inventory",
+                  "description": "No owning compilation inventory exists.",
+                  "type": "string"
+                },
+                {
+                  "const": "incomplete_inventory",
+                  "description": "The owning branch inventory is incomplete.",
+                  "type": "string"
+                },
+                {
+                  "const": "missing_definition",
+                  "description": "No unique source-backed definition exists.",
+                  "type": "string"
+                },
+                {
+                  "const": "ambiguous_definition",
+                  "description": "Competing source-backed definitions exist.",
+                  "type": "string"
+                },
+                {
+                  "const": "cross_scope",
+                  "description": "The returned range crosses distinct compilation scopes.",
+                  "type": "string"
+                },
+                {
+                  "const": "empty_range",
+                  "description": "The assessed range is empty.",
+                  "type": "string"
+                },
+                {
+                  "const": "membership_unproven",
+                  "description": "A complete inventory does not establish membership of the range.",
+                  "type": "string"
+                },
+                {
+                  "const": "scan_incomplete",
+                  "description": "A correctness-bearing scan exhausted its admitted budget.",
+                  "type": "string"
+                },
+                {
+                  "const": "transport_unavailable",
+                  "description": "The negotiated daemon transport cannot carry the assessment.",
+                  "type": "string"
+                }
+              ]
+            },
+            "ConditionalActivityScope": {
+              "additionalProperties": false,
+              "description": "Inventory interval inheriting exact file identity from the assessed source.",
+              "properties": {
+                "end_byte": {
+                  "description": "Exclusive byte offset of the persisted inventory scope.",
+                  "format": "uint64",
+                  "maximum": 18446744073709551615,
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "start_byte": {
+                  "description": "Inclusive byte offset of the persisted inventory scope.",
+                  "format": "uint64",
+                  "maximum": 18446744073709551615,
+                  "minimum": 0,
+                  "type": "integer"
+                }
+              },
+              "required": [
+                "start_byte",
+                "end_byte"
+              ],
+              "type": "object"
+            },
+            "ConditionalActivityState": {
+              "description": "Stored compilation membership of one exact returned source range.",
+              "oneOf": [
+                {
+                  "const": "active",
+                  "description": "The admitted inventory proves active membership.",
+                  "type": "string"
+                },
+                {
+                  "const": "inactive",
+                  "description": "The admitted inventory proves inactive membership.",
+                  "type": "string"
+                },
+                {
+                  "const": "unproven",
+                  "description": "Available evidence cannot prove either membership state.",
+                  "type": "string"
+                }
+              ]
+            },
+            "ConditionalLocateVersion": {
+              "description": "Exact version of conditional-activity-aware locate responses.",
+              "oneOf": [
+                {
+                  "const": "1.10",
+                  "description": "Locate contract 1.10.",
                   "type": "string"
                 }
               ]
@@ -7650,7 +7849,7 @@
                   "description": "Source-free error and remediation."
                 },
                 "schema_version": {
-                  "$ref": "#/$defs/StatementEntityVersion",
+                  "$ref": "#/$defs/ConditionalLocateVersion",
                   "description": "Exact error contract version."
                 }
               },
@@ -7868,7 +8067,7 @@
                   "description": "Relevant coverage."
                 },
                 "data": {
-                  "$ref": "#/$defs/CodeLocateData",
+                  "$ref": "#/$defs/CodeLocateDataV1_10",
                   "description": "Tool-specific result."
                 },
                 "generation": {
@@ -7876,7 +8075,7 @@
                   "description": "Pinned generation and freshness."
                 },
                 "next_cursor": {
-                  "$ref": "#/$defs/RequiredNullable2",
+                  "$ref": "#/$defs/RequiredNullable5",
                   "description": "Safe continuation cursor for pageable results."
                 },
                 "repository": {
@@ -7884,7 +8083,7 @@
                   "description": "Resolved repository."
                 },
                 "schema_version": {
-                  "$ref": "#/$defs/StatementEntityVersion",
+                  "$ref": "#/$defs/ConditionalLocateVersion",
                   "description": "Exact response contract version."
                 },
                 "truncated": {
@@ -8037,6 +8236,10 @@
                   "type": "string"
                 }
               ]
+            },
+            "FactId": {
+              "pattern": "^fact1_[a-z2-7]{39}$",
+              "type": "string"
             },
             "FileId": {
               "pattern": "^file1_[a-z2-7]{39}$",
@@ -8818,6 +9021,39 @@
             "RequiredNullable2": {
               "anyOf": [
                 {
+                  "$ref": "#/$defs/SourceRef"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "A property that must be present and may contain JSON `null`."
+            },
+            "RequiredNullable3": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/ConditionalActivityInventory"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "A property that must be present and may contain JSON `null`."
+            },
+            "RequiredNullable4": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/ConditionalActivityReason"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "A property that must be present and may contain JSON `null`."
+            },
+            "RequiredNullable5": {
+              "anyOf": [
+                {
                   "$ref": "#/$defs/ContinuationCursor"
                 },
                 {
@@ -9010,16 +9246,6 @@
               ],
               "type": "object"
             },
-            "StatementEntityVersion": {
-              "description": "Exact version of statement-label-aware locate and explanation responses.",
-              "oneOf": [
-                {
-                  "const": "1.9",
-                  "description": "Locate and explanation contract 1.9.",
-                  "type": "string"
-                }
-              ]
-            },
             "SuggestedTool": {
               "description": "Read tools that may be suggested by the first slice.",
               "oneOf": [
@@ -9157,7 +9383,7 @@
               "type": "object"
             }
           },
-          "$id": "https://rootlight.local/schema/mcp/code.locate/output/1.9",
+          "$id": "https://rootlight.local/schema/mcp/code.locate/output/1.10",
           "$schema": "https://json-schema.org/draft/2020-12/schema",
           "anyOf": [
             {
@@ -33049,9 +33275,9 @@
             "batchEligible": true,
             "batchSharedBudget": false,
             "budget": "per_request",
-            "contractVersion": "1.1",
+            "contractVersion": "1.2",
             "explainSupported": true,
-            "fallbackSummary": "bounded source ranges from pinned source references as untrusted data",
+            "fallbackSummary": "bounded source ranges from pinned references with source-bound conditional membership as untrusted data",
             "generation": "selects_generation",
             "inputShapeHash": "0bf1574c6ce6a0a4e99261bc6ec5f0e22dd872da1071dc2f26a9eb00663a4659",
             "limitations": [
@@ -33087,7 +33313,7 @@
           "openWorldHint": false,
           "readOnlyHint": true
         },
-        "description": "Read bounded source ranges from pinned source references as untrusted data using exact UTF-8 or explicit base64 bytes with optional context, canonical overlap merging, line projection, and caller-reduced ceilings; direct file selectors are unsupported.",
+        "description": "Read bounded source ranges from pinned references with source-bound conditional membership as untrusted data using exact UTF-8 or explicit base64 bytes with optional context, canonical overlap merging, line projection, and caller-reduced ceilings; conditional activity applies only to classic Visual Basic/VBA returned chunks, and direct file selectors are unsupported.",
         "execution": {
           "taskSupport": "forbidden"
         },
@@ -33402,7 +33628,7 @@
               "type": "string"
             }
           },
-          "$id": "https://rootlight.local/schema/mcp/source.read/input/1.1",
+          "$id": "https://rootlight.local/schema/mcp/source.read/input/1.2",
           "$schema": "https://json-schema.org/draft/2020-12/schema",
           "additionalProperties": false,
           "description": "Strict input for `source.read`.",
@@ -33496,16 +33722,6 @@
         "name": "source.read",
         "outputSchema": {
           "$defs": {
-            "AnalysisSchemaVersion": {
-              "description": "Version marker carried by additive analysis responses.",
-              "oneOf": [
-                {
-                  "const": "1.1",
-                  "description": "Tool contract version 1.1.",
-                  "type": "string"
-                }
-              ]
-            },
             "AnalysisTier": {
               "description": "Requested or observed language support tier.",
               "oneOf": [
@@ -33572,6 +33788,196 @@
                 {
                   "const": "indeterminate",
                   "description": "The producer cannot establish what portion of the domain was evaluated.",
+                  "type": "string"
+                }
+              ]
+            },
+            "ConditionalActivityAssessment": {
+              "additionalProperties": false,
+              "description": "Correctness-bearing conditional metadata for one returned item ordinal.",
+              "properties": {
+                "activity": {
+                  "$ref": "#/$defs/ConditionalActivityState",
+                  "description": "Membership established by stored admitted evidence."
+                },
+                "assessed_source_ref": {
+                  "$ref": "#/$defs/RequiredNullable2",
+                  "description": "Exact token or returned range; null when no unique range was proven."
+                },
+                "basis": {
+                  "$ref": "#/$defs/ConditionalActivityBasis",
+                  "description": "Exact range-selection basis."
+                },
+                "inventory": {
+                  "$ref": "#/$defs/RequiredNullable3",
+                  "description": "Owning persisted inventory; null when none can safely be selected."
+                },
+                "reason": {
+                  "$ref": "#/$defs/RequiredNullable4",
+                  "description": "Unproven reason, required-nullable rather than a wire default."
+                },
+                "result_index": {
+                  "description": "Zero-based ordinal in the returned matches or chunks.",
+                  "format": "uint32",
+                  "minimum": 0,
+                  "type": "integer"
+                }
+              },
+              "required": [
+                "result_index",
+                "basis",
+                "activity",
+                "assessed_source_ref",
+                "inventory",
+                "reason"
+              ],
+              "type": "object"
+            },
+            "ConditionalActivityBasis": {
+              "description": "Source range selected for the conditional membership assessment.",
+              "oneOf": [
+                {
+                  "const": "definition_token",
+                  "description": "The unique source-backed definition token of a returned symbol.",
+                  "type": "string"
+                },
+                {
+                  "const": "returned_range",
+                  "description": "The actual returned file or expanded source chunk range.",
+                  "type": "string"
+                }
+              ]
+            },
+            "ConditionalActivityInventory": {
+              "additionalProperties": false,
+              "description": "Exact persisted inventory and parser provenance selected for an assessment.",
+              "properties": {
+                "complete": {
+                  "description": "Whether the branch inventory is complete, not whole-program validity.",
+                  "type": "boolean"
+                },
+                "fact_id": {
+                  "$ref": "#/$defs/FactId",
+                  "description": "Typed identity of the selected compilation envelope."
+                },
+                "parser_provenance_id": {
+                  "$ref": "#/$defs/FactId",
+                  "description": "Typed parser provenance identity carried by that envelope."
+                },
+                "scope": {
+                  "$ref": "#/$defs/ConditionalActivityScope",
+                  "description": "Owning interval in the assessed file, not another source identity."
+                }
+              },
+              "required": [
+                "fact_id",
+                "parser_provenance_id",
+                "scope",
+                "complete"
+              ],
+              "type": "object"
+            },
+            "ConditionalActivityReason": {
+              "description": "Source-free explanation of an unproven membership assessment.",
+              "oneOf": [
+                {
+                  "const": "no_inventory",
+                  "description": "No owning compilation inventory exists.",
+                  "type": "string"
+                },
+                {
+                  "const": "incomplete_inventory",
+                  "description": "The owning branch inventory is incomplete.",
+                  "type": "string"
+                },
+                {
+                  "const": "missing_definition",
+                  "description": "No unique source-backed definition exists.",
+                  "type": "string"
+                },
+                {
+                  "const": "ambiguous_definition",
+                  "description": "Competing source-backed definitions exist.",
+                  "type": "string"
+                },
+                {
+                  "const": "cross_scope",
+                  "description": "The returned range crosses distinct compilation scopes.",
+                  "type": "string"
+                },
+                {
+                  "const": "empty_range",
+                  "description": "The assessed range is empty.",
+                  "type": "string"
+                },
+                {
+                  "const": "membership_unproven",
+                  "description": "A complete inventory does not establish membership of the range.",
+                  "type": "string"
+                },
+                {
+                  "const": "scan_incomplete",
+                  "description": "A correctness-bearing scan exhausted its admitted budget.",
+                  "type": "string"
+                },
+                {
+                  "const": "transport_unavailable",
+                  "description": "The negotiated daemon transport cannot carry the assessment.",
+                  "type": "string"
+                }
+              ]
+            },
+            "ConditionalActivityScope": {
+              "additionalProperties": false,
+              "description": "Inventory interval inheriting exact file identity from the assessed source.",
+              "properties": {
+                "end_byte": {
+                  "description": "Exclusive byte offset of the persisted inventory scope.",
+                  "format": "uint64",
+                  "maximum": 18446744073709551615,
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "start_byte": {
+                  "description": "Inclusive byte offset of the persisted inventory scope.",
+                  "format": "uint64",
+                  "maximum": 18446744073709551615,
+                  "minimum": 0,
+                  "type": "integer"
+                }
+              },
+              "required": [
+                "start_byte",
+                "end_byte"
+              ],
+              "type": "object"
+            },
+            "ConditionalActivityState": {
+              "description": "Stored compilation membership of one exact returned source range.",
+              "oneOf": [
+                {
+                  "const": "active",
+                  "description": "The admitted inventory proves active membership.",
+                  "type": "string"
+                },
+                {
+                  "const": "inactive",
+                  "description": "The admitted inventory proves inactive membership.",
+                  "type": "string"
+                },
+                {
+                  "const": "unproven",
+                  "description": "Available evidence cannot prove either membership state.",
+                  "type": "string"
+                }
+              ]
+            },
+            "ConditionalSourceReadVersion": {
+              "description": "Exact version of conditional-activity-aware source responses.",
+              "oneOf": [
+                {
+                  "const": "1.2",
+                  "description": "Source read contract 1.2.",
                   "type": "string"
                 }
               ]
@@ -33728,7 +34134,7 @@
                   "description": "Source-free error and remediation."
                 },
                 "schema_version": {
-                  "$ref": "#/$defs/AnalysisSchemaVersion",
+                  "$ref": "#/$defs/ConditionalSourceReadVersion",
                   "description": "Exact error contract version."
                 }
               },
@@ -33751,7 +34157,7 @@
                   "description": "Relevant coverage."
                 },
                 "data": {
-                  "$ref": "#/$defs/SourceReadData",
+                  "$ref": "#/$defs/SourceReadDataV1_2",
                   "description": "Tool-specific result."
                 },
                 "generation": {
@@ -33759,7 +34165,7 @@
                   "description": "Pinned generation and freshness."
                 },
                 "next_cursor": {
-                  "$ref": "#/$defs/RequiredNullable2",
+                  "$ref": "#/$defs/RequiredNullable5",
                   "description": "Safe continuation cursor for pageable results."
                 },
                 "repository": {
@@ -33767,7 +34173,7 @@
                   "description": "Resolved repository."
                 },
                 "schema_version": {
-                  "$ref": "#/$defs/AnalysisSchemaVersion",
+                  "$ref": "#/$defs/ConditionalSourceReadVersion",
                   "description": "Exact response contract version."
                 },
                 "truncated": {
@@ -33920,6 +34326,10 @@
                   "type": "string"
                 }
               ]
+            },
+            "FactId": {
+              "pattern": "^fact1_[a-z2-7]{39}$",
+              "type": "string"
             },
             "FileId": {
               "pattern": "^file1_[a-z2-7]{39}$",
@@ -34533,6 +34943,39 @@
             "RequiredNullable2": {
               "anyOf": [
                 {
+                  "$ref": "#/$defs/SourceRef"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "A property that must be present and may contain JSON `null`."
+            },
+            "RequiredNullable3": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/ConditionalActivityInventory"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "A property that must be present and may contain JSON `null`."
+            },
+            "RequiredNullable4": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/ConditionalActivityReason"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "A property that must be present and may contain JSON `null`."
+            },
+            "RequiredNullable5": {
+              "anyOf": [
+                {
                   "$ref": "#/$defs/ContinuationCursor"
                 },
                 {
@@ -34774,9 +35217,9 @@
               "pattern": "^[a-z0-9 -]+$",
               "type": "string"
             },
-            "SourceReadData": {
+            "SourceReadDataV1_2": {
               "additionalProperties": false,
-              "description": "`source.read` result data.",
+              "description": "Current `source.read` data with required conditional source metadata.",
               "properties": {
                 "chunks": {
                   "description": "Verified chunks in request order.",
@@ -34786,8 +35229,16 @@
                   "maxItems": 32,
                   "type": "array"
                 },
+                "conditional_activity": {
+                  "description": "One ordered assessment for each applicable expanded chunk.",
+                  "items": {
+                    "$ref": "#/$defs/ConditionalActivityAssessment"
+                  },
+                  "maxItems": 32,
+                  "type": "array"
+                },
                 "elisions": {
-                  "description": "Merged, truncated, or unavailable ranges.",
+                  "description": "Merged, truncated or unavailable ranges.",
                   "items": {
                     "$ref": "#/$defs/SourceElision"
                   },
@@ -34803,10 +35254,10 @@
                       "type": "null"
                     }
                   ],
-                  "description": "Bounded source-free plan present when explain was requested."
+                  "description": "Bounded source-free plan when requested."
                 },
                 "stale_references": {
-                  "description": "Selectors invalid for the pinned generation or source snapshot.",
+                  "description": "Selectors invalid for the pinned source snapshot.",
                   "items": {
                     "$ref": "#/$defs/StaleSourceReference"
                   },
@@ -34814,7 +35265,7 @@
                   "type": "array"
                 },
                 "total_source_bytes": {
-                  "description": "Raw bytes returned before JSON escaping.",
+                  "description": "Exact raw source bytes returned before JSON escaping.",
                   "format": "uint32",
                   "maximum": 524288,
                   "minimum": 0,
@@ -34825,7 +35276,8 @@
                 "chunks",
                 "stale_references",
                 "elisions",
-                "total_source_bytes"
+                "total_source_bytes",
+                "conditional_activity"
               ],
               "type": "object"
             },
@@ -34993,7 +35445,7 @@
               "type": "object"
             }
           },
-          "$id": "https://rootlight.local/schema/mcp/source.read/output/1.1",
+          "$id": "https://rootlight.local/schema/mcp/source.read/output/1.2",
           "$schema": "https://json-schema.org/draft/2020-12/schema",
           "anyOf": [
             {

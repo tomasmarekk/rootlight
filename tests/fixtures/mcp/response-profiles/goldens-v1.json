@@ -219,6 +219,7 @@
           "status": "complete"
         },
         "data": {
+          "conditional_activity": [],
           "matches": [
             {
               "display_name": "profile_target",
@@ -268,14 +269,14 @@
           "display_name": "fixture",
           "repository_id": "repo1_3hhm6hhk3shhmievg6ra3yjlhp2wuv5v"
         },
-        "schema_version": "1.8",
+        "schema_version": "1.10",
         "truncated": false,
         "trust": "untrusted_repository_data",
         "usage": {
           "cache_status": "miss",
           "edges": 0,
-          "estimated_tokens": 372,
-          "json_bytes": 1488,
+          "estimated_tokens": 379,
+          "json_bytes": 1515,
           "rows": 1,
           "source_bytes": 0,
           "trace_id": "trace-locate-1",
@@ -306,6 +307,7 @@
           "status": "complete"
         },
         "data": {
+          "conditional_activity": [],
           "matches": [
             {
               "display_name": "profile_target",
@@ -358,14 +360,14 @@
           "display_name": "fixture",
           "repository_id": "repo1_3hhm6hhk3shhmievg6ra3yjlhp2wuv5v"
         },
-        "schema_version": "1.8",
+        "schema_version": "1.10",
         "truncated": false,
         "trust": "untrusted_repository_data",
         "usage": {
           "cache_status": "miss",
           "edges": 0,
-          "estimated_tokens": 389,
-          "json_bytes": 1555,
+          "estimated_tokens": 396,
+          "json_bytes": 1582,
           "rows": 1,
           "source_bytes": 0,
           "trace_id": "trace-locate-1",
@@ -396,6 +398,7 @@
           "status": "complete"
         },
         "data": {
+          "conditional_activity": [],
           "matches": [
             {
               "display_name": "profile_target",
@@ -453,14 +456,14 @@
           "display_name": "fixture",
           "repository_id": "repo1_3hhm6hhk3shhmievg6ra3yjlhp2wuv5v"
         },
-        "schema_version": "1.8",
+        "schema_version": "1.10",
         "truncated": false,
         "trust": "untrusted_repository_data",
         "usage": {
           "cache_status": "miss",
           "edges": 0,
-          "estimated_tokens": 404,
-          "json_bytes": 1616,
+          "estimated_tokens": 411,
+          "json_bytes": 1643,
           "rows": 1,
           "source_bytes": 0,
           "trace_id": "trace-locate-1",
@@ -539,7 +542,7 @@
           "display_name": "fixture",
           "repository_id": "repo1_3hhm6hhk3shhmievg6ra3yjlhp2wuv5v"
         },
-        "schema_version": "1.8",
+        "schema_version": "1.9",
         "truncated": false,
         "trust": "untrusted_repository_data",
         "usage": {
@@ -640,7 +643,7 @@
           "display_name": "fixture",
           "repository_id": "repo1_3hhm6hhk3shhmievg6ra3yjlhp2wuv5v"
         },
-        "schema_version": "1.8",
+        "schema_version": "1.9",
         "truncated": false,
         "trust": "untrusted_repository_data",
         "usage": {
@@ -755,7 +758,7 @@
           "display_name": "fixture",
           "repository_id": "repo1_3hhm6hhk3shhmievg6ra3yjlhp2wuv5v"
         },
-        "schema_version": "1.8",
+        "schema_version": "1.9",
         "truncated": false,
         "trust": "untrusted_repository_data",
         "usage": {
@@ -1515,7 +1518,7 @@
           "display_name": "fixture",
           "repository_id": "repo1_3hhm6hhk3shhmievg6ra3yjlhp2wuv5v"
         },
-        "schema_version": "1.5",
+        "schema_version": "1.6",
         "truncated": false,
         "trust": "untrusted_repository_data",
         "usage": {
@@ -1610,7 +1613,7 @@
           "display_name": "fixture",
           "repository_id": "repo1_3hhm6hhk3shhmievg6ra3yjlhp2wuv5v"
         },
-        "schema_version": "1.5",
+        "schema_version": "1.6",
         "truncated": false,
         "trust": "untrusted_repository_data",
         "usage": {
@@ -1707,7 +1710,7 @@
           "display_name": "fixture",
           "repository_id": "repo1_3hhm6hhk3shhmievg6ra3yjlhp2wuv5v"
         },
-        "schema_version": "1.5",
+        "schema_version": "1.6",
         "truncated": false,
         "trust": "untrusted_repository_data",
         "usage": {
@@ -3459,7 +3462,7 @@
           "display_name": "fixture",
           "repository_id": "repo1_3hhm6hhk3shhmievg6ra3yjlhp2wuv5v"
         },
-        "schema_version": "1.5",
+        "schema_version": "1.6",
         "truncated": false,
         "trust": "untrusted_repository_data",
         "usage": {
@@ -3575,7 +3578,7 @@
           "display_name": "fixture",
           "repository_id": "repo1_3hhm6hhk3shhmievg6ra3yjlhp2wuv5v"
         },
-        "schema_version": "1.5",
+        "schema_version": "1.6",
         "truncated": false,
         "trust": "untrusted_repository_data",
         "usage": {
@@ -3715,7 +3718,7 @@
           "display_name": "fixture",
           "repository_id": "repo1_3hhm6hhk3shhmievg6ra3yjlhp2wuv5v"
         },
-        "schema_version": "1.5",
+        "schema_version": "1.6",
         "truncated": false,
         "trust": "untrusted_repository_data",
         "usage": {
@@ -4550,6 +4553,7 @@
               "trust": "untrusted_repository_data"
             }
           ],
+          "conditional_activity": [],
           "elisions": [],
           "stale_references": [],
           "total_source_bytes": 10
@@ -4565,14 +4569,14 @@
           "display_name": "fixture",
           "repository_id": "repo1_3hhm6hhk3shhmievg6ra3yjlhp2wuv5v"
         },
-        "schema_version": "1.1",
+        "schema_version": "1.2",
         "truncated": false,
         "trust": "untrusted_repository_data",
         "usage": {
           "cache_status": "not_applicable",
           "edges": 0,
-          "estimated_tokens": 347,
-          "json_bytes": 1388,
+          "estimated_tokens": 354,
+          "json_bytes": 1414,
           "rows": 1,
           "source_bytes": 10,
           "trace_id": "trace-source-1",
@@ -4628,6 +4632,7 @@
               "trust": "untrusted_repository_data"
             }
           ],
+          "conditional_activity": [],
           "elisions": [],
           "stale_references": [],
           "total_source_bytes": 10
@@ -4643,14 +4648,14 @@
           "display_name": "fixture",
           "repository_id": "repo1_3hhm6hhk3shhmievg6ra3yjlhp2wuv5v"
         },
-        "schema_version": "1.1",
+        "schema_version": "1.2",
         "truncated": false,
         "trust": "untrusted_repository_data",
         "usage": {
           "cache_status": "not_applicable",
           "edges": 0,
-          "estimated_tokens": 354,
-          "json_bytes": 1416,
+          "estimated_tokens": 361,
+          "json_bytes": 1442,
           "rows": 1,
           "source_bytes": 10,
           "trace_id": "trace-source-1",
@@ -4710,6 +4715,7 @@
               "trust": "untrusted_repository_data"
             }
           ],
+          "conditional_activity": [],
           "elisions": [],
           "stale_references": [],
           "total_source_bytes": 10
@@ -4725,14 +4731,14 @@
           "display_name": "fixture",
           "repository_id": "repo1_3hhm6hhk3shhmievg6ra3yjlhp2wuv5v"
         },
-        "schema_version": "1.1",
+        "schema_version": "1.2",
         "truncated": false,
         "trust": "untrusted_repository_data",
         "usage": {
           "cache_status": "not_applicable",
           "edges": 0,
-          "estimated_tokens": 365,
-          "json_bytes": 1458,
+          "estimated_tokens": 371,
+          "json_bytes": 1484,
           "rows": 1,
           "source_bytes": 10,
           "trace_id": "trace-source-1",
@@ -4778,7 +4784,7 @@
           "display_name": "fixture",
           "repository_id": "repo1_3hhm6hhk3shhmievg6ra3yjlhp2wuv5v"
         },
-        "schema_version": "1.6",
+        "schema_version": "1.7",
         "truncated": false,
         "trust": "untrusted_repository_data",
         "usage": {
@@ -4815,6 +4821,7 @@
           "operation_results": [
             {
               "data": {
+                "conditional_activity": [],
                 "matches": [
                   {
                     "display_name": "profile_target",
@@ -4879,8 +4886,8 @@
         "usage": {
           "cache_status": "miss",
           "edges": 0,
-          "estimated_tokens": 415,
-          "json_bytes": 1657,
+          "estimated_tokens": 421,
+          "json_bytes": 1683,
           "rows": 1,
           "source_bytes": 0,
           "trace_id": "trace-query-batch-1",
@@ -4910,6 +4917,7 @@
           "operation_results": [
             {
               "data": {
+                "conditional_activity": [],
                 "matches": [
                   {
                     "display_name": "profile_target",
@@ -4977,8 +4985,8 @@
         "usage": {
           "cache_status": "miss",
           "edges": 0,
-          "estimated_tokens": 431,
-          "json_bytes": 1724,
+          "estimated_tokens": 438,
+          "json_bytes": 1750,
           "rows": 1,
           "source_bytes": 0,
           "trace_id": "trace-query-batch-1",
@@ -5008,6 +5016,7 @@
           "operation_results": [
             {
               "data": {
+                "conditional_activity": [],
                 "matches": [
                   {
                     "display_name": "profile_target",
@@ -5080,8 +5089,8 @@
         "usage": {
           "cache_status": "miss",
           "edges": 0,
-          "estimated_tokens": 447,
-          "json_bytes": 1785,
+          "estimated_tokens": 453,
+          "json_bytes": 1811,
           "rows": 1,
           "source_bytes": 0,
           "trace_id": "trace-query-batch-1",

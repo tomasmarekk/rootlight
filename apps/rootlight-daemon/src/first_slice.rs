@@ -11405,6 +11405,10 @@ fn code_locate(
         response.data.next_page_offset.is_some(),
         daemon::FirstSliceContinuationGuidance::FirstSliceGuidanceNarrowScope,
     );
+    let conditional_activity = conditional_activity_to_wire(
+        response.data.conditional_activity,
+        context.selected_protocol_minor,
+    )?;
     let mut hits = Vec::new();
     hits.try_reserve_exact(response.data.hits.len())
         .map_err(|_| resource_exhausted())?;
@@ -11441,7 +11445,94 @@ fn code_locate(
         truncated: response.data.truncated,
         next_page_offset: response.data.next_page_offset,
         completeness: Some(completeness),
+        conditional_activity,
     })
+}
+
+fn conditional_activity_to_wire(
+    assessments: Vec<rootlight_query::ConditionalActivityAssessment>,
+    selected_protocol_minor: u32,
+) -> Result<Vec<daemon::ConditionalActivityAssessment>, PublicError> {
+    if selected_protocol_minor < rootlight_protocol::CONDITIONAL_ACTIVITY_PROTOCOL_MINOR {
+        return Ok(Vec::new());
+    }
+    let mut wire = Vec::new();
+    wire.try_reserve_exact(assessments.len())
+        .map_err(|_| resource_exhausted())?;
+    for assessment in assessments {
+        let basis = match assessment.basis {
+            rootlight_query::ConditionalActivityBasis::DefinitionToken => {
+                daemon::ConditionalActivityBasis::DefinitionToken
+            }
+            rootlight_query::ConditionalActivityBasis::ReturnedRange => {
+                daemon::ConditionalActivityBasis::ReturnedRange
+            }
+        };
+        let activity = match assessment.activity {
+            rootlight_query::ConditionalActivityState::Active => {
+                daemon::ConditionalActivityState::Active
+            }
+            rootlight_query::ConditionalActivityState::Inactive => {
+                daemon::ConditionalActivityState::Inactive
+            }
+            rootlight_query::ConditionalActivityState::Unproven => {
+                daemon::ConditionalActivityState::Unproven
+            }
+        };
+        let reason = assessment.reason.map(|reason| match reason {
+            rootlight_query::ConditionalActivityReason::NoInventory => {
+                daemon::ConditionalActivityReason::NoInventory
+            }
+            rootlight_query::ConditionalActivityReason::IncompleteInventory => {
+                daemon::ConditionalActivityReason::IncompleteInventory
+            }
+            rootlight_query::ConditionalActivityReason::MissingDefinition => {
+                daemon::ConditionalActivityReason::MissingDefinition
+            }
+            rootlight_query::ConditionalActivityReason::AmbiguousDefinition => {
+                daemon::ConditionalActivityReason::AmbiguousDefinition
+            }
+            rootlight_query::ConditionalActivityReason::CrossScope => {
+                daemon::ConditionalActivityReason::CrossScope
+            }
+            rootlight_query::ConditionalActivityReason::EmptyRange => {
+                daemon::ConditionalActivityReason::EmptyRange
+            }
+            rootlight_query::ConditionalActivityReason::MembershipUnproven => {
+                daemon::ConditionalActivityReason::MembershipUnproven
+            }
+            rootlight_query::ConditionalActivityReason::ScanIncomplete => {
+                daemon::ConditionalActivityReason::ScanIncomplete
+            }
+            rootlight_query::ConditionalActivityReason::TransportUnavailable => {
+                daemon::ConditionalActivityReason::TransportUnavailable
+            }
+        });
+        wire.push(daemon::ConditionalActivityAssessment {
+            result_index: assessment.result_index,
+            basis: basis as i32,
+            activity: activity as i32,
+            assessed_source_ref: assessment
+                .assessed_source_ref
+                .as_ref()
+                .map(source_ref_to_wire),
+            inventory: assessment
+                .inventory
+                .map(|inventory| daemon::ConditionalActivityInventory {
+                    fact_id: Some(analysis_unit_to_wire(inventory.fact_id)),
+                    parser_provenance_id: Some(analysis_unit_to_wire(
+                        inventory.parser_provenance_id,
+                    )),
+                    scope: Some(daemon::ConditionalActivityScope {
+                        start_byte: inventory.scope.start_byte,
+                        end_byte: inventory.scope.end_byte,
+                    }),
+                    complete: inventory.complete,
+                }),
+            reason: reason.map(|reason| reason as i32),
+        });
+    }
+    Ok(wire)
 }
 
 fn parse_code_locate_paths(paths: Vec<String>) -> Result<Vec<String>, PublicError> {
@@ -13734,6 +13825,8 @@ fn source_read(
         .map_err(service_error)?;
     let data = response.data;
     let execution = data.execution;
+    let conditional_activity =
+        conditional_activity_to_wire(data.conditional_activity, context.selected_protocol_minor)?;
     let mut chunks = Vec::new();
     chunks
         .try_reserve_exact(data.chunks.len())
@@ -13810,6 +13903,7 @@ fn source_read(
             false,
             daemon::FirstSliceContinuationGuidance::FirstSliceGuidanceSplitRequest,
         )),
+        conditional_activity,
     })
 }
 
@@ -16407,6 +16501,166 @@ mod tests {
     use tempfile::TempDir;
 
     static OBSERVED_STARTUP_SIGNAL: AtomicU8 = AtomicU8::new(0);
+
+    #[test]
+    fn conditional_activity_transport_preserves_exact_sources_and_typed_inventory() {
+        use rootlight_query::{
+            ConditionalActivityAssessment, ConditionalActivityBasis, ConditionalActivityInventory,
+            ConditionalActivityScope, ConditionalActivityState,
+        };
+        let source = SourceRef::new(
+            RepositoryId::from_bytes([1; 16]),
+            GenerationId::from_bytes([2; 20]),
+            SourceSpan::new(FileId::from_bytes([3; 20]), 10, 15).unwrap(),
+            ContentHash::from_bytes([4; 32]),
+            None,
+        );
+        let inventory = ConditionalActivityInventory {
+            fact_id: FactId::from_bytes([5; 20]),
+            parser_provenance_id: FactId::from_bytes([6; 20]),
+            scope: ConditionalActivityScope {
+                start_byte: 0,
+                end_byte: 50,
+            },
+            complete: true,
+        };
+        for basis in [
+            ConditionalActivityBasis::DefinitionToken,
+            ConditionalActivityBasis::ReturnedRange,
+        ] {
+            for activity in [
+                ConditionalActivityState::Active,
+                ConditionalActivityState::Inactive,
+            ] {
+                let assessment = ConditionalActivityAssessment {
+                    result_index: 2,
+                    basis,
+                    activity,
+                    assessed_source_ref: Some(source.clone()),
+                    inventory: Some(inventory.clone()),
+                    reason: None,
+                };
+                let wire = conditional_activity_to_wire(vec![assessment.clone()], 22).unwrap();
+                assert_eq!(wire.len(), 1);
+                assert_eq!(wire[0].result_index, 2);
+                assert_eq!(
+                    wire[0].basis,
+                    if basis == ConditionalActivityBasis::DefinitionToken {
+                        1
+                    } else {
+                        2
+                    }
+                );
+                assert_eq!(
+                    wire[0].activity,
+                    if activity == ConditionalActivityState::Active {
+                        1
+                    } else {
+                        2
+                    }
+                );
+                assert_eq!(
+                    wire[0].assessed_source_ref,
+                    Some(source_ref_to_wire(&source))
+                );
+                let carried = wire[0].inventory.as_ref().unwrap();
+                assert_eq!(
+                    carried.fact_id,
+                    Some(analysis_unit_to_wire(inventory.fact_id))
+                );
+                assert_eq!(
+                    carried.parser_provenance_id,
+                    Some(analysis_unit_to_wire(inventory.parser_provenance_id))
+                );
+                assert_eq!(
+                    carried.scope,
+                    Some(daemon::ConditionalActivityScope {
+                        start_byte: 0,
+                        end_byte: 50
+                    })
+                );
+                assert!(carried.complete);
+                assert_eq!(wire[0].reason, None);
+                assert!(
+                    conditional_activity_to_wire(vec![assessment], 21)
+                        .unwrap()
+                        .is_empty()
+                );
+            }
+        }
+        assert!(
+            conditional_activity_to_wire(Vec::new(), 22)
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn conditional_activity_transport_maps_every_unproven_reason_without_defaults() {
+        use rootlight_query::{
+            ConditionalActivityAssessment, ConditionalActivityBasis,
+            ConditionalActivityReason as Reason, ConditionalActivityState,
+        };
+        for (reason, expected) in [
+            (
+                Reason::NoInventory,
+                daemon::ConditionalActivityReason::NoInventory,
+            ),
+            (
+                Reason::IncompleteInventory,
+                daemon::ConditionalActivityReason::IncompleteInventory,
+            ),
+            (
+                Reason::MissingDefinition,
+                daemon::ConditionalActivityReason::MissingDefinition,
+            ),
+            (
+                Reason::AmbiguousDefinition,
+                daemon::ConditionalActivityReason::AmbiguousDefinition,
+            ),
+            (
+                Reason::CrossScope,
+                daemon::ConditionalActivityReason::CrossScope,
+            ),
+            (
+                Reason::EmptyRange,
+                daemon::ConditionalActivityReason::EmptyRange,
+            ),
+            (
+                Reason::MembershipUnproven,
+                daemon::ConditionalActivityReason::MembershipUnproven,
+            ),
+            (
+                Reason::ScanIncomplete,
+                daemon::ConditionalActivityReason::ScanIncomplete,
+            ),
+            (
+                Reason::TransportUnavailable,
+                daemon::ConditionalActivityReason::TransportUnavailable,
+            ),
+        ] {
+            let assessment = ConditionalActivityAssessment {
+                result_index: 0,
+                basis: ConditionalActivityBasis::DefinitionToken,
+                activity: ConditionalActivityState::Unproven,
+                assessed_source_ref: None,
+                inventory: None,
+                reason: Some(reason),
+            };
+            let wire = conditional_activity_to_wire(vec![assessment], 22).unwrap();
+            assert_eq!(
+                wire[0].activity,
+                daemon::ConditionalActivityState::Unproven as i32
+            );
+            assert_eq!(
+                wire[0].basis,
+                daemon::ConditionalActivityBasis::DefinitionToken as i32
+            );
+            assert_eq!(wire[0].reason, Some(expected as i32));
+            assert!(wire[0].assessed_source_ref.is_none());
+            assert!(wire[0].inventory.is_none());
+        }
+    }
 
     #[test]
     fn locate_coverage_reconciles_scoped_gaps_and_positive_hits() {

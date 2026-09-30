@@ -1847,7 +1847,9 @@ const fn tool_fallback_summary(tool: McpTool) -> &'static str {
             "immutable catalog snapshot with bounded display-name or alias and lifecycle-state filters"
         }
         McpTool::OperationStatus => "bounded operation read and cancel",
-        McpTool::CodeLocate => "bounded exact-identifier or indexed lexical-text matching",
+        McpTool::CodeLocate => {
+            "bounded exact-identifier or indexed lexical-text matching with source-bound conditional membership"
+        }
         McpTool::SymbolExplain => {
             "bounded sectioned explanations with typed evidence, source preview, and provenance"
         }
@@ -1882,7 +1884,7 @@ const fn tool_fallback_summary(tool: McpTool) -> &'static str {
             "bounded profiled multi-seed evidence assembly with authenticated continuation under a token budget"
         }
         McpTool::SourceRead => {
-            "bounded source ranges from pinned source references as untrusted data"
+            "bounded source ranges from pinned references with source-bound conditional membership as untrusted data"
         }
         McpTool::QueryAdvanced => {
             "bounded safe-ast query with typed value parameters, authenticated continuation, and enforced cost, row, and depth limits"

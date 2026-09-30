@@ -1423,6 +1423,59 @@ pub struct CodeLocateResponse {
     #[prost(message, optional, tag = "7")]
     #[allow(missing_docs)]
     pub completeness: ::core::option::Option<FirstSliceCompleteness>,
+    #[prost(message, repeated, tag = "8")]
+    #[allow(missing_docs)]
+    pub conditional_activity: ::prost::alloc::vec::Vec<ConditionalActivityAssessment>,
+}
+/// Identity is inherited only from the assessment's exact source reference.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct ConditionalActivityScope {
+    #[prost(uint64, tag = "1")]
+    #[allow(missing_docs)]
+    pub start_byte: u64,
+    #[prost(uint64, tag = "2")]
+    #[allow(missing_docs)]
+    pub end_byte: u64,
+}
+/// One persisted parser inventory, not independent compiler/environment truth.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct ConditionalActivityInventory {
+    #[prost(message, optional, tag = "1")]
+    #[allow(missing_docs)]
+    pub fact_id: ::core::option::Option<super::super::common::v1::AnalysisUnitId>,
+    #[prost(message, optional, tag = "2")]
+    #[allow(missing_docs)]
+    pub parser_provenance_id: ::core::option::Option<
+        super::super::common::v1::AnalysisUnitId,
+    >,
+    #[prost(message, optional, tag = "3")]
+    #[allow(missing_docs)]
+    pub scope: ::core::option::Option<ConditionalActivityScope>,
+    #[prost(bool, tag = "4")]
+    #[allow(missing_docs)]
+    pub complete: bool,
+}
+/// Correlates exactly one applicable returned hit/chunk by its result ordinal.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct ConditionalActivityAssessment {
+    #[prost(uint32, tag = "1")]
+    #[allow(missing_docs)]
+    pub result_index: u32,
+    #[prost(enumeration = "ConditionalActivityBasis", tag = "2")]
+    #[allow(missing_docs)]
+    pub basis: i32,
+    #[prost(enumeration = "ConditionalActivityState", tag = "3")]
+    #[allow(missing_docs)]
+    pub activity: i32,
+    #[prost(message, optional, tag = "4")]
+    #[allow(missing_docs)]
+    pub assessed_source_ref: ::core::option::Option<FirstSliceSourceRef>,
+    #[prost(message, optional, tag = "5")]
+    #[allow(missing_docs)]
+    pub inventory: ::core::option::Option<ConditionalActivityInventory>,
+    #[prost(enumeration = "ConditionalActivityReason", optional, tag = "6")]
+    #[allow(missing_docs)]
+    pub reason: ::core::option::Option<i32>,
 }
 /// Requests bounded explanations for stable symbols.
 #[derive(Clone, PartialEq, ::prost::Message)]
@@ -1681,6 +1734,9 @@ pub struct SourceReadResponse {
     #[prost(message, optional, tag = "6")]
     #[allow(missing_docs)]
     pub completeness: ::core::option::Option<FirstSliceCompleteness>,
+    #[prost(message, repeated, tag = "7")]
+    #[allow(missing_docs)]
+    pub conditional_activity: ::prost::alloc::vec::Vec<ConditionalActivityAssessment>,
 }
 /// Requests the bounded list of repositories known to this daemon process.
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
@@ -4915,6 +4971,154 @@ impl FirstSliceContinuationGuidance {
             }
             "FIRST_SLICE_GUIDANCE_UNSUPPORTED_NO_CONTINUATION" => {
                 Some(Self::FirstSliceGuidanceUnsupportedNoContinuation)
+            }
+            _ => None,
+        }
+    }
+}
+/// Wire defaults cannot assert compilation membership.
+#[allow(missing_docs)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
+#[repr(i32)]
+pub enum ConditionalActivityState {
+    #[allow(missing_docs)]
+    Unspecified = 0,
+    #[allow(missing_docs)]
+    Active = 1,
+    #[allow(missing_docs)]
+    Inactive = 2,
+    #[allow(missing_docs)]
+    Unproven = 3,
+}
+impl ConditionalActivityState {
+    /// String value of the enum field names used in the ProtoBuf definition.
+    ///
+    /// The values are not transformed in any way and thus are considered stable
+    /// (if the ProtoBuf definition does not change) and safe for programmatic use.
+    pub fn as_str_name(&self) -> &'static str {
+        match self {
+            Self::Unspecified => "CONDITIONAL_ACTIVITY_STATE_UNSPECIFIED",
+            Self::Active => "CONDITIONAL_ACTIVITY_STATE_ACTIVE",
+            Self::Inactive => "CONDITIONAL_ACTIVITY_STATE_INACTIVE",
+            Self::Unproven => "CONDITIONAL_ACTIVITY_STATE_UNPROVEN",
+        }
+    }
+    /// Creates an enum from field names used in the ProtoBuf definition.
+    pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+        match value {
+            "CONDITIONAL_ACTIVITY_STATE_UNSPECIFIED" => Some(Self::Unspecified),
+            "CONDITIONAL_ACTIVITY_STATE_ACTIVE" => Some(Self::Active),
+            "CONDITIONAL_ACTIVITY_STATE_INACTIVE" => Some(Self::Inactive),
+            "CONDITIONAL_ACTIVITY_STATE_UNPROVEN" => Some(Self::Unproven),
+            _ => None,
+        }
+    }
+}
+#[allow(missing_docs)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
+#[repr(i32)]
+pub enum ConditionalActivityBasis {
+    #[allow(missing_docs)]
+    Unspecified = 0,
+    #[allow(missing_docs)]
+    DefinitionToken = 1,
+    #[allow(missing_docs)]
+    ReturnedRange = 2,
+}
+impl ConditionalActivityBasis {
+    /// String value of the enum field names used in the ProtoBuf definition.
+    ///
+    /// The values are not transformed in any way and thus are considered stable
+    /// (if the ProtoBuf definition does not change) and safe for programmatic use.
+    pub fn as_str_name(&self) -> &'static str {
+        match self {
+            Self::Unspecified => "CONDITIONAL_ACTIVITY_BASIS_UNSPECIFIED",
+            Self::DefinitionToken => "CONDITIONAL_ACTIVITY_BASIS_DEFINITION_TOKEN",
+            Self::ReturnedRange => "CONDITIONAL_ACTIVITY_BASIS_RETURNED_RANGE",
+        }
+    }
+    /// Creates an enum from field names used in the ProtoBuf definition.
+    pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+        match value {
+            "CONDITIONAL_ACTIVITY_BASIS_UNSPECIFIED" => Some(Self::Unspecified),
+            "CONDITIONAL_ACTIVITY_BASIS_DEFINITION_TOKEN" => Some(Self::DefinitionToken),
+            "CONDITIONAL_ACTIVITY_BASIS_RETURNED_RANGE" => Some(Self::ReturnedRange),
+            _ => None,
+        }
+    }
+}
+#[allow(missing_docs)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
+#[repr(i32)]
+pub enum ConditionalActivityReason {
+    #[allow(missing_docs)]
+    Unspecified = 0,
+    #[allow(missing_docs)]
+    NoInventory = 1,
+    #[allow(missing_docs)]
+    IncompleteInventory = 2,
+    #[allow(missing_docs)]
+    MissingDefinition = 3,
+    #[allow(missing_docs)]
+    AmbiguousDefinition = 4,
+    #[allow(missing_docs)]
+    CrossScope = 5,
+    #[allow(missing_docs)]
+    EmptyRange = 6,
+    #[allow(missing_docs)]
+    MembershipUnproven = 7,
+    #[allow(missing_docs)]
+    ScanIncomplete = 8,
+    #[allow(missing_docs)]
+    TransportUnavailable = 9,
+}
+impl ConditionalActivityReason {
+    /// String value of the enum field names used in the ProtoBuf definition.
+    ///
+    /// The values are not transformed in any way and thus are considered stable
+    /// (if the ProtoBuf definition does not change) and safe for programmatic use.
+    pub fn as_str_name(&self) -> &'static str {
+        match self {
+            Self::Unspecified => "CONDITIONAL_ACTIVITY_REASON_UNSPECIFIED",
+            Self::NoInventory => "CONDITIONAL_ACTIVITY_REASON_NO_INVENTORY",
+            Self::IncompleteInventory => {
+                "CONDITIONAL_ACTIVITY_REASON_INCOMPLETE_INVENTORY"
+            }
+            Self::MissingDefinition => "CONDITIONAL_ACTIVITY_REASON_MISSING_DEFINITION",
+            Self::AmbiguousDefinition => {
+                "CONDITIONAL_ACTIVITY_REASON_AMBIGUOUS_DEFINITION"
+            }
+            Self::CrossScope => "CONDITIONAL_ACTIVITY_REASON_CROSS_SCOPE",
+            Self::EmptyRange => "CONDITIONAL_ACTIVITY_REASON_EMPTY_RANGE",
+            Self::MembershipUnproven => "CONDITIONAL_ACTIVITY_REASON_MEMBERSHIP_UNPROVEN",
+            Self::ScanIncomplete => "CONDITIONAL_ACTIVITY_REASON_SCAN_INCOMPLETE",
+            Self::TransportUnavailable => {
+                "CONDITIONAL_ACTIVITY_REASON_TRANSPORT_UNAVAILABLE"
+            }
+        }
+    }
+    /// Creates an enum from field names used in the ProtoBuf definition.
+    pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+        match value {
+            "CONDITIONAL_ACTIVITY_REASON_UNSPECIFIED" => Some(Self::Unspecified),
+            "CONDITIONAL_ACTIVITY_REASON_NO_INVENTORY" => Some(Self::NoInventory),
+            "CONDITIONAL_ACTIVITY_REASON_INCOMPLETE_INVENTORY" => {
+                Some(Self::IncompleteInventory)
+            }
+            "CONDITIONAL_ACTIVITY_REASON_MISSING_DEFINITION" => {
+                Some(Self::MissingDefinition)
+            }
+            "CONDITIONAL_ACTIVITY_REASON_AMBIGUOUS_DEFINITION" => {
+                Some(Self::AmbiguousDefinition)
+            }
+            "CONDITIONAL_ACTIVITY_REASON_CROSS_SCOPE" => Some(Self::CrossScope),
+            "CONDITIONAL_ACTIVITY_REASON_EMPTY_RANGE" => Some(Self::EmptyRange),
+            "CONDITIONAL_ACTIVITY_REASON_MEMBERSHIP_UNPROVEN" => {
+                Some(Self::MembershipUnproven)
+            }
+            "CONDITIONAL_ACTIVITY_REASON_SCAN_INCOMPLETE" => Some(Self::ScanIncomplete),
+            "CONDITIONAL_ACTIVITY_REASON_TRANSPORT_UNAVAILABLE" => {
+                Some(Self::TransportUnavailable)
             }
             _ => None,
         }

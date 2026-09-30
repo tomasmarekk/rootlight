@@ -5,6 +5,7 @@
 
 use std::{fmt, future::Future, io, pin::Pin, sync::Arc};
 
+use rootlight_agent::policy::BudgetLimits;
 use rootlight_json_schema::{self as jsonschema, Validator};
 use rootlight_mcp_contract::{
     CodeLocateInput, CodeLocateOutput, ContinuationCursor, DetailKey, ErrorCode, ExposureProfile,
@@ -36,19 +37,20 @@ use rootlight_mcp_contract::{
         ChangeImpactOutputV1_3, ChangeImpactOutputV1_4, ChangeImpactOutputV1_5,
         ChangeImpactOutputV1_6, CodeLocateOutputV1_1, CodeLocateOutputV1_2, CodeLocateOutputV1_3,
         CodeLocateOutputV1_4, CodeLocateOutputV1_5, CodeLocateOutputV1_6, CodeLocateOutputV1_7,
-        CodeLocateOutputV1_8, CodeLocateOutputV1_9, EntityToolResponse, HistoryCompareOutputV1_3,
-        HistoryCompareOutputV1_4, HistoryCompareOutputV1_5, HistoryCompareOutputV1_6,
-        QueryAdvancedOutputV1_1, QueryAdvancedOutputV1_2, QueryAdvancedOutputV1_3,
-        QueryAdvancedOutputV1_4, QueryAdvancedOutputV1_5, QueryAdvancedOutputV1_6,
-        QueryAdvancedOutputV1_7, SourceReadOutputV1_1, SymbolExplainOutputV1_2,
-        SymbolExplainOutputV1_3, SymbolExplainOutputV1_4, SymbolExplainOutputV1_5,
-        SymbolExplainOutputV1_6, SymbolExplainOutputV1_7, SymbolExplainOutputV1_8,
-        SymbolExplainOutputV1_9,
+        CodeLocateOutputV1_8, CodeLocateOutputV1_9, CodeLocateOutputV1_10, EntityToolResponse,
+        HistoryCompareOutputV1_3, HistoryCompareOutputV1_4, HistoryCompareOutputV1_5,
+        HistoryCompareOutputV1_6, QueryAdvancedOutputV1_1, QueryAdvancedOutputV1_2,
+        QueryAdvancedOutputV1_3, QueryAdvancedOutputV1_4, QueryAdvancedOutputV1_5,
+        QueryAdvancedOutputV1_6, QueryAdvancedOutputV1_7, SourceReadOutputV1_1,
+        SourceReadOutputV1_2, SymbolExplainOutputV1_2, SymbolExplainOutputV1_3,
+        SymbolExplainOutputV1_4, SymbolExplainOutputV1_5, SymbolExplainOutputV1_6,
+        SymbolExplainOutputV1_7, SymbolExplainOutputV1_8, SymbolExplainOutputV1_9,
     },
     vertical::{
         OperationStatusOutputV1_0, OperationStatusOutputV1_1, OperationStatusOutputV1_2,
         OperationStatusOutputV1_3, OperationStatusOutputV1_4, OperationStatusOutputV1_5,
-        RepoIndexOutputV1_0, RepoIndexOutputV1_1, RepoIndexOutputV1_2, SymbolExplainOutputV1_0,
+        RepoIndexOutputV1_0, RepoIndexOutputV1_1, RepoIndexOutputV1_2, ResponseBudget,
+        SymbolExplainOutputV1_0,
     },
 };
 use serde::{Deserialize, Serialize};
@@ -380,6 +382,10 @@ where
         if cancellation.is_cancelled() {
             return HandlerResponse::Cancelled;
         }
+        let publication_limits = match publication_limits(&arguments_value, &typed_input) {
+            Ok(limits) => limits,
+            Err(()) => return internal_tool_error("tool input budget invariant failed"),
+        };
         let Value::Object(arguments) = arguments_value else {
             return cancel_or(
                 &cancellation,
@@ -446,7 +452,8 @@ where
                 .unwrap_or_else(|_| internal_tool_error("tool error validation failed"));
             return cancel_or(&cancellation, response);
         }
-        let output_value = match select_output_version(contract.tool, selected_version, output) {
+        let mut output_value = match select_output_version(contract.tool, selected_version, output)
+        {
             Ok(output) => output,
             Err(()) => {
                 return cancel_or(
@@ -455,6 +462,22 @@ where
                 );
             }
         };
+        match reconcile_published_usage(contract.tool, &mut output_value, publication_limits) {
+            Ok(()) => {}
+            Err(ToolResultError::Limit) => {
+                return cancel_or(
+                    &cancellation,
+                    tool_error(contract, selected_version, resource_exhausted)
+                        .unwrap_or_else(|_| internal_tool_error("tool error validation failed")),
+                );
+            }
+            Err(ToolResultError::Serialize) => {
+                return cancel_or(
+                    &cancellation,
+                    internal_tool_error("tool output accounting failed"),
+                );
+            }
+        }
         if !serialized_json_fits(&output_value, MAX_TOOL_STRUCTURED_BYTES) {
             return cancel_or(
                 &cancellation,
@@ -563,6 +586,7 @@ struct ToolContract {
     fifth_legacy_input_validator: Option<Validator>,
     initial_input_validator: Option<Validator>,
     output_validator: Validator,
+    pre_activity_output_validator: Option<Validator>,
     pre_label_output_validator: Option<Validator>,
     recent_output_validator: Option<Validator>,
     previous_output_validator: Option<Validator>,
@@ -577,6 +601,7 @@ struct ToolContract {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ContractSelection {
     Current,
+    PreActivity,
     PreLabel,
     Recent,
     Previous,
@@ -593,6 +618,12 @@ impl ContractSelection {
         match requested {
             None => Some(Self::Current),
             Some(requested) if requested == contract.tool.contract_version() => Some(Self::Current),
+            Some(requested)
+                if contract.tool.pre_activity_contract_version() == Some(requested)
+                    && contract.pre_activity_output_validator.is_some() =>
+            {
+                Some(Self::PreActivity)
+            }
             Some(requested)
                 if contract.tool.pre_label_contract_version() == Some(requested)
                     && contract.pre_label_output_validator.is_some() =>
@@ -654,6 +685,9 @@ impl ContractSelection {
     const fn schema_version(self, tool: VerticalTool) -> &'static str {
         match self {
             Self::Current => tool.contract_version(),
+            Self::PreActivity => tool
+                .pre_activity_contract_version()
+                .expect("pre-activity selection requires a retained version"),
             Self::PreLabel => tool
                 .pre_label_contract_version()
                 .expect("pre-label selection requires a retained version"),
@@ -1178,6 +1212,25 @@ impl ToolContract {
                 direction: "output",
                 source,
             })?;
+        let pre_activity_output_validator =
+            tool.pre_activity_output_schema_json()
+                .map(|schema| {
+                    let schema = parse_object_schema(tool, "pre-activity output", schema).map_err(
+                        |source| ToolRegistryError::ParseSchema {
+                            tool,
+                            direction: "pre-activity output",
+                            source,
+                        },
+                    )?;
+                    jsonschema::draft202012::new(&Value::Object(schema)).map_err(|source| {
+                        ToolRegistryError::CompileSchema {
+                            tool,
+                            direction: "pre-activity output",
+                            detail: source.to_string(),
+                        }
+                    })
+                })
+                .transpose()?;
         let input_validator = jsonschema::draft202012::new(&Value::Object(input_schema.clone()))
             .map_err(|source| ToolRegistryError::CompileSchema {
                 tool,
@@ -1569,6 +1622,7 @@ impl ToolContract {
             fifth_legacy_input_validator,
             initial_input_validator,
             output_validator,
+            pre_activity_output_validator,
             pre_label_output_validator,
             recent_output_validator,
             previous_output_validator,
@@ -1584,6 +1638,10 @@ impl ToolContract {
     fn output_validator(&self, selection: ContractSelection) -> &Validator {
         match selection {
             ContractSelection::Current => &self.output_validator,
+            ContractSelection::PreActivity => self
+                .pre_activity_output_validator
+                .as_ref()
+                .expect("pre-activity selection requires a compiled schema"),
             ContractSelection::PreLabel => self
                 .pre_label_output_validator
                 .as_ref()
@@ -1626,6 +1684,7 @@ impl ToolContract {
     fn input_validator(&self, selection: ContractSelection) -> &Validator {
         match selection {
             ContractSelection::Current => &self.input_validator,
+            ContractSelection::PreActivity => &self.input_validator,
             ContractSelection::PreLabel => self
                 .pre_label_input_validator
                 .as_ref()
@@ -2127,7 +2186,181 @@ fn serialized_json_fits<T>(value: &T, maximum: usize) -> bool
 where
     T: Serialize + ?Sized,
 {
-    serde_json::to_writer(ByteLimitWriter { remaining: maximum }, value).is_ok()
+    serialized_json_bytes(value, maximum).is_ok()
+}
+
+fn serialized_json_bytes<T>(value: &T, maximum: usize) -> Result<usize, ToolResultError>
+where
+    T: Serialize + ?Sized,
+{
+    let mut writer = ByteLimitWriter { remaining: maximum };
+    serde_json::to_writer(&mut writer, value).map_err(|_| ToolResultError::Limit)?;
+    Ok(maximum - writer.remaining)
+}
+
+#[derive(Clone, Copy)]
+struct PublicationLimits {
+    byte_budget: BudgetLimits,
+    estimated_tokens: u64,
+}
+
+impl PublicationLimits {
+    fn from_budget(byte_budget: BudgetLimits) -> Self {
+        Self {
+            byte_budget,
+            estimated_tokens: byte_budget.maximums().tokens,
+        }
+    }
+}
+
+fn publication_limits(arguments: &Value, input: &TypedInput) -> Result<PublicationLimits, ()> {
+    let requested = arguments
+        .get("budget")
+        .filter(|value| !value.is_null())
+        .map(ResponseBudget::deserialize)
+        .transpose()
+        .map_err(|_| ())?;
+    let byte_budget =
+        BudgetLimits::server_ceiling().constrained_by_response_budget(requested.as_ref());
+    let mut limits = PublicationLimits::from_budget(byte_budget);
+    limits.estimated_tokens = match input {
+        TypedInput::ContextPack(input) => byte_budget
+            .maximums()
+            .tokens
+            .min(u64::from(input.token_budget)),
+        TypedInput::QueryBatch(input) => {
+            let admitted = rootlight_agent::batch::admitted_parent_budget(input.budget.as_ref());
+            // Batch's admitted default bounds estimated tokens, not raw JSON bytes.
+            // Its executor separately applies only caller-supplied conservative byte limits.
+            byte_budget
+                .constrained_by_response_budget(Some(&admitted))
+                .maximums()
+                .tokens
+        }
+        _ => byte_budget.maximums().tokens,
+    };
+    Ok(limits)
+}
+
+fn reconcile_published_usage(
+    tool: VerticalTool,
+    output: &mut Value,
+    limits: PublicationLimits,
+) -> Result<(), ToolResultError> {
+    let Some(usage) = output.get("usage") else {
+        return Ok(());
+    };
+    let old_tokens = usage
+        .get("estimated_tokens")
+        .and_then(Value::as_u64)
+        .ok_or(ToolResultError::Serialize)?;
+    usage
+        .get("json_bytes")
+        .and_then(Value::as_u64)
+        .ok_or(ToolResultError::Serialize)?;
+    let context_sections = if tool == VerticalTool::ContextPack {
+        let accounting = output
+            .pointer("/data/token_accounting")
+            .ok_or(ToolResultError::Serialize)?;
+        let sections = accounting
+            .get("by_section")
+            .and_then(Value::as_object)
+            .ok_or(ToolResultError::Serialize)?;
+        let mut total = 0_u64;
+        let mut substantive = 0_u64;
+        for (name, value) in sections {
+            let tokens = value.as_u64().ok_or(ToolResultError::Serialize)?;
+            total = total
+                .checked_add(tokens)
+                .ok_or(ToolResultError::Serialize)?;
+            if name != "envelope" {
+                substantive = substantive
+                    .checked_add(tokens)
+                    .ok_or(ToolResultError::Serialize)?;
+            }
+        }
+        if accounting.get("estimated_total").and_then(Value::as_u64) != Some(old_tokens)
+            || total != old_tokens
+            || !sections.contains_key("envelope")
+        {
+            return Err(ToolResultError::Serialize);
+        }
+        Some(substantive)
+    } else {
+        None
+    };
+    // Version selection and retained projection happen after executor accounting.
+    // Count the published representation without copying its bounded source body.
+    let maximums = limits.byte_budget.maximums();
+    let mut maximum_bytes = maximums.json_bytes;
+    if tool != VerticalTool::ContextPack {
+        maximum_bytes = maximum_bytes.min(maximums.tokens);
+    }
+    let maximum_bytes = usize::try_from(maximum_bytes)
+        .unwrap_or(usize::MAX)
+        .min(MAX_TOOL_STRUCTURED_BYTES);
+    if let Ok(bytes) = serialized_json_bytes(output, maximum_bytes) {
+        let tokens = rootlight_mcp_contract::accounting::estimate_tokens(bytes);
+        let usage = output.get("usage").ok_or(ToolResultError::Serialize)?;
+        if usage.get("json_bytes").and_then(Value::as_u64) == u64::try_from(bytes).ok()
+            && usage.get("estimated_tokens").and_then(Value::as_u64) == Some(tokens)
+        {
+            return if tokens <= limits.estimated_tokens {
+                Ok(())
+            } else {
+                Err(ToolResultError::Limit)
+            };
+        }
+    }
+    set_usage_counters(output, 0, 0)?;
+    for _ in 0..8 {
+        let bytes = serialized_json_bytes(output, maximum_bytes)?;
+        let tokens = rootlight_mcp_contract::accounting::estimate_tokens(bytes);
+        let bytes = u64::try_from(bytes).map_err(|_| ToolResultError::Serialize)?;
+        let usage = output.get("usage").ok_or(ToolResultError::Serialize)?;
+        let stable = usage.get("json_bytes").and_then(Value::as_u64) == Some(bytes)
+            && usage.get("estimated_tokens").and_then(Value::as_u64) == Some(tokens)
+            && context_sections.is_none_or(|_| {
+                output
+                    .pointer("/data/token_accounting/estimated_total")
+                    .and_then(Value::as_u64)
+                    == Some(tokens)
+            });
+        if stable {
+            return if tokens <= limits.estimated_tokens {
+                Ok(())
+            } else {
+                Err(ToolResultError::Limit)
+            };
+        }
+        set_usage_counters(output, bytes, tokens)?;
+        if let Some(substantive) = context_sections {
+            let envelope = tokens
+                .checked_sub(substantive)
+                .ok_or(ToolResultError::Serialize)?;
+            let accounting = output
+                .pointer_mut("/data/token_accounting")
+                .and_then(Value::as_object_mut)
+                .ok_or(ToolResultError::Serialize)?;
+            accounting.insert("estimated_total".into(), tokens.into());
+            accounting
+                .get_mut("by_section")
+                .and_then(Value::as_object_mut)
+                .ok_or(ToolResultError::Serialize)?
+                .insert("envelope".into(), envelope.into());
+        }
+    }
+    Err(ToolResultError::Serialize)
+}
+
+fn set_usage_counters(output: &mut Value, bytes: u64, tokens: u64) -> Result<(), ToolResultError> {
+    let usage = output
+        .get_mut("usage")
+        .and_then(Value::as_object_mut)
+        .ok_or(ToolResultError::Serialize)?;
+    usage.insert("json_bytes".into(), bytes.into());
+    usage.insert("estimated_tokens".into(), tokens.into());
+    Ok(())
 }
 
 struct ByteLimitWriter {
@@ -2157,7 +2390,28 @@ fn typed_output_is_valid(tool: VerticalTool, input: &TypedInput, output: &Value)
         VerticalTool::RepoList | VerticalTool::FlowTrace | VerticalTool::QueryBatch => true,
         VerticalTool::QueryAdvanced => QueryAdvancedOutputV1_7::deserialize(output).is_ok(),
         VerticalTool::OperationStatus => OperationStatusOutput::deserialize(output).is_ok(),
-        VerticalTool::CodeLocate => CodeLocateOutputV1_9::deserialize(output).is_ok(),
+        VerticalTool::CodeLocate => {
+            let Ok(output) = CodeLocateOutputV1_10::deserialize(output) else {
+                return false;
+            };
+            let EntityToolResponse::Success(output) = output else {
+                return true;
+            };
+            output.data.matches.iter().all(|item| {
+                item.source_ref.as_ref().is_none_or(|source| {
+                    source.repository() == output.repository.repository_id
+                        && source.generation() == output.generation.generation_id
+                })
+            }) && conditional_output_is_valid(
+                &output.data.conditional_activity,
+                output.repository.repository_id,
+                output.generation.generation_id,
+                &output.warnings,
+                output.truncated,
+                &output.completeness,
+                output.next_cursor.0.is_some(),
+            )
+        }
         VerticalTool::SymbolExplain => SymbolExplainOutputV1_9::deserialize(output).is_ok(),
         VerticalTool::SymbolRelationships => {
             SymbolRelationshipsOutputV1_1::deserialize(output).is_ok()
@@ -2175,7 +2429,7 @@ fn typed_output_is_valid(tool: VerticalTool, input: &TypedInput, output: &Value)
         VerticalTool::PlanChange => PlanChangeOutputV1_1::deserialize(output).is_ok(),
         VerticalTool::ContextPack => ContextPackOutputV1_1::deserialize(output).is_ok(),
         VerticalTool::SourceRead => {
-            let Ok(output) = SourceReadOutputV1_1::deserialize(output) else {
+            let Ok(output) = SourceReadOutputV1_2::deserialize(output) else {
                 return false;
             };
             let TypedInput::SourceRead(input) = input else {
@@ -2184,13 +2438,18 @@ fn typed_output_is_valid(tool: VerticalTool, input: &TypedInput, output: &Value)
             let EntityToolResponse::Success(output) = output else {
                 return true;
             };
-            source_read_fields_are_valid(
+            let metadata_only = output.truncated
+                && output.data.stale_references.is_empty()
+                && output.data.elisions.is_empty();
+            (!metadata_only || output.data.conditional_activity.iter().any(|assessment| assessment.reason.0 == Some(rootlight_mcp_contract::conditional_activity::ConditionalActivityReason::ScanIncomplete)))
+                && conditional_output_is_valid(&output.data.conditional_activity, output.repository.repository_id, output.generation.generation_id, &output.warnings, output.truncated, &output.completeness, output.next_cursor.0.is_some()) && source_read_fields_are_valid(
                 input,
                 output.repository.repository_id,
                 output.generation.generation_id,
                 output.trust,
                 output.usage.source_bytes,
-                &output.data,
+                output.data.total_source_bytes,
+                &output.data.chunks,
             )
         }
     }
@@ -2204,6 +2463,30 @@ fn typed_selected_output_is_valid(
 ) -> bool {
     match selection {
         ContractSelection::Current => typed_output_is_valid(tool, input, output),
+        ContractSelection::PreActivity => match tool {
+            VerticalTool::CodeLocate => CodeLocateOutputV1_9::deserialize(output).is_ok(),
+            VerticalTool::SourceRead => {
+                let Ok(output) = SourceReadOutputV1_1::deserialize(output) else {
+                    return false;
+                };
+                let TypedInput::SourceRead(input) = input else {
+                    return false;
+                };
+                let EntityToolResponse::Success(output) = output else {
+                    return true;
+                };
+                source_read_fields_are_valid(
+                    input,
+                    output.repository.repository_id,
+                    output.generation.generation_id,
+                    output.trust,
+                    output.usage.source_bytes,
+                    output.data.total_source_bytes,
+                    &output.data.chunks,
+                )
+            }
+            _ => false,
+        },
         ContractSelection::PreLabel => match tool {
             VerticalTool::QueryAdvanced => QueryAdvancedOutputV1_6::deserialize(output).is_ok(),
             VerticalTool::CodeLocate => CodeLocateOutputV1_8::deserialize(output).is_ok(),
@@ -2320,7 +2603,8 @@ fn source_read_output_invariants_are_valid(
         output.generation.generation_id,
         output.trust,
         output.usage.source_bytes,
-        &output.data,
+        output.data.total_source_bytes,
+        &output.data.chunks,
     )
 }
 
@@ -2330,10 +2614,11 @@ fn source_read_fields_are_valid(
     generation: rootlight_ids::GenerationId,
     trust: TrustClassification,
     source_bytes: u64,
-    data: &rootlight_mcp_contract::vertical::SourceReadData,
+    total_source_bytes: u32,
+    chunks: &[rootlight_mcp_contract::vertical::SourceChunk],
 ) -> bool {
     if trust != TrustClassification::UntrustedRepositoryData
-        || source_bytes != u64::from(data.total_source_bytes)
+        || source_bytes != u64::from(total_source_bytes)
     {
         return false;
     }
@@ -2359,15 +2644,74 @@ fn source_read_fields_are_valid(
                 .and_then(|budget| budget.max_source_bytes),
         )
         .min();
-    if requested_source_bytes.is_some_and(|maximum| data.total_source_bytes > maximum) {
+    if requested_source_bytes.is_some_and(|maximum| total_source_bytes > maximum) {
         return false;
     }
 
-    data.chunks.iter().all(|chunk| {
+    chunks.iter().all(|chunk| {
         chunk.source_ref.repository() == repository
             && chunk.source_ref.generation() == generation
             && chunk.trust == trust
     })
+}
+
+fn conditional_output_is_valid(
+    assessments: &[rootlight_mcp_contract::conditional_activity::ConditionalActivityAssessment],
+    repository: rootlight_ids::RepositoryId,
+    generation: rootlight_ids::GenerationId,
+    warnings: &[rootlight_mcp_contract::vertical::ResponseWarning],
+    truncated: bool,
+    completeness: &rootlight_mcp_contract::completeness::ResultCompleteness,
+    has_cursor: bool,
+) -> bool {
+    use rootlight_mcp_contract::{
+        completeness::{CompletenessState, LimitingResourceKind},
+        conditional_activity::{ConditionalActivityReason, ConditionalActivityState},
+    };
+    if assessments.iter().any(|assessment| {
+        assessment
+            .assessed_source_ref
+            .0
+            .as_ref()
+            .is_some_and(|source| {
+                source.repository() != repository || source.generation() != generation
+            })
+    }) {
+        return false;
+    }
+    let affected = assessments
+        .iter()
+        .filter(|assessment| assessment.activity == ConditionalActivityState::Unproven)
+        .count();
+    let mut activity_warnings = warnings
+        .iter()
+        .filter(|warning| warning.code.as_str() == "conditional_activity_unproven");
+    let warning = activity_warnings.next();
+    if activity_warnings.next().is_some()
+        || (affected == 0 && warning.is_some())
+        || (affected > 0
+            && warning.is_none_or(|warning| {
+                warning.message.as_str()
+                    != format!("conditional activity unproven for {affected} returned items")
+            }))
+    {
+        return false;
+    }
+    if assessments
+        .iter()
+        .any(|assessment| assessment.reason.0 == Some(ConditionalActivityReason::ScanIncomplete))
+    {
+        return truncated
+            && completeness.state == CompletenessState::Truncated
+            && !has_cursor
+            && completeness.limiting_resources.iter().any(|resource| {
+                matches!(
+                    resource.kind,
+                    LimitingResourceKind::Rows | LimitingResourceKind::MemoryBytes
+                )
+            });
+    }
+    true
 }
 
 fn list_params_are_valid(params: Option<&Value>) -> bool {
@@ -2518,6 +2862,15 @@ fn requires_entity_contract(
     selection: ContractSelection,
     output: &Value,
 ) -> bool {
+    if selection != ContractSelection::Current
+        && matches!(tool, VerticalTool::CodeLocate | VerticalTool::SourceRead)
+        && output
+            .pointer("/data/conditional_activity")
+            .and_then(Value::as_array)
+            .is_some_and(|assessments| !assessments.is_empty())
+    {
+        return true;
+    }
     let origin_path = match tool {
         VerticalTool::CodeLocate => Some("/data/matches"),
         VerticalTool::SourceRead => Some("/data/chunks"),
@@ -2525,7 +2878,7 @@ fn requires_entity_contract(
     };
     if !matches!(
         selection,
-        ContractSelection::Current | ContractSelection::PreLabel
+        ContractSelection::Current | ContractSelection::PreActivity | ContractSelection::PreLabel
     ) && origin_path.is_some_and(|path| {
         output
             .pointer(path)
@@ -2540,7 +2893,10 @@ fn requires_entity_contract(
         return true;
     }
     let is_new_kind = |value: Option<&Value>| match value.and_then(Value::as_str) {
-        Some("statement_label") => selection != ContractSelection::Current,
+        Some("statement_label") => !matches!(
+            selection,
+            ContractSelection::Current | ContractSelection::PreActivity
+        ),
         Some("import" | "export") => match tool {
             VerticalTool::CodeLocate => matches!(
                 selection.schema_version(tool),
@@ -2620,9 +2976,10 @@ fn requires_entity_contract(
             _ => matches!(selection.schema_version(tool), "1.0" | "1.1"),
         },
         Some("build_target") => match tool {
-            VerticalTool::CodeLocate | VerticalTool::SymbolExplain => {
-                !matches!(selection.schema_version(tool), "1.7" | "1.8" | "1.9")
-            }
+            VerticalTool::CodeLocate | VerticalTool::SymbolExplain => !matches!(
+                selection.schema_version(tool),
+                "1.7" | "1.8" | "1.9" | "1.10"
+            ),
             VerticalTool::QueryAdvanced => !matches!(selection.schema_version(tool), "1.6" | "1.7"),
             _ => false,
         },
@@ -2670,7 +3027,7 @@ fn typed_error_output_is_valid(tool: VerticalTool, output: &Value) -> bool {
         VerticalTool::RepoList | VerticalTool::FlowTrace | VerticalTool::QueryBatch => true,
         VerticalTool::QueryAdvanced => QueryAdvancedOutputV1_7::deserialize(output).is_ok(),
         VerticalTool::OperationStatus => OperationStatusOutput::deserialize(output).is_ok(),
-        VerticalTool::CodeLocate => CodeLocateOutputV1_9::deserialize(output).is_ok(),
+        VerticalTool::CodeLocate => CodeLocateOutputV1_10::deserialize(output).is_ok(),
         VerticalTool::SymbolExplain => SymbolExplainOutputV1_9::deserialize(output).is_ok(),
         VerticalTool::SymbolRelationships => {
             SymbolRelationshipsOutputV1_1::deserialize(output).is_ok()
@@ -2687,7 +3044,7 @@ fn typed_error_output_is_valid(tool: VerticalTool, output: &Value) -> bool {
         VerticalTool::HistoryCompare => HistoryCompareOutputV1_6::deserialize(output).is_ok(),
         VerticalTool::PlanChange => PlanChangeOutputV1_1::deserialize(output).is_ok(),
         VerticalTool::ContextPack => ContextPackOutputV1_1::deserialize(output).is_ok(),
-        VerticalTool::SourceRead => SourceReadOutputV1_1::deserialize(output).is_ok(),
+        VerticalTool::SourceRead => SourceReadOutputV1_2::deserialize(output).is_ok(),
     }
 }
 
@@ -2698,6 +3055,11 @@ fn typed_selected_error_output_is_valid(
 ) -> bool {
     match selection {
         ContractSelection::Current => typed_error_output_is_valid(tool, output),
+        ContractSelection::PreActivity => match tool {
+            VerticalTool::CodeLocate => CodeLocateOutputV1_9::deserialize(output).is_ok(),
+            VerticalTool::SourceRead => SourceReadOutputV1_1::deserialize(output).is_ok(),
+            _ => false,
+        },
         ContractSelection::PreLabel => match tool {
             VerticalTool::QueryAdvanced => QueryAdvancedOutputV1_6::deserialize(output).is_ok(),
             VerticalTool::CodeLocate => CodeLocateOutputV1_8::deserialize(output).is_ok(),
@@ -2814,8 +3176,20 @@ fn select_output_version(
         .get_mut("data")
         .and_then(Value::as_object_mut)
         .ok_or(())?;
-    if selection != ContractSelection::PreLabel
-        && matches!(tool, VerticalTool::CodeLocate | VerticalTool::SymbolExplain)
+    if matches!(tool, VerticalTool::CodeLocate | VerticalTool::SourceRead) {
+        if data
+            .get("conditional_activity")
+            .and_then(Value::as_array)
+            .is_none_or(|assessments| !assessments.is_empty())
+        {
+            return Err(());
+        }
+        data.remove("conditional_activity");
+    }
+    if !matches!(
+        selection,
+        ContractSelection::PreActivity | ContractSelection::PreLabel
+    ) && matches!(tool, VerticalTool::CodeLocate | VerticalTool::SymbolExplain)
     {
         coarsen_retained_entity_kinds(tool, data)?;
     }
@@ -2832,6 +3206,7 @@ fn select_output_version(
                 data.remove("semantic_operation_id");
             }
             ContractSelection::Current
+            | ContractSelection::PreActivity
             | ContractSelection::PreLabel
             | ContractSelection::Recent
             | ContractSelection::SecondLegacy
@@ -2848,6 +3223,7 @@ fn select_output_version(
                 data.remove("retained_durable_bytes");
             }
             ContractSelection::Current
+            | ContractSelection::PreActivity
             | ContractSelection::PreLabel
             | ContractSelection::Recent
             | ContractSelection::SecondLegacy
@@ -2913,6 +3289,7 @@ fn select_output_version(
                 }
             }
             ContractSelection::Current
+            | ContractSelection::PreActivity
             | ContractSelection::PreLabel
             | ContractSelection::Recent => return Err(()),
         },
@@ -3366,7 +3743,7 @@ mod tests {
             "../../../tests/fixtures/mcp/1.0/tool-contracts.json"
         ))
         .expect("retained tool contracts are valid JSON");
-        fixture["tools"]
+        let mut output = fixture["tools"]
             .as_array()
             .expect("tool contracts contain an array")
             .iter()
@@ -3374,7 +3751,17 @@ mod tests {
             .unwrap_or_else(|| panic!("retained tool contract {name} exists"))["output"]
             .as_object()
             .expect("retained output is an object")
-            .clone()
+            .clone();
+        // Fixtures stay byte-faithful to 1.0; current fake executors explicitly
+        // author the empty sidecar for their non-classic returned data.
+        if matches!(name, "code.locate" | "source.read") {
+            output
+                .get_mut("data")
+                .and_then(Value::as_object_mut)
+                .unwrap()
+                .insert("conditional_activity".into(), json!([]));
+        }
+        output
     }
 
     fn retained_input(name: &str) -> Map<String, Value> {
@@ -3391,6 +3778,21 @@ mod tests {
             .as_object()
             .expect("retained input is an object")
             .clone()
+    }
+
+    fn independently_recount_usage(output: &mut Value) {
+        for _ in 0..16 {
+            let bytes = serde_json::to_vec(&*output).unwrap().len();
+            let tokens = rootlight_mcp_contract::accounting::estimate_tokens(bytes);
+            if output["usage"]["json_bytes"] == json!(bytes)
+                && output["usage"]["estimated_tokens"] == json!(tokens)
+            {
+                return;
+            }
+            output["usage"]["json_bytes"] = json!(bytes);
+            output["usage"]["estimated_tokens"] = json!(tokens);
+        }
+        panic!("authored fixture accounting converges");
     }
 
     fn vertical_tool(name: &str) -> VerticalTool {
@@ -4602,16 +5004,16 @@ mod tests {
             observed,
             [
                 (
-                    235_555,
-                    "ceebfdb9fe1c8098ab441cbded5ae673411840cc8b16f7f5e0943b70fab7770d".to_owned(),
+                    245_955,
+                    "05e1d7805e3b280a80029f6a34d752cf14c9e36ba820d2a27c7fd5a6dd72a2a8".to_owned(),
                 ),
                 (
-                    505_314,
-                    "8881be584db57d8256422369ee8060c027bc98faae62eef4aa812e59b476ac7d".to_owned(),
+                    515_714,
+                    "8a6ca8cc5b030fe396169b86eae03673763290d04a6fb1e3de4b7b000473fe26".to_owned(),
                 ),
                 (
-                    709_327,
-                    "0a57501c754bc06db4560f837914f1f13af9f163916f853f26693debaef34559".to_owned(),
+                    719_727,
+                    "08d299f3f34dc017021e85848e1e50d9a0e74fe5104adf99e4e547033509c3de".to_owned(),
                 ),
             ],
             "update the reviewed Scout, Analysis, and Developer tools/list goldens"
@@ -5431,9 +5833,10 @@ mod tests {
                 let versions: &[&str] = if tool == VerticalTool::CodeLocate {
                     &[
                         "1.0", "1.1", "1.2", "1.3", "1.4", "1.5", "1.6", "1.7", "1.8", "1.9",
+                        "1.10",
                     ]
                 } else {
-                    &["1.0", "1.1"]
+                    &["1.0", "1.1", "1.2"]
                 };
                 for version in versions {
                     let result = success(router.handle(
@@ -5444,6 +5847,7 @@ mod tests {
                     ).await);
                     let rejected = extracted
                         && *version != tool.contract_version()
+                        && Some(*version) != tool.pre_activity_contract_version()
                         && Some(*version) != tool.pre_label_contract_version();
                     assert_eq!(
                         result["isError"], rejected,
@@ -5457,7 +5861,15 @@ mod tests {
                     } else {
                         let mut expected = output.clone();
                         expected.insert("schema_version".to_owned(), json!(version));
-                        assert_eq!(body, &Value::Object(expected));
+                        if *version != tool.contract_version() {
+                            expected["data"]
+                                .as_object_mut()
+                                .unwrap()
+                                .remove("conditional_activity");
+                        }
+                        let mut expected = Value::Object(expected);
+                        independently_recount_usage(&mut expected);
+                        assert_eq!(body, &expected);
                     }
                 }
                 if extracted {
@@ -5603,6 +6015,7 @@ mod tests {
                     .expect("mirror is JSON");
                     assert_eq!(&mirrored, structured);
                     if supported {
+                        independently_recount_usage(&mut expected);
                         assert_eq!(
                             structured, &expected,
                             "no fields or entities may be dropped"
@@ -5788,7 +6201,10 @@ mod tests {
             (VerticalTool::CodeLocate, "matches"),
             (VerticalTool::SymbolExplain, "symbols"),
         ] {
-            let output = json!({"data": {(field): [{"kind": "class"}]}});
+            let mut output = json!({"data": {(field): [{"kind": "class"}]}});
+            if tool == VerticalTool::CodeLocate {
+                output["data"]["conditional_activity"] = json!([]);
+            }
             let selected =
                 select_output_version(tool, ContractSelection::PreLabel, output).unwrap();
             assert_eq!(selected["data"][field][0]["kind"], "class");
@@ -5813,7 +6229,13 @@ mod tests {
             ExposureProfile::Developer,
         )
         .unwrap();
-        for (version, error) in [("1.9", false), ("1.8", true), ("1.7", true), ("1.6", true)] {
+        for (version, error) in [
+            ("1.10", false),
+            ("1.9", false),
+            ("1.8", true),
+            ("1.7", true),
+            ("1.6", true),
+        ] {
             let response = router
                 .handle(
                     request(
@@ -6056,6 +6478,10 @@ mod tests {
             for (selection, schema) in [
                 (ContractSelection::Current, Some(tool.output_schema_json())),
                 (
+                    ContractSelection::PreActivity,
+                    tool.pre_activity_output_schema_json(),
+                ),
+                (
                     ContractSelection::PreLabel,
                     tool.pre_label_output_schema_json(),
                 ),
@@ -6109,6 +6535,410 @@ mod tests {
                 );
             }
         }
+    }
+
+    fn conditional_fixture(tool: VerticalTool, reason: &str) -> Map<String, Value> {
+        let mut output = retained_output(tool.name());
+        let data = output.get_mut("data").unwrap();
+        let (basis, assessed) = if tool == VerticalTool::CodeLocate {
+            let source = retained_output("source.read")["data"]["chunks"][0]["source_ref"].clone();
+            data["matches"] = json!([{
+                "symbol_id": retained_input("change.impact")["change"]["symbol_ids"][0],
+                "file_id": source["span"]["file"], "kind": "function",
+                "display_name": "Publish", "signature": null, "path": "module.bas",
+                "score": 1000, "why": ["identifier_match"], "source_ref": null,
+                "trust": "untrusted_repository_data"
+            }]);
+            ("definition_token", Value::Null)
+        } else {
+            data["chunks"][0]["language"] = json!("vba");
+            ("returned_range", data["chunks"][0]["source_ref"].clone())
+        };
+        data["conditional_activity"] = json!([{
+            "result_index": 0, "basis": basis, "activity": "unproven",
+            "assessed_source_ref": assessed, "inventory": null, "reason": reason
+        }]);
+        output["warnings"] = json!([{
+            "code": "conditional_activity_unproven", "message": "conditional activity unproven for 1 returned items"
+        }]);
+        output
+    }
+
+    #[tokio::test]
+    async fn selected_version_accounting_enforces_exact_and_one_short_caller_budgets() {
+        let tool = VerticalTool::CodeLocate;
+        for version in ["1.10", "1.9", "1.0"] {
+            let mut canonical = Value::Object(retained_output(tool.name()));
+            independently_recount_usage(&mut canonical);
+            let contract = ToolContract::compile(tool).unwrap();
+            let selection = ContractSelection::select(&contract, Some(version)).unwrap();
+            let mut expected = select_output_version(tool, selection, canonical.clone()).unwrap();
+            independently_recount_usage(&mut expected);
+            let exact = u16::try_from(serde_json::to_vec(&expected).unwrap().len()).unwrap();
+            for ceiling in [exact, exact - 1] {
+                let router = ToolRouter::new(
+                    StaticExecutor {
+                        result: Ok(canonical.as_object().unwrap().clone()),
+                    },
+                    ExposureProfile::Developer,
+                )
+                .unwrap();
+                let mut arguments = retained_input(tool.name());
+                arguments.insert("budget".into(), json!({"max_tokens": ceiling}));
+                let result = success(
+                    router
+                        .handle(
+                            request(
+                                "tools/call",
+                                json!({
+                                    "name": tool.name(), "arguments": arguments,
+                                    "_meta": {(TOOL_CONTRACT_VERSION_META_KEY): version}
+                                }),
+                            ),
+                            cancellation(),
+                        )
+                        .await,
+                );
+                let published = &result["structuredContent"];
+                assert_eq!(published["schema_version"], version);
+                if ceiling == exact {
+                    assert_eq!(result["isError"], false);
+                    assert_eq!(published, &expected);
+                    let bytes = serde_json::to_vec(published).unwrap().len();
+                    assert_eq!(published["usage"]["json_bytes"], json!(bytes));
+                    assert_eq!(
+                        published["usage"]["estimated_tokens"],
+                        json!(bytes.div_ceil(4))
+                    );
+                } else {
+                    assert_eq!(result["isError"], true);
+                    assert_eq!(published["error"]["code"], "RESOURCE_EXHAUSTED");
+                }
+                let mirror: Value =
+                    serde_json::from_str(result["content"][0]["text"].as_str().unwrap()).unwrap();
+                assert_eq!(&mirror, published);
+            }
+        }
+    }
+
+    #[test]
+    fn published_accounting_handles_counter_width_and_exact_structured_boundary() {
+        let tool = VerticalTool::CodeLocate;
+        for padding in [0, 65, 950, 9950] {
+            let mut output = json!({
+                "schema_version": "1.10", "data": {"padding": "x".repeat(padding)},
+                "usage": {"json_bytes": u64::MAX, "estimated_tokens": u64::MAX,
+                    "wall_time_ms": 17, "rows": 23, "source_bytes": 31, "trace_id": "fixed"}
+            });
+            reconcile_published_usage(
+                tool,
+                &mut output,
+                PublicationLimits::from_budget(BudgetLimits::server_ceiling()),
+            )
+            .unwrap();
+            let bytes = serde_json::to_vec(&output).unwrap().len();
+            assert_eq!(output["usage"]["json_bytes"], json!(bytes));
+            assert_eq!(
+                output["usage"]["estimated_tokens"],
+                json!(bytes.div_ceil(4))
+            );
+            assert_eq!(output["usage"]["wall_time_ms"], 17);
+            assert_eq!(output["usage"]["rows"], 23);
+            assert_eq!(output["usage"]["source_bytes"], 31);
+            assert_eq!(output["usage"]["trace_id"], "fixed");
+        }
+        let mut output = json!({
+            "schema_version": "1.10", "data": {"padding": ""},
+            "usage": {"json_bytes": 0, "estimated_tokens": 0}
+        });
+        let mut padding = MAX_TOOL_STRUCTURED_BYTES;
+        for _ in 0..4 {
+            output["data"]["padding"] = json!("x".repeat(padding));
+            independently_recount_usage(&mut output);
+            let actual = serde_json::to_vec(&output).unwrap().len();
+            if actual == MAX_TOOL_STRUCTURED_BYTES {
+                break;
+            }
+            padding = padding + MAX_TOOL_STRUCTURED_BYTES - actual;
+        }
+        assert_eq!(
+            serde_json::to_vec(&output).unwrap().len(),
+            MAX_TOOL_STRUCTURED_BYTES
+        );
+        reconcile_published_usage(
+            tool,
+            &mut output,
+            PublicationLimits::from_budget(BudgetLimits::server_ceiling()),
+        )
+        .unwrap();
+        output["data"]["padding"] = json!("x".repeat(padding + 1));
+        assert!(matches!(
+            reconcile_published_usage(
+                tool,
+                &mut output,
+                PublicationLimits::from_budget(BudgetLimits::server_ceiling())
+            ),
+            Err(ToolResultError::Limit)
+        ));
+        let mut zero = json!({"usage": {"json_bytes": 0, "estimated_tokens": 0}});
+        assert!(matches!(
+            reconcile_published_usage(
+                tool,
+                &mut zero,
+                PublicationLimits::from_budget(BudgetLimits::server_ceiling().with_tokens(0))
+            ),
+            Err(ToolResultError::Limit)
+        ));
+    }
+
+    #[test]
+    fn publication_accounting_preserves_context_sections_and_batch_children() {
+        let mut context = json!({
+            "schema_version": "1.1", "data": {
+                "retained_extra": "x".repeat(80),
+                "evidence": "x".repeat(2400),
+                "token_accounting": {"estimated_total": 20,
+                    "by_section": {"definitions": 5, "envelope": 15}}
+            },
+            "usage": {"json_bytes": 80, "estimated_tokens": 20, "wall_time_ms": 3}
+        });
+        reconcile_published_usage(
+            VerticalTool::ContextPack,
+            &mut context,
+            PublicationLimits::from_budget(BudgetLimits::server_ceiling()),
+        )
+        .unwrap();
+        let unchanged = context.clone();
+        reconcile_published_usage(
+            VerticalTool::ContextPack,
+            &mut context,
+            PublicationLimits::from_budget(BudgetLimits::server_ceiling()),
+        )
+        .unwrap();
+        assert_eq!(context, unchanged);
+        let mut arguments = Value::Object(retained_input("context.pack"));
+        let exact = u16::try_from(context["usage"]["estimated_tokens"].as_u64().unwrap()).unwrap();
+        for ceiling in [exact, exact - 1] {
+            arguments["token_budget"] = json!(ceiling);
+            let typed = decode_typed_input(VerticalTool::ContextPack, &arguments).unwrap();
+            let limits = publication_limits(&arguments, &typed).unwrap();
+            let result =
+                reconcile_published_usage(VerticalTool::ContextPack, &mut context.clone(), limits);
+            assert_eq!(result.is_ok(), ceiling == exact);
+            if ceiling != exact {
+                assert!(matches!(result, Err(ToolResultError::Limit)));
+            }
+        }
+        context["schema_version"] = json!("1.0");
+        context["data"]
+            .as_object_mut()
+            .unwrap()
+            .remove("retained_extra");
+        reconcile_published_usage(
+            VerticalTool::ContextPack,
+            &mut context,
+            PublicationLimits::from_budget(BudgetLimits::server_ceiling()),
+        )
+        .unwrap();
+        let accounting = &context["data"]["token_accounting"];
+        let estimate = serde_json::to_vec(&context).unwrap().len().div_ceil(4);
+        assert_eq!(accounting["estimated_total"], json!(estimate));
+        assert_eq!(context["usage"]["estimated_tokens"], json!(estimate));
+        assert_eq!(accounting["by_section"]["definitions"], 5);
+        assert_eq!(accounting["by_section"]["envelope"], json!(estimate - 5));
+        let mut inconsistent = context.clone();
+        inconsistent["data"]["token_accounting"]["estimated_total"] = json!(0);
+        assert!(matches!(
+            reconcile_published_usage(
+                VerticalTool::ContextPack,
+                &mut inconsistent,
+                PublicationLimits::from_budget(BudgetLimits::server_ceiling())
+            ),
+            Err(ToolResultError::Serialize)
+        ));
+        let mut batch = json!({"schema_version": "1.0",
+            "data": {"operation_results": [{"id": "child", "usage": {"json_bytes": 123, "estimated_tokens": 31},
+                "data": {"conditional_activity": [{"activity": "unproven"}]}}]},
+            "usage": {"json_bytes": 1, "estimated_tokens": 1, "rows": 7}
+        });
+        let children = batch["data"]["operation_results"].clone();
+        reconcile_published_usage(
+            VerticalTool::QueryBatch,
+            &mut batch,
+            PublicationLimits::from_budget(BudgetLimits::server_ceiling()),
+        )
+        .unwrap();
+        assert_eq!(batch["data"]["operation_results"], children);
+        assert_eq!(batch["usage"]["rows"], 7);
+    }
+
+    #[test]
+    fn batch_publication_reuses_default_and_explicit_parent_token_admission() {
+        let tool = VerticalTool::QueryBatch;
+        let mut output = json!({
+            "schema_version": "1.0", "data": {"evidence": "x".repeat(4000),
+                "operation_results": [{"id": "child", "usage": {"json_bytes": 123,
+                    "estimated_tokens": 31}, "data": {"conditional_activity": []}}]},
+            "usage": {"json_bytes": 0, "estimated_tokens": 0}
+        });
+        independently_recount_usage(&mut output);
+        let exact = u16::try_from(serde_json::to_vec(&output).unwrap().len()).unwrap();
+        let default_tokens = u64::from(rootlight_agent::batch::DEFAULT_BATCH_TOKENS);
+        assert!(u64::from(exact) > default_tokens);
+        assert!(output["usage"]["estimated_tokens"].as_u64().unwrap() <= default_tokens);
+        let children = output["data"]["operation_results"].clone();
+        let mut too_many_tokens = output.clone();
+        too_many_tokens["data"]["evidence"] = json!("x".repeat(12_000));
+        independently_recount_usage(&mut too_many_tokens);
+        assert!(
+            too_many_tokens["usage"]["estimated_tokens"]
+                .as_u64()
+                .unwrap()
+                > default_tokens
+        );
+        for budget in [None, Some(json!({"max_results": 1}))] {
+            let mut arguments = Value::Object(retained_input(tool.name()));
+            arguments.as_object_mut().unwrap().remove("budget");
+            if let Some(budget) = budget {
+                arguments["budget"] = budget;
+            }
+            let input = decode_typed_input(tool, &arguments).unwrap();
+            let limits = publication_limits(&arguments, &input).unwrap();
+            assert_eq!(limits.estimated_tokens, default_tokens);
+            assert_eq!(
+                limits.byte_budget.maximums().tokens,
+                BudgetLimits::server_ceiling().maximums().tokens
+            );
+            let mut accepted = output.clone();
+            reconcile_published_usage(tool, &mut accepted, limits).unwrap();
+            assert_eq!(accepted, output);
+            assert_eq!(accepted["data"]["operation_results"], children);
+            assert!(matches!(
+                reconcile_published_usage(tool, &mut too_many_tokens.clone(), limits),
+                Err(ToolResultError::Limit)
+            ));
+        }
+        for ceiling in [exact, exact - 1] {
+            let mut arguments = Value::Object(retained_input(tool.name()));
+            arguments["budget"] = json!({"max_tokens": ceiling});
+            let input = decode_typed_input(tool, &arguments).unwrap();
+            let limits = publication_limits(&arguments, &input).unwrap();
+            let result = reconcile_published_usage(tool, &mut output.clone(), limits);
+            assert_eq!(result.is_ok(), ceiling == exact);
+            if ceiling != exact {
+                assert!(matches!(result, Err(ToolResultError::Limit)));
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn current_conditional_metadata_is_preserved_and_every_retained_downgrade_is_refused() {
+        for (tool, reason, versions) in [
+            (
+                VerticalTool::CodeLocate,
+                "missing_definition",
+                &[
+                    "1.9", "1.8", "1.7", "1.6", "1.5", "1.4", "1.3", "1.2", "1.1", "1.0",
+                ][..],
+            ),
+            (
+                VerticalTool::SourceRead,
+                "no_inventory",
+                &["1.1", "1.0"][..],
+            ),
+        ] {
+            let output = conditional_fixture(tool, reason);
+            for version in std::iter::once(tool.contract_version()).chain(versions.iter().copied())
+            {
+                let router = ToolRouter::new(
+                    StaticExecutor {
+                        result: Ok(output.clone()),
+                    },
+                    ExposureProfile::Developer,
+                )
+                .unwrap();
+                let result = success(
+                    router
+                        .handle(
+                            request(
+                                "tools/call",
+                                json!({
+                                    "name": tool.name(), "arguments": retained_input(tool.name()),
+                                    "_meta": {(TOOL_CONTRACT_VERSION_META_KEY): version}
+                                }),
+                            ),
+                            cancellation(),
+                        )
+                        .await,
+                );
+                assert_eq!(result["structuredContent"]["schema_version"], version);
+                if version == tool.contract_version() {
+                    assert_eq!(result["isError"], false);
+                    assert_eq!(
+                        result["structuredContent"]["data"]["conditional_activity"],
+                        output["data"]["conditional_activity"]
+                    );
+                } else {
+                    assert_eq!(result["isError"], true);
+                    assert_eq!(
+                        result["structuredContent"]["error"]["code"],
+                        "PROTOCOL_MISMATCH"
+                    );
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn new_retained_slots_serve_exact_representable_empty_sidecars() {
+        for (tool, version) in [
+            (VerticalTool::CodeLocate, "1.9"),
+            (VerticalTool::SourceRead, "1.1"),
+        ] {
+            let output = retained_output(tool.name());
+            let router = ToolRouter::new(
+                StaticExecutor { result: Ok(output) },
+                ExposureProfile::Developer,
+            )
+            .unwrap();
+            let result = success(router.handle(request("tools/call", json!({
+                "name": tool.name(), "arguments": retained_input(tool.name()), "_meta": {(TOOL_CONTRACT_VERSION_META_KEY): version}
+            })), cancellation()).await);
+            assert_eq!(result["isError"], false);
+            assert_eq!(result["structuredContent"]["schema_version"], version);
+            assert!(
+                result["structuredContent"]["data"]
+                    .get("conditional_activity")
+                    .is_none()
+            );
+        }
+    }
+
+    #[test]
+    fn metadata_only_source_partiality_requires_exact_scan_warning_and_resource_truth() {
+        let tool = VerticalTool::SourceRead;
+        let input = decode_typed_input(tool, &Value::Object(retained_input(tool.name()))).unwrap();
+        let mut output = Value::Object(conditional_fixture(tool, "scan_incomplete"));
+        output["schema_version"] = json!("1.2");
+        output["truncated"] = json!(true);
+        output["completeness"] = json!({"state": "truncated", "limiting_resources": [{"kind": "rows", "limit": null, "observed": null}], "continuation": "unavailable", "guidance": ["narrow_scope"]});
+        assert!(
+            output["data"]["stale_references"]
+                .as_array()
+                .unwrap()
+                .is_empty()
+        );
+        assert!(output["data"]["elisions"].as_array().unwrap().is_empty());
+        assert!(typed_output_is_valid(tool, &input, &output));
+        let exact_chunks = output["data"]["chunks"].clone();
+        output["warnings"][0]["message"] =
+            json!("conditional activity unproven for 2 returned items");
+        assert!(!typed_output_is_valid(tool, &input, &output));
+        output["warnings"][0]["message"] =
+            json!("conditional activity unproven for 1 returned items");
+        output["completeness"]["limiting_resources"][0]["kind"] = json!("source_bytes");
+        assert!(!typed_output_is_valid(tool, &input, &output));
+        assert_eq!(output["data"]["chunks"], exact_chunks);
     }
 
     #[tokio::test]
@@ -6843,6 +7673,7 @@ mod tests {
     #[tokio::test]
     async fn oversized_valid_source_output_becomes_a_bounded_tool_error() {
         let mut output = retained_output("source.read");
+        output.insert("schema_version".into(), json!("1.2"));
         let source_bytes = 200_000usize;
         output["data"]["chunks"][0]["content"] = json!("\"".repeat(source_bytes));
         output["data"]["chunks"][0]["end_byte"] = json!(source_bytes);
@@ -6853,7 +7684,7 @@ mod tests {
             !serialized_json_fits(&Value::Object(output.clone()), MAX_TOOL_STRUCTURED_BYTES),
             "fixture crosses the mirror-safe structured budget"
         );
-        serde_json::from_value::<SourceReadOutput>(Value::Object(output.clone()))
+        serde_json::from_value::<SourceReadOutputV1_2>(Value::Object(output.clone()))
             .expect("oversized fixture remains a valid typed source response");
 
         let router = ToolRouter::new(
@@ -6881,7 +7712,7 @@ mod tests {
             result["structuredContent"]["error"]["code"],
             "RESOURCE_EXHAUSTED"
         );
-        serde_json::from_value::<SourceReadOutputV1_1>(result["structuredContent"].clone())
+        serde_json::from_value::<SourceReadOutputV1_2>(result["structuredContent"].clone())
             .expect("resource error uses the source.read output contract");
         assert!(serialized_json_fits(&result, MAX_TOOL_RESULT_BYTES));
         let mirror: Value = serde_json::from_str(

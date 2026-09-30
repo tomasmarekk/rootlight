@@ -1438,7 +1438,7 @@ pub struct PlanExplanation {
 ///
 /// Bumped whenever plan construction changes meaningfully so fingerprints taken
 /// under different planner versions never collide.
-pub const PLANNER_VERSION: u32 = 4;
+pub const PLANNER_VERSION: u32 = 5;
 
 impl PlanExplanation {
     /// Creates a plan explanation carrying the current planner version and an
@@ -1543,7 +1543,7 @@ mod tests {
     fn new_plans_carry_the_current_planner_version() {
         let plan = PlanExplanation::new(1, vec!["catalog_snapshot".to_owned()], Vec::new());
 
-        assert_eq!(PLANNER_VERSION, 4);
+        assert_eq!(PLANNER_VERSION, 5);
         assert_eq!(plan.planner_version, PLANNER_VERSION);
     }
 

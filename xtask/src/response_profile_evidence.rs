@@ -437,7 +437,8 @@ fn representative_output(
                 "modes": ["exact", "lexical"],
                 "semantic_available": true
             },
-            "suggested_next": []
+            "suggested_next": [],
+            "conditional_activity": []
         }),
         McpTool::SymbolExplain => serde_json::json!({
             "symbols": [{
@@ -950,6 +951,9 @@ fn invariant_projection_for(output: &Value) -> Value {
     let mut projection = output.clone();
     if let Some(object) = projection.as_object_mut() {
         object.remove("data");
+        if let Some(activity) = output.pointer("/data/conditional_activity") {
+            object.insert("conditional_activity".to_owned(), activity.clone());
+        }
     }
     normalize_usage_counters(&mut projection);
     projection

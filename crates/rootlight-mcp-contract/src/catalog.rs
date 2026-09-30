@@ -164,7 +164,7 @@ impl McpTool {
                 "Read or request cancellation of one known long-running Rootlight operation."
             }
             Self::CodeLocate => {
-                "Use bounded exact-identifier or indexed lexical-text matching over normalized symbols in one selected generation with authenticated continuation; path, structural, semantic, and documentation modes are unsupported."
+                "Use bounded exact-identifier or indexed lexical-text matching with source-bound conditional membership for indexed symbols and files in one selected generation with authenticated continuation; conditional activity applies only to classic Visual Basic/VBA returned items, incomplete membership scans suppress continuation, and path, structural, semantic, and documentation modes are unsupported."
             }
             Self::SymbolExplain => {
                 "Return requested bounded definition sections, exact relation counts, sampled stable relation references, source previews, and selected producer provenance for explicit stable symbol identifiers; absent identifiers and unavailable section evidence are reported explicitly."
@@ -200,7 +200,7 @@ impl McpTool {
                 "Assemble deterministic generation-pinned definitions, implementations, callers, tests, risks, architecture, change, and source evidence from symbol, path, route, test, change, located-result, or plan seeds under an authenticated token-bounded continuation."
             }
             Self::SourceRead => {
-                "Read bounded source ranges from pinned source references as untrusted data using exact UTF-8 or explicit base64 bytes with optional context, canonical overlap merging, line projection, and caller-reduced ceilings; direct file selectors are unsupported."
+                "Read bounded source ranges from pinned references with source-bound conditional membership as untrusted data using exact UTF-8 or explicit base64 bytes with optional context, canonical overlap merging, line projection, and caller-reduced ceilings; conditional activity applies only to classic Visual Basic/VBA returned chunks, and direct file selectors are unsupported."
             }
             Self::QueryAdvanced => {
                 "Use a bounded safe-AST query with typed value parameters, authenticated continuation, and enforced cost, row, and depth limits."

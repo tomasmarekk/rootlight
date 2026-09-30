@@ -89,14 +89,20 @@ fn context_request() -> CanonicalContextPackRequest {
 #[test]
 fn golden_code_locate_lexical_and_exact() {
     let lexical = code_locate_plan(false, 20);
-    assert_eq!(lexical.operators, vec!["lexical_scan".to_owned()]);
+    assert_eq!(
+        lexical.operators,
+        vec!["lexical_scan", "conditional_activity_projection"]
+    );
     assert_eq!(lexical.applied_limits, vec!["max_results: 20".to_owned()]);
-    assert_eq!(lexical.estimated_cost, 160);
+    assert_eq!(lexical.estimated_cost, 240);
     assert_eq!(lexical.planner_version, PLANNER_VERSION);
 
     let exact = code_locate_plan(true, 5);
-    assert_eq!(exact.operators, vec!["index_lookup".to_owned()]);
-    assert_eq!(exact.estimated_cost, 40);
+    assert_eq!(
+        exact.operators,
+        vec!["index_lookup", "conditional_activity_projection"]
+    );
+    assert_eq!(exact.estimated_cost, 60);
 }
 
 #[test]
@@ -111,9 +117,12 @@ fn golden_symbol_explain() {
 #[test]
 fn golden_source_read() {
     let plan = source_read_plan(2);
-    assert_eq!(plan.operators, vec!["source_read".to_owned()]);
+    assert_eq!(
+        plan.operators,
+        vec!["source_read", "conditional_activity_projection"]
+    );
     assert_eq!(plan.applied_limits, vec!["references: 2".to_owned()]);
-    assert_eq!(plan.estimated_cost, 32);
+    assert_eq!(plan.estimated_cost, 40);
 }
 
 #[test]

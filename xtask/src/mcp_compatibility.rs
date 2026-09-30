@@ -335,13 +335,19 @@ fn success_examples(root: &Path) -> Result<Value, CompatibilityError> {
         &mut tools,
         "code.locate",
         VerticalTool::CodeLocate.contract_version(),
-        |_| Ok(()),
+        |data| {
+            data.insert("conditional_activity".into(), json!([]));
+            Ok(())
+        },
     )?;
     upgrade_additive_success_example(
         &mut tools,
         "source.read",
         VerticalTool::SourceRead.contract_version(),
-        |_| Ok(()),
+        |data| {
+            data.insert("conditional_activity".into(), json!([]));
+            Ok(())
+        },
     )?;
     upgrade_additive_success_example(
         &mut tools,
@@ -446,7 +452,9 @@ fn validate_retained_output_projections(tools: &[Value]) -> Result<(), Compatibi
                     tool.name()
                 ))
             })?;
-        let schema = if tool.pre_label_contract_version() == Some(output_version) {
+        let schema = if tool.pre_activity_contract_version() == Some(output_version) {
+            tool.pre_activity_output_schema_json()
+        } else if tool.pre_label_contract_version() == Some(output_version) {
             tool.pre_label_output_schema_json()
         } else if tool.recent_contract_version() == Some(output_version) {
             tool.recent_output_schema_json()
@@ -660,6 +668,14 @@ fn policy_snapshot() -> Value {
             "supported_version_detail": "supported_version",
         },
         "output_projection": {
+            "conditional_activity_downgrade": {
+                "code.locate": {"required_version": "1.10", "retained_through": "1.9"},
+                "source.read": {"required_version": "1.2", "retained_through": "1.1"},
+                "nonempty_sidecar": "reject_lossy_downgrade",
+                "empty_sidecar": "retain_existing_versions",
+                "public_error": ErrorCode::ProtocolMismatch,
+                "recovery": "select_supported_version"
+            },
             "implemented": true,
             "older_closed_output_claimed": true,
             "unrepresentable_entities": [{
@@ -1488,7 +1504,7 @@ mod tests {
                 },
                 {
                     "tool": "code.locate",
-                    "current_version": "1.9",
+                    "current_version": "1.10",
                     "projected_version": "1.0",
                 },
                 {
@@ -1543,7 +1559,7 @@ mod tests {
                 },
                 {
                     "tool": "source.read",
-                    "current_version": "1.1",
+                    "current_version": "1.2",
                     "projected_version": "1.0",
                 },
                 {

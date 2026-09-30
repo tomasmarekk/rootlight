@@ -78,6 +78,313 @@ pub fn scope_page_candidate() -> usize {
 ";
 
 #[test]
+fn vba_conditional_activity_crosses_processes_without_losing_source_or_downgrading() {
+    let source = "Attribute VB_Name = \"Activity\"\r\n#If True Then\r\nPublic Sub Included()\r\nEnd Sub\r\n#Else\r\nPublic Sub Excluded()\r\nEnd Sub\r\n#End If\r\n#If HostChoice Then\r\nPublic Sub Uncertain()\r\nEnd Sub\r\n#End If\r\nPublic Sub Mixed()\r\n#If False Then\r\nDim unused As Long\r\n#End If\r\nEnd Sub\r\n";
+    let mut fixture = RetrievalFixture::spawn_with_sources(
+        &[
+            ("Activity.bas", source.as_bytes()),
+            (
+                "project.vbp",
+                b"Type=Exe\nName=\"ConditionalProject\"\nModule=Activity; Activity.bas\n"
+                    .as_slice(),
+            ),
+        ],
+        FixtureLayout::Data,
+    );
+    let mut inventory = Value::Null;
+    let mut included_token = Value::Null;
+    for (name, expected) in [
+        ("Included", "active"),
+        ("Excluded", "inactive"),
+        ("Uncertain", "unproven"),
+        ("Mixed", "active"),
+    ] {
+        let mut baseline = Value::Null;
+        for profile in ["compact", "standard", "evidence"] {
+            let arguments = json!({
+                "query": name, "search_modes": ["exact"], "kinds": ["function"],
+                "scope": {"paths": ["Activity.bas"]}, "response_profile": profile,
+            });
+            let located = fixture.standalone_version(
+                &format!("conditional-locate-{name}-{profile}"),
+                "code.locate",
+                arguments,
+                "1.10",
+            );
+            assert_success(&located, "code.locate");
+            let output = &located["result"]["structuredContent"];
+            assert_eq!(output["schema_version"], "1.10");
+            assert_common_usage(output);
+            assert_eq!(
+                output["data"]["matches"].as_array().unwrap().len(),
+                1,
+                "{located:#}"
+            );
+            let found = &output["data"]["matches"][0];
+            assert_eq!(found["kind"], "function");
+            assert_eq!(found["display_name"], name);
+            let assessments = output["data"]["conditional_activity"].as_array().unwrap();
+            assert_eq!(assessments.len(), 1);
+            let assessment = &assessments[0];
+            assert_eq!(assessment["result_index"], 0);
+            assert_eq!(assessment["basis"], "definition_token");
+            assert_conditional_process_assessment(
+                assessment,
+                output,
+                source,
+                expected,
+                &mut inventory,
+            );
+            let token = &assessment["assessed_source_ref"];
+            let token_start =
+                source.find(&format!("Public Sub {name}")).unwrap() + "Public Sub ".len();
+            let token_end = token_start + name.len();
+            assert_eq!(
+                token["span"]["start_byte"],
+                u64::try_from(token_start).unwrap()
+            );
+            assert_eq!(token["span"]["end_byte"], u64::try_from(token_end).unwrap());
+            let body = &found["source_ref"];
+            assert_conditional_process_source(body, output, source);
+            assert!(
+                body["span"]["start_byte"].as_u64().unwrap()
+                    < token["span"]["start_byte"].as_u64().unwrap()
+            );
+            assert!(
+                body["span"]["end_byte"].as_u64().unwrap()
+                    > token["span"]["end_byte"].as_u64().unwrap()
+            );
+            assert_eq!(body["span"]["file"], token["span"]["file"]);
+            assert!(
+                found["symbol_id"]
+                    .as_str()
+                    .unwrap()
+                    .parse::<SymbolId>()
+                    .is_ok()
+            );
+            let identity = json!({"symbol_id": found["symbol_id"], "source_ref": body, "assessment": assessment});
+            if baseline.is_null() {
+                baseline = identity;
+            } else {
+                assert_eq!(identity, baseline);
+            }
+            if name == "Included" {
+                included_token = token.clone();
+            }
+
+            let read_arguments = json!({
+                "references": [{"source_ref": token}], "context_lines_before": 0,
+                "context_lines_after": 0, "include_line_numbers": false,
+                "response_profile": profile,
+            });
+            let read = fixture.standalone_version(
+                &format!("conditional-token-{name}-{profile}"),
+                "source.read",
+                read_arguments,
+                "1.2",
+            );
+            let chunk = assert_conditional_process_read(&read, source, expected, &mut inventory);
+            assert_eq!(chunk["content"], name);
+            assert_eq!(chunk["start_byte"], token["span"]["start_byte"]);
+            assert_eq!(chunk["end_byte"], token["span"]["end_byte"]);
+
+            if matches!(name, "Excluded" | "Mixed") {
+                let whole = fixture.standalone(
+                    &format!("conditional-body-{name}-{profile}"), "source.read",
+                    json!({"references": [{"source_ref": body}], "context_lines_before": 0,
+                        "context_lines_after": 0, "include_line_numbers": false, "response_profile": profile}),
+                );
+                let body_expected = if name == "Excluded" {
+                    "inactive"
+                } else {
+                    "unproven"
+                };
+                let chunk =
+                    assert_conditional_process_read(&whole, source, body_expected, &mut inventory);
+                assert!(
+                    chunk["content"]
+                        .as_str()
+                        .unwrap()
+                        .contains(&format!("Public Sub {name}()"))
+                );
+                assert_eq!(chunk["start_byte"], body["span"]["start_byte"]);
+                assert_eq!(chunk["end_byte"], body["span"]["end_byte"]);
+                if name == "Mixed" {
+                    assert!(
+                        chunk["content"]
+                            .as_str()
+                            .unwrap()
+                            .contains("#If False Then")
+                    );
+                }
+            }
+        }
+    }
+    let mut expanded_identity = Value::Null;
+    for profile in ["compact", "standard", "evidence"] {
+        let expanded = fixture.standalone(
+            &format!("conditional-expanded-{profile}"), "source.read",
+            json!({"references": [{"source_ref": included_token}], "context_lines_before": 2,
+                "context_lines_after": 3, "include_line_numbers": false, "response_profile": profile}),
+        );
+        let chunk = assert_conditional_process_read(&expanded, source, "unproven", &mut inventory);
+        assert!(
+            chunk["start_byte"].as_u64().unwrap()
+                < included_token["span"]["start_byte"].as_u64().unwrap()
+        );
+        assert!(
+            chunk["end_byte"].as_u64().unwrap()
+                > included_token["span"]["end_byte"].as_u64().unwrap()
+        );
+        assert!(chunk["content"].as_str().unwrap().contains("#Else"));
+        let identity = json!({"source_ref": chunk["source_ref"], "assessment": expanded["result"]["structuredContent"]["data"]["conditional_activity"][0]});
+        if expanded_identity.is_null() {
+            expanded_identity = identity;
+        } else {
+            assert_eq!(identity, expanded_identity);
+        }
+    }
+    for (tool, version, arguments) in [
+        (
+            "code.locate",
+            "1.9",
+            json!({"query": "Included", "search_modes": ["exact"], "kinds": ["function"], "scope": {"paths": ["Activity.bas"]}, "response_profile": "evidence"}),
+        ),
+        (
+            "source.read",
+            "1.1",
+            json!({"references": [{"source_ref": included_token}], "context_lines_before": 0, "context_lines_after": 0, "response_profile": "evidence"}),
+        ),
+    ] {
+        let refused = fixture.standalone_version(
+            &format!("conditional-retained-{tool}"),
+            tool,
+            arguments,
+            version,
+        );
+        assert_public_error(&refused, "PROTOCOL_MISMATCH");
+        assert_eq!(
+            refused["result"]["structuredContent"]["schema_version"],
+            version
+        );
+    }
+    fixture.finish();
+}
+
+fn assert_conditional_process_source(reference: &Value, output: &Value, source: &str) {
+    let typed: rootlight_ir::SourceRef = serde_json::from_value(reference.clone()).unwrap();
+    assert_eq!(
+        reference["repository"],
+        output["repository"]["repository_id"]
+    );
+    assert_eq!(
+        reference["generation"],
+        output["generation"]["generation_id"]
+    );
+    assert_eq!(
+        typed.content_hash(),
+        rootlight_ids::content_hash(source.as_bytes())
+    );
+    assert!(typed.span().start_byte() < typed.span().end_byte());
+    assert!(typed.span().end_byte() <= u64::try_from(source.len()).unwrap());
+}
+
+fn assert_conditional_process_assessment(
+    assessment: &Value,
+    output: &Value,
+    source: &str,
+    expected: &str,
+    inventory: &mut Value,
+) {
+    assert_eq!(assessment["activity"], expected, "{output:#}");
+    assert_conditional_process_source(&assessment["assessed_source_ref"], output, source);
+    let retained = &assessment["inventory"];
+    assert_eq!(retained["complete"], true);
+    assert_eq!(retained["scope"]["start_byte"], 0);
+    assert_eq!(
+        retained["scope"]["end_byte"],
+        u64::try_from(source.len()).unwrap()
+    );
+    for field in ["fact_id", "parser_provenance_id"] {
+        let encoded = retained[field].as_str().unwrap();
+        let fact = encoded.parse::<rootlight_ids::FactId>().unwrap();
+        assert_eq!(fact.to_string(), encoded);
+    }
+    assert_ne!(retained["fact_id"], retained["parser_provenance_id"]);
+    if inventory.is_null() {
+        *inventory = retained.clone();
+    } else {
+        assert_eq!(retained, inventory);
+    }
+    assert_eq!(
+        assessment["reason"],
+        if expected == "unproven" {
+            json!("membership_unproven")
+        } else {
+            Value::Null
+        }
+    );
+    let warnings: Vec<_> = output["warnings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|warning| warning["code"] == "conditional_activity_unproven")
+        .collect();
+    assert_eq!(warnings.len(), usize::from(expected == "unproven"));
+    if let Some(warning) = warnings.first() {
+        assert!(
+            !warning["message"]
+                .as_str()
+                .unwrap()
+                .contains("Activity.bas")
+        );
+        assert!(!warning["message"].as_str().unwrap().contains("HostChoice"));
+    }
+    assert_eq!(output["truncated"], false);
+    assert!(output["next_cursor"].is_null());
+}
+
+fn assert_conditional_process_read<'response>(
+    response: &'response Value,
+    source: &str,
+    expected: &str,
+    inventory: &mut Value,
+) -> &'response Value {
+    assert_success(response, "source.read");
+    let output = &response["result"]["structuredContent"];
+    assert_eq!(output["schema_version"], "1.2");
+    assert_common_usage(output);
+    assert_eq!(output["data"]["chunks"].as_array().unwrap().len(), 1);
+    let chunk = &output["data"]["chunks"][0];
+    assert_eq!(chunk["path"], "Activity.bas");
+    assert_eq!(chunk["encoding"], "utf8");
+    assert_conditional_process_source(&chunk["source_ref"], output, source);
+    assert_eq!(
+        chunk["content_hash"],
+        rootlight_ids::content_hash(source.as_bytes()).to_string()
+    );
+    let start = usize::try_from(chunk["start_byte"].as_u64().unwrap()).unwrap();
+    let end = usize::try_from(chunk["end_byte"].as_u64().unwrap()).unwrap();
+    assert_eq!(
+        chunk["content"].as_str().unwrap().as_bytes(),
+        &source.as_bytes()[start..end]
+    );
+    let assessments = output["data"]["conditional_activity"].as_array().unwrap();
+    assert_eq!(assessments.len(), 1);
+    let assessment = &assessments[0];
+    assert_eq!(assessment["result_index"], 0);
+    assert_eq!(assessment["basis"], "returned_range");
+    assert_conditional_process_assessment(assessment, output, source, expected, inventory);
+    let assessed = &assessment["assessed_source_ref"];
+    for field in ["repository", "generation", "content_hash", "span"] {
+        assert_eq!(assessed[field], chunk["source_ref"][field]);
+    }
+    assert_eq!(assessed["span"]["start_byte"], chunk["start_byte"]);
+    assert_eq!(assessed["span"]["end_byte"], chunk["end_byte"]);
+    chunk
+}
+
+#[test]
 fn vba_expression_class_types_keep_exact_evidence_across_processes() {
     let client = b"Attribute VB_Name = \"Client\"\nPublic Sub Run(ByVal Worker As Long)\nDim receiver As Object\nSet receiver = New Worker\nIf TypeOf receiver Is Worker Then\nreceiver.Apply\nEnd If\nEnd Sub\n";
     let worker =
@@ -4085,7 +4392,19 @@ fn assert_common_read_contract(output: &Value, repository_id: &str) {
     assert!(
         matches!(
             output["schema_version"].as_str(),
-            Some("1.0" | "1.1" | "1.2" | "1.3" | "1.4" | "1.5" | "1.6" | "1.7" | "1.8" | "1.9")
+            Some(
+                "1.0"
+                    | "1.1"
+                    | "1.2"
+                    | "1.3"
+                    | "1.4"
+                    | "1.5"
+                    | "1.6"
+                    | "1.7"
+                    | "1.8"
+                    | "1.9"
+                    | "1.10"
+            )
         ),
         "read response uses a supported additive schema version"
     );

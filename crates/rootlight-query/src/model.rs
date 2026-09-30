@@ -383,6 +383,8 @@ pub enum QueryOperator {
     LexicalSearch,
     /// Resolve lexical identities against normalized IR.
     EntityHydration,
+    /// Project bounded source-bound conditional membership for returned records.
+    ConditionalActivityProjection,
     /// Resolve one entity by stable identity.
     EntityLookup,
     /// Scan typed relations with an edge cap.
@@ -981,6 +983,8 @@ pub struct CodeLocateResult {
     pub generation: GenerationId,
     /// Hydrated hits in deterministic relevance and identity order.
     pub hits: Vec<LocateHit>,
+    /// Conditional membership for applicable returned hit ordinals.
+    pub conditional_activity: Vec<crate::ConditionalActivityAssessment>,
     /// Matching lexical candidates before the public result cap.
     pub matched_candidates: u64,
     /// Deduplicated coverage evidence relevant to returned entities.
@@ -2417,7 +2421,9 @@ pub struct SourceReadQueryResult {
     pub generation: GenerationId,
     /// Verified chunks in selector order.
     pub chunks: Vec<SourceChunkResult>,
-    /// Authoritative execution completeness for the atomic source read.
+    /// Conditional membership of actual expanded returned chunk ranges.
+    pub conditional_activity: Vec<crate::ConditionalActivityAssessment>,
+    /// Authoritative completeness, including correctness-bearing metadata scans.
     pub execution: ExecutionCompleteness,
 }
 

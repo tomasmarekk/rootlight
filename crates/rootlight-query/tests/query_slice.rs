@@ -1,6 +1,6 @@
 //! End-to-end fixtures for the daemon-independent first query slice.
 
-use std::{collections::BTreeSet, fs, path::Path, time::Duration};
+use std::{collections::BTreeSet, fs, path::Path, sync::Arc, time::Duration};
 
 use rootlight_cancel::{Cancellation, CancellationReason};
 use rootlight_ids::{
@@ -9,11 +9,14 @@ use rootlight_ids::{
 };
 use rootlight_ir::{
     AnalysisTier, BuildContextIdentity, Confidence, CoverageStatus, DiagnosticRecord,
-    DiagnosticSeverity, EvidenceKind, ExtensionSupport, FactEvidence, FileRecord, IrDocument,
-    IrLimits, NormalizedIrDocument, ProducerIdentity, ProducerKind, ProvenanceRecord,
-    RelationEndpoint, RelationPredicate, RelationRecord, SourceRef, SourceSpan, decode_ir_document,
+    DiagnosticSeverity, EntityKind, EntityRecord, EntityVisibility, EvidenceKind, ExtensionSupport,
+    FactEvidence, FileRecord, IrDocument, IrLimits, NormalizedIrDocument, OccurrenceRecord,
+    OccurrenceRole, OccurrenceTarget, ProducerIdentity, ProducerKind, ProvenanceRecord,
+    RelationEndpoint, RelationPredicate, RelationRecord, SourceRef, SourceSpan, VbaCompilation,
+    VbaCompilationActivity, VbaCompilationBranch, decode_ir_document, new_vba_compilation_envelope,
 };
 use rootlight_query::{
+    ConditionalActivityBasis, ConditionalActivityReason, ConditionalActivityState,
     ExecutionCompletenessState, GenerationSet, LexicalProjectionBuilder, LocateMode, PlanKind,
     QueryBudget, QueryError, QueryResource, QueryResponse, QueryService, RelationDirection,
     RelationFamily, RepositoryDataTrust, TokenAccountingProfile, project_lexical_documents,
@@ -802,6 +805,710 @@ fn fixture_search(snapshot: &GenerationSnapshot) -> FakeSearch {
             relevance_score: 1.0,
         }],
     }
+}
+
+const CONDITIONAL_SOURCE: &[u8] = b"Public Sub Always()\n#If True Then\n    value = 1\n#Else\n    value = 2\n#End If\nEnd Sub\n#If True Then\nPublic Sub Included()\nEnd Sub\n#Else\nPublic Sub Excluded()\nEnd Sub\n#End If\n#If Host Then\nPublic Sub Unknown()\nEnd Sub\n#End If\n";
+
+fn conditional_fixture() -> (GenerationSnapshot, Arc<SourceSnapshot>, FakeSearch) {
+    let template = fixture_snapshot();
+    let repository = template.metadata().repository();
+    let generation = template.metadata().generation();
+    let path = RelativePath::parse(Path::new("Module.bas")).unwrap();
+    let file = derive_file(FileIdentity {
+        repository,
+        path_identity: path.identity_bytes(),
+    })
+    .id();
+    let hash = content_hash(CONDITIONAL_SOURCE);
+    let source = |start, end| {
+        SourceRef::new(
+            repository,
+            generation,
+            SourceSpan::new(file, start, end).unwrap(),
+            hash,
+            None,
+        )
+    };
+    let full = source(0, u64::try_from(CONDITIONAL_SOURCE.len()).unwrap());
+    let parser = derive_fact("rootlight.query-test.conditional-parser/v1", b"module").id();
+    let mut document = NormalizedIrDocument::empty(repository, generation);
+    document.files.push(FileRecord {
+        id: file,
+        repository,
+        generation,
+        path: path.as_str().to_owned(),
+        path_locator: Some(path.to_locator()),
+        content_hash: hash,
+        byte_length: u64::try_from(CONDITIONAL_SOURCE.len()).unwrap(),
+        language: "vba".to_owned(),
+        encoding: "utf-8".to_owned(),
+        generated: false,
+        provenance: parser,
+        evidence: FactEvidence {
+            source: Some(full.clone()),
+            derivation: Vec::new(),
+        },
+    });
+    document.provenance.push(ProvenanceRecord {
+        id: parser,
+        repository,
+        generation,
+        producer_kind: ProducerKind::Parser,
+        producer: ProducerIdentity::new("rootlight-query-test", "1.0.0", hash).unwrap(),
+        binary_digest: hash,
+        frontend_version: Some("1.0.0".to_owned()),
+        language: "vba".to_owned(),
+        tier: AnalysisTier::TierB,
+        build_context: BuildContextIdentity::new(hash),
+        input_sources: vec![full.clone()],
+        evidence_sources: vec![full.clone()],
+        derivation_parents: Vec::new(),
+        rule: None,
+    });
+    let text = std::str::from_utf8(CONDITIONAL_SOURCE).unwrap();
+    for (index, name) in ["Always", "Included", "Excluded", "Unknown"]
+        .into_iter()
+        .enumerate()
+    {
+        let token_start = text.find(name).unwrap();
+        let token_end = token_start + name.len();
+        let body_start = text[..token_start].rfind("Public Sub ").unwrap();
+        let body_end = token_end + text[token_end..].find("End Sub\n").unwrap() + "End Sub\n".len();
+        let symbol = SymbolId::from_bytes([u8::try_from(index + 1).unwrap(); 20]);
+        let token = source(
+            u64::try_from(token_start).unwrap(),
+            u64::try_from(token_end).unwrap(),
+        );
+        document.entities.push(EntityRecord {
+            id: symbol,
+            repository,
+            generation,
+            kind: EntityKind::Function,
+            language: "vba".to_owned(),
+            tier: AnalysisTier::TierB,
+            canonical_name: name.to_owned(),
+            display_name: name.to_owned(),
+            qualified_name: format!("Module.{name}"),
+            container: None,
+            visibility: EntityVisibility::Public,
+            flags: Vec::new(),
+            provenance: parser,
+            evidence: FactEvidence {
+                source: Some(source(
+                    u64::try_from(body_start).unwrap(),
+                    u64::try_from(body_end).unwrap(),
+                )),
+                derivation: Vec::new(),
+            },
+        });
+        document.occurrences.push(OccurrenceRecord {
+            id: derive_fact("rootlight.query-test.definition/v1", name.as_bytes()).id(),
+            repository,
+            generation,
+            file,
+            source: token.clone(),
+            role: OccurrenceRole::Definition,
+            enclosing: None,
+            target: OccurrenceTarget::Resolved { symbol },
+            syntactic_text_hash: content_hash(name.as_bytes()),
+            syntax_kind: "procedure_name".to_owned(),
+            provenance: parser,
+            confidence: Confidence::new(1000).unwrap(),
+            evidence: FactEvidence {
+                source: Some(token),
+                derivation: Vec::new(),
+            },
+        });
+    }
+    let mut branches = Vec::new();
+    for (start, _) in text.match_indices("#If ") {
+        let header_end = start + text[start..].find('\n').unwrap() + 1;
+        let closing = header_end + text[header_end..].find("#End If\n").unwrap();
+        let group = source(
+            u64::try_from(start).unwrap(),
+            u64::try_from(closing + "#End If\n".len()).unwrap(),
+        )
+        .span();
+        if let Some(relative_else) = text[header_end..closing].find("#Else\n") {
+            let alternative = header_end + relative_else;
+            branches.push(VbaCompilationBranch {
+                group,
+                region: source(
+                    u64::try_from(header_end).unwrap(),
+                    u64::try_from(alternative).unwrap(),
+                )
+                .span(),
+                activity: VbaCompilationActivity::Active,
+            });
+            branches.push(VbaCompilationBranch {
+                group,
+                region: source(
+                    u64::try_from(alternative + "#Else\n".len()).unwrap(),
+                    u64::try_from(closing).unwrap(),
+                )
+                .span(),
+                activity: VbaCompilationActivity::Inactive,
+            });
+        } else {
+            branches.push(VbaCompilationBranch {
+                group,
+                region: source(
+                    u64::try_from(header_end).unwrap(),
+                    u64::try_from(closing).unwrap(),
+                )
+                .span(),
+                activity: VbaCompilationActivity::Unproven,
+            });
+        }
+    }
+    document.extensions.push(
+        new_vba_compilation_envelope(
+            repository,
+            generation,
+            parser,
+            full.clone(),
+            VbaCompilation {
+                scope: full.span(),
+                complete: true,
+                branches,
+            },
+        )
+        .unwrap(),
+    );
+    let snapshot = GenerationSnapshot::new(
+        template.metadata(),
+        document,
+        &IrLimits::default(),
+        &ExtensionSupport::default(),
+    )
+    .unwrap();
+    let search = FakeSearch {
+        generation,
+        hits: snapshot
+            .document()
+            .entities
+            .iter()
+            .map(|entity| SearchHit {
+                symbol_id: Some(entity.id),
+                file_id: file,
+                identifier: entity.display_name.clone(),
+                canonical_name: None,
+                qualified_name: entity.qualified_name.clone(),
+                path: path.as_str().to_owned(),
+                kind: serialized_label(&entity.kind),
+                language: entity.language.clone(),
+                tier: serialized_label(&entity.tier),
+                generated: false,
+                test: false,
+                declaration_only: false,
+                relevance_score: 1.0,
+            })
+            .collect(),
+    };
+    let retained = Arc::new(
+        SourceSnapshot::from_persisted(repository, path, file, hash, CONDITIONAL_SOURCE.to_vec())
+            .unwrap(),
+    );
+    (snapshot, retained, search)
+}
+
+fn conditional_locate(
+    snapshot: &GenerationSnapshot,
+    search: &FakeSearch,
+    budget: QueryBudget,
+) -> rootlight_query::CodeLocateResult {
+    let query = QueryService::new(snapshot, search).unwrap();
+    let plan = query
+        .plan_code_locate(
+            "procedure".to_owned(),
+            LocateMode::Exact,
+            4,
+            0,
+            SearchBudget {
+                max_candidates: search.hits.len().max(4),
+                ..SearchBudget::default()
+            },
+            budget,
+        )
+        .unwrap();
+    let response = query
+        .execute_code_locate(&plan, &Cancellation::new())
+        .unwrap();
+    assert_exact_response_accounting(&response);
+    response.data
+}
+
+#[test]
+fn conditional_activity_locate_uses_unique_definition_tokens_not_whole_bodies() {
+    let (snapshot, _, search) = conditional_fixture();
+    let result = conditional_locate(&snapshot, &search, QueryBudget::new());
+    assert_eq!(result.hits.len(), 4);
+    assert_eq!(result.conditional_activity.len(), 4);
+    assert!(!result.execution.is_truncated());
+    for assessment in &result.conditional_activity {
+        let hit = &result.hits[usize::try_from(assessment.result_index).unwrap()];
+        assert_eq!(assessment.basis, ConditionalActivityBasis::DefinitionToken);
+        let exact = assessment.assessed_source_ref.as_ref().unwrap();
+        let bytes = &CONDITIONAL_SOURCE[usize::try_from(exact.span().start_byte()).unwrap()
+            ..usize::try_from(exact.span().end_byte()).unwrap()];
+        assert_eq!(bytes, hit.identifier.as_bytes());
+        assert_ne!(exact.span(), hit.source.as_ref().unwrap().span());
+        let expected = match hit.identifier.as_str() {
+            "Always" | "Included" => ConditionalActivityState::Active,
+            "Excluded" => ConditionalActivityState::Inactive,
+            "Unknown" => ConditionalActivityState::Unproven,
+            other => panic!("unexpected authored procedure {other}"),
+        };
+        assert_eq!(assessment.activity, expected);
+        assert_eq!(
+            assessment.reason,
+            (expected == ConditionalActivityState::Unproven)
+                .then_some(ConditionalActivityReason::MembershipUnproven)
+        );
+        let inventory = assessment.inventory.as_ref().unwrap();
+        assert!(inventory.complete);
+        assert_eq!(inventory.fact_id, snapshot.document().extensions[0].id);
+        assert_eq!(
+            inventory.parser_provenance_id,
+            snapshot.document().extensions[0].provenance
+        );
+    }
+}
+
+#[test]
+fn conditional_activity_missing_ambiguous_and_incomplete_never_guess_a_definition() {
+    let (snapshot, _, search) = conditional_fixture();
+    for mode in ["missing", "ambiguous", "no_inventory", "incomplete"] {
+        let mut document = snapshot.document().clone();
+        if mode == "missing" {
+            document.occurrences.clear();
+        }
+        if mode == "ambiguous" {
+            let extra: Vec<_> = document
+                .occurrences
+                .iter()
+                .map(|original| {
+                    let mut duplicate = original.clone();
+                    duplicate.id = derive_fact(
+                        "rootlight.query-test.duplicate-definition/v1",
+                        original.id.to_string().as_bytes(),
+                    )
+                    .id();
+                    duplicate
+                })
+                .collect();
+            document.occurrences.extend(extra);
+        }
+        if mode == "no_inventory" {
+            document.extensions.clear();
+        }
+        if mode == "incomplete" {
+            let envelope = &document.extensions[0];
+            let mut model = rootlight_ir::decode_vba_compilation_envelope(envelope).unwrap();
+            model.complete = false;
+            document.extensions[0] = new_vba_compilation_envelope(
+                document.repository,
+                document.generation,
+                envelope.provenance,
+                envelope.evidence.source.clone().unwrap(),
+                model,
+            )
+            .unwrap();
+        }
+        let changed = GenerationSnapshot::new(
+            snapshot.metadata(),
+            document,
+            &IrLimits::default(),
+            &ExtensionSupport::default(),
+        )
+        .unwrap();
+        let result = conditional_locate(&changed, &search, QueryBudget::new());
+        assert_eq!(result.hits.len(), 4);
+        for assessment in result.conditional_activity {
+            assert_eq!(
+                assessment.activity,
+                ConditionalActivityState::Unproven,
+                "{mode}"
+            );
+            assert_eq!(
+                assessment.reason,
+                Some(match mode {
+                    "missing" => ConditionalActivityReason::MissingDefinition,
+                    "ambiguous" => ConditionalActivityReason::AmbiguousDefinition,
+                    "no_inventory" => ConditionalActivityReason::NoInventory,
+                    "incomplete" => ConditionalActivityReason::IncompleteInventory,
+                    _ => unreachable!(),
+                })
+            );
+            assert_eq!(
+                assessment.assessed_source_ref.is_none(),
+                matches!(mode, "missing" | "ambiguous")
+            );
+            assert_eq!(assessment.inventory.is_some(), mode == "incomplete");
+        }
+    }
+}
+
+#[test]
+fn conditional_activity_source_reads_assess_expanded_bytes_and_keep_inactive_source() {
+    let (snapshot, retained, search) = conditional_fixture();
+    let sources = [retained];
+    let source = SourceService::from_snapshots(&sources, &snapshot).unwrap();
+    let query = QueryService::new(&snapshot, &search).unwrap();
+    let locate = conditional_locate(&snapshot, &search, QueryBudget::new());
+    let always = locate
+        .conditional_activity
+        .iter()
+        .find(|assessment| {
+            locate.hits[usize::try_from(assessment.result_index).unwrap()].identifier == "Always"
+        })
+        .unwrap();
+    assert_eq!(always.activity, ConditionalActivityState::Active);
+    let token = always.assessed_source_ref.clone().unwrap();
+    for (options, expected) in [
+        (
+            SourceReadOptions::new()
+                .with_context_lines_before(0)
+                .with_context_lines_after(0),
+            ConditionalActivityState::Active,
+        ),
+        (
+            SourceReadOptions::new()
+                .with_context_lines_before(0)
+                .with_context_lines_after(8),
+            ConditionalActivityState::Unproven,
+        ),
+    ] {
+        let plan = query
+            .plan_source_read(
+                vec![token.clone()],
+                options,
+                SourceBudget::new(),
+                QueryBudget::new(),
+            )
+            .unwrap();
+        assert_eq!(
+            plan.explanation().estimate.rows,
+            QueryBudget::new().max_rows()
+        );
+        assert_eq!(
+            plan.explanation().estimate.memory_bytes,
+            QueryBudget::new().max_memory_bytes()
+        );
+        let response = query
+            .execute_source_read(&plan, &source, &Cancellation::new())
+            .unwrap();
+        assert_exact_response_accounting(&response);
+        let chunk = &response.data.chunks[0];
+        let assessment = &response.data.conditional_activity[0];
+        assert_eq!(assessment.basis, ConditionalActivityBasis::ReturnedRange);
+        assert_eq!(assessment.activity, expected);
+        let assessed = assessment.assessed_source_ref.as_ref().unwrap();
+        assert_eq!(
+            (assessed.span().start_byte(), assessed.span().end_byte()),
+            (chunk.start_byte, chunk.end_byte)
+        );
+        assert_eq!(
+            chunk.bytes,
+            CONDITIONAL_SOURCE[usize::try_from(chunk.start_byte).unwrap()
+                ..usize::try_from(chunk.end_byte).unwrap()]
+        );
+    }
+    let excluded = locate
+        .hits
+        .iter()
+        .find(|hit| hit.identifier == "Excluded")
+        .unwrap()
+        .source
+        .clone()
+        .unwrap();
+    let plan = query
+        .plan_source_read(
+            vec![excluded],
+            SourceReadOptions::new()
+                .with_context_lines_before(0)
+                .with_context_lines_after(0),
+            SourceBudget::new(),
+            QueryBudget::new(),
+        )
+        .unwrap();
+    let response = query
+        .execute_source_read(&plan, &source, &Cancellation::new())
+        .unwrap();
+    assert_eq!(
+        response.data.conditional_activity[0].activity,
+        ConditionalActivityState::Inactive
+    );
+    assert!(
+        std::str::from_utf8(&response.data.chunks[0].bytes)
+            .unwrap()
+            .contains("Public Sub Excluded()")
+    );
+}
+
+#[test]
+fn conditional_activity_resource_stop_preserves_records_without_membership_or_continuation() {
+    let (snapshot, retained, mut search) = conditional_fixture();
+    let complete = conditional_locate(&snapshot, &search, QueryBudget::new());
+    search.hits.extend(search.hits.clone());
+    let stopped = conditional_locate(&snapshot, &search, QueryBudget::new().with_max_rows(12));
+    assert_eq!(stopped.hits, complete.hits);
+    assert!(stopped.execution.is_truncated());
+    assert_eq!(stopped.next_page_offset, None);
+    assert!(stopped.limiting_resources.contains(&QueryResource::Rows));
+    for assessment in stopped.conditional_activity {
+        assert_eq!(assessment.activity, ConditionalActivityState::Unproven);
+        assert_eq!(
+            assessment.reason,
+            Some(ConditionalActivityReason::ScanIncomplete)
+        );
+        assert!(assessment.assessed_source_ref.is_none());
+        assert!(assessment.inventory.is_none());
+    }
+    let sources = [retained];
+    let source = SourceService::from_snapshots(&sources, &snapshot).unwrap();
+    let query = QueryService::new(&snapshot, &search).unwrap();
+    let reference = complete.hits[0].source.clone().unwrap();
+    let options = SourceReadOptions::new()
+        .with_context_lines_before(0)
+        .with_context_lines_after(0);
+    let full_plan = query
+        .plan_source_read(
+            vec![reference.clone()],
+            options,
+            SourceBudget::new(),
+            QueryBudget::new(),
+        )
+        .unwrap();
+    let full = query
+        .execute_source_read(&full_plan, &source, &Cancellation::new())
+        .unwrap();
+    let limited_plan = query
+        .plan_source_read(
+            vec![reference],
+            options,
+            SourceBudget::new(),
+            QueryBudget::new().with_max_rows(1),
+        )
+        .unwrap();
+    let limited = query
+        .execute_source_read(&limited_plan, &source, &Cancellation::new())
+        .unwrap();
+    assert_eq!(limited.data.chunks, full.data.chunks);
+    assert!(limited.data.execution.is_truncated());
+    assert_eq!(
+        limited.data.conditional_activity[0].reason,
+        Some(ConditionalActivityReason::ScanIncomplete)
+    );
+    assert!(
+        limited.data.conditional_activity[0]
+            .assessed_source_ref
+            .is_some()
+    );
+    assert!(limited.data.conditional_activity[0].inventory.is_none());
+    let cancellation = Cancellation::new();
+    cancellation.cancel(CancellationReason::ClientRequest);
+    assert!(matches!(
+        query.execute_source_read(&full_plan, &source, &cancellation),
+        Err(QueryError::Cancelled(CancellationReason::ClientRequest))
+    ));
+}
+
+#[test]
+fn conditional_activity_branchless_batch_reuses_decoder_scratch_under_default_budget() {
+    let (template, _, _) = conditional_fixture();
+    let mut document = NormalizedIrDocument::empty(
+        template.metadata().repository(),
+        template.metadata().generation(),
+    );
+    let repository = document.repository;
+    let generation = document.generation;
+    let parser = template.document().provenance[0].id;
+    let content = b"Public Sub Plain()\nEnd Sub\n";
+    let hash = content_hash(content);
+    let mut references = Vec::new();
+    let mut sources = Vec::new();
+    let mut producer = template.document().provenance[0].clone();
+    producer.input_sources.clear();
+    producer.evidence_sources.clear();
+    for index in 0..32 {
+        let path = RelativePath::parse(Path::new(&format!("Module{index}.bas"))).unwrap();
+        let file = derive_file(FileIdentity {
+            repository,
+            path_identity: path.identity_bytes(),
+        })
+        .id();
+        let source = SourceRef::new(
+            repository,
+            generation,
+            SourceSpan::new(file, 0, u64::try_from(content.len()).unwrap()).unwrap(),
+            hash,
+            None,
+        );
+        references.push(source.clone());
+        producer.input_sources.push(source.clone());
+        producer.evidence_sources.push(source.clone());
+        document.files.push(FileRecord {
+            id: file,
+            repository,
+            generation,
+            path: path.as_str().to_owned(),
+            path_locator: Some(path.to_locator()),
+            content_hash: hash,
+            byte_length: u64::try_from(content.len()).unwrap(),
+            language: "visual-basic-classic".to_owned(),
+            encoding: "utf-8".to_owned(),
+            generated: false,
+            provenance: parser,
+            evidence: FactEvidence {
+                source: Some(source.clone()),
+                derivation: Vec::new(),
+            },
+        });
+        document.extensions.push(
+            new_vba_compilation_envelope(
+                repository,
+                generation,
+                parser,
+                source.clone(),
+                VbaCompilation {
+                    scope: source.span(),
+                    complete: true,
+                    branches: Vec::new(),
+                },
+            )
+            .unwrap(),
+        );
+        sources.push(Arc::new(
+            SourceSnapshot::from_persisted(repository, path, file, hash, content.to_vec()).unwrap(),
+        ));
+    }
+    document.provenance.push(producer);
+    let snapshot = GenerationSnapshot::new(
+        template.metadata(),
+        document,
+        &IrLimits::default(),
+        &ExtensionSupport::default(),
+    )
+    .unwrap();
+    sources.sort_by_key(|source| source.file());
+    let search = FakeSearch {
+        generation,
+        hits: Vec::new(),
+    };
+    let query = QueryService::new(&snapshot, &search).unwrap();
+    let source = SourceService::from_snapshots(&sources, &snapshot).unwrap();
+    let plan = query
+        .plan_source_read(
+            references.clone(),
+            SourceReadOptions::new()
+                .with_context_lines_before(0)
+                .with_context_lines_after(0),
+            SourceBudget::new(),
+            QueryBudget::new(),
+        )
+        .unwrap();
+    let response = query
+        .execute_source_read(&plan, &source, &Cancellation::new())
+        .unwrap();
+    assert_exact_response_accounting(&response);
+    assert!(!response.data.execution.is_truncated());
+    assert_eq!(response.data.chunks.len(), 32);
+    assert_eq!(response.data.conditional_activity.len(), 32);
+    for (index, assessment) in response.data.conditional_activity.iter().enumerate() {
+        assert_eq!(assessment.result_index, u32::try_from(index).unwrap());
+        assert_eq!(assessment.activity, ConditionalActivityState::Active);
+        assert_eq!(
+            assessment.assessed_source_ref,
+            Some(references[index].clone())
+        );
+        assert!(assessment.inventory.as_ref().unwrap().complete);
+        assert_eq!(response.data.chunks[index].bytes, content);
+    }
+    assert!(response.usage.memory_bytes <= plan.explanation().estimate.memory_bytes);
+    assert!(response.usage.rows <= plan.explanation().estimate.rows);
+}
+
+#[test]
+fn conditional_activity_file_only_range_and_disjoint_scopes_are_not_definition_guesses() {
+    let (snapshot, _, mut search) = conditional_fixture();
+    let file = &snapshot.document().files[0];
+    search.hits = vec![SearchHit {
+        symbol_id: None,
+        file_id: file.id,
+        identifier: file.path.clone(),
+        canonical_name: None,
+        qualified_name: file.path.clone(),
+        path: file.path.clone(),
+        kind: "file".to_owned(),
+        language: file.language.clone(),
+        tier: serialized_label(&snapshot.document().provenance[0].tier),
+        generated: false,
+        test: false,
+        declaration_only: false,
+        relevance_score: 1.0,
+    }];
+    let result = conditional_locate(&snapshot, &search, QueryBudget::new());
+    assert_eq!(
+        result.conditional_activity[0].basis,
+        ConditionalActivityBasis::ReturnedRange
+    );
+    assert_eq!(
+        result.conditional_activity[0].activity,
+        ConditionalActivityState::Unproven
+    );
+    assert_eq!(
+        result.conditional_activity[0].reason,
+        Some(ConditionalActivityReason::MembershipUnproven)
+    );
+    assert_eq!(
+        result.conditional_activity[0].assessed_source_ref,
+        result.hits[0].source
+    );
+    let mut document = snapshot.document().clone();
+    let full = document.files[0].evidence.source.as_ref().unwrap();
+    let split = u64::try_from(CONDITIONAL_SOURCE.len() / 2).unwrap();
+    document.extensions = [(0, split), (split, file.byte_length)]
+        .into_iter()
+        .map(|(start, end)| {
+            let source = SourceRef::new(
+                document.repository,
+                document.generation,
+                SourceSpan::new(file.id, start, end).unwrap(),
+                full.content_hash(),
+                None,
+            );
+            new_vba_compilation_envelope(
+                document.repository,
+                document.generation,
+                file.provenance,
+                source.clone(),
+                VbaCompilation {
+                    scope: source.span(),
+                    complete: true,
+                    branches: Vec::new(),
+                },
+            )
+            .unwrap()
+        })
+        .collect();
+    let divided = GenerationSnapshot::new(
+        snapshot.metadata(),
+        document,
+        &IrLimits::default(),
+        &ExtensionSupport::default(),
+    )
+    .unwrap();
+    let result = conditional_locate(&divided, &search, QueryBudget::new());
+    assert_eq!(
+        result.conditional_activity[0].reason,
+        Some(ConditionalActivityReason::CrossScope)
+    );
+    assert!(result.conditional_activity[0].inventory.is_none());
+    assert_eq!(
+        result.conditional_activity[0].assessed_source_ref,
+        result.hits[0].source
+    );
 }
 
 #[test]

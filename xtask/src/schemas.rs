@@ -110,7 +110,7 @@ const COMPATIBILITY_BASELINES: [&str; 13] = [
     STORAGE_COMPATIBILITY_BASELINES[5],
     STORAGE_COMPATIBILITY_BASELINES[6],
 ];
-const DAEMON_PROTOCOL_DESCRIPTOR_BASELINES: [(&str, &str); 17] = [
+const DAEMON_PROTOCOL_DESCRIPTOR_BASELINES: [(&str, &str); 19] = [
     ("1.1", "protobuf/1.1/rootlight.desc"),
     ("1.2", "protobuf/1.2/rootlight.desc"),
     ("1.3", "protobuf/1.3/rootlight.desc"),
@@ -128,8 +128,10 @@ const DAEMON_PROTOCOL_DESCRIPTOR_BASELINES: [(&str, &str); 17] = [
     ("1.17", "protobuf/1.17/rootlight.desc"),
     ("1.18", "protobuf/1.18/rootlight.desc"),
     ("1.19", "protobuf/1.19/rootlight.desc"),
+    ("1.20", "protobuf/1.20/rootlight.desc"),
+    ("1.21", "protobuf/1.21/rootlight.desc"),
 ];
-const SCHEMA_PROVENANCE_INPUTS: [&str; 25] = [
+const SCHEMA_PROVENANCE_INPUTS: [&str; 26] = [
     "Cargo.lock",
     "crates/rootlight-config/src/lib.rs",
     "crates/rootlight-error/src/lib.rs",
@@ -140,6 +142,7 @@ const SCHEMA_PROVENANCE_INPUTS: [&str; 25] = [
     "crates/rootlight-ir/src/normalized.rs",
     "crates/rootlight-ir/src/validation.rs",
     "crates/rootlight-mcp-contract/src/lib.rs",
+    "crates/rootlight-mcp-contract/src/conditional_activity.rs",
     "crates/rootlight-mcp-contract/src/change.rs",
     "crates/rootlight-mcp-contract/src/context.rs",
     "crates/rootlight-mcp-contract/src/intent.rs",
@@ -934,6 +937,13 @@ fn generate_json_schemas(workspace_root: &Path, staged_root: &Path) -> Result<()
     write_schema::<IrDocumentSchema>(&schema_root.join("ir-1.0.schema.json"))?;
     write_normalized_ir_schema(&schema_root.join("ir-1.7.schema.json"))?;
     write_mcp_tool_schema_version::<CodeLocateInput>(&schema_root, "code.locate", "input", "1.9")?;
+    write_mcp_tool_schema_version::<CodeLocateInput>(&schema_root, "code.locate", "input", "1.10")?;
+    write_mcp_tool_schema_version::<rootlight_mcp_contract::source_entity::CodeLocateOutputV1_10>(
+        &schema_root,
+        "code.locate",
+        "output",
+        "1.10",
+    )?;
     write_mcp_tool_schema_version::<rootlight_mcp_contract::source_entity::CodeLocateOutputV1_9>(
         &schema_root,
         "code.locate",
@@ -1290,6 +1300,13 @@ fn generate_json_schemas(workspace_root: &Path, staged_root: &Path) -> Result<()
     write_mcp_tool_schema::<SourceReadInput>(&schema_root, "source.read", "input")?;
     write_mcp_tool_schema::<SourceReadOutput>(&schema_root, "source.read", "output")?;
     write_mcp_tool_schema_version::<SourceReadInput>(&schema_root, "source.read", "input", "1.1")?;
+    write_mcp_tool_schema_version::<SourceReadInput>(&schema_root, "source.read", "input", "1.2")?;
+    write_mcp_tool_schema_version::<rootlight_mcp_contract::source_entity::SourceReadOutputV1_2>(
+        &schema_root,
+        "source.read",
+        "output",
+        "1.2",
+    )?;
     write_mcp_tool_schema_version::<rootlight_mcp_contract::source_entity::SourceReadOutputV1_1>(
         &schema_root,
         "source.read",
@@ -1609,6 +1626,8 @@ fn write_schema_value(path: &Path, mut schema: schemars::Schema) -> Result<(), S
             name,
             "mcp-code-locate-input-1.9.schema.json"
                 | "mcp-code-locate-output-1.9.schema.json"
+                | "mcp-code-locate-input-1.10.schema.json"
+                | "mcp-code-locate-output-1.10.schema.json"
                 | "mcp-symbol-explain-input-1.9.schema.json"
                 | "mcp-symbol-explain-output-1.9.schema.json"
                 | "mcp-query-advanced-input-1.7.schema.json"
@@ -1643,6 +1662,8 @@ fn write_schema_value(path: &Path, mut schema: schemars::Schema) -> Result<(), S
         let precise_kinds = matches!(
             name,
             "mcp-code-locate-input-1.8.schema.json"
+                | "mcp-code-locate-input-1.10.schema.json"
+                | "mcp-code-locate-output-1.10.schema.json"
                 | "mcp-code-locate-input-1.9.schema.json"
                 | "mcp-code-locate-output-1.9.schema.json"
                 | "mcp-symbol-explain-input-1.9.schema.json"
@@ -1654,6 +1675,7 @@ fn write_schema_value(path: &Path, mut schema: schemars::Schema) -> Result<(), S
         let precise_output = matches!(
             name,
             "mcp-code-locate-output-1.8.schema.json"
+                | "mcp-code-locate-output-1.10.schema.json"
                 | "mcp-symbol-explain-output-1.8.schema.json"
                 | "mcp-code-locate-output-1.9.schema.json"
                 | "mcp-symbol-explain-output-1.9.schema.json"
@@ -3188,6 +3210,10 @@ fn expected_artifact_paths() -> Vec<String> {
         format!("{SCHEMA_ROOT}/json/ir-1.6.schema.json"),
         format!("{SCHEMA_ROOT}/json/ir-1.7.schema.json"),
         format!("{SCHEMA_ROOT}/json/mcp-code-locate-input-1.9.schema.json"),
+        format!("{SCHEMA_ROOT}/json/mcp-code-locate-input-1.10.schema.json"),
+        format!("{SCHEMA_ROOT}/json/mcp-code-locate-output-1.10.schema.json"),
+        format!("{SCHEMA_ROOT}/json/mcp-source-read-input-1.2.schema.json"),
+        format!("{SCHEMA_ROOT}/json/mcp-source-read-output-1.2.schema.json"),
         format!("{SCHEMA_ROOT}/json/mcp-code-locate-output-1.9.schema.json"),
         format!("{SCHEMA_ROOT}/json/mcp-symbol-explain-input-1.9.schema.json"),
         format!("{SCHEMA_ROOT}/json/mcp-symbol-explain-output-1.9.schema.json"),

@@ -18,13 +18,13 @@ use crate::{
 };
 
 /// Estimated cost units per planned match for `code.locate`.
-const LOCATE_COST_PER_RESULT: u64 = 8;
+const LOCATE_COST_PER_RESULT: u64 = 12;
 
 /// Estimated cost units per planned symbol for `symbol.explain`.
 const EXPLAIN_COST_PER_SYMBOL: u64 = 12;
 
 /// Estimated cost units per planned source reference for `source.read`.
-const READ_COST_PER_REFERENCE: u64 = 16;
+const READ_COST_PER_REFERENCE: u64 = 20;
 
 /// Estimated cost units per planned seed for `symbol.relationships`.
 const RELATIONSHIPS_COST_PER_SEED: u64 = 24;
@@ -170,6 +170,8 @@ pub enum RepoListPlanError {
 ///
 /// `exact` selects an index lookup (exact identifier) versus a lexical scan;
 /// `max_results` bounds the planned work and drives the cost estimate.
+/// Conditional membership is projected only for applicable returned records;
+/// this plan construction neither scans inventories nor retrieves source.
 #[must_use]
 pub fn code_locate_plan(exact: bool, max_results: u32) -> PlanExplanation {
     let operator = if exact {
@@ -179,7 +181,10 @@ pub fn code_locate_plan(exact: bool, max_results: u32) -> PlanExplanation {
     };
     PlanExplanation {
         estimated_cost: u64::from(max_results).saturating_mul(LOCATE_COST_PER_RESULT),
-        operators: vec![operator.to_owned()],
+        operators: vec![
+            operator.to_owned(),
+            "conditional_activity_projection".to_owned(),
+        ],
         applied_limits: vec![format!("max_results: {max_results}")],
         planner_version: PLANNER_VERSION,
         fingerprint: String::new(),
@@ -206,6 +211,8 @@ pub fn symbol_explain_plan(symbol_count: usize) -> PlanExplanation {
 /// Builds the source-free `source.read` plan for explain mode.
 ///
 /// `reference_count` bounds the planned work and drives the cost estimate.
+/// The conditional projection assesses actual returned ranges after source
+/// verification; explain itself never reads source or compilation inventories.
 #[must_use]
 pub fn source_read_plan(reference_count: usize) -> PlanExplanation {
     let cost = u64::try_from(reference_count)
@@ -213,7 +220,10 @@ pub fn source_read_plan(reference_count: usize) -> PlanExplanation {
         .saturating_mul(READ_COST_PER_REFERENCE);
     PlanExplanation {
         estimated_cost: cost,
-        operators: vec!["source_read".to_owned()],
+        operators: vec![
+            "source_read".to_owned(),
+            "conditional_activity_projection".to_owned(),
+        ],
         applied_limits: vec![format!("references: {reference_count}")],
         planner_version: PLANNER_VERSION,
         fingerprint: String::new(),
@@ -697,10 +707,16 @@ mod tests {
     #[test]
     fn plan_reflects_mode_and_limits() {
         let lexical = code_locate_plan(false, 20);
-        assert_eq!(lexical.operators, vec!["lexical_scan".to_owned()]);
+        assert_eq!(
+            lexical.operators,
+            vec!["lexical_scan", "conditional_activity_projection"]
+        );
         assert_eq!(lexical.applied_limits, vec!["max_results: 20".to_owned()]);
         let exact = code_locate_plan(true, 5);
-        assert_eq!(exact.operators, vec!["index_lookup".to_owned()]);
+        assert_eq!(
+            exact.operators,
+            vec!["index_lookup", "conditional_activity_projection"]
+        );
         assert!(exact.estimated_cost < lexical.estimated_cost);
     }
 
@@ -718,8 +734,29 @@ mod tests {
         use super::source_read_plan;
         assert_eq!(source_read_plan(2), source_read_plan(2));
         let plan = source_read_plan(2);
-        assert_eq!(plan.operators, vec!["source_read".to_owned()]);
+        assert_eq!(
+            plan.operators,
+            vec!["source_read", "conditional_activity_projection"]
+        );
         assert_eq!(plan.applied_limits, vec!["references: 2".to_owned()]);
+    }
+
+    #[test]
+    fn conditional_activity_stage_is_bound_to_the_current_plan_fingerprint() {
+        for current in [code_locate_plan(true, 2), super::source_read_plan(2)] {
+            assert_eq!(current.planner_version, 5);
+            assert_eq!(
+                current.operators.last().unwrap(),
+                "conditional_activity_projection"
+            );
+            let mut historical = current.clone();
+            historical.operators.pop();
+            historical.planner_version = 4;
+            assert_ne!(
+                physical_plan_fingerprint(&current, "generation"),
+                physical_plan_fingerprint(&historical, "generation")
+            );
+        }
     }
 
     #[test]

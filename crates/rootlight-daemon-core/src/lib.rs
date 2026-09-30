@@ -20900,6 +20900,7 @@ mod tests {
                 source: Some(source.clone()),
             };
         let locate_response = daemon::CodeLocateResponse {
+            conditional_activity: Vec::new(),
             schema_version: schema,
             context: Some(correlation_context(&repository, &generation, 3, 0)),
             hits: vec![locate_hit(6, &first_source), locate_hit(7, &second_source)],
@@ -21155,6 +21156,7 @@ mod tests {
                 tier: daemon::FirstSliceAnalysisTier::FirstSliceTierB as i32,
             };
         let source_response = daemon::SourceReadResponse {
+            conditional_activity: Vec::new(),
             schema_version: schema,
             context: Some(correlation_context(&repository, &generation, 2, 6)),
             chunks: vec![

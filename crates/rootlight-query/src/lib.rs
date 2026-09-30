@@ -6,11 +6,16 @@
 
 #![forbid(unsafe_code)]
 
+mod conditional_activity;
 mod model;
 mod projection;
 mod service;
 mod store;
 
+pub use conditional_activity::{
+    ConditionalActivityAssessment, ConditionalActivityBasis, ConditionalActivityInventory,
+    ConditionalActivityReason, ConditionalActivityScope, ConditionalActivityState,
+};
 pub use model::{
     ADVANCED_DEFAULT_MAX_DEPTH, ADVANCED_DEFAULT_MAX_RESULTS, ADVANCED_MAX_DEPTH,
     ADVANCED_MAX_ESTIMATED_COST, ADVANCED_MAX_RESULTS, ADVANCED_MAX_TRAVERSAL,

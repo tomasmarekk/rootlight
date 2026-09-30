@@ -69,12 +69,13 @@ use rootlight_observability::{
     build_support_bundle_for_schema,
 };
 use rootlight_protocol::{
-    CURRENT_PROTOCOL_MINOR, FIRST_SLICE_EFFECTIVE_BUDGET_SCHEMA_VERSION,
-    MAX_CODE_DEAD_CLASSIFICATION_BYTES, MAX_CODE_LOCATE_LANGUAGE_BYTES, MAX_CODE_LOCATE_LANGUAGES,
-    MAX_FIRST_SLICE_BUDGET_DEPTH, MAX_FIRST_SLICE_BUDGET_DURATION_MICROS,
-    MAX_FIRST_SLICE_BUDGET_EDGES, MAX_FIRST_SLICE_BUDGET_ESTIMATED_TOKENS,
-    MAX_FIRST_SLICE_BUDGET_JSON_BYTES, MAX_FIRST_SLICE_BUDGET_MEMORY_BYTES,
-    MAX_FIRST_SLICE_BUDGET_PATHS, MAX_FIRST_SLICE_BUDGET_RESULTS, MAX_FIRST_SLICE_BUDGET_ROWS,
+    CONDITIONAL_ACTIVITY_PROTOCOL_MINOR, CURRENT_PROTOCOL_MINOR,
+    FIRST_SLICE_EFFECTIVE_BUDGET_SCHEMA_VERSION, MAX_CODE_DEAD_CLASSIFICATION_BYTES,
+    MAX_CODE_LOCATE_LANGUAGE_BYTES, MAX_CODE_LOCATE_LANGUAGES, MAX_FIRST_SLICE_BUDGET_DEPTH,
+    MAX_FIRST_SLICE_BUDGET_DURATION_MICROS, MAX_FIRST_SLICE_BUDGET_EDGES,
+    MAX_FIRST_SLICE_BUDGET_ESTIMATED_TOKENS, MAX_FIRST_SLICE_BUDGET_JSON_BYTES,
+    MAX_FIRST_SLICE_BUDGET_MEMORY_BYTES, MAX_FIRST_SLICE_BUDGET_PATHS,
+    MAX_FIRST_SLICE_BUDGET_RESULTS, MAX_FIRST_SLICE_BUDGET_ROWS,
     MAX_FIRST_SLICE_BUDGET_SOURCE_BYTES, MINIMUM_PROTOCOL_MINOR,
     generated::{common::v1 as common, daemon::v1 as daemon},
 };
@@ -1261,6 +1262,91 @@ impl std::fmt::Debug for LocateHit {
     }
 }
 
+/// Stored conditional-compilation membership, not runtime execution or source truth.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ConditionalActivityState {
+    /// The assessed range has admitted active membership.
+    Active,
+    /// The assessed range has admitted inactive membership.
+    Inactive,
+    /// The available evidence cannot prove either membership.
+    Unproven,
+}
+
+/// The exact source selection assessed for a returned item.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ConditionalActivityBasis {
+    /// A unique definition token, not the entire entity body.
+    DefinitionToken,
+    /// The entire returned file selection or expanded source chunk.
+    ReturnedRange,
+}
+
+/// Why conditional-compilation membership remains unproven.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ConditionalActivityReason {
+    /// No owning inventory was found.
+    NoInventory,
+    /// The owning inventory is incomplete.
+    IncompleteInventory,
+    /// No unique definition token was found.
+    MissingDefinition,
+    /// Multiple competing definition tokens were found.
+    AmbiguousDefinition,
+    /// The range crosses independently owned scopes.
+    CrossScope,
+    /// An empty range has no membership claim.
+    EmptyRange,
+    /// A complete inventory cannot prove this range's membership.
+    MembershipUnproven,
+    /// A bounded metadata scan did not complete.
+    ScanIncomplete,
+    /// The negotiated daemon protocol cannot carry this evidence.
+    TransportUnavailable,
+}
+
+/// Half-open inventory scope inheriting the assessed source's immutable identity.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+pub struct ConditionalActivityScope {
+    /// Inclusive byte offset.
+    pub start_byte: u64,
+    /// Exclusive byte offset.
+    pub end_byte: u64,
+}
+
+/// Exact persisted compilation envelope and its parser provenance.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct ConditionalActivityInventory {
+    /// Typed identity of the persisted compilation envelope.
+    pub fact_id: FactId,
+    /// Typed identity of the envelope's parser provenance.
+    pub parser_provenance_id: FactId,
+    /// Source-relative owning scope.
+    pub scope: ConditionalActivityScope,
+    /// Whether the branch inventory is complete, not whether all conditions are known.
+    pub complete: bool,
+}
+
+/// Source-bound membership metadata for one returned applicable item.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct ConditionalActivityAssessment {
+    /// Zero-based index into the returned items, not the original selectors.
+    pub result_index: u32,
+    /// Selection whose membership was assessed.
+    pub basis: ConditionalActivityBasis,
+    /// Stored membership outcome.
+    pub activity: ConditionalActivityState,
+    /// Exact assessed selection, or null when no unique token is established.
+    pub assessed_source_ref: Option<SourceReference>,
+    /// Owning inventory when one can support this outcome.
+    pub inventory: Option<ConditionalActivityInventory>,
+    /// Required for unproven outcomes and absent for proven membership.
+    pub reason: Option<ConditionalActivityReason>,
+}
+
 /// Bounded lexical results for one generation.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct CodeLocate {
@@ -1276,6 +1362,8 @@ pub struct CodeLocate {
     pub next_page_offset: Option<u64>,
     /// Authoritative execution-completeness diagnostics.
     pub execution_completeness: ResultCompleteness,
+    /// Ordered source-bound membership metadata for applicable returned hits.
+    pub conditional_activity: Vec<ConditionalActivityAssessment>,
 }
 
 /// One compact generation-pinned symbol explanation.
@@ -1507,6 +1595,8 @@ pub struct SourceRead {
     pub truncated: bool,
     /// Authoritative execution-completeness diagnostics.
     pub execution_completeness: ResultCompleteness,
+    /// Ordered membership metadata for the actual expanded returned ranges.
+    pub conditional_activity: Vec<ConditionalActivityAssessment>,
 }
 
 impl std::fmt::Debug for SourceRead {
@@ -4091,7 +4181,7 @@ impl Client {
         page_offset: u64,
         options: RequestOptions,
     ) -> Result<CodeLocate, ClientError> {
-        match self.request_with_options(
+        let (response, minor) = self.request_with_protocol_and_options(
             build_code_locate_request(
                 repository,
                 generation,
@@ -4103,14 +4193,18 @@ impl Client {
                 page_offset,
             )?,
             options,
-        )? {
-            daemon::response_envelope::Response::CodeLocate(response) => parse_code_locate(
-                response,
-                repository,
-                generation,
-                maximum_results,
-                page_offset,
-            ),
+        )?;
+        match response {
+            daemon::response_envelope::Response::CodeLocate(response) => {
+                parse_code_locate_for_minor(
+                    response,
+                    repository,
+                    generation,
+                    maximum_results,
+                    page_offset,
+                    minor,
+                )
+            }
             _ => Err(ClientError::UnexpectedResponse),
         }
     }
@@ -4181,8 +4275,8 @@ impl Client {
         page_offset: u64,
         options: RequestOptions,
     ) -> Result<CodeLocate, ClientError> {
-        match self
-            .request_async_with_options(
+        let (response, minor) = self
+            .request_async_with_options_and_protocol(
                 build_code_locate_request(
                     repository,
                     generation,
@@ -4195,15 +4289,18 @@ impl Client {
                 )?,
                 options,
             )
-            .await?
-        {
-            daemon::response_envelope::Response::CodeLocate(response) => parse_code_locate(
-                response,
-                repository,
-                generation,
-                maximum_results,
-                page_offset,
-            ),
+            .await?;
+        match response {
+            daemon::response_envelope::Response::CodeLocate(response) => {
+                parse_code_locate_for_minor(
+                    response,
+                    repository,
+                    generation,
+                    maximum_results,
+                    page_offset,
+                    minor,
+                )
+            }
             _ => Err(ClientError::UnexpectedResponse),
         }
     }
@@ -4320,8 +4417,8 @@ impl Client {
         page_offset: u64,
         options: RequestOptions,
     ) -> Result<CodeLocate, ClientError> {
-        match self
-            .request_async_with_options(
+        let (response, minor) = self
+            .request_async_with_options_and_protocol(
                 build_code_locate_request_with_kinds(
                     repository,
                     generation,
@@ -4335,15 +4432,16 @@ impl Client {
                 )?,
                 options,
             )
-            .await?
-        {
+            .await?;
+        match response {
             daemon::response_envelope::Response::CodeLocate(response) => {
-                let response = parse_code_locate(
+                let response = parse_code_locate_for_minor(
                     response,
                     repository,
                     generation,
                     maximum_results,
                     page_offset,
+                    minor,
                 )?;
                 if kinds.is_some_and(|kinds| {
                     response
@@ -4523,7 +4621,7 @@ impl Client {
         references: &[SourceReference],
         options: RequestOptions,
     ) -> Result<SourceRead, ClientError> {
-        match self.request_with_options(
+        let (response, minor) = self.request_with_protocol_and_options(
             build_source_read_request(
                 repository,
                 generation,
@@ -4531,14 +4629,18 @@ impl Client {
                 SourceReadOptions::new(),
             )?,
             options,
-        )? {
-            daemon::response_envelope::Response::SourceRead(response) => parse_source_read(
-                response,
-                repository,
-                generation,
-                references,
-                SourceReadOptions::new(),
-            ),
+        )?;
+        match response {
+            daemon::response_envelope::Response::SourceRead(response) => {
+                parse_source_read_for_minor(
+                    response,
+                    repository,
+                    generation,
+                    references,
+                    SourceReadOptions::new(),
+                    minor,
+                )
+            }
             _ => Err(ClientError::UnexpectedResponse),
         }
     }
@@ -4593,8 +4695,8 @@ impl Client {
         references: &[SourceReference],
         options: RequestOptions,
     ) -> Result<SourceRead, ClientError> {
-        match self
-            .request_async_with_options(
+        let (response, minor) = self
+            .request_async_with_options_and_protocol(
                 build_source_read_request(
                     repository,
                     generation,
@@ -4603,15 +4705,18 @@ impl Client {
                 )?,
                 options,
             )
-            .await?
-        {
-            daemon::response_envelope::Response::SourceRead(response) => parse_source_read(
-                response,
-                repository,
-                generation,
-                references,
-                SourceReadOptions::new(),
-            ),
+            .await?;
+        match response {
+            daemon::response_envelope::Response::SourceRead(response) => {
+                parse_source_read_for_minor(
+                    response,
+                    repository,
+                    generation,
+                    references,
+                    SourceReadOptions::new(),
+                    minor,
+                )
+            }
             _ => Err(ClientError::UnexpectedResponse),
         }
     }
@@ -4630,15 +4735,17 @@ impl Client {
         projection: SourceReadOptions,
         options: RequestOptions,
     ) -> Result<SourceRead, ClientError> {
-        match self
-            .request_async_with_options(
+        let (response, minor) = self
+            .request_async_with_options_and_protocol(
                 build_source_read_request(repository, generation, references, projection)?,
                 options,
             )
-            .await?
-        {
+            .await?;
+        match response {
             daemon::response_envelope::Response::SourceRead(response) => {
-                parse_source_read(response, repository, generation, references, projection)
+                parse_source_read_for_minor(
+                    response, repository, generation, references, projection, minor,
+                )
             }
             _ => Err(ClientError::UnexpectedResponse),
         }
@@ -12999,12 +13106,31 @@ fn parse_advanced_query(
     })
 }
 
+#[cfg(test)]
 fn parse_code_locate(
     response: daemon::CodeLocateResponse,
     repository: RepositoryId,
     selector: GenerationSelector,
     maximum_results: u32,
     page_offset: u64,
+) -> Result<CodeLocate, ClientError> {
+    parse_code_locate_for_minor(
+        response,
+        repository,
+        selector,
+        maximum_results,
+        page_offset,
+        CURRENT_PROTOCOL_MINOR,
+    )
+}
+
+fn parse_code_locate_for_minor(
+    response: daemon::CodeLocateResponse,
+    repository: RepositoryId,
+    selector: GenerationSelector,
+    maximum_results: u32,
+    page_offset: u64,
+    selected_protocol_minor: u32,
 ) -> Result<CodeLocate, ClientError> {
     require_first_slice_response_schema(response.schema_version)?;
     let execution_completeness = parse_result_completeness(
@@ -13063,6 +13189,29 @@ fn parse_code_locate(
             source,
         });
     }
+    let conditional_activity = parse_conditional_activity(
+        response.conditional_activity,
+        &context,
+        hits.iter()
+            .enumerate()
+            .filter(|(_, hit)| conditional_language(&hit.language))
+            .map(|(index, hit)| ConditionalActivitySubject {
+                index,
+                basis: if hit.symbol.is_some() {
+                    ConditionalActivityBasis::DefinitionToken
+                } else {
+                    ConditionalActivityBasis::ReturnedRange
+                },
+                source: hit.source.as_ref(),
+                start_byte: hit.source.as_ref().map_or(0, |source| source.start_byte),
+                end_byte: hit.source.as_ref().map_or(0, |source| source.end_byte),
+            }),
+        hits.len(),
+        200,
+        selected_protocol_minor,
+        &execution_completeness,
+        response.next_page_offset.is_some(),
+    )?;
     Ok(CodeLocate {
         context,
         hits,
@@ -13070,6 +13219,7 @@ fn parse_code_locate(
         truncated: response.truncated,
         next_page_offset: response.next_page_offset,
         execution_completeness,
+        conditional_activity,
     })
 }
 
@@ -13224,12 +13374,31 @@ fn parse_symbol_explain(
     })
 }
 
+#[cfg(test)]
 fn parse_source_read(
     response: daemon::SourceReadResponse,
     repository: RepositoryId,
     selector: GenerationSelector,
     requested: &[SourceReference],
     projection: SourceReadOptions,
+) -> Result<SourceRead, ClientError> {
+    parse_source_read_for_minor(
+        response,
+        repository,
+        selector,
+        requested,
+        projection,
+        CURRENT_PROTOCOL_MINOR,
+    )
+}
+
+fn parse_source_read_for_minor(
+    response: daemon::SourceReadResponse,
+    repository: RepositoryId,
+    selector: GenerationSelector,
+    requested: &[SourceReference],
+    projection: SourceReadOptions,
+    selected_protocol_minor: u32,
 ) -> Result<SourceRead, ClientError> {
     require_first_slice_response_schema(response.schema_version)?;
     let execution_completeness =
@@ -13240,7 +13409,11 @@ fn parse_source_read(
     } else {
         requested.to_vec()
     };
-    if context.generation != requested[0].generation
+    if context.generation
+        != requested
+            .first()
+            .ok_or(ClientError::InvalidResponseCorrelation)?
+            .generation
         || response.chunks.len() > expected.len()
         || (!response.truncated && response.chunks.len() != expected.len())
     {
@@ -13331,12 +13504,313 @@ fn parse_source_read(
     {
         return Err(ClientError::InvalidResponseCorrelation);
     }
+    let conditional_activity = parse_conditional_activity(
+        response.conditional_activity,
+        &context,
+        chunks
+            .iter()
+            .enumerate()
+            .filter(|(_, chunk)| conditional_language(&chunk.language))
+            .map(|(index, chunk)| ConditionalActivitySubject {
+                index,
+                basis: ConditionalActivityBasis::ReturnedRange,
+                source: Some(&chunk.source),
+                start_byte: chunk.start_byte,
+                end_byte: chunk.end_byte,
+            }),
+        chunks.len(),
+        32,
+        selected_protocol_minor,
+        &execution_completeness,
+        false,
+    )?;
     Ok(SourceRead {
         context,
         chunks,
         total_source_bytes: response.total_source_bytes,
         truncated: response.truncated,
         execution_completeness,
+        conditional_activity,
+    })
+}
+
+fn conditional_language(language: &str) -> bool {
+    matches!(language, "vba" | "visual-basic-classic")
+}
+
+struct ConditionalActivitySubject<'a> {
+    index: usize,
+    basis: ConditionalActivityBasis,
+    source: Option<&'a SourceReference>,
+    start_byte: u64,
+    end_byte: u64,
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "each argument is a distinct response admission bound"
+)]
+fn parse_conditional_activity<'a>(
+    wire: Vec<daemon::ConditionalActivityAssessment>,
+    context: &QueryContext,
+    subjects: impl Iterator<Item = ConditionalActivitySubject<'a>>,
+    returned_count: usize,
+    maximum_assessments: usize,
+    selected_protocol_minor: u32,
+    completeness: &ResultCompleteness,
+    has_continuation: bool,
+) -> Result<Vec<ConditionalActivityAssessment>, ClientError> {
+    let supported = selected_protocol_minor >= CONDITIONAL_ACTIVITY_PROTOCOL_MINOR;
+    if wire.len() > maximum_assessments || (!supported && !wire.is_empty()) {
+        return Err(ClientError::InvalidResponseCorrelation);
+    }
+    let mut assessments = Vec::new();
+    assessments
+        .try_reserve_exact(if supported {
+            wire.len()
+        } else {
+            returned_count.min(maximum_assessments)
+        })
+        .map_err(|_| ClientError::ResponseAllocationFailed)?;
+    let mut wire = wire.into_iter();
+    for subject in subjects {
+        if assessments.len() == maximum_assessments || supported && subject.source.is_none() {
+            return Err(ClientError::InvalidResponseCorrelation);
+        }
+        let result_index =
+            u32::try_from(subject.index).map_err(|_| ClientError::InvalidResponseCorrelation)?;
+        let assessment = if supported {
+            let item = wire.next().ok_or(ClientError::InvalidResponseCorrelation)?;
+            if item.result_index != result_index {
+                return Err(ClientError::InvalidResponseCorrelation);
+            }
+            parse_conditional_activity_entry(item, context)?
+        } else {
+            // Legacy transport cannot authenticate a definition token or membership.
+            let assessed_source_ref = if subject.basis == ConditionalActivityBasis::ReturnedRange {
+                subject
+                    .source
+                    .map(|source| {
+                        SourceReference::new(
+                            source.repository,
+                            source.generation,
+                            source.file,
+                            subject.start_byte..subject.end_byte,
+                            source.content_hash,
+                            None,
+                        )
+                    })
+                    .transpose()?
+            } else {
+                None
+            };
+            ConditionalActivityAssessment {
+                result_index,
+                basis: subject.basis,
+                activity: ConditionalActivityState::Unproven,
+                assessed_source_ref,
+                inventory: None,
+                reason: Some(ConditionalActivityReason::TransportUnavailable),
+            }
+        };
+        if assessment.basis != subject.basis {
+            return Err(ClientError::InvalidResponseCorrelation);
+        }
+        if let Some(assessed) = &assessment.assessed_source_ref {
+            let returned = subject
+                .source
+                .ok_or(ClientError::InvalidResponseCorrelation)?;
+            if !same_source_identity(assessed, returned)
+                || assessed.start_byte < subject.start_byte
+                || assessed.end_byte > subject.end_byte
+                || assessment.basis == ConditionalActivityBasis::DefinitionToken
+                    && assessed.start_byte == assessed.end_byte
+                || assessment.basis == ConditionalActivityBasis::ReturnedRange
+                    && (assessed.start_byte != subject.start_byte
+                        || assessed.end_byte != subject.end_byte)
+            {
+                return Err(ClientError::InvalidResponseCorrelation);
+            }
+        } else if assessment.basis == ConditionalActivityBasis::ReturnedRange
+            && subject.source.is_some()
+        {
+            return Err(ClientError::InvalidResponseCorrelation);
+        }
+        if matches!(
+            assessment.reason,
+            Some(
+                ConditionalActivityReason::MissingDefinition
+                    | ConditionalActivityReason::AmbiguousDefinition
+            )
+        ) && assessment.basis != ConditionalActivityBasis::DefinitionToken
+            || assessment.reason == Some(ConditionalActivityReason::ScanIncomplete)
+                && (completeness.state != ResultCompletenessState::Truncated
+                    || !completeness.limiting_resources.iter().any(|resource| {
+                        matches!(
+                            resource.kind,
+                            LimitingResourceKind::Rows | LimitingResourceKind::MemoryBytes
+                        )
+                    })
+                    || has_continuation)
+        {
+            return Err(ClientError::InvalidResponseCorrelation);
+        }
+        assessments.push(assessment);
+    }
+    if wire.next().is_some() {
+        return Err(ClientError::InvalidResponseCorrelation);
+    }
+    Ok(assessments)
+}
+
+fn same_source_identity(left: &SourceReference, right: &SourceReference) -> bool {
+    left.repository == right.repository
+        && left.generation == right.generation
+        && left.file == right.file
+        && left.content_hash == right.content_hash
+}
+
+fn parse_conditional_activity_entry(
+    wire: daemon::ConditionalActivityAssessment,
+    context: &QueryContext,
+) -> Result<ConditionalActivityAssessment, ClientError> {
+    let basis = match daemon::ConditionalActivityBasis::try_from(wire.basis) {
+        Ok(daemon::ConditionalActivityBasis::DefinitionToken) => {
+            ConditionalActivityBasis::DefinitionToken
+        }
+        Ok(daemon::ConditionalActivityBasis::ReturnedRange) => {
+            ConditionalActivityBasis::ReturnedRange
+        }
+        _ => return Err(ClientError::InvalidResponseCorrelation),
+    };
+    let activity = match daemon::ConditionalActivityState::try_from(wire.activity) {
+        Ok(daemon::ConditionalActivityState::Active) => ConditionalActivityState::Active,
+        Ok(daemon::ConditionalActivityState::Inactive) => ConditionalActivityState::Inactive,
+        Ok(daemon::ConditionalActivityState::Unproven) => ConditionalActivityState::Unproven,
+        _ => return Err(ClientError::InvalidResponseCorrelation),
+    };
+    let reason = wire
+        .reason
+        .map(
+            |reason| match daemon::ConditionalActivityReason::try_from(reason) {
+                Ok(daemon::ConditionalActivityReason::NoInventory) => {
+                    Ok(ConditionalActivityReason::NoInventory)
+                }
+                Ok(daemon::ConditionalActivityReason::IncompleteInventory) => {
+                    Ok(ConditionalActivityReason::IncompleteInventory)
+                }
+                Ok(daemon::ConditionalActivityReason::MissingDefinition) => {
+                    Ok(ConditionalActivityReason::MissingDefinition)
+                }
+                Ok(daemon::ConditionalActivityReason::AmbiguousDefinition) => {
+                    Ok(ConditionalActivityReason::AmbiguousDefinition)
+                }
+                Ok(daemon::ConditionalActivityReason::CrossScope) => {
+                    Ok(ConditionalActivityReason::CrossScope)
+                }
+                Ok(daemon::ConditionalActivityReason::EmptyRange) => {
+                    Ok(ConditionalActivityReason::EmptyRange)
+                }
+                Ok(daemon::ConditionalActivityReason::MembershipUnproven) => {
+                    Ok(ConditionalActivityReason::MembershipUnproven)
+                }
+                Ok(daemon::ConditionalActivityReason::ScanIncomplete) => {
+                    Ok(ConditionalActivityReason::ScanIncomplete)
+                }
+                Ok(daemon::ConditionalActivityReason::TransportUnavailable) => {
+                    Ok(ConditionalActivityReason::TransportUnavailable)
+                }
+                _ => Err(ClientError::InvalidResponseCorrelation),
+            },
+        )
+        .transpose()?;
+    let assessed_source_ref = wire
+        .assessed_source_ref
+        .map(|source| parse_source_reference(source, context))
+        .transpose()?;
+    let inventory = wire
+        .inventory
+        .map(|inventory| {
+            let scope = inventory
+                .scope
+                .ok_or(ClientError::InvalidResponseCorrelation)?;
+            let source = assessed_source_ref
+                .as_ref()
+                .ok_or(ClientError::InvalidResponseCorrelation)?;
+            if scope.start_byte >= scope.end_byte
+                || source.start_byte == source.end_byte
+                || scope.start_byte > source.start_byte
+                || scope.end_byte < source.end_byte
+            {
+                return Err(ClientError::InvalidResponseCorrelation);
+            }
+            Ok(ConditionalActivityInventory {
+                fact_id: parse_planning_fact(
+                    inventory
+                        .fact_id
+                        .ok_or(ClientError::InvalidResponseCorrelation)?,
+                )?,
+                parser_provenance_id: parse_planning_fact(
+                    inventory
+                        .parser_provenance_id
+                        .ok_or(ClientError::InvalidResponseCorrelation)?,
+                )?,
+                scope: ConditionalActivityScope {
+                    start_byte: scope.start_byte,
+                    end_byte: scope.end_byte,
+                },
+                complete: inventory.complete,
+            })
+        })
+        .transpose()?;
+    let nonempty = assessed_source_ref
+        .as_ref()
+        .is_some_and(|source| source.start_byte < source.end_byte);
+    let valid = match activity {
+        ConditionalActivityState::Active | ConditionalActivityState::Inactive => {
+            nonempty
+                && reason.is_none()
+                && inventory
+                    .as_ref()
+                    .is_some_and(|inventory| inventory.complete)
+        }
+        ConditionalActivityState::Unproven => match reason {
+            Some(ConditionalActivityReason::IncompleteInventory) => inventory
+                .as_ref()
+                .is_some_and(|inventory| !inventory.complete),
+            Some(ConditionalActivityReason::MembershipUnproven) => inventory
+                .as_ref()
+                .is_some_and(|inventory| inventory.complete),
+            Some(
+                ConditionalActivityReason::MissingDefinition
+                | ConditionalActivityReason::AmbiguousDefinition,
+            ) => inventory.is_none() && assessed_source_ref.is_none(),
+            Some(ConditionalActivityReason::EmptyRange) => {
+                inventory.is_none()
+                    && assessed_source_ref
+                        .as_ref()
+                        .is_some_and(|source| source.start_byte == source.end_byte)
+            }
+            Some(
+                ConditionalActivityReason::ScanIncomplete
+                | ConditionalActivityReason::TransportUnavailable,
+            ) => inventory.is_none(),
+            Some(
+                ConditionalActivityReason::NoInventory | ConditionalActivityReason::CrossScope,
+            ) => inventory.is_none() && nonempty,
+            None => false,
+        },
+    };
+    if !valid {
+        return Err(ClientError::InvalidResponseCorrelation);
+    }
+    Ok(ConditionalActivityAssessment {
+        result_index: wire.result_index,
+        basis,
+        activity,
+        assessed_source_ref,
+        inventory,
+        reason,
     })
 }
 
@@ -15723,6 +16197,7 @@ mod tests {
 
     fn wire_code_locate(symbol: SymbolId, source: &SourceReference) -> daemon::CodeLocateResponse {
         daemon::CodeLocateResponse {
+            conditional_activity: Vec::new(),
             schema_version: Some(first_slice_schema()),
             context: Some(wire_query_context(1, 0)),
             hits: vec![daemon::FirstSliceLocateHit {
@@ -15785,6 +16260,7 @@ mod tests {
 
     fn wire_source_read(source: &SourceReference) -> daemon::SourceReadResponse {
         daemon::SourceReadResponse {
+            conditional_activity: Vec::new(),
             schema_version: Some(first_slice_schema()),
             context: Some(wire_query_context(1, 3)),
             chunks: vec![daemon::FirstSliceSourceChunk {
@@ -15887,6 +16363,632 @@ mod tests {
             ),
             Err(ClientError::InvalidResponseCorrelation)
         ));
+    }
+
+    fn wire_activity(
+        source: &SourceReference,
+        basis: daemon::ConditionalActivityBasis,
+    ) -> daemon::ConditionalActivityAssessment {
+        daemon::ConditionalActivityAssessment {
+            result_index: 0,
+            basis: basis as i32,
+            activity: daemon::ConditionalActivityState::Active as i32,
+            assessed_source_ref: Some(wire_source(source)),
+            inventory: Some(daemon::ConditionalActivityInventory {
+                fact_id: Some(common::AnalysisUnitId { value: vec![7; 20] }),
+                parser_provenance_id: Some(common::AnalysisUnitId { value: vec![8; 20] }),
+                scope: Some(daemon::ConditionalActivityScope {
+                    start_byte: 0,
+                    end_byte: 100,
+                }),
+                complete: true,
+            }),
+            reason: None,
+        }
+    }
+
+    fn vba_locate(source: &SourceReference) -> daemon::CodeLocateResponse {
+        let mut response = wire_code_locate(SymbolId::from_bytes([5; 20]), source);
+        response.hits[0].language = "vba".to_owned();
+        response.conditional_activity = vec![wire_activity(
+            source,
+            daemon::ConditionalActivityBasis::DefinitionToken,
+        )];
+        response
+    }
+
+    #[test]
+    fn conditional_activity_definition_tokens_preserve_exact_sources_and_nullable_shape() {
+        let entity = test_source(4, 0, 50);
+        let token = test_source(4, 10, 15);
+        let mut wire = vba_locate(&entity);
+        wire.conditional_activity[0].assessed_source_ref = Some(wire_source(&token));
+        let parsed = parse_code_locate(
+            wire.clone(),
+            test_repository(),
+            GenerationSelector::Active,
+            1,
+            0,
+        )
+        .unwrap();
+        assert_eq!(parsed.hits[0].source.as_ref(), Some(&entity));
+        assert_eq!(
+            parsed.conditional_activity[0].assessed_source_ref.as_ref(),
+            Some(&token)
+        );
+        assert_eq!(
+            parsed.conditional_activity[0]
+                .inventory
+                .as_ref()
+                .unwrap()
+                .fact_id,
+            FactId::from_bytes([7; 20])
+        );
+        let json = serde_json::to_value(&parsed.conditional_activity[0]).unwrap();
+        assert_eq!(json["basis"], "definition_token");
+        assert_eq!(json["activity"], "active");
+        assert!(json.get("reason").unwrap().is_null());
+        wire.conditional_activity[0].activity = daemon::ConditionalActivityState::Unproven as i32;
+        wire.conditional_activity[0].inventory = None;
+        wire.conditional_activity[0].assessed_source_ref = None;
+        wire.conditional_activity[0].reason =
+            Some(daemon::ConditionalActivityReason::MissingDefinition as i32);
+        let missing =
+            parse_code_locate(wire, test_repository(), GenerationSelector::Active, 1, 0).unwrap();
+        let json = serde_json::to_value(&missing.conditional_activity[0]).unwrap();
+        assert!(json.get("assessed_source_ref").unwrap().is_null());
+        assert!(json.get("inventory").unwrap().is_null());
+        assert_eq!(json["reason"], "missing_definition");
+    }
+
+    #[test]
+    fn conditional_activity_rejects_wire_enum_presence_identity_scope_and_ordinal_corruption() {
+        let source = test_source(4, 0, 3);
+        let good = vba_locate(&source);
+        let mutations: &[fn(&mut daemon::ConditionalActivityAssessment)] = &[
+            |a| a.basis = 0,
+            |a| a.basis = 99,
+            |a| a.activity = 0,
+            |a| a.activity = 99,
+            |a| a.basis = daemon::ConditionalActivityBasis::ReturnedRange as i32,
+            |a| a.result_index = 1,
+            |a| a.reason = Some(0),
+            |a| a.reason = Some(99),
+            |a| a.reason = Some(daemon::ConditionalActivityReason::NoInventory as i32),
+            |a| a.assessed_source_ref = None,
+            |a| {
+                a.assessed_source_ref
+                    .as_mut()
+                    .unwrap()
+                    .repository
+                    .as_mut()
+                    .unwrap()
+                    .value = vec![9; 16]
+            },
+            |a| {
+                a.assessed_source_ref
+                    .as_mut()
+                    .unwrap()
+                    .generation
+                    .as_mut()
+                    .unwrap()
+                    .value = vec![9; 20]
+            },
+            |a| {
+                a.assessed_source_ref
+                    .as_mut()
+                    .unwrap()
+                    .generation
+                    .as_mut()
+                    .unwrap()
+                    .value = vec![9; 16]
+            },
+            |a| {
+                a.assessed_source_ref
+                    .as_mut()
+                    .unwrap()
+                    .file
+                    .as_mut()
+                    .unwrap()
+                    .value = vec![9; 20]
+            },
+            |a| {
+                a.assessed_source_ref
+                    .as_mut()
+                    .unwrap()
+                    .content_hash
+                    .as_mut()
+                    .unwrap()
+                    .value = vec![9; 32]
+            },
+            |a| a.assessed_source_ref.as_mut().unwrap().end_byte = 4,
+            |a| a.assessed_source_ref.as_mut().unwrap().end_byte = 0,
+            |a| a.inventory = None,
+            |a| a.inventory.as_mut().unwrap().complete = false,
+            |a| a.inventory.as_mut().unwrap().scope = None,
+            |a| {
+                a.inventory
+                    .as_mut()
+                    .unwrap()
+                    .scope
+                    .as_mut()
+                    .unwrap()
+                    .start_byte = 1
+            },
+            |a| {
+                a.inventory
+                    .as_mut()
+                    .unwrap()
+                    .scope
+                    .as_mut()
+                    .unwrap()
+                    .end_byte = 0
+            },
+            |a| a.inventory.as_mut().unwrap().fact_id = None,
+            |a| {
+                a.inventory
+                    .as_mut()
+                    .unwrap()
+                    .fact_id
+                    .as_mut()
+                    .unwrap()
+                    .value
+                    .pop()
+                    .unwrap();
+            },
+            |a| a.inventory.as_mut().unwrap().parser_provenance_id = None,
+            |a| {
+                a.inventory
+                    .as_mut()
+                    .unwrap()
+                    .parser_provenance_id
+                    .as_mut()
+                    .unwrap()
+                    .value
+                    .push(0)
+            },
+        ];
+        for (index, mutate) in mutations.iter().enumerate() {
+            let mut wire = good.clone();
+            mutate(&mut wire.conditional_activity[0]);
+            assert!(
+                parse_code_locate(wire, test_repository(), GenerationSelector::Active, 1, 0)
+                    .is_err(),
+                "corruption {index}"
+            );
+        }
+        let mut missing = good.clone();
+        missing.conditional_activity.clear();
+        assert!(
+            parse_code_locate(missing, test_repository(), GenerationSelector::Active, 1, 0)
+                .is_err()
+        );
+        let mut duplicate = good.clone();
+        duplicate
+            .conditional_activity
+            .push(duplicate.conditional_activity[0].clone());
+        assert!(
+            parse_code_locate(
+                duplicate,
+                test_repository(),
+                GenerationSelector::Active,
+                1,
+                0
+            )
+            .is_err()
+        );
+        let mut nonapplicable = good;
+        nonapplicable.hits[0].language = "rust".to_owned();
+        assert!(
+            parse_code_locate(
+                nonapplicable,
+                test_repository(),
+                GenerationSelector::Active,
+                1,
+                0
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn conditional_activity_ordered_coverage_uses_returned_language_and_not_paths() {
+        let source = test_source(4, 0, 3);
+        let mut wire = vba_locate(&source);
+        wire.hits[0].language = "rust".to_owned();
+        wire.hits[0].path = "module.bas".to_owned();
+        let mut applicable = wire.hits[0].clone();
+        applicable.language = "visual-basic-classic".to_owned();
+        applicable.path = "source.bin".to_owned();
+        applicable.symbol = None;
+        wire.hits.push(applicable);
+        wire.matched_candidates = 2;
+        wire.context
+            .as_mut()
+            .unwrap()
+            .usage
+            .as_mut()
+            .unwrap()
+            .results = 2;
+        wire.conditional_activity[0].result_index = 1;
+        wire.conditional_activity[0].basis = daemon::ConditionalActivityBasis::ReturnedRange as i32;
+        let parsed = parse_code_locate(
+            wire.clone(),
+            test_repository(),
+            GenerationSelector::Active,
+            2,
+            0,
+        )
+        .unwrap();
+        assert_eq!(parsed.conditional_activity.len(), 1);
+        assert_eq!(parsed.conditional_activity[0].result_index, 1);
+        let mut second = wire.hits[1].clone();
+        second.symbol = Some(symbol_to_wire(SymbolId::from_bytes([6; 20])));
+        wire.hits.push(second);
+        wire.matched_candidates = 3;
+        wire.context
+            .as_mut()
+            .unwrap()
+            .usage
+            .as_mut()
+            .unwrap()
+            .results = 3;
+        let mut assessment = wire.conditional_activity[0].clone();
+        assessment.result_index = 2;
+        assessment.basis = daemon::ConditionalActivityBasis::DefinitionToken as i32;
+        wire.conditional_activity.push(assessment);
+        assert!(
+            parse_code_locate(
+                wire.clone(),
+                test_repository(),
+                GenerationSelector::Active,
+                3,
+                0
+            )
+            .is_ok()
+        );
+        wire.conditional_activity.swap(0, 1);
+        assert!(
+            parse_code_locate(wire, test_repository(), GenerationSelector::Active, 3, 0).is_err()
+        );
+    }
+
+    #[test]
+    fn conditional_activity_source_read_assesses_expanded_ranges_not_selectors() {
+        let selector = test_source(4, 1, 2);
+        let expanded = test_source(4, 0, 3);
+        let projection = SourceReadOptions {
+            context_lines_before: 1,
+            context_lines_after: 1,
+            ..SourceReadOptions::new()
+        };
+        let mut wire = wire_source_read(&selector);
+        wire.chunks[0].language = "vba".to_owned();
+        wire.chunks[0].start_byte = 0;
+        wire.chunks[0].end_byte = 3;
+        wire.conditional_activity = vec![wire_activity(
+            &expanded,
+            daemon::ConditionalActivityBasis::ReturnedRange,
+        )];
+        let parse = |wire| {
+            parse_source_read(
+                wire,
+                test_repository(),
+                GenerationSelector::Active,
+                std::slice::from_ref(&selector),
+                projection,
+            )
+        };
+        let parsed = parse(wire.clone()).unwrap();
+        assert_eq!(parsed.chunks[0].source, selector);
+        assert_eq!(parsed.chunks[0].content, b"abc");
+        assert_eq!(parsed.total_source_bytes, 3);
+        assert_eq!(
+            parsed.conditional_activity[0]
+                .assessed_source_ref
+                .as_ref()
+                .unwrap()
+                .byte_range(),
+            0..3
+        );
+        wire.conditional_activity[0].assessed_source_ref = Some(wire_source(&selector));
+        assert!(parse(wire.clone()).is_err());
+        wire.conditional_activity[0].assessed_source_ref = Some(wire_source(&expanded));
+        wire.conditional_activity[0].basis =
+            daemon::ConditionalActivityBasis::DefinitionToken as i32;
+        assert!(parse(wire.clone()).is_err());
+        wire.conditional_activity.clear();
+        assert!(parse(wire.clone()).is_err());
+        let legacy = parse_source_read_for_minor(
+            wire,
+            test_repository(),
+            GenerationSelector::Active,
+            std::slice::from_ref(&selector),
+            projection,
+            21,
+        )
+        .unwrap();
+        assert_eq!(
+            legacy.conditional_activity[0]
+                .assessed_source_ref
+                .as_ref()
+                .unwrap()
+                .byte_range(),
+            0..3
+        );
+        assert_eq!(
+            legacy.conditional_activity[0].reason,
+            Some(ConditionalActivityReason::TransportUnavailable)
+        );
+    }
+
+    #[test]
+    fn conditional_activity_legacy_transport_is_explicitly_unproven() {
+        let source = test_source(4, 0, 3);
+        let mut wire = vba_locate(&source);
+        assert!(
+            parse_code_locate_for_minor(
+                wire.clone(),
+                test_repository(),
+                GenerationSelector::Active,
+                1,
+                0,
+                21
+            )
+            .is_err()
+        );
+        wire.conditional_activity.clear();
+        for file_only in [false, true] {
+            wire.hits[0].symbol =
+                (!file_only).then(|| symbol_to_wire(SymbolId::from_bytes([5; 20])));
+            let parsed = parse_code_locate_for_minor(
+                wire.clone(),
+                test_repository(),
+                GenerationSelector::Active,
+                1,
+                0,
+                21,
+            )
+            .unwrap();
+            let activity = &parsed.conditional_activity[0];
+            assert_eq!(activity.activity, ConditionalActivityState::Unproven);
+            assert_eq!(
+                activity.reason,
+                Some(ConditionalActivityReason::TransportUnavailable)
+            );
+            assert!(activity.inventory.is_none());
+            assert_eq!(activity.assessed_source_ref.is_some(), file_only);
+        }
+        wire.hits[0].language = "rust".to_owned();
+        assert!(
+            parse_code_locate_for_minor(
+                wire,
+                test_repository(),
+                GenerationSelector::Active,
+                1,
+                0,
+                21
+            )
+            .unwrap()
+            .conditional_activity
+            .is_empty()
+        );
+    }
+
+    #[test]
+    fn conditional_activity_empty_returned_ranges_survive_scan_limits_and_legacy_transport() {
+        let source = test_source(4, 0, 0);
+        let mut wire = wire_source_read(&source);
+        wire.chunks[0].language = "vba".to_owned();
+        wire.chunks[0].content.clear();
+        wire.chunks[0].exact_content.clear();
+        wire.total_source_bytes = 0;
+        wire.context
+            .as_mut()
+            .unwrap()
+            .usage
+            .as_mut()
+            .unwrap()
+            .source_bytes = 0;
+        wire.truncated = true;
+        wire.conditional_activity = vec![daemon::ConditionalActivityAssessment {
+            result_index: 0,
+            basis: daemon::ConditionalActivityBasis::ReturnedRange as i32,
+            activity: daemon::ConditionalActivityState::Unproven as i32,
+            assessed_source_ref: Some(wire_source(&source)),
+            inventory: None,
+            reason: Some(daemon::ConditionalActivityReason::ScanIncomplete as i32),
+        }];
+        let parse = |wire, minor| {
+            parse_source_read_for_minor(
+                wire,
+                test_repository(),
+                GenerationSelector::Active,
+                std::slice::from_ref(&source),
+                SourceReadOptions::new(),
+                minor,
+            )
+        };
+        for resource in [
+            daemon::FirstSliceLimitingResourceKind::FirstSliceLimitRows,
+            daemon::FirstSliceLimitingResourceKind::FirstSliceLimitMemoryBytes,
+        ] {
+            wire.completeness = Some(daemon::FirstSliceCompleteness {
+                state: daemon::FirstSliceCompletenessState::FirstSliceCompletenessTruncated as i32,
+                limiting_resources: vec![daemon::FirstSliceLimitingResource {
+                    kind: resource as i32,
+                    limit: Some(1),
+                    observed: Some(2),
+                }],
+                continuation:
+                    daemon::FirstSliceContinuationAvailability::FirstSliceContinuationUnavailable
+                        as i32,
+                guidance: vec![
+                    daemon::FirstSliceContinuationGuidance::FirstSliceGuidanceSplitRequest as i32,
+                ],
+            });
+            let parsed = parse(wire.clone(), 22).unwrap();
+            assert_eq!(parsed.total_source_bytes, 0);
+            assert!(parsed.chunks[0].content.is_empty());
+            assert_eq!(
+                parsed.conditional_activity[0]
+                    .assessed_source_ref
+                    .as_ref()
+                    .unwrap()
+                    .byte_range(),
+                0..0
+            );
+            assert_eq!(
+                parsed.conditional_activity[0].reason,
+                Some(ConditionalActivityReason::ScanIncomplete)
+            );
+        }
+        wire.conditional_activity[0].reason =
+            Some(daemon::ConditionalActivityReason::TransportUnavailable as i32);
+        assert!(parse(wire.clone(), 22).is_ok());
+        wire.conditional_activity.clear();
+        let legacy = parse(wire, 21).unwrap();
+        assert_eq!(
+            legacy.conditional_activity[0].reason,
+            Some(ConditionalActivityReason::TransportUnavailable)
+        );
+        assert_eq!(
+            legacy.conditional_activity[0]
+                .assessed_source_ref
+                .as_ref()
+                .unwrap()
+                .byte_range(),
+            0..0
+        );
+    }
+
+    #[test]
+    fn conditional_activity_unproven_reasons_require_exact_inventory_shape() {
+        let source = test_source(4, 0, 3);
+        let good = vba_locate(&source);
+        for reason in [
+            daemon::ConditionalActivityReason::NoInventory,
+            daemon::ConditionalActivityReason::CrossScope,
+            daemon::ConditionalActivityReason::IncompleteInventory,
+            daemon::ConditionalActivityReason::MembershipUnproven,
+            daemon::ConditionalActivityReason::MissingDefinition,
+            daemon::ConditionalActivityReason::AmbiguousDefinition,
+            daemon::ConditionalActivityReason::EmptyRange,
+        ] {
+            let mut wire = good.clone();
+            let assessment = &mut wire.conditional_activity[0];
+            assessment.activity = daemon::ConditionalActivityState::Unproven as i32;
+            assessment.reason = Some(reason as i32);
+            match reason {
+                daemon::ConditionalActivityReason::IncompleteInventory => {
+                    assessment.inventory.as_mut().unwrap().complete = false
+                }
+                daemon::ConditionalActivityReason::MembershipUnproven => {}
+                _ => assessment.inventory = None,
+            }
+            if matches!(
+                reason,
+                daemon::ConditionalActivityReason::MissingDefinition
+                    | daemon::ConditionalActivityReason::AmbiguousDefinition
+            ) {
+                assessment.assessed_source_ref = None;
+            } else if reason == daemon::ConditionalActivityReason::EmptyRange {
+                assessment.assessed_source_ref.as_mut().unwrap().end_byte = 0;
+                assessment.basis = daemon::ConditionalActivityBasis::ReturnedRange as i32;
+                wire.hits[0].symbol = None;
+                wire.hits[0].source.as_mut().unwrap().end_byte = 0;
+            }
+            assert!(
+                parse_code_locate(
+                    wire.clone(),
+                    test_repository(),
+                    GenerationSelector::Active,
+                    1,
+                    0
+                )
+                .is_ok(),
+                "reason {reason:?}"
+            );
+            wire.conditional_activity[0].reason = None;
+            assert!(
+                parse_code_locate(wire, test_repository(), GenerationSelector::Active, 1, 0)
+                    .is_err()
+            );
+        }
+    }
+
+    #[test]
+    fn conditional_activity_scan_incomplete_requires_authoritative_partiality() {
+        let source = test_source(4, 0, 3);
+        let mut wire = vba_locate(&source);
+        wire.conditional_activity[0].activity = daemon::ConditionalActivityState::Unproven as i32;
+        wire.conditional_activity[0].reason =
+            Some(daemon::ConditionalActivityReason::ScanIncomplete as i32);
+        wire.conditional_activity[0].assessed_source_ref = None;
+        wire.conditional_activity[0].inventory = None;
+        assert!(
+            parse_code_locate(
+                wire.clone(),
+                test_repository(),
+                GenerationSelector::Active,
+                1,
+                0
+            )
+            .is_err()
+        );
+        wire.truncated = true;
+        for resource in [
+            daemon::FirstSliceLimitingResourceKind::FirstSliceLimitRows,
+            daemon::FirstSliceLimitingResourceKind::FirstSliceLimitMemoryBytes,
+        ] {
+            wire.completeness = Some(daemon::FirstSliceCompleteness {
+                state: daemon::FirstSliceCompletenessState::FirstSliceCompletenessTruncated as i32,
+                limiting_resources: vec![daemon::FirstSliceLimitingResource {
+                    kind: resource as i32,
+                    limit: Some(1),
+                    observed: Some(2),
+                }],
+                continuation:
+                    daemon::FirstSliceContinuationAvailability::FirstSliceContinuationUnavailable
+                        as i32,
+                guidance: vec![
+                    daemon::FirstSliceContinuationGuidance::FirstSliceGuidanceNarrowScope as i32,
+                ],
+            });
+            assert!(
+                parse_code_locate(
+                    wire.clone(),
+                    test_repository(),
+                    GenerationSelector::Active,
+                    1,
+                    0
+                )
+                .is_ok()
+            );
+        }
+        wire.completeness.as_mut().unwrap().limiting_resources[0].kind =
+            daemon::FirstSliceLimitingResourceKind::FirstSliceLimitSourceBytes as i32;
+        assert!(
+            parse_code_locate(
+                wire.clone(),
+                test_repository(),
+                GenerationSelector::Active,
+                1,
+                0
+            )
+            .is_err()
+        );
+        wire.completeness.as_mut().unwrap().limiting_resources[0].kind =
+            daemon::FirstSliceLimitingResourceKind::FirstSliceLimitRows as i32;
+        wire.matched_candidates = 2;
+        wire.next_page_offset = Some(1);
+        wire.completeness.as_mut().unwrap().continuation =
+            daemon::FirstSliceContinuationAvailability::FirstSliceContinuationAvailable as i32;
+        wire.completeness.as_mut().unwrap().guidance =
+            vec![daemon::FirstSliceContinuationGuidance::FirstSliceGuidanceUseCursor as i32];
+        assert!(
+            parse_code_locate(wire, test_repository(), GenerationSelector::Active, 1, 0).is_err()
+        );
     }
 
     #[test]
@@ -18569,6 +19671,7 @@ mod tests {
         let source = test_source(4, 0, 2);
         let symbol = SymbolId::from_bytes([5; 20]);
         let locate = daemon::CodeLocateResponse {
+            conditional_activity: Vec::new(),
             schema_version: Some(first_slice_schema()),
             context: Some(wire_query_context(2, 0)),
             hits: vec![daemon::FirstSliceLocateHit {
@@ -18761,6 +19864,7 @@ mod tests {
             }
         };
         let source_read = daemon::SourceReadResponse {
+            conditional_activity: Vec::new(),
             schema_version: Some(first_slice_schema()),
             context: Some(wire_query_context(2, 6)),
             chunks: vec![chunk(&first, 0, 3, "aaa"), chunk(&second, 3, 6, "bbb")],

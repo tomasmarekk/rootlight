@@ -237,6 +237,7 @@
           "status": "complete"
         },
         "data": {
+          "conditional_activity": [],
           "matches": [],
           "query_interpretation": {
             "modes": [
@@ -260,7 +261,7 @@
           "display_name": "fixture",
           "repository_id": "repo1_3hhm6hhk3shhmievg6ra3yjlhp2wuv5v"
         },
-        "schema_version": "1.9",
+        "schema_version": "1.10",
         "truncated": false,
         "trust": "untrusted_repository_data",
         "usage": {
@@ -405,6 +406,7 @@
               "trust": "untrusted_repository_data"
             }
           ],
+          "conditional_activity": [],
           "elisions": [],
           "stale_references": [],
           "total_source_bytes": 10
@@ -420,7 +422,7 @@
           "display_name": "fixture",
           "repository_id": "repo1_3hhm6hhk3shhmievg6ra3yjlhp2wuv5v"
         },
-        "schema_version": "1.1",
+        "schema_version": "1.2",
         "truncated": false,
         "trust": "untrusted_repository_data",
         "usage": {

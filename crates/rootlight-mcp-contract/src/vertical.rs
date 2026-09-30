@@ -137,6 +137,30 @@ impl VerticalTool {
         }
     }
 
+    /// Exact pre-activity contract retained without changing older version slots.
+    #[must_use]
+    pub const fn pre_activity_contract_version(self) -> Option<&'static str> {
+        match self {
+            Self::CodeLocate => Some("1.9"),
+            Self::SourceRead => Some("1.1"),
+            _ => None,
+        }
+    }
+
+    /// Immutable output schema preceding conditional-activity metadata.
+    #[must_use]
+    pub const fn pre_activity_output_schema_json(self) -> Option<&'static str> {
+        match self {
+            Self::CodeLocate => Some(include_str!(
+                "../../../schemas/generated/json/mcp-code-locate-output-1.9.schema.json"
+            )),
+            Self::SourceRead => Some(include_str!(
+                "../../../schemas/generated/json/mcp-source-read-output-1.1.schema.json"
+            )),
+            _ => None,
+        }
+    }
+
     /// Checked JSON Schema 2020-12 input artifact for this tool.
     #[must_use]
     pub const fn input_schema_json(self) -> &'static str {
@@ -154,7 +178,7 @@ impl VerticalTool {
                 "../../../schemas/generated/json/mcp-operation-status-input-1.6.schema.json"
             ),
             Self::CodeLocate => include_str!(
-                "../../../schemas/generated/json/mcp-code-locate-input-1.9.schema.json"
+                "../../../schemas/generated/json/mcp-code-locate-input-1.10.schema.json"
             ),
             Self::SymbolExplain => include_str!(
                 "../../../schemas/generated/json/mcp-symbol-explain-input-1.9.schema.json"
@@ -190,7 +214,7 @@ impl VerticalTool {
                 "../../../schemas/generated/json/mcp-context-pack-input-1.1.schema.json"
             ),
             Self::SourceRead => include_str!(
-                "../../../schemas/generated/json/mcp-source-read-input-1.1.schema.json"
+                "../../../schemas/generated/json/mcp-source-read-input-1.2.schema.json"
             ),
             Self::QueryAdvanced => include_str!(
                 "../../../schemas/generated/json/mcp-query-advanced-input-1.7.schema.json"
@@ -218,7 +242,7 @@ impl VerticalTool {
                 "../../../schemas/generated/json/mcp-operation-status-output-1.6.schema.json"
             ),
             Self::CodeLocate => include_str!(
-                "../../../schemas/generated/json/mcp-code-locate-output-1.9.schema.json"
+                "../../../schemas/generated/json/mcp-code-locate-output-1.10.schema.json"
             ),
             Self::SymbolExplain => include_str!(
                 "../../../schemas/generated/json/mcp-symbol-explain-output-1.9.schema.json"
@@ -254,7 +278,7 @@ impl VerticalTool {
                 "../../../schemas/generated/json/mcp-context-pack-output-1.1.schema.json"
             ),
             Self::SourceRead => include_str!(
-                "../../../schemas/generated/json/mcp-source-read-output-1.1.schema.json"
+                "../../../schemas/generated/json/mcp-source-read-output-1.2.schema.json"
             ),
             Self::QueryAdvanced => include_str!(
                 "../../../schemas/generated/json/mcp-query-advanced-output-1.7.schema.json"
@@ -3639,7 +3663,7 @@ pub struct SourceChunk {
 }
 
 impl SourceChunk {
-    fn represented_source_bytes(&self) -> Result<u64, McpContractError> {
+    pub(crate) fn represented_source_bytes(&self) -> Result<u64, McpContractError> {
         represented_source_bytes(&self.content, self.encoding)
             .ok_or(McpContractError::InvalidSourceChunk)
     }
@@ -4635,7 +4659,8 @@ mod tests {
         assert_eq!(tool.fifth_legacy_contract_version(), Some("1.0"));
         assert_eq!(tool.initial_contract_version(), None);
         let tool = VerticalTool::CodeLocate;
-        assert_eq!(tool.contract_version(), "1.9");
+        assert_eq!(tool.contract_version(), "1.10");
+        assert_eq!(tool.pre_activity_contract_version(), Some("1.9"));
         assert_eq!(tool.pre_label_contract_version(), Some("1.8"));
         assert_eq!(tool.recent_contract_version(), Some("1.7"));
         assert_eq!(tool.previous_contract_version(), Some("1.6"));
@@ -4646,7 +4671,8 @@ mod tests {
         assert_eq!(tool.fifth_legacy_contract_version(), Some("1.1"));
         assert_eq!(tool.initial_contract_version(), Some("1.0"));
         let tool = VerticalTool::SourceRead;
-        assert_eq!(tool.contract_version(), "1.1");
+        assert_eq!(tool.contract_version(), "1.2");
+        assert_eq!(tool.pre_activity_contract_version(), Some("1.1"));
         assert_eq!(tool.previous_contract_version(), Some("1.0"));
         assert_eq!(tool.legacy_contract_version(), None);
         let tool = VerticalTool::SymbolExplain;
@@ -4788,6 +4814,7 @@ mod tests {
     fn continuation_cursor_is_required_nullable_and_bounded() {
         let mut fixture = retained_tool_output("code.locate");
         fixture["schema_version"] = json!(VerticalTool::CodeLocate.contract_version());
+        fixture["data"]["conditional_activity"] = json!([]);
         let schema: Value = serde_json::from_str(VerticalTool::CodeLocate.output_schema_json())
             .expect("valid JSON");
         let validator = jsonschema::draft202012::new(&schema).expect("schema compiles");
@@ -4803,14 +4830,14 @@ mod tests {
         let mut maximum = fixture.clone();
         maximum["next_cursor"] = json!("c".repeat(4_096));
         assert!(validator.is_valid(&maximum));
-        serde_json::from_value::<crate::source_entity::CodeLocateOutputV1_9>(maximum)
+        serde_json::from_value::<crate::source_entity::CodeLocateOutputV1_10>(maximum)
             .expect("maximum-sized cursor decodes");
 
         let mut oversized = fixture;
         oversized["next_cursor"] = json!("c".repeat(4_097));
         assert!(!validator.is_valid(&oversized));
         assert!(
-            serde_json::from_value::<crate::source_entity::CodeLocateOutputV1_9>(oversized)
+            serde_json::from_value::<crate::source_entity::CodeLocateOutputV1_10>(oversized)
                 .is_err()
         );
     }

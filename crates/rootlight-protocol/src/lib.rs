@@ -28,9 +28,11 @@ pub const FILE_DESCRIPTOR_SET: &[u8] =
 /// authenticated operation submission and cannot satisfy the current contract.
 pub const MINIMUM_PROTOCOL_MINOR: u32 = 1;
 /// Latest daemon protocol implemented by the current client and server.
-pub const CURRENT_PROTOCOL_MINOR: u32 = 21;
+pub const CURRENT_PROTOCOL_MINOR: u32 = 22;
 /// Current production protocol contract version.
-pub const PROTOCOL_VERSION: &str = "1.21";
+pub const PROTOCOL_VERSION: &str = "1.22";
+/// First daemon protocol carrying source-bound conditional-activity assessments.
+pub const CONDITIONAL_ACTIVITY_PROTOCOL_MINOR: u32 = 22;
 /// First daemon protocol separating indexed extracted sources from physical inputs.
 pub const EXTRACTED_SOURCE_COUNTS_PROTOCOL_MINOR: u32 = 20;
 /// First daemon protocol carrying whole-container origins on locate and source results.
@@ -171,6 +173,95 @@ mod tests {
             .expect("unknown protobuf field is skipped");
         assert_eq!(decoded.major, 1);
         assert_eq!(decoded.minor, CURRENT_PROTOCOL_MINOR);
+    }
+
+    #[test]
+    fn conditional_activity_is_additive_and_never_active_by_default() {
+        use generated::daemon::v1 as daemon;
+        #[derive(Clone, PartialEq, Message)]
+        struct LegacyLocate {
+            #[prost(uint64, tag = "4")]
+            matched_candidates: u64,
+        }
+        #[derive(Clone, PartialEq, Message)]
+        struct LegacySource {
+            #[prost(uint64, tag = "4")]
+            total_source_bytes: u64,
+        }
+        let absent_locate = daemon::CodeLocateResponse {
+            matched_candidates: 7,
+            ..Default::default()
+        };
+        let absent_source = daemon::SourceReadResponse {
+            total_source_bytes: 11,
+            ..Default::default()
+        };
+        assert_eq!(
+            absent_locate.encode_to_vec(),
+            LegacyLocate {
+                matched_candidates: 7
+            }
+            .encode_to_vec()
+        );
+        assert_eq!(
+            absent_source.encode_to_vec(),
+            LegacySource {
+                total_source_bytes: 11
+            }
+            .encode_to_vec()
+        );
+        let assessment = daemon::ConditionalActivityAssessment {
+            result_index: 0,
+            basis: daemon::ConditionalActivityBasis::ReturnedRange as i32,
+            activity: daemon::ConditionalActivityState::Unproven as i32,
+            reason: Some(daemon::ConditionalActivityReason::NoInventory as i32),
+            ..Default::default()
+        };
+        let locate = daemon::CodeLocateResponse {
+            conditional_activity: vec![assessment.clone()],
+            ..absent_locate
+        };
+        let source = daemon::SourceReadResponse {
+            conditional_activity: vec![assessment],
+            ..absent_source
+        };
+        assert_eq!(
+            daemon::CodeLocateResponse::decode(locate.encode_to_vec().as_slice()).unwrap(),
+            locate
+        );
+        assert_eq!(
+            daemon::SourceReadResponse::decode(source.encode_to_vec().as_slice()).unwrap(),
+            source
+        );
+        assert_eq!(
+            LegacyLocate::decode(locate.encode_to_vec().as_slice())
+                .unwrap()
+                .matched_candidates,
+            7
+        );
+        assert_eq!(
+            LegacySource::decode(source.encode_to_vec().as_slice())
+                .unwrap()
+                .total_source_bytes,
+            11
+        );
+        assert_eq!(
+            daemon::ConditionalActivityAssessment::default().activity,
+            daemon::ConditionalActivityState::Unspecified as i32
+        );
+        assert_ne!(daemon::ConditionalActivityState::Active as i32, 0);
+        let only_locate = daemon::CodeLocateResponse {
+            conditional_activity: locate.conditional_activity,
+            ..Default::default()
+        }
+        .encode_to_vec();
+        let only_source = daemon::SourceReadResponse {
+            conditional_activity: source.conditional_activity,
+            ..Default::default()
+        }
+        .encode_to_vec();
+        assert_eq!(only_locate[0], 0x42);
+        assert_eq!(only_source[0], 0x3a);
     }
 
     #[test]

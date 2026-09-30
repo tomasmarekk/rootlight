@@ -8,6 +8,7 @@ pub mod capability;
 pub mod catalog;
 pub mod change;
 pub mod completeness;
+pub mod conditional_activity;
 pub mod context;
 pub mod initialize;
 pub mod intent;

@@ -296,6 +296,8 @@ fn typed_data(tool: BatchTool, data: Value) -> Value {
                 })
             });
             data.entry("suggested_next").or_insert_with(|| json!([]));
+            data.entry("conditional_activity")
+                .or_insert_with(|| json!([]));
         }
         BatchTool::SymbolExplain => {
             data.entry("symbols").or_insert_with(|| json!([]));
@@ -367,14 +369,17 @@ fn typed_data(tool: BatchTool, data: Value) -> Value {
                 data.entry("unresolved").or_insert_with(|| json!([]));
             }
         }
+        BatchTool::SourceRead => {
+            data.entry("conditional_activity")
+                .or_insert_with(|| json!([]));
+        }
         BatchTool::ChangeImpact
         | BatchTool::TestsSelect
         | BatchTool::ArchitectureOverview
         | BatchTool::ArchitectureCycles
         | BatchTool::CodeDead
         | BatchTool::PlanChange
-        | BatchTool::ContextPack
-        | BatchTool::SourceRead => {}
+        | BatchTool::ContextPack => {}
     }
     Value::Object(data)
 }
@@ -977,7 +982,7 @@ async fn batch_bindings_use_canonical_data_while_public_results_are_compact() {
         Ok(response(
             generation(2),
             100,
-            json!({"chunks": [], "elisions": [], "stale_references": [], "total_source_bytes": 0}),
+            json!({"chunks": [], "elisions": [], "stale_references": [], "total_source_bytes": 0, "conditional_activity": []}),
         )),
     ]));
 
@@ -1493,7 +1498,8 @@ async fn local_budget_failure_preserves_independent_success_and_usage() {
                 "chunks": [],
                 "elisions": [],
                 "stale_references": [],
-                "total_source_bytes": 0
+                "total_source_bytes": 0,
+                "conditional_activity": []
             }),
         )),
     ]));
@@ -1720,7 +1726,8 @@ async fn exhausted_parent_capacity_prevents_later_child_dispatch() {
             "chunks": [],
             "elisions": [],
             "stale_references": [],
-            "total_source_bytes": 0
+            "total_source_bytes": 0,
+            "conditional_activity": []
         }),
     ))]));
 
@@ -2019,7 +2026,8 @@ async fn ordered_terminal_outcomes_match_the_versioned_golden() {
                     "chunks": [],
                     "elisions": [],
                     "stale_references": [],
-                    "total_source_bytes": 0
+                    "total_source_bytes": 0,
+                    "conditional_activity": []
                 }),
             ))])),
             input(

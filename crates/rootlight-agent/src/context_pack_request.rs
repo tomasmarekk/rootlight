@@ -958,11 +958,17 @@ mod tests {
     }
 
     #[test]
-    fn request_digest_has_a_stable_golden_encoding() {
+    fn request_digest_has_a_stable_current_planner_encoding() {
         let request = canonical(&input());
+        assert_eq!(rootlight_mcp_contract::context::PLANNER_VERSION, 5);
         assert_eq!(
             request.request_digest(),
-            "ctxreq1_46580bf665df899a47c667ff2ebaa508810cb3bdded69a9d10d9cb0caf6d921c"
+            "ctxreq1_1be9f7da335d37efffca1732a48a4932de6530b2422992fdeebe1deb89589269"
+        );
+        assert_ne!(
+            request.request_digest(),
+            "ctxreq1_46580bf665df899a47c667ff2ebaa508810cb3bdded69a9d10d9cb0caf6d921c",
+            "a changed physical planner must not reuse its previous request identity"
         );
         assert_eq!(
             request.pack_id().as_str(),
