@@ -104,6 +104,30 @@ fn compress_literals(bytes: &[u8]) -> Vec<u8> {
     result
 }
 
+fn compress_module_source(bytes: &[u8]) -> Vec<u8> {
+    assert!(!bytes.is_empty());
+    let chunks = bytes.chunks_exact(4096);
+    let tail = chunks.remainder();
+    // Short raw chunks are invalid. Literal-only tails deliberately retain the
+    // small fixture contract instead of encoding a payload beyond its header.
+    assert!(
+        tail.len() < 3500,
+        "authored final source chunk must be below 3500 bytes"
+    );
+    if bytes.len() < 4096 {
+        return compress_literals(bytes);
+    }
+    let mut result = vec![1];
+    for chunk in chunks {
+        word(&mut result, 0x3fff);
+        result.extend_from_slice(chunk);
+    }
+    if !tail.is_empty() {
+        result.extend_from_slice(&compress_literals(tail)[1..]);
+    }
+    result
+}
+
 struct Stream<'a> {
     name: &'a str,
     bytes: Vec<u8>,
@@ -279,7 +303,7 @@ fn compound(streams: &[Stream<'_>]) -> Vec<u8> {
 fn stream<'a>(name: &'a str, body: &[u8]) -> Stream<'a> {
     Stream {
         name,
-        bytes: compress_literals(body),
+        bytes: compress_module_source(body),
         inside: true,
     }
 }
@@ -473,4 +497,68 @@ pub(super) fn native_book_with_directory_values(
     all.extend(streams);
     entries[4].1 = compound(&all);
     zip(&entries)
+}
+
+#[test]
+fn module_source_fixture_preserves_small_literal_encodings() {
+    for length in [1, 7, 8, 9, 1024, 3499] {
+        let bytes: Vec<_> = (0..length)
+            .map(|index| u8::try_from(index % 251).unwrap())
+            .collect();
+        assert_eq!(compress_module_source(&bytes), compress_literals(&bytes));
+    }
+}
+
+#[test]
+fn module_source_fixture_roundtrips_raw_chunks_and_bounded_literal_tails() {
+    use rootlight_source::vba_compression::{ChunkEncoding, DecompressionLimits, decompress};
+
+    for full_chunks in [1, 2, 9] {
+        for tail_bytes in [0, 1, 7, 8, 9, 1024, 3499] {
+            let length = full_chunks * 4096 + tail_bytes;
+            let bytes: Vec<_> = (0..length)
+                .map(|index| u8::try_from(index % 251).unwrap())
+                .collect();
+            let encoded = compress_module_source(&bytes);
+            let decoded = decompress(
+                &encoded,
+                DecompressionLimits::default(),
+                &rootlight_cancel::Cancellation::new(),
+            )
+            .unwrap();
+            assert_eq!(decoded.bytes(), bytes);
+            assert_eq!(
+                decoded.chunks().len(),
+                full_chunks + usize::from(tail_bytes != 0)
+            );
+            for (index, chunk) in decoded.chunks().iter().take(full_chunks).enumerate() {
+                assert_eq!(chunk.encoding(), ChunkEncoding::Raw);
+                assert_eq!(chunk.decoded_range(), index * 4096..(index + 1) * 4096);
+                assert_eq!(
+                    chunk.encoded_range(),
+                    1 + index * 4098..1 + (index + 1) * 4098
+                );
+                let start = chunk.encoded_range().start;
+                assert_eq!(&encoded[start..start + 2], &0x3fffu16.to_le_bytes());
+            }
+            if tail_bytes != 0 {
+                let tail = decoded.chunks().last().unwrap();
+                assert_eq!(tail.encoding(), ChunkEncoding::Tokens);
+                assert_eq!(tail.decoded_range(), full_chunks * 4096..length);
+                assert_eq!(tail.encoded_range().start, 1 + full_chunks * 4098);
+                assert_eq!(tail.encoded_range().end, encoded.len());
+            }
+        }
+    }
+}
+
+#[test]
+fn module_source_fixture_rejects_empty_or_oversized_literal_tails() {
+    assert!(std::panic::catch_unwind(|| compress_module_source(&[])).is_err());
+    for tail_bytes in [3500, 3584, 4095] {
+        for full_chunks in [0, 1] {
+            let bytes = vec![b'x'; full_chunks * 4096 + tail_bytes];
+            assert!(std::panic::catch_unwind(|| compress_module_source(&bytes)).is_err());
+        }
+    }
 }

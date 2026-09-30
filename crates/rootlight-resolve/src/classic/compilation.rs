@@ -23,7 +23,174 @@ struct FileActivity {
     source: SourceRef,
     conditional: bool,
     blocked: bool,
-    inventories: Vec<(FactId, VbaCompilation)>,
+    inventories: Vec<Inventory>,
+    maximum_activity_work: usize,
+}
+
+struct Inventory {
+    id: FactId,
+    model: VbaCompilation,
+    activity: ActivityIndex,
+}
+
+// A per-use branch scan can exhaust work and discard the entire resolution
+// transaction. Compile intervals once so lookup is logarithmic in inventory size.
+struct ActivityIndex {
+    inactive: Intervals,
+    unproven: Intervals,
+    gaps: Intervals,
+}
+
+#[derive(Default)]
+struct Intervals {
+    prefixes: Vec<(u64, u64)>,
+}
+
+impl Intervals {
+    fn build(
+        ranges: Vec<(u64, u64)>,
+        cancellation: &Cancellation,
+        work: &mut ResolutionWorkBudget,
+    ) -> Result<Self, ResolutionError> {
+        let mut ordered = BTreeMap::<u64, u64>::new();
+        for (start, end) in ranges {
+            cancellation.check()?;
+            work.consume()?;
+            ordered
+                .entry(start)
+                .and_modify(|prior| *prior = (*prior).max(end))
+                .or_insert(end);
+        }
+        let mut prefixes = Vec::new();
+        let mut maximum_end = 0;
+        for (start, end) in ordered {
+            cancellation.check()?;
+            work.consume()?;
+            maximum_end = maximum_end.max(end);
+            prefixes.push((start, maximum_end));
+        }
+        Ok(Self { prefixes })
+    }
+
+    fn matches<E>(
+        &self,
+        boundary: u64,
+        inclusive: bool,
+        end_boundary: u64,
+        inclusive_end: bool,
+        check: &mut impl FnMut() -> Result<(), E>,
+    ) -> Result<bool, E> {
+        let mut left = 0;
+        let mut right = self.prefixes.len();
+        while left < right {
+            check()?;
+            let middle = left + (right - left) / 2;
+            let (start, _) = self.prefixes[middle];
+            if start < boundary || (inclusive && start == boundary) {
+                left = middle + 1;
+            } else {
+                right = middle;
+            }
+        }
+        let Some(index) = left.checked_sub(1) else {
+            return Ok(false);
+        };
+        check()?;
+        let (_, maximum_end) = self.prefixes[index];
+        Ok(maximum_end > end_boundary || (inclusive_end && maximum_end == end_boundary))
+    }
+
+    fn contains<E>(
+        &self,
+        span: SourceSpan,
+        check: &mut impl FnMut() -> Result<(), E>,
+    ) -> Result<bool, E> {
+        self.matches(span.start_byte(), true, span.end_byte(), true, check)
+    }
+
+    fn overlaps<E>(
+        &self,
+        span: SourceSpan,
+        check: &mut impl FnMut() -> Result<(), E>,
+    ) -> Result<bool, E> {
+        self.matches(span.end_byte(), false, span.start_byte(), false, check)
+    }
+
+    fn maximum_work(&self) -> usize {
+        if self.prefixes.is_empty() {
+            0
+        } else {
+            usize::try_from(usize::BITS - self.prefixes.len().leading_zeros())
+                .expect("usize bit count fits usize")
+                + 1
+        }
+    }
+}
+
+impl ActivityIndex {
+    fn build(
+        model: &VbaCompilation,
+        cancellation: &Cancellation,
+        work: &mut ResolutionWorkBudget,
+    ) -> Result<Self, ResolutionError> {
+        let mut inactive = Vec::new();
+        let mut unproven = Vec::new();
+        let mut gaps = Vec::new();
+        let mut current: Option<(SourceSpan, u64)> = None;
+        for branch in &model.branches {
+            cancellation.check()?;
+            work.consume()?;
+            if let Some((group, end)) = current.filter(|(group, _)| *group != branch.group) {
+                gaps.push((end, group.end_byte()));
+                current = None;
+            }
+            let preceding = current.map_or(branch.group.start_byte(), |(_, end)| end);
+            // Empty gaps retain strict crossing barriers between adjacent bodies.
+            // A span ending or starting at the barrier still belongs to its body.
+            gaps.push((preceding, branch.region.start_byte()));
+            current = Some((branch.group, branch.region.end_byte()));
+            match branch.activity {
+                VbaCompilationActivity::Inactive => {
+                    inactive.push((branch.region.start_byte(), branch.region.end_byte()));
+                }
+                VbaCompilationActivity::Unproven => {
+                    unproven.push((branch.region.start_byte(), branch.region.end_byte()));
+                }
+                VbaCompilationActivity::Active => {}
+            }
+        }
+        if let Some((group, end)) = current {
+            gaps.push((end, group.end_byte()));
+        }
+        Ok(Self {
+            inactive: Intervals::build(inactive, cancellation, work)?,
+            unproven: Intervals::build(unproven, cancellation, work)?,
+            gaps: Intervals::build(gaps, cancellation, work)?,
+        })
+    }
+
+    fn activity<E>(
+        &self,
+        model: &VbaCompilation,
+        span: SourceSpan,
+        check: &mut impl FnMut() -> Result<(), E>,
+    ) -> Result<VbaCompilationActivity, E> {
+        if !model.complete || !contains(model.scope, span) {
+            return Ok(VbaCompilationActivity::Unproven);
+        }
+        // Whole-span exclusion outranks nested directive and alternative gaps.
+        if self.inactive.contains(span, check)? {
+            return Ok(VbaCompilationActivity::Inactive);
+        }
+        if self.unproven.contains(span, check)? || self.gaps.overlaps(span, check)? {
+            return Ok(VbaCompilationActivity::Unproven);
+        }
+        Ok(VbaCompilationActivity::Active)
+    }
+
+    fn maximum_work(&self) -> usize {
+        self.inactive.maximum_work() + self.unproven.maximum_work() + self.gaps.maximum_work()
+    }
 }
 
 impl CompilationIndex {
@@ -80,6 +247,7 @@ impl CompilationIndex {
                     conditional,
                     blocked: false,
                     inventories: Vec::new(),
+                    maximum_activity_work: 0,
                 },
             );
         }
@@ -127,12 +295,18 @@ impl CompilationIndex {
                 || file
                     .inventories
                     .iter()
-                    .any(|(_, prior)| overlaps(prior.scope, compilation.scope))
+                    .any(|prior| overlaps(prior.model.scope, compilation.scope))
             {
                 file.blocked = true;
                 continue;
             }
-            file.inventories.push((envelope.id, compilation));
+            let activity = ActivityIndex::build(&compilation, cancellation, work)?;
+            file.maximum_activity_work = file.maximum_activity_work.max(activity.maximum_work());
+            file.inventories.push(Inventory {
+                id: envelope.id,
+                model: compilation,
+                activity,
+            });
         }
         let mut definitions: BTreeMap<SymbolId, Option<&SourceRef>> = BTreeMap::new();
         for occurrence in occurrences {
@@ -172,8 +346,7 @@ impl CompilationIndex {
                     }
                     None => source,
                 };
-                work.consume_many(result.source_cost(declaration))?;
-                let activity = result.activity(declaration);
+                let activity = result.activity_with_work(declaration, cancellation, work)?;
                 if activity == VbaCompilationActivity::Unproven
                     && matches!(entity.kind, EntityKind::Module | EntityKind::Class)
                     && !matches!(entity.container, Some(ContainerRef::Entity(_)))
@@ -224,14 +397,18 @@ impl CompilationIndex {
                                     .map_err(|_| ResolutionError::CountOverflow)?,
                             )
                             .ok_or(ResolutionError::CountOverflow)?;
-                        result.activity(&SourceRef::new(
-                            source.repository(),
-                            source.generation(),
-                            SourceSpan::new(source.span().file(), start, end)
-                                .map_err(ResolutionError::InvalidProducer)?,
-                            source.content_hash(),
-                            None,
-                        ))
+                        result.activity_with_work(
+                            &SourceRef::new(
+                                source.repository(),
+                                source.generation(),
+                                SourceSpan::new(source.span().file(), start, end)
+                                    .map_err(ResolutionError::InvalidProducer)?,
+                                source.content_hash(),
+                                None,
+                            ),
+                            cancellation,
+                            work,
+                        )?
                     } else {
                         activity
                     }
@@ -282,8 +459,8 @@ impl CompilationIndex {
         }
         for occurrence in occurrences {
             cancellation.check()?;
-            work.consume_many(result.source_cost(&occurrence.source))?;
-            if result.activity(&occurrence.source) == VbaCompilationActivity::Active
+            if result.activity_with_work(&occurrence.source, cancellation, work)?
+                == VbaCompilationActivity::Active
                 && occurrence
                     .enclosing
                     .is_none_or(|id| result.entity_active(id))
@@ -318,41 +495,64 @@ impl CompilationIndex {
     }
 
     pub(super) fn activity(&self, source: &SourceRef) -> VbaCompilationActivity {
+        match self.activity_checked(source, &mut || Ok::<(), std::convert::Infallible>(())) {
+            Ok(activity) => activity,
+            Err(error) => match error {},
+        }
+    }
+
+    fn activity_with_work(
+        &self,
+        source: &SourceRef,
+        cancellation: &Cancellation,
+        work: &mut ResolutionWorkBudget,
+    ) -> Result<VbaCompilationActivity, ResolutionError> {
+        self.activity_checked(source, &mut || {
+            cancellation.check()?;
+            work.consume()
+        })
+    }
+
+    fn activity_checked<E>(
+        &self,
+        source: &SourceRef,
+        check: &mut impl FnMut() -> Result<(), E>,
+    ) -> Result<VbaCompilationActivity, E> {
+        check()?;
         let Some(file) = self.files.get(&source.span().file()) else {
-            return VbaCompilationActivity::Unproven;
+            return Ok(VbaCompilationActivity::Unproven);
         };
         if file.blocked
             || !same_identity(&file.source, source)
             || !contains(file.source.span(), source.span())
         {
-            return VbaCompilationActivity::Unproven;
+            return Ok(VbaCompilationActivity::Unproven);
         }
-        if let Some((_, model)) = file
-            .inventories
-            .iter()
-            .find(|(_, model)| contains(model.scope, source.span()))
-        {
-            return model.activity_at(source.span());
+        for inventory in &file.inventories {
+            check()?;
+            if contains(inventory.model.scope, source.span()) {
+                return inventory
+                    .activity
+                    .activity(&inventory.model, source.span(), check);
+            }
         }
-        if file.conditional
-            || file
-                .inventories
-                .iter()
-                .any(|(_, model)| overlaps(model.scope, source.span()))
-        {
-            VbaCompilationActivity::Unproven
-        } else {
-            VbaCompilationActivity::Active
+        if file.conditional {
+            return Ok(VbaCompilationActivity::Unproven);
         }
+        for inventory in &file.inventories {
+            check()?;
+            if overlaps(inventory.model.scope, source.span()) {
+                return Ok(VbaCompilationActivity::Unproven);
+            }
+        }
+        Ok(VbaCompilationActivity::Active)
     }
 
     pub(super) fn source_cost(&self, source: &SourceRef) -> usize {
+        // Pure proof/support lookups lack a work callback. Their callers reserve
+        // the binary-search bound; importer queries charge actual comparisons.
         self.files.get(&source.span().file()).map_or(1, |file| {
-            file.inventories
-                .iter()
-                .map(|(_, model)| model.branches.len().max(1))
-                .sum::<usize>()
-                .max(1)
+            file.maximum_activity_work + 2 * file.inventories.len() + 1
         })
     }
 
@@ -360,10 +560,9 @@ impl CompilationIndex {
         self.files.get(&source.span().file()).is_some_and(|file| {
             !file.blocked
                 && same_identity(&file.source, source)
-                && file
-                    .inventories
-                    .iter()
-                    .any(|(_, model)| model.complete && model.scope == source.span())
+                && file.inventories.iter().any(|inventory| {
+                    inventory.model.complete && inventory.model.scope == source.span()
+                })
         })
     }
 
@@ -372,7 +571,11 @@ impl CompilationIndex {
             .get(&file)
             .into_iter()
             .filter(|file| !file.blocked)
-            .flat_map(|file| file.inventories.iter().map(|(id, _)| FactRef::Fact(*id)))
+            .flat_map(|file| {
+                file.inventories
+                    .iter()
+                    .map(|inventory| FactRef::Fact(inventory.id))
+            })
     }
 }
 

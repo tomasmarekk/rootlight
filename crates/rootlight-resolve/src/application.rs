@@ -10,9 +10,10 @@ use rootlight_cancel::Cancellation;
 use rootlight_ids::{FactId, SymbolId, content_hash};
 use rootlight_ir::{
     AnalysisTier, BuildContextIdentity, Confidence, ContainerRef, EntityFlag, EntityKind,
-    EvidenceKind, ExtensionSupport, FactEvidence, FactRef, IrDocumentValidationError, IrLimits,
-    NormalizedIrDocument, OccurrenceRecord, OccurrenceRole, OccurrenceTarget, ProducerIdentity,
-    ProducerKind, ProvenanceRecord, RelationEndpoint, RelationPredicate, RelationRecord, SourceRef,
+    EvidenceKind, ExtensionSupport, FactEvidence, FactRef, GenerationNeutralFactIdIndex,
+    IrDocumentValidationError, IrLimits, NormalizedIrDocument, NormalizedRebindError,
+    OccurrenceRecord, OccurrenceRole, OccurrenceTarget, ProducerIdentity, ProducerKind,
+    ProvenanceRecord, RelationEndpoint, RelationPredicate, RelationRecord, SourceRef,
     canonicalize_ir_document, derive_occurrence_record_id, derive_provenance_record_id,
     derive_relation_record_id, validate_ir_document,
 };
@@ -305,7 +306,7 @@ impl ResolutionEngine {
                 sites.push((site_work, occurrence.id));
             }
         }
-        let estimate = crate::ResolutionWorkEstimate {
+        let mut estimate = crate::ResolutionWorkEstimate {
             required,
             limit: self.limits.work_limit(),
         };
@@ -508,7 +509,13 @@ impl ResolutionEngine {
         reconcile_groovy_import_gaps(&mut document, cancellation)?;
         reconcile_elm_import_relations(&mut document, cancellation)?;
         reconcile_elm_import_gaps(&mut document, cancellation)?;
-        reconcile_vba_target_gaps(&mut document, cancellation)?;
+        reconcile_vba_target_gaps_with_selection(
+            &mut document,
+            &mut work,
+            &mut estimate,
+            bounded,
+            cancellation,
+        )?;
         let document = canonicalize_ir_document(document, &ir_limits, &Default::default())
             .map_err(ResolutionError::InvalidDocument)?;
         Ok((document, estimate))
@@ -671,8 +678,164 @@ impl ResolutionEngine {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+struct VbaRecoveryOrigin<'a> {
+    source: &'a SourceRef,
+    syntax_kind: &'a str,
+    role: OccurrenceRole,
+    target: SymbolId,
+    enclosing: Option<SymbolId>,
+    rule: Option<&'a str>,
+}
+
+type VbaOriginProofs<'a> = BTreeMap<VbaRecoveryOrigin<'a>, BTreeSet<FactId>>;
+type VbaResolvedGapProofs<'a> = BTreeMap<(SourceRef, &'a str), VbaOriginProofs<'a>>;
+type VbaRecoveryProofs<'a> = BTreeMap<(&'a SourceRef, &'a str), Vec<FactId>>;
+type VbaNeutralProofIndex = Option<Result<GenerationNeutralFactIdIndex, NormalizedRebindError>>;
+
+fn record_vba_target_recovery<'a>(
+    resolved: &mut VbaResolvedGapProofs<'a>,
+    source: SourceRef,
+    detail: &'a str,
+    site: &'a OccurrenceRecord,
+    proof: &'a ProvenanceRecord,
+    work: &mut ResolutionWorkBudget,
+) -> Result<(), ResolutionError> {
+    work.consume()?;
+    let OccurrenceTarget::Resolved { symbol } = site.target else {
+        return Err(ResolutionError::UnsupportedIdentityRemap);
+    };
+    if site.provenance != proof.id {
+        return Err(ResolutionError::UnsupportedIdentityRemap);
+    }
+    let origin = VbaRecoveryOrigin {
+        source: &site.source,
+        syntax_kind: &site.syntax_kind,
+        role: site.role,
+        target: symbol,
+        enclosing: site.enclosing,
+        rule: proof.rule.as_deref(),
+    };
+    resolved
+        .entry((source, detail))
+        .or_default()
+        .entry(origin)
+        .or_default()
+        .insert(proof.id);
+    Ok(())
+}
+
+fn ordered_vba_recovery_proofs(
+    origins: &VbaOriginProofs<'_>,
+    document: &NormalizedIrDocument,
+    provenance: &BTreeMap<FactId, &ProvenanceRecord>,
+    limits: &IrLimits,
+    neutral: &mut VbaNeutralProofIndex,
+    work: &mut ResolutionWorkBudget,
+    cancellation: &Cancellation,
+) -> Result<Option<Vec<FactId>>, ResolutionError> {
+    let mut ordered = Vec::new();
+    let mut seen = BTreeSet::new();
+    for proofs in origins.values() {
+        cancellation.check()?;
+        work.consume()?;
+        if proofs.len() == 1 {
+            let &proof = proofs
+                .first()
+                .ok_or(ResolutionError::UnsupportedIdentityRemap)?;
+            if !provenance.contains_key(&proof) {
+                return Ok(None);
+            }
+            if seen.insert(proof) {
+                ordered.push(proof);
+            }
+            continue;
+        }
+        if proofs.is_empty() {
+            return Ok(None);
+        }
+        // A full source origin can legitimately have independent support
+        // chains. Only these ties need the central generation-neutral recipe;
+        // raw IDs never choose shard membership or a provenance template.
+        if neutral.is_none() {
+            let mut interrupted = None;
+            let projected = GenerationNeutralFactIdIndex::new(
+                document,
+                limits,
+                &ExtensionSupport::default(),
+                || {
+                    let checkpoint = cancellation
+                        .check()
+                        .map_err(ResolutionError::from)
+                        .and_then(|()| work.consume());
+                    if let Err(error) = checkpoint {
+                        interrupted = Some(error);
+                        false
+                    } else {
+                        true
+                    }
+                },
+            );
+            if let Some(error) = interrupted {
+                return Err(error);
+            }
+            *neutral = Some(projected);
+        }
+        let Some(Ok(index)) = neutral.as_ref() else {
+            // Unsupported or unrepresentable neutral evidence leaves this
+            // whole gap intact, without disabling independently ordered gaps.
+            return Ok(None);
+        };
+        let mut ties = BTreeMap::new();
+        for &proof in proofs {
+            cancellation.check()?;
+            work.consume()?;
+            let Some(identity) = index.get(proof).filter(|_| provenance.contains_key(&proof))
+            else {
+                return Ok(None);
+            };
+            if ties.insert(identity, proof).is_some() {
+                // Distinct admitted IDs can share one neutral identity. They
+                // are not contradictory, but cannot be safely tie-broken.
+                return Ok(None);
+            }
+        }
+        for proof in ties.into_values() {
+            cancellation.check()?;
+            work.consume()?;
+            if seen.insert(proof) {
+                ordered.push(proof);
+            }
+        }
+    }
+    Ok(Some(ordered))
+}
+
+fn reconcile_vba_target_gaps_with_selection(
+    document: &mut NormalizedIrDocument,
+    work: &mut ResolutionWorkBudget,
+    estimate: &mut crate::ResolutionWorkEstimate,
+    bounded: bool,
+    cancellation: &Cancellation,
+) -> Result<(), ResolutionError> {
+    match reconcile_vba_target_gaps(document, work, cancellation) {
+        Err(ResolutionError::WorkLimit { maximum }) if bounded => {
+            // Recovery charges before mutation. Preserve resolved semantic facts
+            // and every original gap when this optional phase cannot finish.
+            estimate.required = estimate.required.max(
+                maximum
+                    .checked_add(1)
+                    .ok_or(ResolutionError::CountOverflow)?,
+            );
+            Ok(())
+        }
+        result => result,
+    }
+}
+
 fn reconcile_vba_target_gaps(
     document: &mut NormalizedIrDocument,
+    work: &mut ResolutionWorkBudget,
     cancellation: &Cancellation,
 ) -> Result<(), ResolutionError> {
     use rootlight_ir::{CoverageScope, CoverageStatus, FactDomain, SkippedRegionReason};
@@ -817,35 +980,49 @@ fn reconcile_vba_target_gaps(
                     && source.span().end_byte() < site.source.span().end_byte()
                     && default_receivers.contains(source)
                 {
-                    resolved.insert(
-                        (source.clone(), "vba-call-or-index-target-unavailable"),
-                        site.provenance,
-                    );
+                    record_vba_target_recovery(
+                        &mut resolved,
+                        source.clone(),
+                        "vba-call-or-index-target-unavailable",
+                        site,
+                        record,
+                        work,
+                    )?;
                 }
             }
         }
         if site.syntax_kind == "vba.application.reference"
             && matches!(site.target, OccurrenceTarget::Resolved { .. })
-            && producers.get(&site.provenance).is_some_and(|(_, record)| {
-                matches!(
-                    record.rule.as_deref(),
-                    Some(
-                        "classic-project-member-v1.indexed_snapshot"
-                            | "vba-collection-call-v1.indexed_snapshot"
-                    )
+            && let Some((_, record)) = producers.get(&site.provenance)
+            && matches!(
+                record.rule.as_deref(),
+                Some(
+                    "classic-project-member-v1.indexed_snapshot"
+                        | "vba-collection-call-v1.indexed_snapshot"
                 )
-            })
+            )
         {
-            resolved.insert(
-                (site.source.clone(), "vba-call-or-index-target-unavailable"),
-                site.provenance,
-            );
+            record_vba_target_recovery(
+                &mut resolved,
+                site.source.clone(),
+                "vba-call-or-index-target-unavailable",
+                site,
+                record,
+                work,
+            )?;
         }
-        if let Some(((syntax, detail), _)) = producers.get(&site.provenance)
+        if let Some(((syntax, detail), record)) = producers.get(&site.provenance)
             && syntax.contains(&site.syntax_kind.as_str())
             && matches!(site.target, OccurrenceTarget::Resolved { .. })
         {
-            resolved.insert((site.source.clone(), *detail), site.provenance);
+            record_vba_target_recovery(
+                &mut resolved,
+                site.source.clone(),
+                detail,
+                site,
+                record,
+                work,
+            )?;
         }
         if site.syntax_kind == "vba.value_identifier.reference" {
             let count = value_source_counts.entry(&site.source).or_insert(0_u8);
@@ -875,6 +1052,11 @@ fn reconcile_vba_target_gaps(
     if resolved.is_empty() && value_sites.is_empty() {
         return Ok(());
     }
+    let provenance: BTreeMap<_, _> = document
+        .provenance
+        .iter()
+        .map(|record| (record.id, record))
+        .collect();
     // A resolved target alone is insufficient; the exact source relation must
     // already exist before retiring its missing-target gap.
     for relation in &document.relations {
@@ -895,24 +1077,28 @@ fn reconcile_vba_target_gaps(
             && relation.evidence.source.as_ref() == Some(&site.source)
             && relation.provenance == site.provenance
         {
-            resolved.insert(
-                (site.source.clone(), "vba-binding-target-unavailable"),
-                site.provenance,
-            );
+            record_vba_target_recovery(
+                &mut resolved,
+                site.source.clone(),
+                "vba-binding-target-unavailable",
+                site,
+                provenance
+                    .get(&site.provenance)
+                    .copied()
+                    .ok_or(ResolutionError::UnsupportedIdentityRemap)?,
+                work,
+            )?;
         }
     }
     if resolved.is_empty() {
         return Ok(());
     }
-    let provenance: BTreeMap<_, _> = document
-        .provenance
-        .iter()
-        .map(|record| (record.id, record))
-        .collect();
     let files: BTreeMap<_, _> = document.files.iter().map(|file| (file.id, file)).collect();
+    let limits = IrLimits::default();
+    let mut neutral = None;
     let mut removed = BTreeMap::new();
     let mut source_gap_counts = BTreeMap::<_, u64>::new();
-    let mut recovered = BTreeMap::<_, (u64, BTreeSet<FactRef>)>::new();
+    let mut recovered = BTreeMap::<_, (u64, VbaRecoveryProofs<'_>)>::new();
     for gap in &document.skipped_regions {
         cancellation.check()?;
         let Some(file) = files.get(&gap.source.span().file()) else {
@@ -926,17 +1112,38 @@ fn reconcile_vba_target_gaps(
         if gap.reason != SkippedRegionReason::UnsupportedConstruct {
             continue;
         }
-        if let Some(proof) = resolved.get(&(gap.source.clone(), gap.detail.as_str())) {
+        if let Some(origins) = resolved.get(&(gap.source.clone(), gap.detail.as_str()))
+            && let Some(ordered) = ordered_vba_recovery_proofs(
+                origins,
+                document,
+                &provenance,
+                &limits,
+                &mut neutral,
+                work,
+                cancellation,
+            )?
+        {
             removed.insert(gap.id, gap.id);
             let (count, proofs) = recovered.entry(file.id).or_default();
             *count = count.checked_add(1).ok_or(ResolutionError::CountOverflow)?;
-            proofs.insert(FactRef::Fact(*proof));
+            proofs.insert((&gap.source, gap.detail.as_str()), ordered);
         }
     }
     if removed.is_empty() {
         return Ok(());
     }
-    let limits = IrLimits::default();
+    // All budget failures precede document mutation, including the later
+    // flattening walk. Bounded callers can therefore retain original gaps.
+    let flattening = recovered.values().try_fold(0_usize, |total, (_, proofs)| {
+        cancellation.check()?;
+        proofs.values().try_fold(total, |total, ids| {
+            cancellation.check()?;
+            total
+                .checked_add(ids.len())
+                .ok_or(ResolutionError::CountOverflow)
+        })
+    })?;
+    work.consume_many(flattening)?;
     let mut budget = OutputRecordBudget::from_document(document, &limits);
     let mut known = document.provenance.iter().map(|p| p.id).collect();
     let mut added = Vec::new();
@@ -963,16 +1170,27 @@ fn reconcile_vba_target_gaps(
         {
             return Err(ResolutionError::UnsupportedIdentityRemap);
         }
+        // Exact gap witnesses order both the template and shard inputs. All
+        // witnesses share this document's generation, unlike their hashed IDs.
         let proof = proofs
-            .iter()
-            .find_map(|proof| match proof {
-                FactRef::Fact(id) => provenance.get(id).copied(),
-                _ => None,
-            })
+            .values()
+            .next()
+            .and_then(|ids| ids.first())
+            .and_then(|id| provenance.get(id).copied())
             .ok_or(ResolutionError::UnsupportedIdentityRemap)?;
-        let mut facts = proofs.clone();
-        facts.insert(FactRef::Fact(file.provenance));
-        let facts: Vec<_> = facts.into_iter().collect();
+        let mut seen = BTreeSet::new();
+        let mut facts = Vec::new();
+        for ids in proofs.values() {
+            for id in ids {
+                cancellation.check()?;
+                if seen.insert(*id) {
+                    facts.push(FactRef::Fact(*id));
+                }
+            }
+        }
+        if seen.insert(file.provenance) {
+            facts.push(FactRef::Fact(file.provenance));
+        }
         let sources: Vec<_> = file.evidence.source.iter().cloned().collect();
         let root = append_shared_provenance(
             ProvenanceTree {
@@ -1550,6 +1768,8 @@ fn append_shared_provenance(
             .take(width)
             .cloned()
             .collect();
+        record.input_sources.sort_unstable();
+        record.input_sources.dedup();
         record.evidence_sources = record.input_sources.clone();
         record.derivation_parents = evidence
             .facts
@@ -1558,6 +1778,8 @@ fn append_shared_provenance(
             .take(width)
             .copied()
             .collect();
+        record.derivation_parents.sort_unstable();
+        record.derivation_parents.dedup();
         record.id = derive_provenance_record_id(&record).map_err(ResolutionError::FactIdentity)?;
         level.push(FactRef::Fact(record.id));
         if known.insert(record.id) {
@@ -1568,13 +1790,23 @@ fn append_shared_provenance(
     template.rule = Some(format!("{}.branch", evidence.rule));
     while level.len() > 1 {
         cancellation.check()?;
-        level.sort_unstable();
-        level.dedup();
+        // Generation-bound IDs canonicalize each record, never shard membership.
+        // Preserve the caller's semantic order through every construction level.
+        let mut seen = BTreeSet::new();
+        let mut unique = Vec::with_capacity(level.len());
+        for parent in level {
+            cancellation.check()?;
+            if seen.insert(parent) {
+                unique.push(parent);
+            }
+        }
         let mut next = Vec::new();
-        for chunk in level.chunks(width) {
+        for chunk in unique.chunks(width) {
             cancellation.check()?;
             let mut record = template.clone();
             record.derivation_parents = chunk.to_vec();
+            record.derivation_parents.sort_unstable();
+            record.derivation_parents.dedup();
             record.id =
                 derive_provenance_record_id(&record).map_err(ResolutionError::FactIdentity)?;
             next.push(FactRef::Fact(record.id));
@@ -2264,6 +2496,972 @@ mod tests {
         OutputRecordBudget, RESOLVER_PROVIDER_NAME, RESOLVER_PROVIDER_VERSION, ResolutionDecision,
         ResolutionOutcome, ResolutionRule, append_relation_specs, apply_target,
     };
+
+    fn vba_recovery_fixture(
+        generation: GenerationId,
+    ) -> (rootlight_ir::NormalizedIrDocument, Vec<OccurrenceRecord>) {
+        use rootlight_ir::{FactRef, derive_provenance_record_id};
+
+        let fixture = sharded_provenance_fixture(generation);
+        let mut document = fixture.document;
+        let source = SourceRef::new(
+            document.repository,
+            generation,
+            SourceSpan::new(document.files[0].id, 0, 1).unwrap(),
+            document.files[0].content_hash,
+            None,
+        );
+        let mut sites = Vec::new();
+        for parent in fixture.proofs {
+            let mut proof = document
+                .provenance
+                .iter()
+                .find(|record| record.id == parent)
+                .unwrap()
+                .clone();
+            proof.input_sources = vec![source.clone()];
+            proof.evidence_sources = vec![source.clone()];
+            proof.derivation_parents = vec![FactRef::Fact(parent)];
+            proof.rule = Some("vba-standard-call-v1.indexed_snapshot".to_owned());
+            proof.id = derive_provenance_record_id(&proof).unwrap();
+            let mut site = OccurrenceRecord {
+                id: FactId::from_bytes([0; 20]),
+                repository: document.repository,
+                generation,
+                file: source.span().file(),
+                source: source.clone(),
+                role: OccurrenceRole::Reference,
+                enclosing: None,
+                target: OccurrenceTarget::Resolved {
+                    symbol: SymbolId::from_bytes([42; 20]),
+                },
+                syntactic_text_hash: content_hash(b"a"),
+                syntax_kind: "vba.application.reference".to_owned(),
+                provenance: proof.id,
+                confidence: Confidence::new(1_000).unwrap(),
+                evidence: FactEvidence {
+                    source: Some(source.clone()),
+                    derivation: vec![FactRef::Fact(proof.id)],
+                },
+            };
+            site.id = rootlight_ir::derive_occurrence_record_id(&site).unwrap();
+            // Sites are collector inputs, not facts of the projection document;
+            // the authored support DAG needs no invented target declaration.
+            sites.push(site);
+            document.provenance.push(proof);
+        }
+        (document, sites)
+    }
+
+    fn vba_recovery_origins<'a>(
+        document: &'a rootlight_ir::NormalizedIrDocument,
+        sites: &'a [OccurrenceRecord],
+    ) -> super::VbaOriginProofs<'a> {
+        let mut resolved = super::VbaResolvedGapProofs::new();
+        let mut work = crate::engine::ResolutionWorkBudget::new(1_000);
+        for site in sites.iter().rev().chain(sites.first()) {
+            let proof = document
+                .provenance
+                .iter()
+                .find(|record| record.id == site.provenance)
+                .unwrap();
+            super::record_vba_target_recovery(
+                &mut resolved,
+                sites[0].source.clone(),
+                "vba-call-or-index-target-unavailable",
+                site,
+                proof,
+                &mut work,
+            )
+            .unwrap();
+        }
+        assert_eq!(work.consumed(), sites.len() + 1);
+        assert_eq!(resolved.len(), 1, "support multiplicity is not a gap count");
+        resolved.pop_first().unwrap().1
+    }
+
+    fn vba_recovery_document_fixture(
+        generation: GenerationId,
+    ) -> rootlight_ir::NormalizedIrDocument {
+        use rootlight_ir::{
+            AnalysisTier, ContainerRef, CoverageRecord, CoverageScope, EntityKind, EntityRecord,
+            EntityVisibility, FactDomain, SkippedRegion, SkippedRegionReason,
+        };
+
+        let (mut document, sites) = vba_recovery_fixture(generation);
+        let file = &document.files[0];
+        let file_source = file.evidence.source.clone().unwrap();
+        document.entities.push(EntityRecord {
+            id: SymbolId::from_bytes([42; 20]),
+            repository: document.repository,
+            generation,
+            kind: EntityKind::Function,
+            language: file.language.clone(),
+            tier: AnalysisTier::TierB,
+            canonical_name: "authored_target".to_owned(),
+            display_name: "AuthoredTarget".to_owned(),
+            qualified_name: "Module.AuthoredTarget".to_owned(),
+            container: Some(ContainerRef::File(file.id)),
+            visibility: EntityVisibility::Public,
+            flags: Vec::new(),
+            provenance: file.provenance,
+            evidence: FactEvidence {
+                source: Some(file_source.clone()),
+                derivation: Vec::new(),
+            },
+        });
+        let mut gap = SkippedRegion {
+            id: FactId::from_bytes([0; 20]),
+            repository: document.repository,
+            generation,
+            source: sites[0].source.clone(),
+            domain: FactDomain::Relations,
+            reason: SkippedRegionReason::UnsupportedConstruct,
+            detail: "vba-call-or-index-target-unavailable".to_owned(),
+            provenance: file.provenance,
+            evidence: FactEvidence {
+                source: Some(sites[0].source.clone()),
+                derivation: Vec::new(),
+            },
+        };
+        gap.id = rootlight_ir::derive_skipped_region_id(&gap).unwrap();
+        let mut coverage = CoverageRecord {
+            id: FactId::from_bytes([0; 20]),
+            repository: document.repository,
+            generation,
+            scope: CoverageScope::File(file.id),
+            domain: FactDomain::Relations,
+            tier: AnalysisTier::TierB,
+            status: CoverageStatus::Bounded,
+            discovered: 1,
+            indexed: 0,
+            skipped: 1,
+            provenance: file.provenance,
+            evidence: FactEvidence {
+                source: Some(file_source),
+                derivation: Vec::new(),
+            },
+        };
+        coverage.id = rootlight_ir::derive_coverage_record_id(&coverage).unwrap();
+        document.occurrences = sites;
+        document.skipped_regions.push(gap);
+        document.coverage_records.push(coverage);
+        rootlight_ir::canonicalize_ir_document(
+            document,
+            &rootlight_ir::IrLimits::default(),
+            &rootlight_ir::ExtensionSupport::default(),
+        )
+        .unwrap()
+    }
+
+    fn vba_provenance_closure(
+        document: &rootlight_ir::NormalizedIrDocument,
+        root: FactId,
+    ) -> std::collections::BTreeSet<FactId> {
+        let records: std::collections::BTreeMap<_, _> = document
+            .provenance
+            .iter()
+            .map(|record| (record.id, record))
+            .collect();
+        let mut pending = vec![root];
+        let mut visited = std::collections::BTreeSet::new();
+        while let Some(id) = pending.pop() {
+            if !visited.insert(id) {
+                continue;
+            }
+            for parent in &records[&id].derivation_parents {
+                if let rootlight_ir::FactRef::Fact(parent) = parent {
+                    pending.push(*parent);
+                }
+            }
+        }
+        visited
+    }
+
+    #[test]
+    fn vba_recovery_counts_one_gap_and_retains_every_independent_support() {
+        let mut document = vba_recovery_document_fixture(GenerationId::from_bytes([2; 20]));
+        let original_occurrences = document.occurrences.clone();
+        let supports: std::collections::BTreeSet<_> = original_occurrences
+            .iter()
+            .map(|site| site.provenance)
+            .collect();
+        assert_eq!(supports.len(), 9);
+        let mut expected = supports.clone();
+        for &proof in &supports {
+            expected.extend(vba_provenance_closure(&document, proof));
+        }
+        let mut work = crate::engine::ResolutionWorkBudget::new(100_000);
+        super::reconcile_vba_target_gaps(&mut document, &mut work, &Cancellation::new()).unwrap();
+        assert!(document.skipped_regions.is_empty());
+        assert_eq!(document.occurrences, original_occurrences);
+        let coverage = &document.coverage_records[0];
+        assert_eq!(
+            (coverage.discovered, coverage.indexed, coverage.skipped),
+            (1, 1, 0)
+        );
+        assert_eq!(coverage.status, CoverageStatus::Complete);
+        let mut actual = vba_provenance_closure(&document, coverage.provenance);
+        actual.remove(&coverage.provenance);
+        assert_eq!(actual, expected);
+        let canonical = rootlight_ir::canonicalize_ir_document(
+            document.clone(),
+            &rootlight_ir::IrLimits::default(),
+            &rootlight_ir::ExtensionSupport::default(),
+        )
+        .unwrap();
+        assert_eq!(canonical.coverage_records, document.coverage_records);
+        assert_eq!(canonical.occurrences, original_occurrences);
+    }
+
+    #[test]
+    fn vba_recovery_bounded_exhaustion_preserves_semantic_facts_and_original_gaps() {
+        let original = vba_recovery_document_fixture(GenerationId::from_bytes([2; 20]));
+        let mut complete = original.clone();
+        let mut complete_work = crate::engine::ResolutionWorkBudget::new(100_000);
+        super::reconcile_vba_target_gaps(&mut complete, &mut complete_work, &Cancellation::new())
+            .unwrap();
+        let required = complete_work.consumed();
+        assert!(required > original.occurrences.len());
+        // Exhaustion includes construction, the lazy neutral traversal, and
+        // the final flattening precharge immediately before coverage mutation.
+        for maximum in [0, original.occurrences.len(), required - 1] {
+            let mut bounded = original.clone();
+            let mut work = crate::engine::ResolutionWorkBudget::new(maximum);
+            let mut estimate = crate::ResolutionWorkEstimate {
+                required: maximum,
+                limit: maximum,
+            };
+            super::reconcile_vba_target_gaps_with_selection(
+                &mut bounded,
+                &mut work,
+                &mut estimate,
+                true,
+                &Cancellation::new(),
+            )
+            .unwrap();
+            assert_eq!(bounded, original);
+            assert!(!estimate.fits());
+            assert_eq!(estimate.required, maximum + 1);
+            let canonical = rootlight_ir::canonicalize_ir_document(
+                bounded.clone(),
+                &rootlight_ir::IrLimits::default(),
+                &rootlight_ir::ExtensionSupport::default(),
+            )
+            .unwrap();
+            assert_eq!(bounded, canonical);
+            let mut strict = original.clone();
+            let mut work = crate::engine::ResolutionWorkBudget::new(maximum);
+            assert!(matches!(
+                super::reconcile_vba_target_gaps_with_selection(
+                    &mut strict,
+                    &mut work,
+                    &mut estimate,
+                    false,
+                    &Cancellation::new(),
+                ),
+                Err(ResolutionError::WorkLimit { maximum: actual }) if actual == maximum
+            ));
+            assert_eq!(strict, original);
+        }
+        let mut document = original.clone();
+        let mut work = crate::engine::ResolutionWorkBudget::new(100_000);
+        let mut estimate = crate::ResolutionWorkEstimate {
+            required: 0,
+            limit: 100_000,
+        };
+        let deadline = Cancellation::with_deadline(std::time::Instant::now());
+        assert!(matches!(
+            super::reconcile_vba_target_gaps_with_selection(
+                &mut document,
+                &mut work,
+                &mut estimate,
+                true,
+                &deadline,
+            ),
+            Err(ResolutionError::Cancelled(_))
+        ));
+        assert_eq!(document, original);
+    }
+
+    #[test]
+    fn vba_recovery_distinct_nested_origins_do_not_build_neutral_projection() {
+        let (mut document, mut sites) = vba_recovery_fixture(GenerationId::from_bytes([2; 20]));
+        sites.truncate(2);
+        sites[1].source = SourceRef::new(
+            document.repository,
+            document.generation,
+            SourceSpan::new(sites[1].file, 0, 4).unwrap(),
+            sites[1].source.content_hash(),
+            None,
+        );
+        sites[1].target = OccurrenceTarget::Resolved {
+            symbol: SymbolId::from_bytes([43; 20]),
+        };
+        // Untied origins remain usable even with unrelated preserved IR that
+        // has no supported neutral identity recipe.
+        document.extensions[0].namespace = "dev.rootlight.opaque".to_owned();
+        let provenance = document
+            .provenance
+            .iter()
+            .map(|record| (record.id, record))
+            .collect();
+        let origins = vba_recovery_origins(&document, &sites);
+        assert_eq!(origins.len(), 2);
+        assert!(origins.values().all(|proofs| proofs.len() == 1));
+        let mut neutral = None;
+        let mut work = crate::engine::ResolutionWorkBudget::new(2);
+        let ordered = super::ordered_vba_recovery_proofs(
+            &origins,
+            &document,
+            &provenance,
+            &rootlight_ir::IrLimits::default(),
+            &mut neutral,
+            &mut work,
+            &Cancellation::new(),
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            ordered,
+            sites.iter().map(|site| site.provenance).collect::<Vec<_>>()
+        );
+        assert!(neutral.is_none());
+        assert_eq!(work.consumed(), 2);
+    }
+
+    #[test]
+    fn vba_recovery_tied_origins_charge_one_cached_neutral_projection() {
+        use rootlight_ir::{ExtensionSupport, GenerationNeutralFactIdIndex, IrLimits};
+
+        let (document, sites) = vba_recovery_fixture(GenerationId::from_bytes([2; 20]));
+        let provenance = document
+            .provenance
+            .iter()
+            .map(|record| (record.id, record))
+            .collect();
+        let origins = vba_recovery_origins(&document, &sites);
+        assert_eq!(origins.len(), 1);
+        assert_eq!(origins.values().next().unwrap().len(), 9);
+        let mut callbacks = 0;
+        let index = GenerationNeutralFactIdIndex::new(
+            &document,
+            &IrLimits::default(),
+            &ExtensionSupport::default(),
+            || {
+                callbacks += 1;
+                true
+            },
+        )
+        .unwrap();
+        assert!(callbacks > document.provenance.len());
+        let mut expected: Vec<_> = sites.iter().map(|site| site.provenance).collect();
+        expected.sort_unstable_by_key(|id| index.get(*id).unwrap());
+        let mut neutral = None;
+        let mut work = crate::engine::ResolutionWorkBudget::new(100_000);
+        for attempt in 0..2 {
+            let before = work.consumed();
+            let ordered = super::ordered_vba_recovery_proofs(
+                &origins,
+                &document,
+                &provenance,
+                &IrLimits::default(),
+                &mut neutral,
+                &mut work,
+                &Cancellation::new(),
+            )
+            .unwrap()
+            .unwrap();
+            assert_eq!(ordered, expected);
+            assert_eq!(
+                work.consumed() - before,
+                1 + sites.len() * 2 + if attempt == 0 { callbacks } else { 0 }
+            );
+        }
+        assert!(matches!(neutral, Some(Ok(_))));
+        let mut failed = None;
+        let mut work = crate::engine::ResolutionWorkBudget::new(1 + callbacks - 1);
+        assert!(matches!(
+            super::ordered_vba_recovery_proofs(
+                &origins,
+                &document,
+                &provenance,
+                &IrLimits::default(),
+                &mut failed,
+                &mut work,
+                &Cancellation::new(),
+            ),
+            Err(ResolutionError::WorkLimit { .. })
+        ));
+        assert!(failed.is_none());
+    }
+
+    #[test]
+    fn vba_recovery_unorderable_tie_preserves_the_whole_gap_and_other_origins() {
+        use rootlight_ir::IrLimits;
+
+        let (mut document, mut sites) = vba_recovery_fixture(GenerationId::from_bytes([2; 20]));
+        sites.truncate(2);
+        let mut alias = document
+            .provenance
+            .iter()
+            .find(|record| record.id == sites[0].provenance)
+            .unwrap()
+            .clone();
+        alias.id = FactId::from_bytes([240; 20]);
+        assert!(
+            document
+                .provenance
+                .iter()
+                .all(|record| record.id != alias.id)
+        );
+        let mut alias_site = sites[0].clone();
+        alias_site.provenance = alias.id;
+        sites.push(alias_site);
+        document.provenance.push(alias);
+        let provenance = document
+            .provenance
+            .iter()
+            .map(|record| (record.id, record))
+            .collect();
+        let before = document.clone();
+        let origins = vba_recovery_origins(&document, &sites);
+        let mut neutral = None;
+        let mut work = crate::engine::ResolutionWorkBudget::new(100_000);
+        assert!(
+            super::ordered_vba_recovery_proofs(
+                &origins,
+                &document,
+                &provenance,
+                &IrLimits::default(),
+                &mut neutral,
+                &mut work,
+                &Cancellation::new(),
+            )
+            .unwrap()
+            .is_none()
+        );
+        assert_eq!(document, before);
+        let untied = vba_recovery_origins(&document, &sites[..1]);
+        assert_eq!(
+            super::ordered_vba_recovery_proofs(
+                &untied,
+                &document,
+                &provenance,
+                &IrLimits::default(),
+                &mut neutral,
+                &mut work,
+                &Cancellation::new(),
+            )
+            .unwrap(),
+            Some(vec![sites[0].provenance])
+        );
+
+        let mut missing = untied.clone();
+        missing
+            .values_mut()
+            .next()
+            .unwrap()
+            .insert(FactId::from_bytes([241; 20]));
+        assert!(
+            super::ordered_vba_recovery_proofs(
+                &missing,
+                &document,
+                &provenance,
+                &IrLimits::default(),
+                &mut neutral,
+                &mut work,
+                &Cancellation::new(),
+            )
+            .unwrap()
+            .is_none()
+        );
+        let cancelled = Cancellation::new();
+        cancelled.cancel(rootlight_cancel::CancellationReason::ClientRequest);
+        assert!(matches!(
+            super::ordered_vba_recovery_proofs(
+                &origins,
+                &document,
+                &provenance,
+                &IrLimits::default(),
+                &mut neutral,
+                &mut work,
+                &cancelled,
+            ),
+            Err(ResolutionError::Cancelled(_))
+        ));
+        let mut missing_singleton = untied.clone();
+        let proofs = missing_singleton.values_mut().next().unwrap();
+        proofs.clear();
+        proofs.insert(FactId::from_bytes([241; 20]));
+        assert!(
+            super::ordered_vba_recovery_proofs(
+                &missing_singleton,
+                &document,
+                &provenance,
+                &IrLimits::default(),
+                &mut neutral,
+                &mut work,
+                &Cancellation::new(),
+            )
+            .unwrap()
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn vba_recovery_unsupported_projection_keeps_ties_without_disabling_untied_gaps() {
+        use rootlight_ir::IrLimits;
+
+        let (mut document, sites) = vba_recovery_fixture(GenerationId::from_bytes([2; 20]));
+        document.extensions[0].namespace = "dev.rootlight.opaque".to_owned();
+        let provenance = document
+            .provenance
+            .iter()
+            .map(|record| (record.id, record))
+            .collect();
+        let origins = vba_recovery_origins(&document, &sites);
+        let mut neutral = None;
+        let mut work = crate::engine::ResolutionWorkBudget::new(100_000);
+        assert!(
+            super::ordered_vba_recovery_proofs(
+                &origins,
+                &document,
+                &provenance,
+                &IrLimits::default(),
+                &mut neutral,
+                &mut work,
+                &Cancellation::new(),
+            )
+            .unwrap()
+            .is_none()
+        );
+        assert!(matches!(
+            neutral,
+            Some(Err(
+                rootlight_ir::NormalizedRebindError::UnsupportedExtension
+            ))
+        ));
+        let before = work.consumed();
+        let untied = vba_recovery_origins(&document, &sites[..1]);
+        assert_eq!(
+            super::ordered_vba_recovery_proofs(
+                &untied,
+                &document,
+                &provenance,
+                &IrLimits::default(),
+                &mut neutral,
+                &mut work,
+                &Cancellation::new(),
+            )
+            .unwrap(),
+            Some(vec![sites[0].provenance])
+        );
+        assert_eq!(work.consumed() - before, 1);
+    }
+
+    #[test]
+    fn vba_recovery_neutral_collision_keeps_original_gap_counts_and_all_support_facts() {
+        let mut document = vba_recovery_document_fixture(GenerationId::from_bytes([2; 20]));
+        let mut site = document.occurrences[0].clone();
+        let mut alias = document
+            .provenance
+            .iter()
+            .find(|record| record.id == site.provenance)
+            .unwrap()
+            .clone();
+        alias.id = FactId::from_bytes([240; 20]);
+        assert!(
+            document
+                .provenance
+                .iter()
+                .all(|record| record.id != alias.id)
+        );
+        site.provenance = alias.id;
+        site.evidence.derivation = vec![rootlight_ir::FactRef::Fact(alias.id)];
+        site.id = rootlight_ir::derive_occurrence_record_id(&site).unwrap();
+        document.provenance.push(alias);
+        document.occurrences.push(site);
+        let before = document.clone();
+        let mut work = crate::engine::ResolutionWorkBudget::new(100_000);
+        super::reconcile_vba_target_gaps(&mut document, &mut work, &Cancellation::new()).unwrap();
+        assert_eq!(document, before);
+        let coverage = &document.coverage_records[0];
+        assert_eq!(
+            (coverage.discovered, coverage.indexed, coverage.skipped),
+            (1, 0, 1)
+        );
+        assert_eq!(coverage.status, CoverageStatus::Bounded);
+        assert_eq!(document.skipped_regions.len(), 1);
+        rootlight_ir::canonicalize_ir_document(
+            document,
+            &rootlight_ir::IrLimits::default(),
+            &rootlight_ir::ExtensionSupport::default(),
+        )
+        .unwrap();
+    }
+
+    fn vba_recovery_tied_shard_fixture(
+        generation: GenerationId,
+        reverse_input: bool,
+    ) -> (rootlight_ir::NormalizedIrDocument, Vec<usize>, Vec<usize>) {
+        use rootlight_ir::{FactRef, IrLimits};
+
+        let (mut document, sites) = vba_recovery_fixture(generation);
+        if reverse_input {
+            document.provenance.reverse();
+        }
+        let origins = vba_recovery_origins(&document, &sites);
+        let provenance = document
+            .provenance
+            .iter()
+            .map(|record| (record.id, record))
+            .collect();
+        let mut limits = IrLimits::default();
+        limits.max_nested_items_per_record = 2;
+        let mut neutral = None;
+        let mut work = crate::engine::ResolutionWorkBudget::new(100_000);
+        let ordered = super::ordered_vba_recovery_proofs(
+            &origins,
+            &document,
+            &provenance,
+            &limits,
+            &mut neutral,
+            &mut work,
+            &Cancellation::new(),
+        )
+        .unwrap()
+        .unwrap();
+        let semantic_order: Vec<_> = ordered
+            .iter()
+            .map(|id| {
+                sites
+                    .iter()
+                    .position(|site| site.provenance == *id)
+                    .unwrap()
+            })
+            .collect();
+        let mut raw_order: Vec<_> = sites
+            .iter()
+            .enumerate()
+            .map(|(index, site)| (site.provenance, index))
+            .collect();
+        raw_order.sort_unstable();
+        let raw_order = raw_order.into_iter().map(|(_, index)| index).collect();
+        let template = document
+            .provenance
+            .iter()
+            .find(|record| record.id == ordered[0])
+            .unwrap()
+            .clone();
+        let mut expected = std::collections::BTreeSet::new();
+        for &proof in &ordered {
+            expected.extend(vba_provenance_closure(&document, proof));
+        }
+        let mut facts: Vec<_> = ordered.into_iter().map(FactRef::Fact).collect();
+        facts.push(FactRef::Fact(document.files[0].provenance));
+        let source = document.files[0].evidence.source.clone().unwrap();
+        let mut budget = OutputRecordBudget::from_document(&document, &limits);
+        let mut known = document.provenance.iter().map(|record| record.id).collect();
+        let mut output = Vec::new();
+        let root = super::append_shared_provenance(
+            super::ProvenanceTree {
+                sources: &[source],
+                facts: &facts,
+                rule: "vba-target-coverage-v1.tied",
+            },
+            template,
+            &limits,
+            &mut budget,
+            &mut known,
+            &mut output,
+            &Cancellation::new(),
+        )
+        .unwrap();
+        let output_ids: std::collections::BTreeSet<_> =
+            output.iter().map(|record| record.id).collect();
+        assert!(
+            output
+                .iter()
+                .filter(
+                    |record| record.rule.as_deref() == Some("vba-target-coverage-v1.tied.branch")
+                )
+                .count()
+                > 1
+        );
+        document.provenance.extend(output);
+        let actual = vba_provenance_closure(&document, root);
+        assert!(output_ids.is_subset(&actual));
+        assert_eq!(
+            actual
+                .difference(&output_ids)
+                .copied()
+                .collect::<std::collections::BTreeSet<_>>(),
+            expected
+        );
+        let document = rootlight_ir::canonicalize_ir_document(
+            document,
+            &limits,
+            &rootlight_ir::ExtensionSupport::default(),
+        )
+        .unwrap();
+        (document, semantic_order, raw_order)
+    }
+
+    #[test]
+    fn vba_recovery_tied_supports_keep_multilevel_shards_across_generation_order_flips() {
+        let original = vba_recovery_tied_shard_fixture(GenerationId::from_bytes([2; 20]), false);
+        let flipped = (3..=u8::MAX)
+            .map(|value| {
+                vba_recovery_tied_shard_fixture(GenerationId::from_bytes([value; 20]), true)
+            })
+            .find(|candidate| candidate.2 != original.2)
+            .expect("authored support IDs flip order across generations");
+        assert_eq!(original.1, flipped.1);
+        let mut limits = rootlight_ir::IrLimits::default();
+        limits.max_nested_items_per_record = 2;
+        assert_eq!(
+            rootlight_ir::canonical_generation_neutral_digests(
+                &original.0,
+                &limits,
+                &rootlight_ir::ExtensionSupport::default(),
+                || true
+            )
+            .unwrap(),
+            rootlight_ir::canonical_generation_neutral_digests(
+                &flipped.0,
+                &limits,
+                &rootlight_ir::ExtensionSupport::default(),
+                || true
+            )
+            .unwrap(),
+        );
+    }
+
+    struct ShardedProvenanceFixture {
+        document: rootlight_ir::NormalizedIrDocument,
+        root: FactId,
+        proofs: Vec<FactId>,
+        raw_leaf_partition: Vec<Vec<usize>>,
+    }
+
+    fn sharded_provenance_fixture(generation: GenerationId) -> ShardedProvenanceFixture {
+        use rootlight_ir::{
+            AnalysisTier, BuildContextIdentity, ExtensionSupport, FactRef, FileIdentityClaim,
+            FileRecord, IrLimits, NormalizedIrDocument, ProducerIdentity, ProducerKind,
+            ProvenanceRecord, canonicalize_ir_document, derive_provenance_record_id,
+            new_file_identity_claim_envelope,
+        };
+        use std::collections::BTreeSet;
+
+        let repository = RepositoryId::from_bytes([1; 16]);
+        let mut claim = FileIdentityClaim {
+            file: FileId::from_bytes([0; 20]),
+            repository,
+            path: "module.bas".to_owned(),
+            path_identity: b"module.bas".to_vec(),
+            content_hash: content_hash(b"abcdefghi"),
+            byte_length: 9,
+        };
+        claim.file = claim.derived_file();
+        let source = SourceRef::new(
+            repository,
+            generation,
+            SourceSpan::new(claim.file, 0, claim.byte_length).unwrap(),
+            claim.content_hash,
+            None,
+        );
+        let mut parser = ProvenanceRecord {
+            id: FactId::from_bytes([0; 20]),
+            repository,
+            generation,
+            producer_kind: ProducerKind::Parser,
+            producer: ProducerIdentity::new("authored-parser", "1", content_hash(b"config"))
+                .unwrap(),
+            binary_digest: content_hash(b"binary"),
+            frontend_version: Some("1".to_owned()),
+            language: "visual-basic-classic".to_owned(),
+            tier: AnalysisTier::TierB,
+            build_context: BuildContextIdentity::new(content_hash(b"context")),
+            input_sources: vec![source.clone()],
+            evidence_sources: vec![source.clone()],
+            derivation_parents: Vec::new(),
+            rule: None,
+        };
+        parser.id = derive_provenance_record_id(&parser).unwrap();
+        let mut document = NormalizedIrDocument::empty(repository, generation);
+        document.files.push(FileRecord {
+            id: claim.file,
+            repository,
+            generation,
+            path: claim.path.clone(),
+            path_locator: None,
+            content_hash: claim.content_hash,
+            byte_length: claim.byte_length,
+            language: parser.language.clone(),
+            encoding: "utf-8".to_owned(),
+            generated: false,
+            provenance: parser.id,
+            evidence: FactEvidence {
+                source: Some(source.clone()),
+                derivation: Vec::new(),
+            },
+        });
+        document.extensions.push(
+            new_file_identity_claim_envelope(&claim, generation, parser.id, source.clone())
+                .unwrap(),
+        );
+        document.provenance.push(parser.clone());
+        let mut proofs = Vec::new();
+        for offset in 0..9_u64 {
+            let exact_source = SourceRef::new(
+                repository,
+                generation,
+                SourceSpan::new(claim.file, offset, offset + 1).unwrap(),
+                claim.content_hash,
+                None,
+            );
+            let mut proof = parser.clone();
+            proof.producer_kind = ProducerKind::Rule;
+            proof.input_sources = vec![exact_source.clone()];
+            proof.evidence_sources = vec![exact_source];
+            proof.derivation_parents = vec![FactRef::Fact(parser.id)];
+            proof.rule = Some(format!("authored-target-{offset}"));
+            proof.build_context = BuildContextIdentity::new(content_hash(&offset.to_be_bytes()));
+            proof.id = derive_provenance_record_id(&proof).unwrap();
+            proofs.push(proof.id);
+            document.provenance.push(proof);
+        }
+        let mut limits = IrLimits::default();
+        limits.max_nested_items_per_record = 2;
+        let mut facts: Vec<_> = proofs.iter().copied().map(FactRef::Fact).collect();
+        facts.push(FactRef::Fact(parser.id));
+        let mut budget = OutputRecordBudget::from_document(&document, &limits);
+        let mut known = document.provenance.iter().map(|record| record.id).collect();
+        let mut output = Vec::new();
+        let root = super::append_shared_provenance(
+            super::ProvenanceTree {
+                sources: &[source],
+                facts: &facts,
+                rule: "vba-target-coverage-v1",
+            },
+            document.provenance[1].clone(),
+            &limits,
+            &mut budget,
+            &mut known,
+            &mut output,
+            &Cancellation::new(),
+        )
+        .unwrap();
+        assert_eq!(budget.provenance, document.provenance.len() + output.len());
+        let mut raw_leaf_order: Vec<_> = output
+            .iter()
+            .filter(|record| record.rule.as_deref() == Some("vba-target-coverage-v1.leaf"))
+            .enumerate()
+            .map(|(index, record)| (record.id, index))
+            .collect();
+        raw_leaf_order.sort_unstable();
+        let mut raw_leaf_partition: Vec<Vec<_>> = raw_leaf_order
+            .chunks(2)
+            .map(|chunk| {
+                let mut indices: Vec<_> = chunk.iter().map(|(_, index)| *index).collect();
+                indices.sort_unstable();
+                indices
+            })
+            .collect();
+        raw_leaf_partition.sort_unstable();
+        document.provenance.extend(output);
+        let records: std::collections::BTreeMap<_, _> = document
+            .provenance
+            .iter()
+            .map(|record| (record.id, record))
+            .collect();
+        let mut pending = vec![(root, 0_usize)];
+        let mut visited = BTreeSet::new();
+        let mut maximum_depth = 0;
+        while let Some((id, depth)) = pending.pop() {
+            maximum_depth = maximum_depth.max(depth);
+            if !visited.insert(id) {
+                continue;
+            }
+            let record = records[&id];
+            assert_eq!(record.id, derive_provenance_record_id(record).unwrap());
+            assert!(
+                record
+                    .derivation_parents
+                    .windows(2)
+                    .all(|pair| pair[0] < pair[1])
+            );
+            assert!(
+                record
+                    .input_sources
+                    .windows(2)
+                    .all(|pair| pair[0] < pair[1])
+            );
+            assert_eq!(record.evidence_sources, record.input_sources);
+            for parent in &record.derivation_parents {
+                let FactRef::Fact(parent) = parent else {
+                    panic!("the authored fixture has only provenance parents");
+                };
+                pending.push((*parent, depth + 1));
+            }
+        }
+        assert!(maximum_depth >= 4);
+        assert_eq!(visited, records.keys().copied().collect());
+        assert!(proofs.iter().all(|id| visited.contains(id)));
+        let document =
+            canonicalize_ir_document(document, &limits, &ExtensionSupport::default()).unwrap();
+        ShardedProvenanceFixture {
+            document,
+            root,
+            proofs,
+            raw_leaf_partition,
+        }
+    }
+
+    #[test]
+    fn shared_provenance_keeps_multilevel_membership_across_generation_id_order_flips() {
+        use rootlight_ir::{
+            CanonicalNormalizedIrDocument, ExtensionSupport, IrLimits,
+            canonical_generation_neutral_digests,
+        };
+
+        let original = sharded_provenance_fixture(GenerationId::from_bytes([2; 20]));
+        let sorted_proof_indices = |proofs: &[FactId]| {
+            let mut order: Vec<_> = proofs.iter().copied().zip(0..proofs.len()).collect();
+            order.sort_unstable();
+            order
+                .into_iter()
+                .map(|(_, index)| index)
+                .collect::<Vec<_>>()
+        };
+        let original_order = sorted_proof_indices(&original.proofs);
+        let flipped = (3..=u8::MAX)
+            .map(|discriminator| {
+                sharded_provenance_fixture(GenerationId::from_bytes([discriminator; 20]))
+            })
+            .find(|candidate| {
+                original_order != sorted_proof_indices(&candidate.proofs)
+                    && original.raw_leaf_partition != candidate.raw_leaf_partition
+            })
+            .expect("a generation flips both proof order and raw-ID leaf partition membership");
+        assert_ne!(original.root, flipped.root);
+        let mut limits = IrLimits::default();
+        limits.max_nested_items_per_record = 2;
+        let support = ExtensionSupport::default();
+        for fixture in [&original, &flipped] {
+            let canonical =
+                CanonicalNormalizedIrDocument::new(fixture.document.clone(), &limits, &support)
+                    .unwrap();
+            assert_eq!(canonical.document(), &fixture.document);
+        }
+        assert_eq!(
+            canonical_generation_neutral_digests(&original.document, &limits, &support, || true)
+                .unwrap(),
+            canonical_generation_neutral_digests(&flipped.document, &limits, &support, || true)
+                .unwrap()
+        );
+    }
 
     #[test]
     fn shared_provenance_shards_preserve_all_inputs_and_reuse_identity() {

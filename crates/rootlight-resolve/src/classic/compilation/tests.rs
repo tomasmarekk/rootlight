@@ -539,6 +539,274 @@ fn final_retention_charges_each_parameter_and_support_source() {
 }
 
 #[test]
+fn indexed_activity_matches_every_nonempty_span_in_admitted_nested_models() {
+    use VbaCompilationActivity::{Active, Inactive, Unproven};
+
+    let fixture = Fixture::new();
+    let file = fixture.files[0].id;
+    let choices = [
+        (Active, Inactive),
+        (Inactive, Active),
+        (Inactive, Inactive),
+        (Unproven, Unproven),
+        (Unproven, Inactive),
+    ];
+    for (outer, other) in choices {
+        for (inner, sibling) in choices {
+            for complete in [true, false] {
+                let model = VbaCompilation {
+                    scope: span(file, 0, 100),
+                    complete,
+                    branches: vec![
+                        VbaCompilationBranch {
+                            group: span(file, 10, 80),
+                            region: span(file, 15, 45),
+                            activity: outer,
+                        },
+                        VbaCompilationBranch {
+                            group: span(file, 10, 80),
+                            region: span(file, 45, 75),
+                            activity: other,
+                        },
+                        VbaCompilationBranch {
+                            group: span(file, 20, 40),
+                            region: span(file, 25, 30),
+                            activity: inner,
+                        },
+                        VbaCompilationBranch {
+                            group: span(file, 20, 40),
+                            region: span(file, 30, 35),
+                            activity: sibling,
+                        },
+                        VbaCompilationBranch {
+                            group: span(file, 85, 99),
+                            region: span(file, 90, 90),
+                            activity: Active,
+                        },
+                    ],
+                };
+                let envelope = new_vba_compilation_envelope(
+                    fixture.files[0].repository,
+                    fixture.files[0].generation,
+                    fixture.files[0].provenance,
+                    source(
+                        fixture.files[0].repository,
+                        fixture.files[0].generation,
+                        file,
+                        0,
+                        100,
+                    ),
+                    model,
+                )
+                .unwrap();
+                let model = decode_vba_compilation_envelope(&envelope).unwrap();
+                let compiled = ActivityIndex::build(
+                    &model,
+                    &Cancellation::new(),
+                    &mut ResolutionWorkBudget::new(100_000),
+                )
+                .unwrap();
+                for start in 0..=101 {
+                    for end in start..=102 {
+                        let written = span(file, start, end);
+                        let mut actual_work = 0;
+                        let actual = compiled
+                            .activity(&model, written, &mut || {
+                                actual_work += 1;
+                                Ok::<(), ()>(())
+                            })
+                            .unwrap();
+                        assert_eq!(actual, model.activity_at(written), "{model:?}: {written:?}");
+                        assert!(actual_work <= compiled.maximum_work());
+                    }
+                }
+                let foreign = span(FileId::from_bytes([99; 20]), 25, 26);
+                assert_eq!(
+                    compiled
+                        .activity(&model, foreign, &mut || Ok::<(), ()>(()))
+                        .unwrap(),
+                    Unproven
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn indexed_comparisons_preserve_exact_callback_errors() {
+    let fixture = Fixture::new();
+    let model = decode_vba_compilation_envelope(&fixture.envelope).unwrap();
+    let compiled = ActivityIndex::build(
+        &model,
+        &Cancellation::new(),
+        &mut ResolutionWorkBudget::new(100_000),
+    )
+    .unwrap();
+    let query = fixture.entities[2].evidence.source.as_ref().unwrap().span();
+    let mut comparisons = 0;
+    assert_eq!(
+        compiled
+            .activity(&model, query, &mut || {
+                comparisons += 1;
+                Ok::<(), ()>(())
+            })
+            .unwrap(),
+        VbaCompilationActivity::Active
+    );
+    assert!(comparisons > 1);
+    for fail_at in 1..=comparisons {
+        let mut calls = 0;
+        let result = compiled.activity(&model, query, &mut || {
+            calls += 1;
+            if calls == fail_at {
+                Err(("cancelled comparison", fail_at))
+            } else {
+                Ok(())
+            }
+        });
+        assert_eq!(result, Err(("cancelled comparison", fail_at)));
+        assert_eq!(calls, fail_at);
+    }
+}
+
+#[test]
+fn many_groups_and_uses_fit_bounded_indexed_work_without_losing_activity() {
+    let mut fixture = Fixture::new();
+    let file = fixture.files[0].id;
+    let repository = fixture.files[0].repository;
+    let generation = fixture.files[0].generation;
+    let mut text = String::new();
+    let mut branches = Vec::new();
+    for index in 0..128 {
+        let start = text.len();
+        text.push_str("#If HostChoice Then\n");
+        let first = text.len();
+        text.push_str(&format!("Public Const First{index} = True\n"));
+        let first_end = text.len();
+        text.push_str("#Else\n");
+        let second = text.len();
+        text.push_str(&format!("Public Const Second{index} = False\n"));
+        let second_end = text.len();
+        text.push_str("#End If\n");
+        let group = span(file, start, text.len());
+        for region in [span(file, first, first_end), span(file, second, second_end)] {
+            branches.push(VbaCompilationBranch {
+                group,
+                region,
+                activity: VbaCompilationActivity::Unproven,
+            });
+        }
+    }
+    fixture.occurrences.clear();
+    fixture.entities.clear();
+    text.push_str("Public Sub Run()\n");
+    let mut uses = Vec::new();
+    for index in 0_u64..2048 {
+        text.push_str("value = ");
+        let start = text.len();
+        text.push_str("Probe");
+        uses.push((index, start..text.len()));
+        text.push_str("()\n");
+    }
+    text.push_str("End Sub\n");
+    let hash = content_hash(text.as_bytes());
+    let full = SourceRef::new(
+        repository,
+        generation,
+        span(file, 0, text.len()),
+        hash,
+        None,
+    );
+    fixture.files[0].byte_length = u64::try_from(text.len()).unwrap();
+    fixture.files[0].content_hash = hash;
+    fixture.files[0].evidence.source = Some(full.clone());
+    fixture.provenance[0].input_sources = vec![full.clone()];
+    for (index, range) in uses {
+        let mut id = [0; 20];
+        id[..8].copy_from_slice(&index.to_le_bytes());
+        let source = SourceRef::new(
+            repository,
+            generation,
+            span(file, range.start, range.end),
+            hash,
+            None,
+        );
+        fixture.occurrences.push(OccurrenceRecord {
+            id: FactId::from_bytes(id),
+            repository,
+            generation,
+            file,
+            source: source.clone(),
+            role: OccurrenceRole::Reference,
+            enclosing: None,
+            target: OccurrenceTarget::Unresolved {
+                text_hash: content_hash(b"Probe"),
+            },
+            syntactic_text_hash: content_hash(b"Probe"),
+            syntax_kind: "vba.invoked_identifier.reference".to_owned(),
+            provenance: fixture.files[0].provenance,
+            confidence: Confidence::new(1000).unwrap(),
+            evidence: FactEvidence {
+                source: Some(source),
+                derivation: Vec::new(),
+            },
+        });
+    }
+    let model = VbaCompilation {
+        scope: full.span(),
+        complete: true,
+        branches,
+    };
+    let previous_scan_lower_bound = model.branches.len() * fixture.occurrences.len();
+    let maximum = 100_000;
+    assert!(previous_scan_lower_bound > maximum);
+    fixture.envelope = new_vba_compilation_envelope(
+        repository,
+        generation,
+        fixture.files[0].provenance,
+        full,
+        model,
+    )
+    .unwrap();
+    let index = fixture.index();
+    let inputs = BTreeMap::from([(file, text.as_bytes())]);
+    let run = |work: &mut ResolutionWorkBudget, cancellation: &Cancellation| {
+        CompilationIndex::build(
+            &index,
+            std::slice::from_ref(&fixture.envelope),
+            &fixture.occurrences,
+            &inputs,
+            cancellation,
+            work,
+        )
+    };
+    let mut measured = ResolutionWorkBudget::new(maximum);
+    let compilation = run(&mut measured, &Cancellation::new()).unwrap();
+    assert!(measured.consumed() < previous_scan_lower_bound);
+    for site in &fixture.occurrences {
+        assert!(compilation.use_active(site.id));
+        assert_eq!(
+            compilation.activity(&site.source),
+            VbaCompilationActivity::Active
+        );
+    }
+    let exact = measured.consumed();
+    assert!(run(&mut ResolutionWorkBudget::new(exact), &Cancellation::new()).is_ok());
+    assert!(matches!(
+        run(&mut ResolutionWorkBudget::new(exact - 1), &Cancellation::new()),
+        Err(ResolutionError::WorkLimit { maximum }) if maximum == exact - 1
+    ));
+    let cancellation = Cancellation::new();
+    cancellation.cancel(rootlight_cancel::CancellationReason::ClientRequest);
+    let mut untouched = ResolutionWorkBudget::new(maximum);
+    assert!(matches!(
+        run(&mut untouched, &cancellation),
+        Err(ResolutionError::Cancelled(_))
+    ));
+    assert_eq!(untouched.consumed(), 0);
+}
+
+#[test]
 fn verified_legacy_source_without_conditional_markers_remains_ordinary() {
     let mut fixture = Fixture::new();
     let bytes = b"Sub Plain(): End Sub\n' #If ignored in a comment\n";
