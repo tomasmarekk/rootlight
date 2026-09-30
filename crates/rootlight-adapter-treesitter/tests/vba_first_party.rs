@@ -27,6 +27,7 @@ use tempfile::{TempDir, tempdir_in};
 const SOURCE_LIMIT: usize = 1024 * 1024;
 const CLOSED_MODULE: &[u8] = b"Attribute VB_Name = \"Authored\"\r\nOption Explicit\r\nPublic Sub Run()\r\n' only authored trivia\r\nEnd Sub\r\nPrivate Function Count() As Long\r\nEnd Function\r\n";
 const SCALAR_MODULE: &[u8] = b"Attribute VB_Name = \"Authored\"\r\nOption Explicit\r\nSub Run()\r\nDim count As Long\r\nConst Limit As Long = 7\r\ncount = Limit\r\nLet count = 1\r\nEnd Sub\r\nFunction Value() As Long\r\nValue = 7\r\nEnd Function\r\n";
+const CALL_MODULE: &[u8] = b"Attribute VB_Name = \"Authored\"\r\nSub Notify()\r\nEnd Sub\r\nSub Run()\r\nCall Notify\r\nCall [Notify]( )\r\nEnd Sub\r\n";
 
 #[test]
 fn accepted_modules_preserve_exact_identity_without_native_pool_or_cache_work() {
@@ -127,6 +128,61 @@ fn scalar_modules_preserve_local_identity_and_value_reads_without_native_work() 
                 limit: required - 1,
             })
         );
+        assert_eq!(provider.stats().pooled_parsers, 0);
+        assert_eq!(provider.stats().cache.entries, 0);
+    }
+}
+
+#[test]
+fn explicit_calls_preserve_exact_application_and_callee_spans_without_native_work() {
+    for language in ["vba", "visual-basic-classic"] {
+        let fixture = Fixture::new(CALL_MODULE);
+        let provider = provider();
+        let full_limits = limits(4096);
+        let request = fixture.request(&full_limits, language, Vec::new());
+        let required = provider
+            .required_syntax_fact_count(&request, &deadline())
+            .unwrap();
+        let output = parse(&provider, &request);
+        assert_eq!(
+            output.report().coverage().status(),
+            CoverageStatus::Complete
+        );
+        let applications = ["Call Notify", "Call [Notify]( )"];
+        let source = std::str::from_utf8(CALL_MODULE).unwrap();
+        for (kind, spellings, offset) in [
+            ("vba.application.reference", applications, 0),
+            (
+                "vba.invoked_identifier.reference",
+                ["Notify", "[Notify]"],
+                "Call ".len(),
+            ),
+        ] {
+            let facts = output
+                .facts()
+                .iter()
+                .filter(|fact| fact.syntax_kind().as_str() == kind)
+                .collect::<Vec<_>>();
+            assert_eq!(facts.len(), applications.len());
+            for (index, (fact, spelling)) in facts.iter().zip(spellings).enumerate() {
+                let start = source.find(applications[index]).unwrap() + offset;
+                assert_eq!(bytes_at(CALL_MODULE, fact.span()), spelling.as_bytes());
+                assert_eq!(fact.span().start_byte(), u64::try_from(start).unwrap());
+                assert_eq!(
+                    fact.span().end_byte(),
+                    u64::try_from(start + spelling.len()).unwrap()
+                );
+            }
+        }
+        let exact_limits = limits(required);
+        let request = fixture.request(&exact_limits, language, Vec::new());
+        let exact = parse(&provider, &request);
+        for name in [b"Run".as_slice(), b"Notify"] {
+            assert!(exact.facts().iter().any(|fact| {
+                fact.syntax_kind().as_str().ends_with(".definition")
+                    && bytes_at(CALL_MODULE, fact.span()) == name
+            }));
+        }
         assert_eq!(provider.stats().pooled_parsers, 0);
         assert_eq!(provider.stats().cache.entries, 0);
     }

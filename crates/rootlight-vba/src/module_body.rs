@@ -1,4 +1,5 @@
-//! Complete scalar-local statements for the closed first-party module inventory.
+//! Complete scalar-local statements and explicit zero-argument calls for the
+//! closed first-party module inventory.
 //! Records own only original byte ranges; declaration identity and reference roles
 //! remain obligations of the adapter's existing structural normalization boundary.
 
@@ -13,6 +14,8 @@ pub enum ModuleBodyStatement {
     Declaration(ModuleLocalDeclaration),
     /// One simple scalar assignment, optionally introduced by Let.
     Assignment(ModuleScalarAssignment),
+    /// One explicit Call with a simple callee and no written arguments.
+    Call(ModuleZeroArgumentCall),
 }
 
 impl ModuleBodyStatement {
@@ -22,6 +25,7 @@ impl ModuleBodyStatement {
         match self {
             Self::Declaration(declaration) => declaration.statement(),
             Self::Assignment(assignment) => assignment.statement(),
+            Self::Call(call) => call.statement(),
         }
     }
 }
@@ -113,6 +117,40 @@ impl ModuleScalarAssignment {
     }
 }
 
+/// One complete explicit Call retaining syntax without establishing a target.
+///
+/// The callee is a simple ASCII name, optionally bracketed. Parentheses, when
+/// present, contain only logical trivia; target identity and arity are separate
+/// binding obligations.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ModuleZeroArgumentCall {
+    statement: Range<usize>,
+    callee: Range<usize>,
+    arguments: Option<Range<usize>>,
+}
+
+impl ModuleZeroArgumentCall {
+    /// Returns the complete trimmed statement, including the Call keyword.
+    #[must_use]
+    pub fn statement(&self) -> Range<usize> {
+        self.statement.clone()
+    }
+
+    /// Returns the exact callee name token, retaining authored brackets.
+    #[must_use]
+    pub fn callee(&self) -> Range<usize> {
+        self.callee.clone()
+    }
+
+    /// Returns the authored empty parentheses, including their logical trivia.
+    ///
+    /// None means no parentheses were written, not that the target is callable.
+    #[must_use]
+    pub fn arguments(&self) -> Option<Range<usize>> {
+        self.arguments.clone()
+    }
+}
+
 /// Syntax categories admitted as complete atomic scalar values.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ModuleScalarValueKind {
@@ -156,6 +194,9 @@ pub(super) fn statement<E>(
     let text = source.get(range.clone()).unwrap_or_default();
     let mut cursor = 0;
     let first = word(text, &mut cursor, check)?;
+    if first.eq_ignore_ascii_case(b"Call") {
+        return zero_argument_call(text, range, cursor, check);
+    }
     let local = if first.eq_ignore_ascii_case(b"Dim") {
         Some(ModuleLocalKind::Variable)
     } else if first.eq_ignore_ascii_case(b"Const") {
@@ -166,7 +207,8 @@ pub(super) fn statement<E>(
     if let Some(kind) = local {
         return local_declaration(text, range, cursor, kind, check);
     }
-    if first.eq_ignore_ascii_case(b"Let") {
+    let explicit_let = first.eq_ignore_ascii_case(b"Let");
+    if explicit_let {
         if !separator(text, &mut cursor, check)? {
             return Ok(None);
         }
@@ -176,6 +218,11 @@ pub(super) fn statement<E>(
     let Some(destination) = simple_name(text, &mut cursor, check)? else {
         return Ok(None);
     };
+    // Native statement-keyword paths can recover an apparent assignment at its
+    // head. This guard stays contextual; other name positions are independent.
+    if !explicit_let && text.get(destination.clone()).is_some_and(statement_keyword) {
+        return Ok(None);
+    }
     if !equals(text, &mut cursor, check)? {
         return Ok(None);
     }
@@ -195,6 +242,51 @@ pub(super) fn statement<E>(
             statement: range,
         },
     )))
+}
+
+fn zero_argument_call<E>(
+    text: &[u8],
+    range: Range<usize>,
+    mut cursor: usize,
+    check: &mut impl FnMut() -> Result<(), E>,
+) -> Result<Option<ModuleBodyStatement>, E> {
+    // The resolver recognizes an explicit Call only with an immediate space/tab
+    // separator. Broader native extras must not fabricate explicit-call evidence.
+    if !matches!(text.get(cursor), Some(b' ' | b'\t')) || !separator(text, &mut cursor, check)? {
+        return Ok(None);
+    }
+    let Some(callee) = simple_name(text, &mut cursor, check)? else {
+        return Ok(None);
+    };
+    // Bare Name has a contextual token in the native Call grammar. Retaining
+    // that form on the native route avoids claiming complete equivalent facts.
+    if text
+        .get(callee.clone())
+        .is_some_and(|spelling| spelling.eq_ignore_ascii_case(b"Name"))
+    {
+        return Ok(None);
+    }
+    cursor += logical_whitespace_len(text.get(cursor..).unwrap_or_default(), check)?;
+    let arguments = if text.get(cursor) == Some(&b'(') {
+        let start = cursor;
+        cursor += 1;
+        cursor += logical_whitespace_len(text.get(cursor..).unwrap_or_default(), check)?;
+        if text.get(cursor) != Some(&b')') {
+            return Ok(None);
+        }
+        cursor += 1;
+        Some(absolute(&range, start..cursor))
+    } else {
+        None
+    };
+    if !complete(text, &mut cursor, check)? {
+        return Ok(None);
+    }
+    Ok(Some(ModuleBodyStatement::Call(ModuleZeroArgumentCall {
+        callee: absolute(&range, callee),
+        arguments,
+        statement: range,
+    })))
 }
 
 fn local_declaration<E>(
@@ -321,6 +413,13 @@ fn simple_name<E>(
         return Ok(None);
     }
     Ok(Some(start..*cursor))
+}
+
+fn statement_keyword(name: &[u8]) -> bool {
+    const KEYWORDS: &[u8] = b"Load Unload Input Print Close Reset Beep DefBool DefByte DefInt DefLng DefLngLng DefLngPtr DefCur DefSng DefDbl DefDate DefStr DefObj DefVar DefDec";
+    KEYWORDS
+        .split(u8::is_ascii_whitespace)
+        .any(|keyword| name.eq_ignore_ascii_case(keyword))
 }
 
 fn keyword_name(name: &[u8]) -> bool {
@@ -520,6 +619,33 @@ mod tests {
             ),
             ("count=\"\"", "count", "\"\"", ModuleScalarValueKind::String),
             ("[Me]=[True]", "[Me]", "[True]", ModuleScalarValueKind::Name),
+            ("Name=Name", "Name", "Name", ModuleScalarValueKind::Name),
+            ("Line=Line", "Line", "Line", ModuleScalarValueKind::Name),
+            (
+                "[Load]=1",
+                "[Load]",
+                "1",
+                ModuleScalarValueKind::UnsignedDecimal,
+            ),
+            (
+                "[Unload]=1",
+                "[Unload]",
+                "1",
+                ModuleScalarValueKind::UnsignedDecimal,
+            ),
+            (
+                "Let Load=1",
+                "Load",
+                "1",
+                ModuleScalarValueKind::UnsignedDecimal,
+            ),
+            (
+                "lEt UnLoAd=1",
+                "UnLoAd",
+                "1",
+                ModuleScalarValueKind::UnsignedDecimal,
+            ),
+            ("value=Load", "value", "Load", ModuleScalarValueKind::Name),
             (
                 "Let _\n count _\r\n = _\n Limit",
                 "count",
@@ -535,6 +661,171 @@ mod tests {
             assert_eq!(&source[assignment.value().span()], spelling);
             assert_eq!(assignment.value().kind(), kind);
             assert_eq!(assignment.statement(), 0..source.len());
+        }
+    }
+
+    #[test]
+    fn explicit_calls_retain_exact_callee_and_empty_parentheses() {
+        for (source, callee, arguments) in [
+            ("Call Finish", "Finish", None),
+            ("Call Finish()", "Finish", Some("()")),
+            ("cAlL\t[Finish] \t( \t)", "[Finish]", Some("( \t)")),
+            ("Call [Me]()", "[Me]", Some("()")),
+            ("Call [True]", "[True]", None),
+            ("Call [Rem]()", "[Rem]", Some("()")),
+            ("Call [Sub]()", "[Sub]", Some("()")),
+            ("Call Line", "Line", None),
+            ("Call [Name]()", "[Name]", Some("()")),
+            ("cAlL [nAmE]", "[nAmE]", None),
+            ("Call _Target()", "_Target", Some("()")),
+            ("Call Load()", "Load", Some("()")),
+            ("Call _\r\n [End] _\n ( _\r\n )", "[End]", Some("( _\r\n )")),
+        ] {
+            let ModuleBodyStatement::Call(call) = read(source.as_bytes()).unwrap() else {
+                panic!("explicit call expected")
+            };
+            assert_eq!(call.statement(), 0..source.len());
+            assert_eq!(&source[call.callee()], callee);
+            assert_eq!(call.arguments().map(|range| &source[range]), arguments);
+            assert!(call.callee().start > call.statement().start);
+            assert!(call.callee().end <= call.statement().end);
+        }
+    }
+
+    #[test]
+    fn unsupported_call_forms_and_nonempty_tails_never_return_a_prefix() {
+        for source in [
+            "Call",
+            "Call ",
+            "Call()",
+            "Call[Finish]",
+            "Call\x0cFinish()",
+            "Call\x0bFinish()",
+            "Call\nFinish()",
+            "Call_Finish()",
+            "Call 1",
+            "Call \"Finish\"",
+            "Call [open",
+            "Call []",
+            "Call [a b]",
+            "Call Finish$()",
+            "Call Finish!",
+            "Call Me",
+            "Call True",
+            "Call Nothing()",
+            "Call Rem",
+            "Call Sub()",
+            "Call Name",
+            "Call Name()",
+            "cAlL nAmE",
+            "cAlL nAmE()",
+            "Call _\n Name()",
+            "Call .Finish",
+            "Call holder.Finish()",
+            "Call holder!Finish",
+            "Call Finish(1)",
+            "Call Finish(value)",
+            "Call Finish(value:=1)",
+            "Call Finish(,)",
+            "Call Finish(())",
+            "Call Finish(\"\")",
+            "Call Finish( ' comment\n)",
+            "Call Finish(\n)",
+            "Call Finish(\r\n)",
+            "Call Finish(",
+            "Call Finish)",
+            "Call Finish()()",
+            "Call Finish().member",
+            "Call Finish() = 1",
+            "Call Finish = 1",
+            "Call Finish + other",
+            "Call Finish other",
+            "Call Finish _",
+            "Call Finish() trailing",
+            "Call Finish:other=1",
+            "Call Finish ' comment",
+            "Finish",
+            "Finish()",
+        ] {
+            assert!(read(source.as_bytes()).is_none(), "{source}");
+        }
+    }
+
+    #[test]
+    fn call_offsets_and_all_separator_and_suffix_bytes_remain_exact() {
+        let text = b"Call [Finish]( _\r\n )";
+        let source = [b"prefix\n".as_slice(), text, b"\ntail"].concat();
+        let range = 7..7 + text.len();
+        let ModuleBodyStatement::Call(call) =
+            statement(&source, range.clone(), &mut || Ok::<(), ()>(()))
+                .unwrap()
+                .unwrap()
+        else {
+            panic!("explicit call expected")
+        };
+        assert_eq!(call.statement(), range);
+        assert_eq!(&source[call.callee()], b"[Finish]");
+        assert_eq!(&source[call.arguments().unwrap()], b"( _\r\n )");
+        for byte in 0..=u8::MAX {
+            let separator = [b"Call".as_slice(), &[byte], b"Finish()"].concat();
+            assert_eq!(
+                read(&separator).is_some(),
+                matches!(byte, b' ' | b'\t'),
+                "separator byte {byte}"
+            );
+            let suffix = [b"Call Finish()".as_slice(), &[byte]].concat();
+            let result = read(&suffix);
+            assert_eq!(
+                result.is_some(),
+                matches!(byte, b' ' | b'\t'),
+                "suffix byte {byte}"
+            );
+            if let Some(ModuleBodyStatement::Call(call)) = result {
+                assert!(call.statement().end <= suffix.len());
+                assert!(call.callee().end <= suffix.len());
+                assert!(call.arguments().unwrap().end <= suffix.len());
+            }
+        }
+    }
+
+    #[test]
+    fn bare_statement_keyword_assignment_heads_are_rejected_case_insensitively() {
+        for keyword in [
+            "Load",
+            "Unload",
+            "Input",
+            "Print",
+            "Close",
+            "Reset",
+            "Beep",
+            "DefBool",
+            "DefByte",
+            "DefInt",
+            "DefLng",
+            "DefLngLng",
+            "DefLngPtr",
+            "DefCur",
+            "DefSng",
+            "DefDbl",
+            "DefDate",
+            "DefStr",
+            "DefObj",
+            "DefVar",
+            "DefDec",
+        ] {
+            for spelling in [
+                keyword.to_owned(),
+                keyword.to_ascii_lowercase(),
+                keyword.to_ascii_uppercase(),
+            ] {
+                let source = format!("{spelling}=1");
+                assert!(read(source.as_bytes()).is_none(), "{source}");
+            }
+            let identifier = format!("{keyword}Value=1");
+            assert!(matches!(
+                read(identifier.as_bytes()),
+                Some(ModuleBodyStatement::Assignment(_))
+            ));
         }
     }
 
@@ -582,11 +873,17 @@ mod tests {
             "count = Not",
             "Me = count",
             "Rem = count",
+            "Load=1",
+            "Unload=1",
+            "lOaD = 1",
+            "uNlOaD = 1",
+            "Load _\n = 1",
+            "Unload _\r\n = 1",
             "count$ = 1",
             "count(0) = 1",
             "item.member = count",
             "Set item = other",
-            "Call Finish()",
+            "Call Finish(1)",
             "If flag Then",
             "Let = 1",
             "count = TrueValue extra",
@@ -625,23 +922,25 @@ mod tests {
 
     #[test]
     fn bounded_storage_exhaustion_and_fallible_capacity_failures_preserve_entries() {
-        let mut statements = Vec::new();
-        assert_eq!(
-            reserve::<()>(&mut statements, 0),
-            Err(ModuleError::StatementLimit)
-        );
-        reserve::<()>(&mut statements, 1).unwrap();
-        statements.push(read(b"count=1").unwrap());
-        let snapshot = statements.clone();
-        assert_eq!(
-            reserve::<()>(&mut statements, 1),
-            Err(ModuleError::StatementLimit)
-        );
-        assert_eq!(
-            reserve_exact::<()>(&mut statements, usize::MAX),
-            Err(ModuleError::AllocationFailed)
-        );
-        assert_eq!(statements, snapshot);
+        for source in [b"count=1".as_slice(), b"Call Finish", b"Call Finish()"] {
+            let mut statements = Vec::new();
+            assert_eq!(
+                reserve::<()>(&mut statements, 0),
+                Err(ModuleError::StatementLimit)
+            );
+            reserve::<()>(&mut statements, 1).unwrap();
+            statements.push(read(source).unwrap());
+            let snapshot = statements.clone();
+            assert_eq!(
+                reserve::<()>(&mut statements, 1),
+                Err(ModuleError::StatementLimit)
+            );
+            assert_eq!(
+                reserve_exact::<()>(&mut statements, usize::MAX),
+                Err(ModuleError::AllocationFailed)
+            );
+            assert_eq!(statements, snapshot);
+        }
     }
 
     #[test]
@@ -652,6 +951,33 @@ mod tests {
             format!("Dim {} As Long", "x".repeat(8192)),
             format!("count {}=1", " _\n".repeat(8192)),
         ] {
+            for limit in [1, 8] {
+                let mut calls = 0;
+                assert_eq!(
+                    statement(source.as_bytes(), 0..source.len(), &mut || {
+                        calls += 1;
+                        if calls == limit { Err("stop") } else { Ok(()) }
+                    }),
+                    Err("stop")
+                );
+                assert_eq!(calls, limit);
+            }
+        }
+    }
+
+    #[test]
+    fn call_scans_cancel_inside_callees_and_each_logical_trivia_position() {
+        for source in [
+            format!("Call {}()", "x".repeat(8192)),
+            format!("Call {}Finish", " _\r\n".repeat(8192)),
+            format!("Call Finish{}()", " _\n".repeat(8192)),
+            format!("Call Finish({})", " _\r\n".repeat(8192)),
+            format!("Call Finish(){}", " _\n".repeat(8192)),
+        ] {
+            assert!(matches!(
+                read(source.as_bytes()),
+                Some(ModuleBodyStatement::Call(_))
+            ));
             for limit in [1, 8] {
                 let mut calls = 0;
                 assert_eq!(

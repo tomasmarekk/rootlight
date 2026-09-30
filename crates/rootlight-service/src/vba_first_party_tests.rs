@@ -198,3 +198,151 @@ fn procedural_frontend_identity_includes_both_local_and_retained_parser_inputs()
         );
     }
 }
+
+fn assert_explicit_call(
+    service: &FirstSliceService,
+    receipt: &FirstSliceIndexReceipt,
+    source: &str,
+    resolved: bool,
+) {
+    assert_source_and_identity(service, receipt, source);
+    let snapshot = service
+        .loaded_generation_snapshot(receipt.generation)
+        .unwrap();
+    let document = snapshot.document();
+    let calls = document
+        .relations
+        .iter()
+        .filter(|relation| relation.predicate == RelationPredicate::Calls)
+        .collect::<Vec<_>>();
+    assert_eq!(calls.len(), usize::from(resolved), "{source}");
+    let run = document
+        .entities
+        .iter()
+        .find(|entity| entity.canonical_name == "Run")
+        .unwrap();
+    let relationships = service
+        .symbol_relationships(
+            receipt.generation,
+            BTreeSet::from([run.id]),
+            vec![RelationFamily::Calls],
+            Some(RelationDirection::Outbound),
+            0,
+            10,
+            0,
+            &deadline(),
+        )
+        .unwrap();
+    let items = relationships
+        .data
+        .groups
+        .iter()
+        .flat_map(|group| &group.items)
+        .collect::<Vec<_>>();
+    assert_eq!(items.len(), usize::from(resolved));
+    assert!(!relationships.data.truncated);
+    if resolved {
+        let notify = document
+            .entities
+            .iter()
+            .find(|entity| entity.canonical_name == "Notify")
+            .unwrap();
+        assert_eq!(calls[0].object, RelationEndpoint::Entity(notify.id));
+        assert_eq!(items[0].symbol, notify.id);
+        assert_eq!(items[0].source_refs.len(), 1);
+        let reference = &items[0].source_refs[0];
+        assert_eq!(reference.generation(), receipt.generation);
+        assert_eq!(reference.content_hash(), content_hash(source.as_bytes()));
+        let start = source.find("Call Notify").unwrap() + "Call ".len();
+        assert_eq!(reference.span().start_byte(), u64::try_from(start).unwrap());
+        assert_eq!(
+            reference.span().end_byte(),
+            u64::try_from(start + "Notify".len()).unwrap()
+        );
+        let read = service
+            .source_read_with_options_and_budget(
+                receipt.generation,
+                vec![reference.clone()],
+                SourceReadOptions::new()
+                    .with_context_lines_before(0)
+                    .with_context_lines_after(0),
+                FirstSliceBudget::default(),
+                &deadline(),
+            )
+            .unwrap();
+        assert_eq!(read.data.chunks.len(), 1);
+        assert_eq!(read.data.chunks[0].bytes, b"Notify");
+    }
+}
+
+#[test]
+fn explicit_call_targets_survive_reopen_and_retire_without_fabricated_edges() {
+    let current = std::env::current_dir().unwrap();
+    let repository = tempfile::tempdir_in(&current).unwrap();
+    let storage = tempfile::tempdir_in(&current).unwrap();
+    let paths = rootlight_runtime::RuntimePaths::new(
+        storage.path().join("state"),
+        storage.path().join("runtime"),
+    )
+    .unwrap();
+    paths.prepare_owner().unwrap();
+    let target = "Sub Notify()\nEnd Sub\n";
+    let mut previous: Option<(FirstSliceIndexReceipt, String, bool)> = None;
+    for (declarations, body, resolved) in [
+        (target.to_owned(), "Call Notify", true),
+        (target.to_owned(), "Call Notify()", true),
+        (String::new(), "Call Notify()", false),
+        (
+            target.to_owned(),
+            "Dim Notify As Long\nCall Notify()",
+            false,
+        ),
+        (target.repeat(2), "Call Notify()", false),
+        (target.to_owned(), "Call Notify", true),
+        (target.to_owned(), "", false),
+    ] {
+        let source = format!(
+            "Attribute VB_Name = \"Authored\"\nOption Explicit\n{declarations}Sub Run()\n{body}\nEnd Sub\n"
+        );
+        fs::write(repository.path().join("module.bas"), &source).unwrap();
+        let mut service =
+            FirstSliceService::new_durable(4, paths.state_dir(), &deadline()).unwrap();
+        let receipt = service
+            .index_repository(repository.path(), &deadline())
+            .unwrap();
+        assert_explicit_call(&service, &receipt, &source, resolved);
+        assert_eq!(
+            receipt,
+            service
+                .index_repository(repository.path(), &deadline())
+                .unwrap()
+        );
+        if let Some((old_receipt, old_source, old_resolved)) = &previous {
+            assert_explicit_call(&service, old_receipt, old_source, *old_resolved);
+        }
+        drop(service);
+        let mut service =
+            FirstSliceService::new_durable(4, paths.state_dir(), &deadline()).unwrap();
+        assert_eq!(
+            receipt,
+            service
+                .index_repository(repository.path(), &deadline())
+                .unwrap()
+        );
+        assert_explicit_call(&service, &receipt, &source, resolved);
+        if let Some((old_receipt, old_source, old_resolved)) = &previous {
+            assert_explicit_call(&service, old_receipt, old_source, *old_resolved);
+        }
+        let rebuilt = service
+            .index_repository_with_options(
+                repository.path(),
+                FirstSliceIndexOptions::clean_rebuild(FirstSliceIndexMode::Structural),
+                &deadline(),
+            )
+            .unwrap();
+        assert!(receipt.logical_snapshot.is_some());
+        assert_eq!(receipt.logical_snapshot, rebuilt.logical_snapshot);
+        assert_explicit_call(&service, &rebuilt, &source, resolved);
+        previous = Some((receipt, source, resolved));
+    }
+}

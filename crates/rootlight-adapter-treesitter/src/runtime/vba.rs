@@ -461,7 +461,27 @@ fn body_candidates(
                 | ModuleScalarValueKind::Boolean => {}
             }
         }
-        ModuleBodyStatement::Assignment(_) => {}
+        ModuleBodyStatement::Call(call) if include_optional => {
+            push_body_candidate(
+                output,
+                maximum,
+                cancellation,
+                call.statement(),
+                StructuralRole::Reference,
+                "vba.application",
+                false,
+            )?;
+            push_body_candidate(
+                output,
+                maximum,
+                cancellation,
+                call.callee(),
+                StructuralRole::Reference,
+                "vba.invoked_identifier",
+                false,
+            )?;
+        }
+        ModuleBodyStatement::Assignment(_) | ModuleBodyStatement::Call(_) => {}
     }
     Ok(())
 }
@@ -920,10 +940,478 @@ mod tests {
     }
 
     #[test]
+    fn first_party_vba_scalar_contextual_names_match_the_private_native_route() {
+        for body in [
+            "Name = Name",
+            "Let Name = Name",
+            "Dim Name As Long\nName = Name",
+            "Line = Line",
+            "Let Line = Line",
+            "Dim Line As Long\nLine = Line",
+            "[Load] = 1",
+        ] {
+            let source = format!("Sub Run()\n{body}\nEnd Sub\n");
+            for language in ["vba", "visual-basic-classic"] {
+                compare_native(&Fixture::new(&source), language, &[]);
+            }
+        }
+    }
+
+    fn compare_native_procedural_body(body: &str) {
+        let source = format!("Sub Run()\n{body}\nEnd Sub\n");
+        for language in ["vba", "visual-basic-classic"] {
+            compare_native(&Fixture::new(&source), language, &[]);
+        }
+    }
+
+    #[test]
+    fn first_party_vba_contextual_load_let_destination_matches_the_private_native_route() {
+        compare_native_procedural_body("Let Load = 1");
+    }
+
+    #[test]
+    fn first_party_vba_contextual_load_variable_declaration_matches_the_private_native_route() {
+        compare_native_procedural_body("Dim Load As Long");
+    }
+
+    #[test]
+    fn first_party_vba_contextual_load_constant_declaration_matches_the_private_native_route() {
+        compare_native_procedural_body("Const Load As Long = 1");
+    }
+
+    #[test]
+    fn first_party_vba_contextual_load_value_matches_the_private_native_route() {
+        compare_native_procedural_body("value = Load");
+    }
+
+    #[test]
+    fn first_party_vba_contextual_load_call_matches_the_private_native_route() {
+        compare_native_procedural_body("Call Load()");
+    }
+
+    #[test]
+    fn first_party_vba_contextual_unload_let_destination_matches_the_private_native_route() {
+        compare_native_procedural_body("Let Unload = 1");
+    }
+
+    #[test]
+    fn first_party_vba_contextual_unload_bracketed_assignment_matches_the_private_native_route() {
+        compare_native_procedural_body("[Unload] = 1");
+    }
+
+    #[test]
+    fn first_party_vba_contextual_bare_load_and_unload_keep_recovered_native_route() {
+        for body in ["Load = 1", "lOaD = 1", "Unload = 1", "uNlOaD = 1"] {
+            let source = format!("Sub Run()\n{body}\nEnd Sub\n");
+            for language in ["vba", "visual-basic-classic"] {
+                let fixture = Fixture::new(&source);
+                let request = fixture.request(language, &[]);
+                let cancellation = Cancellation::new();
+                let native = fixture
+                    .provider
+                    .prepare_tree(
+                        &request,
+                        None,
+                        &[],
+                        fixture.provider.config.default_settings(),
+                        &cancellation,
+                    )
+                    .unwrap();
+                assert!(native.traversal.fully_traversed);
+                assert_eq!(
+                    native.traversal.coverage,
+                    CoverageStatus::Unknown,
+                    "the native contextual destination requires recovery: {language}, {body}"
+                );
+                assert!(
+                    prepare(
+                        &fixture.provider,
+                        &request,
+                        None,
+                        &[],
+                        fixture.provider.config.default_settings(),
+                        &cancellation,
+                    )
+                    .unwrap()
+                    .is_none(),
+                    "a recovered contextual destination must retain whole-module fallback: {language}, {body}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn first_party_vba_statement_heads_never_gain_false_complete_admission() {
+        let mut unexpected_admissions = Vec::new();
+        for word in [
+            "Name",
+            "Line",
+            "Load",
+            "Unload",
+            "Input",
+            "Print",
+            "Close",
+            "Reset",
+            "Beep",
+            "DefBool",
+            "DefByte",
+            "DefInt",
+            "DefLng",
+            "DefLngLng",
+            "DefLngPtr",
+            "DefCur",
+            "DefSng",
+            "DefDbl",
+            "DefDate",
+            "DefStr",
+            "DefObj",
+            "DefVar",
+            "DefDec",
+        ] {
+            for (shape, body) in [
+                ("assignment", format!("{word}=1")),
+                ("let_assignment", format!("Let {word}=1")),
+                ("variable_declaration", format!("Dim {word} As Long")),
+                ("constant_declaration", format!("Const {word} As Long=1")),
+                ("value", format!("value={word}")),
+                ("call", format!("Call {word}()")),
+            ] {
+                let source = format!("Sub Run()\n{body}\nEnd Sub\n");
+                for language in ["vba", "visual-basic-classic"] {
+                    let fixture = Fixture::new(&source);
+                    let request = fixture.request(language, &[]);
+                    let cancellation = Cancellation::new();
+                    let native = fixture
+                        .provider
+                        .prepare_tree(
+                            &request,
+                            None,
+                            &[],
+                            fixture.provider.config.default_settings(),
+                            &cancellation,
+                        )
+                        .unwrap();
+                    assert!(
+                        native.traversal.fully_traversed,
+                        "the finite head audit must finish traversal: {language}, {shape}, {word}"
+                    );
+                    let admitted = prepare(
+                        &fixture.provider,
+                        &request,
+                        None,
+                        &[],
+                        fixture.provider.config.default_settings(),
+                        &cancellation,
+                    )
+                    .unwrap()
+                    .is_some();
+                    if matches!(word, "Name" | "Line") && shape != "call" {
+                        assert!(
+                            admitted,
+                            "a supported contextual name stays admitted: {language}, {shape}, {word}"
+                        );
+                    }
+                    if native.traversal.coverage == CoverageStatus::Unknown {
+                        if admitted {
+                            unexpected_admissions.push(format!("{language}:{shape}:{word}"));
+                        }
+                    } else {
+                        assert_eq!(
+                            native.traversal.coverage,
+                            CoverageStatus::Complete,
+                            "the finite head oracle must not be resource-bounded: {language}, {shape}, {word}"
+                        );
+                        if admitted {
+                            compare_native(&Fixture::new(&source), language, &[]);
+                        }
+                    }
+                }
+            }
+        }
+        assert!(
+            unexpected_admissions.is_empty(),
+            "native-recovered statement heads must retain whole-module fallback: {unexpected_admissions:?}"
+        );
+    }
+
+    #[test]
+    fn first_party_vba_zero_argument_calls_match_the_private_native_route() {
+        let cases = [
+            "Sub Run()\nCall Target\nEnd Sub\n",
+            "Sub Run()\nCall Target()\nEnd Sub\n",
+            "Sub Run()\nCall Target ()\nEnd Sub\n",
+            "Sub Run()\ncAlL\tTarget ( \t )\nEnd Sub\n",
+            "Sub Run()\nCall [Rem]\nCall [Me]()\nCall [Sub] ()\nCall [True]( )\nEnd Sub\n",
+            "Sub Run()\nCall [Name]\nCall [Name]()\nCall [nAmE] ( )\nEnd Sub\n",
+            "Sub Run()\nCall Target ' call:\nCall Target() ' parenthesized call\nEnd Sub\n",
+            "Attribute VB_Name = \"ModuleA\"\r\nOption Explicit\r\nPrivate Sub Run() ' header\r\nCall Target() ' call\r\nCall [Rem] ' bare call\r\nEnd Sub ' terminator\r\n",
+            "Sub Run():Call Target():Call [Rem]:End Sub\n",
+            "Sub Run(): : Call Target(): ' call:\nCall Other\nEnd Sub\n",
+            "Sub Run()\nCall _\r\n Target( _\n )\nCall Target _\n ( _\r\n )\nEnd Sub\n",
+            "Sub Run()\nDim value As Long\nConst seed As Long = 7\nvalue = seed\nCall Target()\nLet value = 8\nCall [Name]\nEnd Sub\n",
+            "Function Result() As Long\nCall Target\nResult = 7\nCall Target()\nEnd Function\n",
+        ];
+        for source in cases {
+            for language in ["vba", "visual-basic-classic"] {
+                compare_native(&Fixture::new(source), language, &[]);
+            }
+        }
+    }
+
+    #[test]
+    fn first_party_vba_zero_argument_call_contextual_name_keeps_recovered_native_route() {
+        for call in ["Call Name", "Call Name()", "Call nAmE ( )"] {
+            let source = format!("Sub Run()\n{call}\nEnd Sub\n");
+            for language in ["vba", "visual-basic-classic"] {
+                let fixture = Fixture::new(&source);
+                let request = fixture.request(language, &[]);
+                let cancellation = Cancellation::new();
+                assert!(
+                    prepare(
+                        &fixture.provider,
+                        &request,
+                        None,
+                        &[],
+                        fixture.provider.config.default_settings(),
+                        &cancellation,
+                    )
+                    .unwrap()
+                    .is_none(),
+                    "a recovered contextual callee must retain whole-module fallback: {language}, {call}"
+                );
+                assert_eq!(fixture.provider.stats().pooled_parsers, 0);
+                assert_eq!(fixture.provider.stats().cache.entries, 0);
+                let native = fixture
+                    .provider
+                    .prepare_tree(
+                        &request,
+                        None,
+                        &[],
+                        fixture.provider.config.default_settings(),
+                        &cancellation,
+                    )
+                    .unwrap();
+                assert!(native.traversal.fully_traversed);
+                assert_eq!(
+                    native.traversal.coverage,
+                    CoverageStatus::Unknown,
+                    "the native contextual callee requires recovery: {language}, {call}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn first_party_vba_zero_argument_call_contextual_line_matches_the_private_native_route() {
+        for language in ["vba", "visual-basic-classic"] {
+            compare_native(
+                &Fixture::new("Sub Run()\nCall Line\nEnd Sub\n"),
+                language,
+                &[],
+            );
+        }
+    }
+
+    #[test]
+    fn first_party_vba_zero_argument_call_underscore_name_matches_the_private_native_route() {
+        for language in ["vba", "visual-basic-classic"] {
+            compare_native(
+                &Fixture::new("Sub Run()\nCall _Target()\nEnd Sub\n"),
+                language,
+                &[],
+            );
+        }
+    }
+
+    #[test]
+    fn first_party_vba_zero_argument_call_boundaries_keep_whole_native_fallback() {
+        for call in [
+            "Call Target(1)",
+            "Call Target value",
+            "Call Target(value:=1)",
+            "Call Target(,)",
+            "Call Module.Target()",
+            "Call .Target()",
+            "Call Target() extra",
+            "Call Target()()",
+            "Call Target(",
+            "Call Target)",
+            "Call Target(())",
+            "Call[Target]",
+            "Call_Target",
+            "Call\x0cTarget()",
+            "Call\nTarget()",
+            "Call Target$()",
+            "Call Me()",
+            "Call Rem()",
+            "Call True()",
+        ] {
+            let source = format!("Sub Run()\nDim value As Long\nvalue = 7\n{call}\nEnd Sub\n");
+            for language in ["vba", "visual-basic-classic"] {
+                let fixture = Fixture::new(&source);
+                let request = fixture.request(language, &[]);
+                assert!(
+                    prepare(
+                        &fixture.provider,
+                        &request,
+                        None,
+                        &[],
+                        fixture.provider.config.default_settings(),
+                        &Cancellation::new(),
+                    )
+                    .unwrap()
+                    .is_none(),
+                    "an unsupported call tail retains whole-module native parsing: {language}, {call}"
+                );
+                assert_eq!(fixture.provider.stats().pooled_parsers, 0);
+                assert_eq!(fixture.provider.stats().cache.entries, 0);
+            }
+        }
+    }
+
+    #[test]
+    fn first_party_vba_zero_argument_call_candidate_ceilings_and_cancellation_are_exact() {
+        let source = "Sub Run()\nDim value As Long\nCall Target()\nEnd Sub\n";
+        for language in ["vba", "visual-basic-classic"] {
+            let fixture = Fixture::new(source);
+            let request = fixture.request(language, &[]);
+            let cancellation = Cancellation::new();
+            let prepared = prepare(
+                &fixture.provider,
+                &request,
+                None,
+                &[],
+                fixture.provider.config.default_settings(),
+                &cancellation,
+            )
+            .unwrap()
+            .unwrap();
+            let identity_candidates = candidates(
+                &prepared.inventory,
+                request.source().bytes(),
+                false,
+                request.limits().max_syntax_nodes(),
+                &cancellation,
+            )
+            .unwrap();
+            assert!(
+                identity_candidates
+                    .iter()
+                    .all(|candidate| candidate.role != StructuralRole::Reference)
+            );
+            let identity = normalize_query_candidates(
+                identity_candidates,
+                &request,
+                usize::MAX,
+                &cancellation,
+            )
+            .unwrap();
+            let full_candidates = candidates(
+                &prepared.inventory,
+                request.source().bytes(),
+                true,
+                request.limits().max_syntax_nodes(),
+                &cancellation,
+            )
+            .unwrap();
+            let references: Vec<_> = full_candidates
+                .iter()
+                .filter(|candidate| candidate.role == StructuralRole::Reference)
+                .map(|candidate| {
+                    (
+                        source.get(candidate.start..candidate.end).unwrap(),
+                        candidate.syntax,
+                        candidate.required,
+                    )
+                })
+                .collect();
+            assert_eq!(
+                references,
+                [
+                    ("Call Target()", "vba.application", false),
+                    ("Target", "vba.invoked_identifier", false),
+                ]
+            );
+            let full =
+                normalize_query_candidates(full_candidates, &request, usize::MAX, &cancellation)
+                    .unwrap();
+            assert_eq!(identity.required, full.required);
+            for optional in [false, true] {
+                let exact = candidates(
+                    &prepared.inventory,
+                    request.source().bytes(),
+                    optional,
+                    request.limits().max_syntax_nodes(),
+                    &cancellation,
+                )
+                .unwrap()
+                .len();
+                assert_eq!(
+                    candidates(
+                        &prepared.inventory,
+                        request.source().bytes(),
+                        optional,
+                        exact,
+                        &cancellation,
+                    )
+                    .unwrap()
+                    .len(),
+                    exact
+                );
+                assert_eq!(
+                    candidates(
+                        &prepared.inventory,
+                        request.source().bytes(),
+                        optional,
+                        exact - 1,
+                        &cancellation,
+                    )
+                    .unwrap_err(),
+                    AdapterError::RejectedRequest(RequestError::ProviderLimit {
+                        resource: ResourceKind::SyntaxNodes,
+                        observed: exact,
+                        limit: exact - 1,
+                    })
+                );
+            }
+            assert_eq!(
+                candidates(
+                    &prepared.inventory,
+                    request.source().bytes(),
+                    false,
+                    0,
+                    &cancellation,
+                )
+                .unwrap_err(),
+                AdapterError::RejectedRequest(RequestError::ProviderLimit {
+                    resource: ResourceKind::SyntaxNodes,
+                    observed: 9,
+                    limit: 0,
+                })
+            );
+            assert!(cancellation.cancel(rootlight_cancel::CancellationReason::ClientRequest));
+            assert!(matches!(
+                candidates(
+                    &prepared.inventory,
+                    request.source().bytes(),
+                    true,
+                    request.limits().max_syntax_nodes(),
+                    &cancellation,
+                ),
+                Err(AdapterError::Cancelled {
+                    reason: rootlight_cancel::CancellationReason::ClientRequest,
+                })
+            ));
+            assert_eq!(fixture.provider.stats().pooled_parsers, 0);
+            assert_eq!(fixture.provider.stats().cache.entries, 0);
+        }
+    }
+
+    #[test]
     fn first_party_vba_scalar_body_boundaries_keep_whole_native_fallback() {
         for body in [
             "Dim value As Long\nvalue = 1 + 2",
-            "Dim value As Long\nCall Run()",
+            "Dim value As Long\nCall Run(1)",
             "Dim value As Long\nRun value",
             "Dim value As Long\nholder.Value = 1",
             "Dim values(1) As Long",

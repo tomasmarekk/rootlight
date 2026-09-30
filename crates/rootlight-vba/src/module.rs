@@ -177,8 +177,12 @@ impl<E: std::error::Error + 'static> std::error::Error for ModuleError<E> {
 /// Bodies admit one typed scalar Dim or Const per statement and simple scalar
 /// assignments with an optional Let prefix. Const values are unsigned decimal,
 /// physically closed doubled-quote strings or True/False; assignments additionally
-/// admit a simple name. Keyword-shaped unbracketed names, calls and operators
-/// are unsupported. Every body statement must be consumed completely.
+/// admit a simple name. Explicit Call statements admit only a simple name and
+/// optional empty parentheses, with space/tab-based logical trivia. Keyword-shaped
+/// unbracketed names, other calls and operators are unsupported. Every body
+/// statement must be consumed completely.
+/// Bare `Name` callees stay outside this closed call subset; bracketed `[Name]` is admitted.
+/// Without explicit `Let`, bare statement-keyword assignment destinations are excluded.
 /// All other statements, inline Rem tails, directives, class
 /// members, continued-comment forms and incomplete boundaries reject the entire input.
 /// Colon boundaries are allowed only after a procedure opener or within its body.
@@ -738,6 +742,261 @@ mod tests {
     }
 
     #[test]
+    fn explicit_calls_preserve_comments_colons_continuations_and_procedure_ownership() {
+        for newline in ["\n", "\r\n"] {
+            let source = format!(
+                "Attribute VB_Name = \"CallModule\"{newline}Sub Run(){newline}  Call Finish ' End Sub: Call ignored(){newline}  Dim value As Long:Call [Finish]( _{newline} ){newline}  value=\"Call ignored(): End Sub\"{newline}  Call _{newline} [Run] _{newline} ( _{newline} ){newline}End Sub{newline}Sub Finish(){newline}End Sub{newline}"
+            );
+            let inventory = parse(source.as_bytes()).unwrap();
+            assert_eq!(inventory.procedures().len(), 2);
+            let procedure = &inventory.procedures()[0];
+            assert_eq!(procedure.statements().len(), 5);
+            let calls: Vec<_> = procedure
+                .statements()
+                .iter()
+                .filter_map(|statement| match statement {
+                    ModuleBodyStatement::Call(call) => Some(call),
+                    ModuleBodyStatement::Declaration(_) | ModuleBodyStatement::Assignment(_) => {
+                        None
+                    }
+                })
+                .collect();
+            assert_eq!(calls.len(), 3);
+            assert_eq!(&source[calls[0].statement()], "Call Finish");
+            assert_eq!(&source[calls[0].callee()], "Finish");
+            assert!(calls[0].arguments().is_none());
+            assert_eq!(&source[calls[1].callee()], "[Finish]");
+            assert_eq!(
+                &source[calls[1].arguments().unwrap()],
+                format!("( _{newline} )")
+            );
+            assert_eq!(&source[calls[2].callee()], "[Run]");
+            assert_eq!(
+                &source[calls[2].statement()],
+                format!("Call _{newline} [Run] _{newline} ( _{newline} )")
+            );
+            for statement in procedure.statements() {
+                assert!(procedure.body().start <= statement.statement().start);
+                assert!(statement.statement().end <= procedure.body().end);
+            }
+            for call in calls {
+                assert!(call.statement().start < call.callee().start);
+                assert!(call.callee().end <= call.statement().end);
+                if let Some(arguments) = call.arguments() {
+                    assert!(call.callee().end <= arguments.start);
+                    assert!(arguments.end <= call.statement().end);
+                }
+            }
+            assert!(inventory.procedures()[1].statements().is_empty());
+        }
+    }
+
+    #[test]
+    fn unsupported_call_statement_rejects_the_whole_module_without_prior_records() {
+        for body in [
+            "Call",
+            "Call()",
+            "Call[Finish]",
+            "Call\x0cFinish()",
+            "Call\x0bFinish()",
+            "Call Finish(1)",
+            "Call Finish(value:=1)",
+            "Call Finish(,)",
+            "Call Finish(())",
+            "Call Finish()()",
+            "Call Finish() trailing",
+            "Call Finish = 1",
+            "Call Finish other",
+            "Call Finish$()",
+            "Call Me",
+            "Call Nothing()",
+            "Call Rem",
+            "Call Name",
+            "Call Name()",
+            "cAlL nAmE",
+            "cAlL nAmE()",
+            "Call _\n Name()",
+            "Call holder.Finish()",
+            "Call .Finish()",
+            "Call [open",
+            "Call Finish(",
+            "Call Finish(\n)",
+            "Call Finish _\n",
+            "Call Finish ' continued _\nCall Finish",
+            "Finish()",
+            "End Function",
+        ] {
+            let source = format!("Sub Run()\nCall Finish()\n{body}\nEnd Sub\n");
+            assert!(
+                matches!(
+                    parse(source.as_bytes()),
+                    Err(ModuleError::Unsupported { .. })
+                ),
+                "{body}"
+            );
+        }
+        for source in [
+            "Call Finish",
+            "Call Finish()\nSub Run()\nEnd Sub",
+            "Sub Run()\nEnd Sub\nCall Finish()",
+            "Sub Run()\nCall Finish():End Sub:Sub Finish()\nEnd Sub",
+            "Sub Run()\nCall Finish\0\nEnd Sub",
+            "Sub Run()\nCall Finish\rEnd Sub",
+        ] {
+            assert!(
+                matches!(
+                    parse(source.as_bytes()),
+                    Err(ModuleError::Unsupported { .. })
+                ),
+                "{source:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn calls_share_total_body_limits_and_preserve_resource_error_categories() {
+        let source = b"Sub First():Dim value As Long:Call Second():value=1:End Sub\nSub Second()\nCall [First]\nEnd Sub\n";
+        let expected = parse(source).unwrap();
+        assert_eq!(expected.statement_count(), 8);
+        assert_eq!(expected.procedures()[0].statements().len(), 3);
+        assert_eq!(expected.procedures()[1].statements().len(), 1);
+        assert_eq!(
+            module_inventory(source, ModuleLimits::new(source.len(), 8, 2), &mut || Ok::<
+                (),
+                (),
+            >(
+                ()
+            )),
+            Ok(expected)
+        );
+        assert_eq!(
+            module_inventory(source, ModuleLimits::new(source.len(), 7, 2), &mut || Ok::<
+                (),
+                (),
+            >(
+                ()
+            )),
+            Err(ModuleError::StatementLimit)
+        );
+        assert_eq!(
+            module_inventory(
+                source,
+                ModuleLimits::new(source.len() - 1, 8, 2),
+                &mut || Ok::<(), ()>(())
+            ),
+            Err(ModuleError::SourceLimit)
+        );
+        assert_eq!(
+            module_inventory(source, ModuleLimits::new(source.len(), 8, 1), &mut || Ok::<
+                (),
+                (),
+            >(
+                ()
+            )),
+            Err(ModuleError::ProcedureLimit)
+        );
+    }
+
+    #[test]
+    fn module_call_scans_propagate_initial_and_late_cancellation_without_inventory() {
+        let source = format!(
+            "Sub Run()\nCall Finish({})\nEnd Sub\n",
+            " _\r\n".repeat(8192)
+        );
+        let mut successful_checks = 0;
+        let expected = module_inventory(
+            source.as_bytes(),
+            ModuleLimits::new(source.len(), 3, 1),
+            &mut || {
+                successful_checks += 1;
+                Ok::<(), ()>(())
+            },
+        )
+        .unwrap();
+        assert_eq!(expected.procedures()[0].statements().len(), 1);
+        for limit in [1, successful_checks - 2] {
+            let mut calls = 0;
+            assert_eq!(
+                module_inventory(
+                    source.as_bytes(),
+                    ModuleLimits::new(source.len(), 3, 1),
+                    &mut || {
+                        calls += 1;
+                        if calls == limit { Err("stop") } else { Ok(()) }
+                    }
+                ),
+                Err(ModuleError::Cancelled("stop"))
+            );
+            assert_eq!(calls, limit);
+        }
+    }
+
+    #[test]
+    fn contextual_names_stay_admitted_outside_bare_assignment_start() {
+        for body in [
+            "[Load]=1",
+            "[Unload]=1",
+            "Let Load=1",
+            "lEt UnLoAd=1",
+            "Name=1",
+            "Line=1",
+            "Dim Load As Long",
+            "Const Load As Long=1",
+            "value=Load",
+            "Call Load()",
+        ] {
+            let source = format!("Sub Run()\n{body}\nEnd Sub\n");
+            let inventory = parse(source.as_bytes()).unwrap();
+            let statements = inventory.procedures()[0].statements();
+            assert_eq!(statements.len(), 1, "{body}");
+            assert_eq!(&source[statements[0].statement()], body);
+        }
+    }
+
+    #[test]
+    fn bare_statement_keyword_assignment_heads_reject_prior_supported_records() {
+        for keyword in [
+            "Load",
+            "Unload",
+            "Input",
+            "Print",
+            "Close",
+            "Reset",
+            "Beep",
+            "DefBool",
+            "DefByte",
+            "DefInt",
+            "DefLng",
+            "DefLngLng",
+            "DefLngPtr",
+            "DefCur",
+            "DefSng",
+            "DefDbl",
+            "DefDate",
+            "DefStr",
+            "DefObj",
+            "DefVar",
+            "DefDec",
+        ] {
+            for spelling in [
+                keyword.to_owned(),
+                keyword.to_ascii_lowercase(),
+                keyword.to_ascii_uppercase(),
+            ] {
+                let source =
+                    format!("Sub Run()\nDim accepted As Long\naccepted=1\n{spelling}=1\nEnd Sub\n");
+                assert!(
+                    matches!(
+                        parse(source.as_bytes()),
+                        Err(ModuleError::Unsupported { .. })
+                    ),
+                    "{spelling}"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn scalar_body_unsupported_statement_rejects_the_whole_module_without_prefixes() {
         for body in [
             "Dim value As Long\nvalue = 1 + 2",
@@ -747,11 +1006,17 @@ mod tests {
             "Dim item As Product",
             "Dim values() As Long",
             "Dim value As Long=1",
-            "value=1\nCall Finish()",
+            "value=1\nCall Finish(1)",
             "value=Me",
             "value=Nothing",
             "value=Null",
             "value=Empty",
+            "Load=1",
+            "Unload=1",
+            "lOaD = 1",
+            "uNlOaD = 1",
+            "Load _\n = 1",
+            "Unload _\r\n = 1",
             "value=True False",
             "value=\"open",
             "value=\"continued _\n",
