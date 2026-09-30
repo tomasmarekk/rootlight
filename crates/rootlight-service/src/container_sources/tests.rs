@@ -20,6 +20,9 @@ mod collection_tests;
 #[path = "string_tests.rs"]
 mod string_tests;
 
+#[path = "namespace_tests.rs"]
+mod namespace_tests;
+
 fn tempdir() -> tempfile::TempDir {
     #[cfg(target_os = "macos")]
     {

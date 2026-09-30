@@ -136,6 +136,11 @@ pub(crate) fn materialize(
         "VBA.Collection".to_owned(),
     ]
     .into_iter()
+    .chain(
+        functions::Module::ALL
+            .into_iter()
+            .map(|module| format!("VBA.{}", module.name())),
+    )
     .chain(CONSTANTS.iter().map(|name| format!("VBA.Constants.{name}")))
     .chain(
         functions::FUNCTIONS
@@ -303,6 +308,11 @@ pub(super) fn bind<'a>(
             continue;
         }
         let root = identifier(member.receiver).as_deref() == Some("vba");
+        let receiver_module = if root {
+            None
+        } else {
+            qualified_module(member.receiver.as_bytes(), cancellation, work)?
+        };
         if root && let Some(qualifier) = qualifiers.get(&member.span).and_then(|site| *site) {
             candidates.entry(qualifier.id).or_insert((
                 qualifier,
@@ -331,16 +341,19 @@ pub(super) fn bind<'a>(
             );
             continue;
         }
-        if root
-            && matches!(
-                site.syntax_kind.as_str(),
-                "vba.member.reference"
-                    | "vba.get_member.reference"
-                    | "vba.invoked_member.reference"
-                    | "vba.invoked_get_member.reference"
-            )
-            && let Some(function) = functions::find(member.name)
-        {
+        if matches!(
+            site.syntax_kind.as_str(),
+            "vba.member.reference"
+                | "vba.get_member.reference"
+                | "vba.invoked_member.reference"
+                | "vba.invoked_get_member.reference"
+        ) && let Some(function) = if root {
+            functions::find(member.name)
+        } else {
+            receiver_module
+                .and_then(functions::Module::find)
+                .and_then(|module| functions::find_in(module, member.name))
+        } {
             candidates.insert(
                 site.id,
                 (
@@ -354,18 +367,18 @@ pub(super) fn bind<'a>(
         }
         let namespace = receiver_sources.contains_key(&site.source.span());
         if root
-            && name.as_deref() == Some("constants")
             && namespace
             && matches!(
                 site.syntax_kind.as_str(),
                 "vba.member.reference" | "vba.get_member.reference"
             )
+            && let Some(module) = name.as_deref().and_then(module_name)
         {
             candidates.insert(
                 site.id,
                 (
                     *site,
-                    "VBA.Constants".to_owned(),
+                    format!("VBA.{module}"),
                     ResolutionRule::VbaStandardNamespace,
                     "vba",
                 ),
@@ -381,12 +394,7 @@ pub(super) fn bind<'a>(
         }) else {
             continue;
         };
-        let constants =
-            root || member_access_parts(member.receiver.as_bytes(), cancellation, work)?
-                .is_some_and(|(root, module)| {
-                    identifier(root).as_deref() == Some("vba")
-                        && identifier(module).as_deref() == Some("constants")
-                });
+        let constants = root || receiver_module == Some("Constants");
         if constants {
             candidates.insert(
                 site.id,
@@ -599,6 +607,32 @@ fn site_bytes<'a>(
         .get(usize::try_from(span.start_byte()).ok()?..usize::try_from(span.end_byte()).ok()?)
 }
 
+fn module_name(name: &str) -> Option<&'static str> {
+    if name.eq_ignore_ascii_case("constants") {
+        Some("Constants")
+    } else {
+        functions::Module::find(name).map(functions::Module::name)
+    }
+}
+
+fn qualified_module(
+    bytes: &[u8],
+    cancellation: &Cancellation,
+    work: &mut ResolutionWorkBudget,
+) -> Result<Option<&'static str>, ResolutionError> {
+    // MS-VBAL 5.6.12 classifies project -> procedural module -> member.
+    // Prove the exact two-name receiver, including authored syntax, before
+    // consulting declaration ownership. Calls and deeper chains are not modules.
+    // https://learn.microsoft.com/en-us/openspecs/microsoft_general_purpose_programming_languages/ms-vbal/af3a4059-3059-4e79-8aa5-685324fb266a
+    let Some((root, module)) = member_access_parts(bytes, cancellation, work)? else {
+        return Ok(None);
+    };
+    if identifier(root).as_deref() != Some("vba") {
+        return Ok(None);
+    }
+    Ok(identifier(module).as_deref().and_then(module_name))
+}
+
 fn starts_with_namespace(bytes: &[u8]) -> bool {
     // Reject unrelated receivers before tokenizing their potentially large
     // call/member chains. The full parser still proves syntax and boundaries.
@@ -608,4 +642,86 @@ fn starts_with_namespace(bytes: &[u8]) -> bool {
         || bytes
             .get(..5)
             .is_some_and(|prefix| prefix.eq_ignore_ascii_case(b"[VBA]"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn procedural_module_receivers_require_exact_uninvoked_project_paths() {
+        for (text, expected) in [
+            ("VBA.Strings", "Strings"),
+            ("[vBa].[sTrInGs]", "Strings"),
+            ("VBA _\r\n. _\n [Conversion]", "Conversion"),
+            ("VBA.Information", "Information"),
+            ("VBA.Interaction", "Interaction"),
+            ("VBA.Constants", "Constants"),
+        ] {
+            assert_eq!(
+                qualified_module(
+                    text.as_bytes(),
+                    &Cancellation::new(),
+                    &mut ResolutionWorkBudget::new(1024),
+                )
+                .unwrap(),
+                Some(expected),
+                "{text}"
+            );
+        }
+        for text in [
+            "Strings",
+            "Strings.Chr",
+            "VBA.Unknown",
+            "VBA.Strings.Unknown",
+            "VBA.Strings()",
+            "VBA().Strings",
+            "VBA(0).Strings",
+            "VBA.Strings(0).Strings",
+            "VBA$.Strings",
+            "VBA.Strings$",
+            "[VBA.Strings]",
+            "VBA .Strings",
+            "VBA.Strings'comment",
+            "VBA.Collection",
+            "VBA.Err",
+        ] {
+            assert_eq!(
+                qualified_module(
+                    text.as_bytes(),
+                    &Cancellation::new(),
+                    &mut ResolutionWorkBudget::new(1024),
+                )
+                .unwrap(),
+                None,
+                "{text}"
+            );
+        }
+    }
+
+    #[test]
+    fn procedural_module_receiver_scans_share_cancellation_and_work_budget() {
+        let mut work = ResolutionWorkBudget::new(1024);
+        let source = b"[VBA] _\r\n.[Strings]";
+        assert_eq!(
+            qualified_module(source, &Cancellation::new(), &mut work).unwrap(),
+            Some("Strings")
+        );
+        assert!(matches!(
+            qualified_module(
+                source,
+                &Cancellation::new(),
+                &mut ResolutionWorkBudget::new(work.consumed() - 1),
+            ),
+            Err(ResolutionError::WorkLimit { .. })
+        ));
+        let cancelled = Cancellation::new();
+        cancelled.cancel(rootlight_cancel::CancellationReason::ClientRequest);
+        let mut unused = ResolutionWorkBudget::new(1024);
+        assert!(matches!(
+            qualified_module(source, &cancelled, &mut unused),
+            Err(ResolutionError::Cancelled(_))
+        ));
+        assert_eq!(unused.consumed(), 0);
+    }
 }
