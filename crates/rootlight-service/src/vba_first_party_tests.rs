@@ -93,10 +93,11 @@ fn procedural_route_changes_survive_noop_reopen_and_match_clean_rebuild() {
     .unwrap();
     paths.prepare_owner().unwrap();
     let empty = "Attribute VB_Name = \"Authored\"\nOption Explicit\nSub Run()\nEnd Sub\n";
-    let populated = "Attribute VB_Name = \"Authored\"\nOption Explicit\nSub Run()\nDim value As Long\nvalue = 1\nEnd Sub\n";
+    let populated = "Attribute VB_Name = \"Authored\"\nOption Explicit\nSub Run()\nDim value As Long\nConst Limit As Long = 7\nvalue = Limit\nLet value = 1\nEnd Sub\n";
+    let native = "Attribute VB_Name = \"Authored\"\nOption Explicit\nSub Run()\nDim value As Long\nvalue = 1 + 2\nEnd Sub\n";
     let mut first_empty = None;
     let mut previous_generation = None;
-    for source in [empty, populated, empty] {
+    for source in [empty, populated, native, populated, empty] {
         fs::write(repository.path().join("module.bas"), source).unwrap();
         let mut service =
             FirstSliceService::new_durable(4, paths.state_dir(), &deadline()).unwrap();
@@ -104,6 +105,26 @@ fn procedural_route_changes_survive_noop_reopen_and_match_clean_rebuild() {
             .index_repository(repository.path(), &deadline())
             .unwrap();
         assert_source_and_identity(&service, &receipt, source);
+        if source == populated {
+            for name in ["value", "Limit"] {
+                let locate = service
+                    .code_locate(
+                        receipt.generation,
+                        name.to_owned(),
+                        LocateMode::Exact,
+                        10,
+                        0,
+                        &deadline(),
+                    )
+                    .unwrap();
+                assert!(locate.data.hits.iter().any(|hit| hit.symbol.is_some()));
+                for hit in locate.data.hits.iter().filter(|hit| hit.symbol.is_some()) {
+                    let evidence = hit.source.as_ref().unwrap();
+                    assert_eq!(evidence.generation(), receipt.generation);
+                    assert_eq!(evidence.content_hash(), content_hash(source.as_bytes()));
+                }
+            }
+        }
         assert_eq!(
             receipt,
             service

@@ -33,6 +33,7 @@ enum Workload {
     Lua,
     Tsx,
     Json,
+    Vba,
 }
 
 impl Workload {
@@ -43,12 +44,14 @@ impl Workload {
             Self::Lua => "lua",
             Self::Tsx => "tsx",
             Self::Json => "json",
+            Self::Vba => "vba",
         }
     }
 
     fn language(self) -> &'static str {
         match self {
             Self::Tsx => "typescript",
+            Self::Vba => "visual-basic-classic",
             _ => self.label(),
         }
     }
@@ -60,6 +63,7 @@ impl Workload {
             Self::Lua => "lua",
             Self::Tsx => "tsx",
             Self::Json => "json",
+            Self::Vba => "bas",
         }
     }
 
@@ -74,6 +78,9 @@ impl Workload {
                 format!("export function value_{ordinal}() {{ return <span>{{{body}}}</span>; }}\n")
             }
             Self::Json => format!("{{\"marker\":\"value_{ordinal}\",\"value\":{body}}}\n"),
+            Self::Vba => format!(
+                "Function value_{ordinal}() As Long\nDim cached As Long\ncached = {body}\nvalue_{ordinal} = cached\nEnd Function\n"
+            ),
         }
     }
 
@@ -82,12 +89,13 @@ impl Workload {
     }
 }
 
-const WORKLOADS: [Workload; 5] = [
+const WORKLOADS: [Workload; 6] = [
     Workload::Rust,
     Workload::Ruby,
     Workload::Lua,
     Workload::Tsx,
     Workload::Json,
+    Workload::Vba,
 ];
 
 #[test]

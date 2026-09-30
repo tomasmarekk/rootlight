@@ -5,7 +5,10 @@
 use std::ops::Range;
 
 use rootlight_adapter_sdk::NativeVbaModuleKind;
-use rootlight_vba::{ModuleError, ModuleInventory, ModuleLimits, ProcedureKind};
+use rootlight_vba::{
+    ModuleBodyStatement, ModuleError, ModuleInventory, ModuleLimits, ModuleLocalKind,
+    ModuleScalarValueKind, ProcedureKind,
+};
 
 use super::*;
 use crate::VBA_PROCEDURAL_FRONTEND_VERSION;
@@ -230,12 +233,23 @@ fn candidates(
     if inventory.source_len() != source.len() {
         return Err(provider_failure("vba-procedural-source-identity"));
     }
-    let count = inventory
+    let mut count = inventory
         .procedures()
         .len()
         .checked_mul(4)
         .and_then(|count| count.checked_add(3 + usize::from(inventory.module_name().is_some())))
         .ok_or_else(|| provider_failure("vba-procedural-fact-accounting"))?;
+    for procedure in inventory.procedures() {
+        cancellation.check()?;
+        for statement in procedure.statements() {
+            cancellation.check()?;
+            if matches!(statement, ModuleBodyStatement::Declaration(_)) {
+                count = count
+                    .checked_add(2)
+                    .ok_or_else(|| provider_failure("vba-procedural-fact-accounting"))?;
+            }
+        }
+    }
     require_provider_limit(ResourceKind::SyntaxNodes, count, maximum)?;
     let mut output = Vec::new();
     try_reserve_exact_cancellable(
@@ -291,6 +305,10 @@ fn candidates(
             procedure.header(),
             procedure.body(),
             procedure.declaration(),
+            procedure
+                .statements()
+                .first()
+                .map(|statement| statement.statement().start),
             cancellation,
         )?;
         output.push(candidate(
@@ -355,12 +373,119 @@ fn candidates(
                 false,
             ));
         }
+        for statement in procedure.statements() {
+            body_candidates(
+                statement,
+                &mut output,
+                include_optional,
+                maximum,
+                cancellation,
+            )?;
+        }
     }
     if include_optional {
         lexical_trivia(source, &mut output, maximum, cancellation)?;
     }
     cancellation.check()?;
     Ok(output)
+}
+
+fn body_candidates(
+    statement: &ModuleBodyStatement,
+    output: &mut Vec<QueryCandidate>,
+    include_optional: bool,
+    maximum: usize,
+    cancellation: &Cancellation,
+) -> Result<(), AdapterError> {
+    cancellation.check()?;
+    match statement {
+        ModuleBodyStatement::Declaration(declaration) => {
+            let syntax = match declaration.kind() {
+                ModuleLocalKind::Variable => "vba.variable",
+                ModuleLocalKind::Constant => "vba.constant",
+            };
+            push_body_candidate(
+                output,
+                maximum,
+                cancellation,
+                declaration.declarator(),
+                StructuralRole::Declaration,
+                syntax,
+                true,
+            )?;
+            push_body_candidate(
+                output,
+                maximum,
+                cancellation,
+                declaration.name(),
+                StructuralRole::Definition,
+                "vba.identifier",
+                true,
+            )?;
+            if include_optional {
+                push_body_candidate(
+                    output,
+                    maximum,
+                    cancellation,
+                    declaration.declarator(),
+                    StructuralRole::Expression,
+                    "vba.visibility_unknown",
+                    false,
+                )?;
+            }
+        }
+        ModuleBodyStatement::Assignment(assignment) if include_optional => {
+            push_body_candidate(
+                output,
+                maximum,
+                cancellation,
+                assignment.destination(),
+                StructuralRole::Reference,
+                "vba.let_identifier",
+                false,
+            )?;
+            match assignment.value().kind() {
+                ModuleScalarValueKind::Name => push_body_candidate(
+                    output,
+                    maximum,
+                    cancellation,
+                    assignment.value().span(),
+                    StructuralRole::Reference,
+                    "vba.value_identifier",
+                    false,
+                )?,
+                // Numeric and Boolean nodes have no captures in the current query
+                // pack; quoted strings use the shared lexical-trivia scan below.
+                ModuleScalarValueKind::UnsignedDecimal
+                | ModuleScalarValueKind::String
+                | ModuleScalarValueKind::Boolean => {}
+            }
+        }
+        ModuleBodyStatement::Assignment(_) => {}
+    }
+    Ok(())
+}
+
+fn push_body_candidate(
+    output: &mut Vec<QueryCandidate>,
+    maximum: usize,
+    cancellation: &Cancellation,
+    range: Range<usize>,
+    role: StructuralRole,
+    syntax: &'static str,
+    required: bool,
+) -> Result<(), AdapterError> {
+    require_provider_limit(
+        ResourceKind::SyntaxNodes,
+        output
+            .len()
+            .checked_add(1)
+            .ok_or_else(|| provider_failure("vba-procedural-fact-accounting"))?,
+        maximum,
+    )?;
+    try_reserve_cancellable(output, 1, cancellation, "vba-procedural-fact-allocation")?;
+    output.push(candidate(range, role, syntax, required));
+    Ok(())
 }
 
 fn candidate(
@@ -399,6 +524,7 @@ fn native_header(
     header: Range<usize>,
     body: Range<usize>,
     declaration: Range<usize>,
+    first_statement: Option<usize>,
     cancellation: &Cancellation,
 ) -> Result<Range<usize>, AdapterError> {
     let suffix = source
@@ -413,8 +539,12 @@ fn native_header(
         }
     }
     if end == declaration.end {
+        let boundary = first_statement.unwrap_or(body.end);
+        if first_statement.is_some() {
+            end = boundary;
+        }
         let body_bytes = source
-            .get(body.clone())
+            .get(body.start..boundary)
             .ok_or_else(|| provider_failure("vba-procedural-header"))?;
         let mut comment = false;
         for (offset, byte) in body_bytes.iter().enumerate() {
@@ -615,7 +745,7 @@ mod tests {
             &cancellation,
         )
         .unwrap()
-        .expect("the authored complete empty-body module is supported");
+        .expect("the authored complete procedural module is supported");
         let identity = normalize_query_candidates(
             candidates(
                 &prepared.inventory,
@@ -710,8 +840,10 @@ mod tests {
             "full demand for {language}"
         );
         assert_eq!(
-            actual.facts, expected.facts,
-            "exact source facts for {language}"
+            actual.facts,
+            expected.facts,
+            "exact source facts for {language}, {:?}",
+            request.source().bytes()
         );
     }
 
@@ -752,6 +884,156 @@ mod tests {
                 compare_native(&Fixture::new(&source), language, &[]);
             }
         }
+    }
+
+    #[test]
+    fn first_party_vba_scalar_bodies_match_the_private_native_route() {
+        let cases = [
+            "Sub Run()\nDim value As Long\nConst seed As Long = 65\nvalue = seed\nLet value = 7\nEnd Sub\n",
+            "Sub Run()\nDim [value] As String\nConst [text] As String = \"a\"\"b\"\n[value] = [text]\nLet [value] = \"replacement\"\nEnd Sub\n",
+            "Sub Run()\nDim flag As Boolean\nConst enabled As Boolean = True\nflag = enabled\nLet flag = False\nEnd Sub\n",
+            "Sub Run()\nDim [Me] As Boolean\nConst [True] As Boolean = False\n[Me] = [True]\nDim [Rem] As Long\nConst [Sub] As Long = 1\n[Rem] = [Sub]\nEnd Sub\n",
+            "Attribute VB_Name = \"ModuleA\"\r\nOption Explicit\r\nPrivate Static Function Result() As Long\r\nDim count As Long ' declaration\r\nConst seed As Long = 7 ' constant\r\nLet count = seed ' assignment\r\nResult = count\r\nEnd Function ' terminator\r\n",
+            "Sub Run():Dim value As Long:Const seed As Long = 7:value = seed:Let value = 8:End Sub\n",
+            "Sub Run(): : Dim value As Long\n' body:\nLet value = 1\nEnd Sub\n",
+            "Sub Run(): ' header\r\nDim value As Long: ' declaration\r\nLet value = 1\r\nEnd Sub\r\n",
+            "Sub Run()\nDim _\r\n [value] As _\n Long\nConst [seed] As _\r\n Long = _\n 7\nLet _\r\n [value] = _\n [seed]\nEnd Sub\n",
+            "Function Result() As String\nDim value As String\nConst seed As String = \"\"\nvalue = \"text\"\nResult = value\nEnd Function\n",
+            "Sub Run()\nDim value As Long\nConst seed As Long = 001\nvalue = 000\nEnd Sub",
+        ];
+        for source in cases {
+            for language in ["vba", "visual-basic-classic"] {
+                compare_native(&Fixture::new(source), language, &[]);
+            }
+        }
+        for keyword in [
+            "String", "Boolean", "Byte", "Integer", "Long", "LongLong", "LongPtr", "Single",
+            "Double", "Currency", "Date", "Variant", "Object",
+        ] {
+            let source = format!(
+                "Sub Run()\nDim value As {keyword}\nConst seed As {keyword} = 1\nvalue = seed\nEnd Sub\n"
+            );
+            for language in ["vba", "visual-basic-classic"] {
+                compare_native(&Fixture::new(&source), language, &[]);
+            }
+        }
+    }
+
+    #[test]
+    fn first_party_vba_scalar_body_boundaries_keep_whole_native_fallback() {
+        for body in [
+            "Dim value As Long\nvalue = 1 + 2",
+            "Dim value As Long\nCall Run()",
+            "Dim value As Long\nRun value",
+            "Dim value As Long\nholder.Value = 1",
+            "Dim values(1) As Long",
+            "Dim first As Long, second As Long",
+            "Dim value",
+            "Dim value As UserType",
+            "Const seed As Long = value",
+            "Dim value As Long\nvalue = -1",
+            "Dim value As Long\nvalue = 1.5",
+            "Dim value As Long\nvalue = &H10",
+            "Dim value As Long\nvalue = Nothing",
+            "Dim value As Long\nvalue = Me",
+            "Dim value As Long\nMe = value",
+            "Dim value As Long\nIf True Then\nvalue = 1\nEnd If",
+            "Dim value As Long\nvalue = \"unterminated _\n",
+        ] {
+            let source = format!("Sub Run()\n{body}\nEnd Sub\n");
+            for language in ["vba", "visual-basic-classic"] {
+                let fixture = Fixture::new(&source);
+                let request = fixture.request(language, &[]);
+                assert!(
+                    prepare(
+                        &fixture.provider,
+                        &request,
+                        None,
+                        &[],
+                        fixture.provider.config.default_settings(),
+                        &Cancellation::new(),
+                    )
+                    .unwrap()
+                    .is_none(),
+                    "the entire unsupported body retains native parsing: {language}, {body}"
+                );
+                assert_eq!(fixture.provider.stats().pooled_parsers, 0);
+                assert_eq!(fixture.provider.stats().cache.entries, 0);
+            }
+        }
+    }
+
+    #[test]
+    fn first_party_vba_scalar_candidate_ceilings_and_cancellation_are_exact() {
+        let fixture = Fixture::new(
+            "Sub Run()\nDim value As Long\nConst seed As Long = 7\nvalue = seed\nEnd Sub\n",
+        );
+        let request = fixture.request("vba", &[]);
+        let cancellation = Cancellation::new();
+        let prepared = prepare(
+            &fixture.provider,
+            &request,
+            None,
+            &[],
+            fixture.provider.config.default_settings(),
+            &cancellation,
+        )
+        .unwrap()
+        .unwrap();
+        for optional in [false, true] {
+            let exact = candidates(
+                &prepared.inventory,
+                request.source().bytes(),
+                optional,
+                request.limits().max_syntax_nodes(),
+                &cancellation,
+            )
+            .unwrap()
+            .len();
+            assert!(exact > 1);
+            assert_eq!(
+                candidates(
+                    &prepared.inventory,
+                    request.source().bytes(),
+                    optional,
+                    exact,
+                    &cancellation,
+                )
+                .unwrap()
+                .len(),
+                exact
+            );
+            assert_eq!(
+                candidates(
+                    &prepared.inventory,
+                    request.source().bytes(),
+                    optional,
+                    exact - 1,
+                    &cancellation,
+                )
+                .unwrap_err(),
+                AdapterError::RejectedRequest(RequestError::ProviderLimit {
+                    resource: ResourceKind::SyntaxNodes,
+                    observed: exact,
+                    limit: exact - 1,
+                })
+            );
+        }
+        assert!(cancellation.cancel(rootlight_cancel::CancellationReason::ClientRequest));
+        assert!(matches!(
+            candidates(
+                &prepared.inventory,
+                request.source().bytes(),
+                true,
+                request.limits().max_syntax_nodes(),
+                &cancellation,
+            ),
+            Err(AdapterError::Cancelled {
+                reason: rootlight_cancel::CancellationReason::ClientRequest,
+            })
+        ));
+        assert_eq!(fixture.provider.stats().pooled_parsers, 0);
+        assert_eq!(fixture.provider.stats().cache.entries, 0);
     }
 
     #[test]
@@ -991,7 +1273,7 @@ mod tests {
     #[test]
     fn first_party_vba_never_accepts_a_supported_prefix_or_object_context() {
         for source in [
-            "Sub Run()\nunknown = 1\nEnd Sub\n",
+            "Sub Run()\nDim value As Long\nvalue = 1 + 2\nEnd Sub\n",
             "Sub Run()\nEnd Sub\n#If Host Then\n#End If\n",
         ] {
             let fixture = Fixture::new(source);

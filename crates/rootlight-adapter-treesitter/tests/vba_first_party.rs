@@ -26,6 +26,7 @@ use tempfile::{TempDir, tempdir_in};
 
 const SOURCE_LIMIT: usize = 1024 * 1024;
 const CLOSED_MODULE: &[u8] = b"Attribute VB_Name = \"Authored\"\r\nOption Explicit\r\nPublic Sub Run()\r\n' only authored trivia\r\nEnd Sub\r\nPrivate Function Count() As Long\r\nEnd Function\r\n";
+const SCALAR_MODULE: &[u8] = b"Attribute VB_Name = \"Authored\"\r\nOption Explicit\r\nSub Run()\r\nDim count As Long\r\nConst Limit As Long = 7\r\ncount = Limit\r\nLet count = 1\r\nEnd Sub\r\nFunction Value() As Long\r\nValue = 7\r\nEnd Function\r\n";
 
 #[test]
 fn accepted_modules_preserve_exact_identity_without_native_pool_or_cache_work() {
@@ -73,6 +74,61 @@ fn accepted_modules_preserve_exact_identity_without_native_pool_or_cache_work() 
         assert_eq!(stats.pooled_parsers, 0);
         assert_eq!(stats.checked_out_parsers, 0);
         assert_eq!(stats.cache.entries, 0);
+    }
+}
+
+#[test]
+fn scalar_modules_preserve_local_identity_and_value_reads_without_native_work() {
+    for language in ["vba", "visual-basic-classic"] {
+        let fixture = Fixture::new(SCALAR_MODULE);
+        let provider = provider();
+        let full_limits = limits(4096);
+        let request = fixture.request(&full_limits, language, Vec::new());
+        let required = provider
+            .required_syntax_fact_count(&request, &deadline())
+            .unwrap();
+        let output = parse(&provider, &request);
+        assert_eq!(
+            output.report().coverage().status(),
+            CoverageStatus::Complete
+        );
+        assert!(output.facts().iter().any(|fact| {
+            fact.syntax_kind().as_str() == "vba.value_identifier.reference"
+                && bytes_at(SCALAR_MODULE, fact.span()) == b"Limit"
+        }));
+        assert!(output.facts().iter().any(|fact| {
+            fact.syntax_kind().as_str() == "vba.let_identifier.reference"
+                && bytes_at(SCALAR_MODULE, fact.span()) == b"count"
+        }));
+        let exact_limits = limits(required);
+        let request = fixture.request(&exact_limits, language, Vec::new());
+        let exact = parse(&provider, &request);
+        for name in [b"Run".as_slice(), b"Value", b"count", b"Limit"] {
+            for result in [&output, &exact] {
+                assert!(result.facts().iter().any(|fact| {
+                    fact.syntax_kind().as_str().ends_with(".definition")
+                        && bytes_at(SCALAR_MODULE, fact.span()) == name
+                }));
+            }
+        }
+        let short_limits = limits(required - 1);
+        let request = fixture.request(&short_limits, language, Vec::new());
+        assert_eq!(
+            execute_parse(
+                &provider,
+                &request,
+                MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
+                &deadline(),
+            )
+            .unwrap_err(),
+            AdapterError::Sink(SinkError::StreamLimit {
+                resource: ResourceKind::RequiredSyntaxFacts,
+                observed: required,
+                limit: required - 1,
+            })
+        );
+        assert_eq!(provider.stats().pooled_parsers, 0);
+        assert_eq!(provider.stats().cache.entries, 0);
     }
 }
 
@@ -146,7 +202,7 @@ fn native_object_context_cannot_be_promoted_to_a_procedural_file() {
 
 #[test]
 fn native_continuation_is_invalidated_when_an_edit_enters_the_first_party_route() {
-    let native = b"Sub Run()\nDim value As Long\nEnd Sub\n";
+    let native = b"Sub Run()\nDim value As Long\nvalue = 1 + 2\nEnd Sub\n";
     let first_party = b"Sub Run()\nEnd Sub\n";
     let mut fixture = Fixture::new(native);
     let provider = provider();
@@ -169,7 +225,7 @@ fn native_continuation_is_invalidated_when_an_edit_enters_the_first_party_route(
     let old_stats = provider.stats();
     fixture.rewrite(first_party);
     let request = fixture.request(&limits, "vba", Vec::new());
-    let edit = SourceEdit::new(10, 28, "").unwrap();
+    let edit = SourceEdit::new(10, native.len() - b"End Sub\n".len(), "").unwrap();
     let output = provider
         .execute_with_previous(
             &request,

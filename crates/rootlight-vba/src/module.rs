@@ -4,7 +4,7 @@
 
 use std::{fmt, ops::Range};
 
-use super::{ProcedureKind, logical_whitespace_len, procedure_header};
+use super::{ModuleBodyStatement, ProcedureKind, logical_whitespace_len, procedure_header};
 
 /// Caller-owned ceilings for one complete module scan.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -67,7 +67,7 @@ impl ModuleInventory {
     }
 }
 
-/// One complete empty-body Sub or Function retaining original source offsets.
+/// One complete closed-slice Sub or Function retaining original source offsets.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ModuleProcedure {
     kind: ProcedureKind,
@@ -76,6 +76,7 @@ pub struct ModuleProcedure {
     name: Range<usize>,
     body: Range<usize>,
     terminator: Range<usize>,
+    statements: Vec<ModuleBodyStatement>,
 }
 
 impl ModuleProcedure {
@@ -104,7 +105,7 @@ impl ModuleProcedure {
         self.name.clone()
     }
 
-    /// Returns trivia between the consumed header boundary and End statement.
+    /// Returns the body between the consumed header boundary and End statement.
     #[must_use]
     pub fn body(&self) -> Range<usize> {
         self.body.clone()
@@ -114,6 +115,12 @@ impl ModuleProcedure {
     #[must_use]
     pub fn terminator(&self) -> Range<usize> {
         self.terminator.clone()
+    }
+
+    /// Returns complete nontrivia body statements in original source order.
+    #[must_use]
+    pub fn statements(&self) -> &[ModuleBodyStatement] {
+        &self.statements
     }
 }
 
@@ -131,7 +138,7 @@ pub enum ModuleError<E> {
     StatementLimit,
     /// Declared procedures exceed the caller's retained-procedure ceiling.
     ProcedureLimit,
-    /// Fallible reservation of bounded procedure storage failed.
+    /// Fallible reservation of bounded procedure or body storage failed.
     AllocationFailed,
     /// The caller's cancellation or work callback failed.
     Cancelled(E),
@@ -163,11 +170,16 @@ impl<E: std::error::Error + 'static> std::error::Error for ModuleError<E> {
 ///
 /// Supports one leading alpha-first ASCII `Attribute VB_Name` of at most 31
 /// bytes, unique legal Option categories,
-/// blank/comment segments and empty Sub/Function procedures. Sub parameters
+/// blank/comment segments and closed-slice Sub/Function procedures. Sub parameters
 /// may be absent or explicitly empty; Function parameters must be explicitly
 /// empty, with an optional intrinsic scalar As clause or unbracketed type suffix.
 /// Public/Private and optional Static modifiers are accepted in that order.
-/// All other statements, nonempty bodies, inline Rem tails, directives, class
+/// Bodies admit one typed scalar Dim or Const per statement and simple scalar
+/// assignments with an optional Let prefix. Const values are unsigned decimal,
+/// physically closed doubled-quote strings or True/False; assignments additionally
+/// admit a simple name. Keyword-shaped unbracketed names, calls and operators
+/// are unsupported. Every body statement must be consumed completely.
+/// All other statements, inline Rem tails, directives, class
 /// members, continued-comment forms and incomplete boundaries reject the entire input.
 /// Colon boundaries are allowed only after a procedure opener or within its body.
 /// Unbracketed Rem and Rem! names remain on the native route: the comment
@@ -176,7 +188,8 @@ impl<E: std::error::Error + 'static> std::error::Error for ModuleError<E> {
 /// Ranges always address the original bytes, preserving LF/CRLF and explicit
 /// continuations. The scan is nonrecursive, bounded and cancellable before
 /// admission, per statement and periodically within byte scans. Statement
-/// ceilings include trivia segments; procedure storage is reserved fallibly.
+/// ceilings include trivia segments; procedure and body storage is reserved fallibly.
+/// Across all procedures, retained body records cannot exceed the statement ceiling.
 /// This proves structure only, not type identity, visibility or name uniqueness.
 ///
 /// # Errors
@@ -213,6 +226,7 @@ pub fn module_inventory<E>(
     let mut cursor = 0;
     let mut options = 0_u8;
     let mut attribute_header = true;
+    let mut body_count = 0_usize;
     while cursor < source.len() {
         check().map_err(ModuleError::Cancelled)?;
         if inventory.statement_count >= limits.max_statements {
@@ -247,16 +261,26 @@ pub fn module_inventory<E>(
             continue;
         }
         if let Some(procedure) = &mut open {
-            if colon_boundary
-                || !is_terminator(text, procedure.kind, check).map_err(ModuleError::Cancelled)?
-            {
-                return Err(ModuleError::Unsupported { range });
-            }
-            procedure.body.end = range.start;
-            procedure.declaration.end = range.end;
-            procedure.terminator = range;
-            if let Some(procedure) = open.take() {
-                inventory.procedures.push(procedure);
+            if is_terminator(text, procedure.kind, check).map_err(ModuleError::Cancelled)? {
+                if colon_boundary {
+                    return Err(ModuleError::Unsupported { range });
+                }
+                procedure.body.end = range.start;
+                procedure.declaration.end = range.end;
+                procedure.terminator = range;
+                if let Some(procedure) = open.take() {
+                    inventory.procedures.push(procedure);
+                }
+            } else {
+                let Some(statement) = super::module_body::statement(source, range.clone(), check)
+                    .map_err(ModuleError::Cancelled)?
+                else {
+                    return Err(ModuleError::Unsupported { range });
+                };
+                let maximum = limits.max_statements - body_count + procedure.statements.len();
+                super::module_body::reserve(&mut procedure.statements, maximum)?;
+                procedure.statements.push(statement);
+                body_count += 1;
             }
             continue;
         }
@@ -301,6 +325,7 @@ pub fn module_inventory<E>(
             header: range,
             body: cursor..cursor,
             terminator: cursor..cursor,
+            statements: Vec::new(),
         });
     }
     if let Some(procedure) = open {
@@ -366,24 +391,7 @@ fn empty_header<E>(
         return Ok(None);
     };
     let spelling = text.get(ty.clone()).unwrap_or_default();
-    if ![
-        b"String".as_slice(),
-        b"Boolean",
-        b"Byte",
-        b"Integer",
-        b"Long",
-        b"LongLong",
-        b"LongPtr",
-        b"Single",
-        b"Double",
-        b"Currency",
-        b"Date",
-        b"Variant",
-        b"Object",
-    ]
-    .iter()
-    .any(|keyword| spelling.eq_ignore_ascii_case(keyword))
-    {
+    if !super::module_body::intrinsic_type_name(spelling) {
         return Ok(None);
     }
     cursor = ty.end;
@@ -671,6 +679,176 @@ mod tests {
     }
 
     #[test]
+    fn scalar_local_bodies_preserve_exact_ranges_with_comments_and_colon_boundaries() {
+        for newline in ["\n", "\r\n"] {
+            let source = format!(
+                "Attribute VB_Name = \"BodyModule\"{newline}Sub Run(){newline}  Dim [count] As Long ' local{newline}  Const Limit As Long = 7: Let [count] = Limit{newline}  [count] = \"End Sub: Rem ' = \"\"quoted\"\"\"{newline}End Sub{newline}"
+            );
+            let inventory = parse(source.as_bytes()).unwrap();
+            let procedure = &inventory.procedures()[0];
+            assert_eq!(procedure.statements().len(), 4);
+            let ModuleBodyStatement::Declaration(local) = &procedure.statements()[0] else {
+                panic!("first body statement is a typed local");
+            };
+            assert_eq!(&source[local.statement()], "Dim [count] As Long");
+            assert_eq!(&source[local.declarator()], "[count] As Long");
+            assert_eq!(&source[local.name()], "[count]");
+            assert_eq!(&source[local.type_range()], "Long");
+            assert!(local.value().is_none());
+            let ModuleBodyStatement::Declaration(constant) = &procedure.statements()[1] else {
+                panic!("second body statement is a typed constant");
+            };
+            assert_eq!(&source[constant.declarator()], "Limit As Long = 7");
+            assert_eq!(&source[constant.value().unwrap().span()], "7");
+            let ModuleBodyStatement::Assignment(assignment) = &procedure.statements()[2] else {
+                panic!("third body statement is an assignment");
+            };
+            assert_eq!(&source[assignment.statement()], "Let [count] = Limit");
+            assert_eq!(&source[assignment.destination()], "[count]");
+            assert_eq!(&source[assignment.value().span()], "Limit");
+            for statement in procedure.statements() {
+                assert!(procedure.body().start <= statement.statement().start);
+                assert!(statement.statement().end <= procedure.body().end);
+            }
+            assert_eq!(&source[procedure.terminator()], "End Sub");
+            assert!(source[procedure.body()].contains("Const Limit"));
+        }
+    }
+
+    #[test]
+    fn bodies_remain_procedure_owned_and_functions_can_assign_simple_result_names() {
+        let source = b"Sub First():Dim value As Long:value=1:End Sub\nFunction Second() As Long\nConst Limit As Long = 2\nLet Second=Limit\nEnd Function\n";
+        let inventory = parse(source).unwrap();
+        assert_eq!(inventory.procedures().len(), 2);
+        assert_eq!(inventory.procedures()[0].statements().len(), 2);
+        assert_eq!(inventory.procedures()[1].statements().len(), 2);
+        let ModuleBodyStatement::Assignment(assignment) =
+            &inventory.procedures()[1].statements()[1]
+        else {
+            panic!("function result assignment is retained");
+        };
+        assert_eq!(&source[assignment.destination()], b"Second");
+        assert_eq!(&source[assignment.value().span()], b"Limit");
+        for procedure in inventory.procedures() {
+            for statement in procedure.statements() {
+                assert!(statement.statement().start >= procedure.body().start);
+                assert!(statement.statement().end <= procedure.body().end);
+            }
+        }
+    }
+
+    #[test]
+    fn scalar_body_unsupported_statement_rejects_the_whole_module_without_prefixes() {
+        for body in [
+            "Dim value As Long\nvalue = 1 + 2",
+            "Const Limit As Long = other",
+            "Dim x, y As Long",
+            "Dim item As New Object",
+            "Dim item As Product",
+            "Dim values() As Long",
+            "Dim value As Long=1",
+            "value=1\nCall Finish()",
+            "value=Me",
+            "value=Nothing",
+            "value=Null",
+            "value=Empty",
+            "value=True False",
+            "value=\"open",
+            "value=\"continued _\n",
+            "value=target.member",
+            "item.member=1",
+            "value(0)=1",
+            "value$=1",
+            "If True Then",
+            "#If Enabled Then",
+            "Sub Nested()",
+            "End Function",
+            "Option Explicit",
+            "Attribute VB_Name = \"Late\"",
+            "Rem-x\nvalue=1",
+            "Rem: value=1",
+            "value=1 ' continued _\nvalue=2",
+        ] {
+            let source = format!("Sub Run()\nDim accepted As Long\n{body}\nEnd Sub\n");
+            assert!(
+                matches!(
+                    parse(source.as_bytes()),
+                    Err(ModuleError::Unsupported { .. })
+                ),
+                "{body}"
+            );
+        }
+        for source in [
+            "Dim value As Long\nSub Run()\nEnd Sub",
+            "Const Limit As Long=1",
+            "value=1",
+        ] {
+            assert!(matches!(
+                parse(source.as_bytes()),
+                Err(ModuleError::Unsupported { .. })
+            ));
+        }
+    }
+
+    #[test]
+    fn body_retention_uses_total_existing_statement_limits_and_is_cancellable() {
+        let source = b"Sub First()\nDim value As Long\nvalue=1\nEnd Sub\nSub Second()\nConst Limit As Long=2\nvalue=Limit\nEnd Sub\n";
+        let expected = parse(source).unwrap();
+        assert_eq!(expected.statement_count(), 8);
+        assert_eq!(
+            expected
+                .procedures()
+                .iter()
+                .map(|procedure| procedure.statements().len())
+                .sum::<usize>(),
+            4
+        );
+        assert_eq!(
+            module_inventory(source, ModuleLimits::new(source.len(), 8, 2), &mut || Ok::<
+                (),
+                (),
+            >(
+                ()
+            )),
+            Ok(expected)
+        );
+        assert_eq!(
+            module_inventory(source, ModuleLimits::new(source.len(), 7, 2), &mut || Ok::<
+                (),
+                (),
+            >(
+                ()
+            )),
+            Err(ModuleError::StatementLimit)
+        );
+        let source = format!("Sub Run()\nvalue=\"{}\"\nEnd Sub\n", "x\"\"".repeat(8192));
+        let mut successful_checks = 0;
+        module_inventory(
+            source.as_bytes(),
+            ModuleLimits::new(source.len(), 3, 1),
+            &mut || {
+                successful_checks += 1;
+                Ok::<(), ()>(())
+            },
+        )
+        .unwrap();
+        let limit = successful_checks - 2;
+        let mut calls = 0;
+        assert_eq!(
+            module_inventory(
+                source.as_bytes(),
+                ModuleLimits::new(source.len(), 3, 1),
+                &mut || {
+                    calls += 1;
+                    if calls == limit { Err("stop") } else { Ok(()) }
+                }
+            ),
+            Err(ModuleError::Cancelled("stop"))
+        );
+        assert_eq!(calls, limit);
+    }
+
+    #[test]
     fn unsupported_tails_bodies_prefixes_and_module_forms_have_no_inventory() {
         for source in [
             "Sub Run(value As Long)\nEnd Sub",
@@ -690,7 +868,6 @@ mod tests {
             "Public Static Static Sub Run()\nEnd Sub",
             "Sub Run() Rem header\nEnd Sub",
             "Sub Run()\nEnd Sub Rem tail",
-            "Sub Run()\nx = 1\nEnd Sub",
             "Sub Run()\nSub Nested()\nEnd Sub\nEnd Sub",
             "Sub Run()\nEnd Function",
             "Sub Run()",

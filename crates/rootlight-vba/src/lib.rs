@@ -15,6 +15,7 @@ mod group;
 mod lifecycle;
 mod member_attribute;
 mod module;
+mod module_body;
 mod parameter;
 mod procedure;
 mod value_reads;
@@ -37,6 +38,10 @@ pub use group::parenthesized_expression_end;
 pub use lifecycle::{ClassInitializer, class_initializer};
 pub use member_attribute::{MemberDispatchAttribute, member_dispatch_attribute};
 pub use module::{ModuleError, ModuleInventory, ModuleLimits, ModuleProcedure, module_inventory};
+pub use module_body::{
+    ModuleBodyStatement, ModuleLocalDeclaration, ModuleLocalKind, ModuleScalarAssignment,
+    ModuleScalarValue, ModuleScalarValueKind,
+};
 pub use parameter::array_parameter_modifiers;
 pub use procedure::{
     ProcedureHeader, ProcedureKind, parameterless_sub, procedure_header, procedure_parameter_range,
