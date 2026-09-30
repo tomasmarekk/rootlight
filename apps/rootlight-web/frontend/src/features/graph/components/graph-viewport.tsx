@@ -210,7 +210,7 @@ export function GraphViewport(props: GraphViewportProps) {
           data-lifecycle={snapshot.lifecycle}
         />
       )}
-      <span className="graph-attribution">Rendered with cosmos.gl</span>
+      <span className="graph-attribution">Rendered by Rootlight</span>
       <GraphCompanionList
         model={model}
         selectedOrdinals={selectedOrdinals ?? snapshot.selectedOrdinals}

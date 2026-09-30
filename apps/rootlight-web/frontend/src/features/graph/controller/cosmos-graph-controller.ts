@@ -1,7 +1,7 @@
-// Owns the single imperative Cosmos lifecycle for an Atlas viewport.
+// Owns the single imperative graph lifecycle for an Atlas viewport.
 // React supplies immutable models and small ordinal state; GPU arrays stay inside this boundary.
 
-import type { Graph, GraphConfig } from "@cosmos.gl/graph";
+import type { FirstPartyGraph, GraphConfig } from "./first-party-graph";
 
 import type { GraphView } from "../model/graph-contracts";
 import { deriveGraphLayoutSeed, type GraphLayoutIdentity } from "../model/graph-layout";
@@ -26,9 +26,9 @@ export type CosmosGraphControllerSnapshot = {
   errorMessage: string | null;
 };
 
-/** Cosmos methods used by Rootlight and implemented by controller test doubles. */
+/** Renderer methods used by Rootlight and implemented by controller test doubles. */
 export type CosmosGraphPort = Pick<
-  Graph,
+  FirstPartyGraph,
   | "destroy"
   | "fitView"
   | "pause"
@@ -52,7 +52,7 @@ export type CosmosGraphPort = Pick<
   | "unpause"
 >;
 
-/** Creates one Cosmos instance for a container lifecycle. */
+/** Creates one renderer instance for a container lifecycle. */
 export type CosmosGraphFactory = (
   container: HTMLDivElement,
   config: GraphConfig,
@@ -77,7 +77,7 @@ export type CosmosGraphControllerCallbacks = Pick<
 >;
 
 /**
- * Owns Cosmos initialization, model updates, selection, simulation, context recovery, and disposal.
+ * Owns graph initialization, model updates, selection, simulation, context recovery, and disposal.
  */
 export class CosmosGraphController {
   #options: CosmosGraphControllerOptions;
@@ -127,7 +127,7 @@ export class CosmosGraphController {
   };
 
   /**
-   * Allocates the one Cosmos instance owned by a viewport container.
+   * Allocates the one renderer instance owned by a viewport container.
    *
    * @throws Error when called twice or after disposal.
    */
@@ -586,8 +586,8 @@ async function createDefaultCosmosFactory(
   container: HTMLDivElement,
   config: GraphConfig,
 ): Promise<CosmosGraphPort> {
-  const { Graph: CosmosGraph } = await import("@cosmos.gl/graph");
-  return new CosmosGraph(container, config);
+  const { FirstPartyGraph } = await import("./first-party-graph");
+  return new FirstPartyGraph(container, config);
 }
 
 function sameOrdinals(left: readonly number[], right: readonly number[]) {

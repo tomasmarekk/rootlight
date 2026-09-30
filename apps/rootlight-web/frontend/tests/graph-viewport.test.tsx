@@ -1,6 +1,6 @@
-// Verifies the React-to-Cosmos boundary, fallback routing, keyboard reset, and unmount disposal.
+// Verifies the React-to-renderer boundary, fallback routing, keyboard reset, and unmount disposal.
 
-import type { GraphConfig } from "@cosmos.gl/graph";
+import type { GraphConfig } from "../src/features/graph/controller/first-party-graph";
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";

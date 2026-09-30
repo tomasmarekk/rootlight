@@ -1,6 +1,6 @@
-// Verifies the imperative Cosmos lifecycle without requiring a GPU in unit-test CI.
+// Verifies the imperative graph lifecycle without requiring a GPU in unit-test CI.
 
-import type { GraphConfig } from "@cosmos.gl/graph";
+import type { GraphConfig } from "../src/features/graph/controller/first-party-graph";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import {

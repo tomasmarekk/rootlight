@@ -1,7 +1,7 @@
-// Builds bounded Cosmos configuration from graph density and user motion preference.
+// Builds bounded graph configuration from density and user motion preference.
 // Init-only fields are produced once; runtime changes use explicit partial updates.
 
-import type { GraphConfig } from "@cosmos.gl/graph";
+import type { GraphConfig } from "./first-party-graph";
 
 import type { GraphView } from "../model/graph-contracts";
 
@@ -18,14 +18,14 @@ export type GraphDensityProfile = {
   hoverSamplingDistance: number;
 };
 
-/** Event callbacks wired into the imperative Cosmos boundary. */
+/** Event callbacks wired into the imperative renderer boundary. */
 export type CosmosGraphCallbacks = {
   onPointClick: (index: number, event: MouseEvent) => void;
   onPointHover: (index: number | null) => void;
   onInteractionStart: () => void;
 };
 
-/** Inputs for one immutable Cosmos instance configuration. */
+/** Inputs for one immutable renderer instance configuration. */
 export type CosmosGraphConfigInput = {
   randomSeed: string;
   view: GraphView;
@@ -77,7 +77,7 @@ export function graphDensityProfile(nodeCount: number, edgeCount: number): Graph
   };
 }
 
-/** Builds the init-only and event configuration for a new Cosmos graph instance. */
+/** Builds the init-only and event configuration for a new graph instance. */
 export function createCosmosGraphConfig(input: CosmosGraphConfigInput): GraphConfig {
   const density = graphDensityProfile(input.nodeCount, input.edgeCount);
   const collisionAllowed = input.view === "architecture" || input.view === "files";
