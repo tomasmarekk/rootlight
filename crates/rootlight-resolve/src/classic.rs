@@ -9,6 +9,7 @@ mod calls;
 mod compilation;
 mod default_members;
 mod dependencies;
+mod occurrence_views;
 mod project_references;
 mod references;
 pub(crate) mod standard;
@@ -28,6 +29,8 @@ use crate::{
     ResolutionOutcome, ResolutionRule, ResolutionSignal,
     engine::{CandidateIndex, ResolutionWorkBudget},
 };
+
+use occurrence_views::{OccurrenceView, OccurrenceViews};
 
 pub use references::{
     NativeClassicProjectLocator, NativeClassicProjectReference, NativeClassicProjectReferenceKind,
@@ -608,6 +611,7 @@ impl<'a> ClassicIndex<'a> {
         }
         let entities = &retained_entities;
         let mut retained_occurrences = Vec::new();
+        let mut occurrence_views = OccurrenceViews::default();
         for occurrence in occurrences {
             cancellation.check()?;
             work.consume()?;
@@ -615,6 +619,12 @@ impl<'a> ClassicIndex<'a> {
                 && matches!(occurrence.target, OccurrenceTarget::Resolved { symbol }
                     if !result.compilation.entity_inactive(symbol));
             if definition || result.compilation.use_active(occurrence.id) {
+                occurrence_views.record(
+                    retained_occurrences.len(),
+                    occurrence,
+                    cancellation,
+                    work,
+                )?;
                 retained_occurrences.push(occurrence.clone());
             }
         }
@@ -1003,7 +1013,7 @@ impl<'a> ClassicIndex<'a> {
         }
         project_references::link(&mut projects, native, &paths, files, cancellation, work)?;
         let mut pointer_sites = BTreeMap::<usize, Vec<&OccurrenceRecord>>::new();
-        for occurrence in occurrences {
+        for occurrence in occurrence_views.iter(OccurrenceView::Pointers, occurrences) {
             cancellation.check()?;
             work.consume()?;
             if matches!(
@@ -1219,7 +1229,7 @@ impl<'a> ClassicIndex<'a> {
                 );
             }
         }
-        for occurrence in occurrences {
+        for occurrence in occurrence_views.iter(OccurrenceView::TypeLookup, occurrences) {
             cancellation.check()?;
             work.consume()?;
             let implementation = occurrence.role == OccurrenceRole::ImplementationUse
@@ -1491,7 +1501,7 @@ impl<'a> ClassicIndex<'a> {
                 }
             }
         }
-        for occurrence in occurrences {
+        for occurrence in occurrence_views.iter(OccurrenceView::TypeAssociation, occurrences) {
             cancellation.check()?;
             work.consume()?;
             if occurrence.role == OccurrenceRole::Definition
@@ -1682,7 +1692,12 @@ impl<'a> ClassicIndex<'a> {
         let mut member_occurrences = Vec::new();
         let mut read_receivers: BTreeMap<_, Vec<SourceRef>> = BTreeMap::new();
         let mut automatic_reads = BTreeMap::new();
-        let mut calls = calls::CallIndex::build(entities, occurrences, cancellation, work)?;
+        let mut calls = calls::CallIndex::build(
+            entities,
+            occurrence_views.iter(OccurrenceView::Calls, occurrences),
+            cancellation,
+            work,
+        )?;
         let mut constructed_types = BTreeMap::new();
         let mut constructed_classes = BTreeSet::new();
         for (owner, source) in &automatic_types {
@@ -1695,7 +1710,7 @@ impl<'a> ClassicIndex<'a> {
                 constructed_classes.insert(*class);
             }
         }
-        for site in occurrences {
+        for site in occurrence_views.iter(OccurrenceView::ConstructedTypes, occurrences) {
             cancellation.check()?;
             work.consume()?;
             if site.role == OccurrenceRole::TypeUse
@@ -1775,7 +1790,7 @@ impl<'a> ClassicIndex<'a> {
             initializers.insert(*class, initializer);
         }
         let mut constructed_receivers = BTreeMap::new();
-        for site in occurrences {
+        for site in occurrence_views.iter(OccurrenceView::Constructions, occurrences) {
             cancellation.check()?;
             work.consume()?;
             if site.role != OccurrenceRole::Reference
@@ -1848,9 +1863,13 @@ impl<'a> ClassicIndex<'a> {
                 .and_modify(|prior| *prior = None)
                 .or_insert(Some(site));
         }
-        let mut parsed_members =
-            with_members::inventory(occurrences, &sources, cancellation, work)?;
-        for occurrence in occurrences {
+        let mut parsed_members = with_members::inventory(
+            occurrence_views.iter(OccurrenceView::Members, occurrences),
+            &sources,
+            cancellation,
+            work,
+        )?;
+        for occurrence in occurrence_views.iter(OccurrenceView::MemberApplications, occurrences) {
             cancellation.check()?;
             if occurrence.syntax_kind == "vba.application.reference"
                 && matches!(occurrence.target, OccurrenceTarget::Unresolved { .. })
@@ -1901,8 +1920,8 @@ impl<'a> ClassicIndex<'a> {
                     continue;
                 }
             }
-            // Keep the per-occurrence charge even for records that cannot
-            // participate; lexical scans have their own bounded work charges.
+            // Category classification charged nonparticipants during retention;
+            // records admitted here retain their own semantic work charges.
             work.consume()?;
         }
         let order = dependencies::order(&member_occurrences, &calls, &sources, cancellation, work)?;

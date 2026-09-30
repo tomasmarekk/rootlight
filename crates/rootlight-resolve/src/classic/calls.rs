@@ -48,7 +48,7 @@ pub(super) struct CallIndex<'a, 'o> {
 impl<'a, 'o> CallIndex<'a, 'o> {
     pub(super) fn build(
         entities: &BTreeMap<SymbolId, &'a EntityRecord>,
-        occurrences: &'o [OccurrenceRecord],
+        occurrences: impl IntoIterator<Item = &'o OccurrenceRecord>,
         cancellation: &Cancellation,
         work: &mut ResolutionWorkBudget,
     ) -> Result<Self, ResolutionError> {

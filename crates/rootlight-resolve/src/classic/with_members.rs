@@ -17,8 +17,8 @@ pub(super) struct Member<'s> {
     pub(super) implicit_root: bool,
 }
 
-pub(super) fn inventory<'s>(
-    occurrences: &[OccurrenceRecord],
+pub(super) fn inventory<'s, 'o>(
+    occurrences: impl IntoIterator<Item = &'o OccurrenceRecord>,
     sources: &BTreeMap<FileId, &'s [u8]>,
     cancellation: &Cancellation,
     work: &mut ResolutionWorkBudget,
