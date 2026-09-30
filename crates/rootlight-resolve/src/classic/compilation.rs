@@ -476,17 +476,7 @@ impl CompilationIndex {
             }
         }
         for occurrence in occurrences {
-            cancellation.check()?;
-            if result.activity_with_work(&occurrence.source, cancellation, work)?
-                == VbaCompilationActivity::Active
-                && occurrence
-                    .enclosing
-                    .is_none_or(|id| result.entity_active(id))
-                && match occurrence.target {
-                    OccurrenceTarget::Resolved { symbol } => result.entity_active(symbol),
-                    _ => true,
-                }
-            {
+            if result.occurrence_active_with_work(occurrence, cancellation, work)? {
                 result.uses.insert(occurrence.id);
             }
         }
@@ -531,6 +521,28 @@ impl CompilationIndex {
         })
     }
 
+    fn occurrence_active_with_work(
+        &self,
+        occurrence: &OccurrenceRecord,
+        cancellation: &Cancellation,
+        work: &mut ResolutionWorkBudget,
+    ) -> Result<bool, ResolutionError> {
+        cancellation.check()?;
+        // Ownership is immutable after declaration admission. Excluded or
+        // unknown owners/targets cannot be rescued by a source interval lookup.
+        if !occurrence.enclosing.is_none_or(|id| self.entity_active(id))
+            || matches!(occurrence.target, OccurrenceTarget::Resolved { symbol }
+                if !self.entity_active(symbol))
+        {
+            work.consume()?;
+            return Ok(false);
+        }
+        Ok(
+            self.activity_with_work(&occurrence.source, cancellation, work)?
+                == VbaCompilationActivity::Active,
+        )
+    }
+
     fn activity_checked<E>(
         &self,
         source: &SourceRef,
@@ -545,6 +557,15 @@ impl CompilationIndex {
             || !contains(file.source.span(), source.span())
         {
             return Ok(VbaCompilationActivity::Unproven);
+        }
+        // A unique full-file inventory already owns every guarded query;
+        // incomplete models still fail closed in the unchanged activity lookup.
+        if let [inventory] = file.inventories.as_slice()
+            && inventory.model.scope == file.source.span()
+        {
+            return inventory
+                .activity
+                .activity(&inventory.model, source.span(), check);
         }
         for inventory in &file.inventories {
             check()?;
@@ -579,7 +600,13 @@ impl CompilationIndex {
         // Callback-free activity lookups reserve the binary-search bound;
         // importer queries charge actual comparisons.
         self.files.get(&source.span().file()).map_or(1, |file| {
-            file.maximum_activity_work + 2 * file.inventories.len() + 1
+            if let [inventory] = file.inventories.as_slice()
+                && inventory.model.scope == file.source.span()
+            {
+                file.maximum_activity_work + 1
+            } else {
+                file.maximum_activity_work + 2 * file.inventories.len() + 1
+            }
         })
     }
 

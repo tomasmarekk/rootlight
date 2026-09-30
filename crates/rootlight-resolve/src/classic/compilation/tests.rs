@@ -248,6 +248,483 @@ fn source(
     )
 }
 
+// The pre-optimization traversal is an independent oracle for both lookup
+// results and the exact comparison removed by full-file ownership admission.
+fn original_activity_checked<E>(
+    index: &CompilationIndex,
+    source: &SourceRef,
+    check: &mut impl FnMut() -> Result<(), E>,
+) -> Result<VbaCompilationActivity, E> {
+    check()?;
+    let Some(file) = index.files.get(&source.span().file()) else {
+        return Ok(VbaCompilationActivity::Unproven);
+    };
+    if file.blocked
+        || !same_identity(&file.source, source)
+        || !contains(file.source.span(), source.span())
+    {
+        return Ok(VbaCompilationActivity::Unproven);
+    }
+    for inventory in &file.inventories {
+        check()?;
+        if contains(inventory.model.scope, source.span()) {
+            return inventory
+                .activity
+                .activity(&inventory.model, source.span(), check);
+        }
+    }
+    if file.conditional {
+        return Ok(VbaCompilationActivity::Unproven);
+    }
+    for inventory in &file.inventories {
+        check()?;
+        if overlaps(inventory.model.scope, source.span()) {
+            return Ok(VbaCompilationActivity::Unproven);
+        }
+    }
+    Ok(VbaCompilationActivity::Active)
+}
+
+fn original_occurrence_active_with_work(
+    index: &CompilationIndex,
+    occurrence: &OccurrenceRecord,
+    cancellation: &Cancellation,
+    work: &mut ResolutionWorkBudget,
+) -> Result<bool, ResolutionError> {
+    cancellation.check()?;
+    Ok(
+        original_activity_checked(index, &occurrence.source, &mut || {
+            cancellation.check()?;
+            work.consume()
+        })? == VbaCompilationActivity::Active
+            && occurrence
+                .enclosing
+                .is_none_or(|id| index.entity_active(id))
+            && match occurrence.target {
+                OccurrenceTarget::Resolved { symbol } => index.entity_active(symbol),
+                _ => true,
+            },
+    )
+}
+
+fn compilation_envelope(fixture: &Fixture, model: VbaCompilation) -> ExtensionEnvelope {
+    let file = &fixture.files[0];
+    new_vba_compilation_envelope(
+        file.repository,
+        file.generation,
+        file.provenance,
+        SourceRef::new(
+            file.repository,
+            file.generation,
+            model.scope,
+            file.content_hash,
+            None,
+        ),
+        model,
+    )
+    .unwrap()
+}
+
+#[test]
+fn sole_full_file_lookup_preserves_original_ranges_and_identity_guards() {
+    let fixture = Fixture::new();
+    let file = &fixture.files[0];
+    for complete in [true, false] {
+        let mut model = decode_vba_compilation_envelope(&fixture.envelope).unwrap();
+        model.complete = complete;
+        let envelope = compilation_envelope(&fixture, model);
+        let compilation = fixture.import(&[envelope]);
+        for start in 0..=SOURCE.len() + 1 {
+            for end in start..=SOURCE.len() + 1 {
+                let query = source(file.repository, file.generation, file.id, start, end);
+                let expected = original_activity_checked(&compilation, &query, &mut || {
+                    Ok::<(), std::convert::Infallible>(())
+                })
+                .unwrap();
+                assert_eq!(
+                    compilation.activity(&query),
+                    expected,
+                    "{complete}: {start}..{end}"
+                );
+            }
+        }
+        let base = &fixture.occurrences[4].source;
+        let hinted = SourceRef::new(
+            base.repository(),
+            base.generation(),
+            base.span(),
+            base.content_hash(),
+            Some(rootlight_ir::LineRange::new(900, 901).unwrap()),
+        );
+        assert_eq!(compilation.activity(&hinted), compilation.activity(base));
+        let foreign = [
+            SourceRef::new(
+                RepositoryId::from_bytes([99; 16]),
+                base.generation(),
+                base.span(),
+                base.content_hash(),
+                hinted.line_hint(),
+            ),
+            SourceRef::new(
+                base.repository(),
+                GenerationId::from_bytes([99; 20]),
+                base.span(),
+                base.content_hash(),
+                None,
+            ),
+            SourceRef::new(
+                base.repository(),
+                base.generation(),
+                base.span(),
+                content_hash(b"different source"),
+                None,
+            ),
+            SourceRef::new(
+                base.repository(),
+                base.generation(),
+                span(FileId::from_bytes([99; 20]), 0, 1),
+                base.content_hash(),
+                None,
+            ),
+        ];
+        for query in foreign {
+            let mut work = ResolutionWorkBudget::new(1);
+            assert_eq!(
+                compilation
+                    .activity_with_work(&query, &Cancellation::new(), &mut work)
+                    .unwrap(),
+                VbaCompilationActivity::Unproven,
+            );
+            assert_eq!(work.consumed(), 1);
+        }
+    }
+    let blocked = fixture.import(&[fixture.envelope.clone(), fixture.envelope.clone()]);
+    let query = &fixture.occurrences[4].source;
+    let mut work = ResolutionWorkBudget::new(1);
+    assert_eq!(
+        blocked
+            .activity_with_work(query, &Cancellation::new(), &mut work)
+            .unwrap(),
+        VbaCompilationActivity::Unproven,
+    );
+    assert_eq!(work.consumed(), 1);
+}
+
+#[test]
+fn sole_full_file_lookup_charges_exact_work_and_preserves_interruption() {
+    let fixture = Fixture::new();
+    for complete in [true, false] {
+        let mut model = decode_vba_compilation_envelope(&fixture.envelope).unwrap();
+        model.complete = complete;
+        let compilation = fixture.import(&[compilation_envelope(&fixture, model)]);
+        let file = &compilation.files[&fixture.files[0].id];
+        for site in &fixture.occurrences {
+            let mut old_work = ResolutionWorkBudget::new(100);
+            let expected =
+                original_activity_checked(&compilation, &site.source, &mut || old_work.consume())
+                    .unwrap();
+            let mut measured = ResolutionWorkBudget::new(100);
+            assert_eq!(
+                compilation
+                    .activity_with_work(&site.source, &Cancellation::new(), &mut measured)
+                    .unwrap(),
+                expected,
+            );
+            let exact = measured.consumed();
+            assert_eq!(old_work.consumed(), exact + 1);
+            assert_eq!(
+                compilation.source_cost(&site.source),
+                file.maximum_activity_work + 1
+            );
+            assert!(exact <= compilation.source_cost(&site.source));
+            let mut exact_work = ResolutionWorkBudget::new(exact);
+            assert_eq!(
+                compilation
+                    .activity_with_work(&site.source, &Cancellation::new(), &mut exact_work)
+                    .unwrap(),
+                expected,
+            );
+            assert_eq!(exact_work.consumed(), exact);
+            for maximum in [0, exact - 1] {
+                let mut short = ResolutionWorkBudget::new(maximum);
+                assert!(matches!(
+                    compilation.activity_with_work(&site.source, &Cancellation::new(), &mut short),
+                    Err(ResolutionError::WorkLimit { maximum: actual }) if actual == maximum
+                ));
+                assert_eq!(short.consumed(), maximum);
+            }
+            for stop_at in 1..=exact {
+                let mut calls = 0;
+                assert_eq!(
+                    compilation.activity_checked(&site.source, &mut || {
+                        calls += 1;
+                        if calls == stop_at {
+                            Err(stop_at)
+                        } else {
+                            Ok(())
+                        }
+                    }),
+                    Err(stop_at),
+                );
+                assert_eq!(calls, stop_at);
+            }
+            let cancellation = Cancellation::new();
+            cancellation.cancel(rootlight_cancel::CancellationReason::ClientRequest);
+            let mut untouched = ResolutionWorkBudget::new(exact);
+            assert!(matches!(
+                compilation.activity_with_work(&site.source, &cancellation, &mut untouched),
+                Err(ResolutionError::Cancelled(_))
+            ));
+            assert_eq!(untouched.consumed(), 0);
+        }
+    }
+}
+
+#[test]
+fn partial_and_multiple_inventories_keep_original_lookup_work() {
+    let fixture = Fixture::new();
+    let file = &fixture.files[0];
+    let full_model = decode_vba_compilation_envelope(&fixture.envelope).unwrap();
+    let split = SOURCE.find("#If HostChoice Then").unwrap();
+    let models =
+        [span(file.id, 0, split), span(file.id, split, SOURCE.len())].map(|scope| VbaCompilation {
+            scope,
+            complete: true,
+            branches: full_model
+                .branches
+                .iter()
+                .filter(|branch| contains(scope, branch.group))
+                .cloned()
+                .collect(),
+        });
+    let envelopes = models.map(|model| compilation_envelope(&fixture, model));
+    for inputs in [&envelopes[..1], envelopes.as_slice()] {
+        let compilation = fixture.import(inputs);
+        let inventory = &compilation.files[&file.id];
+        assert!(!inventory.blocked);
+        assert_eq!(inventory.inventories.len(), inputs.len());
+        for (start, end) in [
+            (0, 1),
+            (split - 1, split),
+            (split, split + 1),
+            (split - 1, split + 1),
+            (0, SOURCE.len()),
+            (SOURCE.len(), SOURCE.len()),
+        ] {
+            let query = source(file.repository, file.generation, file.id, start, end);
+            let mut original = ResolutionWorkBudget::new(100);
+            let expected =
+                original_activity_checked(&compilation, &query, &mut || original.consume())
+                    .unwrap();
+            let mut measured = ResolutionWorkBudget::new(100);
+            assert_eq!(
+                compilation
+                    .activity_with_work(&query, &Cancellation::new(), &mut measured)
+                    .unwrap(),
+                expected,
+            );
+            assert_eq!(measured.consumed(), original.consumed());
+            assert_eq!(
+                compilation.source_cost(&query),
+                inventory.maximum_activity_work + 2 * inputs.len() + 1
+            );
+            assert!(measured.consumed() <= compilation.source_cost(&query));
+        }
+    }
+    let missing = fixture.import(&[]);
+    let query = &fixture.occurrences[4].source;
+    let mut work = ResolutionWorkBudget::new(1);
+    assert_eq!(
+        missing
+            .activity_with_work(query, &Cancellation::new(), &mut work)
+            .unwrap(),
+        VbaCompilationActivity::Unproven
+    );
+    assert_eq!(work.consumed(), 1);
+    assert_eq!(missing.source_cost(query), 1);
+}
+
+#[test]
+fn immutable_owner_and_target_prechecks_preserve_all_use_choices() {
+    let fixture = Fixture::new();
+    let compilation = fixture.import(std::slice::from_ref(&fixture.envelope));
+    let active = fixture.entities[2].id;
+    let inactive = fixture.entities[3].id;
+    let unknown = fixture.entities[4].id;
+    let missing = SymbolId::from_bytes([99; 20]);
+    let targets = [
+        OccurrenceTarget::Unresolved {
+            text_hash: content_hash(b"Selected"),
+        },
+        OccurrenceTarget::Candidates {
+            symbols: vec![inactive, unknown, missing],
+            total_count: 3,
+            completeness: rootlight_ir::CoverageStatus::Complete,
+        },
+        OccurrenceTarget::Resolved { symbol: active },
+        OccurrenceTarget::Resolved { symbol: inactive },
+        OccurrenceTarget::Resolved { symbol: unknown },
+        OccurrenceTarget::Resolved { symbol: missing },
+    ];
+    for enclosing in [
+        None,
+        Some(active),
+        Some(inactive),
+        Some(unknown),
+        Some(missing),
+    ] {
+        for target in &targets {
+            for source_site in &fixture.occurrences[4..] {
+                let mut site = source_site.clone();
+                site.enclosing = enclosing;
+                site.target = target.clone();
+                let mut original = ResolutionWorkBudget::new(100);
+                let expected = original_occurrence_active_with_work(
+                    &compilation,
+                    &site,
+                    &Cancellation::new(),
+                    &mut original,
+                )
+                .unwrap();
+                let rejected = enclosing.is_some_and(|id| !compilation.entity_active(id))
+                    || matches!(target, OccurrenceTarget::Resolved { symbol } if !compilation.entity_active(*symbol));
+                let mut measured = ResolutionWorkBudget::new(100);
+                assert_eq!(
+                    compilation
+                        .occurrence_active_with_work(&site, &Cancellation::new(), &mut measured)
+                        .unwrap(),
+                    expected
+                );
+                let exact = measured.consumed();
+                if rejected {
+                    assert!(!expected);
+                    assert_eq!(exact, 1);
+                    assert!(original.consumed() > exact);
+                } else {
+                    let mut source_work = ResolutionWorkBudget::new(100);
+                    compilation
+                        .activity_with_work(&site.source, &Cancellation::new(), &mut source_work)
+                        .unwrap();
+                    assert_eq!(exact, source_work.consumed());
+                }
+                let mut exact_work = ResolutionWorkBudget::new(exact);
+                assert_eq!(
+                    compilation
+                        .occurrence_active_with_work(&site, &Cancellation::new(), &mut exact_work)
+                        .unwrap(),
+                    expected
+                );
+                assert_eq!(exact_work.consumed(), exact);
+                for maximum in [0, exact - 1] {
+                    assert!(
+                        matches!(compilation.occurrence_active_with_work(&site, &Cancellation::new(), &mut ResolutionWorkBudget::new(maximum)), Err(ResolutionError::WorkLimit { maximum: actual }) if actual == maximum)
+                    );
+                }
+                let cancelled = Cancellation::new();
+                cancelled.cancel(rootlight_cancel::CancellationReason::ClientRequest);
+                let mut untouched = ResolutionWorkBudget::new(exact);
+                assert!(matches!(
+                    compilation.occurrence_active_with_work(&site, &cancelled, &mut untouched),
+                    Err(ResolutionError::Cancelled(_))
+                ));
+                assert_eq!(untouched.consumed(), 0);
+            }
+        }
+    }
+    let mut candidates = fixture.occurrences[4].clone();
+    candidates.enclosing = None;
+    candidates.target = targets[1].clone();
+    assert!(
+        compilation
+            .occurrence_active_with_work(
+                &candidates,
+                &Cancellation::new(),
+                &mut ResolutionWorkBudget::new(100)
+            )
+            .unwrap()
+    );
+}
+
+#[test]
+fn prechecked_use_import_preserves_definitions_and_exact_active_multiset() {
+    let mut fixture = Fixture::new();
+    let active = fixture.entities[2].id;
+    let inactive = fixture.entities[3].id;
+    let unknown = fixture.entities[4].id;
+    for enclosing in [None, Some(active), Some(inactive), Some(unknown)] {
+        for target in [
+            OccurrenceTarget::Unresolved {
+                text_hash: content_hash(b"Selected"),
+            },
+            OccurrenceTarget::Candidates {
+                symbols: vec![inactive, unknown],
+                total_count: 2,
+                completeness: rootlight_ir::CoverageStatus::Complete,
+            },
+            OccurrenceTarget::Resolved { symbol: active },
+            OccurrenceTarget::Resolved { symbol: inactive },
+            OccurrenceTarget::Resolved { symbol: unknown },
+        ] {
+            fixture.occurrence(
+                "Selected",
+                "value = Selected() ' active use",
+                OccurrenceRole::Reference,
+                enclosing,
+                target,
+            );
+        }
+    }
+    let index = fixture.index();
+    let sources = BTreeMap::from([(fixture.files[0].id, SOURCE.as_bytes())]);
+    let run = |work: &mut ResolutionWorkBudget| {
+        CompilationIndex::build(
+            &index,
+            std::slice::from_ref(&fixture.envelope),
+            &fixture.occurrences,
+            &sources,
+            &Cancellation::new(),
+            work,
+        )
+    };
+    let mut measured = ResolutionWorkBudget::new(100_000);
+    let compilation = run(&mut measured).unwrap();
+    let mut expected = BTreeSet::new();
+    for site in &fixture.occurrences {
+        if original_occurrence_active_with_work(
+            &compilation,
+            site,
+            &Cancellation::new(),
+            &mut ResolutionWorkBudget::new(100),
+        )
+        .unwrap()
+        {
+            expected.insert(site.id);
+        }
+    }
+    assert_eq!(compilation.uses, expected);
+    assert_eq!(compilation.declarations.len(), fixture.entities.len());
+    assert!(compilation.entity_active(active));
+    assert!(compilation.entity_inactive(inactive));
+    assert!(!compilation.entity_active(unknown));
+    assert!(!compilation.entity_inactive(unknown));
+    assert_eq!(
+        fixture
+            .occurrences
+            .iter()
+            .filter(|site| site.role == OccurrenceRole::Definition)
+            .count(),
+        4
+    );
+    let exact = measured.consumed();
+    assert_eq!(
+        run(&mut ResolutionWorkBudget::new(exact)).unwrap().uses,
+        expected
+    );
+    assert!(
+        matches!(run(&mut ResolutionWorkBudget::new(exact - 1)), Err(ResolutionError::WorkLimit { maximum }) if maximum == exact - 1)
+    );
+}
+
 fn span(file: FileId, start: usize, end: usize) -> SourceSpan {
     SourceSpan::new(
         file,
