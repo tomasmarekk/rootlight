@@ -17,6 +17,7 @@ pub struct ModuleLimits {
     max_procedures: usize,
     max_parameters: usize,
     max_arguments: usize,
+    max_expression_nodes: usize,
 }
 
 impl ModuleLimits {
@@ -26,6 +27,8 @@ impl ModuleLimits {
     /// use [`Self::with_max_parameters`] and [`Self::with_max_arguments`] to admit
     /// separately bounded comma lists.
     /// Module constants and variables share the statement ceiling with body records.
+    /// Structured-expression work defaults to the source-byte ceiling; old scalar
+    /// and standalone scalar-application statements do not consume that ceiling.
     #[must_use]
     pub const fn new(
         max_source_bytes: usize,
@@ -38,6 +41,7 @@ impl ModuleLimits {
             max_procedures,
             max_parameters: max_procedures,
             max_arguments: max_procedures,
+            max_expression_nodes: max_source_bytes,
         }
     }
 
@@ -56,6 +60,16 @@ impl ModuleLimits {
     #[must_use]
     pub const fn with_max_arguments(mut self, max_arguments: usize) -> Self {
         self.max_arguments = max_arguments;
+        self
+    }
+
+    /// Sets aggregate structured-expression work across the entire module.
+    /// Atoms, callees, applications, groups and unary/binary operators each cost
+    /// one node. Temporary and retained storage is bounded and fallible, not an
+    /// exact heap-byte budget. Existing scalar and scalar-application records are unchanged.
+    #[must_use]
+    pub const fn with_max_expression_nodes(mut self, max_expression_nodes: usize) -> Self {
+        self.max_expression_nodes = max_expression_nodes;
         self
     }
 }
@@ -412,6 +426,8 @@ pub enum ModuleError<E> {
     ParameterLimit,
     /// Retained Call/application arguments across the module exceed the argument ceiling.
     ArgumentLimit,
+    /// Structured-expression work across the module exceeds its node ceiling.
+    ExpressionLimit,
     /// Fallible reservation of bounded structural storage failed.
     AllocationFailed,
     /// The caller's cancellation or work callback failed.
@@ -427,6 +443,7 @@ impl<E> fmt::Display for ModuleError<E> {
             Self::ProcedureLimit => "module procedure limit exceeded",
             Self::ParameterLimit => "module parameter limit exceeded",
             Self::ArgumentLimit => "module argument limit exceeded",
+            Self::ExpressionLimit => "module expression limit exceeded",
             Self::AllocationFailed => "module inventory allocation failed",
             Self::Cancelled(_) => "module scan cancelled",
         })
@@ -475,14 +492,19 @@ impl<E: std::error::Error + 'static> std::error::Error for ModuleError<E> {
 /// Bodies admit one typed scalar Dim or Const per statement and simple scalar
 /// assignments with an optional Let prefix. Const values are unsigned decimal,
 /// physically closed doubled-quote strings or True/False; assignments additionally
-/// admit a simple name or one parenthesized simple-name application. An application
-/// retains a complete positional scalar argument list without deciding whether its
-/// target is a procedure or an array. Explicit Call statements admit a simple callee and optional
+/// admit names, grouped expressions, unary signs/Not, ordinary arithmetic,
+/// concatenation, comparison and logical operators, and nested simple-name applications.
+/// Applications retain complete positional expression ranges without deciding whether
+/// their targets are procedures or arrays. Old scalar and standalone scalar-application
+/// records remain distinct. Explicit Call statements admit a simple callee and optional
 /// parentheses containing a complete positional list of these scalar atoms, with
 /// space/tab-based logical trivia. Named, omitted, ByVal and nonparenthesized
-/// arguments are unsupported. Keyword-shaped
-/// unbracketed names, nested/member applications and operators are unsupported. Every body
-/// statement must be consumed completely.
+/// arguments are unsupported. Adjacent literal/ordinary-name type suffixes stay
+/// outside this slice instead of being reinterpreted as power or concatenation.
+/// Richer literals, member applications and indexed
+/// destinations remain unsupported. Complete operator chains inventory syntax
+/// without deciding type compatibility or runtime results. Every body statement
+/// must be consumed completely.
 /// Bare `Name` explicit Call callees stay outside this subset; bracketed `[Name]` is admitted.
 /// Without explicit `Let`, bare statement-keyword assignment destinations are excluded.
 /// All other statements, inline Rem tails, directives, class
@@ -504,6 +526,8 @@ impl<E: std::error::Error + 'static> std::error::Error for ModuleError<E> {
 /// or proof of required-after-Optional semantic validity.
 /// Retained Call and application-assignment arguments share an aggregate ceiling across every procedure,
 /// with fallible storage; positional atoms do not establish parameter or type identity.
+/// Structured expressions have a separate aggregate node ceiling. Parsing and temporary
+/// tree storage are iterative, fallible and cancellable; expressions are never evaluated.
 /// This proves structure only, not type identity, visibility or name uniqueness.
 ///
 /// # Errors
@@ -546,6 +570,7 @@ pub fn module_inventory<E>(
     let mut body_count = 0_usize;
     let mut parameter_count = 0_usize;
     let mut argument_count = 0_usize;
+    let mut expression_count = 0_usize;
     while cursor < source.len() {
         check().map_err(ModuleError::Cancelled)?;
         if inventory.statement_count >= limits.max_statements {
@@ -595,10 +620,15 @@ pub fn module_inventory<E>(
                     .max_arguments
                     .checked_sub(argument_count)
                     .ok_or(ModuleError::ArgumentLimit)?;
-                let Some(statement) = super::module_body::statement(
+                let remaining_expression_nodes = limits
+                    .max_expression_nodes
+                    .checked_sub(expression_count)
+                    .ok_or(ModuleError::ExpressionLimit)?;
+                let Some(statement) = super::module_body::statement_with_expression_limits(
                     source,
                     range.clone(),
                     remaining_arguments,
+                    remaining_expression_nodes,
                     check,
                 )?
                 else {
@@ -609,11 +639,19 @@ pub fn module_inventory<E>(
                     ModuleBodyStatement::ApplicationAssignment(assignment) => {
                         assignment.argument_values().len()
                     }
+                    ModuleBodyStatement::ExpressionAssignment(assignment) => {
+                        assignment.inventory().argument_count()
+                    }
                     ModuleBodyStatement::Declaration(_) | ModuleBodyStatement::Assignment(_) => 0,
                 };
                 argument_count = argument_count
                     .checked_add(retained_arguments)
                     .ok_or(ModuleError::ArgumentLimit)?;
+                if let ModuleBodyStatement::ExpressionAssignment(assignment) = &statement {
+                    expression_count = expression_count
+                        .checked_add(assignment.inventory().work_nodes())
+                        .ok_or(ModuleError::ExpressionLimit)?;
+                }
                 let maximum = limits.max_statements
                     - body_count
                     - inventory.constants.len()
@@ -5569,7 +5607,8 @@ mod tests {
                     ModuleBodyStatement::Call(call) => Some(call),
                     ModuleBodyStatement::Declaration(_)
                     | ModuleBodyStatement::Assignment(_)
-                    | ModuleBodyStatement::ApplicationAssignment(_) => None,
+                    | ModuleBodyStatement::ApplicationAssignment(_)
+                    | ModuleBodyStatement::ExpressionAssignment(_) => None,
                 })
                 .collect();
             assert_eq!(calls.len(), 3);
@@ -6025,7 +6064,7 @@ mod tests {
     #[test]
     fn scalar_body_unsupported_statement_rejects_the_whole_module_without_prefixes() {
         for body in [
-            "Dim value As Long\nvalue = 1 + 2",
+            "Dim value As Long\nvalue = 1 +",
             "Const Limit As Long = other",
             "Dim x, y As Long",
             "Dim item As New Object",
@@ -6496,8 +6535,8 @@ mod tests {
             "value=Read(1,next())",
             "value=Read(1,next.member)",
             "value=Read(1,(next))",
-            "value=Read(1,-2)",
-            "value=Read(1,+2)",
+            "value=Read(1,-2.0)",
+            "value=Read(1,+&H2)",
             "value=Read(1,2.0)",
             "value=Read(1,2E3)",
             "value=Read(1,#1/1/2000#)",
@@ -6505,7 +6544,7 @@ mod tests {
             "value=Read(1) extra",
             "value=Read(1)()",
             "value=Read(1).member",
-            "value=Read(1)+2",
+            "value=Read(1)+&H2",
             "value=Read 1,2",
             "value=holder.Read(1)",
             "value(1)=Read()",
@@ -6610,6 +6649,313 @@ mod tests {
                 assert_eq!(&source[assignment.argument_values()[0].span()], b"1");
                 assert_eq!(inventory.source_len(), source.len());
             }
+        }
+    }
+
+    #[test]
+    fn expression_assignments_preserve_source_ranges_nested_inventory_and_old_fast_paths() {
+        for newline in ["\n", "\r\n"] {
+            let expression =
+                format!("[Outer] _{newline} (value _{newline} + 1, [Inner](other)) * -2");
+            let written = format!("Let [sink] = {expression}");
+            let source = format!(
+                "Const Seed=7{newline}Sub Run(){newline}  {written} ' End Sub: ignored(){newline}sink=1:sink=Ready(2):Call Finish(3){newline}End Sub{newline}"
+            );
+            let inventory = parse(source.as_bytes()).unwrap();
+            let statements = inventory.procedures()[0].statements();
+            assert_eq!(statements.len(), 4);
+            let ModuleBodyStatement::ExpressionAssignment(assignment) = &statements[0] else {
+                panic!("nested structured expression retained")
+            };
+            assert_eq!(&source[assignment.statement()], written);
+            assert_eq!(&source[assignment.destination()], "[sink]");
+            assert_eq!(&source[assignment.expression()], expression);
+            assert_eq!(assignment.inventory().work_nodes(), 11);
+            assert_eq!(assignment.inventory().argument_count(), 3);
+            assert_eq!(
+                assignment
+                    .inventory()
+                    .values()
+                    .iter()
+                    .map(|value| &source[value.span()])
+                    .collect::<Vec<_>>(),
+                ["value", "1", "other", "2"]
+            );
+            assert_eq!(
+                assignment
+                    .inventory()
+                    .applications()
+                    .iter()
+                    .map(|application| &source[application.callee()])
+                    .collect::<Vec<_>>(),
+                ["[Outer]", "[Inner]"]
+            );
+            for application in assignment.inventory().applications() {
+                assert!(assignment.expression().start <= application.application().start);
+                assert!(application.application().end <= assignment.expression().end);
+                for argument in application.argument_expressions() {
+                    assert!(
+                        application.arguments().start < argument.start
+                            && argument.end < application.arguments().end
+                    );
+                }
+            }
+            assert!(matches!(statements[1], ModuleBodyStatement::Assignment(_)));
+            assert!(matches!(
+                statements[2],
+                ModuleBodyStatement::ApplicationAssignment(_)
+            ));
+            assert!(matches!(statements[3], ModuleBodyStatement::Call(_)));
+        }
+    }
+
+    #[test]
+    fn expression_limits_are_aggregate_exact_short_zero_and_independent_of_old_records() {
+        let source = b"Sub First()\nsink=1+2\nEnd Sub\nSub Second()\nsink=3*4\nEnd Sub\n";
+        let limits = ModuleLimits::new(source.len(), 6, 2)
+            .with_max_arguments(0)
+            .with_max_expression_nodes(6);
+        let inventory = module_inventory(source, limits, &mut || Ok::<(), ()>(())).unwrap();
+        assert_eq!(inventory.statement_count(), 6);
+        for maximum in [0, 1, 2, 3, 5] {
+            assert_eq!(
+                module_inventory(
+                    source,
+                    limits.with_max_expression_nodes(maximum),
+                    &mut || Ok::<(), ()>(())
+                ),
+                Err(ModuleError::ExpressionLimit),
+                "node ceiling {maximum}"
+            );
+        }
+        assert_eq!(
+            module_inventory(
+                source,
+                ModuleLimits::new(source.len() - 1, 6, 2),
+                &mut || Ok::<(), ()>(())
+            ),
+            Err(ModuleError::SourceLimit)
+        );
+        assert_eq!(
+            module_inventory(source, ModuleLimits::new(source.len(), 5, 2), &mut || Ok::<
+                (),
+                (),
+            >(
+                ()
+            )),
+            Err(ModuleError::StatementLimit)
+        );
+        assert_eq!(
+            module_inventory(source, ModuleLimits::new(source.len(), 6, 1), &mut || Ok::<
+                (),
+                (),
+            >(
+                ()
+            )),
+            Err(ModuleError::ProcedureLimit)
+        );
+        let old = b"Const Seed=7\nSub Run()\nsink=1\nsink=Ready()\nCall Finish\nEnd Sub\n";
+        let old_inventory = module_inventory(
+            old,
+            ModuleLimits::new(old.len(), 6, 1)
+                .with_max_arguments(0)
+                .with_max_expression_nodes(0),
+            &mut || Ok::<(), ()>(()),
+        )
+        .unwrap();
+        assert!(matches!(
+            old_inventory.procedures()[0].statements()[0],
+            ModuleBodyStatement::Assignment(_)
+        ));
+        assert!(matches!(
+            old_inventory.procedures()[0].statements()[1],
+            ModuleBodyStatement::ApplicationAssignment(_)
+        ));
+        assert!(matches!(
+            old_inventory.procedures()[0].statements()[2],
+            ModuleBodyStatement::Call(_)
+        ));
+    }
+
+    #[test]
+    fn expression_arguments_share_exact_module_quota_with_call_and_atomic_application_records() {
+        let source = b"Sub First()\nCall Ready(1)\nsink=Ready(2)\nsink=Outer(value+1,Inner(other))*-2\nEnd Sub\nSub Second()\nsink=B(C(3))\nEnd Sub\n";
+        let limits = ModuleLimits::new(source.len(), 8, 2)
+            .with_max_arguments(7)
+            .with_max_expression_nodes(16);
+        let inventory = module_inventory(source, limits, &mut || Ok::<(), ()>(())).unwrap();
+        assert_eq!(inventory.procedures().len(), 2);
+        assert_eq!(inventory.statement_count(), 8);
+        for maximum in [0, 1, 4, 5, 6] {
+            assert_eq!(
+                module_inventory(source, limits.with_max_arguments(maximum), &mut || Ok::<
+                    (),
+                    (),
+                >(
+                    ()
+                )),
+                Err(ModuleError::ArgumentLimit),
+                "argument ceiling {maximum}"
+            );
+        }
+        assert_eq!(
+            module_inventory(source, limits.with_max_expression_nodes(15), &mut || Ok::<
+                (),
+                (),
+            >(
+                ()
+            )),
+            Err(ModuleError::ExpressionLimit)
+        );
+    }
+
+    #[test]
+    fn expression_late_malformed_or_richer_source_rejects_the_whole_module() {
+        for tail in [
+            "sink=1+",
+            "sink=(1+2",
+            "sink=1+2)",
+            "sink=F(1,)",
+            "sink=F(1,,2)",
+            "sink=F(value:=1)",
+            "sink=F(ByVal value)",
+            "sink=F(G(1).member)",
+            "sink=F(1)(2)",
+            "sink=F(1)+&H2",
+            "sink=F(1)+2.0",
+            "sink=1E2+3",
+            "sink=#1/1/2000#",
+            "sink=value$+1",
+            "sink=Me+1",
+            "sink=Line(1)+2",
+            "sink=a<b<",
+            "sink=\"open",
+            "sink=\"physical\nline\"",
+            "sink(1)=a+b",
+            "item.member=a+b",
+            "sink=1\r+2",
+            "sink=1\0+2",
+            "sink=1+2 extra",
+            "Call Ready(1+2)",
+            "Const Local As Long=1+2",
+            "Dim local As Long=F(1)+2",
+        ] {
+            let source = format!(
+                "Const Seed=7\nDim storage(2)\nSub First()\nsink=1+2\nEnd Sub\nSub Rejected()\nsink=Outer(1+2)\n{tail}\nEnd Sub\n"
+            );
+            assert!(
+                matches!(
+                    parse(source.as_bytes()),
+                    Err(ModuleError::Unsupported { .. })
+                ),
+                "{tail:?}"
+            );
+        }
+        for source in [
+            "Const Seed=1+2\nSub Run()\nEnd Sub\n",
+            "Sub Run(Optional value=F(1))\nEnd Sub\n",
+            "Sub Run(Optional value=1+2)\nEnd Sub\n",
+            "sink=1+2\nSub Run()\nEnd Sub\n",
+        ] {
+            assert!(
+                matches!(
+                    parse(source.as_bytes()),
+                    Err(ModuleError::Unsupported { .. })
+                ),
+                "{source}"
+            );
+        }
+    }
+
+    #[test]
+    fn expression_module_cancellation_at_every_checkpoint_never_exposes_a_partial_inventory() {
+        let source = b"Const Seed=7\nSub First()\nsink=(Outer(value+1,Inner(\"a\"\"b\"&[True])))*-2\nEnd Sub\nSub Second()\nsink=3+4\nEnd Sub\n";
+        let limits = ModuleLimits::new(source.len(), 7, 2).with_max_arguments(3);
+        let mut checkpoints = 0;
+        module_inventory(source, limits, &mut || {
+            checkpoints += 1;
+            Ok::<(), ()>(())
+        })
+        .unwrap();
+        for cancelled_at in 1..=checkpoints {
+            let mut calls = 0;
+            assert_eq!(
+                module_inventory(source, limits, &mut || {
+                    calls += 1;
+                    if calls == cancelled_at {
+                        Err("stop")
+                    } else {
+                        Ok(())
+                    }
+                }),
+                Err(ModuleError::Cancelled("stop")),
+                "checkpoint {cancelled_at}"
+            );
+            assert_eq!(calls, cancelled_at);
+        }
+    }
+
+    #[test]
+    fn expression_module_all_byte_suffixes_preserve_complete_comment_colon_and_crlf_boundaries() {
+        for byte in 0..=u8::MAX {
+            let source = [b"Sub Run()\nsink=(1+2)".as_slice(), &[byte], b"\nEnd Sub\n"].concat();
+            let result = parse(&source);
+            let expected = matches!(byte, b' ' | b'\t' | b'\n' | b'\r' | 0x0c | b'\'' | b':');
+            assert_eq!(
+                result.is_ok(),
+                expected,
+                "expression module suffix byte {byte}"
+            );
+            if let Ok(inventory) = result {
+                assert_eq!(inventory.procedures()[0].statements().len(), 1);
+                let ModuleBodyStatement::ExpressionAssignment(assignment) =
+                    &inventory.procedures()[0].statements()[0]
+                else {
+                    panic!("structured expression retained before trivia boundary")
+                };
+                assert_eq!(&source[assignment.statement()], b"sink=(1+2)");
+                assert_eq!(&source[assignment.expression()], b"(1+2)");
+                assert_eq!(assignment.inventory().work_nodes(), 4);
+            }
+        }
+    }
+
+    #[test]
+    fn expression_typed_suffixes_reject_the_whole_module_without_relabeling_source_atoms() {
+        for (atom, suffixes) in [("2", b"%&^!#@".as_slice()), ("value", b"%&^!#@$")] {
+            for suffix in suffixes {
+                let source = format!(
+                    "Const Seed=7\nSub First()\nsink=1+2\nEnd Sub\nSub Rejected()\nsink={atom}{}3\nEnd Sub\n",
+                    char::from(*suffix)
+                );
+                assert!(
+                    matches!(
+                        parse(source.as_bytes()),
+                        Err(ModuleError::Unsupported { .. })
+                    ),
+                    "{source}"
+                );
+            }
+        }
+        for expression in [
+            "2 ^ 3",
+            "2 & 3",
+            "value ^ other",
+            "value & other",
+            "[value]^[other]",
+            "[value]&[other]",
+            "(value)^other",
+            "Read(1)^2",
+            "\"a\"&\"b\"",
+        ] {
+            let source = format!("Sub Run()\nsink={expression}\nEnd Sub\n");
+            let inventory = parse(source.as_bytes()).unwrap();
+            let ModuleBodyStatement::ExpressionAssignment(assignment) =
+                &inventory.procedures()[0].statements()[0]
+            else {
+                panic!("unambiguous expression remains supported")
+            };
+            assert_eq!(&source[assignment.expression()], expression);
         }
     }
 }

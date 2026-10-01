@@ -45,7 +45,8 @@ pub(super) fn prepare(
         .min(provider.config.max_source_bytes());
     let limits = ModuleLimits::new(maximum_source, maximum_nodes, maximum_nodes)
         .with_max_parameters(maximum_nodes)
-        .with_max_arguments(maximum_nodes);
+        .with_max_arguments(maximum_nodes)
+        .with_max_expression_nodes(maximum_nodes);
     let inventory =
         match rootlight_vba::module_inventory(request.source().bytes(), limits, &mut || {
             cancellation.check()
@@ -64,7 +65,8 @@ pub(super) fn prepare(
                 ModuleError::StatementLimit
                 | ModuleError::ProcedureLimit
                 | ModuleError::ParameterLimit
-                | ModuleError::ArgumentLimit,
+                | ModuleError::ArgumentLimit
+                | ModuleError::ExpressionLimit,
             ) => {
                 return Err(RequestError::ProviderLimit {
                     resource: ResourceKind::SyntaxNodes,
@@ -122,6 +124,9 @@ pub(super) fn prepare(
                     .len()
                     .checked_add(2)
                     .ok_or_else(|| provider_failure("vba-procedural-node-accounting"))?,
+                ModuleBodyStatement::ExpressionAssignment(assignment) => {
+                    assignment.inventory().work_nodes()
+                }
                 ModuleBodyStatement::Declaration(_) | ModuleBodyStatement::Assignment(_) => 0,
             };
             processed_nodes = processed_nodes
@@ -689,6 +694,52 @@ fn body_candidates(
                 }
             }
         }
+        ModuleBodyStatement::ExpressionAssignment(assignment) if include_optional => {
+            push_body_candidate(
+                output,
+                maximum,
+                cancellation,
+                assignment.destination(),
+                StructuralRole::Reference,
+                "vba.let_identifier",
+                false,
+            )?;
+            for application in assignment.inventory().applications() {
+                cancellation.check()?;
+                push_body_candidate(
+                    output,
+                    maximum,
+                    cancellation,
+                    application.application(),
+                    StructuralRole::Reference,
+                    "vba.application",
+                    false,
+                )?;
+                push_body_candidate(
+                    output,
+                    maximum,
+                    cancellation,
+                    application.callee(),
+                    StructuralRole::Reference,
+                    "vba.invoked_get_identifier",
+                    false,
+                )?;
+            }
+            for value in assignment.inventory().values() {
+                cancellation.check()?;
+                if value.kind() == ModuleScalarValueKind::Name {
+                    push_body_candidate(
+                        output,
+                        maximum,
+                        cancellation,
+                        value.span(),
+                        StructuralRole::Reference,
+                        "vba.value_identifier",
+                        false,
+                    )?;
+                }
+            }
+        }
         ModuleBodyStatement::Call(call) if include_optional => {
             push_body_candidate(
                 output,
@@ -728,6 +779,7 @@ fn body_candidates(
         }
         ModuleBodyStatement::Assignment(_)
         | ModuleBodyStatement::ApplicationAssignment(_)
+        | ModuleBodyStatement::ExpressionAssignment(_)
         | ModuleBodyStatement::Call(_) => {}
     }
     Ok(())
@@ -939,6 +991,7 @@ mod tests {
     use super::*;
     use rootlight_adapter_sdk::{
         AnalysisLimits, AnalysisRequest, BatchThresholds, GenerationBoundSnapshot, StreamLimits,
+        SyntaxFactKind,
     };
     use rootlight_ir::{BuildContextIdentity, IrLimits};
     use rootlight_vfs::{RelativePath, RepositoryRoot, SourceSnapshot};
@@ -1131,8 +1184,12 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            identity.required, expected_identity.required,
-            "identity demand for {language}"
+            identity.required,
+            expected_identity.required,
+            "identity demand for {language}, {:?}; native tree: {}; native identity: {:?}",
+            String::from_utf8_lossy(request.source().bytes()),
+            native.tree.root_node().to_sexp(),
+            expected_identity.facts,
         );
         assert_eq!(
             actual.required, expected.required,
@@ -4397,8 +4454,6 @@ mod tests {
             "sink = Line()",
             "sink = line(0)",
             "Let sink = lInE(value)",
-            "sink = Buffer(0) + 1",
-            "sink = Buffer(Nested(0))",
             "sink = Buffer(holder.Value)",
             "sink = holder.Buffer(0)",
             "holder.sink = Buffer(0)",
@@ -4409,8 +4464,6 @@ mod tests {
             "sink = Buffer(,0)",
             "sink = Buffer(0,)",
             "sink = Buffer(0,,1)",
-            "sink = Buffer((0))",
-            "sink = Buffer(-1)",
             "sink = Buffer(1.5)",
             "sink = Buffer(0)(1)",
             "sink = Buffer(0) extra",
@@ -4440,6 +4493,393 @@ mod tests {
                 assert_eq!(fixture.provider.stats().pooled_parsers, 0);
                 assert_eq!(fixture.provider.stats().cache.entries, 0);
             }
+        }
+    }
+
+    #[test]
+    fn first_party_vba_expressions_match_the_private_native_route() {
+        for body in [
+            "sink = Buffer(0) + 1",
+            "sink = Buffer(Nested(0))",
+            "sink = Buffer((0))",
+            "sink = Buffer(-1)",
+            "Dim value As Long\nvalue = 1 + 2",
+            "Dim value As Long\nvalue = -1",
+            "sink = -value ^ 2 ^ 3",
+            "sink = 2 ^ -value ^ 3",
+            "sink = --value + +-2",
+            "sink = Not Not value",
+            "sink = Not value = 1 And True",
+            "sink = Not (value = 1) And True Or False Xor True Eqv False Imp True",
+            "sink = (value = 1 And other < 2) Or (value >= 3 And other <> 4)",
+            "sink = (value = 1) And (other < 2) Or (value >= 3)",
+            "sink = value < 1 Or other > 2 And third < 3",
+            "sink = \"a,\"\"b\"\":()\" & \"x\"",
+            "sink = Outer(Inner(value + 1), items(-(value - 2))) + value",
+            "sink = Outer(Inner(), Inner(value), (value = 1))",
+            "sink = [Line](Not value, +2) + [Name](value - 1)",
+            "sink = Line + Name * 2",
+            "sink=([left]+[right])*+2 ^ 3",
+            "sink=\"a\"&\"b\"",
+            "sink = [Not] + Notable * Modulus - AndAlso",
+        ] {
+            compare_native_procedural_body(body);
+        }
+        for operator in [
+            "+", "-", "*", "/", "\\", "^", "Mod", "&", "=", "<>", "<", "<=", ">", ">=", "Is",
+            "Like", "And", "Or", "Xor", "Eqv", "Imp",
+        ] {
+            for expression in [
+                format!("left {operator} right"),
+                format!("(left {operator} right)"),
+                format!("LeftValue(left) {operator} RightValue(right)"),
+                format!("LeftValue(left {operator} right) + 1"),
+            ] {
+                compare_native_procedural_body(&format!("sink = {expression}"));
+            }
+        }
+        // Operator pairs exercise precedence and associativity while the oracle
+        // compares every source-bound fact, not just the admitted syntax status.
+        for first in ["+", "-", "*", "/", "\\", "^", "Mod", "&"] {
+            for second in ["+", "-", "*", "/", "\\", "^", "Mod", "&"] {
+                compare_native_procedural_body(&format!(
+                    "sink = left {first} middle {second} right"
+                ));
+            }
+        }
+        for first in ["And", "Or", "Xor", "Eqv", "Imp"] {
+            for second in ["And", "Or", "Xor", "Eqv", "Imp"] {
+                compare_native_procedural_body(&format!(
+                    "sink = left {first} middle {second} right"
+                ));
+            }
+        }
+        for operator in ["And", "Or", "Xor", "Eqv", "Imp"] {
+            compare_native_procedural_body(&format!("sink = (left = 1) {operator} (right <> 2)"));
+        }
+        for operator in ["+", "-", "*", "/", "\\", "=", "<", ">"] {
+            compare_native_procedural_body(&format!("sink=Read{operator}(1)"));
+        }
+        for operator in ["^", "&"] {
+            compare_native_procedural_body(&format!("sink=Read {operator}(1)"));
+        }
+        compare_native_procedural_body("sink = value(1) = 2");
+        for source in [
+            "Sub Run()\r\n sink = -(value + _\r\n 007) * +2 ^ 3 ^ 4 ' note\r\nEnd Sub\r\n",
+            "Sub Run(): sink = Outer(Inner(value + 1), 2): sink = Not False: End Sub\n",
+            "Sub Run()\nsink = -(value + 1)\nRem expression comment\nsink = Not False\nEnd Sub\n",
+        ] {
+            for language in ["vba", "visual-basic-classic"] {
+                compare_native(&Fixture::new(source), language, &[]);
+            }
+        }
+    }
+
+    #[test]
+    fn first_party_vba_comparison_logical_precedence_matches_native_syntax() {
+        for body in [
+            "sink = value < 1 Or other > 2 And third < 3",
+            "sink = (value < 1 Or other > 2 And third < 3)",
+        ] {
+            let source = format!("Sub Run()\n{body}\nEnd Sub\n");
+            for language in ["vba", "visual-basic-classic"] {
+                let fixture = Fixture::new(&source);
+                let request = fixture.request(language, &[]);
+                let native = fixture
+                    .provider
+                    .prepare_tree(
+                        &request,
+                        None,
+                        &[],
+                        fixture.provider.config.default_settings(),
+                        &Cancellation::new(),
+                    )
+                    .unwrap();
+                assert_eq!(
+                    native.traversal.coverage,
+                    CoverageStatus::Complete,
+                    "the native expression is complete: {language}, {body}, {}",
+                    native.tree.root_node().to_sexp()
+                );
+                // A fresh provider ensures the first-party admission assertion
+                // cannot inherit pool/cache work from the independent oracle.
+                compare_native(&Fixture::new(&source), language, &[]);
+            }
+        }
+    }
+
+    #[test]
+    fn first_party_vba_expression_tails_keep_whole_native_fallback() {
+        for assignment in [
+            "sink = 1 + &H2",
+            "sink = -(value.Member + 1)",
+            "sink = Outer(Inner(value), extra:=2)",
+            "sink = Outer(Inner(value), ByVal extra)",
+            "sink = Outer(Inner(value),)",
+            "sink = Outer(, Inner(value))",
+            "sink = Outer(Inner(value), #1/2/2000#)",
+            "sink = 1 + Line()",
+            "sink = 1 + Line(0)",
+            "sink = Outer(Line(0))",
+            "sink = -(value + 1) extra",
+            "sink = -(value + 1",
+            "sink = value +",
+            "sink = value And Or other",
+            "sink = 1 + New Widget",
+            "sink = 1 + AddressOf Target",
+            "sink = Outer(value + 1)(other)",
+            "sink = 2^3",
+            "sink = 2&3",
+            "sink = value^other",
+            "sink = value&other",
+        ] {
+            let source = format!(
+                "Sub Valid()\nEnd Sub\nSub Run()\nsink = -(value + 1)\n{assignment}\nEnd Sub\n"
+            );
+            for language in ["vba", "visual-basic-classic"] {
+                let fixture = Fixture::new(&source);
+                let request = fixture.request(language, &[]);
+                assert!(
+                    prepare(
+                        &fixture.provider,
+                        &request,
+                        None,
+                        &[],
+                        fixture.provider.config.default_settings(),
+                        &Cancellation::new(),
+                    )
+                    .unwrap()
+                    .is_none(),
+                    "an unsupported expression tail cannot publish a supported prefix: {language}, {assignment}"
+                );
+                assert_eq!(fixture.provider.stats().pooled_parsers, 0);
+                assert_eq!(fixture.provider.stats().cache.entries, 0);
+            }
+        }
+    }
+
+    #[test]
+    fn first_party_vba_spec_expression_records_preserve_complete_source_facts() {
+        let mut expressions = Vec::new();
+        for operator in ["And", "Or", "Xor", "Eqv", "Imp"] {
+            expressions.push((
+                format!("left < 1 {operator} right > 2"),
+                7,
+                vec!["left", "right"],
+            ));
+        }
+        expressions.extend([
+            ("left < 1 < 2".to_owned(), 5, vec!["left"]),
+            ("left = right <> 1".to_owned(), 5, vec!["left", "right"]),
+            ("(left = right = 1)".to_owned(), 6, vec!["left", "right"]),
+            (
+                "left ^ middle ^ right".to_owned(),
+                5,
+                vec!["left", "middle", "right"],
+            ),
+        ]);
+        for (expression, work_nodes, names) in expressions {
+            let source = format!("Sub Run()\nsink = {expression}\nEnd Sub\n");
+            for language in ["vba", "visual-basic-classic"] {
+                let fixture = Fixture::new(&source);
+                let request = fixture.request(language, &[]);
+                let cancellation = Cancellation::new();
+                let prepared = prepare(
+                    &fixture.provider,
+                    &request,
+                    None,
+                    &[],
+                    fixture.provider.config.default_settings(),
+                    &cancellation,
+                )
+                .unwrap()
+                .expect("the independently specified operator composition is admitted");
+                assert_eq!(prepared.processed_nodes, work_nodes + 5);
+                let ModuleBodyStatement::ExpressionAssignment(assignment) =
+                    &prepared.inventory.procedures()[0].statements()[0]
+                else {
+                    panic!("the complete RHS retains its structured expression inventory");
+                };
+                assert_eq!(&source[assignment.expression()], expression);
+                assert_eq!(assignment.inventory().work_nodes(), work_nodes);
+                assert_eq!(assignment.inventory().argument_count(), 0);
+                assert!(assignment.inventory().applications().is_empty());
+                let actual = normalize_query_candidates(
+                    candidates(
+                        &prepared.inventory,
+                        request.source().bytes(),
+                        true,
+                        request.limits().max_syntax_nodes(),
+                        &cancellation,
+                    )
+                    .unwrap(),
+                    &request,
+                    usize::MAX,
+                    &cancellation,
+                )
+                .unwrap();
+                assert_eq!(actual.required, 7);
+                let declaration = actual
+                    .facts
+                    .iter()
+                    .find(|fact| fact.syntax_kind().as_str() == "vba.sub_function.declaration")
+                    .unwrap();
+                let references = actual
+                    .facts
+                    .iter()
+                    .filter(|fact| fact.kind() == SyntaxFactKind::Occurrence)
+                    .collect::<Vec<_>>();
+                // The procedure name contributes an occurrence alongside the RHS references.
+                assert_eq!(references.len(), names.len() + 2);
+                let definitions = references
+                    .iter()
+                    .filter(|fact| fact.syntax_kind().as_str() == "vba.identifier.definition")
+                    .collect::<Vec<_>>();
+                assert_eq!(definitions.len(), 1);
+                assert_eq!(definitions[0].span().start_byte(), 4);
+                assert_eq!(definitions[0].span().end_byte(), 7);
+                assert_eq!(definitions[0].parent(), Some(declaration.local_id()));
+                assert_eq!(definitions[0].depth(), 5);
+                assert_eq!(
+                    references
+                        .iter()
+                        .filter(|fact| {
+                            matches!(
+                                fact.syntax_kind().as_str(),
+                                "vba.let_identifier.reference" | "vba.value_identifier.reference"
+                            )
+                        })
+                        .count(),
+                    names.len() + 1,
+                );
+                for (syntax, name) in std::iter::once(("vba.let_identifier.reference", "sink"))
+                    .chain(
+                        names
+                            .iter()
+                            .copied()
+                            .map(|name| ("vba.value_identifier.reference", name)),
+                    )
+                {
+                    let start = source.find(name).unwrap();
+                    let matches = references
+                        .iter()
+                        .filter(|fact| {
+                            fact.syntax_kind().as_str() == syntax
+                                && fact.span().start_byte() == u64::try_from(start).unwrap()
+                                && fact.span().end_byte()
+                                    == u64::try_from(start + name.len()).unwrap()
+                        })
+                        .collect::<Vec<_>>();
+                    assert_eq!(matches.len(), 1, "{language}: {expression}: {name}");
+                    assert_eq!(matches[0].parent(), Some(declaration.local_id()));
+                    assert_eq!(matches[0].depth(), 5);
+                    assert_eq!(matches[0].span().file(), fixture.source.span().file());
+                }
+                assert_eq!(fixture.provider.stats().pooled_parsers, 0);
+                assert_eq!(fixture.provider.stats().cache.entries, 0);
+            }
+        }
+    }
+
+    #[test]
+    fn first_party_vba_expression_work_and_candidate_limits_are_exact() {
+        let source = "Sub Run()\nsink = Outer(value + 1, Inner(other)) * -2\nEnd Sub\n";
+        for language in ["vba", "visual-basic-classic"] {
+            let mut fixture = Fixture::new(source);
+            let cancellation = Cancellation::new();
+            let request = fixture.request(language, &[]);
+            let prepared = prepare(
+                &fixture.provider,
+                &request,
+                None,
+                &[],
+                fixture.provider.config.default_settings(),
+                &cancellation,
+            )
+            .unwrap()
+            .unwrap();
+            assert_eq!(prepared.processed_nodes, 16);
+            let ModuleBodyStatement::ExpressionAssignment(assignment) =
+                &prepared.inventory.procedures()[0].statements()[0]
+            else {
+                panic!("the complete richer RHS uses its expression inventory");
+            };
+            assert_eq!(assignment.inventory().work_nodes(), 11);
+            assert_eq!(assignment.inventory().argument_count(), 3);
+            for (optional, exact) in [(false, 7), (true, 15)] {
+                let all = candidates(
+                    &prepared.inventory,
+                    request.source().bytes(),
+                    optional,
+                    exact,
+                    &cancellation,
+                )
+                .unwrap();
+                assert_eq!(all.len(), exact);
+                assert_eq!(
+                    normalize_query_candidates(all, &request, usize::MAX, &cancellation)
+                        .unwrap()
+                        .required,
+                    7
+                );
+                for (limit, observed) in [(exact - 1, exact), (0, 7)] {
+                    assert_eq!(
+                        candidates(
+                            &prepared.inventory,
+                            request.source().bytes(),
+                            optional,
+                            limit,
+                            &cancellation,
+                        )
+                        .unwrap_err(),
+                        AdapterError::RejectedRequest(RequestError::ProviderLimit {
+                            resource: ResourceKind::SyntaxNodes,
+                            observed,
+                            limit,
+                        })
+                    );
+                }
+            }
+            for limit in [16, 15, 10] {
+                fixture.limits = with_maximum_nodes(&fixture.limits, limit);
+                let request = fixture.request(language, &[]);
+                let result = prepare(
+                    &fixture.provider,
+                    &request,
+                    None,
+                    &[],
+                    fixture.provider.config.default_settings(),
+                    &cancellation,
+                );
+                if limit == 16 {
+                    assert_eq!(result.unwrap().unwrap().processed_nodes, 16);
+                } else {
+                    assert_eq!(
+                        result.err().unwrap(),
+                        AdapterError::RejectedRequest(RequestError::ProviderLimit {
+                            resource: ResourceKind::SyntaxNodes,
+                            observed: limit + 1,
+                            limit,
+                        })
+                    );
+                }
+            }
+            assert!(cancellation.cancel(rootlight_cancel::CancellationReason::ClientRequest));
+            let request = fixture.request(language, &[]);
+            assert!(matches!(
+                candidates(
+                    &prepared.inventory,
+                    request.source().bytes(),
+                    true,
+                    100,
+                    &cancellation,
+                ),
+                Err(AdapterError::Cancelled {
+                    reason: rootlight_cancel::CancellationReason::ClientRequest
+                })
+            ));
+            assert_eq!(fixture.provider.stats().pooled_parsers, 0);
+            assert_eq!(fixture.provider.stats().cache.entries, 0);
         }
     }
 
@@ -4978,7 +5418,6 @@ mod tests {
     #[test]
     fn first_party_vba_scalar_body_boundaries_keep_whole_native_fallback() {
         for body in [
-            "Dim value As Long\nvalue = 1 + 2",
             "Dim value As Long\nCall Run(Nested(1))",
             "Dim value As Long\nRun value",
             "Dim value As Long\nholder.Value = 1",
@@ -4987,7 +5426,6 @@ mod tests {
             "Dim value",
             "Dim value As UserType",
             "Const seed As Long = value",
-            "Dim value As Long\nvalue = -1",
             "Dim value As Long\nvalue = 1.5",
             "Dim value As Long\nvalue = &H10",
             "Dim value As Long\nvalue = Nothing",
@@ -5329,7 +5767,7 @@ mod tests {
     #[test]
     fn first_party_vba_never_accepts_a_supported_prefix_or_object_context() {
         for source in [
-            "Sub Run()\nDim value As Long\nvalue = 1 + 2\nEnd Sub\n",
+            "Sub Run()\nDim value As Long\nvalue = &H1\nEnd Sub\n",
             "Sub Run()\nEnd Sub\n#If Host Then\n#End If\n",
         ] {
             let fixture = Fixture::new(source);

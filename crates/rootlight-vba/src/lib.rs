@@ -16,6 +16,7 @@ mod lifecycle;
 mod member_attribute;
 mod module;
 mod module_body;
+mod module_expression;
 mod parameter;
 mod procedure;
 mod value_reads;
@@ -46,6 +47,9 @@ pub use module_body::{
     ModuleApplicationAssignment, ModuleBodyStatement, ModuleCall, ModuleLocalDeclaration,
     ModuleLocalKind, ModuleScalarAssignment, ModuleScalarValue, ModuleScalarValueKind,
     ModuleZeroArgumentCall,
+};
+pub use module_expression::{
+    ModuleExpressionApplication, ModuleExpressionAssignment, ModuleExpressionInventory,
 };
 pub use parameter::{
     array_parameter_modifiers, parameter_declarations_cover, parameter_trivia_len,

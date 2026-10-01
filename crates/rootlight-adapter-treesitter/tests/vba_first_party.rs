@@ -32,6 +32,7 @@ const CALL_MODULE: &[u8] = b"Attribute VB_Name = \"Authored\"\r\nSub Notify()\r\
 const PARAMETER_MODULE: &[u8] = b"Attribute VB_Name = \"Authored\"\r\nSub Accept(ByVal [value] As Long, ByRef text As String)\r\n[value] = [value]\r\ntext = text\r\nEnd Sub\r\nFunction Echo(item As Long) As Long\r\nEcho = item\r\nEnd Function\r\n";
 const CALL_ARGUMENT_MODULE: &[u8] = b"Attribute VB_Name = \"Authored\"\r\nSub Run()\r\nDim value As Long\r\nCall Target(value, 7, \"a,\"\"b\"\":()\", True, [value])\r\nCall Target( value, value )\r\nCall Target()\r\nEnd Sub\r\n";
 const APPLICATION_ASSIGNMENT_MODULE: &[u8] = b"Private items(2) As Long\r\nSub Run()\r\nDim result As Variant\r\nDim value As Long\r\nresult = items()\r\nLet [result] = [items]( 007 )\r\nresult = items(value, True, False, \"a,\"\"b\"\":()\", [value])\r\nresult = items ( value )\r\nresult = items( _\r\n value, _\r\n 7)\r\nEnd Sub\r\n";
+const EXPRESSION_ASSIGNMENT_MODULE: &[u8] = b"Sub Run(ByVal value As Long)\r\nDim result As Variant\r\nresult = -(value + 007) * +2 ^ 3 ^ 4\r\nresult = Not (value = 1) And True Or False Xor True Eqv False Imp True\r\nresult = \"a,\"\"b\"\":()\" & \"x\"\r\nresult = Outer(Inner(value + 1), items(-(value - 2))) + value\r\nEnd Sub\r\n";
 const OPTIONAL_PARAMETER_MODULE: &[u8] = b"Attribute VB_Name = \"Authored\"\r\nSub Accept(required As Long, Optional ByVal count As Long = 007, Optional [text] As String = \"a,\"\"b\"\":()\", Optional flag As Boolean = False, Optional unset As Long)\r\ncount = required\r\n[text] = [text]\r\nEnd Sub\r\n";
 const OMITTED_TYPE_MODULE: &[u8] = b"Attribute VB_Name = \"Authored\"\r\nSub Accept(required, ByVal typed As Long, Optional ByVal count = 007, Optional [text] = \"a,\"\"b\"\":()\", Optional flag = False, Optional unset)\r\ncount = required\r\n[text] = [text]\r\nEnd Sub\r\nFunction Echo(ByRef value) As Long\r\nEcho = value\r\nEnd Function\r\n";
 
@@ -1212,11 +1213,10 @@ fn richer_rhs_applications_keep_whole_native_fallback() {
         "Target(slot:=1)",
         "Target(,1)",
         "Target(ByVal value)",
-        "Target(Other(1))",
         "Target(1)(2)",
-        "Target(1) + 2",
-        "Target(-1)",
         "owner.Target(1)",
+        "Target(&H1)",
+        "Line(1)",
     ] {
         let source = format!(
             "Sub Run()\nDim result As Variant\nDim value As Long\nresult = {expression}\nEnd Sub\n"
@@ -1238,6 +1238,507 @@ fn richer_rhs_applications_keep_whole_native_fallback() {
                 fact.syntax_kind().as_str() == "vba.identifier.definition"
                     && bytes_at(source.as_bytes(), fact.span()) == b"Run"
             }));
+        }
+    }
+}
+
+#[test]
+fn expression_assignments_preserve_exact_flat_capture_identity() {
+    let source = std::str::from_utf8(EXPRESSION_ASSIGNMENT_MODULE).unwrap();
+    let statements = [
+        "result = -(value + 007) * +2 ^ 3 ^ 4",
+        "result = Not (value = 1) And True Or False Xor True Eqv False Imp True",
+        "result = \"a,\"\"b\"\":()\" & \"x\"",
+        "result = Outer(Inner(value + 1), items(-(value - 2))) + value",
+    ];
+    let applications = [
+        ("Outer(Inner(value + 1), items(-(value - 2)))", "Outer"),
+        ("Inner(value + 1)", "Inner"),
+        ("items(-(value - 2))", "items"),
+    ];
+    for language in ["vba", "visual-basic-classic"] {
+        let fixture = Fixture::new(EXPRESSION_ASSIGNMENT_MODULE);
+        let provider = provider();
+        let full_limits = limits(4096);
+        let request = fixture.request(&full_limits, language, Vec::new());
+        assert_eq!(
+            provider
+                .required_syntax_fact_count(&request, &deadline())
+                .unwrap(),
+            11
+        );
+        let output = parse(&provider, &request);
+        assert_eq!(
+            output.report().coverage().status(),
+            CoverageStatus::Complete
+        );
+        assert_eq!(
+            output.report().coverage().covered_source_bytes(),
+            source.len()
+        );
+        assert!(output.diagnostics().is_empty());
+        let scope = output
+            .facts()
+            .iter()
+            .find(|fact| fact.syntax_kind().as_str() == "vba.sub_function.scope")
+            .unwrap();
+        let declaration = output
+            .facts()
+            .iter()
+            .find(|fact| fact.syntax_kind().as_str() == "vba.sub_function.declaration")
+            .unwrap();
+        assert_eq!(scope.depth(), 3);
+        assert_eq!(declaration.parent(), Some(scope.local_id()));
+        assert_eq!(declaration.depth(), 4);
+        let references = output
+            .facts()
+            .iter()
+            .filter(|fact| {
+                fact.kind() == SyntaxFactKind::Occurrence
+                    && fact.syntax_kind().as_str().ends_with(".reference")
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(references.len(), 15);
+        for statement in statements {
+            let start = source.find(statement).unwrap();
+            let destination = references
+                .iter()
+                .find(|fact| {
+                    fact.syntax_kind().as_str() == "vba.let_identifier.reference"
+                        && fact.span().start_byte() == u64::try_from(start).unwrap()
+                })
+                .unwrap();
+            assert_eq!(
+                destination.span().end_byte(),
+                u64::try_from(start + "result".len()).unwrap()
+            );
+        }
+        let reads = references
+            .iter()
+            .filter(|fact| fact.syntax_kind().as_str() == "vba.value_identifier.reference")
+            .collect::<Vec<_>>();
+        assert_eq!(reads.len(), 5);
+        for statement in [statements[0], statements[1], statements[3]] {
+            let statement_start = source.find(statement).unwrap();
+            for (offset, written) in statement.match_indices("value") {
+                let start = statement_start + offset;
+                assert!(reads.iter().any(|fact| {
+                    fact.span().start_byte() == u64::try_from(start).unwrap()
+                        && fact.span().end_byte() == u64::try_from(start + written.len()).unwrap()
+                        && bytes_at(EXPRESSION_ASSIGNMENT_MODULE, fact.span()) == written.as_bytes()
+                }));
+            }
+        }
+        for (application, callee) in applications {
+            let start = source.find(application).unwrap();
+            for (syntax, written) in [
+                ("vba.application.reference", application),
+                ("vba.invoked_get_identifier.reference", callee),
+            ] {
+                let matches = references
+                    .iter()
+                    .filter(|fact| {
+                        fact.syntax_kind().as_str() == syntax
+                            && fact.span().start_byte() == u64::try_from(start).unwrap()
+                            && fact.span().end_byte()
+                                == u64::try_from(start + written.len()).unwrap()
+                    })
+                    .collect::<Vec<_>>();
+                assert_eq!(matches.len(), 1, "{language}: {syntax}: {written}");
+                assert_eq!(
+                    bytes_at(EXPRESSION_ASSIGNMENT_MODULE, matches[0].span()),
+                    written.as_bytes()
+                );
+            }
+        }
+        for fact in references {
+            assert_eq!(fact.parent(), Some(declaration.local_id()));
+            assert_eq!(fact.depth(), 5);
+            assert_eq!(fact.span().file(), fixture.source.span().file());
+            assert!(fact.span().end_byte() <= fixture.source.span().end_byte());
+        }
+        let strings = output
+            .facts()
+            .iter()
+            .filter(|fact| fact.kind() == SyntaxFactKind::StringLiteral)
+            .collect::<Vec<_>>();
+        assert_eq!(strings.len(), 2);
+        for written in ["\"a,\"\"b\"\":()\"", "\"x\""] {
+            let start = source.find(written).unwrap();
+            let literal = strings
+                .iter()
+                .find(|fact| fact.span().start_byte() == u64::try_from(start).unwrap())
+                .unwrap();
+            assert_eq!(
+                literal.span().end_byte(),
+                u64::try_from(start + written.len()).unwrap()
+            );
+            assert_eq!(
+                bytes_at(EXPRESSION_ASSIGNMENT_MODULE, literal.span()),
+                written.as_bytes()
+            );
+            assert_eq!(literal.parent(), Some(declaration.local_id()));
+            assert_eq!(literal.depth(), 5);
+        }
+        assert_eq!(parse(&provider, &request).facts(), output.facts());
+        assert_eq!(provider.stats().pooled_parsers, 0);
+        assert_eq!(provider.stats().checked_out_parsers, 0);
+        assert_eq!(provider.stats().cache.entries, 0);
+    }
+}
+
+#[test]
+fn comparison_chains_and_logical_mixes_preserve_exact_first_party_captures() {
+    for (expression, applications) in [
+        ("value < 1 < 2", Vec::new()),
+        ("value = 1 And value <> 2", Vec::new()),
+        ("value = 1 Or value <> 2", Vec::new()),
+        ("value = 1 Xor value <> 2", Vec::new()),
+        ("value = 1 Eqv value <> 2", Vec::new()),
+        ("value = 1 Imp value <> 2", Vec::new()),
+        (
+            "Outer(Inner(value < 1 < 2), value = 1 Xor value <> 2)",
+            vec![
+                (
+                    "Outer(Inner(value < 1 < 2), value = 1 Xor value <> 2)",
+                    "Outer",
+                ),
+                ("Inner(value < 1 < 2)", "Inner"),
+            ],
+        ),
+    ] {
+        let statement = format!("result = {expression}");
+        let source = format!(
+            "Sub Run(ByVal value As Long)\r\nDim result As Variant\r\n{statement}\r\nEnd Sub\r\n"
+        );
+        for language in ["vba", "visual-basic-classic"] {
+            let fixture = Fixture::new(source.as_bytes());
+            let provider = provider();
+            let full_limits = limits(4096);
+            let request = fixture.request(&full_limits, language, Vec::new());
+            assert_eq!(
+                provider
+                    .required_syntax_fact_count(&request, &deadline())
+                    .unwrap(),
+                11
+            );
+            let output = parse(&provider, &request);
+            assert_eq!(
+                output.report().coverage().status(),
+                CoverageStatus::Complete,
+                "{language}: {expression}"
+            );
+            assert_eq!(
+                output.report().coverage().covered_source_bytes(),
+                source.len()
+            );
+            assert!(output.diagnostics().is_empty());
+            let declaration = output
+                .facts()
+                .iter()
+                .find(|fact| fact.syntax_kind().as_str() == "vba.sub_function.declaration")
+                .unwrap();
+            let references = output
+                .facts()
+                .iter()
+                .filter(|fact| {
+                    fact.kind() == SyntaxFactKind::Occurrence
+                        && fact.syntax_kind().as_str().ends_with(".reference")
+                })
+                .collect::<Vec<_>>();
+            let statement_start = source.find(&statement).unwrap();
+            let expression_start = statement_start + "result = ".len();
+            let mut expected = vec![("vba.let_identifier.reference", statement_start, "result")];
+            for (offset, written) in expression.match_indices("value") {
+                expected.push((
+                    "vba.value_identifier.reference",
+                    expression_start + offset,
+                    written,
+                ));
+            }
+            for &(application, callee) in &applications {
+                let start = expression_start + expression.find(application).unwrap();
+                expected.push(("vba.application.reference", start, application));
+                expected.push(("vba.invoked_get_identifier.reference", start, callee));
+            }
+            assert_eq!(references.len(), expected.len());
+            for (syntax, start, written) in expected {
+                let matches = references
+                    .iter()
+                    .filter(|fact| {
+                        fact.syntax_kind().as_str() == syntax
+                            && fact.span().start_byte() == u64::try_from(start).unwrap()
+                            && fact.span().end_byte()
+                                == u64::try_from(start + written.len()).unwrap()
+                    })
+                    .collect::<Vec<_>>();
+                assert_eq!(matches.len(), 1, "{language}: {expression}: {written}");
+                let fact = matches[0];
+                assert_eq!(bytes_at(source.as_bytes(), fact.span()), written.as_bytes());
+                assert_eq!(fact.parent(), Some(declaration.local_id()));
+                assert_eq!(fact.depth(), 5);
+                assert_eq!(fact.span().file(), fixture.source.span().file());
+                assert!(fact.span().end_byte() <= fixture.source.span().end_byte());
+            }
+            assert_eq!(parse(&provider, &request).facts(), output.facts());
+            assert_eq!(provider.stats().pooled_parsers, 0);
+            assert_eq!(provider.stats().checked_out_parsers, 0);
+            assert_eq!(provider.stats().cache.entries, 0);
+        }
+    }
+}
+
+#[test]
+fn expression_capture_budgets_preserve_declarations_and_cancellation() {
+    for expression in [
+        "value + 1",
+        "-([value] + 1) * +2 ^ 3 ^ 4",
+        "-([value] + _\r\n 1) * +2",
+        "Not (value = 1) And (value <> 2)",
+        "Outer(Inner(value + 1), (value * 2)) + value",
+        "value < 1 < 2",
+        "value = 1 And value <> 2",
+        "value = 1 Or value <> 2",
+        "value = 1 Xor value <> 2",
+        "value = 1 Eqv value <> 2",
+        "value = 1 Imp value <> 2",
+        "Outer(Inner(value < 1 < 2), value = 1 Xor value <> 2)",
+        "\"written\" & \"a,\"\"b\"\":()\"",
+    ] {
+        let source = format!(
+            "Sub Run(ByVal value As Long)\nDim result As Variant\nresult = {expression}\nEnd Sub\n"
+        );
+        for language in ["vba", "visual-basic-classic"] {
+            let fixture = Fixture::new(source.as_bytes());
+            let provider = provider();
+            let full_limits = limits(4096);
+            let request = fixture.request(&full_limits, language, Vec::new());
+            let required = provider
+                .required_syntax_fact_count(&request, &deadline())
+                .unwrap();
+            assert_eq!(required, 11);
+            let full = parse(&provider, &request);
+            assert_eq!(full.report().coverage().status(), CoverageStatus::Complete);
+            assert!(full.facts().len() > required + 1);
+            for capacity in [required, required + 1] {
+                let clipped_limits = limits(capacity);
+                let clipped_request = fixture.request(&clipped_limits, language, Vec::new());
+                let clipped = parse(&provider, &clipped_request);
+                assert_eq!(clipped.facts().len(), capacity);
+                assert_eq!(
+                    clipped.report().coverage().status(),
+                    CoverageStatus::Bounded
+                );
+                assert!(
+                    clipped.diagnostics().iter().any(|diagnostic| {
+                        diagnostic.code().as_str() == "syntax-extraction-limit"
+                    })
+                );
+                for name in ["Run", "value", "result"] {
+                    assert!(clipped.facts().iter().any(|fact| {
+                        fact.syntax_kind().as_str() == "vba.identifier.definition"
+                            && bytes_at(source.as_bytes(), fact.span()) == name.as_bytes()
+                    }));
+                }
+                assert_eq!(
+                    provider
+                        .required_syntax_fact_count(&clipped_request, &deadline())
+                        .unwrap(),
+                    required
+                );
+            }
+            let short_limits = limits(required - 1);
+            let short_request = fixture.request(&short_limits, language, Vec::new());
+            assert_eq!(
+                execute_parse(
+                    &provider,
+                    &short_request,
+                    MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
+                    &deadline()
+                )
+                .unwrap_err(),
+                AdapterError::Sink(SinkError::StreamLimit {
+                    resource: ResourceKind::RequiredSyntaxFacts,
+                    observed: required,
+                    limit: required - 1,
+                })
+            );
+            let cancelled = deadline();
+            assert!(cancelled.cancel(CancellationReason::ClientRequest));
+            assert!(matches!(
+                execute_parse(
+                    &provider,
+                    &request,
+                    MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
+                    &cancelled
+                ),
+                Err(AdapterError::Cancelled {
+                    reason: CancellationReason::ClientRequest
+                })
+            ));
+            assert_eq!(parse(&provider, &request).facts(), full.facts());
+            assert_eq!(provider.stats().pooled_parsers, 0);
+            assert_eq!(provider.stats().checked_out_parsers, 0);
+            assert_eq!(provider.stats().cache.entries, 0);
+        }
+    }
+}
+
+#[test]
+fn expression_operator_families_keep_exact_reads_and_work_limits() {
+    for operator in [
+        "+", "-", "*", "/", "\\", "^", "Mod", "&", "=", "<>", "<", ">", "<=", ">=", "Is", "Like",
+        "And", "Or", "Xor", "Eqv", "Imp",
+    ] {
+        let source = format!(
+            "Sub Run(ByVal left As Variant, ByVal right As Variant)\nDim result As Variant\nLet [result] = [left] {operator} right\nEnd Sub\n"
+        );
+        for language in ["vba", "visual-basic-classic"] {
+            let fixture = Fixture::new(source.as_bytes());
+            let provider = provider();
+            let full_limits = limits(4096);
+            let output = parse(
+                &provider,
+                &fixture.request(&full_limits, language, Vec::new()),
+            );
+            assert_eq!(
+                output.report().coverage().status(),
+                CoverageStatus::Complete,
+                "{language}: {operator}"
+            );
+            let start = source.find("Let [result]").unwrap();
+            let declaration = output
+                .facts()
+                .iter()
+                .find(|fact| fact.syntax_kind().as_str() == "vba.sub_function.declaration")
+                .unwrap();
+            let references = output
+                .facts()
+                .iter()
+                .filter(|fact| {
+                    fact.kind() == SyntaxFactKind::Occurrence
+                        && fact.span().start_byte() >= u64::try_from(start).unwrap()
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(references.len(), 3);
+            for (syntax, written) in [
+                ("vba.let_identifier.reference", "[result]"),
+                ("vba.value_identifier.reference", "[left]"),
+                ("vba.value_identifier.reference", "right"),
+            ] {
+                let offset = start + source[start..].find(written).unwrap();
+                let fact = references
+                    .iter()
+                    .find(|fact| {
+                        fact.syntax_kind().as_str() == syntax
+                            && fact.span().start_byte() == u64::try_from(offset).unwrap()
+                    })
+                    .unwrap();
+                assert_eq!(
+                    fact.span().end_byte(),
+                    u64::try_from(offset + written.len()).unwrap()
+                );
+                assert_eq!(bytes_at(source.as_bytes(), fact.span()), written.as_bytes());
+                assert_eq!(fact.parent(), Some(declaration.local_id()));
+                assert_eq!(fact.depth(), 5);
+            }
+            assert_eq!(provider.stats().pooled_parsers, 0);
+            assert_eq!(provider.stats().checked_out_parsers, 0);
+            assert_eq!(provider.stats().cache.entries, 0);
+        }
+    }
+    let source = b"Sub Run()\nDim result As Variant\nresult = (1 + 2) * (3 + 4)\nEnd Sub\n";
+    for language in ["vba", "visual-basic-classic"] {
+        let fixture = Fixture::new(source);
+        let provider = provider();
+        let base = limits(4096);
+        for maximum in [15, 14] {
+            let bounded = AnalysisLimits::new(
+                base.max_source_bytes(),
+                maximum,
+                base.max_syntax_depth(),
+                base.max_embedded_ranges(),
+                base.max_reported_memory_bytes(),
+                base.syntax_stream().clone(),
+                base.ir_stream().clone(),
+                base.ir().clone(),
+            )
+            .unwrap();
+            let request = fixture.request(&bounded, language, Vec::new());
+            let result = execute_parse(
+                &provider,
+                &request,
+                MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
+                &deadline(),
+            );
+            if maximum == 15 {
+                let output = result.unwrap();
+                assert_eq!(
+                    output.report().coverage().status(),
+                    CoverageStatus::Complete
+                );
+                assert_eq!(output.report().resources().syntax_nodes(), 15);
+            } else {
+                assert_eq!(
+                    result.unwrap_err(),
+                    AdapterError::RejectedRequest(
+                        rootlight_adapter_sdk::RequestError::ProviderLimit {
+                            resource: ResourceKind::SyntaxNodes,
+                            observed: 15,
+                            limit: 14,
+                        }
+                    )
+                );
+            }
+        }
+        assert_eq!(provider.stats().pooled_parsers, 0);
+        assert_eq!(provider.stats().checked_out_parsers, 0);
+        assert_eq!(provider.stats().cache.entries, 0);
+    }
+}
+
+#[test]
+fn expression_processor_keeps_unsupported_tails_on_the_native_route() {
+    for expression in [
+        "value + &H1",
+        "value + #1/2/2000#",
+        "value + 1.5",
+        "value + 1E3",
+        "value + value%",
+        "value + owner.Field",
+        "value + Me",
+        "Target(slot:=1) + 2",
+        "Target(,1) + 2",
+        "Target(ByVal value) + 2",
+        "Target(1)(2) + 3",
+        "Line(1) + 2",
+        "(value + 1",
+        "value +",
+        "Not",
+        "value + 1 trailing",
+    ] {
+        let source = format!(
+            "Sub First()\nEnd Sub\nSub Run(ByVal value As Long)\nDim result As Variant\nresult = (value + 1) * 2\nresult = {expression}\nEnd Sub\n"
+        );
+        for language in ["vba", "visual-basic-classic"] {
+            let fixture = Fixture::new(source.as_bytes());
+            let provider = provider();
+            let full_limits = limits(4096);
+            let output = parse(
+                &provider,
+                &fixture.request(&full_limits, language, Vec::new()),
+            );
+            assert!(
+                provider.stats().pooled_parsers > 0,
+                "{language}: {expression}"
+            );
+            assert_eq!(provider.stats().checked_out_parsers, 0);
+            for name in ["First", "Run"] {
+                assert!(output.facts().iter().any(|fact| {
+                    fact.syntax_kind().as_str() == "vba.identifier.definition"
+                        && bytes_at(source.as_bytes(), fact.span()) == name.as_bytes()
+                }));
+            }
         }
     }
 }
@@ -2026,7 +2527,7 @@ fn required_parameter_identity_fits_exact_and_rejects_one_short() {
 #[test]
 fn unsupported_tail_is_not_hidden_by_a_valid_prefix_or_included_range() {
     let source =
-        b"Sub Empty()\nEnd Sub\nSub Populated(ByVal value As Long)\nvalue = value + 1\nEnd Sub\n";
+        b"Sub Empty()\nEnd Sub\nSub Populated(ByVal value As Long)\nvalue = &H1\nEnd Sub\n";
     for scoped in [false, true] {
         let fixture = Fixture::new(source);
         let provider = provider();
@@ -2093,7 +2594,7 @@ fn native_object_context_cannot_be_promoted_to_a_procedural_file() {
 
 #[test]
 fn native_continuation_is_invalidated_when_an_edit_enters_the_first_party_route() {
-    let native = b"Sub Run()\nDim value As Long\nvalue = 1 + 2\nEnd Sub\n";
+    let native = b"Sub Run()\nDim value As Long\nvalue = &H1\nEnd Sub\n";
     let first_party = b"Sub Run()\nEnd Sub\n";
     let mut fixture = Fixture::new(native);
     let provider = provider();
@@ -2140,6 +2641,74 @@ fn native_continuation_is_invalidated_when_an_edit_enters_the_first_party_route(
     assert_eq!(provider.stats().cache.entries, old_stats.cache.entries);
     assert_eq!(provider.stats().pooled_parsers, old_stats.pooled_parsers);
     assert_eq!(provider.stats().checked_out_parsers, 0);
+}
+
+#[test]
+fn native_continuation_is_invalidated_by_a_richer_first_party_expression() {
+    let native = b"Sub Run()\nDim value As Long\nvalue = &H1\nEnd Sub\n";
+    let first_party = b"Sub Run()\nDim value As Long\nvalue = (value + 1) * -2\nEnd Sub\n";
+    for language in ["vba", "visual-basic-classic"] {
+        let mut fixture = Fixture::new(native);
+        let provider = provider();
+        let full_limits = limits(4096);
+        let settings = ParserSettings::new(512).unwrap();
+        let request = fixture.request(&full_limits, language, Vec::new());
+        let previous = provider
+            .execute_with_previous(
+                &request,
+                None,
+                &[],
+                settings,
+                MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
+                &deadline(),
+            )
+            .unwrap();
+        let continuation = previous
+            .previous()
+            .expect("native parse retains its real tree");
+        let old_stats = provider.stats();
+        assert!(old_stats.pooled_parsers > 0);
+        assert!(old_stats.cache.entries > 0);
+        fixture.rewrite(first_party);
+        let request = fixture.request(&full_limits, language, Vec::new());
+        let edit = SourceEdit::new(
+            b"Sub Run()\n".len(),
+            native.len() - b"End Sub\n".len(),
+            "Dim value As Long\nvalue = (value + 1) * -2\n",
+        )
+        .unwrap();
+        let output = provider
+            .execute_with_previous(
+                &request,
+                Some(continuation),
+                &[edit],
+                settings,
+                MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
+                &deadline(),
+            )
+            .unwrap();
+        assert_eq!(
+            output.reuse_status(),
+            ReuseStatus::Invalidated(ReuseInvalidation::FrontendRoute)
+        );
+        assert_eq!(
+            output.reuse_key().grammar_version(),
+            VBA_PROCEDURAL_FRONTEND_VERSION
+        );
+        assert!(output.previous().is_none());
+        assert_eq!(
+            output.output().report().coverage().status(),
+            CoverageStatus::Complete
+        );
+        assert_eq!(output.output().facts(), parse(&provider, &request).facts());
+        assert!(output.output().facts().iter().any(|fact| {
+            fact.syntax_kind().as_str() == "vba.value_identifier.reference"
+                && bytes_at(first_party, fact.span()) == b"value"
+        }));
+        assert_eq!(provider.stats().cache.entries, old_stats.cache.entries);
+        assert_eq!(provider.stats().pooled_parsers, old_stats.pooled_parsers);
+        assert_eq!(provider.stats().checked_out_parsers, 0);
+    }
 }
 
 #[test]

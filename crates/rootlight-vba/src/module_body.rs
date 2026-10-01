@@ -1,11 +1,11 @@
-//! Complete scalar-local statements, application assignments and explicit calls for the
+//! Complete scalar-local statements, expression assignments and explicit calls for the
 //! closed first-party module inventory.
 //! Records own only original byte ranges; declaration identity and reference roles
 //! remain obligations of the adapter's existing structural normalization boundary.
 
 use std::ops::Range;
 
-use super::{logical_whitespace_len, module::ModuleError, name};
+use super::{logical_whitespace_len, module::ModuleError, module_expression, name};
 
 /// A completely admitted local statement inside one procedural body.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -16,6 +16,8 @@ pub enum ModuleBodyStatement {
     Assignment(ModuleScalarAssignment),
     /// A simple destination assigned one complete parenthesized scalar application.
     ApplicationAssignment(ModuleApplicationAssignment),
+    /// A simple destination assigned one completely admitted structured expression.
+    ExpressionAssignment(module_expression::ModuleExpressionAssignment),
     /// One explicit Call with a simple callee and a complete scalar argument list.
     Call(ModuleCall),
 }
@@ -28,6 +30,7 @@ impl ModuleBodyStatement {
             Self::Declaration(declaration) => declaration.statement(),
             Self::Assignment(assignment) => assignment.statement(),
             Self::ApplicationAssignment(assignment) => assignment.statement(),
+            Self::ExpressionAssignment(assignment) => assignment.statement(),
             Self::Call(call) => call.statement(),
         }
     }
@@ -261,10 +264,21 @@ impl ModuleScalarValue {
     }
 }
 
-pub(super) fn statement<E>(
+#[cfg(test)]
+fn statement<E>(
     source: &[u8],
     range: Range<usize>,
     maximum_arguments: usize,
+    check: &mut impl FnMut() -> Result<(), E>,
+) -> Result<Option<ModuleBodyStatement>, ModuleError<E>> {
+    statement_with_expression_limits(source, range, maximum_arguments, source.len(), check)
+}
+
+pub(super) fn statement_with_expression_limits<E>(
+    source: &[u8],
+    range: Range<usize>,
+    maximum_arguments: usize,
+    maximum_expression_nodes: usize,
     check: &mut impl FnMut() -> Result<(), E>,
 ) -> Result<Option<ModuleBodyStatement>, ModuleError<E>> {
     check().map_err(ModuleError::Cancelled)?;
@@ -274,7 +288,15 @@ pub(super) fn statement<E>(
     if first.eq_ignore_ascii_case(b"Call") {
         return explicit_call(text, range, cursor, maximum_arguments, check);
     }
-    scalar_statement(text, range, cursor, first, maximum_arguments, check)
+    scalar_statement(
+        text,
+        range,
+        cursor,
+        first,
+        maximum_arguments,
+        maximum_expression_nodes,
+        check,
+    )
 }
 
 fn scalar_statement<E>(
@@ -283,6 +305,7 @@ fn scalar_statement<E>(
     mut cursor: usize,
     first: &[u8],
     maximum_arguments: usize,
+    maximum_expression_nodes: usize,
     check: &mut impl FnMut() -> Result<(), E>,
 ) -> Result<Option<ModuleBodyStatement>, ModuleError<E>> {
     let local = if first.eq_ignore_ascii_case(b"Dim") {
@@ -316,6 +339,46 @@ fn scalar_statement<E>(
     if !equals(text, &mut cursor, check).map_err(ModuleError::Cancelled)? {
         return Ok(None);
     }
+    let expression_start = cursor;
+    if let Some(statement) = scalar_assignment(
+        text,
+        range.clone(),
+        cursor,
+        destination.clone(),
+        maximum_arguments,
+        check,
+    )? {
+        return Ok(Some(statement));
+    }
+    let Some((expression, inventory)) = module_expression::inventory(
+        text,
+        expression_start,
+        &range,
+        maximum_expression_nodes,
+        maximum_arguments,
+        check,
+    )?
+    else {
+        return Ok(None);
+    };
+    Ok(Some(ModuleBodyStatement::ExpressionAssignment(
+        module_expression::ModuleExpressionAssignment {
+            destination: absolute(&range, destination),
+            expression,
+            inventory,
+            statement: range,
+        },
+    )))
+}
+
+fn scalar_assignment<E>(
+    text: &[u8],
+    range: Range<usize>,
+    mut cursor: usize,
+    destination: Range<usize>,
+    maximum_arguments: usize,
+    check: &mut impl FnMut() -> Result<(), E>,
+) -> Result<Option<ModuleBodyStatement>, ModuleError<E>> {
     let Some(value) =
         atomic_value(text, &mut cursor, true, check).map_err(ModuleError::Cancelled)?
     else {
@@ -572,7 +635,7 @@ pub(super) fn parameter_default_value<E>(
     atomic_value(text, cursor, true, check)
 }
 
-fn atomic_value<E>(
+pub(super) fn atomic_value<E>(
     text: &[u8],
     cursor: &mut usize,
     allow_name: bool,
@@ -1390,8 +1453,8 @@ mod tests {
             "Const Limit As Long = other",
             "Const Limit As Long = 1, Other = 2",
             "Const Limit As Long = -1",
-            "count = -1",
-            "count = +1",
+            "count = -&H1",
+            "count = +1.0",
             "count = 1.0",
             "count = 1E2",
             "count = &H10",
@@ -1401,8 +1464,8 @@ mod tests {
             "count = \"open",
             "count = \"continued _\n",
             "count = \"physical\nline\"",
-            "count = (1)",
-            "count = 1 + 2",
+            "count = (1",
+            "count = 1 +",
             "count = target()()",
             "count = target.member",
             "count = Me",
@@ -1431,6 +1494,64 @@ mod tests {
             "count = [a b]",
         ] {
             assert!(read(source.as_bytes()).is_none(), "{source}");
+        }
+    }
+
+    #[test]
+    fn expression_assignments_admit_former_scalar_and_application_boundary_controls() {
+        for source in [
+            "count=-1",
+            "count=+1",
+            "count=(1)",
+            "count=1+2",
+            "count=1-2",
+            "count=Not True",
+            "count=True And False",
+            "count=Read((1))",
+            "count=Read(target())",
+            "count=Read(1+2)",
+            "count=Read(True And False)",
+            "count=Read(-1,+1)",
+            "count=Read(1)+2",
+            "count=Read(1)=2",
+            "count=(Read(1))",
+            "count=Read(1)=2=3",
+            "count=a<b<c",
+            "count=a<b Xor c>d Eqv e=f Imp g=h",
+        ] {
+            let Some(ModuleBodyStatement::ExpressionAssignment(assignment)) =
+                read(source.as_bytes())
+            else {
+                panic!("newly supported expression {source}")
+            };
+            assert_eq!(assignment.statement(), 0..source.len());
+            assert_eq!(&source[assignment.destination()], "count");
+            assert!(
+                assignment.expression().start >= 6 && assignment.expression().end == source.len()
+            );
+            assert!(assignment.inventory().work_nodes() > 0);
+        }
+    }
+
+    #[test]
+    fn expression_support_does_not_widen_const_defaults_or_explicit_call_atoms() {
+        for source in [
+            "Const Limit As Long=-1",
+            "Const Limit As Long=1+2",
+            "Const Limit As Long=(1)",
+            "Const Limit As Long=Read(1)",
+            "Call Finish(1+2)",
+            "Call Finish(-1)",
+            "Call Finish((1))",
+            "Call Finish(Read(1))",
+        ] {
+            assert!(read(source.as_bytes()).is_none(), "{source}");
+        }
+        for source in [b"-1".as_slice(), b"1+2", b"(1)", b"Read(1)"] {
+            let mut cursor = 0;
+            let atom =
+                parameter_default_value(source, &mut cursor, &mut || Ok::<(), ()>(())).unwrap();
+            assert!(atom.is_none() || cursor < source.len());
         }
     }
 
@@ -1629,15 +1750,15 @@ mod tests {
             "[value]:=1",
             "ByVal value",
             "ByRef value",
-            "(1)",
+            "(1",
             "()",
-            "target()",
+            "target().member",
             "target.member",
             "target!member",
-            "1+2",
-            "True And False",
-            "-1",
-            "+1",
+            "1+",
+            "True And",
+            "-1.0",
+            "+&H1",
             "1.0",
             ".5",
             "1E2",
@@ -1679,10 +1800,10 @@ mod tests {
             "count=Read(1)()",
             "count=Read(1).member",
             "count=Read(1)!member",
-            "count=Read(1)+2",
-            "count=Read(1)=2",
+            "count=Read(1)+&H2",
+            "count=Read(1)=2=3.0",
             "count=Read 1",
-            "count=(Read(1))",
+            "count=(Read(1) extra)",
             "count=holder.Read(1)",
             "count=.Read(1)",
             "count=Read$()",
@@ -1750,13 +1871,27 @@ mod tests {
                 (
                     b"count=Read(1,",
                     b"2)",
-                    byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b' ' | b'\t'),
+                    byte.is_ascii_alphanumeric()
+                        || matches!(byte, b'_' | b' ' | b'\t' | b'+' | b'-'),
                 ),
                 (b"count=Read(1)", b"", matches!(byte, b' ' | b'\t')),
                 (
                     b"count=Read",
                     b"(1)",
-                    byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b' ' | b'\t'),
+                    byte.is_ascii_alphanumeric()
+                        || matches!(
+                            byte,
+                            b'_' | b' '
+                                | b'\t'
+                                | b'+'
+                                | b'-'
+                                | b'*'
+                                | b'/'
+                                | b'\\'
+                                | b'='
+                                | b'<'
+                                | b'>'
+                        ),
                 ),
                 (
                     b"count",
@@ -1772,6 +1907,34 @@ mod tests {
                     "{prefix:?} byte {byte} {suffix:?}"
                 );
                 if let Some(parsed) = result {
+                    if let ModuleBodyStatement::ExpressionAssignment(assignment) = &parsed {
+                        assert_eq!(assignment.statement(), 0..source.len());
+                        if prefix == b"count=Read" {
+                            assert!(matches!(
+                                byte,
+                                b'+' | b'-' | b'*' | b'/' | b'\\' | b'=' | b'<' | b'>'
+                            ));
+                            assert_eq!(&source[assignment.destination()], b"count");
+                            assert_eq!(assignment.expression(), 6..source.len());
+                            assert!(assignment.inventory().applications().is_empty());
+                            assert_eq!(assignment.inventory().argument_count(), 0);
+                            assert_eq!(assignment.inventory().work_nodes(), 4);
+                            let values = assignment.inventory().values();
+                            assert_eq!(values.len(), 2);
+                            assert_eq!(&source[values[0].span()], b"Read");
+                            assert_eq!(values[0].kind(), ModuleScalarValueKind::Name);
+                            assert_eq!(&source[values[1].span()], b"1");
+                            assert_eq!(values[1].kind(), ModuleScalarValueKind::UnsignedDecimal);
+                            continue;
+                        }
+                        assert_eq!(prefix, b"count=Read(1,");
+                        assert!(matches!(byte, b'+' | b'-'));
+                        let application = &assignment.inventory().applications()[0];
+                        assert_eq!(application.argument_expressions().len(), 2);
+                        assert_eq!(application.application().end, source.len());
+                        assert_eq!(assignment.inventory().work_nodes(), 5);
+                        continue;
+                    }
                     let ModuleBodyStatement::ApplicationAssignment(assignment) = parsed else {
                         panic!("accepted token boundary must retain the whole application")
                     };
