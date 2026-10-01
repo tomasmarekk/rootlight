@@ -11,7 +11,8 @@ use std::{
 use rootlight_adapter_sdk::{
     AdapterError, AnalysisLimits, AnalysisRequest, BatchThresholds, EncodingId,
     GenerationBoundSnapshot, IncludedRange, LanguageId, MemoryAdmissionPolicy, NativeVbaModuleKind,
-    ParseOutput, ParseRequest, ResourceKind, SinkError, StreamLimits, execute_parse,
+    ParseOutput, ParseRequest, ResourceKind, SinkError, StreamLimits, SyntaxFactKind,
+    execute_parse,
 };
 use rootlight_adapter_treesitter::{
     ParserSettings, ReuseInvalidation, ReuseStatus, RuntimeConfig, SourceEdit, TreeSitterProvider,
@@ -30,6 +31,7 @@ const SCALAR_MODULE: &[u8] = b"Attribute VB_Name = \"Authored\"\r\nOption Explic
 const CALL_MODULE: &[u8] = b"Attribute VB_Name = \"Authored\"\r\nSub Notify()\r\nEnd Sub\r\nSub Run()\r\nCall Notify\r\nCall [Notify]( )\r\nEnd Sub\r\n";
 const PARAMETER_MODULE: &[u8] = b"Attribute VB_Name = \"Authored\"\r\nSub Accept(ByVal [value] As Long, ByRef text As String)\r\n[value] = [value]\r\ntext = text\r\nEnd Sub\r\nFunction Echo(item As Long) As Long\r\nEcho = item\r\nEnd Function\r\n";
 const CALL_ARGUMENT_MODULE: &[u8] = b"Attribute VB_Name = \"Authored\"\r\nSub Run()\r\nDim value As Long\r\nCall Target(value, 7, \"a,\"\"b\"\":()\", True, [value])\r\nCall Target( value, value )\r\nCall Target()\r\nEnd Sub\r\n";
+const APPLICATION_ASSIGNMENT_MODULE: &[u8] = b"Private items(2) As Long\r\nSub Run()\r\nDim result As Variant\r\nDim value As Long\r\nresult = items()\r\nLet [result] = [items]( 007 )\r\nresult = items(value, True, False, \"a,\"\"b\"\":()\", [value])\r\nresult = items ( value )\r\nresult = items( _\r\n value, _\r\n 7)\r\nEnd Sub\r\n";
 const OPTIONAL_PARAMETER_MODULE: &[u8] = b"Attribute VB_Name = \"Authored\"\r\nSub Accept(required As Long, Optional ByVal count As Long = 007, Optional [text] As String = \"a,\"\"b\"\":()\", Optional flag As Boolean = False, Optional unset As Long)\r\ncount = required\r\n[text] = [text]\r\nEnd Sub\r\n";
 const OMITTED_TYPE_MODULE: &[u8] = b"Attribute VB_Name = \"Authored\"\r\nSub Accept(required, ByVal typed As Long, Optional ByVal count = 007, Optional [text] = \"a,\"\"b\"\":()\", Optional flag = False, Optional unset)\r\ncount = required\r\n[text] = [text]\r\nEnd Sub\r\nFunction Echo(ByRef value) As Long\r\nEcho = value\r\nEnd Function\r\n";
 
@@ -940,6 +942,302 @@ fn scalar_call_arguments_do_not_change_required_identity_admission() {
             assert_eq!(provider.stats().pooled_parsers, 0);
             assert_eq!(provider.stats().checked_out_parsers, 0);
             assert_eq!(provider.stats().cache.entries, 0);
+        }
+    }
+}
+
+#[test]
+fn rhs_applications_preserve_exact_source_facts_without_native_work() {
+    let source = std::str::from_utf8(APPLICATION_ASSIGNMENT_MODULE).unwrap();
+    let statements = [
+        ("result = items()", "result", "items()", "items"),
+        (
+            "Let [result] = [items]( 007 )",
+            "[result]",
+            "[items]( 007 )",
+            "[items]",
+        ),
+        (
+            "result = items(value, True, False, \"a,\"\"b\"\":()\", [value])",
+            "result",
+            "items(value, True, False, \"a,\"\"b\"\":()\", [value])",
+            "items",
+        ),
+        (
+            "result = items ( value )",
+            "result",
+            "items ( value )",
+            "items",
+        ),
+        (
+            "result = items( _\r\n value, _\r\n 7)",
+            "result",
+            "items( _\r\n value, _\r\n 7)",
+            "items",
+        ),
+    ];
+    for language in ["vba", "visual-basic-classic"] {
+        let fixture = Fixture::new(APPLICATION_ASSIGNMENT_MODULE);
+        let provider = provider();
+        let full_limits = limits(4096);
+        let request = fixture.request(&full_limits, language, Vec::new());
+        let output = parse(&provider, &request);
+        assert_eq!(
+            output.report().coverage().status(),
+            CoverageStatus::Complete
+        );
+        assert_eq!(
+            output.report().coverage().covered_source_bytes(),
+            APPLICATION_ASSIGNMENT_MODULE.len()
+        );
+        assert!(output.diagnostics().is_empty());
+        let scope = output
+            .facts()
+            .iter()
+            .find(|fact| fact.syntax_kind().as_str() == "vba.sub_function.scope")
+            .unwrap();
+        assert_eq!(scope.depth(), 3);
+        assert_eq!(scope.kind(), SyntaxFactKind::Scope);
+        let procedure = output
+            .facts()
+            .iter()
+            .find(|fact| fact.syntax_kind().as_str() == "vba.sub_function.declaration")
+            .unwrap();
+        assert_eq!(procedure.parent(), Some(scope.local_id()));
+        assert_eq!(procedure.depth(), 4);
+        assert_eq!(procedure.kind(), SyntaxFactKind::Declaration);
+        for (statement, destination, application, callee) in statements {
+            let statement_start = source.find(statement).unwrap();
+            for (syntax, written) in [
+                ("vba.let_identifier.reference", destination),
+                ("vba.application.reference", application),
+                ("vba.invoked_get_identifier.reference", callee),
+            ] {
+                let start = statement_start + statement.find(written).unwrap();
+                let matching = output
+                    .facts()
+                    .iter()
+                    .filter(|fact| {
+                        fact.syntax_kind().as_str() == syntax
+                            && fact.span().start_byte() == u64::try_from(start).unwrap()
+                    })
+                    .collect::<Vec<_>>();
+                assert_eq!(matching.len(), 1, "{language}: {statement}: {syntax}");
+                let fact = matching[0];
+                assert_eq!(fact.kind(), SyntaxFactKind::Occurrence);
+                assert_eq!(
+                    fact.span().end_byte(),
+                    u64::try_from(start + written.len()).unwrap()
+                );
+                assert_eq!(
+                    bytes_at(APPLICATION_ASSIGNMENT_MODULE, fact.span()),
+                    written.as_bytes()
+                );
+                assert_eq!(fact.parent(), Some(procedure.local_id()));
+                assert_eq!(fact.depth(), 5);
+            }
+        }
+        for syntax in [
+            "vba.application.reference",
+            "vba.invoked_get_identifier.reference",
+            "vba.let_identifier.reference",
+        ] {
+            assert_eq!(
+                output
+                    .facts()
+                    .iter()
+                    .filter(|fact| fact.syntax_kind().as_str() == syntax)
+                    .count(),
+                statements.len()
+            );
+        }
+        let expected_reads = [
+            (statements[2].0, "value", 0),
+            (statements[2].0, "[value]", 0),
+            (statements[3].0, "value", 0),
+            (statements[4].0, "value", 0),
+        ];
+        let reads = output
+            .facts()
+            .iter()
+            .filter(|fact| fact.syntax_kind().as_str() == "vba.value_identifier.reference")
+            .collect::<Vec<_>>();
+        assert_eq!(reads.len(), expected_reads.len());
+        for (statement, written, ordinal) in expected_reads {
+            let start = source.find(statement).unwrap()
+                + statement.match_indices(written).nth(ordinal).unwrap().0;
+            let read = reads
+                .iter()
+                .find(|fact| fact.span().start_byte() == u64::try_from(start).unwrap())
+                .unwrap();
+            assert_eq!(
+                read.span().end_byte(),
+                u64::try_from(start + written.len()).unwrap()
+            );
+            assert_eq!(
+                bytes_at(APPLICATION_ASSIGNMENT_MODULE, read.span()),
+                written.as_bytes()
+            );
+            assert_eq!(read.parent(), Some(procedure.local_id()));
+            assert_eq!(read.depth(), 5);
+            assert_eq!(read.kind(), SyntaxFactKind::Occurrence);
+        }
+        let literal = "\"a,\"\"b\"\":()\"";
+        let strings = output
+            .facts()
+            .iter()
+            .filter(|fact| {
+                fact.syntax_kind().as_str() == "vba.string.string"
+                    && bytes_at(APPLICATION_ASSIGNMENT_MODULE, fact.span()) == literal.as_bytes()
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(strings.len(), 1);
+        assert_eq!(strings[0].kind(), SyntaxFactKind::StringLiteral);
+        let string_start = source.find(literal).unwrap();
+        assert_eq!(
+            strings[0].span().start_byte(),
+            u64::try_from(string_start).unwrap()
+        );
+        assert_eq!(
+            strings[0].span().end_byte(),
+            u64::try_from(string_start + literal.len()).unwrap()
+        );
+        assert_eq!(strings[0].parent(), Some(procedure.local_id()));
+        assert_eq!(strings[0].depth(), 5);
+        for literal in ["007", "True", "False", "7)"] {
+            let start = source.find(literal).unwrap();
+            assert!(!output.facts().iter().any(|fact| {
+                fact.syntax_kind().as_str().ends_with(".reference")
+                    && fact.span().start_byte() == u64::try_from(start).unwrap()
+            }));
+        }
+        for fact in output.facts() {
+            assert_eq!(fact.span().file(), fixture.source.span().file());
+            assert!(fact.span().end_byte() <= fixture.source.span().end_byte());
+        }
+        let repeated = parse(&provider, &request);
+        assert_eq!(repeated.facts(), output.facts());
+        assert_eq!(repeated.report(), output.report());
+        assert_eq!(provider.stats().pooled_parsers, 0);
+        assert_eq!(provider.stats().checked_out_parsers, 0);
+        assert_eq!(provider.stats().cache.entries, 0);
+    }
+}
+
+#[test]
+fn rhs_application_arguments_do_not_change_required_identity_or_cancellation() {
+    for arguments in ["", "007", "value, 7, True, False, \"written\", [value]"] {
+        let source = format!(
+            "Private items(2) As Long\nSub Run()\nDim result As Variant\nDim value As Long\nresult = items({arguments})\nEnd Sub\n"
+        );
+        for language in ["vba", "visual-basic-classic"] {
+            let fixture = Fixture::new(source.as_bytes());
+            let provider = provider();
+            let full_limits = limits(4096);
+            let full_request = fixture.request(&full_limits, language, Vec::new());
+            let required = provider
+                .required_syntax_fact_count(&full_request, &deadline())
+                .unwrap();
+            assert_eq!(required, 13);
+            let full = parse(&provider, &full_request);
+            assert_eq!(full.report().coverage().status(), CoverageStatus::Complete);
+            assert!(full.facts().len() > required + 2);
+            for capacity in [required, required + 2] {
+                let clipped_limits = limits(capacity);
+                let request = fixture.request(&clipped_limits, language, Vec::new());
+                let clipped = parse(&provider, &request);
+                assert_eq!(clipped.facts().len(), capacity);
+                assert_eq!(
+                    clipped.report().coverage().status(),
+                    CoverageStatus::Bounded
+                );
+                assert!(
+                    clipped.diagnostics().iter().any(|diagnostic| {
+                        diagnostic.code().as_str() == "syntax-extraction-limit"
+                    })
+                );
+                for name in ["items", "Run", "result", "value"] {
+                    assert!(clipped.facts().iter().any(|fact| {
+                        fact.syntax_kind().as_str() == "vba.identifier.definition"
+                            && bytes_at(source.as_bytes(), fact.span()) == name.as_bytes()
+                    }));
+                }
+                assert_eq!(
+                    provider
+                        .required_syntax_fact_count(&request, &deadline())
+                        .unwrap(),
+                    required
+                );
+            }
+            let short_limits = limits(required - 1);
+            let short_request = fixture.request(&short_limits, language, Vec::new());
+            assert_eq!(
+                execute_parse(
+                    &provider,
+                    &short_request,
+                    MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
+                    &deadline()
+                )
+                .unwrap_err(),
+                AdapterError::Sink(SinkError::StreamLimit {
+                    resource: ResourceKind::RequiredSyntaxFacts,
+                    observed: required,
+                    limit: required - 1,
+                })
+            );
+            let cancelled = deadline();
+            assert!(cancelled.cancel(CancellationReason::ClientRequest));
+            assert!(matches!(
+                execute_parse(
+                    &provider,
+                    &full_request,
+                    MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
+                    &cancelled
+                ),
+                Err(AdapterError::Cancelled {
+                    reason: CancellationReason::ClientRequest
+                })
+            ));
+            assert_eq!(parse(&provider, &full_request).facts(), full.facts());
+            assert_eq!(provider.stats().pooled_parsers, 0);
+            assert_eq!(provider.stats().checked_out_parsers, 0);
+            assert_eq!(provider.stats().cache.entries, 0);
+        }
+    }
+}
+
+#[test]
+fn richer_rhs_applications_keep_whole_native_fallback() {
+    for expression in [
+        "Target(slot:=1)",
+        "Target(,1)",
+        "Target(ByVal value)",
+        "Target(Other(1))",
+        "Target(1)(2)",
+        "Target(1) + 2",
+        "Target(-1)",
+        "owner.Target(1)",
+    ] {
+        let source = format!(
+            "Sub Run()\nDim result As Variant\nDim value As Long\nresult = {expression}\nEnd Sub\n"
+        );
+        for language in ["vba", "visual-basic-classic"] {
+            let fixture = Fixture::new(source.as_bytes());
+            let provider = provider();
+            let full_limits = limits(4096);
+            let output = parse(
+                &provider,
+                &fixture.request(&full_limits, language, Vec::new()),
+            );
+            assert!(
+                provider.stats().pooled_parsers > 0,
+                "{language}: {expression}"
+            );
+            assert_eq!(provider.stats().checked_out_parsers, 0);
+            assert!(output.facts().iter().any(|fact| {
+                fact.syntax_kind().as_str() == "vba.identifier.definition"
+                    && bytes_at(source.as_bytes(), fact.span()) == b"Run"
+            }));
         }
     }
 }

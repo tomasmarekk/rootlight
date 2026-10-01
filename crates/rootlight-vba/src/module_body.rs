@@ -1,4 +1,4 @@
-//! Complete scalar-local statements and explicit scalar-argument calls for the
+//! Complete scalar-local statements, application assignments and explicit calls for the
 //! closed first-party module inventory.
 //! Records own only original byte ranges; declaration identity and reference roles
 //! remain obligations of the adapter's existing structural normalization boundary.
@@ -14,6 +14,8 @@ pub enum ModuleBodyStatement {
     Declaration(ModuleLocalDeclaration),
     /// One simple scalar assignment, optionally introduced by Let.
     Assignment(ModuleScalarAssignment),
+    /// A simple destination assigned one complete parenthesized scalar application.
+    ApplicationAssignment(ModuleApplicationAssignment),
     /// One explicit Call with a simple callee and a complete scalar argument list.
     Call(ModuleCall),
 }
@@ -25,6 +27,7 @@ impl ModuleBodyStatement {
         match self {
             Self::Declaration(declaration) => declaration.statement(),
             Self::Assignment(assignment) => assignment.statement(),
+            Self::ApplicationAssignment(assignment) => assignment.statement(),
             Self::Call(call) => call.statement(),
         }
     }
@@ -114,6 +117,60 @@ impl ModuleScalarAssignment {
     #[must_use]
     pub fn value(&self) -> &ModuleScalarValue {
         &self.value
+    }
+}
+
+/// A complete assignment whose right-hand syntax is one simple-name application.
+///
+/// Parentheses contain zero or more positional scalar atoms. This source inventory
+/// does not distinguish procedure application from array indexing or establish
+/// target identity, argument correspondence, arity or runtime type compatibility.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ModuleApplicationAssignment {
+    statement: Range<usize>,
+    destination: Range<usize>,
+    application: Range<usize>,
+    callee: Range<usize>,
+    arguments: Range<usize>,
+    argument_values: Vec<ModuleScalarValue>,
+}
+
+impl ModuleApplicationAssignment {
+    /// Returns the complete trimmed statement, including an optional Let prefix.
+    #[must_use]
+    pub fn statement(&self) -> Range<usize> {
+        self.statement.clone()
+    }
+
+    /// Returns the exact destination name, excluding Let and surrounding trivia.
+    #[must_use]
+    pub fn destination(&self) -> Range<usize> {
+        self.destination.clone()
+    }
+
+    /// Returns the application from the callee name through the closing parenthesis.
+    #[must_use]
+    pub fn application(&self) -> Range<usize> {
+        self.application.clone()
+    }
+
+    /// Returns the exact simple callee name, retaining authored brackets.
+    #[must_use]
+    pub fn callee(&self) -> Range<usize> {
+        self.callee.clone()
+    }
+
+    /// Returns the required authored parentheses, including arguments and trivia.
+    #[must_use]
+    pub fn arguments(&self) -> Range<usize> {
+        self.arguments.clone()
+    }
+
+    /// Returns all retained positional scalar atoms in original source order.
+    /// An empty slice records empty syntax, not a proven zero-arity target.
+    #[must_use]
+    pub fn argument_values(&self) -> &[ModuleScalarValue] {
+        &self.argument_values
     }
 }
 
@@ -217,7 +274,7 @@ pub(super) fn statement<E>(
     if first.eq_ignore_ascii_case(b"Call") {
         return explicit_call(text, range, cursor, maximum_arguments, check);
     }
-    scalar_statement(text, range, cursor, first, check).map_err(ModuleError::Cancelled)
+    scalar_statement(text, range, cursor, first, maximum_arguments, check)
 }
 
 fn scalar_statement<E>(
@@ -225,8 +282,9 @@ fn scalar_statement<E>(
     range: Range<usize>,
     mut cursor: usize,
     first: &[u8],
+    maximum_arguments: usize,
     check: &mut impl FnMut() -> Result<(), E>,
-) -> Result<Option<ModuleBodyStatement>, E> {
+) -> Result<Option<ModuleBodyStatement>, ModuleError<E>> {
     let local = if first.eq_ignore_ascii_case(b"Dim") {
         Some(ModuleLocalKind::Variable)
     } else if first.eq_ignore_ascii_case(b"Const") {
@@ -235,17 +293,19 @@ fn scalar_statement<E>(
         None
     };
     if let Some(kind) = local {
-        return local_declaration(text, range, cursor, kind, check);
+        return local_declaration(text, range, cursor, kind, check).map_err(ModuleError::Cancelled);
     }
     let explicit_let = first.eq_ignore_ascii_case(b"Let");
     if explicit_let {
-        if !separator(text, &mut cursor, check)? {
+        if !separator(text, &mut cursor, check).map_err(ModuleError::Cancelled)? {
             return Ok(None);
         }
     } else {
         cursor = 0;
     }
-    let Some(destination) = simple_name(text, &mut cursor, check)? else {
+    let Some(destination) =
+        simple_name(text, &mut cursor, check).map_err(ModuleError::Cancelled)?
+    else {
         return Ok(None);
     };
     // Native statement-keyword paths can recover an apparent assignment at its
@@ -253,13 +313,53 @@ fn scalar_statement<E>(
     if !explicit_let && text.get(destination.clone()).is_some_and(statement_keyword) {
         return Ok(None);
     }
-    if !equals(text, &mut cursor, check)? {
+    if !equals(text, &mut cursor, check).map_err(ModuleError::Cancelled)? {
         return Ok(None);
     }
-    let Some(value) = atomic_value(text, &mut cursor, true, check)? else {
+    let Some(value) =
+        atomic_value(text, &mut cursor, true, check).map_err(ModuleError::Cancelled)?
+    else {
         return Ok(None);
     };
-    if !complete(text, &mut cursor, check)? {
+    cursor += logical_whitespace_len(text.get(cursor..).unwrap_or_default(), check)
+        .map_err(ModuleError::Cancelled)?;
+    if value.kind == ModuleScalarValueKind::Name && text.get(cursor) == Some(&b'(') {
+        // Line has a contextual value/assignment alias, not a proven callable
+        // alias. Keep that bare token on the full grammar route; [Line] is a name.
+        if text
+            .get(value.span.clone())
+            .is_some_and(|callee| callee.eq_ignore_ascii_case(b"Line"))
+        {
+            return Ok(None);
+        }
+        let arguments_start = cursor;
+        cursor += 1;
+        let Some(mut argument_values) =
+            scalar_arguments(text, &mut cursor, maximum_arguments, check)?
+        else {
+            return Ok(None);
+        };
+        cursor += 1;
+        let application_end = cursor;
+        if !complete(text, &mut cursor, check).map_err(ModuleError::Cancelled)? {
+            return Ok(None);
+        }
+        for argument in &mut argument_values {
+            check().map_err(ModuleError::Cancelled)?;
+            argument.rebase(&range);
+        }
+        return Ok(Some(ModuleBodyStatement::ApplicationAssignment(
+            ModuleApplicationAssignment {
+                destination: absolute(&range, destination),
+                application: absolute(&range, value.span.start..application_end),
+                callee: absolute(&range, value.span),
+                arguments: absolute(&range, arguments_start..application_end),
+                argument_values,
+                statement: range,
+            },
+        )));
+    }
+    if !complete(text, &mut cursor, check).map_err(ModuleError::Cancelled)? {
         return Ok(None);
     }
     Ok(Some(ModuleBodyStatement::Assignment(
@@ -1303,7 +1403,7 @@ mod tests {
             "count = \"physical\nline\"",
             "count = (1)",
             "count = 1 + 2",
-            "count = target()",
+            "count = target()()",
             "count = target.member",
             "count = Me",
             "count = Nothing",
@@ -1361,7 +1461,12 @@ mod tests {
 
     #[test]
     fn bounded_storage_exhaustion_and_fallible_capacity_failures_preserve_entries() {
-        for source in [b"count=1".as_slice(), b"Call Finish", b"Call Finish()"] {
+        for source in [
+            b"count=1".as_slice(),
+            b"Call Finish",
+            b"Call Finish()",
+            b"count=Read(1)",
+        ] {
             let mut statements = Vec::new();
             assert_eq!(
                 reserve::<()>(&mut statements, 0),
@@ -1428,6 +1533,306 @@ mod tests {
                 );
                 assert_eq!(calls, limit);
             }
+        }
+    }
+
+    #[test]
+    fn application_assignments_retain_all_original_ranges_and_scalar_categories() {
+        for (text, destination, callee, expected) in [
+            ("count=Read()", "count", "Read", vec![]),
+            ("count=target()", "count", "target", vec![]),
+            ("count=[Line]()", "count", "[Line]", vec![]),
+            (
+                "Let [count] = [Read](007,\"a,:='Rem End Sub \"\"q\"\"\",True,[Me],TrueRem,[True])",
+                "[count]",
+                "[Read]",
+                vec![
+                    ("007", ModuleScalarValueKind::UnsignedDecimal),
+                    (
+                        "\"a,:='Rem End Sub \"\"q\"\"\"",
+                        ModuleScalarValueKind::String,
+                    ),
+                    ("True", ModuleScalarValueKind::Boolean),
+                    ("[Me]", ModuleScalarValueKind::Name),
+                    ("TrueRem", ModuleScalarValueKind::Name),
+                    ("[True]", ModuleScalarValueKind::Name),
+                ],
+            ),
+            (
+                "lEt _\r\n [count] _\n = _\r\n [Read] _\n ( _\r\n False _\n , _\r\n value _\n )",
+                "[count]",
+                "[Read]",
+                vec![
+                    ("False", ModuleScalarValueKind::Boolean),
+                    ("value", ModuleScalarValueKind::Name),
+                ],
+            ),
+        ] {
+            let prefix = b"prefix\r\n";
+            let source = [prefix.as_slice(), text.as_bytes(), b"\ntail"].concat();
+            let range = prefix.len()..prefix.len() + text.len();
+            let ModuleBodyStatement::ApplicationAssignment(assignment) =
+                statement(&source, range.clone(), expected.len(), &mut || {
+                    Ok::<(), ()>(())
+                })
+                .unwrap()
+                .unwrap()
+            else {
+                panic!("complete application assignment expected")
+            };
+            assert_eq!(assignment.statement(), range.clone());
+            assert_eq!(&source[assignment.destination()], destination.as_bytes());
+            assert_eq!(&source[assignment.callee()], callee.as_bytes());
+            assert_eq!(assignment.application().start, assignment.callee().start);
+            assert_eq!(assignment.application().end, assignment.arguments().end);
+            assert_eq!(assignment.application().end, range.end);
+            assert!(assignment.callee().end <= assignment.arguments().start);
+            assert_eq!(source[assignment.arguments().start], b'(');
+            assert_eq!(source[assignment.arguments().end - 1], b')');
+            assert_eq!(assignment.argument_values().len(), expected.len());
+            let mut previous_end = assignment.arguments().start + 1;
+            for (value, (spelling, kind)) in assignment.argument_values().iter().zip(expected) {
+                assert_eq!(&source[value.span()], spelling.as_bytes());
+                assert_eq!(value.kind(), kind);
+                assert!(previous_end <= value.span().start);
+                assert!(value.span().end < assignment.arguments().end);
+                previous_end = value.span().end;
+            }
+        }
+    }
+
+    #[test]
+    fn application_assignments_retain_many_arguments_without_singleton_shortcuts() {
+        let atoms = (0..256)
+            .map(|number| number.to_string())
+            .collect::<Vec<_>>()
+            .join(",");
+        let text = format!("count=Read({atoms})");
+        let ModuleBodyStatement::ApplicationAssignment(assignment) = read(text.as_bytes()).unwrap()
+        else {
+            panic!("many-argument application expected")
+        };
+        assert_eq!(assignment.argument_values().len(), 256);
+        for (index, value) in assignment.argument_values().iter().enumerate() {
+            assert_eq!(&text[value.span()], index.to_string());
+            assert_eq!(value.kind(), ModuleScalarValueKind::UnsignedDecimal);
+        }
+    }
+
+    #[test]
+    fn application_assignment_malformed_atoms_and_richer_tails_never_return_a_prefix() {
+        for atom in [
+            "",
+            " ",
+            ",",
+            "value:=1",
+            "[value]:=1",
+            "ByVal value",
+            "ByRef value",
+            "(1)",
+            "()",
+            "target()",
+            "target.member",
+            "target!member",
+            "1+2",
+            "True And False",
+            "-1",
+            "+1",
+            "1.0",
+            ".5",
+            "1E2",
+            "&H10",
+            "&O7",
+            "#1/1/2000#",
+            "1&",
+            "value$",
+            "value!",
+            "Nothing",
+            "Null",
+            "Empty",
+            "Me",
+            "\"open",
+            "\"continued _\n",
+            "\"physical\nline\"",
+            "\"closed\" extra",
+            "[open",
+            "[]",
+            "[value name]",
+            "1more",
+            "True False",
+            "1;2",
+            "1\n",
+        ] {
+            let text = format!("count=Read(0,{atom},2)");
+            assert!(read(text.as_bytes()).is_none(), "{atom:?}");
+        }
+        for text in [
+            "count=Line()",
+            "count=line(1)",
+            "Let count=lInE(value)",
+            "count=Read(1,)",
+            "count=Read(,1)",
+            "count=Read(1,,2)",
+            "count=Read(1, _\n )",
+            "count=Read(1",
+            "count=Read(1) extra",
+            "count=Read(1)()",
+            "count=Read(1).member",
+            "count=Read(1)!member",
+            "count=Read(1)+2",
+            "count=Read(1)=2",
+            "count=Read 1",
+            "count=(Read(1))",
+            "count=holder.Read(1)",
+            "count=.Read(1)",
+            "count=Read$()",
+            "count=True()",
+            "count=Me()",
+            "count=Nothing()",
+            "count(1)=Read()",
+            "item.member=Read()",
+            "Set item=Read()",
+            "Load=Read()",
+            "count=Read(\n)",
+            "count=Read(\r\n)",
+            "count=Read( ' comment\n)",
+            "count=Read() Rem tail",
+            "count=Read() ' tail",
+            "Const Limit As Long=Read()",
+            "Dim count As Long=Read()",
+        ] {
+            assert!(read(text.as_bytes()).is_none(), "{text:?}");
+        }
+    }
+
+    #[test]
+    fn application_assignment_argument_limits_preserve_typed_failures_and_empty_syntax() {
+        for (text, maximum, count) in [
+            ("count=Read()", 0, 0),
+            ("Let count=Read( _\r\n )", 0, 0),
+            ("count=Read(1,value,True)", 3, 3),
+        ] {
+            let ModuleBodyStatement::ApplicationAssignment(assignment) =
+                statement(text.as_bytes(), 0..text.len(), maximum, &mut || {
+                    Ok::<(), ()>(())
+                })
+                .unwrap()
+                .unwrap()
+            else {
+                panic!("complete application assignment expected")
+            };
+            assert_eq!(assignment.argument_values().len(), count);
+        }
+        let text = b"count=Read(1,value,True)";
+        for maximum in [0, 1, 2] {
+            assert_eq!(
+                statement(text, 0..text.len(), maximum, &mut || Ok::<(), ()>(())),
+                Err(ModuleError::ArgumentLimit)
+            );
+        }
+        let mut values = Vec::new();
+        assert_eq!(
+            reserve_arguments_exact(&mut values, usize::MAX, &mut || Ok::<(), ()>(())),
+            Err(ModuleError::AllocationFailed)
+        );
+        assert!(values.is_empty());
+    }
+
+    #[test]
+    fn application_assignment_all_byte_boundaries_require_complete_original_tokens() {
+        for byte in 0..=u8::MAX {
+            for (prefix, suffix, expected) in [
+                (
+                    b"count=Read(1".as_slice(),
+                    b")".as_slice(),
+                    byte.is_ascii_digit() || matches!(byte, b' ' | b'\t'),
+                ),
+                (
+                    b"count=Read(1,",
+                    b"2)",
+                    byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b' ' | b'\t'),
+                ),
+                (b"count=Read(1)", b"", matches!(byte, b' ' | b'\t')),
+                (
+                    b"count=Read",
+                    b"(1)",
+                    byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b' ' | b'\t'),
+                ),
+                (
+                    b"count",
+                    b"=Read()",
+                    byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b' ' | b'\t'),
+                ),
+            ] {
+                let source = [prefix, &[byte], suffix].concat();
+                let result = read(&source);
+                assert_eq!(
+                    result.is_some(),
+                    expected,
+                    "{prefix:?} byte {byte} {suffix:?}"
+                );
+                if let Some(parsed) = result {
+                    let ModuleBodyStatement::ApplicationAssignment(assignment) = parsed else {
+                        panic!("accepted token boundary must retain the whole application")
+                    };
+                    assert_eq!(assignment.statement(), 0..source.len());
+                    for range in [
+                        assignment.destination(),
+                        assignment.callee(),
+                        assignment.application(),
+                        assignment.arguments(),
+                    ] {
+                        assert!(range.start < range.end && range.end <= source.len());
+                    }
+                    assert_eq!(source[assignment.arguments().start], b'(');
+                    assert_eq!(source[assignment.arguments().end - 1], b')');
+                    for value in assignment.argument_values() {
+                        assert!(assignment.arguments().start < value.span().start);
+                        assert!(value.span().start < value.span().end);
+                        assert!(value.span().end < assignment.arguments().end);
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn application_assignment_cancellation_survives_every_scan_reserve_and_rebase_checkpoint() {
+        let text = format!(
+            "Let [count] = [Read] _\r\n ({},{},\"{}\" _\n,{}True)",
+            "9".repeat(1024),
+            "value".repeat(256),
+            "x\"\"".repeat(512),
+            " _\r\n".repeat(32)
+        );
+        let source = [b"prefix\n".as_slice(), text.as_bytes(), b"\ntail"].concat();
+        let range = 7..7 + text.len();
+        let mut checkpoints = 0;
+        let parsed = statement(&source, range.clone(), 4, &mut || {
+            checkpoints += 1;
+            Ok::<(), ()>(())
+        })
+        .unwrap()
+        .unwrap();
+        let ModuleBodyStatement::ApplicationAssignment(assignment) = parsed else {
+            panic!("complete application assignment expected")
+        };
+        assert_eq!(assignment.argument_values().len(), 4);
+        for cancelled_at in 1..=checkpoints {
+            let mut calls = 0;
+            assert_eq!(
+                statement(&source, range.clone(), 4, &mut || {
+                    calls += 1;
+                    if calls == cancelled_at {
+                        Err("stop")
+                    } else {
+                        Ok(())
+                    }
+                }),
+                Err(ModuleError::Cancelled("stop")),
+                "checkpoint {cancelled_at}"
+            );
+            assert_eq!(calls, cancelled_at);
         }
     }
 }

@@ -113,11 +113,20 @@ pub(super) fn prepare(
         }
         for statement in procedure.statements() {
             cancellation.check()?;
-            if let ModuleBodyStatement::Call(call) = statement {
-                processed_nodes = processed_nodes
-                    .checked_add(call.argument_values().len())
-                    .ok_or_else(|| provider_failure("vba-procedural-node-accounting"))?;
-            }
+            let extra_nodes = match statement {
+                ModuleBodyStatement::Call(call) => call.argument_values().len(),
+                // The assignment is already counted; its RHS application and
+                // receiver require their own work in addition to argument atoms.
+                ModuleBodyStatement::ApplicationAssignment(assignment) => assignment
+                    .argument_values()
+                    .len()
+                    .checked_add(2)
+                    .ok_or_else(|| provider_failure("vba-procedural-node-accounting"))?,
+                ModuleBodyStatement::Declaration(_) | ModuleBodyStatement::Assignment(_) => 0,
+            };
+            processed_nodes = processed_nodes
+                .checked_add(extra_nodes)
+                .ok_or_else(|| provider_failure("vba-procedural-node-accounting"))?;
         }
     }
     require_provider_limit(ResourceKind::SyntaxNodes, processed_nodes, maximum_nodes)?;
@@ -634,6 +643,52 @@ fn body_candidates(
                 | ModuleScalarValueKind::Boolean => {}
             }
         }
+        ModuleBodyStatement::ApplicationAssignment(assignment) if include_optional => {
+            push_body_candidate(
+                output,
+                maximum,
+                cancellation,
+                assignment.destination(),
+                StructuralRole::Reference,
+                "vba.let_identifier",
+                false,
+            )?;
+            push_body_candidate(
+                output,
+                maximum,
+                cancellation,
+                assignment.application(),
+                StructuralRole::Reference,
+                "vba.application",
+                false,
+            )?;
+            push_body_candidate(
+                output,
+                maximum,
+                cancellation,
+                assignment.callee(),
+                StructuralRole::Reference,
+                "vba.invoked_get_identifier",
+                false,
+            )?;
+            for argument in assignment.argument_values() {
+                cancellation.check()?;
+                match argument.kind() {
+                    ModuleScalarValueKind::Name => push_body_candidate(
+                        output,
+                        maximum,
+                        cancellation,
+                        argument.span(),
+                        StructuralRole::Reference,
+                        "vba.value_identifier",
+                        false,
+                    )?,
+                    ModuleScalarValueKind::UnsignedDecimal
+                    | ModuleScalarValueKind::String
+                    | ModuleScalarValueKind::Boolean => {}
+                }
+            }
+        }
         ModuleBodyStatement::Call(call) if include_optional => {
             push_body_candidate(
                 output,
@@ -671,7 +726,9 @@ fn body_candidates(
                 }
             }
         }
-        ModuleBodyStatement::Assignment(_) | ModuleBodyStatement::Call(_) => {}
+        ModuleBodyStatement::Assignment(_)
+        | ModuleBodyStatement::ApplicationAssignment(_)
+        | ModuleBodyStatement::Call(_) => {}
     }
     Ok(())
 }
@@ -4272,6 +4329,212 @@ mod tests {
                 assert_eq!(fixture.provider.stats().pooled_parsers, 0);
                 assert_eq!(fixture.provider.stats().cache.entries, 0);
             }
+        }
+    }
+
+    #[test]
+    fn first_party_vba_value_applications_match_the_private_native_route() {
+        for source in [
+            "Sub Run()\nsink = Buffer()\nEnd Sub\n",
+            "Sub Run()\nsink = Buffer(0)\nEnd Sub\n",
+            "Sub Run()\nLet sink = Grid(0, index)\nEnd Sub\n",
+            "Sub Run()\nsink = Fetch(value, 7, \"x\", value, True)\nEnd Sub\n",
+            "Sub Run()\nLet [sink] = [Buffer]([index], \"a\"\"b\")\nEnd Sub\n",
+            "Sub Run()\nsink = Buffer ( value )\nEnd Sub\n",
+            "Sub Run()\nsink = Fetch(value, True, False, \"a,\"\"b\"\":()\", [value])\nEnd Sub\n",
+            "Sub Run()\r\n sink = Buffer( _\r\n 0, index) ' read\r\nEnd Sub\r\n",
+            "Sub Run(): sink = Buffer(0): sink = Fetch(): End Sub\n",
+            "Dim Buffer(0 To 2) As Long\nFunction Fetch(ByVal value As Long) As Long\nFetch = Buffer(value)\nEnd Function\n",
+        ] {
+            for language in ["vba", "visual-basic-classic"] {
+                compare_native(&Fixture::new(source), language, &[]);
+            }
+        }
+        // Statement-head keywords can be ordinary RHS receivers; the exact
+        // oracle checks that the separate Call-head exclusion does not leak here.
+        for callee in [
+            "Name",
+            "Line",
+            "Load",
+            "Unload",
+            "Input",
+            "Print",
+            "Close",
+            "Reset",
+            "Beep",
+            "DefBool",
+            "DefByte",
+            "DefInt",
+            "DefLng",
+            "DefLngLng",
+            "DefLngPtr",
+            "DefCur",
+            "DefSng",
+            "DefDbl",
+            "DefDate",
+            "DefStr",
+            "DefObj",
+            "DefVar",
+            "DefDec",
+        ] {
+            for written in [callee.to_owned(), format!("[{callee}]")] {
+                if callee == "Line" && written == callee {
+                    continue;
+                }
+                for arguments in ["", "0", "value"] {
+                    let source = format!("Sub Run()\nsink = {written}({arguments})\nEnd Sub\n");
+                    for language in ["vba", "visual-basic-classic"] {
+                        compare_native(&Fixture::new(&source), language, &[]);
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn first_party_vba_value_applications_keep_whole_native_fallback() {
+        for assignment in [
+            "sink = Line()",
+            "sink = line(0)",
+            "Let sink = lInE(value)",
+            "sink = Buffer(0) + 1",
+            "sink = Buffer(Nested(0))",
+            "sink = Buffer(holder.Value)",
+            "sink = holder.Buffer(0)",
+            "holder.sink = Buffer(0)",
+            "sink(0) = Buffer(0)",
+            "Set sink = Buffer(0)",
+            "sink = Buffer(index:=0)",
+            "sink = Buffer(ByVal index)",
+            "sink = Buffer(,0)",
+            "sink = Buffer(0,)",
+            "sink = Buffer(0,,1)",
+            "sink = Buffer((0))",
+            "sink = Buffer(-1)",
+            "sink = Buffer(1.5)",
+            "sink = Buffer(0)(1)",
+            "sink = Buffer(0) extra",
+            "sink = Buffer(0))",
+            "sink = Buffer(0",
+            "sink = Buffer(\"unclosed)",
+        ] {
+            let source = format!(
+                "Sub Valid()\nEnd Sub\nSub Run()\nsink = Buffer(0)\n{assignment}\nEnd Sub\n"
+            );
+            for language in ["vba", "visual-basic-classic"] {
+                let fixture = Fixture::new(&source);
+                let request = fixture.request(language, &[]);
+                assert!(
+                    prepare(
+                        &fixture.provider,
+                        &request,
+                        None,
+                        &[],
+                        fixture.provider.config.default_settings(),
+                        &Cancellation::new(),
+                    )
+                    .unwrap()
+                    .is_none(),
+                    "unsupported RHS syntax cannot publish a complete prefix: {language}, {assignment}"
+                );
+                assert_eq!(fixture.provider.stats().pooled_parsers, 0);
+                assert_eq!(fixture.provider.stats().cache.entries, 0);
+            }
+        }
+    }
+
+    #[test]
+    fn first_party_vba_value_application_work_and_limits_are_exact() {
+        let source = "Sub Run()\nsink = Fetch(value, 7, \"x\", value, True)\nEnd Sub\n";
+        for language in ["vba", "visual-basic-classic"] {
+            let mut fixture = Fixture::new(source);
+            let cancellation = Cancellation::new();
+            let request = fixture.request(language, &[]);
+            let prepared = prepare(
+                &fixture.provider,
+                &request,
+                None,
+                &[],
+                fixture.provider.config.default_settings(),
+                &cancellation,
+            )
+            .unwrap()
+            .unwrap();
+            assert_eq!(prepared.processed_nodes, 12);
+            for (optional, exact) in [(false, 7), (true, 14)] {
+                let all = candidates(
+                    &prepared.inventory,
+                    request.source().bytes(),
+                    optional,
+                    exact,
+                    &cancellation,
+                )
+                .unwrap();
+                assert_eq!(all.len(), exact);
+                assert_eq!(
+                    normalize_query_candidates(all, &request, usize::MAX, &cancellation)
+                        .unwrap()
+                        .required,
+                    7
+                );
+                for (limit, observed) in [(exact - 1, exact), (0, 7)] {
+                    assert_eq!(
+                        candidates(
+                            &prepared.inventory,
+                            request.source().bytes(),
+                            optional,
+                            limit,
+                            &cancellation,
+                        )
+                        .unwrap_err(),
+                        AdapterError::RejectedRequest(RequestError::ProviderLimit {
+                            resource: ResourceKind::SyntaxNodes,
+                            observed,
+                            limit,
+                        })
+                    );
+                }
+            }
+            for limit in [12, 11] {
+                fixture.limits = with_maximum_nodes(&fixture.limits, limit);
+                let request = fixture.request(language, &[]);
+                let result = prepare(
+                    &fixture.provider,
+                    &request,
+                    None,
+                    &[],
+                    fixture.provider.config.default_settings(),
+                    &cancellation,
+                );
+                if limit == 12 {
+                    assert_eq!(result.unwrap().unwrap().processed_nodes, 12);
+                } else {
+                    assert!(matches!(
+                        result,
+                        Err(AdapterError::RejectedRequest(RequestError::ProviderLimit {
+                            resource: ResourceKind::SyntaxNodes,
+                            observed: 12,
+                            limit: 11,
+                        }))
+                    ));
+                }
+            }
+            assert!(cancellation.cancel(rootlight_cancel::CancellationReason::ClientRequest));
+            let request = fixture.request(language, &[]);
+            assert!(matches!(
+                candidates(
+                    &prepared.inventory,
+                    request.source().bytes(),
+                    true,
+                    100,
+                    &cancellation,
+                ),
+                Err(AdapterError::Cancelled {
+                    reason: rootlight_cancel::CancellationReason::ClientRequest
+                })
+            ));
+            assert_eq!(fixture.provider.stats().pooled_parsers, 0);
+            assert_eq!(fixture.provider.stats().cache.entries, 0);
         }
     }
 

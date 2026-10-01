@@ -50,9 +50,9 @@ impl ModuleLimits {
         self
     }
 
-    /// Sets the aggregate retained-argument ceiling across every Call in the module.
+    /// Sets the aggregate retained-argument ceiling across Calls and application assignments.
     /// A logical statement can contain many arguments, so this ceiling is separate
-    /// from statement count. Zero still admits bare and explicitly empty Calls.
+    /// from statement count. Zero still admits bare/empty Calls and empty applications.
     #[must_use]
     pub const fn with_max_arguments(mut self, max_arguments: usize) -> Self {
         self.max_arguments = max_arguments;
@@ -410,7 +410,7 @@ pub enum ModuleError<E> {
     ProcedureLimit,
     /// Retained parameters across all procedures exceed the parameter ceiling.
     ParameterLimit,
-    /// Retained Call arguments across the module exceed the argument ceiling.
+    /// Retained Call/application arguments across the module exceed the argument ceiling.
     ArgumentLimit,
     /// Fallible reservation of bounded structural storage failed.
     AllocationFailed,
@@ -475,13 +475,15 @@ impl<E: std::error::Error + 'static> std::error::Error for ModuleError<E> {
 /// Bodies admit one typed scalar Dim or Const per statement and simple scalar
 /// assignments with an optional Let prefix. Const values are unsigned decimal,
 /// physically closed doubled-quote strings or True/False; assignments additionally
-/// admit a simple name. Explicit Call statements admit a simple callee and optional
+/// admit a simple name or one parenthesized simple-name application. An application
+/// retains a complete positional scalar argument list without deciding whether its
+/// target is a procedure or an array. Explicit Call statements admit a simple callee and optional
 /// parentheses containing a complete positional list of these scalar atoms, with
 /// space/tab-based logical trivia. Named, omitted, ByVal and nonparenthesized
 /// arguments are unsupported. Keyword-shaped
-/// unbracketed names, other calls and operators are unsupported. Every body
+/// unbracketed names, nested/member applications and operators are unsupported. Every body
 /// statement must be consumed completely.
-/// Bare `Name` callees stay outside this closed call subset; bracketed `[Name]` is admitted.
+/// Bare `Name` explicit Call callees stay outside this subset; bracketed `[Name]` is admitted.
 /// Without explicit `Let`, bare statement-keyword assignment destinations are excluded.
 /// All other statements, inline Rem tails, directives, class
 /// members, continued-comment forms and incomplete boundaries reject the entire input.
@@ -500,7 +502,7 @@ impl<E: std::error::Error + 'static> std::error::Error for ModuleError<E> {
 /// Each parameter retains at most one inline default atom under that same ceiling.
 /// Optionality and defaults are source evidence, not inferred values, coercion,
 /// or proof of required-after-Optional semantic validity.
-/// Retained Call arguments have their own aggregate ceiling across every procedure,
+/// Retained Call and application-assignment arguments share an aggregate ceiling across every procedure,
 /// with fallible storage; positional atoms do not establish parameter or type identity.
 /// This proves structure only, not type identity, visibility or name uniqueness.
 ///
@@ -604,6 +606,9 @@ pub fn module_inventory<E>(
                 };
                 let retained_arguments = match &statement {
                     ModuleBodyStatement::Call(call) => call.argument_values().len(),
+                    ModuleBodyStatement::ApplicationAssignment(assignment) => {
+                        assignment.argument_values().len()
+                    }
                     ModuleBodyStatement::Declaration(_) | ModuleBodyStatement::Assignment(_) => 0,
                 };
                 argument_count = argument_count
@@ -5562,9 +5567,9 @@ mod tests {
                 .iter()
                 .filter_map(|statement| match statement {
                     ModuleBodyStatement::Call(call) => Some(call),
-                    ModuleBodyStatement::Declaration(_) | ModuleBodyStatement::Assignment(_) => {
-                        None
-                    }
+                    ModuleBodyStatement::Declaration(_)
+                    | ModuleBodyStatement::Assignment(_)
+                    | ModuleBodyStatement::ApplicationAssignment(_) => None,
                 })
                 .collect();
             assert_eq!(calls.len(), 3);
@@ -6320,6 +6325,291 @@ mod tests {
                 Err(ModuleError::Cancelled("stop"))
             );
             assert_eq!(calls, 8);
+        }
+    }
+
+    #[test]
+    fn application_assignments_preserve_module_relative_ranges_trivia_and_procedure_ownership() {
+        for newline in ["\n", "\r\n"] {
+            let parentheses = format!(
+                "( _{newline} 007 _{newline}, _{newline} \"a,:='Rem End Sub \"\"quoted\"\"\", [local], FALSE _{newline} )"
+            );
+            let application = format!("[Read] _{newline} {parentheses}");
+            let assignment_text =
+                format!("lEt _{newline} [local] _{newline} = _{newline} {application}");
+            let source = format!(
+                "Attribute VB_Name = \"ApplicationModule\"{newline}Public values(2) As Long{newline}Sub First(){newline}  Dim local As Long{newline}  {assignment_text} ' End Sub: ignored(){newline}  local=Read():Call Finish(1):End Sub{newline}Function NextValue() As Long{newline}NextValue=[Read](False){newline}End Function{newline}"
+            );
+            let inventory = parse(source.as_bytes()).unwrap();
+            assert_eq!(inventory.procedures().len(), 2);
+            let first = &inventory.procedures()[0];
+            assert_eq!(first.statements().len(), 4);
+            let ModuleBodyStatement::ApplicationAssignment(assignment) = &first.statements()[1]
+            else {
+                panic!("application assignment retained after local declaration")
+            };
+            assert_eq!(&source[assignment.statement()], assignment_text);
+            assert_eq!(&source[assignment.destination()], "[local]");
+            assert_eq!(&source[assignment.application()], application);
+            assert_eq!(&source[assignment.callee()], "[Read]");
+            assert_eq!(&source[assignment.arguments()], parentheses);
+            assert_eq!(assignment.argument_values().len(), 4);
+            for (value, (spelling, kind)) in assignment.argument_values().iter().zip([
+                ("007", ModuleScalarValueKind::UnsignedDecimal),
+                (
+                    "\"a,:='Rem End Sub \"\"quoted\"\"\"",
+                    ModuleScalarValueKind::String,
+                ),
+                ("[local]", ModuleScalarValueKind::Name),
+                ("FALSE", ModuleScalarValueKind::Boolean),
+            ]) {
+                assert_eq!(&source[value.span()], spelling);
+                assert_eq!(value.kind(), kind);
+                assert!(assignment.arguments().start < value.span().start);
+                assert!(value.span().end < assignment.arguments().end);
+            }
+            let ModuleBodyStatement::ApplicationAssignment(empty) = &first.statements()[2] else {
+                panic!("empty application retained before explicit Call")
+            };
+            assert_eq!(&source[empty.arguments()], "()");
+            assert!(empty.argument_values().is_empty());
+            let second = &inventory.procedures()[1];
+            let ModuleBodyStatement::ApplicationAssignment(result) = &second.statements()[0] else {
+                panic!("function result destination retained without binding")
+            };
+            assert_eq!(&source[result.destination()], "NextValue");
+            assert_eq!(&source[result.application()], "[Read](False)");
+            for procedure in inventory.procedures() {
+                for statement in procedure.statements() {
+                    assert!(procedure.body().start <= statement.statement().start);
+                    assert!(statement.statement().end <= procedure.body().end);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn application_and_call_arguments_share_exact_aggregate_quotas_across_procedures() {
+        let source = b"Sub First():value=Read(1,True):Call Finish(\"text\"):value=Read():End Sub\nSub Second()\nLet value=Read([value],False)\nCall Finish\nEnd Sub\n";
+        let expected = parse(source).unwrap();
+        assert_eq!(expected.statement_count(), 9);
+        assert_eq!(expected.procedures()[0].statements().len(), 3);
+        assert_eq!(expected.procedures()[1].statements().len(), 2);
+        let limits = ModuleLimits::new(source.len(), 9, 2).with_max_arguments(5);
+        assert_eq!(
+            module_inventory(source, limits, &mut || Ok::<(), ()>(())),
+            Ok(expected)
+        );
+        for maximum in 0..5 {
+            assert_eq!(
+                module_inventory(source, limits.with_max_arguments(maximum), &mut || Ok::<
+                    (),
+                    (),
+                >(
+                    ()
+                )),
+                Err(ModuleError::ArgumentLimit),
+                "argument ceiling {maximum}"
+            );
+        }
+        assert_eq!(
+            module_inventory(
+                source,
+                ModuleLimits::new(source.len() - 1, 9, 2).with_max_arguments(5),
+                &mut || Ok::<(), ()>(())
+            ),
+            Err(ModuleError::SourceLimit)
+        );
+        assert_eq!(
+            module_inventory(
+                source,
+                ModuleLimits::new(source.len(), 8, 2).with_max_arguments(5),
+                &mut || Ok::<(), ()>(())
+            ),
+            Err(ModuleError::StatementLimit)
+        );
+        assert_eq!(
+            module_inventory(
+                source,
+                ModuleLimits::new(source.len(), 9, 1).with_max_arguments(5),
+                &mut || Ok::<(), ()>(())
+            ),
+            Err(ModuleError::ProcedureLimit)
+        );
+        let zero = b"Sub Run():value=Read():Call Finish():Call Finish:End Sub\n";
+        let inventory = module_inventory(
+            zero,
+            ModuleLimits::new(zero.len(), 5, 1).with_max_arguments(0),
+            &mut || Ok::<(), ()>(()),
+        )
+        .unwrap();
+        assert_eq!(inventory.procedures()[0].statements().len(), 3);
+        let ModuleBodyStatement::ApplicationAssignment(empty) =
+            &inventory.procedures()[0].statements()[0]
+        else {
+            panic!("empty application does not consume argument quota")
+        };
+        assert!(empty.argument_values().is_empty());
+    }
+
+    #[test]
+    fn application_argument_large_lists_are_retained_and_charged_before_later_calls() {
+        let values = (0..128)
+            .map(|number| number.to_string())
+            .collect::<Vec<_>>()
+            .join(",");
+        let source =
+            format!("Sub Run()\nvalue=Read({values})\nCall Finish(1,True,False)\nEnd Sub\n");
+        let limits = ModuleLimits::new(source.len(), 4, 1).with_max_arguments(131);
+        let inventory =
+            module_inventory(source.as_bytes(), limits, &mut || Ok::<(), ()>(())).unwrap();
+        let ModuleBodyStatement::ApplicationAssignment(assignment) =
+            &inventory.procedures()[0].statements()[0]
+        else {
+            panic!("many application arguments retained")
+        };
+        assert_eq!(assignment.argument_values().len(), 128);
+        for (index, value) in assignment.argument_values().iter().enumerate() {
+            assert_eq!(&source[value.span()], index.to_string());
+        }
+        for maximum in [0, 1, 127, 128, 130] {
+            assert_eq!(
+                module_inventory(
+                    source.as_bytes(),
+                    limits.with_max_arguments(maximum),
+                    &mut || Ok::<(), ()>(())
+                ),
+                Err(ModuleError::ArgumentLimit),
+                "argument ceiling {maximum}"
+            );
+        }
+    }
+
+    #[test]
+    fn application_assignment_late_invalid_tails_reject_every_preceding_module_record() {
+        for body in [
+            "value=Read(1,)",
+            "value=Read(,1)",
+            "value=Read(1,,2)",
+            "value=Read(1,next:=2)",
+            "value=Read(1,ByVal next)",
+            "value=Read(1,next())",
+            "value=Read(1,next.member)",
+            "value=Read(1,(next))",
+            "value=Read(1,-2)",
+            "value=Read(1,+2)",
+            "value=Read(1,2.0)",
+            "value=Read(1,2E3)",
+            "value=Read(1,#1/1/2000#)",
+            "value=Read(1,next$)",
+            "value=Read(1) extra",
+            "value=Read(1)()",
+            "value=Read(1).member",
+            "value=Read(1)+2",
+            "value=Read 1,2",
+            "value=holder.Read(1)",
+            "value(1)=Read()",
+            "value=Read(1,\"open",
+            "value=Read(1,\"continued _\n",
+            "value=Read(1, ' inline\n2)",
+            "value=Read(1\n)",
+            "value=Read(1,\0)",
+            "value=Read(1,\r2)",
+            "Const Local As Long=Read()",
+            "Dim local As Long=Read()",
+            "value=Read() Rem tail",
+        ] {
+            let source = format!(
+                "Const Seed=7\nSub Accepted()\nprevious=Read(1)\nEnd Sub\nSub Rejected()\nvalue=Read(True)\n{body}\nEnd Sub\n"
+            );
+            assert!(
+                matches!(
+                    parse(source.as_bytes()),
+                    Err(ModuleError::Unsupported { .. })
+                ),
+                "{body:?}"
+            );
+        }
+        for source in [
+            "Const Seed=Read()\nSub Run()\nEnd Sub\n",
+            "Sub Run(Optional value=Read())\nEnd Sub\n",
+            "Sub Run(Optional value As Long=Read(1))\nEnd Sub\n",
+            "Sub Run(value=Read())\nEnd Sub\n",
+            "value=Read()\nSub Run()\nEnd Sub\n",
+            "Sub Run()\nEnd Sub\nvalue=Read()\n",
+        ] {
+            assert!(
+                matches!(
+                    parse(source.as_bytes()),
+                    Err(ModuleError::Unsupported { .. })
+                ),
+                "{source}"
+            );
+        }
+    }
+
+    #[test]
+    fn application_assignment_module_cancellation_never_returns_a_partial_inventory() {
+        let source = format!(
+            "Const Seed=7\nSub First(value)\nresult=Read({},{},\"{}\" _\r\n,{}True)\nCall Finish(Seed)\nEnd Sub\nSub Second()\nLet result=[Read](False)\nEnd Sub\n",
+            "9".repeat(512),
+            "value".repeat(128),
+            "x\"\"".repeat(256),
+            " _\n".repeat(16)
+        );
+        let limits = ModuleLimits::new(source.len(), 8, 2)
+            .with_max_parameters(1)
+            .with_max_arguments(6);
+        let mut checkpoints = 0;
+        let inventory = module_inventory(source.as_bytes(), limits, &mut || {
+            checkpoints += 1;
+            Ok::<(), ()>(())
+        })
+        .unwrap();
+        assert_eq!(inventory.procedures().len(), 2);
+        assert_eq!(inventory.procedures()[0].statements().len(), 2);
+        for cancelled_at in 1..=checkpoints {
+            let mut calls = 0;
+            assert_eq!(
+                module_inventory(source.as_bytes(), limits, &mut || {
+                    calls += 1;
+                    if calls == cancelled_at {
+                        Err("stop")
+                    } else {
+                        Ok(())
+                    }
+                }),
+                Err(ModuleError::Cancelled("stop")),
+                "module checkpoint {cancelled_at}"
+            );
+            assert_eq!(calls, cancelled_at);
+        }
+    }
+
+    #[test]
+    fn application_assignment_module_all_byte_suffixes_preserve_comment_and_colon_boundaries() {
+        for byte in 0..=u8::MAX {
+            let source = [
+                b"Sub Run()\nvalue=Read(1)".as_slice(),
+                &[byte],
+                b"\nEnd Sub\n",
+            ]
+            .concat();
+            let result = parse(&source);
+            let expected = matches!(byte, b' ' | b'\t' | b'\n' | b'\r' | 0x0c | b'\'' | b':');
+            assert_eq!(result.is_ok(), expected, "module suffix byte {byte}");
+            if let Ok(inventory) = result {
+                assert_eq!(inventory.procedures()[0].statements().len(), 1);
+                let ModuleBodyStatement::ApplicationAssignment(assignment) =
+                    &inventory.procedures()[0].statements()[0]
+                else {
+                    panic!("original application retained before trivia boundary")
+                };
+                assert_eq!(&source[assignment.statement()], b"value=Read(1)");
+                assert_eq!(&source[assignment.arguments()], b"(1)");
+                assert_eq!(&source[assignment.argument_values()[0].span()], b"1");
+                assert_eq!(inventory.source_len(), source.len());
+            }
         }
     }
 }

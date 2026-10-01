@@ -43,8 +43,9 @@ pub use module::{
     ModuleVariableVisibility, module_inventory,
 };
 pub use module_body::{
-    ModuleBodyStatement, ModuleCall, ModuleLocalDeclaration, ModuleLocalKind,
-    ModuleScalarAssignment, ModuleScalarValue, ModuleScalarValueKind, ModuleZeroArgumentCall,
+    ModuleApplicationAssignment, ModuleBodyStatement, ModuleCall, ModuleLocalDeclaration,
+    ModuleLocalKind, ModuleScalarAssignment, ModuleScalarValue, ModuleScalarValueKind,
+    ModuleZeroArgumentCall,
 };
 pub use parameter::{
     array_parameter_modifiers, parameter_declarations_cover, parameter_trivia_len,
