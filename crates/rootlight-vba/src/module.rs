@@ -472,7 +472,7 @@ impl<E: std::error::Error + 'static> std::error::Error for ModuleError<E> {
 /// type clauses or explicit intrinsic `As` types and written `ByVal`/`ByRef`.
 /// Type absence is preserved without a synthetic Variant source or identity.
 /// Optional parameters carry the keyword before any passing modifier and may
-/// omit an authored default or retain one unsigned decimal/hexadecimal/octal integer, physically closed
+/// omit an authored default or retain one unsigned INTEGER or FLOAT token, physically closed
 /// string, Boolean literal or simple name requiring independent constant binding.
 /// Parameter-token boundaries also retain form-feed trivia and bare Rem comments;
 /// a comment-only parenthesized list is empty, never a synthetic Rem parameter.
@@ -488,15 +488,17 @@ impl<E: std::error::Error + 'static> std::error::Error for ModuleError<E> {
 /// A module-level Dim, Public or Private statement retains a complete comma list
 /// of uninitialized variables, each with an absent or written intrinsic As type.
 /// Members share statement and visibility ranges, not types or array bounds.
-/// Array bounds may be empty or a complete comma list of signed/unsigned decimal, hexadecimal or octal
+/// Array bounds may be empty or a complete comma list of signed/unsigned INTEGER or FLOAT
 /// endpoints, each upper-only or lower To upper. Magnitudes and runtime array sizes are not
 /// evaluated, and no per-dimension records are retained. Named/expression bounds,
 /// initializers, incomplete declaration lists and richer prefixes remain unsupported.
+/// Numeric endpoint spelling does not prove runtime legality or Long coercibility;
+/// VBA's broader constant-expression bounds remain outside this source-only slice.
 /// Body Dim lists retain the same per-member scalar/numeric-array syntax in
 /// their containing procedure, without module visibility or inferred types.
 /// A single typed scalar Dim keeps its distinct legacy declaration record.
 /// Local Const still admits one typed scalar per statement. Assignments have
-/// an optional Let prefix. Const values are unsigned decimal/hexadecimal/octal integers,
+/// an optional Let prefix. Const values are unsigned INTEGER or FLOAT tokens,
 /// physically closed doubled-quote strings or True/False; assignments additionally
 /// admit names, grouped expressions, unary signs/Not, ordinary arithmetic,
 /// concatenation, comparison and logical operators, and nested simple-name applications.
@@ -506,8 +508,11 @@ impl<E: std::error::Error + 'static> std::error::Error for ModuleError<E> {
 /// parentheses containing a complete positional list of admitted expressions, with
 /// space/tab-based logical trivia. Named, omitted, ByVal and nonparenthesized
 /// arguments are unsupported. Integer literals may retain one authored `%`, `&`
-/// or `^` suffix without type or value evaluation. Repeated, floating and ordinary-name
+/// or `^` suffix; FLOAT tokens retain a point, E/e/D/d exponent or one `!`, `#` or `@`
+/// suffix without value, range, rounding or type evaluation. Repeated and ordinary-name
 /// suffixes stay outside this slice rather than being reinterpreted as operators.
+/// FLOAT tokens have no INTEGER `^` or `&` suffix; power and unambiguous
+/// concatenation may follow them without intervening trivia.
 /// A valid radix prefix following an operand is conservatively unsupported rather
 /// than split into concatenation and a fabricated ordinary-name or decimal atom.
 /// A distinct concatenation token, as in `[a] & &77`, is admitted.
@@ -1251,7 +1256,7 @@ fn numeric_array_bounds<E>(
     let mut work_nodes = 1_usize;
     loop {
         check()?;
-        let Some(endpoint_nodes) = array_integer(text, cursor, check)? else {
+        let Some(endpoint_nodes) = array_numeric_endpoint(text, cursor, check)? else {
             return Ok(None);
         };
         let Some(next_work) = work_nodes
@@ -1271,7 +1276,7 @@ fn numeric_array_bounds<E>(
         {
             *cursor += 2;
             *cursor += logical_whitespace_len(text.get(*cursor..).unwrap_or_default(), check)?;
-            let Some(endpoint_nodes) = array_integer(text, cursor, check)? else {
+            let Some(endpoint_nodes) = array_numeric_endpoint(text, cursor, check)? else {
                 return Ok(None);
             };
             let Some(next_work) = work_nodes.checked_add(endpoint_nodes) else {
@@ -1299,7 +1304,7 @@ fn numeric_array_bounds<E>(
     }
 }
 
-fn array_integer<E>(
+fn array_numeric_endpoint<E>(
     text: &[u8],
     cursor: &mut usize,
     check: &mut impl FnMut() -> Result<(), E>,
@@ -1310,7 +1315,7 @@ fn array_integer<E>(
         *cursor += 1;
         *cursor += logical_whitespace_len(text.get(*cursor..).unwrap_or_default(), check)?;
     }
-    Ok(super::module_body::integer_value(text, cursor, check)?.map(|_| 1 + usize::from(signed)))
+    Ok(super::module_body::numeric_value(text, cursor, check)?.map(|_| 1 + usize::from(signed)))
 }
 
 fn reserve_variables<E>(
@@ -1615,7 +1620,7 @@ fn word<'a, E>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{ModuleIntegerSuffix, ModuleScalarValueKind};
+    use crate::{ModuleFloatSuffix, ModuleIntegerSuffix, ModuleScalarValueKind};
 
     fn parse(source: &[u8]) -> Result<ModuleInventory, ModuleError<()>> {
         module_inventory(
@@ -1623,6 +1628,278 @@ mod tests {
             ModuleLimits::new(source.len(), source.len(), source.len()),
             &mut || Ok(()),
         )
+    }
+
+    #[test]
+    fn float_module_atoms_defaults_and_signed_arrays_retain_exact_source_identity() {
+        for atom in [
+            "1.0", ".5", "10.5", "7.5", "5.", "1E2", "1e+2", "1D-2", "1d2", "1.E+2", ".5d-2", "007",
+        ] {
+            for (suffix, marker) in [
+                (None, ""),
+                (Some(ModuleFloatSuffix::Exclamation), "!"),
+                (Some(ModuleFloatSuffix::Hash), "#"),
+                (Some(ModuleFloatSuffix::At), "@"),
+            ] {
+                if atom == "007" && suffix.is_none() {
+                    continue;
+                }
+                let spelling = format!("{atom}{marker}");
+                for newline in ["\n", "\r\n"] {
+                    let bounds = format!("(- _{newline} {spelling} To +{spelling})");
+                    let source = format!(
+                        "Public Const [Seed] = _{newline} {spelling}{newline}Private [moduleGrid]{bounds}{newline}Sub Run(Optional value As Double = _{newline} {spelling}, Optional other={spelling}){newline}Const [Local] As Double={spelling}{newline}Dim [localGrid]{bounds}{newline}sink={spelling}:Call Target({spelling}){newline}sink=Read({spelling}){newline}End Sub{newline}"
+                    );
+                    let inventory = module_inventory(
+                        source.as_bytes(),
+                        ModuleLimits::new(source.len(), 9, 1)
+                            .with_max_parameters(2)
+                            .with_max_arguments(2)
+                            .with_max_expression_nodes(0),
+                        &mut || Ok::<(), ()>(()),
+                    )
+                    .unwrap();
+                    assert_eq!(inventory.statement_count(), 9);
+                    assert_eq!(inventory.constants().len(), 1);
+                    let constant = &inventory.constants()[0];
+                    assert_eq!(&source[constant.name()], "[Seed]");
+                    assert_eq!(
+                        constant.value().kind(),
+                        ModuleScalarValueKind::UnsignedFloat
+                    );
+                    assert_eq!(constant.value().integer_suffix(), None);
+                    assert_eq!(constant.value().float_suffix(), suffix);
+                    assert_eq!(&source[constant.value().span()], spelling);
+                    assert_eq!(constant.declarator().end, constant.value().span().end);
+                    assert_eq!(
+                        &source[inventory.variables()[0].array_bounds().unwrap()],
+                        bounds
+                    );
+                    assert_eq!(inventory.variables()[0].array_work_nodes(), 6);
+                    let procedure = &inventory.procedures()[0];
+                    assert_eq!(procedure.parameters().len(), 2);
+                    for parameter in procedure.parameters() {
+                        let value = parameter.default_value().unwrap();
+                        assert_eq!(value.kind(), ModuleScalarValueKind::UnsignedFloat);
+                        assert_eq!(value.integer_suffix(), None);
+                        assert_eq!(value.float_suffix(), suffix);
+                        assert_eq!(&source[value.span()], spelling);
+                        assert_eq!(parameter.declaration().end, value.span().end);
+                    }
+                    assert!(procedure.parameters()[1].type_range().is_none());
+                    assert_eq!(procedure.statements().len(), 5);
+                    for statement in procedure.statements() {
+                        let value = match statement {
+                            ModuleBodyStatement::Declaration(local) => local.value().unwrap(),
+                            ModuleBodyStatement::Variables(local) => {
+                                assert_eq!(local.variables().len(), 1);
+                                assert_eq!(
+                                    &source[local.variables()[0].array_bounds().unwrap()],
+                                    bounds
+                                );
+                                assert_eq!(local.variables()[0].array_work_nodes(), 6);
+                                continue;
+                            }
+                            ModuleBodyStatement::Assignment(assignment) => assignment.value(),
+                            ModuleBodyStatement::Call(call) => &call.argument_values()[0],
+                            ModuleBodyStatement::ApplicationAssignment(assignment) => {
+                                &assignment.argument_values()[0]
+                            }
+                            _ => panic!("FLOAT atoms preserve legacy body categories"),
+                        };
+                        assert_eq!(value.kind(), ModuleScalarValueKind::UnsignedFloat);
+                        assert_eq!(value.integer_suffix(), None);
+                        assert_eq!(value.float_suffix(), suffix);
+                        assert_eq!(&source[value.span()], spelling);
+                        assert!(statement.statement().start < value.span().start);
+                        assert!(value.span().end <= statement.statement().end);
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn float_mixed_numeric_modules_keep_shared_exact_short_and_zero_ceilings() {
+        let source = b"Const Seed=7!\nDim moduleGrid(-.5D+2 To+&H2&,7#)\nSub Run(Optional limit=1e-2)\nDim first,localGrid(-1E-2# To+.5D+3@,&77^),pending()\nsink=5.\nCall Target(1.0,.5d+2#)\nsink=Read(7!)\nsink=Read(1E2,+.5D+3@)\nCall Target(7# + 1.5!)\nEnd Sub\n";
+        let limits = ModuleLimits::new(source.len(), 10, 1)
+            .with_max_parameters(1)
+            .with_max_arguments(6)
+            .with_max_expression_nodes(10);
+        let inventory = module_inventory(source, limits, &mut || Ok::<(), ()>(())).unwrap();
+        assert_eq!(inventory.statement_count(), 10);
+        assert_eq!(inventory.variables()[0].array_work_nodes(), 8);
+        assert_eq!(
+            &source[inventory.variables()[0].array_bounds().unwrap()],
+            b"(-.5D+2 To+&H2&,7#)"
+        );
+        let body = inventory.procedures()[0].statements();
+        assert_eq!(body.len(), 6);
+        let ModuleBodyStatement::Variables(local) = &body[0] else {
+            panic!("mixed local numeric bounds expected")
+        };
+        assert_eq!(local.variables().len(), 3);
+        assert_eq!(local.variables()[1].array_work_nodes(), 8);
+        assert_eq!(local.variables()[2].array_work_nodes(), 1);
+        let ModuleBodyStatement::ExpressionAssignment(assignment) = &body[4] else {
+            panic!("signed FLOAT application argument expected")
+        };
+        assert_eq!(assignment.inventory().work_nodes(), 5);
+        assert_eq!(assignment.inventory().argument_count(), 2);
+        assert_eq!(
+            &source[assignment.inventory().values()[1].span()],
+            b".5D+3@"
+        );
+        let ModuleBodyStatement::ExpressionCall(call) = &body[5] else {
+            panic!("composed FLOAT Call argument expected")
+        };
+        assert_eq!(call.inventory().work_nodes(), 5);
+        assert_eq!(call.inventory().argument_count(), 1);
+        for maximum in [0, 1, 9] {
+            assert_eq!(
+                module_inventory(
+                    source,
+                    limits.with_max_expression_nodes(maximum),
+                    &mut || Ok::<(), ()>(())
+                ),
+                Err(ModuleError::ExpressionLimit)
+            );
+            assert_eq!(
+                module_inventory(
+                    source,
+                    ModuleLimits::new(source.len(), maximum, 1)
+                        .with_max_parameters(1)
+                        .with_max_arguments(6)
+                        .with_max_expression_nodes(10),
+                    &mut || Ok::<(), ()>(())
+                ),
+                Err(ModuleError::StatementLimit)
+            );
+        }
+        for maximum in [0, 1, 5] {
+            assert_eq!(
+                module_inventory(source, limits.with_max_arguments(maximum), &mut || Ok::<
+                    (),
+                    (),
+                >(
+                    ()
+                )),
+                Err(ModuleError::ArgumentLimit)
+            );
+        }
+        assert_eq!(
+            module_inventory(source, limits.with_max_parameters(0), &mut || Ok::<(), ()>(
+                ()
+            )),
+            Err(ModuleError::ParameterLimit)
+        );
+        assert_eq!(
+            module_inventory(
+                source,
+                ModuleLimits::new(source.len() - 1, 10, 1),
+                &mut || Ok::<(), ()>(())
+            ),
+            Err(ModuleError::SourceLimit)
+        );
+    }
+
+    #[test]
+    fn float_late_malformed_tokens_and_unimplemented_constant_bounds_close_the_module() {
+        for atom in [
+            "1e", "1E+", "1D-", ".e2", "1..2", "1.5%", "1.5!!", "1.5#@", "1.5@2", "1.5$",
+            "1.2eTrue", "1e\"x\"", "1e2e3", "&H1!", "&O7#", "&77@",
+        ] {
+            for tail in [
+                format!("Const Broken={atom}"),
+                format!("Dim good,broken({atom})"),
+                format!("Sub Bad(Optional value As Double={atom})\nEnd Sub"),
+                format!("Sub Bad()\nDim good,broken({atom})\nEnd Sub"),
+                format!("Sub Bad()\nCall Target(1.5,{atom})\nEnd Sub"),
+                format!("Sub Bad()\nsink={atom}\nEnd Sub"),
+            ] {
+                let source = format!(
+                    "Const Seed=1.5\nPrivate grid(-.5D+2 To+7#)\nSub Good()\nCall Target(7!)\nEnd Sub\n{tail}\n"
+                );
+                let Err(ModuleError::Unsupported { range }) = parse(source.as_bytes()) else {
+                    panic!("unsupported complete late token expected: {tail}")
+                };
+                assert!(source[range].contains(atom), "{tail}");
+            }
+        }
+        for tail in [
+            "Const Broken=-1.5",
+            "Sub Bad(Optional value=-1.5)\nEnd Sub",
+            "Dim grid(1.5 + 1)",
+            "Dim grid(Upper)",
+            "Sub Bad()\nsink=1E2^\nEnd Sub",
+            "Sub Bad()\nsink=1.5&2\nEnd Sub",
+        ] {
+            let source = format!("Const Seed=7#\nSub Good()\nCall Target(1.5)\nEnd Sub\n{tail}\n");
+            assert!(
+                matches!(
+                    parse(source.as_bytes()),
+                    Err(ModuleError::Unsupported { .. })
+                ),
+                "{tail}"
+            );
+        }
+    }
+
+    #[test]
+    fn float_source_only_module_scans_cancel_at_every_significand_exponent_and_rebase_checkpoint() {
+        let significand = "9".repeat(2048);
+        let exponent = "8".repeat(2048);
+        let first = format!("{significand}.{significand}E-{exponent}#");
+        let second = format!(".{significand}d+{exponent}@");
+        let bounds = format!("(- _\r\n {first} To + _\n {second})");
+        let source = format!(
+            "Const Seed={first}\nPrivate grid{bounds}\nSub Run(Optional value={second})\nDim local{bounds}\nCall Target({first} + 1, Inner({second}) * -2.5!)\nEnd Sub\n"
+        );
+        let limits = ModuleLimits::new(source.len(), 6, 1)
+            .with_max_parameters(1)
+            .with_max_arguments(3)
+            .with_max_expression_nodes(11);
+        let mut checkpoints = 0;
+        let inventory = module_inventory(source.as_bytes(), limits, &mut || {
+            checkpoints += 1;
+            Ok::<(), ()>(())
+        })
+        .unwrap();
+        assert_eq!(inventory.statement_count(), 6);
+        assert_eq!(
+            inventory.constants()[0].value().kind(),
+            ModuleScalarValueKind::UnsignedFloat
+        );
+        assert_eq!(inventory.constants()[0].value().integer_suffix(), None);
+        assert_eq!(
+            inventory.constants()[0].value().float_suffix(),
+            Some(ModuleFloatSuffix::Hash)
+        );
+        assert_eq!(&source[inventory.constants()[0].value().span()], first);
+        assert_eq!(
+            &source[inventory.variables()[0].array_bounds().unwrap()],
+            bounds
+        );
+        assert_eq!(inventory.variables()[0].array_work_nodes(), 6);
+        let ModuleBodyStatement::ExpressionCall(call) = &inventory.procedures()[0].statements()[1]
+        else {
+            panic!("source-only FLOAT expressions expected")
+        };
+        assert_eq!(call.inventory().work_nodes(), 11);
+        assert_eq!(call.inventory().argument_count(), 3);
+        assert!(checkpoints > 32);
+        for stop in 1..=checkpoints {
+            let mut calls = 0;
+            assert_eq!(
+                module_inventory(source.as_bytes(), limits, &mut || {
+                    calls += 1;
+                    if calls == stop { Err("stop") } else { Ok(()) }
+                }),
+                Err(ModuleError::Cancelled("stop")),
+                "checkpoint {stop}"
+            );
+            assert_eq!(calls, stop);
+        }
     }
 
     #[test]
@@ -3465,16 +3742,16 @@ mod tests {
             "(1/2)",
             "(1^2)",
             "(1 & 2)",
-            "(1.2)",
-            "(.2)",
-            "(1e2)",
-            "(10.5)",
-            "(7.5)",
+            "(1.2e)",
+            "(.2d)",
+            "(1e+)",
+            "(10.5e-)",
+            "(7.5d+)",
             "(1%%)",
             "(1&&)",
-            "(1!)",
-            "(1#)",
-            "(1@)",
+            "(1!!)",
+            "(1##)",
+            "(1@@)",
             "(1$)",
             "(\"1\")",
             "(#1#)",
@@ -3653,12 +3930,16 @@ mod tests {
                 (
                     b"(".as_slice(),
                     b"2)".as_slice(),
-                    matches!(byte, b' ' | b'\t' | b'+' | b'-' | b'&') || byte.is_ascii_digit(),
+                    matches!(byte, b' ' | b'\t' | b'+' | b'-' | b'&' | b'.')
+                        || byte.is_ascii_digit(),
                 ),
                 (
                     b"(1".as_slice(),
                     b")".as_slice(),
-                    matches!(byte, b' ' | b'\t' | b'%' | b'&' | b'^') || byte.is_ascii_digit(),
+                    matches!(
+                        byte,
+                        b' ' | b'\t' | b'%' | b'&' | b'^' | b'.' | b'!' | b'#' | b'@'
+                    ) || byte.is_ascii_digit(),
                 ),
                 (
                     b"(".as_slice(),
@@ -3669,17 +3950,22 @@ mod tests {
                 (
                     b"(1 To ".as_slice(),
                     b"2)".as_slice(),
-                    matches!(byte, b' ' | b'\t' | b'+' | b'-' | b'&') || byte.is_ascii_digit(),
+                    matches!(byte, b' ' | b'\t' | b'+' | b'-' | b'&' | b'.')
+                        || byte.is_ascii_digit(),
                 ),
                 (
                     b"(1,".as_slice(),
                     b"2)".as_slice(),
-                    matches!(byte, b' ' | b'\t' | b'+' | b'-' | b'&') || byte.is_ascii_digit(),
+                    matches!(byte, b' ' | b'\t' | b'+' | b'-' | b'&' | b'.')
+                        || byte.is_ascii_digit(),
                 ),
                 (
                     b"(1".as_slice(),
                     b"To2)".as_slice(),
-                    matches!(byte, b' ' | b'\t' | b'%' | b'&' | b'^') || byte.is_ascii_digit(),
+                    matches!(
+                        byte,
+                        b' ' | b'\t' | b'%' | b'&' | b'^' | b'.' | b'!' | b'#' | b'@'
+                    ) || byte.is_ascii_digit(),
                 ),
                 (
                     b"(1 T".as_slice(),
@@ -3711,7 +3997,7 @@ mod tests {
             let result = parse(&source);
             assert_eq!(
                 result.is_ok(),
-                matches!(byte, b' ' | b'\t' | b'+' | b'-' | b'&') || byte.is_ascii_digit(),
+                matches!(byte, b' ' | b'\t' | b'+' | b'-' | b'&' | b'.') || byte.is_ascii_digit(),
                 "module array byte {byte}"
             );
             if let Ok(inventory) = result {
@@ -4036,10 +4322,10 @@ mod tests {
             "Const Value=Empty",
             "Const Value=-1",
             "Const Value=+1",
-            "Const Value=1.0",
-            "Const Value=.1",
-            "Const Value=1e2",
-            "Const Value=1.5",
+            "Const Value=1.0e",
+            "Const Value=.1d",
+            "Const Value=1e+",
+            "Const Value=1.5e-",
             "Const Value=#1/1/2000#",
             "Const Value=1%%",
             "Const Value=TrueRem",
@@ -4227,14 +4513,14 @@ mod tests {
                 (
                     b"Const [Value]=".as_slice(),
                     b"1".as_slice(),
-                    byte.is_ascii_digit() || matches!(byte, b' ' | b'\t' | b'&'),
+                    byte.is_ascii_digit() || matches!(byte, b' ' | b'\t' | b'&' | b'.'),
                 ),
                 (
                     b"Const [Value]=1".as_slice(),
                     b"".as_slice(),
                     byte.is_ascii_digit()
                         || byte.is_ascii_whitespace() && byte != b'\r'
-                        || matches!(byte, b'\'' | b'%' | b'&' | b'^'),
+                        || matches!(byte, b'\'' | b'%' | b'&' | b'^' | b'.' | b'!' | b'#' | b'@'),
                 ),
                 (
                     b"Const [Value]=True".as_slice(),
@@ -5035,11 +5321,11 @@ mod tests {
             "Optional value As Long = Empty",
             "Optional value As Long = -1",
             "Optional value As Long = +1",
-            "Optional value As Long = 1.0",
-            "Optional value As Long = .1",
-            "Optional value As Long = 1e2",
-            "Optional value As Long = 1.5",
-            "Optional value As Long = 7.5",
+            "Optional value As Long = 1.0e",
+            "Optional value As Long = .1d",
+            "Optional value As Long = 1e+",
+            "Optional value As Long = 1.5e-",
+            "Optional value As Long = 7.5d+",
             "Optional value As Long = #1/1/2000#",
             "Optional value As Long = 1%%",
             "Optional value As Long = 1+2",
@@ -5212,13 +5498,16 @@ mod tests {
                     b"Sub Run(Optional value As Long=1".as_slice(),
                     b")\nEnd Sub\n".as_slice(),
                     byte.is_ascii_digit()
-                        || matches!(byte, b' ' | b'\t' | b'\x0c' | b'%' | b'&' | b'^'),
+                        || matches!(
+                            byte,
+                            b' ' | b'\t' | b'\x0c' | b'%' | b'&' | b'^' | b'.' | b'!' | b'#' | b'@'
+                        ),
                 ),
                 (
                     b"Sub Run(Optional value As Long=".as_slice(),
                     b"1)\nEnd Sub\n".as_slice(),
                     byte.is_ascii_alphanumeric()
-                        || matches!(byte, b'_' | b' ' | b'\t' | b'\x0c' | b'&'),
+                        || matches!(byte, b'_' | b' ' | b'\t' | b'\x0c' | b'&' | b'.'),
                 ),
                 (
                     b"Sub Run(Optional value As Boolean=True".as_slice(),
@@ -5565,10 +5854,10 @@ mod tests {
             "Optional value=Empty",
             "Optional value=-1",
             "Optional value=+1",
-            "Optional value=1.0",
-            "Optional value=.1",
-            "Optional value=1e2",
-            "Optional value=1.5",
+            "Optional value=1.0e",
+            "Optional value=.1d",
+            "Optional value=1e+",
+            "Optional value=1.5e-",
             "Optional value=#1/1/2000#",
             "Optional value=1%%",
             "Optional value=1+2",
@@ -5740,13 +6029,16 @@ mod tests {
                     b"Sub Run(Optional [value]=1".as_slice(),
                     b")\nEnd Sub\n".as_slice(),
                     byte.is_ascii_digit()
-                        || matches!(byte, b' ' | b'\t' | b'\x0c' | b'%' | b'&' | b'^'),
+                        || matches!(
+                            byte,
+                            b' ' | b'\t' | b'\x0c' | b'%' | b'&' | b'^' | b'.' | b'!' | b'#' | b'@'
+                        ),
                 ),
                 (
                     b"Sub Run(Optional [value]=".as_slice(),
                     b"1)\nEnd Sub\n".as_slice(),
                     byte.is_ascii_alphanumeric()
-                        || matches!(byte, b'_' | b' ' | b'\t' | b'\x0c' | b'&'),
+                        || matches!(byte, b'_' | b' ' | b'\t' | b'\x0c' | b'&' | b'.'),
                 ),
                 (
                     b"Sub Run(Optional [value]=True".as_slice(),
@@ -6461,7 +6753,7 @@ mod tests {
             "Call Finish(1,value:=2)",
             "Call Finish(1,ByVal value)",
             "Call Finish(1,target.member)",
-            "Call Finish(1,2.0)",
+            "Call Finish(1,2.0e)",
             "Call Finish(1,#1/1/2000#)",
             "Call Finish(1,value$)",
             "Call Finish(1) extra",
@@ -7506,16 +7798,16 @@ mod tests {
             "value=Read(1,next())",
             "value=Read(1,next.member)",
             "value=Read(1,(next))",
-            "value=Read(1,-2.0)",
-            "value=Read(1,+2.5)",
-            "value=Read(1,2.0)",
-            "value=Read(1,2E3)",
+            "value=Read(1,-2.0e)",
+            "value=Read(1,+2.5d)",
+            "value=Read(1,2.0e+)",
+            "value=Read(1,2E+)",
             "value=Read(1,#1/1/2000#)",
             "value=Read(1,next$)",
             "value=Read(1) extra",
             "value=Read(1)()",
             "value=Read(1).member",
-            "value=Read(1)+2.5",
+            "value=Read(1)+2.5e",
             "value=Read 1,2",
             "value=holder.Read(1)",
             "value(1)=Read()",
@@ -7847,8 +8139,8 @@ mod tests {
             "Call Target(Line(1)+2)",
             "Call Target(2^3)",
             "Call Target(a&b)",
-            "Call Target(1.0+2)",
-            "Call Target(10.5+2)",
+            "Call Target(1.0e+ +2)",
+            "Call Target(10.5d+ +2)",
             "Call Target(value$+1)",
             "Call Target(1+2) extra",
             "Call Target value+1",
@@ -8033,9 +8325,9 @@ mod tests {
             "sink=F(ByVal value)",
             "sink=F(G(1).member)",
             "sink=F(1)(2)",
-            "sink=F(1)+2.5",
-            "sink=F(1)+2.0",
-            "sink=1E2+3",
+            "sink=F(1)+2.5e",
+            "sink=F(1)+2.0d",
+            "sink=1E+ +3",
             "sink=#1/1/2000#",
             "sink=value$+1",
             "sink=Me+1",

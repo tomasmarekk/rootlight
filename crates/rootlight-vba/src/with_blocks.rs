@@ -206,10 +206,16 @@ pub(crate) fn statement<E>(
                 depth = next;
                 cursor += 1;
             }
+            // A decimal trailing point can precede a FLOAT Hash suffix. This
+            // boundary reader leaves complete numeric validity to its consumers.
             b'#' if !directive
                 && !source
                     .get(cursor.wrapping_sub(1))
-                    .is_some_and(|b| b.is_ascii_alphanumeric() || *b == b')') =>
+                    .is_some_and(|b| b.is_ascii_alphanumeric() || *b == b')')
+                && !(source.get(cursor.wrapping_sub(1)) == Some(&b'.')
+                    && source
+                        .get(cursor.wrapping_sub(2))
+                        .is_some_and(u8::is_ascii_digit)) =>
             {
                 cursor += 1;
                 while source
@@ -292,6 +298,116 @@ fn trimmed(source: &[u8], start: usize, end: usize) -> Range<usize> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn float_trailing_point_hash_suffix_preserves_exact_statement_boundaries() {
+        for literal in ["1.#", "5.#"] {
+            for delimiter in [":", "\n", "\r\n", ""] {
+                let text = format!("  sink={literal} \t");
+                let source = format!(
+                    "prefix\n{text}{delimiter}{}",
+                    if delimiter.is_empty() { "" } else { "next" }
+                );
+                let (range, next) =
+                    statement(source.as_bytes(), 7, false, &mut || Ok::<(), ()>(()))
+                        .unwrap()
+                        .unwrap();
+                assert_eq!(range, 9..9 + "sink=".len() + literal.len());
+                assert_eq!(&source[range], format!("sink={literal}"));
+                assert_eq!(next, 7 + text.len() + delimiter.len());
+                if !delimiter.is_empty() {
+                    assert_eq!(
+                        statement(source.as_bytes(), next, false, &mut || Ok::<(), ()>(()))
+                            .unwrap(),
+                        Some((next..source.len(), source.len()))
+                    );
+                }
+            }
+        }
+        for text in [
+            "Const Seed=1.#",
+            "Call Target(1.#,5.#)",
+            "Dim grid(-1.# To+5.#)",
+            "sink= _\r\n 1.# + _\n 5.#",
+        ] {
+            let source = format!("{text}\nnext");
+            assert_eq!(
+                statement(source.as_bytes(), 0, false, &mut || Ok::<(), ()>(())).unwrap(),
+                Some((0..text.len(), text.len() + 1))
+            );
+        }
+    }
+
+    #[test]
+    fn float_hash_boundaries_preserve_dates_quotes_directives_and_comments() {
+        for text in [
+            "x=#1/2/2000 10:30#",
+            "x=\"1.#: With hidden\"",
+            "x=[1.#: With hidden]",
+            "#If Enabled Then",
+        ] {
+            let source = format!("{text}:next");
+            assert_eq!(
+                statement(source.as_bytes(), 0, false, &mut || Ok::<(), ()>(())).unwrap(),
+                Some((0..text.len(), text.len() + 1))
+            );
+        }
+        for source in [
+            "x=.#unterminated\n",
+            "x=value.#unterminated\n",
+            "x=1. #unterminated\n",
+        ] {
+            assert!(
+                statement(source.as_bytes(), 0, false, &mut || Ok::<(), ()>(()))
+                    .unwrap()
+                    .is_none()
+            );
+        }
+        let input = "With item\nRem 1.#: With hidden\nx=1.#: y=5.#\nx=\"End With:1.#\": x=[With]\nx=#1/2/2000 10:30#\n#If Enabled Then\nx= _\r\n 1.# + _\n 5.# ' End With: With hidden\n#Else\nx=5.#\n#End If\nEnd With\n";
+        let blocks = with_blocks(input.as_bytes(), 1, &mut || Ok::<(), ()>(()))
+            .unwrap()
+            .unwrap();
+        assert_eq!(blocks.len(), 1);
+        assert_eq!(blocks[0].header(), 0.."With item".len());
+        assert_eq!(&input[blocks[0].receiver()], "item");
+        assert_eq!(
+            blocks[0].body(),
+            "With item\n".len()..input.rfind("End With").unwrap()
+        );
+        assert_eq!(&input[blocks[0].terminator()], "End With");
+    }
+
+    #[test]
+    fn float_hash_statement_scans_propagate_cancellation_at_every_checkpoint() {
+        let input = format!(
+            "With item\nsink={}.#: sink= _\r\n 5.# ' {}\nEnd With\n",
+            "9".repeat(2048),
+            "1.#: With hidden ".repeat(128)
+        );
+        let mut checkpoints = 0;
+        assert_eq!(
+            with_blocks(input.as_bytes(), 1, &mut || {
+                checkpoints += 1;
+                Ok::<(), ()>(())
+            })
+            .unwrap()
+            .unwrap()
+            .len(),
+            1
+        );
+        assert!(checkpoints > 8);
+        for stop in 1..=checkpoints {
+            let mut calls = 0;
+            assert_eq!(
+                with_blocks(input.as_bytes(), 1, &mut || {
+                    calls += 1;
+                    if calls == stop { Err("stop") } else { Ok(()) }
+                }),
+                Err("stop")
+            );
+            assert_eq!(calls, stop);
+        }
+    }
 
     #[test]
     fn nested_headers_remain_in_the_outer_body() {

@@ -576,7 +576,7 @@ impl<'a> Parser<'a> {
                     return Ok(None);
                 };
                 // MS-VBAL 3.3.2/3.3.5.3 attach suffixes to numeric literals and
-                // ordinary identifiers. The integer scanner retains one INTEGER
+                // ordinary identifiers. The numeric scanner retains one authored
                 // suffix; a remaining unsupported suffix is not a binary operator.
                 let adjacent_suffix = match value.kind() {
                     ModuleScalarValueKind::UnsignedDecimal
@@ -584,6 +584,10 @@ impl<'a> Parser<'a> {
                     | ModuleScalarValueKind::UnsignedOctal => matches!(
                         self.source.get(self.cursor),
                         Some(b'%' | b'&' | b'^' | b'!' | b'#' | b'@')
+                    ),
+                    ModuleScalarValueKind::UnsignedFloat => matches!(
+                        self.source.get(self.cursor),
+                        Some(b'%' | b'!' | b'#' | b'@' | b'$')
                     ),
                     ModuleScalarValueKind::Name
                         if self.source.get(value.span().start) != Some(&b'[') =>
@@ -1009,13 +1013,124 @@ fn rebase_inventory<E>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ModuleIntegerSuffix;
+    use crate::{ModuleFloatSuffix, ModuleIntegerSuffix};
 
     fn parse(source: &str) -> Parsed {
         Parser::new(source.as_bytes(), 0, source.len(), source.len())
             .parse(&mut || Ok::<(), ()>(()))
             .unwrap()
             .expect("complete expression")
+    }
+
+    #[test]
+    fn float_expression_atoms_preserve_exact_rebased_metadata_and_one_node() {
+        for atom in [
+            ".5", "5.", "1.0", "1E2", "1e+2", "1D-2", "1d2", "1.E+2", ".5d-2", "007",
+        ] {
+            for (suffix, marker) in [
+                (None, ""),
+                (Some(ModuleFloatSuffix::Exclamation), "!"),
+                (Some(ModuleFloatSuffix::Hash), "#"),
+                (Some(ModuleFloatSuffix::At), "@"),
+            ] {
+                if atom == "007" && suffix.is_none() {
+                    continue;
+                }
+                let spelling = format!("{atom}{marker}");
+                let range = 9..9 + spelling.len();
+                let (span, inventory) =
+                    super::inventory(spelling.as_bytes(), 0, &range, 1, 0, &mut || {
+                        Ok::<(), ()>(())
+                    })
+                    .unwrap()
+                    .unwrap();
+                assert_eq!(span, range);
+                assert_eq!(inventory.work_nodes(), 1);
+                assert_eq!(inventory.argument_count(), 0);
+                assert!(inventory.applications().is_empty());
+                assert_eq!(inventory.values().len(), 1);
+                let value = &inventory.values()[0];
+                assert_eq!(value.span(), range);
+                assert_eq!(value.kind(), ModuleScalarValueKind::UnsignedFloat);
+                assert_eq!(value.integer_suffix(), None);
+                assert_eq!(value.float_suffix(), suffix);
+                let original = format!("prefix___{spelling}tail");
+                assert_eq!(&original[value.span()], spelling);
+                assert!(matches!(
+                    super::inventory(spelling.as_bytes(), 0, &range, 0, 0, &mut || Ok::<(), ()>(
+                        ()
+                    )),
+                    Err(ModuleError::ExpressionLimit)
+                ));
+            }
+        }
+    }
+
+    #[test]
+    fn float_operator_boundaries_keep_exponent_signs_atomic_without_integer_suffix_rules() {
+        for (source, work, spellings) in [
+            ("1.5^2", 3, ["1.5", "2"]),
+            ("1.5!^2", 3, ["1.5!", "2"]),
+            ("1D-2^2", 3, ["1D-2", "2"]),
+            ("7#^1.5", 3, ["7#", "1.5"]),
+            ("1.5&8", 3, ["1.5", "8"]),
+            ("7#&8", 3, ["7#", "8"]),
+            ("1d+2&8", 3, ["1d+2", "8"]),
+            ("1.5 & &2", 3, ["1.5", "&2"]),
+            ("1.5&&2", 3, ["1.5", "&2"]),
+            ("1.5e+2+3", 3, ["1.5e+2", "3"]),
+            ("1.5!+2", 3, ["1.5!", "2"]),
+            ("(1.5)^2.5", 4, ["1.5", "2.5"]),
+            ("-1E-2 + +.5D+3#", 5, ["1E-2", ".5D+3#"]),
+            ("- _\r\n 1e-2 + _\r\n +.5d+3@", 5, ["1e-2", ".5d+3@"]),
+        ] {
+            let parsed = parse(source);
+            assert_eq!(parsed.span, 0..source.len());
+            assert_eq!(parsed.inventory.work_nodes(), work, "{source}");
+            assert_eq!(parsed.inventory.argument_count(), 0);
+            assert_eq!(parsed.inventory.values().len(), 2);
+            for (value, spelling) in parsed.inventory.values().iter().zip(spellings) {
+                assert_eq!(&source[value.span()], spelling);
+                if value.kind() == ModuleScalarValueKind::UnsignedFloat {
+                    assert_eq!(value.integer_suffix(), None);
+                }
+            }
+            for maximum in [0, work - 1] {
+                assert!(
+                    matches!(
+                        Parser::new(source.as_bytes(), 0, maximum, 0)
+                            .parse(&mut || Ok::<(), ()>(())),
+                        Err(ModuleError::ExpressionLimit)
+                    ),
+                    "{source}"
+                );
+            }
+        }
+        for source in [
+            "1E2^",
+            "1.5&",
+            "1.5&2",
+            "7#&7",
+            "1D-2&H1",
+            "1.5%",
+            "1.5$",
+            "1.5!#",
+            "7#@",
+            "1E+True",
+            "1.5e- +2",
+            "2^3",
+            "2&3",
+            "value^other",
+            "value&other",
+        ] {
+            assert!(
+                Parser::new(source.as_bytes(), 0, source.len(), source.len())
+                    .parse(&mut || Ok::<(), ()>(()))
+                    .unwrap()
+                    .is_none(),
+                "{source}"
+            );
+        }
     }
 
     #[test]
@@ -1630,9 +1745,9 @@ mod tests {
             "holder.F(1)",
             "Line(1)+2",
             "line()",
-            "1.5+2",
-            "1E2+2",
-            "1.5+2.5",
+            "1.5e+ +2",
+            "1E+ +2",
+            "1.5+2.5d",
             "#1/1/2000#",
             "value$+1",
             "Me+1",
@@ -1839,7 +1954,7 @@ mod tests {
 
     #[test]
     fn expression_adjacent_numeric_and_name_type_suffixes_do_not_become_operators() {
-        for (atom, suffixes) in [("2", b"!#@".as_slice()), ("value", b"%&^!#@$")] {
+        for (atom, suffixes) in [("2!", b"%!#@$".as_slice()), ("value", b"%&^!#@$")] {
             for suffix in suffixes {
                 for tail in ["", "3", "other", "(3)", " + 3"] {
                     let source = format!("{atom}{}{tail}", char::from(*suffix));
@@ -1901,7 +2016,11 @@ mod tests {
         for byte in 0..=u8::MAX {
             let binary = matches!(byte, b'+' | b'-' | b'*' | b'/' | b'\\' | b'=' | b'<' | b'>');
             for (prefix, suffix, atom_continuation) in [
-                (b"2".as_slice(), b"3".as_slice(), byte.is_ascii_digit()),
+                (
+                    b"2".as_slice(),
+                    b"3".as_slice(),
+                    byte.is_ascii_digit() || matches!(byte, b'.' | b'E' | b'e' | b'D' | b'd'),
+                ),
                 (b"a", b"b", byte.is_ascii_alphanumeric() || byte == b'_'),
             ] {
                 let source = [prefix, &[byte], suffix].concat();

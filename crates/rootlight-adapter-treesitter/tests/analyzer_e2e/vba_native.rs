@@ -132,6 +132,18 @@ fn vba_integer_suffixes_retain_exact_atoms_and_complete_formal_source_proofs() {
     }
 }
 
+#[test]
+fn vba_float_atoms_retain_exact_declarations_and_complete_formal_source_proofs() {
+    for literal in [
+        "1.5", ".5", "5.", "1E3", "1e+3", "1D-3", "1d+3", "7!", "7#", "7@", "1.5!", "1e-3#",
+        "1D+3@",
+    ] {
+        for newline in ["\n", "\r\n"] {
+            assert_radix_atom_source_proofs(literal, newline);
+        }
+    }
+}
+
 fn assert_radix_atom_source_proofs(literal: &str, newline: &str) {
     let optional = format!("Optional second As Long = {literal}");
     let atomic = format!("Call Target({literal})");
@@ -401,6 +413,36 @@ fn vba_integer_suffix_arrays_preserve_rank_shadow_and_independent_call_proofs() 
     }
 }
 
+#[test]
+fn vba_float_array_sources_preserve_rank_shadow_and_independent_call_proofs() {
+    for (lower, upper, bound) in [
+        ("1.5", "2.5", "3.5"),
+        (".1", ".2", ".3"),
+        ("1E-1", "2e+1", "3E0"),
+        ("1D-1", "2d+1", "3D0"),
+        ("1!", "2#", "3@"),
+        ("1.5!", "2D+1#", "3e-1@"),
+    ] {
+        for rank_matches in [true, false] {
+            let indices = if rank_matches {
+                format!("{lower}, {upper}")
+            } else {
+                lower.to_owned()
+            };
+            for newline in ["\n", "\r\n"] {
+                assert_radix_array_source_proofs(
+                    lower,
+                    upper,
+                    bound,
+                    &indices,
+                    rank_matches,
+                    newline,
+                );
+            }
+        }
+    }
+}
+
 fn assert_radix_array_source_proofs(
     lower: &str,
     upper: &str,
@@ -562,6 +604,15 @@ fn vba_integer_suffix_duplicate_arrays_preserve_written_ambiguity_witnesses() {
             for newline in ["\n", "\r\n"] {
                 assert_radix_duplicate_source_proofs(&format!("{literal}{suffix}"), newline);
             }
+        }
+    }
+}
+
+#[test]
+fn vba_float_duplicate_arrays_preserve_written_ambiguity_witnesses() {
+    for literal in ["2.5", "2E+1", "2D-1", "2!", "2#", "2@"] {
+        for newline in ["\n", "\r\n"] {
+            assert_radix_duplicate_source_proofs(literal, newline);
         }
     }
 }
@@ -790,7 +841,7 @@ fn vba_application_proofs_retain_exact_materialized_formals_and_parser_parent() 
                 ),
             ] {
                 let body = if native {
-                    "local = 1.5\n"
+                    "local = #1/1/2000#\n"
                 } else {
                     "local = 2\n"
                 };
@@ -9230,7 +9281,11 @@ fn vba_duplicate_module_variables_retain_written_definitions_without_unique_valu
                 ("Dim stored", "stored", "stored"),
                 ("Private [stored]", "[stored]", "[stored]"),
             ] {
-                let body = if native { "local = 1.5" } else { "local = 3" };
+                let body = if native {
+                    "local = #1/1/2000#"
+                } else {
+                    "local = 3"
+                };
                 let source = format!(
                     "{declaration}\n{declaration}\nSub Update(Optional value = stored)\nEnd Sub\nSub Run()\nDim local As Long\nlocal = stored\n{body}\nCall Update()\nEnd Sub\n"
                 );
@@ -9337,7 +9392,11 @@ fn vba_module_variable_constant_collisions_do_not_choose_a_default_target() {
                 "Dim stored As Long\nConst stored = 7",
                 "Const stored = 7\nDim stored As Long",
             ] {
-                let body = if native { "local = 1.5" } else { "local = 3" };
+                let body = if native {
+                    "local = #1/1/2000#"
+                } else {
+                    "local = 3"
+                };
                 let source = format!(
                     "{declarations}\nSub Update(Optional value = stored)\nEnd Sub\nSub Run()\nDim local As Long\n{body}\nCall Update()\nEnd Sub\n"
                 );
@@ -9440,7 +9499,11 @@ fn vba_grouped_module_variables_keep_independent_evidence_and_ambiguous_duplicat
                         .map(|(clause, _)| *clause)
                         .collect::<Vec<_>>()
                         .join(", ");
-                    let body = if native { "scratch=1.5" } else { "scratch=7" };
+                    let body = if native {
+                        "scratch=#1/1/2000#"
+                    } else {
+                        "scratch=7"
+                    };
                     let source = format!(
                         "Attribute VB_Name = \"Grouped\"\n{prefix} {declarations}\nSub Accept(Optional value=stored)\nEnd Sub\nSub Run()\nDim scratch As Long\nscratch=stored\n{body}\nCall stored()\nEnd Sub\n"
                     );
@@ -9644,7 +9707,7 @@ fn vba_module_numeric_arrays_preserve_call_and_index_boundaries() {
                 let invocation = format!("Call items({indices})");
                 let indexed = format!("items({indices})");
                 let body = if native {
-                    format!("scratch = 1.5\nscratch = {indexed}")
+                    format!("scratch = #1/1/2000#\nscratch = {indexed}")
                 } else {
                     format!("scratch = 3\nscratch = {indexed}")
                 };
@@ -9837,7 +9900,7 @@ fn vba_rhs_array_applications_preserve_missing_duplicate_and_shadow_barriers() {
     ] {
         for language in ["vba", "visual-basic-classic"] {
             for native in [false, true] {
-                let native_tail = if native { "result = 1.5\n" } else { "" };
+                let native_tail = if native { "result = #1/1/2000#\n" } else { "" };
                 let source = format!(
                     "Attribute VB_Name = \"Arrays\"\n{declarations}Sub Run({parameters})\nDim result As Variant\n{locals}{native_tail}result = items(0)\nEnd Sub\n"
                 );
@@ -9948,7 +10011,7 @@ fn vba_rhs_array_applications_preserve_missing_duplicate_and_shadow_barriers() {
 fn vba_rhs_array_reads_keep_case_bracket_and_scalar_argument_source_identity() {
     for language in ["vba", "visual-basic-classic"] {
         for native in [false, true] {
-            let native_tail = if native { "result = 1.5\n" } else { "" };
+            let native_tail = if native { "result = #1/1/2000#\n" } else { "" };
             let expression = "[ItEmS](slot, [slot])";
             let source = format!(
                 "Attribute VB_Name = \"Arrays\"\nPrivate items(-2 To +3, 004) As Long\nSub Run(ByVal slot As Long)\nDim result As Variant\n{native_tail}result = {expression}\nEnd Sub\n"
@@ -10094,7 +10157,7 @@ fn vba_rhs_function_applications_require_written_formal_proofs() {
     ] {
         for language in ["vba", "visual-basic-classic"] {
             for native in [false, true] {
-                let native_tail = if native { "result = 1.5\n" } else { "" };
+                let native_tail = if native { "result = #1/1/2000#\n" } else { "" };
                 let expression = format!("Measure({arguments})");
                 let source = format!(
                     "Function Measure({parameter}) As Long\nMeasure = 7\nEnd Function\nSub Run()\nDim result As Long\n{native_tail}result = {expression}\nEnd Sub\n"
@@ -10236,7 +10299,7 @@ fn vba_expression_operands_preserve_values_and_implicit_function_calls() {
     let expression = "-(stored + local) * Seed + Count + Maybe + Needs";
     for language in ["vba", "visual-basic-classic"] {
         for native in [false, true] {
-            let native_tail = if native { "result = 1.5\n" } else { "" };
+            let native_tail = if native { "result = #1/1/2000#\n" } else { "" };
             let source = format!(
                 "Attribute VB_Name = \"Values\"\nPrivate stored As Long\nConst Seed As Long = 7\nFunction Count() As Long\nCount = Count + Seed\nEnd Function\nFunction Maybe(Optional amount As Long = 1) As Long\nMaybe = amount + 1\nEnd Function\nFunction Needs(ByVal amount As Long) As Long\nNeeds = amount + 1\nEnd Function\nSub Run(ByVal stored As Long)\nDim local As Long\nDim result As Variant\n{native_tail}result = {expression}\nEnd Sub\n"
             );
@@ -10417,7 +10480,7 @@ fn vba_expression_reads_preserve_missing_duplicate_and_shadow_barriers() {
     ] {
         for language in ["vba", "visual-basic-classic"] {
             for native in [false, true] {
-                let native_tail = if native { "result = 1.5\n" } else { "" };
+                let native_tail = if native { "result = #1/1/2000#\n" } else { "" };
                 let source = format!(
                     "Attribute VB_Name = \"Values\"\n{declarations}Sub Run({parameters})\nDim result As Variant\n{locals}{native_tail}result = -([stored] + 1) * 2\nEnd Sub\n"
                 );
@@ -10702,7 +10765,7 @@ fn vba_nested_expression_applications_retain_formal_and_array_provenance() {
         (comparative, comparative_applications, false),
     ] {
         for language in ["vba", "visual-basic-classic"] {
-            let native_tail = if native { "result = 1.5\n" } else { "" };
+            let native_tail = if native { "result = #1/1/2000#\n" } else { "" };
             let source = format!(
                 "Attribute VB_Name = \"Expressions\"\nPrivate items(-2 To +2) As Long\nFunction Inner(ByVal value As Long) As Long\nInner = value + 1\nEnd Function\nFunction Outer(ByVal value As Long, Optional ByVal other As Long = 0) As Long\nOuter = value + other\nEnd Function\nSub Run(ByVal slot As Long)\nDim result As Long\n{native_tail}result = {expression}\nEnd Sub\n"
             );
@@ -11018,7 +11081,7 @@ fn vba_explicit_expression_calls_retain_exact_formal_proofs_without_duplicate_ca
                     continue;
                 }
                 let native_tail = if native {
-                    "Dim scratch As Long\nscratch = 1.5\n"
+                    "Dim scratch As Long\nscratch = #1/1/2000#\n"
                 } else {
                     ""
                 };
@@ -11557,7 +11620,7 @@ fn vba_local_dim_lists_preserve_exact_lexical_identity_without_sibling_type_infe
     for language in ["vba", "visual-basic-classic"] {
         for native in [false, true] {
             let source = if native {
-                source.replace("typed = grid(0,1)", "typed = grid(0,1)\ntyped = 1.5")
+                source.replace("typed = grid(0,1)", "typed = grid(0,1)\ntyped = #1/1/2000#")
             } else {
                 source.to_owned()
             };
@@ -12012,7 +12075,11 @@ fn vba_module_variables_preserve_value_ownership_without_constant_or_call_proofs
                     EntityVisibility::Unknown,
                 ),
             ] {
-                let body = if native { "local = 1.5" } else { "local = 3" };
+                let body = if native {
+                    "local = #1/1/2000#"
+                } else {
+                    "local = 3"
+                };
                 let source = format!(
                     "Attribute VB_Name = \"Authored\"\n{declaration}\nSub Update(Optional ByVal stored = [STORED])\nstored = 2\nEnd Sub\nSub Read()\nDim local As Long\nlocal = stored\nEnd Sub\nSub Shadow()\nDim stored As Long\nstored = stored\nEnd Sub\nSub Run()\nDim local As Long\n{body}\nCall Update()\nCall stored()\nEnd Sub\n"
                 );
@@ -12245,7 +12312,11 @@ fn vba_parameter_defaults_bind_module_constants_not_body_parameters() {
                     "Optional Fallback As Variant = [FALLBACK]",
                 ),
             ] {
-                let body = if native { "local = 1.5" } else { "local = 3" };
+                let body = if native {
+                    "local = #1/1/2000#"
+                } else {
+                    "local = 3"
+                };
                 let source = format!(
                     "Attribute VB_Name = \"Authored\"\n{declaration}\nPublic Sub Update({clause})\nFALLBACK = 2\nEnd Sub\nSub Run()\nDim local As Long\n{body}\nCall Update()\nEnd Sub\n"
                 );
@@ -12390,7 +12461,11 @@ fn vba_parameter_defaults_bind_module_constants_not_body_parameters() {
 fn vba_duplicate_module_constants_keep_written_definitions_and_default_ambiguity() {
     for language in ["vba", "visual-basic-classic"] {
         for native in [false, true] {
-            let body = if native { "local = 1.5" } else { "local = 3" };
+            let body = if native {
+                "local = #1/1/2000#"
+            } else {
+                "local = 3"
+            };
             let source = format!(
                 "Private Const Fallback As Long = 7\nPrivate Const Fallback As Long = 8\nSub Notify(Optional value = Fallback)\nEnd Sub\nSub Run()\nDim local As Long\n{body}\nCall Notify()\nEnd Sub\n"
             );
@@ -12534,7 +12609,7 @@ fn vba_conditional_header_conditions_do_not_bind_runtime_variables() {
 fn vba_duplicate_variable_visibility_conflict_is_unknown_with_both_written_witnesses() {
     use rootlight_ir::EntityVisibility;
     for language in ["vba", "visual-basic-classic"] {
-        for body in ["scratch = 7", "scratch = 1.5"] {
+        for body in ["scratch = 7", "scratch = #1/1/2000#"] {
             let source = format!(
                 "Attribute VB_Name = \"Visibility\"\nPublic stored As Long\nPrivate [stored] As Long\nSub Run()\nDim scratch As Long\nscratch = stored\n{body}\nEnd Sub\n"
             );
@@ -12803,7 +12878,7 @@ fn vba_duplicate_variable_visibility_agreement_preserves_every_source_order() {
         (&["Public", "Private", "Public"], EntityVisibility::Unknown),
     ];
     for language in ["vba", "visual-basic-classic"] {
-        for body in ["scratch = 7", "scratch = 1.5"] {
+        for body in ["scratch = 7", "scratch = #1/1/2000#"] {
             for (prefixes, visibility) in cases {
                 let declarations = prefixes
                     .iter()
@@ -12833,7 +12908,7 @@ fn vba_case_preserved_variable_identities_keep_independent_visibility_votes() {
     use rootlight_ir::EntityVisibility;
     let declarations = [("Public", "stored"), ("Private", "[STORED]")];
     for language in ["vba", "visual-basic-classic"] {
-        for body in ["scratch = 7", "scratch = 1.5"] {
+        for body in ["scratch = 7", "scratch = #1/1/2000#"] {
             let source = duplicate_variable_visibility_source(&declarations, body);
             let result =
                 application_proof_output(&source, language, IrLimits::default(), &deadline())
@@ -12878,7 +12953,7 @@ fn vba_bounded_required_fact_stream_retains_unknown_visibility_and_all_definitio
         [("Public", "stored"), ("Private", "[stored]")],
     ];
     for language in ["vba", "visual-basic-classic"] {
-        for body in ["scratch = 7", "scratch = 1.5"] {
+        for body in ["scratch = 7", "scratch = #1/1/2000#"] {
             for declarations in cases {
                 let source = duplicate_variable_visibility_source(&declarations, body);
                 let provider = Arc::new(provider());

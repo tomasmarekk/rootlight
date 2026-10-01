@@ -130,11 +130,17 @@ pub fn argument_list<'a, E>(
                 cursor = end;
                 continue;
             }
+            // A trailing decimal point can precede a FLOAT Hash suffix; the
+            // splitter does not otherwise establish numeric validity.
             Some(b'#')
-                if cursor == 0
+                if (cursor == 0
                     || source
                         .get(cursor - 1)
-                        .is_none_or(|byte| !byte.is_ascii_alphanumeric() && *byte != b'_') =>
+                        .is_none_or(|byte| !byte.is_ascii_alphanumeric() && *byte != b'_'))
+                    && !(source.get(cursor.wrapping_sub(1)) == Some(&b'.')
+                        && source
+                            .get(cursor.wrapping_sub(2))
+                            .is_some_and(u8::is_ascii_digit)) =>
             {
                 cursor += 1;
                 while source
@@ -209,6 +215,134 @@ pub fn argument_list<'a, E>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn float_hash_arguments_preserve_borrowed_slices_offsets_and_exact_limits() {
+        for (source, spans) in [
+            ("0.#", vec![(0, 3)]),
+            ("0.#,5.#", vec![(0, 3), (4, 7)]),
+            ("0.#,5.#,1.#", vec![(0, 3), (4, 7), (8, 11)]),
+            ("-0.# To+5.#,1.#", vec![(0, 11), (12, 15)]),
+            ("Inner(0.#,5.#),1.#", vec![(0, 14), (15, 18)]),
+            ("0.#, _\r\n 5.#", vec![(0, 3), (9, 12)]),
+        ] {
+            let source = source.as_bytes();
+            let arguments = argument_list(source, spans.len(), &mut || Ok::<(), ()>(()))
+                .unwrap()
+                .unwrap();
+            assert_eq!(arguments.len(), spans.len());
+            for (argument, &(start, end)) in arguments.iter().zip(&spans) {
+                let authored = &source[start..end];
+                assert_eq!(argument.expression(), authored);
+                assert_eq!(argument.expression().as_ptr(), authored.as_ptr());
+                assert_eq!(argument.name(), None);
+                assert_eq!(argument.name_span(), None);
+            }
+            for maximum in [0, spans.len() - 1] {
+                assert!(
+                    argument_list(source, maximum, &mut || Ok::<(), ()>(()))
+                        .unwrap()
+                        .is_none()
+                );
+            }
+        }
+        let source = b"[value] := _\r\n 0.#, other:=5.# ";
+        let arguments = argument_list(source, 2, &mut || Ok::<(), ()>(()))
+            .unwrap()
+            .unwrap();
+        assert_eq!(arguments.len(), 2);
+        for (argument, name, name_span, expression_span) in [
+            (arguments[0], b"value".as_slice(), 0..7, 15..18),
+            (arguments[1], b"other".as_slice(), 20..25, 27..31),
+        ] {
+            assert_eq!(argument.name(), Some(name));
+            assert_eq!(argument.name_span(), Some(name_span));
+            let authored = &source[expression_span];
+            assert_eq!(argument.expression(), authored);
+            assert_eq!(argument.expression().as_ptr(), authored.as_ptr());
+        }
+    }
+
+    #[test]
+    fn float_hash_arguments_preserve_protected_regions_and_named_ordering() {
+        let source = b"0.#, #1/2/2000 10:30#, \"5.#,x\", [0.#,x], Inner(0.#,5.#), _\r\n 5.#";
+        let arguments = argument_list(source, 6, &mut || Ok::<(), ()>(()))
+            .unwrap()
+            .unwrap();
+        assert_eq!(arguments.len(), 6);
+        for (argument, expression) in arguments.iter().zip([
+            b"0.#".as_slice(),
+            b"#1/2/2000 10:30#",
+            b"\"5.#,x\"",
+            b"[0.#,x]",
+            b"Inner(0.#,5.#)",
+            b"5.#",
+        ]) {
+            assert_eq!(argument.expression(), expression);
+            assert_eq!(argument.name_span(), None);
+        }
+        let source = b"value#,value_#,1#,.5#";
+        let arguments = argument_list(source, 4, &mut || Ok::<(), ()>(()))
+            .unwrap()
+            .unwrap();
+        assert_eq!(arguments.len(), 4);
+        for (argument, expression) in
+            arguments
+                .iter()
+                .zip([b"value#".as_slice(), b"value_#", b"1#", b".5#"])
+        {
+            assert_eq!(argument.expression(), expression);
+        }
+        for source in [
+            "value:=0.#, 5.#",
+            "[value]:=0.#,,other:=5.#",
+            "0.#,",
+            "0.#, #open",
+            "0.#,\n5.#",
+            "0.# ' comment",
+            "0.#: Next",
+            ".#open",
+            "value.#open",
+            "0. #open",
+        ] {
+            assert!(
+                argument_list(source.as_bytes(), 8, &mut || Ok::<(), ()>(()))
+                    .unwrap()
+                    .is_none(),
+                "{source}"
+            );
+        }
+    }
+
+    #[test]
+    fn float_hash_argument_scans_cancel_at_every_callback() {
+        let source = format!(
+            "{}.#, #{}#, _\r\n {}.#",
+            "1".repeat(1024),
+            "1/2/2000 ".repeat(128),
+            "5".repeat(1024)
+        );
+        let mut total = 0;
+        let arguments = argument_list(source.as_bytes(), 3, &mut || {
+            total += 1;
+            Ok::<(), ()>(())
+        })
+        .unwrap()
+        .unwrap();
+        assert_eq!(arguments.len(), 3);
+        assert!(total > 10);
+        for limit in 1..=total {
+            let mut calls = 0;
+            assert_eq!(
+                argument_list(source.as_bytes(), 3, &mut || {
+                    calls += 1;
+                    if calls == limit { Err("stop") } else { Ok(()) }
+                }),
+                Err("stop")
+            );
+            assert_eq!(calls, limit);
+        }
+    }
 
     #[test]
     fn passing_modifiers_require_external_procedures_and_complete_values() {

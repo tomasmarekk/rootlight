@@ -705,6 +705,7 @@ fn body_candidates(
                 ModuleScalarValueKind::UnsignedDecimal
                 | ModuleScalarValueKind::UnsignedHexadecimal
                 | ModuleScalarValueKind::UnsignedOctal
+                | ModuleScalarValueKind::UnsignedFloat
                 | ModuleScalarValueKind::String
                 | ModuleScalarValueKind::Boolean => {}
             }
@@ -752,6 +753,7 @@ fn body_candidates(
                     ModuleScalarValueKind::UnsignedDecimal
                     | ModuleScalarValueKind::UnsignedHexadecimal
                     | ModuleScalarValueKind::UnsignedOctal
+                    | ModuleScalarValueKind::UnsignedFloat
                     | ModuleScalarValueKind::String
                     | ModuleScalarValueKind::Boolean => {}
                 }
@@ -894,6 +896,7 @@ fn body_candidates(
                     ModuleScalarValueKind::UnsignedDecimal
                     | ModuleScalarValueKind::UnsignedHexadecimal
                     | ModuleScalarValueKind::UnsignedOctal
+                    | ModuleScalarValueKind::UnsignedFloat
                     | ModuleScalarValueKind::String
                     | ModuleScalarValueKind::Boolean => {}
                 }
@@ -2023,7 +2026,7 @@ mod tests {
             "Optional value = seed.Member",
             "Optional value = 1 + 2",
             "Optional value = -1",
-            "Optional value = 1.5",
+            "Optional value = 1.5%",
             "Optional value = 1%%",
             "Optional value = True And False",
             "Optional value = \"unterminated",
@@ -2461,7 +2464,7 @@ mod tests {
             "Optional value As Long = Target()",
             "Optional value As Long = seed.Member",
             "Optional value As Long = -1",
-            "Optional value As Double = 1.5",
+            "Optional value As Double = 1.5%",
             "Optional value As Long = &H10%%",
             "Optional value As Date = #1/1/2000#",
             "Optional value As String = \"unterminated",
@@ -2992,7 +2995,7 @@ mod tests {
             "Dim items([Limit])",
             "Dim items(1 + 2)",
             "Dim items(Target())",
-            "Dim items(1.5)",
+            "Dim items(1.5%)",
             "Dim items(&HFF%%)",
             "Dim items(&O7%%)",
             "Dim items(2&&)",
@@ -3581,7 +3584,7 @@ mod tests {
             "Const Value = -1",
             "Const Value = &H10%%",
             "Const Value = #1/1/2000#",
-            "Const Value = 1.5",
+            "Const Value = 1.5%",
             "Const Value = 1, Other = 2",
             "Const Value As = 1",
             "Const Value As UserType = 1",
@@ -4478,8 +4481,8 @@ mod tests {
             "Call Target(1,,2)",
             "Call Target(1;2)",
             "Call Target((1)",
-            "Call Target(-1.5)",
-            "Call Target(1.5)",
+            "Call Target(-1.5%)",
+            "Call Target(1.5%)",
             "Call Target(#1/2/2000#)",
             "Call Target(1) extra",
             "Call Target(1)(2)",
@@ -4587,7 +4590,7 @@ mod tests {
             "sink = Buffer(,0)",
             "sink = Buffer(0,)",
             "sink = Buffer(0,,1)",
-            "sink = Buffer(1.5)",
+            "sink = Buffer(1.5%)",
             "sink = Buffer(0)(1)",
             "sink = Buffer(0) extra",
             "sink = Buffer(0))",
@@ -4688,7 +4691,7 @@ mod tests {
             "Call Target(Inner(1),)",
             "Call Target(, Inner(1))",
             "Call Target(1 + &H2%%)",
-            "Call Target(1 + 2.0)",
+            "Call Target(1 + 2.0%)",
             "Call Target(2^3)",
             "Call Target(value&other)",
             "Call Target(Line(1) + 1)",
@@ -5751,6 +5754,420 @@ mod tests {
     }
 
     #[test]
+    fn first_party_vba_date_controls_keep_complete_native_fallback() {
+        for source in [
+            "Const Seed=#1/1/2000#\n",
+            "Dim values(#1/1/2000#)\n",
+            "Sub Run(Optional value As Date=#1/1/2000#)\nEnd Sub\n",
+            "Sub Run()\nDim value As Long\nvalue=#1/1/2000#\nEnd Sub\n",
+            "Sub Run()\nsink=Buffer(#1/1/2000#)\nEnd Sub\n",
+            "Sub Run()\nsink=Inner(local + #1/1/2000#)\nEnd Sub\n",
+        ] {
+            for newline in ["\n", "\r\n"] {
+                let source = source.replace('\n', newline);
+                for language in ["vba", "visual-basic-classic"] {
+                    let fixture = Fixture::new(&source);
+                    let request = fixture.request(language, &[]);
+                    let cancellation = Cancellation::with_deadline(
+                        std::time::Instant::now() + std::time::Duration::from_secs(60),
+                    );
+                    assert!(
+                        prepare(
+                            &fixture.provider,
+                            &request,
+                            None,
+                            &[],
+                            fixture.provider.config.default_settings(),
+                            &cancellation,
+                        )
+                        .unwrap()
+                        .is_none()
+                    );
+                    assert_eq!(fixture.provider.stats().pooled_parsers, 0);
+                    assert_eq!(fixture.provider.stats().cache.entries, 0);
+                    let native = fixture
+                        .provider
+                        .prepare_tree(
+                            &request,
+                            None,
+                            &[],
+                            fixture.provider.config.default_settings(),
+                            &cancellation,
+                        )
+                        .unwrap();
+                    assert!(native.traversal.fully_traversed);
+                    assert_eq!(
+                        native.traversal.coverage,
+                        CoverageStatus::Complete,
+                        "{language}, {source}"
+                    );
+                    let pack = fixture
+                        .provider
+                        .query_packs
+                        .get_for_source(native.family, request.source().path().as_str())
+                        .unwrap();
+                    let extracted = pack
+                        .extract(
+                            native.family,
+                            &native.tree,
+                            request.source().bytes(),
+                            request.limits().max_syntax_nodes(),
+                            usize::MAX,
+                            &cancellation,
+                        )
+                        .unwrap();
+                    assert!(extracted.limit.is_none());
+                    let expected = normalize_query_candidates(
+                        extracted.candidates,
+                        &request,
+                        usize::MAX,
+                        &cancellation,
+                    )
+                    .unwrap();
+                    let output = rootlight_adapter_sdk::execute_parse(
+                        &fixture.provider, &request,
+                        rootlight_adapter_sdk::MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
+                        &cancellation,
+                    ).unwrap();
+                    assert_eq!(
+                        output.report().coverage().status(),
+                        CoverageStatus::Complete
+                    );
+                    assert_eq!(
+                        output.report().coverage().covered_source_bytes(),
+                        source.len()
+                    );
+                    assert_eq!(output.facts(), expected.facts);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn first_party_vba_float_tokens_match_complete_compatible_native_facts() {
+        for atom in ["1.5", ".5", "1.", "1E2", "1e-2", "1.E+2"] {
+            for suffix in ["", "!", "#", "@"] {
+                let literal = format!("{atom}{suffix}");
+                for newline in ["\n", "\r\n"] {
+                    let source = radix_module_source(&literal, newline);
+                    for language in ["vba", "visual-basic-classic"] {
+                        compare_native(&Fixture::new(&source), language, &[]);
+                    }
+                }
+            }
+        }
+        for body in [
+            "Call Target(-1.5)",
+            "Call Target(1.5)",
+            "Call Target(1 + 2.0)",
+            "sink = Buffer(1.5)",
+            "Dim first, last(1.5)",
+            "Dim value As Long\nvalue = 1.5",
+        ] {
+            compare_native_procedural_body(body);
+        }
+        for source in [
+            "Sub Run(Optional value=1.5)\nEnd Sub\n",
+            "Sub Run(Optional value As Double=1.5)\nEnd Sub\n",
+            "Const Value=1.5\n",
+            "Dim items(1.5)\n",
+        ] {
+            for language in ["vba", "visual-basic-classic"] {
+                compare_native(&Fixture::new(source), language, &[]);
+            }
+        }
+        for literal in ["1.5", ".5#", "1E2", "1e-2@", "7!", "7#"] {
+            for body in [
+                format!("sink={literal} ^ 3"),
+                format!("sink={literal} & \"x\""),
+                format!("sink={literal}+3"),
+                format!("Call Target({literal}+3)"),
+            ] {
+                compare_native_procedural_body(&body);
+            }
+        }
+        for body in ["sink=1.5!^2", "sink=7#&8"] {
+            compare_native_procedural_body(body);
+        }
+    }
+
+    #[test]
+    fn first_party_vba_float_metadata_and_exponents_preserve_fact_work() {
+        use rootlight_vba::ModuleFloatSuffix;
+
+        // Equal-width spelling changes preserve structural facts, not content hashes;
+        // D/d has direct own-source evidence rather than a native grammar oracle.
+        for newline in ["\n", "\r\n"] {
+            let baseline = radix_module_source("00007", newline);
+            for language in ["vba", "visual-basic-classic"] {
+                let baseline_fixture = Fixture::new(&baseline);
+                let baseline_request = baseline_fixture.request(language, &[]);
+                let cancellation = Cancellation::new();
+                let baseline_prepared = prepare(
+                    &baseline_fixture.provider,
+                    &baseline_request,
+                    None,
+                    &[],
+                    baseline_fixture.provider.config.default_settings(),
+                    &cancellation,
+                )
+                .unwrap()
+                .unwrap();
+                for (literal, suffix) in [
+                    ("0.125", None),
+                    (".1250", None),
+                    ("0.12!", Some(ModuleFloatSuffix::Exclamation)),
+                    ("0.12#", Some(ModuleFloatSuffix::Hash)),
+                    ("0.12@", Some(ModuleFloatSuffix::At)),
+                    ("01E+2", None),
+                    ("01e-2", None),
+                    ("01D+2", None),
+                    ("01d-2", None),
+                    ("0007!", Some(ModuleFloatSuffix::Exclamation)),
+                    ("0007#", Some(ModuleFloatSuffix::Hash)),
+                    ("0007@", Some(ModuleFloatSuffix::At)),
+                    ("1.E2!", Some(ModuleFloatSuffix::Exclamation)),
+                    (".1D2@", Some(ModuleFloatSuffix::At)),
+                    ("1D+2#", Some(ModuleFloatSuffix::Hash)),
+                    ("0001.", None),
+                ] {
+                    let source = radix_module_source(literal, newline);
+                    assert_eq!(source.len(), baseline.len());
+                    let fixture = Fixture::new(&source);
+                    let request = fixture.request(language, &[]);
+                    let prepared = prepare(
+                        &fixture.provider,
+                        &request,
+                        None,
+                        &[],
+                        fixture.provider.config.default_settings(),
+                        &cancellation,
+                    )
+                    .unwrap()
+                    .unwrap();
+                    assert_eq!(prepared.processed_nodes, baseline_prepared.processed_nodes);
+                    assert_eq!(
+                        prepared.inventory.statement_count(),
+                        baseline_prepared.inventory.statement_count()
+                    );
+                    let run = &prepared.inventory.procedures()[2];
+                    let ModuleBodyStatement::Declaration(local) = &run.statements()[1] else {
+                        panic!("floating-point local constant remains atomic");
+                    };
+                    let ModuleBodyStatement::Assignment(assignment) = &run.statements()[2] else {
+                        panic!("floating-point assignment remains atomic");
+                    };
+                    let ModuleBodyStatement::ExpressionAssignment(expression) =
+                        &run.statements()[3]
+                    else {
+                        panic!("composed floating-point assignment retains expression evidence");
+                    };
+                    let ModuleBodyStatement::Call(call) = &run.statements()[4] else {
+                        panic!("floating-point argument retains the atomic Call route");
+                    };
+                    let ModuleBodyStatement::ExpressionCall(expression_call) = &run.statements()[5]
+                    else {
+                        panic!("composed floating-point Call retains expression evidence");
+                    };
+                    let mut values = vec![
+                        prepared.inventory.constants()[0].value(),
+                        prepared.inventory.procedures()[0].parameters()[1]
+                            .default_value()
+                            .unwrap(),
+                        local.value().unwrap(),
+                        assignment.value(),
+                        &call.argument_values()[0],
+                    ];
+                    values.extend(expression.inventory().values());
+                    values.extend(expression_call.inventory().values());
+                    let mut numeric = 0;
+                    let mut names = 0;
+                    for value in values {
+                        assert_eq!(value.integer_suffix(), None);
+                        match value.kind() {
+                            ModuleScalarValueKind::UnsignedFloat => {
+                                numeric += 1;
+                                assert_eq!(value.float_suffix(), suffix);
+                                assert_eq!(&source[value.span()], literal);
+                                if let Some(suffix) = suffix {
+                                    assert_eq!(literal.chars().last(), Some(suffix.as_char()));
+                                }
+                            }
+                            ModuleScalarValueKind::Name => {
+                                names += 1;
+                                assert_eq!(value.float_suffix(), None);
+                            }
+                            ModuleScalarValueKind::UnsignedDecimal
+                            | ModuleScalarValueKind::UnsignedHexadecimal
+                            | ModuleScalarValueKind::UnsignedOctal
+                            | ModuleScalarValueKind::String
+                            | ModuleScalarValueKind::Boolean => {
+                                panic!("fixture has only FLOAT atoms and two name reads")
+                            }
+                        }
+                    }
+                    assert_eq!((numeric, names), (9, 2));
+                    for optional in [false, true] {
+                        let actual = candidates(
+                            &prepared.inventory,
+                            source.as_bytes(),
+                            optional,
+                            usize::MAX,
+                            &cancellation,
+                        )
+                        .unwrap();
+                        let expected = candidates(
+                            &baseline_prepared.inventory,
+                            baseline.as_bytes(),
+                            optional,
+                            usize::MAX,
+                            &cancellation,
+                        )
+                        .unwrap();
+                        assert_eq!(actual, expected, "{language}, {literal}");
+                        let actual =
+                            normalize_query_candidates(actual, &request, usize::MAX, &cancellation)
+                                .unwrap();
+                        let expected = normalize_query_candidates(
+                            expected,
+                            &baseline_request,
+                            usize::MAX,
+                            &cancellation,
+                        )
+                        .unwrap();
+                        assert_eq!(actual.required, expected.required);
+                        assert_eq!(actual.facts, expected.facts);
+                    }
+                    assert_eq!(fixture.provider.stats().pooled_parsers, 0);
+                    assert_eq!(fixture.provider.stats().cache.entries, 0);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn first_party_vba_float_operators_are_not_integer_type_suffixes() {
+        // The retained native number regex accepts INTEGER suffixes on FLOAT;
+        // it is not an oracle for these authored operator boundaries.
+        for (literal, operator, right) in [
+            ("1.5", "^", "2"),
+            ("1D2", "^", "2"),
+            ("1.5", "&", "8"),
+            ("1d2", "&", "8"),
+        ] {
+            for language in ["vba", "visual-basic-classic"] {
+                let mut work = None;
+                for spacing in ["", " "] {
+                    let source = format!(
+                        "Sub Run()\nsink={literal}{spacing}{operator}{spacing}{right}\nEnd Sub\n"
+                    );
+                    let fixture = Fixture::new(&source);
+                    let request = fixture.request(language, &[]);
+                    let cancellation = Cancellation::new();
+                    let prepared = prepare(
+                        &fixture.provider,
+                        &request,
+                        None,
+                        &[],
+                        fixture.provider.config.default_settings(),
+                        &cancellation,
+                    )
+                    .unwrap()
+                    .unwrap();
+                    let ModuleBodyStatement::ExpressionAssignment(assignment) =
+                        &prepared.inventory.procedures()[0].statements()[0]
+                    else {
+                        panic!("FLOAT power or concatenation retains a complete expression");
+                    };
+                    assert_eq!(assignment.inventory().work_nodes(), 3);
+                    assert_eq!(assignment.inventory().values().len(), 2);
+                    assert!(assignment.inventory().applications().is_empty());
+                    let values = assignment.inventory().values();
+                    assert_eq!(values[0].kind(), ModuleScalarValueKind::UnsignedFloat);
+                    assert_eq!(&source[values[0].span()], literal);
+                    assert_eq!(values[1].kind(), ModuleScalarValueKind::UnsignedDecimal);
+                    assert_eq!(&source[values[1].span()], right);
+                    for value in values {
+                        assert_eq!(value.integer_suffix(), None);
+                        assert_eq!(value.float_suffix(), None);
+                    }
+                    let captures = candidates(
+                        &prepared.inventory,
+                        source.as_bytes(),
+                        true,
+                        usize::MAX,
+                        &cancellation,
+                    )
+                    .unwrap();
+                    let references = captures
+                        .iter()
+                        .filter(|capture| capture.role == StructuralRole::Reference)
+                        .collect::<Vec<_>>();
+                    assert_eq!(references.len(), 1);
+                    assert_eq!(&source[references[0].start..references[0].end], "sink");
+                    if let Some(previous) = work {
+                        assert_eq!(prepared.processed_nodes, previous);
+                    }
+                    work = Some(prepared.processed_nodes);
+                    assert_eq!(fixture.provider.stats().pooled_parsers, 0);
+                    assert_eq!(fixture.provider.stats().cache.entries, 0);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn first_party_vba_float_tails_reject_the_whole_module() {
+        for literal in [
+            "1E",
+            "1D+",
+            ".5e-",
+            ".E2",
+            "1..2",
+            "1.2.3",
+            "1E2D3",
+            "1.5%",
+            "1E2^",
+            "1#!",
+            "1@@",
+            "1.5$",
+            "&H1#",
+            "&O7!",
+            "1.5member",
+            "1.5&",
+        ] {
+            for body in [
+                format!("sink={literal}"),
+                format!("Call Target({literal})"),
+                format!("Dim values({literal})"),
+                format!("Const Local As Long={literal}"),
+            ] {
+                let source = format!(
+                    "Const Accepted=1.5\nSub First()\nEnd Sub\nSub Run()\nDim retained As Long\n{body}\nEnd Sub\n"
+                );
+                for language in ["vba", "visual-basic-classic"] {
+                    let fixture = Fixture::new(&source);
+                    assert!(
+                        prepare(
+                            &fixture.provider,
+                            &fixture.request(language, &[]),
+                            None,
+                            &[],
+                            fixture.provider.config.default_settings(),
+                            &Cancellation::new(),
+                        )
+                        .unwrap()
+                        .is_none(),
+                        "{language}, {body}"
+                    );
+                    assert_eq!(fixture.provider.stats().pooled_parsers, 0);
+                    assert_eq!(fixture.provider.stats().cache.entries, 0);
+                }
+            }
+        }
+    }
+
+    #[test]
     fn first_party_vba_integer_suffixes_match_complete_native_source_facts() {
         for atom in ["0", "007", "32767", "&H0", "&hA", "&H7FFF"] {
             for suffix in ['%', '&', '^'] {
@@ -5880,7 +6297,9 @@ mod tests {
                                     names += 1;
                                     assert_eq!(value.integer_suffix(), None);
                                 }
-                                ModuleScalarValueKind::String | ModuleScalarValueKind::Boolean => {
+                                ModuleScalarValueKind::UnsignedFloat
+                                | ModuleScalarValueKind::String
+                                | ModuleScalarValueKind::Boolean => {
                                     panic!(
                                         "the written fixture has only numeric atoms and two name reads"
                                     );
@@ -5950,9 +6369,9 @@ mod tests {
             "2%&",
             "2&^",
             "2^%",
-            "2!",
-            "2#",
-            "2@",
+            "2!!",
+            "2##",
+            "2@@",
             "2$",
             "2^2",
             "2&2",
@@ -6127,11 +6546,12 @@ mod tests {
     }
 
     #[test]
-    fn first_party_vba_radix_array_work_and_candidate_ceilings_are_conserved() {
+    fn first_party_vba_numeric_array_work_and_candidate_ceilings_are_conserved() {
         for literal in [
             "0007", "&H07", "&h07", "&O07", "&o07", "&007", "0007%", "&H07%", "&h07%", "&O07%",
             "&o07%", "&007%", "0007&", "&H07&", "&h07&", "&O07&", "&o07&", "&007&", "0007^",
-            "&H07^", "&h07^", "&O07^", "&o07^", "&007^",
+            "&H07^", "&h07^", "&O07^", "&o07^", "&007^", "1.5", ".5", "1.", "1E2", "1e-2", "1D2",
+            "1d+2", "1.5!", "1.5#", "1.5@", "7!", "7#", "7@",
         ] {
             let source = format!(
                 "Sub Run()\nDim first, grid(-{literal} To +{literal}, {literal}) As Long, pending()\nEnd Sub\n"
@@ -6412,7 +6832,7 @@ mod tests {
             "Dim first, last(Limit)",
             "Dim first, last(&H2%%)",
             "Dim first, last(2&&)",
-            "Dim first, last(1.5)",
+            "Dim first, last(1.5%)",
             "Dim first, last(,2)",
             "Dim first, last(2,)",
             "Dim first, last(2,,3)",
@@ -6569,7 +6989,7 @@ mod tests {
             "Dim value$",
             "Dim value As UserType",
             "Const seed As Long = value",
-            "Dim value As Long\nvalue = 1.5",
+            "Dim value As Long\nvalue = #1/1/2000#",
             "Dim value As Long\nvalue = &H10%%",
             "Dim value As Long\nvalue = Nothing",
             "Dim value As Long\nvalue = Me",
@@ -6910,7 +7330,7 @@ mod tests {
     #[test]
     fn first_party_vba_never_accepts_a_supported_prefix_or_object_context() {
         for source in [
-            "Sub Run()\nDim value As Long\nvalue = 1.5\nEnd Sub\n",
+            "Sub Run()\nDim value As Long\nvalue = #1/1/2000#\nEnd Sub\n",
             "Sub Run()\nEnd Sub\n#If Host Then\n#End If\n",
         ] {
             let fixture = Fixture::new(source);

@@ -112,7 +112,7 @@ fn procedural_route_changes_survive_noop_reopen_and_match_clean_rebuild() {
     paths.prepare_owner().unwrap();
     let empty = "Attribute VB_Name = \"Authored\"\nOption Explicit\nSub Run()\nEnd Sub\n";
     let populated = "Attribute VB_Name = \"Authored\"\nOption Explicit\nSub Run()\nDim value As Long\nConst Limit As Long = 7\nvalue = Limit\nLet value = 1\nEnd Sub\n";
-    let native = "Attribute VB_Name = \"Authored\"\nOption Explicit\nSub Run()\nDim value As Long\nvalue = 1.5\nEnd Sub\n";
+    let native = "Attribute VB_Name = \"Authored\"\nOption Explicit\nSub Run()\nDim value As Long\nvalue = #1/1/2000#\nEnd Sub\n";
     let mut first_empty = None;
     let mut previous_generation = None;
     for source in [empty, populated, native, populated, empty] {
@@ -2742,7 +2742,7 @@ fn named_optional_defaults_preserve_module_constant_namespace_and_source_lifetim
         // An unsupported own-body expression selects the native fallback. The
         // composite parser identity alone is not evidence of which route ran.
         NamedDefaultState {
-            body: "value = 1.5\n",
+            body: "value = #1/1/2000#\n",
             ..initial
         },
         initial,
@@ -3548,7 +3548,11 @@ fn module_variable_edits_preserve_value_binding_without_constant_or_call_claims(
                 .map(|(written, _)| *written)
                 .collect::<Vec<_>>()
                 .join(", ");
-            let arithmetic = if state.arithmetic_body { " + 1.5" } else { "" };
+            let arithmetic = if state.arithmetic_body {
+                " + #1/1/2000#"
+            } else {
+                ""
+            };
             let source = format!(
                 "Attribute VB_Name = \"Authored\"\nOption Explicit\n{}Sub Notify({header})\n{}End Sub\nSub Run()\nDim sink As Long\nsink = {}{arithmetic}\nCall Notify({})\nCall {}()\nEnd Sub\n",
                 state.declarations_source,
@@ -4126,7 +4130,7 @@ fn assert_module_array_contract(
         }
     }
     if state.indexed_body {
-        // The separately authored floating-point statement retains native fallback.
+        // The separately authored date statement retains native fallback.
         // Declared rank proves indexing shape, not runtime bounds or element types.
         for (expression, name, proven) in [
             ("Buffer()", "Buffer", true),
@@ -4314,7 +4318,7 @@ fn module_numeric_array_edits_preserve_source_identity_and_native_rank_contracts
                 .collect::<Vec<_>>()
                 .join(", ");
             let indexed = if state.indexed_body {
-                "sink = Buffer()\nsink = Buffer(0)\nsink = Buffer(0, 1)\nsink = Grid()\nsink = Grid(0)\nsink = Grid(0, 1)\nsink = 1.5\n"
+                "sink = Buffer()\nsink = Buffer(0)\nsink = Buffer(0, 1)\nsink = Grid()\nsink = Grid(0)\nsink = Grid(0, 1)\nsink = #1/1/2000#\n"
             } else {
                 ""
             };
@@ -4436,7 +4440,7 @@ fn grouped_module_variable_source(state: ModuleArrayState) -> String {
         .collect::<Vec<_>>()
         .join(", ");
     let indexed = if state.indexed_body {
-        "sink = Buffer()\nsink = Buffer(0)\nsink = Buffer(0, 1)\nsink = Grid()\nsink = Grid(0)\nsink = Grid(0, 1)\nsink = 1.5\n"
+        "sink = Buffer()\nsink = Buffer(0)\nsink = Buffer(0, 1)\nsink = Grid()\nsink = Grid(0)\nsink = Grid(0, 1)\nsink = #1/1/2000#\n"
     } else {
         ""
     };
@@ -4633,7 +4637,7 @@ fn grouped_module_variable_edits_preserve_independent_declarator_evidence() {
                     1..=4 | 6 => old_source.replace(old_state.declarations_source, state.declarations_source),
                     5 => old_source.replace("Storage", "Buffer"),
                     7 => old_source.replace(old_state.declarations_source, state.declarations_source)
-                        .replace("Call Notify(1)\n", "sink = Buffer()\nsink = Buffer(0)\nsink = Buffer(0, 1)\nsink = Grid()\nsink = Grid(0)\nsink = Grid(0, 1)\nsink = 1.5\nCall Notify(1)\n"),
+                        .replace("Call Notify(1)\n", "sink = Buffer()\nsink = Buffer(0)\nsink = Buffer(0, 1)\nsink = Grid()\nsink = Grid(0)\nsink = Grid(0, 1)\nsink = #1/1/2000#\nCall Notify(1)\n"),
                     8 => initial_source.clone().unwrap(),
                     _ => panic!("an authored grouped declaration edit is required"),
                 };
@@ -5214,10 +5218,10 @@ fn value_application_source(state: ValueApplicationState) -> String {
     } else {
         ""
     };
-    // Hexadecimal arguments remain outside the first-party expression slice;
+    // Date arguments remain outside the first-party expression slice;
     // this separately retained application keeps native rank evidence alive.
     let arithmetic = if state.arithmetic_fallback {
-        "sink = Buffer(0.5) + 1\n"
+        "sink = Buffer(#1/1/2000#) + 1\n"
     } else {
         ""
     };
@@ -5615,7 +5619,7 @@ fn assert_value_application_contract(
         .chain(
             state
                 .arithmetic_fallback
-                .then_some(("Buffer(0.5)", "Buffer", 1, false)),
+                .then_some(("Buffer(#1/1/2000#)", "Buffer", 1, false)),
         )
         .enumerate()
     {
@@ -5899,7 +5903,7 @@ fn assert_value_application_contract(
             } else {
                 assert!(
                     atom.bytes().all(|byte| byte.is_ascii_digit())
-                        || (ordinal == probes.len() && atom == "0.5")
+                        || (ordinal == probes.len() && atom == "#1/1/2000#")
                 );
                 assert!(!document.occurrences.iter().any(|site| {
                     site.source.span().start_byte() == u64::try_from(atom_start).unwrap()
@@ -6048,7 +6052,7 @@ fn assignment_value_applications_preserve_arrays_formals_and_source_lifetimes() 
                 let expected = old_source
                     .replace(old_state.declarations_source, state.declarations_source)
                     .replace("Dim Buffer As Long\n", "")
-                    .replace("sink = Buffer(0.5) + 1\n", "");
+                    .replace("sink = Buffer(#1/1/2000#) + 1\n", "");
                 let expected = if matches!(state.buffer, ExpectedBufferApplication::LocalScalar) {
                     expected.replace("index = 0\n", "Dim Buffer As Long\nindex = 0\n")
                 } else {
@@ -6057,7 +6061,7 @@ fn assignment_value_applications_preserve_arrays_formals_and_source_lifetimes() 
                 let expected = if state.arithmetic_fallback {
                     expected.replace(
                         "sink = Fetch(value, 7, 8)\n",
-                        "sink = Fetch(value, 7, 8)\nsink = Buffer(0.5) + 1\n",
+                        "sink = Fetch(value, 7, 8)\nsink = Buffer(#1/1/2000#) + 1\n",
                     )
                 } else {
                     expected
@@ -6166,12 +6170,12 @@ fn expression_assignment_source(state: ExpressionSourceState) -> String {
         ""
     };
     let fallback = if state.native_fallback {
-        "sink = 1.5\n"
+        "sink = #1/1/2000#\n"
     } else {
         ""
     };
     // The retained grammar recovers these source-valid comparison combinations;
-    // the floating-point control must remain a native-valid whole module independently.
+    // the date control must remain a native-valid whole module independently.
     let comparisons = if state.native_fallback {
         ""
     } else {
@@ -8104,8 +8108,12 @@ fn explicit_call_expressions_preserve_nested_targets_and_generation_lifetimes() 
             ..initial
         },
         ExpressionCallState {
-            arguments: "Inner(local + 2.5), Inner(Inner(local))",
-            nested: &["Inner(local + 2.5)", "Inner(Inner(local))", "Inner(local)"],
+            arguments: "Inner(local + #1/1/2000#), Inner(Inner(local))",
+            nested: &[
+                "Inner(local + #1/1/2000#)",
+                "Inner(Inner(local))",
+                "Inner(local)",
+            ],
             ..initial
         },
         initial,
@@ -8234,7 +8242,7 @@ fn local_dim_source(state: LocalDimState) -> String {
         "Attribute VB_Name = \"Authored\"\nOption Explicit\nPrivate Buffer(2) As Long\nFunction Fetch(ByVal value As Long, Optional extra As Long = 7) As Long\nFetch = value\nEnd Function\nSub Run()\n{}index = 0\nsink = spare\nsink = Buffer()\nsink = Buffer(index)\nsink = Buffer(index, 1)\nsink = dynamic(index)\nsink = dynamic(index, 1)\nsink = Grid(0)\nsink = Grid(0, 1)\nsink = Fetch()\nsink = Fetch(index)\nsink = Fetch(index, 7, 8)\n{}End Sub\n",
         state.declarations_source,
         if state.native_fallback {
-            "sink = 1.5\n"
+            "sink = #1/1/2000#\n"
         } else {
             ""
         },
@@ -9056,7 +9064,7 @@ fn local_dim_lists_and_arrays_preserve_scope_and_generation_lifetimes() {
             buffer: ExpectedBufferApplication::Ambiguous,
             ..initial
         },
-        // A floating-point atom remains outside the first-party body subset.
+        // A date atom remains outside the first-party body subset.
         LocalDimState {
             native_fallback: true,
             ..grouped
@@ -9114,9 +9122,9 @@ fn local_dim_lists_and_arrays_preserve_scope_and_generation_lifetimes() {
                 let expected =
                     old_source.replace(old_state.declarations_source, state.declarations_source);
                 let expected = if state.native_fallback {
-                    expected.replace("End Sub\n", "sink = 1.5\nEnd Sub\n")
+                    expected.replace("End Sub\n", "sink = #1/1/2000#\nEnd Sub\n")
                 } else if old_state.native_fallback {
-                    expected.replace("sink = 1.5\n", "")
+                    expected.replace("sink = #1/1/2000#\n", "")
                 } else {
                     expected
                 };
@@ -9179,19 +9187,25 @@ struct RadixLiteralState {
     index: &'static str,
     second_index: &'static str,
     native_fallback: bool,
+    shadow_ready: bool,
 }
 
 fn radix_literal_source(state: RadixLiteralState) -> String {
     format!(
-        "Attribute VB_Name = \"Authored\"\nOption Explicit\nPrivate Const Seed As Long = {literal}\nPrivate values({module_bounds}) As Long\nSub Notify(ByVal value As Long, Optional extra As Long = {default})\nEnd Sub\nFunction Ready() As Long\nReady = {literal}\nEnd Function\nSub Run()\nDim sink As Long, local As Long, buffer({local_bounds}) As Long\nConst LocalSeed As Long = {literal}\nlocal = {literal}\nsink = LocalSeed\nsink = Seed\nsink = local + {literal}\nCall Notify(local)\nCall Notify({literal}, {literal})\nCall Notify()\nCall Notify({literal}, {literal}, {literal})\nsink = buffer({index})\nsink = buffer({index}, {second_index})\nsink = values({index})\nsink = Ready()\nsink = Ready({literal})\n{fallback}End Sub\n",
+        "Attribute VB_Name = \"Authored\"\nOption Explicit\nPrivate Const Seed As Long = {literal}\nPrivate values({module_bounds}) As Long\nSub Notify(ByVal value As Long, Optional extra As Long = {default})\nEnd Sub\nFunction Ready() As Long\nReady = {literal}\nEnd Function\nSub Run()\nDim sink As Long, local As Long, buffer({local_bounds}) As Long\n{shadow}Const LocalSeed As Long = {literal}\nlocal = {literal}\nsink = LocalSeed\nsink = Seed\nsink = local + {literal}\nCall Notify(local)\nCall Notify({literal}, {literal})\nCall Notify()\nCall Notify({literal}, {literal}, {literal})\nsink = buffer({index})\nsink = buffer({index}, {second_index})\nsink = values({index})\nsink = Ready()\nsink = Ready({literal})\n{fallback}End Sub\n",
         literal = state.literal,
         default = state.default,
         module_bounds = state.module_bounds,
         local_bounds = state.local_bounds,
         index = state.index,
         second_index = state.second_index,
+        shadow = if state.shadow_ready {
+            "Dim Ready As Long\n"
+        } else {
+            ""
+        },
         fallback = if state.native_fallback {
-            "sink = 1.5\n"
+            "sink = #1/1/2000#\n"
         } else {
             ""
         },
@@ -9242,6 +9256,11 @@ fn assert_radix_literal_contract(
     };
     let notify = find(EntityKind::Function, "Notify", module.id);
     let ready = find(EntityKind::Function, "Ready", module.id);
+    let ready_target = if state.shadow_ready {
+        find(EntityKind::Variable, "Ready", run.id)
+    } else {
+        ready
+    };
     let seed = find(EntityKind::Constant, "Seed", module.id);
     let local_seed = find(EntityKind::Constant, "LocalSeed", run.id);
     let values = find(EntityKind::Variable, "values", module.id);
@@ -9316,7 +9335,7 @@ fn assert_radix_literal_contract(
             None,
         )
     };
-    let clauses = [
+    let mut clauses = vec![
         (seed, format!("Seed As Long = {}", state.literal), module.id),
         (
             local_seed,
@@ -9335,6 +9354,9 @@ fn assert_radix_literal_contract(
         ),
         (local, "local As Long".to_owned(), run.id),
     ];
+    if state.shadow_ready {
+        clauses.push((ready_target, "Ready As Long".to_owned(), run.id));
+    }
     for (entity, written, owner) in &clauses {
         let start = source.find(written).unwrap();
         let range = start..start + written.len();
@@ -9419,7 +9441,11 @@ fn assert_radix_literal_contract(
                 .iter()
                 .filter_map(|hit| hit.symbol)
                 .collect::<BTreeSet<_>>(),
-            BTreeSet::from([entity.id])
+            if state.shadow_ready && entity.canonical_name == "Ready" {
+                BTreeSet::from([entity.id, ready.id])
+            } else {
+                BTreeSet::from([entity.id])
+            }
         );
         let hit = located
             .data
@@ -9436,8 +9462,12 @@ fn assert_radix_literal_contract(
                 receipt,
                 source,
                 &reference(range.clone()),
-                range,
+                range.clone(),
             );
+            assert!(!document.occurrences.iter().any(|site| {
+                site.source.span().start_byte() >= u64::try_from(range.start).unwrap()
+                    && site.source.span().end_byte() <= u64::try_from(range.end).unwrap()
+            }));
         }
     }
     assert_eq!(
@@ -9585,12 +9615,18 @@ fn assert_radix_literal_contract(
             values,
             true,
         ),
-        ("Ready()".to_owned(), "Ready", false, ready, true),
+        (
+            "Ready()".to_owned(),
+            "Ready",
+            false,
+            ready_target,
+            !state.shadow_ready,
+        ),
         (
             format!("Ready({})", state.literal),
             "Ready",
             false,
-            ready,
+            ready_target,
             false,
         ),
     ] {
@@ -9618,7 +9654,13 @@ fn assert_radix_literal_contract(
         if proven {
             assert_eq!(
                 application.target,
-                OccurrenceTarget::Resolved { symbol: target.id }
+                OccurrenceTarget::Resolved { symbol: target.id },
+                "{language}: {expression}; literal={}, rank={}, index={}, native_fallback={}, shadow_ready={}",
+                state.literal,
+                state.local_rank,
+                state.index,
+                state.native_fallback,
+                state.shadow_ready,
             );
         } else {
             assert!(matches!(
@@ -9840,7 +9882,7 @@ fn assert_radix_literal_contract(
             .iter()
             .filter(|relation| { relation.predicate == RelationPredicate::Calls })
             .count(),
-        6
+        if state.shadow_ready { 4 } else { 6 }
     );
     let calls = service
         .symbol_relationships(
@@ -9886,6 +9928,7 @@ fn radix_literal_edits_preserve_atom_sources_and_rank_arity_proofs() {
         index: "0",
         second_index: "1",
         native_fallback: false,
+        shadow_ready: false,
     };
     let hexadecimal = RadixLiteralState {
         literal: "&H7",
@@ -9896,6 +9939,7 @@ fn radix_literal_edits_preserve_atom_sources_and_rank_arity_proofs() {
         index: "&H0",
         second_index: "&h1",
         native_fallback: false,
+        shadow_ready: false,
     };
     let states = [
         initial,
@@ -9909,6 +9953,7 @@ fn radix_literal_edits_preserve_atom_sources_and_rank_arity_proofs() {
             index: "&O0",
             second_index: "&o1",
             native_fallback: false,
+            shadow_ready: false,
         },
         RadixLiteralState {
             literal: "&7",
@@ -9919,6 +9964,7 @@ fn radix_literal_edits_preserve_atom_sources_and_rank_arity_proofs() {
             index: "&0",
             second_index: "&1",
             native_fallback: false,
+            shadow_ready: false,
         },
         // The retained VBA grammar does not admit every octal spelling. The
         // fallback fixture therefore keeps independently native-valid hex syntax.
@@ -10051,6 +10097,7 @@ fn integer_suffix_edits_preserve_source_tokens_and_rank_arity_proofs() {
         index: "&0",
         second_index: "&o1",
         native_fallback: false,
+        shadow_ready: false,
     };
     // Suffix-only edits preserve radix, signs, rank and callable contracts. Their
     // authored spellings are syntax evidence, not runtime type or value claims.
@@ -10065,6 +10112,7 @@ fn integer_suffix_edits_preserve_source_tokens_and_rank_arity_proofs() {
             index: "&0%",
             second_index: "&o1%",
             native_fallback: false,
+            shadow_ready: false,
         },
         RadixLiteralState {
             literal: "7&",
@@ -10075,6 +10123,7 @@ fn integer_suffix_edits_preserve_source_tokens_and_rank_arity_proofs() {
             index: "&0&",
             second_index: "&o1&",
             native_fallback: false,
+            shadow_ready: false,
         },
         RadixLiteralState {
             literal: "7^",
@@ -10085,8 +10134,9 @@ fn integer_suffix_edits_preserve_source_tokens_and_rank_arity_proofs() {
             index: "&0^",
             second_index: "&o1^",
             native_fallback: false,
+            shadow_ready: false,
         },
-        // The genuine floating-point fallback keeps only native-compatible
+        // The genuine date fallback keeps only native-compatible
         // decimal/hex tokens; octal admission is not a native-oracle assumption.
         RadixLiteralState {
             literal: "7^",
@@ -10097,6 +10147,84 @@ fn integer_suffix_edits_preserve_source_tokens_and_rank_arity_proofs() {
             index: "&H0^",
             second_index: "&h1^",
             native_fallback: true,
+            shadow_ready: false,
+        },
+        initial,
+    ];
+    assert_radix_literal_trajectory(&states);
+}
+
+#[test]
+fn float_literal_edits_preserve_source_tokens_and_rank_arity_proofs() {
+    let initial = RadixLiteralState {
+        literal: "7.25",
+        default: ".5",
+        module_bounds: "-1. To +3.0",
+        local_bounds: "-1. To +2.0",
+        local_rank: 1,
+        index: "0.",
+        second_index: "1.",
+        native_fallback: false,
+        shadow_ready: false,
+    };
+    let fraction = RadixLiteralState {
+        literal: "7.250",
+        ..initial
+    };
+    let exponent = RadixLiteralState {
+        literal: "7.250E+0",
+        ..fraction
+    };
+    let double_exponent = RadixLiteralState {
+        literal: "7.250D+0",
+        ..exponent
+    };
+    let mixed_double = RadixLiteralState {
+        literal: "7.250D+0#",
+        default: ".5e-1#",
+        module_bounds: "-1.# To +3.0#",
+        local_bounds: "-1.D+0# To +2.0#, 3E0#",
+        local_rank: 2,
+        index: "0.#",
+        second_index: "1e0#",
+        native_fallback: false,
+        shadow_ready: false,
+    };
+    let currency_suffix = RadixLiteralState {
+        literal: "7@",
+        default: ".5d-1@",
+        module_bounds: "-1.@ To +3.0@",
+        local_bounds: "-1.d+0@ To +2.0@, 3e0@",
+        local_rank: 2,
+        index: "0@",
+        second_index: "1d0@",
+        native_fallback: false,
+        shadow_ready: false,
+    };
+    // These bounds and suffixes prove source spelling and rank, not literal
+    // evaluation, Long coercion, default execution or declaration legality.
+    let states = [
+        initial,
+        fraction,
+        exponent,
+        double_exponent,
+        RadixLiteralState {
+            literal: "7.250D+0!",
+            ..double_exponent
+        },
+        mixed_double,
+        currency_suffix,
+        RadixLiteralState {
+            shadow_ready: true,
+            ..currency_suffix
+        },
+        // D/d is not a retained-native grammar oracle. The date control keeps
+        // the complete surrounding tokens independently native-compatible.
+        RadixLiteralState {
+            literal: "7.250E+0#",
+            local_bounds: "-1.E+0# To +2.0#, 3E0#",
+            native_fallback: true,
+            ..mixed_double
         },
         initial,
     ];
