@@ -27,11 +27,12 @@ use rootlight_mcp_contract::{
         CompletenessState, ContinuationAvailability, ContinuationGuidance, LimitingResource,
         LimitingResourceKind, ResultCompleteness,
     },
+    conditional_activity::CodeLocateDataV1_10,
     context::{BatchTool, PlanExplanation},
     intent::{ArchitectureOverviewData, SymbolRelationshipsData},
     vertical::{
-        CodeLocateData, ReadEnvelope, RequiredNullable, ResponseBudget, ResponseProfile,
-        ResponseWarning, UsageSummary,
+        ReadEnvelope, RequiredNullable, ResponseBudget, ResponseProfile, ResponseWarning,
+        UsageSummary,
     },
 };
 use serde::{Serialize, de::DeserializeOwned};
@@ -567,7 +568,7 @@ where
         {
             return Err(PlanChangeServiceError::InvalidResponse);
         }
-        let data: CodeLocateData = serde_json::from_value(envelope.data.clone())
+        let data: CodeLocateDataV1_10 = serde_json::from_value(envelope.data.clone())
             .map_err(|_| PlanChangeServiceError::InvalidResponse)?;
         charge_usage(ledger, &envelope.usage, data.matches.len())?;
         for located in data.matches {

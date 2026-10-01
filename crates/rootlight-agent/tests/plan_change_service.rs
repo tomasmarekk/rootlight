@@ -4,7 +4,7 @@
 //! and public response shaping independent from the application adapter.
 
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     sync::{Arc, Mutex},
     time::{Duration, Instant},
 };
@@ -21,8 +21,8 @@ use rootlight_agent::{
         AgentResolutionContext, AgentResolvedIdentity, AgentToolPort, AgentToolRequest,
     },
 };
-use rootlight_ids::{GenerationId, RepositoryId, SymbolId};
-use rootlight_ir::CoverageStatus;
+use rootlight_ids::{ContentHash, FactId, FileId, GenerationId, RepositoryId, SymbolId};
+use rootlight_ir::{CoverageStatus, SourceRef, SourceSpan};
 use rootlight_mcp_contract::{
     ErrorCode, PublicError, RepositorySelector, TrustClassification,
     change::{
@@ -30,14 +30,19 @@ use rootlight_mcp_contract::{
         PlanEvidenceOmissionReason, PlanEvidenceProvider, PlanObjective, PlanProviderState,
         PlanSymbolTarget, PlanTargetSelector, RiskLevel,
     },
+    conditional_activity::{
+        CodeLocateDataV1_10, ConditionalActivityAssessment, ConditionalActivityBasis,
+        ConditionalActivityInventory, ConditionalActivityScope, ConditionalActivityState,
+    },
     context::BatchTool,
     vertical::{
-        CacheStatus, ContinuationCursor, CoverageSummary, Freshness, GenerationSelector,
-        GenerationSummary, ProvenanceLevel, ReadEnvelope, RepositoryIdSelector, RequiredNullable,
-        ResolvedRepository, ResponseBudget, ResponseProfile, UsageSummary,
+        CacheStatus, ContinuationCursor, CoverageSummary, EntityKind, Freshness,
+        GenerationSelector, GenerationSummary, LocateReason, LocatedItem, ProvenanceLevel,
+        QueryInterpretation, ReadEnvelope, RepositoryIdSelector, RequiredNullable,
+        ResolvedRepository, ResponseBudget, ResponseProfile, SearchMode, UsageSummary,
     },
 };
-use serde_json::{Value, json};
+use serde_json::{Map, Value, json};
 
 #[derive(Debug, Clone, Copy)]
 struct TestCancellation(bool);
@@ -67,6 +72,7 @@ struct PlanCall {
 #[derive(Debug)]
 struct ProviderCall {
     tool: BatchTool,
+    arguments: Map<String, Value>,
     budget: ResponseBudget,
     identity: AgentResolvedIdentity,
     cancelled: bool,
@@ -84,6 +90,7 @@ struct FakePort {
     provider_error: Mutex<Option<(BatchTool, AgentPortError)>>,
     provider_items: Mutex<Option<(BatchTool, usize)>>,
     paginated_provider: Mutex<Option<BatchTool>>,
+    locate_data: Option<Value>,
 }
 
 impl FakePort {
@@ -101,6 +108,7 @@ impl FakePort {
             provider_error: Mutex::new(None),
             provider_items: Mutex::new(None),
             paginated_provider: Mutex::new(None),
+            locate_data: None,
         }
     }
 
@@ -135,6 +143,11 @@ impl FakePort {
             .expect("paginated provider lock is available") = Some(tool);
         self
     }
+
+    fn with_locate_data(mut self, data: Value) -> Self {
+        self.locate_data = Some(data);
+        self
+    }
 }
 
 impl AgentToolPort<TestCancellation> for FakePort {
@@ -167,7 +180,7 @@ impl AgentToolPort<TestCancellation> for FakePort {
         request: AgentToolRequest,
         context: AgentCallContext<TestCancellation>,
     ) -> AgentPortFuture<Result<ReadEnvelope<Value>, AgentPortError>> {
-        let tool = request.tool();
+        let (tool, arguments, _) = request.into_parts();
         let mut pinned = context
             .pinned_identity()
             .cloned()
@@ -184,6 +197,7 @@ impl AgentToolPort<TestCancellation> for FakePort {
             .expect("provider call lock is available")
             .push(ProviderCall {
                 tool,
+                arguments,
                 budget: context.budget().clone(),
                 identity: pinned.clone(),
                 cancelled: context.cancellation().is_cancelled(),
@@ -216,10 +230,19 @@ impl AgentToolPort<TestCancellation> for FakePort {
             .lock()
             .expect("paginated provider lock is available")
             .is_some_and(|configured_tool| configured_tool == tool);
+        let locate_data = (tool == BatchTool::CodeLocate)
+            .then(|| self.locate_data.clone())
+            .flatten();
         Box::pin(async move {
             match error {
                 Some(error) => Err(error),
-                None => Ok(provider_envelope(tool, pinned, item_count, paginated)),
+                None => {
+                    let mut envelope = provider_envelope(tool, pinned, item_count, paginated);
+                    if let Some(data) = locate_data {
+                        envelope.data = data;
+                    }
+                    Ok(envelope)
+                }
             }
         })
     }
@@ -296,6 +319,62 @@ fn usage() -> UsageSummary {
     }
 }
 
+fn locate_data(generation_id: GenerationId) -> CodeLocateDataV1_10 {
+    let file = FileId::from_bytes([4; 20]);
+    let content_hash = ContentHash::from_bytes([5; 32]);
+    let source = SourceRef::new(
+        repository(),
+        generation_id,
+        SourceSpan::new(file, 0, 40).expect("fixture returned span is valid"),
+        content_hash,
+        None,
+    );
+    CodeLocateDataV1_10 {
+        matches: vec![LocatedItem {
+            extracted_from: None,
+            symbol_id: Some(symbol()),
+            file_id: Some(file),
+            kind: EntityKind::Function,
+            display_name: "Run".to_owned(),
+            signature: None,
+            path: "Module.bas".to_owned(),
+            score: 1000,
+            why: vec![LocateReason::Identifier],
+            source_ref: Some(source),
+            trust: TrustClassification::UntrustedRepositoryData,
+        }],
+        query_interpretation: QueryInterpretation {
+            tokens: vec!["Run".to_owned()],
+            modes: BTreeSet::from([SearchMode::Lexical]),
+            semantic_available: false,
+        },
+        suggested_next: Vec::new(),
+        explanation: None,
+        conditional_activity: vec![ConditionalActivityAssessment {
+            result_index: 0,
+            basis: ConditionalActivityBasis::DefinitionToken,
+            activity: ConditionalActivityState::Active,
+            assessed_source_ref: RequiredNullable(Some(SourceRef::new(
+                repository(),
+                generation_id,
+                SourceSpan::new(file, 10, 14).expect("fixture definition span is valid"),
+                content_hash,
+                None,
+            ))),
+            inventory: RequiredNullable(Some(ConditionalActivityInventory {
+                fact_id: FactId::from_bytes([6; 20]),
+                parser_provenance_id: FactId::from_bytes([7; 20]),
+                scope: ConditionalActivityScope {
+                    start_byte: 0,
+                    end_byte: 40,
+                },
+                complete: true,
+            })),
+            reason: RequiredNullable(None),
+        }],
+    }
+}
+
 fn provider_envelope(
     tool: BatchTool,
     pinned: AgentResolvedIdentity,
@@ -313,6 +392,8 @@ fn provider_envelope(
         })
         .collect::<Vec<_>>();
     let data = match tool {
+        BatchTool::CodeLocate => serde_json::to_value(locate_data(pinned.generation.generation_id))
+            .expect("current locate fixture serializes"),
         BatchTool::ChangeImpact => json!({
             "resolved_changes": resolved_changes,
             "impacted": [],
@@ -480,6 +561,113 @@ fn input(generation_id: GenerationId) -> PlanChangeInput {
         budget: None,
         profile: Some(ResponseProfile::Compact),
         explain: None,
+    }
+}
+
+#[tokio::test]
+async fn textual_targets_resolve_current_locate_data_before_planning() {
+    let mut request = input(generation(2));
+    request.targets = serde_json::from_value(json!([
+        {"package": "fixture-package"},
+        {"route": "/fixture/target"},
+        {"located": "fixture-target"}
+    ]))
+    .expect("textual target selectors are valid");
+    let port = Arc::new(FakePort::new(
+        Some(Ok(identity(generation(2)))),
+        Some(Ok(plan_output(generation(2)))),
+    ));
+    let deadline = Instant::now() + Duration::from_secs(1);
+
+    let output = PlanChangeService
+        .execute(
+            Arc::clone(&port),
+            request,
+            TestCancellation(false),
+            deadline,
+        )
+        .await
+        .expect("current locate metadata preserves textual target resolution");
+
+    let calls = port.plan_calls.lock().expect("plan call lock is available");
+    assert_eq!(calls.len(), 1);
+    assert_eq!(calls[0].request.target_symbols(), &[symbol()]);
+    assert_eq!(
+        calls[0].request.target_files(),
+        &[FileId::from_bytes([4; 20])]
+    );
+    assert_eq!(output.generation.generation_id, generation(2));
+    assert_eq!(output.data.plan.len(), 1);
+    let providers = port
+        .provider_calls
+        .lock()
+        .expect("provider call lock is available");
+    assert_eq!(providers.len(), 7);
+    for (call, query) in
+        providers
+            .iter()
+            .take(3)
+            .zip(["fixture-package", "/fixture/target", "fixture-target"])
+    {
+        assert_eq!(call.tool, BatchTool::CodeLocate);
+        assert_eq!(call.arguments["query"], query);
+        assert_eq!(call.identity.generation.generation_id, generation(2));
+        assert_eq!(call.deadline, Some(deadline));
+    }
+}
+
+#[tokio::test]
+async fn textual_targets_reject_uncorrelated_conditional_metadata_before_planning() {
+    let valid = serde_json::to_value(locate_data(generation(2)))
+        .expect("current locate fixture serializes");
+    let mut invalid_ordinal = valid.clone();
+    invalid_ordinal["conditional_activity"][0]["result_index"] = json!(1);
+    let mut foreign_generation = valid;
+    foreign_generation["conditional_activity"][0]["assessed_source_ref"] = serde_json::to_value(
+        locate_data(generation(9)).conditional_activity[0]
+            .assessed_source_ref
+            .clone(),
+    )
+    .expect("foreign assessment source serializes");
+
+    for data in [invalid_ordinal, foreign_generation] {
+        let mut request = input(generation(2));
+        request.targets = serde_json::from_value(json!([{"package": "fixture-package"}]))
+            .expect("textual target selector is valid");
+        let port = Arc::new(
+            FakePort::new(
+                Some(Ok(identity(generation(2)))),
+                Some(Ok(plan_output(generation(2)))),
+            )
+            .with_locate_data(data),
+        );
+
+        assert_eq!(
+            PlanChangeService
+                .execute(
+                    Arc::clone(&port),
+                    request,
+                    TestCancellation(false),
+                    Instant::now() + Duration::from_secs(1),
+                )
+                .await,
+            Err(PlanChangeServiceError::InvalidResponse)
+        );
+        assert!(
+            port.plan_calls
+                .lock()
+                .expect("plan call lock is available")
+                .is_empty()
+        );
+        assert_eq!(
+            port.provider_calls
+                .lock()
+                .expect("provider call lock is available")
+                .iter()
+                .map(|call| call.tool)
+                .collect::<Vec<_>>(),
+            vec![BatchTool::CodeLocate]
+        );
     }
 }
 
