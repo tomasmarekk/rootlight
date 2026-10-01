@@ -1150,6 +1150,205 @@ fn conditional_activity_missing_ambiguous_and_incomplete_never_guess_a_definitio
 }
 
 #[test]
+fn conditional_activity_grouped_generic_definitions_preserve_locate_without_guessing_activity() {
+    let template = fixture_snapshot();
+    let repository = template.metadata().repository();
+    let generation = template.metadata().generation();
+    let text = "Item = 7\nItem = 8\n";
+    let hash = content_hash(text.as_bytes());
+    let path = RelativePath::parse(Path::new("Grouped.bas")).unwrap();
+    let file = derive_file(FileIdentity {
+        repository,
+        path_identity: path.identity_bytes(),
+    })
+    .id();
+    let parser = derive_fact("rootlight.query-test.grouped-parser/v1", b"generic").id();
+    let symbol = SymbolId::from_bytes([73; 20]);
+    let reference = |start, end| {
+        SourceRef::new(
+            repository,
+            generation,
+            SourceSpan::new(
+                file,
+                u64::try_from(start).unwrap(),
+                u64::try_from(end).unwrap(),
+            )
+            .unwrap(),
+            hash,
+            None,
+        )
+    };
+    let full = reference(0, text.len());
+    let mut document = NormalizedIrDocument::empty(repository, generation);
+    document.files.push(FileRecord {
+        id: file,
+        repository,
+        generation,
+        path: path.as_str().to_owned(),
+        path_locator: Some(path.to_locator()),
+        content_hash: hash,
+        byte_length: u64::try_from(text.len()).unwrap(),
+        language: "vba".to_owned(),
+        encoding: "utf-8".to_owned(),
+        generated: false,
+        provenance: parser,
+        evidence: FactEvidence {
+            source: Some(full.clone()),
+            derivation: Vec::new(),
+        },
+    });
+    document.provenance.push(ProvenanceRecord {
+        id: parser,
+        repository,
+        generation,
+        producer_kind: ProducerKind::Parser,
+        producer: ProducerIdentity::new("rootlight-query-test", "1.0.0", hash).unwrap(),
+        binary_digest: hash,
+        frontend_version: None,
+        language: "vba".to_owned(),
+        tier: AnalysisTier::TierB,
+        build_context: BuildContextIdentity::new(hash),
+        input_sources: vec![full.clone()],
+        evidence_sources: vec![full.clone()],
+        derivation_parents: Vec::new(),
+        rule: None,
+    });
+    document.entities.push(EntityRecord {
+        id: symbol,
+        repository,
+        generation,
+        kind: EntityKind::Variable,
+        language: "vba".to_owned(),
+        tier: AnalysisTier::TierB,
+        canonical_name: "Item".to_owned(),
+        display_name: "Item".to_owned(),
+        qualified_name: "Grouped.Item".to_owned(),
+        container: Some(rootlight_ir::ContainerRef::File(file)),
+        visibility: EntityVisibility::Unknown,
+        flags: Vec::new(),
+        provenance: parser,
+        evidence: FactEvidence {
+            source: Some(reference(0, 8)),
+            derivation: Vec::new(),
+        },
+    });
+    for (ordinal, start) in [(0_u8, 0), (1, 9)] {
+        let token = reference(start, start + "Item".len());
+        document.occurrences.push(OccurrenceRecord {
+            id: FactId::from_bytes([80 + ordinal; 20]),
+            repository,
+            generation,
+            file,
+            source: token.clone(),
+            role: OccurrenceRole::Definition,
+            enclosing: None,
+            target: OccurrenceTarget::Resolved { symbol },
+            syntactic_text_hash: content_hash(b"Item"),
+            syntax_kind: "generic_name.definition".to_owned(),
+            provenance: parser,
+            confidence: Confidence::new(1000).unwrap(),
+            evidence: FactEvidence {
+                source: Some(reference(start, start + 8)),
+                derivation: Vec::new(),
+            },
+        });
+        document.relations.push(RelationRecord {
+            id: FactId::from_bytes([90 + ordinal; 20]),
+            repository,
+            generation,
+            subject: RelationEndpoint::File(file),
+            predicate: RelationPredicate::Contains,
+            object: RelationEndpoint::Entity(symbol),
+            confidence: Confidence::new(1000).unwrap(),
+            evidence_kind: EvidenceKind::Syntax,
+            provenance: parser,
+            evidence: FactEvidence {
+                source: Some(reference(start, start + 8)),
+                derivation: Vec::new(),
+            },
+        });
+    }
+    document.extensions.push(
+        new_vba_compilation_envelope(
+            repository,
+            generation,
+            parser,
+            full.clone(),
+            VbaCompilation {
+                scope: full.span(),
+                complete: true,
+                branches: Vec::new(),
+            },
+        )
+        .unwrap(),
+    );
+    let search = FakeSearch {
+        generation,
+        hits: vec![SearchHit {
+            symbol_id: Some(symbol),
+            file_id: file,
+            identifier: "Item".to_owned(),
+            canonical_name: None,
+            qualified_name: "Grouped.Item".to_owned(),
+            path: path.as_str().to_owned(),
+            kind: "variable".to_owned(),
+            language: "vba".to_owned(),
+            tier: "tier_b".to_owned(),
+            generated: false,
+            test: false,
+            declaration_only: false,
+            relevance_score: 1.0,
+        }],
+    };
+    let snapshot = GenerationSnapshot::new(
+        template.metadata(),
+        document.clone(),
+        &IrLimits::default(),
+        &ExtensionSupport::default(),
+    )
+    .unwrap();
+    let result = conditional_locate(&snapshot, &search, QueryBudget::new());
+    assert_eq!(result.hits.len(), 1);
+    assert_eq!(result.hits[0].symbol, Some(symbol));
+    assert_eq!(result.hits[0].source, Some(reference(0, 8)));
+    assert!(!result.execution.is_truncated());
+    assert_eq!(result.conditional_activity.len(), 1);
+    let assessment = &result.conditional_activity[0];
+    assert_eq!(assessment.result_index, 0);
+    assert_eq!(assessment.activity, ConditionalActivityState::Unproven);
+    assert_eq!(
+        assessment.reason,
+        Some(ConditionalActivityReason::AmbiguousDefinition)
+    );
+    assert!(assessment.assessed_source_ref.is_none());
+    assert!(assessment.inventory.is_none());
+    // A second name token alone cannot authorize an arbitrary alternate clause.
+    document.relations.pop();
+    let unsupported = GenerationSnapshot::new(
+        template.metadata(),
+        document,
+        &IrLimits::default(),
+        &ExtensionSupport::default(),
+    )
+    .unwrap();
+    let query = QueryService::new(&unsupported, &search).unwrap();
+    let plan = query
+        .plan_code_locate(
+            "Item".to_owned(),
+            LocateMode::Exact,
+            1,
+            0,
+            SearchBudget::default(),
+            QueryBudget::new(),
+        )
+        .unwrap();
+    assert!(matches!(
+        query.execute_code_locate(&plan, &Cancellation::new()),
+        Err(QueryError::IndexDrift)
+    ));
+}
+
+#[test]
 fn conditional_activity_source_reads_assess_expanded_bytes_and_keep_inactive_source() {
     let (snapshot, retained, search) = conditional_fixture();
     let sources = [retained];

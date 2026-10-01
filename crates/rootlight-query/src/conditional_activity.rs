@@ -6,8 +6,9 @@ use std::{collections::BTreeMap, mem};
 
 use rootlight_ids::{ContentHash, FactId, FileId, SymbolId};
 use rootlight_ir::{
-    ExtensionEnvelope, NormalizedIrDocument, OccurrenceRole, OccurrenceTarget, ProducerKind,
-    SourceRef, SourceSpan, VBA_COMPILATION_NAMESPACE, VbaCompilation, VbaCompilationActivity,
+    ContainerRef, EvidenceKind, ExtensionEnvelope, NormalizedIrDocument, OccurrenceRecord,
+    OccurrenceRole, OccurrenceTarget, ProducerKind, RelationEndpoint, RelationPredicate, SourceRef,
+    SourceSpan, VBA_COMPILATION_NAMESPACE, VbaCompilation, VbaCompilationActivity,
     decode_vba_compilation_envelope,
 };
 use rootlight_storage::GenerationSnapshot;
@@ -134,6 +135,16 @@ struct Inventory {
 struct SelectedFile {
     content_hash: ContentHash,
     byte_length: u64,
+}
+
+type PendingDefinitionKey = (SymbolId, FileId, u64, u64, FactId);
+
+struct PendingDefinition<'source> {
+    source: &'source SourceRef,
+    declaration: &'source SourceRef,
+    owner: RelationEndpoint,
+    provenance: FactId,
+    witnessed: bool,
 }
 
 struct ProjectionBudget<'tracker, 'control, 'cancellation> {
@@ -429,6 +440,7 @@ fn project_document(
             },
         );
     }
+    let mut pending_definitions = BTreeMap::<PendingDefinitionKey, PendingDefinition<'_>>::new();
     if !definitions.is_empty() {
         for occurrence in &document.occurrences {
             if !budget.rows(1)? {
@@ -444,14 +456,42 @@ fn project_document(
                 continue;
             };
             let source = &occurrence.source;
+            let file = files
+                .get(&source.span().file())
+                .ok_or(QueryError::IndexDrift)?;
             if occurrence.repository != document.repository
                 || occurrence.generation != document.generation
                 || occurrence.file != source.span().file()
                 || !same_identity(entity_source, source)
-                || !contains(entity_source.span(), source.span())
+                || source.span().end_byte() > file.byte_length
                 || source.span().start_byte() == source.span().end_byte()
             {
                 return Err(QueryError::IndexDrift);
+            }
+            if !contains(entity_source.span(), source.span()) {
+                if !budget.rows(1)? {
+                    return Ok(incomplete(requests, assessments));
+                }
+                let pending = grouped_definition(
+                    document,
+                    symbol,
+                    entity_source,
+                    occurrence,
+                    file.byte_length,
+                )?;
+                if !budget.memory(pending_definition_memory()?)? {
+                    return Ok(incomplete(requests, assessments));
+                }
+                pending_definitions.insert(
+                    (
+                        symbol,
+                        source.span().file(),
+                        source.span().start_byte(),
+                        source.span().end_byte(),
+                        occurrence.id,
+                    ),
+                    pending,
+                );
             }
             if anchor.source.is_some() {
                 anchor.ambiguous = true;
@@ -459,6 +499,11 @@ fn project_document(
                 anchor.source = Some(source.clone());
             }
         }
+    }
+    if !pending_definitions.is_empty()
+        && !witness_grouped_definitions(document, &files, &mut pending_definitions, &mut budget)?
+    {
+        return Ok(incomplete(requests, assessments));
     }
     for (request, assessment) in requests.iter().zip(&mut assessments) {
         if !budget.rows(1)? {
@@ -546,6 +591,144 @@ fn project_document(
         assessments,
         incomplete: false,
     })
+}
+
+fn pending_definition_memory() -> Result<u64, QueryError> {
+    checked_usize_to_u64(
+        mem::size_of::<(PendingDefinitionKey, PendingDefinition<'_>)>()
+            .checked_add(2 * mem::size_of::<usize>())
+            .and_then(|bytes| bytes.checked_mul(16))
+            .ok_or(QueryError::MemoryUnavailable)?,
+    )
+}
+
+fn grouped_definition<'source>(
+    document: &NormalizedIrDocument,
+    symbol: SymbolId,
+    primary: &SourceRef,
+    occurrence: &'source OccurrenceRecord,
+    file_byte_length: u64,
+) -> Result<PendingDefinition<'source>, QueryError> {
+    let entity = document
+        .entities
+        .binary_search_by_key(&symbol, |entity| entity.id)
+        .ok()
+        .and_then(|index| document.entities.get(index))
+        .ok_or(QueryError::IndexDrift)?;
+    let entity_source = entity
+        .evidence
+        .source
+        .as_ref()
+        .ok_or(QueryError::IndexDrift)?;
+    let declaration = occurrence
+        .evidence
+        .source
+        .as_ref()
+        .ok_or(QueryError::IndexDrift)?;
+    if entity.repository != document.repository
+        || entity.generation != document.generation
+        || !same_identity(entity_source, primary)
+        || entity_source.span() != primary.span()
+        || entity.provenance != occurrence.provenance
+        || !same_identity(primary, declaration)
+        || !contains(declaration.span(), occurrence.source.span())
+        || declaration.span().start_byte() == declaration.span().end_byte()
+        || declaration.span().end_byte() > file_byte_length
+    {
+        return Err(QueryError::IndexDrift);
+    }
+    let (owner, enclosing) = match entity.container.ok_or(QueryError::IndexDrift)? {
+        ContainerRef::Repository(repository) => (RelationEndpoint::Repository(repository), None),
+        ContainerRef::File(file) => (RelationEndpoint::File(file), None),
+        ContainerRef::Entity(entity) => (RelationEndpoint::Entity(entity), Some(entity)),
+    };
+    if occurrence.enclosing != enclosing {
+        return Err(QueryError::IndexDrift);
+    }
+    Ok(PendingDefinition {
+        source: &occurrence.source,
+        declaration,
+        owner,
+        provenance: occurrence.provenance,
+        witnessed: false,
+    })
+}
+
+fn witness_grouped_definitions(
+    document: &NormalizedIrDocument,
+    files: &BTreeMap<FileId, SelectedFile>,
+    pending: &mut BTreeMap<PendingDefinitionKey, PendingDefinition<'_>>,
+    budget: &mut ProjectionBudget<'_, '_, '_>,
+) -> Result<bool, QueryError> {
+    // Grouped symbols retain one primary declaration but can own several
+    // written Definition tokens. Alternate tokens require a separate exact
+    // syntax containment witness; a second token never proves unique activity.
+    for relation in &document.relations {
+        if !budget.rows(1)? {
+            return Ok(false);
+        }
+        let RelationEndpoint::Entity(symbol) = relation.object else {
+            continue;
+        };
+        if relation.predicate != RelationPredicate::Contains
+            || relation.evidence_kind != EvidenceKind::Syntax
+        {
+            continue;
+        }
+        let Some(source) = &relation.evidence.source else {
+            continue;
+        };
+        let span = source.span();
+        let Some(file) = files.get(&span.file()) else {
+            continue;
+        };
+        if relation.repository != document.repository
+            || relation.generation != document.generation
+            || source.repository() != document.repository
+            || source.generation() != document.generation
+            || source.content_hash() != file.content_hash
+            || span.start_byte() == span.end_byte()
+            || span.end_byte() > file.byte_length
+        {
+            continue;
+        }
+        let lower = (
+            symbol,
+            span.file(),
+            span.start_byte(),
+            0,
+            FactId::from_bytes([0; 20]),
+        );
+        let upper = (
+            symbol,
+            span.file(),
+            span.end_byte(),
+            u64::MAX,
+            FactId::from_bytes([u8::MAX; 20]),
+        );
+        for (_, definition) in pending.range_mut(lower..=upper) {
+            if !budget.rows(1)? {
+                return Ok(false);
+            }
+            if relation.subject == definition.owner
+                && relation.provenance == definition.provenance
+                && same_identity(source, definition.source)
+                && source.span() == definition.declaration.span()
+                && contains(span, definition.source.span())
+            {
+                definition.witnessed = true;
+            }
+        }
+    }
+    for definition in pending.values() {
+        if !budget.rows(1)? {
+            return Ok(false);
+        }
+        if !definition.witnessed {
+            return Err(QueryError::IndexDrift);
+        }
+    }
+    Ok(true)
 }
 
 fn validate_inventory(
@@ -666,8 +849,9 @@ mod tests {
     use rootlight_cancel::{Cancellation, CancellationReason};
     use rootlight_ids::{GenerationIdentity, content_hash, derive_generation, derive_repository};
     use rootlight_ir::{
-        AnalysisTier, BuildContextIdentity, ExtensionSupport, FactEvidence, FileRecord, IrLimits,
-        ProducerIdentity, ProvenanceRecord, VbaCompilationBranch, new_vba_compilation_envelope,
+        AnalysisTier, BuildContextIdentity, Confidence, EntityKind, EntityRecord, EntityVisibility,
+        ExtensionSupport, FactEvidence, FileRecord, IrLimits, ProducerIdentity, ProvenanceRecord,
+        RelationRecord, VbaCompilationBranch, new_vba_compilation_envelope,
     };
     use rootlight_storage::{GENERATION_CONTRACT_VERSION, GenerationMetadata};
     use std::time::Duration;
@@ -772,6 +956,572 @@ mod tests {
             generated: false,
             extracted_from: None,
             trust: RepositoryDataTrust::UntrustedRepositoryData,
+        }
+    }
+
+    fn grouped_fixture() -> (GenerationSnapshot, LocateHit) {
+        let (snapshot, full) = fixture();
+        let mut document = snapshot.document().clone();
+        let symbol = SymbolId::from_bytes([5; 20]);
+        let parser = document.provenance[0].id;
+        let reference = |start, end| {
+            SourceRef::new(
+                full.repository(),
+                full.generation(),
+                SourceSpan::new(full.span().file(), start, end).unwrap(),
+                full.content_hash(),
+                None,
+            )
+        };
+        document.entities.push(EntityRecord {
+            id: symbol,
+            repository: document.repository,
+            generation: document.generation,
+            kind: EntityKind::Variable,
+            language: "vba".to_owned(),
+            tier: AnalysisTier::TierB,
+            canonical_name: "Item".to_owned(),
+            display_name: "Item".to_owned(),
+            qualified_name: "Module.Item".to_owned(),
+            container: Some(ContainerRef::File(full.span().file())),
+            visibility: EntityVisibility::Unknown,
+            flags: Vec::new(),
+            provenance: parser,
+            evidence: FactEvidence {
+                source: Some(reference(10, 30)),
+                derivation: Vec::new(),
+            },
+        });
+        for (ordinal, start) in [(0_u8, 10), (1, 50)] {
+            let token = reference(start + 2, start + 6);
+            document.occurrences.push(OccurrenceRecord {
+                id: FactId::from_bytes([10 + ordinal; 20]),
+                repository: document.repository,
+                generation: document.generation,
+                file: full.span().file(),
+                source: token.clone(),
+                role: OccurrenceRole::Definition,
+                enclosing: None,
+                target: OccurrenceTarget::Resolved { symbol },
+                syntactic_text_hash: content_hash(b"Item"),
+                syntax_kind: "generic_name.definition".to_owned(),
+                provenance: parser,
+                confidence: Confidence::new(1000).unwrap(),
+                evidence: FactEvidence {
+                    source: Some(reference(start, start + 20)),
+                    derivation: Vec::new(),
+                },
+            });
+            document.relations.push(RelationRecord {
+                id: FactId::from_bytes([20 + ordinal; 20]),
+                repository: document.repository,
+                generation: document.generation,
+                subject: RelationEndpoint::File(full.span().file()),
+                predicate: RelationPredicate::Contains,
+                object: RelationEndpoint::Entity(symbol),
+                confidence: Confidence::new(1000).unwrap(),
+                evidence_kind: EvidenceKind::Syntax,
+                provenance: parser,
+                evidence: FactEvidence {
+                    source: Some(reference(start, start + 20)),
+                    derivation: Vec::new(),
+                },
+            });
+        }
+        let hit = LocateHit {
+            extracted_from: None,
+            symbol: Some(symbol),
+            file: full.span().file(),
+            identifier: "Item".to_owned(),
+            qualified_name: "Module.Item".to_owned(),
+            path: "Module.bas".to_owned(),
+            kind: "variable".to_owned(),
+            language: "vba".to_owned(),
+            tier: "tier_b".to_owned(),
+            generated: false,
+            relevance_score: 1.0,
+            source: Some(reference(10, 30)),
+            trust: RepositoryDataTrust::UntrustedRepositoryData,
+        };
+        (
+            GenerationSnapshot::new(
+                snapshot.metadata(),
+                document,
+                &IrLimits::default(),
+                &ExtensionSupport::default(),
+            )
+            .unwrap(),
+            hit,
+        )
+    }
+
+    fn grouped_projection(
+        snapshot: &GenerationSnapshot,
+        hit: &LocateHit,
+        budget: QueryBudget,
+    ) -> (ActivityProjection, UsageTracker, Vec<QueryResource>) {
+        let cancellation = Cancellation::new();
+        let control = QueryControl::new(&cancellation, Duration::from_secs(2));
+        let mut tracker = UsageTracker::new(budget);
+        let mut resources = Vec::new();
+        let projection = project_locate(
+            snapshot,
+            std::slice::from_ref(hit),
+            &mut tracker,
+            &control,
+            &mut resources,
+        )
+        .unwrap();
+        (projection, tracker, resources)
+    }
+
+    #[test]
+    fn conditional_activity_grouped_definitions_require_witnesses_and_remain_ambiguous() {
+        let (snapshot, hit) = grouped_fixture();
+        let (projection, _, resources) = grouped_projection(&snapshot, &hit, QueryBudget::new());
+        assert!(!projection.incomplete);
+        assert!(resources.is_empty());
+        let assessment = &projection.assessments[0];
+        assert_eq!(assessment.basis, ConditionalActivityBasis::DefinitionToken);
+        assert_eq!(assessment.activity, ConditionalActivityState::Unproven);
+        assert_eq!(
+            assessment.reason,
+            Some(ConditionalActivityReason::AmbiguousDefinition)
+        );
+        assert!(assessment.assessed_source_ref.is_none());
+        assert!(assessment.inventory.is_none());
+        for count in [0, 1] {
+            let mut document = snapshot.document().clone();
+            document.occurrences.truncate(count);
+            // No alternate token exists, so neither a relation scan nor its
+            // memory reservation may change the ordinary locate path.
+            document.relations.clear();
+            let changed = GenerationSnapshot::new(
+                snapshot.metadata(),
+                document,
+                &IrLimits::default(),
+                &ExtensionSupport::default(),
+            )
+            .unwrap();
+            let (projection, tracker, resources) =
+                grouped_projection(&changed, &hit, QueryBudget::new());
+            assert!(resources.is_empty());
+            assert!(!projection.incomplete);
+            assert_eq!(
+                projection.assessments[0].reason,
+                if count == 0 {
+                    Some(ConditionalActivityReason::MissingDefinition)
+                } else {
+                    None
+                }
+            );
+            assert_eq!(
+                projection.assessments[0].activity,
+                if count == 0 {
+                    ConditionalActivityState::Unproven
+                } else {
+                    ConditionalActivityState::Active
+                }
+            );
+            let reservation = mandatory_memory(1).unwrap()
+                + decoder_memory(changed.document().extensions[0].payload.len()).unwrap()
+                + checked_usize_to_u64(
+                    16 * (mem::size_of::<((FileId, u64, u64), Inventory)>()
+                        + 2 * mem::size_of::<usize>()),
+                )
+                .unwrap();
+            assert!(!tracker.can_add(
+                QueryResource::MemoryBytes,
+                QueryBudget::new().max_memory_bytes() - reservation + 1
+            ));
+            assert!(tracker.can_add(
+                QueryResource::MemoryBytes,
+                QueryBudget::new().max_memory_bytes() - reservation
+            ));
+        }
+    }
+
+    #[test]
+    fn conditional_activity_grouped_definitions_have_exact_soft_resource_boundaries() {
+        let (snapshot, hit) = grouped_fixture();
+        let rows = u64::try_from(rootlight_ir::MAX_VBA_COMPILATION_BRANCHES).unwrap() + 12;
+        let memory = mandatory_memory(1).unwrap()
+            + decoder_memory(snapshot.document().extensions[0].payload.len()).unwrap()
+            + checked_usize_to_u64(
+                16 * (mem::size_of::<((FileId, u64, u64), Inventory)>()
+                    + 2 * mem::size_of::<usize>()),
+            )
+            .unwrap()
+            + pending_definition_memory().unwrap();
+        let (complete, tracker, resources) = grouped_projection(
+            &snapshot,
+            &hit,
+            QueryBudget::new()
+                .with_max_rows(rows)
+                .with_max_memory_bytes(memory),
+        );
+        assert!(!complete.incomplete);
+        assert!(resources.is_empty());
+        assert!(!tracker.can_add(QueryResource::Rows, 1));
+        assert!(!tracker.can_add(QueryResource::MemoryBytes, 1));
+        for budget in [
+            QueryBudget::new().with_max_rows(rows - 1),
+            QueryBudget::new().with_max_rows(0),
+            QueryBudget::new().with_max_memory_bytes(memory - 1),
+        ] {
+            let (projection, _, resources) = grouped_projection(&snapshot, &hit, budget);
+            assert!(projection.incomplete);
+            assert_eq!(resources.len(), 1);
+            let assessment = &projection.assessments[0];
+            assert_eq!(assessment.activity, ConditionalActivityState::Unproven);
+            assert_eq!(
+                assessment.reason,
+                Some(ConditionalActivityReason::ScanIncomplete)
+            );
+            assert!(assessment.assessed_source_ref.is_none());
+            assert!(assessment.inventory.is_none());
+        }
+        let fresh = Cancellation::new();
+        let fresh_control = QueryControl::new(&fresh, Duration::from_secs(2));
+        assert!(matches!(
+            project_locate(
+                &snapshot,
+                std::slice::from_ref(&hit),
+                &mut UsageTracker::new(QueryBudget::new().with_max_memory_bytes(0)),
+                &fresh_control,
+                &mut Vec::new(),
+            ),
+            Err(QueryError::BudgetExceeded {
+                resource: QueryResource::MemoryBytes,
+                limit: 0
+            })
+        ));
+        let cancellation = Cancellation::new();
+        cancellation.cancel(CancellationReason::ClientRequest);
+        let control = QueryControl::new(&cancellation, Duration::from_secs(2));
+        assert!(matches!(
+            project_locate(
+                &snapshot,
+                &[hit],
+                &mut UsageTracker::new(QueryBudget::new()),
+                &control,
+                &mut Vec::new()
+            ),
+            Err(QueryError::Cancelled(CancellationReason::ClientRequest))
+        ));
+    }
+
+    #[test]
+    fn conditional_activity_grouped_late_stop_retires_prior_range_membership() {
+        let (snapshot, grouped) = grouped_fixture();
+        let mut file_hit = grouped.clone();
+        file_hit.symbol = None;
+        file_hit.source = snapshot.document().files[0].evidence.source.clone();
+        let returned = file_hit.source.clone();
+        let hits = [file_hit, grouped];
+        let cancellation = Cancellation::new();
+        let control = QueryControl::new(&cancellation, Duration::from_secs(2));
+        let exact_rows = u64::try_from(rootlight_ir::MAX_VBA_COMPILATION_BRANCHES).unwrap() + 15;
+        for (maximum, complete) in [(exact_rows, true), (exact_rows - 1, false)] {
+            let mut tracker = UsageTracker::new(QueryBudget::new().with_max_rows(maximum));
+            let mut resources = Vec::new();
+            let projection =
+                project_locate(&snapshot, &hits, &mut tracker, &control, &mut resources).unwrap();
+            assert_eq!(projection.incomplete, !complete);
+            assert_eq!(projection.assessments.len(), 2);
+            assert_eq!(projection.assessments[0].result_index, 0);
+            assert_eq!(projection.assessments[1].result_index, 1);
+            assert!(!tracker.can_add(QueryResource::Rows, 1));
+            if complete {
+                assert!(resources.is_empty());
+                assert_eq!(
+                    projection.assessments[0].activity,
+                    ConditionalActivityState::Active
+                );
+                assert_eq!(
+                    projection.assessments[1].reason,
+                    Some(ConditionalActivityReason::AmbiguousDefinition)
+                );
+            } else {
+                // The grouped anchor's last assessment row stops after the
+                // file range was classified. That earlier Active result must
+                // not escape a correctness-bearing incomplete transaction.
+                assert_eq!(resources, vec![QueryResource::Rows]);
+                for assessment in &projection.assessments {
+                    assert_eq!(assessment.activity, ConditionalActivityState::Unproven);
+                    assert_eq!(
+                        assessment.reason,
+                        Some(ConditionalActivityReason::ScanIncomplete)
+                    );
+                    assert!(assessment.inventory.is_none());
+                }
+            }
+            assert_eq!(projection.assessments[0].assessed_source_ref, returned);
+            assert!(projection.assessments[1].assessed_source_ref.is_none());
+        }
+    }
+
+    #[test]
+    fn conditional_activity_grouped_definition_witnesses_reject_source_and_owner_drift() {
+        let (snapshot, hit) = grouped_fixture();
+        let document = snapshot.document();
+        let occurrence = &document.occurrences[1];
+        let symbol = hit.symbol.unwrap();
+        let primary = hit.source.as_ref().unwrap();
+        let key = (
+            symbol,
+            occurrence.file,
+            occurrence.source.span().start_byte(),
+            occurrence.source.span().end_byte(),
+            occurrence.id,
+        );
+        let files = BTreeMap::from([(
+            hit.file,
+            SelectedFile {
+                content_hash: primary.content_hash(),
+                byte_length: 100,
+            },
+        )]);
+        for mode in [
+            "no_contains",
+            "owner",
+            "provenance",
+            "repository",
+            "generation",
+            "source_repository",
+            "source_generation",
+            "file",
+            "hash",
+            "empty",
+            "outside_file",
+            "outside_definition",
+            "no_source",
+            "derived",
+        ] {
+            let mut changed = document.clone();
+            let relation = &mut changed.relations[1];
+            let original = relation.evidence.source.as_ref().unwrap().clone();
+            if mode == "owner" {
+                relation.subject = RelationEndpoint::Repository(document.repository);
+            }
+            if mode == "provenance" {
+                relation.provenance = FactId::from_bytes([90; 20]);
+            }
+            if mode == "repository" {
+                relation.repository = derive_repository(b"foreign-witness").id();
+            }
+            if mode == "generation" {
+                relation.generation = rootlight_ids::GenerationId::from_bytes([90; 20]);
+            }
+            if mode == "derived" {
+                relation.evidence_kind = EvidenceKind::Derived;
+            }
+            if matches!(mode, "source_repository" | "source_generation") {
+                relation.evidence.source = Some(SourceRef::new(
+                    if mode == "source_repository" {
+                        derive_repository(b"foreign-source").id()
+                    } else {
+                        original.repository()
+                    },
+                    if mode == "source_generation" {
+                        rootlight_ids::GenerationId::from_bytes([90; 20])
+                    } else {
+                        original.generation()
+                    },
+                    original.span(),
+                    original.content_hash(),
+                    None,
+                ));
+            }
+            if matches!(
+                mode,
+                "file" | "hash" | "empty" | "outside_file" | "outside_definition"
+            ) {
+                let span = match mode {
+                    "file" => SourceSpan::new(FileId::from_bytes([90; 20]), 50, 70).unwrap(),
+                    "empty" => SourceSpan::new(hit.file, 52, 52).unwrap(),
+                    "outside_file" => SourceSpan::new(hit.file, 50, 101).unwrap(),
+                    "outside_definition" => SourceSpan::new(hit.file, 50, 55).unwrap(),
+                    _ => original.span(),
+                };
+                relation.evidence.source = Some(SourceRef::new(
+                    original.repository(),
+                    original.generation(),
+                    span,
+                    if mode == "hash" {
+                        content_hash(b"wrong")
+                    } else {
+                        original.content_hash()
+                    },
+                    None,
+                ));
+            }
+            if mode == "no_source" {
+                relation.evidence.source = None;
+            }
+            if mode == "no_contains" {
+                changed.relations.clear();
+            }
+            let mut pending = BTreeMap::from([(
+                key,
+                grouped_definition(document, symbol, primary, occurrence, 100).unwrap(),
+            )]);
+            let cancellation = Cancellation::new();
+            let control = QueryControl::new(&cancellation, Duration::from_secs(2));
+            let mut tracker = UsageTracker::new(QueryBudget::new());
+            let mut resources = Vec::new();
+            let mut budget = ProjectionBudget {
+                tracker: &mut tracker,
+                control: &control,
+                limiting_resources: &mut resources,
+            };
+            assert!(
+                matches!(
+                    witness_grouped_definitions(&changed, &files, &mut pending, &mut budget),
+                    Err(QueryError::IndexDrift)
+                ),
+                "{mode}"
+            );
+            assert!(resources.is_empty());
+        }
+        for mode in [
+            "entity_provenance",
+            "entity_owner",
+            "primary_span",
+            "definition_evidence",
+        ] {
+            let mut changed = document.clone();
+            let mut occurrence = occurrence.clone();
+            if mode == "entity_provenance" {
+                changed.entities[0].provenance = FactId::from_bytes([90; 20]);
+            }
+            if mode == "entity_owner" {
+                changed.entities[0].container = None;
+            }
+            if mode == "primary_span" {
+                changed.entities[0].evidence.source = Some(occurrence.source.clone());
+            }
+            if mode == "definition_evidence" {
+                occurrence.evidence.source = Some(primary.clone());
+            }
+            assert!(
+                matches!(
+                    grouped_definition(&changed, symbol, primary, &occurrence, 100),
+                    Err(QueryError::IndexDrift)
+                ),
+                "{mode}"
+            );
+        }
+        for (start, end) in [(52, 56), (50, 80)] {
+            let mut changed = occurrence.clone();
+            changed.evidence.source = Some(SourceRef::new(
+                primary.repository(),
+                primary.generation(),
+                SourceSpan::new(hit.file, start, end).unwrap(),
+                primary.content_hash(),
+                None,
+            ));
+            let mut pending = BTreeMap::from([(
+                key,
+                grouped_definition(document, symbol, primary, &changed, 100).unwrap(),
+            )]);
+            let cancellation = Cancellation::new();
+            let control = QueryControl::new(&cancellation, Duration::from_secs(2));
+            let mut tracker = UsageTracker::new(QueryBudget::new());
+            let mut resources = Vec::new();
+            let mut budget = ProjectionBudget {
+                tracker: &mut tracker,
+                control: &control,
+                limiting_resources: &mut resources,
+            };
+            assert!(
+                matches!(
+                    witness_grouped_definitions(document, &files, &mut pending, &mut budget),
+                    Err(QueryError::IndexDrift)
+                ),
+                "unwitnessed declaration {start}..{end}"
+            );
+        }
+    }
+
+    #[test]
+    fn conditional_activity_grouped_definition_enclosures_follow_canonical_owner() {
+        let (snapshot, hit) = grouped_fixture();
+        let symbol = hit.symbol.unwrap();
+        let parent = SymbolId::from_bytes([6; 20]);
+        for owner in [
+            ContainerRef::File(hit.file),
+            ContainerRef::Repository(snapshot.metadata().repository()),
+            ContainerRef::Entity(parent),
+        ] {
+            let mut document = snapshot.document().clone();
+            if owner == ContainerRef::Entity(parent) {
+                let mut enclosing = document.entities[0].clone();
+                enclosing.id = parent;
+                enclosing.kind = EntityKind::Module;
+                enclosing.canonical_name = "Owner".to_owned();
+                enclosing.display_name = "Owner".to_owned();
+                enclosing.qualified_name = "Owner".to_owned();
+                enclosing.evidence.source = document.files[0].evidence.source.clone();
+                document.entities.push(enclosing);
+            }
+            document.entities[0].container = Some(owner);
+            let (endpoint, expected_enclosing) = match owner {
+                ContainerRef::Repository(repository) => {
+                    (RelationEndpoint::Repository(repository), None)
+                }
+                ContainerRef::File(file) => (RelationEndpoint::File(file), None),
+                ContainerRef::Entity(entity) => (RelationEndpoint::Entity(entity), Some(entity)),
+            };
+            for occurrence in &mut document.occurrences {
+                occurrence.enclosing = expected_enclosing;
+            }
+            for relation in &mut document.relations {
+                relation.subject = endpoint;
+            }
+            let valid = GenerationSnapshot::new(
+                snapshot.metadata(),
+                document.clone(),
+                &IrLimits::default(),
+                &ExtensionSupport::default(),
+            )
+            .unwrap();
+            let (projection, _, resources) = grouped_projection(&valid, &hit, QueryBudget::new());
+            assert!(!projection.incomplete);
+            assert!(resources.is_empty());
+            assert_eq!(
+                projection.assessments[0].reason,
+                Some(ConditionalActivityReason::AmbiguousDefinition)
+            );
+            for wrong in [None, Some(symbol)]
+                .into_iter()
+                .filter(|candidate| *candidate != expected_enclosing)
+            {
+                let mut inconsistent = document.clone();
+                inconsistent.occurrences[1].enclosing = wrong;
+                let changed = GenerationSnapshot::new(
+                    snapshot.metadata(),
+                    inconsistent,
+                    &IrLimits::default(),
+                    &ExtensionSupport::default(),
+                )
+                .unwrap();
+                let cancellation = Cancellation::new();
+                let control = QueryControl::new(&cancellation, Duration::from_secs(2));
+                assert!(
+                    matches!(
+                        project_locate(
+                            &changed,
+                            std::slice::from_ref(&hit),
+                            &mut UsageTracker::new(QueryBudget::new()),
+                            &control,
+                            &mut Vec::new()
+                        ),
+                        Err(QueryError::IndexDrift)
+                    ),
+                    "owner={owner:?}, enclosing={wrong:?}"
+                );
+            }
         }
     }
 
