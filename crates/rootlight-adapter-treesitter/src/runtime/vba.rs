@@ -2024,7 +2024,7 @@ mod tests {
             "Optional value = 1 + 2",
             "Optional value = -1",
             "Optional value = 1.5",
-            "Optional value = 1%",
+            "Optional value = 1%%",
             "Optional value = True And False",
             "Optional value = \"unterminated",
             "Optional value = \"x\" & \"y\"",
@@ -2462,7 +2462,7 @@ mod tests {
             "Optional value As Long = seed.Member",
             "Optional value As Long = -1",
             "Optional value As Double = 1.5",
-            "Optional value As Long = &H10%",
+            "Optional value As Long = &H10%%",
             "Optional value As Date = #1/1/2000#",
             "Optional value As String = \"unterminated",
             "Optional value As String = \"x\" & \"y\"",
@@ -2993,9 +2993,9 @@ mod tests {
             "Dim items(1 + 2)",
             "Dim items(Target())",
             "Dim items(1.5)",
-            "Dim items(&HFF%)",
-            "Dim items(&O7%)",
-            "Dim items(2&)",
+            "Dim items(&HFF%%)",
+            "Dim items(&O7%%)",
+            "Dim items(2&&)",
             "Dim items(\"2\")",
             "Dim items(True)",
             "Dim items(,2)",
@@ -3579,7 +3579,7 @@ mod tests {
             "Const Value = Target()",
             "Const Value = 1 + 2",
             "Const Value = -1",
-            "Const Value = &H10%",
+            "Const Value = &H10%%",
             "Const Value = #1/1/2000#",
             "Const Value = 1.5",
             "Const Value = 1, Other = 2",
@@ -4467,7 +4467,7 @@ mod tests {
         for call in [
             "Call Target 1",
             "Call Target value, 1",
-            "Call Target(1 + &H2%)",
+            "Call Target(1 + &H2%%)",
             "Call Target(Nested(1).member)",
             "Call Target(holder.Value)",
             "Call Target(value:=1)",
@@ -4687,7 +4687,7 @@ mod tests {
             "Call Target(Inner(1), ByVal extra)",
             "Call Target(Inner(1),)",
             "Call Target(, Inner(1))",
-            "Call Target(1 + &H2%)",
+            "Call Target(1 + &H2%%)",
             "Call Target(1 + 2.0)",
             "Call Target(2^3)",
             "Call Target(value&other)",
@@ -4940,7 +4940,7 @@ mod tests {
     #[test]
     fn first_party_vba_expression_tails_keep_whole_native_fallback() {
         for assignment in [
-            "sink = 1 + &H2%",
+            "sink = 1 + &H2%%",
             "sink = -(value.Member + 1)",
             "sink = Outer(Inner(value), extra:=2)",
             "sink = Outer(Inner(value), ByVal extra)",
@@ -5751,6 +5751,249 @@ mod tests {
     }
 
     #[test]
+    fn first_party_vba_integer_suffixes_match_complete_native_source_facts() {
+        for atom in ["0", "007", "32767", "&H0", "&hA", "&H7FFF"] {
+            for suffix in ['%', '&', '^'] {
+                let literal = format!("{atom}{suffix}");
+                for newline in ["\n", "\r\n"] {
+                    let source = radix_module_source(&literal, newline);
+                    for language in ["vba", "visual-basic-classic"] {
+                        compare_native(&Fixture::new(&source), language, &[]);
+                    }
+                }
+            }
+        }
+        for body in [
+            "sink = 1 + &H2%",
+            "Call Target(1 + &H2%)",
+            "Dim first, last(&H2%)",
+            "Dim first, last(2&)",
+            "Dim value As Long\nvalue = &H10%",
+        ] {
+            compare_native_procedural_body(body);
+        }
+        for source in [
+            "Sub Run(Optional value=1%)\nEnd Sub\n",
+            "Sub Run(Optional value As Long=&H10%)\nEnd Sub\n",
+            "Const Value=&H10%\n",
+            "Dim items(&HFF%)\n",
+            "Dim items(2&)\n",
+        ] {
+            for language in ["vba", "visual-basic-classic"] {
+                compare_native(&Fixture::new(source), language, &[]);
+            }
+        }
+    }
+
+    #[test]
+    fn first_party_vba_integer_suffixes_retain_metadata_without_new_numeric_facts() {
+        use rootlight_vba::ModuleIntegerSuffix;
+
+        // Equal-width source tokens keep ordered structural spans comparable;
+        // spelling metadata does not justify numeric references or runtime types.
+        for newline in ["\n", "\r\n"] {
+            let baseline = radix_module_source("00007", newline);
+            for language in ["vba", "visual-basic-classic"] {
+                let baseline_fixture = Fixture::new(&baseline);
+                let baseline_request = baseline_fixture.request(language, &[]);
+                let cancellation = Cancellation::new();
+                let baseline_prepared = prepare(
+                    &baseline_fixture.provider,
+                    &baseline_request,
+                    None,
+                    &[],
+                    baseline_fixture.provider.config.default_settings(),
+                    &cancellation,
+                )
+                .unwrap()
+                .unwrap();
+                for atom in ["0007", "&H07", "&h07", "&O07", "&o07", "&007"] {
+                    for suffix in [
+                        ModuleIntegerSuffix::Percent,
+                        ModuleIntegerSuffix::Ampersand,
+                        ModuleIntegerSuffix::Caret,
+                    ] {
+                        let literal = format!("{atom}{}", suffix.as_char());
+                        let source = radix_module_source(&literal, newline);
+                        assert_eq!(source.len(), baseline.len());
+                        let fixture = Fixture::new(&source);
+                        let request = fixture.request(language, &[]);
+                        let prepared = prepare(
+                            &fixture.provider,
+                            &request,
+                            None,
+                            &[],
+                            fixture.provider.config.default_settings(),
+                            &cancellation,
+                        )
+                        .unwrap()
+                        .unwrap();
+                        assert_eq!(prepared.processed_nodes, baseline_prepared.processed_nodes);
+                        assert_eq!(
+                            prepared.inventory.statement_count(),
+                            baseline_prepared.inventory.statement_count()
+                        );
+                        let run = &prepared.inventory.procedures()[2];
+                        let ModuleBodyStatement::Declaration(local) = &run.statements()[1] else {
+                            panic!("the authored local constant remains atomic");
+                        };
+                        let ModuleBodyStatement::Assignment(assignment) = &run.statements()[2]
+                        else {
+                            panic!("the authored scalar assignment remains atomic");
+                        };
+                        let ModuleBodyStatement::ExpressionAssignment(expression) =
+                            &run.statements()[3]
+                        else {
+                            panic!("the composed assignment keeps expression records");
+                        };
+                        let ModuleBodyStatement::Call(call) = &run.statements()[4] else {
+                            panic!("the typed atomic argument preserves the atomic Call API");
+                        };
+                        let ModuleBodyStatement::ExpressionCall(expression_call) =
+                            &run.statements()[5]
+                        else {
+                            panic!("the composed Call keeps expression records");
+                        };
+                        let mut values = vec![
+                            prepared.inventory.constants()[0].value(),
+                            prepared.inventory.procedures()[0].parameters()[1]
+                                .default_value()
+                                .unwrap(),
+                            local.value().unwrap(),
+                            assignment.value(),
+                            &call.argument_values()[0],
+                        ];
+                        values.extend(expression.inventory().values());
+                        values.extend(expression_call.inventory().values());
+                        let mut numeric = 0;
+                        let mut names = 0;
+                        for value in values {
+                            match value.kind() {
+                                ModuleScalarValueKind::UnsignedDecimal
+                                | ModuleScalarValueKind::UnsignedHexadecimal
+                                | ModuleScalarValueKind::UnsignedOctal => {
+                                    numeric += 1;
+                                    assert_eq!(value.integer_suffix(), Some(suffix));
+                                    assert_eq!(&source[value.span()], literal);
+                                }
+                                ModuleScalarValueKind::Name => {
+                                    names += 1;
+                                    assert_eq!(value.integer_suffix(), None);
+                                }
+                                ModuleScalarValueKind::String | ModuleScalarValueKind::Boolean => {
+                                    panic!(
+                                        "the written fixture has only numeric atoms and two name reads"
+                                    );
+                                }
+                            }
+                        }
+                        assert_eq!((numeric, names), (9, 2));
+                        for optional in [false, true] {
+                            let actual = candidates(
+                                &prepared.inventory,
+                                source.as_bytes(),
+                                optional,
+                                usize::MAX,
+                                &cancellation,
+                            )
+                            .unwrap();
+                            let expected = candidates(
+                                &baseline_prepared.inventory,
+                                baseline.as_bytes(),
+                                optional,
+                                usize::MAX,
+                                &cancellation,
+                            )
+                            .unwrap();
+                            assert_eq!(actual, expected, "{language}, {literal}");
+                            let actual = normalize_query_candidates(
+                                actual,
+                                &request,
+                                usize::MAX,
+                                &cancellation,
+                            )
+                            .unwrap();
+                            let expected = normalize_query_candidates(
+                                expected,
+                                &baseline_request,
+                                usize::MAX,
+                                &cancellation,
+                            )
+                            .unwrap();
+                            assert_eq!(actual.required, expected.required);
+                            assert_eq!(actual.facts, expected.facts);
+                        }
+                        assert_eq!(fixture.provider.stats().pooled_parsers, 0);
+                        assert_eq!(fixture.provider.stats().cache.entries, 0);
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn first_party_vba_integer_suffix_boundaries_preserve_operators_and_whole_module_closure() {
+        for literal in ["2%", "2&", "2^", "&H7%", "&h7&", "&H7^"] {
+            for body in [
+                format!("sink={literal} ^ 3"),
+                format!("sink={literal} & \"x\""),
+                format!("sink={literal}+3"),
+                format!("Call Target({literal}+3)"),
+            ] {
+                compare_native_procedural_body(&body);
+            }
+        }
+        for literal in [
+            "2%%",
+            "2&&",
+            "2^^",
+            "2%&",
+            "2&^",
+            "2^%",
+            "2!",
+            "2#",
+            "2@",
+            "2$",
+            "2^2",
+            "2&2",
+            "&H7%member",
+            "&H%%",
+            "&77%z",
+            "&O8%",
+            "&8&",
+        ] {
+            for body in [
+                format!("sink={literal}"),
+                format!("Call Target({literal})"),
+                format!("Dim values({literal})"),
+                format!("Const Local As Long={literal}"),
+            ] {
+                let source = format!(
+                    "Const Accepted=2%\nSub First()\nEnd Sub\nSub Run()\nDim retained As Long\n{body}\nEnd Sub\n"
+                );
+                for language in ["vba", "visual-basic-classic"] {
+                    let fixture = Fixture::new(&source);
+                    assert!(
+                        prepare(
+                            &fixture.provider,
+                            &fixture.request(language, &[]),
+                            None,
+                            &[],
+                            fixture.provider.config.default_settings(),
+                            &Cancellation::new(),
+                        )
+                        .unwrap()
+                        .is_none(),
+                        "{language}, {body}"
+                    );
+                    assert_eq!(fixture.provider.stats().pooled_parsers, 0);
+                    assert_eq!(fixture.provider.stats().cache.entries, 0);
+                }
+            }
+        }
+    }
+
+    #[test]
     fn first_party_vba_hex_atoms_and_bounds_match_complete_native_source_facts() {
         for literal in [
             "&H0",
@@ -5885,7 +6128,11 @@ mod tests {
 
     #[test]
     fn first_party_vba_radix_array_work_and_candidate_ceilings_are_conserved() {
-        for literal in ["0007", "&H07", "&h07", "&O07", "&o07", "&007"] {
+        for literal in [
+            "0007", "&H07", "&h07", "&O07", "&o07", "&007", "0007%", "&H07%", "&h07%", "&O07%",
+            "&o07%", "&007%", "0007&", "&H07&", "&h07&", "&O07&", "&o07&", "&007&", "0007^",
+            "&H07^", "&h07^", "&O07^", "&o07^", "&007^",
+        ] {
             let source = format!(
                 "Sub Run()\nDim first, grid(-{literal} To +{literal}, {literal}) As Long, pending()\nEnd Sub\n"
             );
@@ -5996,9 +6243,9 @@ mod tests {
             "&O",
             "&o8",
             "&8",
-            "&77%",
-            "&H7&",
-            "&o7^",
+            "&77%%",
+            "&H7&&",
+            "&o7^^",
             "&H7!",
             "&O7@",
             "&7#",
@@ -6163,8 +6410,8 @@ mod tests {
             "Dim first, last=1",
             "Dim first, last(1+2)",
             "Dim first, last(Limit)",
-            "Dim first, last(&H2%)",
-            "Dim first, last(2&)",
+            "Dim first, last(&H2%%)",
+            "Dim first, last(2&&)",
             "Dim first, last(1.5)",
             "Dim first, last(,2)",
             "Dim first, last(2,)",
@@ -6323,7 +6570,7 @@ mod tests {
             "Dim value As UserType",
             "Const seed As Long = value",
             "Dim value As Long\nvalue = 1.5",
-            "Dim value As Long\nvalue = &H10%",
+            "Dim value As Long\nvalue = &H10%%",
             "Dim value As Long\nvalue = Nothing",
             "Dim value As Long\nvalue = Me",
             "Dim value As Long\nMe = value",

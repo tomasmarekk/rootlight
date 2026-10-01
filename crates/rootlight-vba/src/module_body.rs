@@ -301,14 +301,16 @@ impl ModuleCall {
 
 /// Syntax categories admitted as complete atomic scalar values.
 /// `Unsigned` means no authored unary sign, not a proven nonnegative runtime value.
+/// Integer categories may carry a separate authored [`ModuleIntegerSuffix`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ModuleScalarValueKind {
-    /// One or more decimal digits without sign, separator, exponent or suffix.
+    /// One or more decimal digits without sign, separator or exponent.
+    /// An optional authored integer suffix is retained separately.
     UnsignedDecimal,
-    /// An authored `&H`/`&h` prefix and ASCII hexadecimal digits, without a suffix.
+    /// An authored `&H`/`&h` prefix and ASCII hexadecimal digits.
     /// The spelling is retained without magnitude, signed-value or type evaluation.
     UnsignedHexadecimal,
-    /// An authored `&`, `&O` or `&o` prefix and octal digits, without a suffix.
+    /// An authored `&`, `&O` or `&o` prefix and octal digits.
     /// The spelling is retained without magnitude, signed-value or type evaluation.
     UnsignedOctal,
     /// One physically closed string, with optional doubled-quote escapes.
@@ -319,10 +321,34 @@ pub enum ModuleScalarValueKind {
     Name,
 }
 
+/// One authored INTEGER literal suffix, without magnitude or runtime-type evaluation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ModuleIntegerSuffix {
+    /// The authored `%` marker.
+    Percent,
+    /// The authored `&` marker.
+    Ampersand,
+    /// The authored `^` marker.
+    Caret,
+}
+
+impl ModuleIntegerSuffix {
+    /// Returns the exact ASCII suffix marker written in the original token.
+    #[must_use]
+    pub const fn as_char(self) -> char {
+        match self {
+            Self::Percent => '%',
+            Self::Ampersand => '&',
+            Self::Caret => '^',
+        }
+    }
+}
+
 /// One complete atomic value retaining its original source spelling.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ModuleScalarValue {
     kind: ModuleScalarValueKind,
+    integer_suffix: Option<ModuleIntegerSuffix>,
     span: Range<usize>,
 }
 
@@ -333,7 +359,14 @@ impl ModuleScalarValue {
         self.kind
     }
 
-    /// Returns the exact value token; strings include both authored quotes.
+    /// Returns the optional authored INTEGER suffix, never an inferred runtime type.
+    /// Noninteger atoms and integers with no written suffix return None.
+    #[must_use]
+    pub const fn integer_suffix(&self) -> Option<ModuleIntegerSuffix> {
+        self.integer_suffix
+    }
+
+    /// Returns the exact token, including a written integer suffix or both string quotes.
     #[must_use]
     pub fn span(&self) -> Range<usize> {
         self.span.clone()
@@ -543,6 +576,7 @@ fn scalar_assignment<E>(
             destination: absolute(&range, destination),
             value: ModuleScalarValue {
                 kind: value.kind,
+                integer_suffix: value.integer_suffix,
                 span: absolute(&range, value.span),
             },
             statement: range,
@@ -802,6 +836,7 @@ fn local_declaration<E>(
         };
         Some(ModuleScalarValue {
             kind: value.kind,
+            integer_suffix: value.integer_suffix,
             span: absolute(&range, value.span),
         })
     } else {
@@ -848,8 +883,8 @@ pub(super) fn atomic_value<E>(
     check: &mut impl FnMut() -> Result<(), E>,
 ) -> Result<Option<ModuleScalarValue>, E> {
     let start = *cursor;
-    let kind = if let Some(kind) = integer_value(text, cursor, check)? {
-        kind
+    let (kind, integer_suffix) = if let Some(integer) = integer_value(text, cursor, check)? {
+        integer
     } else if text.get(*cursor) == Some(&b'"') {
         *cursor += 1;
         let mut checkpoint = *cursor;
@@ -871,23 +906,24 @@ pub(super) fn atomic_value<E>(
                 Some(_) => *cursor += 1,
             }
         }
-        ModuleScalarValueKind::String
+        (ModuleScalarValueKind::String, None)
     } else {
         let keyword = word(text, cursor, check)?;
         if keyword.eq_ignore_ascii_case(b"True") || keyword.eq_ignore_ascii_case(b"False") {
-            ModuleScalarValueKind::Boolean
+            (ModuleScalarValueKind::Boolean, None)
         } else if allow_name {
             *cursor = start;
             if simple_name(text, cursor, check)?.is_none() {
                 return Ok(None);
             }
-            ModuleScalarValueKind::Name
+            (ModuleScalarValueKind::Name, None)
         } else {
             return Ok(None);
         }
     };
     Ok(Some(ModuleScalarValue {
         kind,
+        integer_suffix,
         span: start..*cursor,
     }))
 }
@@ -941,8 +977,8 @@ pub(super) fn integer_value<E>(
     text: &[u8],
     cursor: &mut usize,
     check: &mut impl FnMut() -> Result<(), E>,
-) -> Result<Option<ModuleScalarValueKind>, E> {
-    // The enclosing grammar owns suffix and whole-statement closure; this scan
+) -> Result<Option<(ModuleScalarValueKind, Option<ModuleIntegerSuffix>)>, E> {
+    // The enclosing grammar owns repeated-suffix and whole-statement closure; this scan
     // retains only the number token and never evaluates its magnitude or type.
     let Some((radix, prefix)) = integer_prefix(text.get(*cursor..).unwrap_or_default()) else {
         return Ok(None);
@@ -954,7 +990,17 @@ pub(super) fn integer_value<E>(
         }
         *cursor += 1;
     }
-    Ok(Some(radix.kind()))
+    let suffix = match text.get(*cursor) {
+        Some(b'%') => Some(ModuleIntegerSuffix::Percent),
+        Some(b'&') => Some(ModuleIntegerSuffix::Ampersand),
+        Some(b'^') => Some(ModuleIntegerSuffix::Caret),
+        _ => None,
+    };
+    if suffix.is_some() {
+        check()?;
+        *cursor += 1;
+    }
+    Ok(Some((radix.kind(), suffix)))
 }
 
 pub(super) fn simple_name<E>(
@@ -1093,6 +1139,303 @@ mod tests {
 
     fn read(text: &[u8]) -> Option<ModuleBodyStatement> {
         statement(text, 0..text.len(), text.len(), &mut || Ok::<(), ()>(())).unwrap()
+    }
+
+    #[test]
+    fn integer_suffix_atoms_preserve_exact_kind_metadata_and_legacy_routes() {
+        for (atom, kind) in [
+            ("1", ModuleScalarValueKind::UnsignedDecimal),
+            ("001", ModuleScalarValueKind::UnsignedDecimal),
+            ("&H0A", ModuleScalarValueKind::UnsignedHexadecimal),
+            ("&hF", ModuleScalarValueKind::UnsignedHexadecimal),
+            ("&O7", ModuleScalarValueKind::UnsignedOctal),
+            ("&o7", ModuleScalarValueKind::UnsignedOctal),
+            ("&77", ModuleScalarValueKind::UnsignedOctal),
+        ] {
+            for suffix in [
+                ModuleIntegerSuffix::Percent,
+                ModuleIntegerSuffix::Ampersand,
+                ModuleIntegerSuffix::Caret,
+            ] {
+                let spelling = format!("{atom}{}", suffix.as_char());
+                for newline in ["\n", "\r\n"] {
+                    for text in [
+                        format!("Const [Limit] As Long = _{newline} {spelling}"),
+                        format!("Let [sink] = _{newline} {spelling}"),
+                        format!("Call [Target]( _{newline} {spelling})"),
+                        format!("[sink]=[Read]( _{newline} {spelling})"),
+                    ] {
+                        let source = [b"prefix\n".as_slice(), text.as_bytes(), b"\ntail"].concat();
+                        let range = 7..7 + text.len();
+                        let parsed = statement_with_expression_limits(
+                            &source,
+                            range.clone(),
+                            1,
+                            0,
+                            &mut || Ok::<(), ()>(()),
+                        )
+                        .unwrap()
+                        .unwrap();
+                        assert_eq!(parsed.statement(), range);
+                        let value = match &parsed {
+                            ModuleBodyStatement::Declaration(declaration) => {
+                                declaration.value().unwrap()
+                            }
+                            ModuleBodyStatement::Assignment(assignment) => assignment.value(),
+                            ModuleBodyStatement::Call(call) => {
+                                let legacy: &ModuleZeroArgumentCall = call;
+                                assert_eq!(legacy.callee(), call.callee());
+                                assert_eq!(call.argument_values().len(), 1);
+                                &call.argument_values()[0]
+                            }
+                            ModuleBodyStatement::ApplicationAssignment(assignment) => {
+                                assert_eq!(assignment.argument_values().len(), 1);
+                                &assignment.argument_values()[0]
+                            }
+                            _ => panic!("typed integer must preserve the old atomic route"),
+                        };
+                        assert_eq!(value.kind(), kind);
+                        assert_eq!(value.integer_suffix(), Some(suffix));
+                        assert_eq!(&source[value.span()], spelling.as_bytes());
+                        assert_eq!(char::from(source[value.span().end - 1]), suffix.as_char());
+                    }
+                }
+            }
+        }
+        for atom in [
+            "007",
+            "&H1",
+            "&77",
+            "\"value\"",
+            "True",
+            "False",
+            "value",
+            "[value]",
+        ] {
+            let text = format!("sink={atom}");
+            let ModuleBodyStatement::Assignment(assignment) = read(text.as_bytes()).unwrap() else {
+                panic!("unsuffixed atomic assignment expected")
+            };
+            assert_eq!(assignment.value().integer_suffix(), None);
+            assert_eq!(&text[assignment.value().span()], atom);
+        }
+    }
+
+    #[test]
+    fn integer_suffix_byte_boundaries_retain_one_marker_and_reject_adjacent_tails() {
+        for byte in 0..=u8::MAX {
+            let suffix = match byte {
+                b'%' => Some(ModuleIntegerSuffix::Percent),
+                b'&' => Some(ModuleIntegerSuffix::Ampersand),
+                b'^' => Some(ModuleIntegerSuffix::Caret),
+                _ => None,
+            };
+            for (atom, digit) in [
+                (b"1".as_slice(), byte.is_ascii_digit()),
+                (b"&H1".as_slice(), byte.is_ascii_hexdigit()),
+                (b"&O7".as_slice(), matches!(byte, b'0'..=b'7')),
+                (b"&77".as_slice(), matches!(byte, b'0'..=b'7')),
+            ] {
+                let source = [b"sink=".as_slice(), atom, &[byte]].concat();
+                let parsed = read(&source);
+                assert_eq!(
+                    parsed.is_some(),
+                    digit || suffix.is_some() || matches!(byte, b' ' | b'\t'),
+                    "{atom:?}, byte {byte}"
+                );
+                if let Some(ModuleBodyStatement::Assignment(assignment)) = parsed {
+                    assert_eq!(assignment.value().integer_suffix(), suffix);
+                    assert_eq!(assignment.value().span().start, 5);
+                    assert_eq!(
+                        assignment.value().span().end,
+                        source.len() - usize::from(matches!(byte, b' ' | b'\t'))
+                    );
+                }
+                for marker in *b"%&^" {
+                    let source = [b"sink=".as_slice(), atom, &[marker, byte]].concat();
+                    assert_eq!(
+                        read(&source).is_some(),
+                        matches!(byte, b' ' | b'\t'),
+                        "{atom:?}, marker {marker}, adjacent byte {byte}"
+                    );
+                }
+            }
+        }
+        for suffix in [
+            "%%", "&&", "^^", "%&", "&^", "^%", "%!", "&#", "^@", "%$", "%2", "&2", "^2",
+        ] {
+            for atom in ["1", "&H1", "&O7", "&77"] {
+                for text in [
+                    format!("sink={atom}{suffix}"),
+                    format!("Call Target({atom}{suffix})"),
+                    format!("Const Limit As Long={atom}{suffix}"),
+                    format!("sink=Read({atom}{suffix})"),
+                ] {
+                    assert!(read(text.as_bytes()).is_none(), "{text}");
+                }
+            }
+        }
+        for atom in [
+            "True%",
+            "False&",
+            "\"text\"^",
+            "value%",
+            "[value]&",
+            "&H%",
+            "&O&",
+            "&^",
+        ] {
+            let text = format!("sink={atom}");
+            assert!(read(text.as_bytes()).is_none(), "{text}");
+        }
+    }
+
+    #[test]
+    fn integer_suffix_expression_and_array_work_preserve_existing_exact_ceilings() {
+        for newline in ["\n", "\r\n"] {
+            let text =
+                format!("Call Target(value + _{newline} 1%, Inner(&77&) * - _{newline} &hF^)");
+            let source = [b"prefix\n".as_slice(), text.as_bytes(), b"\ntail"].concat();
+            let range = 7..7 + text.len();
+            let ModuleBodyStatement::ExpressionCall(call) =
+                statement_with_expression_limits(&source, range.clone(), 3, 11, &mut || {
+                    Ok::<(), ()>(())
+                })
+                .unwrap()
+                .unwrap()
+            else {
+                panic!("typed integer expression arguments expected")
+            };
+            assert_eq!(call.statement(), range);
+            assert_eq!(&source[call.callee()], b"Target");
+            assert_eq!(call.inventory().work_nodes(), 11);
+            assert_eq!(call.inventory().argument_count(), 3);
+            assert_eq!(call.inventory().applications()[0].callee(), call.callee());
+            assert_eq!(call.inventory().values().len(), 4);
+            for (value, (spelling, suffix)) in call.inventory().values().iter().zip([
+                ("value", None),
+                ("1%", Some(ModuleIntegerSuffix::Percent)),
+                ("&77&", Some(ModuleIntegerSuffix::Ampersand)),
+                ("&hF^", Some(ModuleIntegerSuffix::Caret)),
+            ]) {
+                assert_eq!(&source[value.span()], spelling.as_bytes());
+                assert_eq!(value.integer_suffix(), suffix);
+            }
+            for maximum in [0, 1, 10] {
+                assert_eq!(
+                    statement_with_expression_limits(
+                        &source,
+                        range.clone(),
+                        3,
+                        maximum,
+                        &mut || Ok::<(), ()>(())
+                    ),
+                    Err(ModuleError::ExpressionLimit)
+                );
+            }
+            for maximum in [0, 1, 2] {
+                assert_eq!(
+                    statement_with_expression_limits(
+                        &source,
+                        range.clone(),
+                        maximum,
+                        11,
+                        &mut || Ok::<(), ()>(())
+                    ),
+                    Err(ModuleError::ArgumentLimit)
+                );
+            }
+        }
+        let text = b"Call Target(1%,&H2&,&o7^)";
+        assert!(matches!(
+            statement_with_expression_limits(text, 0..text.len(), 3, 0, &mut || Ok::<(), ()>(())),
+            Ok(Some(ModuleBodyStatement::Call(_)))
+        ));
+        for maximum in [0, 1, 2] {
+            assert_eq!(
+                statement_with_expression_limits(text, 0..text.len(), maximum, 0, &mut || Ok::<
+                    (),
+                    (),
+                >(
+                    ()
+                )),
+                Err(ModuleError::ArgumentLimit)
+            );
+        }
+        let text = b"Dim grid(-1% To+&H2&, &o7^)";
+        let limits = BodyLimits {
+            arguments: 0,
+            expression_nodes: 0,
+            records: 1,
+        };
+        let ModuleBodyStatement::Variables(list) =
+            statement_with_limits(text, 0..text.len(), limits, &mut || Ok::<(), ()>(()))
+                .unwrap()
+                .unwrap()
+        else {
+            panic!("typed integer local bounds expected")
+        };
+        assert_eq!(list.variables()[0].array_bounds(), Some(8..text.len()));
+        assert_eq!(list.variables()[0].array_work_nodes(), 8);
+        assert_eq!(
+            statement_with_limits(
+                text,
+                0..text.len(),
+                BodyLimits {
+                    records: 0,
+                    ..limits
+                },
+                &mut || Ok::<(), ()>(())
+            ),
+            Err(ModuleError::StatementLimit)
+        );
+    }
+
+    #[test]
+    fn integer_suffix_scan_and_rebase_cancellation_remain_typed_at_every_checkpoint() {
+        for text in [
+            format!("Const Limit As Long={}^", "9".repeat(2048)),
+            format!(
+                "Call Target(&H{}%,&{}&)",
+                "F".repeat(2048),
+                "7".repeat(2048)
+            ),
+            format!(
+                "Dim grid(-&H{}% To+&O{}&, 1^)",
+                "F".repeat(2048),
+                "7".repeat(2048)
+            ),
+            format!(
+                "Call Target(&H{}% + 1, Inner(&{}&) * -2^)",
+                "F".repeat(2048),
+                "7".repeat(2048)
+            ),
+        ] {
+            let source = [b"prefix\n".as_slice(), text.as_bytes(), b"\ntail"].concat();
+            let range = 7..7 + text.len();
+            let mut checkpoints = 0;
+            assert!(
+                statement(&source, range.clone(), 3, &mut || {
+                    checkpoints += 1;
+                    Ok::<(), ()>(())
+                })
+                .unwrap()
+                .is_some()
+            );
+            assert!(checkpoints > 8);
+            for stop in 1..=checkpoints {
+                let mut calls = 0;
+                assert_eq!(
+                    statement(&source, range.clone(), 3, &mut || {
+                        calls += 1;
+                        if calls == stop { Err("stop") } else { Ok(()) }
+                    }),
+                    Err(ModuleError::Cancelled("stop")),
+                    "checkpoint {stop}"
+                );
+                assert_eq!(calls, stop);
+            }
+        }
     }
 
     #[test]
@@ -1259,13 +1602,13 @@ mod tests {
                 let source = [b"count=".as_slice(), atom, &[byte]].concat();
                 assert_eq!(
                     read(&source).is_some(),
-                    admits_digit || matches!(byte, b' ' | b'\t'),
+                    admits_digit || matches!(byte, b' ' | b'\t' | b'%' | b'&' | b'^'),
                     "atom {atom:?}, tail byte {byte}"
                 );
                 let source = [b"Call Target(".as_slice(), atom, &[byte], b")".as_slice()].concat();
                 assert_eq!(
                     read(&source).is_some(),
-                    admits_digit || matches!(byte, b' ' | b'\t'),
+                    admits_digit || matches!(byte, b' ' | b'\t' | b'%' | b'&' | b'^'),
                     "call atom {atom:?}, tail byte {byte}"
                 );
             }
@@ -1284,7 +1627,7 @@ mod tests {
             }
         }
         for atom in ["&H1", "&hF", "&O7", "&o1", "&77"] {
-            for suffix in ['%', '&', '^', '!', '#', '@', '$'] {
+            for suffix in ['!', '#', '@', '$'] {
                 for text in [
                     format!("count={atom}{suffix}"),
                     format!("count={atom}{suffix}2"),
@@ -1985,7 +2328,7 @@ mod tests {
             "10.5",
             "7.5",
             "#1/1/2000#",
-            "1&",
+            "1&&",
             "value$",
             "value!",
             "True$",
@@ -2288,7 +2631,7 @@ mod tests {
 
     #[test]
     fn expression_call_adjacent_type_suffixes_and_richer_literals_fail_closed() {
-        for (atom, suffixes) in [("2", b"%&^!#@".as_slice()), ("value", b"%&^!#@$")] {
+        for (atom, suffixes) in [("2", b"!#@".as_slice()), ("value", b"%&^!#@$")] {
             for suffix in suffixes {
                 for tail in ["", "3", "other", "(3)", " + 3"] {
                     let source = format!(
@@ -2371,7 +2714,7 @@ mod tests {
             let result = read(&tail);
             assert_eq!(
                 result.is_some(),
-                byte.is_ascii_digit() || matches!(byte, b' ' | b'\t'),
+                byte.is_ascii_digit() || matches!(byte, b' ' | b'\t' | b'%' | b'&' | b'^'),
                 "argument tail byte {byte}"
             );
             if let Some(ModuleBodyStatement::Call(call)) = result {
@@ -2431,6 +2774,7 @@ mod tests {
         reserve_arguments(&mut values, 1, &mut || Ok::<(), ()>(())).unwrap();
         values.push(ModuleScalarValue {
             kind: ModuleScalarValueKind::UnsignedDecimal,
+            integer_suffix: None,
             span: 0..1,
         });
         let snapshot = values.clone();
@@ -2688,7 +3032,7 @@ mod tests {
             "count = 1.0",
             "count = 1E2",
             "count = 10.5",
-            "count = 1&",
+            "count = 1&&",
             "count = 1more",
             "count = \"closed\" extra",
             "count = \"open",
@@ -2990,7 +3334,7 @@ mod tests {
             "10.5",
             "7.5",
             "#1/1/2000#",
-            "1&",
+            "1&&",
             "value$",
             "value!",
             "Nothing",
@@ -3091,7 +3435,7 @@ mod tests {
                 (
                     b"count=Read(1".as_slice(),
                     b")".as_slice(),
-                    byte.is_ascii_digit() || matches!(byte, b' ' | b'\t'),
+                    byte.is_ascii_digit() || matches!(byte, b' ' | b'\t' | b'%' | b'&' | b'^'),
                 ),
                 (
                     b"count=Read(1,",

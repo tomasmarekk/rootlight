@@ -287,7 +287,7 @@ pub enum ModuleParameterPassingMode {
 
 /// One scalar parameter retaining its authored intrinsic type or type absence.
 /// Optional parameters retain an absent or atomic authored default without
-/// evaluation. Array bounds and type suffixes are excluded. All ranges address
+/// evaluation. Parameter arrays and name type suffixes are excluded. All ranges address
 /// the entire module, never a reconstructed parameter list.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ModuleParameter {
@@ -505,8 +505,9 @@ impl<E: std::error::Error + 'static> std::error::Error for ModuleError<E> {
 /// records remain distinct. Explicit Call statements admit a simple callee and optional
 /// parentheses containing a complete positional list of admitted expressions, with
 /// space/tab-based logical trivia. Named, omitted, ByVal and nonparenthesized
-/// arguments are unsupported. Adjacent literal/ordinary-name type suffixes stay
-/// outside this slice instead of being reinterpreted as power or concatenation.
+/// arguments are unsupported. Integer literals may retain one authored `%`, `&`
+/// or `^` suffix without type or value evaluation. Repeated, floating and ordinary-name
+/// suffixes stay outside this slice rather than being reinterpreted as operators.
 /// A valid radix prefix following an operand is conservatively unsupported rather
 /// than split into concatenation and a fabricated ordinary-name or decimal atom.
 /// A distinct concatenation token, as in `[a] & &77`, is admitted.
@@ -1614,7 +1615,7 @@ fn word<'a, E>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ModuleScalarValueKind;
+    use crate::{ModuleIntegerSuffix, ModuleScalarValueKind};
 
     fn parse(source: &[u8]) -> Result<ModuleInventory, ModuleError<()>> {
         module_inventory(
@@ -1622,6 +1623,267 @@ mod tests {
             ModuleLimits::new(source.len(), source.len(), source.len()),
             &mut || Ok(()),
         )
+    }
+
+    #[test]
+    fn integer_suffixes_preserve_complete_module_atom_metadata_and_array_spelling() {
+        for (atom, kind) in [
+            ("1", ModuleScalarValueKind::UnsignedDecimal),
+            ("&H1", ModuleScalarValueKind::UnsignedHexadecimal),
+            ("&hF", ModuleScalarValueKind::UnsignedHexadecimal),
+            ("&O7", ModuleScalarValueKind::UnsignedOctal),
+            ("&o7", ModuleScalarValueKind::UnsignedOctal),
+            ("&77", ModuleScalarValueKind::UnsignedOctal),
+        ] {
+            for suffix in [
+                ModuleIntegerSuffix::Percent,
+                ModuleIntegerSuffix::Ampersand,
+                ModuleIntegerSuffix::Caret,
+            ] {
+                for newline in ["\n", "\r\n"] {
+                    let spelling = format!("{atom}{}", suffix.as_char());
+                    let bounds = format!("(- _{newline} {spelling} To +{spelling})");
+                    let source = format!(
+                        "Public Const [Seed] = _{newline} {spelling}{newline}Private [moduleGrid]{bounds}{newline}Sub Run(Optional value As Long = _{newline} {spelling}, Optional other={spelling}){newline}Const [Local] As Long={spelling}{newline}Dim [localGrid]{bounds}{newline}sink={spelling}:Call Target({spelling}){newline}sink=Read({spelling}){newline}End Sub{newline}"
+                    );
+                    let inventory = module_inventory(
+                        source.as_bytes(),
+                        ModuleLimits::new(source.len(), 9, 1)
+                            .with_max_parameters(2)
+                            .with_max_arguments(2)
+                            .with_max_expression_nodes(0),
+                        &mut || Ok::<(), ()>(()),
+                    )
+                    .unwrap();
+                    assert_eq!(inventory.statement_count(), 9);
+                    assert_eq!(inventory.constants().len(), 1);
+                    let constant = &inventory.constants()[0];
+                    assert_eq!(&source[constant.name()], "[Seed]");
+                    assert_eq!(constant.value().kind(), kind);
+                    assert_eq!(constant.value().integer_suffix(), Some(suffix));
+                    assert_eq!(&source[constant.value().span()], spelling);
+                    assert_eq!(inventory.variables().len(), 1);
+                    assert_eq!(
+                        &source[inventory.variables()[0].array_bounds().unwrap()],
+                        bounds
+                    );
+                    assert_eq!(inventory.variables()[0].array_work_nodes(), 6);
+                    let procedure = &inventory.procedures()[0];
+                    assert_eq!(procedure.parameters().len(), 2);
+                    for parameter in procedure.parameters() {
+                        let value = parameter.default_value().unwrap();
+                        assert_eq!(value.kind(), kind);
+                        assert_eq!(value.integer_suffix(), Some(suffix));
+                        assert_eq!(&source[value.span()], spelling);
+                        assert_eq!(parameter.declaration().end, value.span().end);
+                    }
+                    assert!(procedure.parameters()[1].type_range().is_none());
+                    assert_eq!(procedure.statements().len(), 5);
+                    for statement in procedure.statements() {
+                        let value = match statement {
+                            ModuleBodyStatement::Declaration(local) => local.value().unwrap(),
+                            ModuleBodyStatement::Variables(local) => {
+                                assert_eq!(local.variables().len(), 1);
+                                assert_eq!(
+                                    &source[local.variables()[0].array_bounds().unwrap()],
+                                    bounds
+                                );
+                                assert_eq!(local.variables()[0].array_work_nodes(), 6);
+                                continue;
+                            }
+                            ModuleBodyStatement::Assignment(assignment) => assignment.value(),
+                            ModuleBodyStatement::Call(call) => &call.argument_values()[0],
+                            ModuleBodyStatement::ApplicationAssignment(assignment) => {
+                                &assignment.argument_values()[0]
+                            }
+                            _ => panic!("integer suffixes preserve old body route categories"),
+                        };
+                        assert_eq!(value.kind(), kind);
+                        assert_eq!(value.integer_suffix(), Some(suffix));
+                        assert_eq!(&source[value.span()], spelling);
+                        assert!(statement.statement().start < value.span().start);
+                        assert!(value.span().end <= statement.statement().end);
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn integer_suffix_mixed_array_and_expression_modules_keep_exact_shared_ceilings() {
+        let source = b"Const Seed=1%\nDim moduleGrid(-1% To+&H2&,&77^)\nSub Run(Optional limit=&O7%)\nDim first,localGrid(-&H1% To+&O2&, &77^),pending()\nsink=1^\nCall Target(1%,&H2&)\nsink=Read(&o7^)\nsink=Read(1%,+&H2&)\nCall Target(&77% + &H2&)\nEnd Sub\n";
+        let limits = ModuleLimits::new(source.len(), 10, 1)
+            .with_max_parameters(1)
+            .with_max_arguments(6)
+            .with_max_expression_nodes(10);
+        let inventory = module_inventory(source, limits, &mut || Ok::<(), ()>(())).unwrap();
+        assert_eq!(inventory.statement_count(), 10);
+        assert_eq!(inventory.variables()[0].array_work_nodes(), 8);
+        assert_eq!(
+            &source[inventory.variables()[0].array_bounds().unwrap()],
+            b"(-1% To+&H2&,&77^)"
+        );
+        let body = inventory.procedures()[0].statements();
+        assert_eq!(body.len(), 6);
+        let ModuleBodyStatement::Variables(local) = &body[0] else {
+            panic!("local typed bounds expected")
+        };
+        assert_eq!(local.variables().len(), 3);
+        assert_eq!(local.variables()[1].array_work_nodes(), 8);
+        assert_eq!(local.variables()[2].array_work_nodes(), 1);
+        let ModuleBodyStatement::ExpressionAssignment(assignment) = &body[4] else {
+            panic!("typed integer signed argument expected")
+        };
+        assert_eq!(assignment.inventory().work_nodes(), 5);
+        assert_eq!(assignment.inventory().argument_count(), 2);
+        let ModuleBodyStatement::ExpressionCall(call) = &body[5] else {
+            panic!("typed integer composed argument expected")
+        };
+        assert_eq!(call.inventory().work_nodes(), 5);
+        assert_eq!(call.inventory().argument_count(), 1);
+        for maximum in [0, 1, 9] {
+            assert_eq!(
+                module_inventory(
+                    source,
+                    limits.with_max_expression_nodes(maximum),
+                    &mut || Ok::<(), ()>(())
+                ),
+                Err(ModuleError::ExpressionLimit)
+            );
+        }
+        for maximum in [0, 1, 5] {
+            assert_eq!(
+                module_inventory(source, limits.with_max_arguments(maximum), &mut || Ok::<
+                    (),
+                    (),
+                >(
+                    ()
+                )),
+                Err(ModuleError::ArgumentLimit)
+            );
+        }
+        assert_eq!(
+            module_inventory(source, limits.with_max_parameters(0), &mut || Ok::<(), ()>(
+                ()
+            )),
+            Err(ModuleError::ParameterLimit)
+        );
+        for maximum in [0, 1, 9] {
+            assert_eq!(
+                module_inventory(
+                    source,
+                    ModuleLimits::new(source.len(), maximum, 1)
+                        .with_max_parameters(1)
+                        .with_max_arguments(6)
+                        .with_max_expression_nodes(10),
+                    &mut || Ok::<(), ()>(())
+                ),
+                Err(ModuleError::StatementLimit)
+            );
+        }
+        assert_eq!(
+            module_inventory(
+                source,
+                ModuleLimits::new(source.len() - 1, 10, 1),
+                &mut || Ok::<(), ()>(())
+            ),
+            Err(ModuleError::SourceLimit)
+        );
+    }
+
+    #[test]
+    fn integer_suffix_late_malformed_members_and_operator_tails_reject_the_whole_module() {
+        for atom in ["1", "&H1", "&O7", "&77"] {
+            for suffix in [
+                "%%", "&&", "^^", "%&", "&^", "^%", "%!", "&#", "^@", "%$", "%2", "&2", "^2",
+            ] {
+                let spelling = format!("{atom}{suffix}");
+                for tail in [
+                    format!("Const Broken={spelling}"),
+                    format!("Dim good,broken({spelling})"),
+                    format!("Sub Bad(Optional value As Long={spelling})\nEnd Sub"),
+                    format!("Sub Bad()\nDim good,broken({spelling})\nEnd Sub"),
+                    format!("Sub Bad()\nCall Target(1%,{spelling})\nEnd Sub"),
+                    format!("Sub Bad()\nsink={spelling}\nEnd Sub"),
+                ] {
+                    let source = format!(
+                        "Const Seed=&H1%\nSub Good()\nCall Target(&77&)\nEnd Sub\n{tail}\n"
+                    );
+                    assert!(
+                        matches!(
+                            parse(source.as_bytes()),
+                            Err(ModuleError::Unsupported { .. })
+                        ),
+                        "{tail}"
+                    );
+                }
+            }
+        }
+        for parameter in [
+            "Optional value=-1%",
+            "Optional value=+&H1&",
+            "Optional value=1.5%",
+            "Optional value=value%",
+        ] {
+            let source = format!("Sub Run({parameter})\nEnd Sub\n");
+            assert!(
+                matches!(
+                    parse(source.as_bytes()),
+                    Err(ModuleError::Unsupported { .. })
+                ),
+                "{parameter}"
+            );
+        }
+    }
+
+    #[test]
+    fn integer_suffix_source_only_module_scans_cancel_at_every_checkpoint() {
+        let hex = format!("&H{}%", "F".repeat(2048));
+        let octal = format!("&{}&", "7".repeat(2048));
+        let bounds = format!("(- _\r\n {hex} To + _\n {octal})");
+        let source = format!(
+            "Const Seed={hex}\nPrivate grid{bounds}\nSub Run(Optional value={octal})\nDim local{bounds}\nCall Target({hex} + 1, Inner({octal}) * -2^)\nEnd Sub\n"
+        );
+        let limits = ModuleLimits::new(source.len(), 6, 1)
+            .with_max_parameters(1)
+            .with_max_arguments(3)
+            .with_max_expression_nodes(11);
+        let mut checkpoints = 0;
+        let inventory = module_inventory(source.as_bytes(), limits, &mut || {
+            checkpoints += 1;
+            Ok::<(), ()>(())
+        })
+        .unwrap();
+        assert_eq!(inventory.statement_count(), 6);
+        assert_eq!(
+            inventory.constants()[0].value().integer_suffix(),
+            Some(ModuleIntegerSuffix::Percent)
+        );
+        assert_eq!(&source[inventory.constants()[0].value().span()], hex);
+        assert_eq!(
+            &source[inventory.variables()[0].array_bounds().unwrap()],
+            bounds
+        );
+        assert_eq!(inventory.variables()[0].array_work_nodes(), 6);
+        let ModuleBodyStatement::ExpressionCall(call) = &inventory.procedures()[0].statements()[1]
+        else {
+            panic!("source-only typed integer expressions expected")
+        };
+        assert_eq!(call.inventory().work_nodes(), 11);
+        assert_eq!(call.inventory().argument_count(), 3);
+        assert!(checkpoints > 32);
+        for stop in 1..=checkpoints {
+            let mut calls = 0;
+            assert_eq!(
+                module_inventory(source.as_bytes(), limits, &mut || {
+                    calls += 1;
+                    if calls == stop { Err("stop") } else { Ok(()) }
+                }),
+                Err(ModuleError::Cancelled("stop")),
+                "checkpoint {stop}"
+            );
+            assert_eq!(calls, stop);
+        }
     }
 
     #[test]
@@ -1873,7 +2135,7 @@ mod tests {
             }
         }
         for atom in ["&H1", "&O7", "&77"] {
-            for suffix in ['%', '&', '^', '!', '#', '@', '$'] {
+            for suffix in ['!', '#', '@', '$'] {
                 for tail in [
                     format!("Const Broken={atom}{suffix}"),
                     format!("Dim good,broken({atom}{suffix})"),
@@ -3208,8 +3470,8 @@ mod tests {
             "(1e2)",
             "(10.5)",
             "(7.5)",
-            "(1%)",
-            "(1&)",
+            "(1%%)",
+            "(1&&)",
             "(1!)",
             "(1#)",
             "(1@)",
@@ -3396,7 +3658,7 @@ mod tests {
                 (
                     b"(1".as_slice(),
                     b")".as_slice(),
-                    matches!(byte, b' ' | b'\t') || byte.is_ascii_digit(),
+                    matches!(byte, b' ' | b'\t' | b'%' | b'&' | b'^') || byte.is_ascii_digit(),
                 ),
                 (
                     b"(".as_slice(),
@@ -3417,7 +3679,7 @@ mod tests {
                 (
                     b"(1".as_slice(),
                     b"To2)".as_slice(),
-                    matches!(byte, b' ' | b'\t') || byte.is_ascii_digit(),
+                    matches!(byte, b' ' | b'\t' | b'%' | b'&' | b'^') || byte.is_ascii_digit(),
                 ),
                 (
                     b"(1 T".as_slice(),
@@ -3779,7 +4041,7 @@ mod tests {
             "Const Value=1e2",
             "Const Value=1.5",
             "Const Value=#1/1/2000#",
-            "Const Value=1%",
+            "Const Value=1%%",
             "Const Value=TrueRem",
             "Const Value=1+2",
             "Const Value=(1)",
@@ -3972,7 +4234,7 @@ mod tests {
                     b"".as_slice(),
                     byte.is_ascii_digit()
                         || byte.is_ascii_whitespace() && byte != b'\r'
-                        || byte == b'\'',
+                        || matches!(byte, b'\'' | b'%' | b'&' | b'^'),
                 ),
                 (
                     b"Const [Value]=True".as_slice(),
@@ -4779,7 +5041,7 @@ mod tests {
             "Optional value As Long = 1.5",
             "Optional value As Long = 7.5",
             "Optional value As Long = #1/1/2000#",
-            "Optional value As Long = 1%",
+            "Optional value As Long = 1%%",
             "Optional value As Long = 1+2",
             "Optional value As Long = True And False",
             "Optional value As Long = (1)",
@@ -4949,7 +5211,8 @@ mod tests {
                 (
                     b"Sub Run(Optional value As Long=1".as_slice(),
                     b")\nEnd Sub\n".as_slice(),
-                    byte.is_ascii_digit() || matches!(byte, b' ' | b'\t' | b'\x0c'),
+                    byte.is_ascii_digit()
+                        || matches!(byte, b' ' | b'\t' | b'\x0c' | b'%' | b'&' | b'^'),
                 ),
                 (
                     b"Sub Run(Optional value As Long=".as_slice(),
@@ -5307,7 +5570,7 @@ mod tests {
             "Optional value=1e2",
             "Optional value=1.5",
             "Optional value=#1/1/2000#",
-            "Optional value=1%",
+            "Optional value=1%%",
             "Optional value=1+2",
             "Optional value=True And False",
             "Optional value=(1)",
@@ -5476,7 +5739,8 @@ mod tests {
                 (
                     b"Sub Run(Optional [value]=1".as_slice(),
                     b")\nEnd Sub\n".as_slice(),
-                    byte.is_ascii_digit() || matches!(byte, b' ' | b'\t' | b'\x0c'),
+                    byte.is_ascii_digit()
+                        || matches!(byte, b' ' | b'\t' | b'\x0c' | b'%' | b'&' | b'^'),
                 ),
                 (
                     b"Sub Run(Optional [value]=".as_slice(),

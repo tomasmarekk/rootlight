@@ -9928,6 +9928,10 @@ fn radix_literal_edits_preserve_atom_sources_and_rank_arity_proofs() {
         },
         initial,
     ];
+    assert_radix_literal_trajectory(&states);
+}
+
+fn assert_radix_literal_trajectory(states: &[RadixLiteralState]) {
     for language in ["visual-basic-classic", "vba"] {
         let current = std::env::current_dir().unwrap();
         let repository = tempfile::tempdir_in(&current).unwrap();
@@ -9944,7 +9948,7 @@ fn radix_literal_edits_preserve_atom_sources_and_rank_arity_proofs() {
         let mut previous: Option<(FirstSliceIndexReceipt, String, RadixLiteralState)> = None;
         let mut initial_source = None;
         let mut initial_logical = None;
-        for (position, state) in states.into_iter().enumerate() {
+        for (position, state) in states.iter().copied().enumerate() {
             let source = radix_literal_source(state);
             fs::write(repository.path().join("module.bas"), &source).unwrap();
             let mut service = FirstSliceService::new_durable_with_policy(
@@ -10034,4 +10038,67 @@ fn radix_literal_edits_preserve_atom_sources_and_rank_arity_proofs() {
             previous = Some((rebuilt, source, state));
         }
     }
+}
+
+#[test]
+fn integer_suffix_edits_preserve_source_tokens_and_rank_arity_proofs() {
+    let initial = RadixLiteralState {
+        literal: "7",
+        default: "&H10",
+        module_bounds: "-&O1 To +&o3",
+        local_bounds: "-&1 To +&3, &H2",
+        local_rank: 2,
+        index: "&0",
+        second_index: "&o1",
+        native_fallback: false,
+    };
+    // Suffix-only edits preserve radix, signs, rank and callable contracts. Their
+    // authored spellings are syntax evidence, not runtime type or value claims.
+    let states = [
+        initial,
+        RadixLiteralState {
+            literal: "7%",
+            default: "&H10%",
+            module_bounds: "-&O1% To +&o3%",
+            local_bounds: "-&1% To +&3%, &H2%",
+            local_rank: 2,
+            index: "&0%",
+            second_index: "&o1%",
+            native_fallback: false,
+        },
+        RadixLiteralState {
+            literal: "7&",
+            default: "&H10&",
+            module_bounds: "-&O1& To +&o3&",
+            local_bounds: "-&1& To +&3&, &H2&",
+            local_rank: 2,
+            index: "&0&",
+            second_index: "&o1&",
+            native_fallback: false,
+        },
+        RadixLiteralState {
+            literal: "7^",
+            default: "&H10^",
+            module_bounds: "-&O1^ To +&o3^",
+            local_bounds: "-&1^ To +&3^, &H2^",
+            local_rank: 2,
+            index: "&0^",
+            second_index: "&o1^",
+            native_fallback: false,
+        },
+        // The genuine floating-point fallback keeps only native-compatible
+        // decimal/hex tokens; octal admission is not a native-oracle assumption.
+        RadixLiteralState {
+            literal: "7^",
+            default: "&H10^",
+            module_bounds: "-&H1^ To +&h3^",
+            local_bounds: "-&h1^ To +&H3^, &H2^",
+            local_rank: 2,
+            index: "&H0^",
+            second_index: "&h1^",
+            native_fallback: true,
+        },
+        initial,
+    ];
+    assert_radix_literal_trajectory(&states);
 }

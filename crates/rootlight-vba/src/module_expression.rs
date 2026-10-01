@@ -576,8 +576,8 @@ impl<'a> Parser<'a> {
                     return Ok(None);
                 };
                 // MS-VBAL 3.3.2/3.3.5.3 attach suffixes to numeric literals and
-                // ordinary identifiers. An unsupported typed token is not a
-                // binary operator merely because its suffix shares that spelling.
+                // ordinary identifiers. The integer scanner retains one INTEGER
+                // suffix; a remaining unsupported suffix is not a binary operator.
                 let adjacent_suffix = match value.kind() {
                     ModuleScalarValueKind::UnsignedDecimal
                     | ModuleScalarValueKind::UnsignedHexadecimal
@@ -1009,12 +1009,147 @@ fn rebase_inventory<E>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ModuleIntegerSuffix;
 
     fn parse(source: &str) -> Parsed {
         Parser::new(source.as_bytes(), 0, source.len(), source.len())
             .parse(&mut || Ok::<(), ()>(()))
             .unwrap()
             .expect("complete expression")
+    }
+
+    #[test]
+    fn integer_suffix_expression_atoms_retain_exact_rebased_metadata_without_extra_work() {
+        for (atom, kind) in [
+            ("001", ModuleScalarValueKind::UnsignedDecimal),
+            ("&H1E2", ModuleScalarValueKind::UnsignedHexadecimal),
+            ("&hF", ModuleScalarValueKind::UnsignedHexadecimal),
+            ("&O7", ModuleScalarValueKind::UnsignedOctal),
+            ("&o7", ModuleScalarValueKind::UnsignedOctal),
+            ("&77", ModuleScalarValueKind::UnsignedOctal),
+        ] {
+            for suffix in [
+                ModuleIntegerSuffix::Percent,
+                ModuleIntegerSuffix::Ampersand,
+                ModuleIntegerSuffix::Caret,
+            ] {
+                let source = format!("{atom}{}", suffix.as_char());
+                let range = 9..9 + source.len();
+                let (span, inventory) =
+                    super::inventory(source.as_bytes(), 0, &range, 1, 0, &mut || Ok::<(), ()>(()))
+                        .unwrap()
+                        .unwrap();
+                assert_eq!(span, range);
+                assert_eq!(inventory.work_nodes(), 1);
+                assert_eq!(inventory.argument_count(), 0);
+                assert!(inventory.applications().is_empty());
+                assert_eq!(inventory.values().len(), 1);
+                let value = &inventory.values()[0];
+                assert_eq!(value.span(), range);
+                assert_eq!(value.kind(), kind);
+                assert_eq!(value.integer_suffix(), Some(suffix));
+                assert_eq!(
+                    value.integer_suffix().unwrap().as_char(),
+                    source.chars().last().unwrap()
+                );
+                assert!(matches!(
+                    super::inventory(source.as_bytes(), 0, &range, 0, 0, &mut || Ok::<(), ()>(())),
+                    Err(ModuleError::ExpressionLimit)
+                ));
+            }
+        }
+    }
+
+    #[test]
+    fn integer_suffixes_do_not_fabricate_power_or_concat_from_adjacent_token_tails() {
+        for source in [
+            "1^2",
+            "1&2",
+            "1%2",
+            "&H1^2",
+            "&O7&2",
+            "&77%2",
+            "1^^",
+            "1&&",
+            "1%%",
+            "1%^2",
+            "1&^2",
+            "1^&2",
+            "1%!",
+            "1&#",
+            "1^@",
+            "1%$",
+            "&H%",
+            "&O&",
+            "&^",
+            "1%other",
+            "1%(2)",
+            "value% + 2",
+            "[value]&",
+            "True^",
+            "\"text\"%",
+            "1.5%",
+        ] {
+            assert!(
+                Parser::new(source.as_bytes(), 0, source.len(), source.len())
+                    .parse(&mut || Ok::<(), ()>(()))
+                    .unwrap()
+                    .is_none(),
+                "{source}"
+            );
+        }
+        for (source, work, expected) in [
+            (
+                "1% + &H2& * -&o3^",
+                6,
+                vec![
+                    ("1%", Some(ModuleIntegerSuffix::Percent)),
+                    ("&H2&", Some(ModuleIntegerSuffix::Ampersand)),
+                    ("&o3^", Some(ModuleIntegerSuffix::Caret)),
+                ],
+            ),
+            (
+                "1^ ^ 2",
+                3,
+                vec![("1^", Some(ModuleIntegerSuffix::Caret)), ("2", None)],
+            ),
+            (
+                "1& & &H2%",
+                3,
+                vec![
+                    ("1&", Some(ModuleIntegerSuffix::Ampersand)),
+                    ("&H2%", Some(ModuleIntegerSuffix::Percent)),
+                ],
+            ),
+            (
+                "(1%)^2",
+                4,
+                vec![("1%", Some(ModuleIntegerSuffix::Percent)), ("2", None)],
+            ),
+            (
+                "[a] & &77^",
+                3,
+                vec![("[a]", None), ("&77^", Some(ModuleIntegerSuffix::Caret))],
+            ),
+        ] {
+            let parsed = parse(source);
+            assert_eq!(parsed.span, 0..source.len());
+            assert_eq!(parsed.inventory.work_nodes(), work);
+            assert_eq!(parsed.inventory.values().len(), expected.len());
+            for (value, (spelling, suffix)) in parsed.inventory.values().iter().zip(expected) {
+                assert_eq!(&source[value.span()], spelling);
+                assert_eq!(value.integer_suffix(), suffix);
+            }
+        }
+        for source in ["[a] &77%", "[a] &H1&", "[a] &O7^", "True&77%", "(1%)&77"] {
+            assert!(
+                Parser::new(source.as_bytes(), 0, source.len(), 0)
+                    .parse(&mut || Ok::<(), ()>(()))
+                    .unwrap()
+                    .is_none(),
+                "{source}"
+            );
+        }
     }
 
     #[test]
@@ -1704,7 +1839,7 @@ mod tests {
 
     #[test]
     fn expression_adjacent_numeric_and_name_type_suffixes_do_not_become_operators() {
-        for (atom, suffixes) in [("2", b"%&^!#@".as_slice()), ("value", b"%&^!#@$")] {
+        for (atom, suffixes) in [("2", b"!#@".as_slice()), ("value", b"%&^!#@$")] {
             for suffix in suffixes {
                 for tail in ["", "3", "other", "(3)", " + 3"] {
                     let source = format!("{atom}{}{tail}", char::from(*suffix));
