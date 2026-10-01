@@ -138,6 +138,138 @@ fn scalar_modules_preserve_local_identity_and_value_reads_without_native_work() 
 }
 
 #[test]
+fn module_scalar_variables_keep_written_visibility_and_lexical_owners() {
+    let source = b"Attribute VB_Name = \"Authored\"\r\nPublic stored As Long\r\nPrivate [text]\r\nDim hidden As Boolean\r\nSub Run(ByVal stored As Long)\r\nDim hidden As Boolean\r\nstored = stored\r\nhidden = hidden\r\nEnd Sub\r\n";
+    for language in ["vba", "visual-basic-classic"] {
+        let fixture = Fixture::new(source);
+        let provider = provider();
+        let full_limits = limits(4096);
+        let request = fixture.request(&full_limits, language, Vec::new());
+        let required = provider
+            .required_syntax_fact_count(&request, &deadline())
+            .unwrap();
+        let output = parse(&provider, &request);
+        assert_eq!(
+            output.report().coverage().status(),
+            CoverageStatus::Complete
+        );
+        assert_eq!(
+            output.report().coverage().covered_source_bytes(),
+            source.len()
+        );
+        assert!(output.diagnostics().is_empty());
+        let variables = output
+            .facts()
+            .iter()
+            .filter(|fact| fact.syntax_kind().as_str() == "vba.variable.declaration")
+            .collect::<Vec<_>>();
+        assert_eq!(variables.len(), 4);
+        let mut module_count = 0;
+        let mut body_count = 0;
+        for variable in variables {
+            let parent = output
+                .facts()
+                .iter()
+                .find(|fact| Some(fact.local_id()) == variable.parent())
+                .unwrap();
+            let (name, visibility) = match parent.syntax_kind().as_str() {
+                "vba.file.scope" => {
+                    module_count += 1;
+                    assert_eq!(variable.depth(), 3);
+                    match bytes_at(source, variable.span()) {
+                        b"stored As Long" => (b"stored".as_slice(), "vba.public.expression"),
+                        b"[text]" => (b"[text]".as_slice(), "vba.private.expression"),
+                        b"hidden As Boolean" => {
+                            (b"hidden".as_slice(), "vba.visibility_unknown.expression")
+                        }
+                        written => {
+                            panic!("a module variable retains its exact declarator: {written:?}")
+                        }
+                    }
+                }
+                "vba.sub_function.declaration" => {
+                    body_count += 1;
+                    assert_eq!(bytes_at(source, variable.span()), b"hidden As Boolean");
+                    (b"hidden".as_slice(), "vba.visibility_unknown.expression")
+                }
+                kind => panic!("a variable has an exact file or procedure owner: {kind}"),
+            };
+            let definition = output
+                .facts()
+                .iter()
+                .find(|fact| {
+                    fact.parent() == Some(variable.local_id())
+                        && fact.syntax_kind().as_str() == "vba.identifier.definition"
+                })
+                .unwrap();
+            assert_eq!(bytes_at(source, definition.span()), name);
+            assert_eq!(definition.depth(), variable.depth() + 1);
+            assert!(
+                output
+                    .facts()
+                    .iter()
+                    .any(|fact| fact.syntax_kind().as_str() == visibility
+                        && fact.span() == variable.span())
+            );
+        }
+        assert_eq!((module_count, body_count), (3, 1));
+        assert_eq!(output.facts(), parse(&provider, &request).facts());
+        let exact_limits = limits(required);
+        let exact_request = fixture.request(&exact_limits, language, Vec::new());
+        let exact = parse(&provider, &exact_request);
+        assert_eq!(
+            exact
+                .facts()
+                .iter()
+                .filter(|fact| fact.syntax_kind().as_str() == "vba.variable.declaration")
+                .count(),
+            4
+        );
+        assert_eq!(
+            exact
+                .facts()
+                .iter()
+                .filter(|fact| fact.syntax_kind().as_str() == "vba.parameter.declaration")
+                .count(),
+            1
+        );
+        let short_limits = limits(required - 1);
+        let short_request = fixture.request(&short_limits, language, Vec::new());
+        assert_eq!(
+            execute_parse(
+                &provider,
+                &short_request,
+                MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
+                &deadline()
+            )
+            .unwrap_err(),
+            AdapterError::Sink(SinkError::StreamLimit {
+                resource: ResourceKind::RequiredSyntaxFacts,
+                observed: required,
+                limit: required - 1,
+            })
+        );
+        let cancelled = deadline();
+        cancelled.cancel(CancellationReason::ClientRequest);
+        assert!(matches!(
+            execute_parse(
+                &provider,
+                &request,
+                MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
+                &cancelled
+            ),
+            Err(AdapterError::Cancelled {
+                reason: CancellationReason::ClientRequest,
+            })
+        ));
+        let stats = provider.stats();
+        assert_eq!(stats.pooled_parsers, 0);
+        assert_eq!(stats.checked_out_parsers, 0);
+        assert_eq!(stats.cache.entries, 0);
+    }
+}
+
+#[test]
 fn module_constants_and_named_defaults_keep_file_and_formal_ownership() {
     let source = b"Attribute VB_Name = \"Authored\"\r\nOption Explicit\r\nPublic Const Fallback = 7\r\nPrivate Const Label As String = \"text\"\r\nSub Accept(Optional Fallback = [FALLBACK], Optional text As String = Label)\r\nConst Fallback As Long = 8\r\nEnd Sub\r\nSub Run()\r\nCall Accept()\r\nEnd Sub\r\n";
     for language in ["vba", "visual-basic-classic"] {

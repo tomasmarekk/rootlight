@@ -7,7 +7,7 @@ use std::ops::Range;
 use rootlight_adapter_sdk::NativeVbaModuleKind;
 use rootlight_vba::{
     ModuleBodyStatement, ModuleConstantVisibility, ModuleError, ModuleInventory, ModuleLimits,
-    ModuleLocalKind, ModuleScalarValueKind, ProcedureKind,
+    ModuleLocalKind, ModuleScalarValueKind, ModuleVariableVisibility, ProcedureKind,
 };
 
 use super::*;
@@ -274,6 +274,12 @@ fn candidates(
         .checked_mul(2)
         .and_then(|constants| count.checked_add(constants))
         .ok_or_else(|| provider_failure("vba-procedural-fact-accounting"))?;
+    count = inventory
+        .variables()
+        .len()
+        .checked_mul(2)
+        .and_then(|variables| count.checked_add(variables))
+        .ok_or_else(|| provider_failure("vba-procedural-fact-accounting"))?;
     for procedure in inventory.procedures() {
         cancellation.check()?;
         count = procedure
@@ -364,6 +370,42 @@ fn candidates(
                 match constant.visibility() {
                     Some(ModuleConstantVisibility::Public) => "vba.public",
                     Some(ModuleConstantVisibility::Private) => "vba.private",
+                    None => "vba.visibility_unknown",
+                },
+                false,
+            )?;
+        }
+    }
+    for variable in inventory.variables() {
+        cancellation.check()?;
+        push_body_candidate(
+            &mut output,
+            maximum,
+            cancellation,
+            variable.declarator(),
+            StructuralRole::Declaration,
+            "vba.variable",
+            true,
+        )?;
+        push_body_candidate(
+            &mut output,
+            maximum,
+            cancellation,
+            variable.name(),
+            StructuralRole::Definition,
+            "vba.identifier",
+            true,
+        )?;
+        if include_optional {
+            push_body_candidate(
+                &mut output,
+                maximum,
+                cancellation,
+                variable.declarator(),
+                StructuralRole::Expression,
+                match variable.visibility() {
+                    Some(ModuleVariableVisibility::Public) => "vba.public",
+                    Some(ModuleVariableVisibility::Private) => "vba.private",
                     None => "vba.visibility_unknown",
                 },
                 false,
@@ -2202,6 +2244,356 @@ mod tests {
                     .unwrap()
                     .is_none(),
                     "{language}:{parameters}"
+                );
+                assert_eq!(fixture.provider.stats().pooled_parsers, 0);
+                assert_eq!(fixture.provider.stats().cache.entries, 0);
+            }
+        }
+    }
+
+    #[test]
+    fn first_party_vba_module_scalar_variables_match_native_facts() {
+        for source in [
+            "Dim stored",
+            "Public stored As Long\n",
+            "Private [stored] As String ' tail\r\n",
+            "Dim stored\nDim stored\n",
+            "' leading\nAttribute VB_Name = \"Authored\"\nOption Explicit\nPublic stored As Long\nConst Limit = 7\nSub Run()\nstored = Limit\nEnd Sub\n",
+            "Private _\r\n[stored] _\r\nAs _\r\nLong\r\nSub Run()\n[stored] = [stored]\nEnd Sub\n",
+            "Sub First()\nEnd Sub\nDim stored\nSub Second(ByVal stored As Long)\nstored = stored\nEnd Sub\nPrivate Last As Boolean\n",
+            "Public stored As Long\nSub Run(Optional value = stored)\nDim stored As Long\nstored = stored\nEnd Sub\n",
+            "Dim [True]\nPublic Name\nPrivate Line As Long\nDim Load As Long\n",
+            "Dim stored\nConst Limit = 7\nPublic Last As Long\nSub Run()\nDim stored As Long\nCall Target(stored, Limit)\nEnd Sub\n",
+            "Dim stored As Long\nConst stored = 7\nSub Run(Optional value = stored)\nEnd Sub\n",
+            "Const stored = 7\nDim stored As Long\nSub Run(Optional value = stored)\nEnd Sub\n",
+        ] {
+            for language in ["vba", "visual-basic-classic"] {
+                compare_native(&Fixture::new(source), language, &[]);
+            }
+        }
+        for ty in [
+            "",
+            " As String",
+            " As Boolean",
+            " As Byte",
+            " As Integer",
+            " As Long",
+            " As LongLong",
+            " As LongPtr",
+            " As Single",
+            " As Double",
+            " As Currency",
+            " As Date",
+            " As Variant",
+            " As Object",
+        ] {
+            for prefix in ["Dim", "Public", "Private"] {
+                for name in ["stored", "[Item]", "Name"] {
+                    for newline in ["\n", "\r\n"] {
+                        let source = format!(
+                            "{prefix} {name}{ty}{newline}Sub Run(){newline}End Sub{newline}"
+                        );
+                        for language in ["vba", "visual-basic-classic"] {
+                            compare_native(&Fixture::new(&source), language, &[]);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn first_party_vba_module_variable_names_keep_exact_native_admission() {
+        for prefix in ["Dim", "Public", "Private"] {
+            for name in [
+                "Name",
+                "Line",
+                "Load",
+                "Unload",
+                "Input",
+                "Print",
+                "Close",
+                "Reset",
+                "Beep",
+                "DefBool",
+                "DefByte",
+                "DefInt",
+                "DefLng",
+                "DefLngLng",
+                "DefLngPtr",
+                "DefCur",
+                "DefSng",
+                "DefDbl",
+                "DefDate",
+                "DefStr",
+                "DefObj",
+                "DefVar",
+                "DefDec",
+                "[True]",
+                "[Me]",
+                "[Rem]",
+                "[Dim]",
+                "[ReDim]",
+            ] {
+                for ty in ["", " As Long"] {
+                    let source = format!("{prefix} {name}{ty}\nSub Run()\nEnd Sub\n");
+                    for language in ["vba", "visual-basic-classic"] {
+                        compare_native(&Fixture::new(&source), language, &[]);
+                    }
+                }
+            }
+        }
+        for name in [
+            "Dim", "ReDim", "Rem", "True", "False", "Sub", "Function", "Public", "Private",
+        ] {
+            let source = format!("Dim {name} As Long\nSub Run()\nEnd Sub\n");
+            for language in ["vba", "visual-basic-classic"] {
+                let fixture = Fixture::new(&source);
+                let request = fixture.request(language, &[]);
+                let cancellation = Cancellation::new();
+                let native = fixture
+                    .provider
+                    .prepare_tree(
+                        &request,
+                        None,
+                        &[],
+                        fixture.provider.config.default_settings(),
+                        &cancellation,
+                    )
+                    .unwrap();
+                assert!(native.traversal.fully_traversed);
+                let expected_coverage = if matches!(name, "Dim" | "ReDim" | "Rem") {
+                    CoverageStatus::Unknown
+                } else {
+                    CoverageStatus::Complete
+                };
+                assert_eq!(
+                    native.traversal.coverage, expected_coverage,
+                    "exact native admission for a conservatively excluded spelling: {language}:{name}"
+                );
+                if expected_coverage == CoverageStatus::Complete {
+                    let pack = fixture
+                        .provider
+                        .query_packs
+                        .get_for_source(native.family, request.source().path().as_str())
+                        .unwrap();
+                    let legacy = pack
+                        .extract(
+                            native.family,
+                            &native.tree,
+                            request.source().bytes(),
+                            request.limits().max_syntax_nodes(),
+                            usize::MAX,
+                            &cancellation,
+                        )
+                        .unwrap();
+                    assert!(legacy.limit.is_none());
+                    let normalized = normalize_query_candidates(
+                        legacy.candidates,
+                        &request,
+                        usize::MAX,
+                        &cancellation,
+                    )
+                    .unwrap();
+                    assert_eq!(
+                        normalized
+                            .facts
+                            .iter()
+                            .filter(|fact| {
+                                fact.syntax_kind().as_str() == "vba.identifier.definition"
+                                    && fact.span().start_byte() == 4
+                                    && fact.span().end_byte()
+                                        == u64::try_from(4 + name.len()).unwrap()
+                            })
+                            .count(),
+                        1,
+                        "the native route retains the exact written definition: {language}:{name}"
+                    );
+                    assert_eq!(
+                        normalized
+                            .facts
+                            .iter()
+                            .filter(|fact| {
+                                fact.syntax_kind().as_str() == "vba.variable.declaration"
+                                    && fact.span().start_byte() == 4
+                                    && fact.span().end_byte()
+                                        == u64::try_from(4 + name.len() + " As Long".len()).unwrap()
+                            })
+                            .count(),
+                        1,
+                        "the contextual name belongs to its full authored declaration: {language}:{name}"
+                    );
+                    assert!(normalized.facts.iter().all(|fact| {
+                        !fact.syntax_kind().as_str().ends_with(".reference")
+                            || fact.span().start_byte() != 4
+                            || fact.span().end_byte() != u64::try_from(4 + name.len()).unwrap()
+                    }));
+                }
+                assert!(
+                    prepare(
+                        &fixture.provider,
+                        &request,
+                        None,
+                        &[],
+                        fixture.provider.config.default_settings(),
+                        &cancellation
+                    )
+                    .unwrap()
+                    .is_none(),
+                    "{language}:{name}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn first_party_vba_module_variables_obey_exact_node_and_candidate_ceilings() {
+        let source = "Public stored As Long\nSub Run()\nstored = stored\nEnd Sub\n";
+        for language in ["vba", "visual-basic-classic"] {
+            let mut fixture = Fixture::new(source);
+            let cancellation = Cancellation::new();
+            let request = fixture.request(language, &[]);
+            let prepared = prepare(
+                &fixture.provider,
+                &request,
+                None,
+                &[],
+                fixture.provider.config.default_settings(),
+                &cancellation,
+            )
+            .unwrap()
+            .unwrap();
+            assert_eq!(prepared.inventory.variables().len(), 1);
+            assert_eq!(prepared.processed_nodes, 6);
+            for (optional, expected) in [(false, 9), (true, 13)] {
+                let exact = candidates(
+                    &prepared.inventory,
+                    source.as_bytes(),
+                    optional,
+                    expected,
+                    &cancellation,
+                )
+                .unwrap();
+                assert_eq!(exact.len(), expected);
+                assert_eq!(
+                    exact
+                        .iter()
+                        .filter(|fact| fact.syntax == "vba.variable")
+                        .count(),
+                    1
+                );
+                assert_eq!(
+                    exact
+                        .iter()
+                        .filter(|fact| fact.syntax == "vba.public")
+                        .count(),
+                    usize::from(optional)
+                );
+                assert_eq!(
+                    exact
+                        .iter()
+                        .filter(|fact| fact.syntax == "vba.value_identifier")
+                        .count(),
+                    usize::from(optional)
+                );
+                assert!(
+                    matches!(candidates(&prepared.inventory, source.as_bytes(), optional, expected - 1, &cancellation), Err(AdapterError::RejectedRequest(RequestError::ProviderLimit {
+                    resource: ResourceKind::SyntaxNodes, observed, limit,
+                })) if observed == expected && limit == expected - 1)
+                );
+            }
+            fixture.limits = with_maximum_nodes(&fixture.limits, 6);
+            let request = fixture.request(language, &[]);
+            assert_eq!(
+                prepare(
+                    &fixture.provider,
+                    &request,
+                    None,
+                    &[],
+                    fixture.provider.config.default_settings(),
+                    &cancellation
+                )
+                .unwrap()
+                .unwrap()
+                .processed_nodes,
+                6
+            );
+            fixture.limits = with_maximum_nodes(&fixture.limits, 5);
+            let request = fixture.request(language, &[]);
+            assert!(matches!(
+                prepare(
+                    &fixture.provider,
+                    &request,
+                    None,
+                    &[],
+                    fixture.provider.config.default_settings(),
+                    &cancellation
+                ),
+                Err(AdapterError::RejectedRequest(RequestError::ProviderLimit {
+                    resource: ResourceKind::SyntaxNodes,
+                    observed: 6,
+                    limit: 5,
+                }))
+            ));
+            cancellation.cancel(rootlight_cancel::CancellationReason::ClientRequest);
+            assert!(matches!(
+                candidates(
+                    &prepared.inventory,
+                    source.as_bytes(),
+                    true,
+                    13,
+                    &cancellation
+                ),
+                Err(AdapterError::Cancelled {
+                    reason: rootlight_cancel::CancellationReason::ClientRequest,
+                })
+            ));
+            assert_eq!(fixture.provider.stats().pooled_parsers, 0);
+            assert_eq!(fixture.provider.stats().cache.entries, 0);
+        }
+    }
+
+    #[test]
+    fn first_party_vba_richer_module_variables_keep_whole_native_fallback() {
+        for declaration in [
+            "Dim",
+            "Public",
+            "Private",
+            "Dim stored As",
+            "Public stored As UserType",
+            "Private stored As New Object",
+            "Dim stored As String * 3",
+            "Dim stored$",
+            "Dim stored = 1",
+            "Dim stored As Long = 1",
+            "Dim first, second As Long",
+            "Dim stored() As Long",
+            "Public stored(1 To 3) As Long",
+            "Global stored As Long",
+            "Friend stored As Long",
+            "Static stored As Long",
+            "Public Dim stored As Long",
+            "Private WithEvents stored As Object",
+            "Dim stored: Dim last",
+            "Dim stored\nOption Explicit",
+            "Dim stored\nAttribute VB_Name = \"Late\"",
+        ] {
+            let source = format!("Sub First()\nEnd Sub\n{declaration}\nSub Run()\nEnd Sub\n");
+            for language in ["vba", "visual-basic-classic"] {
+                let fixture = Fixture::new(&source);
+                let request = fixture.request(language, &[]);
+                assert!(
+                    prepare(
+                        &fixture.provider,
+                        &request,
+                        None,
+                        &[],
+                        fixture.provider.config.default_settings(),
+                        &Cancellation::new()
+                    )
+                    .unwrap()
+                    .is_none(),
+                    "{language}:{declaration}"
                 );
                 assert_eq!(fixture.provider.stats().pooled_parsers, 0);
                 assert_eq!(fixture.provider.stats().cache.entries, 0);

@@ -39,7 +39,8 @@ pub use lifecycle::{ClassInitializer, class_initializer};
 pub use member_attribute::{MemberDispatchAttribute, member_dispatch_attribute};
 pub use module::{
     ModuleConstant, ModuleConstantVisibility, ModuleError, ModuleInventory, ModuleLimits,
-    ModuleParameter, ModuleParameterPassingMode, ModuleProcedure, module_inventory,
+    ModuleParameter, ModuleParameterPassingMode, ModuleProcedure, ModuleVariable,
+    ModuleVariableVisibility, module_inventory,
 };
 pub use module_body::{
     ModuleBodyStatement, ModuleCall, ModuleLocalDeclaration, ModuleLocalKind,

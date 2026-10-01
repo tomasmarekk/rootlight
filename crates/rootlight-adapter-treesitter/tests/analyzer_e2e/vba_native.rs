@@ -8579,6 +8579,397 @@ fn vba_accessor_parameters_remain_separate_environments() {
 }
 
 #[test]
+fn vba_duplicate_module_variables_retain_written_definitions_without_unique_value_binding() {
+    for language in ["vba", "visual-basic-classic"] {
+        for native in [false, true] {
+            for (declaration, declarator, written_name) in [
+                ("Dim stored As Long", "stored As Long", "stored"),
+                ("Public stored As Long", "stored As Long", "stored"),
+                ("Dim stored", "stored", "stored"),
+                ("Private [stored]", "[stored]", "[stored]"),
+            ] {
+                let body = if native { "local = 1 + 2" } else { "local = 3" };
+                let source = format!(
+                    "{declaration}\n{declaration}\nSub Update(Optional value = stored)\nEnd Sub\nSub Run()\nDim local As Long\nlocal = stored\n{body}\nCall Update()\nEnd Sub\n"
+                );
+                let result =
+                    application_proof_output(&source, language, IrLimits::default(), &deadline())
+                        .unwrap();
+                let document = result.document();
+                let variables = document
+                    .entities
+                    .iter()
+                    .filter(|entity| {
+                        entity.kind == EntityKind::Variable && entity.canonical_name == "stored"
+                    })
+                    .collect::<Vec<_>>();
+                assert_eq!(variables.len(), 1);
+                let variable = variables[0];
+                let parser = document.files[0].provenance;
+                let definitions = document
+                    .occurrences
+                    .iter()
+                    .filter(|site| {
+                        site.role == OccurrenceRole::Definition
+                            && site.target
+                                == OccurrenceTarget::Resolved {
+                                    symbol: variable.id,
+                                }
+                    })
+                    .collect::<Vec<_>>();
+                assert_eq!(definitions.len(), 2);
+                for (start, _) in source.match_indices(declaration) {
+                    let start = start + declaration.len() - declarator.len();
+                    let definition = definitions
+                        .iter()
+                        .find(|site| {
+                            site.source.span().start_byte() == u64::try_from(start).unwrap()
+                        })
+                        .unwrap();
+                    assert_eq!(
+                        definition.source.span().end_byte(),
+                        u64::try_from(start + written_name.len()).unwrap()
+                    );
+                    assert_eq!(
+                        definition.source.content_hash(),
+                        content_hash(source.as_bytes())
+                    );
+                    assert_eq!(definition.provenance, parser);
+                    let context = definition.evidence.source.as_ref().unwrap();
+                    assert_eq!(context.span().start_byte(), u64::try_from(start).unwrap());
+                    assert_eq!(
+                        context.span().end_byte(),
+                        u64::try_from(start + declarator.len()).unwrap()
+                    );
+                    let containment = document
+                        .relations
+                        .iter()
+                        .filter(|edge| {
+                            edge.predicate == RelationPredicate::Contains
+                                && edge.object == RelationEndpoint::Entity(variable.id)
+                                && edge.evidence.source.as_ref() == Some(context)
+                        })
+                        .collect::<Vec<_>>();
+                    assert_eq!(containment.len(), 1);
+                    assert_eq!(containment[0].provenance, parser);
+                }
+                let default = document
+                    .occurrences
+                    .iter()
+                    .find(|site| site.syntax_kind == "vba.default_constant_identifier.reference")
+                    .unwrap();
+                let read_start =
+                    u64::try_from(source.find("local = stored").unwrap() + "local = ".len())
+                        .unwrap();
+                let read = document
+                    .occurrences
+                    .iter()
+                    .find(|site| {
+                        site.syntax_kind == "vba.value_identifier.reference"
+                            && site.source.span().start_byte() == read_start
+                    })
+                    .unwrap();
+                for site in [default, read] {
+                    assert!(matches!(site.target, OccurrenceTarget::Unresolved { .. }));
+                    assert!(document.skipped_regions.iter().any(
+                        |gap| gap.source == site.source && gap.domain == FactDomain::Relations
+                    ));
+                    assert!(
+                        !document
+                            .relations
+                            .iter()
+                            .any(|edge| edge.subject == RelationEndpoint::Occurrence(site.id)
+                                && edge.predicate == RelationPredicate::RefersTo)
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn vba_module_variable_constant_collisions_do_not_choose_a_default_target() {
+    for language in ["vba", "visual-basic-classic"] {
+        for native in [false, true] {
+            for declarations in [
+                "Dim stored As Long\nConst stored = 7",
+                "Const stored = 7\nDim stored As Long",
+            ] {
+                let body = if native { "local = 1 + 2" } else { "local = 3" };
+                let source = format!(
+                    "{declarations}\nSub Update(Optional value = stored)\nEnd Sub\nSub Run()\nDim local As Long\n{body}\nCall Update()\nEnd Sub\n"
+                );
+                let result =
+                    application_proof_output(&source, language, IrLimits::default(), &deadline())
+                        .unwrap();
+                let document = result.document();
+                let values = document
+                    .entities
+                    .iter()
+                    .filter(|entity| entity.canonical_name == "stored")
+                    .collect::<Vec<_>>();
+                assert_eq!(values.len(), 2);
+                assert!(
+                    values
+                        .iter()
+                        .any(|entity| entity.kind == EntityKind::Variable)
+                );
+                assert!(
+                    values
+                        .iter()
+                        .any(|entity| entity.kind == EntityKind::Constant)
+                );
+                let default = document
+                    .occurrences
+                    .iter()
+                    .find(|site| site.syntax_kind == "vba.default_constant_identifier.reference")
+                    .unwrap();
+                assert!(matches!(
+                    default.target,
+                    OccurrenceTarget::Unresolved { .. }
+                ));
+                assert_eq!(
+                    document
+                        .skipped_regions
+                        .iter()
+                        .filter(|gap| gap.source == default.source
+                            && gap.detail == "vba-default-constant-target-unavailable")
+                        .count(),
+                    1
+                );
+                assert!(!document.relations.iter().any(|edge| edge.subject
+                    == RelationEndpoint::Occurrence(default.id)
+                    && edge.predicate == RelationPredicate::RefersTo));
+            }
+        }
+    }
+}
+
+#[test]
+fn vba_module_variables_preserve_value_ownership_without_constant_or_call_proofs() {
+    use rootlight_ir::EntityVisibility;
+    for language in ["vba", "visual-basic-classic"] {
+        for native in [false, true] {
+            for (declaration, declarator, name, visibility) in [
+                (
+                    "Public stored As Long",
+                    "stored As Long",
+                    "stored",
+                    EntityVisibility::Public,
+                ),
+                (
+                    "Private [stored]",
+                    "[stored]",
+                    "[stored]",
+                    EntityVisibility::Private,
+                ),
+                ("Dim stored", "stored", "stored", EntityVisibility::Unknown),
+                (
+                    "Dim stored As Variant",
+                    "stored As Variant",
+                    "stored",
+                    EntityVisibility::Unknown,
+                ),
+            ] {
+                let body = if native { "local = 1 + 2" } else { "local = 3" };
+                let source = format!(
+                    "Attribute VB_Name = \"Authored\"\n{declaration}\nSub Update(Optional ByVal stored = [STORED])\nstored = 2\nEnd Sub\nSub Read()\nDim local As Long\nlocal = stored\nEnd Sub\nSub Shadow()\nDim stored As Long\nstored = stored\nEnd Sub\nSub Run()\nDim local As Long\n{body}\nCall Update()\nCall stored()\nEnd Sub\n"
+                );
+                let result =
+                    application_proof_output(&source, language, IrLimits::default(), &deadline())
+                        .unwrap();
+                let document = result.document();
+                let module = document
+                    .entities
+                    .iter()
+                    .find(|entity| entity.kind == EntityKind::Module)
+                    .unwrap();
+                let variable = document
+                    .entities
+                    .iter()
+                    .find(|entity| {
+                        entity.kind == EntityKind::Variable
+                            && entity.canonical_name == "stored"
+                            && entity.container == Some(ContainerRef::Entity(module.id))
+                    })
+                    .unwrap();
+                let parameter = document
+                    .entities
+                    .iter()
+                    .find(|entity| {
+                        entity.kind == EntityKind::Parameter && entity.canonical_name == "stored"
+                    })
+                    .unwrap();
+                let shadow = document
+                    .entities
+                    .iter()
+                    .find(|entity| {
+                        entity.kind == EntityKind::Variable
+                            && entity.canonical_name == "stored"
+                            && entity.id != variable.id
+                    })
+                    .unwrap();
+                let parser = document.files[0].provenance;
+                assert_eq!(variable.visibility, visibility);
+                assert_eq!(variable.provenance, parser);
+                let definition = document
+                    .occurrences
+                    .iter()
+                    .find(|site| {
+                        site.role == OccurrenceRole::Definition
+                            && site.target
+                                == OccurrenceTarget::Resolved {
+                                    symbol: variable.id,
+                                }
+                    })
+                    .unwrap();
+                let default = document
+                    .occurrences
+                    .iter()
+                    .find(|site| site.syntax_kind == "vba.default_constant_identifier.reference")
+                    .unwrap();
+                for (reference, written) in [
+                    (variable.evidence.source.as_ref().unwrap(), declarator),
+                    (&definition.source, name),
+                    (&default.source, "[STORED]"),
+                ] {
+                    let span = reference.span();
+                    assert_eq!(
+                        source
+                            .get(
+                                usize::try_from(span.start_byte()).unwrap()
+                                    ..usize::try_from(span.end_byte()).unwrap()
+                            )
+                            .unwrap(),
+                        written
+                    );
+                    assert_eq!(reference.repository(), document.repository);
+                    assert_eq!(reference.generation(), document.generation);
+                    assert_eq!(span.file(), document.files[0].id);
+                    assert_eq!(reference.content_hash(), content_hash(source.as_bytes()));
+                }
+                assert_eq!(definition.enclosing, Some(module.id));
+                assert_eq!(definition.provenance, parser);
+                assert_eq!(default.enclosing, Some(parameter.id));
+                assert!(matches!(
+                    default.target,
+                    OccurrenceTarget::Unresolved { .. }
+                ));
+                assert_eq!(
+                    document
+                        .skipped_regions
+                        .iter()
+                        .filter(|gap| gap.source == default.source
+                            && gap.detail == "vba-default-constant-target-unavailable")
+                        .count(),
+                    1
+                );
+                assert!(!document.relations.iter().any(|edge| edge.subject
+                    == RelationEndpoint::Occurrence(default.id)
+                    && edge.predicate == RelationPredicate::RefersTo));
+                assert_eq!(
+                    reference_at(document, &source, "stored = 2").target,
+                    OccurrenceTarget::Resolved {
+                        symbol: parameter.id
+                    }
+                );
+                let read_start = source.find("local = stored").unwrap() + "local = ".len();
+                let read = document
+                    .occurrences
+                    .iter()
+                    .find(|site| {
+                        site.role == OccurrenceRole::Reference
+                            && site.source.span().start_byte() == u64::try_from(read_start).unwrap()
+                    })
+                    .unwrap();
+                assert_eq!(
+                    read.target,
+                    OccurrenceTarget::Resolved {
+                        symbol: variable.id
+                    }
+                );
+                let shadow_start = source.find("stored = stored").unwrap();
+                let shadow_end = shadow_start + "stored = stored".len();
+                let shadow_reads = document
+                    .occurrences
+                    .iter()
+                    .filter(|site| {
+                        site.role == OccurrenceRole::Reference
+                            && site.source.span().start_byte()
+                                >= u64::try_from(shadow_start).unwrap()
+                            && site.source.span().end_byte() <= u64::try_from(shadow_end).unwrap()
+                    })
+                    .collect::<Vec<_>>();
+                assert_eq!(shadow_reads.len(), 2);
+                assert!(shadow_reads.iter().all(|site| site.target == OccurrenceTarget::Resolved { symbol: shadow.id }));
+                let callee_start =
+                    u64::try_from(source.find("Call stored()").unwrap() + "Call ".len()).unwrap();
+                let callee = document
+                    .occurrences
+                    .iter()
+                    .find(|site| {
+                        site.syntax_kind == "vba.invoked_identifier.reference"
+                            && site.source.span().start_byte() == callee_start
+                            && site.source.span().end_byte()
+                                == callee_start + u64::try_from("stored".len()).unwrap()
+                    })
+                    .unwrap();
+                assert_eq!(
+                    callee.target,
+                    OccurrenceTarget::Resolved {
+                        symbol: variable.id
+                    }
+                );
+                assert_eq!(callee.role, OccurrenceRole::Reference);
+                let application = document
+                    .occurrences
+                    .iter()
+                    .find(|site| {
+                        site.syntax_kind == "vba.application.reference"
+                            && site.source.span().start_byte() <= callee.source.span().start_byte()
+                            && site.source.span().end_byte() >= callee.source.span().end_byte()
+                    })
+                    .unwrap();
+                assert!(matches!(
+                    application.target,
+                    OccurrenceTarget::Unresolved { .. }
+                ));
+                assert!(!document.relations.iter().any(|edge| matches!(edge.subject, RelationEndpoint::Occurrence(id) if id == callee.id || id == application.id) && edge.predicate == RelationPredicate::Calls));
+                let update_start = u64::try_from(source.find("Call Update()").unwrap()).unwrap();
+                let update = document
+                    .occurrences
+                    .iter()
+                    .find(|site| {
+                        site.syntax_kind == "vba.application.reference"
+                            && site.source.span().start_byte() == update_start
+                    })
+                    .unwrap();
+                assert!(matches!(update.target, OccurrenceTarget::Resolved { .. }));
+                let proof = document
+                    .provenance
+                    .iter()
+                    .find(|proof| proof.id == update.provenance)
+                    .unwrap();
+                assert_eq!(
+                    proof.rule.as_deref(),
+                    Some("vba-procedure-application-v1.source")
+                );
+                assert!(
+                    proof
+                        .derivation_parents
+                        .contains(&FactRef::Entity(parameter.id))
+                );
+                assert!(
+                    !proof
+                        .derivation_parents
+                        .contains(&FactRef::Entity(variable.id))
+                );
+            }
+        }
+    }
+}
+
+#[test]
 fn vba_parameter_defaults_bind_module_constants_not_body_parameters() {
     use rootlight_ir::EntityVisibility;
     for language in ["vba", "visual-basic-classic"] {
