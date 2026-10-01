@@ -47,7 +47,7 @@ impl ModuleBodyStatement {
 pub enum ModuleLocalKind {
     /// A local Dim variable without an initializer.
     Variable,
-    /// A local Const with an atomic literal initializer.
+    /// A local Const with a literal or single-minus numeric initializer.
     Constant,
 }
 
@@ -94,7 +94,8 @@ impl ModuleLocalDeclaration {
         self.type_range.clone()
     }
 
-    /// Returns the atomic literal initializer for Const, or None for Dim.
+    /// Returns the initializer atom for Const, or None for Dim.
+    /// A numeric unary minus is retained separately from the atom's token span.
     #[must_use]
     pub fn value(&self) -> Option<&ModuleScalarValue> {
         self.value.as_ref()
@@ -300,7 +301,8 @@ impl ModuleCall {
 }
 
 /// Syntax categories admitted as complete atomic scalar values.
-/// `Unsigned` means no authored unary sign, not a proven nonnegative runtime value.
+/// `Unsigned` describes the atom token, not a proven nonnegative runtime value.
+/// An initializer's authored unary minus is retained separately from that token.
 /// Numeric categories may carry an authored [`ModuleIntegerSuffix`] or [`ModuleFloatSuffix`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ModuleScalarValueKind {
@@ -370,12 +372,14 @@ impl ModuleFloatSuffix {
     }
 }
 
-/// One complete atomic value retaining its original source spelling.
+/// One complete source atom with optional initializer-only unary-minus evidence.
+/// The atom's category, suffixes and token range do not evaluate its runtime value.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ModuleScalarValue {
     kind: ModuleScalarValueKind,
     integer_suffix: Option<ModuleIntegerSuffix>,
     float_suffix: Option<ModuleFloatSuffix>,
+    unary_minus: Option<Range<usize>>,
     span: Range<usize>,
 }
 
@@ -400,14 +404,42 @@ impl ModuleScalarValue {
         self.float_suffix
     }
 
-    /// Returns the exact token, including a written numeric suffix or both string quotes.
+    /// Returns the exact atom token, including a numeric suffix or both string quotes.
+    /// An initializer's unary minus and intervening trivia are excluded.
     #[must_use]
     pub fn span(&self) -> Range<usize> {
         self.span.clone()
     }
 
+    /// Returns the exact authored unary minus of a numeric initializer, if present.
+    /// General expression operators are retained by their separate expression inventory.
+    #[must_use]
+    pub fn unary_minus_span(&self) -> Option<Range<usize>> {
+        self.unary_minus.clone()
+    }
+
+    /// Returns the complete initializer from its unary minus or atom through the token end.
+    /// Authored intervening trivia is retained; equals and surrounding trivia are excluded.
+    #[must_use]
+    pub fn initializer_span(&self) -> Range<usize> {
+        self.unary_minus
+            .as_ref()
+            .map_or(self.span.start, |minus| minus.start)..self.span.end
+    }
+
+    /// Returns extra initializer work beyond the preserved legacy atom path.
+    /// An authored unary minus costs one node; all other atoms cost zero extra nodes.
+    /// Exponent signs are part of a FLOAT token and do not add operator work.
+    #[must_use]
+    pub const fn initializer_work_nodes(&self) -> usize {
+        if self.unary_minus.is_some() { 1 } else { 0 }
+    }
+
     pub(super) fn rebase(&mut self, source_range: &Range<usize>) {
         self.span = absolute(source_range, self.span.clone());
+        if let Some(minus) = &mut self.unary_minus {
+            *minus = absolute(source_range, minus.clone());
+        }
     }
 }
 
@@ -490,6 +522,13 @@ fn scalar_statement<E>(
         if let Some(statement) = local_declaration(text, range.clone(), cursor, kind, check)
             .map_err(ModuleError::Cancelled)?
         {
+            if let ModuleBodyStatement::Declaration(declaration) = &statement
+                && declaration
+                    .value()
+                    .is_some_and(|value| value.initializer_work_nodes() > limits.expression_nodes)
+            {
+                return Err(ModuleError::ExpressionLimit);
+            }
             return Ok(Some(statement));
         }
         return if kind == ModuleLocalKind::Variable {
@@ -612,6 +651,7 @@ fn scalar_assignment<E>(
                 kind: value.kind,
                 integer_suffix: value.integer_suffix,
                 float_suffix: value.float_suffix,
+                unary_minus: value.unary_minus.map(|minus| absolute(&range, minus)),
                 span: absolute(&range, value.span),
             },
             statement: range,
@@ -695,7 +735,7 @@ fn atomic_call<E>(
     }
     for value in &mut argument_values {
         check().map_err(ModuleError::Cancelled)?;
-        value.span = absolute(&range, value.span.clone());
+        value.rebase(&range);
     }
     Ok(Some(ModuleBodyStatement::Call(ModuleCall {
         callee: absolute(&range, callee),
@@ -866,15 +906,12 @@ fn local_declaration<E>(
         if !equals(text, &mut cursor, check)? {
             return Ok(None);
         }
-        let Some(value) = atomic_value(text, &mut cursor, false, check)? else {
+        let Some(mut value) = literal_value(text, &mut cursor, check)? else {
             return Ok(None);
         };
-        Some(ModuleScalarValue {
-            kind: value.kind,
-            integer_suffix: value.integer_suffix,
-            float_suffix: value.float_suffix,
-            span: absolute(&range, value.span),
-        })
+        check()?;
+        value.rebase(&range);
+        Some(value)
     } else {
         None
     };
@@ -899,7 +936,7 @@ pub(super) fn literal_value<E>(
     cursor: &mut usize,
     check: &mut impl FnMut() -> Result<(), E>,
 ) -> Result<Option<ModuleScalarValue>, E> {
-    atomic_value(text, cursor, false, check)
+    initializer_value(text, cursor, InitializerContext::Literal, check)
 }
 
 pub(super) fn parameter_default_value<E>(
@@ -907,9 +944,58 @@ pub(super) fn parameter_default_value<E>(
     cursor: &mut usize,
     check: &mut impl FnMut() -> Result<(), E>,
 ) -> Result<Option<ModuleScalarValue>, E> {
-    // Parameter defaults may name a constant; local Const initializers retain
-    // the narrower literal-only route independently of this syntax inventory.
-    atomic_value(text, cursor, true, check)
+    initializer_value(text, cursor, InitializerContext::ParameterDefault, check)
+}
+
+#[derive(Clone, Copy)]
+enum InitializerContext {
+    Literal,
+    ParameterDefault,
+}
+
+fn initializer_value<E>(
+    text: &[u8],
+    cursor: &mut usize,
+    context: InitializerContext,
+    check: &mut impl FnMut() -> Result<(), E>,
+) -> Result<Option<ModuleScalarValue>, E> {
+    // Only this declaration/default route retains one numeric unary minus.
+    // Failed atom scans and cancellation must not advance the caller's cursor;
+    // the enclosing grammar separately proves complete initializer boundaries.
+    check()?;
+    let start = *cursor;
+    let mut end = start;
+    let unary_minus = if text.get(end) == Some(&b'-') {
+        end += 1;
+        end += match context {
+            InitializerContext::Literal => {
+                logical_whitespace_len(text.get(end..).unwrap_or_default(), check)?
+            }
+            InitializerContext::ParameterDefault => {
+                super::parameter::parameter_trivia_len(text.get(end..).unwrap_or_default(), check)?
+            }
+        };
+        Some(start..start + 1)
+    } else {
+        None
+    };
+    let value = if unary_minus.is_some() {
+        numeric_value(text, &mut end, check)?
+    } else {
+        atomic_value(
+            text,
+            &mut end,
+            matches!(context, InitializerContext::ParameterDefault),
+            check,
+        )?
+    };
+    let Some(mut value) = value else {
+        return Ok(None);
+    };
+    check()?;
+    value.unary_minus = unary_minus;
+    *cursor = end;
+    Ok(Some(value))
 }
 
 pub(super) fn atomic_value<E>(
@@ -962,6 +1048,7 @@ pub(super) fn atomic_value<E>(
         kind,
         integer_suffix: None,
         float_suffix: None,
+        unary_minus: None,
         span: start..*cursor,
     }))
 }
@@ -1090,6 +1177,7 @@ pub(super) fn numeric_value<E>(
         },
         integer_suffix,
         float_suffix,
+        unary_minus: None,
         span: start..end,
     }))
 }
@@ -1245,6 +1333,276 @@ mod tests {
 
     fn read(text: &[u8]) -> Option<ModuleBodyStatement> {
         statement(text, 0..text.len(), text.len(), &mut || Ok::<(), ()>(())).unwrap()
+    }
+
+    #[test]
+    fn unary_minus_initializers_keep_unsigned_tokens_suffixes_and_rebased_ranges() {
+        for (base, kind) in [
+            ("007", ModuleScalarValueKind::UnsignedDecimal),
+            ("&H1E2", ModuleScalarValueKind::UnsignedHexadecimal),
+            ("&hF", ModuleScalarValueKind::UnsignedHexadecimal),
+            ("&O7", ModuleScalarValueKind::UnsignedOctal),
+            ("&o1", ModuleScalarValueKind::UnsignedOctal),
+            ("&77", ModuleScalarValueKind::UnsignedOctal),
+            ("1.5", ModuleScalarValueKind::UnsignedFloat),
+            ("5.", ModuleScalarValueKind::UnsignedFloat),
+            (".5", ModuleScalarValueKind::UnsignedFloat),
+            ("1E-2", ModuleScalarValueKind::UnsignedFloat),
+            ("1e+2", ModuleScalarValueKind::UnsignedFloat),
+            ("1D+2", ModuleScalarValueKind::UnsignedFloat),
+            ("1d-2", ModuleScalarValueKind::UnsignedFloat),
+        ] {
+            let suffixes = if kind == ModuleScalarValueKind::UnsignedFloat {
+                ["", "!", "#", "@"]
+            } else {
+                ["", "%", "&", "^"]
+            };
+            for suffix in suffixes {
+                let token = format!("{base}{suffix}");
+                let integer_suffix = match suffix {
+                    "%" => Some(ModuleIntegerSuffix::Percent),
+                    "&" => Some(ModuleIntegerSuffix::Ampersand),
+                    "^" => Some(ModuleIntegerSuffix::Caret),
+                    _ => None,
+                };
+                let float_suffix = match suffix {
+                    "!" => Some(ModuleFloatSuffix::Exclamation),
+                    "#" => Some(ModuleFloatSuffix::Hash),
+                    "@" => Some(ModuleFloatSuffix::At),
+                    _ => None,
+                };
+                for trivia in ["", " ", "\t", " _\n ", " _\r\n "] {
+                    let prefix = "Const [Limit] As Double=";
+                    let text = format!("{prefix}-{trivia}{token}");
+                    let source = format!("prefix\n{text}\ntail");
+                    let range = 7..7 + text.len();
+                    let Some(ModuleBodyStatement::Declaration(declaration)) =
+                        statement_with_expression_limits(
+                            source.as_bytes(),
+                            range.clone(),
+                            0,
+                            1,
+                            &mut || Ok::<(), ()>(()),
+                        )
+                        .unwrap()
+                    else {
+                        panic!("complete numeric initializer expected: {text}")
+                    };
+                    let value = declaration.value().unwrap();
+                    let minus_start = 7 + prefix.len();
+                    let token_start = minus_start + 1 + trivia.len();
+                    assert_eq!(declaration.statement(), range.clone());
+                    assert_eq!(&source[declaration.name()], "[Limit]");
+                    assert_eq!(&source[declaration.type_range()], "Double");
+                    assert_eq!(value.span(), token_start..range.end);
+                    assert_eq!(&source[value.span()], token);
+                    assert_eq!(value.kind(), kind);
+                    assert_eq!(value.integer_suffix(), integer_suffix);
+                    assert_eq!(value.float_suffix(), float_suffix);
+                    assert_eq!(value.unary_minus_span(), Some(minus_start..minus_start + 1));
+                    assert_eq!(value.initializer_span(), minus_start..range.end);
+                    assert_eq!(
+                        &source[value.initializer_span()],
+                        format!("-{trivia}{token}")
+                    );
+                    assert_eq!(value.initializer_work_nodes(), 1);
+                    assert_eq!(declaration.declarator().end, range.end);
+                    assert_eq!(
+                        statement_with_expression_limits(
+                            source.as_bytes(),
+                            range,
+                            0,
+                            0,
+                            &mut || Ok::<(), ()>(())
+                        ),
+                        Err(ModuleError::ExpressionLimit)
+                    );
+                }
+                for signed in [false, true] {
+                    let source = if signed {
+                        format!("-{token}")
+                    } else {
+                        token.clone()
+                    };
+                    let mut cursor = 0;
+                    let value =
+                        parameter_default_value(source.as_bytes(), &mut cursor, &mut || {
+                            Ok::<(), ()>(())
+                        })
+                        .unwrap()
+                        .unwrap();
+                    assert_eq!(cursor, source.len());
+                    assert_eq!(&source[value.span()], token);
+                    assert_eq!(value.kind(), kind);
+                    assert_eq!(value.integer_suffix(), integer_suffix);
+                    assert_eq!(value.float_suffix(), float_suffix);
+                    assert_eq!(value.initializer_span(), 0..source.len());
+                    assert_eq!(value.unary_minus_span(), signed.then_some(0..1));
+                    assert_eq!(value.initializer_work_nodes(), usize::from(signed));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn unary_minus_initializer_scope_preserves_legacy_atoms_and_expression_operators() {
+        for source in [
+            "007", "&H1%", "&77^", "1E-2#", "\"text\"", "True", "[True]", "Seed",
+        ] {
+            let mut cursor = 0;
+            let value =
+                parameter_default_value(source.as_bytes(), &mut cursor, &mut || Ok::<(), ()>(()))
+                    .unwrap()
+                    .unwrap();
+            assert_eq!(value.span(), 0..source.len());
+            assert_eq!(value.initializer_span(), value.span());
+            assert_eq!(value.unary_minus_span(), None);
+            assert_eq!(value.initializer_work_nodes(), 0);
+        }
+        for source in [
+            "-",
+            "--1",
+            "-+1",
+            "+1",
+            "-True",
+            "-\"text\"",
+            "-Seed",
+            "-[True]",
+            "-(1)",
+            "-Fetch(1)",
+            "-1E",
+            "-&H",
+            "-\n1",
+        ] {
+            for context in [
+                InitializerContext::Literal,
+                InitializerContext::ParameterDefault,
+            ] {
+                let mut cursor = 0;
+                assert_eq!(
+                    initializer_value(
+                        source.as_bytes(),
+                        &mut cursor,
+                        context,
+                        &mut || Ok::<(), ()>(())
+                    ),
+                    Ok(None),
+                    "{source}"
+                );
+                assert_eq!(cursor, 0);
+            }
+        }
+        for tail in ["-1%%", "-1 extra", "-1+2", "-1.5#@", "-1E2^2", "-1,2"] {
+            let source = format!("Const Limit As Double={tail}");
+            assert!(read(source.as_bytes()).is_none(), "{source}");
+        }
+        let mut cursor = 0;
+        assert_eq!(
+            atomic_value(b"-1", &mut cursor, true, &mut || Ok::<(), ()>(())),
+            Ok(None)
+        );
+        assert_eq!(cursor, 0);
+        for source in ["sink=-1E-2#", "Call Target(-&H1%)"] {
+            let statement = read(source.as_bytes()).unwrap();
+            let (values, work) = match &statement {
+                ModuleBodyStatement::ExpressionAssignment(assignment) => (
+                    assignment.inventory().values(),
+                    assignment.inventory().work_nodes(),
+                ),
+                ModuleBodyStatement::ExpressionCall(call) => {
+                    (call.inventory().values(), call.inventory().work_nodes())
+                }
+                ModuleBodyStatement::Declaration(_)
+                | ModuleBodyStatement::Variables(_)
+                | ModuleBodyStatement::Assignment(_)
+                | ModuleBodyStatement::ApplicationAssignment(_)
+                | ModuleBodyStatement::Call(_) => {
+                    panic!("unary operator must stay in a structured expression")
+                }
+            };
+            assert_eq!(work, if source.starts_with("Call") { 4 } else { 2 });
+            assert_eq!(values.len(), 1);
+            assert_eq!(values[0].unary_minus_span(), None);
+            assert_eq!(values[0].initializer_span(), values[0].span());
+            assert_eq!(values[0].initializer_work_nodes(), 0);
+        }
+    }
+
+    #[test]
+    fn unary_minus_initializer_scans_are_transactional_at_every_callback() {
+        for (initializer, context) in [
+            (
+                format!("-{}%", "9".repeat(1024)),
+                InitializerContext::Literal,
+            ),
+            (
+                format!("- _\r\n &H{}&", "F".repeat(1024)),
+                InitializerContext::Literal,
+            ),
+            (
+                format!("-.{}D-{}#", "5".repeat(1024), "2".repeat(1024)),
+                InitializerContext::ParameterDefault,
+            ),
+            (
+                format!("-{}1", " \x0cRem\x0c _\n ".repeat(128)),
+                InitializerContext::ParameterDefault,
+            ),
+            (
+                format!("\"{}\"", "x".repeat(1024)),
+                InitializerContext::Literal,
+            ),
+            ("[Seed]".to_owned(), InitializerContext::ParameterDefault),
+        ] {
+            let source = format!("head{initializer}");
+            let mut cursor = 4;
+            let mut total = 0;
+            let value = initializer_value(source.as_bytes(), &mut cursor, context, &mut || {
+                total += 1;
+                Ok::<(), ()>(())
+            })
+            .unwrap()
+            .unwrap();
+            assert_eq!(cursor, source.len());
+            assert_eq!(value.initializer_span(), 4..source.len());
+            assert!(total > 1);
+            for stop in 1..=total {
+                let mut cursor = 4;
+                let mut calls = 0;
+                assert_eq!(
+                    initializer_value(source.as_bytes(), &mut cursor, context, &mut || {
+                        calls += 1;
+                        if calls == stop { Err("stop") } else { Ok(()) }
+                    }),
+                    Err("stop")
+                );
+                assert_eq!(calls, stop);
+                assert_eq!(cursor, 4);
+            }
+        }
+        let source = format!("head-{}E+", "1".repeat(1024));
+        let mut cursor = 4;
+        let mut total = 0;
+        assert_eq!(
+            literal_value(source.as_bytes(), &mut cursor, &mut || {
+                total += 1;
+                Ok::<(), ()>(())
+            }),
+            Ok(None)
+        );
+        assert_eq!(cursor, 4);
+        for stop in 1..=total {
+            let mut cursor = 4;
+            let mut calls = 0;
+            assert_eq!(
+                literal_value(source.as_bytes(), &mut cursor, &mut || {
+                    calls += 1;
+                    if calls == stop { Err("stop") } else { Ok(()) }
+                }),
+                Err("stop")
+            );
+            assert_eq!(calls, stop);
+            assert_eq!(cursor, 4);
+        }
     }
 
     #[test]
@@ -2058,10 +2416,10 @@ mod tests {
                 }
             }
         }
-        for text in ["Const Limit As Long=-&H1", "Const Limit As Long=+&77"] {
+        for text in ["Const Limit As Long=--&H1", "Const Limit As Long=+&77"] {
             assert!(
                 read(text.as_bytes()).is_none(),
-                "unsigned literal-only Const: {text}"
+                "unsupported literal initializer: {text}"
             );
         }
     }
@@ -3204,6 +3562,7 @@ mod tests {
             kind: ModuleScalarValueKind::UnsignedDecimal,
             integer_suffix: None,
             float_suffix: None,
+            unary_minus: None,
             span: 0..1,
         });
         let snapshot = values.clone();
@@ -3455,7 +3814,7 @@ mod tests {
             "Const Limit As Long",
             "Const Limit As Long = other",
             "Const Limit As Long = 1, Other = 2",
-            "Const Limit As Long = -1",
+            "Const Limit As Long = --1",
             "count = -1.5e",
             "count = +1.0d",
             "count = 1.0e+",
@@ -3538,14 +3897,14 @@ mod tests {
     #[test]
     fn expression_support_does_not_widen_const_initializers_or_parameter_defaults() {
         for source in [
-            "Const Limit As Long=-1",
+            "Const Limit As Long=--1",
             "Const Limit As Long=1+2",
             "Const Limit As Long=(1)",
             "Const Limit As Long=Read(1)",
         ] {
             assert!(read(source.as_bytes()).is_none(), "{source}");
         }
-        for source in [b"-1".as_slice(), b"1+2", b"(1)", b"Read(1)"] {
+        for source in [b"--1".as_slice(), b"1+2", b"(1)", b"Read(1)"] {
             let mut cursor = 0;
             let atom =
                 parameter_default_value(source, &mut cursor, &mut || Ok::<(), ()>(())).unwrap();

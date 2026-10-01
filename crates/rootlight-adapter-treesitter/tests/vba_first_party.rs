@@ -298,22 +298,81 @@ fn float_literals_preserve_exact_sdk_identity_without_numeric_or_type_facts() {
 }
 
 fn assert_numeric_sdk_identity(literal: &str) {
-    let optional = format!("Optional ByVal second As Long = {literal}");
-    let module_constant = format!("ModuleSeed As Long = {literal}");
+    assert_numeric_sdk_initializer_identity(literal, literal);
+}
+
+fn assert_numeric_sdk_initializer_identity(literal: &str, initializer: &str) {
+    let optional = format!("Optional ByVal second As Long = {initializer}");
+    let module_constant = format!("ModuleSeed As Long = {initializer}");
     let module_array = format!("slots(-{literal} To +{literal}, {literal}) As Long");
     let local_array = format!("grid(-{literal} To +{literal}, {literal}) As Long");
-    let local_constant = format!("LocalSeed As Long = {literal}");
+    let local_constant = format!("LocalSeed As Long = {initializer}");
     let source = format!(
         "Attribute VB_Name = \"Suffix\"\n' retained header trivia\nConst {module_constant}\nPrivate {module_array}\nSub Target(ByVal first As Long, {optional})\nEnd Sub\nFunction Inner(ByVal value As Long) As Long\nInner = {literal}\nEnd Function\nSub Run()\nDim local As Long, {local_array}\nConst {local_constant}\nlocal = {literal}\nLet local = {literal}\nlocal = LocalSeed\nlocal = grid({literal}, {literal})\nCall Target({literal})\nCall Target(local + {literal}, Inner({literal}) * -{literal})\nEnd Sub\n"
     );
     for newline in ["\n", "\r\n"] {
         let source = source.replace('\n', newline);
+        let module_constant = module_constant.replace('\n', newline);
+        let local_constant = local_constant.replace('\n', newline);
+        let optional = optional.replace('\n', newline);
         let bytes = source.as_bytes();
         for language in ["vba", "visual-basic-classic"] {
             let fixture = Fixture::new(bytes);
             let provider = provider();
             let budget = limits(4096);
             let request = fixture.request(&budget, language, Vec::new());
+            let inventory = rootlight_vba::module_inventory(
+                bytes,
+                rootlight_vba::ModuleLimits::new(bytes.len(), 4096, 4096),
+                &mut || Ok::<(), ()>(()),
+            )
+            .unwrap();
+            let rootlight_vba::ModuleBodyStatement::Declaration(local_constant_record) =
+                &inventory.procedures()[2].statements()[1]
+            else {
+                panic!("local constant remains an atomic declaration");
+            };
+            for (clause, value) in [
+                (module_constant.as_str(), inventory.constants()[0].value()),
+                (
+                    optional.as_str(),
+                    inventory.procedures()[0].parameters()[1]
+                        .default_value()
+                        .unwrap(),
+                ),
+                (
+                    local_constant.as_str(),
+                    local_constant_record.value().unwrap(),
+                ),
+            ] {
+                let clause_start = source.find(clause).unwrap();
+                let initializer_start = clause_start + clause.find(" = ").unwrap() + 3;
+                let atom_start =
+                    initializer_start + initializer.replace('\n', newline).find(literal).unwrap();
+                assert!(matches!(
+                    value.kind(),
+                    rootlight_vba::ModuleScalarValueKind::UnsignedDecimal
+                        | rootlight_vba::ModuleScalarValueKind::UnsignedHexadecimal
+                        | rootlight_vba::ModuleScalarValueKind::UnsignedOctal
+                        | rootlight_vba::ModuleScalarValueKind::UnsignedFloat
+                ));
+                assert_eq!(&bytes[value.span()], literal.as_bytes());
+                assert_eq!(value.span(), atom_start..atom_start + literal.len());
+                assert_eq!(
+                    value.initializer_span(),
+                    initializer_start..atom_start + literal.len()
+                );
+                assert_eq!(
+                    value.unary_minus_span(),
+                    initializer
+                        .starts_with('-')
+                        .then_some(initializer_start..initializer_start + 1)
+                );
+                assert_eq!(
+                    value.initializer_work_nodes(),
+                    usize::from(initializer.starts_with('-'))
+                );
+            }
             let required = provider
                 .required_syntax_fact_count(&request, &deadline())
                 .unwrap();
@@ -322,6 +381,19 @@ fn assert_numeric_sdk_identity(literal: &str) {
             assert_eq!(full.report().coverage().status(), CoverageStatus::Complete);
             assert_eq!(full.report().coverage().covered_source_bytes(), bytes.len());
             assert!(full.diagnostics().is_empty());
+            for value in [
+                inventory.constants()[0].value(),
+                inventory.procedures()[0].parameters()[1]
+                    .default_value()
+                    .unwrap(),
+                local_constant_record.value().unwrap(),
+            ] {
+                let initializer = value.initializer_span();
+                assert!(!full.facts().iter().any(|fact| {
+                    fact.span().start_byte() >= u64::try_from(initializer.start).unwrap()
+                        && fact.span().end_byte() <= u64::try_from(initializer.end).unwrap()
+                }));
+            }
             assert_eq!(
                 fixture.source.content_hash(),
                 rootlight_ids::content_hash(bytes)
@@ -416,6 +488,189 @@ fn assert_numeric_sdk_identity(literal: &str) {
             assert_eq!(provider.stats().pooled_parsers, 0);
             assert_eq!(provider.stats().checked_out_parsers, 0);
             assert_eq!(provider.stats().cache.entries, 0);
+        }
+    }
+}
+
+#[test]
+fn signed_numeric_initializers_preserve_unsigned_atoms_and_exact_sdk_clauses() {
+    for literal in [
+        "007", "7%", "&Hf&", "&o7^", "&77", "1.5", ".5#", "0.#", "1e-3", "1D+3", "7!", "1D+3@",
+    ] {
+        for trivia in ["", " _\n "] {
+            assert_numeric_sdk_initializer_identity(literal, &format!("-{trivia}{literal}"));
+        }
+    }
+}
+
+#[test]
+fn signed_numeric_initializers_charge_sign_work_without_more_required_facts() {
+    let unsigned = "Sub Run(Optional a=7, Optional b=7, Optional c=7, Optional d=7, Optional e=7, Optional f=7, Optional g=7, Optional h=7)\nEnd Sub\n";
+    let signed = unsigned.replace("=7", "=-7");
+    for language in ["vba", "visual-basic-classic"] {
+        let fixture = Fixture::new(signed.as_bytes());
+        let provider = provider();
+        let base = limits(4096);
+        let request = fixture.request(&base, language, Vec::new());
+        let required = provider
+            .required_syntax_fact_count(&request, &deadline())
+            .unwrap();
+        assert_eq!(required, 23);
+        let full = parse(&provider, &request);
+        assert_eq!(full.report().resources().syntax_nodes(), 28);
+        assert_eq!(full.facts().len(), 24);
+        let unsigned_fixture = Fixture::new(unsigned.as_bytes());
+        let unsigned_output = parse(
+            &provider,
+            &unsigned_fixture.request(&base, language, Vec::new()),
+        );
+        assert_eq!(unsigned_output.report().resources().syntax_nodes(), 20);
+        assert_eq!(unsigned_output.facts().len(), full.facts().len());
+        assert_eq!(
+            provider
+                .required_syntax_fact_count(
+                    &unsigned_fixture.request(&base, language, Vec::new()),
+                    &deadline(),
+                )
+                .unwrap(),
+            required
+        );
+        for capacity in [required, full.facts().len()] {
+            let budget = limits(capacity);
+            let output = parse(&provider, &fixture.request(&budget, language, Vec::new()));
+            assert_eq!(output.facts().len(), capacity);
+            assert_eq!(
+                output
+                    .facts()
+                    .iter()
+                    .filter(|fact| fact.syntax_kind().as_str() == "vba.identifier.definition")
+                    .count(),
+                9
+            );
+        }
+        let short = limits(required - 1);
+        assert_eq!(
+            execute_parse(
+                &provider,
+                &fixture.request(&short, language, Vec::new()),
+                MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
+                &deadline(),
+            )
+            .unwrap_err(),
+            AdapterError::Sink(SinkError::StreamLimit {
+                resource: ResourceKind::RequiredSyntaxFacts,
+                observed: required,
+                limit: required - 1,
+            })
+        );
+        for maximum in [28, 27] {
+            let budget = AnalysisLimits::new(
+                base.max_source_bytes(),
+                maximum,
+                base.max_syntax_depth(),
+                base.max_embedded_ranges(),
+                base.max_reported_memory_bytes(),
+                base.syntax_stream().clone(),
+                base.ir_stream().clone(),
+                base.ir().clone(),
+            )
+            .unwrap();
+            let result = execute_parse(
+                &provider,
+                &fixture.request(&budget, language, Vec::new()),
+                MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
+                &deadline(),
+            );
+            if maximum == 28 {
+                assert_eq!(result.unwrap().facts(), full.facts());
+            } else {
+                assert_eq!(
+                    result.unwrap_err(),
+                    AdapterError::RejectedRequest(
+                        rootlight_adapter_sdk::RequestError::ProviderLimit {
+                            resource: ResourceKind::SyntaxNodes,
+                            observed: 28,
+                            limit: 27,
+                        }
+                    )
+                );
+            }
+        }
+        assert!(matches!(
+            AnalysisLimits::new(
+                base.max_source_bytes(),
+                0,
+                base.max_syntax_depth(),
+                base.max_embedded_ranges(),
+                base.max_reported_memory_bytes(),
+                base.syntax_stream().clone(),
+                base.ir_stream().clone(),
+                base.ir().clone(),
+            ),
+            Err(rootlight_adapter_sdk::LimitError::Zero {
+                field: "analysis.max_syntax_nodes",
+            })
+        ));
+        let cancelled = deadline();
+        cancelled.cancel(CancellationReason::ClientRequest);
+        assert!(matches!(
+            execute_parse(
+                &provider,
+                &request,
+                MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
+                &cancelled,
+            ),
+            Err(AdapterError::Cancelled {
+                reason: CancellationReason::ClientRequest,
+            })
+        ));
+        assert_eq!(parse(&provider, &request).facts(), full.facts());
+        assert_eq!(provider.stats().pooled_parsers, 0);
+        assert_eq!(provider.stats().checked_out_parsers, 0);
+        assert_eq!(provider.stats().cache.entries, 0);
+    }
+}
+
+#[test]
+fn signed_initializer_unsupported_tails_preserve_whole_native_fallback() {
+    for initializer in [
+        "+7",
+        "--7",
+        "-+7",
+        "-(7)",
+        "-Seed",
+        "-True",
+        "-\"text\"",
+        "-7 + 1",
+        "-1D+",
+        "-1.5%",
+        "-&H1#",
+        "-7 trailing",
+    ] {
+        for statement in [
+            format!("Const Bad As Long = {initializer}\n"),
+            format!("Sub Other(Optional value As Long = {initializer})\nEnd Sub\n"),
+            format!("Sub Other()\nConst Bad As Long = {initializer}\nEnd Sub\n"),
+        ] {
+            let source = format!("Sub First()\nEnd Sub\n{statement}");
+            for newline in ["\n", "\r\n"] {
+                let source = source.replace('\n', newline);
+                for language in ["vba", "visual-basic-classic"] {
+                    let fixture = Fixture::new(source.as_bytes());
+                    let provider = provider();
+                    let budget = limits(4096);
+                    let output = parse(&provider, &fixture.request(&budget, language, Vec::new()));
+                    assert!(
+                        provider.stats().pooled_parsers > 0,
+                        "{language}: {statement}"
+                    );
+                    assert_eq!(provider.stats().checked_out_parsers, 0);
+                    assert!(output.facts().iter().any(|fact| {
+                        fact.syntax_kind().as_str() == "vba.identifier.definition"
+                            && bytes_at(source.as_bytes(), fact.span()) == b"First"
+                    }));
+                }
+            }
         }
     }
 }
@@ -622,7 +877,7 @@ fn float_literal_late_invalid_tails_preserve_whole_native_fallback() {
         "Call Target(1.5, 2D+)",
         "Dim grid(-1.5 To +2D+)",
         "Const Seed As Double = 1.5@#",
-        "Const Seed As Double = -1.5",
+        "Const Seed As Double = -1.5 + 2",
         "Sub Nested(Optional value = 1D+)\nEnd Sub",
     ] {
         let source = format!(

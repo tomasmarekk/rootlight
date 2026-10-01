@@ -145,13 +145,19 @@ fn vba_float_atoms_retain_exact_declarations_and_complete_formal_source_proofs()
 }
 
 fn assert_radix_atom_source_proofs(literal: &str, newline: &str) {
-    let optional = format!("Optional second As Long = {literal}");
+    assert_numeric_initializer_source_proofs(literal, literal, newline);
+}
+
+fn assert_numeric_initializer_source_proofs(literal: &str, initializer: &str, newline: &str) {
+    let optional = format!("Optional second As Long = {initializer}");
     let atomic = format!("Call Target({literal})");
     let nested = format!("Inner({literal})");
     let expression = format!("Call Target(local + {literal}, {nested} * -{literal})");
     let source = format!(
-            "Attribute VB_Name = \"Radix\"\nConst ModuleSeed As Long = {literal}\nSub Target(ByVal first As Long, {optional})\nEnd Sub\nFunction Inner(ByVal value As Long) As Long\nInner = {literal}\nEnd Function\nSub Run()\nDim local As Long\nConst LocalSeed As Long = {literal}\nlocal = {literal}\nlocal = LocalSeed\nlocal = ModuleSeed\n{atomic}\n{expression}\nEnd Sub\n"
+            "Attribute VB_Name = \"Radix\"\nConst ModuleSeed As Long = {initializer}\nSub Target(ByVal first As Long, {optional})\nEnd Sub\nFunction Inner(ByVal value As Long) As Long\nInner = {literal}\nEnd Function\nSub Run()\nDim local As Long\nConst LocalSeed As Long = {initializer}\nlocal = {literal}\nlocal = LocalSeed\nlocal = ModuleSeed\n{atomic}\n{expression}\nEnd Sub\n"
         ).replace('\n', newline);
+    let optional = optional.replace('\n', newline);
+    let initializer_source = initializer.replace('\n', newline);
     for language in ["vba", "visual-basic-classic"] {
         let provider = Arc::new(provider());
         let case = LanguageCase {
@@ -200,12 +206,12 @@ fn assert_radix_atom_source_proofs(literal: &str, newline: &str) {
             .unwrap();
         for (clause, name, owner) in [
             (
-                format!("ModuleSeed As Long = {literal}"),
+                format!("ModuleSeed As Long = {initializer}").replace('\n', newline),
                 "ModuleSeed",
                 module.id,
             ),
             (
-                format!("LocalSeed As Long = {literal}"),
+                format!("LocalSeed As Long = {initializer}").replace('\n', newline),
                 "LocalSeed",
                 run.id,
             ),
@@ -221,6 +227,9 @@ fn assert_radix_atom_source_proofs(literal: &str, newline: &str) {
                 })
                 .unwrap();
             let context = constant.evidence.source.as_ref().unwrap();
+            assert_eq!(context.repository(), document.repository);
+            assert_eq!(context.generation(), document.generation);
+            assert_eq!(context.span().file(), document.files[0].id);
             assert_eq!(context.span().start_byte(), u64::try_from(start).unwrap());
             assert_eq!(
                 context.span().end_byte(),
@@ -248,6 +257,8 @@ fn assert_radix_atom_source_proofs(literal: &str, newline: &str) {
                 u64::try_from(start + name.len()).unwrap()
             );
             assert_eq!(definition.evidence.source.as_ref(), Some(context));
+            assert_eq!(definition.enclosing, Some(owner));
+            assert_eq!(definition.provenance, parser);
             assert_eq!(
                 document
                     .relations
@@ -300,6 +311,13 @@ fn assert_radix_atom_source_proofs(literal: &str, newline: &str) {
                     ),
                 "no numeric identifier occurrence: {language}, {literal}"
             );
+        }
+        for (start, _) in source.match_indices(initializer_source.as_str()) {
+            let end = start + initializer_source.len();
+            assert!(!document.occurrences.iter().any(|site| {
+                site.source.span().start_byte() >= u64::try_from(start).unwrap()
+                    && site.source.span().end_byte() <= u64::try_from(end).unwrap()
+            }));
         }
         for site in &document.occurrences {
             assert_eq!(site.source.repository(), document.repository);
@@ -365,6 +383,232 @@ fn assert_radix_atom_source_proofs(literal: &str, newline: &str) {
         assert_eq!(provider.stats().pooled_parsers, 0);
         assert_eq!(provider.stats().checked_out_parsers, 0);
         assert_eq!(provider.stats().cache.entries, 0);
+    }
+}
+
+#[test]
+fn vba_signed_numeric_initializers_keep_source_owned_formals_and_calls() {
+    for literal in [
+        "007", "7%", "&Hf&", "&o7^", "&77", "1.5", ".5#", "0.#", "1e-3", "1D+3", "7!", "1D+3@",
+    ] {
+        for trivia in ["", " _\n "] {
+            let initializer = format!("-{trivia}{literal}");
+            for newline in ["\n", "\r\n"] {
+                assert_numeric_initializer_source_proofs(literal, &initializer, newline);
+            }
+        }
+    }
+}
+
+#[test]
+fn vba_signed_defaults_preserve_written_arity_and_local_shadow_boundaries() {
+    let clauses = ["ByVal required As Long", "Optional extra As Long = -1D+3@"];
+    for shadow in [false, true] {
+        let source = format!(
+            "Const Seed As Long = -7\nSub Target({}, {})\nEnd Sub\nSub Run()\n{}Call Target()\nCall Target(1)\nCall Target(1, 2)\nCall Target(1, 2, 3)\nEnd Sub\n",
+            clauses[0],
+            clauses[1],
+            if shadow { "Dim Target As Long\n" } else { "" },
+        );
+        for newline in ["\n", "\r\n"] {
+            let source = source.replace('\n', newline);
+            for language in ["vba", "visual-basic-classic"] {
+                let output = radix_own_proof_output(&source, language);
+                let document = output.document();
+                assert_radix_ir_source_identity(document, &source, language);
+                let parser = document.files[0].provenance;
+                let run = document
+                    .entities
+                    .iter()
+                    .find(|entity| entity.canonical_name == "Run")
+                    .unwrap();
+                let target = document
+                    .entities
+                    .iter()
+                    .find(|entity| {
+                        entity.canonical_name == "Target" && entity.kind == EntityKind::Function
+                    })
+                    .unwrap();
+                for (clause, name) in [(clauses[0], "required"), (clauses[1], "extra")] {
+                    let start = source.find(clause).unwrap();
+                    let formal = document
+                        .entities
+                        .iter()
+                        .find(|entity| {
+                            entity.kind == EntityKind::Parameter
+                                && entity.canonical_name == name
+                                && entity.container == Some(ContainerRef::Entity(target.id))
+                        })
+                        .unwrap();
+                    assert_eq!(formal.provenance, parser);
+                    let reference = formal.evidence.source.as_ref().unwrap();
+                    assert_eq!(reference.repository(), document.repository);
+                    assert_eq!(reference.generation(), document.generation);
+                    assert_eq!(reference.span().file(), document.files[0].id);
+                    assert_eq!(reference.content_hash(), content_hash(source.as_bytes()));
+                    assert_eq!(reference.span().start_byte(), u64::try_from(start).unwrap());
+                    assert_eq!(
+                        reference.span().end_byte(),
+                        u64::try_from(start + clause.len()).unwrap()
+                    );
+                    let definitions = document
+                        .occurrences
+                        .iter()
+                        .filter(|site| {
+                            site.role == OccurrenceRole::Definition
+                                && site.target == OccurrenceTarget::Resolved { symbol: formal.id }
+                        })
+                        .collect::<Vec<_>>();
+                    assert_eq!(definitions.len(), 1);
+                    assert_eq!(definitions[0].enclosing, Some(target.id));
+                    assert_eq!(definitions[0].provenance, parser);
+                    assert_eq!(definitions[0].evidence.source.as_ref(), Some(reference));
+                    let name_start = start + clause.find(name).unwrap();
+                    assert_eq!(
+                        definitions[0].source.span().start_byte(),
+                        u64::try_from(name_start).unwrap()
+                    );
+                    assert_eq!(
+                        definitions[0].source.span().end_byte(),
+                        u64::try_from(name_start + name.len()).unwrap()
+                    );
+                    assert_eq!(
+                        document
+                            .relations
+                            .iter()
+                            .filter(|edge| {
+                                edge.predicate == RelationPredicate::Contains
+                                    && edge.subject == RelationEndpoint::Entity(target.id)
+                                    && edge.object == RelationEndpoint::Entity(formal.id)
+                                    && edge.evidence.source.as_ref() == Some(reference)
+                                    && edge.provenance == parser
+                            })
+                            .count(),
+                        1
+                    );
+                }
+                let callee_target = if shadow {
+                    document
+                        .entities
+                        .iter()
+                        .find(|entity| {
+                            entity.canonical_name == "Target"
+                                && entity.kind == EntityKind::Variable
+                                && entity.container == Some(ContainerRef::Entity(run.id))
+                        })
+                        .unwrap()
+                } else {
+                    target
+                };
+                for (written, arity_matches) in [
+                    ("Call Target()", false),
+                    ("Call Target(1)", true),
+                    ("Call Target(1, 2)", true),
+                    ("Call Target(1, 2, 3)", false),
+                ] {
+                    let start = source.find(written).unwrap();
+                    let application = document
+                        .occurrences
+                        .iter()
+                        .find(|site| {
+                            site.syntax_kind == "vba.application.reference"
+                                && site.source.span().start_byte() == u64::try_from(start).unwrap()
+                                && site.source.span().end_byte()
+                                    == u64::try_from(start + written.len()).unwrap()
+                        })
+                        .unwrap();
+                    assert_eq!(application.enclosing, Some(run.id));
+                    let proven = arity_matches && !shadow;
+                    if proven {
+                        assert_explicit_expression_application_proof(
+                            document,
+                            &source,
+                            written,
+                            "Target",
+                            "vba.invoked_identifier.reference",
+                            &clauses,
+                        );
+                    } else {
+                        assert!(matches!(
+                            application.target,
+                            OccurrenceTarget::Unresolved { .. }
+                        ));
+                        assert_eq!(application.provenance, parser);
+                        assert!(!document.relations.iter().any(|edge| {
+                            edge.subject == RelationEndpoint::Occurrence(application.id)
+                                && matches!(
+                                    edge.predicate,
+                                    RelationPredicate::RefersTo | RelationPredicate::Calls
+                                )
+                        }));
+                    }
+                    let callee = document
+                        .occurrences
+                        .iter()
+                        .find(|site| {
+                            site.syntax_kind == "vba.invoked_identifier.reference"
+                                && site.source.span().start_byte()
+                                    == u64::try_from(start + "Call ".len()).unwrap()
+                                && site.source.span().end_byte()
+                                    == u64::try_from(start + "Call Target".len()).unwrap()
+                        })
+                        .unwrap();
+                    assert_eq!(callee.enclosing, Some(run.id));
+                    assert_eq!(
+                        callee.target,
+                        OccurrenceTarget::Resolved {
+                            symbol: callee_target.id
+                        }
+                    );
+                    assert_eq!(callee.provenance, parser);
+                    assert_eq!(
+                        callee.role,
+                        if shadow {
+                            OccurrenceRole::Reference
+                        } else {
+                            OccurrenceRole::CallSite
+                        }
+                    );
+                    for predicate in [RelationPredicate::RefersTo, RelationPredicate::Calls] {
+                        let edges = document
+                            .relations
+                            .iter()
+                            .filter(|edge| {
+                                edge.subject == RelationEndpoint::Occurrence(callee.id)
+                                    && edge.predicate == predicate
+                            })
+                            .collect::<Vec<_>>();
+                        let expected = if shadow {
+                            predicate == RelationPredicate::RefersTo
+                        } else {
+                            predicate == RelationPredicate::Calls
+                        };
+                        assert_eq!(edges.len(), usize::from(expected));
+                        if expected {
+                            assert_eq!(edges[0].object, RelationEndpoint::Entity(callee_target.id));
+                            assert_eq!(edges[0].provenance, parser);
+                            assert_eq!(edges[0].evidence.source.as_ref(), Some(&callee.source));
+                        }
+                    }
+                }
+                assert_eq!(
+                    document
+                        .relations
+                        .iter()
+                        .filter(|edge| edge.predicate == RelationPredicate::Calls)
+                        .count(),
+                    if shadow { 0 } else { 4 }
+                );
+                for initializer in ["-7", "-1D+3@"] {
+                    let start = source.find(initializer).unwrap();
+                    assert!(!document.occurrences.iter().any(|site| {
+                        site.source.span().start_byte() >= u64::try_from(start).unwrap()
+                            && site.source.span().end_byte()
+                                <= u64::try_from(start + initializer.len()).unwrap()
+                    }));
+                }
+            }
+        }
     }
 }
 

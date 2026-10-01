@@ -28,7 +28,8 @@ impl ModuleLimits {
     /// separately bounded comma lists.
     /// Module constants, variables and local Dim members share the retained-record
     /// ceiling with other body records, independently of consumed logical segments.
-    /// Structured-expression work defaults to the source-byte ceiling; old scalar,
+    /// Expression work defaults to the source-byte ceiling. Structured expressions
+    /// and initializer unary-minus operators share it; legacy scalar atoms,
     /// scalar-application and atomic Call statements do not consume that ceiling.
     #[must_use]
     pub const fn new(
@@ -64,11 +65,13 @@ impl ModuleLimits {
         self
     }
 
-    /// Sets aggregate structured-expression work across the entire module.
+    /// Sets aggregate expression and initializer-operator work across the module.
     /// Atoms, callees, applications, groups and unary/binary operators each cost
     /// one node. Both structured assignments and expression Calls share this
-    /// ceiling. Storage is bounded and fallible, not an exact heap-byte budget.
-    /// Existing scalar, scalar-application and atomic Call records are unchanged.
+    /// ceiling. Each authored numeric initializer unary minus costs one extra
+    /// node; its atom preserves the legacy zero extra cost. Storage is bounded
+    /// and fallible, not an exact heap-byte budget. Existing scalar,
+    /// scalar-application and atomic Call records are unchanged.
     #[must_use]
     pub const fn with_max_expression_nodes(mut self, max_expression_nodes: usize) -> Self {
         self.max_expression_nodes = max_expression_nodes;
@@ -218,7 +221,7 @@ pub enum ModuleConstantVisibility {
     Private,
 }
 
-/// One module-level scalar constant with a complete literal initializer.
+/// One module-level scalar constant with a literal or single-minus numeric initializer.
 /// All ranges address the original module; no inferred type, visibility or
 /// evaluated constant value is substituted for absent source syntax.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -257,7 +260,8 @@ impl ModuleConstant {
         self.type_range.clone()
     }
 
-    /// Returns the authored literal token without evaluating or coercing it.
+    /// Returns the authored initializer atom without evaluating or coercing it.
+    /// A numeric unary minus is retained separately from the atom's token span.
     #[must_use]
     pub fn value(&self) -> &ModuleScalarValue {
         &self.value
@@ -286,7 +290,7 @@ pub enum ModuleParameterPassingMode {
 }
 
 /// One scalar parameter retaining its authored intrinsic type or type absence.
-/// Optional parameters retain an absent or atomic authored default without
+/// Optional parameters retain an absent, atomic or single-minus numeric default without
 /// evaluation. Parameter arrays and name type suffixes are excluded. All ranges address
 /// the entire module, never a reconstructed parameter list.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -335,7 +339,8 @@ impl ModuleParameter {
         self.is_optional
     }
 
-    /// Returns the authored scalar literal or name, or None when none is written.
+    /// Returns the authored default atom, or None when none is written.
+    /// A numeric unary minus is retained separately from the atom's token span.
     /// Absence is never replaced by an inferred value; names require independent
     /// binding. The atom proves neither type compatibility nor constant validity.
     #[must_use]
@@ -429,7 +434,7 @@ pub enum ModuleError<E> {
     ParameterLimit,
     /// Retained Call/application arguments across the module exceed the argument ceiling.
     ArgumentLimit,
-    /// Structured-expression work across the module exceeds its node ceiling.
+    /// Expression and initializer-operator work exceeds the module's node ceiling.
     ExpressionLimit,
     /// Fallible reservation of bounded structural storage failed.
     AllocationFailed,
@@ -472,8 +477,9 @@ impl<E: std::error::Error + 'static> std::error::Error for ModuleError<E> {
 /// type clauses or explicit intrinsic `As` types and written `ByVal`/`ByRef`.
 /// Type absence is preserved without a synthetic Variant source or identity.
 /// Optional parameters carry the keyword before any passing modifier and may
-/// omit an authored default or retain one unsigned INTEGER or FLOAT token, physically closed
-/// string, Boolean literal or simple name requiring independent constant binding.
+/// omit an authored default or retain one INTEGER or FLOAT token with an optional
+/// unary minus, one physically closed string, Boolean literal or simple name
+/// requiring independent constant binding.
 /// Parameter-token boundaries also retain form-feed trivia and bare Rem comments;
 /// a comment-only parenthesized list is empty, never a synthetic Rem parameter.
 /// Rem comments with space/tab tails, bare line endings and missing comma-list
@@ -482,7 +488,7 @@ impl<E: std::error::Error + 'static> std::error::Error for ModuleError<E> {
 /// and type-suffixed parameter names are unsupported. Functions retain
 /// an optional intrinsic scalar As return clause or unbracketed type suffix.
 /// Public/Private and optional Static modifiers are accepted in that order.
-/// Module-level Const statements retain one typed or untyped scalar literal
+/// Module-level Const statements retain one typed or untyped scalar
 /// initializer and optional Public/Private spelling. They may precede, separate
 /// or follow procedures, but Attribute and Option remain leading-header forms.
 /// A module-level Dim, Public or Private statement retains a complete comma list
@@ -498,8 +504,8 @@ impl<E: std::error::Error + 'static> std::error::Error for ModuleError<E> {
 /// their containing procedure, without module visibility or inferred types.
 /// A single typed scalar Dim keeps its distinct legacy declaration record.
 /// Local Const still admits one typed scalar per statement. Assignments have
-/// an optional Let prefix. Const values are unsigned INTEGER or FLOAT tokens,
-/// physically closed doubled-quote strings or True/False; assignments additionally
+/// an optional Let prefix. Const values are INTEGER or FLOAT tokens with an optional
+/// unary minus, physically closed doubled-quote strings or True/False; assignments additionally
 /// admit names, grouped expressions, unary signs/Not, ordinary arithmetic,
 /// concatenation, comparison and logical operators, and nested simple-name applications.
 /// Applications retain complete positional expression ranges without deciding whether
@@ -538,13 +544,16 @@ impl<E: std::error::Error + 'static> std::error::Error for ModuleError<E> {
 /// before retaining siblings; this bounds records, not allocator bytes.
 /// Retained parameters across all procedures have a separate aggregate ceiling;
 /// their storage is reserved fallibly, never inferred from logical statement count.
-/// Each parameter retains at most one inline default atom under that same ceiling.
+/// Each parameter retains at most one inline default atom and optional numeric
+/// unary minus under that same retention ceiling.
 /// Optionality and defaults are source evidence, not inferred values, coercion,
 /// or proof of required-after-Optional semantic validity.
 /// Retained Call and application-assignment arguments share an aggregate ceiling across every procedure,
 /// with fallible storage; positional atoms and expressions do not establish
 /// parameter or type identity. Nested expression applications share that ceiling.
-/// Structured expressions have a separate aggregate node ceiling. Parsing and temporary
+/// Structured expressions and authored initializer unary-minus operators share
+/// a separate aggregate node ceiling. Initializer atoms preserve their legacy
+/// zero extra cost; each written minus adds one node. Parsing and temporary
 /// tree storage are iterative, fallible and cancellable; expressions are never evaluated.
 /// This proves structure only, not type identity, visibility or name uniqueness.
 ///
@@ -682,8 +691,10 @@ pub fn module_inventory<E>(
                         assignment.inventory().work_nodes()
                     }
                     ModuleBodyStatement::ExpressionCall(call) => call.inventory().work_nodes(),
-                    ModuleBodyStatement::Declaration(_)
-                    | ModuleBodyStatement::Variables(_)
+                    ModuleBodyStatement::Declaration(declaration) => declaration
+                        .value()
+                        .map_or(0, ModuleScalarValue::initializer_work_nodes),
+                    ModuleBodyStatement::Variables(_)
                     | ModuleBodyStatement::Assignment(_)
                     | ModuleBodyStatement::ApplicationAssignment(_)
                     | ModuleBodyStatement::Call(_) => 0,
@@ -739,6 +750,10 @@ pub fn module_inventory<E>(
             if colon_boundary {
                 return Err(ModuleError::Unsupported { range });
             }
+            expression_count = expression_count
+                .checked_add(constant.value().initializer_work_nodes())
+                .filter(|count| *count <= limits.max_expression_nodes)
+                .ok_or(ModuleError::ExpressionLimit)?;
             reserve_constants(
                 &mut inventory.constants,
                 limits.max_statements - body_count - inventory.variables.len(),
@@ -770,6 +785,17 @@ pub fn module_inventory<E>(
         let Some(mut header) = closed_header(text, remaining_parameters, check)? else {
             return Err(ModuleError::Unsupported { range });
         };
+        for parameter in &header.parameters {
+            check().map_err(ModuleError::Cancelled)?;
+            expression_count = expression_count
+                .checked_add(
+                    parameter
+                        .default_value()
+                        .map_or(0, ModuleScalarValue::initializer_work_nodes),
+                )
+                .filter(|count| *count <= limits.max_expression_nodes)
+                .ok_or(ModuleError::ExpressionLimit)?;
+        }
         if inventory.procedures.len() >= limits.max_procedures {
             return Err(ModuleError::ProcedureLimit);
         }
@@ -1630,6 +1656,283 @@ mod tests {
         )
     }
 
+    fn assert_negative_one_initializer(
+        source: &[u8],
+        value: &ModuleScalarValue,
+        minus_start: usize,
+    ) {
+        assert_eq!(value.kind(), ModuleScalarValueKind::UnsignedDecimal);
+        assert_eq!(value.span(), minus_start + 1..minus_start + 2);
+        assert_eq!(value.unary_minus_span(), Some(minus_start..minus_start + 1));
+        assert_eq!(value.initializer_span(), minus_start..minus_start + 2);
+        assert_eq!(&source[value.span()], b"1");
+        assert_eq!(&source[value.initializer_span()], b"-1");
+        assert_eq!(value.integer_suffix(), None);
+        assert_eq!(value.float_suffix(), None);
+        assert_eq!(value.initializer_work_nodes(), 1);
+    }
+
+    #[test]
+    fn unary_minus_module_initializers_preserve_atom_metadata_and_full_declarations() {
+        for (token, kind) in [
+            ("007%", ModuleScalarValueKind::UnsignedDecimal),
+            ("&H1&", ModuleScalarValueKind::UnsignedHexadecimal),
+            ("&hF^", ModuleScalarValueKind::UnsignedHexadecimal),
+            ("&O7%", ModuleScalarValueKind::UnsignedOctal),
+            ("&o1&", ModuleScalarValueKind::UnsignedOctal),
+            ("&77^", ModuleScalarValueKind::UnsignedOctal),
+            ("1.5!", ModuleScalarValueKind::UnsignedFloat),
+            ("5.#", ModuleScalarValueKind::UnsignedFloat),
+            (".5@", ModuleScalarValueKind::UnsignedFloat),
+            ("1E-2", ModuleScalarValueKind::UnsignedFloat),
+            ("1e+2#", ModuleScalarValueKind::UnsignedFloat),
+            ("1D+2@", ModuleScalarValueKind::UnsignedFloat),
+            ("1d-2!", ModuleScalarValueKind::UnsignedFloat),
+            ("7!", ModuleScalarValueKind::UnsignedFloat),
+            ("7#", ModuleScalarValueKind::UnsignedFloat),
+            ("7@", ModuleScalarValueKind::UnsignedFloat),
+        ] {
+            for newline in ["\n", "\r\n"] {
+                for trivia in [String::new(), " ".to_owned(), format!(" _{newline} ")] {
+                    for type_clause in ["", " As Double"] {
+                        let initializer = format!("-{trivia}{token}");
+                        let source = format!(
+                            "Option Explicit{newline}Public Const [Seed]={initializer}{newline}Sub Run(Optional [value]{type_clause}={initializer},Optional absent,Optional named=[Seed]){newline}Const [local] As Double={initializer}{newline}End Sub{newline}"
+                        );
+                        let limits = ModuleLimits::new(source.len(), 5, 1)
+                            .with_max_parameters(3)
+                            .with_max_arguments(0)
+                            .with_max_expression_nodes(3);
+                        let inventory =
+                            module_inventory(source.as_bytes(), limits, &mut || Ok::<(), ()>(()))
+                                .unwrap();
+                        assert_eq!(inventory.statement_count(), 5);
+                        let constant = &inventory.constants()[0];
+                        assert_eq!(&source[constant.name()], "[Seed]");
+                        assert_eq!(constant.type_range(), None);
+                        assert_eq!(
+                            constant.visibility(),
+                            Some(ModuleConstantVisibility::Public)
+                        );
+                        let procedure = &inventory.procedures()[0];
+                        let parameters = procedure.parameters();
+                        assert_eq!(parameters.len(), 3);
+                        assert_eq!(&source[parameters[0].name()], "[value]");
+                        assert_eq!(
+                            parameters[0].type_range().is_some(),
+                            !type_clause.is_empty()
+                        );
+                        assert_eq!(parameters[1].default_value(), None);
+                        let named = parameters[2].default_value().unwrap();
+                        assert_eq!(named.kind(), ModuleScalarValueKind::Name);
+                        assert_eq!(&source[named.span()], "[Seed]");
+                        assert_eq!(named.unary_minus_span(), None);
+                        assert_eq!(named.initializer_work_nodes(), 0);
+                        let ModuleBodyStatement::Declaration(local) = &procedure.statements()[0]
+                        else {
+                            panic!("typed local Const expected")
+                        };
+                        assert_eq!(&source[local.name()], "[local]");
+                        assert_eq!(&source[local.type_range()], "Double");
+                        for (declaration, value) in [
+                            (constant.declarator(), constant.value()),
+                            (
+                                parameters[0].declaration(),
+                                parameters[0].default_value().unwrap(),
+                            ),
+                            (local.declarator(), local.value().unwrap()),
+                        ] {
+                            let equals = source[declaration.clone()].find('=').unwrap();
+                            let start = declaration.start + equals + 1;
+                            let atom_start = start + 1 + trivia.len();
+                            assert_eq!(value.unary_minus_span(), Some(start..start + 1));
+                            assert_eq!(value.initializer_span(), start..declaration.end);
+                            assert_eq!(value.span(), atom_start..declaration.end);
+                            assert_eq!(&source[value.initializer_span()], initializer);
+                            assert_eq!(&source[value.span()], token);
+                            assert_eq!(value.kind(), kind);
+                            assert_eq!(value.initializer_work_nodes(), 1);
+                            assert_eq!(
+                                value.integer_suffix(),
+                                match token.as_bytes().last() {
+                                    Some(b'%') => Some(ModuleIntegerSuffix::Percent),
+                                    Some(b'&') => Some(ModuleIntegerSuffix::Ampersand),
+                                    Some(b'^') => Some(ModuleIntegerSuffix::Caret),
+                                    _ => None,
+                                }
+                            );
+                            assert_eq!(
+                                value.float_suffix(),
+                                match token.as_bytes().last() {
+                                    Some(b'!') => Some(ModuleFloatSuffix::Exclamation),
+                                    Some(b'#') => Some(ModuleFloatSuffix::Hash),
+                                    Some(b'@') => Some(ModuleFloatSuffix::At),
+                                    _ => None,
+                                }
+                            );
+                        }
+                    }
+                }
+            }
+        }
+        let source = b"Sub Run(Optional value=-\x0cRem\x0c _\r\n 1#)\nEnd Sub\n";
+        let inventory = parse(source).unwrap();
+        let value = inventory.procedures()[0].parameters()[0]
+            .default_value()
+            .unwrap();
+        assert_eq!(&source[value.span()], b"1#");
+        assert_eq!(&source[value.initializer_span()], b"-\x0cRem\x0c _\r\n 1#");
+        assert!(matches!(
+            parse(b"Const Seed=-\x0cRem\x0c 1#\n"),
+            Err(ModuleError::Unsupported { .. })
+        ));
+    }
+
+    #[test]
+    fn unary_minus_initializer_work_shares_exact_aggregate_expression_limits() {
+        let source = b"Const [Seed]=-&H1%\nSub Run(Optional [value] As Double=- _\r\n 1E-2#,Optional absent,Optional named=[Seed])\nConst [local] As Double=-.5D+2@\nsink=value+1\nEnd Sub\nConst Last=-&77^\nSub Next(Optional other=-2)\nEnd Sub\n";
+        let limits = ModuleLimits::new(source.len(), 8, 2)
+            .with_max_parameters(4)
+            .with_max_arguments(0)
+            .with_max_expression_nodes(8);
+        let inventory = module_inventory(source, limits, &mut || Ok::<(), ()>(())).unwrap();
+        assert_eq!(inventory.statement_count(), 8);
+        assert_eq!(inventory.constants().len(), 2);
+        assert_eq!(inventory.procedures().len(), 2);
+        assert_eq!(inventory.procedures()[0].parameters().len(), 3);
+        assert_eq!(inventory.procedures()[1].parameters().len(), 1);
+        let ModuleBodyStatement::ExpressionAssignment(assignment) =
+            &inventory.procedures()[0].statements()[1]
+        else {
+            panic!("structured three-node assignment expected")
+        };
+        assert_eq!(assignment.inventory().work_nodes(), 3);
+        for maximum in [0, 1, 4, 7] {
+            assert_eq!(
+                module_inventory(
+                    source,
+                    limits.with_max_expression_nodes(maximum),
+                    &mut || Ok::<(), ()>(())
+                ),
+                Err(ModuleError::ExpressionLimit)
+            );
+        }
+        for source in [
+            b"Const Seed=-1\n".as_slice(),
+            b"Sub Run(Optional value=-1)\nEnd Sub\n",
+            b"Sub Run()\nConst local As Long=-1\nEnd Sub\n",
+        ] {
+            let limits = ModuleLimits::new(source.len(), source.len(), 1)
+                .with_max_parameters(1)
+                .with_max_expression_nodes(1);
+            assert!(module_inventory(source, limits, &mut || Ok::<(), ()>(())).is_ok());
+            assert_eq!(
+                module_inventory(source, limits.with_max_expression_nodes(0), &mut || Ok::<
+                    (),
+                    (),
+                >(
+                    ()
+                )),
+                Err(ModuleError::ExpressionLimit)
+            );
+        }
+        let source = b"Const Seed=1\nSub Run(Optional value=1E-2#,Optional named=[Seed])\nConst local As Long=2%\nCall Target(1)\nEnd Sub\n";
+        let limits = ModuleLimits::new(source.len(), 5, 1)
+            .with_max_parameters(2)
+            .with_max_arguments(1)
+            .with_max_expression_nodes(0);
+        let inventory = module_inventory(source, limits, &mut || Ok::<(), ()>(())).unwrap();
+        assert_eq!(inventory.constants()[0].value().initializer_work_nodes(), 0);
+        for parameter in inventory.procedures()[0].parameters() {
+            assert_eq!(
+                parameter.default_value().unwrap().initializer_work_nodes(),
+                0
+            );
+        }
+        let ModuleBodyStatement::Call(call) = &inventory.procedures()[0].statements()[1] else {
+            panic!("legacy atomic Call expected")
+        };
+        assert_eq!(call.argument_values()[0].unary_minus_span(), None);
+        assert_eq!(
+            call.argument_values()[0].initializer_span(),
+            call.argument_values()[0].span()
+        );
+    }
+
+    #[test]
+    fn unary_minus_initializer_late_tails_reject_whole_module_without_prefix_records() {
+        for initializer in [
+            "-",
+            "--1",
+            "-+1",
+            "+1",
+            "-True",
+            "-\"text\"",
+            "-Seed",
+            "-[Seed]",
+            "-(1)",
+            "-Fetch(1)",
+            "-1+2",
+            "-1E",
+            "-1%%",
+            "-1.5#@",
+            "-1 extra",
+            "-1.5^2",
+            "-&H",
+            "-1,2",
+        ] {
+            for tail in [
+                format!("Const Broken={initializer}\n"),
+                format!("Sub Bad(Optional value={initializer})\nEnd Sub\n"),
+                format!("Sub Bad()\nConst local As Double={initializer}\nEnd Sub\n"),
+            ] {
+                let source = format!(
+                    "Const Seed=-1\nSub Good(Optional value=-1E-2#)\nConst local As Long=-2%\nEnd Sub\n{tail}"
+                );
+                let Err(ModuleError::Unsupported { range }) = parse(source.as_bytes()) else {
+                    panic!("complete late initializer rejection expected: {tail}")
+                };
+                assert!(range.end <= source.len());
+                assert!(source[range].contains(initializer), "{tail}");
+            }
+        }
+    }
+
+    #[test]
+    fn unary_minus_module_scan_rebase_and_retention_cancel_at_every_checkpoint() {
+        for token in [
+            format!("&H{}%", "F".repeat(1024)),
+            format!(".{}D-{}#", "5".repeat(1024), "2".repeat(1024)),
+        ] {
+            let source = format!(
+                "Const [Seed]=- _\r\n {token}\nSub Run(Optional [value]=- _\n {token})\nConst [local] As Double=- _\r\n {token}\nEnd Sub\n"
+            );
+            let limits = ModuleLimits::new(source.len(), 4, 1)
+                .with_max_parameters(1)
+                .with_max_expression_nodes(3);
+            let mut total = 0;
+            let inventory = module_inventory(source.as_bytes(), limits, &mut || {
+                total += 1;
+                Ok::<(), ()>(())
+            })
+            .unwrap();
+            assert_eq!(inventory.statement_count(), 4);
+            assert_eq!(inventory.constants()[0].value().initializer_work_nodes(), 1);
+            assert!(total > 10);
+            for stop in 1..=total {
+                let mut calls = 0;
+                assert_eq!(
+                    module_inventory(source.as_bytes(), limits, &mut || {
+                        calls += 1;
+                        if calls == stop { Err("stop") } else { Ok(()) }
+                    }),
+                    Err(ModuleError::Cancelled("stop"))
+                );
+                assert_eq!(calls, stop);
+            }
+        }
+    }
+
     #[test]
     fn float_module_atoms_defaults_and_signed_arrays_retain_exact_source_identity() {
         for atom in [
@@ -1827,8 +2130,8 @@ mod tests {
             }
         }
         for tail in [
-            "Const Broken=-1.5",
-            "Sub Bad(Optional value=-1.5)\nEnd Sub",
+            "Const Broken=-1.5e",
+            "Sub Bad(Optional value=-1.5e)\nEnd Sub",
             "Dim grid(1.5 + 1)",
             "Dim grid(Upper)",
             "Sub Bad()\nsink=1E2^\nEnd Sub",
@@ -2097,7 +2400,7 @@ mod tests {
             }
         }
         for parameter in [
-            "Optional value=-1%",
+            "Optional value=--1%",
             "Optional value=+&H1&",
             "Optional value=1.5%",
             "Optional value=value%",
@@ -2430,7 +2733,7 @@ mod tests {
                 }
             }
         }
-        for parameter in ["Optional value=-&H1", "Optional value=+&77"] {
+        for parameter in ["Optional value=--&H1", "Optional value=+&77"] {
             let source = format!("Sub Run({parameter})\nEnd Sub\n");
             assert!(matches!(
                 parse(source.as_bytes()),
@@ -4320,7 +4623,7 @@ mod tests {
             "Const Value=Null",
             "Const Value=Nothing",
             "Const Value=Empty",
-            "Const Value=-1",
+            "Const Value=--1",
             "Const Value=+1",
             "Const Value=1.0e",
             "Const Value=.1d",
@@ -4513,7 +4816,7 @@ mod tests {
                 (
                     b"Const [Value]=".as_slice(),
                     b"1".as_slice(),
-                    byte.is_ascii_digit() || matches!(byte, b' ' | b'\t' | b'&' | b'.'),
+                    byte.is_ascii_digit() || matches!(byte, b' ' | b'\t' | b'&' | b'.' | b'-'),
                 ),
                 (
                     b"Const [Value]=1".as_slice(),
@@ -4551,8 +4854,23 @@ mod tests {
                         assert!(constant.statement().end <= source.len());
                         assert_eq!(constant.declarator().end, constant.value().span().end);
                     }
+                    if byte == b'-' {
+                        assert_eq!(inventory.constants().len(), 1);
+                        assert_negative_one_initializer(
+                            &source,
+                            inventory.constants()[0].value(),
+                            prefix.len(),
+                        );
+                    }
                 }
             }
+        }
+        for initializer in ["-Seed", "-[Seed]", "-True", "-\"a\""] {
+            let source = format!("Const [Value]={initializer}");
+            assert!(matches!(
+                parse(source.as_bytes()),
+                Err(ModuleError::Unsupported { .. })
+            ));
         }
     }
 
@@ -5319,7 +5637,7 @@ mod tests {
             "Optional value As Long = Null",
             "Optional value As Long = Nothing",
             "Optional value As Long = Empty",
-            "Optional value As Long = -1",
+            "Optional value As Long = --1",
             "Optional value As Long = +1",
             "Optional value As Long = 1.0e",
             "Optional value As Long = .1d",
@@ -5507,7 +5825,7 @@ mod tests {
                     b"Sub Run(Optional value As Long=".as_slice(),
                     b"1)\nEnd Sub\n".as_slice(),
                     byte.is_ascii_alphanumeric()
-                        || matches!(byte, b'_' | b' ' | b'\t' | b'\x0c' | b'&' | b'.'),
+                        || matches!(byte, b'_' | b' ' | b'\t' | b'\x0c' | b'&' | b'.' | b'-'),
                 ),
                 (
                     b"Sub Run(Optional value As Boolean=True".as_slice(),
@@ -5535,8 +5853,18 @@ mod tests {
                     assert!(parameter.type_range().unwrap().end < value.span().start);
                     assert!(value.span().end < procedure.header().end);
                     assert_eq!(value.span().end, parameter.declaration().end);
+                    if byte == b'-' {
+                        assert_negative_one_initializer(&source, value, prefix.len());
+                    }
                 }
             }
+        }
+        for initializer in ["-Seed", "-[Seed]", "-True", "-\"a\""] {
+            let source = format!("Sub Run(Optional value As Variant={initializer})\nEnd Sub\n");
+            assert!(matches!(
+                parse(source.as_bytes()),
+                Err(ModuleError::Unsupported { .. })
+            ));
         }
     }
 
@@ -5852,7 +6180,7 @@ mod tests {
             "Optional value=Null",
             "Optional value=Nothing",
             "Optional value=Empty",
-            "Optional value=-1",
+            "Optional value=--1",
             "Optional value=+1",
             "Optional value=1.0e",
             "Optional value=.1d",
@@ -6038,7 +6366,7 @@ mod tests {
                     b"Sub Run(Optional [value]=".as_slice(),
                     b"1)\nEnd Sub\n".as_slice(),
                     byte.is_ascii_alphanumeric()
-                        || matches!(byte, b'_' | b' ' | b'\t' | b'\x0c' | b'&' | b'.'),
+                        || matches!(byte, b'_' | b' ' | b'\t' | b'\x0c' | b'&' | b'.' | b'-'),
                 ),
                 (
                     b"Sub Run(Optional [value]=True".as_slice(),
@@ -6072,11 +6400,21 @@ mod tests {
                     } else if let Some(value) = parameter.default_value() {
                         assert!(parameter.name().end < value.span().start);
                         assert_eq!(value.span().end, parameter.declaration().end);
+                        if byte == b'-' {
+                            assert_negative_one_initializer(&source, value, prefix.len());
+                        }
                     } else {
                         assert_eq!(parameter.name().end, parameter.declaration().end);
                     }
                 }
             }
+        }
+        for initializer in ["-Seed", "-[Seed]", "-True", "-\"a\""] {
+            let source = format!("Sub Run(Optional [value]={initializer})\nEnd Sub\n");
+            assert!(matches!(
+                parse(source.as_bytes()),
+                Err(ModuleError::Unsupported { .. })
+            ));
         }
     }
 

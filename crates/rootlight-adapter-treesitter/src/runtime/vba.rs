@@ -85,6 +85,12 @@ pub(super) fn prepare(
         .checked_add(inventory.procedures().len())
         .and_then(|count| count.checked_add(1))
         .ok_or_else(|| provider_failure("vba-procedural-node-accounting"))?;
+    for constant in inventory.constants() {
+        cancellation.check()?;
+        processed_nodes = processed_nodes
+            .checked_add(constant.value().initializer_work_nodes())
+            .ok_or_else(|| provider_failure("vba-procedural-node-accounting"))?;
+    }
     let mut previous_variable_statement = None;
     for variable in inventory.variables() {
         cancellation.check()?;
@@ -107,9 +113,10 @@ pub(super) fn prepare(
             .ok_or_else(|| provider_failure("vba-procedural-node-accounting"))?;
         for parameter in procedure.parameters() {
             cancellation.check()?;
-            if parameter.default_value().is_some() {
+            if let Some(value) = parameter.default_value() {
                 processed_nodes = processed_nodes
                     .checked_add(1)
+                    .and_then(|count| count.checked_add(value.initializer_work_nodes()))
                     .ok_or_else(|| provider_failure("vba-procedural-node-accounting"))?;
             }
         }
@@ -144,7 +151,10 @@ pub(super) fn prepare(
                     assignment.inventory().work_nodes()
                 }
                 ModuleBodyStatement::ExpressionCall(call) => call.inventory().work_nodes(),
-                ModuleBodyStatement::Declaration(_) | ModuleBodyStatement::Assignment(_) => 0,
+                ModuleBodyStatement::Declaration(declaration) => declaration
+                    .value()
+                    .map_or(0, rootlight_vba::ModuleScalarValue::initializer_work_nodes),
+                ModuleBodyStatement::Assignment(_) => 0,
             };
             processed_nodes = processed_nodes
                 .checked_add(extra_nodes)
@@ -2025,7 +2035,7 @@ mod tests {
             "value = 1",
             "Optional value = seed.Member",
             "Optional value = 1 + 2",
-            "Optional value = -1",
+            "Optional value = --1",
             "Optional value = 1.5%",
             "Optional value = 1%%",
             "Optional value = True And False",
@@ -2463,7 +2473,7 @@ mod tests {
             "Optional value As Long = 1 + 2",
             "Optional value As Long = Target()",
             "Optional value As Long = seed.Member",
-            "Optional value As Long = -1",
+            "Optional value As Long = --1",
             "Optional value As Double = 1.5%",
             "Optional value As Long = &H10%%",
             "Optional value As Date = #1/1/2000#",
@@ -3581,7 +3591,7 @@ mod tests {
             "Const Value = Other.Member",
             "Const Value = Target()",
             "Const Value = 1 + 2",
-            "Const Value = -1",
+            "Const Value = --1",
             "Const Value = &H10%%",
             "Const Value = #1/1/2000#",
             "Const Value = 1.5%",
@@ -5838,6 +5848,293 @@ mod tests {
                         source.len()
                     );
                     assert_eq!(output.facts(), expected.facts);
+                }
+            }
+        }
+    }
+
+    fn signed_initializer_source(literal: &str, newline: &str, signed: bool) -> String {
+        let sign = if signed { "-" } else { " " };
+        format!(
+            "Const ModuleSeed As Double = {sign}{literal}\nSub Target(Optional extra As Double = {sign} {literal})\nEnd Sub\nSub Run()\nConst LocalSeed As Double = {sign} _\n {literal}\nDim sink As Double\nsink = LocalSeed\nCall Target(7)\nEnd Sub\n"
+        )
+        .replace('\n', newline)
+    }
+
+    #[test]
+    fn first_party_vba_signed_initializers_match_complete_native_facts() {
+        for literal in [
+            "1", "&H7", "&Hf", "1%", "1&", "1.5", ".5", "1E-2", "1!", "1.#",
+        ] {
+            for newline in ["\n", "\r\n"] {
+                let source = signed_initializer_source(literal, newline, true);
+                for language in ["vba", "visual-basic-classic"] {
+                    compare_native(&Fixture::new(&source), language, &[]);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn first_party_vba_signed_initializer_metadata_preserves_fact_identity() {
+        for literal in [
+            "0", "7%", "7&", "7^", "&h7%", "&O7&", "&7^", "1.5", ".5!", "1.#", "7@", "1E-2",
+            "1e+2#", "1D-2", ".5d+2@", "1.D-2!",
+        ] {
+            for newline in ["\n", "\r\n"] {
+                let source = signed_initializer_source(literal, newline, true);
+                let baseline = signed_initializer_source(literal, newline, false);
+                assert_eq!(source.len(), baseline.len());
+                for language in ["vba", "visual-basic-classic"] {
+                    let fixture = Fixture::new(&source);
+                    let baseline_fixture = Fixture::new(&baseline);
+                    let request = fixture.request(language, &[]);
+                    let baseline_request = baseline_fixture.request(language, &[]);
+                    let cancellation = Cancellation::new();
+                    let prepare_fixture = |fixture: &Fixture, request: &ParseRequest<'_>| {
+                        prepare(
+                            &fixture.provider,
+                            request,
+                            None,
+                            &[],
+                            fixture.provider.config.default_settings(),
+                            &cancellation,
+                        )
+                        .unwrap()
+                        .unwrap()
+                    };
+                    let prepared = prepare_fixture(&fixture, &request);
+                    let baseline_prepared = prepare_fixture(&baseline_fixture, &baseline_request);
+                    assert_eq!(prepared.processed_nodes, 18);
+                    assert_eq!(baseline_prepared.processed_nodes, 15);
+                    let ModuleBodyStatement::Declaration(local) =
+                        &prepared.inventory.procedures()[1].statements()[0]
+                    else {
+                        panic!("the signed local constant keeps its declaration identity");
+                    };
+                    let values = [
+                        prepared.inventory.constants()[0].value(),
+                        prepared.inventory.procedures()[0].parameters()[0]
+                            .default_value()
+                            .unwrap(),
+                        local.value().unwrap(),
+                    ];
+                    let ModuleBodyStatement::Declaration(baseline_local) =
+                        &baseline_prepared.inventory.procedures()[1].statements()[0]
+                    else {
+                        panic!("the unsigned local constant keeps its declaration identity");
+                    };
+                    let baseline_values = [
+                        baseline_prepared.inventory.constants()[0].value(),
+                        baseline_prepared.inventory.procedures()[0].parameters()[0]
+                            .default_value()
+                            .unwrap(),
+                        baseline_local.value().unwrap(),
+                    ];
+                    for (value, baseline_value) in values.into_iter().zip(baseline_values) {
+                        assert_eq!(value.kind(), baseline_value.kind());
+                        assert_eq!(value.integer_suffix(), baseline_value.integer_suffix());
+                        assert_eq!(value.float_suffix(), baseline_value.float_suffix());
+                        assert_eq!(baseline_value.unary_minus_span(), None);
+                        assert_eq!(baseline_value.initializer_span(), baseline_value.span());
+                        assert_eq!(baseline_value.initializer_work_nodes(), 0);
+                        assert_eq!(&source[value.span()], literal);
+                        let minus = value.unary_minus_span().unwrap();
+                        assert_eq!(&source[minus.clone()], "-");
+                        assert_eq!(value.initializer_span(), minus.start..value.span().end);
+                        assert_eq!(value.initializer_work_nodes(), 1);
+                        assert!(minus.end <= value.span().start);
+                    }
+                    assert_eq!(
+                        &source[prepared.inventory.constants()[0].declarator()],
+                        format!("ModuleSeed As Double = -{literal}")
+                    );
+                    assert_eq!(
+                        &source[prepared.inventory.procedures()[0].parameters()[0].declaration()],
+                        format!("Optional extra As Double = - {literal}")
+                    );
+                    assert_eq!(
+                        &source[local.declarator()],
+                        format!("LocalSeed As Double = - _{newline} {literal}")
+                    );
+                    let ModuleBodyStatement::Assignment(assignment) =
+                        &prepared.inventory.procedures()[1].statements()[2]
+                    else {
+                        panic!("the unchanged assignment remains atomic");
+                    };
+                    let ModuleBodyStatement::Call(call) =
+                        &prepared.inventory.procedures()[1].statements()[3]
+                    else {
+                        panic!("the unchanged Call remains atomic");
+                    };
+                    for value in [assignment.value(), &call.argument_values()[0]] {
+                        assert_eq!(value.unary_minus_span(), None);
+                        assert_eq!(value.initializer_span(), value.span());
+                        assert_eq!(value.initializer_work_nodes(), 0);
+                    }
+                    for optional in [false, true] {
+                        let actual = candidates(
+                            &prepared.inventory,
+                            source.as_bytes(),
+                            optional,
+                            usize::MAX,
+                            &cancellation,
+                        )
+                        .unwrap();
+                        let expected = candidates(
+                            &baseline_prepared.inventory,
+                            baseline.as_bytes(),
+                            optional,
+                            usize::MAX,
+                            &cancellation,
+                        )
+                        .unwrap();
+                        assert_eq!(actual, expected, "{language}, {literal}");
+                        let actual =
+                            normalize_query_candidates(actual, &request, usize::MAX, &cancellation)
+                                .unwrap();
+                        let expected = normalize_query_candidates(
+                            expected,
+                            &baseline_request,
+                            usize::MAX,
+                            &cancellation,
+                        )
+                        .unwrap();
+                        assert_eq!(actual.required, expected.required);
+                        assert_eq!(actual.facts, expected.facts);
+                    }
+                    assert_eq!(fixture.provider.stats().pooled_parsers, 0);
+                    assert_eq!(fixture.provider.stats().cache.entries, 0);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn first_party_vba_signed_initializer_work_limits_are_exact() {
+        let source = signed_initializer_source("1D-2#", "\n", true);
+        for language in ["vba", "visual-basic-classic"] {
+            let mut fixture = Fixture::new(&source);
+            let cancellation = Cancellation::new();
+            let request = fixture.request(language, &[]);
+            let prepared = prepare(
+                &fixture.provider,
+                &request,
+                None,
+                &[],
+                fixture.provider.config.default_settings(),
+                &cancellation,
+            )
+            .unwrap()
+            .unwrap();
+            assert_eq!(prepared.processed_nodes, 18);
+            for (optional, exact) in [(false, 19), (true, 28)] {
+                let all = candidates(
+                    &prepared.inventory,
+                    source.as_bytes(),
+                    optional,
+                    exact,
+                    &cancellation,
+                )
+                .unwrap();
+                assert_eq!(all.len(), exact);
+                assert_eq!(
+                    normalize_query_candidates(all, &request, usize::MAX, &cancellation)
+                        .unwrap()
+                        .required,
+                    19
+                );
+                for (limit, observed) in [(exact - 1, exact), (0, 19)] {
+                    assert_eq!(
+                        candidates(
+                            &prepared.inventory,
+                            source.as_bytes(),
+                            optional,
+                            limit,
+                            &cancellation
+                        )
+                        .unwrap_err(),
+                        AdapterError::RejectedRequest(RequestError::ProviderLimit {
+                            resource: ResourceKind::SyntaxNodes,
+                            observed,
+                            limit,
+                        })
+                    );
+                }
+            }
+            for limit in [18, 17] {
+                fixture.limits = with_maximum_nodes(&fixture.limits, limit);
+                let request = fixture.request(language, &[]);
+                let result = prepare(
+                    &fixture.provider,
+                    &request,
+                    None,
+                    &[],
+                    fixture.provider.config.default_settings(),
+                    &cancellation,
+                );
+                if limit == 18 {
+                    assert_eq!(result.unwrap().unwrap().processed_nodes, 18);
+                } else {
+                    assert_eq!(
+                        result.err().unwrap(),
+                        AdapterError::RejectedRequest(RequestError::ProviderLimit {
+                            resource: ResourceKind::SyntaxNodes,
+                            observed: 18,
+                            limit,
+                        })
+                    );
+                }
+            }
+            assert!(cancellation.cancel(rootlight_cancel::CancellationReason::ClientRequest));
+            let request = fixture.request(language, &[]);
+            assert!(matches!(
+                prepare(
+                    &fixture.provider,
+                    &request,
+                    None,
+                    &[],
+                    fixture.provider.config.default_settings(),
+                    &cancellation,
+                ),
+                Err(AdapterError::Cancelled {
+                    reason: rootlight_cancel::CancellationReason::ClientRequest
+                })
+            ));
+            assert_eq!(fixture.provider.stats().pooled_parsers, 0);
+            assert_eq!(fixture.provider.stats().cache.entries, 0);
+        }
+    }
+
+    #[test]
+    fn first_party_vba_signed_initializer_tails_reject_the_whole_module() {
+        for initializer in [
+            "-", "-1E", "-1D+", "-1.5%", "-1#!", "-&O8", "-1+2", "--1", "+1", "-(1)", "-True",
+            "-\"x\"", "-Seed", "-Read(1)",
+        ] {
+            for tail in [
+                format!("Const Last As Double = {initializer}\n"),
+                format!("Sub Last(Optional extra As Double = {initializer})\nEnd Sub\n"),
+                format!("Sub Last()\nConst LastSeed As Double = {initializer}\nEnd Sub\n"),
+            ] {
+                let source = format!("Const Seed=1\nSub First()\nEnd Sub\n{tail}");
+                for language in ["vba", "visual-basic-classic"] {
+                    let fixture = Fixture::new(&source);
+                    assert!(
+                        prepare(
+                            &fixture.provider,
+                            &fixture.request(language, &[]),
+                            None,
+                            &[],
+                            fixture.provider.config.default_settings(),
+                            &Cancellation::new(),
+                        )
+                        .unwrap()
+                        .is_none(),
+                        "{language}, {tail}"
+                    );
+                    assert_eq!(fixture.provider.stats().pooled_parsers, 0);
+                    assert_eq!(fixture.provider.stats().cache.entries, 0);
                 }
             }
         }
