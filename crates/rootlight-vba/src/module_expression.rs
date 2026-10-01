@@ -1,4 +1,4 @@
-//! Iterative, source-bound expression inventory for procedural assignments.
+//! Iterative, source-bound expression inventory for assignments and explicit calls.
 //! Flat temporary nodes preserve precedence without recursive parsing or dropping.
 //! The retained inventory is syntax only, not evaluation, type or binding evidence.
 
@@ -39,6 +39,55 @@ impl ModuleExpressionAssignment {
     }
 
     /// Returns the source inventory without evaluating or resolving its syntax.
+    #[must_use]
+    pub fn inventory(&self) -> &ModuleExpressionInventory {
+        &self.inventory
+    }
+}
+
+/// One explicit Call with a complete parenthesized positional expression list.
+///
+/// The inventory's first application is the explicit outer callee; subsequent
+/// applications are nested argument syntax. Consumers must not emit that first
+/// record again as an implicit value application. Syntax does not prove a target,
+/// formal-parameter correspondence, runtime types or successful evaluation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ModuleExpressionCall {
+    statement: Range<usize>,
+    callee: Range<usize>,
+    arguments: Range<usize>,
+    inventory: ModuleExpressionInventory,
+}
+
+impl ModuleExpressionCall {
+    /// Returns the complete trimmed statement, including the Call keyword.
+    #[must_use]
+    pub fn statement(&self) -> Range<usize> {
+        self.statement.clone()
+    }
+
+    /// Returns the exact explicit simple callee name, retaining authored brackets.
+    #[must_use]
+    pub fn callee(&self) -> Range<usize> {
+        self.callee.clone()
+    }
+
+    /// Returns the required outer parentheses, including argument bytes and trivia.
+    #[must_use]
+    pub fn arguments(&self) -> Range<usize> {
+        self.arguments.clone()
+    }
+
+    /// Returns complete outer positional expressions without surrounding trivia.
+    #[must_use]
+    pub fn argument_expressions(&self) -> &[Range<usize>] {
+        self.inventory
+            .applications
+            .first()
+            .map_or(&[], |application| application.argument_expressions())
+    }
+
+    /// Returns source records, with the explicit outer application at index zero.
     #[must_use]
     pub fn inventory(&self) -> &ModuleExpressionInventory {
         &self.inventory
@@ -282,11 +331,13 @@ struct Parser<'a> {
     operators: Vec<PendingOperator>,
     frames: Vec<Frame>,
     argument_count: usize,
+    explicit_callee: Option<Range<usize>>,
 }
 
 struct Parsed {
     inventory: ModuleExpressionInventory,
     span: Range<usize>,
+    root_kind: NodeKind,
     #[cfg(test)]
     nodes: Vec<Node>,
     #[cfg(test)]
@@ -307,6 +358,7 @@ impl<'a> Parser<'a> {
             operators: Vec::new(),
             frames: Vec::new(),
             argument_count: 0,
+            explicit_callee: None,
         }
     }
 
@@ -554,6 +606,7 @@ impl<'a> Parser<'a> {
                         .source
                         .get(value.span())
                         .is_some_and(|name| name.eq_ignore_ascii_case(b"Line"))
+                        && self.explicit_callee.as_ref() != Some(&value.span())
                     {
                         return Ok(None);
                     }
@@ -648,9 +701,11 @@ impl<'a> Parser<'a> {
                 let Some(root) = self.finish_segment(check)? else {
                     return Ok(None);
                 };
-                let Some(span) = self.nodes.get(root).map(|node| node.span.clone()) else {
+                let Some(root_node) = self.nodes.get(root) else {
                     return Ok(None);
                 };
+                let span = root_node.span.clone();
+                let root_kind = root_node.kind;
                 // Verify flat indices without walking a recursive tree. Pending
                 // placeholders must never reach an admitted source inventory.
                 for node in &self.nodes {
@@ -681,6 +736,7 @@ impl<'a> Parser<'a> {
                 return Ok(Some(Parsed {
                     inventory,
                     span,
+                    root_kind,
                     #[cfg(test)]
                     nodes: self.nodes,
                     #[cfg(test)]
@@ -843,11 +899,86 @@ pub(super) fn inventory<E>(
     {
         return Ok(None);
     }
-    let Some(mut parsed) =
-        Parser::new(source, start, maximum_nodes, maximum_arguments).parse(check)?
+    let Some(parsed) = Parser::new(source, start, maximum_nodes, maximum_arguments).parse(check)?
     else {
         return Ok(None);
     };
+    rebase_inventory(parsed, source_range, check).map(Some)
+}
+
+pub(super) fn expression_call<E>(
+    source: &[u8],
+    callee: Range<usize>,
+    source_range: Range<usize>,
+    maximum_nodes: usize,
+    maximum_arguments: usize,
+    check: &mut impl FnMut() -> Result<(), E>,
+) -> Result<Option<ModuleExpressionCall>, ModuleError<E>> {
+    check().map_err(ModuleError::Cancelled)?;
+    if source_range.end.checked_sub(source_range.start) != Some(source.len())
+        || callee.start >= callee.end
+        || source.get(callee.clone()).is_none()
+    {
+        return Ok(None);
+    }
+    // The parser starts at a supplied byte offset, not a lexer token boundary.
+    // A suffix of an identifier can otherwise look like a new complete callee.
+    if callee
+        .start
+        .checked_sub(1)
+        .and_then(|previous| source.get(previous))
+        .is_some_and(|byte| byte.is_ascii_alphanumeric() || *byte == b'_')
+    {
+        return Ok(None);
+    }
+    let mut parser = Parser::new(source, callee.start, maximum_nodes, maximum_arguments);
+    // Explicit Call permits the contextual outer Line name; nested applications
+    // still require the existing unambiguous value-application spelling.
+    parser.explicit_callee = Some(callee.clone());
+    let Some(parsed) = parser.parse(check)? else {
+        return Ok(None);
+    };
+    check().map_err(ModuleError::Cancelled)?;
+    let Some(outer) = parsed.inventory.applications.first() else {
+        return Ok(None);
+    };
+    // A first source record alone is insufficient: groups, unary/binary roots
+    // and trailing applications must not masquerade as an explicit Call list.
+    if parsed.root_kind != NodeKind::Application(0)
+        || parsed.span != outer.application
+        || parsed.span.start != callee.start
+        || outer.callee != callee
+        || outer.arguments.start < callee.end
+        || outer.arguments.end != parsed.span.end
+        || source.get(outer.arguments.start) != Some(&b'(')
+        || outer
+            .arguments
+            .end
+            .checked_sub(1)
+            .and_then(|end| source.get(end))
+            != Some(&b')')
+    {
+        return Ok(None);
+    }
+    let (_, inventory) = rebase_inventory(parsed, &source_range, check)?;
+    let Some(outer) = inventory.applications.first() else {
+        return Ok(None);
+    };
+    let callee = outer.callee();
+    let arguments = outer.arguments();
+    Ok(Some(ModuleExpressionCall {
+        statement: source_range,
+        callee,
+        arguments,
+        inventory,
+    }))
+}
+
+fn rebase_inventory<E>(
+    mut parsed: Parsed,
+    source_range: &Range<usize>,
+    check: &mut impl FnMut() -> Result<(), E>,
+) -> Result<(Range<usize>, ModuleExpressionInventory), ModuleError<E>> {
     let rebase = |range: &mut Range<usize>| {
         range.start += source_range.start;
         range.end += source_range.start;
@@ -868,7 +999,7 @@ pub(super) fn inventory<E>(
     }
     check().map_err(ModuleError::Cancelled)?;
     rebase(&mut parsed.span);
-    Ok(Some((parsed.span, parsed.inventory)))
+    Ok((parsed.span, parsed.inventory))
 }
 
 #[cfg(test)]
@@ -1560,6 +1691,125 @@ mod tests {
             );
             assert!(nodes.is_empty());
         }
+    }
+
+    #[test]
+    fn explicit_call_private_root_proofs_and_source_ranges_fail_closed() {
+        let source = b"Target(1+2)";
+        let read = |source: &[u8], callee, range| {
+            expression_call(
+                source,
+                callee,
+                range,
+                source.len(),
+                source.len(),
+                &mut || Ok::<(), ()>(()),
+            )
+            .unwrap()
+        };
+        let call = read(source, 0..6, 7..7 + source.len()).unwrap();
+        assert_eq!(call.callee(), 7..13);
+        assert_eq!(call.arguments(), 13..7 + source.len());
+        assert_eq!(
+            call.inventory().applications()[0].application(),
+            7..7 + source.len()
+        );
+        for callee in [
+            0..5,
+            0..7,
+            1..6,
+            2..6,
+            3..6,
+            4..6,
+            5..6,
+            0..0,
+            0..source.len() + 1,
+        ] {
+            assert!(read(source, callee, 0..source.len()).is_none());
+        }
+        for (source, callee) in [
+            (b"prefixTarget(1+2)".as_slice(), 6..12),
+            (b"_Target(1+2)", 1..7),
+            (b"1Target(1+2)", 1..7),
+        ] {
+            assert!(read(source, callee, 0..source.len()).is_none());
+        }
+        for (source, callee) in [
+            (b"Call Target(1+2)".as_slice(), 5..11),
+            (b"Call\tTarget(1+2)", 5..11),
+            (b"Call _\r\n Target(1+2)", 9..15),
+            (b"Call _\n [Target](1+2)", 8..16),
+        ] {
+            let call = read(source, callee.clone(), 0..source.len()).unwrap();
+            assert_eq!(call.callee(), callee);
+            assert_eq!(call.inventory().work_nodes(), 5);
+        }
+        for range in [
+            0..source.len() - 1,
+            0..source.len() + 1,
+            Range {
+                start: usize::MAX,
+                end: 0,
+            },
+        ] {
+            assert!(read(source, 0..6, range).is_none());
+        }
+        for source in [
+            b"Target(1)+2".as_slice(),
+            b"Target(1)(2)",
+            b"Target(1)=2",
+            b"Target(1) trailing",
+            b"Target",
+            b"Target+Inner(1)",
+        ] {
+            assert!(read(source, 0..6, 0..source.len()).is_none());
+        }
+        let offset = usize::MAX - source.len();
+        let call = read(source, 0..6, offset..usize::MAX).unwrap();
+        assert_eq!(call.statement().end, usize::MAX);
+        assert_eq!(call.arguments().end, usize::MAX);
+        assert_eq!(call.argument_expressions()[0].end, usize::MAX - 1);
+    }
+
+    #[test]
+    fn explicit_call_deep_applications_use_bounded_iterative_inventory_and_drop() {
+        let depth = 2048;
+        let source = format!(
+            "Target({}value{})",
+            "Inner(".repeat(depth),
+            ")".repeat(depth)
+        );
+        let maximum_nodes = 2 * (depth + 1) + 1;
+        let maximum_arguments = depth + 1;
+        let read = |maximum_nodes, maximum_arguments| {
+            expression_call(
+                source.as_bytes(),
+                0..6,
+                0..source.len(),
+                maximum_nodes,
+                maximum_arguments,
+                &mut || Ok::<(), ()>(()),
+            )
+        };
+        let call = read(maximum_nodes, maximum_arguments).unwrap().unwrap();
+        assert_eq!(call.inventory().work_nodes(), maximum_nodes);
+        assert_eq!(call.inventory().argument_count(), maximum_arguments);
+        assert_eq!(call.inventory().applications().len(), depth + 1);
+        assert_eq!(call.inventory().values().len(), 1);
+        assert_eq!(call.argument_expressions().len(), 1);
+        assert_eq!(
+            call.inventory().applications()[0].application(),
+            0..source.len()
+        );
+        assert_eq!(
+            read(maximum_nodes - 1, maximum_arguments),
+            Err(ModuleError::ExpressionLimit)
+        );
+        assert_eq!(
+            read(maximum_nodes, maximum_arguments - 1),
+            Err(ModuleError::ArgumentLimit)
+        );
+        drop(call);
     }
 
     #[test]

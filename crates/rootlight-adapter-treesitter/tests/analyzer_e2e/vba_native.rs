@@ -10365,6 +10365,551 @@ fn vba_nested_expression_applications_retain_formal_and_array_provenance() {
 }
 
 #[test]
+fn vba_explicit_expression_calls_retain_exact_formal_proofs_without_duplicate_calls() {
+    for statement in [
+        "Call Target(value + 1, Inner(other) * -2)",
+        "Call Target(value < 1 < 2, Inner(other = 1 Xor other <> 2))",
+    ] {
+        for language in ["vba", "visual-basic-classic"] {
+            for native in [false, true] {
+                if native && statement.contains("< 1 < 2") {
+                    continue;
+                }
+                let native_tail = if native {
+                    "Dim scratch As Long\nscratch = &H1\n"
+                } else {
+                    ""
+                };
+                let source = format!(
+                    "Sub Target(ByVal first As Long, ByVal second As Long)\nEnd Sub\nFunction Inner(ByVal item As Long) As Long\nEnd Function\nSub Run(ByVal value As Long, ByVal other As Long)\n{native_tail}{statement}\nEnd Sub\n"
+                );
+                let provider = Arc::new(provider());
+                let case = LanguageCase {
+                    name: language,
+                    ..VBA
+                };
+                let fixture = Fixture::new(case, source.as_bytes());
+                let budget = limits();
+                let request = request(&fixture.snapshot, &fixture.source, case, &budget);
+                if !native {
+                    let parsed = rootlight_adapter_sdk::execute_parse(
+                        provider.as_ref(),
+                        &request.to_parse_request(),
+                        MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
+                        &deadline(),
+                    )
+                    .unwrap();
+                    assert_eq!(
+                        parsed.report().coverage().status(),
+                        CoverageStatus::Complete
+                    );
+                    assert_eq!(
+                        parsed.report().coverage().covered_source_bytes(),
+                        source.len()
+                    );
+                    assert!(parsed.diagnostics().is_empty());
+                }
+                let output = execute_analysis(
+                    &analyzer(&provider, case),
+                    &request,
+                    ExtensionSupport::default(),
+                    MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
+                    &deadline(),
+                )
+                .unwrap();
+                let document = output.document();
+                let parser = document.files[0].provenance;
+                if !native {
+                    assert_eq!(provider.stats().pooled_parsers, 0);
+                    assert_eq!(provider.stats().checked_out_parsers, 0);
+                    assert_eq!(provider.stats().cache.entries, 0);
+                    if language == "vba" {
+                        assert_eq!(
+                            output.report().coverage().status(),
+                            CoverageStatus::Complete
+                        );
+                        assert!(document.skipped_regions.is_empty());
+                    } else {
+                        assert_eq!(output.report().coverage().status(), CoverageStatus::Bounded);
+                        assert_eq!(document.skipped_regions.len(), 1);
+                        let gap = &document.skipped_regions[0];
+                        assert_eq!(gap.detail, "visual-basic-dialect-unproven");
+                        assert_eq!(gap.domain, FactDomain::Relations);
+                        assert_eq!(gap.reason, SkippedRegionReason::UnsupportedConstruct);
+                        assert_eq!(gap.source, fixture.source);
+                        assert_eq!(gap.provenance, parser);
+                    }
+                }
+                assert_explicit_expression_application_proof(
+                    document,
+                    &source,
+                    statement,
+                    "Target",
+                    "vba.invoked_identifier.reference",
+                    &["ByVal first As Long", "ByVal second As Long"],
+                );
+                let nested = if statement.contains("< 1 < 2") {
+                    "Inner(other = 1 Xor other <> 2)"
+                } else {
+                    "Inner(other)"
+                };
+                assert_explicit_expression_application_proof(
+                    document,
+                    &source,
+                    nested,
+                    "Inner",
+                    "vba.invoked_get_identifier.reference",
+                    &["ByVal item As Long"],
+                );
+                let start = source.find(statement).unwrap();
+                let end = start + statement.len();
+                assert_eq!(
+                    document
+                        .occurrences
+                        .iter()
+                        .filter(|site| {
+                            site.syntax_kind == "vba.application.reference"
+                                && site.source.span().start_byte() >= u64::try_from(start).unwrap()
+                                && site.source.span().end_byte() <= u64::try_from(end).unwrap()
+                        })
+                        .count(),
+                    2
+                );
+                let run = document
+                    .entities
+                    .iter()
+                    .find(|entity| entity.canonical_name == "Run")
+                    .unwrap();
+                for name in ["value", "other"] {
+                    let formal = document
+                        .entities
+                        .iter()
+                        .find(|entity| {
+                            entity.kind == EntityKind::Parameter
+                                && entity.canonical_name == name
+                                && entity.container == Some(ContainerRef::Entity(run.id))
+                        })
+                        .unwrap();
+                    for (offset, written) in statement.match_indices(name) {
+                        let position = start + offset;
+                        let read = document
+                            .occurrences
+                            .iter()
+                            .find(|site| {
+                                site.syntax_kind == "vba.value_identifier.reference"
+                                    && site.source.span().start_byte()
+                                        == u64::try_from(position).unwrap()
+                                    && site.source.span().end_byte()
+                                        == u64::try_from(position + written.len()).unwrap()
+                            })
+                            .unwrap();
+                        assert_eq!(
+                            read.target,
+                            OccurrenceTarget::Resolved { symbol: formal.id }
+                        );
+                        assert_eq!(read.enclosing, Some(run.id));
+                        assert_eq!(read.provenance, parser);
+                        assert_eq!(read.syntactic_text_hash, content_hash(written.as_bytes()));
+                        assert_eq!(
+                            document
+                                .relations
+                                .iter()
+                                .filter(|edge| {
+                                    edge.subject == RelationEndpoint::Occurrence(read.id)
+                                        && edge.predicate == RelationPredicate::RefersTo
+                                        && edge.object == RelationEndpoint::Entity(formal.id)
+                                })
+                                .count(),
+                            1
+                        );
+                        assert!(!document.relations.iter().any(|edge| {
+                            edge.subject == RelationEndpoint::Occurrence(read.id)
+                                && edge.predicate == RelationPredicate::Calls
+                        }));
+                    }
+                }
+                assert_eq!(document.provenance.len(), 3);
+            }
+        }
+    }
+}
+
+fn assert_explicit_expression_application_proof(
+    document: &rootlight_ir::NormalizedIrDocument,
+    source: &str,
+    written: &str,
+    name: &str,
+    callee_syntax: &str,
+    clauses: &[&str],
+) {
+    let start = source.find(written).unwrap();
+    let end = start + written.len();
+    let target = document
+        .entities
+        .iter()
+        .find(|entity| entity.canonical_name == name && entity.kind == EntityKind::Function)
+        .unwrap();
+    let run = document
+        .entities
+        .iter()
+        .find(|entity| entity.canonical_name == "Run")
+        .unwrap();
+    let parser = document
+        .provenance
+        .iter()
+        .find(|proof| proof.id == document.files[0].provenance)
+        .unwrap();
+    let matches = document
+        .occurrences
+        .iter()
+        .filter(|site| {
+            site.syntax_kind == "vba.application.reference"
+                && site.source.span().start_byte() == u64::try_from(start).unwrap()
+                && site.source.span().end_byte() == u64::try_from(end).unwrap()
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(matches.len(), 1, "{written}");
+    let application = matches[0];
+    assert_eq!(
+        application.target,
+        OccurrenceTarget::Resolved { symbol: target.id }
+    );
+    assert_eq!(application.role, OccurrenceRole::Reference);
+    assert_eq!(application.enclosing, Some(run.id));
+    assert_eq!(
+        application.syntactic_text_hash,
+        content_hash(written.as_bytes())
+    );
+    let proof = document
+        .provenance
+        .iter()
+        .find(|proof| proof.id == application.provenance)
+        .unwrap();
+    assert_eq!(
+        proof.rule.as_deref(),
+        Some("vba-procedure-application-v1.source")
+    );
+    assert_eq!(proof.producer, parser.producer);
+    assert_eq!(proof.producer_kind, ProducerKind::Parser);
+    assert_eq!(proof.binary_digest, parser.binary_digest);
+    assert_eq!(proof.frontend_version, parser.frontend_version);
+    assert_eq!(proof.language, parser.language);
+    assert_eq!(proof.build_context, parser.build_context);
+    assert!(proof.derivation_parents.contains(&FactRef::Fact(parser.id)));
+    assert!(
+        proof
+            .derivation_parents
+            .contains(&FactRef::Entity(target.id))
+    );
+    assert_eq!(proof.derivation_parents.len(), clauses.len() + 2);
+    assert!(proof.input_sources.contains(&parser.input_sources[0]));
+    assert!(proof.evidence_sources.contains(&application.source));
+    let formals = document
+        .entities
+        .iter()
+        .filter(|entity| {
+            entity.kind == EntityKind::Parameter
+                && entity.container == Some(ContainerRef::Entity(target.id))
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(formals.len(), clauses.len());
+    for clause in clauses {
+        let offset = source.find(clause).unwrap();
+        let formal = formals
+            .iter()
+            .find(|formal| {
+                formal.evidence.source.as_ref().is_some_and(|reference| {
+                    reference.span().start_byte() == u64::try_from(offset).unwrap()
+                        && reference.span().end_byte()
+                            == u64::try_from(offset + clause.len()).unwrap()
+                })
+            })
+            .unwrap();
+        let reference = formal.evidence.source.as_ref().unwrap();
+        assert!(
+            proof
+                .derivation_parents
+                .contains(&FactRef::Entity(formal.id))
+        );
+        assert!(proof.input_sources.contains(reference));
+        assert!(proof.evidence_sources.contains(reference));
+        let definitions = document
+            .occurrences
+            .iter()
+            .filter(|site| {
+                site.role == OccurrenceRole::Definition
+                    && site.target == OccurrenceTarget::Resolved { symbol: formal.id }
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(definitions.len(), 1);
+        let definition = definitions[0];
+        assert_eq!(definition.enclosing, Some(target.id));
+        assert!(proof.evidence_sources.contains(&definition.source));
+        assert_eq!(
+            source
+                .get(
+                    usize::try_from(definition.source.span().start_byte()).unwrap()
+                        ..usize::try_from(definition.source.span().end_byte()).unwrap()
+                )
+                .unwrap(),
+            formal.canonical_name
+        );
+    }
+    for reference in proof
+        .input_sources
+        .iter()
+        .chain(&proof.evidence_sources)
+        .chain([&application.source])
+    {
+        assert_eq!(reference.repository(), document.repository);
+        assert_eq!(reference.generation(), document.generation);
+        assert_eq!(reference.content_hash(), content_hash(source.as_bytes()));
+        assert_eq!(reference.span().file(), document.files[0].id);
+        assert!(reference.span().end_byte() <= u64::try_from(source.len()).unwrap());
+    }
+    let refers = document
+        .relations
+        .iter()
+        .filter(|edge| {
+            edge.subject == RelationEndpoint::Occurrence(application.id)
+                && edge.predicate == RelationPredicate::RefersTo
+                && edge.object == RelationEndpoint::Entity(target.id)
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(refers.len(), 1);
+    assert_eq!(refers[0].provenance, proof.id);
+    assert_eq!(
+        refers[0].evidence.source.as_ref(),
+        Some(&application.source)
+    );
+    assert!(!document.relations.iter().any(|edge| {
+        edge.subject == RelationEndpoint::Occurrence(application.id)
+            && edge.predicate == RelationPredicate::Calls
+    }));
+    let callee_start = start + written.find(name).unwrap();
+    let callees = document
+        .occurrences
+        .iter()
+        .filter(|site| {
+            site.syntax_kind == callee_syntax
+                && site.source.span().start_byte() == u64::try_from(callee_start).unwrap()
+                && site.source.span().end_byte()
+                    == u64::try_from(callee_start + name.len()).unwrap()
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(callees.len(), 1);
+    let callee = callees[0];
+    assert_eq!(callee.role, OccurrenceRole::CallSite);
+    assert_eq!(
+        callee.target,
+        OccurrenceTarget::Resolved { symbol: target.id }
+    );
+    assert_eq!(callee.enclosing, Some(run.id));
+    assert_eq!(callee.provenance, parser.id);
+    assert_eq!(callee.syntactic_text_hash, content_hash(name.as_bytes()));
+    assert_eq!(callee.source.repository(), document.repository);
+    assert_eq!(callee.source.generation(), document.generation);
+    assert_eq!(
+        callee.source.content_hash(),
+        content_hash(source.as_bytes())
+    );
+    assert_eq!(callee.source.span().file(), document.files[0].id);
+    assert_eq!(
+        document
+            .relations
+            .iter()
+            .filter(|edge| {
+                edge.subject == RelationEndpoint::Occurrence(callee.id)
+                    && edge.predicate == RelationPredicate::Calls
+                    && edge.object == RelationEndpoint::Entity(target.id)
+            })
+            .count(),
+        1
+    );
+}
+
+#[test]
+fn vba_explicit_expression_calls_keep_missing_duplicate_shadowed_and_wrong_arity_unproven() {
+    const TARGET: &str = "Sub Target(ByVal first As Long, ByVal second As Long)\nEnd Sub\n";
+    for (prefix, local, statement) in [
+        (String::new(), "", "Call Target(value + 1, Inner(other))"),
+        (TARGET.repeat(2), "", "Call Target(value + 1, Inner(other))"),
+        (
+            TARGET.to_owned(),
+            "Dim Target As Long\n",
+            "Call Target(value + 1, Inner(other))",
+        ),
+        (TARGET.to_owned(), "", "Call Target(Inner(other) + 1)"),
+        (
+            TARGET.to_owned(),
+            "",
+            "Call Target(value + 1, Inner(other), other + 2)",
+        ),
+    ] {
+        let source = format!(
+            "{prefix}Function Inner(ByVal item As Long) As Long\nEnd Function\nSub Run(ByVal value As Long, ByVal other As Long)\n{local}{statement}\nEnd Sub\n"
+        );
+        for language in ["vba", "visual-basic-classic"] {
+            let output =
+                application_proof_output(&source, language, IrLimits::default(), &deadline())
+                    .unwrap();
+            let document = output.document();
+            let start = source.find(statement).unwrap();
+            let application = document
+                .occurrences
+                .iter()
+                .find(|site| {
+                    site.syntax_kind == "vba.application.reference"
+                        && site.source.span().start_byte() == u64::try_from(start).unwrap()
+                        && site.source.span().end_byte()
+                            == u64::try_from(start + statement.len()).unwrap()
+                })
+                .unwrap();
+            assert!(
+                matches!(application.target, OccurrenceTarget::Unresolved { .. }),
+                "{language}: {source}"
+            );
+            assert_eq!(application.provenance, document.files[0].provenance);
+            assert!(!document.relations.iter().any(|edge| {
+                edge.subject == RelationEndpoint::Occurrence(application.id)
+                    && matches!(
+                        edge.predicate,
+                        RelationPredicate::RefersTo | RelationPredicate::Calls
+                    )
+            }));
+            assert_explicit_expression_application_proof(
+                document,
+                &source,
+                "Inner(other)",
+                "Inner",
+                "vba.invoked_get_identifier.reference",
+                &["ByVal item As Long"],
+            );
+            if prefix.is_empty() || !local.is_empty() || prefix == TARGET.repeat(2) {
+                let callee_start = start + "Call ".len();
+                let callee = document
+                    .occurrences
+                    .iter()
+                    .find(|site| {
+                        site.syntax_kind == "vba.invoked_identifier.reference"
+                            && site.source.span().start_byte()
+                                == u64::try_from(callee_start).unwrap()
+                    })
+                    .unwrap();
+                assert_eq!(
+                    callee.source.span().end_byte(),
+                    u64::try_from(callee_start + "Target".len()).unwrap()
+                );
+                assert_eq!(callee.provenance, document.files[0].provenance);
+                if !local.is_empty() {
+                    let shadow = document
+                        .entities
+                        .iter()
+                        .find(|entity| {
+                            entity.kind == EntityKind::Variable && entity.canonical_name == "Target"
+                        })
+                        .unwrap();
+                    assert_eq!(
+                        shadow.container,
+                        application.enclosing.map(ContainerRef::Entity)
+                    );
+                    assert_eq!(
+                        callee.target,
+                        OccurrenceTarget::Resolved { symbol: shadow.id }
+                    );
+                    assert_eq!(callee.role, OccurrenceRole::Reference);
+                    let refers = document
+                        .relations
+                        .iter()
+                        .filter(|edge| {
+                            edge.subject == RelationEndpoint::Occurrence(callee.id)
+                                && edge.predicate == RelationPredicate::RefersTo
+                        })
+                        .collect::<Vec<_>>();
+                    assert_eq!(refers.len(), 1);
+                    assert_eq!(refers[0].object, RelationEndpoint::Entity(shadow.id));
+                    assert_eq!(refers[0].evidence.source.as_ref(), Some(&callee.source));
+                    assert_eq!(refers[0].provenance, document.files[0].provenance);
+                } else {
+                    assert!(matches!(callee.target, OccurrenceTarget::Unresolved { .. }));
+                    assert!(!document.relations.iter().any(|edge| {
+                        edge.subject == RelationEndpoint::Occurrence(callee.id)
+                            && edge.predicate == RelationPredicate::RefersTo
+                    }));
+                }
+                assert!(!document.relations.iter().any(|edge| {
+                    edge.subject == RelationEndpoint::Occurrence(callee.id)
+                        && edge.predicate == RelationPredicate::Calls
+                }));
+            }
+        }
+    }
+}
+
+#[test]
+fn vba_explicit_expression_array_arguments_preserve_rank_barriers_without_callable_facts() {
+    for (arguments, valid) in [("value + 1", true), ("value + 1, other", false)] {
+        let nested = format!("items({arguments})");
+        let statement = format!("Call Target({nested} + 1)");
+        let source = format!(
+            "Private items(2) As Long\nSub Target(ByVal first As Long)\nEnd Sub\nSub Run(ByVal value As Long, ByVal other As Long)\n{statement}\nEnd Sub\n"
+        );
+        for language in ["vba", "visual-basic-classic"] {
+            let output =
+                application_proof_output(&source, language, IrLimits::default(), &deadline())
+                    .unwrap();
+            let document = output.document();
+            assert_explicit_expression_application_proof(
+                document,
+                &source,
+                &statement,
+                "Target",
+                "vba.invoked_identifier.reference",
+                &["ByVal first As Long"],
+            );
+            let start = source.find(&nested).unwrap();
+            let application = document
+                .occurrences
+                .iter()
+                .find(|site| {
+                    site.syntax_kind == "vba.application.reference"
+                        && site.source.span().start_byte() == u64::try_from(start).unwrap()
+                        && site.source.span().end_byte()
+                            == u64::try_from(start + nested.len()).unwrap()
+                })
+                .unwrap();
+            let array = document
+                .entities
+                .iter()
+                .find(|entity| {
+                    entity.kind == EntityKind::Variable && entity.canonical_name == "items"
+                })
+                .unwrap();
+            if valid {
+                assert_eq!(
+                    application.target,
+                    OccurrenceTarget::Resolved { symbol: array.id }
+                );
+            } else {
+                assert!(matches!(
+                    application.target,
+                    OccurrenceTarget::Unresolved { .. }
+                ));
+                assert!(!document.relations.iter().any(|edge| {
+                    edge.subject == RelationEndpoint::Occurrence(application.id)
+                        && edge.predicate == RelationPredicate::RefersTo
+                }));
+            }
+            assert_eq!(application.provenance, document.files[0].provenance);
+            assert!(!document.relations.iter().any(|edge| {
+                edge.object == RelationEndpoint::Entity(array.id)
+                    && edge.predicate == RelationPredicate::Calls
+            }));
+        }
+    }
+}
+
+#[test]
 fn vba_module_variables_preserve_value_ownership_without_constant_or_call_proofs() {
     use rootlight_ir::EntityVisibility;
     for language in ["vba", "visual-basic-classic"] {

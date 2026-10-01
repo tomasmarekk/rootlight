@@ -49,7 +49,8 @@ pub use module_body::{
     ModuleZeroArgumentCall,
 };
 pub use module_expression::{
-    ModuleExpressionApplication, ModuleExpressionAssignment, ModuleExpressionInventory,
+    ModuleExpressionApplication, ModuleExpressionAssignment, ModuleExpressionCall,
+    ModuleExpressionInventory,
 };
 pub use parameter::{
     array_parameter_modifiers, parameter_declarations_cover, parameter_trivia_len,

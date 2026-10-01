@@ -27,8 +27,8 @@ impl ModuleLimits {
     /// use [`Self::with_max_parameters`] and [`Self::with_max_arguments`] to admit
     /// separately bounded comma lists.
     /// Module constants and variables share the statement ceiling with body records.
-    /// Structured-expression work defaults to the source-byte ceiling; old scalar
-    /// and standalone scalar-application statements do not consume that ceiling.
+    /// Structured-expression work defaults to the source-byte ceiling; old scalar,
+    /// scalar-application and atomic Call statements do not consume that ceiling.
     #[must_use]
     pub const fn new(
         max_source_bytes: usize,
@@ -65,8 +65,9 @@ impl ModuleLimits {
 
     /// Sets aggregate structured-expression work across the entire module.
     /// Atoms, callees, applications, groups and unary/binary operators each cost
-    /// one node. Temporary and retained storage is bounded and fallible, not an
-    /// exact heap-byte budget. Existing scalar and scalar-application records are unchanged.
+    /// one node. Both structured assignments and expression Calls share this
+    /// ceiling. Storage is bounded and fallible, not an exact heap-byte budget.
+    /// Existing scalar, scalar-application and atomic Call records are unchanged.
     #[must_use]
     pub const fn with_max_expression_nodes(mut self, max_expression_nodes: usize) -> Self {
         self.max_expression_nodes = max_expression_nodes;
@@ -525,7 +526,8 @@ impl<E: std::error::Error + 'static> std::error::Error for ModuleError<E> {
 /// Optionality and defaults are source evidence, not inferred values, coercion,
 /// or proof of required-after-Optional semantic validity.
 /// Retained Call and application-assignment arguments share an aggregate ceiling across every procedure,
-/// with fallible storage; positional atoms do not establish parameter or type identity.
+/// with fallible storage; positional atoms and expressions do not establish
+/// parameter or type identity. Nested expression applications share that ceiling.
 /// Structured expressions have a separate aggregate node ceiling. Parsing and temporary
 /// tree storage are iterative, fallible and cancellable; expressions are never evaluated.
 /// This proves structure only, not type identity, visibility or name uniqueness.
@@ -642,14 +644,25 @@ pub fn module_inventory<E>(
                     ModuleBodyStatement::ExpressionAssignment(assignment) => {
                         assignment.inventory().argument_count()
                     }
+                    ModuleBodyStatement::ExpressionCall(call) => call.inventory().argument_count(),
                     ModuleBodyStatement::Declaration(_) | ModuleBodyStatement::Assignment(_) => 0,
                 };
                 argument_count = argument_count
                     .checked_add(retained_arguments)
                     .ok_or(ModuleError::ArgumentLimit)?;
-                if let ModuleBodyStatement::ExpressionAssignment(assignment) = &statement {
+                let retained_expression_nodes = match &statement {
+                    ModuleBodyStatement::ExpressionAssignment(assignment) => {
+                        assignment.inventory().work_nodes()
+                    }
+                    ModuleBodyStatement::ExpressionCall(call) => call.inventory().work_nodes(),
+                    ModuleBodyStatement::Declaration(_)
+                    | ModuleBodyStatement::Assignment(_)
+                    | ModuleBodyStatement::ApplicationAssignment(_)
+                    | ModuleBodyStatement::Call(_) => 0,
+                };
+                if retained_expression_nodes != 0 {
                     expression_count = expression_count
-                        .checked_add(assignment.inventory().work_nodes())
+                        .checked_add(retained_expression_nodes)
                         .ok_or(ModuleError::ExpressionLimit)?;
                 }
                 let maximum = limits.max_statements
@@ -5608,7 +5621,8 @@ mod tests {
                     ModuleBodyStatement::Declaration(_)
                     | ModuleBodyStatement::Assignment(_)
                     | ModuleBodyStatement::ApplicationAssignment(_)
-                    | ModuleBodyStatement::ExpressionAssignment(_) => None,
+                    | ModuleBodyStatement::ExpressionAssignment(_)
+                    | ModuleBodyStatement::ExpressionCall(_) => None,
                 })
                 .collect();
             assert_eq!(calls.len(), 3);
@@ -5792,10 +5806,7 @@ mod tests {
             "Call Finish(1,,2)",
             "Call Finish(1,value:=2)",
             "Call Finish(1,ByVal value)",
-            "Call Finish(1,target())",
             "Call Finish(1,target.member)",
-            "Call Finish(1,(value))",
-            "Call Finish(1,-2)",
             "Call Finish(1,2.0)",
             "Call Finish(1,#1/1/2000#)",
             "Call Finish(1,value$)",
@@ -5864,7 +5875,6 @@ mod tests {
             "Call[Finish]",
             "Call\x0cFinish()",
             "Call\x0bFinish()",
-            "Call Finish(1+2)",
             "Call Finish(value:=1)",
             "Call Finish(,)",
             "Call Finish(())",
@@ -6071,7 +6081,6 @@ mod tests {
             "Dim item As Product",
             "Dim values() As Long",
             "Dim value As Long=1",
-            "value=1\nCall Finish(1+2)",
             "value=Me",
             "value=Nothing",
             "value=Null",
@@ -6710,6 +6719,247 @@ mod tests {
     }
 
     #[test]
+    fn expression_calls_preserve_whole_module_ranges_comments_and_procedure_ownership() {
+        for newline in ["\n", "\r\n"] {
+            let parentheses = format!("(value _{newline} + 1, [Inner](other) * -2)");
+            let written = format!("Call _{newline} [Target] _{newline} {parentheses}");
+            let source = format!(
+                "Attribute VB_Name = \"CallModule\"{newline}Const Seed=7{newline}Sub Run(){newline}  Dim local As Long{newline}  {written} ' End Sub: ignored(){newline}Call Target(1+2):Call Finish(3):End Sub{newline}Sub Second(){newline}Call Finish{newline}End Sub{newline}"
+            );
+            let inventory = parse(source.as_bytes()).unwrap();
+            assert_eq!(inventory.procedures().len(), 2);
+            let procedure = &inventory.procedures()[0];
+            let statements = procedure.statements();
+            assert_eq!(statements.len(), 4);
+            let ModuleBodyStatement::ExpressionCall(call) = &statements[1] else {
+                panic!("nested explicit expression Call retained after local declaration");
+            };
+            assert_eq!(&source[call.statement()], written);
+            assert_eq!(&source[call.callee()], "[Target]");
+            assert_eq!(&source[call.arguments()], parentheses);
+            assert_eq!(call.inventory().work_nodes(), 11);
+            assert_eq!(call.inventory().argument_count(), 3);
+            assert_eq!(call.argument_expressions().len(), 2);
+            assert_eq!(
+                call.inventory()
+                    .applications()
+                    .iter()
+                    .map(|application| &source[application.callee()])
+                    .collect::<Vec<_>>(),
+                ["[Target]", "[Inner]"]
+            );
+            for value in call.inventory().values() {
+                assert!(procedure.body().start <= value.span().start);
+                assert!(value.span().end <= procedure.body().end);
+                assert!(call.arguments().start < value.span().start);
+                assert!(value.span().end < call.arguments().end);
+            }
+            let ModuleBodyStatement::ExpressionCall(formerly_unsupported) = &statements[2] else {
+                panic!("binary argument Call retained at a colon boundary");
+            };
+            assert_eq!(
+                &source[formerly_unsupported.statement()],
+                "Call Target(1+2)"
+            );
+            assert_eq!(
+                &source[formerly_unsupported.argument_expressions()[0].clone()],
+                "1+2"
+            );
+            assert!(matches!(statements[0], ModuleBodyStatement::Declaration(_)));
+            assert!(matches!(statements[3], ModuleBodyStatement::Call(_)));
+            assert!(matches!(
+                inventory.procedures()[1].statements()[0],
+                ModuleBodyStatement::Call(_)
+            ));
+            for statement in statements {
+                assert!(procedure.body().start <= statement.statement().start);
+                assert!(statement.statement().end <= procedure.body().end);
+            }
+        }
+    }
+
+    #[test]
+    fn expression_call_work_and_arguments_share_aggregate_limits_with_assignments_and_old_calls() {
+        let source = b"Sub First()\nCall Ready(1)\nsink=Ready(2)\nsink=1+2\nCall Target(value+1,Inner(other)*-2)\nEnd Sub\nSub Second()\nsink=B(C(3))\nCall Finish\nEnd Sub\n";
+        let limits = ModuleLimits::new(source.len(), 10, 2)
+            .with_max_arguments(7)
+            .with_max_expression_nodes(19);
+        let inventory = module_inventory(source, limits, &mut || Ok::<(), ()>(())).unwrap();
+        assert_eq!(inventory.statement_count(), 10);
+        assert_eq!(inventory.procedures().len(), 2);
+        let statements = inventory.procedures()[0].statements();
+        assert!(matches!(statements[0], ModuleBodyStatement::Call(_)));
+        assert!(matches!(
+            statements[1],
+            ModuleBodyStatement::ApplicationAssignment(_)
+        ));
+        assert!(matches!(
+            statements[2],
+            ModuleBodyStatement::ExpressionAssignment(_)
+        ));
+        let ModuleBodyStatement::ExpressionCall(call) = &statements[3] else {
+            panic!("expression Call retained among mixed statements");
+        };
+        assert_eq!(call.inventory().work_nodes(), 11);
+        assert_eq!(call.inventory().argument_count(), 3);
+        for maximum in [0, 1, 2, 4, 5, 6] {
+            assert_eq!(
+                module_inventory(source, limits.with_max_arguments(maximum), &mut || Ok::<
+                    (),
+                    (),
+                >(
+                    ()
+                )),
+                Err(ModuleError::ArgumentLimit),
+                "aggregate argument ceiling {maximum}"
+            );
+        }
+        for maximum in [0, 1, 3, 13, 14, 18] {
+            assert_eq!(
+                module_inventory(
+                    source,
+                    limits.with_max_expression_nodes(maximum),
+                    &mut || Ok::<(), ()>(())
+                ),
+                Err(ModuleError::ExpressionLimit),
+                "aggregate expression ceiling {maximum}"
+            );
+        }
+        for (limits, expected) in [
+            (
+                ModuleLimits::new(source.len() - 1, 10, 2),
+                ModuleError::SourceLimit,
+            ),
+            (
+                ModuleLimits::new(source.len(), 9, 2),
+                ModuleError::StatementLimit,
+            ),
+            (
+                ModuleLimits::new(source.len(), 10, 1),
+                ModuleError::ProcedureLimit,
+            ),
+        ] {
+            assert_eq!(
+                module_inventory(
+                    source,
+                    limits.with_max_arguments(7).with_max_expression_nodes(19),
+                    &mut || Ok::<(), ()>(())
+                ),
+                Err(expected)
+            );
+        }
+        let old = b"Sub Run()\nsink=1\nsink=Ready(2)\nCall Ready(3)\nCall Finish\nCall Finish()\nEnd Sub\n";
+        let inventory = module_inventory(
+            old,
+            ModuleLimits::new(old.len(), 7, 1)
+                .with_max_arguments(2)
+                .with_max_expression_nodes(0),
+            &mut || Ok::<(), ()>(()),
+        )
+        .unwrap();
+        assert!(
+            inventory.procedures()[0]
+                .statements()
+                .iter()
+                .all(|statement| matches!(
+                    statement,
+                    ModuleBodyStatement::Assignment(_)
+                        | ModuleBodyStatement::ApplicationAssignment(_)
+                        | ModuleBodyStatement::Call(_)
+                ))
+        );
+    }
+
+    #[test]
+    fn expression_call_late_unsupported_tail_rejects_the_whole_module_without_prefix_records() {
+        for tail in [
+            "Call Target(1+2)+3",
+            "Call (Target(1+2))",
+            "Call Target(1+2)(3)",
+            "Call Target(1+)",
+            "Call Target(1+2,)",
+            "Call Target(value:=1+2)",
+            "Call Target(ByVal value+1)",
+            "Call Target(Inner(value:=1))",
+            "Call Target(Inner(1).member)",
+            "Call Target(Line(1)+2)",
+            "Call Target(2^3)",
+            "Call Target(a&b)",
+            "Call Target(1.0+2)",
+            "Call Target(&H10+2)",
+            "Call Target(value$+1)",
+            "Call Target(1+2) extra",
+            "Call Target value+1",
+            "Call Name(1+2)",
+            "Call\x0cTarget(1+2)",
+            "Call Target(1\0+2)",
+            "Call Target(1\r+2)",
+            "Call Target(\"physical\nline\" & value)",
+            "Const Local As Long=1+2",
+            "Dim local As Long=Inner(1)+2",
+        ] {
+            let source = format!(
+                "Const Seed=7\nSub Accepted()\nCall Target(value+1,Inner(other)*-2)\nEnd Sub\nSub Rejected()\nsink=Outer(1+2)\n{tail}\nEnd Sub\n"
+            );
+            assert!(
+                matches!(
+                    parse(source.as_bytes()),
+                    Err(ModuleError::Unsupported { .. })
+                ),
+                "{tail:?}"
+            );
+        }
+        for source in [
+            "Call Target(1+2)\nSub Run()\nEnd Sub\n",
+            "Sub Run(Optional value=1+2)\nCall Target(1+2)\nEnd Sub\n",
+            "Const Seed=1+2\nSub Run()\nCall Target(1+2)\nEnd Sub\n",
+        ] {
+            assert!(
+                matches!(
+                    parse(source.as_bytes()),
+                    Err(ModuleError::Unsupported { .. })
+                ),
+                "{source}"
+            );
+        }
+    }
+
+    #[test]
+    fn expression_call_module_cancellation_at_every_checkpoint_never_publishes_partial_records() {
+        let source = b"Const Seed=7\nSub First(value As Long)\nsink=1+2\nCall Target((value+007),Inner(\"a\"\"b\" & [True]))\nEnd Sub\nSub Second()\nCall Finish(-1)\nEnd Sub\n";
+        let limits = ModuleLimits::new(source.len(), 8, 2)
+            .with_max_parameters(1)
+            .with_max_arguments(4);
+        let mut checkpoints = 0;
+        let inventory = module_inventory(source, limits, &mut || {
+            checkpoints += 1;
+            Ok::<(), ()>(())
+        })
+        .unwrap();
+        assert_eq!(inventory.procedures().len(), 2);
+        assert!(matches!(
+            inventory.procedures()[0].statements()[1],
+            ModuleBodyStatement::ExpressionCall(_)
+        ));
+        for cancelled_at in 1..=checkpoints {
+            let mut calls = 0;
+            assert_eq!(
+                module_inventory(source, limits, &mut || {
+                    calls += 1;
+                    if calls == cancelled_at {
+                        Err("stop")
+                    } else {
+                        Ok(())
+                    }
+                }),
+                Err(ModuleError::Cancelled("stop")),
+                "checkpoint {cancelled_at}"
+            );
+            assert_eq!(calls, cancelled_at);
+        }
+    }
+
+    #[test]
     fn expression_limits_are_aggregate_exact_short_zero_and_independent_of_old_records() {
         let source = b"Sub First()\nsink=1+2\nEnd Sub\nSub Second()\nsink=3*4\nEnd Sub\n";
         let limits = ModuleLimits::new(source.len(), 6, 2)
@@ -6836,7 +7086,6 @@ mod tests {
             "sink=1\r+2",
             "sink=1\0+2",
             "sink=1+2 extra",
-            "Call Ready(1+2)",
             "Const Local As Long=1+2",
             "Dim local As Long=F(1)+2",
         ] {

@@ -127,6 +127,7 @@ pub(super) fn prepare(
                 ModuleBodyStatement::ExpressionAssignment(assignment) => {
                     assignment.inventory().work_nodes()
                 }
+                ModuleBodyStatement::ExpressionCall(call) => call.inventory().work_nodes(),
                 ModuleBodyStatement::Declaration(_) | ModuleBodyStatement::Assignment(_) => 0,
             };
             processed_nodes = processed_nodes
@@ -740,6 +741,63 @@ fn body_candidates(
                 }
             }
         }
+        ModuleBodyStatement::ExpressionCall(call) if include_optional => {
+            push_body_candidate(
+                output,
+                maximum,
+                cancellation,
+                call.statement(),
+                StructuralRole::Reference,
+                "vba.application",
+                false,
+            )?;
+            push_body_candidate(
+                output,
+                maximum,
+                cancellation,
+                call.callee(),
+                StructuralRole::Reference,
+                "vba.invoked_identifier",
+                false,
+            )?;
+            // The leaf retains its proven root application for argument evidence;
+            // explicit Call already emitted that root with its complete statement.
+            for application in call.inventory().applications().iter().skip(1) {
+                cancellation.check()?;
+                push_body_candidate(
+                    output,
+                    maximum,
+                    cancellation,
+                    application.application(),
+                    StructuralRole::Reference,
+                    "vba.application",
+                    false,
+                )?;
+                push_body_candidate(
+                    output,
+                    maximum,
+                    cancellation,
+                    application.callee(),
+                    StructuralRole::Reference,
+                    "vba.invoked_get_identifier",
+                    false,
+                )?;
+            }
+            for value in call.inventory().values() {
+                cancellation.check()?;
+                if value.kind() == ModuleScalarValueKind::Name {
+                    push_body_candidate(
+                        output,
+                        maximum,
+                        cancellation,
+                        value.span(),
+                        StructuralRole::Reference,
+                        "vba.value_identifier",
+                        false,
+                    )?;
+                }
+            }
+        }
         ModuleBodyStatement::Call(call) if include_optional => {
             push_body_candidate(
                 output,
@@ -780,6 +838,7 @@ fn body_candidates(
         ModuleBodyStatement::Assignment(_)
         | ModuleBodyStatement::ApplicationAssignment(_)
         | ModuleBodyStatement::ExpressionAssignment(_)
+        | ModuleBodyStatement::ExpressionCall(_)
         | ModuleBodyStatement::Call(_) => {}
     }
     Ok(())
@@ -4344,8 +4403,8 @@ mod tests {
         for call in [
             "Call Target 1",
             "Call Target value, 1",
-            "Call Target(1 + 2)",
-            "Call Target(Nested(1))",
+            "Call Target(1 + &H2)",
+            "Call Target(Nested(1).member)",
             "Call Target(holder.Value)",
             "Call Target(value:=1)",
             "Call Target(1, extra:=2)",
@@ -4354,8 +4413,8 @@ mod tests {
             "Call Target(1,)",
             "Call Target(1,,2)",
             "Call Target(1;2)",
-            "Call Target((1))",
-            "Call Target(-1)",
+            "Call Target((1)",
+            "Call Target(-1.5)",
             "Call Target(1.5)",
             "Call Target(#1/2/2000#)",
             "Call Target(1) extra",
@@ -4493,6 +4552,212 @@ mod tests {
                 assert_eq!(fixture.provider.stats().pooled_parsers, 0);
                 assert_eq!(fixture.provider.stats().cache.entries, 0);
             }
+        }
+    }
+
+    #[test]
+    fn first_party_vba_expression_calls_match_the_private_native_route() {
+        for body in [
+            "Call Target(value + 1, Inner(other) * -2)",
+            "Call Target(1 + 2)",
+            "Call Target(Nested(1))",
+            "Call Target((1))",
+            "Call Target(-1)",
+            "Dim value As Long\nCall Run(Nested(1))",
+            "Call [Name]([value] + 1)",
+            "Call Line(value + 1)",
+            "Call Target(Not Not value, --other)",
+            "Call Target(Inner(), Inner(value), (value = 1))",
+            "Call Target(\"a,\"\"b\"\":()\" & \"x\")",
+            "Call Target(-(value + 1), [Line](other) + [Name](2))",
+        ] {
+            compare_native_procedural_body(body);
+        }
+        for operator in [
+            "+", "-", "*", "/", "\\", "^", "Mod", "&", "=", "<>", "<", "<=", ">", ">=", "Is",
+            "Like", "And", "Or", "Xor", "Eqv", "Imp",
+        ] {
+            for expression in [
+                format!("left {operator} right"),
+                format!("(left {operator} right)"),
+                format!("LeftValue(left) {operator} RightValue(right)"),
+            ] {
+                compare_native_procedural_body(&format!("Call Target({expression})"));
+            }
+        }
+        for first in ["+", "-", "*", "/", "\\", "^", "Mod", "&"] {
+            for second in ["+", "-", "*", "/", "\\", "^", "Mod", "&"] {
+                compare_native_procedural_body(&format!(
+                    "Call Target(left {first} middle {second} right)"
+                ));
+            }
+        }
+        for first in ["And", "Or", "Xor", "Eqv", "Imp"] {
+            for second in ["And", "Or", "Xor", "Eqv", "Imp"] {
+                compare_native_procedural_body(&format!(
+                    "Call Target(left {first} middle {second} right)"
+                ));
+            }
+        }
+        for source in [
+            "Sub Run()\r\n Call Target( _\r\n value + 007, Inner( _\r\n other) * -2) ' note\r\nEnd Sub\r\n",
+            "Sub Run(): Call Target(Inner(value + 1), 2): Call Target(Not False): End Sub\n",
+        ] {
+            for language in ["vba", "visual-basic-classic"] {
+                compare_native(&Fixture::new(source), language, &[]);
+            }
+        }
+    }
+
+    #[test]
+    fn first_party_vba_expression_call_root_and_tails_keep_whole_native_fallback() {
+        for call in [
+            "Call Target(1)+2",
+            "Call Target(Inner(1))+2",
+            "Call (Target(1))",
+            "Call Target(1)(2)",
+            "Call Target(1) extra",
+            "Call Target(1 +)",
+            "Call Target(Inner(1).member)",
+            "Call Target(Inner(1), extra:=2)",
+            "Call Target(Inner(1), ByVal extra)",
+            "Call Target(Inner(1),)",
+            "Call Target(, Inner(1))",
+            "Call Target(1 + &H2)",
+            "Call Target(1 + 2.0)",
+            "Call Target(2^3)",
+            "Call Target(value&other)",
+            "Call Target(Line(1) + 1)",
+            "Call Name(1 + 2)",
+            "Call Target 1 + 2",
+            "Call Module.Target(1 + 2)",
+            "Call Target(())",
+        ] {
+            let source =
+                format!("Sub Valid()\nEnd Sub\nSub Run()\nCall Other(1 + 2)\n{call}\nEnd Sub\n");
+            for language in ["vba", "visual-basic-classic"] {
+                let fixture = Fixture::new(&source);
+                let request = fixture.request(language, &[]);
+                assert!(
+                    prepare(
+                        &fixture.provider,
+                        &request,
+                        None,
+                        &[],
+                        fixture.provider.config.default_settings(),
+                        &Cancellation::new(),
+                    )
+                    .unwrap()
+                    .is_none(),
+                    "unsupported root/tail cannot publish an own prefix: {language}, {call}"
+                );
+                assert_eq!(fixture.provider.stats().pooled_parsers, 0);
+                assert_eq!(fixture.provider.stats().cache.entries, 0);
+            }
+        }
+    }
+
+    #[test]
+    fn first_party_vba_expression_call_work_and_candidate_limits_are_exact() {
+        let source = "Sub Run()\nCall Target(value + 1, Inner(other) * -2)\nEnd Sub\n";
+        for language in ["vba", "visual-basic-classic"] {
+            let mut fixture = Fixture::new(source);
+            let cancellation = Cancellation::new();
+            let request = fixture.request(language, &[]);
+            let prepared = prepare(
+                &fixture.provider,
+                &request,
+                None,
+                &[],
+                fixture.provider.config.default_settings(),
+                &cancellation,
+            )
+            .unwrap()
+            .unwrap();
+            assert_eq!(prepared.processed_nodes, 16);
+            let ModuleBodyStatement::ExpressionCall(call) =
+                &prepared.inventory.procedures()[0].statements()[0]
+            else {
+                panic!("the complete explicit Call retains its expression inventory");
+            };
+            assert_eq!(call.inventory().work_nodes(), 11);
+            assert_eq!(call.inventory().argument_count(), 3);
+            assert_eq!(call.argument_expressions().len(), 2);
+            assert_eq!(call.inventory().applications().len(), 2);
+            for (optional, exact) in [(false, 7), (true, 14)] {
+                let all = candidates(
+                    &prepared.inventory,
+                    request.source().bytes(),
+                    optional,
+                    exact,
+                    &cancellation,
+                )
+                .unwrap();
+                assert_eq!(all.len(), exact);
+                assert_eq!(
+                    normalize_query_candidates(all, &request, usize::MAX, &cancellation)
+                        .unwrap()
+                        .required,
+                    7
+                );
+                for (limit, observed) in [(exact - 1, exact), (0, 7)] {
+                    assert_eq!(
+                        candidates(
+                            &prepared.inventory,
+                            request.source().bytes(),
+                            optional,
+                            limit,
+                            &cancellation,
+                        )
+                        .unwrap_err(),
+                        AdapterError::RejectedRequest(RequestError::ProviderLimit {
+                            resource: ResourceKind::SyntaxNodes,
+                            observed,
+                            limit,
+                        })
+                    );
+                }
+            }
+            for limit in [16, 15, 10] {
+                fixture.limits = with_maximum_nodes(&fixture.limits, limit);
+                let request = fixture.request(language, &[]);
+                let result = prepare(
+                    &fixture.provider,
+                    &request,
+                    None,
+                    &[],
+                    fixture.provider.config.default_settings(),
+                    &cancellation,
+                );
+                if limit == 16 {
+                    assert_eq!(result.unwrap().unwrap().processed_nodes, 16);
+                } else {
+                    assert_eq!(
+                        result.err().unwrap(),
+                        AdapterError::RejectedRequest(RequestError::ProviderLimit {
+                            resource: ResourceKind::SyntaxNodes,
+                            observed: limit + 1,
+                            limit,
+                        })
+                    );
+                }
+            }
+            assert!(cancellation.cancel(rootlight_cancel::CancellationReason::ClientRequest));
+            let request = fixture.request(language, &[]);
+            assert!(matches!(
+                candidates(
+                    &prepared.inventory,
+                    request.source().bytes(),
+                    true,
+                    100,
+                    &cancellation,
+                ),
+                Err(AdapterError::Cancelled {
+                    reason: rootlight_cancel::CancellationReason::ClientRequest
+                })
+            ));
+            assert_eq!(fixture.provider.stats().pooled_parsers, 0);
+            assert_eq!(fixture.provider.stats().cache.entries, 0);
         }
     }
 
@@ -5234,7 +5499,7 @@ mod tests {
     #[test]
     fn first_party_vba_zero_argument_call_boundaries_keep_whole_native_fallback() {
         for call in [
-            "Call Target(1 + 2)",
+            "Call Target(1 +)",
             "Call Target value",
             "Call Target(value:=1)",
             "Call Target(,)",
@@ -5418,7 +5683,7 @@ mod tests {
     #[test]
     fn first_party_vba_scalar_body_boundaries_keep_whole_native_fallback() {
         for body in [
-            "Dim value As Long\nCall Run(Nested(1))",
+            "Dim value As Long\nCall Run(Nested(1).member)",
             "Dim value As Long\nRun value",
             "Dim value As Long\nholder.Value = 1",
             "Dim values(1) As Long",

@@ -7270,3 +7270,953 @@ fn expression_assignments_preserve_nested_proofs_and_generation_lifetimes() {
         }
     }
 }
+
+#[derive(Debug, Clone, Copy)]
+struct ExpressionCallState {
+    target: ExpressionFunctionTarget,
+    arguments: &'static str,
+    nested: &'static [&'static str],
+    argument_count: usize,
+}
+
+fn expression_call_source(state: ExpressionCallState) -> String {
+    let name = if matches!(state.target, ExpressionFunctionTarget::Missing) {
+        "OtherTarget"
+    } else {
+        "Target"
+    };
+    let declaration = format!("Sub {name}(ByVal payload As Long, ByVal second As Long)\nEnd Sub\n");
+    let target = if matches!(state.target, ExpressionFunctionTarget::Duplicate) {
+        declaration.repeat(2)
+    } else {
+        declaration
+    };
+    let shadow = if matches!(state.target, ExpressionFunctionTarget::LocalScalar) {
+        "Dim Target As Long\n"
+    } else {
+        ""
+    };
+    format!(
+        "Attribute VB_Name = \"Authored\"\nOption Explicit\n{target}Function Inner(ByVal value As Long) As Long\nInner = value\nEnd Function\nSub Run()\nDim local As Long\n{shadow}local = 1\nCall Target({})\nEnd Sub\n",
+        state.arguments
+    )
+}
+
+fn assert_expression_call_contract(
+    service: &FirstSliceService,
+    receipt: &FirstSliceIndexReceipt,
+    source: &str,
+    language: &str,
+    state: ExpressionCallState,
+) {
+    assert_source_and_identity_for_language(service, receipt, source, language);
+    let snapshot = service
+        .loaded_generation_snapshot(receipt.generation)
+        .unwrap();
+    let document = snapshot.document();
+    let file = &document.files[0];
+    let module = document
+        .entities
+        .iter()
+        .find(|entity| entity.kind == EntityKind::Module && entity.canonical_name == "Authored")
+        .unwrap();
+    assert_eq!(
+        module.container,
+        Some(rootlight_ir::ContainerRef::File(file.id))
+    );
+    let run = document
+        .entities
+        .iter()
+        .find(|entity| {
+            entity.canonical_name == "Run"
+                && entity.container == Some(rootlight_ir::ContainerRef::Entity(module.id))
+        })
+        .unwrap();
+    let parser = document
+        .provenance
+        .iter()
+        .find(|proof| proof.id == run.provenance)
+        .unwrap();
+    let reference = |range: std::ops::Range<usize>| {
+        SourceRef::new(
+            receipt.repository,
+            receipt.generation,
+            SourceSpan::new(
+                file.id,
+                u64::try_from(range.start).unwrap(),
+                u64::try_from(range.end).unwrap(),
+            )
+            .unwrap(),
+            content_hash(source.as_bytes()),
+            None,
+        )
+    };
+    let assert_declaration = |entity: &rootlight_ir::EntityRecord,
+                              owner,
+                              range: std::ops::Range<usize>,
+                              name: std::ops::Range<usize>| {
+        assert_eq!(
+            entity.container,
+            Some(rootlight_ir::ContainerRef::Entity(owner))
+        );
+        assert_eq!(entity.provenance, parser.id);
+        let definitions = document
+            .occurrences
+            .iter()
+            .filter(|site| {
+                site.role == OccurrenceRole::Definition
+                    && site.target == OccurrenceTarget::Resolved { symbol: entity.id }
+                    && site.source.span() == reference(name.clone()).span()
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(definitions.len(), 1, "{state:?}: definition {name:?}");
+        let definition = definitions[0];
+        assert_eq!(definition.enclosing, Some(owner));
+        assert_eq!(definition.provenance, parser.id);
+        assert_exact_parameter_source(service, receipt, source, &definition.source, name);
+        let clause = definition.evidence.source.as_ref().unwrap();
+        assert_exact_parameter_source(service, receipt, source, clause, range);
+        let contains = document
+            .relations
+            .iter()
+            .filter(|relation| {
+                relation.subject == RelationEndpoint::Entity(owner)
+                    && relation.predicate == RelationPredicate::Contains
+                    && relation.object == RelationEndpoint::Entity(entity.id)
+                    && relation.evidence.source.as_ref() == Some(clause)
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(contains.len(), 1);
+        assert_eq!(contains[0].provenance, parser.id);
+        let explained = service
+            .symbol_explain(receipt.generation, entity.id, &deadline())
+            .unwrap();
+        assert_eq!(&explained.data.entity, entity);
+        assert!(!explained.data.truncated);
+        assert!(
+            explained
+                .data
+                .occurrences
+                .iter()
+                .any(|site| site == definition)
+        );
+        assert!(
+            explained
+                .data
+                .relations
+                .iter()
+                .any(|edge| edge == contains[0])
+        );
+    };
+    let target_name = if matches!(state.target, ExpressionFunctionTarget::Missing) {
+        "OtherTarget"
+    } else {
+        "Target"
+    };
+    let target = document.entities.iter().find(|entity| {
+        entity.kind == EntityKind::Function
+            && entity.canonical_name == target_name
+            && entity.container == run.container
+    });
+    let inner = document
+        .entities
+        .iter()
+        .find(|entity| {
+            entity.kind == EntityKind::Function
+                && entity.canonical_name == "Inner"
+                && entity.container == run.container
+        })
+        .unwrap();
+    let mut formals = BTreeMap::new();
+    for (name, header, terminator, written, entity) in [
+        (
+            target_name,
+            format!("Sub {target_name}("),
+            "End Sub",
+            &[
+                ("ByVal payload As Long", "payload"),
+                ("ByVal second As Long", "second"),
+            ][..],
+            target,
+        ),
+        (
+            "Inner",
+            "Function Inner(".to_owned(),
+            "End Function",
+            &[("ByVal value As Long", "value")][..],
+            Some(inner),
+        ),
+    ] {
+        let headers = source
+            .match_indices(&header)
+            .map(|(start, _)| start)
+            .collect::<Vec<_>>();
+        let quarantined =
+            name == "Target" && matches!(state.target, ExpressionFunctionTarget::Duplicate);
+        assert_eq!(headers.len(), if quarantined { 2 } else { 1 });
+        let mut expected_gaps = BTreeSet::new();
+        if quarantined {
+            assert!(entity.is_none());
+            assert!(!document.entities.iter().any(|entity| {
+                entity.kind == EntityKind::Parameter
+                    && matches!(entity.canonical_name.as_str(), "payload" | "second")
+            }));
+        }
+        for &start in &headers {
+            let end = start + source[start..].find(terminator).unwrap() + terminator.len();
+            let name_start = start + header.find(name).unwrap();
+            let mut declarations = vec![(start..end, name_start..name_start + name.len())];
+            for &(clause, parameter_name) in written {
+                let clause_start = start + source[start..end].find(clause).unwrap();
+                let parameter_start = clause_start + clause.find(parameter_name).unwrap();
+                declarations.push((
+                    clause_start..clause_start + clause.len(),
+                    parameter_start..parameter_start + parameter_name.len(),
+                ));
+            }
+            if quarantined {
+                // Ambiguous procedure scopes retain declarations as diagnostic
+                // anchors, not first-wins callable or parameter identities.
+                for (range, token) in declarations {
+                    let expected = reference(range.clone());
+                    let gaps = document
+                        .skipped_regions
+                        .iter()
+                        .filter(|gap| {
+                            gap.source.span() == expected.span()
+                                && gap.detail == "stable-scope-identity-unavailable"
+                        })
+                        .collect::<Vec<_>>();
+                    assert_eq!(gaps.len(), 1, "{state:?}: quarantine {range:?}");
+                    let gap = gaps[0];
+                    assert_eq!(gap.domain, rootlight_ir::FactDomain::Entities);
+                    assert_eq!(
+                        gap.reason,
+                        rootlight_ir::SkippedRegionReason::UnsupportedConstruct
+                    );
+                    assert_eq!(gap.repository, receipt.repository);
+                    assert_eq!(gap.generation, receipt.generation);
+                    assert_eq!(gap.provenance, parser.id);
+                    assert_eq!(gap.evidence.source.as_ref(), Some(&gap.source));
+                    assert_exact_parameter_source(
+                        service,
+                        receipt,
+                        source,
+                        &gap.source,
+                        range.clone(),
+                    );
+                    assert!(range.start <= token.start && token.end <= range.end);
+                    let token_source = reference(token.clone());
+                    assert_exact_parameter_source(service, receipt, source, &token_source, token);
+                    assert!(!document.occurrences.iter().any(|site| {
+                        site.role == OccurrenceRole::Definition
+                            && site.source.span() == token_source.span()
+                    }));
+                    assert!(!document.relations.iter().any(|edge| {
+                        edge.predicate == RelationPredicate::Contains
+                            && edge
+                                .evidence
+                                .source
+                                .as_ref()
+                                .is_some_and(|source| source.span() == expected.span())
+                    }));
+                    assert!(expected_gaps.insert(expected.span()));
+                }
+            } else {
+                let entity = entity.unwrap();
+                assert_exact_parameter_source(
+                    service,
+                    receipt,
+                    source,
+                    entity.evidence.source.as_ref().unwrap(),
+                    start..end,
+                );
+                assert_declaration(
+                    entity,
+                    module.id,
+                    declarations[0].0.clone(),
+                    declarations[0].1.clone(),
+                );
+                let parameters = document
+                    .entities
+                    .iter()
+                    .filter(|parameter| {
+                        parameter.kind == EntityKind::Parameter
+                            && parameter.container
+                                == Some(rootlight_ir::ContainerRef::Entity(entity.id))
+                    })
+                    .collect::<Vec<_>>();
+                assert_eq!(parameters.len(), written.len());
+                for ((_, parameter_name), (range, token)) in written.iter().zip(&declarations[1..])
+                {
+                    let parameter = parameters
+                        .iter()
+                        .find(|parameter| parameter.canonical_name == *parameter_name)
+                        .unwrap();
+                    assert_exact_parameter_source(
+                        service,
+                        receipt,
+                        source,
+                        parameter.evidence.source.as_ref().unwrap(),
+                        range.clone(),
+                    );
+                    assert_declaration(parameter, entity.id, range.clone(), token.clone());
+                }
+                assert!(formals.insert(entity.id, parameters).is_none());
+            }
+        }
+        if quarantined {
+            assert_eq!(expected_gaps.len(), 6);
+            let actual = document
+                .skipped_regions
+                .iter()
+                .filter(|gap| gap.detail == "stable-scope-identity-unavailable")
+                .map(|gap| gap.source.span())
+                .collect::<Vec<_>>();
+            assert_eq!(actual.len(), expected_gaps.len());
+            assert_eq!(actual.into_iter().collect::<BTreeSet<_>>(), expected_gaps);
+        }
+    }
+    assert_eq!(
+        document
+            .entities
+            .iter()
+            .filter(|entity| entity.kind == EntityKind::Parameter)
+            .count(),
+        if target.is_some() { 3 } else { 1 }
+    );
+    let local = document
+        .entities
+        .iter()
+        .find(|entity| {
+            entity.kind == EntityKind::Variable
+                && entity.canonical_name == "local"
+                && entity.container == Some(rootlight_ir::ContainerRef::Entity(run.id))
+        })
+        .unwrap();
+    let local_start = source.find("Dim local As Long").unwrap() + "Dim ".len();
+    assert_exact_parameter_source(
+        service,
+        receipt,
+        source,
+        local.evidence.source.as_ref().unwrap(),
+        local_start..local_start + "local As Long".len(),
+    );
+    assert_declaration(
+        local,
+        run.id,
+        local_start..local_start + "local As Long".len(),
+        local_start..local_start + "local".len(),
+    );
+    let shadow = document.entities.iter().find(|entity| {
+        entity.kind == EntityKind::Variable
+            && entity.canonical_name == "Target"
+            && entity.container == Some(rootlight_ir::ContainerRef::Entity(run.id))
+    });
+    assert_eq!(
+        shadow.is_some(),
+        matches!(state.target, ExpressionFunctionTarget::LocalScalar)
+    );
+    if let Some(shadow) = shadow {
+        let start = source.find("Dim Target As Long").unwrap() + "Dim ".len();
+        assert_declaration(
+            shadow,
+            run.id,
+            start..start + "Target As Long".len(),
+            start..start + "Target".len(),
+        );
+    }
+    for name in [
+        "Target",
+        "OtherTarget",
+        "Inner",
+        "payload",
+        "second",
+        "value",
+        "local",
+    ] {
+        let located = service
+            .code_locate(
+                receipt.generation,
+                name.to_owned(),
+                LocateMode::Exact,
+                20,
+                0,
+                &deadline(),
+            )
+            .unwrap();
+        assert_eq!(
+            located
+                .data
+                .hits
+                .iter()
+                .filter_map(|hit| hit.symbol)
+                .collect::<BTreeSet<_>>(),
+            document
+                .entities
+                .iter()
+                .filter(|entity| entity.canonical_name == name)
+                .map(|entity| entity.id)
+                .collect::<BTreeSet<_>>()
+        );
+        for hit in located.data.hits.iter().filter(|hit| hit.symbol.is_some()) {
+            let entity = document
+                .entities
+                .iter()
+                .find(|entity| Some(entity.id) == hit.symbol)
+                .unwrap();
+            assert_eq!(hit.source.as_ref(), entity.evidence.source.as_ref());
+        }
+    }
+    let statement = format!("Call Target({})", state.arguments);
+    let statement_start = source.find(&statement).unwrap();
+    let statement_end = statement_start + statement.len();
+    let outer_callable = matches!(state.target, ExpressionFunctionTarget::Unique);
+    let outer_receiver = if outer_callable {
+        Some(target.unwrap().id)
+    } else {
+        shadow.map(|entity| entity.id)
+    };
+    let mut probes = vec![(
+        statement_start..statement_end,
+        statement_start + "Call ".len(),
+        "Target",
+        true,
+        outer_receiver,
+        outer_callable,
+        outer_callable && state.argument_count == 2,
+    )];
+    for &application in state.nested {
+        let start = statement_start + statement.find(application).unwrap();
+        probes.push((
+            start..start + application.len(),
+            start,
+            "Inner",
+            false,
+            Some(inner.id),
+            true,
+            true,
+        ));
+    }
+    assert_eq!(
+        document
+            .occurrences
+            .iter()
+            .filter(|site| site.syntax_kind == "vba.application.reference")
+            .count(),
+        probes.len()
+    );
+    assert_eq!(
+        document
+            .occurrences
+            .iter()
+            .filter(|site| site.syntax_kind == "vba.invoked_identifier.reference")
+            .count(),
+        1
+    );
+    assert_eq!(
+        document
+            .occurrences
+            .iter()
+            .filter(|site| site.syntax_kind == "vba.invoked_get_identifier.reference")
+            .count(),
+        state.nested.len()
+    );
+    let mut expected_calls = BTreeMap::new();
+    for (range, callee_start, name, outer, receiver, callable, proven) in probes {
+        let sites = document
+            .occurrences
+            .iter()
+            .filter(|site| {
+                site.syntax_kind == "vba.application.reference"
+                    && site.source.span() == reference(range.clone()).span()
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(sites.len(), 1, "{state:?}: application {range:?}");
+        let application = sites[0];
+        assert_eq!(application.role, OccurrenceRole::Reference);
+        assert_eq!(application.enclosing, Some(run.id));
+        assert_exact_parameter_source(service, receipt, source, &application.source, range);
+        if proven {
+            assert_eq!(
+                application.target,
+                OccurrenceTarget::Resolved {
+                    symbol: receiver.unwrap()
+                }
+            );
+        } else {
+            assert!(matches!(
+                application.target,
+                OccurrenceTarget::Unresolved { .. }
+            ));
+        }
+        let refers = document
+            .relations
+            .iter()
+            .filter(|edge| {
+                edge.subject == RelationEndpoint::Occurrence(application.id)
+                    && edge.predicate == RelationPredicate::RefersTo
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(refers.len(), usize::from(proven));
+        if proven {
+            assert_eq!(
+                refers[0].object,
+                RelationEndpoint::Entity(receiver.unwrap())
+            );
+            assert_eq!(refers[0].provenance, application.provenance);
+            assert_eq!(
+                refers[0].evidence.source.as_ref(),
+                Some(&application.source)
+            );
+            let explained = service
+                .symbol_explain(receipt.generation, receiver.unwrap(), &deadline())
+                .unwrap();
+            assert!(!explained.data.truncated);
+            assert!(
+                explained
+                    .data
+                    .occurrences
+                    .iter()
+                    .any(|site| site == application)
+            );
+            assert!(
+                explained
+                    .data
+                    .relations
+                    .iter()
+                    .any(|edge| edge == refers[0])
+            );
+        }
+        assert!(!document.relations.iter().any(|edge| edge.subject
+            == RelationEndpoint::Occurrence(application.id)
+            && edge.predicate == RelationPredicate::Calls));
+        let gaps = document
+            .skipped_regions
+            .iter()
+            .filter(|gap| {
+                gap.source == application.source
+                    && gap.detail == "vba-call-or-index-target-unavailable"
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(gaps.len(), usize::from(!proven));
+        for gap in gaps {
+            assert_eq!(gap.provenance, parser.id);
+            assert_eq!(gap.evidence.source.as_ref(), Some(&application.source));
+        }
+        let proof = document
+            .provenance
+            .iter()
+            .find(|proof| proof.id == application.provenance)
+            .unwrap();
+        if proven {
+            let target_id = receiver.unwrap();
+            let entity = document
+                .entities
+                .iter()
+                .find(|entity| entity.id == target_id)
+                .unwrap();
+            let mut parents = vec![FactRef::Fact(parser.id), FactRef::Entity(target_id)];
+            for &parameter in &formals[&target_id] {
+                parents.push(FactRef::Entity(parameter.id));
+                let clause = parameter.evidence.source.as_ref().unwrap();
+                assert!(proof.input_sources.contains(clause));
+                assert!(proof.evidence_sources.contains(clause));
+                let definition = document
+                    .occurrences
+                    .iter()
+                    .find(|site| {
+                        site.role == OccurrenceRole::Definition
+                            && site.target
+                                == OccurrenceTarget::Resolved {
+                                    symbol: parameter.id,
+                                }
+                    })
+                    .unwrap();
+                assert!(proof.evidence_sources.contains(&definition.source));
+            }
+            parents.sort_unstable();
+            parents.dedup();
+            assert_eq!(proof.derivation_parents, parents);
+            assert_eq!(
+                proof.rule.as_deref(),
+                Some("vba-procedure-application-v1.source")
+            );
+            assert!(
+                proof
+                    .input_sources
+                    .contains(file.evidence.source.as_ref().unwrap())
+            );
+            assert!(
+                proof
+                    .evidence_sources
+                    .contains(entity.evidence.source.as_ref().unwrap())
+            );
+            assert!(proof.evidence_sources.contains(&application.source));
+        } else {
+            assert_eq!(proof.id, parser.id);
+            assert_eq!(proof.rule, None);
+        }
+        assert_eq!(proof.producer_kind, parser.producer_kind);
+        assert_eq!(proof.binary_digest, parser.binary_digest);
+        assert_eq!(proof.frontend_version, parser.frontend_version);
+        for source_ref in proof.input_sources.iter().chain(&proof.evidence_sources) {
+            assert_eq!(source_ref.repository(), receipt.repository);
+            assert_eq!(source_ref.generation(), receipt.generation);
+            assert_eq!(source_ref.content_hash(), content_hash(source.as_bytes()));
+            assert_eq!(source_ref.span().file(), file.id);
+            assert!(source_ref.span().end_byte() <= u64::try_from(source.len()).unwrap());
+        }
+        let label = if outer {
+            "vba.invoked_identifier.reference"
+        } else {
+            "vba.invoked_get_identifier.reference"
+        };
+        let callees = document
+            .occurrences
+            .iter()
+            .filter(|site| {
+                site.syntax_kind == label
+                    && site.source.span()
+                        == reference(callee_start..callee_start + name.len()).span()
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(callees.len(), 1);
+        let callee = callees[0];
+        assert_eq!(callee.enclosing, Some(run.id));
+        assert_eq!(callee.provenance, parser.id);
+        assert_eq!(
+            callee.role,
+            if callable {
+                OccurrenceRole::CallSite
+            } else {
+                OccurrenceRole::Reference
+            }
+        );
+        assert_exact_parameter_source(
+            service,
+            receipt,
+            source,
+            &callee.source,
+            callee_start..callee_start + name.len(),
+        );
+        if let Some(symbol) = receiver {
+            assert_eq!(callee.target, OccurrenceTarget::Resolved { symbol });
+        } else {
+            assert!(matches!(callee.target, OccurrenceTarget::Unresolved { .. }));
+        }
+        let explained_callee = receiver.map(|symbol| {
+            let explained = service
+                .symbol_explain(receipt.generation, symbol, &deadline())
+                .unwrap();
+            assert!(!explained.data.truncated);
+            assert!(explained.data.occurrences.iter().any(|site| site == callee));
+            explained
+        });
+        for predicate in [RelationPredicate::Calls, RelationPredicate::RefersTo] {
+            let present = receiver.is_some()
+                && if callable {
+                    predicate == RelationPredicate::Calls
+                } else {
+                    predicate == RelationPredicate::RefersTo
+                };
+            let edges = document
+                .relations
+                .iter()
+                .filter(|edge| {
+                    edge.subject == RelationEndpoint::Occurrence(callee.id)
+                        && edge.predicate == predicate
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(edges.len(), usize::from(present));
+            if present {
+                assert_eq!(edges[0].object, RelationEndpoint::Entity(receiver.unwrap()));
+                assert_eq!(edges[0].provenance, parser.id);
+                assert_eq!(edges[0].evidence.source.as_ref(), Some(&callee.source));
+                assert!(
+                    explained_callee
+                        .as_ref()
+                        .unwrap()
+                        .data
+                        .relations
+                        .iter()
+                        .any(|edge| edge == edges[0])
+                );
+            }
+        }
+        if callable {
+            assert!(
+                expected_calls
+                    .insert(callee.source.clone(), receiver.unwrap())
+                    .is_none()
+            );
+        }
+    }
+    let reads = document
+        .occurrences
+        .iter()
+        .filter(|site| {
+            site.syntax_kind == "vba.value_identifier.reference" && site.enclosing == Some(run.id)
+        })
+        .collect::<Vec<_>>();
+    let written_reads = statement
+        .match_indices("local")
+        .map(|(offset, _)| statement_start + offset)
+        .collect::<Vec<_>>();
+    assert_eq!(reads.len(), written_reads.len());
+    let explained = service
+        .symbol_explain(receipt.generation, local.id, &deadline())
+        .unwrap();
+    assert_eq!(&explained.data.entity, local);
+    assert!(!explained.data.truncated);
+    for start in written_reads {
+        let sites = reads
+            .iter()
+            .filter(|site| site.source.span() == reference(start..start + "local".len()).span())
+            .collect::<Vec<_>>();
+        assert_eq!(sites.len(), 1);
+        let site = sites[0];
+        assert_eq!(site.role, OccurrenceRole::Reference);
+        assert_eq!(site.target, OccurrenceTarget::Resolved { symbol: local.id });
+        assert_eq!(site.provenance, parser.id);
+        assert_exact_parameter_source(
+            service,
+            receipt,
+            source,
+            &site.source,
+            start..start + "local".len(),
+        );
+        assert!(
+            explained
+                .data
+                .occurrences
+                .iter()
+                .any(|candidate| candidate == *site)
+        );
+        let edges = document
+            .relations
+            .iter()
+            .filter(|edge| {
+                edge.subject == RelationEndpoint::Occurrence(site.id)
+                    && edge.predicate == RelationPredicate::RefersTo
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(edges.len(), 1);
+        assert_eq!(edges[0].object, RelationEndpoint::Entity(local.id));
+        assert_eq!(edges[0].provenance, parser.id);
+        assert_eq!(edges[0].evidence.source.as_ref(), Some(&site.source));
+        assert!(explained.data.relations.iter().any(|edge| edge == edges[0]));
+        assert!(
+            !document
+                .relations
+                .iter()
+                .any(|edge| edge.subject == RelationEndpoint::Occurrence(site.id)
+                    && edge.predicate == RelationPredicate::Calls)
+        );
+    }
+    let call_edges = document
+        .relations
+        .iter()
+        .filter(|edge| edge.predicate == RelationPredicate::Calls)
+        .collect::<Vec<_>>();
+    assert_eq!(call_edges.len(), expected_calls.len());
+    assert_eq!(
+        expected_calls.len(),
+        state.nested.len() + usize::from(outer_callable)
+    );
+    let relationships = service
+        .symbol_relationships(
+            receipt.generation,
+            BTreeSet::from([run.id]),
+            vec![RelationFamily::Calls],
+            Some(RelationDirection::Outbound),
+            0,
+            20,
+            0,
+            &deadline(),
+        )
+        .unwrap();
+    assert!(!relationships.data.truncated);
+    let items = relationships
+        .data
+        .groups
+        .iter()
+        .flat_map(|group| &group.items)
+        .collect::<Vec<_>>();
+    assert_eq!(items.len(), expected_calls.len());
+    assert_eq!(
+        items
+            .iter()
+            .flat_map(|item| item.source_refs.iter().cloned())
+            .collect::<BTreeSet<_>>(),
+        expected_calls.keys().cloned().collect::<BTreeSet<_>>()
+    );
+    for item in items {
+        assert_eq!(item.source_refs.len(), 1);
+        assert_eq!(Some(&item.symbol), expected_calls.get(&item.source_refs[0]));
+        let span = item.source_refs[0].span();
+        assert_exact_parameter_source(
+            service,
+            receipt,
+            source,
+            &item.source_refs[0],
+            usize::try_from(span.start_byte()).unwrap()..usize::try_from(span.end_byte()).unwrap(),
+        );
+    }
+}
+
+#[test]
+fn explicit_call_expressions_preserve_nested_targets_and_generation_lifetimes() {
+    let initial = ExpressionCallState {
+        target: ExpressionFunctionTarget::Unique,
+        arguments: "Inner(local + 2), Inner(Inner(local))",
+        nested: &["Inner(local + 2)", "Inner(Inner(local))", "Inner(local)"],
+        argument_count: 2,
+    };
+    let states = [
+        initial,
+        ExpressionCallState {
+            arguments: "Inner(local + 3), Inner(Inner(local))",
+            nested: &["Inner(local + 3)", "Inner(Inner(local))", "Inner(local)"],
+            ..initial
+        },
+        ExpressionCallState {
+            target: ExpressionFunctionTarget::Missing,
+            ..initial
+        },
+        ExpressionCallState {
+            target: ExpressionFunctionTarget::Duplicate,
+            ..initial
+        },
+        ExpressionCallState {
+            target: ExpressionFunctionTarget::LocalScalar,
+            ..initial
+        },
+        ExpressionCallState {
+            arguments: "Inner(local + 2)",
+            nested: &["Inner(local + 2)"],
+            argument_count: 1,
+            ..initial
+        },
+        ExpressionCallState {
+            arguments: "Inner(local + 2), Inner(Inner(local)), 9",
+            argument_count: 3,
+            ..initial
+        },
+        ExpressionCallState {
+            arguments: "Inner(local + &H2), Inner(Inner(local))",
+            nested: &["Inner(local + &H2)", "Inner(Inner(local))", "Inner(local)"],
+            ..initial
+        },
+        initial,
+    ];
+    for language in ["visual-basic-classic", "vba"] {
+        let current = std::env::current_dir().unwrap();
+        let repository = tempfile::tempdir_in(&current).unwrap();
+        let storage = tempfile::tempdir_in(&current).unwrap();
+        let paths = rootlight_runtime::RuntimePaths::new(
+            storage.path().join("state"),
+            storage.path().join("runtime"),
+        )
+        .unwrap();
+        paths.prepare_owner().unwrap();
+        let configuration = (language == "vba").then_some("version='1.3'\n[extensions.source-languages]\nversion='1.0'\ncritical=true\n[extensions.source-languages.data.extensions]\nbas='vba'\n");
+        let policy = FirstSliceStoragePolicy::resolve_user_config(configuration, 4).unwrap();
+        assert_eq!(policy.retained_generations(), 2);
+        let mut previous: Option<(FirstSliceIndexReceipt, String, ExpressionCallState)> = None;
+        let mut initial_source = None;
+        let mut initial_logical = None;
+        for (position, state) in states.into_iter().enumerate() {
+            let source = expression_call_source(state);
+            fs::write(repository.path().join("module.bas"), &source).unwrap();
+            let mut service = FirstSliceService::new_durable_with_policy(
+                policy.clone(),
+                paths.state_dir(),
+                &deadline(),
+            )
+            .unwrap();
+            let prepared = service
+                .prepare_repository(repository.path(), &deadline())
+                .unwrap();
+            let committed = service
+                .publish_prepared_with_metrics(prepared, &deadline())
+                .unwrap();
+            assert_eq!(committed.evidence().rebuilt_files, 1);
+            assert_eq!(committed.evidence().reused_files, 0);
+            if position > 0 {
+                assert_eq!(committed.evidence().changed_files, 1);
+            }
+            let receipt = committed.receipt().clone();
+            assert_expression_call_contract(&service, &receipt, &source, language, state);
+            assert_eq!(
+                receipt,
+                service
+                    .index_repository(repository.path(), &deadline())
+                    .unwrap()
+            );
+            if let Some((old_receipt, old_source, old_state)) = &previous {
+                assert_ne!(receipt.generation, old_receipt.generation);
+                assert!(receipt.logical_snapshot.is_some());
+                assert_ne!(receipt.logical_snapshot, old_receipt.logical_snapshot);
+                if position == 1 {
+                    assert_eq!(source, old_source.replace("local + 2", "local + 3"));
+                }
+                assert_expression_call_contract(
+                    &service,
+                    old_receipt,
+                    old_source,
+                    language,
+                    *old_state,
+                );
+            }
+            drop(service);
+            let mut service = FirstSliceService::new_durable_with_policy(
+                policy.clone(),
+                paths.state_dir(),
+                &deadline(),
+            )
+            .unwrap();
+            assert_eq!(
+                receipt,
+                service
+                    .index_repository(repository.path(), &deadline())
+                    .unwrap()
+            );
+            assert_expression_call_contract(&service, &receipt, &source, language, state);
+            if let Some((old_receipt, old_source, old_state)) = &previous {
+                assert_expression_call_contract(
+                    &service,
+                    old_receipt,
+                    old_source,
+                    language,
+                    *old_state,
+                );
+            }
+            let prepared = service
+                .prepare_repository_with_options(
+                    repository.path(),
+                    FirstSliceIndexOptions::clean_rebuild(FirstSliceIndexMode::Structural),
+                    &deadline(),
+                )
+                .unwrap();
+            let committed = service
+                .publish_prepared_with_metrics(prepared, &deadline())
+                .unwrap();
+            assert_eq!(committed.evidence().rebuilt_files, 1);
+            assert_eq!(committed.evidence().reused_files, 0);
+            let rebuilt = committed.receipt().clone();
+            assert_ne!(receipt.generation, rebuilt.generation);
+            assert!(receipt.logical_snapshot.is_some());
+            assert_eq!(receipt.logical_snapshot, rebuilt.logical_snapshot);
+            assert_expression_call_contract(&service, &rebuilt, &source, language, state);
+            if position == 0 {
+                initial_source = Some(source.clone());
+                initial_logical = receipt.logical_snapshot.clone();
+            } else if position + 1 == states.len() {
+                assert_eq!(initial_source.as_ref(), Some(&source));
+                assert_eq!(receipt.logical_snapshot, initial_logical);
+            }
+            previous = Some((rebuilt, source, state));
+        }
+    }
+}

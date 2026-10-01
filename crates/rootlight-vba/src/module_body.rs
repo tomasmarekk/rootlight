@@ -20,6 +20,8 @@ pub enum ModuleBodyStatement {
     ExpressionAssignment(module_expression::ModuleExpressionAssignment),
     /// One explicit Call with a simple callee and a complete scalar argument list.
     Call(ModuleCall),
+    /// One explicit Call with a complete parenthesized positional expression list.
+    ExpressionCall(module_expression::ModuleExpressionCall),
 }
 
 impl ModuleBodyStatement {
@@ -32,6 +34,7 @@ impl ModuleBodyStatement {
             Self::ApplicationAssignment(assignment) => assignment.statement(),
             Self::ExpressionAssignment(assignment) => assignment.statement(),
             Self::Call(call) => call.statement(),
+            Self::ExpressionCall(call) => call.statement(),
         }
     }
 }
@@ -286,7 +289,14 @@ pub(super) fn statement_with_expression_limits<E>(
     let mut cursor = 0;
     let first = word(text, &mut cursor, check).map_err(ModuleError::Cancelled)?;
     if first.eq_ignore_ascii_case(b"Call") {
-        return explicit_call(text, range, cursor, maximum_arguments, check);
+        return explicit_call(
+            text,
+            range,
+            cursor,
+            maximum_arguments,
+            maximum_expression_nodes,
+            check,
+        );
     }
     scalar_statement(
         text,
@@ -442,6 +452,7 @@ fn explicit_call<E>(
     range: Range<usize>,
     mut cursor: usize,
     maximum_arguments: usize,
+    maximum_expression_nodes: usize,
     check: &mut impl FnMut() -> Result<(), E>,
 ) -> Result<Option<ModuleBodyStatement>, ModuleError<E>> {
     // The resolver recognizes an explicit Call only with an immediate space/tab
@@ -465,6 +476,35 @@ fn explicit_call<E>(
     }
     cursor += logical_whitespace_len(text.get(cursor..).unwrap_or_default(), check)
         .map_err(ModuleError::Cancelled)?;
+    if let Some(statement) = atomic_call(
+        text,
+        range.clone(),
+        cursor,
+        callee.clone(),
+        maximum_arguments,
+        check,
+    )? {
+        return Ok(Some(statement));
+    }
+    module_expression::expression_call(
+        text,
+        callee,
+        range,
+        maximum_expression_nodes,
+        maximum_arguments,
+        check,
+    )
+    .map(|call| call.map(ModuleBodyStatement::ExpressionCall))
+}
+
+fn atomic_call<E>(
+    text: &[u8],
+    range: Range<usize>,
+    mut cursor: usize,
+    callee: Range<usize>,
+    maximum_arguments: usize,
+    check: &mut impl FnMut() -> Result<(), E>,
+) -> Result<Option<ModuleBodyStatement>, ModuleError<E>> {
     let mut argument_values = Vec::new();
     let arguments = if text.get(cursor) == Some(&b'(') {
         let start = cursor;
@@ -1069,7 +1109,7 @@ mod tests {
     }
 
     #[test]
-    fn incomplete_or_nonscalar_call_arguments_never_return_a_partial_list() {
+    fn incomplete_or_unsupported_call_arguments_never_return_a_partial_list() {
         for unsupported in [
             "",
             " ",
@@ -1078,18 +1118,10 @@ mod tests {
             "[value]:=1",
             "ByVal value",
             "ByRef value",
-            "(1)",
             "()",
-            "target()",
             "target.member",
             ".member",
             "target!member",
-            "1+2",
-            "1 - 2",
-            "True And False",
-            "Not True",
-            "-1",
-            "+1",
             "1.0",
             ".5",
             "1E2",
@@ -1145,6 +1177,337 @@ mod tests {
     }
 
     #[test]
+    fn expression_calls_admit_former_atom_boundaries_with_exact_outer_argument_ranges() {
+        for (source, expected, work, arguments) in [
+            ("Call Finish(1+2)", vec!["1+2"], 5, 1),
+            ("Call Finish(1 - 2)", vec!["1 - 2"], 5, 1),
+            ("Call Finish(True And False)", vec!["True And False"], 5, 1),
+            ("Call Finish(Not True)", vec!["Not True"], 4, 1),
+            ("Call Finish(-1)", vec!["-1"], 4, 1),
+            ("Call Finish(+1)", vec!["+1"], 4, 1),
+            ("Call Finish((1))", vec!["(1)"], 4, 1),
+            ("Call Finish(target())", vec!["target()"], 4, 1),
+            ("Call Finish(0,(1),2)", vec!["0", "(1)", "2"], 6, 3),
+            ("Call Finish(Read(1))", vec!["Read(1)"], 5, 2),
+            ("Call Line(1+2)", vec!["1+2"], 5, 1),
+            ("Call [Name](1+2)", vec!["1+2"], 5, 1),
+        ] {
+            let ModuleBodyStatement::ExpressionCall(call) = read(source.as_bytes()).unwrap() else {
+                panic!("complete expression Call expected in {source}");
+            };
+            assert_eq!(call.statement(), 0..source.len());
+            assert_eq!(call.inventory().work_nodes(), work);
+            assert_eq!(call.inventory().argument_count(), arguments);
+            assert_eq!(
+                call.argument_expressions()
+                    .iter()
+                    .map(|range| &source[range.clone()])
+                    .collect::<Vec<_>>(),
+                expected
+            );
+            let outer = &call.inventory().applications()[0];
+            assert_eq!(outer.callee(), call.callee());
+            assert_eq!(outer.arguments(), call.arguments());
+            assert_eq!(outer.argument_expressions(), call.argument_expressions());
+            assert_eq!(outer.application(), call.callee().start..source.len());
+        }
+    }
+
+    #[test]
+    fn expression_calls_preserve_rebased_ranges_nested_records_and_logical_trivia() {
+        for newline in ["\n", "\r\n"] {
+            let parentheses = format!("(value _{newline} + 1, [Inner] _{newline} (other) * -2)");
+            let text = format!("cAlL\t_{newline} [Target] _{newline} {parentheses}");
+            let source = [b"prefix\n".as_slice(), text.as_bytes(), b"\ntail"].concat();
+            let range = 7..7 + text.len();
+            let ModuleBodyStatement::ExpressionCall(call) =
+                statement_with_expression_limits(&source, range.clone(), 3, 11, &mut || {
+                    Ok::<(), ()>(())
+                })
+                .unwrap()
+                .unwrap()
+            else {
+                panic!("complete nested expression Call expected");
+            };
+            assert_eq!(call.statement(), range);
+            assert_eq!(&source[call.callee()], b"[Target]");
+            assert_eq!(&source[call.arguments()], parentheses.as_bytes());
+            assert_eq!(call.inventory().work_nodes(), 11);
+            assert_eq!(call.inventory().argument_count(), 3);
+            assert_eq!(
+                call.inventory()
+                    .values()
+                    .iter()
+                    .map(|value| &source[value.span()])
+                    .collect::<Vec<_>>(),
+                [b"value".as_slice(), b"1", b"other", b"2"]
+            );
+            let applications = call.inventory().applications();
+            assert_eq!(applications.len(), 2);
+            assert_eq!(&source[applications[0].callee()], b"[Target]");
+            assert_eq!(&source[applications[1].callee()], b"[Inner]");
+            assert_eq!(call.argument_expressions().len(), 2);
+            assert_eq!(
+                &source[call.argument_expressions()[0].clone()],
+                format!("value _{newline} + 1").as_bytes()
+            );
+            assert_eq!(
+                &source[call.argument_expressions()[1].clone()],
+                format!("[Inner] _{newline} (other) * -2").as_bytes()
+            );
+            assert_eq!(
+                &source[applications[1].argument_expressions()[0].clone()],
+                b"other"
+            );
+            for application in applications {
+                assert!(call.callee().start <= application.application().start);
+                assert!(application.application().end <= call.arguments().end);
+                for argument in application.argument_expressions() {
+                    assert!(application.arguments().start < argument.start);
+                    assert!(argument.start < argument.end);
+                    assert!(argument.end < application.arguments().end);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn expression_calls_require_the_exact_outer_application_not_an_expression_prefix() {
+        for source in [
+            "Call Target(1)+2",
+            "Call Target(1) = 2",
+            "Call (Target(1))",
+            "Call -Target(1)",
+            "Call Not Target(1)",
+            "Call Target(1)(2)",
+            "Call Target(1+2)()",
+            "Call Target(1+2).member",
+            "Call Target(1+2) trailing",
+            "Call Target(1+)",
+            "Call Target((1+2)",
+            "Call Target(1+2))",
+            "Call Target(1+2,)",
+            "Call Target(,1+2)",
+            "Call Target(1+2,,3)",
+            "Call Target(value:=1+2)",
+            "Call Target(ByVal value+1)",
+            "Call Target(ByRef value+1)",
+            "Call Target(Inner(value:=1))",
+            "Call Target(Inner(1,))",
+            "Call Target(Inner(1).member)",
+            "Call Target(Line(1)+2)",
+            "Call Name(1+2)",
+            "Call Target 1+2",
+            "Call Target value+1,2",
+        ] {
+            assert!(read(source.as_bytes()).is_none(), "{source}");
+        }
+    }
+
+    #[test]
+    fn expression_calls_retain_every_operator_without_claiming_evaluation_or_binding() {
+        for operator in [
+            "^", "*", "/", "\\", "Mod", "+", "-", "&", "=", "<>", "<", "<=", ">", ">=", "Is",
+            "Like", "And", "Or", "Xor", "Eqv", "Imp",
+        ] {
+            let expression = format!("left {operator} right");
+            let source = format!("Call Target({expression})");
+            let ModuleBodyStatement::ExpressionCall(call) = read(source.as_bytes()).unwrap() else {
+                panic!("complete operator argument expected in {source}");
+            };
+            assert_eq!(call.inventory().work_nodes(), 5);
+            assert_eq!(call.inventory().argument_count(), 1);
+            assert_eq!(call.inventory().applications().len(), 1);
+            assert_eq!(&source[call.argument_expressions()[0].clone()], expression);
+            assert_eq!(
+                call.inventory()
+                    .values()
+                    .iter()
+                    .map(|value| &source[value.span()])
+                    .collect::<Vec<_>>(),
+                ["left", "right"]
+            );
+        }
+        for source in [
+            "Call Target(a<b<c)",
+            "Call Target(a<b Xor c>d Eqv e=f Imp g=h)",
+            "Call Target(Not a=b And c=d)",
+            "Call Target(a ^ -b ^ c)",
+        ] {
+            let ModuleBodyStatement::ExpressionCall(call) = read(source.as_bytes()).unwrap() else {
+                panic!("normative structured argument expected in {source}");
+            };
+            assert_eq!(call.inventory().applications().len(), 1);
+            assert_eq!(call.argument_expressions().len(), 1);
+            assert_eq!(call.argument_expressions()[0].end, source.len() - 1);
+        }
+    }
+
+    #[test]
+    fn expression_call_limits_are_exact_and_never_retry_after_a_typed_failure() {
+        let source = b"Call Target(value + 1, Inner(other) * -2)";
+        let range = 0..source.len();
+        let admitted =
+            statement_with_expression_limits(
+                source,
+                range.clone(),
+                3,
+                11,
+                &mut || Ok::<(), ()>(()),
+            )
+            .unwrap()
+            .unwrap();
+        assert!(matches!(admitted, ModuleBodyStatement::ExpressionCall(_)));
+        for maximum in [0, 1, 2] {
+            assert_eq!(
+                statement_with_expression_limits(source, range.clone(), maximum, 11, &mut || {
+                    Ok::<(), ()>(())
+                }),
+                Err(ModuleError::ArgumentLimit),
+                "argument ceiling {maximum}"
+            );
+        }
+        for maximum in [0, 1, 2, 5, 10] {
+            assert_eq!(
+                statement_with_expression_limits(source, range.clone(), 3, maximum, &mut || {
+                    Ok::<(), ()>(())
+                }),
+                Err(ModuleError::ExpressionLimit),
+                "expression ceiling {maximum}"
+            );
+        }
+        for source in [
+            b"Call Target".as_slice(),
+            b"Call Target()",
+            b"Call Target(1,value,True)",
+        ] {
+            let ModuleBodyStatement::Call(call) =
+                statement_with_expression_limits(source, 0..source.len(), 3, 0, &mut || {
+                    Ok::<(), ()>(())
+                })
+                .unwrap()
+                .unwrap()
+            else {
+                panic!("legacy atomic Call must not consume expression work");
+            };
+            let legacy: &ModuleZeroArgumentCall = &call;
+            assert_eq!(legacy.argument_values(), call.argument_values());
+        }
+    }
+
+    #[test]
+    fn expression_call_separator_callee_and_closed_statement_byte_boundaries_are_exact() {
+        for byte in 0..=u8::MAX {
+            for (prefix, suffix, expected) in [
+                (
+                    b"Call".as_slice(),
+                    b"Target(1+2)".as_slice(),
+                    matches!(byte, b' ' | b'\t'),
+                ),
+                (
+                    b"Call Target",
+                    b"(1+2)",
+                    byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b' ' | b'\t'),
+                ),
+                (b"Call Target(1+2)", b"", matches!(byte, b' ' | b'\t')),
+            ] {
+                let source = [prefix, &[byte], suffix].concat();
+                let parsed = read(&source);
+                assert_eq!(
+                    parsed.is_some(),
+                    expected,
+                    "{prefix:?} byte {byte} {suffix:?}"
+                );
+                if let Some(ModuleBodyStatement::ExpressionCall(call)) = parsed {
+                    assert_eq!(call.statement(), 0..source.len());
+                    assert_eq!(call.inventory().work_nodes(), 5);
+                    assert_eq!(call.inventory().argument_count(), 1);
+                    assert_eq!(&source[call.argument_expressions()[0].clone()], b"1+2");
+                    assert_eq!(call.inventory().applications().len(), 1);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn expression_call_adjacent_type_suffixes_and_richer_literals_fail_closed() {
+        for (atom, suffixes) in [("2", b"%&^!#@".as_slice()), ("value", b"%&^!#@$")] {
+            for suffix in suffixes {
+                for tail in ["", "3", "other", "(3)", " + 3"] {
+                    let source = format!(
+                        "Call Target(Inner({atom}{}{tail}) + 1)",
+                        char::from(*suffix)
+                    );
+                    assert!(read(source.as_bytes()).is_none(), "{source}");
+                }
+            }
+        }
+        for expression in [
+            "2^3",
+            "a&b",
+            "1.0+2",
+            "1E2+3",
+            "&H10+2",
+            "#1/1/2000#",
+            "Me+1",
+            "Nothing",
+            "target.member",
+        ] {
+            let source = format!("Call Target({expression})");
+            assert!(read(source.as_bytes()).is_none(), "{source}");
+        }
+        for expression in [
+            "2 ^3",
+            "a & b",
+            "[a]&[b]",
+            "(a)^b",
+            "Inner(1)^2",
+            "\"a\"&\"b\"",
+            "True&False",
+        ] {
+            let source = format!("Call Target({expression})");
+            assert!(
+                matches!(
+                    read(source.as_bytes()),
+                    Some(ModuleBodyStatement::ExpressionCall(_))
+                ),
+                "{source}"
+            );
+        }
+    }
+
+    #[test]
+    fn expression_call_cancellation_is_typed_at_every_probe_parse_and_rebase_checkpoint() {
+        let text = b"Call [Target] _\r\n ((value + 007), Inner(\"a\"\"b\" & [True]))";
+        let source = [b"prefix\n".as_slice(), text, b"\ntail"].concat();
+        let range = 7..7 + text.len();
+        let mut checkpoints = 0;
+        let admitted = statement(&source, range.clone(), 3, &mut || {
+            checkpoints += 1;
+            Ok::<(), ()>(())
+        })
+        .unwrap()
+        .unwrap();
+        assert!(matches!(admitted, ModuleBodyStatement::ExpressionCall(_)));
+        for cancelled_at in 1..=checkpoints {
+            let mut calls = 0;
+            assert_eq!(
+                statement(&source, range.clone(), 3, &mut || {
+                    calls += 1;
+                    if calls == cancelled_at {
+                        Err("stop")
+                    } else {
+                        Ok(())
+                    }
+                }),
+                Err(ModuleError::Cancelled("stop")),
+                "checkpoint {cancelled_at}"
+            );
+            assert_eq!(calls, cancelled_at);
+        }
+    }
+
+    #[test]
     fn scalar_call_argument_delimiters_and_all_byte_boundaries_are_exact() {
         for byte in 0..=u8::MAX {
             let tail = [b"Call Finish(1".as_slice(), &[byte], b")"].concat();
@@ -1166,15 +1529,28 @@ mod tests {
             let result = read(&next);
             assert_eq!(
                 result.is_some(),
-                byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b' ' | b'\t'),
+                byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b' ' | b'\t' | b'+' | b'-'),
                 "argument prefix byte {byte}"
             );
-            if let Some(ModuleBodyStatement::Call(call)) = result {
-                assert_eq!(call.argument_values().len(), 2);
-                for value in call.argument_values() {
-                    assert!(call.arguments().unwrap().start < value.span().start);
-                    assert!(value.span().end < call.arguments().unwrap().end);
-                    assert!(value.span().start <= value.span().end);
+            if let Some(statement) = result {
+                match statement {
+                    ModuleBodyStatement::Call(call) => {
+                        assert_eq!(call.argument_values().len(), 2);
+                        for value in call.argument_values() {
+                            assert!(call.arguments().unwrap().start < value.span().start);
+                            assert!(value.span().end < call.arguments().unwrap().end);
+                            assert!(value.span().start <= value.span().end);
+                        }
+                    }
+                    ModuleBodyStatement::ExpressionCall(call) => {
+                        assert!(matches!(byte, b'+' | b'-'));
+                        assert_eq!(call.statement(), 0..next.len());
+                        assert_eq!(call.argument_expressions().len(), 2);
+                        assert_eq!(call.inventory().argument_count(), 2);
+                        assert_eq!(call.inventory().work_nodes(), 5);
+                        assert_eq!(&next[call.argument_expressions()[1].clone()], &[byte, b'2']);
+                    }
+                    _ => panic!("complete explicit Call expected"),
                 }
             }
             let suffix = [b"Call Finish(1)".as_slice(), &[byte]].concat();
@@ -1325,7 +1701,6 @@ mod tests {
             "Call .Finish",
             "Call holder.Finish()",
             "Call holder!Finish",
-            "Call Finish(1+2)",
             "Call Finish(value.member)",
             "Call Finish(value:=1)",
             "Call Finish(,)",
@@ -1485,7 +1860,6 @@ mod tests {
             "count(0) = 1",
             "item.member = count",
             "Set item = other",
-            "Call Finish(1+2)",
             "If flag Then",
             "Let = 1",
             "count = TrueValue extra",
@@ -1534,16 +1908,12 @@ mod tests {
     }
 
     #[test]
-    fn expression_support_does_not_widen_const_defaults_or_explicit_call_atoms() {
+    fn expression_support_does_not_widen_const_initializers_or_parameter_defaults() {
         for source in [
             "Const Limit As Long=-1",
             "Const Limit As Long=1+2",
             "Const Limit As Long=(1)",
             "Const Limit As Long=Read(1)",
-            "Call Finish(1+2)",
-            "Call Finish(-1)",
-            "Call Finish((1))",
-            "Call Finish(Read(1))",
         ] {
             assert!(read(source.as_bytes()).is_none(), "{source}");
         }
