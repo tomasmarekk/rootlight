@@ -3698,6 +3698,23 @@ fn module_array_call(runtime_name: &'static str) -> OptionalCallState {
     }
 }
 
+fn module_array_declaration_ranges(
+    source: &str,
+    state: ModuleArrayState,
+) -> Vec<std::ops::Range<usize>> {
+    let block_start = source.find(state.declarations_source).unwrap();
+    let mut cursor = 0;
+    state
+        .declarations
+        .iter()
+        .map(|(written, _)| {
+            let offset = cursor + state.declarations_source[cursor..].find(written).unwrap();
+            cursor = offset + written.len();
+            block_start + offset..block_start + cursor
+        })
+        .collect()
+}
+
 fn assert_module_array_contract(
     service: &FirstSliceService,
     receipt: &FirstSliceIndexReceipt,
@@ -3762,23 +3779,38 @@ fn assert_module_array_contract(
             .count(),
         state.declarations.len()
     );
-    for &(written, name) in state.declarations {
+    let declaration_ranges = module_array_declaration_ranges(source, state);
+    for (&(written, name), range) in state.declarations.iter().zip(&declaration_ranges) {
         let variable = variables
             .iter()
             .find(|entity| entity.canonical_name == name)
             .unwrap();
         assert_eq!(variable.provenance, parser.id);
         assert_eq!(variable.language, language);
-        let start = source.find(written).unwrap();
-        let end = start + written.len();
+        let start = range.start;
+        let end = range.end;
+        assert_eq!(&source[range.clone()], written);
+        let name_length = if written.starts_with('[') {
+            written.find(']').unwrap() + 1
+        } else {
+            written
+                .bytes()
+                .take_while(|byte| byte.is_ascii_alphanumeric() || *byte == b'_')
+                .count()
+        };
+        let authored_name = &written[..name_length];
+        assert!(
+            authored_name
+                .trim_start_matches('[')
+                .trim_end_matches(']')
+                .eq_ignore_ascii_case(name)
+        );
         let representative = state
             .declarations
             .iter()
-            .filter(|(_, candidate)| *candidate == name)
-            .map(|(written, _)| {
-                let start = source.find(written).unwrap();
-                start..start + written.len()
-            })
+            .zip(&declaration_ranges)
+            .filter(|((_, candidate), _)| *candidate == name)
+            .map(|(_, range)| range.clone())
             .min_by_key(|range| (range.start, range.end))
             .unwrap();
         assert_exact_parameter_source(
@@ -3822,7 +3854,7 @@ fn assert_module_array_contract(
                             symbol: variable.id,
                         }
                     && site.source.span().start_byte() == u64::try_from(start).unwrap()
-                    && site.source.span().end_byte() == u64::try_from(start + name.len()).unwrap()
+                    && site.source.span().end_byte() == u64::try_from(start + name_length).unwrap()
             })
             .collect::<Vec<_>>();
         assert_eq!(definitions.len(), 1);
@@ -3841,10 +3873,15 @@ fn assert_module_array_contract(
             receipt,
             source,
             &definitions[0].source,
-            start..start + name.len(),
+            start..start + name_length,
         );
         let line_start = source[..start].rfind('\n').map_or(0, |offset| offset + 1);
-        let prefix = &source[line_start..start];
+        let prefix = ["Private ", "Public ", "Dim "]
+            .into_iter()
+            .find(|prefix| source[line_start..].starts_with(*prefix))
+            .unwrap();
+        let prefix_end = line_start + prefix.len();
+        assert!(prefix_end <= start);
         let visibility = match prefix {
             "Private " => rootlight_ir::EntityVisibility::Private,
             "Public " => rootlight_ir::EntityVisibility::Public,
@@ -3870,8 +3907,8 @@ fn assert_module_array_contract(
             service,
             receipt,
             source,
-            &reference(line_start..start),
-            line_start..start,
+            &reference(line_start..prefix_end),
+            line_start..prefix_end,
         );
         if let Some(bounds_start) = written.find('(') {
             let bounds_end = written.find(')').unwrap() + 1;
@@ -4386,6 +4423,286 @@ fn module_numeric_array_edits_preserve_source_identity_and_native_rank_contracts
             }
             // A rebuild is the latest retained predecessor; check it before
             // another publication legitimately evicts it under retention2.
+            previous = Some((rebuilt, source, state));
+        }
+    }
+}
+
+fn grouped_module_variable_source(state: ModuleArrayState) -> String {
+    let header = module_array_call(state.runtime_name)
+        .parameters
+        .iter()
+        .map(|(written, _)| *written)
+        .collect::<Vec<_>>()
+        .join(", ");
+    let indexed = if state.indexed_body {
+        "sink = Buffer()\nsink = Buffer(0)\nsink = Buffer(0, 1)\nsink = Grid()\nsink = Grid(0)\nsink = Grid(0, 1)\n"
+    } else {
+        ""
+    };
+    format!(
+        "Attribute VB_Name = \"Authored\"\nOption Explicit\n{}Sub Notify({header})\nEnd Sub\nSub Run()\nDim sink As Long\nsink = {}\nsink = Grid\n{indexed}Call Notify(1)\nEnd Sub\n",
+        state.declarations_source, state.runtime_name
+    )
+}
+
+fn assert_grouped_module_variable_contract(
+    service: &FirstSliceService,
+    receipt: &FirstSliceIndexReceipt,
+    source: &str,
+    language: &str,
+    state: ModuleArrayState,
+) {
+    assert_module_array_contract(service, receipt, source, language, state);
+    let snapshot = service
+        .loaded_generation_snapshot(receipt.generation)
+        .unwrap();
+    let document = snapshot.document();
+    let run = document
+        .entities
+        .iter()
+        .find(|entity| entity.canonical_name == "Run")
+        .unwrap();
+    let grid = document
+        .entities
+        .iter()
+        .find(|entity| entity.canonical_name == "Grid")
+        .unwrap();
+    assert_eq!(grid.kind, EntityKind::Variable);
+    assert!(!document.entities.iter().any(|entity| {
+        entity.kind == EntityKind::Constant
+            && entity.container == grid.container
+            && entity.evidence.source.is_some()
+    }));
+    let start = source.find("sink = Grid\n").unwrap() + "sink = ".len();
+    let sites = document
+        .occurrences
+        .iter()
+        .filter(|site| {
+            site.syntax_kind == "vba.value_identifier.reference"
+                && site.source.span().start_byte() == u64::try_from(start).unwrap()
+                && site.source.span().end_byte() == u64::try_from(start + "Grid".len()).unwrap()
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(sites.len(), 1);
+    let site = sites[0];
+    assert_eq!(site.role, OccurrenceRole::Reference);
+    assert_eq!(site.enclosing, Some(run.id));
+    assert_eq!(site.target, OccurrenceTarget::Resolved { symbol: grid.id });
+    assert_eq!(site.provenance, grid.provenance);
+    assert_exact_parameter_source(
+        service,
+        receipt,
+        source,
+        &site.source,
+        start..start + "Grid".len(),
+    );
+    let relations = document
+        .relations
+        .iter()
+        .filter(|relation| {
+            relation.subject == RelationEndpoint::Occurrence(site.id)
+                && matches!(
+                    relation.predicate,
+                    RelationPredicate::RefersTo | RelationPredicate::Calls
+                )
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(relations.len(), 1);
+    assert_eq!(relations[0].predicate, RelationPredicate::RefersTo);
+    assert_eq!(relations[0].object, RelationEndpoint::Entity(grid.id));
+    assert_eq!(relations[0].provenance, grid.provenance);
+    assert_eq!(relations[0].evidence.source.as_ref(), Some(&site.source));
+}
+
+#[test]
+fn grouped_module_variable_edits_preserve_independent_declarator_evidence() {
+    let initial = ModuleArrayState {
+        declarations_source: "Private Storage As Long\nPrivate Grid As String\n",
+        declarations: &[("Storage As Long", "Storage"), ("Grid As String", "Grid")],
+        runtime_name: "Storage",
+        indexed_body: false,
+    };
+    let states = [
+        initial,
+        ModuleArrayState {
+            declarations_source: "Private Storage As Long, Grid As String\n",
+            ..initial
+        },
+        ModuleArrayState {
+            declarations_source: "Public Storage(2) As Long, Grid(-2 To +3, 0 To 4) As Long\n",
+            declarations: &[
+                ("Storage(2) As Long", "Storage"),
+                ("Grid(-2 To +3, 0 To 4) As Long", "Grid"),
+            ],
+            ..initial
+        },
+        ModuleArrayState {
+            declarations_source: "Public Storage(2), Grid(-2 To +3, 0 To 4) As Long\n",
+            declarations: &[
+                ("Storage(2)", "Storage"),
+                ("Grid(-2 To +3, 0 To 4) As Long", "Grid"),
+            ],
+            ..initial
+        },
+        ModuleArrayState {
+            declarations_source: "Public Storage(2) As Long, Grid(-2 To +3, 0 To 4)\n",
+            declarations: &[
+                ("Storage(2) As Long", "Storage"),
+                ("Grid(-2 To +3, 0 To 4)", "Grid"),
+            ],
+            ..initial
+        },
+        ModuleArrayState {
+            declarations_source: "Public Buffer(2) As Long, Grid(-2 To +3, 0 To 4)\n",
+            declarations: &[
+                ("Buffer(2) As Long", "Buffer"),
+                ("Grid(-2 To +3, 0 To 4)", "Grid"),
+            ],
+            runtime_name: "Buffer",
+            ..initial
+        },
+        ModuleArrayState {
+            declarations_source: "Dim Buffer(2) As Long, [Buffer](0 To 2, 1 To 3) As Long, Grid(-2 To +3, 0 To 4)\n",
+            declarations: &[
+                ("Buffer(2) As Long", "Buffer"),
+                ("[Buffer](0 To 2, 1 To 3) As Long", "Buffer"),
+                ("Grid(-2 To +3, 0 To 4)", "Grid"),
+            ],
+            runtime_name: "Buffer",
+            ..initial
+        },
+        ModuleArrayState {
+            declarations_source: "Public Buffer(2) As Long, Grid(-2 To +3, 0 To 4) As Long\n",
+            declarations: &[
+                ("Buffer(2) As Long", "Buffer"),
+                ("Grid(-2 To +3, 0 To 4) As Long", "Grid"),
+            ],
+            runtime_name: "Buffer",
+            indexed_body: true,
+        },
+        initial,
+    ];
+    for language in ["visual-basic-classic", "vba"] {
+        let current = std::env::current_dir().unwrap();
+        let repository = tempfile::tempdir_in(&current).unwrap();
+        let storage = tempfile::tempdir_in(&current).unwrap();
+        let paths = rootlight_runtime::RuntimePaths::new(
+            storage.path().join("state"),
+            storage.path().join("runtime"),
+        )
+        .unwrap();
+        paths.prepare_owner().unwrap();
+        let configuration = (language == "vba").then_some("version='1.3'\n[extensions.source-languages]\nversion='1.0'\ncritical=true\n[extensions.source-languages.data.extensions]\nbas='vba'\n");
+        let policy = FirstSliceStoragePolicy::resolve_user_config(configuration, 4).unwrap();
+        assert_eq!(policy.retained_generations(), 2);
+        let mut previous: Option<(FirstSliceIndexReceipt, String, ModuleArrayState)> = None;
+        let mut initial_source = None;
+        let mut initial_logical = None;
+        for (position, state) in states.into_iter().enumerate() {
+            let source = grouped_module_variable_source(state);
+            fs::write(repository.path().join("module.bas"), &source).unwrap();
+            let mut service = FirstSliceService::new_durable_with_policy(
+                policy.clone(),
+                paths.state_dir(),
+                &deadline(),
+            )
+            .unwrap();
+            let prepared = service
+                .prepare_repository(repository.path(), &deadline())
+                .unwrap();
+            let committed = service
+                .publish_prepared_with_metrics(prepared, &deadline())
+                .unwrap();
+            assert_eq!(committed.evidence().rebuilt_files, 1);
+            assert_eq!(committed.evidence().reused_files, 0);
+            if position > 0 {
+                assert_eq!(committed.evidence().changed_files, 1);
+            }
+            let receipt = committed.receipt().clone();
+            assert_grouped_module_variable_contract(&service, &receipt, &source, language, state);
+            assert_eq!(
+                receipt,
+                service
+                    .index_repository(repository.path(), &deadline())
+                    .unwrap()
+            );
+            if let Some((old_receipt, old_source, old_state)) = &previous {
+                assert_ne!(receipt.generation, old_receipt.generation);
+                let expected = match position {
+                    1..=4 | 6 => old_source.replace(old_state.declarations_source, state.declarations_source),
+                    5 => old_source.replace("Storage", "Buffer"),
+                    7 => old_source.replace(old_state.declarations_source, state.declarations_source)
+                        .replace("Call Notify(1)\n", "sink = Buffer()\nsink = Buffer(0)\nsink = Buffer(0, 1)\nsink = Grid()\nsink = Grid(0)\nsink = Grid(0, 1)\nCall Notify(1)\n"),
+                    8 => initial_source.clone().unwrap(),
+                    _ => panic!("an authored grouped declaration edit is required"),
+                };
+                assert_eq!(source, expected);
+                assert!(receipt.logical_snapshot.is_some());
+                assert_ne!(receipt.logical_snapshot, old_receipt.logical_snapshot);
+                if position == 3 {
+                    assert_eq!(
+                        source,
+                        old_source.replacen("Storage(2) As Long", "Storage(2)", 1)
+                    );
+                }
+                assert_grouped_module_variable_contract(
+                    &service,
+                    old_receipt,
+                    old_source,
+                    language,
+                    *old_state,
+                );
+            }
+            drop(service);
+            let mut service = FirstSliceService::new_durable_with_policy(
+                policy.clone(),
+                paths.state_dir(),
+                &deadline(),
+            )
+            .unwrap();
+            assert_eq!(
+                receipt,
+                service
+                    .index_repository(repository.path(), &deadline())
+                    .unwrap()
+            );
+            assert_grouped_module_variable_contract(&service, &receipt, &source, language, state);
+            if let Some((old_receipt, old_source, old_state)) = &previous {
+                assert_grouped_module_variable_contract(
+                    &service,
+                    old_receipt,
+                    old_source,
+                    language,
+                    *old_state,
+                );
+            }
+            let prepared = service
+                .prepare_repository_with_options(
+                    repository.path(),
+                    FirstSliceIndexOptions::clean_rebuild(FirstSliceIndexMode::Structural),
+                    &deadline(),
+                )
+                .unwrap();
+            let committed = service
+                .publish_prepared_with_metrics(prepared, &deadline())
+                .unwrap();
+            assert_eq!(committed.evidence().rebuilt_files, 1);
+            assert_eq!(committed.evidence().reused_files, 0);
+            let rebuilt = committed.receipt().clone();
+            assert_ne!(receipt.generation, rebuilt.generation);
+            assert!(receipt.logical_snapshot.is_some());
+            assert_eq!(receipt.logical_snapshot, rebuilt.logical_snapshot);
+            assert_grouped_module_variable_contract(&service, &rebuilt, &source, language, state);
+            if position == 0 {
+                initial_source = Some(source.clone());
+                initial_logical = receipt.logical_snapshot.clone();
+            } else if position + 1 == states.len() {
+                assert_eq!(initial_source.as_ref(), Some(&source));
+                assert_eq!(receipt.logical_snapshot, initial_logical);
+            }
+            // Verify the latest rebuilt predecessor before another rebuild can
+            // legitimately evict it under the unchanged two-generation policy.
             previous = Some((rebuilt, source, state));
         }
     }

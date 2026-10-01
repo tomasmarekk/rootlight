@@ -83,8 +83,17 @@ pub(super) fn prepare(
         .checked_add(inventory.procedures().len())
         .and_then(|count| count.checked_add(1))
         .ok_or_else(|| provider_failure("vba-procedural-node-accounting"))?;
+    let mut previous_variable_statement = None;
     for variable in inventory.variables() {
         cancellation.check()?;
+        let statement = variable.statement();
+        // A comma group is one logical statement, but every sibling needs work.
+        if previous_variable_statement.as_ref() == Some(&statement) {
+            processed_nodes = processed_nodes
+                .checked_add(1)
+                .ok_or_else(|| provider_failure("vba-procedural-node-accounting"))?;
+        }
+        previous_variable_statement = Some(statement);
         processed_nodes = processed_nodes
             .checked_add(variable.array_work_nodes())
             .ok_or_else(|| provider_failure("vba-procedural-node-accounting"))?;
@@ -2764,7 +2773,7 @@ mod tests {
             "Dim items(+)",
             "Dim items(--2)",
             "Dim items(2) = 1",
-            "Dim items(2), last()",
+            "Dim items(2), last(Limit)",
             "Dim items As Long()",
             "Dim items() As New Object",
             "Dim items() As Product",
@@ -2795,6 +2804,338 @@ mod tests {
     }
 
     #[test]
+    fn first_party_vba_grouped_module_variables_match_exact_native_facts() {
+        for ty in [
+            "",
+            " As String",
+            " As Boolean",
+            " As Byte",
+            " As Integer",
+            " As Long",
+            " As LongLong",
+            " As LongPtr",
+            " As Single",
+            " As Double",
+            " As Currency",
+            " As Date",
+            " As Variant",
+            " As Object",
+        ] {
+            for prefix in ["Dim", "Public", "Private"] {
+                for bounds in ["", "2", "-2 To +3", "0 To 2, 1 To 3", "2,3,4", "- _\n 2"] {
+                    for newline in ["\n", "\r\n"] {
+                        let bounds = bounds.replace('\n', newline);
+                        let source = format!(
+                            "{prefix} [first], second{ty}, grid({bounds}) As Long, pending(){newline}Sub Run(Optional seed=first){newline}Dim value As Long{newline}value=second{newline}Call grid(){newline}End Sub{newline}"
+                        );
+                        for language in ["vba", "visual-basic-classic"] {
+                            compare_native(&Fixture::new(&source), language, &[]);
+                        }
+                    }
+                }
+            }
+        }
+        for source in [
+            "Dim first, second As Long",
+            "Public first As Long, second\n",
+            "Private first(),second(1To2)As Long\n",
+            "Dim first, _\r\n second(2,3)As Long\n",
+            "Dim first _\r\n,second()\n",
+            "Public _\r\n first _\n, _\r\n[second] _\n( _\r\n-1 _\nTo +2,3) _\r\nAs _\nVariant, last\n",
+            "Private first, [Public] As Long, [Rem](), [Dim](2)\n",
+            "Dim first, Rem2, Remember, [Rem]\n",
+            "Public stored As Long, [STORED](2)\nSub Run(Optional value=stored)\nEnd Sub\n",
+            "Attribute VB_Name = \"Grouped\"\nOption Explicit\nDim first, second(2)\nConst Seed=7\nSub Run(Optional value=Seed)\nCall second()\nEnd Sub\n",
+            "Dim before, early(2)\nSub First()\nEnd Sub\nPublic middle As Long, grid(-1 To 3, 004)\nSub Second()\nEnd Sub\nPrivate after(), last As String\n",
+            "Dim first, items(2)\nConst items=7\nSub Run(Optional value=items)\nEnd Sub\n",
+        ] {
+            for language in ["vba", "visual-basic-classic"] {
+                compare_native(&Fixture::new(source), language, &[]);
+            }
+        }
+        for name in [
+            "Name", "Line", "Remember", "Rem2", "[True]", "[Public]", "[As]", "[To]", "[Dim]",
+            "[ReDim]",
+        ] {
+            for prefix in ["Dim", "Public", "Private"] {
+                let source = format!("{prefix} first, {name}(2) As Long, last\n");
+                for language in ["vba", "visual-basic-classic"] {
+                    compare_native(&Fixture::new(&source), language, &[]);
+                }
+            }
+        }
+        let declarations = (0..128)
+            .map(|index| format!("value{index}"))
+            .collect::<Vec<_>>()
+            .join(",");
+        let source = format!("Private {declarations}\n");
+        for language in ["vba", "visual-basic-classic"] {
+            compare_native(&Fixture::new(&source), language, &[]);
+        }
+    }
+
+    #[test]
+    fn first_party_vba_grouped_module_keyword_names_keep_exact_closed_admission() {
+        for name in [
+            "Dim", "ReDim", "Rem", "True", "False", "Sub", "Function", "Public", "Private", "As",
+            "To", "Empty",
+        ] {
+            let source = format!("Dim first, {name} As Long\nSub Run()\nEnd Sub\n");
+            for language in ["vba", "visual-basic-classic"] {
+                let fixture = Fixture::new(&source);
+                let request = fixture.request(language, &[]);
+                let cancellation = Cancellation::new();
+                assert!(
+                    prepare(
+                        &fixture.provider,
+                        &request,
+                        None,
+                        &[],
+                        fixture.provider.config.default_settings(),
+                        &cancellation
+                    )
+                    .unwrap()
+                    .is_none()
+                );
+                assert_eq!(fixture.provider.stats().pooled_parsers, 0);
+                assert_eq!(fixture.provider.stats().cache.entries, 0);
+                let native = fixture
+                    .provider
+                    .prepare_tree(
+                        &request,
+                        None,
+                        &[],
+                        fixture.provider.config.default_settings(),
+                        &cancellation,
+                    )
+                    .unwrap();
+                assert!(native.traversal.fully_traversed);
+                let expected = if matches!(name, "Dim" | "ReDim" | "Rem") {
+                    CoverageStatus::Unknown
+                } else {
+                    CoverageStatus::Complete
+                };
+                assert_eq!(native.traversal.coverage, expected, "{language}: {name}");
+                if expected == CoverageStatus::Complete {
+                    let pack = fixture
+                        .provider
+                        .query_packs
+                        .get_for_source(native.family, request.source().path().as_str())
+                        .unwrap();
+                    let extracted = pack
+                        .extract(
+                            native.family,
+                            &native.tree,
+                            request.source().bytes(),
+                            request.limits().max_syntax_nodes(),
+                            usize::MAX,
+                            &cancellation,
+                        )
+                        .unwrap();
+                    assert!(extracted.limit.is_none());
+                    let normalized = normalize_query_candidates(
+                        extracted.candidates,
+                        &request,
+                        usize::MAX,
+                        &cancellation,
+                    )
+                    .unwrap();
+                    let start = u64::try_from("Dim first, ".len()).unwrap();
+                    for (syntax, length) in [
+                        ("vba.identifier.definition", name.len()),
+                        ("vba.variable.declaration", name.len() + " As Long".len()),
+                    ] {
+                        assert_eq!(
+                            normalized
+                                .facts
+                                .iter()
+                                .filter(|fact| fact.syntax_kind().as_str() == syntax
+                                    && fact.span().start_byte() == start
+                                    && fact.span().end_byte()
+                                        == start + u64::try_from(length).unwrap())
+                                .count(),
+                            1,
+                            "exact native after-comma declaration: {language}: {name}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn first_party_vba_grouped_module_work_and_candidates_obey_exact_ceilings() {
+        let source = "Public alpha, beta As Long, grid(-1 To +2, 3) As Variant, pending()\n";
+        for language in ["vba", "visual-basic-classic"] {
+            let mut fixture = Fixture::new(source);
+            let cancellation = Cancellation::new();
+            let prepared = prepare(
+                &fixture.provider,
+                &fixture.request(language, &[]),
+                None,
+                &[],
+                fixture.provider.config.default_settings(),
+                &cancellation,
+            )
+            .unwrap()
+            .unwrap();
+            assert_eq!(prepared.inventory.statement_count(), 1);
+            assert_eq!(prepared.inventory.variables().len(), 4);
+            assert_eq!(prepared.processed_nodes, 14);
+            for (optional, required) in [(false, 11), (true, 15)] {
+                assert_eq!(
+                    candidates(
+                        &prepared.inventory,
+                        source.as_bytes(),
+                        optional,
+                        required,
+                        &cancellation
+                    )
+                    .unwrap()
+                    .len(),
+                    required
+                );
+                assert!(
+                    matches!(candidates(&prepared.inventory, source.as_bytes(), optional, required - 1, &cancellation), Err(AdapterError::RejectedRequest(RequestError::ProviderLimit { resource: ResourceKind::SyntaxNodes, observed, limit })) if observed == required && limit == required - 1)
+                );
+            }
+            fixture.limits = with_maximum_nodes(&fixture.limits, 14);
+            assert_eq!(
+                prepare(
+                    &fixture.provider,
+                    &fixture.request(language, &[]),
+                    None,
+                    &[],
+                    fixture.provider.config.default_settings(),
+                    &cancellation
+                )
+                .unwrap()
+                .unwrap()
+                .processed_nodes,
+                14
+            );
+            fixture.limits = with_maximum_nodes(&fixture.limits, 13);
+            assert!(matches!(
+                prepare(
+                    &fixture.provider,
+                    &fixture.request(language, &[]),
+                    None,
+                    &[],
+                    fixture.provider.config.default_settings(),
+                    &cancellation
+                ),
+                Err(AdapterError::RejectedRequest(RequestError::ProviderLimit {
+                    resource: ResourceKind::SyntaxNodes,
+                    observed: 14,
+                    limit: 13
+                }))
+            ));
+            cancellation.cancel(rootlight_cancel::CancellationReason::ClientRequest);
+            assert!(matches!(
+                candidates(
+                    &prepared.inventory,
+                    source.as_bytes(),
+                    true,
+                    15,
+                    &cancellation
+                ),
+                Err(AdapterError::Cancelled {
+                    reason: rootlight_cancel::CancellationReason::ClientRequest
+                })
+            ));
+            assert_eq!(fixture.provider.stats().pooled_parsers, 0);
+            assert_eq!(fixture.provider.stats().cache.entries, 0);
+        }
+        let declarations = (0..128)
+            .map(|index| format!("value{index}"))
+            .collect::<Vec<_>>()
+            .join(",");
+        let source = format!("Dim {declarations}\n");
+        for language in ["vba", "visual-basic-classic"] {
+            let mut fixture = Fixture::new(&source);
+            fixture.limits = with_maximum_nodes(&fixture.limits, 129);
+            let cancellation = Cancellation::new();
+            assert_eq!(
+                prepare(
+                    &fixture.provider,
+                    &fixture.request(language, &[]),
+                    None,
+                    &[],
+                    fixture.provider.config.default_settings(),
+                    &cancellation
+                )
+                .unwrap()
+                .unwrap()
+                .processed_nodes,
+                129
+            );
+            fixture.limits = with_maximum_nodes(&fixture.limits, 128);
+            assert!(matches!(
+                prepare(
+                    &fixture.provider,
+                    &fixture.request(language, &[]),
+                    None,
+                    &[],
+                    fixture.provider.config.default_settings(),
+                    &cancellation
+                ),
+                Err(AdapterError::RejectedRequest(RequestError::ProviderLimit {
+                    resource: ResourceKind::SyntaxNodes,
+                    observed: 129,
+                    limit: 128
+                }))
+            ));
+            assert_eq!(fixture.provider.stats().pooled_parsers, 0);
+            assert_eq!(fixture.provider.stats().cache.entries, 0);
+        }
+    }
+
+    #[test]
+    fn first_party_vba_grouped_module_variables_keep_whole_fallback_for_late_tails() {
+        for declaration in [
+            "Dim first,",
+            "Dim first,,second",
+            "Dim first, As Long",
+            "Dim first, second As",
+            "Dim first, second As Product",
+            "Dim first, second As New Object",
+            "Dim first, second=1",
+            "Dim first, second(Limit)",
+            "Dim first, second(1+2)",
+            "Dim first, second(2,)",
+            "Dim first, second As Long()",
+            "Dim first, second$",
+            "Dim first, [two words]",
+            "Dim first, [a,b]",
+            "Dim first,\nsecond",
+            "Dim first, Public second",
+            "Dim first, second: Dim last",
+            "Dim first, second\nOption Explicit",
+            "Dim first, second\nSub Run()\nDim local, other As Long\nEnd Sub",
+        ] {
+            let source = format!("Dim accepted, earlier(2)\nSub First()\nEnd Sub\n{declaration}\n");
+            for language in ["vba", "visual-basic-classic"] {
+                let fixture = Fixture::new(&source);
+                assert!(
+                    prepare(
+                        &fixture.provider,
+                        &fixture.request(language, &[]),
+                        None,
+                        &[],
+                        fixture.provider.config.default_settings(),
+                        &Cancellation::new()
+                    )
+                    .unwrap()
+                    .is_none(),
+                    "{language}: {declaration}"
+                );
+                assert_eq!(fixture.provider.stats().pooled_parsers, 0);
+                assert_eq!(fixture.provider.stats().cache.entries, 0);
+            }
+        }
+    }
+
+    #[test]
     fn first_party_vba_richer_module_variables_keep_whole_native_fallback() {
         for declaration in [
             "Dim",
@@ -2807,7 +3148,7 @@ mod tests {
             "Dim stored$",
             "Dim stored = 1",
             "Dim stored As Long = 1",
-            "Dim first, second As Long",
+            "Dim first, second As Product",
             "Dim stored(Limit) As Long",
             "Public stored(1 + 3) As Long",
             "Global stored As Long",

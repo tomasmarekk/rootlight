@@ -97,6 +97,7 @@ impl ModuleInventory {
     }
 
     /// Returns complete module-level variables in source order, not local declarations.
+    /// Comma-list members stay flat and share their complete statement range.
     #[must_use]
     pub fn variables(&self) -> &[ModuleVariable] {
         &self.variables
@@ -136,6 +137,7 @@ pub struct ModuleVariable {
 
 impl ModuleVariable {
     /// Returns the complete trimmed statement, including its declaration prefix.
+    /// Every declarator in one comma list shares this range.
     #[must_use]
     pub fn statement(&self) -> Range<usize> {
         self.statement.clone()
@@ -463,12 +465,13 @@ impl<E: std::error::Error + 'static> std::error::Error for ModuleError<E> {
 /// Module-level Const statements retain one typed or untyped scalar literal
 /// initializer and optional Public/Private spelling. They may precede, separate
 /// or follow procedures, but Attribute and Option remain leading-header forms.
-/// A module-level Dim, Public or Private statement retains one uninitialized
-/// variable, with an absent or written intrinsic As type. Array bounds may be
-/// empty or a complete comma list of signed/unsigned decimal endpoints, each
-/// upper-only or lower To upper. Magnitudes and runtime array sizes are not
+/// A module-level Dim, Public or Private statement retains a complete comma list
+/// of uninitialized variables, each with an absent or written intrinsic As type.
+/// Members share statement and visibility ranges, not types or array bounds.
+/// Array bounds may be empty or a complete comma list of signed/unsigned decimal
+/// endpoints, each upper-only or lower To upper. Magnitudes and runtime array sizes are not
 /// evaluated, and no per-dimension records are retained. Named/expression bounds,
-/// initializers, declaration lists and richer prefixes remain unsupported.
+/// initializers, incomplete declaration lists and richer prefixes remain unsupported.
 /// Bodies admit one typed scalar Dim or Const per statement and simple scalar
 /// assignments with an optional Let prefix. Const values are unsigned decimal,
 /// physically closed doubled-quote strings or True/False; assignments additionally
@@ -650,18 +653,16 @@ pub fn module_inventory<E>(
             attribute_header = false;
             continue;
         }
-        if let Some(variable) =
-            module_variable(text, range.clone(), check).map_err(ModuleError::Cancelled)?
-        {
+        if module_variables(
+            text,
+            range.clone(),
+            limits.max_statements - body_count - inventory.constants.len(),
+            &mut inventory.variables,
+            check,
+        )? {
             if colon_boundary {
                 return Err(ModuleError::Unsupported { range });
             }
-            reserve_variables(
-                &mut inventory.variables,
-                limits.max_statements - body_count - inventory.constants.len(),
-                check,
-            )?;
-            inventory.variables.push(variable);
             declaration_started = true;
             attribute_header = false;
             continue;
@@ -982,14 +983,16 @@ fn scalar_parameter<E>(
     }))
 }
 
-fn module_variable<E>(
+fn module_variables<E>(
     text: &[u8],
     range: Range<usize>,
+    maximum: usize,
+    variables: &mut Vec<ModuleVariable>,
     check: &mut impl FnMut() -> Result<(), E>,
-) -> Result<Option<ModuleVariable>, E> {
-    check()?;
+) -> Result<bool, ModuleError<E>> {
+    check().map_err(ModuleError::Cancelled)?;
     let mut cursor = 0;
-    let prefix = word(text, &mut cursor, check)?;
+    let prefix = word(text, &mut cursor, check).map_err(ModuleError::Cancelled)?;
     let visibility = if prefix.eq_ignore_ascii_case(b"Public") {
         Some(ModuleVariableVisibility::Public)
     } else if prefix.eq_ignore_ascii_case(b"Private") {
@@ -997,24 +1000,67 @@ fn module_variable<E>(
     } else if prefix.eq_ignore_ascii_case(b"Dim") {
         None
     } else {
-        return Ok(None);
+        return Ok(false);
     };
     let visibility_range = visibility.map(|_| range.start..range.start + cursor);
-    if !separator(text, &mut cursor, check)? {
-        return Ok(None);
+    if !separator(text, &mut cursor, check).map_err(ModuleError::Cancelled)? {
+        return Ok(false);
     }
-    let Some(name) = super::module_body::simple_name(text, &mut cursor, check)? else {
+    let original_len = variables.len();
+    let result = (|| {
+        loop {
+            check().map_err(ModuleError::Cancelled)?;
+            let Some(variable) = module_variable(
+                text,
+                &range,
+                &mut cursor,
+                visibility,
+                visibility_range.clone(),
+                check,
+            )
+            .map_err(ModuleError::Cancelled)?
+            else {
+                return Ok(false);
+            };
+            if cursor != text.len() && text.get(cursor) != Some(&b',') {
+                return Ok(false);
+            }
+            reserve_variables(variables, maximum, check)?;
+            variables.push(variable);
+            if cursor == text.len() {
+                return Ok(true);
+            }
+            cursor += 1;
+            cursor += logical_whitespace_len(text.get(cursor..).unwrap_or_default(), check)
+                .map_err(ModuleError::Cancelled)?;
+        }
+    })();
+    if !matches!(&result, Ok(true)) {
+        variables.truncate(original_len);
+    }
+    result
+}
+
+fn module_variable<E>(
+    text: &[u8],
+    range: &Range<usize>,
+    cursor: &mut usize,
+    visibility: Option<ModuleVariableVisibility>,
+    visibility_range: Option<Range<usize>>,
+    check: &mut impl FnMut() -> Result<(), E>,
+) -> Result<Option<ModuleVariable>, E> {
+    let Some(name) = super::module_body::simple_name(text, cursor, check)? else {
         return Ok(None);
     };
     let mut separator_length =
-        logical_whitespace_len(text.get(cursor..).unwrap_or_default(), check)?;
-    cursor += separator_length;
-    let (array_bounds, array_work_nodes) = if text.get(cursor) == Some(&b'(') {
-        let Some(bounds) = numeric_array_bounds(text, &mut cursor, check)? else {
+        logical_whitespace_len(text.get(*cursor..).unwrap_or_default(), check)?;
+    *cursor += separator_length;
+    let (array_bounds, array_work_nodes) = if text.get(*cursor) == Some(&b'(') {
+        let Some(bounds) = numeric_array_bounds(text, cursor, check)? else {
             return Ok(None);
         };
-        separator_length = logical_whitespace_len(text.get(cursor..).unwrap_or_default(), check)?;
-        cursor += separator_length;
+        separator_length = logical_whitespace_len(text.get(*cursor..).unwrap_or_default(), check)?;
+        *cursor += separator_length;
         (
             Some(range.start + bounds.span.start..range.start + bounds.span.end),
             bounds.work_nodes,
@@ -1022,20 +1068,18 @@ fn module_variable<E>(
     } else {
         (None, 0)
     };
-    let after_declarator = cursor;
-    let type_range = if word(text, &mut cursor, check)?.eq_ignore_ascii_case(b"As") {
-        if (separator_length == 0 && array_bounds.is_none())
-            || !separator(text, &mut cursor, check)?
-        {
+    let after_declarator = *cursor;
+    let type_range = if word(text, cursor, check)?.eq_ignore_ascii_case(b"As") {
+        if (separator_length == 0 && array_bounds.is_none()) || !separator(text, cursor, check)? {
             return Ok(None);
         }
-        let start = cursor;
-        if !super::module_body::intrinsic_type_name(word(text, &mut cursor, check)?) {
+        let start = *cursor;
+        if !super::module_body::intrinsic_type_name(word(text, cursor, check)?) {
             return Ok(None);
         }
-        Some(range.start + start..range.start + cursor)
+        Some(range.start + start..range.start + *cursor)
     } else {
-        cursor = after_declarator;
+        *cursor = after_declarator;
         None
     };
     let declarator_end = type_range.as_ref().map_or_else(
@@ -1046,10 +1090,7 @@ fn module_variable<E>(
         },
         |ty| ty.end,
     );
-    cursor += logical_whitespace_len(text.get(cursor..).unwrap_or_default(), check)?;
-    if cursor != text.len() {
-        return Ok(None);
-    }
+    *cursor += logical_whitespace_len(text.get(*cursor..).unwrap_or_default(), check)?;
     check()?;
     Ok(Some(ModuleVariable {
         statement: range.clone(),
@@ -1638,8 +1679,8 @@ mod tests {
             "Public value As Long=1",
             "Private value:=1",
             "Dim value==1",
-            "Dim value,other",
-            "Public value As Long,other As Long",
+            "Dim value,other As Product",
+            "Public value As Long,other As",
             "Private value,",
             "Dim value$",
             "Dim value!",
@@ -1764,9 +1805,18 @@ mod tests {
     #[test]
     fn module_variable_retention_propagates_allocation_and_cancellation_errors() {
         let source = b"Private [value] As Long";
-        let variable = module_variable(source, 0..source.len(), &mut || Ok::<(), ()>(()))
+        let mut parsed = Vec::new();
+        assert!(
+            module_variables(
+                source,
+                0..source.len(),
+                1,
+                &mut parsed,
+                &mut || Ok::<(), ()>(())
+            )
             .unwrap()
-            .unwrap();
+        );
+        let variable = parsed.pop().unwrap();
         let mut variables = Vec::new();
         assert_eq!(
             reserve_variables(&mut variables, 0, &mut || Ok::<(), ()>(())),
@@ -1897,6 +1947,540 @@ mod tests {
                         assert_eq!(&source[variable.statement()], b"Dim [value]");
                         assert_eq!(&source[variable.declarator()], b"[value]");
                         assert!(variable.type_range().is_none());
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn grouped_module_variables_preserve_independent_ranges_and_shared_statement() {
+        for newline in ["\n", "\r\n"] {
+            let clauses = [
+                "[implicit]".to_owned(),
+                format!("[typed] _{newline} As _{newline} Long"),
+                "pending()".to_owned(),
+                format!("[matrix] _{newline} ( -1 To _{newline} +2, 003 )As Variant"),
+                "last".to_owned(),
+            ];
+            let statement = format!(
+                "pUbLiC _{newline} {}",
+                clauses.join(&format!(" _{newline} , _{newline} "))
+            );
+            let source = format!(
+                "Attribute VB_Name = \"Groups\"{newline}Option Explicit{newline}  {statement} ' tail{newline}"
+            );
+            let inventory = parse(source.as_bytes()).unwrap();
+            assert_eq!(inventory.statement_count(), 3);
+            assert_eq!(inventory.variables().len(), clauses.len());
+            assert!(inventory.procedures().is_empty());
+            assert!(inventory.constants().is_empty());
+            let first = &inventory.variables()[0];
+            for (variable, clause) in inventory.variables().iter().zip(&clauses) {
+                assert_eq!(&source[variable.statement()], statement);
+                assert_eq!(variable.statement(), first.statement());
+                assert_eq!(&source[variable.declarator()], clause);
+                assert_eq!(
+                    variable.visibility(),
+                    Some(ModuleVariableVisibility::Public)
+                );
+                assert_eq!(variable.visibility_range(), first.visibility_range());
+                assert_eq!(&source[variable.visibility_range().unwrap()], "pUbLiC");
+                assert_eq!(variable.name().start, variable.declarator().start);
+                assert!(variable.declarator().end <= variable.statement().end);
+            }
+            for index in [0, 2, 4] {
+                assert!(inventory.variables()[index].type_range().is_none());
+            }
+            assert_eq!(
+                &source[inventory.variables()[1].type_range().unwrap()],
+                "Long"
+            );
+            assert_eq!(
+                &source[inventory.variables()[3].type_range().unwrap()],
+                "Variant"
+            );
+            assert_eq!(
+                &source[inventory.variables()[2].array_bounds().unwrap()],
+                "()"
+            );
+            assert_eq!(
+                &source[inventory.variables()[3].array_bounds().unwrap()],
+                format!("( -1 To _{newline} +2, 003 )")
+            );
+            assert_eq!(inventory.variables()[2].array_work_nodes(), 1);
+            assert_eq!(inventory.variables()[3].array_work_nodes(), 8);
+            for index in [0, 1, 4] {
+                assert!(inventory.variables()[index].array_bounds().is_none());
+                assert_eq!(inventory.variables()[index].array_work_nodes(), 0);
+            }
+            for pair in inventory.variables().windows(2) {
+                assert!(pair[0].declarator().end < pair[1].declarator().start);
+            }
+        }
+    }
+
+    #[test]
+    fn grouped_module_variables_keep_per_member_types_visibility_and_contextual_names() {
+        for prefix in ["Dim", "Public", "Private"] {
+            for ty in [
+                "String", "Boolean", "Byte", "Integer", "Long", "LongLong", "LongPtr", "Single",
+                "Double", "Currency", "Date", "Variant", "Object",
+            ] {
+                let source = format!(
+                    "{prefix} absent, [typed] As {ty}, pending(), [matrix](1,2)As {ty}, last"
+                );
+                let inventory = parse(source.as_bytes()).unwrap();
+                assert_eq!(inventory.statement_count(), 1);
+                assert_eq!(inventory.variables().len(), 5);
+                for index in [0, 2, 4] {
+                    assert!(
+                        inventory.variables()[index].type_range().is_none(),
+                        "{source}"
+                    );
+                }
+                assert_eq!(&source[inventory.variables()[2].name()], "pending");
+                assert_eq!(
+                    &source[inventory.variables()[2].array_bounds().unwrap()],
+                    "()"
+                );
+                assert_eq!(inventory.variables()[2].array_work_nodes(), 1);
+                for index in [1, 3] {
+                    assert_eq!(
+                        &source[inventory.variables()[index].type_range().unwrap()],
+                        ty
+                    );
+                }
+                for variable in inventory.variables() {
+                    let expected = match prefix {
+                        "Public" => Some(ModuleVariableVisibility::Public),
+                        "Private" => Some(ModuleVariableVisibility::Private),
+                        _ => None,
+                    };
+                    assert_eq!(variable.visibility(), expected);
+                    assert_eq!(variable.visibility_range().is_some(), expected.is_some());
+                    assert_eq!(&source[variable.statement()], source);
+                }
+            }
+            let names = [
+                "Name", "Line", "Load", "Unload", "Input", "Print", "Close", "Reset", "Beep",
+                "DefBool", "_value", "Remember", "TrueRem", "[Me]", "[True]", "[Rem]", "[Sub]",
+                "[Public]",
+            ];
+            let source = format!("{prefix} {}", names.join(","));
+            let inventory = parse(source.as_bytes()).unwrap();
+            assert_eq!(inventory.variables().len(), names.len());
+            assert_eq!(inventory.statement_count(), 1);
+            for (variable, name) in inventory.variables().iter().zip(names) {
+                assert_eq!(&source[variable.name()], name);
+                assert_eq!(variable.name(), variable.declarator());
+                assert!(variable.type_range().is_none());
+            }
+        }
+    }
+
+    #[test]
+    fn grouped_module_variables_keep_duplicates_and_module_order_without_body_expansion() {
+        let source = b"Dim before, before As Variant\nConst Seed=1\nSub First()\nDim local As Long\nEnd Sub\nPublic between(1,2), plain\nFunction Second(Optional value=Seed) As Long\nSecond=value\nEnd Function\nPrivate after(), before\n";
+        let inventory = parse(source).unwrap();
+        assert_eq!(inventory.variables().len(), 6);
+        assert_eq!(inventory.constants().len(), 1);
+        assert_eq!(inventory.procedures().len(), 2);
+        assert_eq!(
+            inventory.variables()[0].statement(),
+            inventory.variables()[1].statement()
+        );
+        assert_eq!(
+            inventory.variables()[2].statement(),
+            inventory.variables()[3].statement()
+        );
+        assert_eq!(
+            inventory.variables()[4].statement(),
+            inventory.variables()[5].statement()
+        );
+        assert_eq!(&source[inventory.variables()[0].name()], b"before");
+        assert_eq!(&source[inventory.variables()[1].name()], b"before");
+        assert_eq!(&source[inventory.variables()[5].name()], b"before");
+        assert_ne!(
+            inventory.variables()[0].name(),
+            inventory.variables()[1].name()
+        );
+        assert!(
+            inventory.variables()[1].declarator().end < inventory.procedures()[0].header().start
+        );
+        assert!(
+            inventory.procedures()[0].terminator().end
+                < inventory.variables()[2].declarator().start
+        );
+        assert!(
+            inventory.variables()[3].declarator().end < inventory.procedures()[1].header().start
+        );
+        assert!(
+            inventory.procedures()[1].terminator().end
+                < inventory.variables()[4].declarator().start
+        );
+        assert!(
+            matches!(&inventory.procedures()[0].statements()[0], ModuleBodyStatement::Declaration(local) if &source[local.name()] == b"local")
+        );
+        for source in [
+            "Dim first,second\nOption Explicit",
+            "Public first,second\nAttribute VB_Name = \"Late\"",
+            "Dim first,second:",
+            "Dim first,second:Private third",
+            "Const first=1,second=2",
+            "Dim field,other\nSub Run()\nDim first As Long,second As Long\nEnd Sub",
+        ] {
+            assert!(
+                matches!(
+                    parse(source.as_bytes()),
+                    Err(ModuleError::Unsupported { .. })
+                ),
+                "{source}"
+            );
+        }
+    }
+
+    #[test]
+    fn grouped_module_variables_reject_incomplete_and_richer_later_members_atomically() {
+        for tail in [
+            "",
+            ",second",
+            "second,",
+            "second,,third",
+            "second, ,third",
+            "second As",
+            "second As Product",
+            "second As New Object",
+            "second As String * 8",
+            "second As Long()",
+            "second As Long$",
+            "second$",
+            "[second]$",
+            "second!",
+            "second=1",
+            "second As Long=1",
+            "second:=1",
+            "second==1",
+            "holder.second",
+            "holder!second",
+            "second extra",
+            "second(upper)",
+            "second(1+2)",
+            "second(,1)",
+            "second(1,)",
+            "second(1,,2)",
+            "second(1 To)",
+            "second(1",
+            "second(1)(2)",
+            "second(1) As",
+            "second(1) As Product",
+            "second(1) = 1",
+            "second(1),third As",
+            "[second",
+            "[]",
+            "[second name]",
+            "é",
+            "Dim second",
+            "Public second",
+            "Private second",
+            "Static second",
+            "WithEvents second As Object",
+            "Empty",
+            "eMpTy()",
+            "Empty As Long",
+            "Rem tail",
+            "second Rem tail",
+            "second\0",
+            "second\r extra",
+            "second\nthird",
+        ] {
+            let source = format!(
+                "Dim prior\nConst Seed=1\nSub Accepted()\nEnd Sub\nPrivate first(-1 To 2,3) As Long, {tail}\n"
+            );
+            assert!(
+                matches!(
+                    parse(source.as_bytes()),
+                    Err(ModuleError::Unsupported { .. })
+                ),
+                "{tail:?}"
+            );
+        }
+        let preserved = parse(b"Dim prior").unwrap().variables()[0].clone();
+        for source in [
+            b"Dim first,second As".as_slice(),
+            b"Dim first(1,2),second(upper)",
+            b"Dim first,",
+        ] {
+            let mut variables = vec![preserved.clone()];
+            assert!(
+                !module_variables(source, 0..source.len(), 8, &mut variables, &mut || Ok::<
+                    (),
+                    (),
+                >(
+                    ()
+                ))
+                .unwrap()
+            );
+            assert_eq!(variables, vec![preserved.clone()]);
+        }
+    }
+
+    #[test]
+    fn grouped_module_variables_obey_shared_record_quota_independently_of_statement_count() {
+        let source = b"Dim first,second(1,2),third As Long,fourth(),fifth";
+        let limits = ModuleLimits::new(source.len(), 5, 0)
+            .with_max_parameters(0)
+            .with_max_arguments(0);
+        let inventory = module_inventory(source, limits, &mut || Ok::<(), ()>(())).unwrap();
+        assert_eq!(inventory.statement_count(), 1);
+        assert_eq!(inventory.variables().len(), 5);
+        assert!(inventory.procedures().is_empty());
+        for maximum in 0..5 {
+            assert_eq!(
+                module_inventory(
+                    source,
+                    ModuleLimits::new(source.len(), maximum, 0),
+                    &mut || Ok::<(), ()>(())
+                ),
+                Err(ModuleError::StatementLimit)
+            );
+        }
+        assert_eq!(
+            module_inventory(
+                source,
+                ModuleLimits::new(source.len() - 1, 5, 0),
+                &mut || Ok::<(), ()>(())
+            ),
+            Err(ModuleError::SourceLimit)
+        );
+        let source = b"Dim first,second,third\nConst Seed=1\nSub Run()\nDim local As Long\nEnd Sub\nPrivate fourth(),fifth(1),sixth As Long\n";
+        let inventory =
+            module_inventory(source, ModuleLimits::new(source.len(), 8, 1), &mut || {
+                Ok::<(), ()>(())
+            })
+            .unwrap();
+        assert_eq!(inventory.statement_count(), 6);
+        assert_eq!(inventory.variables().len(), 6);
+        assert_eq!(inventory.constants().len(), 1);
+        assert_eq!(inventory.procedures()[0].statements().len(), 1);
+        assert_eq!(
+            module_inventory(source, ModuleLimits::new(source.len(), 7, 1), &mut || Ok::<
+                (),
+                (),
+            >(
+                ()
+            )),
+            Err(ModuleError::StatementLimit)
+        );
+        for source in [
+            "Const Seed=1\nDim first,second,third",
+            "Dim first,second,third\nConst Seed=1",
+            "Sub Run()\nDim local As Long\nEnd Sub\nDim first,second,third",
+            "Dim first,second,third\nSub Run()\nDim local As Long\nEnd Sub",
+        ] {
+            let required = 4;
+            let inventory = module_inventory(
+                source.as_bytes(),
+                ModuleLimits::new(source.len(), required, 1),
+                &mut || Ok::<(), ()>(()),
+            )
+            .unwrap();
+            assert_eq!(inventory.variables().len(), 3);
+            assert_eq!(
+                module_inventory(
+                    source.as_bytes(),
+                    ModuleLimits::new(source.len(), required - 1, 1),
+                    &mut || Ok::<(), ()>(())
+                ),
+                Err(ModuleError::StatementLimit)
+            );
+        }
+    }
+
+    #[test]
+    fn grouped_module_variables_large_lists_keep_source_order_and_fallible_retention() {
+        let declarations = (0..128)
+            .map(|index| match index % 3 {
+                0 => format!("[value{index}]"),
+                1 => format!("[value{index}](-1 To +2,{index})"),
+                _ => format!("[value{index}] As Long"),
+            })
+            .collect::<Vec<_>>();
+        let source = format!("Private {}", declarations.join(","));
+        let inventory = module_inventory(
+            source.as_bytes(),
+            ModuleLimits::new(source.len(), 128, 0),
+            &mut || Ok::<(), ()>(()),
+        )
+        .unwrap();
+        assert_eq!(inventory.statement_count(), 1);
+        assert_eq!(inventory.variables().len(), declarations.len());
+        for (index, (variable, declaration)) in
+            inventory.variables().iter().zip(&declarations).enumerate()
+        {
+            assert_eq!(&source[variable.declarator()], declaration);
+            assert_eq!(&source[variable.name()], format!("[value{index}]"));
+            assert_eq!(variable.statement(), inventory.variables()[0].statement());
+        }
+        assert_eq!(
+            module_inventory(
+                source.as_bytes(),
+                ModuleLimits::new(source.len(), 127, 0),
+                &mut || Ok::<(), ()>(())
+            ),
+            Err(ModuleError::StatementLimit)
+        );
+        let preserved = parse(b"Dim prior").unwrap().variables()[0].clone();
+        let source = b"Dim first,second";
+        let mut variables = vec![preserved.clone()];
+        assert_eq!(
+            module_variables(source, 0..source.len(), 2, &mut variables, &mut || Ok::<
+                (),
+                (),
+            >(
+                ()
+            )),
+            Err(ModuleError::StatementLimit)
+        );
+        assert_eq!(variables, vec![preserved.clone()]);
+        assert_eq!(
+            reserve_variables_exact(&mut variables, usize::MAX, &mut || Ok::<(), ()>(())),
+            Err(ModuleError::AllocationFailed)
+        );
+        assert_eq!(variables, vec![preserved]);
+    }
+
+    #[test]
+    fn grouped_module_variables_cancel_at_every_checkpoint_without_exposing_prefixes() {
+        let source = format!(
+            "Dim prior\nPublic _\r\n [{}] _\n , _\r\n [matrix]( -{} To +{}, 3) _\n As Long, _\r\n last()\nConst Seed=1\nSub Run()\nDim local As Long\nEnd Sub\n",
+            "x".repeat(1024),
+            "9".repeat(1024),
+            "8".repeat(1024)
+        );
+        let limits = ModuleLimits::new(source.len(), 8, 1);
+        let mut checkpoints = 0;
+        let inventory = module_inventory(source.as_bytes(), limits, &mut || {
+            checkpoints += 1;
+            Ok::<(), ()>(())
+        })
+        .unwrap();
+        assert_eq!(inventory.variables().len(), 4);
+        for cancelled_at in 1..=checkpoints {
+            let mut calls = 0;
+            assert_eq!(
+                module_inventory(source.as_bytes(), limits, &mut || {
+                    calls += 1;
+                    if calls == cancelled_at {
+                        Err("stop")
+                    } else {
+                        Ok(())
+                    }
+                }),
+                Err(ModuleError::Cancelled("stop")),
+                "module checkpoint {cancelled_at}"
+            );
+            assert_eq!(calls, cancelled_at);
+        }
+        let source = b"Private first(1,2),second As Long,third()";
+        let preserved = parse(b"Dim prior").unwrap().variables()[0].clone();
+        let mut variables = vec![preserved.clone()];
+        let mut checkpoints = 0;
+        assert!(
+            module_variables(source, 0..source.len(), 4, &mut variables, &mut || {
+                checkpoints += 1;
+                Ok::<(), ()>(())
+            })
+            .unwrap()
+        );
+        assert_eq!(variables.len(), 4);
+        for cancelled_at in 1..=checkpoints {
+            let mut variables = vec![preserved.clone()];
+            let mut calls = 0;
+            assert_eq!(
+                module_variables(source, 0..source.len(), 4, &mut variables, &mut || {
+                    calls += 1;
+                    if calls == cancelled_at {
+                        Err("stop")
+                    } else {
+                        Ok(())
+                    }
+                }),
+                Err(ModuleError::Cancelled("stop")),
+                "group checkpoint {cancelled_at}"
+            );
+            assert_eq!(calls, cancelled_at);
+            assert_eq!(variables, vec![preserved.clone()]);
+        }
+    }
+
+    #[test]
+    fn grouped_module_variable_all_byte_outer_separators_preserve_complete_lists() {
+        for byte in 0..=u8::MAX {
+            for prefix in [
+                "Dim [first]",
+                "Public [first](0,1)",
+                "Private [first] As Long",
+            ] {
+                let source = [prefix.as_bytes(), &[byte], b"[second]"].concat();
+                let result = parse(&source);
+                assert_eq!(
+                    result.is_ok(),
+                    matches!(byte, b',' | b'\''),
+                    "outer byte {byte}, prefix {prefix}"
+                );
+                if let Ok(inventory) = result {
+                    assert_eq!(
+                        inventory.variables().len(),
+                        if byte == b',' { 2 } else { 1 }
+                    );
+                    assert_eq!(inventory.statement_count(), 1);
+                    assert_eq!(&source[inventory.variables()[0].name()], b"[first]");
+                    if byte == b',' {
+                        assert_eq!(&source[inventory.variables()[1].name()], b"[second]");
+                        assert_eq!(
+                            inventory.variables()[0].statement(),
+                            inventory.variables()[1].statement()
+                        );
+                    } else {
+                        assert_eq!(inventory.variables()[0].statement().end, prefix.len());
+                    }
+                }
+            }
+            for (prefix, suffix, accepted) in [
+                (
+                    b"Dim [first],".as_slice(),
+                    b"[second]".as_slice(),
+                    matches!(byte, b' ' | b'\t'),
+                ),
+                (
+                    b"Dim [first]".as_slice(),
+                    b",[second]".as_slice(),
+                    matches!(byte, b' ' | b'\t' | b'\''),
+                ),
+                (
+                    b"Dim [first],[second]".as_slice(),
+                    b"".as_slice(),
+                    byte.is_ascii_whitespace() && byte != b'\r' || byte == b'\'',
+                ),
+            ] {
+                let source = [prefix, &[byte], suffix].concat();
+                let result = parse(&source);
+                assert_eq!(
+                    result.is_ok(),
+                    accepted,
+                    "comma trivia byte {byte}, prefix {prefix:?}"
+                );
+                if let Ok(inventory) = result {
+                    let expected = if byte == b'\'' && suffix == b",[second]" {
+                        1
+                    } else {
+                        2
+                    };
+                    assert_eq!(inventory.variables().len(), expected);
+                    for variable in inventory.variables() {
+                        assert!(variable.declarator().end <= variable.statement().end);
+                        assert!(variable.statement().end <= source.len());
                     }
                 }
             }
@@ -2219,7 +2803,7 @@ mod tests {
         }
         for tail in [
             "=1",
-            ",other",
+            ",other(upper)",
             " As",
             " As Product",
             " As Long()",
