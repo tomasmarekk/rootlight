@@ -198,6 +198,10 @@ impl ModuleScalarValue {
     pub fn span(&self) -> Range<usize> {
         self.span.clone()
     }
+
+    pub(super) fn rebase(&mut self, source_range: &Range<usize>) {
+        self.span = absolute(source_range, self.span.clone());
+    }
 }
 
 pub(super) fn statement<E>(
@@ -448,6 +452,14 @@ fn local_declaration<E>(
             statement: range,
         },
     )))
+}
+
+pub(super) fn literal_value<E>(
+    text: &[u8],
+    cursor: &mut usize,
+    check: &mut impl FnMut() -> Result<(), E>,
+) -> Result<Option<ModuleScalarValue>, E> {
+    atomic_value(text, cursor, false, check)
 }
 
 fn atomic_value<E>(

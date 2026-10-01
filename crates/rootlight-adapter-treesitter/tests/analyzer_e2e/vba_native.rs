@@ -51,6 +51,48 @@ fn vba_application_proofs_retain_exact_materialized_formals_and_parser_parent() 
                     "1, local",
                     vec!["ByVal value As Long", "ByRef other As Long"],
                 ),
+                (
+                    "Optional ByVal value As Long = 7",
+                    "",
+                    vec!["Optional ByVal value As Long = 7"],
+                ),
+                (
+                    "Optional value As Variant",
+                    "",
+                    vec!["Optional value As Variant"],
+                ),
+                (
+                    "ByVal value As Long, Optional ByRef other As String = \"a,\"\"b\"\":()\"",
+                    "1",
+                    vec![
+                        "ByVal value As Long",
+                        "Optional ByRef other As String = \"a,\"\"b\"\":()\"",
+                    ],
+                ),
+                (
+                    "ByVal value As Long, Optional ByRef other As String = \"a,\"\"b\"\":()\"",
+                    "1, \"written\"",
+                    vec![
+                        "ByVal value As Long",
+                        "Optional ByRef other As String = \"a,\"\"b\"\":()\"",
+                    ],
+                ),
+                (
+                    "Optional first As Boolean = False, Optional second As String = \"text\"",
+                    "",
+                    vec![
+                        "Optional first As Boolean = False",
+                        "Optional second As String = \"text\"",
+                    ],
+                ),
+                (
+                    "Optional first As Boolean = False, Optional second As String = \"text\"",
+                    "True, \"written\"",
+                    vec![
+                        "Optional first As Boolean = False",
+                        "Optional second As String = \"text\"",
+                    ],
+                ),
             ] {
                 let body = if native {
                     "local = 1 + 2\n"

@@ -4,7 +4,9 @@
 
 use std::{fmt, ops::Range};
 
-use super::{ModuleBodyStatement, ProcedureKind, logical_whitespace_len, procedure_header};
+use super::{
+    ModuleBodyStatement, ModuleScalarValue, ProcedureKind, logical_whitespace_len, procedure_header,
+};
 
 /// Caller-owned ceilings for one complete module scan.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -102,18 +104,21 @@ pub enum ModuleParameterPassingMode {
 }
 
 /// One explicitly intrinsic-typed scalar parameter in original source bytes.
-/// The closed slice excludes defaults, array bounds and type suffixes. Its ranges
-/// are relative to the entire module, never a reconstructed parameter list.
+/// Optional parameters retain an absent or literal-only authored default without
+/// evaluation. Array bounds and type suffixes are excluded. All ranges address
+/// the entire module, never a reconstructed parameter list.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ModuleParameter {
     declaration: Range<usize>,
     name: Range<usize>,
     type_range: Range<usize>,
     passing_mode: Option<ModuleParameterPassingMode>,
+    is_optional: bool,
+    default_value: Option<ModuleScalarValue>,
 }
 
 impl ModuleParameter {
-    /// Returns the written modifier or name through the intrinsic type keyword.
+    /// Returns the first written modifier or name through the type or default.
     /// Surrounding parentheses and trailing logical trivia are excluded.
     #[must_use]
     pub fn declaration(&self) -> Range<usize> {
@@ -137,6 +142,21 @@ impl ModuleParameter {
     #[must_use]
     pub const fn passing_mode(&self) -> Option<ModuleParameterPassingMode> {
         self.passing_mode
+    }
+
+    /// Returns whether the parameter explicitly carries the Optional keyword.
+    /// This is source syntax, not an inferred runtime value or passing mode.
+    #[must_use]
+    pub const fn is_optional(&self) -> bool {
+        self.is_optional
+    }
+
+    /// Returns the exact authored literal default, or None when none is written.
+    /// Absence is never replaced by an inferred value. The literal's category
+    /// does not prove compatibility with the parameter's declared intrinsic type.
+    #[must_use]
+    pub fn default_value(&self) -> Option<&ModuleScalarValue> {
+        self.default_value.as_ref()
     }
 }
 
@@ -261,8 +281,11 @@ impl<E: std::error::Error + 'static> std::error::Error for ModuleError<E> {
 /// blank/comment segments and closed-slice Sub/Function procedures. Sub parameter
 /// lists may be absent; Function lists require parentheses. Explicit lists are
 /// empty or contain a complete comma list of scalar parameters with required
-/// intrinsic `As` types and optional written `ByVal`/`ByRef`. Defaults, arrays, `Optional`,
-/// `ParamArray` and type-suffixed parameter names are unsupported. Functions retain
+/// intrinsic `As` types and optional written `ByVal`/`ByRef`. Optional parameters
+/// carry the keyword before any passing modifier and may omit an authored default
+/// or retain one unsigned decimal, physically closed string or Boolean literal.
+/// Defaults on required parameters, other default expressions, arrays, `ParamArray`
+/// and type-suffixed parameter names are unsupported. Functions retain
 /// an optional intrinsic scalar As return clause or unbracketed type suffix.
 /// Public/Private and optional Static modifiers are accepted in that order.
 /// Bodies admit one typed scalar Dim or Const per statement and simple scalar
@@ -289,6 +312,9 @@ impl<E: std::error::Error + 'static> std::error::Error for ModuleError<E> {
 /// Across all procedures, retained body records cannot exceed the statement ceiling.
 /// Retained parameters across all procedures have a separate aggregate ceiling;
 /// their storage is reserved fallibly, never inferred from logical statement count.
+/// Each parameter retains at most one inline default atom under that same ceiling.
+/// Optionality and defaults are source evidence, not inferred values, coercion,
+/// or proof of required-after-Optional semantic validity.
 /// Retained Call arguments have their own aggregate ceiling across every procedure,
 /// with fallible storage; positional atoms do not establish parameter or type identity.
 /// This proves structure only, not type identity, visibility or name uniqueness.
@@ -450,6 +476,10 @@ pub fn module_inventory<E>(
             parameter.name = range.start + parameter.name.start..range.start + parameter.name.end;
             parameter.type_range =
                 range.start + parameter.type_range.start..range.start + parameter.type_range.end;
+            if let Some(value) = &mut parameter.default_value {
+                check().map_err(ModuleError::Cancelled)?;
+                value.rebase(&range);
+            }
         }
         open = Some(ModuleProcedure {
             kind: header.kind,
@@ -639,13 +669,22 @@ fn scalar_parameter<E>(
 ) -> Result<Option<ModuleParameter>, E> {
     check()?;
     let start = *cursor;
+    let is_optional = word(text, cursor, check)?.eq_ignore_ascii_case(b"Optional");
+    if is_optional {
+        if !separator(text, cursor, check)? {
+            return Ok(None);
+        }
+    } else {
+        *cursor = start;
+    }
+    let passing_start = *cursor;
     let modifier = word(text, cursor, check)?;
     let passing_mode = if modifier.eq_ignore_ascii_case(b"ByVal") {
         Some(ModuleParameterPassingMode::ByVal)
     } else if modifier.eq_ignore_ascii_case(b"ByRef") {
         Some(ModuleParameterPassingMode::ByRef)
     } else {
-        *cursor = start;
+        *cursor = passing_start;
         None
     };
     if passing_mode.is_some() && !separator(text, cursor, check)? {
@@ -655,17 +694,12 @@ fn scalar_parameter<E>(
     let Some(spelling) = super::name(text, cursor, check)? else {
         return Ok(None);
     };
+    // Modifiers are consumed only in their authored positions. The complete
+    // As/type tail distinguishes keyword-shaped names from extra modifiers.
     if text.get(name_start) != Some(&b'[')
-        && [
-            b"ByVal".as_slice(),
-            b"ByRef",
-            b"Optional",
-            b"ParamArray",
-            b"As",
-            b"Rem",
-        ]
-        .iter()
-        .any(|keyword| spelling.eq_ignore_ascii_case(keyword))
+        && [b"ParamArray".as_slice(), b"Rem"]
+            .iter()
+            .any(|keyword| spelling.eq_ignore_ascii_case(keyword))
     {
         return Ok(None);
     }
@@ -680,11 +714,31 @@ fn scalar_parameter<E>(
     if !super::module_body::intrinsic_type_name(word(text, cursor, check)?) {
         return Ok(None);
     }
+    let type_end = *cursor;
+    *cursor += logical_whitespace_len(text.get(*cursor..).unwrap_or_default(), check)?;
+    let default_value = if text.get(*cursor) == Some(&b'=') {
+        if !is_optional {
+            return Ok(None);
+        }
+        *cursor += 1;
+        *cursor += logical_whitespace_len(text.get(*cursor..).unwrap_or_default(), check)?;
+        let Some(value) = super::module_body::literal_value(text, cursor, check)? else {
+            return Ok(None);
+        };
+        Some(value)
+    } else {
+        None
+    };
+    let declaration_end = default_value
+        .as_ref()
+        .map_or(type_end, |value| value.span().end);
     Ok(Some(ModuleParameter {
-        declaration: start..*cursor,
+        declaration: start..declaration_end,
         name,
-        type_range: type_start..*cursor,
+        type_range: type_start..type_end,
         passing_mode,
+        is_optional,
+        default_value,
     }))
 }
 
@@ -1017,6 +1071,8 @@ mod tests {
                     assert_eq!(&source[parameter.name()], "value");
                     assert_eq!(&source[parameter.type_range()], ty);
                     assert_eq!(parameter.passing_mode(), mode);
+                    assert!(!parameter.is_optional());
+                    assert!(parameter.default_value().is_none());
                 }
             }
         }
@@ -1044,7 +1100,7 @@ mod tests {
             "value() As Long",
             "value(1) As Long",
             "value As Long()",
-            "Optional value As Long",
+            "Optional value As Long =",
             "ParamArray value() As Variant",
             "ByVal ByRef value As Long",
             "ByVal ByVal value As Long",
@@ -1053,7 +1109,7 @@ mod tests {
             "ByVal[value] As Long",
             "ByVal As Long",
             "ByRef As Long",
-            "As As Long",
+            "As As",
             "Optional As Long",
             "ParamArray As Long",
             "value$ As String",
@@ -1333,6 +1389,612 @@ mod tests {
                 parse(source),
                 Err(ModuleError::Unsupported { .. })
             ));
+        }
+    }
+
+    #[test]
+    fn optional_parameter_lists_preserve_exact_ranges_default_absence_and_trivia() {
+        for newline in ["\n", "\r\n"] {
+            let first = "required As Long";
+            let second = format!(
+                "oPtIoNaL _{newline} bYvAl _{newline} [label] _{newline} As _{newline} String _{newline} = _{newline} \"a,\"\"b\"\":) As Rem\""
+            );
+            let third = "Optional ByRef count As Long=001";
+            let fourth = "Optional [Optional] As Boolean = fAlSe";
+            let fifth = "Optional absent As Variant";
+            let header = format!(
+                "Public Function Run({first}, _{newline} {second} _{newline}, {third}, {fourth}, {fifth} _{newline} ) As Long"
+            );
+            let source = format!(
+                "Attribute VB_Name = \"OptionalModule\"{newline}  {header} ' header{newline}End Function{newline}Sub Plain([Optional] As Long){newline}End Sub{newline}"
+            );
+            let inventory = parse(source.as_bytes()).unwrap();
+            let procedure = &inventory.procedures()[0];
+            assert_eq!(&source[procedure.header()], header);
+            assert_eq!(procedure.parameters().len(), 5);
+            for (index, declaration, name, ty, mode, optional, default) in [
+                (0, first, "required", "Long", None, false, None),
+                (
+                    1,
+                    second.as_str(),
+                    "[label]",
+                    "String",
+                    Some(ModuleParameterPassingMode::ByVal),
+                    true,
+                    Some((
+                        super::super::ModuleScalarValueKind::String,
+                        "\"a,\"\"b\"\":) As Rem\"",
+                    )),
+                ),
+                (
+                    2,
+                    third,
+                    "count",
+                    "Long",
+                    Some(ModuleParameterPassingMode::ByRef),
+                    true,
+                    Some((super::super::ModuleScalarValueKind::UnsignedDecimal, "001")),
+                ),
+                (
+                    3,
+                    fourth,
+                    "[Optional]",
+                    "Boolean",
+                    None,
+                    true,
+                    Some((super::super::ModuleScalarValueKind::Boolean, "fAlSe")),
+                ),
+                (4, fifth, "absent", "Variant", None, true, None),
+            ] {
+                let parameter = &procedure.parameters()[index];
+                assert_eq!(&source[parameter.declaration()], declaration);
+                assert_eq!(&source[parameter.name()], name);
+                assert_eq!(&source[parameter.type_range()], ty);
+                assert_eq!(parameter.passing_mode(), mode);
+                assert_eq!(parameter.is_optional(), optional);
+                assert!(procedure.header().start < parameter.declaration().start);
+                assert!(parameter.declaration().end < procedure.header().end);
+                if let Some((kind, spelling)) = default {
+                    let value = parameter.default_value().unwrap();
+                    assert_eq!(value.kind(), kind);
+                    assert_eq!(&source[value.span()], spelling);
+                    assert!(parameter.type_range().end < value.span().start);
+                    assert_eq!(value.span().end, parameter.declaration().end);
+                } else {
+                    assert!(parameter.default_value().is_none());
+                    assert_eq!(parameter.type_range().end, parameter.declaration().end);
+                }
+            }
+            let bracketed = &inventory.procedures()[1].parameters()[0];
+            assert!(!bracketed.is_optional());
+            assert!(bracketed.default_value().is_none());
+            assert_eq!(&source[bracketed.name()], "[Optional]");
+        }
+        let inventory = parse(b"Sub Run(Optional first As Long=1,required As String,Optional last As Boolean)\nEnd Sub\n").unwrap();
+        assert_eq!(inventory.procedures()[0].parameters().len(), 3);
+        assert!(!inventory.procedures()[0].parameters()[1].is_optional());
+    }
+
+    #[test]
+    fn optional_parameter_intrinsic_types_modes_and_literal_kinds_are_source_only() {
+        for ty in [
+            "String", "Boolean", "Byte", "Integer", "Long", "LongLong", "LongPtr", "Single",
+            "Double", "Currency", "Date", "Variant", "Object",
+        ] {
+            for (modifier, passing) in [
+                ("", None),
+                ("ByVal ", Some(ModuleParameterPassingMode::ByVal)),
+                ("bYrEf\t", Some(ModuleParameterPassingMode::ByRef)),
+            ] {
+                for (suffix, expected) in [
+                    ("", None),
+                    (
+                        "=00019",
+                        Some((
+                            super::super::ModuleScalarValueKind::UnsignedDecimal,
+                            "00019",
+                        )),
+                    ),
+                    (
+                        " = \"a\"\"b\"",
+                        Some((super::super::ModuleScalarValueKind::String, "\"a\"\"b\"")),
+                    ),
+                    (
+                        "=tRuE",
+                        Some((super::super::ModuleScalarValueKind::Boolean, "tRuE")),
+                    ),
+                ] {
+                    let declaration = format!("Optional {modifier}value As {ty}{suffix}");
+                    let source = format!("Sub Run({declaration})\nEnd Sub\n");
+                    let inventory = parse(source.as_bytes()).unwrap();
+                    let parameter = &inventory.procedures()[0].parameters()[0];
+                    assert!(parameter.is_optional());
+                    assert_eq!(parameter.passing_mode(), passing);
+                    assert_eq!(&source[parameter.declaration()], declaration);
+                    assert_eq!(&source[parameter.type_range()], ty);
+                    if let Some((kind, spelling)) = expected {
+                        let value = parameter.default_value().unwrap();
+                        assert_eq!(value.kind(), kind);
+                        assert_eq!(&source[value.span()], spelling);
+                    } else {
+                        assert!(parameter.default_value().is_none());
+                    }
+                }
+            }
+        }
+        for spelling in ["\"\"", "\"\"\"\"", "True", "False", "0", "000"] {
+            let source =
+                format!("Function Run$(Optional value As String={spelling})\nEnd Function\n");
+            let inventory = parse(source.as_bytes()).unwrap();
+            assert_eq!(
+                &source[inventory.procedures()[0].parameters()[0]
+                    .default_value()
+                    .unwrap()
+                    .span()],
+                spelling
+            );
+        }
+    }
+
+    #[test]
+    fn optional_parameter_name_positions_use_complete_tails_after_modifiers() {
+        for (passing, mode) in [
+            ("", None),
+            ("ByVal ", Some(ModuleParameterPassingMode::ByVal)),
+            ("ByRef ", Some(ModuleParameterPassingMode::ByRef)),
+        ] {
+            let names: &[&str] = if passing.is_empty() {
+                &["Optional", "As"]
+            } else {
+                &["Optional", "As", "ByVal", "ByRef"]
+            };
+            for name in names {
+                for default in ["", " = 1"] {
+                    let declaration = format!("Optional {passing}{name} As Long{default}");
+                    let source = format!("Sub Run({declaration})\nEnd Sub\n");
+                    let inventory = parse(source.as_bytes()).unwrap();
+                    let parameter = &inventory.procedures()[0].parameters()[0];
+                    assert!(parameter.is_optional());
+                    assert_eq!(parameter.passing_mode(), mode);
+                    assert_eq!(&source[parameter.declaration()], declaration);
+                    assert_eq!(&source[parameter.name()], *name);
+                    assert_eq!(&source[parameter.type_range()], "Long");
+                    if default.is_empty() {
+                        assert!(parameter.default_value().is_none());
+                    } else {
+                        assert_eq!(&source[parameter.default_value().unwrap().span()], "1");
+                    }
+                }
+            }
+        }
+        for clause in [
+            "Optional bYvAl oPtIoNaL As Long=001",
+            "Optional bYrEf aS As Long",
+            "Optional [ParamArray] As Long",
+            "Optional [Rem] As Long=1",
+        ] {
+            assert!(
+                parse(format!("Sub Run({clause})\nEnd Sub\n").as_bytes()).is_ok(),
+                "{clause}"
+            );
+        }
+        for clause in [
+            "Optional Optional value As Long",
+            "Optional ByVal ByVal value As Long",
+            "Optional ByRef ByRef value As Long",
+            "Optional As As",
+            "Optional As As Long extra",
+            "Optional ByVal Optional As Long = name",
+            "Optional ParamArray As Long",
+            "Optional ByVal ParamArray As Long",
+            "Optional Rem As Long",
+            "Optional ByRef Rem As Long",
+        ] {
+            let source = format!(
+                "Sub Accepted(Optional previous As Long=1)\nEnd Sub\nSub Rejected(Optional complete As Long=1,{clause})\nEnd Sub\n"
+            );
+            assert!(
+                matches!(
+                    parse(source.as_bytes()),
+                    Err(ModuleError::Unsupported { .. })
+                ),
+                "{clause}"
+            );
+        }
+    }
+
+    #[test]
+    fn required_parameter_keyword_names_follow_the_authored_name_position() {
+        for (passing, mode) in [
+            ("", None),
+            ("ByVal ", Some(ModuleParameterPassingMode::ByVal)),
+            ("ByRef ", Some(ModuleParameterPassingMode::ByRef)),
+        ] {
+            let names: &[&str] = if passing.is_empty() {
+                &["As"]
+            } else {
+                &["Optional", "As", "ByVal", "ByRef"]
+            };
+            for name in names {
+                let declaration = format!("{passing}{name} As Long");
+                let source = format!("Sub Run({declaration})\nEnd Sub\n");
+                let inventory = parse(source.as_bytes()).unwrap();
+                let parameter = &inventory.procedures()[0].parameters()[0];
+                assert_eq!(&source[parameter.declaration()], declaration);
+                assert_eq!(&source[parameter.name()], *name);
+                assert_eq!(&source[parameter.type_range()], "Long");
+                assert_eq!(parameter.passing_mode(), mode);
+                assert!(!parameter.is_optional());
+                assert!(parameter.default_value().is_none());
+            }
+        }
+        for clause in [
+            "bYvAl oPtIoNaL As Long",
+            "bYrEf bYvAl As String",
+            "bYvAl bYrEf As Boolean",
+            "aS As Long",
+            "[Optional] As Long",
+        ] {
+            let source = format!("Sub Run({clause})\nEnd Sub\n");
+            let inventory = parse(source.as_bytes()).unwrap();
+            let parameter = &inventory.procedures()[0].parameters()[0];
+            assert!(!parameter.is_optional());
+            assert!(parameter.default_value().is_none());
+            assert_eq!(&source[parameter.declaration()], clause);
+        }
+        for clause in [
+            "Optional As Long",
+            "ByVal As Long",
+            "ByRef As Long",
+            "As As",
+            "ByVal ByVal value As Long",
+            "ByRef ByRef value As Long",
+            "ByVal Optional value As Long",
+            "ByRef As As Long trailing",
+            "ByVal Optional As Long=1",
+            "ByRef ByVal As Long=1",
+            "Rem As Long",
+            "ByVal Rem As Long",
+            "ParamArray As Long",
+            "ByRef ParamArray As Long",
+        ] {
+            let source = format!(
+                "Sub Accepted()\nEnd Sub\nSub Rejected(complete As Long,{clause})\nEnd Sub\n"
+            );
+            assert!(
+                matches!(
+                    parse(source.as_bytes()),
+                    Err(ModuleError::Unsupported { .. })
+                ),
+                "{clause}"
+            );
+        }
+    }
+
+    #[test]
+    fn optional_parameter_default_and_modifier_tails_reject_entire_inventory() {
+        for parameters in [
+            "Optional value As Long =",
+            "Optional value As Long = name",
+            "Optional value As Long = [True]",
+            "Optional value As Long = Null",
+            "Optional value As Long = Nothing",
+            "Optional value As Long = Empty",
+            "Optional value As Long = -1",
+            "Optional value As Long = +1",
+            "Optional value As Long = 1.0",
+            "Optional value As Long = .1",
+            "Optional value As Long = 1e2",
+            "Optional value As Long = &H1",
+            "Optional value As Long = &O1",
+            "Optional value As Long = #1/1/2000#",
+            "Optional value As Long = 1%",
+            "Optional value As Long = 1+2",
+            "Optional value As Long = True And False",
+            "Optional value As Long = (1)",
+            "Optional value As Long = Make()",
+            "Optional value As Long = holder.value",
+            "Optional value As Long = 1 extra",
+            "Optional value As Long = TrueFalse",
+            "Optional value As Long = True$",
+            "Optional value As Long := 1",
+            "Optional value As Long ==1",
+            "Optional value As String = \"a\" \"b\"",
+            "Optional value As String = \"open",
+            "Optional value As String = \"continued _\n ",
+            "Optional value As String = \"line\nend\"",
+            "Optional value As Long = 1 ' inside\n",
+            "Optional value As Long = 1,",
+            "Optional value As Long = 1,,other As Long",
+            "Optional value As Long = 1,Optional next As Long =",
+            "Optional Optional value As Long",
+            "Optional ByVal ByRef value As Long",
+            "Optional ByRef ByVal value As Long",
+            "Optional ByVal ByVal value As Long",
+            "ByVal Optional value As Long",
+            "ByRef Optional value As Long",
+            "Optional[value] As Long",
+            "Optional ByVal[value] As Long",
+            "Optional As Long",
+            "Optional ByVal As Long",
+            "Optional ParamArray value() As Variant",
+            "Optional value() As Long",
+            "Optional value As Long()",
+            "Optional value As Product",
+            "Optional value As [Long]",
+            "Optional value As New Object",
+            "Optional value As String * 8",
+            "Optional value As Long$",
+            "Optional value$ As String",
+            "Optional value",
+            "Optional value = 1",
+            "Optional value As",
+            "required As Long=1",
+        ] {
+            let source = format!(
+                "Sub Accepted(Optional previous As Long=1)\nDim local As Long\nEnd Sub\nSub Rejected(required As Long,Optional complete As String=\"kept\",{parameters})\nEnd Sub\n"
+            );
+            assert!(
+                matches!(
+                    parse(source.as_bytes()),
+                    Err(ModuleError::Unsupported { .. })
+                ),
+                "{parameters:?}"
+            );
+        }
+        for header in [
+            "Sub Rejected(Optional value As Long=1) tail",
+            "Sub Rejected(Optional value As Long=1)()",
+            "Sub Rejected(Optional value As Long=1",
+            "Sub Rejected(Optional value As Long=1) As Long",
+            "Function Rejected(Optional value As Long=1) As Product",
+            "Function Rejected(Optional value As Long=1) As Long extra",
+        ] {
+            let category = if header.starts_with("Function") {
+                "Function"
+            } else {
+                "Sub"
+            };
+            let source = format!("Sub Accepted()\nEnd Sub\n{header}\nEnd {category}\n");
+            assert!(
+                matches!(
+                    parse(source.as_bytes()),
+                    Err(ModuleError::Unsupported { .. })
+                ),
+                "{header}"
+            );
+        }
+    }
+
+    #[test]
+    fn optional_parameter_retention_remains_aggregate_and_bounded() {
+        let source = b"Sub First(Optional a As Long=1,ByVal b As String)\nEnd Sub\nFunction Second(Optional ByRef c As Boolean=False,Optional d As Variant,e As Date) As Long\nEnd Function\n";
+        let limits = ModuleLimits::new(source.len(), 4, 2).with_max_parameters(5);
+        let expected = parse(source).unwrap();
+        assert_eq!(expected.statement_count(), 4);
+        assert_eq!(
+            module_inventory(source, limits, &mut || Ok::<(), ()>(())),
+            Ok(expected)
+        );
+        for maximum in [0, 1, 2, 4] {
+            assert_eq!(
+                module_inventory(source, limits.with_max_parameters(maximum), &mut || Ok::<
+                    (),
+                    (),
+                >(
+                    ()
+                )),
+                Err(ModuleError::ParameterLimit)
+            );
+        }
+        for (limits, expected) in [
+            (
+                ModuleLimits::new(source.len() - 1, 4, 2),
+                ModuleError::SourceLimit,
+            ),
+            (
+                ModuleLimits::new(source.len(), 3, 2),
+                ModuleError::StatementLimit,
+            ),
+            (
+                ModuleLimits::new(source.len(), 4, 1),
+                ModuleError::ProcedureLimit,
+            ),
+        ] {
+            assert_eq!(
+                module_inventory(source, limits.with_max_parameters(5), &mut || Ok::<(), ()>(
+                    ()
+                )),
+                Err(expected)
+            );
+        }
+        let list = (0..256_usize)
+            .map(|index| {
+                if index.is_multiple_of(2) {
+                    format!("Optional value{index} As Long={index}")
+                } else {
+                    format!("Optional value{index} As Variant")
+                }
+            })
+            .collect::<Vec<_>>()
+            .join(",");
+        let source = format!("Sub Run({list})\nEnd Sub\n");
+        for maximum in [256, usize::MAX] {
+            let inventory = module_inventory(
+                source.as_bytes(),
+                ModuleLimits::new(source.len(), 2, 1).with_max_parameters(maximum),
+                &mut || Ok::<(), ()>(()),
+            )
+            .unwrap();
+            let parameters = inventory.procedures()[0].parameters();
+            assert_eq!(parameters.len(), 256);
+            for (index, parameter) in parameters.iter().enumerate() {
+                assert!(parameter.is_optional());
+                assert_eq!(&source[parameter.name()], format!("value{index}"));
+                if index.is_multiple_of(2) {
+                    assert_eq!(
+                        &source[parameter.default_value().unwrap().span()],
+                        index.to_string()
+                    );
+                } else {
+                    assert!(parameter.default_value().is_none());
+                }
+            }
+        }
+        assert_eq!(
+            module_inventory(
+                source.as_bytes(),
+                ModuleLimits::new(source.len(), 2, 1).with_max_parameters(255),
+                &mut || Ok::<(), ()>(())
+            ),
+            Err(ModuleError::ParameterLimit)
+        );
+    }
+
+    #[test]
+    fn optional_parameter_byte_boundaries_are_complete_not_prefixes() {
+        for byte in 0..=u8::MAX {
+            for (prefix, suffix, accepted) in [
+                (
+                    b"Sub Run(Optional value As Long=1".as_slice(),
+                    b")\nEnd Sub\n".as_slice(),
+                    byte.is_ascii_digit() || matches!(byte, b' ' | b'\t'),
+                ),
+                (
+                    b"Sub Run(Optional value As Long=".as_slice(),
+                    b"1)\nEnd Sub\n".as_slice(),
+                    byte.is_ascii_digit() || matches!(byte, b' ' | b'\t'),
+                ),
+                (
+                    b"Sub Run(Optional value As Boolean=True".as_slice(),
+                    b")\nEnd Sub\n".as_slice(),
+                    matches!(byte, b' ' | b'\t'),
+                ),
+                (
+                    b"Sub Run(Optional value As String=\"a\"".as_slice(),
+                    b")\nEnd Sub\n".as_slice(),
+                    matches!(byte, b' ' | b'\t'),
+                ),
+            ] {
+                let source = [prefix, &[byte], suffix].concat();
+                let result = parse(&source);
+                assert_eq!(
+                    result.is_ok(),
+                    accepted,
+                    "boundary byte {byte}, prefix {prefix:?}"
+                );
+                if let Ok(inventory) = result {
+                    let procedure = &inventory.procedures()[0];
+                    let parameter = &procedure.parameters()[0];
+                    assert!(parameter.is_optional());
+                    let value = parameter.default_value().unwrap();
+                    assert!(parameter.type_range().end < value.span().start);
+                    assert!(value.span().end < procedure.header().end);
+                    assert_eq!(value.span().end, parameter.declaration().end);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn optional_parameter_every_checkpoint_cancellation_never_returns_inventory() {
+        let header = format!(
+            "Sub Run(Optional ByVal [{}] As Long={} _\r\n,Optional ByRef text As String=\"{}\",Optional absent As Variant)",
+            "x".repeat(1024),
+            "9".repeat(1024),
+            "a\"\"".repeat(512)
+        );
+        let mut successful_checks = 0;
+        let parsed = closed_header(header.as_bytes(), 3, &mut || {
+            successful_checks += 1;
+            Ok::<(), ()>(())
+        })
+        .unwrap()
+        .unwrap();
+        assert_eq!(parsed.parameters.len(), 3);
+        for cancelled_at in 1..=successful_checks {
+            let mut calls = 0;
+            assert!(
+                matches!(
+                    closed_header(header.as_bytes(), 3, &mut || {
+                        calls += 1;
+                        if calls == cancelled_at {
+                            Err("stop")
+                        } else {
+                            Ok(())
+                        }
+                    }),
+                    Err(ModuleError::Cancelled("stop"))
+                ),
+                "header checkpoint {cancelled_at}"
+            );
+            assert_eq!(calls, cancelled_at);
+        }
+        let source = format!(
+            "Sub Accepted(Optional previous As Boolean=True)\nEnd Sub\n{header}\nEnd Sub\n"
+        );
+        let limits = ModuleLimits::new(source.len(), 4, 2).with_max_parameters(4);
+        let mut successful_checks = 0;
+        let inventory = module_inventory(source.as_bytes(), limits, &mut || {
+            successful_checks += 1;
+            Ok::<(), ()>(())
+        })
+        .unwrap();
+        assert_eq!(inventory.procedures().len(), 2);
+        assert_eq!(inventory.procedures()[1].parameters().len(), 3);
+        for cancelled_at in 1..=successful_checks {
+            let mut calls = 0;
+            assert_eq!(
+                module_inventory(source.as_bytes(), limits, &mut || {
+                    calls += 1;
+                    if calls == cancelled_at {
+                        Err("stop")
+                    } else {
+                        Ok(())
+                    }
+                }),
+                Err(ModuleError::Cancelled("stop")),
+                "module checkpoint {cancelled_at}"
+            );
+            assert_eq!(calls, cancelled_at);
+        }
+    }
+
+    #[test]
+    fn optional_parameter_inline_defaults_preserve_allocation_error_rules() {
+        let text = b"Optional ByVal value As String=\"a\"\"b\"";
+        let parameter = scalar_parameter(text, &mut 0, &mut || Ok::<(), ()>(()))
+            .unwrap()
+            .unwrap();
+        assert!(parameter.default_value().is_some());
+        let mut parameters = Vec::new();
+        reserve_parameters(&mut parameters, 1, &mut || Ok::<(), ()>(())).unwrap();
+        parameters.push(parameter.clone());
+        assert_eq!(
+            reserve_parameters(&mut parameters, 1, &mut || Ok::<(), ()>(())),
+            Err(ModuleError::ParameterLimit)
+        );
+        assert_eq!(
+            reserve_parameters_exact(&mut parameters, usize::MAX, &mut || Ok::<(), ()>(())),
+            Err(ModuleError::AllocationFailed)
+        );
+        assert_eq!(parameters, vec![parameter]);
+        for cancelled_at in [1, 2] {
+            let mut empty = Vec::new();
+            let mut calls = 0;
+            assert_eq!(
+                reserve_parameters_exact(&mut empty, 1, &mut || {
+                    calls += 1;
+                    if calls == cancelled_at {
+                        Err("stop")
+                    } else {
+                        Ok(())
+                    }
+                }),
+                Err(ModuleError::Cancelled("stop"))
+            );
+            assert_eq!(calls, cancelled_at);
+            assert!(empty.is_empty());
         }
     }
 

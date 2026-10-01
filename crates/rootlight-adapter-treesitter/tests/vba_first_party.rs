@@ -30,6 +30,7 @@ const SCALAR_MODULE: &[u8] = b"Attribute VB_Name = \"Authored\"\r\nOption Explic
 const CALL_MODULE: &[u8] = b"Attribute VB_Name = \"Authored\"\r\nSub Notify()\r\nEnd Sub\r\nSub Run()\r\nCall Notify\r\nCall [Notify]( )\r\nEnd Sub\r\n";
 const PARAMETER_MODULE: &[u8] = b"Attribute VB_Name = \"Authored\"\r\nSub Accept(ByVal [value] As Long, ByRef text As String)\r\n[value] = [value]\r\ntext = text\r\nEnd Sub\r\nFunction Echo(item As Long) As Long\r\nEcho = item\r\nEnd Function\r\n";
 const CALL_ARGUMENT_MODULE: &[u8] = b"Attribute VB_Name = \"Authored\"\r\nSub Run()\r\nDim value As Long\r\nCall Target(value, 7, \"a,\"\"b\"\":()\", True, [value])\r\nCall Target( value, value )\r\nCall Target()\r\nEnd Sub\r\n";
+const OPTIONAL_PARAMETER_MODULE: &[u8] = b"Attribute VB_Name = \"Authored\"\r\nSub Accept(required As Long, Optional ByVal count As Long = 007, Optional [text] As String = \"a,\"\"b\"\":()\", Optional flag As Boolean = False, Optional unset As Long)\r\ncount = required\r\n[text] = [text]\r\nEnd Sub\r\n";
 
 #[test]
 fn accepted_modules_preserve_exact_identity_without_native_pool_or_cache_work() {
@@ -479,6 +480,222 @@ fn intrinsic_parameters_preserve_exact_identity_and_mandatory_retention() {
         assert_eq!(stats.pooled_parsers, 0);
         assert_eq!(stats.checked_out_parsers, 0);
         assert_eq!(stats.cache.entries, 0);
+    }
+}
+
+#[test]
+fn optional_parameters_preserve_written_modifiers_defaults_and_exact_identity() {
+    let source = std::str::from_utf8(OPTIONAL_PARAMETER_MODULE).unwrap();
+    let clauses = [
+        ("required As Long", "required", "vba.parameter.declaration"),
+        (
+            "Optional ByVal count As Long = 007",
+            "count",
+            "vba.omittable_parameter.declaration",
+        ),
+        (
+            "Optional [text] As String = \"a,\"\"b\"\":()\"",
+            "[text]",
+            "vba.omittable_parameter.declaration",
+        ),
+        (
+            "Optional flag As Boolean = False",
+            "flag",
+            "vba.omittable_parameter.declaration",
+        ),
+        (
+            "Optional unset As Long",
+            "unset",
+            "vba.omittable_parameter.declaration",
+        ),
+    ];
+    for language in ["vba", "visual-basic-classic"] {
+        let fixture = Fixture::new(OPTIONAL_PARAMETER_MODULE);
+        let provider = provider();
+        let full_limits = limits(4096);
+        let request = fixture.request(&full_limits, language, Vec::new());
+        let required = provider
+            .required_syntax_fact_count(&request, &deadline())
+            .unwrap();
+        assert_eq!(required, 18);
+        let full = parse(&provider, &request);
+        assert_eq!(full.report().coverage().status(), CoverageStatus::Complete);
+        assert!(full.diagnostics().is_empty());
+        let string_start = u64::try_from(source.find("\"a,").unwrap()).unwrap();
+        let strings: Vec<_> = full
+            .facts()
+            .iter()
+            .filter(|fact| {
+                fact.syntax_kind().as_str() == "vba.string.string"
+                    && fact.span().start_byte() == string_start
+            })
+            .collect();
+        assert_eq!(strings.len(), 1);
+        assert_eq!(
+            bytes_at(OPTIONAL_PARAMETER_MODULE, strings[0].span()),
+            b"\"a,\"\"b\"\":()\""
+        );
+        for literal in ["007", "False"] {
+            let start = u64::try_from(source.find(literal).unwrap()).unwrap();
+            assert!(
+                !full.facts().iter().any(|fact| fact
+                    .syntax_kind()
+                    .as_str()
+                    .ends_with(".reference")
+                    && fact.span().start_byte() == start)
+            );
+        }
+        let exact_limits = limits(required);
+        let exact = parse(
+            &provider,
+            &fixture.request(&exact_limits, language, Vec::new()),
+        );
+        assert_eq!(exact.facts().len(), required);
+        assert_eq!(exact.report().coverage().status(), CoverageStatus::Bounded);
+        for output in [&full, &exact] {
+            for (clause, name, syntax) in clauses {
+                let start = source.find(clause).unwrap();
+                let end = start + clause.len();
+                let declaration = output
+                    .facts()
+                    .iter()
+                    .find(|fact| {
+                        fact.syntax_kind().as_str() == syntax
+                            && fact.span().start_byte() == u64::try_from(start).unwrap()
+                    })
+                    .unwrap();
+                assert_eq!(declaration.span().end_byte(), u64::try_from(end).unwrap());
+                assert_eq!(
+                    bytes_at(OPTIONAL_PARAMETER_MODULE, declaration.span()),
+                    clause.as_bytes()
+                );
+                let name_start = start + clause.find(name).unwrap();
+                let definition = output
+                    .facts()
+                    .iter()
+                    .find(|fact| {
+                        fact.syntax_kind().as_str() == "vba.identifier.definition"
+                            && fact.parent() == Some(declaration.local_id())
+                            && fact.span().start_byte() == u64::try_from(name_start).unwrap()
+                    })
+                    .unwrap();
+                assert_eq!(
+                    bytes_at(OPTIONAL_PARAMETER_MODULE, definition.span()),
+                    name.as_bytes()
+                );
+                assert_eq!(
+                    definition.span().end_byte(),
+                    u64::try_from(name_start + name.len()).unwrap()
+                );
+                assert_eq!(definition.span().file(), fixture.source.span().file());
+                let owner = output
+                    .facts()
+                    .iter()
+                    .find(|fact| Some(fact.local_id()) == declaration.parent())
+                    .unwrap();
+                assert_eq!(owner.syntax_kind().as_str(), "vba.sub_function.declaration");
+                assert!(
+                    owner.span().start_byte() <= declaration.span().start_byte()
+                        && owner.span().end_byte() >= declaration.span().end_byte()
+                );
+            }
+        }
+        assert_eq!(full.facts(), parse(&provider, &request).facts());
+        assert_eq!(provider.stats().pooled_parsers, 0);
+        assert_eq!(provider.stats().checked_out_parsers, 0);
+        assert_eq!(provider.stats().cache.entries, 0);
+    }
+}
+
+#[test]
+fn optional_parameter_identity_retains_all_formals_at_exact_and_short_budgets() {
+    for (parameters, required, optional_count) in [
+        ("Optional value As Long", 9, 1),
+        ("Optional value As String = \"x\"", 9, 1),
+        ("required As Long, Optional value As Long = 7", 11, 1),
+        (
+            "Optional count As Long = 7, Optional text As String = \"x\", Optional flag As Boolean = True",
+            13,
+            3,
+        ),
+    ] {
+        let source = format!("Sub Run({parameters})\nEnd Sub\n");
+        for language in ["vba", "visual-basic-classic"] {
+            let fixture = Fixture::new(source.as_bytes());
+            let provider = provider();
+            let full_limits = limits(4096);
+            let request = fixture.request(&full_limits, language, Vec::new());
+            assert_eq!(
+                provider
+                    .required_syntax_fact_count(&request, &deadline())
+                    .unwrap(),
+                required
+            );
+            let full = parse(&provider, &request);
+            let exact_limits = limits(required);
+            let exact = parse(
+                &provider,
+                &fixture.request(&exact_limits, language, Vec::new()),
+            );
+            assert_eq!(exact.facts().len(), required);
+            for output in [&full, &exact] {
+                assert_eq!(
+                    output
+                        .facts()
+                        .iter()
+                        .filter(|fact| fact.syntax_kind().as_str()
+                            == "vba.omittable_parameter.declaration")
+                        .count(),
+                    optional_count
+                );
+                for declaration in output.facts().iter().filter(|fact| {
+                    matches!(
+                        fact.syntax_kind().as_str(),
+                        "vba.parameter.declaration" | "vba.omittable_parameter.declaration"
+                    )
+                }) {
+                    assert!(
+                        output
+                            .facts()
+                            .iter()
+                            .any(|fact| fact.parent() == Some(declaration.local_id())
+                                && fact.syntax_kind().as_str() == "vba.identifier.definition")
+                    );
+                }
+            }
+            let short_limits = limits(required - 1);
+            let request = fixture.request(&short_limits, language, Vec::new());
+            assert_eq!(
+                execute_parse(
+                    &provider,
+                    &request,
+                    MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
+                    &deadline()
+                )
+                .unwrap_err(),
+                AdapterError::Sink(SinkError::StreamLimit {
+                    resource: ResourceKind::RequiredSyntaxFacts,
+                    observed: required,
+                    limit: required - 1
+                })
+            );
+            let cancelled = deadline();
+            cancelled.cancel(CancellationReason::ClientRequest);
+            assert!(matches!(
+                execute_parse(
+                    &provider,
+                    &request,
+                    MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
+                    &cancelled
+                ),
+                Err(AdapterError::Cancelled {
+                    reason: CancellationReason::ClientRequest
+                })
+            ));
+            assert_eq!(provider.stats().pooled_parsers, 0);
+            assert_eq!(provider.stats().checked_out_parsers, 0);
+            assert_eq!(provider.stats().cache.entries, 0);
+        }
     }
 }
 

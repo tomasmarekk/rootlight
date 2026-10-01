@@ -1112,3 +1112,428 @@ fn scalar_call_argument_edits_preserve_sources_ownership_and_written_arity() {
         }
     }
 }
+
+#[derive(Debug, Clone, Copy)]
+struct OptionalCallState {
+    parameters: WrittenParameters<'static>,
+    arguments: &'static str,
+    application_proven: bool,
+}
+
+fn assert_optional_call_contract(
+    service: &FirstSliceService,
+    receipt: &FirstSliceIndexReceipt,
+    source: &str,
+    language: &str,
+    state: OptionalCallState,
+) {
+    let expression = format!("Call Notify({})", state.arguments);
+    assert_parameter_call_contract(
+        service,
+        receipt,
+        source,
+        language,
+        state.parameters,
+        &expression,
+        state.application_proven,
+    );
+    let snapshot = service
+        .loaded_generation_snapshot(receipt.generation)
+        .unwrap();
+    let document = snapshot.document();
+    let notify = document
+        .entities
+        .iter()
+        .find(|entity| entity.canonical_name == "Notify")
+        .unwrap();
+    let parser = document
+        .provenance
+        .iter()
+        .find(|proof| proof.id == notify.provenance)
+        .unwrap();
+    assert_eq!(parser.producer_kind, ProducerKind::Parser);
+    assert_eq!(parser.repository, receipt.repository);
+    assert_eq!(parser.generation, receipt.generation);
+    assert_eq!(parser.language, language);
+    let start = source.find(&expression).unwrap();
+    let end = start + expression.len();
+    let application = document
+        .occurrences
+        .iter()
+        .find(|site| {
+            site.syntax_kind == "vba.application.reference"
+                && site.source.span().start_byte() == u64::try_from(start).unwrap()
+                && site.source.span().end_byte() == u64::try_from(end).unwrap()
+        })
+        .unwrap();
+    let proof = document
+        .provenance
+        .iter()
+        .find(|proof| proof.id == application.provenance)
+        .unwrap();
+    let mut expected_parents = vec![FactRef::Fact(parser.id), FactRef::Entity(notify.id)];
+    for &(written, name) in state.parameters {
+        let parameter = document
+            .entities
+            .iter()
+            .find(|entity| {
+                entity.kind == EntityKind::Parameter
+                    && entity.canonical_name == name
+                    && entity.container == Some(rootlight_ir::ContainerRef::Entity(notify.id))
+            })
+            .unwrap();
+        assert_eq!(parameter.provenance, parser.id);
+        let clause = parameter.evidence.source.as_ref().unwrap();
+        let definition = document
+            .occurrences
+            .iter()
+            .find(|site| {
+                site.role == OccurrenceRole::Definition
+                    && site.target
+                        == OccurrenceTarget::Resolved {
+                            symbol: parameter.id,
+                        }
+            })
+            .unwrap();
+        assert_eq!(definition.provenance, parser.id);
+        assert_eq!(
+            proof
+                .derivation_parents
+                .contains(&FactRef::Entity(parameter.id)),
+            state.application_proven,
+            "formal source closure for {state:?}: rule={:?}",
+            proof.rule,
+        );
+        if state.application_proven {
+            expected_parents.push(FactRef::Entity(parameter.id));
+            assert!(proof.input_sources.contains(clause));
+            assert!(proof.evidence_sources.contains(clause));
+            assert!(proof.evidence_sources.contains(&definition.source));
+        }
+        if let Some((prefix, literal)) = written.split_once(" = ") {
+            let literal_start = source.find(written).unwrap() + prefix.len() + " = ".len();
+            let literal_end = literal_start + literal.len();
+            let reference = SourceRef::new(
+                receipt.repository,
+                receipt.generation,
+                SourceSpan::new(
+                    clause.span().file(),
+                    u64::try_from(literal_start).unwrap(),
+                    u64::try_from(literal_end).unwrap(),
+                )
+                .unwrap(),
+                content_hash(source.as_bytes()),
+                None,
+            );
+            assert_exact_parameter_source(
+                service,
+                receipt,
+                source,
+                &reference,
+                literal_start..literal_end,
+            );
+            let literal_sites = document
+                .occurrences
+                .iter()
+                .filter(|site| site.source.span() == reference.span())
+                .collect::<Vec<_>>();
+            if literal.starts_with('"') {
+                assert_eq!(literal_sites.len(), 1);
+                assert_eq!(literal_sites[0].role, OccurrenceRole::StringEvidence);
+                assert_eq!(literal_sites[0].provenance, parser.id);
+                assert_exact_parameter_source(
+                    service,
+                    receipt,
+                    source,
+                    &literal_sites[0].source,
+                    literal_start..literal_end,
+                );
+            } else {
+                assert!(literal_sites.is_empty());
+            }
+        }
+    }
+    if state.application_proven {
+        expected_parents.sort_unstable();
+        expected_parents.dedup();
+        assert_ne!(proof.id, parser.id);
+        assert_eq!(proof.derivation_parents, expected_parents);
+        assert_eq!(
+            proof.rule.as_deref(),
+            Some("vba-procedure-application-v1.source")
+        );
+        assert_eq!(proof.producer_kind, parser.producer_kind);
+        assert_eq!(proof.binary_digest, parser.binary_digest);
+        assert_eq!(proof.frontend_version, parser.frontend_version);
+        assert!(
+            proof
+                .input_sources
+                .contains(document.files[0].evidence.source.as_ref().unwrap())
+        );
+        assert!(proof.evidence_sources.contains(&application.source));
+        assert!(
+            proof
+                .evidence_sources
+                .contains(notify.evidence.source.as_ref().unwrap())
+        );
+        let relation = document
+            .relations
+            .iter()
+            .find(|relation| {
+                relation.subject == RelationEndpoint::Occurrence(application.id)
+                    && relation.predicate == RelationPredicate::RefersTo
+                    && relation.object == RelationEndpoint::Entity(notify.id)
+            })
+            .unwrap();
+        assert_eq!(relation.provenance, proof.id);
+        assert_eq!(relation.evidence.source.as_ref(), Some(&application.source));
+    } else {
+        assert_eq!(proof.id, parser.id);
+    }
+    for reference in proof.input_sources.iter().chain(&proof.evidence_sources) {
+        assert_eq!(reference.repository(), receipt.repository);
+        assert_eq!(reference.generation(), receipt.generation);
+        assert_eq!(reference.content_hash(), content_hash(source.as_bytes()));
+        assert_eq!(reference.span().file(), document.files[0].id);
+        assert!(reference.span().end_byte() <= u64::try_from(source.len()).unwrap());
+    }
+    assert!(!document.occurrences.iter().any(|site| {
+        site.syntax_kind == "vba.value_identifier.reference"
+            && site.source.span().start_byte() >= u64::try_from(start).unwrap()
+            && site.source.span().end_byte() <= u64::try_from(end).unwrap()
+    }));
+    for argument in state
+        .arguments
+        .split(',')
+        .filter(|argument| !argument.trim().is_empty())
+    {
+        let literal = argument.trim();
+        let offset = expression.find(literal).unwrap();
+        let literal_start = start + offset;
+        let literal_end = literal_start + literal.len();
+        let literal_sites = document
+            .occurrences
+            .iter()
+            .filter(|site| {
+                site.source.span().start_byte() == u64::try_from(literal_start).unwrap()
+                    && site.source.span().end_byte() == u64::try_from(literal_end).unwrap()
+            })
+            .collect::<Vec<_>>();
+        if literal.starts_with('"') {
+            assert_eq!(literal_sites.len(), 1);
+            assert_eq!(literal_sites[0].role, OccurrenceRole::StringEvidence);
+            assert_exact_parameter_source(
+                service,
+                receipt,
+                source,
+                &literal_sites[0].source,
+                literal_start..literal_end,
+            );
+        } else {
+            assert!(literal_sites.is_empty());
+        }
+    }
+}
+
+#[test]
+fn optional_parameter_default_edits_preserve_sources_and_omission_proofs() {
+    let initial = OptionalCallState {
+        parameters: &[
+            ("ByVal value As Long", "value"),
+            ("Optional ByVal extra As Long = 7", "extra"),
+        ],
+        arguments: "1",
+        application_proven: true,
+    };
+    let states = [
+        initial,
+        OptionalCallState {
+            parameters: &[
+                ("ByVal value As Long", "value"),
+                ("Optional ByVal extra As Long = 8", "extra"),
+            ],
+            ..initial
+        },
+        OptionalCallState {
+            parameters: &[
+                ("ByVal value As Long", "value"),
+                ("Optional ByRef renamed As String = \"text\"", "renamed"),
+            ],
+            arguments: "1, \"text\"",
+            application_proven: true,
+        },
+        OptionalCallState {
+            parameters: &[
+                ("ByVal value As Long", "value"),
+                ("Optional ByVal renamed As Boolean = False", "renamed"),
+            ],
+            arguments: "1, True",
+            application_proven: true,
+        },
+        // Omission uses the source-written Optional marker, not a fabricated
+        // default value or a claim about compiler legality of this typed form.
+        OptionalCallState {
+            parameters: &[
+                ("ByVal value As Long", "value"),
+                ("Optional ByVal renamed As Boolean", "renamed"),
+            ],
+            ..initial
+        },
+        OptionalCallState {
+            parameters: &[("ByVal value As Long", "value")],
+            arguments: "1, True",
+            application_proven: false,
+        },
+        OptionalCallState {
+            arguments: "1, 2, True",
+            application_proven: false,
+            ..initial
+        },
+        OptionalCallState {
+            parameters: &[
+                ("ByVal value As Long", "value"),
+                ("ByVal extra As Long", "extra"),
+            ],
+            arguments: "1",
+            application_proven: false,
+        },
+        // The application matcher proves written arguments and formal omission;
+        // Boolean atoms do not prove or disprove runtime scalar type coercion.
+        OptionalCallState {
+            parameters: &[
+                ("ByVal value As Long", "value"),
+                ("ByVal extra As Long", "extra"),
+            ],
+            arguments: "False, True",
+            application_proven: true,
+        },
+        OptionalCallState {
+            arguments: "",
+            application_proven: false,
+            ..initial
+        },
+        initial,
+    ];
+    for language in ["visual-basic-classic", "vba"] {
+        let current = std::env::current_dir().unwrap();
+        let repository = tempfile::tempdir_in(&current).unwrap();
+        let storage = tempfile::tempdir_in(&current).unwrap();
+        let paths = rootlight_runtime::RuntimePaths::new(
+            storage.path().join("state"),
+            storage.path().join("runtime"),
+        )
+        .unwrap();
+        paths.prepare_owner().unwrap();
+        let configuration = (language == "vba").then_some(
+            "version='1.3'\n[extensions.source-languages]\nversion='1.0'\ncritical=true\n[extensions.source-languages.data.extensions]\nbas='vba'\n",
+        );
+        let policy = FirstSliceStoragePolicy::resolve_user_config(configuration, 4).unwrap();
+        assert_eq!(policy.retained_generations(), 2);
+        let mut previous: Option<(FirstSliceIndexReceipt, String, OptionalCallState)> = None;
+        let mut initial_source = None;
+        let mut initial_logical = None;
+        for (position, state) in states.into_iter().enumerate() {
+            let header = state
+                .parameters
+                .iter()
+                .map(|(written, _)| *written)
+                .collect::<Vec<_>>()
+                .join(", ");
+            let source = format!(
+                "Attribute VB_Name = \"Authored\"\nOption Explicit\nSub Notify({header})\nEnd Sub\nSub Run()\nCall Notify({})\nEnd Sub\n",
+                state.arguments,
+            );
+            fs::write(repository.path().join("module.bas"), &source).unwrap();
+            let mut service = FirstSliceService::new_durable_with_policy(
+                policy.clone(),
+                paths.state_dir(),
+                &deadline(),
+            )
+            .unwrap();
+            let prepared = service
+                .prepare_repository(repository.path(), &deadline())
+                .unwrap();
+            let committed = service
+                .publish_prepared_with_metrics(prepared, &deadline())
+                .unwrap();
+            assert_eq!(committed.evidence().rebuilt_files, 1);
+            assert_eq!(committed.evidence().reused_files, 0);
+            if position > 0 {
+                assert_eq!(committed.evidence().changed_files, 1);
+            }
+            let receipt = committed.receipt().clone();
+            assert_optional_call_contract(&service, &receipt, &source, language, state);
+            assert_eq!(
+                receipt,
+                service
+                    .index_repository(repository.path(), &deadline())
+                    .unwrap()
+            );
+            if let Some((old_receipt, old_source, old_state)) = &previous {
+                assert_ne!(receipt.generation, old_receipt.generation);
+                if position == 1 {
+                    assert_eq!(source, old_source.replace(" = 7", " = 8"));
+                    assert!(receipt.logical_snapshot.is_some());
+                    assert_ne!(receipt.logical_snapshot, old_receipt.logical_snapshot);
+                }
+                assert_optional_call_contract(
+                    &service,
+                    old_receipt,
+                    old_source,
+                    language,
+                    *old_state,
+                );
+            }
+            drop(service);
+            let mut service = FirstSliceService::new_durable_with_policy(
+                policy.clone(),
+                paths.state_dir(),
+                &deadline(),
+            )
+            .unwrap();
+            assert_eq!(
+                receipt,
+                service
+                    .index_repository(repository.path(), &deadline())
+                    .unwrap()
+            );
+            assert_optional_call_contract(&service, &receipt, &source, language, state);
+            if let Some((old_receipt, old_source, old_state)) = &previous {
+                assert_optional_call_contract(
+                    &service,
+                    old_receipt,
+                    old_source,
+                    language,
+                    *old_state,
+                );
+            }
+            let prepared = service
+                .prepare_repository_with_options(
+                    repository.path(),
+                    FirstSliceIndexOptions::clean_rebuild(FirstSliceIndexMode::Structural),
+                    &deadline(),
+                )
+                .unwrap();
+            let committed = service
+                .publish_prepared_with_metrics(prepared, &deadline())
+                .unwrap();
+            assert_eq!(committed.evidence().rebuilt_files, 1);
+            assert_eq!(committed.evidence().reused_files, 0);
+            let rebuilt = committed.receipt().clone();
+            assert_ne!(receipt.generation, rebuilt.generation);
+            assert!(receipt.logical_snapshot.is_some());
+            assert_eq!(receipt.logical_snapshot, rebuilt.logical_snapshot);
+            assert_optional_call_contract(&service, &rebuilt, &source, language, state);
+            if position == 0 {
+                initial_source = Some(source.clone());
+                initial_logical = receipt.logical_snapshot.clone();
+            } else if position + 1 == states.len() {
+                assert_eq!(initial_source.as_ref(), Some(&source));
+                assert_eq!(receipt.logical_snapshot, initial_logical);
+            }
+            // The retained predecessor is the latest published rebuild. Check
+            // it before another rebuild legitimately evicts it under retention2.
+            previous = Some((rebuilt, source, state));
+        }
+    }
+}
