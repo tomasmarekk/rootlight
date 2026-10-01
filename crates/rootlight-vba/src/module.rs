@@ -119,7 +119,7 @@ pub enum ModuleVariableVisibility {
     Private,
 }
 
-/// One uninitialized module-level scalar variable retaining only written syntax.
+/// One uninitialized module-level variable retaining scalar or numeric-array syntax.
 /// An absent As clause or a Dim prefix does not fabricate Variant type or Private
 /// visibility. Every range addresses the original module rather than copied text.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -127,6 +127,8 @@ pub struct ModuleVariable {
     statement: Range<usize>,
     declarator: Range<usize>,
     name: Range<usize>,
+    array_bounds: Option<Range<usize>>,
+    array_work_nodes: usize,
     type_range: Option<Range<usize>>,
     visibility: Option<ModuleVariableVisibility>,
     visibility_range: Option<Range<usize>>,
@@ -139,8 +141,8 @@ impl ModuleVariable {
         self.statement.clone()
     }
 
-    /// Returns the exact name through written type, excluding Dim/Public/Private.
-    /// With no authored type, this range is exactly the name token.
+    /// Returns the name through authored array bounds or type, excluding its prefix.
+    /// Without either bounds or type, this range is exactly the name token.
     #[must_use]
     pub fn declarator(&self) -> Range<usize> {
         self.declarator.clone()
@@ -150,6 +152,22 @@ impl ModuleVariable {
     #[must_use]
     pub fn name(&self) -> Range<usize> {
         self.name.clone()
+    }
+
+    /// Returns the complete numeric array designator, including both parentheses.
+    /// None means scalar syntax; an authored empty group is Some, never omitted.
+    /// Endpoint magnitudes, lower-bound defaults and allocation size are not evaluated.
+    #[must_use]
+    pub fn array_bounds(&self) -> Option<Range<usize>> {
+        self.array_bounds.clone()
+    }
+
+    /// Returns logical work for the authored numeric array designator.
+    /// Scalar syntax costs zero. A group costs one node, as does each dimension,
+    /// numeric endpoint and authored unary sign; no value or array size is evaluated.
+    #[must_use]
+    pub const fn array_work_nodes(&self) -> usize {
+        self.array_work_nodes
     }
 
     /// Returns the written intrinsic type, or None without a written As clause.
@@ -446,8 +464,11 @@ impl<E: std::error::Error + 'static> std::error::Error for ModuleError<E> {
 /// initializer and optional Public/Private spelling. They may precede, separate
 /// or follow procedures, but Attribute and Option remain leading-header forms.
 /// A module-level Dim, Public or Private statement retains one uninitialized
-/// scalar variable, with an absent or written intrinsic As type. Initializers,
-/// arrays, declaration lists and richer prefixes remain unsupported.
+/// variable, with an absent or written intrinsic As type. Array bounds may be
+/// empty or a complete comma list of signed/unsigned decimal endpoints, each
+/// upper-only or lower To upper. Magnitudes and runtime array sizes are not
+/// evaluated, and no per-dimension records are retained. Named/expression bounds,
+/// initializers, declaration lists and richer prefixes remain unsupported.
 /// Bodies admit one typed scalar Dim or Const per statement and simple scalar
 /// assignments with an optional Let prefix. Const values are unsigned decimal,
 /// physically closed doubled-quote strings or True/False; assignments additionally
@@ -985,11 +1006,27 @@ fn module_variable<E>(
     let Some(name) = super::module_body::simple_name(text, &mut cursor, check)? else {
         return Ok(None);
     };
-    let separator_length = logical_whitespace_len(text.get(cursor..).unwrap_or_default(), check)?;
+    let mut separator_length =
+        logical_whitespace_len(text.get(cursor..).unwrap_or_default(), check)?;
     cursor += separator_length;
-    let after_name = cursor;
+    let (array_bounds, array_work_nodes) = if text.get(cursor) == Some(&b'(') {
+        let Some(bounds) = numeric_array_bounds(text, &mut cursor, check)? else {
+            return Ok(None);
+        };
+        separator_length = logical_whitespace_len(text.get(cursor..).unwrap_or_default(), check)?;
+        cursor += separator_length;
+        (
+            Some(range.start + bounds.span.start..range.start + bounds.span.end),
+            bounds.work_nodes,
+        )
+    } else {
+        (None, 0)
+    };
+    let after_declarator = cursor;
     let type_range = if word(text, &mut cursor, check)?.eq_ignore_ascii_case(b"As") {
-        if separator_length == 0 || !separator(text, &mut cursor, check)? {
+        if (separator_length == 0 && array_bounds.is_none())
+            || !separator(text, &mut cursor, check)?
+        {
             return Ok(None);
         }
         let start = cursor;
@@ -998,12 +1035,17 @@ fn module_variable<E>(
         }
         Some(range.start + start..range.start + cursor)
     } else {
-        cursor = after_name;
+        cursor = after_declarator;
         None
     };
-    let declarator_end = type_range
-        .as_ref()
-        .map_or(range.start + name.end, |ty| ty.end);
+    let declarator_end = type_range.as_ref().map_or_else(
+        || {
+            array_bounds
+                .as_ref()
+                .map_or(range.start + name.end, |bounds| bounds.end)
+        },
+        |ty| ty.end,
+    );
     cursor += logical_whitespace_len(text.get(cursor..).unwrap_or_default(), check)?;
     if cursor != text.len() {
         return Ok(None);
@@ -1013,10 +1055,110 @@ fn module_variable<E>(
         statement: range.clone(),
         declarator: range.start + name.start..declarator_end,
         name: range.start + name.start..range.start + name.end,
+        array_bounds,
+        array_work_nodes,
         type_range,
         visibility,
         visibility_range,
     }))
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct NumericArrayBounds {
+    span: Range<usize>,
+    work_nodes: usize,
+}
+
+fn numeric_array_bounds<E>(
+    text: &[u8],
+    cursor: &mut usize,
+    check: &mut impl FnMut() -> Result<(), E>,
+) -> Result<Option<NumericArrayBounds>, E> {
+    check()?;
+    let start = *cursor;
+    if text.get(*cursor) != Some(&b'(') {
+        return Ok(None);
+    }
+    *cursor += 1;
+    *cursor += logical_whitespace_len(text.get(*cursor..).unwrap_or_default(), check)?;
+    if text.get(*cursor) == Some(&b')') {
+        *cursor += 1;
+        return Ok(Some(NumericArrayBounds {
+            span: start..*cursor,
+            work_nodes: 1,
+        }));
+    }
+    // Every counted component consumes at least one distinct authored byte.
+    let mut work_nodes = 1_usize;
+    loop {
+        check()?;
+        let Some(endpoint_nodes) = array_integer(text, cursor, check)? else {
+            return Ok(None);
+        };
+        let Some(next_work) = work_nodes
+            .checked_add(1)
+            .and_then(|count| count.checked_add(endpoint_nodes))
+        else {
+            return Ok(None);
+        };
+        work_nodes = next_work;
+        *cursor += logical_whitespace_len(text.get(*cursor..).unwrap_or_default(), check)?;
+        let after_endpoint = *cursor;
+        if text
+            .get(*cursor..)
+            .unwrap_or_default()
+            .get(..2)
+            .is_some_and(|token| token.eq_ignore_ascii_case(b"To"))
+        {
+            *cursor += 2;
+            *cursor += logical_whitespace_len(text.get(*cursor..).unwrap_or_default(), check)?;
+            let Some(endpoint_nodes) = array_integer(text, cursor, check)? else {
+                return Ok(None);
+            };
+            let Some(next_work) = work_nodes.checked_add(endpoint_nodes) else {
+                return Ok(None);
+            };
+            work_nodes = next_work;
+            *cursor += logical_whitespace_len(text.get(*cursor..).unwrap_or_default(), check)?;
+        } else {
+            *cursor = after_endpoint;
+        }
+        match text.get(*cursor) {
+            Some(b')') => {
+                *cursor += 1;
+                return Ok(Some(NumericArrayBounds {
+                    span: start..*cursor,
+                    work_nodes,
+                }));
+            }
+            Some(b',') => {
+                *cursor += 1;
+                *cursor += logical_whitespace_len(text.get(*cursor..).unwrap_or_default(), check)?;
+            }
+            _ => return Ok(None),
+        }
+    }
+}
+
+fn array_integer<E>(
+    text: &[u8],
+    cursor: &mut usize,
+    check: &mut impl FnMut() -> Result<(), E>,
+) -> Result<Option<usize>, E> {
+    check()?;
+    let signed = matches!(text.get(*cursor), Some(b'+' | b'-'));
+    if signed {
+        *cursor += 1;
+        *cursor += logical_whitespace_len(text.get(*cursor..).unwrap_or_default(), check)?;
+    }
+    let start = *cursor;
+    while text.get(*cursor).is_some_and(u8::is_ascii_digit) {
+        if cursor.is_multiple_of(512) {
+            check()?;
+        }
+        *cursor += 1;
+    }
+    Ok((*cursor != start).then_some(1 + usize::from(signed)))
 }
 
 fn reserve_variables<E>(
@@ -1502,8 +1644,8 @@ mod tests {
             "Dim value$",
             "Dim value!",
             "Public [value]$",
-            "Dim value()",
-            "Dim value(1)",
+            "Dim value(upper)",
+            "Dim value(1+2)",
             "Dim holder.value",
             "Dim holder!value",
             "Dim value extra",
@@ -1756,6 +1898,554 @@ mod tests {
                         assert_eq!(&source[variable.declarator()], b"[value]");
                         assert!(variable.type_range().is_none());
                     }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn module_array_variables_preserve_bounds_ranges_and_scalar_absence() {
+        for newline in ["\n", "\r\n"] {
+            let bounds =
+                format!("( _{newline} - _{newline} 2 To _{newline} +3, 9, -0 To 0004 _{newline} )");
+            let declaration = format!("[values] _{newline} {bounds} _{newline} As _{newline} Long");
+            let first = format!("pUbLiC _{newline} {declaration}");
+            let source = format!(
+                "Attribute VB_Name = \"Arrays\"{newline}Option Base 1{newline}  {first} ' tail{newline}Private pending(){newline}Dim fixed(001){newline}Dim scalar{newline}"
+            );
+            let inventory = parse(source.as_bytes()).unwrap();
+            assert!(inventory.procedures().is_empty());
+            assert!(inventory.constants().is_empty());
+            let variables = inventory.variables();
+            assert_eq!(variables.len(), 4);
+            assert_eq!(&source[variables[0].statement()], first);
+            assert_eq!(&source[variables[0].declarator()], declaration);
+            assert_eq!(&source[variables[0].name()], "[values]");
+            assert_eq!(&source[variables[0].array_bounds().unwrap()], bounds);
+            assert_eq!(variables[0].array_work_nodes(), 12);
+            assert_eq!(&source[variables[0].type_range().unwrap()], "Long");
+            assert_eq!(
+                variables[0].visibility(),
+                Some(ModuleVariableVisibility::Public)
+            );
+            assert_eq!(&source[variables[0].visibility_range().unwrap()], "pUbLiC");
+            assert_eq!(&source[variables[1].array_bounds().unwrap()], "()");
+            assert_eq!(variables[1].array_work_nodes(), 1);
+            assert_eq!(&source[variables[1].declarator()], "pending()");
+            assert_eq!(
+                variables[1].visibility(),
+                Some(ModuleVariableVisibility::Private)
+            );
+            assert!(variables[1].type_range().is_none());
+            assert_eq!(&source[variables[2].array_bounds().unwrap()], "(001)");
+            assert_eq!(variables[2].array_work_nodes(), 3);
+            assert_eq!(&source[variables[2].declarator()], "fixed(001)");
+            assert!(variables[2].type_range().is_none());
+            assert_eq!(variables[2].visibility(), None);
+            assert_eq!(variables[2].visibility_range(), None);
+            assert!(variables[3].array_bounds().is_none());
+            assert_eq!(variables[3].array_work_nodes(), 0);
+            assert_eq!(variables[3].declarator(), variables[3].name());
+            for variable in variables {
+                if let Some(bounds) = variable.array_bounds() {
+                    assert_eq!(source.as_bytes()[bounds.start], b'(');
+                    assert_eq!(source.as_bytes()[bounds.end - 1], b')');
+                    assert!(variable.name().end <= bounds.start);
+                    assert!(bounds.end <= variable.declarator().end);
+                    if variable.type_range().is_none() {
+                        assert_eq!(variable.declarator().end, bounds.end);
+                    }
+                }
+                assert_eq!(variable.name().start, variable.declarator().start);
+                assert!(variable.declarator().end <= variable.statement().end);
+            }
+        }
+    }
+
+    #[test]
+    fn module_array_variables_retain_complete_numeric_dimension_lists() {
+        for prefix in ["Dim", "Public", "Private"] {
+            for bounds in [
+                "()",
+                "( )",
+                "(0)",
+                "(+0)",
+                "(-1)",
+                "(+ 12)",
+                "(-\t12)",
+                "(0 To 9)",
+                "(-12 tO + 24)",
+                "(9 To -9)",
+                "(1To -2)",
+                "(1 To-2)",
+                "(1To+2)",
+                "(1To2)",
+                "(1,2)",
+                "(1, -2 To +3, +4, 0 To 0)",
+                "( _\n 1 _\r\n To _\n - _\r\n 2, _\n +3 _\r\n )",
+            ] {
+                for tail in ["", " As Variant"] {
+                    let source = format!("{prefix} [value] {bounds}{tail}\n");
+                    let inventory = parse(source.as_bytes()).unwrap();
+                    assert_eq!(inventory.variables().len(), 1, "{source:?}");
+                    let variable = &inventory.variables()[0];
+                    assert_eq!(&source[variable.array_bounds().unwrap()], bounds);
+                    assert_eq!(&source[variable.name()], "[value]");
+                    assert_eq!(
+                        &source[variable.declarator()],
+                        format!("[value] {bounds}{tail}")
+                    );
+                    assert_eq!(variable.type_range().is_some(), !tail.is_empty());
+                }
+            }
+            let source = format!("{prefix} [value](1)As Long");
+            let inventory = parse(source.as_bytes()).unwrap();
+            assert_eq!(
+                &source[inventory.variables()[0].declarator()],
+                "[value](1)As Long"
+            );
+            assert_eq!(
+                &source[inventory.variables()[0].type_range().unwrap()],
+                "Long"
+            );
+            for ty in [
+                "String", "Boolean", "Byte", "Integer", "Long", "LongLong", "LongPtr", "Single",
+                "Double", "Currency", "Date", "Variant", "Object",
+            ] {
+                let source = format!("{prefix} [value](2,-1 To 4) As {ty}");
+                let inventory = parse(source.as_bytes()).unwrap();
+                assert_eq!(&source[inventory.variables()[0].type_range().unwrap()], ty);
+                assert_eq!(
+                    &source[inventory.variables()[0].array_bounds().unwrap()],
+                    "(2,-1 To 4)"
+                );
+            }
+            for name in [
+                "Name", "Line", "Load", "Remember", "_values", "[True]", "[Rem]", "[Sub]",
+            ] {
+                let source = format!("{prefix} {name}(1)");
+                let inventory = parse(source.as_bytes()).unwrap();
+                assert_eq!(&source[inventory.variables()[0].name()], name);
+            }
+        }
+    }
+
+    #[test]
+    fn module_array_variables_charge_groups_dimensions_endpoints_and_written_signs() {
+        for (bounds, expected) in [
+            ("()", 1),
+            ("(0)", 3),
+            ("(+0)", 4),
+            ("(- 0)", 4),
+            ("(0 To 1)", 4),
+            ("(-2 To +3,4)", 8),
+            ("(1,2,3)", 7),
+            ("(- _\n 1 To + _\r\n 2, +3 To -4)", 11),
+        ] {
+            let source = format!("Dim value{bounds}");
+            let inventory = parse(source.as_bytes()).unwrap();
+            assert_eq!(
+                inventory.variables()[0].array_work_nodes(),
+                expected,
+                "{bounds:?}"
+            );
+            let mut cursor = 0;
+            let scanned =
+                numeric_array_bounds(bounds.as_bytes(), &mut cursor, &mut || Ok::<(), ()>(()))
+                    .unwrap()
+                    .unwrap();
+            assert_eq!(scanned.work_nodes, expected);
+            assert_eq!(scanned.span, 0..bounds.len());
+            assert!(scanned.work_nodes <= bounds.len());
+        }
+        let inventory = parse(b"Dim scalar").unwrap();
+        assert_eq!(inventory.variables()[0].array_work_nodes(), 0);
+    }
+
+    #[test]
+    fn module_array_variables_do_not_evaluate_magnitudes_or_retain_dimensions() {
+        let magnitude = "9".repeat(4096);
+        let bounds = format!("(-{magnitude} To +{magnitude})");
+        let source = format!("Private wide{bounds}\n");
+        let inventory = module_inventory(
+            source.as_bytes(),
+            ModuleLimits::new(source.len(), 1, 0),
+            &mut || Ok::<(), ()>(()),
+        )
+        .unwrap();
+        assert_eq!(inventory.statement_count(), 1);
+        assert_eq!(inventory.variables().len(), 1);
+        assert_eq!(
+            &source[inventory.variables()[0].array_bounds().unwrap()],
+            bounds
+        );
+        assert_eq!(inventory.variables()[0].array_work_nodes(), 6);
+        let dimensions = (0..128)
+            .map(|index| format!("-{index} To +{index}"))
+            .collect::<Vec<_>>()
+            .join(",");
+        let source = format!("Dim many({dimensions})");
+        let inventory = module_inventory(
+            source.as_bytes(),
+            ModuleLimits::new(source.len(), 1, 0),
+            &mut || Ok::<(), ()>(()),
+        )
+        .unwrap();
+        assert_eq!(inventory.statement_count(), 1);
+        assert_eq!(inventory.variables().len(), 1);
+        assert_eq!(
+            &source[inventory.variables()[0].array_bounds().unwrap()],
+            format!("({dimensions})")
+        );
+        assert_eq!(inventory.variables()[0].array_work_nodes(), 1 + 128 * 5);
+        assert_eq!(inventory.variables()[0].declarator().end, source.len());
+    }
+
+    #[test]
+    fn module_array_variables_preserve_module_order_and_other_closed_scopes() {
+        let source = b"Dim before()\nConst Seed=1\nSub First()\nDim local As Long\nEnd Sub\nPublic between(1,2) As Long\nFunction Second(Optional value=Seed) As Long\nSecond=value\nEnd Function\nPrivate after(-1 To 1)\n";
+        let inventory = parse(source).unwrap();
+        assert_eq!(inventory.variables().len(), 3);
+        assert_eq!(inventory.constants().len(), 1);
+        assert_eq!(inventory.procedures().len(), 2);
+        assert!(
+            inventory.variables()[0].statement().end < inventory.procedures()[0].header().start
+        );
+        assert!(
+            inventory.procedures()[0].terminator().end < inventory.variables()[1].statement().start
+        );
+        assert!(
+            inventory.variables()[1].statement().end < inventory.procedures()[1].header().start
+        );
+        assert!(
+            inventory.procedures()[1].terminator().end < inventory.variables()[2].statement().start
+        );
+        assert!(
+            matches!(&inventory.procedures()[0].statements()[0], ModuleBodyStatement::Declaration(local) if &source[local.name()] == b"local")
+        );
+        for source in [
+            "Dim value()\nOption Explicit",
+            "Public value(1)\nAttribute VB_Name = \"Late\"",
+            "Dim value():",
+            "Dim value(1):Private other(2)",
+            "Dim value\nSub Run()\nDim local(1) As Long\nEnd Sub",
+            "Const Seed(1)=1",
+            "Sub Run(value(1))\nEnd Sub",
+            "Sub Run(Optional value()=1)\nEnd Sub",
+        ] {
+            assert!(
+                matches!(
+                    parse(source.as_bytes()),
+                    Err(ModuleError::Unsupported { .. })
+                ),
+                "{source}"
+            );
+        }
+    }
+
+    #[test]
+    fn module_array_variables_reject_every_incomplete_or_richer_dimension_tail() {
+        for bounds in [
+            "(",
+            "(1",
+            "(1 To",
+            "(1 To)",
+            "(To 1)",
+            "(1 To 2 To 3)",
+            "(,)",
+            "(,1)",
+            "(1,)",
+            "(1,,2)",
+            "(1, ,2)",
+            "(1 2)",
+            "(())",
+            "((1))",
+            "(1)(2)",
+            "(value)",
+            "([value])",
+            "(True)",
+            "(False)",
+            "(Nothing)",
+            "(Rem)",
+            "(1 To value)",
+            "(value To 1)",
+            "(1ToFoo)",
+            "(1+2)",
+            "(1-2)",
+            "(1*2)",
+            "(1/2)",
+            "(1^2)",
+            "(1 & 2)",
+            "(1.2)",
+            "(.2)",
+            "(1e2)",
+            "(&H10)",
+            "(&O10)",
+            "(1%)",
+            "(1&)",
+            "(1!)",
+            "(1#)",
+            "(1@)",
+            "(1$)",
+            "(\"1\")",
+            "(#1#)",
+            "(+)",
+            "(-)",
+            "(--1)",
+            "(+-1)",
+            "(-+1)",
+            "(+ +1)",
+            "(1 To --2)",
+            "(1 To 2,)",
+            "(1 To 2, [upper])",
+            "(1\n)",
+            "(1\r\n)",
+            "(1\x0c)",
+            "(1 ' tail\n)",
+            "(1 Rem tail)",
+            "(1:=2)",
+            "(é)",
+        ] {
+            let source = format!(
+                "Dim prior()\nConst Seed=1\nSub Accepted()\nEnd Sub\nPrivate value{bounds}\n"
+            );
+            assert!(
+                matches!(
+                    parse(source.as_bytes()),
+                    Err(ModuleError::Unsupported { .. })
+                ),
+                "{bounds:?}"
+            );
+        }
+        for tail in [
+            "=1",
+            ",other",
+            " As",
+            " As Product",
+            " As Long()",
+            " As Long$",
+            " extra",
+            "$",
+            "!",
+        ] {
+            let source = format!("Dim prior(1)\nDim value(1){tail}\n");
+            assert!(
+                matches!(
+                    parse(source.as_bytes()),
+                    Err(ModuleError::Unsupported { .. })
+                ),
+                "{tail}"
+            );
+        }
+    }
+
+    #[test]
+    fn module_array_variables_keep_existing_source_statement_and_retention_limits() {
+        let source = b"Dim first()\nPublic second(1,2) As Variant\nPrivate third(-1 To +1)\n";
+        let limits = ModuleLimits::new(source.len(), 3, 0)
+            .with_max_parameters(0)
+            .with_max_arguments(0);
+        let inventory = module_inventory(source, limits, &mut || Ok::<(), ()>(())).unwrap();
+        assert_eq!(inventory.statement_count(), 3);
+        assert_eq!(inventory.variables().len(), 3);
+        assert!(inventory.procedures().is_empty());
+        for maximum in [0, 1, 2] {
+            assert_eq!(
+                module_inventory(
+                    source,
+                    ModuleLimits::new(source.len(), maximum, 0),
+                    &mut || Ok::<(), ()>(())
+                ),
+                Err(ModuleError::StatementLimit)
+            );
+        }
+        assert_eq!(
+            module_inventory(
+                source,
+                ModuleLimits::new(source.len() - 1, 3, 0),
+                &mut || Ok::<(), ()>(())
+            ),
+            Err(ModuleError::SourceLimit)
+        );
+        let source = b"Dim first(1)\nConst Seed=1\nSub Run()\nDim local As Long\nlocal=Seed\nEnd Sub\nPrivate last()\n";
+        let inventory =
+            module_inventory(source, ModuleLimits::new(source.len(), 7, 1), &mut || {
+                Ok::<(), ()>(())
+            })
+            .unwrap();
+        assert_eq!(inventory.statement_count(), 7);
+        assert_eq!(inventory.variables().len(), 2);
+        assert_eq!(inventory.constants().len(), 1);
+        assert_eq!(inventory.procedures()[0].statements().len(), 2);
+        assert_eq!(
+            module_inventory(source, ModuleLimits::new(source.len(), 6, 1), &mut || Ok::<
+                (),
+                (),
+            >(
+                ()
+            )),
+            Err(ModuleError::StatementLimit)
+        );
+        let mut variables = inventory.variables().to_vec();
+        let preserved = variables.clone();
+        assert_eq!(
+            reserve_variables_exact(&mut variables, usize::MAX, &mut || Ok::<(), ()>(())),
+            Err(ModuleError::AllocationFailed)
+        );
+        assert_eq!(variables, preserved);
+    }
+
+    #[test]
+    fn module_array_variables_cancel_at_every_scan_and_retention_checkpoint() {
+        let source = format!(
+            "Dim first()\nPrivate _\r\n [wide]( - _\n {} To _\r\n +{}, _\n 3) _\r\n As Long\nConst Seed=1\nSub Run()\nDim local As Long\nEnd Sub\n",
+            "9".repeat(1024),
+            "8".repeat(1024)
+        );
+        let limits = ModuleLimits::new(source.len(), 6, 1);
+        let mut successful_checks = 0;
+        let inventory = module_inventory(source.as_bytes(), limits, &mut || {
+            successful_checks += 1;
+            Ok::<(), ()>(())
+        })
+        .unwrap();
+        assert_eq!(inventory.variables().len(), 2);
+        assert!(successful_checks > 20);
+        for cancelled_at in 1..=successful_checks {
+            let mut calls = 0;
+            assert_eq!(
+                module_inventory(source.as_bytes(), limits, &mut || {
+                    calls += 1;
+                    if calls == cancelled_at {
+                        Err("stop")
+                    } else {
+                        Ok(())
+                    }
+                }),
+                Err(ModuleError::Cancelled("stop")),
+                "checkpoint {cancelled_at}"
+            );
+            assert_eq!(calls, cancelled_at);
+        }
+        let bounds = format!("( -{} To +{}, 3)", "9".repeat(1024), "8".repeat(1024));
+        let mut successful_checks = 0;
+        let mut cursor = 0;
+        let scanned = numeric_array_bounds(bounds.as_bytes(), &mut cursor, &mut || {
+            successful_checks += 1;
+            Ok::<(), ()>(())
+        })
+        .unwrap()
+        .unwrap();
+        assert_eq!(scanned.span, 0..bounds.len());
+        assert_eq!(scanned.work_nodes, 8);
+        for cancelled_at in 1..=successful_checks {
+            let mut calls = 0;
+            let mut cursor = 0;
+            assert_eq!(
+                numeric_array_bounds(bounds.as_bytes(), &mut cursor, &mut || {
+                    calls += 1;
+                    if calls == cancelled_at {
+                        Err("stop")
+                    } else {
+                        Ok(())
+                    }
+                }),
+                Err("stop"),
+                "bounds checkpoint {cancelled_at}"
+            );
+            assert_eq!(calls, cancelled_at);
+        }
+    }
+
+    #[test]
+    fn module_array_variable_all_byte_boundaries_require_full_numeric_groups() {
+        for byte in 0..=u8::MAX {
+            for (prefix, suffix, accepted) in [
+                (
+                    b"(".as_slice(),
+                    b"2)".as_slice(),
+                    matches!(byte, b' ' | b'\t' | b'+' | b'-') || byte.is_ascii_digit(),
+                ),
+                (
+                    b"(1".as_slice(),
+                    b")".as_slice(),
+                    matches!(byte, b' ' | b'\t') || byte.is_ascii_digit(),
+                ),
+                (
+                    b"(".as_slice(),
+                    b")".as_slice(),
+                    matches!(byte, b' ' | b'\t') || byte.is_ascii_digit(),
+                ),
+                (b"(1 ".as_slice(), b" 2)".as_slice(), byte == b','),
+                (
+                    b"(1 To ".as_slice(),
+                    b"2)".as_slice(),
+                    matches!(byte, b' ' | b'\t' | b'+' | b'-') || byte.is_ascii_digit(),
+                ),
+                (
+                    b"(1,".as_slice(),
+                    b"2)".as_slice(),
+                    matches!(byte, b' ' | b'\t' | b'+' | b'-') || byte.is_ascii_digit(),
+                ),
+                (
+                    b"(1".as_slice(),
+                    b"To2)".as_slice(),
+                    matches!(byte, b' ' | b'\t') || byte.is_ascii_digit(),
+                ),
+                (
+                    b"(1 T".as_slice(),
+                    b"2)".as_slice(),
+                    matches!(byte, b'o' | b'O'),
+                ),
+            ] {
+                let source = [prefix, &[byte], suffix].concat();
+                let mut cursor = 0;
+                let result =
+                    numeric_array_bounds(&source, &mut cursor, &mut || Ok::<(), ()>(())).unwrap();
+                assert_eq!(
+                    result
+                        .as_ref()
+                        .is_some_and(|bounds| bounds.span.end == source.len()),
+                    accepted,
+                    "array byte {byte}, prefix {prefix:?}"
+                );
+                if let Some(bounds) = result {
+                    assert_eq!(bounds.span, 0..cursor);
+                    assert!(cursor <= source.len());
+                    assert!(bounds.span.len() >= 2);
+                    assert_eq!(source[bounds.span.start], b'(');
+                    assert_eq!(source[bounds.span.end - 1], b')');
+                    assert!(bounds.work_nodes <= bounds.span.len());
+                }
+            }
+            let source = [b"Dim value(".as_slice(), &[byte], b"2)".as_slice()].concat();
+            let result = parse(&source);
+            assert_eq!(
+                result.is_ok(),
+                matches!(byte, b' ' | b'\t' | b'+' | b'-') || byte.is_ascii_digit(),
+                "module array byte {byte}"
+            );
+            if let Ok(inventory) = result {
+                let variable = &inventory.variables()[0];
+                assert_eq!(variable.array_bounds().unwrap(), 9..source.len());
+                assert_eq!(variable.declarator().end, source.len());
+                assert!(variable.type_range().is_none());
+            }
+            let source = [b"Dim value(1)".as_slice(), &[byte], b"As Long".as_slice()].concat();
+            let result = parse(&source);
+            assert_eq!(
+                result.is_ok(),
+                matches!(byte, b' ' | b'\t' | b'\''),
+                "array type boundary byte {byte}"
+            );
+            if let Ok(inventory) = result {
+                let variable = &inventory.variables()[0];
+                assert_eq!(&source[variable.array_bounds().unwrap()], b"(1)");
+                if byte == b'\'' {
+                    assert_eq!(&source[variable.declarator()], b"value(1)");
+                    assert!(variable.type_range().is_none());
+                } else {
+                    assert_eq!(&source[variable.type_range().unwrap()], b"Long");
                 }
             }
         }

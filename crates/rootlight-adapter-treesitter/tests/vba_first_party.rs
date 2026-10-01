@@ -138,6 +138,127 @@ fn scalar_modules_preserve_local_identity_and_value_reads_without_native_work() 
 }
 
 #[test]
+fn module_numeric_arrays_keep_exact_declarations_and_required_identity() {
+    let source = b"Attribute VB_Name = \"Arrays\"\r\nDim items()\r\nPrivate grid(-1 To +2, 003) As Long\r\nPublic [more] _\r\n( _\r\n- _\r\n2 _\r\n)\r\nSub Run()\r\nCall items()\r\nEnd Sub\r\n";
+    for language in ["vba", "visual-basic-classic"] {
+        let fixture = Fixture::new(source);
+        let provider = provider();
+        let full_limits = limits(4096);
+        let request = fixture.request(&full_limits, language, Vec::new());
+        let required = provider
+            .required_syntax_fact_count(&request, &deadline())
+            .unwrap();
+        let full = parse(&provider, &request);
+        assert_eq!(full.report().coverage().status(), CoverageStatus::Complete);
+        assert_eq!(
+            full.report().coverage().covered_source_bytes(),
+            source.len()
+        );
+        assert!(full.diagnostics().is_empty());
+        let exact_limits = limits(required);
+        let exact = parse(
+            &provider,
+            &fixture.request(&exact_limits, language, Vec::new()),
+        );
+        for (output, includes_visibility) in [(&full, true), (&exact, false)] {
+            let variables = output
+                .facts()
+                .iter()
+                .filter(|fact| fact.syntax_kind().as_str() == "vba.variable.declaration")
+                .collect::<Vec<_>>();
+            assert_eq!(variables.len(), 3);
+            for (clause, name, visibility) in [
+                (
+                    b"items()".as_slice(),
+                    b"items".as_slice(),
+                    "vba.visibility_unknown.expression",
+                ),
+                (
+                    b"grid(-1 To +2, 003) As Long".as_slice(),
+                    b"grid".as_slice(),
+                    "vba.private.expression",
+                ),
+                (
+                    b"[more] _\r\n( _\r\n- _\r\n2 _\r\n)".as_slice(),
+                    b"[more]".as_slice(),
+                    "vba.public.expression",
+                ),
+            ] {
+                let declaration = variables
+                    .iter()
+                    .find(|fact| bytes_at(source, fact.span()) == clause)
+                    .unwrap();
+                assert_eq!(declaration.depth(), 3);
+                let owner = output
+                    .facts()
+                    .iter()
+                    .find(|fact| Some(fact.local_id()) == declaration.parent())
+                    .unwrap();
+                assert_eq!(owner.syntax_kind().as_str(), "vba.file.scope");
+                let definition = output
+                    .facts()
+                    .iter()
+                    .find(|fact| {
+                        fact.parent() == Some(declaration.local_id())
+                            && fact.syntax_kind().as_str() == "vba.identifier.definition"
+                    })
+                    .unwrap();
+                assert_eq!(bytes_at(source, definition.span()), name);
+                assert_eq!(
+                    definition.span().start_byte(),
+                    declaration.span().start_byte()
+                );
+                assert_eq!(definition.span().file(), fixture.source.span().file());
+                assert_eq!(definition.depth(), 4);
+                if includes_visibility {
+                    assert!(output.facts().iter().any(|fact| {
+                        fact.syntax_kind().as_str() == visibility
+                            && fact.span() == declaration.span()
+                    }));
+                }
+                assert!(output.facts().iter().all(|fact| {
+                    !fact.syntax_kind().as_str().ends_with(".reference")
+                        || fact.span().end_byte() <= declaration.span().start_byte()
+                        || fact.span().start_byte() >= declaration.span().end_byte()
+                }));
+            }
+        }
+        assert_eq!(full.facts(), parse(&provider, &request).facts());
+        let short_limits = limits(required - 1);
+        assert_eq!(
+            execute_parse(
+                &provider,
+                &fixture.request(&short_limits, language, Vec::new()),
+                MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
+                &deadline()
+            )
+            .unwrap_err(),
+            AdapterError::Sink(SinkError::StreamLimit {
+                resource: ResourceKind::RequiredSyntaxFacts,
+                observed: required,
+                limit: required - 1,
+            })
+        );
+        let cancelled = deadline();
+        cancelled.cancel(CancellationReason::ClientRequest);
+        assert!(matches!(
+            execute_parse(
+                &provider,
+                &request,
+                MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
+                &cancelled
+            ),
+            Err(AdapterError::Cancelled {
+                reason: CancellationReason::ClientRequest
+            })
+        ));
+        assert_eq!(provider.stats().pooled_parsers, 0);
+        assert_eq!(provider.stats().checked_out_parsers, 0);
+        assert_eq!(provider.stats().cache.entries, 0);
+    }
+}
+
+#[test]
 fn module_scalar_variables_keep_written_visibility_and_lexical_owners() {
     let source = b"Attribute VB_Name = \"Authored\"\r\nPublic stored As Long\r\nPrivate [text]\r\nDim hidden As Boolean\r\nSub Run(ByVal stored As Long)\r\nDim hidden As Boolean\r\nstored = stored\r\nhidden = hidden\r\nEnd Sub\r\n";
     for language in ["vba", "visual-basic-classic"] {

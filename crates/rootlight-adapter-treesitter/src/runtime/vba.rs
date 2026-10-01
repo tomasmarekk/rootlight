@@ -83,6 +83,12 @@ pub(super) fn prepare(
         .checked_add(inventory.procedures().len())
         .and_then(|count| count.checked_add(1))
         .ok_or_else(|| provider_failure("vba-procedural-node-accounting"))?;
+    for variable in inventory.variables() {
+        cancellation.check()?;
+        processed_nodes = processed_nodes
+            .checked_add(variable.array_work_nodes())
+            .ok_or_else(|| provider_failure("vba-procedural-node-accounting"))?;
+    }
     for procedure in inventory.procedures() {
         cancellation.check()?;
         processed_nodes = processed_nodes
@@ -2554,6 +2560,241 @@ mod tests {
     }
 
     #[test]
+    fn first_party_vba_module_array_work_obeys_exact_node_and_candidate_ceilings() {
+        let source = "Public items(-2 To +3, 004) As Long\nSub Run()\nitems = items\nEnd Sub\n";
+        for language in ["vba", "visual-basic-classic"] {
+            let mut fixture = Fixture::new(source);
+            let cancellation = Cancellation::new();
+            let request = fixture.request(language, &[]);
+            let prepared = prepare(
+                &fixture.provider,
+                &request,
+                None,
+                &[],
+                fixture.provider.config.default_settings(),
+                &cancellation,
+            )
+            .unwrap()
+            .unwrap();
+            assert_eq!(prepared.inventory.variables()[0].array_work_nodes(), 8);
+            assert_eq!(prepared.processed_nodes, 14);
+            for (optional, required) in [(false, 9), (true, 13)] {
+                assert_eq!(
+                    candidates(
+                        &prepared.inventory,
+                        source.as_bytes(),
+                        optional,
+                        required,
+                        &cancellation
+                    )
+                    .unwrap()
+                    .len(),
+                    required
+                );
+                assert!(
+                    matches!(candidates(&prepared.inventory, source.as_bytes(), optional, required - 1, &cancellation), Err(AdapterError::RejectedRequest(RequestError::ProviderLimit {
+                    resource: ResourceKind::SyntaxNodes, observed, limit,
+                })) if observed == required && limit == required - 1)
+                );
+            }
+            fixture.limits = with_maximum_nodes(&fixture.limits, 14);
+            assert_eq!(
+                prepare(
+                    &fixture.provider,
+                    &fixture.request(language, &[]),
+                    None,
+                    &[],
+                    fixture.provider.config.default_settings(),
+                    &cancellation
+                )
+                .unwrap()
+                .unwrap()
+                .processed_nodes,
+                14
+            );
+            fixture.limits = with_maximum_nodes(&fixture.limits, 13);
+            assert!(matches!(
+                prepare(
+                    &fixture.provider,
+                    &fixture.request(language, &[]),
+                    None,
+                    &[],
+                    fixture.provider.config.default_settings(),
+                    &cancellation
+                ),
+                Err(AdapterError::RejectedRequest(RequestError::ProviderLimit {
+                    resource: ResourceKind::SyntaxNodes,
+                    observed: 14,
+                    limit: 13,
+                }))
+            ));
+            cancellation.cancel(rootlight_cancel::CancellationReason::ClientRequest);
+            assert!(matches!(
+                candidates(
+                    &prepared.inventory,
+                    source.as_bytes(),
+                    true,
+                    13,
+                    &cancellation
+                ),
+                Err(AdapterError::Cancelled {
+                    reason: rootlight_cancel::CancellationReason::ClientRequest
+                })
+            ));
+            assert_eq!(fixture.provider.stats().pooled_parsers, 0);
+            assert_eq!(fixture.provider.stats().cache.entries, 0);
+        }
+        let bounds = std::iter::repeat_n("2", 64).collect::<Vec<_>>().join(",");
+        let source = format!("Dim items({bounds})\n");
+        for language in ["vba", "visual-basic-classic"] {
+            let mut fixture = Fixture::new(&source);
+            fixture.limits = with_maximum_nodes(&fixture.limits, 130);
+            assert!(matches!(
+                prepare(
+                    &fixture.provider,
+                    &fixture.request(language, &[]),
+                    None,
+                    &[],
+                    fixture.provider.config.default_settings(),
+                    &Cancellation::new()
+                ),
+                Err(AdapterError::RejectedRequest(RequestError::ProviderLimit {
+                    resource: ResourceKind::SyntaxNodes,
+                    observed: 131,
+                    limit: 130,
+                }))
+            ));
+            assert_eq!(fixture.provider.stats().pooled_parsers, 0);
+            assert_eq!(fixture.provider.stats().cache.entries, 0);
+        }
+    }
+
+    #[test]
+    fn first_party_vba_module_numeric_arrays_match_exact_native_facts() {
+        for ty in [
+            "",
+            " As String",
+            " As Boolean",
+            " As Byte",
+            " As Integer",
+            " As Long",
+            " As LongLong",
+            " As LongPtr",
+            " As Single",
+            " As Double",
+            " As Currency",
+            " As Date",
+            " As Variant",
+            " As Object",
+        ] {
+            for prefix in ["Dim", "Public", "Private"] {
+                for bounds in [
+                    "",
+                    "2",
+                    "+2",
+                    "-2",
+                    "-2 To +3",
+                    "0 To 2, 1 To 3",
+                    "2,3,4",
+                    "+ 2",
+                    "- _\n 2",
+                ] {
+                    for newline in ["\n", "\r\n"] {
+                        let bounds = bounds.replace('\n', newline);
+                        let source = format!(
+                            "{prefix} [items]({bounds}){ty}{newline}Sub Run(){newline}End Sub{newline}"
+                        );
+                        for language in ["vba", "visual-basic-classic"] {
+                            compare_native(&Fixture::new(&source), language, &[]);
+                        }
+                    }
+                }
+            }
+        }
+        for source in [
+            "Dim items()",
+            "Public items(0 To 2, -1 To +3) As Long\n",
+            "Private _\r\n[items] _\r\n( _\r\n- _\r\n1 _\r\nTo _\r\n+ _\r\n2 _\r\n, _\r\n003 _\r\n) _\r\nAs _\r\nVariant ' tail\r\n",
+            "Dim items(2)\nDim items(3)\n",
+            "Attribute VB_Name = \"Arrays\"\nOption Explicit\nDim items()\nConst Limit=7\nSub Run(Optional initial=items)\nCall items()\nEnd Sub\n",
+            "Sub First()\nEnd Sub\nPublic items(-2 To 3, 004) As Long\nSub Second()\nEnd Sub\nDim last()\n",
+            "Dim items(2)\nConst items=7\nSub Run(Optional initial=items)\nEnd Sub\n",
+            "Const items=7\nDim items(-1 To 3)\nSub Run(Optional initial=items)\nEnd Sub\n",
+            "Dim items(1)As Long\n",
+            "Dim items(1To -2)\n",
+            "Dim items(1 To-2)\n",
+            "Dim items(1To+2)\n",
+            "Dim items(1To2)\n",
+            "Dim items(1 _\r\nTo _\r\n-2)\n",
+        ] {
+            for language in ["vba", "visual-basic-classic"] {
+                compare_native(&Fixture::new(source), language, &[]);
+            }
+        }
+        let magnitude = "9".repeat(2048);
+        let source = format!("Dim items(-{magnitude} To +{magnitude}, {magnitude}) As Long\n");
+        for language in ["vba", "visual-basic-classic"] {
+            compare_native(&Fixture::new(&source), language, &[]);
+        }
+    }
+
+    #[test]
+    fn first_party_vba_module_array_bounds_keep_whole_fallback_for_other_expressions() {
+        for declaration in [
+            "Dim items(Limit)",
+            "Dim items(-Limit)",
+            "Dim items([Limit])",
+            "Dim items(1 + 2)",
+            "Dim items(Target())",
+            "Dim items(1.5)",
+            "Dim items(&HFF)",
+            "Dim items(&O7)",
+            "Dim items(2&)",
+            "Dim items(\"2\")",
+            "Dim items(True)",
+            "Dim items(,2)",
+            "Dim items(2,)",
+            "Dim items(2,,3)",
+            "Dim items(1 To)",
+            "Dim items(To 2)",
+            "Dim items(1 To 2 To 3)",
+            "Dim items((2))",
+            "Dim items(2",
+            "Dim items(2))",
+            "Dim items(+)",
+            "Dim items(--2)",
+            "Dim items(2) = 1",
+            "Dim items(2), last()",
+            "Dim items As Long()",
+            "Dim items() As New Object",
+            "Dim items() As Product",
+            "Dim items(): Dim last",
+            "Dim items()\nOption Explicit",
+        ] {
+            let source =
+                format!("Dim previous\nSub First()\nEnd Sub\n{declaration}\nSub Run()\nEnd Sub\n");
+            for language in ["vba", "visual-basic-classic"] {
+                let fixture = Fixture::new(&source);
+                assert!(
+                    prepare(
+                        &fixture.provider,
+                        &fixture.request(language, &[]),
+                        None,
+                        &[],
+                        fixture.provider.config.default_settings(),
+                        &Cancellation::new()
+                    )
+                    .unwrap()
+                    .is_none(),
+                    "{language}:{declaration}"
+                );
+                assert_eq!(fixture.provider.stats().pooled_parsers, 0);
+                assert_eq!(fixture.provider.stats().cache.entries, 0);
+            }
+        }
+    }
+
+    #[test]
     fn first_party_vba_richer_module_variables_keep_whole_native_fallback() {
         for declaration in [
             "Dim",
@@ -2567,8 +2808,8 @@ mod tests {
             "Dim stored = 1",
             "Dim stored As Long = 1",
             "Dim first, second As Long",
-            "Dim stored() As Long",
-            "Public stored(1 To 3) As Long",
+            "Dim stored(Limit) As Long",
+            "Public stored(1 + 3) As Long",
             "Global stored As Long",
             "Friend stored As Long",
             "Static stored As Long",

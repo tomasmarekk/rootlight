@@ -8746,6 +8746,185 @@ fn vba_module_variable_constant_collisions_do_not_choose_a_default_target() {
 }
 
 #[test]
+fn vba_module_numeric_arrays_preserve_call_and_index_boundaries() {
+    for language in ["vba", "visual-basic-classic"] {
+        for native in [false, true] {
+            for (designator, indices, proven) in [
+                ("", "", false),
+                ("()", "", true),
+                ("()", "0,1", true),
+                ("(2)", "0", true),
+                ("(2)", "0,1", false),
+                ("(-2 To +3)", "0", true),
+                ("(-2 To +3, 004)", "0", false),
+                ("(-2 To +3, 004)", "0,1", true),
+                ("(-2 To +3, 004)", "", true),
+                ("(2,3,4)", "0,1,2", true),
+            ] {
+                let declaration = format!("items{designator} As Long");
+                let invocation = format!("Call items({indices})");
+                let indexed = format!("items({indices})");
+                let body = if native {
+                    format!("scratch = 1 + 2\nscratch = {indexed}")
+                } else {
+                    "scratch = 3".to_owned()
+                };
+                let source = format!(
+                    "Attribute VB_Name = \"Arrays\"\nPrivate {declaration}\nSub Accept(Optional value=items)\nEnd Sub\nSub Run()\nDim scratch As Long\n{body}\n{invocation}\nEnd Sub\n"
+                );
+                let result =
+                    application_proof_output(&source, language, IrLimits::default(), &deadline())
+                        .unwrap();
+                let document = result.document();
+                let module = document
+                    .entities
+                    .iter()
+                    .find(|entity| entity.kind == EntityKind::Module)
+                    .unwrap();
+                let variable = document
+                    .entities
+                    .iter()
+                    .find(|entity| {
+                        entity.kind == EntityKind::Variable
+                            && entity.canonical_name == "items"
+                            && entity.container == Some(ContainerRef::Entity(module.id))
+                    })
+                    .unwrap();
+                let definition = document
+                    .occurrences
+                    .iter()
+                    .find(|site| {
+                        site.role == OccurrenceRole::Definition
+                            && site.target
+                                == OccurrenceTarget::Resolved {
+                                    symbol: variable.id,
+                                }
+                    })
+                    .unwrap();
+                for (reference, written) in [
+                    (
+                        variable.evidence.source.as_ref().unwrap(),
+                        declaration.as_str(),
+                    ),
+                    (&definition.source, "items"),
+                    (
+                        definition.evidence.source.as_ref().unwrap(),
+                        declaration.as_str(),
+                    ),
+                ] {
+                    let span = reference.span();
+                    assert_eq!(
+                        source
+                            .get(
+                                usize::try_from(span.start_byte()).unwrap()
+                                    ..usize::try_from(span.end_byte()).unwrap()
+                            )
+                            .unwrap(),
+                        written
+                    );
+                    assert_eq!(reference.repository(), document.repository);
+                    assert_eq!(reference.generation(), document.generation);
+                    assert_eq!(reference.content_hash(), content_hash(source.as_bytes()));
+                    assert_eq!(span.file(), document.files[0].id);
+                }
+                assert_eq!(definition.enclosing, Some(module.id));
+                // Call-prefixed syntax does not prove an array read. Indexed reads
+                // remain native-only until the first-party body grammar admits them.
+                for (expression, expected) in std::iter::once((invocation.as_str(), false))
+                    .chain(native.then_some((indexed.as_str(), proven)))
+                {
+                    let start = if expression == invocation {
+                        source.find(expression).unwrap()
+                    } else {
+                        source.find(&format!("scratch = {expression}")).unwrap()
+                            + "scratch = ".len()
+                    };
+                    let start = u64::try_from(start).unwrap();
+                    let application = document
+                        .occurrences
+                        .iter()
+                        .find(|site| {
+                            site.syntax_kind == "vba.application.reference"
+                                && site.source.span().start_byte() == start
+                        })
+                        .unwrap();
+                    assert_eq!(
+                        application.source.span().end_byte(),
+                        start + u64::try_from(expression.len()).unwrap()
+                    );
+                    assert_eq!(application.role, OccurrenceRole::Reference);
+                    if expected {
+                        assert_eq!(
+                            application.target,
+                            OccurrenceTarget::Resolved {
+                                symbol: variable.id
+                            },
+                            "{language}: {designator}: {expression}"
+                        );
+                    } else {
+                        assert!(matches!(
+                            application.target,
+                            OccurrenceTarget::Unresolved { .. }
+                        ));
+                    }
+                    assert_eq!(
+                        document
+                            .relations
+                            .iter()
+                            .filter(|edge| {
+                                edge.subject == RelationEndpoint::Occurrence(application.id)
+                                    && edge.predicate == RelationPredicate::RefersTo
+                                    && edge.object == RelationEndpoint::Entity(variable.id)
+                            })
+                            .count(),
+                        usize::from(expected)
+                    );
+                    assert_eq!(
+                        document
+                            .skipped_regions
+                            .iter()
+                            .filter(|gap| {
+                                gap.source == application.source
+                                    && gap.detail == "vba-call-or-index-target-unavailable"
+                            })
+                            .count(),
+                        usize::from(!expected)
+                    );
+                    assert!(!document.relations.iter().any(|edge| {
+                        edge.subject == RelationEndpoint::Occurrence(application.id)
+                            && edge.predicate == RelationPredicate::Calls
+                    }));
+                }
+                let default = document
+                    .occurrences
+                    .iter()
+                    .find(|site| site.syntax_kind == "vba.default_constant_identifier.reference")
+                    .unwrap();
+                assert!(matches!(
+                    default.target,
+                    OccurrenceTarget::Unresolved { .. }
+                ));
+                assert!(!document.relations.iter().any(|edge| {
+                    edge.subject == RelationEndpoint::Occurrence(default.id)
+                        && edge.predicate == RelationPredicate::RefersTo
+                }));
+                assert_eq!(
+                    document
+                        .skipped_regions
+                        .iter()
+                        .filter(|gap| {
+                            gap.source == default.source
+                                && gap.detail == "vba-default-constant-target-unavailable"
+                        })
+                        .count(),
+                    1
+                );
+            }
+        }
+    }
+}
+
+#[test]
 fn vba_module_variables_preserve_value_ownership_without_constant_or_call_proofs() {
     use rootlight_ir::EntityVisibility;
     for language in ["vba", "visual-basic-classic"] {

@@ -3670,3 +3670,723 @@ fn module_variable_edits_preserve_value_binding_without_constant_or_call_claims(
         }
     }
 }
+
+#[derive(Debug, Clone, Copy)]
+struct ModuleArrayState {
+    declarations_source: &'static str,
+    declarations: WrittenParameters<'static>,
+    runtime_name: &'static str,
+    indexed_body: bool,
+}
+
+fn module_array_call(runtime_name: &'static str) -> OptionalCallState {
+    let parameters: WrittenParameters<'static> = match runtime_name {
+        "Storage" => &[
+            ("ByVal value As Long", "value"),
+            ("Optional extra As Long = Storage", "extra"),
+        ],
+        "Buffer" => &[
+            ("ByVal value As Long", "value"),
+            ("Optional extra As Long = Buffer", "extra"),
+        ],
+        _ => panic!("an authored module-array name is required"),
+    };
+    OptionalCallState {
+        parameters,
+        arguments: "1",
+        application_proven: true,
+    }
+}
+
+fn assert_module_array_contract(
+    service: &FirstSliceService,
+    receipt: &FirstSliceIndexReceipt,
+    source: &str,
+    language: &str,
+    state: ModuleArrayState,
+) {
+    assert_authored_parameter_types(
+        service,
+        receipt,
+        source,
+        language,
+        module_array_call(state.runtime_name),
+    );
+    let snapshot = service
+        .loaded_generation_snapshot(receipt.generation)
+        .unwrap();
+    let document = snapshot.document();
+    let notify = document
+        .entities
+        .iter()
+        .find(|entity| entity.canonical_name == "Notify")
+        .unwrap();
+    let run = document
+        .entities
+        .iter()
+        .find(|entity| entity.canonical_name == "Run")
+        .unwrap();
+    let parser = document
+        .provenance
+        .iter()
+        .find(|proof| proof.id == notify.provenance)
+        .unwrap();
+    let variables = document
+        .entities
+        .iter()
+        .filter(|entity| {
+            entity.kind == EntityKind::Variable
+                && entity.container == notify.container
+                && entity.evidence.source.is_some()
+        })
+        .collect::<Vec<_>>();
+    let names = state
+        .declarations
+        .iter()
+        .map(|(_, name)| *name)
+        .collect::<BTreeSet<_>>();
+    assert_eq!(variables.len(), names.len());
+    assert_eq!(
+        document
+            .occurrences
+            .iter()
+            .filter(|site| {
+                site.role == OccurrenceRole::Definition
+                    && variables.iter().any(|variable| {
+                        site.target
+                            == OccurrenceTarget::Resolved {
+                                symbol: variable.id,
+                            }
+                    })
+            })
+            .count(),
+        state.declarations.len()
+    );
+    for &(written, name) in state.declarations {
+        let variable = variables
+            .iter()
+            .find(|entity| entity.canonical_name == name)
+            .unwrap();
+        assert_eq!(variable.provenance, parser.id);
+        assert_eq!(variable.language, language);
+        let start = source.find(written).unwrap();
+        let end = start + written.len();
+        let representative = state
+            .declarations
+            .iter()
+            .filter(|(_, candidate)| *candidate == name)
+            .map(|(written, _)| {
+                let start = source.find(written).unwrap();
+                start..start + written.len()
+            })
+            .min_by_key(|range| (range.start, range.end))
+            .unwrap();
+        assert_exact_parameter_source(
+            service,
+            receipt,
+            source,
+            variable.evidence.source.as_ref().unwrap(),
+            representative,
+        );
+        let contains = document
+            .relations
+            .iter()
+            .filter(|relation| {
+                relation.predicate == RelationPredicate::Contains
+                    && relation.object == RelationEndpoint::Entity(variable.id)
+                    && relation.evidence.source.as_ref().is_some_and(|reference| {
+                        reference.span().start_byte() == u64::try_from(start).unwrap()
+                            && reference.span().end_byte() == u64::try_from(end).unwrap()
+                    })
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(contains.len(), 1, "written array clause: {written}");
+        let owner = match variable.container.unwrap() {
+            rootlight_ir::ContainerRef::Repository(repository) => {
+                RelationEndpoint::Repository(repository)
+            }
+            rootlight_ir::ContainerRef::File(file) => RelationEndpoint::File(file),
+            rootlight_ir::ContainerRef::Entity(entity) => RelationEndpoint::Entity(entity),
+        };
+        assert_eq!(contains[0].subject, owner);
+        assert_eq!(contains[0].provenance, parser.id);
+        let clause = contains[0].evidence.source.as_ref().unwrap();
+        assert_exact_parameter_source(service, receipt, source, clause, start..end);
+        let definitions = document
+            .occurrences
+            .iter()
+            .filter(|site| {
+                site.role == OccurrenceRole::Definition
+                    && site.target
+                        == OccurrenceTarget::Resolved {
+                            symbol: variable.id,
+                        }
+                    && site.source.span().start_byte() == u64::try_from(start).unwrap()
+                    && site.source.span().end_byte() == u64::try_from(start + name.len()).unwrap()
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(definitions.len(), 1);
+        assert_eq!(definitions[0].provenance, parser.id);
+        assert_eq!(definitions[0].evidence.source.as_ref(), Some(clause));
+        assert_eq!(
+            definitions[0].enclosing,
+            match variable.container.unwrap() {
+                rootlight_ir::ContainerRef::Entity(entity) => Some(entity),
+                rootlight_ir::ContainerRef::Repository(_) | rootlight_ir::ContainerRef::File(_) =>
+                    None,
+            }
+        );
+        assert_exact_parameter_source(
+            service,
+            receipt,
+            source,
+            &definitions[0].source,
+            start..start + name.len(),
+        );
+        let line_start = source[..start].rfind('\n').map_or(0, |offset| offset + 1);
+        let prefix = &source[line_start..start];
+        let visibility = match prefix {
+            "Private " => rootlight_ir::EntityVisibility::Private,
+            "Public " => rootlight_ir::EntityVisibility::Public,
+            "Dim " => rootlight_ir::EntityVisibility::Unknown,
+            _ => panic!("an authored module variable prefix is required"),
+        };
+        assert_eq!(variable.visibility, visibility);
+        let reference = |range: std::ops::Range<usize>| {
+            SourceRef::new(
+                receipt.repository,
+                receipt.generation,
+                SourceSpan::new(
+                    clause.span().file(),
+                    u64::try_from(range.start).unwrap(),
+                    u64::try_from(range.end).unwrap(),
+                )
+                .unwrap(),
+                content_hash(source.as_bytes()),
+                None,
+            )
+        };
+        assert_exact_parameter_source(
+            service,
+            receipt,
+            source,
+            &reference(line_start..start),
+            line_start..start,
+        );
+        if let Some(bounds_start) = written.find('(') {
+            let bounds_end = written.find(')').unwrap() + 1;
+            let range = start + bounds_start..start + bounds_end;
+            assert_exact_parameter_source(
+                service,
+                receipt,
+                source,
+                &reference(range.clone()),
+                range,
+            );
+        }
+        if let Some((prefix, authored_type)) = written.split_once(" As ") {
+            let range = start + prefix.len() + " As ".len()..end;
+            assert_eq!(&source[range.clone()], authored_type);
+            assert_exact_parameter_source(
+                service,
+                receipt,
+                source,
+                &reference(range.clone()),
+                range,
+            );
+        } else {
+            let within_clause = |reference: &SourceRef| {
+                reference.repository() == clause.repository()
+                    && reference.generation() == clause.generation()
+                    && reference.content_hash() == clause.content_hash()
+                    && reference.span().file() == clause.span().file()
+                    && reference.span().start_byte() >= clause.span().start_byte()
+                    && reference.span().end_byte() <= clause.span().end_byte()
+            };
+            assert!(!document.occurrences.iter().any(|site| {
+                within_clause(&site.source) && site.role == OccurrenceRole::TypeUse
+            }));
+            assert!(!document.relations.iter().any(|relation| {
+                relation.predicate == RelationPredicate::UsesType
+                    && (relation.subject == RelationEndpoint::Entity(variable.id)
+                        || relation.evidence.source.as_ref().is_some_and(within_clause))
+            }));
+            assert!(!document.entities.iter().any(|entity| {
+                entity.canonical_name.eq_ignore_ascii_case("Variant")
+                    && entity.evidence.source.as_ref().is_some_and(within_clause)
+            }));
+        }
+    }
+    let defaults = document
+        .occurrences
+        .iter()
+        .filter(|site| site.syntax_kind == "vba.default_constant_identifier.reference")
+        .collect::<Vec<_>>();
+    assert_eq!(defaults.len(), 1);
+    let default = defaults[0];
+    assert!(matches!(
+        default.target,
+        OccurrenceTarget::Unresolved { .. }
+    ));
+    assert_eq!(default.provenance, parser.id);
+    assert!(!document.relations.iter().any(|relation| {
+        relation.subject == RelationEndpoint::Occurrence(default.id)
+            && matches!(
+                relation.predicate,
+                RelationPredicate::RefersTo | RelationPredicate::Calls
+            )
+    }));
+    let default_gaps = document
+        .skipped_regions
+        .iter()
+        .filter(|gap| {
+            gap.source == default.source && gap.detail == "vba-default-constant-target-unavailable"
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(default_gaps.len(), 1);
+    assert_eq!(default_gaps[0].provenance, parser.id);
+    assert_eq!(
+        default_gaps[0].evidence.source.as_ref(),
+        Some(&default.source)
+    );
+    let unique = state
+        .declarations
+        .iter()
+        .filter(|(_, name)| *name == state.runtime_name)
+        .count()
+        == 1;
+    let variable = variables
+        .iter()
+        .find(|entity| entity.canonical_name == state.runtime_name)
+        .unwrap();
+    let read_start = source
+        .find(&format!("sink = {}\n", state.runtime_name))
+        .unwrap()
+        + "sink = ".len();
+    let reads = document
+        .occurrences
+        .iter()
+        .filter(|site| {
+            site.syntax_kind == "vba.value_identifier.reference"
+                && site.source.span().start_byte() == u64::try_from(read_start).unwrap()
+                && site.source.span().end_byte()
+                    == u64::try_from(read_start + state.runtime_name.len()).unwrap()
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(reads.len(), 1);
+    let read = reads[0];
+    assert_eq!(read.role, OccurrenceRole::Reference);
+    assert_eq!(read.enclosing, Some(run.id));
+    assert_eq!(read.provenance, parser.id);
+    assert_exact_parameter_source(
+        service,
+        receipt,
+        source,
+        &read.source,
+        read_start..read_start + state.runtime_name.len(),
+    );
+    if unique {
+        assert_eq!(
+            read.target,
+            OccurrenceTarget::Resolved {
+                symbol: variable.id
+            }
+        );
+    } else {
+        assert!(matches!(read.target, OccurrenceTarget::Unresolved { .. }));
+    }
+    let refers = document
+        .relations
+        .iter()
+        .filter(|relation| {
+            relation.subject == RelationEndpoint::Occurrence(read.id)
+                && relation.predicate == RelationPredicate::RefersTo
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(refers.len(), usize::from(unique));
+    if unique {
+        assert_eq!(refers[0].object, RelationEndpoint::Entity(variable.id));
+        assert_eq!(refers[0].provenance, parser.id);
+        assert_eq!(refers[0].evidence.source.as_ref(), Some(&read.source));
+    }
+    assert!(!document.relations.iter().any(|relation| {
+        relation.subject == RelationEndpoint::Occurrence(read.id)
+            && relation.predicate == RelationPredicate::Calls
+    }));
+    for name in ["Storage", "Buffer", "Grid"] {
+        let located = service
+            .code_locate(
+                receipt.generation,
+                name.to_owned(),
+                LocateMode::Exact,
+                20,
+                0,
+                &deadline(),
+            )
+            .unwrap();
+        let mut actual = located
+            .data
+            .hits
+            .iter()
+            .filter_map(|hit| hit.symbol)
+            .collect::<Vec<_>>();
+        let mut expected = variables
+            .iter()
+            .filter(|entity| entity.canonical_name == name)
+            .map(|entity| entity.id)
+            .collect::<Vec<_>>();
+        actual.sort_unstable();
+        expected.sort_unstable();
+        assert_eq!(actual, expected);
+        for (ordinal, hit) in located
+            .data
+            .hits
+            .iter()
+            .enumerate()
+            .filter(|(_, hit)| hit.symbol.is_some())
+        {
+            let entity = variables
+                .iter()
+                .find(|entity| Some(entity.id) == hit.symbol)
+                .unwrap();
+            assert_eq!(hit.source.as_ref(), entity.evidence.source.as_ref());
+            let definitions = document
+                .occurrences
+                .iter()
+                .filter(|site| {
+                    site.role == OccurrenceRole::Definition
+                        && site.target == OccurrenceTarget::Resolved { symbol: entity.id }
+                })
+                .collect::<Vec<_>>();
+            let assessment = located
+                .data
+                .conditional_activity
+                .iter()
+                .find(|assessment| assessment.result_index == u32::try_from(ordinal).unwrap())
+                .unwrap();
+            assert_eq!(assessment.basis, ConditionalActivityBasis::DefinitionToken);
+            if definitions.len() > 1 {
+                assert_eq!(assessment.activity, ConditionalActivityState::Unproven);
+                assert_eq!(
+                    assessment.reason,
+                    Some(ConditionalActivityReason::AmbiguousDefinition)
+                );
+                assert!(assessment.assessed_source_ref.is_none());
+                assert!(assessment.inventory.is_none());
+            } else {
+                assert_eq!(definitions.len(), 1);
+                assert_eq!(assessment.activity, ConditionalActivityState::Active);
+                assert_eq!(assessment.reason, None);
+                assert_eq!(
+                    assessment.assessed_source_ref.as_ref(),
+                    Some(&definitions[0].source)
+                );
+                assert_eq!(
+                    assessment.inventory.as_ref().unwrap().parser_provenance_id,
+                    parser.id
+                );
+            }
+        }
+    }
+    if state.indexed_body {
+        // These expressions intentionally force native fallback. Declared rank
+        // proves written indexing shape, not runtime bounds or element types.
+        for (expression, name, proven) in [
+            ("Buffer()", "Buffer", true),
+            ("Buffer(0)", "Buffer", true),
+            ("Buffer(0, 1)", "Buffer", false),
+            ("Grid()", "Grid", true),
+            ("Grid(0)", "Grid", false),
+            ("Grid(0, 1)", "Grid", true),
+        ] {
+            let start = source.find(&format!("sink = {expression}\n")).unwrap() + "sink = ".len();
+            let applications = document
+                .occurrences
+                .iter()
+                .filter(|site| {
+                    site.syntax_kind == "vba.application.reference"
+                        && site.source.span().start_byte() == u64::try_from(start).unwrap()
+                        && site.source.span().end_byte()
+                            == u64::try_from(start + expression.len()).unwrap()
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(applications.len(), 1, "array application: {expression}");
+            let application = applications[0];
+            let array = variables
+                .iter()
+                .find(|entity| entity.canonical_name == name)
+                .unwrap();
+            assert_eq!(application.role, OccurrenceRole::Reference);
+            assert_eq!(application.enclosing, Some(run.id));
+            assert_eq!(application.provenance, parser.id);
+            assert_exact_parameter_source(
+                service,
+                receipt,
+                source,
+                &application.source,
+                start..start + expression.len(),
+            );
+            if proven {
+                assert_eq!(
+                    application.target,
+                    OccurrenceTarget::Resolved { symbol: array.id }
+                );
+            } else {
+                assert!(matches!(
+                    application.target,
+                    OccurrenceTarget::Unresolved { .. }
+                ));
+            }
+            let refers = document
+                .relations
+                .iter()
+                .filter(|relation| {
+                    relation.subject == RelationEndpoint::Occurrence(application.id)
+                        && relation.predicate == RelationPredicate::RefersTo
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(refers.len(), usize::from(proven));
+            if proven {
+                assert_eq!(refers[0].object, RelationEndpoint::Entity(array.id));
+                assert_eq!(refers[0].provenance, parser.id);
+                assert_eq!(
+                    refers[0].evidence.source.as_ref(),
+                    Some(&application.source)
+                );
+            }
+            assert!(!document.relations.iter().any(|relation| {
+                relation.predicate == RelationPredicate::Calls
+                    && relation.evidence.source.as_ref().is_some_and(|reference| {
+                        reference.span().start_byte() >= u64::try_from(start).unwrap()
+                            && reference.span().end_byte()
+                                <= u64::try_from(start + expression.len()).unwrap()
+                    })
+            }));
+            assert_eq!(
+                document.skipped_regions.iter().any(|gap| {
+                    gap.source == application.source
+                        && gap.detail == "vba-call-or-index-target-unavailable"
+                }),
+                !proven
+            );
+            assert_eq!(
+                document
+                    .provenance
+                    .iter()
+                    .find(|proof| proof.id == application.provenance)
+                    .unwrap()
+                    .rule,
+                None
+            );
+        }
+    } else {
+        assert_eq!(
+            document
+                .occurrences
+                .iter()
+                .filter(|site| { site.syntax_kind == "vba.application.reference" })
+                .count(),
+            1
+        );
+    }
+}
+
+#[test]
+fn module_numeric_array_edits_preserve_source_identity_and_native_rank_contracts() {
+    let initial = ModuleArrayState {
+        declarations_source: "Private Storage As Long\n",
+        declarations: &[("Storage As Long", "Storage")],
+        runtime_name: "Storage",
+        indexed_body: false,
+    };
+    let states = [
+        initial,
+        ModuleArrayState {
+            declarations_source: "Private Storage() As Long\n",
+            declarations: &[("Storage() As Long", "Storage")],
+            ..initial
+        },
+        ModuleArrayState {
+            declarations_source: "Private Storage(2) As Long\n",
+            declarations: &[("Storage(2) As Long", "Storage")],
+            ..initial
+        },
+        ModuleArrayState {
+            declarations_source: "Private Storage(-2 To +3) As Long\n",
+            declarations: &[("Storage(-2 To +3) As Long", "Storage")],
+            ..initial
+        },
+        ModuleArrayState {
+            declarations_source: "Private Storage(-2 To +3, 0 To 4) As Long\n",
+            declarations: &[("Storage(-2 To +3, 0 To 4) As Long", "Storage")],
+            ..initial
+        },
+        ModuleArrayState {
+            declarations_source: "Dim Storage(-2 To +3, 0 To 4)\n",
+            declarations: &[("Storage(-2 To +3, 0 To 4)", "Storage")],
+            ..initial
+        },
+        ModuleArrayState {
+            declarations_source: "Dim Buffer(-2 To +3, 0 To 4)\n",
+            declarations: &[("Buffer(-2 To +3, 0 To 4)", "Buffer")],
+            runtime_name: "Buffer",
+            ..initial
+        },
+        ModuleArrayState {
+            declarations_source: "Dim Buffer(2)\nDim Buffer(0 To 2, 1 To 3)\n",
+            declarations: &[
+                ("Buffer(2)", "Buffer"),
+                ("Buffer(0 To 2, 1 To 3)", "Buffer"),
+            ],
+            runtime_name: "Buffer",
+            ..initial
+        },
+        ModuleArrayState {
+            declarations_source: "Public Buffer(2) As Long\nPrivate Grid(-2 To +3, 0 To 4) As Long\n",
+            declarations: &[
+                ("Buffer(2) As Long", "Buffer"),
+                ("Grid(-2 To +3, 0 To 4) As Long", "Grid"),
+            ],
+            runtime_name: "Buffer",
+            indexed_body: true,
+        },
+        initial,
+    ];
+    for language in ["visual-basic-classic", "vba"] {
+        let current = std::env::current_dir().unwrap();
+        let repository = tempfile::tempdir_in(&current).unwrap();
+        let storage = tempfile::tempdir_in(&current).unwrap();
+        let paths = rootlight_runtime::RuntimePaths::new(
+            storage.path().join("state"),
+            storage.path().join("runtime"),
+        )
+        .unwrap();
+        paths.prepare_owner().unwrap();
+        let configuration = (language == "vba").then_some("version='1.3'\n[extensions.source-languages]\nversion='1.0'\ncritical=true\n[extensions.source-languages.data.extensions]\nbas='vba'\n");
+        let policy = FirstSliceStoragePolicy::resolve_user_config(configuration, 4).unwrap();
+        assert_eq!(policy.retained_generations(), 2);
+        let mut previous: Option<(FirstSliceIndexReceipt, String, ModuleArrayState)> = None;
+        let mut initial_source = None;
+        let mut initial_logical = None;
+        for (position, state) in states.into_iter().enumerate() {
+            let call = module_array_call(state.runtime_name);
+            let header = call
+                .parameters
+                .iter()
+                .map(|(written, _)| *written)
+                .collect::<Vec<_>>()
+                .join(", ");
+            let indexed = if state.indexed_body {
+                "sink = Buffer()\nsink = Buffer(0)\nsink = Buffer(0, 1)\nsink = Grid()\nsink = Grid(0)\nsink = Grid(0, 1)\n"
+            } else {
+                ""
+            };
+            let source = format!(
+                "Attribute VB_Name = \"Authored\"\nOption Explicit\n{}Sub Notify({header})\nEnd Sub\nSub Run()\nDim sink As Long\nsink = {}\n{indexed}Call Notify(1)\nEnd Sub\n",
+                state.declarations_source, state.runtime_name
+            );
+            fs::write(repository.path().join("module.bas"), &source).unwrap();
+            let mut service = FirstSliceService::new_durable_with_policy(
+                policy.clone(),
+                paths.state_dir(),
+                &deadline(),
+            )
+            .unwrap();
+            let prepared = service
+                .prepare_repository(repository.path(), &deadline())
+                .unwrap();
+            let committed = service
+                .publish_prepared_with_metrics(prepared, &deadline())
+                .unwrap();
+            assert_eq!(committed.evidence().rebuilt_files, 1);
+            assert_eq!(committed.evidence().reused_files, 0);
+            if position > 0 {
+                assert_eq!(committed.evidence().changed_files, 1);
+            }
+            let receipt = committed.receipt().clone();
+            assert_module_array_contract(&service, &receipt, &source, language, state);
+            assert_eq!(
+                receipt,
+                service
+                    .index_repository(repository.path(), &deadline())
+                    .unwrap()
+            );
+            if let Some((old_receipt, old_source, old_state)) = &previous {
+                assert_ne!(receipt.generation, old_receipt.generation);
+                let expected =
+                    match position {
+                        1..=5 => old_source
+                            .replace(old_state.declarations_source, state.declarations_source),
+                        6 => old_source.replace("Storage", "Buffer"),
+                        7 => old_source
+                            .replace(old_state.declarations_source, state.declarations_source),
+                        8 => old_source
+                            .replace(old_state.declarations_source, state.declarations_source)
+                            .replace("Call Notify(1)\n", &format!("{indexed}Call Notify(1)\n")),
+                        9 => initial_source.clone().unwrap(),
+                        _ => panic!("an authored array edit is required"),
+                    };
+                assert_eq!(source, expected);
+                assert!(receipt.logical_snapshot.is_some());
+                assert_ne!(receipt.logical_snapshot, old_receipt.logical_snapshot);
+                assert_module_array_contract(
+                    &service,
+                    old_receipt,
+                    old_source,
+                    language,
+                    *old_state,
+                );
+            }
+            drop(service);
+            let mut service = FirstSliceService::new_durable_with_policy(
+                policy.clone(),
+                paths.state_dir(),
+                &deadline(),
+            )
+            .unwrap();
+            assert_eq!(
+                receipt,
+                service
+                    .index_repository(repository.path(), &deadline())
+                    .unwrap()
+            );
+            assert_module_array_contract(&service, &receipt, &source, language, state);
+            if let Some((old_receipt, old_source, old_state)) = &previous {
+                assert_module_array_contract(
+                    &service,
+                    old_receipt,
+                    old_source,
+                    language,
+                    *old_state,
+                );
+            }
+            let prepared = service
+                .prepare_repository_with_options(
+                    repository.path(),
+                    FirstSliceIndexOptions::clean_rebuild(FirstSliceIndexMode::Structural),
+                    &deadline(),
+                )
+                .unwrap();
+            let committed = service
+                .publish_prepared_with_metrics(prepared, &deadline())
+                .unwrap();
+            assert_eq!(committed.evidence().rebuilt_files, 1);
+            assert_eq!(committed.evidence().reused_files, 0);
+            let rebuilt = committed.receipt().clone();
+            assert_ne!(receipt.generation, rebuilt.generation);
+            assert!(receipt.logical_snapshot.is_some());
+            assert_eq!(receipt.logical_snapshot, rebuilt.logical_snapshot);
+            assert_module_array_contract(&service, &rebuilt, &source, language, state);
+            if position == 0 {
+                initial_source = Some(source.clone());
+                initial_logical = receipt.logical_snapshot.clone();
+            } else if position + 1 == states.len() {
+                assert_eq!(initial_source.as_ref(), Some(&source));
+                assert_eq!(receipt.logical_snapshot, initial_logical);
+            }
+            // A rebuild is the latest retained predecessor; check it before
+            // another publication legitimately evicts it under retention2.
+            previous = Some((rebuilt, source, state));
+        }
+    }
+}
