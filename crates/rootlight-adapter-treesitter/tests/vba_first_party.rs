@@ -36,6 +36,7 @@ const EXPRESSION_ASSIGNMENT_MODULE: &[u8] = b"Sub Run(ByVal value As Long)\r\nDi
 const EXPRESSION_CALL_MODULE: &[u8] = b"Sub Run(ByVal value As Long, ByVal other As Long)\r\nCall Target(value + 1, Inner(other) * -2)\r\nEnd Sub\r\n";
 const OPTIONAL_PARAMETER_MODULE: &[u8] = b"Attribute VB_Name = \"Authored\"\r\nSub Accept(required As Long, Optional ByVal count As Long = 007, Optional [text] As String = \"a,\"\"b\"\":()\", Optional flag As Boolean = False, Optional unset As Long)\r\ncount = required\r\n[text] = [text]\r\nEnd Sub\r\n";
 const OMITTED_TYPE_MODULE: &[u8] = b"Attribute VB_Name = \"Authored\"\r\nSub Accept(required, ByVal typed As Long, Optional ByVal count = 007, Optional [text] = \"a,\"\"b\"\":()\", Optional flag = False, Optional unset)\r\ncount = required\r\n[text] = [text]\r\nEnd Sub\r\nFunction Echo(ByRef value) As Long\r\nEcho = value\r\nEnd Function\r\n";
+const RADIX_MODULE: &str = "Attribute VB_Name = \"Radix\"\nConst ModuleSeed As Long = &H0A\nPrivate slots(-&O1 To +&H2, &3) As Long\nSub Target(ByVal first As Long, Optional ByVal second As Long = &o7)\nEnd Sub\nFunction Inner(ByVal value As Long) As Long\nInner = &H1\nEnd Function\nSub Run()\nDim local As Long, grid(-&H1 To +&O2, &3) As Long\nConst LocalSeed As Long = &O7\nlocal = &hF\nLet local = &77\nlocal = LocalSeed\nlocal = grid(&H0, &O1)\nCall Target(&H1, &o2)\nCall Target(local + &H2, Inner(&3) * -&H1)\nEnd Sub\n";
 
 #[test]
 fn accepted_modules_preserve_exact_identity_without_native_pool_or_cache_work() {
@@ -138,6 +139,368 @@ fn scalar_modules_preserve_local_identity_and_value_reads_without_native_work() 
         );
         assert_eq!(provider.stats().pooled_parsers, 0);
         assert_eq!(provider.stats().cache.entries, 0);
+    }
+}
+
+#[test]
+fn radix_literals_preserve_exact_source_identity_without_numeric_facts() {
+    for newline in ["\n", "\r\n"] {
+        let source = RADIX_MODULE.replace('\n', newline);
+        let bytes = source.as_bytes();
+        for language in ["vba", "visual-basic-classic"] {
+            let fixture = Fixture::new(bytes);
+            let provider = provider();
+            let budget = limits(4096);
+            let request = fixture.request(&budget, language, Vec::new());
+            let required = provider
+                .required_syntax_fact_count(&request, &deadline())
+                .unwrap();
+            assert_eq!(required, 32);
+            let output = parse(&provider, &request);
+            assert_eq!(
+                output.report().coverage().status(),
+                CoverageStatus::Complete
+            );
+            assert_eq!(
+                output.report().coverage().covered_source_bytes(),
+                bytes.len()
+            );
+            assert!(output.diagnostics().is_empty());
+            assert_eq!(
+                fixture.source.content_hash(),
+                rootlight_ids::content_hash(bytes)
+            );
+            let exact_limits = limits(required);
+            let exact = parse(
+                &provider,
+                &fixture.request(&exact_limits, language, Vec::new()),
+            );
+            for (clause, name, syntax) in [
+                (
+                    "ModuleSeed As Long = &H0A",
+                    "ModuleSeed",
+                    "vba.constant.declaration",
+                ),
+                (
+                    "slots(-&O1 To +&H2, &3) As Long",
+                    "slots",
+                    "vba.variable.declaration",
+                ),
+                ("ByVal first As Long", "first", "vba.parameter.declaration"),
+                (
+                    "Optional ByVal second As Long = &o7",
+                    "second",
+                    "vba.omittable_parameter.declaration",
+                ),
+                ("ByVal value As Long", "value", "vba.parameter.declaration"),
+                ("local As Long", "local", "vba.variable.declaration"),
+                (
+                    "grid(-&H1 To +&O2, &3) As Long",
+                    "grid",
+                    "vba.variable.declaration",
+                ),
+                (
+                    "LocalSeed As Long = &O7",
+                    "LocalSeed",
+                    "vba.constant.declaration",
+                ),
+            ] {
+                let start = source.find(clause).unwrap();
+                let name_start = start + clause.find(name).unwrap();
+                for result in [&output, &exact] {
+                    let declaration = result
+                        .facts()
+                        .iter()
+                        .find(|fact| {
+                            fact.syntax_kind().as_str() == syntax
+                                && fact.span().start_byte() == u64::try_from(start).unwrap()
+                                && fact.span().end_byte()
+                                    == u64::try_from(start + clause.len()).unwrap()
+                        })
+                        .unwrap();
+                    assert_eq!(bytes_at(bytes, declaration.span()), clause.as_bytes());
+                    let definition = result
+                        .facts()
+                        .iter()
+                        .find(|fact| {
+                            fact.syntax_kind().as_str() == "vba.identifier.definition"
+                                && fact.span().start_byte() == u64::try_from(name_start).unwrap()
+                                && fact.span().end_byte()
+                                    == u64::try_from(name_start + name.len()).unwrap()
+                        })
+                        .unwrap();
+                    assert_eq!(definition.parent(), Some(declaration.local_id()));
+                    assert_eq!(definition.depth(), declaration.depth() + 1);
+                    assert_eq!(bytes_at(bytes, definition.span()), name.as_bytes());
+                    assert_eq!(definition.span().file(), fixture.source.span().file());
+                }
+            }
+            for literal in [
+                "&H0A", "&O1", "&H2", "&3", "&o7", "&H1", "&O2", "&O7", "&hF", "&77", "&H0", "&o2",
+            ] {
+                for (start, _) in source.match_indices(literal) {
+                    assert!(
+                        !output.facts().iter().any(|fact| {
+                            fact.syntax_kind().as_str().ends_with(".reference")
+                                && fact.span().start_byte() >= u64::try_from(start).unwrap()
+                                && fact.span().end_byte()
+                                    <= u64::try_from(start + literal.len()).unwrap()
+                        }),
+                        "numeric syntax never fabricates an identifier: {language}, {literal}"
+                    );
+                }
+            }
+            for fact in output.facts() {
+                assert_eq!(fact.span().file(), fixture.source.span().file());
+                assert!(fact.span().end_byte() <= fixture.source.span().end_byte());
+                if let Some(parent) = fact.parent() {
+                    assert!(
+                        output
+                            .facts()
+                            .iter()
+                            .any(|candidate| candidate.local_id() == parent)
+                    );
+                }
+            }
+            assert!(
+                exact
+                    .facts()
+                    .iter()
+                    .all(|fact| !fact.syntax_kind().as_str().ends_with(".reference"))
+            );
+            let repeated = parse(&provider, &request);
+            assert_eq!(output.facts(), repeated.facts());
+            assert_eq!(output.report(), repeated.report());
+            assert_eq!(provider.stats().pooled_parsers, 0);
+            assert_eq!(provider.stats().checked_out_parsers, 0);
+            assert_eq!(provider.stats().cache.entries, 0);
+        }
+    }
+}
+
+#[test]
+fn radix_call_limits_preserve_mandatory_identity_and_typed_cancellation() {
+    let literals = ["&Hf", "&h0A", "&O7", "&o0007", "&77"].map(str::to_owned);
+    for literal in literals.into_iter().chain([
+        format!("&H{}", "F".repeat(2048)),
+        format!("&{}", "7".repeat(2048)),
+    ]) {
+        let source =
+            format!("Sub Run(ByVal value As Long)\nCall Target({literal}, &O2, &3)\nEnd Sub\n");
+        for language in ["vba", "visual-basic-classic"] {
+            let fixture = Fixture::new(source.as_bytes());
+            let provider = provider();
+            let base = limits(4096);
+            let request = fixture.request(&base, language, Vec::new());
+            let required = provider
+                .required_syntax_fact_count(&request, &deadline())
+                .unwrap();
+            assert_eq!(required, 9);
+            let full = parse(&provider, &request);
+            assert_eq!(full.report().resources().syntax_nodes(), 9);
+            assert_eq!(full.facts().len(), 12);
+            for capacity in [required, full.facts().len() - 1, full.facts().len()] {
+                let budget = limits(capacity);
+                let output = parse(&provider, &fixture.request(&budget, language, Vec::new()));
+                assert_eq!(output.facts().len(), capacity);
+                assert_eq!(
+                    output.report().coverage().status(),
+                    if capacity == full.facts().len() {
+                        CoverageStatus::Complete
+                    } else {
+                        CoverageStatus::Bounded
+                    }
+                );
+                for name in [b"Run".as_slice(), b"value"] {
+                    assert!(output.facts().iter().any(|fact| fact.syntax_kind().as_str()
+                        == "vba.identifier.definition"
+                        && bytes_at(source.as_bytes(), fact.span()) == name));
+                }
+                if capacity == required {
+                    assert!(
+                        output
+                            .facts()
+                            .iter()
+                            .all(|fact| !fact.syntax_kind().as_str().ends_with(".reference"))
+                    );
+                }
+            }
+            let short = limits(required - 1);
+            assert_eq!(
+                execute_parse(
+                    &provider,
+                    &fixture.request(&short, language, Vec::new()),
+                    MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
+                    &deadline()
+                )
+                .unwrap_err(),
+                AdapterError::Sink(SinkError::StreamLimit {
+                    resource: ResourceKind::RequiredSyntaxFacts,
+                    observed: required,
+                    limit: required - 1
+                })
+            );
+            // Work is nine, but full optional output independently needs twelve candidates.
+            for maximum in [12, 11] {
+                let budget = AnalysisLimits::new(
+                    base.max_source_bytes(),
+                    maximum,
+                    base.max_syntax_depth(),
+                    base.max_embedded_ranges(),
+                    base.max_reported_memory_bytes(),
+                    base.syntax_stream().clone(),
+                    base.ir_stream().clone(),
+                    base.ir().clone(),
+                )
+                .unwrap();
+                let result = execute_parse(
+                    &provider,
+                    &fixture.request(&budget, language, Vec::new()),
+                    MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
+                    &deadline(),
+                );
+                if maximum == 12 {
+                    assert_eq!(result.unwrap().facts(), full.facts());
+                } else {
+                    assert_eq!(
+                        result.unwrap_err(),
+                        AdapterError::RejectedRequest(
+                            rootlight_adapter_sdk::RequestError::ProviderLimit {
+                                resource: ResourceKind::SyntaxNodes,
+                                observed: 12,
+                                limit: 11
+                            }
+                        )
+                    );
+                }
+            }
+            let cancelled = deadline();
+            cancelled.cancel(CancellationReason::ClientRequest);
+            assert!(matches!(
+                execute_parse(
+                    &provider,
+                    &request,
+                    MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
+                    &cancelled
+                ),
+                Err(AdapterError::Cancelled {
+                    reason: CancellationReason::ClientRequest
+                })
+            ));
+            assert_eq!(parse(&provider, &request).facts(), full.facts());
+            assert_eq!(provider.stats().pooled_parsers, 0);
+            assert_eq!(provider.stats().checked_out_parsers, 0);
+            assert_eq!(provider.stats().cache.entries, 0);
+        }
+    }
+}
+
+#[test]
+fn radix_literal_late_invalid_tails_preserve_whole_native_fallback() {
+    for statement in [
+        "value = &H",
+        "value = &O",
+        "value = &O8",
+        "value = &08",
+        "value = &H1G",
+        "value = &H1&",
+        "value = &O7%",
+        "value = &7!",
+        "Call Target(&H1, &O8)",
+        "Dim grid(&H1, &O8) As Long",
+        "Const Seed As Long = &H1&",
+    ] {
+        let source = format!(
+            "Sub First()\nEnd Sub\nSub Run()\nDim value As Long\nvalue = &H1\n{statement}\nEnd Sub\n"
+        );
+        for language in ["vba", "visual-basic-classic"] {
+            let fixture = Fixture::new(source.as_bytes());
+            let provider = provider();
+            let budget = limits(4096);
+            let output = parse(&provider, &fixture.request(&budget, language, Vec::new()));
+            assert!(
+                provider.stats().pooled_parsers > 0,
+                "whole native fallback: {language}, {statement}"
+            );
+            assert_eq!(provider.stats().checked_out_parsers, 0);
+            assert!(output.facts().iter().any(|fact| fact.syntax_kind().as_str()
+                == "vba.identifier.definition"
+                && bytes_at(source.as_bytes(), fact.span()) == b"First"));
+        }
+    }
+}
+
+#[test]
+fn radix_literal_edit_invalidates_a_real_native_tree_without_identity_fabrication() {
+    const NATIVE: &str = "Sub Run()\r\nDim value As Long\r\nvalue = 1.5\r\nEnd Sub\r\n";
+    const OWN: &str = "Sub Run()\r\nDim value As Long\r\nvalue = &H1\r\nEnd Sub\r\n";
+    for language in ["vba", "visual-basic-classic"] {
+        let mut fixture = Fixture::new(NATIVE.as_bytes());
+        let provider = provider();
+        let budget = limits(4096);
+        let settings = ParserSettings::new(512).unwrap();
+        let previous = provider
+            .execute_with_previous(
+                &fixture.request(&budget, language, Vec::new()),
+                None,
+                &[],
+                settings,
+                MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
+                &deadline(),
+            )
+            .unwrap();
+        let continuation = previous
+            .previous()
+            .expect("floating syntax owns a real cached native tree");
+        assert_eq!(
+            previous.output().report().coverage().status(),
+            CoverageStatus::Complete
+        );
+        let old_hash = fixture.source.content_hash();
+        let old_stats = provider.stats();
+        assert!(old_stats.pooled_parsers > 0);
+        assert!(old_stats.cache.entries > 0);
+        fixture.rewrite(OWN.as_bytes());
+        assert_ne!(old_hash, fixture.source.content_hash());
+        assert_eq!(
+            fixture.source.content_hash(),
+            rootlight_ids::content_hash(OWN.as_bytes())
+        );
+        let request = fixture.request(&budget, language, Vec::new());
+        let start = NATIVE.find("1.5").unwrap();
+        let edit = SourceEdit::new(start, start + "1.5".len(), "&H1").unwrap();
+        let output = provider
+            .execute_with_previous(
+                &request,
+                Some(continuation),
+                &[edit],
+                settings,
+                MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
+                &deadline(),
+            )
+            .unwrap();
+        assert_eq!(
+            output.reuse_status(),
+            ReuseStatus::Invalidated(ReuseInvalidation::FrontendRoute)
+        );
+        assert_eq!(
+            output.reuse_key().grammar_version(),
+            VBA_PROCEDURAL_FRONTEND_VERSION
+        );
+        assert!(output.previous().is_none());
+        assert_eq!(
+            output.output().report().coverage().status(),
+            CoverageStatus::Complete
+        );
+        assert_eq!(
+            output.output().report().coverage().covered_source_bytes(),
+            OWN.len()
+        );
+        assert!(output.output().diagnostics().is_empty());
+        assert_eq!(output.output().facts(), parse(&provider, &request).facts());
+        assert_eq!(provider.stats().pooled_parsers, old_stats.pooled_parsers);
+        assert_eq!(provider.stats().cache.entries, old_stats.cache.entries);
+        assert_eq!(provider.stats().checked_out_parsers, 0);
     }
 }
 
@@ -355,7 +718,7 @@ fn local_dim_lists_keep_late_unsupported_declarators_on_the_whole_native_route()
         "Dim good, bad As New Product",
         "Dim good, bad$",
         "Dim good, bad(1 + 2)",
-        "Dim good, bad(&H2)",
+        "Dim good, bad(1.5)",
         "Dim good, bad(1,)",
         "Dim good, bad As Long=1",
         "Dim good,",
@@ -383,7 +746,7 @@ fn local_dim_lists_keep_late_unsupported_declarators_on_the_whole_native_route()
 
 #[test]
 fn local_dim_list_edit_invalidates_a_real_native_tree_with_source_bound_identity() {
-    const NATIVE: &str = "Dim first, grid(-1 To +2, &H3) As Long";
+    const NATIVE: &str = "Dim first, grid(-1 To +2, 1.5) As Long";
     const OWN: &str = "Dim first, grid(-1 To +2, 003) As Long";
     let native = format!("Sub Run()\r\n{NATIVE}\r\nEnd Sub\r\n");
     let own = format!("Sub Run()\r\n{OWN}\r\nEnd Sub\r\n");
@@ -405,7 +768,7 @@ fn local_dim_list_edit_invalidates_a_real_native_tree_with_source_bound_identity
             .unwrap();
         let continuation = previous
             .previous()
-            .expect("hex bounds retain a real native continuation");
+            .expect("floating bounds retain a real native continuation");
         let old_hash = fixture.source.content_hash();
         let old_stats = provider.stats();
         assert!(old_stats.pooled_parsers > 0);
@@ -1524,7 +1887,7 @@ fn richer_rhs_applications_keep_whole_native_fallback() {
         "Target(ByVal value)",
         "Target(1)(2)",
         "owner.Target(1)",
-        "Target(&H1)",
+        "Target(1.5)",
         "Line(1)",
     ] {
         let source = format!(
@@ -1919,7 +2282,7 @@ fn expression_calls_keep_unsupported_argument_and_root_tails_on_native_route() {
         "Call Target(, value + 1)",
         "Call Target(ByVal value + 1)",
         "Call owner.Target(value + 1)",
-        "Call Target(value + &H1)",
+        "Call Target(value + &H1&)",
         "Call Target(value + 1.5)",
         "Call Target(value + #1/2/2000#)",
         "Call Target(value% + 1)",
@@ -1954,7 +2317,7 @@ fn expression_calls_keep_unsupported_argument_and_root_tails_on_native_route() {
 
 #[test]
 fn expression_call_edit_invalidates_real_native_tree_without_cache_or_identity_fabrication() {
-    const NATIVE_STATEMENT: &str = "Call Target(value + &H1, Inner(other) * -2)";
+    const NATIVE_STATEMENT: &str = "Call Target(value + 1.5, Inner(other) * -2)";
     const OWN_STATEMENT: &str = "Call Target(value + 1, Inner(other) * -2)";
     let native = format!(
         "Sub Run(ByVal value As Long, ByVal other As Long)\r\n{NATIVE_STATEMENT}\r\nEnd Sub\r\n"
@@ -1977,7 +2340,7 @@ fn expression_call_edit_invalidates_real_native_tree_without_cache_or_identity_f
             .unwrap();
         let continuation = previous
             .previous()
-            .expect("the unsupported hex argument retains a native tree");
+            .expect("the unsupported floating argument retains a native tree");
         let old_hash = fixture.source.content_hash();
         let old_stats = provider.stats();
         assert!(old_stats.pooled_parsers > 0);
@@ -2479,7 +2842,7 @@ fn expression_operator_families_keep_exact_reads_and_work_limits() {
 #[test]
 fn expression_processor_keeps_unsupported_tails_on_the_native_route() {
     for expression in [
-        "value + &H1",
+        "value + &H1&",
         "value + #1/2/2000#",
         "value + 1.5",
         "value + 1E3",
@@ -3306,7 +3669,7 @@ fn required_parameter_identity_fits_exact_and_rejects_one_short() {
 #[test]
 fn unsupported_tail_is_not_hidden_by_a_valid_prefix_or_included_range() {
     let source =
-        b"Sub Empty()\nEnd Sub\nSub Populated(ByVal value As Long)\nvalue = &H1\nEnd Sub\n";
+        b"Sub Empty()\nEnd Sub\nSub Populated(ByVal value As Long)\nvalue = 1.5\nEnd Sub\n";
     for scoped in [false, true] {
         let fixture = Fixture::new(source);
         let provider = provider();
@@ -3373,7 +3736,7 @@ fn native_object_context_cannot_be_promoted_to_a_procedural_file() {
 
 #[test]
 fn native_continuation_is_invalidated_when_an_edit_enters_the_first_party_route() {
-    let native = b"Sub Run()\nDim value As Long\nvalue = &H1\nEnd Sub\n";
+    let native = b"Sub Run()\nDim value As Long\nvalue = 1.5\nEnd Sub\n";
     let first_party = b"Sub Run()\nEnd Sub\n";
     let mut fixture = Fixture::new(native);
     let provider = provider();
@@ -3424,7 +3787,7 @@ fn native_continuation_is_invalidated_when_an_edit_enters_the_first_party_route(
 
 #[test]
 fn native_continuation_is_invalidated_by_a_richer_first_party_expression() {
-    let native = b"Sub Run()\nDim value As Long\nvalue = &H1\nEnd Sub\n";
+    let native = b"Sub Run()\nDim value As Long\nvalue = 1.5\nEnd Sub\n";
     let first_party = b"Sub Run()\nDim value As Long\nvalue = (value + 1) * -2\nEnd Sub\n";
     for language in ["vba", "visual-basic-classic"] {
         let mut fixture = Fixture::new(native);

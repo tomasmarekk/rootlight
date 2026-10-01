@@ -300,10 +300,17 @@ impl ModuleCall {
 }
 
 /// Syntax categories admitted as complete atomic scalar values.
+/// `Unsigned` means no authored unary sign, not a proven nonnegative runtime value.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ModuleScalarValueKind {
     /// One or more decimal digits without sign, separator, exponent or suffix.
     UnsignedDecimal,
+    /// An authored `&H`/`&h` prefix and ASCII hexadecimal digits, without a suffix.
+    /// The spelling is retained without magnitude, signed-value or type evaluation.
+    UnsignedHexadecimal,
+    /// An authored `&`, `&O` or `&o` prefix and octal digits, without a suffix.
+    /// The spelling is retained without magnitude, signed-value or type evaluation.
+    UnsignedOctal,
     /// One physically closed string, with optional doubled-quote escapes.
     String,
     /// An unbracketed True or False keyword, without coercion or evaluation.
@@ -841,14 +848,8 @@ pub(super) fn atomic_value<E>(
     check: &mut impl FnMut() -> Result<(), E>,
 ) -> Result<Option<ModuleScalarValue>, E> {
     let start = *cursor;
-    let kind = if text.get(*cursor).is_some_and(u8::is_ascii_digit) {
-        while text.get(*cursor).is_some_and(u8::is_ascii_digit) {
-            if cursor.is_multiple_of(512) {
-                check()?;
-            }
-            *cursor += 1;
-        }
-        ModuleScalarValueKind::UnsignedDecimal
+    let kind = if let Some(kind) = integer_value(text, cursor, check)? {
+        kind
     } else if text.get(*cursor) == Some(&b'"') {
         *cursor += 1;
         let mut checkpoint = *cursor;
@@ -889,6 +890,71 @@ pub(super) fn atomic_value<E>(
         kind,
         span: start..*cursor,
     }))
+}
+
+#[derive(Clone, Copy)]
+enum IntegerRadix {
+    Decimal,
+    Hexadecimal,
+    Octal,
+}
+
+impl IntegerRadix {
+    fn admits(self, byte: u8) -> bool {
+        match self {
+            Self::Decimal => byte.is_ascii_digit(),
+            Self::Hexadecimal => byte.is_ascii_hexdigit(),
+            Self::Octal => matches!(byte, b'0'..=b'7'),
+        }
+    }
+
+    fn kind(self) -> ModuleScalarValueKind {
+        match self {
+            Self::Decimal => ModuleScalarValueKind::UnsignedDecimal,
+            Self::Hexadecimal => ModuleScalarValueKind::UnsignedHexadecimal,
+            Self::Octal => ModuleScalarValueKind::UnsignedOctal,
+        }
+    }
+}
+
+fn integer_prefix(text: &[u8]) -> Option<(IntegerRadix, usize)> {
+    // MS-VBAL 3.3.2 permits an omitted O/o marker after the octal ampersand.
+    let (radix, prefix) = match text.first()? {
+        byte if byte.is_ascii_digit() => (IntegerRadix::Decimal, 0),
+        b'&' => match text.get(1) {
+            Some(b'H' | b'h') => (IntegerRadix::Hexadecimal, 2),
+            Some(b'O' | b'o') => (IntegerRadix::Octal, 2),
+            _ => (IntegerRadix::Octal, 1),
+        },
+        _ => return None,
+    };
+    text.get(prefix)
+        .is_some_and(|byte| radix.admits(*byte))
+        .then_some((radix, prefix))
+}
+
+pub(super) fn radix_integer_prefix(text: &[u8]) -> bool {
+    text.first() == Some(&b'&') && integer_prefix(text).is_some()
+}
+
+pub(super) fn integer_value<E>(
+    text: &[u8],
+    cursor: &mut usize,
+    check: &mut impl FnMut() -> Result<(), E>,
+) -> Result<Option<ModuleScalarValueKind>, E> {
+    // The enclosing grammar owns suffix and whole-statement closure; this scan
+    // retains only the number token and never evaluates its magnitude or type.
+    let Some((radix, prefix)) = integer_prefix(text.get(*cursor..).unwrap_or_default()) else {
+        return Ok(None);
+    };
+    *cursor += prefix;
+    while text.get(*cursor).is_some_and(|byte| radix.admits(*byte)) {
+        if cursor.is_multiple_of(512) {
+            check()?;
+        }
+        *cursor += 1;
+    }
+    Ok(Some(radix.kind()))
 }
 
 pub(super) fn simple_name<E>(
@@ -1027,6 +1093,257 @@ mod tests {
 
     fn read(text: &[u8]) -> Option<ModuleBodyStatement> {
         statement(text, 0..text.len(), text.len(), &mut || Ok::<(), ()>(())).unwrap()
+    }
+
+    #[test]
+    fn integer_atoms_retain_all_radix_spellings_and_decimal_compatibility() {
+        for (spelling, kind) in [
+            ("00019", ModuleScalarValueKind::UnsignedDecimal),
+            ("&H0A", ModuleScalarValueKind::UnsignedHexadecimal),
+            ("&hFf", ModuleScalarValueKind::UnsignedHexadecimal),
+            ("&H1E2", ModuleScalarValueKind::UnsignedHexadecimal),
+            ("&O007", ModuleScalarValueKind::UnsignedOctal),
+            ("&o71", ModuleScalarValueKind::UnsignedOctal),
+            ("&77", ModuleScalarValueKind::UnsignedOctal),
+            ("&0", ModuleScalarValueKind::UnsignedOctal),
+        ] {
+            let source = format!("prefix:{spelling},tail");
+            let mut cursor = 7;
+            let value = atomic_value(source.as_bytes(), &mut cursor, false, &mut || {
+                Ok::<(), ()>(())
+            })
+            .unwrap()
+            .unwrap();
+            assert_eq!(value.kind(), kind);
+            assert_eq!(value.span(), 7..7 + spelling.len());
+            assert_eq!(&source[value.span()], spelling);
+            assert_eq!(cursor, 7 + spelling.len());
+            assert_eq!(source.as_bytes()[cursor], b',');
+        }
+        for invalid in ["&", "&H", "&hG", "&O", "&o8", "&8", "& 7", "&H 1"] {
+            let mut cursor = 0;
+            assert_eq!(
+                integer_value(invalid.as_bytes(), &mut cursor, &mut || Ok::<(), ()>(())),
+                Ok(None),
+                "{invalid}"
+            );
+            assert_eq!(cursor, 0);
+        }
+    }
+
+    #[test]
+    fn radix_atoms_keep_atomic_declaration_assignment_call_and_application_routes() {
+        for (spelling, kind) in [
+            ("&H10", ModuleScalarValueKind::UnsignedHexadecimal),
+            ("&hA", ModuleScalarValueKind::UnsignedHexadecimal),
+            ("&O7", ModuleScalarValueKind::UnsignedOctal),
+            ("&o7", ModuleScalarValueKind::UnsignedOctal),
+            ("&77", ModuleScalarValueKind::UnsignedOctal),
+        ] {
+            for text in [
+                format!("Const [Limit] As Long={spelling}"),
+                format!("Let [sink] = {spelling}"),
+                format!("Call [Target]({spelling})"),
+                format!("[sink]=[Read]({spelling})"),
+            ] {
+                let source = [b"prefix\n".as_slice(), text.as_bytes(), b"\ntail"].concat();
+                let range = 7..7 + text.len();
+                let parsed =
+                    statement_with_expression_limits(&source, range.clone(), 1, 0, &mut || {
+                        Ok::<(), ()>(())
+                    })
+                    .unwrap()
+                    .unwrap();
+                assert_eq!(parsed.statement(), range);
+                let value = match &parsed {
+                    ModuleBodyStatement::Declaration(declaration) => {
+                        assert_eq!(declaration.kind(), ModuleLocalKind::Constant);
+                        assert_eq!(&source[declaration.type_range()], b"Long");
+                        declaration.value().unwrap()
+                    }
+                    ModuleBodyStatement::Assignment(assignment) => assignment.value(),
+                    ModuleBodyStatement::Call(call) => {
+                        let legacy: &ModuleZeroArgumentCall = call;
+                        assert_eq!(legacy.callee(), call.callee());
+                        assert_eq!(call.argument_values().len(), 1);
+                        &call.argument_values()[0]
+                    }
+                    ModuleBodyStatement::ApplicationAssignment(assignment) => {
+                        assert_eq!(assignment.argument_values().len(), 1);
+                        &assignment.argument_values()[0]
+                    }
+                    _ => panic!("radix atom must preserve the legacy atomic route"),
+                };
+                assert_eq!(value.kind(), kind);
+                assert_eq!(&source[value.span()], spelling.as_bytes());
+                assert_eq!(
+                    value.span().end,
+                    parsed.statement().end - usize::from(text.ends_with(')'))
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn signed_and_composed_radix_values_use_complete_expression_records() {
+        for (text, expected, work, arguments) in [
+            ("count = -&H1", vec!["&H1"], 2, 0),
+            ("count=Read(0,+&H1,2)", vec!["0", "&H1", "2"], 6, 3),
+            ("count=Read(1)+&H2", vec!["1", "&H2"], 5, 1),
+            ("Call Target(&H10+2)", vec!["&H10", "2"], 5, 1),
+            ("Call Target(&77 * -&o2)", vec!["&77", "&o2"], 6, 1),
+        ] {
+            let parsed = statement_with_expression_limits(
+                text.as_bytes(),
+                0..text.len(),
+                arguments,
+                work,
+                &mut || Ok::<(), ()>(()),
+            )
+            .unwrap()
+            .unwrap();
+            let inventory = match &parsed {
+                ModuleBodyStatement::ExpressionAssignment(assignment) => assignment.inventory(),
+                ModuleBodyStatement::ExpressionCall(call) => {
+                    assert_eq!(&text[call.callee()], "Target");
+                    assert_eq!(call.inventory().applications()[0].callee(), call.callee());
+                    call.inventory()
+                }
+                _ => panic!("signed or composed radix expression expected"),
+            };
+            assert_eq!(parsed.statement(), 0..text.len());
+            assert_eq!(inventory.work_nodes(), work);
+            assert_eq!(inventory.argument_count(), arguments);
+            assert_eq!(
+                inventory
+                    .values()
+                    .iter()
+                    .map(|value| &text[value.span()])
+                    .collect::<Vec<_>>(),
+                expected
+            );
+            assert_eq!(
+                statement_with_expression_limits(
+                    text.as_bytes(),
+                    0..text.len(),
+                    arguments,
+                    work - 1,
+                    &mut || Ok::<(), ()>(())
+                ),
+                Err(ModuleError::ExpressionLimit),
+                "{text}"
+            );
+        }
+    }
+
+    #[test]
+    fn radix_atom_byte_alphabets_and_typed_tails_remain_closed() {
+        for byte in 0..=u8::MAX {
+            for (prefix, admits) in [
+                (b"count=&H".as_slice(), byte.is_ascii_hexdigit()),
+                (b"count=&h".as_slice(), byte.is_ascii_hexdigit()),
+                (b"count=&O".as_slice(), matches!(byte, b'0'..=b'7')),
+                (b"count=&o".as_slice(), matches!(byte, b'0'..=b'7')),
+                (b"count=&".as_slice(), matches!(byte, b'0'..=b'7')),
+            ] {
+                let source = [prefix, &[byte]].concat();
+                assert_eq!(read(&source).is_some(), admits, "{prefix:?}, byte {byte}");
+            }
+            for (atom, admits_digit) in [
+                (b"&H1".as_slice(), byte.is_ascii_hexdigit()),
+                (b"&hA".as_slice(), byte.is_ascii_hexdigit()),
+                (b"&O7".as_slice(), matches!(byte, b'0'..=b'7')),
+                (b"&o7".as_slice(), matches!(byte, b'0'..=b'7')),
+                (b"&77".as_slice(), matches!(byte, b'0'..=b'7')),
+            ] {
+                let source = [b"count=".as_slice(), atom, &[byte]].concat();
+                assert_eq!(
+                    read(&source).is_some(),
+                    admits_digit || matches!(byte, b' ' | b'\t'),
+                    "atom {atom:?}, tail byte {byte}"
+                );
+                let source = [b"Call Target(".as_slice(), atom, &[byte], b")".as_slice()].concat();
+                assert_eq!(
+                    read(&source).is_some(),
+                    admits_digit || matches!(byte, b' ' | b'\t'),
+                    "call atom {atom:?}, tail byte {byte}"
+                );
+            }
+        }
+        for atom in [
+            "&", "&H", "&hG", "&O", "&o8", "&8", "&78", "&H1G", "&O7a", "&H1.0", "&O7.0", "&77E2",
+            "& H1", "&O 7", "&H_1", "&H1more",
+        ] {
+            for text in [
+                format!("count={atom}"),
+                format!("Const Limit As Long={atom}"),
+                format!("Call Target(0,{atom},2)"),
+                format!("count=Read(0,{atom},2)"),
+            ] {
+                assert!(read(text.as_bytes()).is_none(), "{text}");
+            }
+        }
+        for atom in ["&H1", "&hF", "&O7", "&o1", "&77"] {
+            for suffix in ['%', '&', '^', '!', '#', '@', '$'] {
+                for text in [
+                    format!("count={atom}{suffix}"),
+                    format!("count={atom}{suffix}2"),
+                    format!("Const Limit As Long={atom}{suffix}"),
+                    format!("Call Target({atom}{suffix}+2)"),
+                    format!("count=Read({atom}{suffix})"),
+                ] {
+                    assert!(read(text.as_bytes()).is_none(), "{text}");
+                }
+            }
+        }
+        for text in ["Const Limit As Long=-&H1", "Const Limit As Long=+&77"] {
+            assert!(
+                read(text.as_bytes()).is_none(),
+                "unsigned literal-only Const: {text}"
+            );
+        }
+    }
+
+    #[test]
+    fn radix_body_scans_and_expression_rebasing_cancel_at_every_checkpoint() {
+        for text in [
+            format!("Const Limit As Long=&H{}", "F".repeat(2048)),
+            format!("Call Target(&O{}, &{})", "7".repeat(2048), "1".repeat(2048)),
+            format!(
+                "Dim grid(-&H{} To +&O{}, &77)",
+                "F".repeat(2048),
+                "7".repeat(2048)
+            ),
+            format!(
+                "Call Target(&H{}+1, Inner(&{}) * -&o2)",
+                "F".repeat(2048),
+                "7".repeat(2048)
+            ),
+        ] {
+            let source = [b"prefix\n".as_slice(), text.as_bytes(), b"\ntail"].concat();
+            let range = 7..7 + text.len();
+            let mut checkpoints = 0;
+            let admitted = statement(&source, range.clone(), 3, &mut || {
+                checkpoints += 1;
+                Ok::<(), ()>(())
+            })
+            .unwrap()
+            .unwrap();
+            assert_eq!(admitted.statement(), range);
+            assert!(checkpoints > 8);
+            for stop in 1..=checkpoints {
+                let mut calls = 0;
+                assert_eq!(
+                    statement(&source, range.clone(), 3, &mut || {
+                        calls += 1;
+                        if calls == stop { Err("stop") } else { Ok(()) }
+                    }),
+                    Err(ModuleError::Cancelled("stop")),
+                    "checkpoint {stop}"
+                );
+                assert_eq!(calls, stop);
+            }
+        }
     }
 
     #[test]
@@ -1351,7 +1668,7 @@ mod tests {
                 (
                     b"Dim first, grid(",
                     b"2)",
-                    byte.is_ascii_digit() || matches!(byte, b'+' | b'-' | b' ' | b'\t'),
+                    byte.is_ascii_digit() || matches!(byte, b'+' | b'-' | b'&' | b' ' | b'\t'),
                 ),
             ] {
                 let source = [prefix, &[byte], suffix].concat();
@@ -1665,8 +1982,8 @@ mod tests {
             "1.0",
             ".5",
             "1E2",
-            "&H10",
-            "&O7",
+            "10.5",
+            "7.5",
             "#1/1/2000#",
             "1&",
             "value$",
@@ -1987,7 +2304,7 @@ mod tests {
             "a&b",
             "1.0+2",
             "1E2+3",
-            "&H10+2",
+            "10.5+2",
             "#1/1/2000#",
             "Me+1",
             "Nothing",
@@ -2069,7 +2386,8 @@ mod tests {
             let result = read(&next);
             assert_eq!(
                 result.is_some(),
-                byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b' ' | b'\t' | b'+' | b'-'),
+                byte.is_ascii_alphanumeric()
+                    || matches!(byte, b'_' | b' ' | b'\t' | b'+' | b'-' | b'&'),
                 "argument prefix byte {byte}"
             );
             if let Some(statement) = result {
@@ -2365,11 +2683,11 @@ mod tests {
             "Const Limit As Long = other",
             "Const Limit As Long = 1, Other = 2",
             "Const Limit As Long = -1",
-            "count = -&H1",
+            "count = -1.5",
             "count = +1.0",
             "count = 1.0",
             "count = 1E2",
-            "count = &H10",
+            "count = 10.5",
             "count = 1&",
             "count = 1more",
             "count = \"closed\" extra",
@@ -2665,12 +2983,12 @@ mod tests {
             "1+",
             "True And",
             "-1.0",
-            "+&H1",
+            "+1.5",
             "1.0",
             ".5",
             "1E2",
-            "&H10",
-            "&O7",
+            "10.5",
+            "7.5",
             "#1/1/2000#",
             "1&",
             "value$",
@@ -2707,7 +3025,7 @@ mod tests {
             "count=Read(1)()",
             "count=Read(1).member",
             "count=Read(1)!member",
-            "count=Read(1)+&H2",
+            "count=Read(1)+2.5",
             "count=Read(1)=2=3.0",
             "count=Read 1",
             "count=(Read(1) extra)",
@@ -2779,7 +3097,7 @@ mod tests {
                     b"count=Read(1,",
                     b"2)",
                     byte.is_ascii_alphanumeric()
-                        || matches!(byte, b'_' | b' ' | b'\t' | b'+' | b'-'),
+                        || matches!(byte, b'_' | b' ' | b'\t' | b'+' | b'-' | b'&'),
                 ),
                 (b"count=Read(1)", b"", matches!(byte, b' ' | b'\t')),
                 (

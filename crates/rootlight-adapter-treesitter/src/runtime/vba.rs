@@ -703,6 +703,8 @@ fn body_candidates(
                 // Numeric and Boolean nodes have no captures in the current query
                 // pack; quoted strings use the shared lexical-trivia scan below.
                 ModuleScalarValueKind::UnsignedDecimal
+                | ModuleScalarValueKind::UnsignedHexadecimal
+                | ModuleScalarValueKind::UnsignedOctal
                 | ModuleScalarValueKind::String
                 | ModuleScalarValueKind::Boolean => {}
             }
@@ -748,6 +750,8 @@ fn body_candidates(
                         false,
                     )?,
                     ModuleScalarValueKind::UnsignedDecimal
+                    | ModuleScalarValueKind::UnsignedHexadecimal
+                    | ModuleScalarValueKind::UnsignedOctal
                     | ModuleScalarValueKind::String
                     | ModuleScalarValueKind::Boolean => {}
                 }
@@ -888,6 +892,8 @@ fn body_candidates(
                         false,
                     )?,
                     ModuleScalarValueKind::UnsignedDecimal
+                    | ModuleScalarValueKind::UnsignedHexadecimal
+                    | ModuleScalarValueKind::UnsignedOctal
                     | ModuleScalarValueKind::String
                     | ModuleScalarValueKind::Boolean => {}
                 }
@@ -2456,7 +2462,7 @@ mod tests {
             "Optional value As Long = seed.Member",
             "Optional value As Long = -1",
             "Optional value As Double = 1.5",
-            "Optional value As Long = &H10",
+            "Optional value As Long = &H10%",
             "Optional value As Date = #1/1/2000#",
             "Optional value As String = \"unterminated",
             "Optional value As String = \"x\" & \"y\"",
@@ -2987,8 +2993,8 @@ mod tests {
             "Dim items(1 + 2)",
             "Dim items(Target())",
             "Dim items(1.5)",
-            "Dim items(&HFF)",
-            "Dim items(&O7)",
+            "Dim items(&HFF%)",
+            "Dim items(&O7%)",
             "Dim items(2&)",
             "Dim items(\"2\")",
             "Dim items(True)",
@@ -3573,7 +3579,7 @@ mod tests {
             "Const Value = Target()",
             "Const Value = 1 + 2",
             "Const Value = -1",
-            "Const Value = &H10",
+            "Const Value = &H10%",
             "Const Value = #1/1/2000#",
             "Const Value = 1.5",
             "Const Value = 1, Other = 2",
@@ -4461,7 +4467,7 @@ mod tests {
         for call in [
             "Call Target 1",
             "Call Target value, 1",
-            "Call Target(1 + &H2)",
+            "Call Target(1 + &H2%)",
             "Call Target(Nested(1).member)",
             "Call Target(holder.Value)",
             "Call Target(value:=1)",
@@ -4681,7 +4687,7 @@ mod tests {
             "Call Target(Inner(1), ByVal extra)",
             "Call Target(Inner(1),)",
             "Call Target(, Inner(1))",
-            "Call Target(1 + &H2)",
+            "Call Target(1 + &H2%)",
             "Call Target(1 + 2.0)",
             "Call Target(2^3)",
             "Call Target(value&other)",
@@ -4934,7 +4940,7 @@ mod tests {
     #[test]
     fn first_party_vba_expression_tails_keep_whole_native_fallback() {
         for assignment in [
-            "sink = 1 + &H2",
+            "sink = 1 + &H2%",
             "sink = -(value.Member + 1)",
             "sink = Outer(Inner(value), extra:=2)",
             "sink = Outer(Inner(value), ByVal extra)",
@@ -5738,6 +5744,343 @@ mod tests {
         }
     }
 
+    fn radix_module_source(literal: &str, newline: &str) -> String {
+        format!(
+            "Attribute VB_Name = \"ModuleA\"{newline}Const Seed={literal}{newline}Dim GlobalValues(-{literal} To +{literal}, {literal}) As Long{newline}Function Fetch(ByVal item As Long, Optional extra As Long={literal}) As Long{newline}Fetch=item{newline}End Function{newline}Sub Target(ByVal item As Long){newline}End Sub{newline}Sub Run(){newline}Dim sink As Long, localValues(-{literal} To +{literal}, {literal}) As Long{newline}Const Local As Long={literal}{newline}sink={literal}{newline}sink=Fetch(localValues({literal}, {literal}), Seed)+{literal}{newline}Call Target({literal}){newline}Call Target(Fetch({literal})+Local){newline}End Sub{newline}"
+        )
+    }
+
+    #[test]
+    fn first_party_vba_hex_atoms_and_bounds_match_complete_native_source_facts() {
+        for literal in [
+            "&H0",
+            "&h7",
+            "&H0f",
+            "&hAb",
+            "&H7FFF",
+            "&H8000",
+            "&HFFFF",
+            "&HFFFFFFFF",
+        ] {
+            for newline in ["\n", "\r\n"] {
+                let source = radix_module_source(literal, newline);
+                for language in ["vba", "visual-basic-classic"] {
+                    compare_native(&Fixture::new(&source), language, &[]);
+                }
+            }
+        }
+        let magnitude = format!("&H{}", "A".repeat(2048));
+        for language in ["vba", "visual-basic-classic"] {
+            compare_native(
+                &Fixture::new(&radix_module_source(&magnitude, "\n")),
+                language,
+                &[],
+            );
+        }
+        for body in [
+            "sink = 1 + &H2",
+            "Call Target(1 + &H2)",
+            "Dim first, last(&H2)",
+            "Dim value As Long\nvalue = &H10",
+        ] {
+            compare_native_procedural_body(body);
+        }
+        for source in [
+            "Sub Run(Optional value As Long = &H10)\nEnd Sub\n",
+            "Const Value = &H10\n",
+            "Dim items(&HFF)\n",
+        ] {
+            for language in ["vba", "visual-basic-classic"] {
+                compare_native(&Fixture::new(source), language, &[]);
+            }
+        }
+    }
+
+    #[test]
+    fn first_party_vba_radix_spelling_does_not_fabricate_numeric_reference_facts() {
+        // These equal-width tokens change source identity, not declaration,
+        // call or value-read ranges. Octal is proved directly: the retained
+        // native grammar does not admit every normative octal spelling.
+        for newline in ["\n", "\r\n"] {
+            let decimal = radix_module_source("0007", newline);
+            for language in ["vba", "visual-basic-classic"] {
+                let decimal_fixture = Fixture::new(&decimal);
+                let cancellation = Cancellation::new();
+                let decimal_request = decimal_fixture.request(language, &[]);
+                let decimal_prepared = prepare(
+                    &decimal_fixture.provider,
+                    &decimal_request,
+                    None,
+                    &[],
+                    decimal_fixture.provider.config.default_settings(),
+                    &cancellation,
+                )
+                .unwrap()
+                .unwrap();
+                for literal in ["&H07", "&h07", "&O07", "&o07", "&007"] {
+                    let source = radix_module_source(literal, newline);
+                    assert_eq!(source.len(), decimal.len());
+                    let fixture = Fixture::new(&source);
+                    let request = fixture.request(language, &[]);
+                    let prepared = prepare(
+                        &fixture.provider,
+                        &request,
+                        None,
+                        &[],
+                        fixture.provider.config.default_settings(),
+                        &cancellation,
+                    )
+                    .unwrap()
+                    .unwrap();
+                    assert_eq!(prepared.processed_nodes, decimal_prepared.processed_nodes);
+                    assert_eq!(
+                        prepared.inventory.statement_count(),
+                        decimal_prepared.inventory.statement_count(),
+                    );
+                    for optional in [false, true] {
+                        let actual = candidates(
+                            &prepared.inventory,
+                            source.as_bytes(),
+                            optional,
+                            usize::MAX,
+                            &cancellation,
+                        )
+                        .unwrap();
+                        let expected = candidates(
+                            &decimal_prepared.inventory,
+                            decimal.as_bytes(),
+                            optional,
+                            usize::MAX,
+                            &cancellation,
+                        )
+                        .unwrap();
+                        assert_eq!(actual, expected, "{language}, {literal}");
+                        assert!(!actual.iter().any(|candidate| {
+                            candidate.role == StructuralRole::Reference
+                                && source.get(candidate.start..candidate.end) == Some(literal)
+                        }));
+                        let normalized =
+                            normalize_query_candidates(actual, &request, usize::MAX, &cancellation)
+                                .unwrap();
+                        let decimal_normalized = normalize_query_candidates(
+                            expected,
+                            &decimal_request,
+                            usize::MAX,
+                            &cancellation,
+                        )
+                        .unwrap();
+                        assert_eq!(normalized.required, decimal_normalized.required);
+                        assert_eq!(normalized.facts, decimal_normalized.facts);
+                        assert!(normalized.facts.iter().all(|fact| {
+                            fact.span().file() == fixture.source.span().file()
+                                && usize::try_from(fact.span().end_byte()).unwrap() <= source.len()
+                        }));
+                    }
+                    assert_eq!(fixture.provider.stats().pooled_parsers, 0);
+                    assert_eq!(fixture.provider.stats().cache.entries, 0);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn first_party_vba_radix_array_work_and_candidate_ceilings_are_conserved() {
+        for literal in ["0007", "&H07", "&h07", "&O07", "&o07", "&007"] {
+            let source = format!(
+                "Sub Run()\nDim first, grid(-{literal} To +{literal}, {literal}) As Long, pending()\nEnd Sub\n"
+            );
+            for language in ["vba", "visual-basic-classic"] {
+                let mut fixture = Fixture::new(&source);
+                let cancellation = Cancellation::new();
+                let request = fixture.request(language, &[]);
+                let prepared = prepare(
+                    &fixture.provider,
+                    &request,
+                    None,
+                    &[],
+                    fixture.provider.config.default_settings(),
+                    &cancellation,
+                )
+                .unwrap()
+                .unwrap();
+                assert_eq!(prepared.processed_nodes, 16);
+                let ModuleBodyStatement::Variables(list) =
+                    &prepared.inventory.procedures()[0].statements()[0]
+                else {
+                    panic!("complete local array declaration expected");
+                };
+                assert_eq!(list.variables()[1].array_work_nodes(), 8);
+                assert_eq!(list.variables()[2].array_work_nodes(), 1);
+                for (optional, exact) in [(false, 13), (true, 17)] {
+                    let all = candidates(
+                        &prepared.inventory,
+                        source.as_bytes(),
+                        optional,
+                        exact,
+                        &cancellation,
+                    )
+                    .unwrap();
+                    assert_eq!(all.len(), exact);
+                    assert_eq!(
+                        normalize_query_candidates(all, &request, usize::MAX, &cancellation)
+                            .unwrap()
+                            .required,
+                        13,
+                    );
+                    for (limit, observed) in [(exact - 1, exact), (0, 13)] {
+                        assert_eq!(
+                            candidates(
+                                &prepared.inventory,
+                                source.as_bytes(),
+                                optional,
+                                limit,
+                                &cancellation,
+                            )
+                            .unwrap_err(),
+                            AdapterError::RejectedRequest(RequestError::ProviderLimit {
+                                resource: ResourceKind::SyntaxNodes,
+                                observed,
+                                limit,
+                            }),
+                        );
+                    }
+                }
+                for limit in [16, 15, 1] {
+                    fixture.limits = with_maximum_nodes(&fixture.limits, limit);
+                    let request = fixture.request(language, &[]);
+                    let result = prepare(
+                        &fixture.provider,
+                        &request,
+                        None,
+                        &[],
+                        fixture.provider.config.default_settings(),
+                        &cancellation,
+                    );
+                    if limit == 16 {
+                        assert_eq!(result.unwrap().unwrap().processed_nodes, 16);
+                    } else {
+                        assert_eq!(
+                            result.err().unwrap(),
+                            AdapterError::RejectedRequest(RequestError::ProviderLimit {
+                                resource: ResourceKind::SyntaxNodes,
+                                observed: limit + 1,
+                                limit,
+                            }),
+                        );
+                    }
+                }
+                assert!(cancellation.cancel(rootlight_cancel::CancellationReason::ClientRequest));
+                assert!(matches!(
+                    candidates(
+                        &prepared.inventory,
+                        source.as_bytes(),
+                        true,
+                        100,
+                        &cancellation,
+                    ),
+                    Err(AdapterError::Cancelled {
+                        reason: rootlight_cancel::CancellationReason::ClientRequest
+                    }),
+                ));
+                assert_eq!(fixture.provider.stats().pooled_parsers, 0);
+                assert_eq!(fixture.provider.stats().cache.entries, 0);
+            }
+        }
+    }
+
+    #[test]
+    fn first_party_vba_radix_tails_never_publish_an_admitted_module_prefix() {
+        for literal in [
+            "&H",
+            "&hG",
+            "&O",
+            "&o8",
+            "&8",
+            "&77%",
+            "&H7&",
+            "&o7^",
+            "&H7!",
+            "&O7@",
+            "&7#",
+            "&H7$",
+            "&H7.member",
+            "&O7z",
+            "&H 7",
+            "& _\n77",
+        ] {
+            for body in [
+                format!("sink={literal}"),
+                format!("Call Target({literal})"),
+                format!("sink=Outer({literal}+1)"),
+                format!("Dim values({literal})"),
+                format!("Const Local As Long={literal}"),
+            ] {
+                let source = format!(
+                    "Const Accepted=&H7\nSub First()\nEnd Sub\nSub Run()\nDim retained As Long\n{body}\nEnd Sub\n"
+                );
+                for language in ["vba", "visual-basic-classic"] {
+                    let fixture = Fixture::new(&source);
+                    let request = fixture.request(language, &[]);
+                    assert!(
+                        prepare(
+                            &fixture.provider,
+                            &request,
+                            None,
+                            &[],
+                            fixture.provider.config.default_settings(),
+                            &Cancellation::new(),
+                        )
+                        .unwrap()
+                        .is_none(),
+                        "unsupported radix tail must retain whole-module fallback: {language}, {body:?}"
+                    );
+                    assert_eq!(fixture.provider.stats().pooled_parsers, 0);
+                    assert_eq!(fixture.provider.stats().cache.entries, 0);
+                }
+            }
+        }
+        for literal in ["&77", "&O7", "&H1"] {
+            for language in ["vba", "visual-basic-classic"] {
+                let source = format!("Sub Run()\nsink=[value] {literal}\nEnd Sub\n");
+                let fixture = Fixture::new(&source);
+                assert!(
+                    prepare(
+                        &fixture.provider,
+                        &fixture.request(language, &[]),
+                        None,
+                        &[],
+                        fixture.provider.config.default_settings(),
+                        &Cancellation::new(),
+                    )
+                    .unwrap()
+                    .is_none(),
+                );
+            }
+        }
+        for body in [
+            "sink=[value] & 77",
+            "sink=[value] & &77",
+            "sink=[value] & &H1",
+        ] {
+            for language in ["vba", "visual-basic-classic"] {
+                let source = format!("Sub Run()\n{body}\nEnd Sub\n");
+                let fixture = Fixture::new(&source);
+                assert!(
+                    prepare(
+                        &fixture.provider,
+                        &fixture.request(language, &[]),
+                        None,
+                        &[],
+                        fixture.provider.config.default_settings(),
+                        &Cancellation::new(),
+                    )
+                    .unwrap()
+                    .is_some(),
+                );
+            }
+        }
+    }
+
     #[test]
     fn first_party_vba_local_variable_lists_and_arrays_match_exact_native_facts() {
         for ty in [
@@ -5820,7 +6163,7 @@ mod tests {
             "Dim first, last=1",
             "Dim first, last(1+2)",
             "Dim first, last(Limit)",
-            "Dim first, last(&H2)",
+            "Dim first, last(&H2%)",
             "Dim first, last(2&)",
             "Dim first, last(1.5)",
             "Dim first, last(,2)",
@@ -5980,7 +6323,7 @@ mod tests {
             "Dim value As UserType",
             "Const seed As Long = value",
             "Dim value As Long\nvalue = 1.5",
-            "Dim value As Long\nvalue = &H10",
+            "Dim value As Long\nvalue = &H10%",
             "Dim value As Long\nvalue = Nothing",
             "Dim value As Long\nvalue = Me",
             "Dim value As Long\nMe = value",
@@ -6320,7 +6663,7 @@ mod tests {
     #[test]
     fn first_party_vba_never_accepts_a_supported_prefix_or_object_context() {
         for source in [
-            "Sub Run()\nDim value As Long\nvalue = &H1\nEnd Sub\n",
+            "Sub Run()\nDim value As Long\nvalue = 1.5\nEnd Sub\n",
             "Sub Run()\nEnd Sub\n#If Host Then\n#End If\n",
         ] {
             let fixture = Fixture::new(source);

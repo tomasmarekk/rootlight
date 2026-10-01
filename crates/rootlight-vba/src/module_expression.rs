@@ -7,7 +7,7 @@ use std::ops::Range;
 use super::{
     logical_whitespace_len,
     module::ModuleError,
-    module_body::{ModuleScalarValue, ModuleScalarValueKind, atomic_value},
+    module_body::{ModuleScalarValue, ModuleScalarValueKind, atomic_value, radix_integer_prefix},
 };
 
 /// A complete simple-name assignment with a structured expression right-hand side.
@@ -579,7 +579,9 @@ impl<'a> Parser<'a> {
                 // ordinary identifiers. An unsupported typed token is not a
                 // binary operator merely because its suffix shares that spelling.
                 let adjacent_suffix = match value.kind() {
-                    ModuleScalarValueKind::UnsignedDecimal => matches!(
+                    ModuleScalarValueKind::UnsignedDecimal
+                    | ModuleScalarValueKind::UnsignedHexadecimal
+                    | ModuleScalarValueKind::UnsignedOctal => matches!(
                         self.source.get(self.cursor),
                         Some(b'%' | b'&' | b'^' | b'!' | b'#' | b'@')
                     ),
@@ -859,7 +861,9 @@ fn binary(source: &[u8], cursor: usize) -> Option<(Operator, usize)> {
         b'\\' => Some(Operator::IntegerDivide),
         b'+' => Some(Operator::Add),
         b'-' => Some(Operator::Subtract),
-        b'&' => Some(Operator::Concatenate),
+        // Ambiguous operand-following radix tokens remain on the native route;
+        // a distinct ampersand can still precede a decimal or radix operand.
+        b'&' if !radix_integer_prefix(bytes) => Some(Operator::Concatenate),
         b'=' => Some(Operator::Equal),
         b'<' => Some(Operator::Less),
         b'>' => Some(Operator::Greater),
@@ -1011,6 +1015,161 @@ mod tests {
             .parse(&mut || Ok::<(), ()>(()))
             .unwrap()
             .expect("complete expression")
+    }
+
+    #[test]
+    fn radix_expression_inventory_preserves_exact_rebased_atoms_applications_and_work() {
+        for newline in ["\n", "\r\n"] {
+            let source = format!("Target(value + _{newline} &H0A, Inner(&77) * - _{newline} &o2)");
+            let range = 9..9 + source.len();
+            let (span, inventory) = super::inventory(
+                source.as_bytes(),
+                0,
+                &range,
+                11,
+                3,
+                &mut || Ok::<(), ()>(()),
+            )
+            .unwrap()
+            .unwrap();
+            assert_eq!(span, range);
+            assert_eq!(inventory.work_nodes(), 11);
+            assert_eq!(inventory.argument_count(), 3);
+            for (value, (spelling, kind)) in inventory.values().iter().zip([
+                ("value", ModuleScalarValueKind::Name),
+                ("&H0A", ModuleScalarValueKind::UnsignedHexadecimal),
+                ("&77", ModuleScalarValueKind::UnsignedOctal),
+                ("&o2", ModuleScalarValueKind::UnsignedOctal),
+            ]) {
+                assert_eq!(value.kind(), kind);
+                let relative = value.span().start - range.start..value.span().end - range.start;
+                assert_eq!(&source[relative], spelling);
+            }
+            assert_eq!(inventory.values().len(), 4);
+            assert_eq!(inventory.applications().len(), 2);
+            let outer = &inventory.applications()[0];
+            assert_eq!(outer.application(), range);
+            assert_eq!(outer.callee(), 9..15);
+            assert_eq!(outer.argument_expressions().len(), 2);
+            for (argument, spelling) in outer.argument_expressions().iter().zip([
+                format!("value + _{newline} &H0A"),
+                format!("Inner(&77) * - _{newline} &o2"),
+            ]) {
+                assert_eq!(&source[argument.start - 9..argument.end - 9], spelling);
+            }
+            let nested = &inventory.applications()[1];
+            assert_eq!(
+                &source[nested.callee().start - 9..nested.callee().end - 9],
+                "Inner"
+            );
+            assert_eq!(nested.argument_expressions().len(), 1);
+            let argument = &nested.argument_expressions()[0];
+            assert_eq!(&source[argument.start - 9..argument.end - 9], "&77");
+            for maximum in [0, 1, 10] {
+                assert!(matches!(
+                    super::inventory(
+                        source.as_bytes(),
+                        0,
+                        &range,
+                        maximum,
+                        3,
+                        &mut || Ok::<(), ()>(())
+                    ),
+                    Err(ModuleError::ExpressionLimit)
+                ));
+            }
+            for maximum in [0, 1, 2] {
+                assert!(matches!(
+                    super::inventory(source.as_bytes(), 0, &range, 11, maximum, &mut || Ok::<
+                        (),
+                        (),
+                    >(
+                        ()
+                    )),
+                    Err(ModuleError::ArgumentLimit)
+                ));
+            }
+        }
+        for source in ["&H1+2", "&hF + &O7", "&77 * -&o2", "&H1 ^ 2"] {
+            let parsed = parse(source);
+            assert_eq!(parsed.span, 0..source.len());
+            assert!(parsed.inventory.values().iter().any(|value| matches!(
+                value.kind(),
+                ModuleScalarValueKind::UnsignedHexadecimal | ModuleScalarValueKind::UnsignedOctal
+            )));
+        }
+    }
+
+    #[test]
+    fn ambiguous_operand_following_radix_prefixes_do_not_become_concat_or_name_reads() {
+        for left in ["[a]", "True", "\"text\"", "(value)", "Inner()"] {
+            for radix in ["&77", "&O7", "&o7", "&H1", "&hA", "&Hfoo"] {
+                for separator in ["", " ", " _\r\n "] {
+                    let source = format!("{left}{separator}{radix}");
+                    assert!(
+                        Parser::new(source.as_bytes(), 0, source.len(), 0)
+                            .parse(&mut || Ok::<(), ()>(()))
+                            .unwrap()
+                            .is_none(),
+                        "{source}"
+                    );
+                }
+            }
+        }
+        for (source, right, kind) in [
+            ("[a] & 77", "77", ModuleScalarValueKind::UnsignedDecimal),
+            ("[a] & &77", "&77", ModuleScalarValueKind::UnsignedOctal),
+            ("[a] &&77", "&77", ModuleScalarValueKind::UnsignedOctal),
+            (
+                "\"x\" & &H1",
+                "&H1",
+                ModuleScalarValueKind::UnsignedHexadecimal,
+            ),
+            ("True&&O7", "&O7", ModuleScalarValueKind::UnsignedOctal),
+            ("[a] &H", "H", ModuleScalarValueKind::Name),
+            ("[a] &O", "O", ModuleScalarValueKind::Name),
+            ("[a] &Other", "Other", ModuleScalarValueKind::Name),
+            ("[a] &Hmore", "Hmore", ModuleScalarValueKind::Name),
+        ] {
+            let parsed = parse(source);
+            assert_eq!(parsed.span, 0..source.len());
+            assert_eq!(parsed.inventory.work_nodes(), 3);
+            let NodeKind::Binary(Operator::Concatenate, _, _) = parsed.nodes[parsed.root].kind
+            else {
+                panic!("a distinct concat token must retain its operator")
+            };
+            assert_eq!(parsed.inventory.values().len(), 2);
+            assert_eq!(parsed.inventory.values()[1].kind(), kind);
+            assert_eq!(&source[parsed.inventory.values()[1].span()], right);
+        }
+    }
+
+    #[test]
+    fn radix_prefix_probe_uses_only_complete_numeric_prefixes_and_ascii_digits() {
+        for byte in 0..=u8::MAX {
+            for (prefix, expected) in [
+                (b"&H".as_slice(), byte.is_ascii_hexdigit()),
+                (b"&h".as_slice(), byte.is_ascii_hexdigit()),
+                (b"&O".as_slice(), matches!(byte, b'0'..=b'7')),
+                (b"&o".as_slice(), matches!(byte, b'0'..=b'7')),
+                (b"&".as_slice(), matches!(byte, b'0'..=b'7')),
+            ] {
+                let source = [prefix, &[byte]].concat();
+                assert_eq!(
+                    radix_integer_prefix(&source),
+                    expected,
+                    "{prefix:?}, byte {byte}"
+                );
+                assert_eq!(
+                    binary(&source, 0),
+                    (!expected).then_some((Operator::Concatenate, 1))
+                );
+            }
+        }
+        for source in [b"&".as_slice(), b"&H", b"&O", b"&h", b"&o"] {
+            assert!(!radix_integer_prefix(source));
+            assert_eq!(binary(source, 0), Some((Operator::Concatenate, 1)));
+        }
     }
 
     #[test]
@@ -1338,7 +1497,7 @@ mod tests {
             "line()",
             "1.5+2",
             "1E2+2",
-            "&H1+2",
+            "1.5+2.5",
             "#1/1/2000#",
             "value$+1",
             "Me+1",

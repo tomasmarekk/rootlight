@@ -2,6 +2,8 @@
 //! No parser runtime is required. Identifier paths retain argument boundaries;
 //! procedure categories come from source, never from an uncontinued following line.
 //! Closed whole-module inventories reject unsupported syntax without partial facts.
+//! Integer atoms retain decimal, hexadecimal or octal spelling without evaluating
+//! magnitudes, signed values or runtime types.
 
 #![forbid(unsafe_code)]
 

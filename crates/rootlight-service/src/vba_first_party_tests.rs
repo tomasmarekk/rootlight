@@ -112,7 +112,7 @@ fn procedural_route_changes_survive_noop_reopen_and_match_clean_rebuild() {
     paths.prepare_owner().unwrap();
     let empty = "Attribute VB_Name = \"Authored\"\nOption Explicit\nSub Run()\nEnd Sub\n";
     let populated = "Attribute VB_Name = \"Authored\"\nOption Explicit\nSub Run()\nDim value As Long\nConst Limit As Long = 7\nvalue = Limit\nLet value = 1\nEnd Sub\n";
-    let native = "Attribute VB_Name = \"Authored\"\nOption Explicit\nSub Run()\nDim value As Long\nvalue = &H1\nEnd Sub\n";
+    let native = "Attribute VB_Name = \"Authored\"\nOption Explicit\nSub Run()\nDim value As Long\nvalue = 1.5\nEnd Sub\n";
     let mut first_empty = None;
     let mut previous_generation = None;
     for source in [empty, populated, native, populated, empty] {
@@ -2742,7 +2742,7 @@ fn named_optional_defaults_preserve_module_constant_namespace_and_source_lifetim
         // An unsupported own-body expression selects the native fallback. The
         // composite parser identity alone is not evidence of which route ran.
         NamedDefaultState {
-            body: "value = &H1\n",
+            body: "value = 1.5\n",
             ..initial
         },
         initial,
@@ -3548,7 +3548,7 @@ fn module_variable_edits_preserve_value_binding_without_constant_or_call_claims(
                 .map(|(written, _)| *written)
                 .collect::<Vec<_>>()
                 .join(", ");
-            let arithmetic = if state.arithmetic_body { " + &H1" } else { "" };
+            let arithmetic = if state.arithmetic_body { " + 1.5" } else { "" };
             let source = format!(
                 "Attribute VB_Name = \"Authored\"\nOption Explicit\n{}Sub Notify({header})\n{}End Sub\nSub Run()\nDim sink As Long\nsink = {}{arithmetic}\nCall Notify({})\nCall {}()\nEnd Sub\n",
                 state.declarations_source,
@@ -4126,7 +4126,7 @@ fn assert_module_array_contract(
         }
     }
     if state.indexed_body {
-        // The separately authored hexadecimal statement retains native fallback.
+        // The separately authored floating-point statement retains native fallback.
         // Declared rank proves indexing shape, not runtime bounds or element types.
         for (expression, name, proven) in [
             ("Buffer()", "Buffer", true),
@@ -4314,7 +4314,7 @@ fn module_numeric_array_edits_preserve_source_identity_and_native_rank_contracts
                 .collect::<Vec<_>>()
                 .join(", ");
             let indexed = if state.indexed_body {
-                "sink = Buffer()\nsink = Buffer(0)\nsink = Buffer(0, 1)\nsink = Grid()\nsink = Grid(0)\nsink = Grid(0, 1)\nsink = &H1\n"
+                "sink = Buffer()\nsink = Buffer(0)\nsink = Buffer(0, 1)\nsink = Grid()\nsink = Grid(0)\nsink = Grid(0, 1)\nsink = 1.5\n"
             } else {
                 ""
             };
@@ -4436,7 +4436,7 @@ fn grouped_module_variable_source(state: ModuleArrayState) -> String {
         .collect::<Vec<_>>()
         .join(", ");
     let indexed = if state.indexed_body {
-        "sink = Buffer()\nsink = Buffer(0)\nsink = Buffer(0, 1)\nsink = Grid()\nsink = Grid(0)\nsink = Grid(0, 1)\nsink = &H1\n"
+        "sink = Buffer()\nsink = Buffer(0)\nsink = Buffer(0, 1)\nsink = Grid()\nsink = Grid(0)\nsink = Grid(0, 1)\nsink = 1.5\n"
     } else {
         ""
     };
@@ -4633,7 +4633,7 @@ fn grouped_module_variable_edits_preserve_independent_declarator_evidence() {
                     1..=4 | 6 => old_source.replace(old_state.declarations_source, state.declarations_source),
                     5 => old_source.replace("Storage", "Buffer"),
                     7 => old_source.replace(old_state.declarations_source, state.declarations_source)
-                        .replace("Call Notify(1)\n", "sink = Buffer()\nsink = Buffer(0)\nsink = Buffer(0, 1)\nsink = Grid()\nsink = Grid(0)\nsink = Grid(0, 1)\nsink = &H1\nCall Notify(1)\n"),
+                        .replace("Call Notify(1)\n", "sink = Buffer()\nsink = Buffer(0)\nsink = Buffer(0, 1)\nsink = Grid()\nsink = Grid(0)\nsink = Grid(0, 1)\nsink = 1.5\nCall Notify(1)\n"),
                     8 => initial_source.clone().unwrap(),
                     _ => panic!("an authored grouped declaration edit is required"),
                 };
@@ -5217,7 +5217,7 @@ fn value_application_source(state: ValueApplicationState) -> String {
     // Hexadecimal arguments remain outside the first-party expression slice;
     // this separately retained application keeps native rank evidence alive.
     let arithmetic = if state.arithmetic_fallback {
-        "sink = Buffer(&H0) + 1\n"
+        "sink = Buffer(0.5) + 1\n"
     } else {
         ""
     };
@@ -5615,7 +5615,7 @@ fn assert_value_application_contract(
         .chain(
             state
                 .arithmetic_fallback
-                .then_some(("Buffer(&H0)", "Buffer", 1, false)),
+                .then_some(("Buffer(0.5)", "Buffer", 1, false)),
         )
         .enumerate()
     {
@@ -5899,7 +5899,7 @@ fn assert_value_application_contract(
             } else {
                 assert!(
                     atom.bytes().all(|byte| byte.is_ascii_digit())
-                        || (ordinal == probes.len() && atom == "&H0")
+                        || (ordinal == probes.len() && atom == "0.5")
                 );
                 assert!(!document.occurrences.iter().any(|site| {
                     site.source.span().start_byte() == u64::try_from(atom_start).unwrap()
@@ -6048,7 +6048,7 @@ fn assignment_value_applications_preserve_arrays_formals_and_source_lifetimes() 
                 let expected = old_source
                     .replace(old_state.declarations_source, state.declarations_source)
                     .replace("Dim Buffer As Long\n", "")
-                    .replace("sink = Buffer(&H0) + 1\n", "");
+                    .replace("sink = Buffer(0.5) + 1\n", "");
                 let expected = if matches!(state.buffer, ExpectedBufferApplication::LocalScalar) {
                     expected.replace("index = 0\n", "Dim Buffer As Long\nindex = 0\n")
                 } else {
@@ -6057,7 +6057,7 @@ fn assignment_value_applications_preserve_arrays_formals_and_source_lifetimes() 
                 let expected = if state.arithmetic_fallback {
                     expected.replace(
                         "sink = Fetch(value, 7, 8)\n",
-                        "sink = Fetch(value, 7, 8)\nsink = Buffer(&H0) + 1\n",
+                        "sink = Fetch(value, 7, 8)\nsink = Buffer(0.5) + 1\n",
                     )
                 } else {
                     expected
@@ -6166,12 +6166,12 @@ fn expression_assignment_source(state: ExpressionSourceState) -> String {
         ""
     };
     let fallback = if state.native_fallback {
-        "sink = &H1\n"
+        "sink = 1.5\n"
     } else {
         ""
     };
     // The retained grammar recovers these source-valid comparison combinations;
-    // the hex control must remain a native-valid whole module independently.
+    // the floating-point control must remain a native-valid whole module independently.
     let comparisons = if state.native_fallback {
         ""
     } else {
@@ -8104,8 +8104,8 @@ fn explicit_call_expressions_preserve_nested_targets_and_generation_lifetimes() 
             ..initial
         },
         ExpressionCallState {
-            arguments: "Inner(local + &H2), Inner(Inner(local))",
-            nested: &["Inner(local + &H2)", "Inner(Inner(local))", "Inner(local)"],
+            arguments: "Inner(local + 2.5), Inner(Inner(local))",
+            nested: &["Inner(local + 2.5)", "Inner(Inner(local))", "Inner(local)"],
             ..initial
         },
         initial,
@@ -8234,7 +8234,7 @@ fn local_dim_source(state: LocalDimState) -> String {
         "Attribute VB_Name = \"Authored\"\nOption Explicit\nPrivate Buffer(2) As Long\nFunction Fetch(ByVal value As Long, Optional extra As Long = 7) As Long\nFetch = value\nEnd Function\nSub Run()\n{}index = 0\nsink = spare\nsink = Buffer()\nsink = Buffer(index)\nsink = Buffer(index, 1)\nsink = dynamic(index)\nsink = dynamic(index, 1)\nsink = Grid(0)\nsink = Grid(0, 1)\nsink = Fetch()\nsink = Fetch(index)\nsink = Fetch(index, 7, 8)\n{}End Sub\n",
         state.declarations_source,
         if state.native_fallback {
-            "sink = &H1\n"
+            "sink = 1.5\n"
         } else {
             ""
         },
@@ -9056,7 +9056,7 @@ fn local_dim_lists_and_arrays_preserve_scope_and_generation_lifetimes() {
             buffer: ExpectedBufferApplication::Ambiguous,
             ..initial
         },
-        // A hexadecimal atom remains outside the first-party body subset.
+        // A floating-point atom remains outside the first-party body subset.
         LocalDimState {
             native_fallback: true,
             ..grouped
@@ -9114,9 +9114,9 @@ fn local_dim_lists_and_arrays_preserve_scope_and_generation_lifetimes() {
                 let expected =
                     old_source.replace(old_state.declarations_source, state.declarations_source);
                 let expected = if state.native_fallback {
-                    expected.replace("End Sub\n", "sink = &H1\nEnd Sub\n")
+                    expected.replace("End Sub\n", "sink = 1.5\nEnd Sub\n")
                 } else if old_state.native_fallback {
-                    expected.replace("sink = &H1\n", "")
+                    expected.replace("sink = 1.5\n", "")
                 } else {
                     expected
                 };
@@ -9157,6 +9157,873 @@ fn local_dim_lists_and_arrays_preserve_scope_and_generation_lifetimes() {
             assert!(receipt.logical_snapshot.is_some());
             assert_eq!(receipt.logical_snapshot, rebuilt.logical_snapshot);
             assert_local_dim_contract(&service, &rebuilt, &source, language, state);
+            if position == 0 {
+                initial_source = Some(source.clone());
+                initial_logical = receipt.logical_snapshot.clone();
+            } else if position + 1 == states.len() {
+                assert_eq!(initial_source.as_ref(), Some(&source));
+                assert_eq!(receipt.logical_snapshot, initial_logical);
+            }
+            previous = Some((rebuilt, source, state));
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+struct RadixLiteralState {
+    literal: &'static str,
+    default: &'static str,
+    module_bounds: &'static str,
+    local_bounds: &'static str,
+    local_rank: usize,
+    index: &'static str,
+    second_index: &'static str,
+    native_fallback: bool,
+}
+
+fn radix_literal_source(state: RadixLiteralState) -> String {
+    format!(
+        "Attribute VB_Name = \"Authored\"\nOption Explicit\nPrivate Const Seed As Long = {literal}\nPrivate values({module_bounds}) As Long\nSub Notify(ByVal value As Long, Optional extra As Long = {default})\nEnd Sub\nFunction Ready() As Long\nReady = {literal}\nEnd Function\nSub Run()\nDim sink As Long, local As Long, buffer({local_bounds}) As Long\nConst LocalSeed As Long = {literal}\nlocal = {literal}\nsink = LocalSeed\nsink = Seed\nsink = local + {literal}\nCall Notify(local)\nCall Notify({literal}, {literal})\nCall Notify()\nCall Notify({literal}, {literal}, {literal})\nsink = buffer({index})\nsink = buffer({index}, {second_index})\nsink = values({index})\nsink = Ready()\nsink = Ready({literal})\n{fallback}End Sub\n",
+        literal = state.literal,
+        default = state.default,
+        module_bounds = state.module_bounds,
+        local_bounds = state.local_bounds,
+        index = state.index,
+        second_index = state.second_index,
+        fallback = if state.native_fallback {
+            "sink = 1.5\n"
+        } else {
+            ""
+        },
+    )
+}
+
+fn assert_radix_literal_contract(
+    service: &FirstSliceService,
+    receipt: &FirstSliceIndexReceipt,
+    source: &str,
+    language: &str,
+    state: RadixLiteralState,
+) {
+    assert_source_and_identity_for_language(service, receipt, source, language);
+    let snapshot = service
+        .loaded_generation_snapshot(receipt.generation)
+        .unwrap();
+    let document = snapshot.document();
+    let file = &document.files[0];
+    let module = document
+        .entities
+        .iter()
+        .find(|entity| entity.kind == EntityKind::Module && entity.canonical_name == "Authored")
+        .unwrap();
+    let run = document
+        .entities
+        .iter()
+        .find(|entity| {
+            entity.canonical_name == "Run"
+                && entity.container == Some(rootlight_ir::ContainerRef::Entity(module.id))
+        })
+        .unwrap();
+    let parser = document
+        .provenance
+        .iter()
+        .find(|proof| proof.id == run.provenance)
+        .unwrap();
+    let find = |kind: EntityKind, name: &str, owner| {
+        document
+            .entities
+            .iter()
+            .find(|entity| {
+                entity.kind == kind
+                    && entity.canonical_name == name
+                    && entity.container == Some(rootlight_ir::ContainerRef::Entity(owner))
+            })
+            .unwrap()
+    };
+    let notify = find(EntityKind::Function, "Notify", module.id);
+    let ready = find(EntityKind::Function, "Ready", module.id);
+    let seed = find(EntityKind::Constant, "Seed", module.id);
+    let local_seed = find(EntityKind::Constant, "LocalSeed", run.id);
+    let values = find(EntityKind::Variable, "values", module.id);
+    let buffer = find(EntityKind::Variable, "buffer", run.id);
+    let local = find(EntityKind::Variable, "local", run.id);
+    for (callable, opener, terminator) in [
+        (notify, "Sub Notify(", "End Sub"),
+        (ready, "Function Ready(", "End Function"),
+    ] {
+        let start = source.find(opener).unwrap();
+        let end = start + source[start..].find(terminator).unwrap() + terminator.len();
+        assert_eq!(callable.provenance, parser.id);
+        assert_exact_parameter_source(
+            service,
+            receipt,
+            source,
+            callable.evidence.source.as_ref().unwrap(),
+            start..end,
+        );
+        let name_start = start + opener.find(&callable.canonical_name).unwrap();
+        let definitions = document
+            .occurrences
+            .iter()
+            .filter(|site| {
+                site.role == OccurrenceRole::Definition
+                    && site.target
+                        == OccurrenceTarget::Resolved {
+                            symbol: callable.id,
+                        }
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(definitions.len(), 1);
+        assert_eq!(definitions[0].enclosing, Some(module.id));
+        assert_eq!(definitions[0].provenance, parser.id);
+        assert_exact_parameter_source(
+            service,
+            receipt,
+            source,
+            &definitions[0].source,
+            name_start..name_start + callable.canonical_name.len(),
+        );
+        let explained = service
+            .symbol_explain(receipt.generation, callable.id, &deadline())
+            .unwrap();
+        assert_eq!(&explained.data.entity, callable);
+        assert!(!explained.data.truncated);
+        assert!(
+            explained
+                .data
+                .occurrences
+                .iter()
+                .any(|site| site == definitions[0])
+        );
+    }
+    assert!(
+        !document
+            .skipped_regions
+            .iter()
+            .any(|gap| gap.detail == "syntax-error-recovery")
+    );
+    let reference = |range: std::ops::Range<usize>| {
+        SourceRef::new(
+            receipt.repository,
+            receipt.generation,
+            SourceSpan::new(
+                file.id,
+                u64::try_from(range.start).unwrap(),
+                u64::try_from(range.end).unwrap(),
+            )
+            .unwrap(),
+            content_hash(source.as_bytes()),
+            None,
+        )
+    };
+    let clauses = [
+        (seed, format!("Seed As Long = {}", state.literal), module.id),
+        (
+            local_seed,
+            format!("LocalSeed As Long = {}", state.literal),
+            run.id,
+        ),
+        (
+            values,
+            format!("values({}) As Long", state.module_bounds),
+            module.id,
+        ),
+        (
+            buffer,
+            format!("buffer({}) As Long", state.local_bounds),
+            run.id,
+        ),
+        (local, "local As Long".to_owned(), run.id),
+    ];
+    for (entity, written, owner) in &clauses {
+        let start = source.find(written).unwrap();
+        let range = start..start + written.len();
+        assert_eq!(entity.language, language);
+        assert_eq!(entity.provenance, parser.id);
+        assert_exact_parameter_source(
+            service,
+            receipt,
+            source,
+            entity.evidence.source.as_ref().unwrap(),
+            range.clone(),
+        );
+        let definitions = document
+            .occurrences
+            .iter()
+            .filter(|site| {
+                site.role == OccurrenceRole::Definition
+                    && site.target == OccurrenceTarget::Resolved { symbol: entity.id }
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(definitions.len(), 1);
+        let definition = definitions[0];
+        assert_eq!(definition.enclosing, Some(*owner));
+        assert_eq!(definition.provenance, parser.id);
+        assert_exact_parameter_source(
+            service,
+            receipt,
+            source,
+            &definition.source,
+            start..start + entity.canonical_name.len(),
+        );
+        assert_eq!(
+            definition.evidence.source.as_ref(),
+            entity.evidence.source.as_ref()
+        );
+        let contains = document
+            .relations
+            .iter()
+            .filter(|relation| {
+                relation.predicate == RelationPredicate::Contains
+                    && relation.subject == RelationEndpoint::Entity(*owner)
+                    && relation.object == RelationEndpoint::Entity(entity.id)
+                    && relation.evidence.source.as_ref() == entity.evidence.source.as_ref()
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(contains.len(), 1);
+        assert_eq!(contains[0].provenance, parser.id);
+        let explained = service
+            .symbol_explain(receipt.generation, entity.id, &deadline())
+            .unwrap();
+        assert_eq!(&explained.data.entity, *entity);
+        assert!(!explained.data.truncated);
+        assert!(
+            explained
+                .data
+                .occurrences
+                .iter()
+                .any(|site| site == definition)
+        );
+        assert!(
+            explained
+                .data
+                .relations
+                .iter()
+                .any(|relation| relation == contains[0])
+        );
+        let located = service
+            .code_locate(
+                receipt.generation,
+                entity.canonical_name.clone(),
+                LocateMode::Exact,
+                10,
+                0,
+                &deadline(),
+            )
+            .unwrap();
+        assert!(!located.data.truncated);
+        assert_eq!(
+            located
+                .data
+                .hits
+                .iter()
+                .filter_map(|hit| hit.symbol)
+                .collect::<BTreeSet<_>>(),
+            BTreeSet::from([entity.id])
+        );
+        let hit = located
+            .data
+            .hits
+            .iter()
+            .find(|hit| hit.symbol == Some(entity.id))
+            .unwrap();
+        assert_eq!(hit.source.as_ref(), entity.evidence.source.as_ref());
+        if let Some(bounds_start) = written.find('(') {
+            let bounds_end = written.find(')').unwrap() + 1;
+            let range = start + bounds_start..start + bounds_end;
+            assert_exact_parameter_source(
+                service,
+                receipt,
+                source,
+                &reference(range.clone()),
+                range,
+            );
+        }
+    }
+    assert_eq!(
+        document
+            .entities
+            .iter()
+            .filter(|entity| entity.kind == EntityKind::Parameter)
+            .count(),
+        2
+    );
+    let formals = [
+        ("ByVal value As Long".to_owned(), "value"),
+        (
+            format!("Optional extra As Long = {}", state.default),
+            "extra",
+        ),
+    ]
+    .into_iter()
+    .map(|(written, name)| {
+        let formal = find(EntityKind::Parameter, name, notify.id);
+        let start = source.find(&written).unwrap();
+        assert_eq!(formal.provenance, parser.id);
+        assert_exact_parameter_source(
+            service,
+            receipt,
+            source,
+            formal.evidence.source.as_ref().unwrap(),
+            start..start + written.len(),
+        );
+        let name_start = start + written.find(name).unwrap();
+        let definitions = document
+            .occurrences
+            .iter()
+            .filter(|site| {
+                site.role == OccurrenceRole::Definition
+                    && site.target == OccurrenceTarget::Resolved { symbol: formal.id }
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(definitions.len(), 1);
+        let definition = definitions[0];
+        assert_eq!(definition.enclosing, Some(notify.id));
+        assert_eq!(definition.provenance, parser.id);
+        assert_exact_parameter_source(
+            service,
+            receipt,
+            source,
+            &definition.source,
+            name_start..name_start + name.len(),
+        );
+        let contains = document
+            .relations
+            .iter()
+            .filter(|relation| {
+                relation.predicate == RelationPredicate::Contains
+                    && relation.subject == RelationEndpoint::Entity(notify.id)
+                    && relation.object == RelationEndpoint::Entity(formal.id)
+                    && relation.evidence.source.as_ref() == formal.evidence.source.as_ref()
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(contains.len(), 1);
+        assert_eq!(contains[0].provenance, parser.id);
+        (formal, definition)
+    })
+    .collect::<Vec<_>>();
+    assert!(
+        !document
+            .occurrences
+            .iter()
+            .any(|site| { site.syntax_kind == "vba.default_constant_identifier.reference" })
+    );
+    let mut numeric_ranges = BTreeSet::new();
+    for token in [
+        state.literal,
+        state.default,
+        state.index,
+        state.second_index,
+    ] {
+        for (start, _) in source.match_indices(token) {
+            let end = start + token.len();
+            if !source
+                .as_bytes()
+                .get(end)
+                .is_some_and(|byte| byte.is_ascii_alphanumeric() || *byte == b'_')
+            {
+                numeric_ranges.insert((start, end));
+            }
+        }
+    }
+    for (start, end) in numeric_ranges {
+        assert_exact_parameter_source(service, receipt, source, &reference(start..end), start..end);
+        assert!(
+            !document.occurrences.iter().any(|site| {
+                site.source.span().start_byte() >= u64::try_from(start).unwrap()
+                    && site.source.span().end_byte() <= u64::try_from(end).unwrap()
+            }),
+            "numeric source must not fabricate a reference: {}",
+            &source[start..end]
+        );
+    }
+    let mut expected_calls = BTreeMap::new();
+    for (expression, name, explicit, target, proven) in [
+        (
+            "Call Notify(local)".to_owned(),
+            "Notify",
+            true,
+            notify,
+            true,
+        ),
+        (
+            format!("Call Notify({}, {})", state.literal, state.literal),
+            "Notify",
+            true,
+            notify,
+            true,
+        ),
+        ("Call Notify()".to_owned(), "Notify", true, notify, false),
+        (
+            format!(
+                "Call Notify({}, {}, {})",
+                state.literal, state.literal, state.literal
+            ),
+            "Notify",
+            true,
+            notify,
+            false,
+        ),
+        (
+            format!("buffer({})", state.index),
+            "buffer",
+            false,
+            buffer,
+            state.local_rank == 1,
+        ),
+        (
+            format!("buffer({}, {})", state.index, state.second_index),
+            "buffer",
+            false,
+            buffer,
+            state.local_rank == 2,
+        ),
+        (
+            format!("values({})", state.index),
+            "values",
+            false,
+            values,
+            true,
+        ),
+        ("Ready()".to_owned(), "Ready", false, ready, true),
+        (
+            format!("Ready({})", state.literal),
+            "Ready",
+            false,
+            ready,
+            false,
+        ),
+    ] {
+        let start = if explicit {
+            source.find(&expression).unwrap()
+        } else {
+            source.find(&format!("sink = {expression}\n")).unwrap() + "sink = ".len()
+        };
+        let end = start + expression.len();
+        let is_function = target.kind == EntityKind::Function;
+        let applications = document
+            .occurrences
+            .iter()
+            .filter(|site| {
+                site.syntax_kind == "vba.application.reference"
+                    && site.source.span().start_byte() == u64::try_from(start).unwrap()
+                    && site.source.span().end_byte() == u64::try_from(end).unwrap()
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(applications.len(), 1, "radix application: {expression}");
+        let application = applications[0];
+        assert_eq!(application.role, OccurrenceRole::Reference);
+        assert_eq!(application.enclosing, Some(run.id));
+        assert_exact_parameter_source(service, receipt, source, &application.source, start..end);
+        if proven {
+            assert_eq!(
+                application.target,
+                OccurrenceTarget::Resolved { symbol: target.id }
+            );
+        } else {
+            assert!(matches!(
+                application.target,
+                OccurrenceTarget::Unresolved { .. }
+            ));
+        }
+        let refers = document
+            .relations
+            .iter()
+            .filter(|relation| {
+                relation.subject == RelationEndpoint::Occurrence(application.id)
+                    && relation.predicate == RelationPredicate::RefersTo
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(refers.len(), usize::from(proven));
+        if proven {
+            assert_eq!(refers[0].object, RelationEndpoint::Entity(target.id));
+            assert_eq!(refers[0].provenance, application.provenance);
+            assert_eq!(
+                refers[0].evidence.source.as_ref(),
+                Some(&application.source)
+            );
+        }
+        assert!(!document.relations.iter().any(|relation| {
+            relation.subject == RelationEndpoint::Occurrence(application.id)
+                && relation.predicate == RelationPredicate::Calls
+        }));
+        assert_eq!(
+            document
+                .skipped_regions
+                .iter()
+                .filter(|gap| {
+                    gap.source == application.source
+                        && gap.detail == "vba-call-or-index-target-unavailable"
+                })
+                .count(),
+            usize::from(!proven)
+        );
+        let proof = document
+            .provenance
+            .iter()
+            .find(|proof| proof.id == application.provenance)
+            .unwrap();
+        if is_function && proven {
+            let mut parents = vec![FactRef::Fact(parser.id), FactRef::Entity(target.id)];
+            if explicit {
+                for (formal, definition) in &formals {
+                    parents.push(FactRef::Entity(formal.id));
+                    let clause = formal.evidence.source.as_ref().unwrap();
+                    assert!(proof.input_sources.contains(clause));
+                    assert!(proof.evidence_sources.contains(clause));
+                    assert!(proof.evidence_sources.contains(&definition.source));
+                }
+            }
+            parents.sort_unstable();
+            parents.dedup();
+            assert_eq!(proof.derivation_parents, parents);
+            assert_eq!(
+                proof.rule.as_deref(),
+                Some("vba-procedure-application-v1.source")
+            );
+            assert!(
+                proof
+                    .input_sources
+                    .contains(file.evidence.source.as_ref().unwrap())
+            );
+            assert!(
+                proof
+                    .evidence_sources
+                    .contains(target.evidence.source.as_ref().unwrap())
+            );
+            assert!(proof.evidence_sources.contains(&application.source));
+        } else {
+            assert_eq!(proof.id, parser.id);
+            assert_eq!(proof.rule, None);
+        }
+        for reference in proof.input_sources.iter().chain(&proof.evidence_sources) {
+            assert_eq!(reference.repository(), receipt.repository);
+            assert_eq!(reference.generation(), receipt.generation);
+            assert_eq!(reference.content_hash(), content_hash(source.as_bytes()));
+            assert_eq!(reference.span().file(), file.id);
+            assert!(reference.span().end_byte() <= u64::try_from(source.len()).unwrap());
+        }
+        let callee_start = start + if explicit { "Call ".len() } else { 0 };
+        let syntax = if explicit {
+            "vba.invoked_identifier.reference"
+        } else {
+            "vba.invoked_get_identifier.reference"
+        };
+        let callees = document
+            .occurrences
+            .iter()
+            .filter(|site| {
+                site.syntax_kind == syntax
+                    && site.source.span().start_byte() == u64::try_from(callee_start).unwrap()
+                    && site.source.span().end_byte()
+                        == u64::try_from(callee_start + name.len()).unwrap()
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(callees.len(), 1);
+        let callee = callees[0];
+        assert_eq!(
+            callee.role,
+            if is_function {
+                OccurrenceRole::CallSite
+            } else {
+                OccurrenceRole::Reference
+            }
+        );
+        assert_eq!(callee.enclosing, Some(run.id));
+        assert_eq!(
+            callee.target,
+            OccurrenceTarget::Resolved { symbol: target.id }
+        );
+        assert_eq!(callee.provenance, parser.id);
+        assert_exact_parameter_source(
+            service,
+            receipt,
+            source,
+            &callee.source,
+            callee_start..callee_start + name.len(),
+        );
+        for predicate in [RelationPredicate::RefersTo, RelationPredicate::Calls] {
+            let relations = document
+                .relations
+                .iter()
+                .filter(|relation| {
+                    relation.subject == RelationEndpoint::Occurrence(callee.id)
+                        && relation.predicate == predicate
+                })
+                .collect::<Vec<_>>();
+            let expected = if is_function {
+                predicate == RelationPredicate::Calls
+            } else {
+                predicate == RelationPredicate::RefersTo
+            };
+            assert_eq!(relations.len(), usize::from(expected));
+            if expected {
+                assert_eq!(relations[0].object, RelationEndpoint::Entity(target.id));
+                assert_eq!(relations[0].provenance, parser.id);
+                assert_eq!(relations[0].evidence.source.as_ref(), Some(&callee.source));
+            }
+        }
+        if is_function {
+            expected_calls.insert(callee.source.clone(), target.id);
+        }
+    }
+    assert_eq!(
+        document
+            .occurrences
+            .iter()
+            .filter(|site| {
+                site.syntax_kind == "vba.application.reference" && site.enclosing == Some(run.id)
+            })
+            .count(),
+        9
+    );
+    for (written, target) in [
+        ("sink = LocalSeed\n", local_seed),
+        ("sink = Seed\n", seed),
+        ("Call Notify(local)\n", local),
+        ("sink = local + ", local),
+    ] {
+        let start = source.find(written).unwrap() + written.find(&target.canonical_name).unwrap();
+        let end = start + target.canonical_name.len();
+        let reads = document
+            .occurrences
+            .iter()
+            .filter(|site| {
+                site.syntax_kind == "vba.value_identifier.reference"
+                    && site.source.span().start_byte() == u64::try_from(start).unwrap()
+                    && site.source.span().end_byte() == u64::try_from(end).unwrap()
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(reads.len(), 1);
+        let read = reads[0];
+        assert_eq!(read.role, OccurrenceRole::Reference);
+        assert_eq!(read.enclosing, Some(run.id));
+        assert_eq!(
+            read.target,
+            OccurrenceTarget::Resolved { symbol: target.id }
+        );
+        assert_eq!(read.provenance, parser.id);
+        assert!(!formals.iter().any(|(formal, _)| formal.id == target.id));
+        assert_exact_parameter_source(service, receipt, source, &read.source, start..end);
+        let refers = document
+            .relations
+            .iter()
+            .filter(|relation| {
+                relation.subject == RelationEndpoint::Occurrence(read.id)
+                    && relation.predicate == RelationPredicate::RefersTo
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(refers.len(), 1);
+        assert_eq!(refers[0].object, RelationEndpoint::Entity(target.id));
+        assert_eq!(refers[0].provenance, parser.id);
+        assert_eq!(refers[0].evidence.source.as_ref(), Some(&read.source));
+        assert!(!document.relations.iter().any(|relation| {
+            relation.subject == RelationEndpoint::Occurrence(read.id)
+                && relation.predicate == RelationPredicate::Calls
+        }));
+        let explained = service
+            .symbol_explain(receipt.generation, target.id, &deadline())
+            .unwrap();
+        assert!(!explained.data.truncated);
+        assert!(explained.data.occurrences.iter().any(|site| site == read));
+        assert!(
+            explained
+                .data
+                .relations
+                .iter()
+                .any(|relation| relation == refers[0])
+        );
+    }
+    assert_eq!(
+        document
+            .relations
+            .iter()
+            .filter(|relation| { relation.predicate == RelationPredicate::Calls })
+            .count(),
+        6
+    );
+    let calls = service
+        .symbol_relationships(
+            receipt.generation,
+            BTreeSet::from([run.id]),
+            vec![RelationFamily::Calls],
+            Some(RelationDirection::Outbound),
+            0,
+            20,
+            0,
+            &deadline(),
+        )
+        .unwrap();
+    assert!(!calls.data.truncated);
+    let items = calls
+        .data
+        .groups
+        .iter()
+        .flat_map(|group| &group.items)
+        .collect::<Vec<_>>();
+    assert_eq!(items.len(), expected_calls.len());
+    assert_eq!(
+        items
+            .iter()
+            .flat_map(|item| item.source_refs.iter().cloned())
+            .collect::<BTreeSet<_>>(),
+        expected_calls.keys().cloned().collect::<BTreeSet<_>>()
+    );
+    for item in items {
+        assert_eq!(item.source_refs.len(), 1);
+        assert_eq!(Some(&item.symbol), expected_calls.get(&item.source_refs[0]));
+    }
+}
+
+#[test]
+fn radix_literal_edits_preserve_atom_sources_and_rank_arity_proofs() {
+    let initial = RadixLiteralState {
+        literal: "7",
+        default: "7",
+        module_bounds: "0 To 3",
+        local_bounds: "-1 To 2",
+        local_rank: 1,
+        index: "0",
+        second_index: "1",
+        native_fallback: false,
+    };
+    let hexadecimal = RadixLiteralState {
+        literal: "&H7",
+        default: "&h7",
+        module_bounds: "-&H1 To +&h3",
+        local_bounds: "-&h1 To +&H2",
+        local_rank: 1,
+        index: "&H0",
+        second_index: "&h1",
+        native_fallback: false,
+    };
+    let states = [
+        initial,
+        hexadecimal,
+        RadixLiteralState {
+            literal: "&O7",
+            default: "&o10",
+            module_bounds: "-&O1 To +&o3",
+            local_bounds: "-&o1 To +&O2",
+            local_rank: 1,
+            index: "&O0",
+            second_index: "&o1",
+            native_fallback: false,
+        },
+        RadixLiteralState {
+            literal: "&7",
+            default: "&10",
+            module_bounds: "-&1 To +&3",
+            local_bounds: "-&H1 To +&O2, &3",
+            local_rank: 2,
+            index: "&0",
+            second_index: "&1",
+            native_fallback: false,
+        },
+        // The retained VBA grammar does not admit every octal spelling. The
+        // fallback fixture therefore keeps independently native-valid hex syntax.
+        RadixLiteralState {
+            native_fallback: true,
+            ..hexadecimal
+        },
+        initial,
+    ];
+    for language in ["visual-basic-classic", "vba"] {
+        let current = std::env::current_dir().unwrap();
+        let repository = tempfile::tempdir_in(&current).unwrap();
+        let storage = tempfile::tempdir_in(&current).unwrap();
+        let paths = rootlight_runtime::RuntimePaths::new(
+            storage.path().join("state"),
+            storage.path().join("runtime"),
+        )
+        .unwrap();
+        paths.prepare_owner().unwrap();
+        let configuration = (language == "vba").then_some("version='1.3'\n[extensions.source-languages]\nversion='1.0'\ncritical=true\n[extensions.source-languages.data.extensions]\nbas='vba'\n");
+        let policy = FirstSliceStoragePolicy::resolve_user_config(configuration, 4).unwrap();
+        assert_eq!(policy.retained_generations(), 2);
+        let mut previous: Option<(FirstSliceIndexReceipt, String, RadixLiteralState)> = None;
+        let mut initial_source = None;
+        let mut initial_logical = None;
+        for (position, state) in states.into_iter().enumerate() {
+            let source = radix_literal_source(state);
+            fs::write(repository.path().join("module.bas"), &source).unwrap();
+            let mut service = FirstSliceService::new_durable_with_policy(
+                policy.clone(),
+                paths.state_dir(),
+                &deadline(),
+            )
+            .unwrap();
+            let prepared = service
+                .prepare_repository(repository.path(), &deadline())
+                .unwrap();
+            let committed = service
+                .publish_prepared_with_metrics(prepared, &deadline())
+                .unwrap();
+            assert_eq!(committed.evidence().rebuilt_files, 1);
+            assert_eq!(committed.evidence().reused_files, 0);
+            if position > 0 {
+                assert_eq!(committed.evidence().changed_files, 1);
+            }
+            let receipt = committed.receipt().clone();
+            assert_radix_literal_contract(&service, &receipt, &source, language, state);
+            assert_eq!(
+                receipt,
+                service
+                    .index_repository(repository.path(), &deadline())
+                    .unwrap()
+            );
+            if let Some((old_receipt, old_source, old_state)) = &previous {
+                assert_ne!(receipt.generation, old_receipt.generation);
+                assert!(receipt.logical_snapshot.is_some());
+                assert_ne!(receipt.logical_snapshot, old_receipt.logical_snapshot);
+                assert_radix_literal_contract(
+                    &service,
+                    old_receipt,
+                    old_source,
+                    language,
+                    *old_state,
+                );
+            }
+            drop(service);
+            let mut service = FirstSliceService::new_durable_with_policy(
+                policy.clone(),
+                paths.state_dir(),
+                &deadline(),
+            )
+            .unwrap();
+            assert_eq!(
+                receipt,
+                service
+                    .index_repository(repository.path(), &deadline())
+                    .unwrap()
+            );
+            assert_radix_literal_contract(&service, &receipt, &source, language, state);
+            if let Some((old_receipt, old_source, old_state)) = &previous {
+                assert_radix_literal_contract(
+                    &service,
+                    old_receipt,
+                    old_source,
+                    language,
+                    *old_state,
+                );
+            }
+            let prepared = service
+                .prepare_repository_with_options(
+                    repository.path(),
+                    FirstSliceIndexOptions::clean_rebuild(FirstSliceIndexMode::Structural),
+                    &deadline(),
+                )
+                .unwrap();
+            let committed = service
+                .publish_prepared_with_metrics(prepared, &deadline())
+                .unwrap();
+            assert_eq!(committed.evidence().rebuilt_files, 1);
+            assert_eq!(committed.evidence().reused_files, 0);
+            let rebuilt = committed.receipt().clone();
+            assert_ne!(receipt.generation, rebuilt.generation);
+            assert!(receipt.logical_snapshot.is_some());
+            assert_eq!(receipt.logical_snapshot, rebuilt.logical_snapshot);
+            assert_radix_literal_contract(&service, &rebuilt, &source, language, state);
             if position == 0 {
                 initial_source = Some(source.clone());
                 initial_logical = receipt.logical_snapshot.clone();
