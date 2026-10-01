@@ -9702,3 +9702,410 @@ fn vba_conditional_header_conditions_do_not_bind_runtime_variables() {
             .any(|gap| { gap.detail == "vba-conditional-compilation-evaluation-unavailable" })
     );
 }
+
+#[test]
+fn vba_duplicate_variable_visibility_conflict_is_unknown_with_both_written_witnesses() {
+    use rootlight_ir::EntityVisibility;
+    for language in ["vba", "visual-basic-classic"] {
+        for body in ["scratch = 7", "scratch = 1 + 2"] {
+            let source = format!(
+                "Attribute VB_Name = \"Visibility\"\nPublic stored As Long\nPrivate [stored] As Long\nSub Run()\nDim scratch As Long\nscratch = stored\n{body}\nEnd Sub\n"
+            );
+            let result =
+                application_proof_output(&source, language, IrLimits::default(), &deadline())
+                    .unwrap();
+            let document = result.document();
+            let module = document
+                .entities
+                .iter()
+                .find(|entity| entity.kind == EntityKind::Module)
+                .unwrap();
+            let variables = document
+                .entities
+                .iter()
+                .filter(|entity| {
+                    entity.kind == EntityKind::Variable
+                        && entity.canonical_name == "stored"
+                        && entity.container == Some(ContainerRef::Entity(module.id))
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(variables.len(), 1);
+            let variable = variables[0];
+            assert_eq!(
+                variable.visibility,
+                EntityVisibility::Unknown,
+                "{language}: {body}"
+            );
+            let parser = document.files[0].provenance;
+            assert_eq!(variable.provenance, parser);
+            assert!(document.provenance.iter().any(|proof| proof.id == parser));
+            let definitions = document
+                .occurrences
+                .iter()
+                .filter(|site| {
+                    site.role == OccurrenceRole::Definition
+                        && site.target
+                            == OccurrenceTarget::Resolved {
+                                symbol: variable.id,
+                            }
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(definitions.len(), 2);
+            for (statement, clause, name) in [
+                ("Public stored As Long", "stored As Long", "stored"),
+                ("Private [stored] As Long", "[stored] As Long", "[stored]"),
+            ] {
+                let start = source.find(statement).unwrap() + statement.len() - clause.len();
+                let definition = definitions
+                    .iter()
+                    .find(|site| site.source.span().start_byte() == u64::try_from(start).unwrap())
+                    .unwrap();
+                assert_eq!(
+                    definition.source.span().end_byte(),
+                    u64::try_from(start + name.len()).unwrap()
+                );
+                assert_eq!(definition.enclosing, Some(module.id));
+                assert_eq!(definition.provenance, parser);
+                let context = definition.evidence.source.as_ref().unwrap();
+                assert_eq!(context.span().start_byte(), u64::try_from(start).unwrap());
+                assert_eq!(
+                    context.span().end_byte(),
+                    u64::try_from(start + clause.len()).unwrap()
+                );
+                for reference in [&definition.source, context] {
+                    assert_eq!(reference.repository(), document.repository);
+                    assert_eq!(reference.generation(), document.generation);
+                    assert_eq!(reference.span().file(), document.files[0].id);
+                    assert_eq!(reference.content_hash(), content_hash(source.as_bytes()));
+                }
+                let contains = document
+                    .relations
+                    .iter()
+                    .filter(|edge| {
+                        edge.predicate == RelationPredicate::Contains
+                            && edge.subject == RelationEndpoint::Entity(module.id)
+                            && edge.object == RelationEndpoint::Entity(variable.id)
+                            && edge.evidence.source.as_ref() == Some(context)
+                    })
+                    .collect::<Vec<_>>();
+                assert_eq!(contains.len(), 1);
+                assert_eq!(contains[0].provenance, parser);
+            }
+            let read = reference_at(document, &source, "stored\n");
+            assert!(matches!(read.target, OccurrenceTarget::Unresolved { .. }));
+            assert!(
+                document
+                    .skipped_regions
+                    .iter()
+                    .any(|gap| gap.source == read.source && gap.domain == FactDomain::Relations)
+            );
+            assert!(!document.relations.iter().any(|edge| {
+                edge.subject == RelationEndpoint::Occurrence(read.id)
+                    && matches!(
+                        edge.predicate,
+                        RelationPredicate::RefersTo | RelationPredicate::Calls
+                    )
+            }));
+            assert!(!document.relations.iter().any(|edge| {
+                edge.object == RelationEndpoint::Entity(variable.id)
+                    && edge.predicate == RelationPredicate::Calls
+            }));
+        }
+    }
+}
+
+fn duplicate_variable_visibility_source(declarations: &[(&str, &str)], body: &str) -> String {
+    let mut source = String::from("Attribute VB_Name = \"Visibility\"\n");
+    for (prefix, name) in declarations {
+        source.push_str(&format!("{prefix} {name} As Long\n"));
+    }
+    source.push_str(&format!(
+        "Sub Run()\nDim scratch As Long\nscratch = stored\n{body}\nEnd Sub\n"
+    ));
+    source
+}
+
+fn assert_duplicate_variable_visibility_witnesses(
+    document: &rootlight_ir::NormalizedIrDocument,
+    source: &str,
+    declarations: &[(&str, &str)],
+    expected: &[(&str, rootlight_ir::EntityVisibility)],
+) {
+    let module = document
+        .entities
+        .iter()
+        .find(|entity| entity.kind == EntityKind::Module)
+        .unwrap();
+    let variables = document
+        .entities
+        .iter()
+        .filter(|entity| {
+            entity.kind == EntityKind::Variable
+                && entity.container == Some(ContainerRef::Entity(module.id))
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(variables.len(), expected.len(), "{source}");
+    let parser = document.files[0].provenance;
+    assert!(document.provenance.iter().any(|proof| proof.id == parser));
+    for (name, visibility) in expected {
+        let variable = variables
+            .iter()
+            .find(|entity| entity.canonical_name == *name)
+            .unwrap();
+        assert_eq!(variable.visibility, *visibility, "{source}");
+        assert_eq!(variable.provenance, parser);
+        assert_eq!(
+            document
+                .occurrences
+                .iter()
+                .filter(|site| {
+                    site.role == OccurrenceRole::Definition
+                        && site.target
+                            == OccurrenceTarget::Resolved {
+                                symbol: variable.id,
+                            }
+                })
+                .count(),
+            declarations
+                .iter()
+                .filter(|(_, written_name)| {
+                    written_name.trim_start_matches('[').trim_end_matches(']') == *name
+                })
+                .count()
+        );
+        assert!(!document.relations.iter().any(|edge| {
+            edge.object == RelationEndpoint::Entity(variable.id)
+                && edge.predicate == RelationPredicate::Calls
+        }));
+    }
+    let mut cursor = source.find('\n').unwrap() + 1;
+    for (prefix, written_name) in declarations {
+        let start = cursor + prefix.len() + 1;
+        let end = start + written_name.len() + " As Long".len();
+        assert_eq!(
+            &source[cursor..end],
+            format!("{prefix} {written_name} As Long")
+        );
+        let canonical_name = written_name.trim_start_matches('[').trim_end_matches(']');
+        let variable = variables
+            .iter()
+            .find(|entity| entity.canonical_name == canonical_name)
+            .unwrap();
+        let definitions = document
+            .occurrences
+            .iter()
+            .filter(|site| {
+                site.role == OccurrenceRole::Definition
+                    && site.target
+                        == OccurrenceTarget::Resolved {
+                            symbol: variable.id,
+                        }
+                    && site.source.span().start_byte() == u64::try_from(start).unwrap()
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(definitions.len(), 1, "{source}");
+        let definition = definitions[0];
+        assert_eq!(
+            definition.source.span().end_byte(),
+            u64::try_from(start + written_name.len()).unwrap()
+        );
+        assert_eq!(definition.enclosing, Some(module.id));
+        assert_eq!(definition.provenance, parser);
+        let context = definition.evidence.source.as_ref().unwrap();
+        assert_eq!(context.span().start_byte(), u64::try_from(start).unwrap());
+        assert_eq!(context.span().end_byte(), u64::try_from(end).unwrap());
+        for reference in [&definition.source, context] {
+            assert_eq!(reference.repository(), document.repository);
+            assert_eq!(reference.generation(), document.generation);
+            assert_eq!(reference.span().file(), document.files[0].id);
+            assert_eq!(reference.content_hash(), content_hash(source.as_bytes()));
+        }
+        let contains = document
+            .relations
+            .iter()
+            .filter(|edge| {
+                edge.predicate == RelationPredicate::Contains
+                    && edge.subject == RelationEndpoint::Entity(module.id)
+                    && edge.object == RelationEndpoint::Entity(variable.id)
+                    && edge.evidence.source.as_ref() == Some(context)
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(contains.len(), 1, "{source}");
+        assert_eq!(contains[0].provenance, parser);
+        cursor = end + 1;
+    }
+}
+
+fn assert_duplicate_variable_read_is_ambiguous(
+    document: &rootlight_ir::NormalizedIrDocument,
+    source: &str,
+) {
+    let read = reference_at(document, source, "stored\n");
+    assert!(
+        matches!(read.target, OccurrenceTarget::Unresolved { .. }),
+        "{source}"
+    );
+    assert!(
+        document
+            .skipped_regions
+            .iter()
+            .any(|gap| { gap.source == read.source && gap.domain == FactDomain::Relations })
+    );
+    assert!(!document.relations.iter().any(|edge| {
+        edge.subject == RelationEndpoint::Occurrence(read.id)
+            && matches!(
+                edge.predicate,
+                RelationPredicate::RefersTo | RelationPredicate::Calls
+            )
+    }));
+}
+
+#[test]
+fn vba_duplicate_variable_visibility_agreement_preserves_every_source_order() {
+    use rootlight_ir::EntityVisibility;
+    let cases: &[(&[&str], EntityVisibility)] = &[
+        (&["Public", "Public"], EntityVisibility::Public),
+        (&["Private", "Private"], EntityVisibility::Private),
+        (&["Dim", "Dim"], EntityVisibility::Unknown),
+        (&["Public", "Private"], EntityVisibility::Unknown),
+        (&["Private", "Public"], EntityVisibility::Unknown),
+        (&["Public", "Dim"], EntityVisibility::Unknown),
+        (&["Dim", "Public"], EntityVisibility::Unknown),
+        (&["Private", "Dim"], EntityVisibility::Unknown),
+        (&["Dim", "Private"], EntityVisibility::Unknown),
+        (&["Public", "Private", "Public"], EntityVisibility::Unknown),
+    ];
+    for language in ["vba", "visual-basic-classic"] {
+        for body in ["scratch = 7", "scratch = 1 + 2"] {
+            for (prefixes, visibility) in cases {
+                let declarations = prefixes
+                    .iter()
+                    .enumerate()
+                    .map(|(index, prefix)| {
+                        (*prefix, if index == 1 { "[stored]" } else { "stored" })
+                    })
+                    .collect::<Vec<_>>();
+                let source = duplicate_variable_visibility_source(&declarations, body);
+                let result =
+                    application_proof_output(&source, language, IrLimits::default(), &deadline())
+                        .unwrap();
+                assert_duplicate_variable_visibility_witnesses(
+                    result.document(),
+                    &source,
+                    &declarations,
+                    &[("stored", *visibility)],
+                );
+                assert_duplicate_variable_read_is_ambiguous(result.document(), &source);
+            }
+        }
+    }
+}
+
+#[test]
+fn vba_case_preserved_variable_identities_keep_independent_visibility_votes() {
+    use rootlight_ir::EntityVisibility;
+    let declarations = [("Public", "stored"), ("Private", "[STORED]")];
+    for language in ["vba", "visual-basic-classic"] {
+        for body in ["scratch = 7", "scratch = 1 + 2"] {
+            let source = duplicate_variable_visibility_source(&declarations, body);
+            let result =
+                application_proof_output(&source, language, IrLimits::default(), &deadline())
+                    .unwrap();
+            assert_duplicate_variable_visibility_witnesses(
+                result.document(),
+                &source,
+                &declarations,
+                &[
+                    ("stored", EntityVisibility::Public),
+                    ("STORED", EntityVisibility::Private),
+                ],
+            );
+            let stored = result
+                .document()
+                .entities
+                .iter()
+                .find(|entity| {
+                    entity.kind == EntityKind::Variable && entity.canonical_name == "stored"
+                })
+                .unwrap();
+            let upper = result
+                .document()
+                .entities
+                .iter()
+                .find(|entity| {
+                    entity.kind == EntityKind::Variable && entity.canonical_name == "STORED"
+                })
+                .unwrap();
+            assert_ne!(stored.id, upper.id);
+            assert_duplicate_variable_read_is_ambiguous(result.document(), &source);
+        }
+    }
+}
+
+#[test]
+fn vba_bounded_required_fact_stream_retains_unknown_visibility_and_all_definitions() {
+    use rootlight_ir::EntityVisibility;
+    let cases = [
+        [("Public", "stored"), ("Public", "[stored]")],
+        [("Private", "stored"), ("Private", "[stored]")],
+        [("Public", "stored"), ("Private", "[stored]")],
+    ];
+    for language in ["vba", "visual-basic-classic"] {
+        for body in ["scratch = 7", "scratch = 1 + 2"] {
+            for declarations in cases {
+                let source = duplicate_variable_visibility_source(&declarations, body);
+                let provider = Arc::new(provider());
+                let case = LanguageCase {
+                    name: language,
+                    ..VBA
+                };
+                let fixture = Fixture::new(case, source.as_bytes());
+                let defaults = limits();
+                let initial = request(&fixture.snapshot, &fixture.source, case, &defaults);
+                let required = provider
+                    .required_syntax_fact_count(&initial.to_parse_request(), &deadline())
+                    .unwrap();
+                let bounded = limits_with_syntax_records(required);
+                let request = request(&fixture.snapshot, &fixture.source, case, &bounded);
+                let parsed = rootlight_adapter_sdk::execute_parse(
+                    provider.as_ref(),
+                    &request.to_parse_request(),
+                    MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
+                    &deadline(),
+                )
+                .unwrap();
+                assert_eq!(parsed.facts().len(), required);
+                assert_eq!(parsed.report().coverage().status(), CoverageStatus::Bounded);
+                assert!(parsed.facts().iter().all(|fact| !matches!(
+                    fact.syntax_kind().as_str(),
+                    "vba.public.expression"
+                        | "vba.private.expression"
+                        | "vba.project_restricted.expression"
+                        | "vba.visibility_unknown.expression"
+                )));
+                let result = execute_analysis(
+                    &analyzer(&provider, case),
+                    &request,
+                    ExtensionSupport::default(),
+                    MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
+                    &deadline(),
+                )
+                .unwrap();
+                assert!(
+                    result
+                        .document()
+                        .diagnostics
+                        .iter()
+                        .any(|diagnostic| { diagnostic.code == "syntax-extraction-limit" })
+                );
+                // Bounded parsing bypasses binding; this is not COMPLETE missing-vote evidence.
+                assert_duplicate_variable_visibility_witnesses(
+                    result.document(),
+                    &source,
+                    &declarations,
+                    &[("stored", EntityVisibility::Unknown)],
+                );
+            }
+        }
+    }
+}

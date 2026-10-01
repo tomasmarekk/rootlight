@@ -1477,9 +1477,28 @@ impl<'context, 'source> Lowering<'context, 'source> {
                 cancellation.check()?;
                 if let Some(entity) = materialized.get_mut(&owner) {
                     entity.record.visibility = visibility;
-                    if let Some(record) = entities.get_mut(&entity.record.id) {
+                    // Unknown is real missing evidence, not an uninitialized vote.
+                    // Seed only from the selected source-witnessed representative.
+                    if let Some(record) = entities.get_mut(&entity.record.id)
+                        && entity
+                            .record
+                            .evidence
+                            .source
+                            .as_ref()
+                            .is_some_and(|source| record.evidence.source.as_ref() == Some(source))
+                    {
                         record.visibility = visibility;
                     }
+                }
+            }
+            // Include declarations without optional visibility facts. A conflict
+            // stays Unknown regardless of the materialized hash map's order.
+            for entity in materialized.values() {
+                cancellation.check()?;
+                if let Some(record) = entities.get_mut(&entity.record.id)
+                    && record.visibility != entity.record.visibility
+                {
+                    record.visibility = EntityVisibility::Unknown;
                 }
             }
         }

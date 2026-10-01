@@ -989,6 +989,171 @@ fn automatic_instantiation_reserves_a_separate_semantic_gap() {
 }
 
 #[test]
+fn vba_visibility_agreement_includes_missing_optional_witnesses() {
+    use rootlight_ir::{
+        ContainerRef, EntityKind, EntityVisibility, OccurrenceTarget, RelationEndpoint,
+    };
+
+    const SOURCE: &str = "Public stored As Long\nPublic [stored] As Long\n";
+    let (_temporary, snapshot, source) =
+        source_fixture_for(SOURCE, "src/Visibility.bas", b"vba-visibility-witnesses");
+    let analysis_limits = limits(IrLimits::default());
+    for language in ["vba", "visual-basic-classic"] {
+        for (witnesses, expected) in [
+            ([false, true], EntityVisibility::Unknown),
+            ([true, false], EntityVisibility::Unknown),
+            ([true, true], EntityVisibility::Public),
+            ([false, false], EntityVisibility::Unknown),
+        ] {
+            let mut facts = vec![
+                SyntaxFact::new(
+                    1,
+                    None,
+                    SyntaxFactKind::Root,
+                    source.span(),
+                    0,
+                    label("vba.file.root"),
+                ),
+                SyntaxFact::new(
+                    2,
+                    Some(1),
+                    SyntaxFactKind::Module,
+                    source.span(),
+                    1,
+                    label("vba.file.module"),
+                ),
+                SyntaxFact::new(
+                    3,
+                    Some(2),
+                    SyntaxFactKind::Scope,
+                    source.span(),
+                    2,
+                    label("vba.file.scope"),
+                ),
+            ];
+            for (declaration, clause, name, witness) in [
+                (4, "stored As Long", "stored", witnesses[0]),
+                (7, "[stored] As Long", "[stored]", witnesses[1]),
+            ] {
+                let clause_span = span_in(SOURCE, &source, clause, 0);
+                facts.push(SyntaxFact::new(
+                    declaration,
+                    Some(3),
+                    SyntaxFactKind::Declaration,
+                    clause_span,
+                    3,
+                    label("vba.variable.declaration"),
+                ));
+                facts.push(SyntaxFact::new(
+                    declaration + 1,
+                    Some(declaration),
+                    SyntaxFactKind::Occurrence,
+                    span_in(SOURCE, &source, name, 0),
+                    4,
+                    label("vba.identifier.definition"),
+                ));
+                if witness {
+                    facts.push(SyntaxFact::new(
+                        declaration + 2,
+                        Some(declaration),
+                        SyntaxFactKind::Signature,
+                        clause_span,
+                        4,
+                        label("vba.public.expression"),
+                    ));
+                }
+            }
+            // Clipped parser coverage bypasses VBA bindings; complete mock coverage
+            // isolates an admitted declaration without optional visibility evidence.
+            let output = analyze_custom(
+                &snapshot,
+                &source,
+                LanguageId::new(language).unwrap(),
+                &analysis_limits,
+                facts,
+            )
+            .expect("complete declaration identities lower without optional witnesses");
+            let document = output.document();
+            let module = document
+                .entities
+                .iter()
+                .find(|entity| entity.kind == EntityKind::Module)
+                .unwrap();
+            let variables = document
+                .entities
+                .iter()
+                .filter(|entity| entity.kind == EntityKind::Variable)
+                .collect::<Vec<_>>();
+            assert_eq!(variables.len(), 1, "{language}: {witnesses:?}");
+            let variable = variables[0];
+            assert_eq!(variable.canonical_name, "stored");
+            assert_eq!(variable.language, language);
+            assert_eq!(variable.container, Some(ContainerRef::Entity(module.id)));
+            assert_eq!(variable.visibility, expected, "{language}: {witnesses:?}");
+            assert_eq!(
+                variable.evidence.source,
+                Some(source_for_span(
+                    &source,
+                    span_in(SOURCE, &source, "stored As Long", 0)
+                ))
+            );
+            let parser = document.files[0].provenance;
+            assert_eq!(variable.provenance, parser);
+            let definitions = document
+                .occurrences
+                .iter()
+                .filter(|site| {
+                    site.role == OccurrenceRole::Definition
+                        && site.target
+                            == OccurrenceTarget::Resolved {
+                                symbol: variable.id,
+                            }
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(definitions.len(), 2);
+            for (clause, name) in [
+                ("stored As Long", "stored"),
+                ("[stored] As Long", "[stored]"),
+            ] {
+                let written = source_for_span(&source, span_in(SOURCE, &source, name, 0));
+                let context = source_for_span(&source, span_in(SOURCE, &source, clause, 0));
+                let definition = definitions
+                    .iter()
+                    .find(|site| site.source == written)
+                    .unwrap();
+                assert_eq!(definition.enclosing, Some(module.id));
+                assert_eq!(definition.provenance, parser);
+                assert_eq!(definition.evidence.source.as_ref(), Some(&context));
+                let contains = document
+                    .relations
+                    .iter()
+                    .filter(|edge| {
+                        edge.predicate == RelationPredicate::Contains
+                            && edge.subject == RelationEndpoint::Entity(module.id)
+                            && edge.object == RelationEndpoint::Entity(variable.id)
+                            && edge.evidence.source.as_ref() == Some(&context)
+                    })
+                    .collect::<Vec<_>>();
+                assert_eq!(contains.len(), 1);
+                assert_eq!(contains[0].provenance, parser);
+            }
+            assert_eq!(
+                document
+                    .relations
+                    .iter()
+                    .filter(|edge| {
+                        edge.predicate == RelationPredicate::Contains
+                            && edge.subject == RelationEndpoint::Entity(module.id)
+                            && edge.object == RelationEndpoint::Entity(variable.id)
+                    })
+                    .count(),
+                2
+            );
+        }
+    }
+}
+
+#[test]
 fn markdown_reference_edges_are_reserved_before_ir_materialization() {
     const MARKDOWN: &str = "[ref]: target.md\n\n[ref]\n";
     let (_temporary, snapshot, source) = source_fixture_for(
