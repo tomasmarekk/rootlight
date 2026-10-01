@@ -170,25 +170,41 @@ struct Inner {
 }
 
 /// Failure to extend an active monotonic deadline.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DeadlineUpdateError {
     /// The new deadline did not strictly advance the current deadline.
-    #[error("cancellation deadline did not advance")]
     NotAdvanced,
     /// Cancellation already established a terminal reason.
-    #[error("cancellation was already requested")]
     AlreadyCancelled,
     /// A prior panic poisoned the deadline mutex.
-    #[error("cancellation deadline mutex was poisoned")]
     MutexPoisoned,
 }
 
+impl fmt::Display for DeadlineUpdateError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(match self {
+            Self::NotAdvanced => "cancellation deadline did not advance",
+            Self::AlreadyCancelled => "cancellation was already requested",
+            Self::MutexPoisoned => "cancellation deadline mutex was poisoned",
+        })
+    }
+}
+
+impl std::error::Error for DeadlineUpdateError {}
+
 /// Terminal cooperative cancellation returned by checkpoints.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
-#[error("operation was cancelled: {reason:?}")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Cancelled {
     reason: CancellationReason,
 }
+
+impl fmt::Display for Cancelled {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(formatter, "operation was cancelled: {:?}", self.reason)
+    }
+}
+
+impl std::error::Error for Cancelled {}
 
 impl Cancelled {
     /// Returns the stable first-writer cancellation reason.
@@ -209,6 +225,56 @@ mod tests {
         thread,
         time::Duration,
     };
+
+    #[test]
+    fn deadline_errors_preserve_display_and_source_contracts() {
+        let cases = [
+            (
+                DeadlineUpdateError::NotAdvanced,
+                "cancellation deadline did not advance",
+            ),
+            (
+                DeadlineUpdateError::AlreadyCancelled,
+                "cancellation was already requested",
+            ),
+            (
+                DeadlineUpdateError::MutexPoisoned,
+                "cancellation deadline mutex was poisoned",
+            ),
+        ];
+
+        for (error, expected) in cases {
+            let typed: &(dyn std::error::Error + Send + Sync) = &error;
+            assert_eq!(typed.to_string(), expected);
+            assert!(typed.source().is_none());
+            assert_eq!(typed.downcast_ref::<DeadlineUpdateError>(), Some(&error));
+        }
+    }
+
+    #[test]
+    fn cancelled_errors_preserve_each_reason_and_source_contract() {
+        let cases = [
+            (CancellationReason::ClientRequest, "ClientRequest"),
+            (CancellationReason::ParentCancelled, "ParentCancelled"),
+            (CancellationReason::DeadlineExceeded, "DeadlineExceeded"),
+            (CancellationReason::Shutdown, "Shutdown"),
+            (CancellationReason::ResourceLimit, "ResourceLimit"),
+        ];
+
+        for (reason, expected) in cases {
+            let cancellation = Cancellation::new();
+            assert!(cancellation.cancel(reason));
+            let error = cancellation.check().expect_err("cancellation is terminal");
+            let typed: &(dyn std::error::Error + Send + Sync) = &error;
+            assert_eq!(
+                typed.to_string(),
+                format!("operation was cancelled: {expected}")
+            );
+            assert!(typed.source().is_none());
+            assert_eq!(typed.downcast_ref::<Cancelled>(), Some(&error));
+            assert_eq!(error.reason(), reason);
+        }
+    }
 
     #[test]
     fn clones_observe_monotonic_first_reason() {
