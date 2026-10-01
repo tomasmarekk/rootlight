@@ -154,7 +154,7 @@ pub(super) fn prepare(
                 ModuleBodyStatement::Declaration(declaration) => declaration
                     .value()
                     .map_or(0, rootlight_vba::ModuleScalarValue::initializer_work_nodes),
-                ModuleBodyStatement::Assignment(_) => 0,
+                ModuleBodyStatement::Assignment(_) | ModuleBodyStatement::ProcedureExit(_) => 0,
             };
             processed_nodes = processed_nodes
                 .checked_add(extra_nodes)
@@ -353,7 +353,8 @@ fn candidates(
                 | ModuleBodyStatement::ApplicationAssignment(_)
                 | ModuleBodyStatement::ExpressionAssignment(_)
                 | ModuleBodyStatement::Call(_)
-                | ModuleBodyStatement::ExpressionCall(_) => 0,
+                | ModuleBodyStatement::ExpressionCall(_)
+                | ModuleBodyStatement::ProcedureExit(_) => 0,
             };
             count = declarations
                 .checked_mul(2)
@@ -916,7 +917,8 @@ fn body_candidates(
         | ModuleBodyStatement::ApplicationAssignment(_)
         | ModuleBodyStatement::ExpressionAssignment(_)
         | ModuleBodyStatement::ExpressionCall(_)
-        | ModuleBodyStatement::Call(_) => {}
+        | ModuleBodyStatement::Call(_)
+        | ModuleBodyStatement::ProcedureExit(_) => {}
     }
     Ok(())
 }
@@ -5849,6 +5851,326 @@ mod tests {
                     );
                     assert_eq!(output.facts(), expected.facts);
                 }
+            }
+        }
+    }
+
+    fn procedure_exit_spellings() -> [(&'static str, &'static str); 6] {
+        [
+            ("Exit Sub", "Exit Function"),
+            ("eXiT\tSuB", "ExIt\tFuNcTiOn"),
+            ("Exit _\n Sub", "Exit _\n Function"),
+            ("Exit Sub ' written exit", "Exit Function ' written exit"),
+            ("Exit Sub:Call Target(1)", "Exit Function:Call Target(1)"),
+            (
+                "Exit _\n Sub ' continued exit",
+                "Exit _\n Function ' continued exit",
+            ),
+        ]
+    }
+
+    fn procedure_exit_source(sub_exit: &str, function_exit: &str, newline: &str) -> String {
+        format!(
+            "Sub Target(Optional extra As Long=1)\n{sub_exit}\nCall Target(extra)\nEnd Sub\nFunction Ready(Optional extra As Long=1) As Long\nReady=extra\n{function_exit}\nCall Target(extra)\nEnd Function\nSub Run()\nDim local As Long\nlocal=1\n{sub_exit}\nCall Target(local)\nlocal=Ready(local)\nEnd Sub\n"
+        )
+        .replace('\n', newline)
+    }
+
+    #[test]
+    fn first_party_vba_procedure_exits_match_complete_native_facts() {
+        for (sub_exit, function_exit) in procedure_exit_spellings() {
+            for newline in ["\n", "\r\n"] {
+                let source = procedure_exit_source(sub_exit, function_exit, newline);
+                for language in ["vba", "visual-basic-classic"] {
+                    compare_native(&Fixture::new(&source), language, &[]);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn first_party_vba_procedure_exit_ranges_preserve_surrounding_fact_identity() {
+        for (sub_exit, function_exit) in procedure_exit_spellings() {
+            for newline in ["\n", "\r\n"] {
+                let source = procedure_exit_source(sub_exit, function_exit, newline);
+                for language in ["vba", "visual-basic-classic"] {
+                    let fixture = Fixture::new(&source);
+                    let request = fixture.request(language, &[]);
+                    let cancellation = Cancellation::new();
+                    let prepared = prepare(
+                        &fixture.provider,
+                        &request,
+                        None,
+                        &[],
+                        fixture.provider.config.default_settings(),
+                        &cancellation,
+                    )
+                    .unwrap()
+                    .unwrap();
+                    let mut baseline = source.as_bytes().to_vec();
+                    let mut exits = 0;
+                    let mut erased_continuations = 0;
+                    for procedure in prepared.inventory.procedures() {
+                        for statement in procedure.statements() {
+                            let ModuleBodyStatement::ProcedureExit(exit) = statement else {
+                                continue;
+                            };
+                            exits += 1;
+                            let range = exit.statement();
+                            assert_eq!(range, statement.statement());
+                            assert!(procedure.declaration().start < range.start);
+                            assert!(range.end < procedure.declaration().end);
+                            assert_eq!(exit.exit_keyword().start, range.start);
+                            assert_eq!(exit.kind_keyword().end, range.end);
+                            assert!(exit.exit_keyword().end < exit.kind_keyword().start);
+                            erased_continuations += source[range.clone()]
+                                .bytes()
+                                .filter(|byte| *byte == b'\n')
+                                .count();
+                            assert!(source[exit.exit_keyword()].eq_ignore_ascii_case("Exit"));
+                            match exit.kind() {
+                                rootlight_vba::ModuleProcedureExitKind::Sub => {
+                                    assert_eq!(procedure.kind(), ProcedureKind::Sub);
+                                    assert!(
+                                        source[exit.kind_keyword()].eq_ignore_ascii_case("Sub")
+                                    );
+                                }
+                                rootlight_vba::ModuleProcedureExitKind::Function => {
+                                    assert_eq!(procedure.kind(), ProcedureKind::Function);
+                                    assert!(
+                                        source[exit.kind_keyword()]
+                                            .eq_ignore_ascii_case("Function")
+                                    );
+                                }
+                            }
+                            for byte in baseline.get_mut(range).unwrap() {
+                                if !matches!(*byte, b'\r' | b'\n') {
+                                    *byte = b' ';
+                                }
+                            }
+                        }
+                    }
+                    assert_eq!(exits, 3);
+                    let baseline = String::from_utf8(baseline).unwrap();
+                    assert_eq!(baseline.len(), source.len());
+                    let baseline_fixture = Fixture::new(&baseline);
+                    let baseline_request = baseline_fixture.request(language, &[]);
+                    let baseline_prepared = prepare(
+                        &baseline_fixture.provider,
+                        &baseline_request,
+                        None,
+                        &[],
+                        baseline_fixture.provider.config.default_settings(),
+                        &cancellation,
+                    )
+                    .unwrap()
+                    .unwrap();
+                    // Blank segments still cost work. Masking continuation
+                    // underscores splits each retained logical line into two.
+                    assert_eq!(
+                        baseline_prepared.processed_nodes,
+                        prepared.processed_nodes + erased_continuations
+                    );
+                    assert_eq!(
+                        baseline_prepared.inventory.statement_count(),
+                        prepared.inventory.statement_count() + erased_continuations
+                    );
+                    assert!(prepared.inventory.procedures().iter().any(|procedure| {
+                        let mut after_exit = false;
+                        procedure
+                            .statements()
+                            .iter()
+                            .any(|statement| match statement {
+                                ModuleBodyStatement::ProcedureExit(_) => {
+                                    after_exit = true;
+                                    false
+                                }
+                                ModuleBodyStatement::Call(_) if after_exit => true,
+                                _ => false,
+                            })
+                    }));
+                    for optional in [false, true] {
+                        let actual = candidates(
+                            &prepared.inventory,
+                            source.as_bytes(),
+                            optional,
+                            usize::MAX,
+                            &cancellation,
+                        )
+                        .unwrap();
+                        let expected = candidates(
+                            &baseline_prepared.inventory,
+                            baseline.as_bytes(),
+                            optional,
+                            usize::MAX,
+                            &cancellation,
+                        )
+                        .unwrap();
+                        assert_eq!(actual, expected, "{language}, {sub_exit}");
+                        let actual =
+                            normalize_query_candidates(actual, &request, usize::MAX, &cancellation)
+                                .unwrap();
+                        let expected = normalize_query_candidates(
+                            expected,
+                            &baseline_request,
+                            usize::MAX,
+                            &cancellation,
+                        )
+                        .unwrap();
+                        assert_eq!(actual.required, expected.required);
+                        assert_eq!(actual.facts, expected.facts);
+                    }
+                    assert_eq!(fixture.provider.stats().pooled_parsers, 0);
+                    assert_eq!(fixture.provider.stats().cache.entries, 0);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn first_party_vba_procedure_exit_work_and_fact_limits_are_exact() {
+        let source = format!("Sub Run()\n{}End Sub\n", "Exit Sub\n".repeat(16));
+        for language in ["vba", "visual-basic-classic"] {
+            let mut fixture = Fixture::new(&source);
+            let cancellation = Cancellation::new();
+            let request = fixture.request(language, &[]);
+            let prepared = prepare(
+                &fixture.provider,
+                &request,
+                None,
+                &[],
+                fixture.provider.config.default_settings(),
+                &cancellation,
+            )
+            .unwrap()
+            .unwrap();
+            assert_eq!(prepared.processed_nodes, 20);
+            assert_eq!(prepared.inventory.procedures()[0].statements().len(), 16);
+            for (optional, exact) in [(false, 7), (true, 8)] {
+                let all = candidates(
+                    &prepared.inventory,
+                    source.as_bytes(),
+                    optional,
+                    exact,
+                    &cancellation,
+                )
+                .unwrap();
+                assert_eq!(all.len(), exact);
+                assert_eq!(
+                    normalize_query_candidates(all, &request, usize::MAX, &cancellation)
+                        .unwrap()
+                        .required,
+                    7
+                );
+                for (limit, observed) in [(exact - 1, exact), (0, 7)] {
+                    assert_eq!(
+                        candidates(
+                            &prepared.inventory,
+                            source.as_bytes(),
+                            optional,
+                            limit,
+                            &cancellation
+                        )
+                        .err()
+                        .unwrap(),
+                        AdapterError::RejectedRequest(RequestError::ProviderLimit {
+                            resource: ResourceKind::SyntaxNodes,
+                            observed,
+                            limit
+                        })
+                    );
+                }
+            }
+            for limit in [20, 19] {
+                fixture.limits = AnalysisLimits::new(
+                    1024 * 1024,
+                    limit,
+                    64,
+                    16,
+                    8 * 1024 * 1024,
+                    fixture.limits.syntax_stream().clone(),
+                    fixture.limits.ir_stream().clone(),
+                    IrLimits::default(),
+                )
+                .unwrap();
+                let request = fixture.request(language, &[]);
+                let result = prepare(
+                    &fixture.provider,
+                    &request,
+                    None,
+                    &[],
+                    fixture.provider.config.default_settings(),
+                    &cancellation,
+                );
+                if limit == 20 {
+                    assert_eq!(result.unwrap().unwrap().processed_nodes, 20);
+                } else {
+                    assert_eq!(
+                        result.err().unwrap(),
+                        AdapterError::RejectedRequest(RequestError::ProviderLimit {
+                            resource: ResourceKind::SyntaxNodes,
+                            observed: 20,
+                            limit
+                        })
+                    );
+                }
+            }
+            assert!(cancellation.cancel(rootlight_cancel::CancellationReason::ClientRequest));
+            let request = fixture.request(language, &[]);
+            assert!(matches!(
+                prepare(
+                    &fixture.provider,
+                    &request,
+                    None,
+                    &[],
+                    fixture.provider.config.default_settings(),
+                    &cancellation
+                ),
+                Err(AdapterError::Cancelled {
+                    reason: rootlight_cancel::CancellationReason::ClientRequest
+                })
+            ));
+            assert_eq!(fixture.provider.stats().pooled_parsers, 0);
+            assert_eq!(fixture.provider.stats().cache.entries, 0);
+        }
+    }
+
+    #[test]
+    fn first_party_vba_procedure_exit_tails_reject_the_whole_module() {
+        for (kind, tail) in [
+            ("Sub", "Exit Function"),
+            ("Function", "Exit Sub"),
+            ("Sub", "Exit"),
+            ("Sub", "ExitSub"),
+            ("Sub", "Exit Submarine"),
+            ("Sub", "Exit Sub extra"),
+            ("Sub", "Exit Sub(1)"),
+            ("Sub", "Exit [Sub]"),
+            ("Sub", "Exit Do"),
+            ("Sub", "Exit For"),
+            ("Sub", "Exit Property"),
+            ("Sub", "Return"),
+            ("Function", "Exit Function + 1"),
+            ("Function", "Exit Function#"),
+        ] {
+            let source = format!("Sub First()\nEnd Sub\n{kind} Last()\n{tail}\nEnd {kind}\n");
+            for language in ["vba", "visual-basic-classic"] {
+                let fixture = Fixture::new(&source);
+                assert!(
+                    prepare(
+                        &fixture.provider,
+                        &fixture.request(language, &[]),
+                        None,
+                        &[],
+                        fixture.provider.config.default_settings(),
+                        &Cancellation::new()
+                    )
+                    .unwrap()
+                    .is_none(),
+                    "{language}, {tail}"
+                );
+                assert_eq!(fixture.provider.stats().pooled_parsers, 0);
+                assert_eq!(fixture.provider.stats().cache.entries, 0);
             }
         }
     }

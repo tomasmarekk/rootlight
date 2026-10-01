@@ -1,5 +1,5 @@
-//! Complete local declarations, expression assignments and explicit calls for the
-//! closed first-party module inventory.
+//! Complete local declarations, expressions, explicit calls and procedural exits
+//! for the closed first-party module inventory.
 //! Records own only original byte ranges; declaration identity and reference roles
 //! remain obligations of the adapter's existing structural normalization boundary.
 
@@ -24,6 +24,8 @@ pub enum ModuleBodyStatement {
     Call(ModuleCall),
     /// One explicit Call with a complete parenthesized positional expression list.
     ExpressionCall(module_expression::ModuleExpressionCall),
+    /// One complete Exit Sub or Exit Function statement with source-written keywords.
+    ProcedureExit(ModuleProcedureExit),
 }
 
 impl ModuleBodyStatement {
@@ -38,7 +40,57 @@ impl ModuleBodyStatement {
             Self::ExpressionAssignment(assignment) => assignment.statement(),
             Self::Call(call) => call.statement(),
             Self::ExpressionCall(call) => call.statement(),
+            Self::ProcedureExit(exit) => exit.statement(),
         }
+    }
+}
+
+/// The source-written procedure category in an Exit statement.
+/// This does not establish an enclosing procedure or infer executed control flow.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ModuleProcedureExitKind {
+    /// A written Exit Sub statement.
+    Sub,
+    /// A written Exit Function statement.
+    Function,
+}
+
+/// One complete procedural exit with exact original source ranges.
+///
+/// The statement retains both keywords and intervening logical continuations.
+/// Whole-module admission checks its kind against the enclosing Sub or Function;
+/// the record does not assert reachability, execution or suppression of later source.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ModuleProcedureExit {
+    kind: ModuleProcedureExitKind,
+    statement: Range<usize>,
+    exit_keyword: Range<usize>,
+    kind_keyword: Range<usize>,
+}
+
+impl ModuleProcedureExit {
+    /// Returns the written Sub or Function category without control-flow inference.
+    #[must_use]
+    pub const fn kind(&self) -> ModuleProcedureExitKind {
+        self.kind
+    }
+
+    /// Returns the whole trimmed statement, excluding its trailing comment or separator.
+    #[must_use]
+    pub fn statement(&self) -> Range<usize> {
+        self.statement.clone()
+    }
+
+    /// Returns the exact source-written Exit keyword, preserving authored case.
+    #[must_use]
+    pub fn exit_keyword(&self) -> Range<usize> {
+        self.exit_keyword.clone()
+    }
+
+    /// Returns the exact source-written Sub or Function keyword, preserving authored case.
+    #[must_use]
+    pub fn kind_keyword(&self) -> Range<usize> {
+        self.kind_keyword.clone()
     }
 }
 
@@ -490,6 +542,11 @@ pub(super) fn statement_with_limits<E>(
     let text = source.get(range.clone()).unwrap_or_default();
     let mut cursor = 0;
     let first = word(text, &mut cursor, check).map_err(ModuleError::Cancelled)?;
+    if first.eq_ignore_ascii_case(b"Exit") {
+        return procedure_exit(text, range, cursor, check)
+            .map(|exit| exit.map(ModuleBodyStatement::ProcedureExit))
+            .map_err(ModuleError::Cancelled);
+    }
     if first.eq_ignore_ascii_case(b"Call") {
         return explicit_call(
             text,
@@ -501,6 +558,38 @@ pub(super) fn statement_with_limits<E>(
         );
     }
     scalar_statement(text, range, cursor, first, limits, check)
+}
+
+fn procedure_exit<E>(
+    text: &[u8],
+    range: Range<usize>,
+    mut cursor: usize,
+    check: &mut impl FnMut() -> Result<(), E>,
+) -> Result<Option<ModuleProcedureExit>, E> {
+    let exit_end = cursor;
+    if !separator(text, &mut cursor, check)? {
+        return Ok(None);
+    }
+    let kind_start = cursor;
+    let spelling = word(text, &mut cursor, check)?;
+    let kind = if spelling.eq_ignore_ascii_case(b"Sub") {
+        ModuleProcedureExitKind::Sub
+    } else if spelling.eq_ignore_ascii_case(b"Function") {
+        ModuleProcedureExitKind::Function
+    } else {
+        return Ok(None);
+    };
+    let kind_end = cursor;
+    if !complete(text, &mut cursor, check)? {
+        return Ok(None);
+    }
+    check()?;
+    Ok(Some(ModuleProcedureExit {
+        kind,
+        exit_keyword: absolute(&range, 0..exit_end),
+        kind_keyword: absolute(&range, kind_start..kind_end),
+        statement: range,
+    }))
 }
 
 fn scalar_statement<E>(
@@ -1336,6 +1425,192 @@ mod tests {
     }
 
     #[test]
+    fn procedure_exit_keywords_preserve_written_case_continuations_and_rebased_ranges() {
+        for (first, second, kind) in [
+            ("Exit", "Sub", ModuleProcedureExitKind::Sub),
+            ("exit", "sub", ModuleProcedureExitKind::Sub),
+            ("eXiT", "sUb", ModuleProcedureExitKind::Sub),
+            ("Exit", "Function", ModuleProcedureExitKind::Function),
+            ("exit", "function", ModuleProcedureExitKind::Function),
+            ("eXiT", "fUnCtIoN", ModuleProcedureExitKind::Function),
+        ] {
+            for separator in [" ", "\t", " \t ", " _\n ", " _\r\n "] {
+                let text = format!("{first}{separator}{second}");
+                let source = format!("prefix\n{text}\ntail");
+                let range = 7..7 + text.len();
+                let parsed = statement_with_expression_limits(
+                    source.as_bytes(),
+                    range.clone(),
+                    0,
+                    0,
+                    &mut || Ok::<(), ()>(()),
+                )
+                .unwrap()
+                .unwrap();
+                assert_eq!(parsed.statement(), range.clone());
+                let ModuleBodyStatement::ProcedureExit(exit) = parsed else {
+                    panic!("complete procedural exit expected: {text}")
+                };
+                assert_eq!(exit.kind(), kind);
+                assert_eq!(exit.statement(), range);
+                assert_eq!(exit.exit_keyword(), 7..7 + first.len());
+                assert_eq!(
+                    exit.kind_keyword(),
+                    7 + first.len() + separator.len()..7 + text.len()
+                );
+                assert_eq!(&source[exit.exit_keyword()], first);
+                assert_eq!(&source[exit.kind_keyword()], second);
+                assert_eq!(&source[exit.statement()], text);
+            }
+        }
+    }
+
+    #[test]
+    fn procedure_exit_all_keyword_bytes_and_boundaries_require_complete_tokens() {
+        for (text, kind) in [
+            (b"Exit Sub".as_slice(), ModuleProcedureExitKind::Sub),
+            (
+                b"Exit Function".as_slice(),
+                ModuleProcedureExitKind::Function,
+            ),
+        ] {
+            for position in 0..text.len() {
+                for byte in 0..=u8::MAX {
+                    let mut source = text.to_vec();
+                    source[position] = byte;
+                    let accepted = if text[position] == b' ' {
+                        matches!(byte, b' ' | b'\t')
+                    } else {
+                        byte.eq_ignore_ascii_case(&text[position])
+                    };
+                    let parsed = read(&source);
+                    assert_eq!(parsed.is_some(), accepted, "{text:?}, {position}, {byte}");
+                    if let Some(statement) = parsed {
+                        let ModuleBodyStatement::ProcedureExit(exit) = statement else {
+                            panic!("keyword mutation must not fabricate a different statement")
+                        };
+                        assert_eq!(exit.kind(), kind);
+                        assert_eq!(exit.exit_keyword(), 0..4);
+                        assert_eq!(exit.kind_keyword(), 5..source.len());
+                        assert_eq!(exit.statement(), 0..source.len());
+                    }
+                }
+            }
+            for byte in 0..=u8::MAX {
+                for source in [
+                    [b"Exit".as_slice(), &[byte], &text[4..]].concat(),
+                    [&text[..5], &[byte], &text[5..]].concat(),
+                    [text, &[byte]].concat(),
+                ] {
+                    let parsed = read(&source);
+                    assert_eq!(parsed.is_some(), matches!(byte, b' ' | b'\t'), "{source:?}");
+                    if let Some(statement) = parsed {
+                        assert!(matches!(statement, ModuleBodyStatement::ProcedureExit(_)));
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn procedure_exit_tail_closure_does_not_hijack_authored_assignments() {
+        for text in [
+            "Exit",
+            "ExitSub",
+            "Exit FunctionExtra",
+            "Exit Sub1",
+            "Exit [Sub]",
+            "Exit Sub%",
+            "Exit Function&",
+            "Exit Sub As Long",
+            "Exit Function(1)",
+            "Exit Sub extra",
+            "Exit Sub:Exit Sub",
+            "Exit Sub ' tail",
+            "Exit Sub Rem tail",
+            "Exit Sub _",
+            "Exit _ Sub",
+            "Exit\nSub",
+            "Exit\r\nFunction",
+            "Exit=1",
+            "Exit = 1",
+            "Exit Sub=1",
+            "Let Exit=1",
+            "Exit.Function",
+            "[Exit] Sub",
+            "Exit Property",
+            "Exit For",
+            "Exit Do",
+            "Return",
+        ] {
+            assert!(read(text.as_bytes()).is_none(), "{text}");
+        }
+        for destination in [
+            "[Exit]",
+            "ExitSub",
+            "ExitFunction",
+            "ExitValue",
+            "[Sub]",
+            "[Function]",
+        ] {
+            let source = format!("{destination}=1");
+            let ModuleBodyStatement::Assignment(assignment) = read(source.as_bytes()).unwrap()
+            else {
+                panic!("original assignment expected: {source}")
+            };
+            assert_eq!(&source[assignment.destination()], destination);
+            assert_eq!(&source[assignment.value().span()], "1");
+        }
+    }
+
+    #[test]
+    fn procedure_exit_scans_cancel_at_every_observed_keyword_and_trivia_checkpoint() {
+        for (text, accepted) in [
+            (format!("Exit{}Function", " ".repeat(2048)), true),
+            (format!("Exit{}Sub", " _\r\n ".repeat(128)), true),
+            (format!("Exit {}", "Function".repeat(256)), false),
+        ] {
+            let source = format!("prefix\n{text}\ntail");
+            let range = 7..7 + text.len();
+            let mut observed = 0;
+            let parsed = statement_with_expression_limits(
+                source.as_bytes(),
+                range.clone(),
+                0,
+                0,
+                &mut || {
+                    observed += 1;
+                    Ok::<(), &str>(())
+                },
+            )
+            .unwrap();
+            assert_eq!(parsed.is_some(), accepted);
+            for cancelled_at in 1..=observed {
+                let mut calls = 0;
+                assert_eq!(
+                    statement_with_expression_limits(
+                        source.as_bytes(),
+                        range.clone(),
+                        0,
+                        0,
+                        &mut || {
+                            calls += 1;
+                            if calls == cancelled_at {
+                                Err("stop")
+                            } else {
+                                Ok(())
+                            }
+                        },
+                    ),
+                    Err(ModuleError::Cancelled("stop")),
+                    "checkpoint {cancelled_at}: {accepted}"
+                );
+                assert_eq!(calls, cancelled_at);
+            }
+        }
+    }
+
+    #[test]
     fn unary_minus_initializers_keep_unsigned_tokens_suffixes_and_rebased_ranges() {
         for (base, kind) in [
             ("007", ModuleScalarValueKind::UnsignedDecimal),
@@ -1516,7 +1791,8 @@ mod tests {
                 | ModuleBodyStatement::Variables(_)
                 | ModuleBodyStatement::Assignment(_)
                 | ModuleBodyStatement::ApplicationAssignment(_)
-                | ModuleBodyStatement::Call(_) => {
+                | ModuleBodyStatement::Call(_)
+                | ModuleBodyStatement::ProcedureExit(_) => {
                     panic!("unary operator must stay in a structured expression")
                 }
             };

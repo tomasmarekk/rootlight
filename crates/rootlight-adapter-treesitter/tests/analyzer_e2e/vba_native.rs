@@ -4,6 +4,378 @@
 use super::*;
 use rootlight_ir::{ContainerRef, FactRef};
 
+#[test]
+fn vba_procedure_exits_keep_later_declarations_reads_and_independent_call_proofs() {
+    let clauses = ["ByVal required As Long", "Optional extra As Long = 7"];
+    for (sub_exit, function_exit) in [
+        ("Exit Sub", "Exit Function"),
+        ("Exit _\n Sub", "Exit _\n Function"),
+    ] {
+        for shadow in [false, true] {
+            let source = format!(
+                "Attribute VB_Name = \"Authored\"\nSub Target({}, {})\n{sub_exit}\nEnd Sub\nFunction Echo(Optional amount As Long = 7) As Long\n{function_exit}\nEcho = amount\nEnd Function\nSub Run()\n{sub_exit}:Dim local As Long\n{}local = local ' source remains indexed after Exit\nCall Target()\nCall Target(1)\nCall Target(1, 2)\nCall Target(1, 2, 3)\nlocal = Echo()\nEnd Sub\n",
+                clauses[0],
+                clauses[1],
+                if shadow { "Dim Target As Long\n" } else { "" },
+            );
+            for newline in ["\n", "\r\n"] {
+                let source = source.replace('\n', newline);
+                let sub_exit = sub_exit.replace('\n', newline);
+                let function_exit = function_exit.replace('\n', newline);
+                let baseline =
+                    [&sub_exit, &function_exit]
+                        .iter()
+                        .fold(source.clone(), |source, written| {
+                            source.replace(
+                                written.as_str(),
+                                &written
+                                    .chars()
+                                    .map(|character| {
+                                        if matches!(character, '\r' | '\n') {
+                                            character
+                                        } else {
+                                            ' '
+                                        }
+                                    })
+                                    .collect::<String>(),
+                            )
+                        });
+                assert_eq!(source.len(), baseline.len());
+                for language in ["vba", "visual-basic-classic"] {
+                    let output = radix_own_proof_output(&source, language);
+                    let document = output.document();
+                    assert_radix_ir_source_identity(document, &source, language);
+                    let baseline_output = radix_own_proof_output(&baseline, language);
+                    let baseline_document = baseline_output.document();
+                    assert_eq!(document.entities.len(), baseline_document.entities.len());
+                    assert_eq!(
+                        document.occurrences.len(),
+                        baseline_document.occurrences.len()
+                    );
+                    assert_eq!(document.relations.len(), baseline_document.relations.len());
+                    assert_eq!(
+                        document.provenance.len(),
+                        baseline_document.provenance.len()
+                    );
+                    assert_eq!(
+                        document.skipped_regions.len(),
+                        baseline_document.skipped_regions.len()
+                    );
+                    let occurrence_geometry = |document: &rootlight_ir::NormalizedIrDocument| {
+                        let mut records = document
+                            .occurrences
+                            .iter()
+                            .map(|site| {
+                                (
+                                    site.source.span().start_byte(),
+                                    site.source.span().end_byte(),
+                                    site.syntax_kind.clone(),
+                                    site.role,
+                                )
+                            })
+                            .collect::<Vec<_>>();
+                        records.sort_unstable();
+                        records
+                    };
+                    assert_eq!(
+                        occurrence_geometry(document),
+                        occurrence_geometry(baseline_document)
+                    );
+                    let parser = document.files[0].provenance;
+                    let run = document
+                        .entities
+                        .iter()
+                        .find(|entity| entity.canonical_name == "Run")
+                        .unwrap();
+                    let target = document
+                        .entities
+                        .iter()
+                        .find(|entity| {
+                            entity.kind == EntityKind::Function && entity.canonical_name == "Target"
+                        })
+                        .unwrap();
+                    let echo = document
+                        .entities
+                        .iter()
+                        .find(|entity| {
+                            entity.kind == EntityKind::Function && entity.canonical_name == "Echo"
+                        })
+                        .unwrap();
+                    let local = document
+                        .entities
+                        .iter()
+                        .find(|entity| {
+                            entity.kind == EntityKind::Variable
+                                && entity.canonical_name == "local"
+                                && entity.container == Some(ContainerRef::Entity(run.id))
+                        })
+                        .unwrap();
+                    for (clause, name, owner, kind) in [
+                        (clauses[0], "required", target.id, EntityKind::Parameter),
+                        (clauses[1], "extra", target.id, EntityKind::Parameter),
+                        (
+                            "Optional amount As Long = 7",
+                            "amount",
+                            echo.id,
+                            EntityKind::Parameter,
+                        ),
+                        ("local As Long", "local", run.id, EntityKind::Variable),
+                    ] {
+                        let start = source.find(clause).unwrap();
+                        let entity = document
+                            .entities
+                            .iter()
+                            .find(|entity| {
+                                entity.kind == kind
+                                    && entity.canonical_name == name
+                                    && entity.container == Some(ContainerRef::Entity(owner))
+                            })
+                            .unwrap();
+                        let reference = entity.evidence.source.as_ref().unwrap();
+                        assert_eq!(entity.language, language);
+                        assert_eq!(reference.repository(), document.repository);
+                        assert_eq!(reference.generation(), document.generation);
+                        assert_eq!(reference.span().file(), document.files[0].id);
+                        assert_eq!(reference.content_hash(), content_hash(source.as_bytes()));
+                        assert_eq!(reference.span().start_byte(), u64::try_from(start).unwrap());
+                        assert_eq!(
+                            reference.span().end_byte(),
+                            u64::try_from(start + clause.len()).unwrap()
+                        );
+                        assert_eq!(entity.provenance, parser);
+                        let definitions = document
+                            .occurrences
+                            .iter()
+                            .filter(|site| {
+                                site.role == OccurrenceRole::Definition
+                                    && site.target
+                                        == OccurrenceTarget::Resolved { symbol: entity.id }
+                            })
+                            .collect::<Vec<_>>();
+                        assert_eq!(definitions.len(), 1);
+                        let definition = definitions[0];
+                        let name_start = start + clause.find(name).unwrap();
+                        assert_eq!(
+                            definition.source.span().start_byte(),
+                            u64::try_from(name_start).unwrap()
+                        );
+                        assert_eq!(
+                            definition.source.span().end_byte(),
+                            u64::try_from(name_start + name.len()).unwrap()
+                        );
+                        assert_eq!(definition.enclosing, Some(owner));
+                        assert_eq!(definition.provenance, parser);
+                        assert_eq!(definition.evidence.source.as_ref(), Some(reference));
+                        assert_eq!(
+                            document
+                                .relations
+                                .iter()
+                                .filter(|edge| {
+                                    edge.predicate == RelationPredicate::Contains
+                                        && edge.subject == RelationEndpoint::Entity(owner)
+                                        && edge.object == RelationEndpoint::Entity(entity.id)
+                                        && edge.provenance == parser
+                                        && edge.evidence.source.as_ref() == Some(reference)
+                                })
+                                .count(),
+                            1
+                        );
+                    }
+                    let callee_target = if shadow {
+                        document
+                            .entities
+                            .iter()
+                            .find(|entity| {
+                                entity.kind == EntityKind::Variable
+                                    && entity.canonical_name == "Target"
+                                    && entity.container == Some(ContainerRef::Entity(run.id))
+                            })
+                            .unwrap()
+                    } else {
+                        target
+                    };
+                    for (written, arity_matches) in [
+                        ("Call Target()", false),
+                        ("Call Target(1)", true),
+                        ("Call Target(1, 2)", true),
+                        ("Call Target(1, 2, 3)", false),
+                    ] {
+                        let start = source.find(written).unwrap();
+                        let applications = document
+                            .occurrences
+                            .iter()
+                            .filter(|site| {
+                                site.syntax_kind == "vba.application.reference"
+                                    && site.source.span().start_byte()
+                                        == u64::try_from(start).unwrap()
+                                    && site.source.span().end_byte()
+                                        == u64::try_from(start + written.len()).unwrap()
+                            })
+                            .collect::<Vec<_>>();
+                        assert_eq!(applications.len(), 1);
+                        let application = applications[0];
+                        assert_eq!(application.enclosing, Some(run.id));
+                        if arity_matches && !shadow {
+                            assert_explicit_expression_application_proof(
+                                document,
+                                &source,
+                                written,
+                                "Target",
+                                "vba.invoked_identifier.reference",
+                                &clauses,
+                            );
+                        } else {
+                            assert!(matches!(
+                                application.target,
+                                OccurrenceTarget::Unresolved { .. }
+                            ));
+                            assert_eq!(application.provenance, parser);
+                            assert!(!document.relations.iter().any(|edge| {
+                                edge.subject == RelationEndpoint::Occurrence(application.id)
+                                    && matches!(
+                                        edge.predicate,
+                                        RelationPredicate::RefersTo | RelationPredicate::Calls
+                                    )
+                            }));
+                        }
+                        let callee = document
+                            .occurrences
+                            .iter()
+                            .find(|site| {
+                                site.syntax_kind == "vba.invoked_identifier.reference"
+                                    && site.source.span().start_byte()
+                                        == u64::try_from(start + "Call ".len()).unwrap()
+                                    && site.source.span().end_byte()
+                                        == u64::try_from(start + "Call Target".len()).unwrap()
+                            })
+                            .unwrap();
+                        assert_eq!(
+                            callee.target,
+                            OccurrenceTarget::Resolved {
+                                symbol: callee_target.id
+                            }
+                        );
+                        assert_eq!(callee.enclosing, Some(run.id));
+                        assert_eq!(callee.provenance, parser);
+                        assert_eq!(
+                            callee.role,
+                            if shadow {
+                                OccurrenceRole::Reference
+                            } else {
+                                OccurrenceRole::CallSite
+                            }
+                        );
+                        for predicate in [RelationPredicate::Calls, RelationPredicate::RefersTo] {
+                            let edges = document
+                                .relations
+                                .iter()
+                                .filter(|edge| {
+                                    edge.subject == RelationEndpoint::Occurrence(callee.id)
+                                        && edge.predicate == predicate
+                                })
+                                .collect::<Vec<_>>();
+                            let expected = if shadow {
+                                predicate == RelationPredicate::RefersTo
+                            } else {
+                                predicate == RelationPredicate::Calls
+                            };
+                            assert_eq!(edges.len(), usize::from(expected));
+                            if expected {
+                                assert_eq!(
+                                    edges[0].object,
+                                    RelationEndpoint::Entity(callee_target.id)
+                                );
+                                assert_eq!(edges[0].provenance, parser);
+                                assert_eq!(edges[0].evidence.source.as_ref(), Some(&callee.source));
+                            }
+                        }
+                    }
+                    assert_explicit_expression_application_proof(
+                        document,
+                        &source,
+                        "Echo()",
+                        "Echo",
+                        "vba.invoked_get_identifier.reference",
+                        &["Optional amount As Long = 7"],
+                    );
+                    let amount = document
+                        .entities
+                        .iter()
+                        .find(|entity| {
+                            entity.kind == EntityKind::Parameter
+                                && entity.canonical_name == "amount"
+                                && entity.container == Some(ContainerRef::Entity(echo.id))
+                        })
+                        .unwrap();
+                    for (statement, name, owner, symbol) in [
+                        ("local = local", "local", run.id, local.id),
+                        ("Echo = amount", "amount", echo.id, amount.id),
+                    ] {
+                        let start =
+                            source.find(statement).unwrap() + statement.rfind(name).unwrap();
+                        let reads = document
+                            .occurrences
+                            .iter()
+                            .filter(|site| {
+                                site.syntax_kind == "vba.value_identifier.reference"
+                                    && site.source.span().start_byte()
+                                        == u64::try_from(start).unwrap()
+                                    && site.source.span().end_byte()
+                                        == u64::try_from(start + name.len()).unwrap()
+                            })
+                            .collect::<Vec<_>>();
+                        assert_eq!(reads.len(), 1);
+                        let read = reads[0];
+                        assert_eq!(read.target, OccurrenceTarget::Resolved { symbol });
+                        assert_eq!(read.enclosing, Some(owner));
+                        assert_eq!(read.provenance, parser);
+                        let edges = document
+                            .relations
+                            .iter()
+                            .filter(|edge| {
+                                edge.subject == RelationEndpoint::Occurrence(read.id)
+                                    && edge.predicate == RelationPredicate::RefersTo
+                                    && edge.object == RelationEndpoint::Entity(symbol)
+                            })
+                            .collect::<Vec<_>>();
+                        assert_eq!(edges.len(), 1);
+                        assert_eq!(edges[0].evidence.source.as_ref(), Some(&read.source));
+                        assert_eq!(edges[0].provenance, parser);
+                        assert!(!document.relations.iter().any(|edge| {
+                            edge.subject == RelationEndpoint::Occurrence(read.id)
+                                && edge.predicate == RelationPredicate::Calls
+                        }));
+                    }
+                    assert_eq!(
+                        document
+                            .relations
+                            .iter()
+                            .filter(|edge| edge.predicate == RelationPredicate::Calls)
+                            .count(),
+                        if shadow { 1 } else { 5 }
+                    );
+                    for written in [&sub_exit, &function_exit] {
+                        for (start, _) in source.match_indices(written.as_str()) {
+                            let end = start + written.len();
+                            assert!(!document.occurrences.iter().any(|site| {
+                                site.source.span().start_byte() >= u64::try_from(start).unwrap()
+                                    && site.source.span().end_byte() <= u64::try_from(end).unwrap()
+                            }));
+                            assert!(!document.relations.iter().any(|edge| {
+                                edge.evidence.source.as_ref().is_some_and(|reference| {
+                                    reference.span().start_byte() >= u64::try_from(start).unwrap()
+                                        && reference.span().end_byte()
+                                            <= u64::try_from(end).unwrap()
+                                })
+                            }));
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
 fn application_proof_output(
     source: &str,
     language: &'static str,

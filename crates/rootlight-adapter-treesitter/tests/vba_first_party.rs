@@ -4422,6 +4422,360 @@ fn cancellation_does_not_trigger_native_fallback_or_leave_output_state() {
     assert!(!parse(&provider, &request).facts().is_empty());
 }
 
+fn procedure_exit_blank(source: &str, exits: &[&str]) -> String {
+    exits.iter().fold(source.to_owned(), |source, written| {
+        source.replace(
+            written,
+            &written
+                .chars()
+                .map(|character| {
+                    if matches!(character, '\r' | '\n') {
+                        character
+                    } else {
+                        ' '
+                    }
+                })
+                .collect::<String>(),
+        )
+    })
+}
+
+#[test]
+fn procedure_exits_preserve_later_sdk_facts_and_exact_keyword_ranges() {
+    for (sub_exit, function_exit) in [
+        ("Exit Sub", "Exit Function"),
+        ("eXiT\tSuB", "eXiT\tFuNcTiOn"),
+        ("Exit _\n Sub", "Exit _\n Function"),
+    ] {
+        let source = format!(
+            "Attribute VB_Name = \"Authored\"\nSub Notify(Optional count As Long = 7)\n{sub_exit} ' retained exit trivia\nEnd Sub\nSub Run()\n{sub_exit}:Dim local As Long:local = local ' retained sibling\nCall Notify()\nEnd Sub\nFunction Echo(Optional value As Long = 7) As Long\n{function_exit}\nEcho = value\nEnd Function\n"
+        );
+        for newline in ["\n", "\r\n"] {
+            let source = source.replace('\n', newline);
+            let sub_exit = sub_exit.replace('\n', newline);
+            let function_exit = function_exit.replace('\n', newline);
+            let baseline = procedure_exit_blank(&source, &[&sub_exit, &function_exit]);
+            assert_eq!(source.len(), baseline.len());
+            for language in ["vba", "visual-basic-classic"] {
+                let fixture = Fixture::new(source.as_bytes());
+                let baseline_fixture = Fixture::new(baseline.as_bytes());
+                let provider = provider();
+                let budget = limits(4096);
+                let request = fixture.request(&budget, language, Vec::new());
+                let output = parse(&provider, &request);
+                let baseline_output = parse(
+                    &provider,
+                    &baseline_fixture.request(&budget, language, Vec::new()),
+                );
+                assert_eq!(
+                    output.report().coverage().status(),
+                    CoverageStatus::Complete
+                );
+                assert_eq!(
+                    output.report().coverage().covered_source_bytes(),
+                    source.len()
+                );
+                assert!(output.diagnostics().is_empty());
+                let required = provider
+                    .required_syntax_fact_count(&request, &deadline())
+                    .unwrap();
+                assert_eq!(required, 22);
+                assert_eq!(
+                    required,
+                    provider
+                        .required_syntax_fact_count(
+                            &baseline_fixture.request(&budget, language, Vec::new()),
+                            &deadline(),
+                        )
+                        .unwrap(),
+                );
+                let geometry = |output: &ParseOutput| {
+                    output
+                        .facts()
+                        .iter()
+                        .map(|fact| {
+                            (
+                                fact.local_id(),
+                                fact.parent(),
+                                fact.kind(),
+                                fact.span().start_byte(),
+                                fact.span().end_byte(),
+                                fact.depth(),
+                                fact.syntax_kind().as_str().to_owned(),
+                            )
+                        })
+                        .collect::<Vec<_>>()
+                };
+                // Source hashes differ, but equal-width trivia cannot erase later facts.
+                assert_eq!(geometry(&output), geometry(&baseline_output));
+                assert_eq!(
+                    fixture.source.content_hash(),
+                    rootlight_ids::content_hash(source.as_bytes())
+                );
+                let inventory = rootlight_vba::module_inventory(
+                    source.as_bytes(),
+                    rootlight_vba::ModuleLimits::new(source.len(), 4096, 4096),
+                    &mut || Ok::<(), ()>(()),
+                )
+                .unwrap();
+                let run = &inventory.procedures()[1];
+                let run_declaration = output
+                    .facts()
+                    .iter()
+                    .find(|fact| {
+                        fact.syntax_kind().as_str() == "vba.sub_function.declaration"
+                            && fact.span().start_byte()
+                                == u64::try_from(run.declaration().start).unwrap()
+                            && fact.span().end_byte()
+                                == u64::try_from(run.declaration().end).unwrap()
+                    })
+                    .unwrap();
+                let local_declaration = output
+                    .facts()
+                    .iter()
+                    .find(|fact| {
+                        fact.syntax_kind().as_str() == "vba.variable.declaration"
+                            && bytes_at(source.as_bytes(), fact.span()) == b"local As Long"
+                    })
+                    .unwrap();
+                assert_eq!(local_declaration.parent(), Some(run_declaration.local_id()));
+                for fact in output.facts() {
+                    assert_eq!(fact.span().file(), fixture.source.span().file());
+                    assert!(fact.span().end_byte() <= fixture.source.span().end_byte());
+                }
+                let mut exit_count = 0;
+                for (procedure_index, procedure) in inventory.procedures().iter().enumerate() {
+                    for statement in procedure.statements() {
+                        let rootlight_vba::ModuleBodyStatement::ProcedureExit(exit) = statement
+                        else {
+                            continue;
+                        };
+                        exit_count += 1;
+                        let written = if procedure_index == 2 {
+                            &function_exit
+                        } else {
+                            &sub_exit
+                        };
+                        assert_eq!(&source[exit.statement()], written);
+                        assert!(source[exit.exit_keyword()].eq_ignore_ascii_case("Exit"));
+                        assert!(source[exit.kind_keyword()].eq_ignore_ascii_case(
+                            if procedure_index == 2 {
+                                "Function"
+                            } else {
+                                "Sub"
+                            },
+                        ));
+                        assert_eq!(
+                            exit.kind(),
+                            if procedure_index == 2 {
+                                rootlight_vba::ModuleProcedureExitKind::Function
+                            } else {
+                                rootlight_vba::ModuleProcedureExitKind::Sub
+                            }
+                        );
+                        assert!(exit.statement().start >= procedure.body().start);
+                        assert!(exit.statement().end <= procedure.body().end);
+                        assert!(!output.facts().iter().any(|fact| {
+                            fact.span().start_byte()
+                                >= u64::try_from(exit.statement().start).unwrap()
+                                && fact.span().end_byte()
+                                    <= u64::try_from(exit.statement().end).unwrap()
+                        }));
+                    }
+                }
+                assert_eq!(exit_count, 3);
+                for (syntax, written) in [
+                    ("vba.variable.declaration", "local As Long"),
+                    ("vba.application.reference", "Call Notify()"),
+                    ("vba.value_identifier.reference", "value"),
+                ] {
+                    assert!(
+                        output.facts().iter().any(|fact| {
+                            fact.syntax_kind().as_str() == syntax
+                                && bytes_at(source.as_bytes(), fact.span()) == written.as_bytes()
+                        }),
+                        "{language}: {syntax} {written}"
+                    );
+                }
+                assert_eq!(output.facts(), parse(&provider, &request).facts());
+                assert_eq!(provider.stats().pooled_parsers, 0);
+                assert_eq!(provider.stats().checked_out_parsers, 0);
+                assert_eq!(provider.stats().cache.entries, 0);
+            }
+        }
+    }
+}
+
+#[test]
+fn procedure_exits_charge_statement_work_without_new_required_facts() {
+    let source = format!(
+        "Sub Run()\n{}Dim value As Long\nvalue = 1\nEnd Sub\n",
+        "Exit Sub\n".repeat(8)
+    );
+    for newline in ["\n", "\r\n"] {
+        let source = source.replace('\n', newline);
+        for language in ["vba", "visual-basic-classic"] {
+            let fixture = Fixture::new(source.as_bytes());
+            let provider = provider();
+            let base = limits(4096);
+            let request = fixture.request(&base, language, Vec::new());
+            let required = provider
+                .required_syntax_fact_count(&request, &deadline())
+                .unwrap();
+            assert_eq!(required, 9);
+            let full = parse(&provider, &request);
+            assert_eq!(full.report().resources().syntax_nodes(), 14);
+            assert_eq!(full.facts().len(), 12);
+            let baseline = procedure_exit_blank(&source, &["Exit Sub"]);
+            let baseline_fixture = Fixture::new(baseline.as_bytes());
+            let baseline_output = parse(
+                &provider,
+                &baseline_fixture.request(&base, language, Vec::new()),
+            );
+            assert_eq!(full.facts(), baseline_output.facts());
+            for capacity in [required, full.facts().len()] {
+                let bounded = limits(capacity);
+                let output = parse(&provider, &fixture.request(&bounded, language, Vec::new()));
+                assert_eq!(output.facts().len(), capacity);
+                assert_eq!(
+                    output
+                        .facts()
+                        .iter()
+                        .filter(|fact| {
+                            fact.syntax_kind().as_str() == "vba.identifier.definition"
+                        })
+                        .count(),
+                    2
+                );
+            }
+            let short = limits(required - 1);
+            assert_eq!(
+                execute_parse(
+                    &provider,
+                    &fixture.request(&short, language, Vec::new()),
+                    MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
+                    &deadline(),
+                )
+                .unwrap_err(),
+                AdapterError::Sink(SinkError::StreamLimit {
+                    resource: ResourceKind::RequiredSyntaxFacts,
+                    observed: required,
+                    limit: required - 1,
+                })
+            );
+            for maximum in [14, 13] {
+                let bounded = AnalysisLimits::new(
+                    base.max_source_bytes(),
+                    maximum,
+                    base.max_syntax_depth(),
+                    base.max_embedded_ranges(),
+                    base.max_reported_memory_bytes(),
+                    base.syntax_stream().clone(),
+                    base.ir_stream().clone(),
+                    base.ir().clone(),
+                )
+                .unwrap();
+                let result = execute_parse(
+                    &provider,
+                    &fixture.request(&bounded, language, Vec::new()),
+                    MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
+                    &deadline(),
+                );
+                if maximum == 14 {
+                    assert_eq!(result.unwrap().facts(), full.facts());
+                } else {
+                    assert_eq!(
+                        result.unwrap_err(),
+                        AdapterError::RejectedRequest(
+                            rootlight_adapter_sdk::RequestError::ProviderLimit {
+                                resource: ResourceKind::SyntaxNodes,
+                                observed: 14,
+                                limit: 13,
+                            },
+                        )
+                    );
+                }
+            }
+            assert!(matches!(
+                AnalysisLimits::new(
+                    base.max_source_bytes(),
+                    0,
+                    base.max_syntax_depth(),
+                    base.max_embedded_ranges(),
+                    base.max_reported_memory_bytes(),
+                    base.syntax_stream().clone(),
+                    base.ir_stream().clone(),
+                    base.ir().clone(),
+                ),
+                Err(rootlight_adapter_sdk::LimitError::Zero {
+                    field: "analysis.max_syntax_nodes"
+                })
+            ));
+            let cancelled = deadline();
+            cancelled.cancel(CancellationReason::ClientRequest);
+            assert!(matches!(
+                execute_parse(
+                    &provider,
+                    &request,
+                    MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
+                    &cancelled,
+                ),
+                Err(AdapterError::Cancelled {
+                    reason: CancellationReason::ClientRequest
+                })
+            ));
+            assert_eq!(parse(&provider, &request).facts(), full.facts());
+            assert_eq!(provider.stats().pooled_parsers, 0);
+            assert_eq!(provider.stats().checked_out_parsers, 0);
+            assert_eq!(provider.stats().cache.entries, 0);
+        }
+    }
+}
+
+#[test]
+fn unsupported_procedure_exit_forms_preserve_whole_module_native_fallback() {
+    for (header, terminator, body) in [
+        ("Sub Run()", "End Sub", "Exit Function"),
+        ("Function Run() As Long", "End Function", "Exit Sub"),
+        ("Sub Run()", "End Sub", "Exit"),
+        ("Sub Run()", "End Sub", "Exit Sub trailing"),
+        ("Sub Run()", "End Sub", "Exit Sub()"),
+        ("Sub Run()", "End Sub", "ExitSub"),
+        ("Sub Run()", "End Sub", "Exit Property"),
+        ("Sub Run()", "End Sub", "Exit Do"),
+        ("Sub Run()", "End Sub", "Exit For"),
+        ("Sub Run()", "End Sub", "Do\nExit Do\nLoop"),
+    ] {
+        for newline in ["\n", "\r\n"] {
+            let source = format!(
+                "Sub First()\nEnd Sub\n{header}\n{body}\nDim later As Long\n{terminator}\n"
+            )
+            .replace('\n', newline);
+            assert!(matches!(
+                rootlight_vba::module_inventory(
+                    source.as_bytes(),
+                    rootlight_vba::ModuleLimits::new(source.len(), 4096, 4096),
+                    &mut || Ok::<(), ()>(()),
+                ),
+                Err(rootlight_vba::ModuleError::Unsupported { .. })
+            ));
+            for language in ["vba", "visual-basic-classic"] {
+                let fixture = Fixture::new(source.as_bytes());
+                let provider = provider();
+                let budget = limits(4096);
+                // Invalid fixtures test fallback routing, not native completeness.
+                let output = parse(&provider, &fixture.request(&budget, language, Vec::new()));
+                assert!(provider.stats().pooled_parsers > 0, "{language}: {body}");
+                assert_eq!(provider.stats().checked_out_parsers, 0);
+                assert!(output.facts().iter().any(|fact| {
+                    fact.syntax_kind().as_str() == "vba.identifier.definition"
+                        && bytes_at(source.as_bytes(), fact.span()) == b"First"
+                }));
+            }
+        }
+    }
+}
+
 fn bytes_at(source: &[u8], span: SourceSpan) -> &[u8] {
     source
         .get(usize::try_from(span.start_byte()).unwrap()..usize::try_from(span.end_byte()).unwrap())

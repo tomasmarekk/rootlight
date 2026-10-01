@@ -10910,3 +10910,327 @@ fn negative_numeric_initializer_edits_preserve_atom_sources_and_optional_call_pr
         }
     }
 }
+
+#[derive(Debug, Clone, Copy)]
+enum ProcedureExitPlacement {
+    Inserted,
+    Moved,
+    Repeated,
+    Removed,
+    Continued,
+}
+
+const PROCEDURE_EXIT_LITERALS: RadixLiteralState = RadixLiteralState {
+    literal: "7",
+    default: "8",
+    module_bounds: "-1 To +3",
+    local_bounds: "-1 To +2",
+    local_rank: 1,
+    index: "0",
+    second_index: "1",
+    native_fallback: false,
+    shadow_ready: false,
+};
+
+fn procedure_exit_source(placement: ProcedureExitPlacement) -> String {
+    let mut source = radix_literal_source(PROCEDURE_EXIT_LITERALS);
+    if matches!(placement, ProcedureExitPlacement::Removed) {
+        return source;
+    }
+    let (sub_exit, function_exit) = if matches!(placement, ProcedureExitPlacement::Continued) {
+        ("eXiT _\r\n\tsUb", "eXiT _\r\n\tfUnCtIoN")
+    } else {
+        ("Exit Sub", "Exit Function")
+    };
+    source = source.replace(
+        "Sub Notify(ByVal value As Long, Optional extra As Long = 8)\nEnd Sub",
+        &format!(
+            "Sub Notify(ByVal value As Long, Optional extra As Long = 8)\n{sub_exit}\nEnd Sub"
+        ),
+    );
+    if matches!(placement, ProcedureExitPlacement::Moved) {
+        source = source.replace("Ready = 7\n", &format!("Ready = 7\n{function_exit}\n"));
+        source = source.replace(
+            "Const LocalSeed As Long = 7\n",
+            &format!("{sub_exit}\nConst LocalSeed As Long = 7\n"),
+        );
+    } else {
+        source = source.replace(
+            "Function Ready() As Long\n",
+            &format!("Function Ready() As Long\n{function_exit}\n"),
+        );
+        source = source.replace("Sub Run()\n", &format!("Sub Run()\n{sub_exit}\n"));
+    }
+    if matches!(placement, ProcedureExitPlacement::Repeated) {
+        source = source.replace("Ready = 7\n", &format!("Ready = 7\n{function_exit}\n"));
+        source = source.replace(
+            "Call Notify(local)\n",
+            &format!("{sub_exit}\nCall Notify(local)\n"),
+        );
+    }
+    source
+}
+
+fn assert_procedure_exit_contract(
+    service: &FirstSliceService,
+    receipt: &FirstSliceIndexReceipt,
+    source: &str,
+    language: &str,
+    placement: ProcedureExitPlacement,
+) {
+    // Exits do not establish runtime reachability. Later declarations, value
+    // reads, rank/arity proofs and independent callee Calls remain source facts.
+    assert_radix_literal_contract(service, receipt, source, language, PROCEDURE_EXIT_LITERALS);
+    let snapshot = service
+        .loaded_generation_snapshot(receipt.generation)
+        .unwrap();
+    let document = snapshot.document();
+    let file = &document.files[0];
+    let parser = document
+        .provenance
+        .iter()
+        .find(|proof| proof.id == file.provenance)
+        .unwrap();
+    assert_eq!(parser.producer_kind, ProducerKind::Parser);
+    assert!(
+        parser
+            .input_sources
+            .contains(file.evidence.source.as_ref().unwrap())
+    );
+    let (sub_exit, function_exit) = if matches!(placement, ProcedureExitPlacement::Continued) {
+        ("eXiT _\r\n\tsUb", "eXiT _\r\n\tfUnCtIoN")
+    } else {
+        ("Exit Sub", "Exit Function")
+    };
+    let mut counts = [0_usize; 2];
+    for (position, (written, kind_keyword)) in [(sub_exit, "sUb"), (function_exit, "fUnCtIoN")]
+        .into_iter()
+        .enumerate()
+    {
+        let kind_keyword = if matches!(placement, ProcedureExitPlacement::Continued) {
+            kind_keyword
+        } else if position == 0 {
+            "Sub"
+        } else {
+            "Function"
+        };
+        for (start, _) in source.match_indices(written) {
+            counts[position] += 1;
+            let end = start + written.len();
+            let owners = document
+                .entities
+                .iter()
+                .filter(|entity| {
+                    entity.kind == EntityKind::Function
+                        && entity.evidence.source.as_ref().is_some_and(|reference| {
+                            reference.span().start_byte() <= u64::try_from(start).unwrap()
+                                && reference.span().end_byte() >= u64::try_from(end).unwrap()
+                        })
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(owners.len(), 1);
+            let owner = owners[0];
+            assert_eq!(owner.provenance, parser.id);
+            assert!(if position == 0 {
+                matches!(owner.canonical_name.as_str(), "Notify" | "Run")
+            } else {
+                owner.canonical_name == "Ready"
+            });
+            let keyword_start = start + written.rfind(kind_keyword).unwrap();
+            assert!(source[start..start + "Exit".len()].eq_ignore_ascii_case("Exit"));
+            assert!(
+                source[keyword_start..end].eq_ignore_ascii_case(if position == 0 {
+                    "Sub"
+                } else {
+                    "Function"
+                })
+            );
+            for range in [start..end, start..start + "Exit".len(), keyword_start..end] {
+                let reference = SourceRef::new(
+                    receipt.repository,
+                    receipt.generation,
+                    SourceSpan::new(
+                        file.id,
+                        u64::try_from(range.start).unwrap(),
+                        u64::try_from(range.end).unwrap(),
+                    )
+                    .unwrap(),
+                    content_hash(source.as_bytes()),
+                    None,
+                );
+                assert_exact_parameter_source(service, receipt, source, &reference, range);
+            }
+            let contained = |reference: &SourceRef| {
+                reference.span().start_byte() >= u64::try_from(start).unwrap()
+                    && reference.span().end_byte() <= u64::try_from(end).unwrap()
+            };
+            assert!(
+                !document
+                    .occurrences
+                    .iter()
+                    .any(|site| contained(&site.source))
+            );
+            assert!(
+                !document.entities.iter().any(|entity| entity
+                    .evidence
+                    .source
+                    .as_ref()
+                    .is_some_and(contained))
+            );
+            assert!(
+                !document.relations.iter().any(|relation| relation
+                    .evidence
+                    .source
+                    .as_ref()
+                    .is_some_and(contained))
+            );
+            assert!(
+                !document
+                    .skipped_regions
+                    .iter()
+                    .any(|gap| contained(&gap.source))
+            );
+        }
+    }
+    assert_eq!(
+        counts,
+        match placement {
+            ProcedureExitPlacement::Inserted
+            | ProcedureExitPlacement::Moved
+            | ProcedureExitPlacement::Continued => [2, 1],
+            ProcedureExitPlacement::Repeated => [3, 2],
+            ProcedureExitPlacement::Removed => [0, 0],
+        }
+    );
+    let run_start = source.find("Sub Run()\n").unwrap();
+    let first_run_exit = source[run_start..]
+        .find(sub_exit)
+        .map(|offset| run_start + offset);
+    if let Some(first_exit) = first_run_exit {
+        assert!(source.find("Const LocalSeed As Long = 7").unwrap() > first_exit);
+        assert!(source.find("sink = LocalSeed").unwrap() > first_exit);
+        assert!(source.find("Call Notify(local)").unwrap() > first_exit);
+    }
+}
+
+#[test]
+fn procedure_exit_edits_preserve_later_facts_and_durable_source_lifetimes() {
+    let states = [
+        ProcedureExitPlacement::Inserted,
+        ProcedureExitPlacement::Moved,
+        ProcedureExitPlacement::Repeated,
+        ProcedureExitPlacement::Removed,
+        ProcedureExitPlacement::Continued,
+        ProcedureExitPlacement::Inserted,
+    ];
+    for language in ["visual-basic-classic", "vba"] {
+        let current = std::env::current_dir().unwrap();
+        let repository = tempfile::tempdir_in(&current).unwrap();
+        let storage = tempfile::tempdir_in(&current).unwrap();
+        let paths = rootlight_runtime::RuntimePaths::new(
+            storage.path().join("state"),
+            storage.path().join("runtime"),
+        )
+        .unwrap();
+        paths.prepare_owner().unwrap();
+        let configuration = (language == "vba").then_some("version='1.3'\n[extensions.source-languages]\nversion='1.0'\ncritical=true\n[extensions.source-languages.data.extensions]\nbas='vba'\n");
+        let policy = FirstSliceStoragePolicy::resolve_user_config(configuration, 4).unwrap();
+        assert_eq!(policy.retained_generations(), 2);
+        let mut previous: Option<(FirstSliceIndexReceipt, String, ProcedureExitPlacement)> = None;
+        let mut initial_source = None;
+        let mut initial_logical = None;
+        for (position, placement) in states.into_iter().enumerate() {
+            let source = procedure_exit_source(placement);
+            fs::write(repository.path().join("module.bas"), &source).unwrap();
+            let mut service = FirstSliceService::new_durable_with_policy(
+                policy.clone(),
+                paths.state_dir(),
+                &deadline(),
+            )
+            .unwrap();
+            let prepared = service
+                .prepare_repository(repository.path(), &deadline())
+                .unwrap();
+            let committed = service
+                .publish_prepared_with_metrics(prepared, &deadline())
+                .unwrap();
+            assert_eq!(committed.evidence().rebuilt_files, 1);
+            assert_eq!(committed.evidence().reused_files, 0);
+            if position > 0 {
+                assert_eq!(committed.evidence().changed_files, 1);
+            }
+            let receipt = committed.receipt().clone();
+            assert_procedure_exit_contract(&service, &receipt, &source, language, placement);
+            assert_eq!(
+                receipt,
+                service
+                    .index_repository(repository.path(), &deadline())
+                    .unwrap()
+            );
+            if let Some((old_receipt, old_source, old_placement)) = &previous {
+                assert_ne!(receipt.generation, old_receipt.generation);
+                assert_ne!(
+                    content_hash(source.as_bytes()),
+                    content_hash(old_source.as_bytes())
+                );
+                assert!(receipt.logical_snapshot.is_some());
+                assert_ne!(receipt.logical_snapshot, old_receipt.logical_snapshot);
+                assert_procedure_exit_contract(
+                    &service,
+                    old_receipt,
+                    old_source,
+                    language,
+                    *old_placement,
+                );
+            }
+            drop(service);
+            let mut service = FirstSliceService::new_durable_with_policy(
+                policy.clone(),
+                paths.state_dir(),
+                &deadline(),
+            )
+            .unwrap();
+            assert_eq!(
+                receipt,
+                service
+                    .index_repository(repository.path(), &deadline())
+                    .unwrap()
+            );
+            assert_procedure_exit_contract(&service, &receipt, &source, language, placement);
+            if let Some((old_receipt, old_source, old_placement)) = &previous {
+                assert_procedure_exit_contract(
+                    &service,
+                    old_receipt,
+                    old_source,
+                    language,
+                    *old_placement,
+                );
+            }
+            let prepared = service
+                .prepare_repository_with_options(
+                    repository.path(),
+                    FirstSliceIndexOptions::clean_rebuild(FirstSliceIndexMode::Structural),
+                    &deadline(),
+                )
+                .unwrap();
+            let committed = service
+                .publish_prepared_with_metrics(prepared, &deadline())
+                .unwrap();
+            assert_eq!(committed.evidence().rebuilt_files, 1);
+            assert_eq!(committed.evidence().reused_files, 0);
+            let rebuilt = committed.receipt().clone();
+            assert_ne!(receipt.generation, rebuilt.generation);
+            assert!(receipt.logical_snapshot.is_some());
+            assert_eq!(receipt.logical_snapshot, rebuilt.logical_snapshot);
+            assert_procedure_exit_contract(&service, &rebuilt, &source, language, placement);
+            if position == 0 {
+                initial_source = Some(source.clone());
+                initial_logical = receipt.logical_snapshot.clone();
+            } else if position + 1 == states.len() {
+                assert_eq!(initial_source.as_ref(), Some(&source));
+                assert_eq!(receipt.logical_snapshot, initial_logical);
+            }
+            previous = Some((rebuilt, source, placement));
+        }
+    }
+}

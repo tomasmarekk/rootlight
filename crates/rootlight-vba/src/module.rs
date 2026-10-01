@@ -6,7 +6,8 @@ use std::{fmt, ops::Range};
 
 use super::parameter::parameter_trivia_len;
 use super::{
-    ModuleBodyStatement, ModuleScalarValue, ProcedureKind, logical_whitespace_len, procedure_header,
+    ModuleBodyStatement, ModuleProcedureExitKind, ModuleScalarValue, ProcedureKind,
+    logical_whitespace_len, procedure_header,
 };
 
 /// Caller-owned ceilings for one complete module scan.
@@ -503,6 +504,11 @@ impl<E: std::error::Error + 'static> std::error::Error for ModuleError<E> {
 /// Body Dim lists retain the same per-member scalar/numeric-array syntax in
 /// their containing procedure, without module visibility or inferred types.
 /// A single typed scalar Dim keeps its distinct legacy declaration record.
+/// Exit Sub and Exit Function retain their two complete source-written keywords
+/// only inside the matching procedure category. They consume one retained body
+/// record and no expression/argument work; later authored statements stay inventoried.
+/// No reachability or executed control flow is inferred. Exit Property, Exit For,
+/// Exit Do and Return remain outside this closed procedural slice.
 /// Local Const still admits one typed scalar per statement. Assignments have
 /// an optional Let prefix. Const values are INTEGER or FLOAT tokens with an optional
 /// unary minus, physically closed doubled-quote strings or True/False; assignments additionally
@@ -670,6 +676,20 @@ pub fn module_inventory<E>(
                 else {
                     return Err(ModuleError::Unsupported { range });
                 };
+                if let ModuleBodyStatement::ProcedureExit(exit) = &statement {
+                    let matches_procedure = match procedure.kind {
+                        ProcedureKind::Sub => exit.kind() == ModuleProcedureExitKind::Sub,
+                        ProcedureKind::Function => exit.kind() == ModuleProcedureExitKind::Function,
+                        ProcedureKind::PropertyGet
+                        | ProcedureKind::PropertyLet
+                        | ProcedureKind::PropertySet
+                        | ProcedureKind::ExternalSub
+                        | ProcedureKind::ExternalFunction => false,
+                    };
+                    if !matches_procedure {
+                        return Err(ModuleError::Unsupported { range });
+                    }
+                }
                 let retained_arguments = match &statement {
                     ModuleBodyStatement::Call(call) => call.argument_values().len(),
                     ModuleBodyStatement::ApplicationAssignment(assignment) => {
@@ -681,7 +701,8 @@ pub fn module_inventory<E>(
                     ModuleBodyStatement::ExpressionCall(call) => call.inventory().argument_count(),
                     ModuleBodyStatement::Declaration(_)
                     | ModuleBodyStatement::Variables(_)
-                    | ModuleBodyStatement::Assignment(_) => 0,
+                    | ModuleBodyStatement::Assignment(_)
+                    | ModuleBodyStatement::ProcedureExit(_) => 0,
                 };
                 argument_count = argument_count
                     .checked_add(retained_arguments)
@@ -697,7 +718,8 @@ pub fn module_inventory<E>(
                     ModuleBodyStatement::Variables(_)
                     | ModuleBodyStatement::Assignment(_)
                     | ModuleBodyStatement::ApplicationAssignment(_)
-                    | ModuleBodyStatement::Call(_) => 0,
+                    | ModuleBodyStatement::Call(_)
+                    | ModuleBodyStatement::ProcedureExit(_) => 0,
                 };
                 if retained_expression_nodes != 0 {
                     expression_count = expression_count
@@ -711,7 +733,8 @@ pub fn module_inventory<E>(
                     | ModuleBodyStatement::ApplicationAssignment(_)
                     | ModuleBodyStatement::ExpressionAssignment(_)
                     | ModuleBodyStatement::Call(_)
-                    | ModuleBodyStatement::ExpressionCall(_) => 1,
+                    | ModuleBodyStatement::ExpressionCall(_)
+                    | ModuleBodyStatement::ProcedureExit(_) => 1,
                 };
                 if retained_records > remaining_records {
                     return Err(ModuleError::StatementLimit);
@@ -1670,6 +1693,299 @@ mod tests {
         assert_eq!(value.integer_suffix(), None);
         assert_eq!(value.float_suffix(), None);
         assert_eq!(value.initializer_work_nodes(), 1);
+    }
+
+    #[test]
+    fn procedure_exits_keep_original_ranges_comments_colon_siblings_and_later_statements() {
+        for newline in ["\n", "\r\n"] {
+            let first_exit = format!("eXiT _{newline} SuB");
+            let function_exit = format!("Exit _{newline} Function");
+            let source = format!(
+                "Const Seed=7{newline}Sub [Run](){newline}' Exit Function: End Sub{newline}Dim value As Long{newline}value=\"Exit Function: End Sub\"{newline}  {first_exit} ' source note{newline}value=Seed:Exit Sub:Call Target(value){newline}End Sub{newline}Function [Read]() As Long{newline}[Read]=Seed:{function_exit}{newline}Dim later As Long{newline}later=Seed ' Exit Sub{newline}End Function{newline}"
+            );
+            let limits = ModuleLimits::new(source.len(), source.len(), 2)
+                .with_max_parameters(0)
+                .with_max_arguments(1)
+                .with_max_expression_nodes(0);
+            let inventory =
+                module_inventory(source.as_bytes(), limits, &mut || Ok::<(), ()>(())).unwrap();
+            assert_eq!(inventory.procedures().len(), 2);
+            let first = &inventory.procedures()[0];
+            let second = &inventory.procedures()[1];
+            assert_eq!(first.kind(), ProcedureKind::Sub);
+            assert_eq!(second.kind(), ProcedureKind::Function);
+            assert_eq!(first.statements().len(), 6);
+            assert_eq!(second.statements().len(), 4);
+            for (statement, written, kind, keyword) in [
+                (
+                    &first.statements()[2],
+                    first_exit.as_str(),
+                    ModuleProcedureExitKind::Sub,
+                    "SuB",
+                ),
+                (
+                    &first.statements()[4],
+                    "Exit Sub",
+                    ModuleProcedureExitKind::Sub,
+                    "Sub",
+                ),
+                (
+                    &second.statements()[1],
+                    function_exit.as_str(),
+                    ModuleProcedureExitKind::Function,
+                    "Function",
+                ),
+            ] {
+                let ModuleBodyStatement::ProcedureExit(exit) = statement else {
+                    panic!("source-written procedure exit expected")
+                };
+                let start = source.find(written).unwrap();
+                let keyword_start = start + written.rfind(keyword).unwrap();
+                assert_eq!(exit.kind(), kind);
+                assert_eq!(exit.statement(), start..start + written.len());
+                assert_eq!(statement.statement(), exit.statement());
+                assert_eq!(exit.exit_keyword(), start..start + 4);
+                assert_eq!(
+                    exit.kind_keyword(),
+                    keyword_start..keyword_start + keyword.len()
+                );
+                assert_eq!(&source[exit.statement()], written);
+                assert_eq!(&source[exit.kind_keyword()], keyword);
+            }
+            assert!(matches!(
+                first.statements()[3],
+                ModuleBodyStatement::Assignment(_)
+            ));
+            assert!(matches!(
+                first.statements()[5],
+                ModuleBodyStatement::Call(_)
+            ));
+            assert!(matches!(
+                second.statements()[2],
+                ModuleBodyStatement::Declaration(_)
+            ));
+            assert!(matches!(
+                second.statements()[3],
+                ModuleBodyStatement::Assignment(_)
+            ));
+            assert_eq!(&source[first.terminator()], "End Sub");
+            assert_eq!(&source[second.terminator()], "End Function");
+        }
+    }
+
+    #[test]
+    fn procedure_exit_byte_boundaries_preserve_whole_module_statement_closure() {
+        for category in ["Sub", "Function"] {
+            for byte in 0..=u8::MAX {
+                for (prefix, suffix, accepted) in [
+                    (
+                        b"Exit".to_vec(),
+                        category.as_bytes().to_vec(),
+                        matches!(byte, b' ' | b'\t'),
+                    ),
+                    (
+                        b"Exit ".to_vec(),
+                        category.as_bytes().to_vec(),
+                        matches!(byte, b' ' | b'\t'),
+                    ),
+                    (
+                        format!("Exit {category}").into_bytes(),
+                        Vec::new(),
+                        byte.is_ascii_whitespace() || matches!(byte, b'\'' | b':'),
+                    ),
+                ] {
+                    let body = [prefix.as_slice(), &[byte], suffix.as_slice()].concat();
+                    let header = format!("{category} Run()\n");
+                    let tail = format!("\nEnd {category}\n");
+                    let source = [header.as_bytes(), body.as_slice(), tail.as_bytes()].concat();
+                    let parsed = parse(&source);
+                    assert_eq!(
+                        parsed.is_ok(),
+                        accepted,
+                        "{category}, {prefix:?}, byte {byte}"
+                    );
+                    if let Ok(inventory) = parsed {
+                        let statements = inventory.procedures()[0].statements();
+                        assert_eq!(statements.len(), 1);
+                        let ModuleBodyStatement::ProcedureExit(exit) = &statements[0] else {
+                            panic!("exit boundary cannot publish another statement kind")
+                        };
+                        assert_eq!(exit.exit_keyword(), header.len()..header.len() + 4);
+                        assert_eq!(&source[exit.kind_keyword()], category.as_bytes());
+                        assert!(exit.statement().end <= header.len() + body.len());
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn procedure_exit_mismatches_and_richer_forms_reject_every_retained_prefix() {
+        // The suffix-byte matrix joins CR to the following LF. A truly bare
+        // carriage return remains outside the whole-module input contract.
+        for category in ["Sub", "Function"] {
+            let source = format!("{category} Run()\nExit {category}\r \nEnd {category}\n");
+            let Err(ModuleError::Unsupported { range }) = parse(source.as_bytes()) else {
+                panic!("bare carriage return must reject the complete module")
+            };
+            assert_eq!(&source[range], "\r");
+        }
+        for category in ["Sub", "Function"] {
+            let mismatch = if category == "Sub" {
+                "Exit Function"
+            } else {
+                "Exit Sub"
+            };
+            for unsupported in [
+                mismatch,
+                "Exit",
+                "Exit Property",
+                "Exit For",
+                "Exit Do",
+                "Return",
+                "Exit Sub extra",
+                "Exit Function extra",
+                "Exit [Sub]",
+                "Exit [Function]",
+                "Exit Sub=1",
+                "Exit Function()",
+                "Exit Sub%",
+                "Exit Function&",
+                "Exit=1",
+                "Let Exit=1",
+            ] {
+                let source = format!(
+                    "Const Seed=7\nSub First()\nExit Sub\nEnd Sub\n{category} Bad()\nDim local As Long\n{unsupported}\nlocal=Seed\nEnd {category}\n"
+                );
+                let Err(ModuleError::Unsupported { range }) = parse(source.as_bytes()) else {
+                    panic!("whole-module rejection expected: {category}, {unsupported}")
+                };
+                assert_eq!(&source[range], unsupported);
+            }
+        }
+        for outside in ["Exit Sub", "Exit Function"] {
+            for prefix in ["", "Sub First()\nExit Sub\nEnd Sub\n"] {
+                let source = format!("{prefix}{outside}\n");
+                let Err(ModuleError::Unsupported { range }) = parse(source.as_bytes()) else {
+                    panic!("procedure exit outside a procedure must not publish a prefix")
+                };
+                assert_eq!(&source[range], outside);
+            }
+        }
+        assert!(matches!(
+            parse(b"Property Get Value()\nExit Property\nEnd Property\n"),
+            Err(ModuleError::Unsupported { .. })
+        ));
+    }
+
+    #[test]
+    fn procedure_exits_share_exact_logical_and_retained_record_ceilings_without_expression_work() {
+        let source = b"Dim fieldA,fieldB,fieldC,fieldD\nConst Seed=1\nSub First()\nDim localA,localB,localC,localD\nExit Sub\nlocalA=Seed\nExit Sub\nEnd Sub\nFunction NextValue() As Long\nExit Function\nEnd Function\n";
+        let limits = |maximum| {
+            ModuleLimits::new(source.len(), maximum, 2)
+                .with_max_parameters(0)
+                .with_max_arguments(0)
+                .with_max_expression_nodes(0)
+        };
+        let inventory = module_inventory(source, limits(13), &mut || Ok::<(), ()>(())).unwrap();
+        assert_eq!(inventory.statement_count(), 11);
+        assert_eq!(inventory.variables().len(), 4);
+        assert_eq!(inventory.constants().len(), 1);
+        assert_eq!(inventory.procedures()[0].statements().len(), 4);
+        assert_eq!(inventory.procedures()[1].statements().len(), 1);
+        let body_records: usize = inventory
+            .procedures()
+            .iter()
+            .flat_map(|procedure| procedure.statements())
+            .map(|statement| match statement {
+                ModuleBodyStatement::Variables(list) => list.variables().len(),
+                ModuleBodyStatement::Declaration(_)
+                | ModuleBodyStatement::Assignment(_)
+                | ModuleBodyStatement::ApplicationAssignment(_)
+                | ModuleBodyStatement::ExpressionAssignment(_)
+                | ModuleBodyStatement::Call(_)
+                | ModuleBodyStatement::ExpressionCall(_)
+                | ModuleBodyStatement::ProcedureExit(_) => 1,
+            })
+            .sum();
+        assert_eq!(
+            body_records + inventory.variables().len() + inventory.constants().len(),
+            13
+        );
+        for maximum in [0, 1, 10, 11, 12] {
+            assert_eq!(
+                module_inventory(source, limits(maximum), &mut || Ok::<(), ()>(())),
+                Err(ModuleError::StatementLimit),
+                "shared ceiling {maximum}"
+            );
+        }
+        for category in ["Sub", "Function"] {
+            let source = format!("{category} Run()\nExit {category}\nEnd {category}\n");
+            let limits = |maximum| {
+                ModuleLimits::new(source.len(), maximum, 1)
+                    .with_max_parameters(0)
+                    .with_max_arguments(0)
+                    .with_max_expression_nodes(0)
+            };
+            assert_eq!(
+                module_inventory(source.as_bytes(), limits(3), &mut || Ok::<(), ()>(()))
+                    .unwrap()
+                    .statement_count(),
+                3
+            );
+            for maximum in [0, 2] {
+                assert_eq!(
+                    module_inventory(source.as_bytes(), limits(maximum), &mut || Ok::<(), ()>(())),
+                    Err(ModuleError::StatementLimit)
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn procedure_exit_module_scans_cancel_before_publishing_valid_or_mismatched_inventory() {
+        let source = format!(
+            "Const Seed=1\nSub Run()\nExit{} _\r\n Sub:Dim after As Long:after=Seed\nExit Sub\nEnd Sub\nFunction [Read]() As Long\nExit{}Function:[Read]=Seed\nEnd Function\n",
+            " ".repeat(2048),
+            " _\n ".repeat(128)
+        );
+        for (source, accepted) in [
+            (source.clone(), true),
+            (
+                source.replace("Exit Sub\nEnd Sub", "Exit Function\nEnd Sub"),
+                false,
+            ),
+        ] {
+            let limits = ModuleLimits::new(source.len(), source.len(), 2)
+                .with_max_parameters(0)
+                .with_max_arguments(0)
+                .with_max_expression_nodes(0);
+            let mut observed = 0;
+            let parsed = module_inventory(source.as_bytes(), limits, &mut || {
+                observed += 1;
+                Ok::<(), &str>(())
+            });
+            assert_eq!(parsed.is_ok(), accepted);
+            if !accepted {
+                assert!(matches!(parsed, Err(ModuleError::Unsupported { .. })));
+            }
+            for cancelled_at in 1..=observed {
+                let mut calls = 0;
+                assert_eq!(
+                    module_inventory(source.as_bytes(), limits, &mut || {
+                        calls += 1;
+                        if calls == cancelled_at {
+                            Err("stop")
+                        } else {
+                            Ok(())
+                        }
+                    }),
+                    Err(ModuleError::Cancelled("stop")),
+                    "checkpoint {cancelled_at}: {accepted}"
+                );
+                assert_eq!(calls, cancelled_at);
+            }
+        }
     }
 
     #[test]
@@ -6906,7 +7222,8 @@ mod tests {
                     | ModuleBodyStatement::Assignment(_)
                     | ModuleBodyStatement::ApplicationAssignment(_)
                     | ModuleBodyStatement::ExpressionAssignment(_)
-                    | ModuleBodyStatement::ExpressionCall(_) => None,
+                    | ModuleBodyStatement::ExpressionCall(_)
+                    | ModuleBodyStatement::ProcedureExit(_) => None,
                 })
                 .collect();
             assert_eq!(calls.len(), 3);
@@ -7555,7 +7872,8 @@ mod tests {
                 | ModuleBodyStatement::ApplicationAssignment(_)
                 | ModuleBodyStatement::ExpressionAssignment(_)
                 | ModuleBodyStatement::Call(_)
-                | ModuleBodyStatement::ExpressionCall(_) => 1,
+                | ModuleBodyStatement::ExpressionCall(_)
+                | ModuleBodyStatement::ProcedureExit(_) => 1,
             })
             .sum();
         assert_eq!(
