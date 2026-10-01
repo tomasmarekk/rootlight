@@ -15,7 +15,6 @@ schema = ["dep:schemars"]
 blake3.workspace = true
 schemars = { workspace = true, optional = true }
 serde.workspace = true
-thiserror.workspace = true
 
 [dev-dependencies]
 proptest.workspace = true

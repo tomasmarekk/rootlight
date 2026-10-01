@@ -662,28 +662,21 @@ fn text_checksum(prefix: &str, raw: &[u8]) -> [u8; CHECKSUM_BYTES] {
 }
 
 /// Errors returned by strict public ID decoding.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum IdParseError {
     /// The expected ID family prefix was absent.
-    #[error("invalid identifier prefix")]
     InvalidPrefix,
     /// The ID uses a recognized family with an unsupported encoding version.
-    #[error("unsupported identifier version")]
     UnsupportedVersion,
     /// The input contains uppercase characters.
-    #[error("uppercase identifier encoding is not canonical")]
     Uppercase,
     /// The input contains base32 padding.
-    #[error("padded identifier encoding is not canonical")]
     Padding,
     /// The input contains leading or trailing whitespace.
-    #[error("identifier encoding contains whitespace")]
     Whitespace,
     /// The encoded payload contains characters outside the base32 alphabet.
-    #[error("identifier encoding uses an invalid alphabet")]
     InvalidAlphabet,
     /// The encoded payload has the wrong fixed width.
-    #[error("invalid identifier encoded length: expected {expected}, got {actual}")]
     InvalidEncodedLength {
         /// Required unpadded base32 character count.
         expected: usize,
@@ -691,7 +684,6 @@ pub enum IdParseError {
         actual: usize,
     },
     /// The decoded payload has the wrong length.
-    #[error("invalid identifier payload length: expected {expected}, got {actual}")]
     InvalidLength {
         /// Required decoded payload length in bytes.
         expected: usize,
@@ -699,12 +691,39 @@ pub enum IdParseError {
         actual: usize,
     },
     /// The checksum does not match the family and raw bytes.
-    #[error("identifier checksum mismatch")]
     ChecksumMismatch,
     /// The input decodes but is not the unique canonical spelling.
-    #[error("identifier encoding is not canonical")]
     NonCanonical,
 }
+
+impl fmt::Display for IdParseError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::InvalidPrefix => formatter.write_str("invalid identifier prefix"),
+            Self::UnsupportedVersion => formatter.write_str("unsupported identifier version"),
+            Self::Uppercase => {
+                formatter.write_str("uppercase identifier encoding is not canonical")
+            }
+            Self::Padding => formatter.write_str("padded identifier encoding is not canonical"),
+            Self::Whitespace => formatter.write_str("identifier encoding contains whitespace"),
+            Self::InvalidAlphabet => {
+                formatter.write_str("identifier encoding uses an invalid alphabet")
+            }
+            Self::InvalidEncodedLength { expected, actual } => write!(
+                formatter,
+                "invalid identifier encoded length: expected {expected}, got {actual}"
+            ),
+            Self::InvalidLength { expected, actual } => write!(
+                formatter,
+                "invalid identifier payload length: expected {expected}, got {actual}"
+            ),
+            Self::ChecksumMismatch => formatter.write_str("identifier checksum mismatch"),
+            Self::NonCanonical => formatter.write_str("identifier encoding is not canonical"),
+        }
+    }
+}
+
+impl std::error::Error for IdParseError {}
 
 struct Hex<'a>(&'a [u8]);
 
@@ -773,6 +792,92 @@ mod tests {
 
     use super::*;
     use proptest::prelude::*;
+
+    fn assert_id_parse_error_contract(error: IdParseError, expected_display: &str) {
+        assert_eq!(error.to_string(), expected_display);
+        let erased: &(dyn std::error::Error + 'static) = &error;
+        assert!(erased.source().is_none());
+        assert_eq!(erased.downcast_ref::<IdParseError>(), Some(&error));
+        let owned: Box<dyn std::error::Error + Send + Sync> = Box::new(error);
+        assert_eq!(
+            *owned
+                .downcast::<IdParseError>()
+                .expect("identifier errors preserve their concrete type"),
+            error
+        );
+    }
+
+    #[test]
+    fn id_parse_errors_preserve_leaf_messages_and_trait_contracts() {
+        fn assert_traits<T>()
+        where
+            T: std::error::Error
+                + Send
+                + Sync
+                + Clone
+                + Copy
+                + PartialEq
+                + Eq
+                + fmt::Debug
+                + 'static,
+        {
+        }
+        assert_traits::<IdParseError>();
+
+        for (error, expected_display) in [
+            (IdParseError::InvalidPrefix, "invalid identifier prefix"),
+            (
+                IdParseError::UnsupportedVersion,
+                "unsupported identifier version",
+            ),
+            (
+                IdParseError::Uppercase,
+                "uppercase identifier encoding is not canonical",
+            ),
+            (
+                IdParseError::Padding,
+                "padded identifier encoding is not canonical",
+            ),
+            (
+                IdParseError::Whitespace,
+                "identifier encoding contains whitespace",
+            ),
+            (
+                IdParseError::InvalidAlphabet,
+                "identifier encoding uses an invalid alphabet",
+            ),
+            (
+                IdParseError::ChecksumMismatch,
+                "identifier checksum mismatch",
+            ),
+            (
+                IdParseError::NonCanonical,
+                "identifier encoding is not canonical",
+            ),
+        ] {
+            assert_id_parse_error_contract(error, expected_display);
+        }
+    }
+
+    #[test]
+    fn id_parse_error_length_messages_preserve_usize_boundaries() {
+        for expected in [0, 1, usize::MAX] {
+            for actual in [0, 1, usize::MAX] {
+                assert_id_parse_error_contract(
+                    IdParseError::InvalidEncodedLength { expected, actual },
+                    &format!(
+                        "invalid identifier encoded length: expected {expected}, got {actual}"
+                    ),
+                );
+                assert_id_parse_error_contract(
+                    IdParseError::InvalidLength { expected, actual },
+                    &format!(
+                        "invalid identifier payload length: expected {expected}, got {actual}"
+                    ),
+                );
+            }
+        }
+    }
 
     #[test]
     fn base32_codec_preserves_canonical_vectors_and_rejects_tail_bits() {
