@@ -547,17 +547,6 @@ fn contract<'a>(
     let Some(range) = rootlight_vba::procedure_parameter_range(bytes, check)? else {
         return Ok(None);
     };
-    let Some(written) = rootlight_vba::argument_list(
-        bytes.get(range).unwrap_or_default(),
-        parameters.len(),
-        check,
-    )?
-    else {
-        return Ok(None);
-    };
-    if written.len() != parameters.len() {
-        return Ok(None);
-    }
     parameters.sort_by_key(|entity| {
         entity
             .evidence
@@ -565,10 +554,54 @@ fn contract<'a>(
             .as_ref()
             .map(|source| source.span().start_byte())
     });
+    let Some(interior) = bytes.get(range.clone()) else {
+        return Ok(None);
+    };
+    let parameter_start = source
+        .span()
+        .start_byte()
+        .checked_add(u64::try_from(range.start).map_err(|_| ResolutionError::CountOverflow)?)
+        .ok_or(ResolutionError::CountOverflow)?;
+    enum CoverageFailure {
+        IncompleteEvidence,
+        Work(ResolutionError),
+    }
+    let declarations = parameters.iter().map(|parameter| {
+        let declaration = parameter
+            .evidence
+            .source
+            .as_ref()
+            .ok_or(CoverageFailure::IncompleteEvidence)?;
+        if declaration.span().file() != source.span().file() {
+            return Err(CoverageFailure::IncompleteEvidence);
+        }
+        let start = declaration
+            .span()
+            .start_byte()
+            .checked_sub(parameter_start)
+            .and_then(|offset| usize::try_from(offset).ok())
+            .ok_or(CoverageFailure::IncompleteEvidence)?;
+        let end = declaration
+            .span()
+            .end_byte()
+            .checked_sub(parameter_start)
+            .and_then(|offset| usize::try_from(offset).ok())
+            .ok_or(CoverageFailure::IncompleteEvidence)?;
+        Ok(start..end)
+    });
+    // Preserve missing-source fail-closed behavior while forwarding the exact
+    // work/cancellation error from the source-conservation scan.
+    match rootlight_vba::parameter_declarations_cover(interior, declarations, &mut || {
+        check().map_err(CoverageFailure::Work)
+    }) {
+        Ok(true) => {}
+        Ok(false) | Err(CoverageFailure::IncompleteEvidence) => return Ok(None),
+        Err(CoverageFailure::Work(error)) => return Err(error),
+    }
     let mut optional = Vec::new();
     let mut names = BTreeMap::new();
     let mut variadic = false;
-    for (position, (parameter, written)) in parameters.iter().zip(written).enumerate() {
+    for (position, parameter) in parameters.iter().enumerate() {
         check()?;
         let Some(declaration) = parameter.evidence.source.as_ref() else {
             return Ok(None);
@@ -588,9 +621,6 @@ fn contract<'a>(
         let Some(raw) = source_bytes(declaration, sources) else {
             return Ok(None);
         };
-        if raw.trim_ascii() != written.expression().trim_ascii() {
-            return Ok(None);
-        }
         let Some(name_bytes) = source_bytes(definition, sources) else {
             return Ok(None);
         };
@@ -611,9 +641,9 @@ fn contract<'a>(
         else {
             return Ok(None);
         };
-        let Some(prefix) = raw.get(..name_offset) else {
+        if raw.get(..name_offset).is_none() {
             return Ok(None);
-        };
+        }
         let is_optional = if let Some(name) = rootlight_vba::param_array_parameter(raw, check)? {
             if position + 1 != parameters.len()
                 || optional.iter().any(|optional| *optional)
@@ -629,7 +659,7 @@ fn contract<'a>(
             variadic = true;
             true
         } else {
-            let Some(optional) = parameter_modifiers(prefix, check)? else {
+            let Some(optional) = parameter_modifiers(raw, name_offset, check)? else {
                 return Ok(None);
             };
             optional
@@ -684,24 +714,44 @@ fn assignment_source(
 }
 
 fn parameter_modifiers(
-    mut bytes: &[u8],
+    bytes: &[u8],
+    name_offset: usize,
     check: &mut impl FnMut() -> Result<(), ResolutionError>,
 ) -> Result<Option<bool>, ResolutionError> {
+    if name_offset > bytes.len() {
+        return Ok(None);
+    }
+    let mut cursor = 0;
     let mut optional = false;
     let mut passing = false;
     loop {
-        bytes = bytes
-            .get(rootlight_vba::logical_whitespace_len(bytes, check)?..)
-            .unwrap_or_default();
-        if bytes.is_empty() {
+        let Some(remaining) = bytes.get(cursor..) else {
+            return Ok(None);
+        };
+        cursor = cursor
+            .checked_add(rootlight_vba::parameter_trivia_len(remaining, check)?)
+            .ok_or(ResolutionError::CountOverflow)?;
+        if cursor > name_offset {
+            return Ok(None);
+        }
+        if cursor == name_offset {
             return Ok(Some(optional));
         }
-        let length = bytes
+        let Some(remaining) = bytes.get(cursor..) else {
+            return Ok(None);
+        };
+        let length = remaining
             .iter()
             .take(9)
             .take_while(|byte| byte.is_ascii_alphabetic())
             .count();
-        let word = bytes.get(..length).unwrap_or_default();
+        let end = cursor
+            .checked_add(length)
+            .ok_or(ResolutionError::CountOverflow)?;
+        if end > name_offset {
+            return Ok(None);
+        }
+        let word = remaining.get(..length).unwrap_or_default();
         if word.eq_ignore_ascii_case(b"Optional") && !optional && !passing {
             optional = true;
         } else if (word.eq_ignore_ascii_case(b"ByVal") || word.eq_ignore_ascii_case(b"ByRef"))
@@ -712,8 +762,13 @@ fn parameter_modifiers(
             // ParamArray is validated from its complete declaration, not a prefix.
             return Ok(None);
         }
-        bytes = bytes.get(length..).unwrap_or_default();
-        if rootlight_vba::logical_whitespace_len(bytes, check)? == 0 {
+        cursor = end;
+        let Some(remaining) = bytes.get(cursor..) else {
+            return Ok(None);
+        };
+        // Scan the full clause: a prefix ending in Rem must not turn the joined
+        // spelling Remvalue into a comment merely by hiding its name bytes.
+        if rootlight_vba::parameter_trivia_len(remaining, check)? == 0 {
             return Ok(None);
         }
     }
@@ -834,6 +889,397 @@ fn arguments_match(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    type WrittenParameter<'a> = (&'a str, &'a str, &'a str);
+    type ParameterContractCase<'a> = (&'a str, &'a [WrittenParameter<'a>], &'a [bool]);
+
+    struct ParameterContractFixture {
+        source: String,
+        file: FileId,
+        target: EntityRecord,
+        parameters: Vec<EntityRecord>,
+        definitions: BTreeMap<SymbolId, SourceRef>,
+    }
+
+    impl ParameterContractFixture {
+        fn new(header: &str, parameters: &[WrittenParameter<'_>]) -> Self {
+            use rootlight_ids::{FactId, GenerationId, RepositoryId, content_hash};
+            use rootlight_ir::{AnalysisTier, EntityVisibility, FactEvidence, SourceSpan};
+
+            let source =
+                format!("Attribute VB_Name = \"Authored\"\nSub Target({header})\nEnd Sub\n");
+            let repository = RepositoryId::from_bytes([1; 16]);
+            let generation = GenerationId::from_bytes([2; 20]);
+            let file = FileId::from_bytes([3; 20]);
+            let target_id = SymbolId::from_bytes([4; 20]);
+            let parser = FactId::from_bytes([5; 20]);
+            let reference = |start, end| {
+                SourceRef::new(
+                    repository,
+                    generation,
+                    SourceSpan::new(
+                        file,
+                        u64::try_from(start).unwrap(),
+                        u64::try_from(end).unwrap(),
+                    )
+                    .unwrap(),
+                    content_hash(source.as_bytes()),
+                    None,
+                )
+            };
+            let entity = |id, kind, name: &str, container, start, end| EntityRecord {
+                id,
+                repository,
+                generation,
+                kind,
+                language: "vba".to_owned(),
+                tier: AnalysisTier::TierB,
+                canonical_name: name.to_owned(),
+                display_name: name.to_owned(),
+                qualified_name: format!("Authored.Target.{name}"),
+                container: Some(container),
+                visibility: EntityVisibility::Public,
+                flags: Vec::new(),
+                provenance: parser,
+                evidence: FactEvidence {
+                    source: Some(reference(start, end)),
+                    derivation: Vec::new(),
+                },
+            };
+            let target = entity(
+                target_id,
+                EntityKind::Function,
+                "Target",
+                ContainerRef::File(file),
+                source.find("Sub Target(").unwrap(),
+                source.find("End Sub").unwrap() + "End Sub".len(),
+            );
+            let mut owned = Vec::new();
+            let mut definitions = BTreeMap::new();
+            for (index, &(written, name, token)) in parameters.iter().enumerate() {
+                let id = SymbolId::from_bytes([u8::try_from(index + 6).unwrap(); 20]);
+                let start = source.find(written).unwrap();
+                owned.push(entity(
+                    id,
+                    EntityKind::Parameter,
+                    name,
+                    ContainerRef::Entity(target_id),
+                    start,
+                    start + written.len(),
+                ));
+                let definition_start = start + written.find(token).unwrap();
+                definitions.insert(
+                    id,
+                    reference(definition_start, definition_start + token.len()),
+                );
+            }
+            Self {
+                source,
+                file,
+                target,
+                parameters: owned,
+                definitions,
+            }
+        }
+
+        fn check<'a>(
+            &'a self,
+            parameters: Vec<&'a EntityRecord>,
+            check: &mut impl FnMut() -> Result<(), ResolutionError>,
+        ) -> Result<Option<Contract<'a>>, ResolutionError> {
+            let definitions = self
+                .definitions
+                .iter()
+                .map(|(id, source)| (*id, Some(source)))
+                .collect();
+            contract(
+                &self.target,
+                parameters,
+                &definitions,
+                &BTreeMap::from([(self.file, self.source.as_bytes())]),
+                check,
+            )
+        }
+    }
+
+    #[test]
+    fn parameter_contract_trivia_covers_only_exact_normalized_declarations() {
+        let cases: &[ParameterContractCase<'_>] = &[
+            ("Rem", &[], &[]),
+            (
+                "Remvalue",
+                &[("Remvalue", "Remvalue", "Remvalue")],
+                &[false],
+            ),
+            (
+                "Rem[value], Optional extra = 7",
+                &[
+                    ("[value]", "value", "[value]"),
+                    ("Optional extra = 7", "extra", "extra"),
+                ],
+                &[false, true],
+            ),
+            (
+                "\x0cByVal\x0cvalue\x0cAs\x0cLong\x0c",
+                &[("ByVal\x0cvalue\x0cAs\x0cLong", "value", "value")],
+                &[false],
+            ),
+            (
+                "ByVal Rem[value], Optional extra = \"x,y Rem\"",
+                &[
+                    ("ByVal Rem[value]", "value", "[value]"),
+                    ("Optional extra = \"x,y Rem\"", "extra", "extra"),
+                ],
+                &[false, true],
+            ),
+        ];
+        for &(header, written, expected_optional) in cases {
+            let fixture = ParameterContractFixture::new(header, written);
+            let contract = fixture
+                .check(fixture.parameters.iter().rev().collect(), &mut || Ok(()))
+                .unwrap()
+                .unwrap();
+            assert_eq!(contract.optional, expected_optional, "{header:?}");
+            assert_eq!(
+                contract
+                    .parameters
+                    .iter()
+                    .map(|parameter| parameter.id)
+                    .collect::<Vec<_>>(),
+                fixture
+                    .parameters
+                    .iter()
+                    .map(|parameter| parameter.id)
+                    .collect::<Vec<_>>(),
+            );
+            assert_eq!(contract.names.len(), written.len());
+            assert!(!contract.names.contains_key("rem"));
+            let call = if written.is_empty() {
+                b"()".as_slice()
+            } else {
+                b"(1)".as_slice()
+            };
+            assert!(
+                arguments_match(
+                    call,
+                    true,
+                    &contract.optional,
+                    &contract.names,
+                    contract.variadic,
+                    contract.kind,
+                    &mut || Ok(()),
+                )
+                .unwrap()
+                .is_some()
+            );
+            assert!(
+                arguments_match(
+                    b"(1, 2, 3)",
+                    true,
+                    &contract.optional,
+                    &contract.names,
+                    contract.variadic,
+                    contract.kind,
+                    &mut || Ok(()),
+                )
+                .unwrap()
+                .is_none()
+            );
+            if !written.is_empty() {
+                assert!(
+                    arguments_match(
+                        b"()",
+                        true,
+                        &contract.optional,
+                        &contract.names,
+                        contract.variadic,
+                        contract.kind,
+                        &mut || Ok(()),
+                    )
+                    .unwrap()
+                    .is_none()
+                );
+            }
+        }
+        let fixture = ParameterContractFixture::new(
+            "Rem[value], Optional extra = 7",
+            &[
+                ("[value]", "value", "[value]"),
+                ("Optional extra = 7", "extra", "extra"),
+            ],
+        );
+        assert!(fixture.check(Vec::new(), &mut || Ok(())).unwrap().is_none());
+        assert!(
+            fixture
+                .check(vec![&fixture.parameters[1]], &mut || Ok(()))
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            fixture
+                .check(
+                    vec![
+                        &fixture.parameters[0],
+                        &fixture.parameters[0],
+                        &fixture.parameters[1]
+                    ],
+                    &mut || Ok(())
+                )
+                .unwrap()
+                .is_none()
+        );
+        let mut missing_source = fixture.parameters[0].clone();
+        missing_source.evidence.source = None;
+        assert!(
+            fixture
+                .check(
+                    vec![&missing_source, &fixture.parameters[1]],
+                    &mut || Ok(())
+                )
+                .unwrap()
+                .is_none()
+        );
+        let mut moved = fixture.parameters[0].clone();
+        let original = moved.evidence.source.as_ref().unwrap();
+        moved.evidence.source = Some(SourceRef::new(
+            original.repository(),
+            original.generation(),
+            rootlight_ir::SourceSpan::new(
+                original.span().file(),
+                original.span().start_byte() + 1,
+                original.span().end_byte(),
+            )
+            .unwrap(),
+            original.content_hash(),
+            None,
+        ));
+        assert!(
+            fixture
+                .check(vec![&moved, &fixture.parameters[1]], &mut || Ok(()))
+                .unwrap()
+                .is_none()
+        );
+        let mut wrong_file = fixture.parameters[0].clone();
+        let original = wrong_file.evidence.source.as_ref().unwrap();
+        wrong_file.evidence.source = Some(SourceRef::new(
+            original.repository(),
+            original.generation(),
+            rootlight_ir::SourceSpan::new(
+                FileId::from_bytes([99; 20]),
+                original.span().start_byte(),
+                original.span().end_byte(),
+            )
+            .unwrap(),
+            original.content_hash(),
+            None,
+        ));
+        assert!(
+            fixture
+                .check(vec![&wrong_file, &fixture.parameters[1]], &mut || Ok(()))
+                .unwrap()
+                .is_none()
+        );
+        let mut wrong_name = fixture;
+        let definition = wrong_name.definitions.values_mut().next().unwrap();
+        *definition = SourceRef::new(
+            definition.repository(),
+            definition.generation(),
+            rootlight_ir::SourceSpan::new(
+                definition.span().file(),
+                definition.span().start_byte() + 1,
+                definition.span().end_byte(),
+            )
+            .unwrap(),
+            definition.content_hash(),
+            None,
+        );
+        assert!(
+            wrong_name
+                .check(wrong_name.parameters.iter().collect(), &mut || Ok(()))
+                .unwrap()
+                .is_none()
+        );
+        let comment_formal = ParameterContractFixture::new("Rem", &[("Rem", "Rem", "Rem")]);
+        assert!(
+            comment_formal
+                .check(comment_formal.parameters.iter().collect(), &mut || Ok(()))
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn parameter_contract_trivia_preserves_callback_errors_and_work_bounds() {
+        let fixture = ParameterContractFixture::new(
+            "ByVal Rem[value], Optional extra = 7",
+            &[
+                ("ByVal Rem[value]", "value", "[value]"),
+                ("Optional extra = 7", "extra", "extra"),
+            ],
+        );
+        let mut measured = ResolutionWorkBudget::new(usize::MAX);
+        assert!(
+            fixture
+                .check(fixture.parameters.iter().collect(), &mut || measured
+                    .consume())
+                .unwrap()
+                .is_some()
+        );
+        let required = measured.consumed();
+        assert!(required > 1);
+        for limit in [0, required - 1] {
+            let mut work = ResolutionWorkBudget::new(limit);
+            assert!(matches!(
+                fixture.check(fixture.parameters.iter().collect(), &mut || work.consume()),
+                Err(ResolutionError::WorkLimit { .. })
+            ));
+        }
+        let mut work = ResolutionWorkBudget::new(required);
+        assert!(
+            fixture
+                .check(fixture.parameters.iter().collect(), &mut || work.consume())
+                .unwrap()
+                .is_some()
+        );
+        let sources = BTreeMap::from([(fixture.file, fixture.source.as_bytes())]);
+        let bytes =
+            source_bytes(fixture.target.evidence.source.as_ref().unwrap(), &sources).unwrap();
+        let mut prefix_checks = 0;
+        rootlight_vba::procedure_header(bytes, &mut || {
+            prefix_checks += 1;
+            Ok::<(), ResolutionError>(())
+        })
+        .unwrap()
+        .unwrap();
+        rootlight_vba::procedure_parameter_range(bytes, &mut || {
+            prefix_checks += 1;
+            Ok::<(), ResolutionError>(())
+        })
+        .unwrap()
+        .unwrap();
+        let mut checks = 0;
+        assert!(matches!(
+            fixture.check(fixture.parameters.iter().collect(), &mut || {
+                checks += 1;
+                if checks == prefix_checks + 1 {
+                    Err(ResolutionError::CountOverflow)
+                } else {
+                    Ok(())
+                }
+            }),
+            Err(ResolutionError::CountOverflow)
+        ));
+        assert_eq!(checks, prefix_checks + 1);
+        let cancellation = Cancellation::new();
+        cancellation.cancel(rootlight_cancel::CancellationReason::ClientRequest);
+        assert!(matches!(
+            fixture.check(fixture.parameters.iter().collect(), &mut || {
+                cancellation.check()?;
+                Ok(())
+            }),
+            Err(ResolutionError::Cancelled(_))
+        ));
+    }
 
     #[test]
     fn unresolved_calls_return_the_selected_callee_without_repeating_work() {
@@ -1039,8 +1485,9 @@ mod tests {
             ("ByVal", None),
             ("ByVal\n", None),
         ] {
+            let source = format!("{prefix}value");
             assert_eq!(
-                parameter_modifiers(prefix.as_bytes(), &mut || Ok(())).unwrap(),
+                parameter_modifiers(source.as_bytes(), prefix.len(), &mut || Ok(())).unwrap(),
                 expected,
                 "{prefix:?}"
             );
@@ -1048,7 +1495,7 @@ mod tests {
         let cancellation = Cancellation::new();
         cancellation.cancel(rootlight_cancel::CancellationReason::ClientRequest);
         assert!(matches!(
-            parameter_modifiers(b"Optional ", &mut || {
+            parameter_modifiers(b"Optional value", "Optional ".len(), &mut || {
                 cancellation.check()?;
                 Ok(())
             }),
@@ -1066,6 +1513,82 @@ mod tests {
                 &mut || { work.consume() }
             ),
             Err(ResolutionError::WorkLimit { .. })
+        ));
+    }
+
+    #[test]
+    fn parameter_modifier_trivia_uses_full_clauses_and_exact_name_boundaries() {
+        for (source, name, expected) in [
+            ("ByVal\x0cvalue", "value", Some(false)),
+            ("ByVal Rem[value]", "[value]", Some(false)),
+            ("Optional\x0cvalue = 7", "value", Some(true)),
+            (
+                "Optional Rem\x0cByRef Rem[value] = \"Remvalue\"",
+                "[value]",
+                Some(true),
+            ),
+            ("ByRef Remvalue", "Remvalue", Some(false)),
+            ("ByVal Rem$", "Rem$", Some(false)),
+            ("ByVal Rem[value]", "value", None),
+            ("Optionality value", "value", None),
+            ("ByVal Optional value", "value", None),
+            ("Optional Rem value", "value", None),
+        ] {
+            assert_eq!(
+                parameter_modifiers(
+                    source.as_bytes(),
+                    source.find(name).unwrap(),
+                    &mut || Ok(()),
+                )
+                .unwrap(),
+                expected,
+                "{source:?}: {name:?}",
+            );
+        }
+        assert_eq!(
+            parameter_modifiers(b"ByVal value", 5, &mut || Ok(())).unwrap(),
+            None,
+        );
+        assert_eq!(
+            parameter_modifiers(b"value", 6, &mut || Ok(())).unwrap(),
+            None,
+        );
+    }
+
+    #[test]
+    fn parameter_modifier_trivia_preserves_work_limits_and_cancellation() {
+        let source = b"Optional Rem\x0cByRef Rem[value] = 7";
+        let name_offset = "Optional Rem\x0cByRef Rem".len();
+        let mut required = 0;
+        assert_eq!(
+            parameter_modifiers(source, name_offset, &mut || {
+                required += 1;
+                Ok(())
+            })
+            .unwrap(),
+            Some(true),
+        );
+        assert!(required > 1);
+        for limit in [0, required - 1] {
+            let mut work = ResolutionWorkBudget::new(limit);
+            assert!(matches!(
+                parameter_modifiers(source, name_offset, &mut || work.consume()),
+                Err(ResolutionError::WorkLimit { .. }),
+            ));
+        }
+        let mut work = ResolutionWorkBudget::new(required);
+        assert_eq!(
+            parameter_modifiers(source, name_offset, &mut || work.consume()).unwrap(),
+            Some(true),
+        );
+        let cancellation = Cancellation::new();
+        cancellation.cancel(rootlight_cancel::CancellationReason::ClientRequest);
+        assert!(matches!(
+            parameter_modifiers(source, name_offset, &mut || {
+                cancellation.check()?;
+                Ok(())
+            }),
+            Err(ResolutionError::Cancelled(_)),
         ));
     }
 }

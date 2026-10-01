@@ -1568,40 +1568,52 @@ impl<'a> VbaBindings<'a> {
         let Some(range) = rootlight_vba::procedure_parameter_range(source, &mut check)? else {
             return Ok(false);
         };
-        let Some(written) = rootlight_vba::argument_list(
+        let parameter_start = scope_fact
+            .span()
+            .start_byte()
+            .checked_add(u64::try_from(range.start).map_err(|_| invalid_capture())?)
+            .ok_or_else(invalid_capture)?;
+        let declarations = parameters.iter().map(|(declaration, _, _)| {
+            if declaration.span().file() != scope_fact.span().file() {
+                return Err(invalid_capture());
+            }
+            let start = declaration
+                .span()
+                .start_byte()
+                .checked_sub(parameter_start)
+                .ok_or_else(invalid_capture)?;
+            let end = declaration
+                .span()
+                .end_byte()
+                .checked_sub(parameter_start)
+                .ok_or_else(invalid_capture)?;
+            Ok(usize::try_from(start).map_err(|_| invalid_capture())?
+                ..usize::try_from(end).map_err(|_| invalid_capture())?)
+        });
+        // Actual declaration spans own their clauses. Header comments may be
+        // trivia between those clauses, never invented call arguments/formals.
+        if !rootlight_vba::parameter_declarations_cover(
             source.get(range).ok_or_else(invalid_capture)?,
-            self.maximum_name_bytes,
+            declarations,
             &mut check,
-        )?
-        else {
-            return Ok(false);
-        };
-        if written.len() != parameters.len() {
+        )? {
             return Ok(false);
         }
         let mut variadic = None;
-        for (position, (written, (declaration, definition, _))) in
-            written.iter().zip(parameters).enumerate()
-        {
+        for (position, (declaration, definition, _)) in parameters.iter().enumerate() {
             cancellation.check()?;
             let start =
                 usize::try_from(declaration.span().start_byte()).map_err(|_| invalid_capture())?;
             let end =
                 usize::try_from(declaration.span().end_byte()).map_err(|_| invalid_capture())?;
-            if self.source.get(start..end).map(<[u8]>::trim_ascii)
-                != Some(written.expression().trim_ascii())
-            {
-                return Ok(false);
-            }
+            let raw = self.source.get(start..end).ok_or_else(invalid_capture)?;
             let name_start =
                 usize::try_from(definition.span().start_byte()).map_err(|_| invalid_capture())?;
             let modifiers = self
                 .source
                 .get(start..name_start)
                 .ok_or_else(invalid_capture)?;
-            if let Some(name) =
-                rootlight_vba::param_array_parameter(written.expression(), &mut check)?
-            {
+            if let Some(name) = rootlight_vba::param_array_parameter(raw, &mut check)? {
                 let name_end =
                     usize::try_from(definition.span().end_byte()).map_err(|_| invalid_capture())?;
                 let Some(written_name) = self.source.get(name_start..name_end) else {

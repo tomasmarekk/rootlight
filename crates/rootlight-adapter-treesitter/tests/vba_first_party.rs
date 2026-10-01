@@ -31,6 +31,7 @@ const CALL_MODULE: &[u8] = b"Attribute VB_Name = \"Authored\"\r\nSub Notify()\r\
 const PARAMETER_MODULE: &[u8] = b"Attribute VB_Name = \"Authored\"\r\nSub Accept(ByVal [value] As Long, ByRef text As String)\r\n[value] = [value]\r\ntext = text\r\nEnd Sub\r\nFunction Echo(item As Long) As Long\r\nEcho = item\r\nEnd Function\r\n";
 const CALL_ARGUMENT_MODULE: &[u8] = b"Attribute VB_Name = \"Authored\"\r\nSub Run()\r\nDim value As Long\r\nCall Target(value, 7, \"a,\"\"b\"\":()\", True, [value])\r\nCall Target( value, value )\r\nCall Target()\r\nEnd Sub\r\n";
 const OPTIONAL_PARAMETER_MODULE: &[u8] = b"Attribute VB_Name = \"Authored\"\r\nSub Accept(required As Long, Optional ByVal count As Long = 007, Optional [text] As String = \"a,\"\"b\"\":()\", Optional flag As Boolean = False, Optional unset As Long)\r\ncount = required\r\n[text] = [text]\r\nEnd Sub\r\n";
+const OMITTED_TYPE_MODULE: &[u8] = b"Attribute VB_Name = \"Authored\"\r\nSub Accept(required, ByVal typed As Long, Optional ByVal count = 007, Optional [text] = \"a,\"\"b\"\":()\", Optional flag = False, Optional unset)\r\ncount = required\r\n[text] = [text]\r\nEnd Sub\r\nFunction Echo(ByRef value) As Long\r\nEcho = value\r\nEnd Function\r\n";
 
 #[test]
 fn accepted_modules_preserve_exact_identity_without_native_pool_or_cache_work() {
@@ -480,6 +481,417 @@ fn intrinsic_parameters_preserve_exact_identity_and_mandatory_retention() {
         assert_eq!(stats.pooled_parsers, 0);
         assert_eq!(stats.checked_out_parsers, 0);
         assert_eq!(stats.cache.entries, 0);
+    }
+}
+
+#[test]
+fn header_parameter_trivia_never_becomes_a_fabricated_formal() {
+    let source = b"Sub Empty(Rem)\nEnd Sub\nSub Accept(Rem[value], Optional other = 7)\nEnd Sub\n";
+    let text = std::str::from_utf8(source).unwrap();
+    for language in ["vba", "visual-basic-classic"] {
+        let fixture = Fixture::new(source);
+        let provider = provider();
+        let full_limits = limits(4096);
+        let request = fixture.request(&full_limits, language, Vec::new());
+        assert_eq!(request.source().source_ref(), &fixture.source);
+        assert_eq!(
+            fixture.source.content_hash(),
+            rootlight_ids::content_hash(source)
+        );
+        let required = provider
+            .required_syntax_fact_count(&request, &deadline())
+            .unwrap();
+        assert_eq!(required, 15);
+        let full = parse(&provider, &request);
+        assert_eq!(full.report().coverage().status(), CoverageStatus::Complete);
+        assert_eq!(full.report().resources().syntax_nodes(), 10);
+        assert!(full.diagnostics().is_empty());
+        let comments: Vec<_> = full
+            .facts()
+            .iter()
+            .filter(|fact| fact.syntax_kind().as_str() == "vba.comment.comment")
+            .collect();
+        assert_eq!(comments.len(), 2);
+        for (comment, start) in comments
+            .iter()
+            .zip([text.find("Rem)").unwrap(), text.find("Rem[value]").unwrap()])
+        {
+            assert_eq!(comment.span().start_byte(), u64::try_from(start).unwrap());
+            assert_eq!(comment.span().end_byte(), u64::try_from(start + 3).unwrap());
+            assert_eq!(bytes_at(source, comment.span()), b"Rem");
+            assert!(!full.facts().iter().any(|fact| {
+                fact.syntax_kind().as_str() == "vba.identifier.definition"
+                    && fact.span() == comment.span()
+            }));
+        }
+        let exact_limits = limits(required);
+        let exact = parse(
+            &provider,
+            &fixture.request(&exact_limits, language, Vec::new()),
+        );
+        assert_eq!(exact.facts().len(), required);
+        for output in [&full, &exact] {
+            let parameters: Vec<_> = output
+                .facts()
+                .iter()
+                .filter(|fact| {
+                    matches!(
+                        fact.syntax_kind().as_str(),
+                        "vba.parameter.declaration" | "vba.omittable_parameter.declaration"
+                    )
+                })
+                .collect();
+            assert_eq!(parameters.len(), 2);
+            for (parameter, clause, name) in [
+                (parameters[0], "[value]", "[value]"),
+                (parameters[1], "Optional other = 7", "other"),
+            ] {
+                let start = text.find(clause).unwrap();
+                assert_eq!(parameter.span().start_byte(), u64::try_from(start).unwrap());
+                assert_eq!(
+                    parameter.span().end_byte(),
+                    u64::try_from(start + clause.len()).unwrap()
+                );
+                assert_eq!(bytes_at(source, parameter.span()), clause.as_bytes());
+                assert!(output.facts().iter().any(|fact| {
+                    fact.parent() == Some(parameter.local_id())
+                        && fact.syntax_kind().as_str() == "vba.identifier.definition"
+                        && bytes_at(source, fact.span()) == name.as_bytes()
+                }));
+            }
+            let empty = output
+                .facts()
+                .iter()
+                .find(|fact| {
+                    fact.syntax_kind().as_str() == "vba.sub_function.declaration"
+                        && bytes_at(source, fact.span()).starts_with(b"Sub Empty")
+                })
+                .unwrap();
+            assert!(
+                parameters
+                    .iter()
+                    .all(|parameter| parameter.parent() != Some(empty.local_id()))
+            );
+        }
+        let short_limits = limits(required - 1);
+        let request = fixture.request(&short_limits, language, Vec::new());
+        assert_eq!(
+            execute_parse(
+                &provider,
+                &request,
+                MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
+                &deadline()
+            )
+            .unwrap_err(),
+            AdapterError::Sink(SinkError::StreamLimit {
+                resource: ResourceKind::RequiredSyntaxFacts,
+                observed: required,
+                limit: required - 1
+            })
+        );
+        let cancelled = deadline();
+        cancelled.cancel(CancellationReason::ClientRequest);
+        assert!(matches!(
+            execute_parse(
+                &provider,
+                &request,
+                MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
+                &cancelled
+            ),
+            Err(AdapterError::Cancelled {
+                reason: CancellationReason::ClientRequest
+            })
+        ));
+        assert_eq!(provider.stats().pooled_parsers, 0);
+        assert_eq!(provider.stats().checked_out_parsers, 0);
+        assert_eq!(provider.stats().cache.entries, 0);
+    }
+}
+
+#[test]
+fn omitted_types_preserve_exact_written_clauses_and_bound_source_identity() {
+    let source = std::str::from_utf8(OMITTED_TYPE_MODULE).unwrap();
+    let clauses = [
+        ("required", "required", "vba.parameter.declaration"),
+        ("ByVal typed As Long", "typed", "vba.parameter.declaration"),
+        (
+            "Optional ByVal count = 007",
+            "count",
+            "vba.omittable_parameter.declaration",
+        ),
+        (
+            "Optional [text] = \"a,\"\"b\"\":()\"",
+            "[text]",
+            "vba.omittable_parameter.declaration",
+        ),
+        (
+            "Optional flag = False",
+            "flag",
+            "vba.omittable_parameter.declaration",
+        ),
+        (
+            "Optional unset",
+            "unset",
+            "vba.omittable_parameter.declaration",
+        ),
+        ("ByRef value", "value", "vba.parameter.declaration"),
+    ];
+    for language in ["vba", "visual-basic-classic"] {
+        let fixture = Fixture::new(OMITTED_TYPE_MODULE);
+        let provider = provider();
+        let full_limits = limits(4096);
+        let request = fixture.request(&full_limits, language, Vec::new());
+        assert_eq!(request.source().source_ref(), &fixture.source);
+        assert_eq!(request.source().bytes(), OMITTED_TYPE_MODULE);
+        assert_eq!(
+            fixture.source.content_hash(),
+            rootlight_ids::content_hash(OMITTED_TYPE_MODULE)
+        );
+        assert_eq!(
+            fixture.source.content_hash(),
+            fixture.snapshot.content_hash()
+        );
+        let required = provider
+            .required_syntax_fact_count(&request, &deadline())
+            .unwrap();
+        assert_eq!(required, 26);
+        let full = parse(&provider, &request);
+        assert_eq!(full.report().coverage().status(), CoverageStatus::Complete);
+        assert_eq!(
+            full.report().coverage().covered_source_bytes(),
+            OMITTED_TYPE_MODULE.len()
+        );
+        assert_eq!(full.report().resources().syntax_nodes(), 21);
+        assert!(full.diagnostics().is_empty());
+        assert_eq!(
+            full.facts()
+                .iter()
+                .filter(|fact| {
+                    fact.syntax_kind().as_str() == "vba.parameter.declaration"
+                        || fact.syntax_kind().as_str() == "vba.omittable_parameter.declaration"
+                })
+                .count(),
+            clauses.len()
+        );
+        for fact in full.facts() {
+            assert_eq!(fact.span().file(), fixture.source.span().file());
+            assert!(fact.span().end_byte() <= fixture.source.span().end_byte());
+            assert!(!fact.syntax_kind().as_str().contains("variant"));
+            if fact.syntax_kind().as_str().ends_with(".reference") {
+                assert!(
+                    [
+                        b"count".as_slice(),
+                        b"required",
+                        b"[text]",
+                        b"Echo",
+                        b"value"
+                    ]
+                    .contains(&bytes_at(OMITTED_TYPE_MODULE, fact.span()))
+                );
+            }
+        }
+        let string_start = u64::try_from(source.find("\"a,").unwrap()).unwrap();
+        let strings: Vec<_> = full
+            .facts()
+            .iter()
+            .filter(|fact| {
+                fact.syntax_kind().as_str() == "vba.string.string"
+                    && fact.span().start_byte() == string_start
+            })
+            .collect();
+        assert_eq!(strings.len(), 1);
+        assert_eq!(
+            bytes_at(OMITTED_TYPE_MODULE, strings[0].span()),
+            b"\"a,\"\"b\"\":()\""
+        );
+        for literal in ["007", "False"] {
+            let start = u64::try_from(source.find(literal).unwrap()).unwrap();
+            assert!(!full.facts().iter().any(|fact| {
+                fact.syntax_kind().as_str().ends_with(".reference")
+                    && fact.span().start_byte() == start
+            }));
+        }
+        let exact_limits = limits(required);
+        let exact = parse(
+            &provider,
+            &fixture.request(&exact_limits, language, Vec::new()),
+        );
+        assert_eq!(exact.facts().len(), required);
+        assert_eq!(exact.report().coverage().status(), CoverageStatus::Bounded);
+        assert_eq!(exact.report().resources().syntax_nodes(), 21);
+        for output in [&full, &exact] {
+            for (clause, name, syntax) in clauses {
+                let start = source.find(clause).unwrap();
+                let declaration = output
+                    .facts()
+                    .iter()
+                    .find(|fact| {
+                        fact.syntax_kind().as_str() == syntax
+                            && fact.span().start_byte() == u64::try_from(start).unwrap()
+                    })
+                    .unwrap();
+                assert_eq!(
+                    declaration.span().end_byte(),
+                    u64::try_from(start + clause.len()).unwrap()
+                );
+                assert_eq!(
+                    bytes_at(OMITTED_TYPE_MODULE, declaration.span()),
+                    clause.as_bytes()
+                );
+                let name_start = start + clause.find(name).unwrap();
+                let definition = output
+                    .facts()
+                    .iter()
+                    .find(|fact| {
+                        fact.syntax_kind().as_str() == "vba.identifier.definition"
+                            && fact.parent() == Some(declaration.local_id())
+                            && fact.span().start_byte() == u64::try_from(name_start).unwrap()
+                    })
+                    .unwrap();
+                assert_eq!(
+                    bytes_at(OMITTED_TYPE_MODULE, definition.span()),
+                    name.as_bytes()
+                );
+                assert_eq!(
+                    definition.span().end_byte(),
+                    u64::try_from(name_start + name.len()).unwrap()
+                );
+                let owner = output
+                    .facts()
+                    .iter()
+                    .find(|fact| Some(fact.local_id()) == declaration.parent())
+                    .unwrap();
+                assert!(matches!(
+                    owner.syntax_kind().as_str(),
+                    "vba.sub_function.declaration" | "vba.function.declaration"
+                ));
+                assert!(
+                    owner.span().start_byte() <= declaration.span().start_byte()
+                        && owner.span().end_byte() >= declaration.span().end_byte()
+                );
+            }
+        }
+        assert_eq!(full.facts(), parse(&provider, &request).facts());
+        assert_eq!(provider.stats().pooled_parsers, 0);
+        assert_eq!(provider.stats().checked_out_parsers, 0);
+        assert_eq!(provider.stats().cache.entries, 0);
+    }
+}
+
+#[test]
+fn omitted_type_identity_retains_every_formal_at_exact_and_short_budgets() {
+    for (parameters, parameter_count, optional_count, defaults, required) in [
+        ("value", 1, 0, 0, 9),
+        ("ByVal first, ByRef second", 2, 0, 0, 11),
+        ("Optional value", 1, 1, 0, 9),
+        ("Optional value = 7", 1, 1, 1, 9),
+        ("required, Optional value = \"x\"", 2, 1, 1, 11),
+        (
+            "typed As Long, untyped, Optional count = 7, Optional flag = True",
+            4,
+            2,
+            2,
+            15,
+        ),
+    ] {
+        let source = format!("Sub Run({parameters})\nEnd Sub\n");
+        for language in ["vba", "visual-basic-classic"] {
+            let fixture = Fixture::new(source.as_bytes());
+            let provider = provider();
+            let full_limits = limits(4096);
+            let request = fixture.request(&full_limits, language, Vec::new());
+            assert_eq!(
+                provider
+                    .required_syntax_fact_count(&request, &deadline())
+                    .unwrap(),
+                required
+            );
+            let full = parse(&provider, &request);
+            assert_eq!(full.report().coverage().status(), CoverageStatus::Complete);
+            assert_eq!(
+                full.report().resources().syntax_nodes(),
+                4 + parameter_count + defaults
+            );
+            assert!(full.diagnostics().is_empty());
+            assert!(
+                full.facts()
+                    .iter()
+                    .all(|fact| !fact.syntax_kind().as_str().ends_with(".reference"))
+            );
+            let exact_limits = limits(required);
+            let exact = parse(
+                &provider,
+                &fixture.request(&exact_limits, language, Vec::new()),
+            );
+            assert_eq!(exact.facts().len(), required);
+            for output in [&full, &exact] {
+                assert_eq!(
+                    output
+                        .facts()
+                        .iter()
+                        .filter(|fact| fact.syntax_kind().as_str()
+                            == "vba.omittable_parameter.declaration")
+                        .count(),
+                    optional_count
+                );
+                let declarations: Vec<_> = output
+                    .facts()
+                    .iter()
+                    .filter(|fact| {
+                        matches!(
+                            fact.syntax_kind().as_str(),
+                            "vba.parameter.declaration" | "vba.omittable_parameter.declaration"
+                        )
+                    })
+                    .collect();
+                assert_eq!(declarations.len(), parameter_count);
+                for declaration in declarations {
+                    assert_eq!(
+                        output
+                            .facts()
+                            .iter()
+                            .filter(|fact| {
+                                fact.parent() == Some(declaration.local_id())
+                                    && fact.syntax_kind().as_str() == "vba.identifier.definition"
+                            })
+                            .count(),
+                        1
+                    );
+                }
+            }
+            let short_limits = limits(required - 1);
+            let request = fixture.request(&short_limits, language, Vec::new());
+            assert_eq!(
+                execute_parse(
+                    &provider,
+                    &request,
+                    MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
+                    &deadline()
+                )
+                .unwrap_err(),
+                AdapterError::Sink(SinkError::StreamLimit {
+                    resource: ResourceKind::RequiredSyntaxFacts,
+                    observed: required,
+                    limit: required - 1
+                })
+            );
+            let cancelled = deadline();
+            cancelled.cancel(CancellationReason::ClientRequest);
+            assert!(matches!(
+                execute_parse(
+                    &provider,
+                    &request,
+                    MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
+                    &cancelled
+                ),
+                Err(AdapterError::Cancelled {
+                    reason: CancellationReason::ClientRequest
+                })
+            ));
+            assert_eq!(provider.stats().pooled_parsers, 0);
+            assert_eq!(provider.stats().checked_out_parsers, 0);
+            assert_eq!(provider.stats().cache.entries, 0);
+        }
     }
 }
 

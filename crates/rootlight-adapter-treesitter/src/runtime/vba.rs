@@ -697,22 +697,46 @@ fn lexical_trivia(
             }
             cursor += 1;
             continue;
-        } else if *byte == b'\''
-            || (source
-                .get(cursor..cursor.saturating_add(3))
-                .is_some_and(|word| word.eq_ignore_ascii_case(b"Rem"))
-                && (cursor == 0
-                    || source
-                        .get(cursor - 1)
-                        .is_some_and(|byte| byte.is_ascii_whitespace() || *byte == b':'))
-                && source
-                    .get(cursor + 3)
-                    .is_none_or(|byte| byte.is_ascii_whitespace()))
-        {
+        } else if *byte == b'\'' {
             while source.get(cursor).is_some_and(|byte| *byte != b'\n') {
                 cancellation.check()?;
                 cursor += 1;
             }
+        } else if byte.is_ascii_alphabetic() || *byte == b'_' {
+            while source
+                .get(cursor)
+                .is_some_and(|byte| byte.is_ascii_alphanumeric() || *byte == b'_')
+            {
+                cancellation.check()?;
+                cursor += 1;
+            }
+            if source
+                .get(cursor)
+                .is_some_and(|byte| b"%&^!#@$".contains(byte))
+            {
+                cursor += 1;
+                continue;
+            }
+            if !source
+                .get(start..cursor)
+                .is_some_and(|word| word.eq_ignore_ascii_case(b"Rem"))
+            {
+                continue;
+            }
+            // Native Rem is a bare three-byte extra unless a space/tab starts
+            // its line tail. Header delimiters and form feeds are not that tail.
+            if matches!(source.get(cursor), Some(b' ' | b'\t')) {
+                while source.get(cursor).is_some_and(|byte| *byte != b'\n') {
+                    cancellation.check()?;
+                    cursor += 1;
+                }
+            }
+        } else if byte.is_ascii_digit() {
+            while source.get(cursor).is_some_and(u8::is_ascii_digit) {
+                cancellation.check()?;
+                cursor += 1;
+            }
+            continue;
         } else {
             cursor += 1;
             continue;
@@ -842,7 +866,15 @@ mod tests {
             &cancellation,
         )
         .unwrap()
-        .expect("the authored complete procedural module is supported");
+        .unwrap_or_else(|| {
+            let source = request.source().bytes();
+            let prefix = source.get(..source.len().min(1024)).unwrap();
+            panic!(
+                "the authored complete procedural module is supported: language={language:?}, source_bytes={}, source_prefix={:?}",
+                source.len(),
+                String::from_utf8_lossy(prefix),
+            );
+        });
         let identity = normalize_query_candidates(
             candidates(
                 &prepared.inventory,
@@ -1049,6 +1081,788 @@ mod tests {
         ] {
             for language in ["vba", "visual-basic-classic"] {
                 compare_native(&Fixture::new(source), language, &[]);
+            }
+        }
+    }
+
+    #[test]
+    fn first_party_vba_omitted_types_match_the_private_native_route() {
+        for passing in ["", "ByVal ", "ByRef "] {
+            for parameters in [
+                format!("{passing}value"),
+                format!("Optional {passing}value"),
+                format!("Optional {passing}value = 007"),
+                format!("Optional {passing}[value] = \"a,\"\"b\"\":()\""),
+                format!("Optional {passing}value = False"),
+                format!(
+                    "{passing}value, typed As Long, Optional unset, Optional text As String = \"x\""
+                ),
+            ] {
+                for category in ["Sub", "Function"] {
+                    let source = format!("{category} Run({parameters})\nEnd {category}\n");
+                    for language in ["vba", "visual-basic-classic"] {
+                        compare_native(&Fixture::new(&source), language, &[]);
+                    }
+                }
+            }
+        }
+        for source in [
+            "Sub Run(first, ByVal second, ByRef third, Optional count = 1, Optional flag As Boolean = True)\nEnd Sub\n",
+            "Sub Run(value, value, Optional value, Optional value = 1)\nEnd Sub\n",
+            "Sub Run([Optional], ByVal [ByRef], Optional [As] = True, Optional [Rem])\nEnd Sub\n",
+            "Sub Run(Optional first = 1, second, Optional third)\nEnd Sub\n",
+            "Public Sub Run(ByVal first, _\r\nByRef second As Long, Optional [text] = \"x\", Optional unset) ' header\r\nDim value As Long\r\nvalue = first\r\nCall Target(first, second, [text])\r\nEnd Sub ' done\r\n",
+            "Sub Run(first, Optional second = 1):first = second:End Sub\n",
+            "Function Echo(ByRef value, Optional count = 1) As Long\nEcho = value\nEnd Function\n",
+            "Sub Before(value)\nEnd Sub\nSub After(Optional value = \"x\")\nEnd Sub\n",
+        ] {
+            for language in ["vba", "visual-basic-classic"] {
+                compare_native(&Fixture::new(source), language, &[]);
+            }
+        }
+        let source = "Sub Run(ByVal untyped, typed As Long, Optional unset, Optional text = \"x\")\nEnd Sub\n";
+        for language in ["vba", "visual-basic-classic"] {
+            let fixture = Fixture::new(source);
+            let request = fixture.request(language, &[]);
+            let prepared = prepare(
+                &fixture.provider,
+                &request,
+                None,
+                &[],
+                fixture.provider.config.default_settings(),
+                &Cancellation::new(),
+            )
+            .unwrap()
+            .unwrap();
+            let parameters = prepared.inventory.procedures()[0].parameters();
+            assert_eq!(parameters.len(), 4);
+            for (parameter, ty) in parameters.iter().zip([None, Some("Long"), None, None]) {
+                assert_eq!(
+                    parameter
+                        .type_range()
+                        .map(|range| &source.as_bytes()[range]),
+                    ty.map(str::as_bytes)
+                );
+            }
+            let all = candidates(
+                &prepared.inventory,
+                source.as_bytes(),
+                true,
+                request.limits().max_syntax_nodes(),
+                &Cancellation::new(),
+            )
+            .unwrap();
+            assert!(
+                all.iter()
+                    .all(|candidate| candidate.role != StructuralRole::Reference)
+            );
+            assert!(
+                all.iter()
+                    .all(|candidate| candidate.syntax != "vba.variant")
+            );
+        }
+    }
+
+    #[test]
+    fn first_party_vba_omitted_type_name_positions_keep_native_admission() {
+        let mut unexpected = Vec::new();
+        let mut missing = Vec::new();
+        let mut complete = 0;
+        let mut unknown = 0;
+        for name in [
+            "Name",
+            "Line",
+            "Load",
+            "Unload",
+            "Input",
+            "Print",
+            "Close",
+            "Reset",
+            "Beep",
+            "DefBool",
+            "DefByte",
+            "DefInt",
+            "DefLng",
+            "DefLngLng",
+            "DefLngPtr",
+            "DefCur",
+            "DefSng",
+            "DefDbl",
+            "DefDate",
+            "DefStr",
+            "DefObj",
+            "DefVar",
+            "DefDec",
+            "Optional",
+            "ByVal",
+            "ByRef",
+            "ParamArray",
+            "As",
+            "Rem",
+        ] {
+            for passing in ["", "ByVal ", "ByRef "] {
+                for clause in [
+                    format!("{passing}{name}"),
+                    format!("{passing}[{name}]"),
+                    format!("Optional {passing}{name}"),
+                    format!("Optional {passing}[{name}]"),
+                    format!("Optional {passing}{name} = 1"),
+                    format!("Optional {passing}[{name}] = \"x\""),
+                ] {
+                    let source = format!("Sub Run({clause})\nEnd Sub\n");
+                    for language in ["vba", "visual-basic-classic"] {
+                        let fixture = Fixture::new(&source);
+                        let request = fixture.request(language, &[]);
+                        let cancellation = Cancellation::new();
+                        let native = fixture
+                            .provider
+                            .prepare_tree(
+                                &request,
+                                None,
+                                &[],
+                                fixture.provider.config.default_settings(),
+                                &cancellation,
+                            )
+                            .unwrap();
+                        assert!(native.traversal.fully_traversed);
+                        let admitted = prepare(
+                            &fixture.provider,
+                            &request,
+                            None,
+                            &[],
+                            fixture.provider.config.default_settings(),
+                            &cancellation,
+                        )
+                        .unwrap()
+                        .is_some();
+                        if native.traversal.coverage == CoverageStatus::Unknown {
+                            unknown += 1;
+                            if admitted {
+                                unexpected.push(format!("{language}:{clause}"));
+                            }
+                        } else {
+                            assert_eq!(native.traversal.coverage, CoverageStatus::Complete);
+                            complete += 1;
+                            if admitted {
+                                compare_native(&Fixture::new(&source), language, &[]);
+                            } else {
+                                missing.push(format!("{language}:{clause}"));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        assert_eq!((complete, unknown), (996, 48));
+        assert!(
+            unexpected.is_empty(),
+            "native-recovered omitted-type names keep whole-module fallback: {unexpected:?}"
+        );
+        assert!(
+            missing.is_empty(),
+            "native-complete omitted-type names belong to the written slice: {missing:?}"
+        );
+    }
+
+    #[test]
+    fn first_party_vba_rem_parameter_boundaries_keep_the_native_contract() {
+        let mut complete = 0;
+        let mut unknown = 0;
+        let mut empty = 0;
+        for spelling in ["Rem", "rEm", "[Rem]"] {
+            for prefix in [
+                "",
+                "ByVal ",
+                "ByRef ",
+                "Optional ",
+                "Optional ByVal ",
+                "Optional ByRef ",
+            ] {
+                for tail in [
+                    "", ", value", "=1", " = 1", " ", "\t", "\x0c", " _\r\n ", " As Long",
+                ] {
+                    let clause = format!("{prefix}{spelling}{tail}");
+                    let source = format!("Sub Run({clause})\nEnd Sub\n");
+                    for language in ["vba", "visual-basic-classic"] {
+                        let fixture = Fixture::new(&source);
+                        let request = fixture.request(language, &[]);
+                        let cancellation = Cancellation::new();
+                        let native = fixture
+                            .provider
+                            .prepare_tree(
+                                &request,
+                                None,
+                                &[],
+                                fixture.provider.config.default_settings(),
+                                &cancellation,
+                            )
+                            .unwrap();
+                        assert!(native.traversal.fully_traversed);
+                        assert!(matches!(
+                            native.traversal.coverage,
+                            CoverageStatus::Complete | CoverageStatus::Unknown
+                        ));
+                        let pack = fixture
+                            .provider
+                            .query_packs
+                            .get_for_source(native.family, request.source().path().as_str())
+                            .unwrap();
+                        let extracted = pack
+                            .extract(
+                                native.family,
+                                &native.tree,
+                                request.source().bytes(),
+                                request.limits().max_syntax_nodes(),
+                                usize::MAX,
+                                &cancellation,
+                            )
+                            .unwrap();
+                        assert!(extracted.limit.is_none());
+                        let normalized = normalize_query_candidates(
+                            extracted.candidates,
+                            &request,
+                            usize::MAX,
+                            &cancellation,
+                        )
+                        .unwrap();
+                        assert!(!normalized.limited);
+                        let mut nodes = vec![native.tree.root_node()];
+                        let mut parameters = Vec::new();
+                        while let Some(node) = nodes.pop() {
+                            if node.kind() == "parameter" {
+                                parameters.push(node);
+                            }
+                            let mut cursor = node.walk();
+                            nodes.extend(node.named_children(&mut cursor));
+                        }
+                        let admitted = prepare(
+                            &fixture.provider,
+                            &request,
+                            None,
+                            &[],
+                            fixture.provider.config.default_settings(),
+                            &cancellation,
+                        )
+                        .unwrap();
+                        if native.traversal.coverage == CoverageStatus::Unknown {
+                            unknown += 1;
+                            assert!(
+                                admitted.is_none(),
+                                "native recovery retains whole-module fallback: {language}:{clause:?}"
+                            );
+                            continue;
+                        }
+                        complete += 1;
+                        let required_default = parameters.iter().any(|node| {
+                            node.child_by_field_name("default_value").is_some()
+                                && node.child_by_field_name("optional_modifier").is_none()
+                        });
+                        if required_default {
+                            assert!(
+                                admitted.is_none(),
+                                "required defaults remain outside the literal-default slice: {language}:{clause:?}"
+                            );
+                            continue;
+                        }
+                        parameters.sort_by_key(|node| node.start_byte());
+                        let prepared = admitted.unwrap_or_else(|| {
+                            panic!(
+                                "native-complete header trivia is supported: {language}:{clause:?}"
+                            )
+                        });
+                        let actual = prepared.inventory.procedures()[0].parameters();
+                        assert_eq!(actual.len(), parameters.len());
+                        assert_eq!(normalized.required, 7 + parameters.len() * 2);
+                        for (actual, expected) in actual.iter().zip(&parameters) {
+                            let name = expected.child_by_field_name("name").unwrap();
+                            assert_eq!(actual.name(), name.start_byte()..name.end_byte());
+                            assert_eq!(
+                                actual.is_optional(),
+                                expected.child_by_field_name("optional_modifier").is_some()
+                            );
+                            assert_eq!(
+                                actual.default_value().is_some(),
+                                expected.child_by_field_name("default_value").is_some()
+                            );
+                        }
+                        if actual.is_empty() {
+                            empty += 1;
+                            assert_eq!(
+                                normalized
+                                    .facts
+                                    .iter()
+                                    .filter(
+                                        |fact| fact.syntax_kind().as_str() == "vba.comment.comment"
+                                    )
+                                    .count(),
+                                1
+                            );
+                            assert!(normalized.facts.iter().all(|fact| {
+                                !matches!(
+                                    fact.syntax_kind().as_str(),
+                                    "vba.parameter.declaration"
+                                        | "vba.omittable_parameter.declaration"
+                                )
+                            }));
+                        }
+                        compare_native(&Fixture::new(&source), language, &[]);
+                    }
+                }
+            }
+        }
+        assert_eq!((complete, unknown, empty), (116, 208, 8));
+    }
+
+    #[test]
+    fn first_party_vba_parameter_default_word_boundaries_use_native_captures() {
+        for (expression, kind, default_text, value_text, end) in [
+            ("TrueRem", "identifier", "= TrueRem", "TrueRem", 54),
+            ("True\x0cRem", "boolean_literal", "= True", "True", 51),
+            ("False\x0cRem", "boolean_literal", "= False", "False", 52),
+        ] {
+            let source =
+                format!("Sub Run(ByVal Rem[value], Optional Rem[flag] = {expression})\nEnd Sub\n");
+            for language in ["vba", "visual-basic-classic"] {
+                let fixture = Fixture::new(&source);
+                let request = fixture.request(language, &[]);
+                let cancellation = Cancellation::new();
+                let native = fixture
+                    .provider
+                    .prepare_tree(
+                        &request,
+                        None,
+                        &[],
+                        fixture.provider.config.default_settings(),
+                        &cancellation,
+                    )
+                    .unwrap();
+                assert!(native.traversal.fully_traversed);
+                assert_eq!(
+                    native.traversal.coverage,
+                    CoverageStatus::Complete,
+                    "{language}:{expression:?}",
+                );
+                let pack = fixture
+                    .provider
+                    .query_packs
+                    .get_for_source(native.family, request.source().path().as_str())
+                    .unwrap();
+                let extracted = pack
+                    .extract(
+                        native.family,
+                        &native.tree,
+                        request.source().bytes(),
+                        request.limits().max_syntax_nodes(),
+                        usize::MAX,
+                        &cancellation,
+                    )
+                    .unwrap();
+                assert!(extracted.limit.is_none());
+                let normalized = normalize_query_candidates(
+                    extracted.candidates,
+                    &request,
+                    usize::MAX,
+                    &cancellation,
+                )
+                .unwrap();
+                assert!(!normalized.limited);
+                let mut nodes = vec![native.tree.root_node()];
+                let mut defaults = Vec::new();
+                while let Some(node) = nodes.pop() {
+                    if node.kind() == "parameter"
+                        && let Some(default) = node.child_by_field_name("default_value")
+                    {
+                        defaults.push(default);
+                    }
+                    let mut cursor = node.walk();
+                    nodes.extend(node.named_children(&mut cursor));
+                }
+                assert_eq!(defaults.len(), 1, "{language}:{expression:?}");
+                let default = defaults[0];
+                let value = default.child_by_field_name("value").unwrap();
+                assert_eq!(default.byte_range(), 45..end);
+                assert_eq!(source.get(default.byte_range()).unwrap(), default_text);
+                assert_eq!(value.kind(), kind);
+                assert_eq!(value.byte_range(), 47..end);
+                assert_eq!(source.get(value.byte_range()).unwrap(), value_text);
+                let default_facts = normalized
+                    .facts
+                    .iter()
+                    .filter(|fact| {
+                        fact.span().start_byte() >= u64::try_from(default.start_byte()).unwrap()
+                            && fact.span().end_byte() <= u64::try_from(default.end_byte()).unwrap()
+                    })
+                    .collect::<Vec<_>>();
+                match value.kind() {
+                    "identifier" => {
+                        assert_eq!(default_facts.len(), 1);
+                        let fact = default_facts[0];
+                        assert_eq!(
+                            fact.syntax_kind().as_str(),
+                            "vba.default_constant_identifier.reference",
+                        );
+                        assert_eq!(fact.span().start_byte(), 47);
+                        assert_eq!(fact.span().end_byte(), 54);
+                        assert!(
+                            prepare(
+                                &fixture.provider,
+                                &request,
+                                None,
+                                &[],
+                                fixture.provider.config.default_settings(),
+                                &cancellation,
+                            )
+                            .unwrap()
+                            .is_none(),
+                            "a captured nonliteral default retains whole-module fallback"
+                        );
+                    }
+                    "boolean_literal" => {
+                        assert!(default_facts.is_empty());
+                        compare_native(&Fixture::new(&source), language, &[]);
+                    }
+                    kind => panic!(
+                        "the narrow default-word control has an unexpected captured value: {language}:{expression:?}:{kind:?}:{value_text:?}"
+                    ),
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn first_party_vba_header_parameter_trivia_matches_native_facts() {
+        for source in [
+            "Sub Run(Rem)\nEnd Sub\n",
+            "Sub Run(rEm\x0c)\r\nEnd Sub\r\n",
+            "Sub Run(Rem[value], Optional other = 7)\nEnd Sub\n",
+            "Sub Run(value Rem)\nEnd Sub\n",
+            "Sub Run(ByVal Rem[value])\nEnd Sub\n",
+            "Sub Run(Optional Rem[value] = 7)\nEnd Sub\n",
+            "Sub Run(value As Rem\x0cLong)\nEnd Sub\n",
+            "Sub Run(Optional value = Rem\x0c1)\nEnd Sub\n",
+            "Sub Run(Optional value = 1Rem)\nEnd Sub\n",
+            "Sub Run(Optional value = \"x\"Rem)\nEnd Sub\n",
+            "Sub Run(ByVal Rem[value], Optional Rem[flag] = True\x0cRem)\nEnd Sub\n",
+            "Sub Run(Remember, Rem1, [Rem], Optional text = \"Rem\")\nEnd Sub\n",
+            "Function Rem$()\nEnd Function\n",
+            "Rem\r\nSub Run()\r\nEnd Sub\r\n",
+            "Rem\n",
+            "Rem",
+            "Sub Run(Rem\x0cByVal\x0c[Rem] Rem, _\n Rem\x0cOptional Rem\x0cByRef\x0c[label] Rem\x0cAs Rem\x0cString Rem\x0c= Rem\x0c\"Rem,\"\"As\"\":)\" Rem,[last] Rem)\nEnd Sub\n",
+        ] {
+            for language in ["vba", "visual-basic-classic"] {
+                compare_native(&Fixture::new(source), language, &[]);
+            }
+        }
+    }
+
+    #[test]
+    fn first_party_vba_header_trivia_nodes_and_candidate_ceilings_are_exact() {
+        for (source, nodes, required) in [
+            ("Sub Run(Rem)\nEnd Sub\n", 4, 7),
+            ("Sub Run(Rem[value], Optional other = 7)\nEnd Sub\n", 7, 11),
+        ] {
+            for language in ["vba", "visual-basic-classic"] {
+                let mut fixture = Fixture::new(source);
+                let cancellation = Cancellation::new();
+                let request = fixture.request(language, &[]);
+                let prepared = prepare(
+                    &fixture.provider,
+                    &request,
+                    None,
+                    &[],
+                    fixture.provider.config.default_settings(),
+                    &cancellation,
+                )
+                .unwrap()
+                .unwrap();
+                assert_eq!(prepared.processed_nodes, nodes);
+                for optional in [false, true] {
+                    let all = candidates(
+                        &prepared.inventory,
+                        source.as_bytes(),
+                        optional,
+                        request.limits().max_syntax_nodes(),
+                        &cancellation,
+                    )
+                    .unwrap();
+                    let exact = all.len();
+                    assert_eq!(
+                        all.iter()
+                            .filter(|candidate| candidate.role == StructuralRole::Comment)
+                            .count(),
+                        usize::from(optional)
+                    );
+                    assert_eq!(
+                        normalize_query_candidates(all, &request, usize::MAX, &cancellation)
+                            .unwrap()
+                            .required,
+                        required
+                    );
+                    assert_eq!(
+                        candidates(
+                            &prepared.inventory,
+                            source.as_bytes(),
+                            optional,
+                            exact,
+                            &cancellation
+                        )
+                        .unwrap()
+                        .len(),
+                        exact
+                    );
+                    assert_eq!(
+                        candidates(
+                            &prepared.inventory,
+                            source.as_bytes(),
+                            optional,
+                            exact - 1,
+                            &cancellation
+                        )
+                        .unwrap_err(),
+                        AdapterError::RejectedRequest(RequestError::ProviderLimit {
+                            resource: ResourceKind::SyntaxNodes,
+                            observed: exact,
+                            limit: exact - 1
+                        })
+                    );
+                }
+                fixture.limits = with_maximum_nodes(&fixture.limits, nodes);
+                let request = fixture.request(language, &[]);
+                assert_eq!(
+                    prepare(
+                        &fixture.provider,
+                        &request,
+                        None,
+                        &[],
+                        fixture.provider.config.default_settings(),
+                        &cancellation
+                    )
+                    .unwrap()
+                    .unwrap()
+                    .processed_nodes,
+                    nodes
+                );
+                fixture.limits = with_maximum_nodes(&fixture.limits, nodes - 1);
+                let request = fixture.request(language, &[]);
+                assert!(
+                    matches!(prepare(&fixture.provider, &request, None, &[], fixture.provider.config.default_settings(), &cancellation),
+                    Err(AdapterError::RejectedRequest(RequestError::ProviderLimit { resource: ResourceKind::SyntaxNodes, observed, limit })) if observed == nodes && limit == nodes - 1)
+                );
+                cancellation.cancel(rootlight_cancel::CancellationReason::ClientRequest);
+                assert!(matches!(
+                    prepare(
+                        &fixture.provider,
+                        &request,
+                        None,
+                        &[],
+                        fixture.provider.config.default_settings(),
+                        &cancellation
+                    ),
+                    Err(AdapterError::Cancelled {
+                        reason: rootlight_cancel::CancellationReason::ClientRequest
+                    })
+                ));
+                assert_eq!(fixture.provider.stats().pooled_parsers, 0);
+                assert_eq!(fixture.provider.stats().cache.entries, 0);
+            }
+        }
+    }
+
+    #[test]
+    fn first_party_vba_omitted_type_residual_tails_keep_whole_native_fallback() {
+        for parameters in [
+            "value As",
+            "Optional value As",
+            "value As UserType",
+            "value As [Long]",
+            "value As New Object",
+            "value As Long extra",
+            "value As Long()",
+            "Optional value As = 1",
+            "Optional value As UserType = 1",
+            "value = 1",
+            "Optional value = seed",
+            "Optional value = 1 + 2",
+            "Optional value = -1",
+            "Optional value = 1.5",
+            "Optional value = 1%",
+            "Optional value = True And False",
+            "Optional value = \"unterminated",
+            "Optional value = \"x\" & \"y\"",
+            "Optional = 1",
+            "ByVal",
+            "ByRef",
+            "value$",
+            "value()",
+            "ParamArray values()",
+            "value,",
+            ", value",
+            "value,,other",
+            "value, Optional other =",
+            "value, valid As Long, invalid As",
+            "value unexpected",
+        ] {
+            let source =
+                format!("Sub Accepted(value)\nEnd Sub\nSub Rejected({parameters})\nEnd Sub\n");
+            for language in ["vba", "visual-basic-classic"] {
+                let fixture = Fixture::new(&source);
+                let request = fixture.request(language, &[]);
+                assert!(
+                    prepare(
+                        &fixture.provider,
+                        &request,
+                        None,
+                        &[],
+                        fixture.provider.config.default_settings(),
+                        &Cancellation::new(),
+                    )
+                    .unwrap()
+                    .is_none(),
+                    "{language}:{parameters}"
+                );
+                assert_eq!(fixture.provider.stats().pooled_parsers, 0);
+                assert_eq!(fixture.provider.stats().cache.entries, 0);
+            }
+        }
+    }
+
+    #[test]
+    fn first_party_vba_omitted_type_nodes_and_candidate_ceilings_are_exact() {
+        for (parameters, parameter_count, defaults, required) in [
+            ("value", 1, 0, 9),
+            ("ByVal first, ByRef second", 2, 0, 11),
+            ("required, Optional value = 1", 2, 1, 11),
+            (
+                "Optional count = 7, Optional text = \"x\", Optional flag = True, Optional unset",
+                4,
+                3,
+                15,
+            ),
+            ("typed As Long, untyped, Optional value = 007", 3, 1, 13),
+        ] {
+            let source = format!("Sub Run({parameters})\nEnd Sub\n");
+            for language in ["vba", "visual-basic-classic"] {
+                let mut fixture = Fixture::new(&source);
+                let cancellation = Cancellation::new();
+                let request = fixture.request(language, &[]);
+                let prepared = prepare(
+                    &fixture.provider,
+                    &request,
+                    None,
+                    &[],
+                    fixture.provider.config.default_settings(),
+                    &cancellation,
+                )
+                .unwrap()
+                .unwrap();
+                assert_eq!(prepared.processed_nodes, 4 + parameter_count + defaults);
+                assert_eq!(
+                    prepared.inventory.procedures()[0].parameters().len(),
+                    parameter_count
+                );
+                for optional in [false, true] {
+                    let all = candidates(
+                        &prepared.inventory,
+                        source.as_bytes(),
+                        optional,
+                        request.limits().max_syntax_nodes(),
+                        &cancellation,
+                    )
+                    .unwrap();
+                    assert!(
+                        all.iter()
+                            .all(|candidate| candidate.role != StructuralRole::Reference)
+                    );
+                    let exact = all.len();
+                    assert_eq!(
+                        normalize_query_candidates(all, &request, usize::MAX, &cancellation)
+                            .unwrap()
+                            .required,
+                        required
+                    );
+                    assert_eq!(
+                        candidates(
+                            &prepared.inventory,
+                            source.as_bytes(),
+                            optional,
+                            exact,
+                            &cancellation
+                        )
+                        .unwrap()
+                        .len(),
+                        exact
+                    );
+                    assert_eq!(
+                        candidates(
+                            &prepared.inventory,
+                            source.as_bytes(),
+                            optional,
+                            exact - 1,
+                            &cancellation
+                        )
+                        .unwrap_err(),
+                        AdapterError::RejectedRequest(RequestError::ProviderLimit {
+                            resource: ResourceKind::SyntaxNodes,
+                            observed: exact,
+                            limit: exact - 1
+                        })
+                    );
+                    assert_eq!(
+                        candidates(
+                            &prepared.inventory,
+                            source.as_bytes(),
+                            optional,
+                            0,
+                            &cancellation
+                        )
+                        .unwrap_err(),
+                        AdapterError::RejectedRequest(RequestError::ProviderLimit {
+                            resource: ResourceKind::SyntaxNodes,
+                            observed: required,
+                            limit: 0
+                        })
+                    );
+                }
+                fixture.limits = with_maximum_nodes(&fixture.limits, prepared.processed_nodes);
+                let request = fixture.request(language, &[]);
+                assert_eq!(
+                    prepare(
+                        &fixture.provider,
+                        &request,
+                        None,
+                        &[],
+                        fixture.provider.config.default_settings(),
+                        &cancellation
+                    )
+                    .unwrap()
+                    .unwrap()
+                    .processed_nodes,
+                    prepared.processed_nodes
+                );
+                fixture.limits = with_maximum_nodes(&fixture.limits, prepared.processed_nodes - 1);
+                let request = fixture.request(language, &[]);
+                assert!(
+                    matches!(prepare(&fixture.provider, &request, None, &[], fixture.provider.config.default_settings(), &cancellation),
+                    Err(AdapterError::RejectedRequest(RequestError::ProviderLimit { resource: ResourceKind::SyntaxNodes, observed, limit }))
+                        if observed == prepared.processed_nodes && limit == prepared.processed_nodes - 1)
+                );
+                cancellation.cancel(rootlight_cancel::CancellationReason::ClientRequest);
+                assert!(matches!(
+                    prepare(
+                        &fixture.provider,
+                        &request,
+                        None,
+                        &[],
+                        fixture.provider.config.default_settings(),
+                        &cancellation
+                    ),
+                    Err(AdapterError::Cancelled {
+                        reason: rootlight_cancel::CancellationReason::ClientRequest
+                    })
+                ));
+                assert_eq!(fixture.provider.stats().pooled_parsers, 0);
+                assert_eq!(fixture.provider.stats().cache.entries, 0);
             }
         }
     }
@@ -1680,7 +2494,7 @@ mod tests {
             "ByVal value As [Types].[Result]",
             "ByVal value As New Object",
             "ByVal value As String * 4",
-            "ByVal value",
+            "ByVal value unexpected",
             "ByVal ByRef value As Long",
             "ByVal value$ As String",
             "ByVal first As Long,",

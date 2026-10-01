@@ -71,6 +71,7 @@ pub fn vba_procedural_frontend_digest() -> rootlight_ids::ContentHash {
         include_bytes!("../../rootlight-vba/src/lib.rs").as_slice(),
         include_bytes!("../../rootlight-vba/src/module.rs").as_slice(),
         include_bytes!("../../rootlight-vba/src/module_body.rs").as_slice(),
+        include_bytes!("../../rootlight-vba/src/parameter.rs").as_slice(),
         include_bytes!("../../rootlight-vba/src/procedure.rs").as_slice(),
         include_bytes!("../../rootlight-vba/src/with_blocks.rs").as_slice(),
         include_bytes!("../../rootlight-vba/src/group.rs").as_slice(),

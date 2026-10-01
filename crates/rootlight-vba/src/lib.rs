@@ -45,7 +45,9 @@ pub use module_body::{
     ModuleBodyStatement, ModuleCall, ModuleLocalDeclaration, ModuleLocalKind,
     ModuleScalarAssignment, ModuleScalarValue, ModuleScalarValueKind, ModuleZeroArgumentCall,
 };
-pub use parameter::array_parameter_modifiers;
+pub use parameter::{
+    array_parameter_modifiers, parameter_declarations_cover, parameter_trivia_len,
+};
 pub use procedure::{
     ProcedureHeader, ProcedureKind, parameterless_sub, procedure_header, procedure_parameter_range,
     scalar_return_type,

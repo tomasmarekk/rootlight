@@ -93,6 +93,59 @@ fn vba_application_proofs_retain_exact_materialized_formals_and_parser_parent() 
                         "Optional second As String = \"text\"",
                     ],
                 ),
+                ("value", "1", vec!["value"]),
+                ("Rem", "", Vec::<&str>::new()),
+                (
+                    "Rem[value], Optional other = 7",
+                    "1",
+                    vec!["[value]", "Optional other = 7"],
+                ),
+                (
+                    "\x0cByVal\x0cvalue\x0cAs\x0cLong\x0c",
+                    "1",
+                    vec!["ByVal\x0cvalue\x0cAs\x0cLong"],
+                ),
+                (
+                    "ByVal Rem[value], Optional other = 7",
+                    "1",
+                    vec!["ByVal Rem[value]", "Optional other = 7"],
+                ),
+                (
+                    "ByVal value, ByRef other As Long",
+                    "1, local",
+                    vec!["ByVal value", "ByRef other As Long"],
+                ),
+                (
+                    "ByVal value As Variant, ByRef other",
+                    "1, local",
+                    vec!["ByVal value As Variant", "ByRef other"],
+                ),
+                ("Optional value", "", vec!["Optional value"]),
+                (
+                    "Optional ByVal value = 7",
+                    "",
+                    vec!["Optional ByVal value = 7"],
+                ),
+                (
+                    "ByVal value, Optional ByRef other = \"a,\"\"b\"\":()\"",
+                    "1",
+                    vec!["ByVal value", "Optional ByRef other = \"a,\"\"b\"\":()\""],
+                ),
+                (
+                    "ByVal value, Optional ByRef other = \"a,\"\"b\"\":()\"",
+                    "1, \"written\"",
+                    vec!["ByVal value", "Optional ByRef other = \"a,\"\"b\"\":()\""],
+                ),
+                (
+                    "Optional first = False, Optional second = \"text\"",
+                    "",
+                    vec!["Optional first = False", "Optional second = \"text\""],
+                ),
+                (
+                    "Optional first = False, Optional second = \"text\"",
+                    "True, \"written\"",
+                    vec!["Optional first = False", "Optional second = \"text\""],
+                ),
             ] {
                 let body = if native {
                     "local = 1 + 2\n"
