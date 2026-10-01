@@ -4,6 +4,9 @@
 
 use super::*;
 use rootlight_ir::OccurrenceTarget;
+use rootlight_query::{
+    ConditionalActivityBasis, ConditionalActivityReason, ConditionalActivityState,
+};
 use std::fs;
 
 fn deadline() -> Cancellation {
@@ -1258,8 +1261,27 @@ fn assert_optional_call_contract(
                     &literal_sites[0].source,
                     literal_start..literal_end,
                 );
-            } else {
+            } else if literal.eq_ignore_ascii_case("True")
+                || literal.eq_ignore_ascii_case("False")
+                || literal.bytes().all(|byte| byte.is_ascii_digit())
+            {
                 assert!(literal_sites.is_empty());
+            } else {
+                assert_eq!(literal_sites.len(), 1);
+                assert_eq!(
+                    literal_sites[0].syntax_kind,
+                    "vba.default_constant_identifier.reference"
+                );
+                assert_eq!(literal_sites[0].role, OccurrenceRole::Reference);
+                assert_eq!(literal_sites[0].enclosing, Some(parameter.id));
+                assert_eq!(literal_sites[0].provenance, parser.id);
+                assert_exact_parameter_source(
+                    service,
+                    receipt,
+                    source,
+                    &literal_sites[0].source,
+                    literal_start..literal_end,
+                );
             }
         }
     }
@@ -2036,6 +2058,834 @@ fn parameter_header_comments_do_not_become_formals_or_block_application_proofs()
                     .unwrap();
                 assert_eq!(comments[0].provenance, notify.provenance);
             }
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+enum NamedDefaultShadow {
+    None,
+    Parameter,
+    LocalConstant,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct NamedDefaultState {
+    module_constants: &'static str,
+    declarations: WrittenParameters<'static>,
+    call: OptionalCallState,
+    body: &'static str,
+    bound_constant: Option<&'static str>,
+    shadow: NamedDefaultShadow,
+}
+
+fn assert_named_default_constant_contract(
+    service: &FirstSliceService,
+    receipt: &FirstSliceIndexReceipt,
+    source: &str,
+    language: &str,
+    state: NamedDefaultState,
+) {
+    assert_authored_parameter_types(service, receipt, source, language, state.call);
+    let snapshot = service
+        .loaded_generation_snapshot(receipt.generation)
+        .unwrap();
+    let document = snapshot.document();
+    let notify = document
+        .entities
+        .iter()
+        .find(|entity| entity.canonical_name == "Notify")
+        .unwrap();
+    let parser = document
+        .provenance
+        .iter()
+        .find(|proof| proof.id == notify.provenance)
+        .unwrap();
+    let module_constants = document
+        .entities
+        .iter()
+        .filter(|entity| {
+            entity.kind == EntityKind::Constant
+                && entity.container == notify.container
+                && entity.evidence.source.is_some()
+        })
+        .collect::<Vec<_>>();
+    let semantic_names = state
+        .declarations
+        .iter()
+        .map(|(_, name)| *name)
+        .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(module_constants.len(), semantic_names.len());
+    assert_eq!(
+        document
+            .occurrences
+            .iter()
+            .filter(|site| {
+                site.role == OccurrenceRole::Definition
+                    && module_constants.iter().any(|constant| {
+                        site.target
+                            == OccurrenceTarget::Resolved {
+                                symbol: constant.id,
+                            }
+                    })
+            })
+            .count(),
+        state.declarations.len()
+    );
+    for &(written, name) in state.declarations {
+        let start = source.find(written).unwrap();
+        let end = start + written.len();
+        let constants = module_constants
+            .iter()
+            .filter(|entity| entity.canonical_name == name)
+            .collect::<Vec<_>>();
+        assert_eq!(constants.len(), 1, "module declaration {written}");
+        let constant = constants[0];
+        assert_eq!(constant.language, language);
+        assert_eq!(constant.provenance, parser.id);
+        // Ordinary Const identity coalesces equal name/kind/owner signatures.
+        // The entity keeps the earliest declaration, while every written clause
+        // still owns an exact Definition and Contains source witness.
+        let representative = state
+            .declarations
+            .iter()
+            .filter(|(_, candidate)| *candidate == name)
+            .map(|(written, _)| {
+                let start = source.find(written).unwrap();
+                (start, start + written.len())
+            })
+            .min()
+            .unwrap();
+        assert_exact_parameter_source(
+            service,
+            receipt,
+            source,
+            constant.evidence.source.as_ref().unwrap(),
+            representative.0..representative.1,
+        );
+        let containers = document
+            .relations
+            .iter()
+            .filter(|relation| {
+                relation.predicate == RelationPredicate::Contains
+                    && relation.object == RelationEndpoint::Entity(constant.id)
+                    && relation.evidence.source.as_ref().is_some_and(|reference| {
+                        reference.span().start_byte() == u64::try_from(start).unwrap()
+                            && reference.span().end_byte() == u64::try_from(end).unwrap()
+                    })
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(containers.len(), 1, "written declaration {written}");
+        let owner = match constant.container.unwrap() {
+            rootlight_ir::ContainerRef::Repository(repository) => {
+                RelationEndpoint::Repository(repository)
+            }
+            rootlight_ir::ContainerRef::File(file) => RelationEndpoint::File(file),
+            rootlight_ir::ContainerRef::Entity(entity) => RelationEndpoint::Entity(entity),
+        };
+        assert_eq!(containers[0].subject, owner);
+        assert_eq!(containers[0].provenance, parser.id);
+        let clause = containers[0].evidence.source.as_ref().unwrap();
+        assert_exact_parameter_source(service, receipt, source, clause, start..end);
+        let token = if written.starts_with('[') {
+            format!("[{name}]")
+        } else {
+            name.to_owned()
+        };
+        assert!(written.starts_with(&token));
+        let definitions = document
+            .occurrences
+            .iter()
+            .filter(|site| {
+                site.role == OccurrenceRole::Definition
+                    && site.target
+                        == OccurrenceTarget::Resolved {
+                            symbol: constant.id,
+                        }
+                    && site.source.span().start_byte() == u64::try_from(start).unwrap()
+                    && site.source.span().end_byte() == u64::try_from(start + token.len()).unwrap()
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(definitions.len(), 1);
+        assert_eq!(
+            definitions[0].enclosing,
+            document
+                .occurrences
+                .iter()
+                .find(|site| {
+                    site.role == OccurrenceRole::Definition
+                        && site.target == OccurrenceTarget::Resolved { symbol: notify.id }
+                })
+                .unwrap()
+                .enclosing
+        );
+        assert_eq!(definitions[0].provenance, parser.id);
+        assert_exact_parameter_source(
+            service,
+            receipt,
+            source,
+            &definitions[0].source,
+            start..start + token.len(),
+        );
+        let (prefix, initializer) = written.split_once(" = ").unwrap();
+        let initializer_start = start + prefix.len() + " = ".len();
+        let initializer_ref = SourceRef::new(
+            receipt.repository,
+            receipt.generation,
+            SourceSpan::new(
+                clause.span().file(),
+                u64::try_from(initializer_start).unwrap(),
+                u64::try_from(end).unwrap(),
+            )
+            .unwrap(),
+            content_hash(source.as_bytes()),
+            None,
+        );
+        assert_exact_parameter_source(
+            service,
+            receipt,
+            source,
+            &initializer_ref,
+            initializer_start..end,
+        );
+        let initializer_sites = document
+            .occurrences
+            .iter()
+            .filter(|site| site.source.span() == initializer_ref.span())
+            .collect::<Vec<_>>();
+        if initializer.starts_with('"') {
+            assert_eq!(initializer_sites.len(), 1);
+            assert_eq!(initializer_sites[0].role, OccurrenceRole::StringEvidence);
+            assert_eq!(initializer_sites[0].provenance, parser.id);
+        } else {
+            // Numeric and Boolean syntax does not manufacture evaluated-value
+            // occurrences or a runtime type identity for the constant.
+            assert!(initializer_sites.is_empty());
+        }
+        if let Some((type_prefix, authored)) = prefix.split_once(" As ") {
+            let type_start = start + type_prefix.len() + " As ".len();
+            let reference = SourceRef::new(
+                receipt.repository,
+                receipt.generation,
+                SourceSpan::new(
+                    clause.span().file(),
+                    u64::try_from(type_start).unwrap(),
+                    u64::try_from(type_start + authored.len()).unwrap(),
+                )
+                .unwrap(),
+                content_hash(source.as_bytes()),
+                None,
+            );
+            assert_exact_parameter_source(
+                service,
+                receipt,
+                source,
+                &reference,
+                type_start..type_start + authored.len(),
+            );
+        } else {
+            let within_clause = |reference: &SourceRef| {
+                reference.repository() == clause.repository()
+                    && reference.generation() == clause.generation()
+                    && reference.content_hash() == clause.content_hash()
+                    && reference.span().file() == clause.span().file()
+                    && reference.span().start_byte() >= clause.span().start_byte()
+                    && reference.span().end_byte() <= clause.span().end_byte()
+            };
+            assert!(!document.occurrences.iter().any(|site| {
+                within_clause(&site.source) && site.role == OccurrenceRole::TypeUse
+            }));
+            assert!(!document.relations.iter().any(|relation| {
+                relation.predicate == RelationPredicate::UsesType
+                    && (relation.subject == RelationEndpoint::Entity(constant.id)
+                        || relation.evidence.source.as_ref().is_some_and(within_clause))
+            }));
+            assert!(!document.entities.iter().any(|entity| {
+                entity.canonical_name.eq_ignore_ascii_case("Variant")
+                    && entity.evidence.source.as_ref().is_some_and(within_clause)
+            }));
+        }
+    }
+    let expected = state.bound_constant.map(|written| {
+        let start = u64::try_from(source.find(written).unwrap()).unwrap();
+        *module_constants
+            .iter()
+            .find(|entity| {
+                entity
+                    .evidence
+                    .source
+                    .as_ref()
+                    .is_some_and(|reference| reference.span().start_byte() == start)
+            })
+            .unwrap()
+    });
+    let defaults = document
+        .occurrences
+        .iter()
+        .filter(|site| site.syntax_kind == "vba.default_constant_identifier.reference")
+        .collect::<Vec<_>>();
+    assert_eq!(
+        defaults.len(),
+        state
+            .call
+            .parameters
+            .iter()
+            .filter(|(written, _)| written.contains(" = "))
+            .count()
+    );
+    for default in defaults {
+        assert_eq!(default.role, OccurrenceRole::Reference);
+        let formal = document
+            .entities
+            .iter()
+            .find(|entity| {
+                entity.kind == EntityKind::Parameter
+                    && entity.container == Some(rootlight_ir::ContainerRef::Entity(notify.id))
+                    && entity.evidence.source.as_ref().is_some_and(|clause| {
+                        clause.span().file() == default.source.span().file()
+                            && clause.span().start_byte() <= default.source.span().start_byte()
+                            && clause.span().end_byte() >= default.source.span().end_byte()
+                    })
+            })
+            .unwrap();
+        assert_eq!(default.enclosing, Some(formal.id));
+        assert_eq!(default.provenance, parser.id);
+        let refers = document
+            .relations
+            .iter()
+            .filter(|relation| {
+                relation.subject == RelationEndpoint::Occurrence(default.id)
+                    && relation.predicate == RelationPredicate::RefersTo
+            })
+            .collect::<Vec<_>>();
+        if let Some(constant) = expected {
+            assert_eq!(
+                default.target,
+                OccurrenceTarget::Resolved {
+                    symbol: constant.id
+                }
+            );
+            assert_eq!(refers.len(), 1);
+            assert_eq!(refers[0].object, RelationEndpoint::Entity(constant.id));
+            assert_eq!(refers[0].provenance, parser.id);
+            assert_eq!(refers[0].evidence.source.as_ref(), Some(&default.source));
+        } else {
+            assert!(matches!(
+                default.target,
+                OccurrenceTarget::Unresolved { .. }
+            ));
+            assert!(refers.is_empty());
+        }
+        let gaps = document
+            .skipped_regions
+            .iter()
+            .filter(|gap| {
+                gap.source == default.source
+                    && gap.detail == "vba-default-constant-target-unavailable"
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(gaps.len(), usize::from(expected.is_none()));
+        for gap in gaps {
+            assert_eq!(gap.repository, receipt.repository);
+            assert_eq!(gap.generation, receipt.generation);
+            assert_eq!(gap.provenance, parser.id);
+            assert_eq!(gap.evidence.source.as_ref(), Some(&default.source));
+        }
+        assert!(!document.relations.iter().any(|relation| {
+            relation.subject == RelationEndpoint::Occurrence(default.id)
+                && relation.predicate == RelationPredicate::Calls
+        }));
+    }
+    let local_constants = document
+        .entities
+        .iter()
+        .filter(|entity| {
+            entity.kind == EntityKind::Constant
+                && entity.container == Some(rootlight_ir::ContainerRef::Entity(notify.id))
+        })
+        .collect::<Vec<_>>();
+    let runtime_target = match state.shadow {
+        NamedDefaultShadow::None => {
+            assert!(local_constants.is_empty());
+            None
+        }
+        NamedDefaultShadow::Parameter => {
+            assert!(local_constants.is_empty());
+            let target = document
+                .entities
+                .iter()
+                .find(|entity| {
+                    entity.kind == EntityKind::Parameter
+                        && entity.canonical_name == "Fallback"
+                        && entity.container == Some(rootlight_ir::ContainerRef::Entity(notify.id))
+                })
+                .unwrap();
+            Some((target, "vba.let_identifier.reference", "Fallback = 1", 0))
+        }
+        NamedDefaultShadow::LocalConstant => {
+            assert_eq!(local_constants.len(), 1);
+            let target = local_constants[0];
+            assert_eq!(target.canonical_name, "Fallback");
+            assert_eq!(target.provenance, parser.id);
+            let written = "Fallback As Long = 9";
+            let start = source.find(written).unwrap();
+            assert_exact_parameter_source(
+                service,
+                receipt,
+                source,
+                target.evidence.source.as_ref().unwrap(),
+                start..start + written.len(),
+            );
+            let definition = document
+                .occurrences
+                .iter()
+                .find(|site| {
+                    site.role == OccurrenceRole::Definition
+                        && site.target == OccurrenceTarget::Resolved { symbol: target.id }
+                })
+                .unwrap();
+            assert_eq!(definition.enclosing, Some(notify.id));
+            assert_exact_parameter_source(
+                service,
+                receipt,
+                source,
+                &definition.source,
+                start..start + "Fallback".len(),
+            );
+            Some((
+                target,
+                "vba.value_identifier.reference",
+                "value = Fallback",
+                "value = ".len(),
+            ))
+        }
+    };
+    if let Some((target, syntax, statement, offset)) = runtime_target {
+        let start = source.find(statement).unwrap() + offset;
+        let uses = document
+            .occurrences
+            .iter()
+            .filter(|site| {
+                site.syntax_kind == syntax
+                    && site.source.span().start_byte() == u64::try_from(start).unwrap()
+                    && site.source.span().end_byte()
+                        == u64::try_from(start + "Fallback".len()).unwrap()
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(uses.len(), 1);
+        assert_eq!(
+            uses[0].target,
+            OccurrenceTarget::Resolved { symbol: target.id }
+        );
+        assert_eq!(uses[0].enclosing, Some(notify.id));
+        assert_eq!(uses[0].provenance, parser.id);
+        assert_exact_parameter_source(
+            service,
+            receipt,
+            source,
+            &uses[0].source,
+            start..start + "Fallback".len(),
+        );
+        if let Some(constant) = expected {
+            assert_ne!(constant.id, target.id);
+        }
+    }
+    for name in ["Fallback", "Chosen"] {
+        let located = service
+            .code_locate(
+                receipt.generation,
+                name.to_owned(),
+                LocateMode::Exact,
+                20,
+                0,
+                &deadline(),
+            )
+            .unwrap_or_else(|error| {
+                let lease = service
+                    .generation_lease(receipt.generation, &deadline())
+                    .unwrap();
+                let query = lease.query().unwrap();
+                let budget = FirstSliceBudget::default();
+                let plan = query
+                    .plan_code_locate(
+                        name.to_owned(),
+                        LocateMode::Exact,
+                        20,
+                        0,
+                        budget.search(),
+                        budget.query(),
+                    )
+                    .unwrap();
+                let typed = query.execute_code_locate(&plan, &deadline());
+                panic!("named default locate {name}: {error:?}; typed={typed:?}; state={state:?}")
+            });
+        let mut actual = located
+            .data
+            .hits
+            .iter()
+            .filter_map(|hit| hit.symbol)
+            .collect::<Vec<_>>();
+        let mut expected = document
+            .entities
+            .iter()
+            .filter(|entity| entity.canonical_name == name && entity.evidence.source.is_some())
+            .map(|entity| entity.id)
+            .collect::<Vec<_>>();
+        actual.sort_unstable();
+        expected.sort_unstable();
+        assert_eq!(actual, expected);
+        for (result_index, hit) in located
+            .data
+            .hits
+            .iter()
+            .enumerate()
+            .filter(|(_, hit)| hit.symbol.is_some())
+        {
+            let entity = document
+                .entities
+                .iter()
+                .find(|entity| Some(entity.id) == hit.symbol)
+                .unwrap();
+            assert_eq!(hit.source.as_ref(), entity.evidence.source.as_ref());
+            let definitions = document
+                .occurrences
+                .iter()
+                .filter(|occurrence| {
+                    occurrence.role == OccurrenceRole::Definition
+                        && occurrence.target == OccurrenceTarget::Resolved { symbol: entity.id }
+                })
+                .collect::<Vec<_>>();
+            let assessment = located
+                .data
+                .conditional_activity
+                .iter()
+                .find(|assessment| {
+                    usize::try_from(assessment.result_index).unwrap() == result_index
+                })
+                .unwrap();
+            assert_eq!(assessment.basis, ConditionalActivityBasis::DefinitionToken);
+            if definitions.len() > 1 {
+                assert_eq!(assessment.activity, ConditionalActivityState::Unproven);
+                assert_eq!(
+                    assessment.reason,
+                    Some(ConditionalActivityReason::AmbiguousDefinition)
+                );
+                assert!(assessment.assessed_source_ref.is_none());
+                assert!(assessment.inventory.is_none());
+            } else {
+                assert_eq!(definitions.len(), 1);
+                assert_eq!(assessment.activity, ConditionalActivityState::Active);
+                assert!(assessment.reason.is_none());
+                assert_eq!(
+                    assessment.assessed_source_ref.as_ref(),
+                    Some(&definitions[0].source)
+                );
+                assert_eq!(
+                    assessment.inventory.as_ref().unwrap().parser_provenance_id,
+                    parser.id
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn named_optional_defaults_preserve_module_constant_namespace_and_source_lifetimes() {
+    let initial = NamedDefaultState {
+        module_constants: "Private Const Fallback As Long = 7\n",
+        declarations: &[("Fallback As Long = 7", "Fallback")],
+        call: OptionalCallState {
+            parameters: &[
+                ("ByVal value As Long", "value"),
+                ("Optional extra As Long = Fallback", "extra"),
+            ],
+            arguments: "1",
+            application_proven: true,
+        },
+        body: "",
+        bound_constant: Some("Fallback As Long = 7"),
+        shadow: NamedDefaultShadow::None,
+    };
+    let untyped = NamedDefaultState {
+        module_constants: "Private Const Fallback = 8\n",
+        declarations: &[("Fallback = 8", "Fallback")],
+        bound_constant: Some("Fallback = 8"),
+        ..initial
+    };
+    let variant = NamedDefaultState {
+        module_constants: "Private Const Fallback As Variant = 8\n",
+        declarations: &[("Fallback As Variant = 8", "Fallback")],
+        bound_constant: Some("Fallback As Variant = 8"),
+        ..initial
+    };
+    let renamed = NamedDefaultState {
+        module_constants: "Public Const Chosen As Variant = 8\n",
+        declarations: &[("Chosen As Variant = 8", "Chosen")],
+        bound_constant: None,
+        ..initial
+    };
+    let local_body = "Const Fallback As Long = 9\nvalue = Fallback\n";
+    let states = [
+        initial,
+        NamedDefaultState {
+            module_constants: "Private Const Fallback As Long = 8\n",
+            declarations: &[("Fallback As Long = 8", "Fallback")],
+            bound_constant: Some("Fallback As Long = 8"),
+            ..initial
+        },
+        untyped,
+        variant,
+        NamedDefaultState {
+            module_constants: "Public Const Fallback As Variant = 8\n",
+            ..variant
+        },
+        renamed,
+        NamedDefaultState {
+            call: OptionalCallState {
+                parameters: &[
+                    ("ByVal value As Long", "value"),
+                    ("Optional extra As Long = [Chosen]", "extra"),
+                ],
+                ..initial.call
+            },
+            bound_constant: Some("Chosen As Variant = 8"),
+            ..renamed
+        },
+        NamedDefaultState {
+            module_constants: "Const Fallback = True\n",
+            declarations: &[("Fallback = True", "Fallback")],
+            call: OptionalCallState {
+                parameters: &[
+                    ("ByVal value As Long", "value"),
+                    ("Optional extra = Fallback", "extra"),
+                ],
+                arguments: "1, False",
+                application_proven: true,
+            },
+            bound_constant: Some("Fallback = True"),
+            ..initial
+        },
+        NamedDefaultState {
+            module_constants: "Public Const Fallback As String = \"text\"\n",
+            declarations: &[("Fallback As String = \"text\"", "Fallback")],
+            call: OptionalCallState {
+                parameters: &[
+                    ("ByVal value As Long", "value"),
+                    ("Optional extra As String = Fallback", "extra"),
+                    ("Optional renamed = [FALLBACK]", "renamed"),
+                ],
+                ..initial.call
+            },
+            bound_constant: Some("Fallback As String = \"text\""),
+            ..initial
+        },
+        NamedDefaultState {
+            call: OptionalCallState {
+                parameters: &[("Optional ByVal Fallback As Long = [FALLBACK]", "Fallback")],
+                arguments: "",
+                application_proven: true,
+            },
+            body: "Fallback = 1\n",
+            shadow: NamedDefaultShadow::Parameter,
+            ..initial
+        },
+        NamedDefaultState {
+            module_constants: "",
+            declarations: &[],
+            bound_constant: None,
+            call: OptionalCallState {
+                parameters: &[("Optional ByVal Fallback As Long = Fallback", "Fallback")],
+                arguments: "",
+                application_proven: true,
+            },
+            body: "Fallback = 1\n",
+            shadow: NamedDefaultShadow::Parameter,
+        },
+        NamedDefaultState {
+            body: local_body,
+            shadow: NamedDefaultShadow::LocalConstant,
+            ..initial
+        },
+        NamedDefaultState {
+            module_constants: "",
+            declarations: &[],
+            body: local_body,
+            bound_constant: None,
+            shadow: NamedDefaultShadow::LocalConstant,
+            ..initial
+        },
+        NamedDefaultState {
+            module_constants: "Private Const Fallback As Long = 7\nPrivate Const Fallback As Long = 8\n",
+            declarations: &[
+                ("Fallback As Long = 7", "Fallback"),
+                ("Fallback As Long = 8", "Fallback"),
+            ],
+            bound_constant: None,
+            ..initial
+        },
+        NamedDefaultState {
+            call: OptionalCallState {
+                arguments: "",
+                application_proven: false,
+                ..initial.call
+            },
+            ..initial
+        },
+        NamedDefaultState {
+            call: OptionalCallState {
+                arguments: "1, 2, 3",
+                application_proven: false,
+                ..initial.call
+            },
+            ..initial
+        },
+        // An unsupported own-body expression selects the native fallback. The
+        // composite parser identity alone is not evidence of which route ran.
+        NamedDefaultState {
+            body: "value = 1 + 2\n",
+            ..initial
+        },
+        initial,
+    ];
+    for language in ["visual-basic-classic", "vba"] {
+        let current = std::env::current_dir().unwrap();
+        let repository = tempfile::tempdir_in(&current).unwrap();
+        let storage = tempfile::tempdir_in(&current).unwrap();
+        let paths = rootlight_runtime::RuntimePaths::new(
+            storage.path().join("state"),
+            storage.path().join("runtime"),
+        )
+        .unwrap();
+        paths.prepare_owner().unwrap();
+        let configuration = (language == "vba").then_some(
+            "version='1.3'\n[extensions.source-languages]\nversion='1.0'\ncritical=true\n[extensions.source-languages.data.extensions]\nbas='vba'\n",
+        );
+        let policy = FirstSliceStoragePolicy::resolve_user_config(configuration, 4).unwrap();
+        assert_eq!(policy.retained_generations(), 2);
+        let mut previous: Option<(FirstSliceIndexReceipt, String, NamedDefaultState)> = None;
+        let mut initial_source = None;
+        let mut initial_logical = None;
+        for (position, state) in states.into_iter().enumerate() {
+            let header = state
+                .call
+                .parameters
+                .iter()
+                .map(|(written, _)| *written)
+                .collect::<Vec<_>>()
+                .join(", ");
+            let source = format!(
+                "Attribute VB_Name = \"Authored\"\nOption Explicit\n{}Sub Notify({header})\n{}End Sub\nSub Run()\nCall Notify({})\nEnd Sub\n",
+                state.module_constants, state.body, state.call.arguments,
+            );
+            fs::write(repository.path().join("module.bas"), &source).unwrap();
+            let mut service = FirstSliceService::new_durable_with_policy(
+                policy.clone(),
+                paths.state_dir(),
+                &deadline(),
+            )
+            .unwrap();
+            let prepared = service
+                .prepare_repository(repository.path(), &deadline())
+                .unwrap();
+            let committed = service
+                .publish_prepared_with_metrics(prepared, &deadline())
+                .unwrap();
+            assert_eq!(committed.evidence().rebuilt_files, 1);
+            assert_eq!(committed.evidence().reused_files, 0);
+            if position > 0 {
+                assert_eq!(committed.evidence().changed_files, 1);
+            }
+            let receipt = committed.receipt().clone();
+            assert_named_default_constant_contract(&service, &receipt, &source, language, state);
+            assert_eq!(
+                receipt,
+                service
+                    .index_repository(repository.path(), &deadline())
+                    .unwrap()
+            );
+            if let Some((old_receipt, old_source, old_state)) = &previous {
+                assert_ne!(receipt.generation, old_receipt.generation);
+                let isolated_edit = match position {
+                    1 => Some(
+                        old_source
+                            .replace("Const Fallback As Long = 7", "Const Fallback As Long = 8"),
+                    ),
+                    2 => {
+                        Some(old_source.replace("Const Fallback As Long = 8", "Const Fallback = 8"))
+                    }
+                    3 => Some(
+                        old_source.replace("Const Fallback = 8", "Const Fallback As Variant = 8"),
+                    ),
+                    4 => Some(old_source.replace("Private Const", "Public Const")),
+                    5 => Some(
+                        old_source.replace("Const Fallback As Variant", "Const Chosen As Variant"),
+                    ),
+                    6 => Some(old_source.replace("= Fallback)", "= [Chosen])")),
+                    _ => None,
+                };
+                if let Some(expected) = isolated_edit {
+                    assert_eq!(source, expected);
+                    assert!(receipt.logical_snapshot.is_some());
+                    assert_ne!(receipt.logical_snapshot, old_receipt.logical_snapshot);
+                }
+                assert_named_default_constant_contract(
+                    &service,
+                    old_receipt,
+                    old_source,
+                    language,
+                    *old_state,
+                );
+            }
+            drop(service);
+            let mut service = FirstSliceService::new_durable_with_policy(
+                policy.clone(),
+                paths.state_dir(),
+                &deadline(),
+            )
+            .unwrap();
+            assert_eq!(
+                receipt,
+                service
+                    .index_repository(repository.path(), &deadline())
+                    .unwrap()
+            );
+            assert_named_default_constant_contract(&service, &receipt, &source, language, state);
+            if let Some((old_receipt, old_source, old_state)) = &previous {
+                assert_named_default_constant_contract(
+                    &service,
+                    old_receipt,
+                    old_source,
+                    language,
+                    *old_state,
+                );
+            }
+            let prepared = service
+                .prepare_repository_with_options(
+                    repository.path(),
+                    FirstSliceIndexOptions::clean_rebuild(FirstSliceIndexMode::Structural),
+                    &deadline(),
+                )
+                .unwrap();
+            let committed = service
+                .publish_prepared_with_metrics(prepared, &deadline())
+                .unwrap();
+            assert_eq!(committed.evidence().rebuilt_files, 1);
+            assert_eq!(committed.evidence().reused_files, 0);
+            let rebuilt = committed.receipt().clone();
+            assert_ne!(receipt.generation, rebuilt.generation);
+            assert!(receipt.logical_snapshot.is_some());
+            assert_eq!(receipt.logical_snapshot, rebuilt.logical_snapshot);
+            assert_named_default_constant_contract(&service, &rebuilt, &source, language, state);
+            if position == 0 {
+                initial_source = Some(source.clone());
+                initial_logical = receipt.logical_snapshot.clone();
+            } else if position + 1 == states.len() {
+                assert_eq!(initial_source.as_ref(), Some(&source));
+                assert_eq!(receipt.logical_snapshot, initial_logical);
+            }
+            // The latest rebuilt predecessor is checked before a new rebuild
+            // can legitimately evict it under the unchanged retention2 policy.
+            previous = Some((rebuilt, source, state));
         }
     }
 }

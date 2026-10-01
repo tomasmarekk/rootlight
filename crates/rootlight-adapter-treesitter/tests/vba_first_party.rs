@@ -138,6 +138,154 @@ fn scalar_modules_preserve_local_identity_and_value_reads_without_native_work() 
 }
 
 #[test]
+fn module_constants_and_named_defaults_keep_file_and_formal_ownership() {
+    let source = b"Attribute VB_Name = \"Authored\"\r\nOption Explicit\r\nPublic Const Fallback = 7\r\nPrivate Const Label As String = \"text\"\r\nSub Accept(Optional Fallback = [FALLBACK], Optional text As String = Label)\r\nConst Fallback As Long = 8\r\nEnd Sub\r\nSub Run()\r\nCall Accept()\r\nEnd Sub\r\n";
+    for language in ["vba", "visual-basic-classic"] {
+        let fixture = Fixture::new(source);
+        let provider = provider();
+        let full_limits = limits(4096);
+        let request = fixture.request(&full_limits, language, Vec::new());
+        let required = provider
+            .required_syntax_fact_count(&request, &deadline())
+            .unwrap();
+        let output = parse(&provider, &request);
+        assert_eq!(
+            output.report().coverage().status(),
+            CoverageStatus::Complete
+        );
+        assert_eq!(
+            output.report().coverage().covered_source_bytes(),
+            source.len()
+        );
+        assert!(output.diagnostics().is_empty());
+        let constants: Vec<_> = output
+            .facts()
+            .iter()
+            .filter(|fact| fact.syntax_kind().as_str() == "vba.constant.declaration")
+            .collect();
+        assert_eq!(constants.len(), 3);
+        let mut module_constants = 0;
+        let mut local_constants = 0;
+        for constant in constants {
+            let parent = output
+                .facts()
+                .iter()
+                .find(|fact| Some(fact.local_id()) == constant.parent())
+                .unwrap();
+            match parent.syntax_kind().as_str() {
+                "vba.file.scope" => {
+                    module_constants += 1;
+                    assert_eq!(constant.depth(), 3);
+                    assert!(matches!(
+                        bytes_at(source, constant.span()),
+                        b"Fallback = 7" | b"Label As String = \"text\""
+                    ));
+                }
+                "vba.sub_function.declaration" => {
+                    local_constants += 1;
+                    assert_eq!(bytes_at(source, constant.span()), b"Fallback As Long = 8");
+                }
+                kind => panic!("a scalar constant has an authored file or procedure owner: {kind}"),
+            }
+            let definition = output
+                .facts()
+                .iter()
+                .find(|fact| {
+                    fact.syntax_kind().as_str() == "vba.identifier.definition"
+                        && fact.parent() == Some(constant.local_id())
+                })
+                .unwrap();
+            assert_eq!(definition.depth(), constant.depth() + 1);
+        }
+        assert_eq!((module_constants, local_constants), (2, 1));
+        let defaults: Vec<_> = output
+            .facts()
+            .iter()
+            .filter(|fact| {
+                fact.syntax_kind().as_str() == "vba.default_constant_identifier.reference"
+            })
+            .collect();
+        assert_eq!(defaults.len(), 2);
+        for default in defaults {
+            assert!(matches!(
+                bytes_at(source, default.span()),
+                b"[FALLBACK]" | b"Label"
+            ));
+            let formal = output
+                .facts()
+                .iter()
+                .find(|fact| Some(fact.local_id()) == default.parent())
+                .unwrap();
+            assert_eq!(
+                formal.syntax_kind().as_str(),
+                "vba.omittable_parameter.declaration"
+            );
+            assert_eq!(default.depth(), formal.depth() + 1);
+        }
+        for (kind, written) in [
+            ("vba.public.expression", b"Fallback = 7".as_slice()),
+            (
+                "vba.private.expression",
+                b"Label As String = \"text\"".as_slice(),
+            ),
+        ] {
+            assert!(
+                output
+                    .facts()
+                    .iter()
+                    .any(|fact| fact.syntax_kind().as_str() == kind
+                        && bytes_at(source, fact.span()) == written)
+            );
+        }
+        assert_eq!(output.facts(), parse(&provider, &request).facts());
+        let exact_limits = limits(required);
+        let exact_request = fixture.request(&exact_limits, language, Vec::new());
+        let exact = parse(&provider, &exact_request);
+        assert_eq!(
+            exact
+                .facts()
+                .iter()
+                .filter(|fact| fact.syntax_kind().as_str() == "vba.constant.declaration")
+                .count(),
+            3
+        );
+        let short_limits = limits(required - 1);
+        let short_request = fixture.request(&short_limits, language, Vec::new());
+        assert_eq!(
+            execute_parse(
+                &provider,
+                &short_request,
+                MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
+                &deadline(),
+            )
+            .unwrap_err(),
+            AdapterError::Sink(SinkError::StreamLimit {
+                resource: ResourceKind::RequiredSyntaxFacts,
+                observed: required,
+                limit: required - 1,
+            })
+        );
+        let cancelled = deadline();
+        cancelled.cancel(CancellationReason::ClientRequest);
+        assert!(matches!(
+            execute_parse(
+                &provider,
+                &request,
+                MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
+                &cancelled,
+            ),
+            Err(AdapterError::Cancelled {
+                reason: CancellationReason::ClientRequest
+            })
+        ));
+        let stats = provider.stats();
+        assert_eq!(stats.pooled_parsers, 0);
+        assert_eq!(stats.checked_out_parsers, 0);
+        assert_eq!(stats.cache.entries, 0);
+    }
+}
+
+#[test]
 fn explicit_calls_preserve_exact_application_and_callee_spans_without_native_work() {
     for language in ["vba", "visual-basic-classic"] {
         let fixture = Fixture::new(CALL_MODULE);

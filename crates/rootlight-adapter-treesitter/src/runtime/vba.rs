@@ -6,8 +6,8 @@ use std::ops::Range;
 
 use rootlight_adapter_sdk::NativeVbaModuleKind;
 use rootlight_vba::{
-    ModuleBodyStatement, ModuleError, ModuleInventory, ModuleLimits, ModuleLocalKind,
-    ModuleScalarValueKind, ProcedureKind,
+    ModuleBodyStatement, ModuleConstantVisibility, ModuleError, ModuleInventory, ModuleLimits,
+    ModuleLocalKind, ModuleScalarValueKind, ProcedureKind,
 };
 
 use super::*;
@@ -268,6 +268,12 @@ fn candidates(
         .checked_mul(4)
         .and_then(|count| count.checked_add(3 + usize::from(inventory.module_name().is_some())))
         .ok_or_else(|| provider_failure("vba-procedural-fact-accounting"))?;
+    count = inventory
+        .constants()
+        .len()
+        .checked_mul(2)
+        .and_then(|constants| count.checked_add(constants))
+        .ok_or_else(|| provider_failure("vba-procedural-fact-accounting"))?;
     for procedure in inventory.procedures() {
         cancellation.check()?;
         count = procedure
@@ -327,6 +333,42 @@ fn candidates(
             "vba.module_name",
             true,
         ));
+    }
+    for constant in inventory.constants() {
+        cancellation.check()?;
+        push_body_candidate(
+            &mut output,
+            maximum,
+            cancellation,
+            constant.declarator(),
+            StructuralRole::Declaration,
+            "vba.constant",
+            true,
+        )?;
+        push_body_candidate(
+            &mut output,
+            maximum,
+            cancellation,
+            constant.name(),
+            StructuralRole::Definition,
+            "vba.identifier",
+            true,
+        )?;
+        if include_optional {
+            push_body_candidate(
+                &mut output,
+                maximum,
+                cancellation,
+                constant.declarator(),
+                StructuralRole::Expression,
+                match constant.visibility() {
+                    Some(ModuleConstantVisibility::Public) => "vba.public",
+                    Some(ModuleConstantVisibility::Private) => "vba.private",
+                    None => "vba.visibility_unknown",
+                },
+                false,
+            )?;
+        }
     }
     for procedure in inventory.procedures() {
         cancellation.check()?;
@@ -394,6 +436,20 @@ fn candidates(
                 "vba.identifier",
                 true,
             )?;
+            if include_optional
+                && let Some(value) = parameter.default_value()
+                && value.kind() == ModuleScalarValueKind::Name
+            {
+                push_body_candidate(
+                    &mut output,
+                    maximum,
+                    cancellation,
+                    value.span(),
+                    StructuralRole::Reference,
+                    "vba.default_constant_identifier",
+                    false,
+                )?;
+            }
         }
         if include_optional {
             let text = source
@@ -1503,19 +1559,7 @@ mod tests {
                         );
                         assert_eq!(fact.span().start_byte(), 47);
                         assert_eq!(fact.span().end_byte(), 54);
-                        assert!(
-                            prepare(
-                                &fixture.provider,
-                                &request,
-                                None,
-                                &[],
-                                fixture.provider.config.default_settings(),
-                                &cancellation,
-                            )
-                            .unwrap()
-                            .is_none(),
-                            "a captured nonliteral default retains whole-module fallback"
-                        );
+                        compare_native(&Fixture::new(&source), language, &[]);
                     }
                     "boolean_literal" => {
                         assert!(default_facts.is_empty());
@@ -1682,7 +1726,7 @@ mod tests {
             "Optional value As = 1",
             "Optional value As UserType = 1",
             "value = 1",
-            "Optional value = seed",
+            "Optional value = seed.Member",
             "Optional value = 1 + 2",
             "Optional value = -1",
             "Optional value = 1.5",
@@ -2000,7 +2044,7 @@ mod tests {
     }
 
     #[test]
-    fn first_party_vba_optional_default_positions_preserve_literal_only_admission() {
+    fn first_party_vba_optional_default_positions_preserve_atomic_admission() {
         for default in [
             "True",
             "False",
@@ -2071,14 +2115,44 @@ mod tests {
                 )
                 .unwrap()
                 .is_some();
-                if default.eq_ignore_ascii_case("True") || default.eq_ignore_ascii_case("False") {
+                if matches!(
+                    default,
+                    "True"
+                        | "False"
+                        | "tRuE"
+                        | "Name"
+                        | "Line"
+                        | "Load"
+                        | "Unload"
+                        | "Input"
+                        | "Print"
+                        | "Close"
+                        | "Reset"
+                        | "Beep"
+                        | "DefBool"
+                        | "DefByte"
+                        | "DefInt"
+                        | "DefLng"
+                        | "DefLngLng"
+                        | "DefLngPtr"
+                        | "DefCur"
+                        | "DefSng"
+                        | "DefDbl"
+                        | "DefDate"
+                        | "DefStr"
+                        | "DefObj"
+                        | "DefVar"
+                        | "DefDec"
+                        | "[True]"
+                        | "[Name]"
+                ) {
                     assert_eq!(native.traversal.coverage, CoverageStatus::Complete);
                     assert!(admitted);
                     compare_native(&Fixture::new(&source), language, &[]);
                 } else {
                     assert!(
                         !admitted,
-                        "a source identifier or reserved expression is not an authored literal default: {language}:{default}"
+                        "a reserved expression is outside the authored atomic default slice: {language}:{default}"
                     );
                 }
             }
@@ -2091,7 +2165,7 @@ mod tests {
             "Optional value As Long =",
             "Optional value As Long = 1 + 2",
             "Optional value As Long = Target()",
-            "Optional value As Long = seed",
+            "Optional value As Long = seed.Member",
             "Optional value As Long = -1",
             "Optional value As Double = 1.5",
             "Optional value As Long = &H10",
@@ -2128,6 +2202,206 @@ mod tests {
                     .unwrap()
                     .is_none(),
                     "{language}:{parameters}"
+                );
+                assert_eq!(fixture.provider.stats().pooled_parsers, 0);
+                assert_eq!(fixture.provider.stats().cache.entries, 0);
+            }
+        }
+    }
+
+    #[test]
+    fn first_party_vba_module_constants_and_named_defaults_match_native_facts() {
+        for source in [
+            "Const Limit=7",
+            "Public Const [Limit] = 007\n",
+            "Private Const Label As String = \"a,\"\"b\"\":()\" ' tail\r\n",
+            "Const Flag As Boolean = False\nConst Flag As Boolean = True\n",
+            "' leading\nAttribute VB_Name = \"Authored\"\nOption Explicit\nPrivate Const Fallback As Long = 3\nSub Run(Optional value = [FALLBACK])\nConst Fallback As Long = 8\nvalue = Fallback\nEnd Sub\n",
+            "Public _\r\nConst _\r\n[Limit] _\r\nAs _\r\nLong _\r\n= _\r\n7\r\nSub Run(Optional value As Long = _\r\n[Limit])\r\nEnd Sub\r\n",
+            "Sub First(Optional value = Limit)\nEnd Sub\nPrivate Const Limit = 3\nSub Second(Optional value As Long = Limit)\nEnd Sub\nPublic Const Last As Boolean = True\n",
+            "Sub Run(Optional value = TrueRem)\nEnd Sub\nConst TrueRem = False\n",
+            "Const [True] = 3\nSub Run(Optional value = [True])\nEnd Sub\n",
+            "Sub Run(Optional value = Missing)\nEnd Sub\n",
+        ] {
+            for language in ["vba", "visual-basic-classic"] {
+                compare_native(&Fixture::new(source), language, &[]);
+            }
+        }
+        for ty in [
+            "",
+            " As String",
+            " As Boolean",
+            " As Byte",
+            " As Integer",
+            " As Long",
+            " As LongLong",
+            " As LongPtr",
+            " As Single",
+            " As Double",
+            " As Currency",
+            " As Date",
+            " As Variant",
+            " As Object",
+        ] {
+            for visibility in ["", "Public ", "Private "] {
+                for (name, value) in [("Limit", "7"), ("[Flag]", "True"), ("Label", "\"text\"")] {
+                    for newline in ["\n", "\r\n"] {
+                        let source = format!(
+                            "{visibility}Const {name}{ty} = {value}{newline}Sub Run(Optional value{ty} = {name}){newline}End Sub{newline}"
+                        );
+                        for language in ["vba", "visual-basic-classic"] {
+                            compare_native(&Fixture::new(&source), language, &[]);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn first_party_vba_module_constants_obey_exact_node_and_candidate_ceilings() {
+        let source = "Const Limit = 7\nSub Run(Optional value = Limit)\nEnd Sub\n";
+        for language in ["vba", "visual-basic-classic"] {
+            let mut fixture = Fixture::new(source);
+            let cancellation = Cancellation::new();
+            let request = fixture.request(language, &[]);
+            let prepared = prepare(
+                &fixture.provider,
+                &request,
+                None,
+                &[],
+                fixture.provider.config.default_settings(),
+                &cancellation,
+            )
+            .unwrap()
+            .unwrap();
+            assert_eq!(prepared.inventory.constants().len(), 1);
+            assert_eq!(prepared.processed_nodes, 7);
+            for (optional, expected) in [(false, 11), (true, 14)] {
+                let exact = candidates(
+                    &prepared.inventory,
+                    request.source().bytes(),
+                    optional,
+                    expected,
+                    &cancellation,
+                )
+                .unwrap();
+                assert_eq!(exact.len(), expected);
+                assert_eq!(
+                    exact
+                        .iter()
+                        .filter(|fact| fact.syntax == "vba.constant")
+                        .count(),
+                    1
+                );
+                assert_eq!(
+                    exact
+                        .iter()
+                        .filter(|fact| fact.syntax == "vba.default_constant_identifier")
+                        .count(),
+                    usize::from(optional)
+                );
+                assert!(matches!(candidates(
+                    &prepared.inventory, request.source().bytes(), optional, expected - 1, &cancellation,
+                ), Err(AdapterError::RejectedRequest(RequestError::ProviderLimit {
+                    resource: ResourceKind::SyntaxNodes, observed, limit,
+                })) if observed == expected && limit == expected - 1));
+            }
+            fixture.limits = with_maximum_nodes(&fixture.limits, 7);
+            let request = fixture.request(language, &[]);
+            assert_eq!(
+                prepare(
+                    &fixture.provider,
+                    &request,
+                    None,
+                    &[],
+                    fixture.provider.config.default_settings(),
+                    &cancellation,
+                )
+                .unwrap()
+                .unwrap()
+                .processed_nodes,
+                7
+            );
+            fixture.limits = with_maximum_nodes(&fixture.limits, 6);
+            let request = fixture.request(language, &[]);
+            assert!(matches!(
+                prepare(
+                    &fixture.provider,
+                    &request,
+                    None,
+                    &[],
+                    fixture.provider.config.default_settings(),
+                    &cancellation,
+                ),
+                Err(AdapterError::RejectedRequest(RequestError::ProviderLimit {
+                    resource: ResourceKind::SyntaxNodes,
+                    observed: 7,
+                    limit: 6,
+                }))
+            ));
+            cancellation.cancel(rootlight_cancel::CancellationReason::ClientRequest);
+            assert!(matches!(
+                candidates(
+                    &prepared.inventory,
+                    source.as_bytes(),
+                    true,
+                    14,
+                    &cancellation,
+                ),
+                Err(AdapterError::Cancelled {
+                    reason: rootlight_cancel::CancellationReason::ClientRequest,
+                })
+            ));
+            assert_eq!(fixture.provider.stats().pooled_parsers, 0);
+            assert_eq!(fixture.provider.stats().cache.entries, 0);
+        }
+    }
+
+    #[test]
+    fn first_party_vba_module_constant_exclusions_keep_whole_native_fallback() {
+        for declaration in [
+            "Const Missing",
+            "Const Value =",
+            "Const Value = Other",
+            "Const Value = Other.Member",
+            "Const Value = Target()",
+            "Const Value = 1 + 2",
+            "Const Value = -1",
+            "Const Value = &H10",
+            "Const Value = #1/1/2000#",
+            "Const Value = 1.5",
+            "Const Value = 1, Other = 2",
+            "Const Value As = 1",
+            "Const Value As UserType = 1",
+            "Const Value As New Object = 1",
+            "Const Value As String * 3 = \"abc\"",
+            "Const Value$ = \"abc\"",
+            "Const Values() = 1",
+            "Friend Const Value = 1",
+            "Global Const Value = 1",
+            "Const Value = \"unterminated",
+            "#Const Value = 1",
+            "Const Value = 1: Const Other = 2",
+            "Const Value = 1\nOption Explicit",
+            "Const Value = 1\nAttribute VB_Name = \"Late\"",
+        ] {
+            let source = format!("Sub First()\nEnd Sub\n{declaration}\nSub Run()\nEnd Sub\n");
+            for language in ["vba", "visual-basic-classic"] {
+                let fixture = Fixture::new(&source);
+                let request = fixture.request(language, &[]);
+                assert!(
+                    prepare(
+                        &fixture.provider,
+                        &request,
+                        None,
+                        &[],
+                        fixture.provider.config.default_settings(),
+                        &Cancellation::new(),
+                    )
+                    .unwrap()
+                    .is_none(),
+                    "{language}:{declaration}"
                 );
                 assert_eq!(fixture.provider.stats().pooled_parsers, 0);
                 assert_eq!(fixture.provider.stats().cache.entries, 0);
@@ -2486,7 +2760,7 @@ mod tests {
     #[test]
     fn first_party_vba_unsupported_parameters_keep_whole_native_fallback() {
         for parameters in [
-            "Optional value As Long = seed",
+            "Optional value As Long = seed.Member",
             "ByVal value As Long = 1",
             "ParamArray values() As Variant",
             "ByRef values() As Long",

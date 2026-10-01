@@ -462,6 +462,16 @@ pub(super) fn literal_value<E>(
     atomic_value(text, cursor, false, check)
 }
 
+pub(super) fn parameter_default_value<E>(
+    text: &[u8],
+    cursor: &mut usize,
+    check: &mut impl FnMut() -> Result<(), E>,
+) -> Result<Option<ModuleScalarValue>, E> {
+    // Parameter defaults may name a constant; local Const initializers retain
+    // the narrower literal-only route independently of this syntax inventory.
+    atomic_value(text, cursor, true, check)
+}
+
 fn atomic_value<E>(
     text: &[u8],
     cursor: &mut usize,
@@ -519,7 +529,7 @@ fn atomic_value<E>(
     }))
 }
 
-fn simple_name<E>(
+pub(super) fn simple_name<E>(
     text: &[u8],
     cursor: &mut usize,
     check: &mut impl FnMut() -> Result<(), E>,

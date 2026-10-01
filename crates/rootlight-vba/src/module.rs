@@ -25,6 +25,7 @@ impl ModuleLimits {
     /// Aggregate parameter and argument ceilings default to the procedure ceiling;
     /// use [`Self::with_max_parameters`] and [`Self::with_max_arguments`] to admit
     /// separately bounded comma lists.
+    /// Module constants share the existing statement ceiling with body records.
     #[must_use]
     pub const fn new(
         max_source_bytes: usize,
@@ -65,6 +66,7 @@ pub struct ModuleInventory {
     source_len: usize,
     module_name: Option<Range<usize>>,
     procedures: Vec<ModuleProcedure>,
+    constants: Vec<ModuleConstant>,
     statement_count: usize,
 }
 
@@ -87,11 +89,84 @@ impl ModuleInventory {
         &self.procedures
     }
 
+    /// Returns complete module-level constants in source order, not local declarations.
+    #[must_use]
+    pub fn constants(&self) -> &[ModuleConstant] {
+        &self.constants
+    }
+
     /// Returns consumed logical segments, including blank and comment segments.
     /// A trailing EOF does not add a synthetic segment.
     #[must_use]
     pub const fn statement_count(&self) -> usize {
         self.statement_count
+    }
+}
+
+/// The authored visibility keyword on a module-level constant.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ModuleConstantVisibility {
+    /// The statement explicitly carries `Public`.
+    Public,
+    /// The statement explicitly carries `Private`.
+    Private,
+}
+
+/// One module-level scalar constant with a complete literal initializer.
+/// All ranges address the original module; no inferred type, visibility or
+/// evaluated constant value is substituted for absent source syntax.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ModuleConstant {
+    statement: Range<usize>,
+    declarator: Range<usize>,
+    name: Range<usize>,
+    type_range: Option<Range<usize>>,
+    value: ModuleScalarValue,
+    visibility: Option<ModuleConstantVisibility>,
+    visibility_range: Option<Range<usize>>,
+}
+
+impl ModuleConstant {
+    /// Returns the complete trimmed statement, including any visibility keyword.
+    #[must_use]
+    pub fn statement(&self) -> Range<usize> {
+        self.statement.clone()
+    }
+
+    /// Returns the exact name through initializer, excluding visibility and Const.
+    #[must_use]
+    pub fn declarator(&self) -> Range<usize> {
+        self.declarator.clone()
+    }
+
+    /// Returns the exact authored constant name, including any brackets.
+    #[must_use]
+    pub fn name(&self) -> Range<usize> {
+        self.name.clone()
+    }
+
+    /// Returns the written intrinsic type keyword, or None for absent As syntax.
+    #[must_use]
+    pub fn type_range(&self) -> Option<Range<usize>> {
+        self.type_range.clone()
+    }
+
+    /// Returns the authored literal token without evaluating or coercing it.
+    #[must_use]
+    pub fn value(&self) -> &ModuleScalarValue {
+        &self.value
+    }
+
+    /// Returns only a written Public or Private keyword, never inferred visibility.
+    #[must_use]
+    pub const fn visibility(&self) -> Option<ModuleConstantVisibility> {
+        self.visibility
+    }
+
+    /// Returns the exact visibility keyword token, or None when none was written.
+    #[must_use]
+    pub fn visibility_range(&self) -> Option<Range<usize>> {
+        self.visibility_range.clone()
     }
 }
 
@@ -105,7 +180,7 @@ pub enum ModuleParameterPassingMode {
 }
 
 /// One scalar parameter retaining its authored intrinsic type or type absence.
-/// Optional parameters retain an absent or literal-only authored default without
+/// Optional parameters retain an absent or atomic authored default without
 /// evaluation. Array bounds and type suffixes are excluded. All ranges address
 /// the entire module, never a reconstructed parameter list.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -154,9 +229,9 @@ impl ModuleParameter {
         self.is_optional
     }
 
-    /// Returns the exact authored literal default, or None when none is written.
-    /// Absence is never replaced by an inferred value. The literal's category
-    /// does not prove compatibility with the parameter's declared intrinsic type.
+    /// Returns the authored scalar literal or name, or None when none is written.
+    /// Absence is never replaced by an inferred value; names require independent
+    /// binding. The atom proves neither type compatibility nor constant validity.
     #[must_use]
     pub fn default_value(&self) -> Option<&ModuleScalarValue> {
         self.default_value.as_ref()
@@ -247,7 +322,7 @@ pub enum ModuleError<E> {
     ParameterLimit,
     /// Retained Call arguments across the module exceed the argument ceiling.
     ArgumentLimit,
-    /// Fallible reservation of bounded procedure, parameter, argument or body storage failed.
+    /// Fallible reservation of bounded structural storage failed.
     AllocationFailed,
     /// The caller's cancellation or work callback failed.
     Cancelled(E),
@@ -288,7 +363,7 @@ impl<E: std::error::Error + 'static> std::error::Error for ModuleError<E> {
 /// Type absence is preserved without a synthetic Variant source or identity.
 /// Optional parameters carry the keyword before any passing modifier and may
 /// omit an authored default or retain one unsigned decimal, physically closed
-/// string or Boolean literal.
+/// string, Boolean literal or simple name requiring independent constant binding.
 /// Parameter-token boundaries also retain form-feed trivia and bare Rem comments;
 /// a comment-only parenthesized list is empty, never a synthetic Rem parameter.
 /// Rem comments with space/tab tails, bare line endings and missing comma-list
@@ -297,6 +372,9 @@ impl<E: std::error::Error + 'static> std::error::Error for ModuleError<E> {
 /// and type-suffixed parameter names are unsupported. Functions retain
 /// an optional intrinsic scalar As return clause or unbracketed type suffix.
 /// Public/Private and optional Static modifiers are accepted in that order.
+/// Module-level Const statements retain one typed or untyped scalar literal
+/// initializer and optional Public/Private spelling. They may precede, separate
+/// or follow procedures, but Attribute and Option remain leading-header forms.
 /// Bodies admit one typed scalar Dim or Const per statement and simple scalar
 /// assignments with an optional Let prefix. Const values are unsigned decimal,
 /// physically closed doubled-quote strings or True/False; assignments additionally
@@ -318,7 +396,8 @@ impl<E: std::error::Error + 'static> std::error::Error for ModuleError<E> {
 /// continuations. The scan is nonrecursive, bounded and cancellable before
 /// admission, per statement and periodically within byte scans. Statement
 /// ceilings include trivia segments; procedure and body storage is reserved fallibly.
-/// Across all procedures, retained body records cannot exceed the statement ceiling.
+/// Retained body and module-constant records together cannot exceed the statement
+/// ceiling. Constant storage is fallible; this bounds records, not allocator bytes.
 /// Retained parameters across all procedures have a separate aggregate ceiling;
 /// their storage is reserved fallibly, never inferred from logical statement count.
 /// Each parameter retains at most one inline default atom under that same ceiling.
@@ -356,12 +435,14 @@ pub fn module_inventory<E>(
         source_len: source.len(),
         module_name: None,
         procedures: Vec::new(),
+        constants: Vec::new(),
         statement_count: 0,
     };
     let mut open: Option<ModuleProcedure> = None;
     let mut cursor = 0;
     let mut options = 0_u8;
     let mut attribute_header = true;
+    let mut declaration_started = false;
     let mut body_count = 0_usize;
     let mut parameter_count = 0_usize;
     let mut argument_count = 0_usize;
@@ -430,14 +511,15 @@ pub fn module_inventory<E>(
                 argument_count = argument_count
                     .checked_add(retained_arguments)
                     .ok_or(ModuleError::ArgumentLimit)?;
-                let maximum = limits.max_statements - body_count + procedure.statements.len();
+                let maximum = limits.max_statements - body_count - inventory.constants.len()
+                    + procedure.statements.len();
                 super::module_body::reserve(&mut procedure.statements, maximum)?;
                 procedure.statements.push(statement);
                 body_count += 1;
             }
             continue;
         }
-        if inventory.procedures.is_empty() {
+        if !declaration_started {
             if let Some(name) = module_attribute(text, check).map_err(ModuleError::Cancelled)? {
                 if colon_boundary || !attribute_header || inventory.module_name.is_some() {
                     return Err(ModuleError::Unsupported { range });
@@ -453,6 +535,22 @@ pub fn module_inventory<E>(
                 attribute_header = false;
                 continue;
             }
+        }
+        if let Some(constant) =
+            module_constant(text, range.clone(), check).map_err(ModuleError::Cancelled)?
+        {
+            if colon_boundary {
+                return Err(ModuleError::Unsupported { range });
+            }
+            reserve_constants(
+                &mut inventory.constants,
+                limits.max_statements - body_count,
+                check,
+            )?;
+            inventory.constants.push(constant);
+            declaration_started = true;
+            attribute_header = false;
+            continue;
         }
         let remaining_parameters = limits
             .max_parameters
@@ -501,6 +599,8 @@ pub fn module_inventory<E>(
             terminator: cursor..cursor,
             statements: Vec::new(),
         });
+        declaration_started = true;
+        attribute_header = false;
     }
     if let Some(procedure) = open {
         return Err(ModuleError::Unsupported {
@@ -748,7 +848,7 @@ fn scalar_parameter<E>(
         }
         *cursor += 1;
         *cursor += parameter_trivia_len(text.get(*cursor..).unwrap_or_default(), check)?;
-        let Some(value) = super::module_body::literal_value(text, cursor, check)? else {
+        let Some(value) = super::module_body::parameter_default_value(text, cursor, check)? else {
             return Ok(None);
         };
         Some(value)
@@ -766,6 +866,108 @@ fn scalar_parameter<E>(
         is_optional,
         default_value,
     }))
+}
+
+fn module_constant<E>(
+    text: &[u8],
+    range: Range<usize>,
+    check: &mut impl FnMut() -> Result<(), E>,
+) -> Result<Option<ModuleConstant>, E> {
+    check()?;
+    let mut cursor = 0;
+    let first = word(text, &mut cursor, check)?;
+    let visibility = if first.eq_ignore_ascii_case(b"Public") {
+        Some(ModuleConstantVisibility::Public)
+    } else if first.eq_ignore_ascii_case(b"Private") {
+        Some(ModuleConstantVisibility::Private)
+    } else {
+        None
+    };
+    let visibility_range = visibility.map(|_| range.start..range.start + cursor);
+    let keyword = if visibility.is_some() {
+        if !separator(text, &mut cursor, check)? {
+            return Ok(None);
+        }
+        word(text, &mut cursor, check)?
+    } else {
+        first
+    };
+    if !keyword.eq_ignore_ascii_case(b"Const") || !separator(text, &mut cursor, check)? {
+        return Ok(None);
+    }
+    let Some(name) = super::module_body::simple_name(text, &mut cursor, check)? else {
+        return Ok(None);
+    };
+    let separator_length = logical_whitespace_len(text.get(cursor..).unwrap_or_default(), check)?;
+    cursor += separator_length;
+    let after_name = cursor;
+    let type_range = if word(text, &mut cursor, check)?.eq_ignore_ascii_case(b"As") {
+        if separator_length == 0 || !separator(text, &mut cursor, check)? {
+            return Ok(None);
+        }
+        let start = cursor;
+        if !super::module_body::intrinsic_type_name(word(text, &mut cursor, check)?) {
+            return Ok(None);
+        }
+        Some(range.start + start..range.start + cursor)
+    } else {
+        cursor = after_name;
+        None
+    };
+    cursor += logical_whitespace_len(text.get(cursor..).unwrap_or_default(), check)?;
+    if text.get(cursor) != Some(&b'=') {
+        return Ok(None);
+    }
+    cursor += 1;
+    cursor += logical_whitespace_len(text.get(cursor..).unwrap_or_default(), check)?;
+    let Some(mut value) = super::module_body::literal_value(text, &mut cursor, check)? else {
+        return Ok(None);
+    };
+    let declarator_end = value.span().end;
+    cursor += logical_whitespace_len(text.get(cursor..).unwrap_or_default(), check)?;
+    if cursor != text.len() {
+        return Ok(None);
+    }
+    check()?;
+    value.rebase(&range);
+    Ok(Some(ModuleConstant {
+        statement: range.clone(),
+        declarator: range.start + name.start..range.start + declarator_end,
+        name: range.start + name.start..range.start + name.end,
+        type_range,
+        value,
+        visibility,
+        visibility_range,
+    }))
+}
+
+fn reserve_constants<E>(
+    constants: &mut Vec<ModuleConstant>,
+    maximum: usize,
+    check: &mut impl FnMut() -> Result<(), E>,
+) -> Result<(), ModuleError<E>> {
+    check().map_err(ModuleError::Cancelled)?;
+    if constants.len() >= maximum {
+        return Err(ModuleError::StatementLimit);
+    }
+    if constants.len() == constants.capacity() {
+        let additional = constants.capacity().max(1).min(maximum - constants.len());
+        reserve_constants_exact(constants, additional, check)?;
+    }
+    Ok(())
+}
+
+fn reserve_constants_exact<E>(
+    constants: &mut Vec<ModuleConstant>,
+    additional: usize,
+    check: &mut impl FnMut() -> Result<(), E>,
+) -> Result<(), ModuleError<E>> {
+    check().map_err(ModuleError::Cancelled)?;
+    let result = constants
+        .try_reserve_exact(additional)
+        .map_err(|_| ModuleError::AllocationFailed);
+    check().map_err(ModuleError::Cancelled)?;
+    result
 }
 
 fn is_terminator<E>(
@@ -947,6 +1149,536 @@ mod tests {
             ModuleLimits::new(source.len(), source.len(), source.len()),
             &mut || Ok(()),
         )
+    }
+
+    #[test]
+    fn named_optional_defaults_preserve_exact_atoms_and_source_absence() {
+        for newline in ["\n", "\r\n"] {
+            let source = format!(
+                "Const Seed As Long=7{newline}Sub Run(Optional ByVal first As Long=Seed,Optional [second] _{newline} = _{newline} [True],Optional third=TrueRem,Optional fourth=True,Optional absent){newline}End Sub{newline}"
+            );
+            let inventory = parse(source.as_bytes()).unwrap();
+            assert_eq!(inventory.constants().len(), 1);
+            let parameters = inventory.procedures()[0].parameters();
+            assert_eq!(parameters.len(), 5);
+            for (parameter, spelling, kind) in [
+                (&parameters[0], "Seed", ModuleScalarValueKind::Name),
+                (&parameters[1], "[True]", ModuleScalarValueKind::Name),
+                (&parameters[2], "TrueRem", ModuleScalarValueKind::Name),
+                (&parameters[3], "True", ModuleScalarValueKind::Boolean),
+            ] {
+                assert!(parameter.is_optional());
+                let value = parameter.default_value().unwrap();
+                assert_eq!(&source[value.span()], spelling);
+                assert_eq!(value.kind(), kind);
+                assert_eq!(parameter.declaration().end, value.span().end);
+            }
+            assert_eq!(
+                parameters[0].passing_mode(),
+                Some(ModuleParameterPassingMode::ByVal)
+            );
+            assert_eq!(&source[parameters[0].type_range().unwrap()], "Long");
+            for parameter in &parameters[1..] {
+                assert!(parameter.type_range().is_none());
+            }
+            assert_eq!(
+                &source[parameters[1].declaration()],
+                format!("Optional [second] _{newline} = _{newline} [True]")
+            );
+            assert!(parameters[4].default_value().is_none());
+        }
+        for spelling in [
+            "name",
+            "seed",
+            "TrueFalse",
+            "FalseRem",
+            "Remember",
+            "Rem1",
+            "[Me]",
+            "[Rem]",
+            "[Nothing]",
+            "_seed",
+        ] {
+            let source = format!("Sub Run(Optional value={spelling})\nEnd Sub\n");
+            let inventory = parse(source.as_bytes()).unwrap();
+            let value = inventory.procedures()[0].parameters()[0]
+                .default_value()
+                .unwrap();
+            assert_eq!(value.kind(), ModuleScalarValueKind::Name, "{spelling}");
+            assert_eq!(&source[value.span()], spelling);
+        }
+    }
+
+    #[test]
+    fn named_defaults_do_not_expand_const_initializers_or_accept_partial_tails() {
+        for statement in [
+            "Const Limit As Long=Seed",
+            "Const Limit=Seed",
+            "Public Const Limit=[True]",
+        ] {
+            assert!(
+                matches!(
+                    parse(statement.as_bytes()),
+                    Err(ModuleError::Unsupported { .. })
+                ),
+                "{statement}"
+            );
+        }
+        for statement in ["Const Limit As Long=Seed", "Const Limit As Long=[True]"] {
+            let source = format!("Sub Run(Optional value=Seed)\n{statement}\nEnd Sub\n");
+            assert!(
+                matches!(
+                    parse(source.as_bytes()),
+                    Err(ModuleError::Unsupported { .. })
+                ),
+                "{statement}"
+            );
+        }
+        for clause in [
+            "value=Seed",
+            "ByVal value As Long=[True]",
+            "Optional value=",
+            "Optional value=Seed.member",
+            "Optional value=Seed()",
+            "Optional value=[Seed].member",
+            "Optional value=Seed+1",
+            "Optional value=Seed tail",
+            "Optional value=Seed$",
+            "Optional value=[Seed]$",
+            "Optional value=Seeds(1)",
+            "Optional value=Null",
+            "Optional value=Nothing",
+            "Optional value=Empty",
+            "Optional value=Me",
+            "Optional value=Rem",
+            "Optional value=1Seed",
+            "Optional value=[Seed",
+            "Optional value=[]",
+            "Optional value=[Seed name]",
+            "Optional value=é",
+            "Optional value=Seed,,Optional other=1",
+            "Optional value=Seed,",
+        ] {
+            let source = format!(
+                "Const Seed=7\nSub Accepted(Optional first=Seed)\nEnd Sub\nSub Rejected(Optional prior=Seed,{clause})\nEnd Sub\n"
+            );
+            assert!(
+                matches!(
+                    parse(source.as_bytes()),
+                    Err(ModuleError::Unsupported { .. })
+                ),
+                "{clause}"
+            );
+        }
+    }
+
+    #[test]
+    fn named_optional_defaults_keep_complete_lists_under_the_parameter_quota() {
+        let clauses: Vec<_> = (0..64)
+            .map(|index| format!("Optional value{index}=Seed{index}"))
+            .collect();
+        let source = format!(
+            "Sub First({})\nEnd Sub\nSub Second(Optional [last]=[Seed])\nEnd Sub\n",
+            clauses.join(",")
+        );
+        let limits = ModuleLimits::new(source.len(), 4, 2).with_max_parameters(65);
+        let inventory =
+            module_inventory(source.as_bytes(), limits, &mut || Ok::<(), ()>(())).unwrap();
+        assert_eq!(inventory.procedures()[0].parameters().len(), 64);
+        assert_eq!(inventory.procedures()[1].parameters().len(), 1);
+        for (index, parameter) in inventory.procedures()[0].parameters().iter().enumerate() {
+            let value = parameter.default_value().unwrap();
+            assert_eq!(value.kind(), ModuleScalarValueKind::Name);
+            assert_eq!(&source[value.span()], format!("Seed{index}"));
+        }
+        for maximum in [0, 1, 63, 64] {
+            assert_eq!(
+                module_inventory(
+                    source.as_bytes(),
+                    limits.with_max_parameters(maximum),
+                    &mut || Ok::<(), ()>(())
+                ),
+                Err(ModuleError::ParameterLimit)
+            );
+        }
+    }
+
+    #[test]
+    fn module_constants_preserve_literal_type_visibility_and_all_source_ranges() {
+        for newline in ["\n", "\r\n"] {
+            let first = format!(
+                "pUbLiC _{newline} cOnSt _{newline} [Limit] _{newline} As _{newline} Long _{newline} = _{newline} 007"
+            );
+            let second = "Private Const Message=\"Rem: ' = End Sub, \"\"quoted\"\"\"";
+            let source = format!(
+                "Attribute VB_Name = \"Constants\"{newline}Option Explicit{newline}  {first} ' tail{newline}{second}{newline}Const Enabled As Boolean=tRuE{newline}Const Absent=False{newline}"
+            );
+            let inventory = parse(source.as_bytes()).unwrap();
+            assert!(inventory.procedures().is_empty());
+            assert_eq!(inventory.constants().len(), 4);
+            let constants = inventory.constants();
+            assert_eq!(&source[constants[0].statement()], first);
+            assert_eq!(&source[constants[0].name()], "[Limit]");
+            assert_eq!(
+                &source[constants[0].declarator()],
+                format!("[Limit] _{newline} As _{newline} Long _{newline} = _{newline} 007")
+            );
+            assert_eq!(&source[constants[0].type_range().unwrap()], "Long");
+            assert_eq!(
+                constants[0].visibility(),
+                Some(ModuleConstantVisibility::Public)
+            );
+            assert_eq!(&source[constants[0].visibility_range().unwrap()], "pUbLiC");
+            assert_eq!(&source[constants[0].value().span()], "007");
+            assert_eq!(
+                constants[0].value().kind(),
+                ModuleScalarValueKind::UnsignedDecimal
+            );
+            assert_eq!(&source[constants[1].statement()], second);
+            assert_eq!(
+                constants[1].visibility(),
+                Some(ModuleConstantVisibility::Private)
+            );
+            assert_eq!(&source[constants[1].visibility_range().unwrap()], "Private");
+            assert!(constants[1].type_range().is_none());
+            assert_eq!(constants[1].value().kind(), ModuleScalarValueKind::String);
+            assert_eq!(
+                &source[constants[1].value().span()],
+                "\"Rem: ' = End Sub, \"\"quoted\"\"\""
+            );
+            assert_eq!(&source[constants[2].type_range().unwrap()], "Boolean");
+            assert_eq!(constants[2].value().kind(), ModuleScalarValueKind::Boolean);
+            assert_eq!(&source[constants[2].value().span()], "tRuE");
+            assert!(constants[3].type_range().is_none());
+            for constant in &constants[2..] {
+                assert_eq!(constant.visibility(), None);
+                assert_eq!(constant.visibility_range(), None);
+            }
+            for constant in constants {
+                assert_eq!(constant.declarator().start, constant.name().start);
+                assert_eq!(constant.declarator().end, constant.value().span().end);
+                assert!(constant.statement().start <= constant.declarator().start);
+                assert!(constant.declarator().end <= constant.statement().end);
+            }
+        }
+        for ty in [
+            "String", "Boolean", "Byte", "Integer", "Long", "LongLong", "LongPtr", "Single",
+            "Double", "Currency", "Date", "Variant", "Object",
+        ] {
+            let source = format!("Const Value As {ty}=1");
+            let inventory = parse(source.as_bytes()).unwrap();
+            assert_eq!(&source[inventory.constants()[0].type_range().unwrap()], ty);
+        }
+    }
+
+    #[test]
+    fn module_constants_can_surround_procedures_but_close_the_leading_header() {
+        let source = b"Const Before=1\nSub First()\nConst Local As Long=2\nEnd Sub\nPrivate Const Between As Variant=3\nFunction Second(Optional value=Before) As Long\nSecond=value\nEnd Function\nPublic Const After=4\nConst Before=5\n";
+        let inventory = parse(source).unwrap();
+        assert_eq!(inventory.constants().len(), 4);
+        assert_eq!(inventory.procedures().len(), 2);
+        let first = &inventory.procedures()[0];
+        assert_eq!(first.statements().len(), 1);
+        assert!(
+            matches!(&first.statements()[0], ModuleBodyStatement::Declaration(local) if &source[local.name()] == b"Local")
+        );
+        assert_eq!(&source[inventory.constants()[0].name()], b"Before");
+        assert_eq!(&source[inventory.constants()[3].name()], b"Before");
+        assert!(inventory.constants()[0].statement().end < first.header().start);
+        assert!(first.terminator().end < inventory.constants()[1].statement().start);
+        assert!(
+            inventory.procedures()[1].terminator().end < inventory.constants()[2].statement().start
+        );
+        for tail in [
+            "Option Explicit",
+            "Option Base 0",
+            "Attribute VB_Name = \"Late\"",
+        ] {
+            let source = format!("Const Before=1\n{tail}\n");
+            assert!(
+                matches!(
+                    parse(source.as_bytes()),
+                    Err(ModuleError::Unsupported { .. })
+                ),
+                "{tail}"
+            );
+        }
+        for source in [
+            "Const Value=1:",
+            "Const Value=1:Const Other=2",
+            ":Const Value=1",
+            "Const Value=1\n:",
+            "Sub First()\nEnd Sub:Const Value=1",
+        ] {
+            assert!(
+                matches!(
+                    parse(source.as_bytes()),
+                    Err(ModuleError::Unsupported { .. })
+                ),
+                "{source}"
+            );
+        }
+    }
+
+    #[test]
+    fn malformed_module_constants_never_publish_preceding_structural_records() {
+        for statement in [
+            "Const",
+            "Const Value",
+            "Const Value=",
+            "Const Value As",
+            "Const Value As=1",
+            "Const Value As Product=1",
+            "Const Value As [Long]=1",
+            "Const Value As Long()=1",
+            "Const Value As New Object=1",
+            "Const Value As String * 8=\"a\"",
+            "Const Value As Long$=1",
+            "Const Value$=1",
+            "Const [Value]$=1",
+            "Const Value()=1",
+            "Const holder.Value=1",
+            "Const Value=1,Other=2",
+            "Const Value=1,",
+            "Const Value=Seed",
+            "Const Value=[True]",
+            "Const Value=Null",
+            "Const Value=Nothing",
+            "Const Value=Empty",
+            "Const Value=-1",
+            "Const Value=+1",
+            "Const Value=1.0",
+            "Const Value=.1",
+            "Const Value=1e2",
+            "Const Value=&H1",
+            "Const Value=#1/1/2000#",
+            "Const Value=1%",
+            "Const Value=TrueRem",
+            "Const Value=1+2",
+            "Const Value=(1)",
+            "Const Value=Make()",
+            "Const Value=1 extra",
+            "Const Value:=1",
+            "Const Value==1",
+            "Const Value=\"a\" \"b\"",
+            "Const Value=\"open",
+            "Const Value=\"continued _\n ",
+            "Const []=1",
+            "Const [Value name]=1",
+            "Const é=1",
+            "Const Value=1 Rem tail",
+            "Public Private Const Value=1",
+            "Private Public Const Value=1",
+            "Public Static Const Value=1",
+            "Friend Const Value=1",
+            "Static Const Value=1",
+            "PublicConst Value=1",
+            "ConstValue=1",
+            "Const [Value]As Long=1",
+        ] {
+            let source =
+                format!("Const Seed=7\nSub Accepted(Optional first=Seed)\nEnd Sub\n{statement}\n");
+            assert!(
+                matches!(
+                    parse(source.as_bytes()),
+                    Err(ModuleError::Unsupported { .. })
+                ),
+                "{statement:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn module_constants_share_exact_statement_quota_without_procedure_cost() {
+        let source = b"Const First=1\nPrivate Const Second=\"two\"\nPublic Const Third=True\n";
+        let limits = ModuleLimits::new(source.len(), 3, 0)
+            .with_max_parameters(0)
+            .with_max_arguments(0);
+        let inventory = module_inventory(source, limits, &mut || Ok::<(), ()>(())).unwrap();
+        assert_eq!(inventory.constants().len(), 3);
+        assert_eq!(inventory.statement_count(), 3);
+        assert!(inventory.procedures().is_empty());
+        for maximum in [0, 1, 2] {
+            assert_eq!(
+                module_inventory(
+                    source,
+                    ModuleLimits::new(source.len(), maximum, 0),
+                    &mut || Ok::<(), ()>(())
+                ),
+                Err(ModuleError::StatementLimit)
+            );
+        }
+        assert_eq!(
+            module_inventory(
+                source,
+                ModuleLimits::new(source.len() - 1, 3, 0),
+                &mut || Ok::<(), ()>(())
+            ),
+            Err(ModuleError::SourceLimit)
+        );
+        let source = b"Const First=1\nSub Run()\nConst Local As Long=2\nEnd Sub\nConst Last=3\n";
+        let inventory =
+            module_inventory(source, ModuleLimits::new(source.len(), 5, 1), &mut || {
+                Ok::<(), ()>(())
+            })
+            .unwrap();
+        assert_eq!(inventory.statement_count(), 5);
+        assert_eq!(inventory.constants().len(), 2);
+        assert_eq!(inventory.procedures()[0].statements().len(), 1);
+        assert_eq!(
+            module_inventory(source, ModuleLimits::new(source.len(), 4, 1), &mut || Ok::<
+                (),
+                (),
+            >(
+                ()
+            )),
+            Err(ModuleError::StatementLimit)
+        );
+        let mut many = String::new();
+        for index in 0..128 {
+            many.push_str(&format!("Const Value{index}={index}\n"));
+        }
+        let inventory = module_inventory(
+            many.as_bytes(),
+            ModuleLimits::new(many.len(), 128, 0),
+            &mut || Ok::<(), ()>(()),
+        )
+        .unwrap();
+        assert_eq!(inventory.constants().len(), 128);
+        for (index, constant) in inventory.constants().iter().enumerate() {
+            assert_eq!(&many[constant.name()], format!("Value{index}"));
+        }
+    }
+
+    #[test]
+    fn module_constant_retention_preserves_allocation_and_cancellation_errors() {
+        let source = b"Private Const [Value]=1";
+        let constant = module_constant(source, 0..source.len(), &mut || Ok::<(), ()>(()))
+            .unwrap()
+            .unwrap();
+        let mut constants = Vec::new();
+        assert_eq!(
+            reserve_constants(&mut constants, 0, &mut || Ok::<(), ()>(())),
+            Err(ModuleError::StatementLimit)
+        );
+        reserve_constants(&mut constants, 1, &mut || Ok::<(), ()>(())).unwrap();
+        constants.push(constant.clone());
+        assert_eq!(
+            reserve_constants(&mut constants, 1, &mut || Ok::<(), ()>(())),
+            Err(ModuleError::StatementLimit)
+        );
+        assert_eq!(
+            reserve_constants_exact(&mut constants, usize::MAX, &mut || Ok::<(), ()>(())),
+            Err(ModuleError::AllocationFailed)
+        );
+        assert_eq!(constants, vec![constant]);
+        for cancelled_at in [1, 2] {
+            let mut empty = Vec::new();
+            let mut calls = 0;
+            assert_eq!(
+                reserve_constants_exact(&mut empty, 1, &mut || {
+                    calls += 1;
+                    if calls == cancelled_at {
+                        Err("stop")
+                    } else {
+                        Ok(())
+                    }
+                }),
+                Err(ModuleError::Cancelled("stop"))
+            );
+            assert_eq!(calls, cancelled_at);
+            assert!(empty.is_empty());
+        }
+    }
+
+    #[test]
+    fn module_constant_and_named_default_scans_cancel_at_every_checkpoint() {
+        let source = format!(
+            "Const First=1\nPrivate Const [{}] _\r\n As String=\"{}\"\nSub Run(Optional value={})\nEnd Sub\nConst Last=2\n",
+            "x".repeat(1024),
+            "a\"\"".repeat(256),
+            "y".repeat(1024)
+        );
+        let limits = ModuleLimits::new(source.len(), 5, 1);
+        let mut successful_checks = 0;
+        let inventory = module_inventory(source.as_bytes(), limits, &mut || {
+            successful_checks += 1;
+            Ok::<(), ()>(())
+        })
+        .unwrap();
+        assert_eq!(inventory.constants().len(), 3);
+        assert_eq!(inventory.procedures()[0].parameters().len(), 1);
+        for cancelled_at in 1..=successful_checks {
+            let mut calls = 0;
+            assert_eq!(
+                module_inventory(source.as_bytes(), limits, &mut || {
+                    calls += 1;
+                    if calls == cancelled_at {
+                        Err("stop")
+                    } else {
+                        Ok(())
+                    }
+                }),
+                Err(ModuleError::Cancelled("stop")),
+                "checkpoint {cancelled_at}"
+            );
+            assert_eq!(calls, cancelled_at);
+        }
+    }
+
+    #[test]
+    fn module_constant_and_named_default_all_byte_boundaries_require_complete_tokens() {
+        for byte in 0..=u8::MAX {
+            for (prefix, suffix, accepted) in [
+                (
+                    b"Const [Value]".as_slice(),
+                    b"As Long=1".as_slice(),
+                    matches!(byte, b' ' | b'\t'),
+                ),
+                (
+                    b"Const [Value]=".as_slice(),
+                    b"1".as_slice(),
+                    byte.is_ascii_digit() || matches!(byte, b' ' | b'\t'),
+                ),
+                (
+                    b"Const [Value]=1".as_slice(),
+                    b"".as_slice(),
+                    byte.is_ascii_digit()
+                        || byte.is_ascii_whitespace() && byte != b'\r'
+                        || byte == b'\'',
+                ),
+                (
+                    b"Const [Value]=True".as_slice(),
+                    b"".as_slice(),
+                    byte.is_ascii_whitespace() && byte != b'\r' || byte == b'\'',
+                ),
+                (
+                    b"Sub Run(Optional value=Seed".as_slice(),
+                    b")\nEnd Sub".as_slice(),
+                    byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b' ' | b'\t' | b'\x0c'),
+                ),
+                (
+                    b"Sub Run(Optional value=[Seed]".as_slice(),
+                    b")\nEnd Sub".as_slice(),
+                    matches!(byte, b' ' | b'\t' | b'\x0c'),
+                ),
+            ] {
+                let source = [prefix, &[byte], suffix].concat();
+                let result = parse(&source);
+                assert_eq!(
+                    result.is_ok(),
+                    accepted,
+                    "boundary byte {byte}, prefix {prefix:?}"
+                );
+                if let Ok(inventory) = result {
+                    for constant in inventory.constants() {
+                        assert!(constant.statement().start < constant.statement().end);
+                        assert!(constant.statement().end <= source.len());
+                        assert_eq!(constant.declarator().end, constant.value().span().end);
+                    }
+                }
+            }
+        }
     }
 
     #[test]
@@ -1616,7 +2348,7 @@ mod tests {
             "Optional ByRef ByRef value As Long",
             "Optional As As",
             "Optional As As Long extra",
-            "Optional ByVal Optional As Long = name",
+            "Optional ByVal Optional As Long = name+1",
             "Optional ParamArray As Long",
             "Optional ByVal ParamArray As Long",
             "Optional Rem As Long",
@@ -1707,8 +2439,8 @@ mod tests {
     fn optional_parameter_default_and_modifier_tails_reject_entire_inventory() {
         for parameters in [
             "Optional value As Long =",
-            "Optional value As Long = name",
-            "Optional value As Long = [True]",
+            "Optional value As Long = name.member",
+            "Optional value As Long = [True].member",
             "Optional value As Long = Null",
             "Optional value As Long = Nothing",
             "Optional value As Long = Empty",
@@ -1727,7 +2459,7 @@ mod tests {
             "Optional value As Long = Make()",
             "Optional value As Long = holder.value",
             "Optional value As Long = 1 extra",
-            "Optional value As Long = TrueFalse",
+            "Optional value As Long = TrueFalse()",
             "Optional value As Long = True$",
             "Optional value As Long := 1",
             "Optional value As Long ==1",
@@ -1758,7 +2490,7 @@ mod tests {
             "Optional value As String * 8",
             "Optional value As Long$",
             "Optional value$ As String",
-            "Optional value = seed",
+            "Optional value = seed.member",
             "Optional value = 1 + 2",
             "Optional value As",
             "required As Long=1",
@@ -1895,12 +2627,12 @@ mod tests {
                 (
                     b"Sub Run(Optional value As Long=".as_slice(),
                     b"1)\nEnd Sub\n".as_slice(),
-                    byte.is_ascii_digit() || matches!(byte, b' ' | b'\t' | b'\x0c'),
+                    byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b' ' | b'\t' | b'\x0c'),
                 ),
                 (
                     b"Sub Run(Optional value As Boolean=True".as_slice(),
                     b")\nEnd Sub\n".as_slice(),
-                    matches!(byte, b' ' | b'\t' | b'\x0c'),
+                    byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b' ' | b'\t' | b'\x0c'),
                 ),
                 (
                     b"Sub Run(Optional value As String=\"a\"".as_slice(),
@@ -2235,8 +2967,8 @@ mod tests {
             "value,,other",
             ",value",
             "Optional value=",
-            "Optional value=seed",
-            "Optional value=[True]",
+            "Optional value=seed.member",
+            "Optional value=[True].member",
             "Optional value=Null",
             "Optional value=Nothing",
             "Optional value=Empty",
@@ -2254,7 +2986,7 @@ mod tests {
             "Optional value=Make()",
             "Optional value=holder.value",
             "Optional value=1 extra",
-            "Optional value=TrueFalse",
+            "Optional value=TrueFalse()",
             "Optional value=True$",
             "Optional value:=1",
             "Optional value==1",
@@ -2421,12 +3153,12 @@ mod tests {
                 (
                     b"Sub Run(Optional [value]=".as_slice(),
                     b"1)\nEnd Sub\n".as_slice(),
-                    byte.is_ascii_digit() || matches!(byte, b' ' | b'\t' | b'\x0c'),
+                    byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b' ' | b'\t' | b'\x0c'),
                 ),
                 (
                     b"Sub Run(Optional [value]=True".as_slice(),
                     b")\nEnd Sub\n".as_slice(),
-                    matches!(byte, b' ' | b'\t' | b'\x0c'),
+                    byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b' ' | b'\t' | b'\x0c'),
                 ),
                 (
                     b"Sub Run(Optional [value]=\"a\"".as_slice(),
@@ -3450,7 +4182,7 @@ mod tests {
         }
         for source in [
             "Dim value As Long\nSub Run()\nEnd Sub",
-            "Const Limit As Long=1",
+            "Const Limit As Long=other",
             "value=1",
         ] {
             assert!(matches!(

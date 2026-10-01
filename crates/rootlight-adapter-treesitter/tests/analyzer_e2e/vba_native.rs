@@ -8580,36 +8580,294 @@ fn vba_accessor_parameters_remain_separate_environments() {
 
 #[test]
 fn vba_parameter_defaults_bind_module_constants_not_body_parameters() {
-    let source = "Private Const Fallback As Long = 3\nPublic Sub Update(Optional ByVal Fallback As Long = [FALLBACK])\nFALLBACK = 2\nEnd Sub\n";
-    let result = output(source);
-    let document = result.document();
-    let constant = document
-        .entities
-        .iter()
-        .find(|entity| entity.kind == EntityKind::Constant)
-        .unwrap();
-    let parameter = document
-        .entities
-        .iter()
-        .find(|entity| entity.kind == EntityKind::Parameter)
-        .unwrap();
-    let default = document
-        .occurrences
-        .iter()
-        .find(|site| site.syntax_kind == "vba.default_constant_identifier.reference")
-        .unwrap();
-    assert_eq!(
-        default.target,
-        OccurrenceTarget::Resolved {
-            symbol: constant.id
+    use rootlight_ir::EntityVisibility;
+    for language in ["vba", "visual-basic-classic"] {
+        for native in [false, true] {
+            for (declaration, name, declarator, visibility, clause) in [
+                (
+                    "Private Const Fallback As Long = 3",
+                    "Fallback",
+                    "Fallback As Long = 3",
+                    EntityVisibility::Private,
+                    "Optional ByVal Fallback As Long = [FALLBACK]",
+                ),
+                (
+                    "Public Const [Fallback] = 3",
+                    "[Fallback]",
+                    "[Fallback] = 3",
+                    EntityVisibility::Public,
+                    "Optional Fallback = [FALLBACK]",
+                ),
+                (
+                    "Const Fallback = 3",
+                    "Fallback",
+                    "Fallback = 3",
+                    EntityVisibility::Unknown,
+                    "Optional ByRef Fallback = [FALLBACK]",
+                ),
+                (
+                    "Const Fallback As Variant = True",
+                    "Fallback",
+                    "Fallback As Variant = True",
+                    EntityVisibility::Unknown,
+                    "Optional Fallback As Variant = [FALLBACK]",
+                ),
+            ] {
+                let body = if native { "local = 1 + 2" } else { "local = 3" };
+                let source = format!(
+                    "Attribute VB_Name = \"Authored\"\n{declaration}\nPublic Sub Update({clause})\nFALLBACK = 2\nEnd Sub\nSub Run()\nDim local As Long\n{body}\nCall Update()\nEnd Sub\n"
+                );
+                let result =
+                    application_proof_output(&source, language, IrLimits::default(), &deadline())
+                        .unwrap();
+                let document = result.document();
+                let parser = document
+                    .provenance
+                    .iter()
+                    .find(|proof| proof.id == document.files[0].provenance)
+                    .unwrap();
+                let constant = document
+                    .entities
+                    .iter()
+                    .find(|entity| entity.kind == EntityKind::Constant)
+                    .unwrap();
+                let parameter = document
+                    .entities
+                    .iter()
+                    .find(|entity| entity.kind == EntityKind::Parameter)
+                    .unwrap();
+                assert_eq!(constant.canonical_name, "Fallback");
+                assert_eq!(constant.visibility, visibility);
+                assert_eq!(constant.provenance, parser.id);
+                assert_eq!(parameter.provenance, parser.id);
+                let module = document
+                    .entities
+                    .iter()
+                    .find(|entity| entity.kind == EntityKind::Module)
+                    .unwrap();
+                assert_eq!(constant.container, Some(ContainerRef::Entity(module.id)));
+                let default = document
+                    .occurrences
+                    .iter()
+                    .find(|site| site.syntax_kind == "vba.default_constant_identifier.reference")
+                    .unwrap();
+                assert_eq!(
+                    default.target,
+                    OccurrenceTarget::Resolved {
+                        symbol: constant.id
+                    }
+                );
+                assert_eq!(default.provenance, parser.id);
+                assert_eq!(default.enclosing, Some(parameter.id));
+                assert_eq!(
+                    reference_at(document, &source, "FALLBACK = 2").target,
+                    OccurrenceTarget::Resolved {
+                        symbol: parameter.id
+                    }
+                );
+                let definition = document
+                    .occurrences
+                    .iter()
+                    .find(|site| {
+                        site.role == OccurrenceRole::Definition
+                            && site.target
+                                == OccurrenceTarget::Resolved {
+                                    symbol: constant.id,
+                                }
+                    })
+                    .unwrap();
+                for (reference, written) in [
+                    (constant.evidence.source.as_ref().unwrap(), declarator),
+                    (&definition.source, name),
+                    (parameter.evidence.source.as_ref().unwrap(), clause),
+                    (&default.source, "[FALLBACK]"),
+                ] {
+                    let span = reference.span();
+                    assert_eq!(
+                        source
+                            .get(
+                                usize::try_from(span.start_byte()).unwrap()
+                                    ..usize::try_from(span.end_byte()).unwrap()
+                            )
+                            .unwrap(),
+                        written
+                    );
+                    assert_eq!(reference.generation(), document.files[0].generation);
+                    assert_eq!(reference.content_hash(), content_hash(source.as_bytes()));
+                    assert_eq!(span.file(), document.files[0].id);
+                    assert_eq!(reference.repository(), document.files[0].repository);
+                }
+                let relation = document
+                    .relations
+                    .iter()
+                    .find(|edge| {
+                        edge.subject == RelationEndpoint::Occurrence(default.id)
+                            && edge.predicate == RelationPredicate::RefersTo
+                            && edge.object == RelationEndpoint::Entity(constant.id)
+                    })
+                    .unwrap();
+                assert_eq!(relation.provenance, parser.id);
+                assert!(
+                    !document
+                        .skipped_regions
+                        .iter()
+                        .any(|gap| gap.source == default.source
+                            && gap.detail == "vba-default-constant-target-unavailable")
+                );
+                let application = document
+                    .occurrences
+                    .iter()
+                    .find(|site| site.syntax_kind == "vba.application.reference")
+                    .unwrap();
+                assert!(matches!(
+                    application.target,
+                    OccurrenceTarget::Resolved { .. }
+                ));
+                let proof = document
+                    .provenance
+                    .iter()
+                    .find(|proof| proof.id == application.provenance)
+                    .unwrap();
+                assert_eq!(
+                    proof.rule.as_deref(),
+                    Some("vba-procedure-application-v1.source")
+                );
+                assert!(proof.derivation_parents.contains(&FactRef::Fact(parser.id)));
+                assert!(
+                    proof
+                        .derivation_parents
+                        .contains(&FactRef::Entity(parameter.id))
+                );
+                assert!(
+                    proof
+                        .evidence_sources
+                        .contains(parameter.evidence.source.as_ref().unwrap())
+                );
+                assert!(
+                    !proof
+                        .derivation_parents
+                        .contains(&FactRef::Entity(constant.id)),
+                    "written argument omission is not a proof of evaluating the default"
+                );
+            }
         }
-    );
-    assert_eq!(
-        reference_at(document, source, "FALLBACK = 2").target,
-        OccurrenceTarget::Resolved {
-            symbol: parameter.id
+    }
+}
+
+#[test]
+fn vba_duplicate_module_constants_keep_written_definitions_and_default_ambiguity() {
+    for language in ["vba", "visual-basic-classic"] {
+        for native in [false, true] {
+            let body = if native { "local = 1 + 2" } else { "local = 3" };
+            let source = format!(
+                "Private Const Fallback As Long = 7\nPrivate Const Fallback As Long = 8\nSub Notify(Optional value = Fallback)\nEnd Sub\nSub Run()\nDim local As Long\n{body}\nCall Notify()\nEnd Sub\n"
+            );
+            let result =
+                application_proof_output(&source, language, IrLimits::default(), &deadline())
+                    .unwrap();
+            let document = result.document();
+            let constants: Vec<_> = document
+                .entities
+                .iter()
+                .filter(|entity| {
+                    entity.kind == EntityKind::Constant && entity.canonical_name == "Fallback"
+                })
+                .collect();
+            assert_eq!(
+                constants.len(),
+                1,
+                "equal semantic projections share identity, not a unique binding"
+            );
+            let constant = constants[0];
+            let parser = document.files[0].provenance;
+            let definitions: Vec<_> = document
+                .occurrences
+                .iter()
+                .filter(|site| {
+                    site.role == OccurrenceRole::Definition
+                        && site.target
+                            == OccurrenceTarget::Resolved {
+                                symbol: constant.id,
+                            }
+                })
+                .collect();
+            assert_eq!(definitions.len(), 2);
+            for (ordinal, (start, _)) in source.match_indices("Fallback As Long").enumerate() {
+                let definition = definitions
+                    .iter()
+                    .find(|site| site.source.span().start_byte() == u64::try_from(start).unwrap())
+                    .unwrap();
+                assert_eq!(
+                    definition.source.span().end_byte(),
+                    u64::try_from(start + "Fallback".len()).unwrap()
+                );
+                assert_eq!(
+                    definition.source.content_hash(),
+                    content_hash(source.as_bytes())
+                );
+                assert_eq!(definition.provenance, parser);
+                let clause = format!("Fallback As Long = {}", 7 + ordinal);
+                let containment: Vec<_> = document
+                    .relations
+                    .iter()
+                    .filter(|edge| {
+                        edge.object == RelationEndpoint::Entity(constant.id)
+                            && edge.predicate == RelationPredicate::Contains
+                            && edge.evidence.source.as_ref().is_some_and(|reference| {
+                                reference.span().start_byte() == u64::try_from(start).unwrap()
+                                    && reference.span().end_byte()
+                                        == u64::try_from(start + clause.len()).unwrap()
+                            })
+                    })
+                    .collect();
+                assert_eq!(
+                    containment.len(),
+                    1,
+                    "each written declaration retains source-bound containment"
+                );
+                assert_eq!(containment[0].provenance, parser);
+                assert_eq!(
+                    containment[0]
+                        .evidence
+                        .source
+                        .as_ref()
+                        .unwrap()
+                        .content_hash(),
+                    content_hash(source.as_bytes())
+                );
+            }
+            let default = document
+                .occurrences
+                .iter()
+                .find(|site| site.syntax_kind == "vba.default_constant_identifier.reference")
+                .unwrap();
+            assert!(matches!(
+                default.target,
+                OccurrenceTarget::Unresolved { .. }
+            ));
+            assert_eq!(
+                document
+                    .skipped_regions
+                    .iter()
+                    .filter(|gap| gap.source == default.source
+                        && gap.detail == "vba-default-constant-target-unavailable")
+                    .count(),
+                1
+            );
+            assert!(!document.relations.iter().any(|edge| edge.subject
+                == RelationEndpoint::Occurrence(default.id)
+                && edge.predicate == RelationPredicate::RefersTo));
+            let application = document
+                .occurrences
+                .iter()
+                .find(|site| site.syntax_kind == "vba.application.reference")
+                .unwrap();
+            assert!(
+                matches!(application.target, OccurrenceTarget::Resolved { .. }),
+                "written Optional omission remains distinct from default evaluation"
+            );
         }
-    );
+    }
 }
 
 #[test]
