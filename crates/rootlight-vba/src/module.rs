@@ -26,7 +26,8 @@ impl ModuleLimits {
     /// Aggregate parameter and argument ceilings default to the procedure ceiling;
     /// use [`Self::with_max_parameters`] and [`Self::with_max_arguments`] to admit
     /// separately bounded comma lists.
-    /// Module constants and variables share the statement ceiling with body records.
+    /// Module constants, variables and local Dim members share the retained-record
+    /// ceiling with other body records, independently of consumed logical segments.
     /// Structured-expression work defaults to the source-byte ceiling; old scalar,
     /// scalar-application and atomic Call statements do not consume that ceiling.
     #[must_use]
@@ -419,7 +420,8 @@ pub enum ModuleError<E> {
     },
     /// The source exceeds the caller's byte ceiling.
     SourceLimit,
-    /// Consumed logical segments exceed the caller's statement ceiling.
+    /// Consumed logical segments or aggregate retained declaration/body records
+    /// exceed the caller's statement ceiling.
     StatementLimit,
     /// Declared procedures exceed the caller's retained-procedure ceiling.
     ProcedureLimit,
@@ -490,15 +492,18 @@ impl<E: std::error::Error + 'static> std::error::Error for ModuleError<E> {
 /// endpoints, each upper-only or lower To upper. Magnitudes and runtime array sizes are not
 /// evaluated, and no per-dimension records are retained. Named/expression bounds,
 /// initializers, incomplete declaration lists and richer prefixes remain unsupported.
-/// Bodies admit one typed scalar Dim or Const per statement and simple scalar
-/// assignments with an optional Let prefix. Const values are unsigned decimal,
+/// Body Dim lists retain the same per-member scalar/numeric-array syntax in
+/// their containing procedure, without module visibility or inferred types.
+/// A single typed scalar Dim keeps its distinct legacy declaration record.
+/// Local Const still admits one typed scalar per statement. Assignments have
+/// an optional Let prefix. Const values are unsigned decimal,
 /// physically closed doubled-quote strings or True/False; assignments additionally
 /// admit names, grouped expressions, unary signs/Not, ordinary arithmetic,
 /// concatenation, comparison and logical operators, and nested simple-name applications.
 /// Applications retain complete positional expression ranges without deciding whether
 /// their targets are procedures or arrays. Old scalar and standalone scalar-application
 /// records remain distinct. Explicit Call statements admit a simple callee and optional
-/// parentheses containing a complete positional list of these scalar atoms, with
+/// parentheses containing a complete positional list of admitted expressions, with
 /// space/tab-based logical trivia. Named, omitted, ByVal and nonparenthesized
 /// arguments are unsupported. Adjacent literal/ordinary-name type suffixes stay
 /// outside this slice instead of being reinterpreted as power or concatenation.
@@ -519,7 +524,9 @@ impl<E: std::error::Error + 'static> std::error::Error for ModuleError<E> {
 /// admission, per statement and periodically within byte scans. Statement
 /// ceilings include trivia segments; procedure and body storage is reserved fallibly.
 /// Retained body, module-constant and module-variable records together cannot exceed
-/// the statement ceiling. Storage is fallible; this bounds records, not allocator bytes.
+/// the statement ceiling; each local Dim member costs a separate record, while
+/// its comma list remains one logical segment. Storage is fallible and bounded
+/// before retaining siblings; this bounds records, not allocator bytes.
 /// Retained parameters across all procedures have a separate aggregate ceiling;
 /// their storage is reserved fallibly, never inferred from logical statement count.
 /// Each parameter retains at most one inline default atom under that same ceiling.
@@ -626,11 +633,20 @@ pub fn module_inventory<E>(
                     .max_expression_nodes
                     .checked_sub(expression_count)
                     .ok_or(ModuleError::ExpressionLimit)?;
-                let Some(statement) = super::module_body::statement_with_expression_limits(
+                let remaining_records = limits
+                    .max_statements
+                    .checked_sub(body_count)
+                    .and_then(|remaining| remaining.checked_sub(inventory.constants.len()))
+                    .and_then(|remaining| remaining.checked_sub(inventory.variables.len()))
+                    .ok_or(ModuleError::StatementLimit)?;
+                let Some(statement) = super::module_body::statement_with_limits(
                     source,
                     range.clone(),
-                    remaining_arguments,
-                    remaining_expression_nodes,
+                    super::module_body::BodyLimits {
+                        arguments: remaining_arguments,
+                        expression_nodes: remaining_expression_nodes,
+                        records: remaining_records,
+                    },
                     check,
                 )?
                 else {
@@ -645,7 +661,9 @@ pub fn module_inventory<E>(
                         assignment.inventory().argument_count()
                     }
                     ModuleBodyStatement::ExpressionCall(call) => call.inventory().argument_count(),
-                    ModuleBodyStatement::Declaration(_) | ModuleBodyStatement::Assignment(_) => 0,
+                    ModuleBodyStatement::Declaration(_)
+                    | ModuleBodyStatement::Variables(_)
+                    | ModuleBodyStatement::Assignment(_) => 0,
                 };
                 argument_count = argument_count
                     .checked_add(retained_arguments)
@@ -656,6 +674,7 @@ pub fn module_inventory<E>(
                     }
                     ModuleBodyStatement::ExpressionCall(call) => call.inventory().work_nodes(),
                     ModuleBodyStatement::Declaration(_)
+                    | ModuleBodyStatement::Variables(_)
                     | ModuleBodyStatement::Assignment(_)
                     | ModuleBodyStatement::ApplicationAssignment(_)
                     | ModuleBodyStatement::Call(_) => 0,
@@ -665,14 +684,26 @@ pub fn module_inventory<E>(
                         .checked_add(retained_expression_nodes)
                         .ok_or(ModuleError::ExpressionLimit)?;
                 }
-                let maximum = limits.max_statements
-                    - body_count
-                    - inventory.constants.len()
-                    - inventory.variables.len()
-                    + procedure.statements.len();
+                let retained_records = match &statement {
+                    ModuleBodyStatement::Variables(variables) => variables.variables().len(),
+                    ModuleBodyStatement::Declaration(_)
+                    | ModuleBodyStatement::Assignment(_)
+                    | ModuleBodyStatement::ApplicationAssignment(_)
+                    | ModuleBodyStatement::ExpressionAssignment(_)
+                    | ModuleBodyStatement::Call(_)
+                    | ModuleBodyStatement::ExpressionCall(_) => 1,
+                };
+                if retained_records > remaining_records {
+                    return Err(ModuleError::StatementLimit);
+                }
+                let maximum = remaining_records
+                    .checked_add(procedure.statements.len())
+                    .ok_or(ModuleError::StatementLimit)?;
                 super::module_body::reserve(&mut procedure.statements, maximum)?;
                 procedure.statements.push(statement);
-                body_count += 1;
+                body_count = body_count
+                    .checked_add(retained_records)
+                    .ok_or(ModuleError::StatementLimit)?;
             }
             continue;
         }
@@ -1105,6 +1136,36 @@ fn module_variable<E>(
     visibility_range: Option<Range<usize>>,
     check: &mut impl FnMut() -> Result<(), E>,
 ) -> Result<Option<ModuleVariable>, E> {
+    let Some(syntax) = variable_declarator(text, range, cursor, check)? else {
+        return Ok(None);
+    };
+    Ok(Some(ModuleVariable {
+        statement: range.clone(),
+        declarator: syntax.declarator,
+        name: syntax.name,
+        array_bounds: syntax.array_bounds,
+        array_work_nodes: syntax.array_work_nodes,
+        type_range: syntax.type_range,
+        visibility,
+        visibility_range,
+    }))
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct VariableDeclarator {
+    pub(super) declarator: Range<usize>,
+    pub(super) name: Range<usize>,
+    pub(super) array_bounds: Option<Range<usize>>,
+    pub(super) array_work_nodes: usize,
+    pub(super) type_range: Option<Range<usize>>,
+}
+
+pub(super) fn variable_declarator<E>(
+    text: &[u8],
+    range: &Range<usize>,
+    cursor: &mut usize,
+    check: &mut impl FnMut() -> Result<(), E>,
+) -> Result<Option<VariableDeclarator>, E> {
     let Some(name) = super::module_body::simple_name(text, cursor, check)? else {
         return Ok(None);
     };
@@ -1148,15 +1209,12 @@ fn module_variable<E>(
     );
     *cursor += logical_whitespace_len(text.get(*cursor..).unwrap_or_default(), check)?;
     check()?;
-    Ok(Some(ModuleVariable {
-        statement: range.clone(),
+    Ok(Some(VariableDeclarator {
         declarator: range.start + name.start..declarator_end,
         name: range.start + name.start..range.start + name.end,
         array_bounds,
         array_work_nodes,
         type_range,
-        visibility,
-        visibility_range,
     }))
 }
 
@@ -1704,7 +1762,7 @@ mod tests {
                 "{source}"
             );
         }
-        for body in ["Dim untyped", "Public value", "Private value As Long"] {
+        for body in ["Public value", "Private value As Long"] {
             let source = format!("Dim field\nSub Run()\n{body}\nEnd Sub\n");
             assert!(
                 matches!(
@@ -2184,7 +2242,6 @@ mod tests {
             "Dim first,second:",
             "Dim first,second:Private third",
             "Const first=1,second=2",
-            "Dim field,other\nSub Run()\nDim first As Long,second As Long\nEnd Sub",
         ] {
             assert!(
                 matches!(
@@ -2768,7 +2825,6 @@ mod tests {
             "Public value(1)\nAttribute VB_Name = \"Late\"",
             "Dim value():",
             "Dim value(1):Private other(2)",
-            "Dim value\nSub Run()\nDim local(1) As Long\nEnd Sub",
             "Const Seed(1)=1",
             "Sub Run(value(1))\nEnd Sub",
             "Sub Run(Optional value()=1)\nEnd Sub",
@@ -5619,6 +5675,7 @@ mod tests {
                 .filter_map(|statement| match statement {
                     ModuleBodyStatement::Call(call) => Some(call),
                     ModuleBodyStatement::Declaration(_)
+                    | ModuleBodyStatement::Variables(_)
                     | ModuleBodyStatement::Assignment(_)
                     | ModuleBodyStatement::ApplicationAssignment(_)
                     | ModuleBodyStatement::ExpressionAssignment(_)
@@ -6076,10 +6133,8 @@ mod tests {
         for body in [
             "Dim value As Long\nvalue = 1 +",
             "Const Limit As Long = other",
-            "Dim x, y As Long",
             "Dim item As New Object",
             "Dim item As Product",
-            "Dim values() As Long",
             "Dim value As Long=1",
             "value=Me",
             "value=Nothing",
@@ -6126,6 +6181,316 @@ mod tests {
                 parse(source.as_bytes()),
                 Err(ModuleError::Unsupported { .. })
             ));
+        }
+    }
+
+    #[test]
+    fn local_variable_lists_preserve_procedure_ownership_comments_colons_and_module_separation() {
+        for newline in ["\n", "\r\n"] {
+            let local_text =
+                format!("Dim _{newline} first, [grid](-1 To +2,3) _{newline} As Long, pending()");
+            let source = format!(
+                "Dim field, storage(2){newline}Const Seed=7{newline}Sub First(){newline}  {local_text} ' End Sub: ignored{newline}Dim typed As Long:first=Seed:Call Target(first):End Sub{newline}Sub Second(){newline}Dim first, [first] As Variant{newline}End Sub{newline}"
+            );
+            let inventory = parse(source.as_bytes()).unwrap();
+            assert_eq!(inventory.variables().len(), 2);
+            assert_eq!(inventory.constants().len(), 1);
+            assert_eq!(inventory.procedures().len(), 2);
+            let first = &inventory.procedures()[0];
+            let ModuleBodyStatement::Variables(list) = &first.statements()[0] else {
+                panic!("complete local declarators retained in first procedure");
+            };
+            assert_eq!(&source[list.statement()], local_text);
+            assert_eq!(list.variables().len(), 3);
+            assert!(list.variables()[0].type_range().is_none());
+            assert_eq!(&source[list.variables()[1].type_range().unwrap()], "Long");
+            assert_eq!(
+                &source[list.variables()[1].array_bounds().unwrap()],
+                "(-1 To +2,3)"
+            );
+            assert_eq!(list.variables()[1].array_work_nodes(), 8);
+            assert_eq!(list.variables()[2].array_work_nodes(), 1);
+            for variable in list.variables() {
+                assert!(first.body().start <= variable.declarator().start);
+                assert!(variable.declarator().end <= first.body().end);
+                assert!(
+                    inventory
+                        .variables()
+                        .iter()
+                        .all(|module| module.name() != variable.name())
+                );
+            }
+            assert!(
+                matches!(&first.statements()[1], ModuleBodyStatement::Declaration(local) if &source[local.name()] == "typed")
+            );
+            assert!(matches!(
+                first.statements()[2],
+                ModuleBodyStatement::Assignment(_)
+            ));
+            assert!(matches!(
+                first.statements()[3],
+                ModuleBodyStatement::Call(_)
+            ));
+            let second = &inventory.procedures()[1];
+            let ModuleBodyStatement::Variables(list) = &second.statements()[0] else {
+                panic!("duplicate local spellings remain independent source records");
+            };
+            assert_eq!(&source[list.variables()[0].name()], "first");
+            assert_eq!(&source[list.variables()[1].name()], "[first]");
+            assert_ne!(list.variables()[0].name(), list.variables()[1].name());
+            assert!(second.body().start <= list.variables()[0].declarator().start);
+            assert!(list.variables()[1].declarator().end <= second.body().end);
+        }
+        for source in [
+            "Dim field\nSub Run()\nDim untyped\nEnd Sub",
+            "Dim field,other\nSub Run()\nDim first As Long,second As Long\nEnd Sub",
+            "Dim value\nSub Run()\nDim local(1) As Long\nEnd Sub",
+            "Sub Run()\nDim x, y As Long\nDim values() As Long\nEnd Sub",
+        ] {
+            let inventory = parse(source.as_bytes()).unwrap();
+            assert!(
+                inventory.procedures()[0]
+                    .statements()
+                    .iter()
+                    .all(|statement| matches!(statement, ModuleBodyStatement::Variables(_))),
+                "{source}"
+            );
+        }
+    }
+
+    #[test]
+    fn local_and_module_variable_declarators_share_exact_original_syntax_without_relabeling_scopes()
+    {
+        for declaration in [
+            "first, [second] As Long, grid(-1 To +2,3) As Variant, pending()",
+            "[True], [Me], [Rem], [Sub], [Name], [Line]",
+            "untyped, typed As Object, array(0To1)",
+        ] {
+            let module = format!("Dim {declaration}\n");
+            let local = format!("Sub Run()\nDim {declaration}\nEnd Sub\n");
+            let module_inventory = parse(module.as_bytes()).unwrap();
+            let local_inventory = parse(local.as_bytes()).unwrap();
+            assert!(local_inventory.variables().is_empty());
+            let ModuleBodyStatement::Variables(list) =
+                &local_inventory.procedures()[0].statements()[0]
+            else {
+                panic!("local declaration list expected");
+            };
+            assert_eq!(list.variables().len(), module_inventory.variables().len());
+            for (local_variable, module_variable) in
+                list.variables().iter().zip(module_inventory.variables())
+            {
+                assert_eq!(
+                    &local[local_variable.name()],
+                    &module[module_variable.name()]
+                );
+                assert_eq!(
+                    &local[local_variable.declarator()],
+                    &module[module_variable.declarator()]
+                );
+                assert_eq!(
+                    local_variable.type_range().map(|range| &local[range]),
+                    module_variable.type_range().map(|range| &module[range])
+                );
+                assert_eq!(
+                    local_variable.array_bounds().map(|range| &local[range]),
+                    module_variable.array_bounds().map(|range| &module[range])
+                );
+                assert_eq!(
+                    local_variable.array_work_nodes(),
+                    module_variable.array_work_nodes()
+                );
+                assert!(module_variable.visibility().is_none());
+            }
+        }
+    }
+
+    #[test]
+    fn local_dim_members_share_exact_aggregate_record_credits_without_inflating_logical_segments() {
+        let source = b"Dim field,storage(2)\nConst Seed=7\nSub First()\nDim first,grid(-1 To +2,3) As Long,pending(),fourth\nDim typed As Long\nfirst=Seed\nCall Target(first)\nEnd Sub\nSub Second()\nDim first,second(),third As Variant\nEnd Sub\n";
+        let limits = ModuleLimits::new(source.len(), 13, 2)
+            .with_max_arguments(1)
+            .with_max_expression_nodes(0);
+        let inventory = module_inventory(source, limits, &mut || Ok::<(), ()>(())).unwrap();
+        assert_eq!(inventory.statement_count(), 11);
+        assert_eq!(inventory.variables().len(), 2);
+        assert_eq!(inventory.constants().len(), 1);
+        assert_eq!(inventory.procedures()[0].statements().len(), 4);
+        assert_eq!(inventory.procedures()[1].statements().len(), 1);
+        let local_count: usize = inventory
+            .procedures()
+            .iter()
+            .flat_map(|procedure| procedure.statements())
+            .map(|statement| match statement {
+                ModuleBodyStatement::Variables(list) => list.variables().len(),
+                ModuleBodyStatement::Declaration(_)
+                | ModuleBodyStatement::Assignment(_)
+                | ModuleBodyStatement::ApplicationAssignment(_)
+                | ModuleBodyStatement::ExpressionAssignment(_)
+                | ModuleBodyStatement::Call(_)
+                | ModuleBodyStatement::ExpressionCall(_) => 1,
+            })
+            .sum();
+        assert_eq!(
+            local_count + inventory.variables().len() + inventory.constants().len(),
+            13
+        );
+        for maximum in [0, 1, 3, 7, 10, 11, 12] {
+            assert_eq!(
+                module_inventory(
+                    source,
+                    ModuleLimits::new(source.len(), maximum, 2)
+                        .with_max_arguments(1)
+                        .with_max_expression_nodes(0),
+                    &mut || Ok::<(), ()>(())
+                ),
+                Err(ModuleError::StatementLimit),
+                "aggregate record ceiling {maximum}"
+            );
+        }
+        let grouped = b"Sub Run()\nDim a,b,c,d,e,f,g,h,i,j\nEnd Sub\n";
+        let inventory = module_inventory(
+            grouped,
+            ModuleLimits::new(grouped.len(), 10, 1),
+            &mut || Ok::<(), ()>(()),
+        )
+        .unwrap();
+        assert_eq!(inventory.statement_count(), 3);
+        for maximum in [0, 1, 2, 3, 5, 9] {
+            assert_eq!(
+                module_inventory(
+                    grouped,
+                    ModuleLimits::new(grouped.len(), maximum, 1),
+                    &mut || Ok::<(), ()>(())
+                ),
+                Err(ModuleError::StatementLimit)
+            );
+        }
+        let list_before_module = b"Sub Run()\nDim a,b,c,d,e,f,g,h,i,j\nEnd Sub\nDim after\n";
+        assert!(
+            module_inventory(
+                list_before_module,
+                ModuleLimits::new(list_before_module.len(), 11, 1),
+                &mut || Ok::<(), ()>(())
+            )
+            .is_ok()
+        );
+        assert_eq!(
+            module_inventory(
+                list_before_module,
+                ModuleLimits::new(list_before_module.len(), 10, 1),
+                &mut || Ok::<(), ()>(())
+            ),
+            Err(ModuleError::StatementLimit)
+        );
+        assert_eq!(
+            module_inventory(
+                source,
+                ModuleLimits::new(source.len() - 1, 13, 2).with_max_arguments(1),
+                &mut || Ok::<(), ()>(())
+            ),
+            Err(ModuleError::SourceLimit)
+        );
+        assert_eq!(
+            module_inventory(
+                source,
+                ModuleLimits::new(source.len(), 13, 1).with_max_arguments(1),
+                &mut || Ok::<(), ()>(())
+            ),
+            Err(ModuleError::ProcedureLimit)
+        );
+    }
+
+    #[test]
+    fn local_dim_late_malformed_or_richer_members_reject_all_preceding_module_records() {
+        for tail in [
+            "",
+            ",other",
+            "other,",
+            "other,,third",
+            "other As",
+            "other As Product",
+            "other As New Object",
+            "other As String * 8",
+            "other$",
+            "other=1",
+            "other As Long=1",
+            "other(upper)",
+            "other(1+2)",
+            "other(,1)",
+            "other(1,)",
+            "other(1,,2)",
+            "other(1 To)",
+            "other(1",
+            "other(1)(2)",
+            "other(1) As Product",
+            "other(1)=1",
+            "holder.other",
+            "[open",
+            "other extra",
+            "other\0",
+            "other\r extra",
+            "other\nthird",
+        ] {
+            let source = format!(
+                "Dim module_field\nSub Accepted()\nDim previous, array(2) As Long\nEnd Sub\nSub Rejected()\nDim valid, second(-1 To +2,3) As Long, {tail}\nEnd Sub\n"
+            );
+            assert!(
+                matches!(
+                    parse(source.as_bytes()),
+                    Err(ModuleError::Unsupported { .. })
+                ),
+                "{tail:?}"
+            );
+        }
+        for body in [
+            "Public value",
+            "Private value As Long",
+            "Static value As Long",
+            "Shared value",
+            "Dim value As Product",
+            "Dim value As Long=1",
+            "Const first As Long=1,second As Long=2",
+            "Const value=1",
+            "ReDim value(2)",
+        ] {
+            let source = format!("Sub Run()\nDim accepted, other()\n{body}\nEnd Sub\n");
+            assert!(
+                matches!(
+                    parse(source.as_bytes()),
+                    Err(ModuleError::Unsupported { .. })
+                ),
+                "{body}"
+            );
+        }
+    }
+
+    #[test]
+    fn local_dim_module_cancellation_at_every_checkpoint_preserves_typed_failure_and_no_inventory()
+    {
+        let source = b"Dim module_first, module_grid(2)\nConst Seed=7\nSub First(value As Long)\nDim local, grid(-1 To +2,3) As Long, pending()\nlocal=Seed\nCall Target(local)\nEnd Sub\nSub Second()\nDim local, [local] As Variant\nEnd Sub\n";
+        let limits = ModuleLimits::new(source.len(), 10, 2)
+            .with_max_parameters(1)
+            .with_max_arguments(1)
+            .with_max_expression_nodes(0);
+        let mut checkpoints = 0;
+        let inventory = module_inventory(source, limits, &mut || {
+            checkpoints += 1;
+            Ok::<(), ()>(())
+        })
+        .unwrap();
+        assert_eq!(inventory.procedures().len(), 2);
+        for stop in 1..=checkpoints {
+            let mut calls = 0;
+            assert_eq!(
+                module_inventory(source, limits, &mut || {
+                    calls += 1;
+                    if calls == stop { Err("stop") } else { Ok(()) }
+                }),
+                Err(ModuleError::Cancelled("stop")),
+                "checkpoint {stop}"
+            );
+            assert_eq!(calls, stop);
         }
     }
 

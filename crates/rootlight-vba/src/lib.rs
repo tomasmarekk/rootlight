@@ -45,8 +45,8 @@ pub use module::{
 };
 pub use module_body::{
     ModuleApplicationAssignment, ModuleBodyStatement, ModuleCall, ModuleLocalDeclaration,
-    ModuleLocalKind, ModuleScalarAssignment, ModuleScalarValue, ModuleScalarValueKind,
-    ModuleZeroArgumentCall,
+    ModuleLocalKind, ModuleLocalVariable, ModuleLocalVariables, ModuleScalarAssignment,
+    ModuleScalarValue, ModuleScalarValueKind, ModuleZeroArgumentCall,
 };
 pub use module_expression::{
     ModuleExpressionApplication, ModuleExpressionAssignment, ModuleExpressionCall,

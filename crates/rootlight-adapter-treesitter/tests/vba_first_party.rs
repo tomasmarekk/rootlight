@@ -142,6 +142,314 @@ fn scalar_modules_preserve_local_identity_and_value_reads_without_native_work() 
 }
 
 #[test]
+fn local_dim_lists_preserve_each_required_declarator_and_procedure_owner() {
+    let source = b"Sub Run()\r\nDim alpha, beta As Long, grid(-1 To +2, 003) As Variant, pending()\r\nDim [Rem] As String, [Public](), first, _\r\n second(2,3)As Long ' retained note\r\nalpha = beta: beta = alpha\r\nEnd Sub\r\n";
+    for language in ["vba", "visual-basic-classic"] {
+        let fixture = Fixture::new(source);
+        let provider = provider();
+        let full_limits = limits(4096);
+        let request = fixture.request(&full_limits, language, Vec::new());
+        let required = provider
+            .required_syntax_fact_count(&request, &deadline())
+            .unwrap();
+        assert_eq!(required, 23);
+        let full = parse(&provider, &request);
+        assert_eq!(full.report().coverage().status(), CoverageStatus::Complete);
+        assert_eq!(
+            full.report().coverage().covered_source_bytes(),
+            source.len()
+        );
+        assert_eq!(
+            fixture.source.content_hash(),
+            rootlight_ids::content_hash(source)
+        );
+        assert!(full.diagnostics().is_empty());
+        let exact_limits = limits(required);
+        let exact = parse(
+            &provider,
+            &fixture.request(&exact_limits, language, Vec::new()),
+        );
+        for (output, optional) in [(&full, true), (&exact, false)] {
+            let procedure = output
+                .facts()
+                .iter()
+                .find(|fact| fact.syntax_kind().as_str() == "vba.sub_function.declaration")
+                .unwrap();
+            let variables = output
+                .facts()
+                .iter()
+                .filter(|fact| fact.syntax_kind().as_str() == "vba.variable.declaration")
+                .collect::<Vec<_>>();
+            assert_eq!(variables.len(), 8);
+            let mut ids = std::collections::BTreeSet::new();
+            for (clause, name) in [
+                (b"alpha".as_slice(), b"alpha".as_slice()),
+                (b"beta As Long", b"beta"),
+                (b"grid(-1 To +2, 003) As Variant", b"grid"),
+                (b"pending()", b"pending"),
+                (b"[Rem] As String", b"[Rem]"),
+                (b"[Public]()", b"[Public]"),
+                (b"first", b"first"),
+                (b"second(2,3)As Long", b"second"),
+            ] {
+                let declaration = variables
+                    .iter()
+                    .find(|fact| bytes_at(source, fact.span()) == clause)
+                    .unwrap();
+                assert!(ids.insert(declaration.local_id()));
+                assert_eq!(declaration.parent(), Some(procedure.local_id()));
+                assert_eq!(declaration.depth(), 5);
+                assert_eq!(declaration.span().file(), fixture.source.span().file());
+                let definition = output
+                    .facts()
+                    .iter()
+                    .find(|fact| {
+                        fact.parent() == Some(declaration.local_id())
+                            && fact.syntax_kind().as_str() == "vba.identifier.definition"
+                    })
+                    .unwrap();
+                assert_eq!(bytes_at(source, definition.span()), name);
+                assert_eq!(
+                    definition.span().start_byte(),
+                    declaration.span().start_byte()
+                );
+                assert_eq!(definition.depth(), 6);
+                assert_eq!(
+                    output
+                        .facts()
+                        .iter()
+                        .filter(|fact| fact.syntax_kind().as_str()
+                            == "vba.visibility_unknown.expression"
+                            && fact.span() == declaration.span())
+                        .count(),
+                    usize::from(optional)
+                );
+                assert!(!output.facts().iter().any(|fact| {
+                    fact.syntax_kind().as_str().ends_with(".reference")
+                        && declaration.span().start_byte() <= fact.span().start_byte()
+                        && fact.span().end_byte() <= declaration.span().end_byte()
+                }));
+            }
+            assert!(
+                output
+                    .facts()
+                    .iter()
+                    .all(|fact| fact.parent().is_none_or(|parent| output
+                        .facts()
+                        .iter()
+                        .any(|candidate| candidate.local_id() == parent)))
+            );
+        }
+        assert_eq!(full.facts(), parse(&provider, &request).facts());
+        assert_eq!(full.report(), parse(&provider, &request).report());
+        assert_eq!(provider.stats().pooled_parsers, 0);
+        assert_eq!(provider.stats().checked_out_parsers, 0);
+        assert_eq!(provider.stats().cache.entries, 0);
+    }
+}
+
+#[test]
+fn local_dim_list_limits_keep_exact_identity_and_typed_cancellation() {
+    let source = b"Sub Run()\nDim first, grid(-1 To +2,003) As Long\nEnd Sub\n";
+    for language in ["vba", "visual-basic-classic"] {
+        let fixture = Fixture::new(source);
+        let provider = provider();
+        let base = limits(4096);
+        let request = fixture.request(&base, language, Vec::new());
+        let required = provider
+            .required_syntax_fact_count(&request, &deadline())
+            .unwrap();
+        assert_eq!(required, 11);
+        let full = parse(&provider, &request);
+        assert_eq!(full.report().resources().syntax_nodes(), 14);
+        for maximum in [required, full.facts().len() - 1, full.facts().len()] {
+            let budget = limits(maximum);
+            let output = parse(&provider, &fixture.request(&budget, language, Vec::new()));
+            assert_eq!(output.facts().len(), maximum);
+            assert_eq!(
+                output.report().coverage().status(),
+                if maximum == full.facts().len() {
+                    CoverageStatus::Complete
+                } else {
+                    CoverageStatus::Bounded
+                }
+            );
+            for name in [b"first".as_slice(), b"grid"] {
+                assert!(output.facts().iter().any(|fact| fact.syntax_kind().as_str()
+                    == "vba.identifier.definition"
+                    && bytes_at(source, fact.span()) == name));
+            }
+        }
+        let short = limits(required - 1);
+        assert_eq!(
+            execute_parse(
+                &provider,
+                &fixture.request(&short, language, Vec::new()),
+                MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
+                &deadline()
+            )
+            .unwrap_err(),
+            AdapterError::Sink(SinkError::StreamLimit {
+                resource: ResourceKind::RequiredSyntaxFacts,
+                observed: required,
+                limit: required - 1
+            })
+        );
+        for maximum in [14, 13] {
+            let budget = AnalysisLimits::new(
+                base.max_source_bytes(),
+                maximum,
+                base.max_syntax_depth(),
+                base.max_embedded_ranges(),
+                base.max_reported_memory_bytes(),
+                base.syntax_stream().clone(),
+                base.ir_stream().clone(),
+                base.ir().clone(),
+            )
+            .unwrap();
+            let result = execute_parse(
+                &provider,
+                &fixture.request(&budget, language, Vec::new()),
+                MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
+                &deadline(),
+            );
+            if maximum == 14 {
+                assert_eq!(result.unwrap().facts(), full.facts());
+            } else {
+                assert_eq!(
+                    result.unwrap_err(),
+                    AdapterError::RejectedRequest(
+                        rootlight_adapter_sdk::RequestError::ProviderLimit {
+                            resource: ResourceKind::SyntaxNodes,
+                            observed: 14,
+                            limit: 13
+                        }
+                    )
+                );
+            }
+        }
+        let cancelled = deadline();
+        cancelled.cancel(CancellationReason::ClientRequest);
+        assert!(matches!(
+            execute_parse(
+                &provider,
+                &request,
+                MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
+                &cancelled
+            ),
+            Err(AdapterError::Cancelled {
+                reason: CancellationReason::ClientRequest
+            })
+        ));
+        assert_eq!(parse(&provider, &request).facts(), full.facts());
+        assert_eq!(provider.stats().pooled_parsers, 0);
+        assert_eq!(provider.stats().checked_out_parsers, 0);
+        assert_eq!(provider.stats().cache.entries, 0);
+    }
+}
+
+#[test]
+fn local_dim_lists_keep_late_unsupported_declarators_on_the_whole_native_route() {
+    for declaration in [
+        "Dim good, bad As Product",
+        "Dim good, bad As New Product",
+        "Dim good, bad$",
+        "Dim good, bad(1 + 2)",
+        "Dim good, bad(&H2)",
+        "Dim good, bad(1,)",
+        "Dim good, bad As Long=1",
+        "Dim good,",
+        "Dim good,,other",
+        "Dim good, bad As",
+        "Dim good, bad(1) extra",
+    ] {
+        let source = format!("Sub Run()\n{declaration}\nEnd Sub\n");
+        for language in ["vba", "visual-basic-classic"] {
+            let fixture = Fixture::new(source.as_bytes());
+            let provider = provider();
+            let budget = limits(4096);
+            let output = parse(&provider, &fixture.request(&budget, language, Vec::new()));
+            assert!(
+                provider.stats().pooled_parsers > 0,
+                "{language}: {declaration}"
+            );
+            assert_eq!(provider.stats().checked_out_parsers, 0);
+            assert!(output.facts().iter().any(|fact| fact.syntax_kind().as_str()
+                == "vba.identifier.definition"
+                && bytes_at(source.as_bytes(), fact.span()) == b"Run"));
+        }
+    }
+}
+
+#[test]
+fn local_dim_list_edit_invalidates_a_real_native_tree_with_source_bound_identity() {
+    const NATIVE: &str = "Dim first, grid(-1 To +2, &H3) As Long";
+    const OWN: &str = "Dim first, grid(-1 To +2, 003) As Long";
+    let native = format!("Sub Run()\r\n{NATIVE}\r\nEnd Sub\r\n");
+    let own = format!("Sub Run()\r\n{OWN}\r\nEnd Sub\r\n");
+    for language in ["vba", "visual-basic-classic"] {
+        let mut fixture = Fixture::new(native.as_bytes());
+        let provider = provider();
+        let budget = limits(4096);
+        let settings = ParserSettings::new(512).unwrap();
+        let request = fixture.request(&budget, language, Vec::new());
+        let previous = provider
+            .execute_with_previous(
+                &request,
+                None,
+                &[],
+                settings,
+                MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
+                &deadline(),
+            )
+            .unwrap();
+        let continuation = previous
+            .previous()
+            .expect("hex bounds retain a real native continuation");
+        let old_hash = fixture.source.content_hash();
+        let old_stats = provider.stats();
+        assert!(old_stats.pooled_parsers > 0);
+        assert!(old_stats.cache.entries > 0);
+        fixture.rewrite(own.as_bytes());
+        let request = fixture.request(&budget, language, Vec::new());
+        assert_ne!(old_hash, fixture.source.content_hash());
+        assert_eq!(
+            fixture.source.content_hash(),
+            rootlight_ids::content_hash(own.as_bytes())
+        );
+        let start = native.find(NATIVE).unwrap();
+        let edit = SourceEdit::new(start, start + NATIVE.len(), OWN).unwrap();
+        let output = provider
+            .execute_with_previous(
+                &request,
+                Some(continuation),
+                &[edit],
+                settings,
+                MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
+                &deadline(),
+            )
+            .unwrap();
+        assert_eq!(
+            output.reuse_status(),
+            ReuseStatus::Invalidated(ReuseInvalidation::FrontendRoute)
+        );
+        assert_eq!(
+            output.reuse_key().grammar_version(),
+            VBA_PROCEDURAL_FRONTEND_VERSION
+        );
+        assert!(output.previous().is_none());
+        assert_eq!(
+            output.output().report().coverage().status(),
+            CoverageStatus::Complete
+        );
+        assert_eq!(output.output().facts(), parse(&provider, &request).facts());
+        assert_eq!(provider.stats().pooled_parsers, old_stats.pooled_parsers);
+        assert_eq!(provider.stats().cache.entries, old_stats.cache.entries);
+        assert_eq!(provider.stats().checked_out_parsers, 0);
+    }
+}
+
+#[test]
 fn grouped_module_variables_keep_individual_required_source_identity() {
     let source = b"Attribute VB_Name = \"Grouped\"\r\nPublic alpha, beta As Long, grid(-1 To +2, 003) As Variant, pending()\r\nPrivate [Public] As String, [Rem]()\r\nDim first, _\r\n second(2,3)As Long\r\nSub Run()\r\nCall grid()\r\nEnd Sub\r\n";
     for language in ["vba", "visual-basic-classic"] {

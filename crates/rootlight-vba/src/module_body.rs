@@ -1,4 +1,4 @@
-//! Complete scalar-local statements, expression assignments and explicit calls for the
+//! Complete local declarations, expression assignments and explicit calls for the
 //! closed first-party module inventory.
 //! Records own only original byte ranges; declaration identity and reference roles
 //! remain obligations of the adapter's existing structural normalization boundary.
@@ -12,6 +12,8 @@ use super::{logical_whitespace_len, module::ModuleError, module_expression, name
 pub enum ModuleBodyStatement {
     /// One explicitly typed scalar Dim or Const declaration.
     Declaration(ModuleLocalDeclaration),
+    /// One complete Dim list retaining each local scalar or numeric-array declarator.
+    Variables(ModuleLocalVariables),
     /// One simple scalar assignment, optionally introduced by Let.
     Assignment(ModuleScalarAssignment),
     /// A simple destination assigned one complete parenthesized scalar application.
@@ -30,6 +32,7 @@ impl ModuleBodyStatement {
     pub fn statement(&self) -> Range<usize> {
         match self {
             Self::Declaration(declaration) => declaration.statement(),
+            Self::Variables(variables) => variables.statement(),
             Self::Assignment(assignment) => assignment.statement(),
             Self::ApplicationAssignment(assignment) => assignment.statement(),
             Self::ExpressionAssignment(assignment) => assignment.statement(),
@@ -95,6 +98,73 @@ impl ModuleLocalDeclaration {
     #[must_use]
     pub fn value(&self) -> Option<&ModuleScalarValue> {
         self.value.as_ref()
+    }
+}
+
+/// One complete local Dim statement with independently authored declarators.
+///
+/// Variables stay in source order and belong to the containing procedure, never
+/// the module-variable inventory. A comma list does not distribute one sibling's
+/// written type to another or establish runtime sizes or uniqueness.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ModuleLocalVariables {
+    statement: Range<usize>,
+    variables: Vec<ModuleLocalVariable>,
+}
+
+impl ModuleLocalVariables {
+    /// Returns the complete trimmed Dim statement, shared by every sibling.
+    #[must_use]
+    pub fn statement(&self) -> Range<usize> {
+        self.statement.clone()
+    }
+
+    /// Returns every complete local declarator in authored source order.
+    #[must_use]
+    pub fn variables(&self) -> &[ModuleLocalVariable] {
+        &self.variables
+    }
+}
+
+/// One uninitialized local variable with exact source-written declaration ranges.
+///
+/// An absent As clause does not fabricate a Variant token. Array syntax retains
+/// numeric bounds without evaluating magnitudes, allocation size or lower defaults.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ModuleLocalVariable {
+    syntax: super::module::VariableDeclarator,
+}
+
+impl ModuleLocalVariable {
+    /// Returns the exact name through written bounds or type, excluding Dim.
+    #[must_use]
+    pub fn declarator(&self) -> Range<usize> {
+        self.syntax.declarator.clone()
+    }
+
+    /// Returns the exact authored local name, retaining brackets when present.
+    #[must_use]
+    pub fn name(&self) -> Range<usize> {
+        self.syntax.name.clone()
+    }
+
+    /// Returns complete numeric array parentheses, or None for scalar syntax.
+    #[must_use]
+    pub fn array_bounds(&self) -> Option<Range<usize>> {
+        self.syntax.array_bounds.clone()
+    }
+
+    /// Returns logical group, dimension, endpoint and written-sign work for bounds.
+    /// Scalar syntax costs zero; this count is not an evaluated array size.
+    #[must_use]
+    pub const fn array_work_nodes(&self) -> usize {
+        self.syntax.array_work_nodes
+    }
+
+    /// Returns the written intrinsic type keyword, or None without an As clause.
+    #[must_use]
+    pub fn type_range(&self) -> Option<Range<usize>> {
+        self.syntax.type_range.clone()
     }
 }
 
@@ -277,11 +347,37 @@ fn statement<E>(
     statement_with_expression_limits(source, range, maximum_arguments, source.len(), check)
 }
 
+#[cfg(test)]
 pub(super) fn statement_with_expression_limits<E>(
     source: &[u8],
     range: Range<usize>,
     maximum_arguments: usize,
     maximum_expression_nodes: usize,
+    check: &mut impl FnMut() -> Result<(), E>,
+) -> Result<Option<ModuleBodyStatement>, ModuleError<E>> {
+    statement_with_limits(
+        source,
+        range,
+        BodyLimits {
+            arguments: maximum_arguments,
+            expression_nodes: maximum_expression_nodes,
+            records: source.len(),
+        },
+        check,
+    )
+}
+
+#[derive(Clone, Copy)]
+pub(super) struct BodyLimits {
+    pub(super) arguments: usize,
+    pub(super) expression_nodes: usize,
+    pub(super) records: usize,
+}
+
+pub(super) fn statement_with_limits<E>(
+    source: &[u8],
+    range: Range<usize>,
+    limits: BodyLimits,
     check: &mut impl FnMut() -> Result<(), E>,
 ) -> Result<Option<ModuleBodyStatement>, ModuleError<E>> {
     check().map_err(ModuleError::Cancelled)?;
@@ -293,20 +389,12 @@ pub(super) fn statement_with_expression_limits<E>(
             text,
             range,
             cursor,
-            maximum_arguments,
-            maximum_expression_nodes,
+            limits.arguments,
+            limits.expression_nodes,
             check,
         );
     }
-    scalar_statement(
-        text,
-        range,
-        cursor,
-        first,
-        maximum_arguments,
-        maximum_expression_nodes,
-        check,
-    )
+    scalar_statement(text, range, cursor, first, limits, check)
 }
 
 fn scalar_statement<E>(
@@ -314,8 +402,7 @@ fn scalar_statement<E>(
     range: Range<usize>,
     mut cursor: usize,
     first: &[u8],
-    maximum_arguments: usize,
-    maximum_expression_nodes: usize,
+    limits: BodyLimits,
     check: &mut impl FnMut() -> Result<(), E>,
 ) -> Result<Option<ModuleBodyStatement>, ModuleError<E>> {
     let local = if first.eq_ignore_ascii_case(b"Dim") {
@@ -326,7 +413,16 @@ fn scalar_statement<E>(
         None
     };
     if let Some(kind) = local {
-        return local_declaration(text, range, cursor, kind, check).map_err(ModuleError::Cancelled);
+        if let Some(statement) = local_declaration(text, range.clone(), cursor, kind, check)
+            .map_err(ModuleError::Cancelled)?
+        {
+            return Ok(Some(statement));
+        }
+        return if kind == ModuleLocalKind::Variable {
+            local_variables(text, range, cursor, limits.records, check)
+        } else {
+            Ok(None)
+        };
     }
     let explicit_let = first.eq_ignore_ascii_case(b"Let");
     if explicit_let {
@@ -355,7 +451,7 @@ fn scalar_statement<E>(
         range.clone(),
         cursor,
         destination.clone(),
-        maximum_arguments,
+        limits.arguments,
         check,
     )? {
         return Ok(Some(statement));
@@ -364,8 +460,8 @@ fn scalar_statement<E>(
         text,
         expression_start,
         &range,
-        maximum_expression_nodes,
-        maximum_arguments,
+        limits.expression_nodes,
+        limits.arguments,
         check,
     )?
     else {
@@ -601,6 +697,69 @@ fn reserve_arguments_exact<E>(
         .map_err(|_| ModuleError::AllocationFailed);
     check().map_err(ModuleError::Cancelled)?;
     result
+}
+
+fn local_variables<E>(
+    text: &[u8],
+    range: Range<usize>,
+    mut cursor: usize,
+    maximum_records: usize,
+    check: &mut impl FnMut() -> Result<(), E>,
+) -> Result<Option<ModuleBodyStatement>, ModuleError<E>> {
+    if !separator(text, &mut cursor, check).map_err(ModuleError::Cancelled)? {
+        return Ok(None);
+    }
+    let mut variables = Vec::new();
+    loop {
+        check().map_err(ModuleError::Cancelled)?;
+        let Some(syntax) = super::module::variable_declarator(text, &range, &mut cursor, check)
+            .map_err(ModuleError::Cancelled)?
+        else {
+            return Ok(None);
+        };
+        if cursor != text.len() && text.get(cursor) != Some(&b',') {
+            return Ok(None);
+        }
+        reserve_local_variables(&mut variables, maximum_records, check)?;
+        variables.push(ModuleLocalVariable { syntax });
+        if cursor == text.len() {
+            return Ok(Some(ModuleBodyStatement::Variables(ModuleLocalVariables {
+                statement: range,
+                variables,
+            })));
+        }
+        cursor += 1;
+        cursor += logical_whitespace_len(text.get(cursor..).unwrap_or_default(), check)
+            .map_err(ModuleError::Cancelled)?;
+    }
+}
+
+fn reserve_local_variables<E>(
+    variables: &mut Vec<ModuleLocalVariable>,
+    maximum: usize,
+    check: &mut impl FnMut() -> Result<(), E>,
+) -> Result<(), ModuleError<E>> {
+    check().map_err(ModuleError::Cancelled)?;
+    if variables.len() >= maximum {
+        return Err(ModuleError::StatementLimit);
+    }
+    if variables.len() == variables.capacity() {
+        let additional = variables.capacity().max(4).min(maximum - variables.len());
+        reserve_local_variables_exact(variables, additional, check)?;
+    }
+    Ok(())
+}
+
+fn reserve_local_variables_exact<E>(
+    variables: &mut Vec<ModuleLocalVariable>,
+    additional: usize,
+    check: &mut impl FnMut() -> Result<(), E>,
+) -> Result<(), ModuleError<E>> {
+    check().map_err(ModuleError::Cancelled)?;
+    variables
+        .try_reserve_exact(additional)
+        .map_err(|_| ModuleError::AllocationFailed)?;
+    check().map_err(ModuleError::Cancelled)
 }
 
 fn local_declaration<E>(
@@ -868,6 +1027,387 @@ mod tests {
 
     fn read(text: &[u8]) -> Option<ModuleBodyStatement> {
         statement(text, 0..text.len(), text.len(), &mut || Ok::<(), ()>(())).unwrap()
+    }
+
+    #[test]
+    fn local_variable_lists_preserve_independent_rebased_types_names_and_array_ranges() {
+        for newline in ["\n", "\r\n"] {
+            let bounds = format!("( - _{newline} 1 To +2, _{newline} 3)");
+            let text = format!(
+                "dIm _{newline} [first], second _{newline} As _{newline} Long, [grid]{bounds} _{newline} As Variant, pending()"
+            );
+            let source = [b"prefix\n".as_slice(), text.as_bytes(), b"\ntail"].concat();
+            let range = 7..7 + text.len();
+            let ModuleBodyStatement::Variables(list) = statement_with_limits(
+                &source,
+                range.clone(),
+                BodyLimits {
+                    arguments: 0,
+                    expression_nodes: 0,
+                    records: 4,
+                },
+                &mut || Ok::<(), ()>(()),
+            )
+            .unwrap()
+            .unwrap() else {
+                panic!("complete local variable list expected");
+            };
+            assert_eq!(list.statement(), range);
+            assert_eq!(list.variables().len(), 4);
+            let first = &list.variables()[0];
+            assert_eq!(&source[first.name()], b"[first]");
+            assert_eq!(first.declarator(), first.name());
+            assert!(first.type_range().is_none());
+            assert!(first.array_bounds().is_none());
+            assert_eq!(first.array_work_nodes(), 0);
+            let second = &list.variables()[1];
+            assert_eq!(&source[second.name()], b"second");
+            assert_eq!(&source[second.type_range().unwrap()], b"Long");
+            assert_eq!(
+                &source[second.declarator()],
+                format!("second _{newline} As _{newline} Long").as_bytes()
+            );
+            let grid = &list.variables()[2];
+            assert_eq!(&source[grid.name()], b"[grid]");
+            assert_eq!(&source[grid.array_bounds().unwrap()], bounds.as_bytes());
+            assert_eq!(&source[grid.type_range().unwrap()], b"Variant");
+            assert_eq!(grid.array_work_nodes(), 8);
+            let pending = &list.variables()[3];
+            assert_eq!(&source[pending.name()], b"pending");
+            assert_eq!(&source[pending.array_bounds().unwrap()], b"()");
+            assert_eq!(&source[pending.declarator()], b"pending()");
+            assert!(pending.type_range().is_none());
+            assert_eq!(pending.array_work_nodes(), 1);
+            let mut end = list.statement().start;
+            for variable in list.variables() {
+                assert!(end <= variable.declarator().start);
+                assert!(variable.declarator().start < variable.declarator().end);
+                assert!(variable.declarator().end <= list.statement().end);
+                assert!(variable.declarator().start <= variable.name().start);
+                assert!(variable.name().end <= variable.declarator().end);
+                end = variable.declarator().end;
+            }
+        }
+    }
+
+    #[test]
+    fn local_variables_admit_untyped_groups_and_arrays_without_changing_typed_scalar_api() {
+        for ty in [
+            "String", "Boolean", "Byte", "Integer", "Long", "LongLong", "LongPtr", "Single",
+            "Double", "Currency", "Date", "Variant", "Object",
+        ] {
+            let scalar = format!("Dim [value] As {ty}");
+            let ModuleBodyStatement::Declaration(declaration) = read(scalar.as_bytes()).unwrap()
+            else {
+                panic!("single typed scalar retains original API in {scalar}");
+            };
+            assert_eq!(declaration.kind(), ModuleLocalKind::Variable);
+            assert_eq!(&scalar[declaration.type_range()], ty);
+            assert!(declaration.value().is_none());
+            let text = format!("Dim first, [value] As {ty}, grid(-1 To +2, 3) As {ty}");
+            let ModuleBodyStatement::Variables(list) = read(text.as_bytes()).unwrap() else {
+                panic!("complete grouped variables expected in {text}");
+            };
+            assert!(list.variables()[0].type_range().is_none());
+            assert_eq!(&text[list.variables()[1].type_range().unwrap()], ty);
+            assert_eq!(&text[list.variables()[2].type_range().unwrap()], ty);
+            assert_eq!(list.variables()[2].array_work_nodes(), 8);
+        }
+        for (text, count) in [
+            ("Dim count", 1),
+            ("Dim x, y As Long", 2),
+            ("Dim values() As Long", 1),
+            ("Dim [True], [Me], [Rem], [Sub], [Name], [Line]", 6),
+            ("Dim first As Long,second As Long", 2),
+            ("Dim items(1,2), pending(), [items]", 3),
+        ] {
+            let ModuleBodyStatement::Variables(list) = read(text.as_bytes()).unwrap() else {
+                panic!("newly supported variable syntax {text}");
+            };
+            assert_eq!(list.statement(), 0..text.len());
+            assert_eq!(list.variables().len(), count);
+        }
+        let text = b"Const Limit As Long=7";
+        let ModuleBodyStatement::Declaration(declaration) = read(text).unwrap() else {
+            panic!("Const keeps original declaration API");
+        };
+        assert_eq!(declaration.kind(), ModuleLocalKind::Constant);
+        assert_eq!(&text[declaration.value().unwrap().span()], b"7");
+    }
+
+    #[test]
+    fn local_array_designators_match_existing_complete_numeric_syntax_without_evaluation() {
+        for (bounds, work) in [
+            ("()", 1),
+            ("(1)", 3),
+            ("(-1)", 4),
+            ("(+1)", 4),
+            ("(1 To 2)", 4),
+            ("(-1 To +2)", 6),
+            ("(-1 To +2,3)", 8),
+            ("(1,2,3)", 7),
+            ("(3 To 1)", 4),
+            ("(0To1)", 4),
+        ] {
+            let text = format!("Dim value{bounds}");
+            let ModuleBodyStatement::Variables(list) = read(text.as_bytes()).unwrap() else {
+                panic!("complete numeric bounds in {text}");
+            };
+            let variable = &list.variables()[0];
+            assert_eq!(&text[variable.array_bounds().unwrap()], bounds);
+            assert_eq!(variable.array_work_nodes(), work);
+            assert!(variable.type_range().is_none());
+        }
+        let text = format!("Dim value({} To +{})", "9".repeat(4096), "8".repeat(4096));
+        let ModuleBodyStatement::Variables(list) = read(text.as_bytes()).unwrap() else {
+            panic!("numeric magnitudes are source syntax, not allocation sizes");
+        };
+        assert_eq!(list.variables()[0].array_work_nodes(), 5);
+    }
+
+    #[test]
+    fn local_variable_retention_limits_and_allocation_cancellation_are_typed() {
+        let source = b"Dim first, second(), third(-1 To +2) As Long";
+        let limits = BodyLimits {
+            arguments: 0,
+            expression_nodes: 0,
+            records: 3,
+        };
+        let ModuleBodyStatement::Variables(list) =
+            statement_with_limits(source, 0..source.len(), limits, &mut || Ok::<(), ()>(()))
+                .unwrap()
+                .unwrap()
+        else {
+            panic!("exact record credit expected");
+        };
+        assert_eq!(list.variables().len(), 3);
+        for records in [0, 1, 2] {
+            assert_eq!(
+                statement_with_limits(
+                    source,
+                    0..source.len(),
+                    BodyLimits { records, ..limits },
+                    &mut || Ok::<(), ()>(())
+                ),
+                Err(ModuleError::StatementLimit),
+                "retained local record ceiling {records}"
+            );
+        }
+        let mut empty = Vec::new();
+        assert_eq!(
+            reserve_local_variables(&mut empty, 0, &mut || Ok::<(), ()>(())),
+            Err(ModuleError::StatementLimit)
+        );
+        assert_eq!(empty.capacity(), 0);
+        assert_eq!(
+            reserve_local_variables_exact(&mut empty, usize::MAX, &mut || Ok::<(), ()>(())),
+            Err(ModuleError::AllocationFailed)
+        );
+        assert!(empty.is_empty());
+        for stop in 1..=2 {
+            let mut variables = Vec::new();
+            let mut calls = 0;
+            assert_eq!(
+                reserve_local_variables_exact(&mut variables, 1, &mut || {
+                    calls += 1;
+                    if calls == stop { Err("stop") } else { Ok(()) }
+                }),
+                Err(ModuleError::Cancelled("stop"))
+            );
+            assert!(variables.is_empty());
+            assert_eq!(calls, stop);
+            if stop == 1 {
+                assert_eq!(variables.capacity(), 0);
+            }
+        }
+    }
+
+    #[test]
+    fn local_variable_late_malformed_members_never_return_a_partial_list() {
+        for tail in [
+            "",
+            ",last",
+            "last,",
+            "last,,other",
+            "last As",
+            "last As Product",
+            "last As New Object",
+            "last As String * 8",
+            "last As Long()",
+            "last$",
+            "[last]$",
+            "last=1",
+            "last As Long=1",
+            "holder.last",
+            "last(upper)",
+            "last(1+2)",
+            "last(,1)",
+            "last(1,)",
+            "last(1,,2)",
+            "last(1 To)",
+            "last(1",
+            "last(1)(2)",
+            "last(1) As",
+            "last(1) As Product",
+            "last(1)=1",
+            "[open",
+            "[]",
+            "[last name]",
+            "é",
+            "Dim last",
+            "Public last",
+            "Private last",
+            "Static last",
+            "WithEvents last As Object",
+            "Empty",
+            "Me",
+            "last extra",
+            "last\0",
+            "last\r extra",
+            "last\nother",
+        ] {
+            let source = format!("Dim first, valid(-1 To +2,3) As Long, {tail}");
+            assert!(read(source.as_bytes()).is_none(), "{tail:?}");
+        }
+        for source in [
+            "Dim",
+            "Dim()",
+            "Dim[first]",
+            "Dim first:Dim second",
+            "Dim first ' tail",
+            "Dim first Rem tail",
+            "Private first",
+            "Public first As Long",
+            "Static first As Long",
+            "Const first=1",
+            "Const first As Long=1, second As Long=2",
+        ] {
+            assert!(read(source.as_bytes()).is_none(), "{source}");
+        }
+    }
+
+    #[test]
+    fn large_local_variable_lists_keep_order_and_exact_bounded_sibling_retention() {
+        let count = 256;
+        let text = format!(
+            "Dim {}",
+            (0..count)
+                .map(|index| format!("value{index}({index})"))
+                .collect::<Vec<_>>()
+                .join(",")
+        );
+        let limits = BodyLimits {
+            arguments: 0,
+            expression_nodes: 0,
+            records: count,
+        };
+        let ModuleBodyStatement::Variables(list) =
+            statement_with_limits(text.as_bytes(), 0..text.len(), limits, &mut || {
+                Ok::<(), ()>(())
+            })
+            .unwrap()
+            .unwrap()
+        else {
+            panic!("large complete local list expected");
+        };
+        assert_eq!(list.variables().len(), count);
+        for (index, variable) in list.variables().iter().enumerate() {
+            assert_eq!(&text[variable.name()], format!("value{index}"));
+            assert_eq!(
+                &text[variable.array_bounds().unwrap()],
+                format!("({index})")
+            );
+            assert_eq!(variable.array_work_nodes(), 3);
+        }
+        assert_eq!(
+            statement_with_limits(
+                text.as_bytes(),
+                0..text.len(),
+                BodyLimits {
+                    records: count - 1,
+                    ..limits
+                },
+                &mut || Ok::<(), ()>(())
+            ),
+            Err(ModuleError::StatementLimit)
+        );
+    }
+
+    #[test]
+    fn local_variable_all_byte_boundaries_preserve_complete_lists_and_record_ranges() {
+        for byte in 0..=u8::MAX {
+            for (prefix, suffix, expected) in [
+                (
+                    b"Dim".as_slice(),
+                    b"first".as_slice(),
+                    matches!(byte, b' ' | b'\t'),
+                ),
+                (
+                    b"Dim first,",
+                    b"second",
+                    byte.is_ascii_alphabetic() || matches!(byte, b'_' | b' ' | b'\t'),
+                ),
+                (b"Dim first, [second]", b"", matches!(byte, b' ' | b'\t')),
+                (
+                    b"Dim first, grid(",
+                    b"2)",
+                    byte.is_ascii_digit() || matches!(byte, b'+' | b'-' | b' ' | b'\t'),
+                ),
+            ] {
+                let source = [prefix, &[byte], suffix].concat();
+                let parsed = read(&source);
+                assert_eq!(
+                    parsed.is_some(),
+                    expected,
+                    "{prefix:?} byte {byte} {suffix:?}"
+                );
+                if let Some(ModuleBodyStatement::Variables(list)) = parsed {
+                    assert_eq!(list.statement(), 0..source.len());
+                    for variable in list.variables() {
+                        assert!(variable.declarator().start < variable.declarator().end);
+                        assert!(variable.declarator().end <= source.len());
+                        assert!(variable.name().end <= variable.declarator().end);
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn local_variable_scan_parse_reserve_and_rebase_cancel_at_every_callback() {
+        let text = format!(
+            "Dim _\r\n [{}], _\n grid(- _\r\n {} To +{}, _\n 3) _\r\n As Long, _\n pending()",
+            "identifier".repeat(128),
+            "9".repeat(1024),
+            "8".repeat(1024)
+        );
+        let source = [b"prefix\n".as_slice(), text.as_bytes(), b"\ntail"].concat();
+        let range = 7..7 + text.len();
+        let limits = BodyLimits {
+            arguments: 0,
+            expression_nodes: 0,
+            records: 3,
+        };
+        let mut checkpoints = 0;
+        let admitted = statement_with_limits(&source, range.clone(), limits, &mut || {
+            checkpoints += 1;
+            Ok::<(), ()>(())
+        })
+        .unwrap()
+        .unwrap();
+        assert!(matches!(admitted, ModuleBodyStatement::Variables(_)));
+        for stop in 1..=checkpoints {
+            let mut calls = 0;
+            assert_eq!(
+                statement_with_limits(&source, range.clone(), limits, &mut || {
+                    calls += 1;
+                    if calls == stop { Err("stop") } else { Ok(()) }
+                }),
+                Err(ModuleError::Cancelled("stop")),
+                "checkpoint {stop}"
+            );
+            assert_eq!(calls, stop);
+        }
     }
 
     #[test]
@@ -1809,16 +2349,13 @@ mod tests {
     #[test]
     fn unsupported_local_forms_and_value_tails_never_return_a_prefix() {
         for source in [
-            "Dim count",
             "Dim count As",
             "Dim count As Product",
             "Dim count As [Long]",
-            "Dim count() As Long",
             "Dim count As Long()",
             "Dim count As New Object",
             "Dim count As String * 8",
             "Dim count As Long = 1",
-            "Dim x, y As Long",
             "Dim count$ As String",
             "Dim Me As Long",
             "Dim Dim As Long",
