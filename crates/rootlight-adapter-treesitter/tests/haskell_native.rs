@@ -670,7 +670,7 @@ fn unsupported_equation_binders_and_rhs_shapes_keep_all_use_sites_unresolved() {
         "blocked xs = [x | x <- xs]\n",
         "blocked x = Module.x\n",
         "blocked x = Record { field = x }\n",
-        "blocked x = (x +)\n",
+        "blocked x = (x Module.+)\n",
         "blocked x = (x :: Int)\n",
         "blocked x = [| x |]\n",
         "blocked x = Just x\n",
@@ -913,7 +913,7 @@ fn unsupported_conditional_children_close_the_whole_clause_read_frontier() {
             "blocked flag x = if flag then (x :: Int) else x\n",
             "blocked flag x = if Module.flag then x else x\n",
             "blocked flag x = if flag then Just x else x\n",
-            "blocked flag x = if flag then (x +) else x\n",
+            "blocked flag x = if flag then (x Module.+) else x\n",
             "blocked flag x = if flag then x else x where\n  x = 1\n",
             "blocked flag x | flag = if flag then x else x\n",
             "blocked flag (Just x) = if flag then x else x\n",
@@ -1200,8 +1200,8 @@ fn infix_operand_reads_resolve_only_their_exact_clause_formals() {
 fn unsupported_infix_children_and_operator_shapes_close_the_whole_clause_frontier() {
     for newline in ["\n", "\r\n"] {
         for body in [
-            "blocked x = (x +)\n",
-            "blocked x = (+ x)\n",
+            "blocked x = (x Module.+)\n",
+            "blocked x = (Module.+ x)\n",
             "blocked x = x Module.+ 1\n",
             "blocked x = x `Module.combine` x\n",
             "blocked x = x : x\n",
@@ -1251,6 +1251,290 @@ fn unsupported_infix_children_and_operator_shapes_close_the_whole_clause_frontie
 }
 
 #[test]
+fn operator_section_reads_resolve_only_their_exact_clause_formals() {
+    for newline in ["\n", "\r\n"] {
+        let clauses: [(&str, &[&str]); 12] = [
+            ("left value = (value +)", &["value"]),
+            ("right value = (+ value)", &["value"]),
+            ("applyLeft value = unknown (value *)", &["value"]),
+            ("applyRight value = unknown ( # value)", &["value"]),
+            ("nested value = unknown ((value +) $)", &["value"]),
+            (
+                "pair left right = unknown (left +) ($ right)",
+                &["left", "right"],
+            ),
+            ("choose value = unknown (value +)", &["value"]),
+            ("choose value = unknown ($ value)", &["value"]),
+            (
+                "tick operation left right = unknown (left `operation`) (`operation` right)",
+                &["left", "right"],
+            ),
+            ("dispatch operation value = (operation +) value", &["value"]),
+            ("free value = unknown (value +) ($ missing)", &["value"]),
+            (
+                "conditional flag value = if flag then (value +) else ($ value)",
+                &["flag", "value"],
+            ),
+        ];
+        let text = format!(
+            "module Sections where\n{}\n",
+            clauses
+                .iter()
+                .map(|(clause, _)| *clause)
+                .collect::<Vec<_>>()
+                .join("\n")
+        )
+        .replace('\n', newline);
+        let fixture = Fixture::new(text);
+        let output = fixture.analyze();
+        let document = output.document();
+        let mut resolved_reads = BTreeSet::new();
+        let mut choose_parameters = BTreeSet::new();
+        let mut choose_owner = None;
+        for (clause, names) in clauses {
+            let start = fixture.span(clause, 0).start_byte();
+            let (head, rhs) = clause.split_once('=').unwrap();
+            let rhs_offset = head.len() + 1;
+            let source_span = |offset: usize, length: usize| {
+                SourceSpan::new(
+                    fixture.snapshot.file(),
+                    start + u64::try_from(offset).unwrap(),
+                    start + u64::try_from(offset + length).unwrap(),
+                )
+                .unwrap()
+            };
+            if clause.starts_with("choose ") {
+                let function = defined_entity(document, fixture.head(clause, 0, "choose"));
+                assert_eq!(function.kind, EntityKind::Function);
+                assert_eq!(*choose_owner.get_or_insert(function.id), function.id);
+            }
+            for &name in names {
+                let parameter =
+                    defined_entity(document, source_span(head.find(name).unwrap(), name.len()));
+                assert_eq!(parameter.kind, EntityKind::Parameter);
+                if clause.starts_with("choose ") {
+                    assert_eq!(
+                        parameter.container,
+                        Some(ContainerRef::Entity(choose_owner.unwrap()))
+                    );
+                    assert!(choose_parameters.insert(parameter.id));
+                }
+                for (offset, _) in rhs.match_indices(name) {
+                    let read_span = source_span(rhs_offset + offset, name.len());
+                    let reads = document
+                        .occurrences
+                        .iter()
+                        .filter(|site| {
+                            site.role == OccurrenceRole::Reference
+                                && site.source.span() == read_span
+                        })
+                        .collect::<Vec<_>>();
+                    assert_eq!(reads.len(), 1, "{clause}: {name}");
+                    let read = reads[0];
+                    assert_eq!(
+                        read.target,
+                        OccurrenceTarget::Resolved {
+                            symbol: parameter.id
+                        },
+                        "{clause}: {name}"
+                    );
+                    assert!(resolved_reads.insert(read.id));
+                    assert_eq!(
+                        read.id,
+                        rootlight_ir::derive_occurrence_record_id(read).unwrap()
+                    );
+                    assert_eq!(read.syntactic_text_hash, content_hash(name.as_bytes()));
+                    assert_eq!(read.source.generation(), fixture.source.generation());
+                    assert_eq!(read.source.content_hash(), fixture.source.content_hash());
+                    let relations = document
+                        .relations
+                        .iter()
+                        .filter(|relation| {
+                            relation.subject == RelationEndpoint::Occurrence(read.id)
+                        })
+                        .collect::<Vec<_>>();
+                    assert_eq!(relations.len(), 1, "{clause}: {name}");
+                    assert_eq!(relations[0].predicate, RelationPredicate::RefersTo);
+                    assert_eq!(relations[0].object, RelationEndpoint::Entity(parameter.id));
+                    assert_eq!(
+                        relations[0].evidence_kind,
+                        rootlight_ir::EvidenceKind::Derived
+                    );
+                    assert_eq!(relations[0].evidence.source.as_ref(), Some(&read.source));
+                    assert_eq!(
+                        relations[0].id,
+                        rootlight_ir::derive_relation_record_id(relations[0]).unwrap()
+                    );
+                    assert!(
+                        !document.skipped_regions.iter().any(|gap| {
+                            gap.detail == "haskell-binding-target-unavailable"
+                                && gap.source.span() == read_span
+                        }),
+                        "{clause}: {name}"
+                    );
+                }
+            }
+        }
+        assert_eq!(choose_parameters.len(), 2);
+        assert_eq!(resolved_reads.len(), 16);
+        assert_eq!(
+            document
+                .occurrences
+                .iter()
+                .filter(|site| {
+                    site.role == OccurrenceRole::Reference
+                        && matches!(site.target, OccurrenceTarget::Resolved { .. })
+                })
+                .count(),
+            resolved_reads.len()
+        );
+        for (clause, occurrences) in [
+            (
+                "tick operation left right = unknown (left `operation`) (`operation` right)",
+                2,
+            ),
+            ("dispatch operation value = (operation +) value", 1),
+        ] {
+            let start = fixture.span(clause, 0).start_byte();
+            let (head, rhs) = clause.split_once('=').unwrap();
+            let formal_offset = head.find("operation").unwrap();
+            assert_eq!(head.match_indices("operation").count(), 1);
+            let formal_span = SourceSpan::new(
+                fixture.snapshot.file(),
+                start + u64::try_from(formal_offset).unwrap(),
+                start + u64::try_from(formal_offset + "operation".len()).unwrap(),
+            )
+            .unwrap();
+            let parameter = defined_entity(document, formal_span);
+            assert_eq!(parameter.kind, EntityKind::Parameter);
+            assert_eq!(rhs.match_indices("operation").count(), occurrences);
+            for (offset, _) in rhs.match_indices("operation") {
+                let span = SourceSpan::new(
+                    fixture.snapshot.file(),
+                    start + u64::try_from(head.len() + 1 + offset).unwrap(),
+                    start + u64::try_from(head.len() + 1 + offset + "operation".len()).unwrap(),
+                )
+                .unwrap();
+                let sites = document
+                    .occurrences
+                    .iter()
+                    .filter(|site| {
+                        site.role == OccurrenceRole::Reference && site.source.span() == span
+                    })
+                    .collect::<Vec<_>>();
+                assert_eq!(sites.len(), 1, "{clause}");
+                assert!(matches!(
+                    sites[0].target,
+                    OccurrenceTarget::Unresolved { .. }
+                ));
+                assert!(document.relations.iter().all(|relation| {
+                    relation.subject != RelationEndpoint::Occurrence(sites[0].id)
+                }));
+                assert!(document.skipped_regions.iter().any(|gap| {
+                    gap.detail == "haskell-binding-target-unavailable" && gap.source.span() == span
+                }));
+            }
+        }
+        let missing_span = fixture.span("missing", 0);
+        let missing = document
+            .occurrences
+            .iter()
+            .filter(|site| {
+                site.role == OccurrenceRole::Reference && site.source.span() == missing_span
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(missing.len(), 1);
+        assert!(matches!(
+            missing[0].target,
+            OccurrenceTarget::Unresolved { .. }
+        ));
+        assert!(document.skipped_regions.iter().any(|gap| {
+            gap.detail == "haskell-binding-target-unavailable" && gap.source.span() == missing_span
+        }));
+        let unknown = document
+            .occurrences
+            .iter()
+            .filter(|site| site.role == OccurrenceRole::CallSite)
+            .collect::<Vec<_>>();
+        assert!(!unknown.is_empty());
+        assert!(
+            unknown
+                .iter()
+                .all(|site| matches!(site.target, OccurrenceTarget::Unresolved { .. }))
+        );
+        assert!(
+            unknown
+                .iter()
+                .any(|site| site.source.span() == fixture.span("unknown (value *)", 0))
+        );
+        assert!(
+            document
+                .relations
+                .iter()
+                .all(|relation| relation.predicate != RelationPredicate::Calls)
+        );
+        assert_eq!(
+            document
+                .relations
+                .iter()
+                .filter(|relation| relation.predicate == RelationPredicate::RefersTo)
+                .count(),
+            resolved_reads.len()
+        );
+    }
+}
+
+#[test]
+fn unsupported_operator_sections_close_the_whole_clause_frontier() {
+    for newline in ["\n", "\r\n"] {
+        for body in [
+            "blocked x = unknown (x Module.+)\n",
+            "blocked x = unknown (Module.+ x)\n",
+            "blocked x = unknown (x :)\n",
+            "blocked x = unknown (: x)\n",
+            "blocked x = unknown (x `Module.combine`)\n",
+            "blocked x = unknown (`Module.combine` x)\n",
+            "blocked x = unknown (x `Just`)\n",
+            "blocked x = unknown (`Just` x)\n",
+            "blocked x = unknown ((let x = 1 in x) +)\n",
+            "blocked x = unknown (+ (\\x -> x))\n",
+            "blocked x = unknown (x +) (let x = 1 in x)\n",
+        ] {
+            let fixture = Fixture::new(
+                format!("module NegativeSections where\n{body}").replace('\n', newline),
+            );
+            let output = fixture.analyze();
+            let document = output.document();
+            let uses = document
+                .occurrences
+                .iter()
+                .filter(|site| {
+                    matches!(
+                        site.role,
+                        OccurrenceRole::Reference
+                            | OccurrenceRole::CallSite
+                            | OccurrenceRole::TypeUse
+                    )
+                })
+                .collect::<Vec<_>>();
+            assert!(!uses.is_empty(), "{body}");
+            assert!(
+                uses.iter()
+                    .all(|site| matches!(site.target, OccurrenceTarget::Unresolved { .. })),
+                "{body}"
+            );
+            assert!(
+                document.relations.iter().all(|relation| {
+                    relation.predicate != RelationPredicate::RefersTo
+                        && relation.predicate != RelationPredicate::Calls
+                }),
+                "{body}"
+            );
+        }
+    }
+}
+
+#[test]
 fn body_only_admission_changes_preserve_function_and_clause_formal_identities() {
     let mut original = None;
     for body in [
@@ -1259,6 +1543,9 @@ fn body_only_admission_changes_preserve_function_and_clause_formal_identities() 
         "if x then y else x",
         "x + 1",
         "x `unknown` y",
+        "(x +)",
+        "($ y)",
+        "unknown (x +) ($ y)",
         "let z = x in z",
     ] {
         let fixture = Fixture::new(format!("module Stable where\npick x y = {body}\n"));

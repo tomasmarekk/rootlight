@@ -91,6 +91,103 @@ fn simple_binary_infix(node: Node<'_>, cancellation: &Cancellation) -> Result<bo
     Ok(seen == 7)
 }
 
+fn simple_operator_section(
+    node: Node<'_>,
+    cancellation: &Cancellation,
+) -> Result<bool, AdapterError> {
+    cancellation.check()?;
+    let (operand, operand_first) = match node.kind() {
+        "left_section" if node.child_by_field_name("right_operand").is_none() => {
+            (node.child_by_field_name("left_operand"), true)
+        }
+        "right_section"
+            if node.child_by_field_name("left_operand").is_none()
+                && node.child_by_field_name("operator").is_none() =>
+        {
+            (node.child_by_field_name("right_operand"), false)
+        }
+        _ => return Ok(false),
+    };
+    let Some(operand) = operand else {
+        return Ok(false);
+    };
+    if node.has_error()
+        || node.is_missing()
+        || operand.is_missing()
+        || operand.start_byte() == operand.end_byte()
+    {
+        return Ok(false);
+    }
+    // Right sections expose only their operand as a field. Their operator must
+    // be the unique other direct named child, not a descendant or guessed token.
+    let mut cursor = node.walk();
+    let mut operator = None;
+    for child in node.named_children(&mut cursor) {
+        cancellation.check()?;
+        if child.is_extra() || child == operand {
+            continue;
+        }
+        if operator.replace(child).is_some() {
+            return Ok(false);
+        }
+    }
+    let Some(operator) = operator else {
+        return Ok(false);
+    };
+    if operator.is_missing()
+        || operator.start_byte() == operator.end_byte()
+        || operand_first && node.child_by_field_name("operator") != Some(operator)
+    {
+        return Ok(false);
+    }
+    let written_operator = match operator.kind() {
+        "operator" => operator.named_child_count() == 0,
+        "infix_id" if operator.named_child_count() == 1 => operator
+            .named_child(0)
+            .is_some_and(|name| name.kind() == "variable" && name.child_count() == 0),
+        _ => false,
+    };
+    if !written_operator {
+        return Ok(false);
+    }
+    let [first, second] = if operand_first {
+        [operand, operator]
+    } else {
+        [operator, operand]
+    };
+    if first.end_byte() > second.start_byte() {
+        return Ok(false);
+    }
+    let mut cursor = node.walk();
+    let mut position = 0;
+    for child in node.children(&mut cursor) {
+        cancellation.check()?;
+        if child.is_extra() {
+            continue;
+        }
+        let valid = match position {
+            0 => {
+                child.kind() == "("
+                    && child.start_byte() == node.start_byte()
+                    && child.end_byte() <= first.start_byte()
+            }
+            1 => child == first,
+            2 => child == second,
+            3 => {
+                child.kind() == ")"
+                    && child.end_byte() == node.end_byte()
+                    && second.end_byte() <= child.start_byte()
+            }
+            _ => false,
+        };
+        if !valid {
+            return Ok(false);
+        }
+        position += 1;
+    }
+    Ok(position == 4)
+}
+
 fn simple_function_clause(
     node: Node<'_>,
     cancellation: &Cancellation,
@@ -159,11 +256,18 @@ fn simple_function_clause(
                 "variable" | "integer" | "float" | "char" | "string" => false,
                 "literal" if current.named_child_count() == 1 => true,
                 "infix" if simple_binary_infix(current, cancellation)? => true,
+                "left_section" | "right_section"
+                    if simple_operator_section(current, cancellation)? =>
+                {
+                    true
+                }
                 // A backticked formal is dispatch syntax, not an operand read.
                 "operator" | "infix_id"
                     if current.parent().is_some_and(|parent| {
-                        parent.kind() == "infix"
+                        matches!(parent.kind(), "infix" | "left_section")
                             && parent.child_by_field_name("operator") == Some(current)
+                            || parent.kind() == "right_section"
+                                && parent.child_by_field_name("right_operand") != Some(current)
                     }) =>
                 {
                     false
@@ -213,6 +317,8 @@ fn equation_rhs_read(node: Node<'_>, cancellation: &Cancellation) -> Result<bool
             "infix"
                 if parent.child_by_field_name("left_operand") == Some(current)
                     || parent.child_by_field_name("right_operand") == Some(current) => {}
+            "left_section" if parent.child_by_field_name("left_operand") == Some(current) => {}
+            "right_section" if parent.child_by_field_name("right_operand") == Some(current) => {}
             "conditional"
                 if parent.child_by_field_name("if") == Some(current)
                     || parent.child_by_field_name("then") == Some(current)
@@ -1172,7 +1278,7 @@ mod tests {
             ("blocked xs = [x | x <- xs]\n", false),
             ("blocked x = Module.x\n", false),
             ("blocked x = Record { field = x }\n", false),
-            ("blocked x = (x +)\n", false),
+            ("blocked x = (x Module.+)\n", false),
             ("blocked x = (x :: Int)\n", false),
             ("blocked x = [| x |]\n", false),
             ("blocked x = Just x\n", false),
@@ -1237,7 +1343,7 @@ mod tests {
             ("blocked flag x = if flag then x else (\\x -> x)\n", false),
             ("blocked flag x = if flag then x else (x :: Int)\n", false),
             ("blocked flag x = if Module.flag then x else x\n", false),
-            ("blocked flag x = if flag then (x +) else x\n", false),
+            ("blocked flag x = if flag then (x Module.+) else x\n", false),
             ("blocked flag x = if flag then Just x else x\n", false),
             (
                 "blocked flag x = if flag then x else x where\n  x = 1\n",
@@ -1307,8 +1413,8 @@ mod tests {
                 true,
             ),
             ("conditional flag x = if flag then x + 1 else x\n", true),
-            ("blocked x = (x +)\n", false),
-            ("blocked x = (+ x)\n", false),
+            ("blocked x = (x Module.+)\n", false),
+            ("blocked x = (Module.+ x)\n", false),
             ("blocked x = x Module.+ 1\n", false),
             ("blocked x = x `Module.combine` x\n", false),
             ("blocked x = x : x\n", false),
@@ -1382,6 +1488,114 @@ mod tests {
         ));
         assert!(matches!(
             equation_rhs_read(variables[0], &cancelled),
+            Err(AdapterError::Cancelled { .. })
+        ));
+    }
+
+    #[test]
+    fn operator_sections_admit_only_their_exact_written_operand_reads() {
+        let cancellation = Cancellation::new();
+        for (source, eligible) in [
+            ("left x = (x +)\n", true),
+            ("right x = (+ x)\n", true),
+            ("star x = unknown (x *)\n", true),
+            ("hash x = unknown ( # x)\n", true),
+            ("subtract x = (x -)\n", true),
+            ("both x y = unknown (x +) ($ y)\n", true),
+            (
+                "tick operation x y = unknown (x `operation`) (`operation` y)\n",
+                true,
+            ),
+            ("conditional flag x = if flag then (x +) else ($ x)\n", true),
+            ("nested x = unknown ((x +) $)\n", true),
+            ("blocked x = (x Module.+)\n", false),
+            ("blocked x = (Module.+ x)\n", false),
+            ("blocked x = (x :)\n", false),
+            ("blocked x = (: x)\n", false),
+            ("blocked x = (x `Module.combine`)\n", false),
+            ("blocked x = (`Module.combine` x)\n", false),
+            ("blocked x = (x `Just`)\n", false),
+            ("blocked x = (`Just` x)\n", false),
+            ("blocked x = ((let x = 1 in x) +)\n", false),
+            ("blocked x = (+ (\\x -> x))\n", false),
+            ("blocked x = (x +) where\n  x = 1\n", false),
+            ("blocked x | x = (x +)\n", false),
+            ("blocked x = (+)\n", false),
+            ("negated x = (- x)\n", false),
+            ("blocked x = unknown (x +) (let x = 1 in x)\n", false),
+        ] {
+            let tree = parse(source);
+            let clause = nodes(tree.root_node(), "function")
+                .into_iter()
+                .find(|node| equation(*node))
+                .unwrap();
+            assert_eq!(
+                simple_function_clause(clause, &cancellation).unwrap(),
+                eligible,
+                "{source}"
+            );
+        }
+        for (source, expected) in [
+            ("left x = (x +)\n", vec!["x"]),
+            ("right x = (+ x)\n", vec!["x"]),
+            ("both x y = unknown (x +) ($ y)\n", vec!["x", "y"]),
+            (
+                "tick operation x y = unknown (x `operation`) (`operation` y)\n",
+                vec!["x", "y"],
+            ),
+            ("dispatch operation x = (operation +) x\n", vec!["x"]),
+            ("callee operation x = operation (x +)\n", vec!["x"]),
+            ("free x = unknown (x +) ($ missing)\n", vec!["x", "missing"]),
+            ("nested x = unknown ((x +) $)\n", vec!["x"]),
+            (
+                "conditional flag x = if flag then (x +) else ($ x)\n",
+                vec!["flag", "x", "x"],
+            ),
+        ] {
+            let tree = parse(source);
+            let actual = nodes(tree.root_node(), "variable")
+                .into_iter()
+                .filter(|node| equation_rhs_read(*node, &cancellation).unwrap())
+                .map(|node| node.utf8_text(source.as_bytes()).unwrap())
+                .collect::<Vec<_>>();
+            assert_eq!(actual, expected, "{source}");
+        }
+        let mut parser = tree_sitter::Parser::new();
+        parser
+            .set_language(&tree_sitter_haskell::LANGUAGE.into())
+            .unwrap();
+        let incomplete = parser.parse("broken x = ($ x\n", None).unwrap();
+        assert!(incomplete.root_node().has_error());
+        let incomplete_variables = nodes(incomplete.root_node(), "variable");
+        assert!(!incomplete_variables.is_empty());
+        for variable in incomplete_variables {
+            assert!(!equation_rhs_read(variable, &cancellation).unwrap());
+        }
+        for section in nodes(incomplete.root_node(), "right_section") {
+            assert!(!simple_operator_section(section, &cancellation).unwrap());
+        }
+        for clause in nodes(incomplete.root_node(), "function")
+            .into_iter()
+            .filter(|node| equation(*node))
+        {
+            assert!(!simple_function_clause(clause, &cancellation).unwrap());
+        }
+        let source = "right x = ($ x)\n";
+        let tree = parse(source);
+        let section = nodes(tree.root_node(), "right_section")
+            .into_iter()
+            .next()
+            .unwrap();
+        assert!(simple_operator_section(section, &cancellation).unwrap());
+        let operand = section.child_by_field_name("right_operand").unwrap();
+        let cancelled = Cancellation::new();
+        cancelled.cancel(CancellationReason::ClientRequest);
+        assert!(matches!(
+            simple_operator_section(section, &cancelled),
+            Err(AdapterError::Cancelled { .. })
+        ));
+        assert!(matches!(
+            equation_rhs_read(operand, &cancelled),
             Err(AdapterError::Cancelled { .. })
         ));
     }
