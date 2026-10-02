@@ -17,6 +17,9 @@ pub fn structural_entity_kind(fact: &SyntaxFact) -> Option<EntityKind> {
     match fact.kind() {
         SyntaxFactKind::Module if label == "vba.class.module" => Some(EntityKind::Class),
         SyntaxFactKind::Module => Some(EntityKind::Module),
+        SyntaxFactKind::Declaration if label == "haskell.module.declaration" => {
+            Some(EntityKind::Module)
+        }
         SyntaxFactKind::Declaration
             if matches!(
                 label,
@@ -848,6 +851,7 @@ mod tests {
         use rootlight_ir::SourceSpan;
 
         for (syntax, expected) in [
+            ("haskell.module.declaration", Some(EntityKind::Module)),
             ("haskell.data_type.declaration", Some(EntityKind::Enum)),
             ("haskell.newtype.declaration", Some(EntityKind::Enum)),
             ("haskell.class.declaration", Some(EntityKind::Trait)),

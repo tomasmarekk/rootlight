@@ -1073,6 +1073,18 @@ fn preflight_lowering_limits(
                 limits,
             )?;
         }
+        if fact.syntax_kind().as_str() == "haskell.field.declaration" {
+            // One written field signature may name several independently owned fields.
+            extension_candidates = checked_add(extension_candidates, 1)?;
+            skipped_candidates = checked_add(skipped_candidates, 1)?;
+            account_string(
+                &mut string_bytes,
+                "signature-capture-unavailable"
+                    .len()
+                    .max("lexical-evidence-resource-limit".len()),
+                limits,
+            )?;
+        }
         if fact.kind() == SyntaxFactKind::Import {
             skipped_candidates = checked_add(skipped_candidates, 1)?;
             account_string(&mut string_bytes, "unresolved-import-target".len(), limits)?;
@@ -2168,7 +2180,14 @@ impl<'context, 'source> Lowering<'context, 'source> {
                         )?;
                         skipped.insert(region.id, region);
                     }
-                } else if supports_signature(entity.record.kind, &entity.record.language) {
+                } else if supports_declaration_signature(
+                    entity.record.kind,
+                    &entity.record.language,
+                    fact,
+                    entity
+                        .definition_local_id
+                        .and_then(|id| facts_by_id.get(&id).copied()),
+                ) {
                     let region = skipped_region(
                         self.full_source,
                         entity
@@ -3243,8 +3262,25 @@ impl<'context, 'source> Lowering<'context, 'source> {
         let mut captures = HashMap::<u64, AssociatedCaptures>::new();
         let mut scope_identity_captures = HashMap::<u64, ScopeIdentityCaptures>::new();
         let mut signature_comments = Vec::new();
+        let mut haskell_declarations = HashMap::new();
+        let mut haskell_scopes = HashMap::new();
+        let mut haskell_field_signatures = Vec::new();
         for (index, fact) in ordered_facts.iter().enumerate() {
             check_periodically(index, cancellation)?;
+            if self.language_for_fact(fact) == "haskell" {
+                let scope = if fact.kind() == SyntaxFactKind::Scope {
+                    Some(fact.local_id())
+                } else {
+                    fact.parent()
+                        .and_then(|parent| haskell_scopes.get(&parent).copied().flatten())
+                };
+                cancellation.check()?;
+                haskell_scopes
+                    .try_reserve(1)
+                    .map_err(|_| SinkError::AllocationFailed)?;
+                cancellation.check()?;
+                haskell_scopes.insert(fact.local_id(), scope);
+            }
             if self.language_for_fact(fact) == "powershell"
                 && fact.kind() == SyntaxFactKind::Comment
             {
@@ -3254,6 +3290,14 @@ impl<'context, 'source> Lowering<'context, 'source> {
                 .parent()
                 .and_then(|parent| nearest_declaration.get(&parent).copied().flatten());
             if structural_entity_kind(fact).is_some() || is_haskell_annotation_name(fact) {
+                if self.language_for_fact(fact) == "haskell" {
+                    cancellation.check()?;
+                    haskell_declarations
+                        .try_reserve(1)
+                        .map_err(|_| SinkError::AllocationFailed)?;
+                    cancellation.check()?;
+                    haskell_declarations.insert(fact.local_id(), *fact);
+                }
                 nearest_declaration.insert(fact.local_id(), Some(fact.local_id()));
                 captures.entry(fact.local_id()).or_default();
             } else {
@@ -3274,7 +3318,19 @@ impl<'context, 'source> Lowering<'context, 'source> {
                             .definition_parts
                             .push(*fact);
                     } else if is_signature_capture(fact) && !is_haskell_type_annotation(fact) {
-                        captures.entry(owner).or_default().signatures.push(*fact);
+                        if fact.syntax_kind().as_str() == "haskell.field_signature.signature" {
+                            cancellation.check()?;
+                            haskell_field_signatures
+                                .try_reserve(1)
+                                .map_err(|_| SinkError::AllocationFailed)?;
+                            cancellation.check()?;
+                            haskell_field_signatures.push(*fact);
+                        } else if haskell_signature_owner_matches(
+                            fact,
+                            haskell_declarations.get(&owner).copied(),
+                        ) {
+                            captures.entry(owner).or_default().signatures.push(*fact);
+                        }
                     }
                 }
             }
@@ -3292,6 +3348,14 @@ impl<'context, 'source> Lowering<'context, 'source> {
                 }
             }
         }
+        Self::associate_haskell_field_signatures(
+            &ordered_facts,
+            &nearest_declaration,
+            &haskell_scopes,
+            haskell_field_signatures,
+            &mut captures,
+            cancellation,
+        )?;
         crate::runtime::sort_cancellable_by(
             &mut signature_comments,
             cancellation,
@@ -3927,57 +3991,70 @@ impl<'context, 'source> Lowering<'context, 'source> {
                     .as_ref()
                     .and_then(|scope| scope.stable_identity)
             };
-            let (signature, signature_evidence, signature_span) =
-                if supports_signature(kind, self.language_for_fact(fact))
-                    && let Some(signature) = signature_capture
+            let (signature, signature_evidence, signature_span) = if supports_declaration_signature(
+                kind,
+                self.language_for_fact(fact),
+                fact,
+                definition,
+            ) && let Some(signature) =
+                signature_capture
+            {
+                let text = self.text_for_span(signature.span())?;
+                let maximum = self.request.limits().ir().max_string_bytes;
+                let first_comment = signature_comments.partition_point(|comment| {
+                    comment.start_byte() < signature.span().start_byte()
+                });
+                let comments = &signature_comments[first_comment..];
+                let needs_projection = comments
+                    .first()
+                    .is_some_and(|comment| comment.start_byte() < signature.span().end_byte());
+                let projection = if needs_projection {
+                    project_commented_signature(text, signature.span(), comments, cancellation)?
+                } else {
+                    None
+                };
+                let signature_text = projection
+                    .as_ref()
+                    .map_or(text, rootlight_ir::SourceTextProjection::text);
+                let canonical = if needs_projection && projection.is_none() {
+                    None
+                } else if kind == EntityKind::Constructor
+                    && self.language_for_fact(fact) == "dart"
+                    && let Some(definition) = definition
                 {
-                    let text = self.text_for_span(signature.span())?;
-                    let maximum = self.request.limits().ir().max_string_bytes;
-                    let first_comment = signature_comments.partition_point(|comment| {
-                        comment.start_byte() < signature.span().start_byte()
-                    });
-                    let comments = &signature_comments[first_comment..];
-                    let needs_projection = comments
-                        .first()
-                        .is_some_and(|comment| comment.start_byte() < signature.span().end_byte());
-                    let projection = if needs_projection {
-                        project_commented_signature(text, signature.span(), comments, cancellation)?
-                    } else {
-                        None
-                    };
-                    let signature_text = projection
-                        .as_ref()
-                        .map_or(text, rootlight_ir::SourceTextProjection::text);
-                    let canonical = if needs_projection && projection.is_none() {
-                        None
-                    } else if kind == EntityKind::Constructor
-                        && self.language_for_fact(fact) == "dart"
-                        && let Some(definition) = definition
-                    {
-                        rootlight_adapter_sdk::canonical_dart_constructor_signature(
-                            text,
-                            signature.span(),
-                            definition.span(),
-                            &name,
-                            maximum,
-                        )
-                    } else {
-                        canonical_symbol_signature(signature_text, maximum)
-                    };
-                    match canonical {
-                        Some(canonical) => (
+                    rootlight_adapter_sdk::canonical_dart_constructor_signature(
+                        text,
+                        signature.span(),
+                        definition.span(),
+                        &name,
+                        maximum,
+                    )
+                } else {
+                    canonical_symbol_signature(signature_text, maximum)
+                };
+                match canonical {
+                    Some(canonical) => {
+                        if fact.syntax_kind().as_str() == "haskell.field.declaration" {
+                            account_string(
+                                total_string_bytes,
+                                text.len(),
+                                self.request.limits().ir(),
+                            )?;
+                        }
+                        (
                             canonical,
                             Some(match projection {
                                 Some(projection) => SignatureEvidence::Projected(projection),
                                 None => SignatureEvidence::Contiguous(text.to_owned()),
                             }),
                             Some(signature.span()),
-                        ),
-                        None => (String::new(), None, None),
+                        )
                     }
-                } else {
-                    (String::new(), None, None)
-                };
+                    None => (String::new(), None, None),
+                }
+            } else {
+                (String::new(), None, None)
+            };
             let language = self.language_for_fact(fact).to_owned();
             let qualified_prefix = parent_scope
                 .as_ref()
@@ -4200,6 +4277,77 @@ impl<'context, 'source> Lowering<'context, 'source> {
         self.source_text
             .get(start..end)
             .ok_or_else(|| provider_failure("treesitter-lowering-span"))
+    }
+
+    fn associate_haskell_field_signatures<'fact>(
+        facts: &[&'fact SyntaxFact],
+        owners: &HashMap<u64, Option<u64>>,
+        scopes: &HashMap<u64, Option<u64>>,
+        mut signatures: Vec<&'fact SyntaxFact>,
+        captures: &mut HashMap<u64, AssociatedCaptures<'fact>>,
+        cancellation: &Cancellation,
+    ) -> Result<(), AdapterError> {
+        if signatures.is_empty() {
+            return Ok(());
+        }
+        crate::runtime::sort_cancellable_by(&mut signatures, cancellation, |left, right| {
+            (left.span().start_byte(), left.span().end_byte())
+                .cmp(&(right.span().start_byte(), right.span().end_byte()))
+        })?;
+        let mut invalid = HashMap::new();
+        invalid
+            .try_reserve(signatures.len())
+            .map_err(|_| SinkError::AllocationFailed)?;
+        cancellation.check()?;
+        let mut active: Option<&SyntaxFact> = None;
+        for signature in &signatures {
+            cancellation.check()?;
+            if let Some(previous) = active
+                && previous.span() != signature.span()
+                && previous.span().end_byte() > signature.span().start_byte()
+            {
+                invalid.insert(previous.local_id(), ());
+                invalid.insert(signature.local_id(), ());
+            }
+            if active
+                .is_none_or(|previous| previous.span().end_byte() < signature.span().end_byte())
+            {
+                active = Some(signature);
+            }
+        }
+        for field in facts {
+            cancellation.check()?;
+            if field.syntax_kind().as_str() != "haskell.field.declaration" {
+                continue;
+            }
+            let end = signatures.partition_point(|signature| {
+                signature.span().start_byte() <= field.span().start_byte()
+            });
+            let signature = end
+                .checked_sub(1)
+                .and_then(|index| signatures.get(index))
+                .copied();
+            let field_owner = field
+                .parent()
+                .and_then(|parent| owners.get(&parent).copied().flatten());
+            let Some(signature) = signature.filter(|signature| {
+                !invalid.contains_key(&signature.local_id())
+                    && span_contains(signature.span(), field.span())
+                    && owners.get(&signature.local_id()).copied().flatten() == field_owner
+                    && scopes.get(&signature.local_id()) == scopes.get(&field.local_id())
+                    && field_owner.is_some()
+            }) else {
+                continue;
+            };
+            let associated = captures.entry(field.local_id()).or_default();
+            associated
+                .signatures
+                .try_reserve(1)
+                .map_err(|_| SinkError::AllocationFailed)?;
+            cancellation.check()?;
+            associated.signatures.push(signature);
+        }
+        Ok(())
     }
 
     fn haskell_annotations(
@@ -6233,6 +6381,47 @@ fn select_unique_capture<'a>(captures: &[&'a SyntaxFact]) -> Option<&'a SyntaxFa
         .then_some(selected)
 }
 
+fn haskell_signature_owner_matches(signature: &SyntaxFact, owner: Option<&SyntaxFact>) -> bool {
+    match signature.syntax_kind().as_str() {
+        // These headers belong to lexical scopes, not the enclosing named declaration.
+        "haskell.lambda_header.signature" | "haskell.instance_header.signature" => false,
+        "haskell.function_header.signature" => owner
+            .is_some_and(|owner| owner.syntax_kind().as_str() == "haskell.function.declaration"),
+        "haskell.binding_header.signature" => owner
+            .is_some_and(|owner| owner.syntax_kind().as_str() == "haskell.variable.declaration"),
+        "haskell.declaration_header.signature" => owner.is_some_and(|owner| {
+            matches!(
+                owner.syntax_kind().as_str(),
+                "haskell.module.declaration"
+                    | "haskell.data_type.declaration"
+                    | "haskell.newtype.declaration"
+                    | "haskell.type_synonym.declaration"
+                    | "haskell.class.declaration"
+                    | "haskell.constructor.declaration"
+            )
+        }),
+        _ => true,
+    }
+}
+
+fn supports_declaration_signature(
+    kind: EntityKind,
+    language: &str,
+    declaration: &SyntaxFact,
+    definition: Option<&SyntaxFact>,
+) -> bool {
+    if language == "haskell" {
+        if kind == EntityKind::Variable {
+            // Pattern leaves have the exact name span; equations also contain their match.
+            return definition.is_some_and(|definition| definition.span() != declaration.span());
+        }
+        if kind == EntityKind::Field {
+            return declaration.syntax_kind().as_str() == "haskell.field.declaration";
+        }
+    }
+    supports_signature(kind, language)
+}
+
 fn supports_signature(kind: EntityKind, language: &str) -> bool {
     // Classic BASIC accessors share a name but have distinct Get/Let/Set headers.
     // The same rule governs identity, evidence emission and admission accounting.
@@ -6816,6 +7005,95 @@ mod tests {
             0,
             SyntaxKindLabel::new(label).expect("test label is valid"),
         )
+    }
+
+    #[test]
+    fn haskell_scope_headers_cannot_replace_a_named_declaration_header() {
+        let fact = |id, span, label| {
+            SyntaxFact::new(
+                id,
+                None,
+                SyntaxFactKind::Signature,
+                span,
+                1,
+                SyntaxKindLabel::new(label).unwrap(),
+            )
+        };
+        let span = SourceSpan::new(FileId::from_bytes([3; 20]), 0, 1).unwrap();
+        let owner = declaration("haskell.function.declaration");
+        let header = fact(2, span, "haskell.function_header.signature");
+        let lambda = fact(3, span, "haskell.lambda_header.signature");
+        let instance = fact(4, span, "haskell.instance_header.signature");
+        assert!(haskell_signature_owner_matches(&header, Some(&owner)));
+        assert!(!haskell_signature_owner_matches(&header, None));
+        assert!(!haskell_signature_owner_matches(&lambda, Some(&owner)));
+        assert!(!haskell_signature_owner_matches(&instance, Some(&owner)));
+        let foreign = fact(5, span, "rust.function.signature");
+        assert!(haskell_signature_owner_matches(&foreign, None));
+        let conflicting = fact(
+            6,
+            SourceSpan::new(span.file(), 0, 2).unwrap(),
+            "haskell.function_header.signature",
+        );
+        assert!(select_unique_capture(&[&header, &header]).is_some());
+        assert!(select_unique_capture(&[&header, &conflicting]).is_none());
+    }
+
+    #[test]
+    fn haskell_signature_requiredness_distinguishes_name_leaves_from_equations() {
+        let leaf = declaration("haskell.variable.declaration");
+        let definition = SyntaxFact::new(
+            2,
+            Some(1),
+            SyntaxFactKind::Occurrence,
+            leaf.span(),
+            1,
+            SyntaxKindLabel::new("haskell.binding_name.definition").unwrap(),
+        );
+        let equation = SyntaxFact::new(
+            1,
+            None,
+            SyntaxFactKind::Declaration,
+            SourceSpan::new(leaf.span().file(), 0, 8).unwrap(),
+            0,
+            SyntaxKindLabel::new("haskell.variable.declaration").unwrap(),
+        );
+        assert!(!supports_declaration_signature(
+            EntityKind::Variable,
+            "haskell",
+            &leaf,
+            Some(&definition)
+        ));
+        assert!(supports_declaration_signature(
+            EntityKind::Variable,
+            "haskell",
+            &equation,
+            Some(&definition)
+        ));
+        assert!(!supports_declaration_signature(
+            EntityKind::Variable,
+            "haskell",
+            &equation,
+            None
+        ));
+        assert!(!supports_declaration_signature(
+            EntityKind::Variable,
+            "javascript",
+            &equation,
+            Some(&definition)
+        ));
+        assert!(supports_declaration_signature(
+            EntityKind::Field,
+            "haskell",
+            &declaration("haskell.field.declaration"),
+            None
+        ));
+        assert!(!supports_declaration_signature(
+            EntityKind::Field,
+            "rust",
+            &declaration("rust.field.declaration"),
+            None
+        ));
     }
 
     #[test]
