@@ -133,7 +133,9 @@ fn write_pretty_report(
     report: &serde_json::Value,
     output: &mut impl Write,
 ) -> Result<(), Box<dyn Error>> {
-    serde_json::to_writer_pretty(&mut *output, report)?;
+    // Pretty JSON emits small fragments; buffer them before line-buffered stdout.
+    let mut output = std::io::BufWriter::new(output);
+    serde_json::to_writer_pretty(&mut output, report)?;
     output.write_all(b"\n")?;
     output.flush()?;
     Ok(())
@@ -1251,6 +1253,51 @@ mod tests {
             .err()
             .unwrap();
         assert!(failure.to_string().contains("rejected write"));
+        struct RejectFlush;
+        impl Write for RejectFlush {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                Ok(bytes.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Err(std::io::Error::other("rejected flush"))
+            }
+        }
+        assert!(
+            write_pretty_report(&report, &mut RejectFlush)
+                .unwrap_err()
+                .to_string()
+                .contains("rejected flush")
+        );
+    }
+
+    #[test]
+    fn pretty_report_stream_buffers_small_output_fragments() {
+        #[derive(Default)]
+        struct CountWrites {
+            bytes: Vec<u8>,
+            calls: usize,
+        }
+        impl Write for CountWrites {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                self.calls += 1;
+                self.bytes.extend_from_slice(bytes);
+                Ok(bytes.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let values: Vec<_> = (0..1_000)
+            .map(|index| json!({"index":index, "source":"exact witness"}))
+            .collect();
+        let report = json!({"values":values});
+        let mut output = CountWrites::default();
+        write_pretty_report(&report, &mut output).unwrap();
+        assert_eq!(
+            output.bytes,
+            format!("{}\n", serde_json::to_string_pretty(&report).unwrap()).as_bytes()
+        );
+        assert!(output.calls < values.len());
     }
 
     #[test]
