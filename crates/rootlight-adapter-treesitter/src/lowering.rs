@@ -978,6 +978,24 @@ fn preflight_lowering_limits(
             }
             account_string(&mut string_bytes, fact.syntax_kind().as_str().len(), limits)?;
         }
+        if is_haskell_signature_member_name(fact) {
+            // A missing direct class member can publish a definition as well as
+            // the written annotation, even though generic labels infer no callable.
+            entity_candidates = checked_add(entity_candidates, 1)?;
+            occurrence_candidates = checked_add(occurrence_candidates, 1)?;
+            extension_candidates = checked_add(extension_candidates, 1)?;
+            skipped_candidates = checked_add(skipped_candidates, 1)?;
+            account_string(
+                &mut string_bytes,
+                "lexical-evidence-resource-limit".len(),
+                limits,
+            )?;
+            account_string(
+                &mut string_bytes,
+                "haskell.binding_name.definition".len(),
+                limits,
+            )?;
+        }
         if is_haskell_type_annotation(fact) {
             account_string(
                 &mut string_bytes,
@@ -3719,6 +3737,7 @@ impl<'context, 'source> Lowering<'context, 'source> {
                         .as_ref()
                         .and_then(|scope| scope.stable_identity),
                     span: fact.span(),
+                    direct_class_member: is_haskell_signature_member_name(fact),
                 });
                 nearest_entity_ancestor.insert(fact.local_id(), parent_entity);
                 nearest_scope_ancestor.insert(fact.local_id(), parent_scope);
@@ -4221,7 +4240,11 @@ impl<'context, 'source> Lowering<'context, 'source> {
             self.request.limits().ir(),
             cancellation,
         )?;
-        let (haskell_annotations, haskell_orphan_signatures) = self.haskell_annotations(
+        let HaskellAnnotationPlan {
+            annotations: haskell_annotations,
+            orphan_signatures: haskell_orphan_signatures,
+            members: haskell_members,
+        } = self.haskell_annotations(
             &drafts,
             haskell_annotation_drafts,
             &nearest_entity_ancestor,
@@ -4229,6 +4252,15 @@ impl<'context, 'source> Lowering<'context, 'source> {
             total_string_bytes,
             cancellation,
         )?;
+        drafts
+            .try_reserve(haskell_members.len())
+            .map_err(|_| SinkError::AllocationFailed)?;
+        for member in haskell_members {
+            cancellation.check()?;
+            if drafts.insert(member.local_id, member).is_some() {
+                return Err(provider_failure("haskell-member-definition-collision"));
+            }
+        }
         let mut drafts: Vec<_> = drafts.into_values().collect();
         drafts.sort_by(|left, right| {
             (
@@ -4358,46 +4390,9 @@ impl<'context, 'source> Lowering<'context, 'source> {
         scopes: &HashMap<u64, Option<ScopeContext>>,
         total_string_bytes: &mut usize,
         cancellation: &Cancellation,
-    ) -> Result<(HashMap<u64, HaskellAnnotation>, BTreeSet<u64>), AdapterError> {
+    ) -> Result<HaskellAnnotationPlan, AdapterError> {
         if self.request.language().as_str() != "haskell" {
-            return Ok((HashMap::new(), BTreeSet::new()));
-        }
-        let mut bindings = HashMap::new();
-        cancellation.check()?;
-        bindings
-            .try_reserve(drafts.len())
-            .map_err(|_| SinkError::AllocationFailed)?;
-        cancellation.check()?;
-        for draft in drafts.values() {
-            cancellation.check()?;
-            if draft.language != "haskell"
-                || !matches!(
-                    draft.kind,
-                    EntityKind::Function | EntityKind::Method | EntityKind::Variable
-                )
-            {
-                continue;
-            }
-            let key = (
-                draft.parent_entity,
-                draft.scope_identity,
-                draft.name.as_str(),
-            );
-            bindings
-                .entry(key)
-                .and_modify(|target: &mut Option<(u64, EntityKind)>| {
-                    if target.is_some_and(|(_, kind)| kind != draft.kind) {
-                        *target = None;
-                    } else if let Some((local, _)) = target
-                        && drafts.get(local).is_some_and(|existing| {
-                            (draft.span.start_byte(), draft.span.end_byte())
-                                < (existing.span.start_byte(), existing.span.end_byte())
-                        })
-                    {
-                        *local = draft.local_id;
-                    }
-                })
-                .or_insert(Some((draft.local_id, draft.kind)));
+            return Ok(HaskellAnnotationPlan::default());
         }
         let mut signatures = Vec::new();
         for fact in self.parse_output.facts() {
@@ -4441,9 +4436,9 @@ impl<'context, 'source> Lowering<'context, 'source> {
             cancellation.check()?;
             facts.insert(fact.local_id(), fact);
         }
-        let mut result = HashMap::new();
-        result
-            .try_reserve(annotations.len())
+        let mut proposals = Vec::new();
+        proposals
+            .try_reserve_exact(annotations.len())
             .map_err(|_| SinkError::AllocationFailed)?;
         let mut represented_signatures = BTreeSet::new();
         for annotation in annotations {
@@ -4452,26 +4447,18 @@ impl<'context, 'source> Lowering<'context, 'source> {
             let name = definition
                 .map(|fact| {
                     let text = self.text_for_span(fact.span())?;
-                    Ok::<_, AdapterError>(rootlight_adapter_sdk::structural_captured_name_for_fact(
-                        "haskell",
-                        fact,
-                        text,
-                        self.request.limits().ir().max_string_bytes,
-                    ))
+                    Ok::<_, AdapterError>(
+                        rootlight_adapter_sdk::structural_captured_name_for_fact(
+                            "haskell",
+                            fact,
+                            text,
+                            self.request.limits().ir().max_string_bytes,
+                        )
+                        .map(|_| text),
+                    )
                 })
                 .transpose()?
                 .flatten();
-            let target = name
-                .as_deref()
-                .and_then(|name| {
-                    bindings.get(&(annotation.parent_entity, annotation.scope_identity, name))
-                })
-                .copied()
-                .flatten()
-                .map(|(local, _)| local)
-                .filter(|_| {
-                    self.parse_output.report().coverage().status() == CoverageStatus::Complete
-                });
             let end = signatures
                 .partition_point(|fact| fact.span().start_byte() <= annotation.span.start_byte());
             let signature_fact = end
@@ -4506,14 +4493,192 @@ impl<'context, 'source> Lowering<'context, 'source> {
                 }
                 _ => None,
             };
+            proposals.push(HaskellAnnotationProposal {
+                definition: definition
+                    .filter(|_| name.is_some())
+                    .map(SyntaxFact::local_id),
+                name,
+                signature,
+                annotation,
+            });
+        }
+        let mut bindings = HashMap::new();
+        cancellation.check()?;
+        bindings
+            .try_reserve(checked_add(drafts.len(), proposals.len())?)
+            .map_err(|_| SinkError::AllocationFailed)?;
+        for draft in drafts.values() {
+            cancellation.check()?;
+            if draft.language != "haskell"
+                || !matches!(
+                    draft.kind,
+                    EntityKind::Function | EntityKind::Method | EntityKind::Variable
+                )
+            {
+                continue;
+            }
+            let key = (
+                draft.parent_entity,
+                draft.scope_identity,
+                draft.name.as_str(),
+            );
+            bindings
+                .entry(key)
+                .and_modify(|target: &mut HaskellBinding| {
+                    if let HaskellBinding::Existing(local, kind) = target {
+                        if *kind != draft.kind {
+                            *target = HaskellBinding::Ambiguous;
+                        } else if drafts.get(local).is_some_and(|existing| {
+                            (draft.span.start_byte(), draft.span.end_byte())
+                                < (existing.span.start_byte(), existing.span.end_byte())
+                        }) {
+                            *local = draft.local_id;
+                        }
+                    }
+                })
+                .or_insert(HaskellBinding::Existing(draft.local_id, draft.kind));
+        }
+        let complete = self.parse_output.report().coverage().status() == CoverageStatus::Complete;
+        for (index, proposal) in proposals.iter().enumerate() {
+            cancellation.check()?;
+            let annotation = &proposal.annotation;
+            if !complete
+                || !annotation.direct_class_member
+                || proposal.signature.is_none()
+                || proposal.definition.is_none()
+                || !annotation
+                    .parent_entity
+                    .and_then(|id| drafts.get(&id))
+                    .is_some_and(|owner| {
+                        owner.kind == EntityKind::Trait && owner.language == "haskell"
+                    })
+                || scopes
+                    .get(&annotation.local_id)
+                    .and_then(Option::as_ref)
+                    .is_some_and(|scope| scope.unsupported_semantic_identity)
+                || !proposal
+                    .definition
+                    .and_then(|id| facts.get(&id))
+                    .is_some_and(|definition| {
+                        definition.syntax_kind().as_str() == "haskell.binding_name.definition"
+                            && span_contains(annotation.span, definition.span())
+                            && definition.span().start_byte() < definition.span().end_byte()
+                    })
+            {
+                continue;
+            }
+            let Some(name) = proposal.name else {
+                continue;
+            };
+            // An occupied-but-ambiguous binding key is not an absent declaration.
+            // A second signature-only candidate is ambiguous as well.
+            bindings
+                .entry((annotation.parent_entity, annotation.scope_identity, name))
+                .and_modify(|target| {
+                    if matches!(target, HaskellBinding::Member(_)) {
+                        *target = HaskellBinding::Ambiguous;
+                    }
+                })
+                .or_insert(HaskellBinding::Member(index));
+        }
+        let mut result = HashMap::new();
+        cancellation.check()?;
+        result
+            .try_reserve(proposals.len())
+            .map_err(|_| SinkError::AllocationFailed)?;
+        let mut members = Vec::new();
+        cancellation.check()?;
+        members
+            .try_reserve_exact(proposals.len())
+            .map_err(|_| SinkError::AllocationFailed)?;
+        for (index, proposal) in proposals.iter().enumerate() {
+            cancellation.check()?;
+            let annotation = &proposal.annotation;
+            let binding = proposal
+                .name
+                .and_then(|name| {
+                    bindings.get(&(annotation.parent_entity, annotation.scope_identity, name))
+                })
+                .copied();
+            let target = match binding {
+                Some(HaskellBinding::Existing(local, _)) => Some(local),
+                Some(HaskellBinding::Member(candidate)) => proposals[candidate].definition,
+                Some(HaskellBinding::Ambiguous) | None => None,
+            }
+            .filter(|_| complete && proposal.signature.is_some());
+            if matches!(binding, Some(HaskellBinding::Member(candidate)) if candidate == index) {
+                let name = proposal
+                    .name
+                    .ok_or_else(|| provider_failure("haskell-member-name"))?;
+                let definition = proposal
+                    .definition
+                    .ok_or_else(|| provider_failure("haskell-member-definition"))?;
+                let signature = proposal
+                    .signature
+                    .ok_or_else(|| provider_failure("haskell-member-signature"))?;
+                let owner = annotation
+                    .parent_entity
+                    .and_then(|id| drafts.get(&id))
+                    .ok_or_else(|| provider_failure("haskell-member-owner"))?;
+                let qualified_length =
+                    checked_add(checked_add(owner.qualified_length, 2)?, name.len())?;
+                require_resource_limit(
+                    ResourceKind::StringBytes,
+                    qualified_length,
+                    self.request.limits().ir().max_string_bytes,
+                )?;
+                let written = self.text_for_span(signature)?;
+                for length in [
+                    "haskell".len(),
+                    name.len(),
+                    name.len(),
+                    qualified_length,
+                    written.len(),
+                ] {
+                    account_string(total_string_bytes, length, self.request.limits().ir())?;
+                }
+                let definition_fact = facts
+                    .get(&definition)
+                    .ok_or_else(|| provider_failure("haskell-member-definition"))?;
+                // Key the staged draft by the associated definition, so normal
+                // publication emits its exact witness and containment. The
+                // annotation remains a separate declaration occurrence.
+                members.push(EntityDraft {
+                    local_id: definition,
+                    parent_entity: annotation.parent_entity,
+                    lexical_module: None,
+                    scope_identity: annotation.scope_identity,
+                    data_identity: None,
+                    data_root_entity: None,
+                    data_qualified_name: None,
+                    scope_collision_guard: scopes
+                        .get(&annotation.local_id)
+                        .and_then(Option::as_ref)
+                        .and_then(|scope| scope.collision_guard),
+                    qualified_prefix: None,
+                    synthetic: false,
+                    is_test: owner.is_test,
+                    definition_local_id: Some(definition),
+                    span: signature,
+                    depth: definition_fact.depth(),
+                    kind: EntityKind::Method,
+                    name: haskell_owned_text(name, cancellation)?,
+                    signature: String::new(),
+                    signature_evidence: Some(SignatureEvidence::Contiguous(haskell_owned_text(
+                        written,
+                        cancellation,
+                    )?)),
+                    signature_span: Some(signature),
+                    language: haskell_owned_text("haskell", cancellation)?,
+                    qualified_length,
+                });
+            }
             result.insert(
                 annotation.local_id,
                 HaskellAnnotation {
-                    definition: definition
-                        .filter(|_| name.is_some())
-                        .map(SyntaxFact::local_id),
-                    signature,
-                    target: target.filter(|_| signature.is_some()),
+                    definition: proposal.definition,
+                    signature: proposal.signature,
+                    target,
                     enclosing: annotation.parent_entity,
                 },
             );
@@ -4525,7 +4690,11 @@ impl<'context, 'source> Lowering<'context, 'source> {
                 orphan_signatures.insert(fact.local_id());
             }
         }
-        Ok((result, orphan_signatures))
+        Ok(HaskellAnnotationPlan {
+            annotations: result,
+            orphan_signatures,
+            members,
+        })
     }
 
     fn stable_scope_header(
@@ -4789,6 +4958,28 @@ struct HaskellAnnotationDraft {
     parent_entity: Option<u64>,
     scope_identity: Option<[u8; 32]>,
     span: SourceSpan,
+    direct_class_member: bool,
+}
+
+struct HaskellAnnotationProposal<'a> {
+    annotation: HaskellAnnotationDraft,
+    definition: Option<u64>,
+    name: Option<&'a str>,
+    signature: Option<SourceSpan>,
+}
+
+#[derive(Clone, Copy)]
+enum HaskellBinding {
+    Existing(u64, EntityKind),
+    Member(usize),
+    Ambiguous,
+}
+
+#[derive(Default)]
+struct HaskellAnnotationPlan {
+    annotations: HashMap<u64, HaskellAnnotation>,
+    orphan_signatures: BTreeSet<u64>,
+    members: Vec<EntityDraft>,
 }
 
 type HaskellClauseKey = (Option<u64>, Option<[u8; 32]>, String, String);
@@ -6341,7 +6532,15 @@ fn span_contains(container: SourceSpan, child: SourceSpan) -> bool {
 
 fn is_haskell_annotation_name(fact: &SyntaxFact) -> bool {
     fact.kind() == SyntaxFactKind::Declaration
-        && fact.syntax_kind().as_str() == "haskell.signature_name.declaration"
+        && matches!(
+            fact.syntax_kind().as_str(),
+            "haskell.signature_name.declaration" | "haskell.signature_member_name.declaration"
+        )
+}
+
+fn is_haskell_signature_member_name(fact: &SyntaxFact) -> bool {
+    fact.kind() == SyntaxFactKind::Declaration
+        && fact.syntax_kind().as_str() == "haskell.signature_member_name.declaration"
 }
 
 fn is_haskell_type_annotation(fact: &SyntaxFact) -> bool {

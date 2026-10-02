@@ -23,6 +23,23 @@ fn declaration_signature(node: Node<'_>) -> bool {
         && node.child_by_field_name("pattern").is_none()
 }
 
+fn direct_class_signature(node: Node<'_>) -> bool {
+    if !declaration_signature(node) || node.has_error() || node.is_missing() {
+        return false;
+    }
+    let Some(declarations) = node
+        .parent()
+        .filter(|parent| parent.kind() == "class_declarations")
+    else {
+        return false;
+    };
+    declarations.parent().is_some_and(|class| {
+        class.kind() == "class"
+            && !class.has_error()
+            && class.child_by_field_name("declarations") == Some(declarations)
+    })
+}
+
 fn contains(outer: Node<'_>, inner: Node<'_>) -> bool {
     outer.start_byte() <= inner.start_byte() && inner.end_byte() <= outer.end_byte()
 }
@@ -169,7 +186,11 @@ fn binding(
         if declaration_signature(parent) {
             return Ok((field_contains(parent, "name", node)
                 || field_contains(parent, "names", node))
-            .then_some("haskell.signature_name"));
+            .then_some(if direct_class_signature(parent) {
+                "haskell.signature_member_name"
+            } else {
+                "haskell.signature_name"
+            }));
         }
         if parent.kind() == "signature" && !field_contains(parent, "pattern", node) {
             return Ok(None);

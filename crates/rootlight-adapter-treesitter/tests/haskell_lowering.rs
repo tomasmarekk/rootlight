@@ -1131,3 +1131,454 @@ fn orphan_or_missing_name_annotations_report_exact_gaps_without_synthesizing_bin
         }
     }
 }
+
+fn class_member_facts(fixture: &Fixture) -> Vec<SyntaxFact> {
+    let mut facts = fixture.module();
+    let class = fixture
+        .text
+        .strip_prefix("module Sample where\n")
+        .unwrap()
+        .trim_end();
+    facts.extend([
+        fixture.fact(
+            5,
+            Some(4),
+            SyntaxFactKind::Declaration,
+            (class, 0),
+            3,
+            "haskell.class.declaration",
+        ),
+        fixture.fact(
+            6,
+            Some(5),
+            SyntaxFactKind::Occurrence,
+            ("Select", 0),
+            4,
+            "haskell.binding_name.definition",
+        ),
+        fixture.fact(
+            7,
+            Some(5),
+            SyntaxFactKind::Signature,
+            ("class Select a", 0),
+            4,
+            "haskell.declaration_header.signature",
+        ),
+        fixture.fact(
+            8,
+            Some(5),
+            SyntaxFactKind::Scope,
+            (class, 0),
+            4,
+            "haskell.class.scope",
+        ),
+        fixture.fact(
+            10,
+            Some(8),
+            SyntaxFactKind::Signature,
+            ("pick :: a -> a", 0),
+            5,
+            "haskell.written_signature.signature",
+        ),
+        fixture.fact(
+            11,
+            Some(8),
+            SyntaxFactKind::Declaration,
+            ("pick", 0),
+            5,
+            "haskell.signature_member_name.declaration",
+        ),
+        fixture.fact(
+            12,
+            Some(11),
+            SyntaxFactKind::Occurrence,
+            ("pick", 0),
+            6,
+            "haskell.binding_name.definition",
+        ),
+    ]);
+    facts
+}
+
+#[test]
+fn complete_class_signature_member_publishes_exact_definition_and_annotation() {
+    let fixture = Fixture::new("module Sample where\nclass Select a where\n  pick :: a -> a\n");
+    let full = fixture
+        .analyze(
+            class_member_facts(&fixture),
+            IrLimits::default(),
+            CoverageStatus::Complete,
+            &deadline(),
+        )
+        .unwrap();
+    let document = full.document();
+    let method = document
+        .entities
+        .iter()
+        .find(|entity| entity.kind == EntityKind::Method)
+        .unwrap();
+    let class = document
+        .entities
+        .iter()
+        .find(|entity| entity.kind == EntityKind::Trait)
+        .unwrap();
+    assert_eq!(method.container, Some(ContainerRef::Entity(class.id)));
+    assert_eq!(method.canonical_name, "pick");
+    assert_eq!(method.qualified_name, "Sample::Select::pick");
+    assert_eq!(
+        method.evidence.source.as_ref().unwrap().span(),
+        fixture.span("pick :: a -> a", 0)
+    );
+    assert!(
+        !document
+            .entities
+            .iter()
+            .any(|entity| entity.kind == EntityKind::Parameter)
+    );
+    for role in [OccurrenceRole::Definition, OccurrenceRole::Declaration] {
+        let witnesses: Vec<_> = document
+            .occurrences
+            .iter()
+            .filter(|site| site.role == role && site.source.span() == fixture.span("pick", 0))
+            .collect();
+        assert_eq!(witnesses.len(), 1);
+        assert_eq!(
+            witnesses[0].target,
+            OccurrenceTarget::Resolved { symbol: method.id }
+        );
+        assert_eq!(
+            witnesses[0].source.generation(),
+            fixture.source.generation()
+        );
+        assert_eq!(
+            witnesses[0].source.content_hash(),
+            fixture.source.content_hash()
+        );
+    }
+    assert!(
+        document
+            .relations
+            .iter()
+            .all(|edge| edge.predicate == RelationPredicate::Contains)
+    );
+    assert!(document.relations.iter().any(|edge| {
+        edge.subject == RelationEndpoint::Entity(class.id)
+            && edge.object == RelationEndpoint::Entity(method.id)
+            && edge.evidence.source.as_ref().unwrap().span() == fixture.span("pick :: a -> a", 0)
+    }));
+    assert!(
+        !document
+            .skipped_regions
+            .iter()
+            .any(|gap| gap.detail == "haskell-annotation-owner-unavailable")
+    );
+    let encoded = serde_json::to_vec(document).unwrap();
+    assert_eq!(
+        decode_ir_document(&encoded, &IrLimits::default(), &ExtensionSupport::default()).unwrap(),
+        IrDocument::NormalizedV1_1(document.clone())
+    );
+    let mut bounded = IrLimits::default();
+    bounded.max_extensions = document.entities.len() + 1;
+    let output = fixture
+        .analyze(
+            class_member_facts(&fixture),
+            bounded,
+            CoverageStatus::Complete,
+            &deadline(),
+        )
+        .unwrap();
+    assert_eq!(
+        output
+            .document()
+            .entities
+            .iter()
+            .find(|entity| entity.kind == EntityKind::Method)
+            .unwrap()
+            .id,
+        method.id
+    );
+    assert!(
+        output
+            .document()
+            .skipped_regions
+            .iter()
+            .any(|gap| gap.detail == "lexical-evidence-resource-limit")
+    );
+}
+
+#[test]
+fn incomplete_or_ambiguous_class_member_evidence_never_creates_a_method() {
+    let fixture = Fixture::new("module Sample where\nclass Select a where\n  pick :: a -> a\n");
+    for (remove, overlap, status) in [
+        (None, false, CoverageStatus::Bounded),
+        (Some(12), false, CoverageStatus::Complete),
+        (Some(10), false, CoverageStatus::Complete),
+        (Some(6), false, CoverageStatus::Complete),
+        (None, true, CoverageStatus::Complete),
+    ] {
+        let mut facts = class_member_facts(&fixture);
+        facts.retain(|fact| Some(fact.local_id()) != remove);
+        if overlap {
+            facts.push(fixture.fact(
+                13,
+                Some(8),
+                SyntaxFactKind::Signature,
+                ("pick :: a", 0),
+                5,
+                "haskell.written_signature.signature",
+            ));
+        }
+        let output = fixture
+            .analyze(facts, IrLimits::default(), status, &deadline())
+            .unwrap();
+        assert!(
+            !output
+                .document()
+                .entities
+                .iter()
+                .any(|entity| entity.kind == EntityKind::Method),
+            "remove={remove:?}, overlap={overlap}, status={status:?}"
+        );
+        assert!(
+            output
+                .document()
+                .occurrences
+                .iter()
+                .filter(|site| site.role == OccurrenceRole::Declaration)
+                .all(|site| matches!(site.target, OccurrenceTarget::Unresolved { .. }))
+        );
+        assert!(
+            output
+                .document()
+                .skipped_regions
+                .iter()
+                .any(|gap| gap.detail == "haskell-annotation-owner-unavailable")
+        );
+    }
+    let duplicate = Fixture::new(
+        "module Sample where\nclass Select a where\n  pick :: a -> a\n  pick :: a -> a\n",
+    );
+    let mut facts = class_member_facts(&duplicate);
+    facts.extend([
+        duplicate.fact(
+            20,
+            Some(8),
+            SyntaxFactKind::Signature,
+            ("pick :: a -> a", 1),
+            5,
+            "haskell.written_signature.signature",
+        ),
+        duplicate.fact(
+            21,
+            Some(8),
+            SyntaxFactKind::Declaration,
+            ("pick", 1),
+            5,
+            "haskell.signature_member_name.declaration",
+        ),
+        duplicate.fact(
+            22,
+            Some(21),
+            SyntaxFactKind::Occurrence,
+            ("pick", 1),
+            6,
+            "haskell.binding_name.definition",
+        ),
+    ]);
+    let output = duplicate
+        .analyze(
+            facts,
+            IrLimits::default(),
+            CoverageStatus::Complete,
+            &deadline(),
+        )
+        .unwrap();
+    assert!(
+        !output
+            .document()
+            .entities
+            .iter()
+            .any(|entity| entity.kind == EntityKind::Method)
+    );
+    assert_eq!(
+        output
+            .document()
+            .occurrences
+            .iter()
+            .filter(|site| site.role == OccurrenceRole::Declaration)
+            .count(),
+        2
+    );
+    assert!(
+        output
+            .document()
+            .occurrences
+            .iter()
+            .filter(|site| site.role == OccurrenceRole::Declaration)
+            .all(|site| matches!(site.target, OccurrenceTarget::Unresolved { .. }))
+    );
+}
+
+#[test]
+fn occupied_ambiguous_class_binding_is_not_treated_as_a_missing_method() {
+    let fixture = Fixture::new(
+        "module Sample where\nclass Select a where\n  pick :: a -> a\n  pick value = value\n  pick = 1\n",
+    );
+    let mut facts = class_member_facts(&fixture);
+    facts.extend([
+        fixture.fact(
+            20,
+            Some(8),
+            SyntaxFactKind::Declaration,
+            ("pick value = value", 0),
+            5,
+            "haskell.function.declaration",
+        ),
+        fixture.fact(
+            21,
+            Some(20),
+            SyntaxFactKind::Occurrence,
+            ("pick", 1),
+            6,
+            "haskell.binding_name.definition",
+        ),
+        fixture.fact(
+            22,
+            Some(20),
+            SyntaxFactKind::Signature,
+            ("pick value", 0),
+            6,
+            "haskell.function_header.signature",
+        ),
+        fixture.fact(
+            30,
+            Some(8),
+            SyntaxFactKind::Declaration,
+            ("pick = 1", 0),
+            5,
+            "haskell.variable.declaration",
+        ),
+        fixture.fact(
+            31,
+            Some(30),
+            SyntaxFactKind::Occurrence,
+            ("pick", 2),
+            6,
+            "haskell.binding_name.definition",
+        ),
+        fixture.fact(
+            32,
+            Some(30),
+            SyntaxFactKind::Signature,
+            ("pick", 2),
+            6,
+            "haskell.binding_header.signature",
+        ),
+    ]);
+    let output = fixture
+        .analyze(
+            facts,
+            IrLimits::default(),
+            CoverageStatus::Complete,
+            &deadline(),
+        )
+        .unwrap();
+    let document = output.document();
+    assert_eq!(
+        document
+            .entities
+            .iter()
+            .filter(|entity| entity.kind == EntityKind::Method)
+            .count(),
+        1
+    );
+    assert_eq!(
+        document
+            .entities
+            .iter()
+            .filter(|entity| entity.kind == EntityKind::Variable)
+            .count(),
+        1
+    );
+    assert!(
+        !document
+            .occurrences
+            .iter()
+            .any(|site| site.role == OccurrenceRole::Definition
+                && site.source.span() == fixture.span("pick", 0))
+    );
+    let annotation = document
+        .occurrences
+        .iter()
+        .find(|site| site.role == OccurrenceRole::Declaration)
+        .unwrap();
+    assert!(matches!(
+        annotation.target,
+        OccurrenceTarget::Unresolved { .. }
+    ));
+    assert!(
+        document
+            .skipped_regions
+            .iter()
+            .any(|gap| gap.detail == "haskell-annotation-owner-unavailable")
+    );
+}
+
+#[test]
+fn class_member_publication_obeys_record_limits_and_typed_cancellation() {
+    let fixture = Fixture::new("module Sample where\nclass Select a where\n  pick :: a -> a\n");
+    for maximum in 0..3 {
+        let mut limits = IrLimits::default();
+        limits.max_entities = maximum;
+        assert!(matches!(
+            fixture.analyze(
+                class_member_facts(&fixture),
+                limits,
+                CoverageStatus::Complete,
+                &deadline()
+            ),
+            Err(AdapterError::Sink(
+                rootlight_adapter_sdk::SinkError::StreamLimit { .. }
+            ))
+        ));
+    }
+    for maximum in 0..4 {
+        let mut limits = IrLimits::default();
+        limits.max_occurrences = maximum;
+        assert!(matches!(
+            fixture.analyze(
+                class_member_facts(&fixture),
+                limits,
+                CoverageStatus::Complete,
+                &deadline()
+            ),
+            Err(AdapterError::Sink(
+                rootlight_adapter_sdk::SinkError::StreamLimit { .. }
+            ))
+        ));
+    }
+    let mut exact = IrLimits::default();
+    exact.max_entities = 3;
+    exact.max_occurrences = 4;
+    let output = fixture
+        .analyze(
+            class_member_facts(&fixture),
+            exact,
+            CoverageStatus::Complete,
+            &deadline(),
+        )
+        .unwrap();
+    assert_eq!(output.document().entities.len(), 3);
+    assert_eq!(output.document().occurrences.len(), 4);
+    let cancelled = deadline();
+    cancelled.cancel(CancellationReason::ClientRequest);
+    assert!(matches!(
+        fixture.analyze(
+            class_member_facts(&fixture),
+            IrLimits::default(),
+            CoverageStatus::Complete,
+            &cancelled
+        ),
+        Err(AdapterError::Cancelled { .. })
+    ));
+}

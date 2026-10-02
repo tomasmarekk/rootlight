@@ -868,6 +868,7 @@ mod tests {
             ("haskell.field.declaration", Some(EntityKind::Field)),
             ("haskell.parameter.declaration", Some(EntityKind::Parameter)),
             ("haskell.signature_name.declaration", None),
+            ("haskell.signature_member_name.declaration", None),
         ] {
             let fact = SyntaxFact::new(
                 1,

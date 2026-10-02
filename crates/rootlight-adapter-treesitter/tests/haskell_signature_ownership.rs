@@ -446,3 +446,188 @@ fn multi_name_field_evidence_obeys_optional_output_budget_without_dropping_defin
                 && gap.source.span() == fixture.span("first, second, third :: Int", 0))
     );
 }
+
+#[test]
+fn direct_class_member_signatures_publish_source_owned_methods() {
+    for newline in ["\n", "\r\n"] {
+        let fixture = Fixture::new(
+            concat!(
+                "module Example where\n",
+                "class Select a where\n",
+                "  select, retain :: a -> a\n",
+                "  (%%) :: a -> a -> a\n",
+                "  singleton :: a\n",
+                "class Other a where\n",
+                "  select :: a -> a\n",
+            )
+            .replace('\n', newline),
+        );
+        let (_, output) = fixture.analyze(IrLimits::default());
+        let document = output.document();
+        let select_class = defined_entity(document, fixture.span("Select", 0));
+        let other_class = defined_entity(document, fixture.span("Other", 0));
+        for (name, ordinal, owner, written) in [
+            ("select", 0, select_class, "select, retain :: a -> a"),
+            ("retain", 0, select_class, "select, retain :: a -> a"),
+            ("%%", 0, select_class, "(%%) :: a -> a -> a"),
+            ("singleton", 0, select_class, "singleton :: a"),
+            ("select", 1, other_class, "select :: a -> a"),
+        ] {
+            let span = fixture.span(name, ordinal);
+            let method = defined_entity(document, span);
+            assert_eq!(method.kind, EntityKind::Method);
+            assert_eq!(method.canonical_name, name);
+            assert_eq!(
+                method.container,
+                Some(rootlight_ir::ContainerRef::Entity(owner.id))
+            );
+            assert_eq!(
+                method.evidence.source.as_ref().unwrap().span(),
+                fixture.span(written, 0)
+            );
+            assert_signature(&fixture, document, method, written);
+            let declarations: Vec<_> = document
+                .occurrences
+                .iter()
+                .filter(|site| {
+                    site.role == OccurrenceRole::Declaration && site.source.span() == span
+                })
+                .collect();
+            assert_eq!(declarations.len(), 1);
+            assert_eq!(
+                declarations[0].target,
+                OccurrenceTarget::Resolved { symbol: method.id }
+            );
+            let source = declarations[0].evidence.source.as_ref().unwrap();
+            assert_eq!(source.span(), fixture.span(written, 0));
+            assert_eq!(source.generation(), fixture.source.generation());
+            assert_eq!(source.content_hash(), fixture.source.content_hash());
+            assert!(document.relations.iter().any(|relation| {
+                relation.predicate == RelationPredicate::Contains
+                    && relation.subject == rootlight_ir::RelationEndpoint::Entity(owner.id)
+                    && relation.object == rootlight_ir::RelationEndpoint::Entity(method.id)
+                    && relation.evidence.source.as_ref().unwrap().span() == fixture.span(written, 0)
+            }));
+            assert!(!document.entities.iter().any(|entity| {
+                entity.kind == EntityKind::Parameter
+                    && entity.container == Some(rootlight_ir::ContainerRef::Entity(method.id))
+            }));
+        }
+        assert_eq!(
+            document
+                .entities
+                .iter()
+                .filter(|entity| entity.kind == EntityKind::Method)
+                .count(),
+            5
+        );
+        assert_ne!(
+            defined_entity(document, fixture.span("select", 0)).id,
+            defined_entity(document, fixture.span("select", 1)).id
+        );
+        assert_no_structural_header_gaps(document);
+        assert!(
+            !document
+                .skipped_regions
+                .iter()
+                .any(|gap| gap.detail == "haskell-annotation-owner-unavailable")
+        );
+    }
+}
+
+#[test]
+fn class_member_signatures_reuse_default_equations_without_inventing_outside_members() {
+    for newline in ["\n", "\r\n"] {
+        let fixture = Fixture::new(
+            concat!(
+                "module Example where\n",
+                "top :: Int\n",
+                "class Select a where\n",
+                "  select :: a -> a\n",
+                "  default select :: a -> a\n",
+                "  select 0 = 0\n",
+                "  select value = value\n",
+                "class DefaultOnly a where\n",
+                "  default absent :: a -> a\n",
+                "instance Select Int where\n",
+                "  instanceOnly :: Int -> Int\n",
+                "outer = let\n",
+                "  localOnly :: Int\n",
+                "  in 1\n",
+            )
+            .replace('\n', newline),
+        );
+        let (syntax, output) = fixture.analyze(IrLimits::default());
+        let document = output.document();
+        let class = defined_entity(document, fixture.span("Select", 0));
+        let first = defined_entity(document, fixture.span("select", 2));
+        let second = defined_entity(document, fixture.span("select", 3));
+        assert_eq!(first.kind, EntityKind::Method);
+        assert_eq!(first.id, second.id);
+        assert_eq!(
+            first.container,
+            Some(rootlight_ir::ContainerRef::Entity(class.id))
+        );
+        assert_eq!(
+            document
+                .entities
+                .iter()
+                .filter(|entity| entity.kind == EntityKind::Method)
+                .count(),
+            1
+        );
+        for ordinal in [0, 1] {
+            let annotation = document
+                .occurrences
+                .iter()
+                .find(|site| {
+                    site.role == OccurrenceRole::Declaration
+                        && site.source.span() == fixture.span("select", ordinal)
+                })
+                .unwrap();
+            assert_eq!(
+                annotation.target,
+                OccurrenceTarget::Resolved { symbol: first.id }
+            );
+        }
+        for name in ["top", "absent", "instanceOnly", "localOnly"] {
+            assert!(
+                !document
+                    .entities
+                    .iter()
+                    .any(|entity| entity.canonical_name == name),
+                "{name}"
+            );
+            let annotation = document
+                .occurrences
+                .iter()
+                .find(|site| {
+                    site.role == OccurrenceRole::Declaration
+                        && site.source.span() == fixture.span(name, 0)
+                })
+                .unwrap();
+            assert!(
+                matches!(annotation.target, OccurrenceTarget::Unresolved { .. }),
+                "{name}"
+            );
+            assert!(
+                !syntax.facts().iter().any(|fact| {
+                    fact.span() == fixture.span(name, 0)
+                        && fact.syntax_kind().as_str()
+                            == "haskell.signature_member_name.declaration"
+                }),
+                "{name}"
+            );
+        }
+        assert_eq!(
+            syntax
+                .facts()
+                .iter()
+                .filter(|fact| {
+                    fact.syntax_kind().as_str() == "haskell.signature_member_name.declaration"
+                })
+                .count(),
+            1
+        );
+    }
+}
