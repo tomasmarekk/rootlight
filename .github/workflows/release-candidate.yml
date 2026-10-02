@@ -161,7 +161,7 @@ jobs:
           test "$(git rev-parse HEAD)" = "$SOURCE_REVISION"
           test "$(node --version)" = "v24.11.1"
           test "$(npm --version)" = "11.6.2"
-          npm ci --ignore-scripts
+          npm ci --ignore-scripts --offline --audit=false --fund=false
           npm run release:dependencies
           npm audit --omit=dev --audit-level=moderate
           npm run check

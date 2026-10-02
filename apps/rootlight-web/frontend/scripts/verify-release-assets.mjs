@@ -6,6 +6,7 @@
 import { createHash } from "node:crypto";
 import { lstat, readdir, readFile, writeFile } from "node:fs/promises";
 import { relative, resolve, sep } from "node:path";
+import { verifyLocalDependencyOrigins } from "./verify-local-dependency-origins.mjs";
 
 const options = parseOptions(process.argv.slice(2));
 if (process.version !== "v24.11.1" || options.npmVersion !== "11.6.2") {
@@ -85,6 +86,7 @@ const lockPath = resolve(frontendRoot, "package-lock.json");
 const packagePath = resolve(frontendRoot, "package.json");
 const lockBytes = await readRegular(lockPath, 16 * 1024 * 1024);
 const packageBytes = await readRegular(packagePath, 1024 * 1024);
+await verifyLocalDependencyOrigins(resolve(frontendRoot, "../../.."), lockBytes);
 const lock = JSON.parse(lockBytes.toString("utf8"));
 const ignoredOptionalInstallScripts = [];
 for (const [path, dependency] of Object.entries(lock.packages ?? {})) {
@@ -105,12 +107,6 @@ for (const [path, dependency] of Object.entries(lock.packages ?? {})) {
       throw new Error("npm dependency lifecycle script is not explicitly allowlisted");
     }
     ignoredOptionalInstallScripts.push(path);
-  }
-  if (
-    typeof dependency.resolved === "string" &&
-    !dependency.resolved.startsWith("https://registry.npmjs.org/")
-  ) {
-    throw new Error("npm dependency does not come from the approved registry");
   }
 }
 

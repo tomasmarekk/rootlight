@@ -26,6 +26,51 @@ performs no acquisition, and refuses an existing `source-inputs/` destination.
 `scripts/prepare_rust_source_bundle.py` exports already versioned inputs without
 consulting a dependency cache or fetching, resolving, or compiling code.
 
+## Frontend distribution inputs
+
+The canonical frontend lock resolves every non-root record to a versioned local
+archive, including nested, development, optional, and other-platform packages.
+`npm/upstream-package-lock.json` retains the exact original registry pins.
+`npm/archives/` retains unchanged original distributions; declared replacements
+live separately in `npm/local-distributions/`, with their own integrity and
+redacted provenance. `npm/local-distributions.json` binds those replacements and
+the original lock. No modified archive is presented as original upstream bytes.
+
+`npm/npm-source-closure.json` records each locked placement, current archive
+integrity, member inventory and modes, supplied licenses, provenance metadata,
+and observed native binary files. Verification requires the canonical lock to
+equal the upstream lock except for derived local paths and explicitly declared
+replacement integrity. Original registry verification remains a separate scope.
+
+`scripts/prepare_npm_source_bundle.py` reads the retained upstream lock for
+separately authorized acquisition or copying previously acquired archives.
+It does not install or execute packages.
+`scripts/import_npm_source_bundle.py` verifies and publishes only already acquired
+local inputs into a new destination; it never uses the network or a package cache.
+`scripts/verify_npm_source_bundle.py` independently checks original registry
+inputs, including strong SRI and package manifest identities.
+`scripts/verify_local_npm_sources.py` checks the current all-local project inputs
+and their exact canonical-lock projection without acquisition or installation.
+The browser release gate independently checks the same origin projection and
+current archive integrity before producing release evidence. It does not treat
+report metadata or retained binaries as preferred-source acceptance.
+Archive members retain their authored top-level directory; npm strips this layer
+on installation and does not require its name to be `package`.
+
+Fixture replacements preserve the license, manifest, runtime code and every
+other member. Their evidence distinguishes historical verification of the
+removed original archive from rechecking the currently retained replacement;
+redacted removed bytes cannot prove reconstruction of the upstream archive.
+
+`scripts/install_frontend_from_archives.py` stages authenticated inputs from an
+immutable export into a separate work tree and uses the all-local canonical lock.
+It requires a fresh dependency cache and an independently enforced OS network
+boundary supplied by its caller. An offline option alone is not that boundary.
+Distribution verification and installation do not establish complete preferred
+sources for native, WASI, or bundled implementations. Their reports deliberately
+leave preferred-source, frontend, signature, and build/packaging acceptance
+claims false. Retained binaries are not implementation-source completeness.
+
 ## Acceptance boundaries
 
 Rust archive and directory-source verification proves the published input

@@ -1,7 +1,13 @@
 #!/usr/bin/env python3
-"""Exercise source preparation and portable archives without Cargo or downloads."""
+"""Exercise Cargo/local npm input exports using authored fixtures and mocked Git.
 
+No Cargo, npm, registry or product process runs; the portable export retains
+strict source/mode boundaries without claiming installation or OS isolation.
+"""
+
+import base64
 import contextlib
+import copy
 import hashlib
 import io
 import json
@@ -14,7 +20,11 @@ import unittest
 from unittest.mock import patch
 
 import prepare_rust_source_bundle as bundle
+import patch_npm_source_fixture as fixture
+import verify_local_npm_sources as npm
+import verify_npm_source_bundle as original_npm
 import vendor_rust_sources as vendor
+from test_verify_local_npm_sources import _archive as npm_archive
 
 
 class RustSourceBundleTests(unittest.TestCase):
@@ -189,11 +199,78 @@ class RustSourceBundleTests(unittest.TestCase):
         acquired.mkdir()
         (acquired / self.archive.name).write_bytes(self.archive.read_bytes())
         vendor.vendor_sources(source, acquired)
+        self.add_npm_inputs(source)
         # A Windows Git index may mark all vendor files non-executable; the
         # original archives, not those host/index bits, remain authoritative.
         inventory = sorted((path.relative_to(source).as_posix(), path.name == "run.sh")
                            for path in source.rglob("*") if path.is_file())
         return source, inventory
+
+    def add_npm_inputs(self, source: Path) -> None:
+        def encode(document):
+            return (json.dumps(document, sort_keys=True, indent=2) + "\n").encode("utf-8")
+
+        def sri(payload):
+            return "sha512-" + base64.b64encode(hashlib.sha512(payload).digest()).decode("ascii")
+
+        packages = {}
+        payloads = {}
+        for name, version in (("fixture-lib", "1.0.0"), ("support-lib", "2.0.0")):
+            payload = npm_archive(name, version)
+            resolved = f"https://registry.npmjs.org/{name}/-/{name}-{version}.tgz"
+            packages["node_modules/" + name] = {"version": version, "resolved": resolved,
+                                                  "integrity": sri(payload), "license": "MIT"}
+            payloads[original_npm.archive_filename(resolved)] = payload
+        packages["node_modules/support-lib"]["optional"] = True
+        packages["node_modules/support-lib"]["os"] = ["linux"]
+        packages["node_modules/support-lib/node_modules/fixture-lib"] = dict(packages["node_modules/fixture-lib"])
+        package = {"name": "authored-ui", "version": "1.0.0", "dependencies": {"fixture-lib": "1.0.0", "support-lib": "2.0.0"}}
+        upstream = {"name": package["name"], "version": package["version"], "lockfileVersion": 3,
+                    "packages": {"": package, **packages}}
+        upstream_path = source / npm.UPSTREAM_LOCK
+        upstream_path.parent.mkdir(parents=True)
+        upstream_path.write_bytes(encode(upstream))
+        prepared = self.root / (source.name + "-npm-prepared")
+        prepared.mkdir()
+        for name, payload in payloads.items():
+            (prepared / name).write_bytes(payload)
+        patch_output = self.root / (source.name + "-npm-patched")
+        patch_output.mkdir()
+        fixture.patch_fixture_archive(
+            upstream_path, prepared, "fixture-lib", "1.0.0", "authored/tests/string.test.js",
+            hashlib.sha256(b"prefix original fixture suffix").hexdigest(), len(b"original fixture"),
+            hashlib.sha256(b"original fixture").hexdigest(), b"replacement fixture", patch_output,
+            synthetic_replacement_confirmed=True,
+        )
+        archive_path = npm.LOCAL_DISTRIBUTIONS + "/fixture-lib.tgz"
+        provenance_path = npm.LOCAL_DISTRIBUTIONS + "/fixture-lib.json"
+        (source / npm.LOCAL_DISTRIBUTIONS).mkdir()
+        (source / archive_path).write_bytes((patch_output / "patched.tgz").read_bytes())
+        (source / provenance_path).write_bytes((patch_output / "patch-provenance.json").read_bytes())
+        (source / npm.ORIGINAL_ARCHIVES).mkdir()
+        identities = original_npm._locked_archives(upstream)
+        for identity in identities:
+            if identity["name"] != "fixture-lib":
+                filename = identity["archive_filename"]
+                (source / npm.ORIGINAL_ARCHIVES / filename).write_bytes(payloads[filename])
+        manifest = {"schema": "rootlight.npm-local-distributions/1", "upstream_lock_sha256": bundle.digest(upstream_path),
+                    "variants": [{"name": "fixture-lib", "version": "1.0.0", "archive_path": archive_path,
+                                  "archive_sha256": bundle.digest(source / archive_path), "provenance_path": provenance_path,
+                                  "provenance_sha256": bundle.digest(source / provenance_path)}]}
+        (source / npm.DISTRIBUTIONS_MANIFEST).write_bytes(encode(manifest))
+        canonical = copy.deepcopy(upstream)
+        for identity in identities:
+            path = archive_path if identity["name"] == "fixture-lib" else npm.ORIGINAL_ARCHIVES + "/" + identity["archive_filename"]
+            for location in identity["lock_paths"]:
+                canonical["packages"][location]["resolved"] = "file:../../../" + path
+                if identity["name"] == "fixture-lib":
+                    canonical["packages"][location]["integrity"] = sri((source / path).read_bytes())
+        frontend = (source / npm.CANONICAL_LOCK).parent
+        frontend.mkdir(parents=True)
+        (frontend / "package.json").write_bytes(encode(package))
+        (frontend / ".npmrc").write_bytes(b"audit-level=high\nfund=false\npackage-lock=true\n")
+        (source / npm.CANONICAL_LOCK).write_bytes(encode(canonical))
+        (source / bundle.NPM_REPORT_PATH).write_bytes(encode(npm.verify_local_bundle(source)))
 
     def export_project(self, source: Path, inventory: list[tuple[str, bool]],
                        destination: Path | None = None) -> tuple[Path, dict]:
@@ -227,6 +304,16 @@ class RustSourceBundleTests(unittest.TestCase):
         self.assertTrue(manifest["cargo_source_closure"]["archives_verified"])
         self.assertFalse(manifest["project_sources_match_revision"])
         self.assertFalse(manifest["frontend_external_source_closure_verified"])
+        self.assertEqual(manifest["scope"], bundle.BUNDLE_SCOPE)
+        self.assertIs(manifest["npm_distribution_inputs_verified"], True)
+        npm_inputs = manifest["npm_distribution_inputs"]
+        self.assertEqual((npm_inputs["archive_count"], npm_inputs["lock_record_count"],
+                          npm_inputs["original_archive_count"], npm_inputs["local_distribution_count"]),
+                         (2, 3, 1, 1))
+        self.assertFalse(npm_inputs["upstream_original_sri_recomputed"])
+        for field in ("installation_verified", "build_and_packaging_acceptance_verified",
+                      "os_denied_acceptance_verified", "frontend_source_complete"):
+            self.assertIs(npm_inputs[field], False)
         self.assertEqual(bundle.verify_project_bundle(project), manifest)
         self.assertEqual((project / bundle.ARCHIVES_PATH / self.archive.name).read_bytes(),
                          self.archive.read_bytes())
@@ -234,6 +321,12 @@ class RustSourceBundleTests(unittest.TestCase):
         paths = [record["path"] for record in manifest["project_sources"]]
         self.assertEqual(len(paths), len(set(paths)))
         self.assertIn(bundle.CLOSURE_PATH, paths)
+        self.assertIn(bundle.NPM_REPORT_PATH, paths)
+        self.assertTrue(set(bundle.FRONTEND_PATHS).issubset(paths))
+        self.assertTrue({item["path"] for item in npm_inputs["input_files"]}.issubset(paths))
+        self.assertEqual(npm.verify_local_bundle(project), npm_inputs)
+        for record in npm_inputs["input_files"]:
+            self.assertEqual(bundle.digest(project / record["path"]), record["sha256"])
         self.assertIn(f"{bundle.ARCHIVES_PATH}/{self.archive.name}", paths)
         self.assertIn(f"{bundle.VENDOR_PATH}/sample-1.0.0/.cargo-checksum.json", paths)
         self.assertNotIn(bundle.MANIFEST_PATH, paths)
@@ -294,6 +387,97 @@ class RustSourceBundleTests(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, "untracked"):
                     bundle.create_bundle(source, destination, allow_network=False)
                 self.assertFalse(destination.exists())
+
+    def test_every_npm_input_and_authored_frontend_file_must_be_tracked(self) -> None:
+        source, inventory = self.create_checkout()
+        report = npm.verify_local_bundle(source)
+        required = {item["path"] for item in report["input_files"]} | {
+            bundle.NPM_REPORT_PATH, *bundle.FRONTEND_PATHS}
+        for missing in sorted(required):
+            with self.subTest(missing=missing), patch.object(bundle, "tracked_files", return_value=[
+                record for record in inventory if record[0] != missing
+            ]):
+                destination = self.root / "rejected"
+                with self.assertRaisesRegex(ValueError, "untracked"):
+                    bundle.create_bundle(source, destination, allow_network=False)
+                self.assertFalse(destination.exists())
+
+    def test_missing_npm_and_frontend_inputs_reject_without_cache_or_process_fallback(self) -> None:
+        source, inventory = self.create_checkout()
+        report = npm.verify_local_bundle(source)
+        required = {item["path"] for item in report["input_files"]} | {
+            bundle.NPM_REPORT_PATH, *bundle.FRONTEND_PATHS}
+        for missing in sorted(required):
+            path = source / missing
+            payload = path.read_bytes()
+            path.unlink()
+            with self.subTest(missing=missing), patch.object(bundle, "tracked_files", return_value=inventory), \
+                    patch.object(bundle.subprocess, "run", side_effect=AssertionError("no process fallback")), \
+                    patch.object(bundle.subprocess, "check_output", side_effect=AssertionError("no process fallback")):
+                destination = self.root / "rejected"
+                with self.assertRaises(ValueError):
+                    bundle.create_bundle(source, destination, allow_network=False)
+                self.assertFalse(destination.exists())
+            path.write_bytes(payload)
+
+    def test_tampered_npm_report_canonical_upstream_manifest_provenance_and_archives_reject(self) -> None:
+        source, inventory = self.create_checkout()
+        report = npm.verify_local_bundle(source)
+        required = {item["path"] for item in report["input_files"]} | {bundle.NPM_REPORT_PATH}
+        for changed in sorted(required):
+            path = source / changed
+            payload = path.read_bytes()
+            path.write_bytes(payload + b"tampered")
+            with self.subTest(changed=changed), patch.object(bundle, "tracked_files", return_value=inventory), \
+                    patch.object(bundle.subprocess, "run", side_effect=AssertionError("no process fallback")), \
+                    patch.object(bundle.subprocess, "check_output", side_effect=AssertionError("no process fallback")):
+                destination = self.root / "rejected"
+                with self.assertRaises(ValueError):
+                    bundle.create_bundle(source, destination, allow_network=False)
+                self.assertFalse(destination.exists())
+            path.write_bytes(payload)
+
+    def test_npm_dependency_report_cannot_expand_verification_claims(self) -> None:
+        source, inventory = self.create_checkout()
+        path = source / bundle.NPM_REPORT_PATH
+        original = path.read_bytes()
+        for field in ("frontend_source_complete", "installation_verified", "os_denied_acceptance_verified",
+                      "upstream_original_sri_recomputed", "archive_count"):
+            report = json.loads(original)
+            report[field] = True if field != "archive_count" else 9
+            path.write_bytes((json.dumps(report, sort_keys=True, indent=2) + "\n").encode())
+            with self.subTest(field=field), patch.object(bundle, "tracked_files", return_value=inventory):
+                with self.assertRaisesRegex(ValueError, "npm distribution report differs"):
+                    bundle.create_bundle(source, self.root / "rejected", allow_network=False)
+            self.assertFalse((self.root / "rejected").exists())
+
+    def test_export_rechecks_both_source_and_copied_npm_archives(self) -> None:
+        source, inventory = self.create_checkout()
+        report = npm.verify_local_bundle(source)
+        archive_path = next(item["archive_path"] for item in report["packages"]
+                            if item["distribution_kind"] == "locally_modified_distribution")
+        digest = bundle.digest
+        for changed_root in ("source", "destination"):
+            destination = self.root / ("changed-" + changed_root)
+            changed = False
+            original_bytes = (source / archive_path).read_bytes()
+
+            def mutate(path):
+                nonlocal changed
+                result = digest(path)
+                if Path(path) == destination / archive_path and not changed:
+                    changed = True
+                    target = source / archive_path if changed_root == "source" else destination / archive_path
+                    target.write_bytes(target.read_bytes() + b"changed after copying")
+                return result
+
+            with self.subTest(changed_root=changed_root), patch.object(bundle, "digest", side_effect=mutate), \
+                    self.assertRaises(ValueError):
+                self.export_project(source, inventory, destination)
+            self.assertTrue(changed)
+            self.assertTrue(destination.exists())
+            self.assertFalse((destination / bundle.MANIFEST_PATH).exists())
+            (source / archive_path).write_bytes(original_bytes)
 
     def test_export_rejects_acquisition_flag_without_inspecting_or_writing_inputs(self) -> None:
         destination = self.root / "rejected"
@@ -368,12 +552,100 @@ class RustSourceBundleTests(unittest.TestCase):
     def test_restored_dependency_directories_have_no_allowlist_exemptions(self) -> None:
         project, _manifest = self.create_project()
         for relative in (f"{bundle.VENDOR_PATH}/sample-1.0.0/unreviewed",
-                         f"{bundle.ARCHIVES_PATH}/unreviewed.crate"):
+                         f"{bundle.ARCHIVES_PATH}/unreviewed.crate",
+                         f"{npm.ORIGINAL_ARCHIVES}/unreviewed.tgz",
+                         f"{npm.LOCAL_DISTRIBUTIONS}/unreviewed.json",
+                         "apps/rootlight-web/frontend/node_modules/unreviewed/index.js",
+                         "apps/rootlight-web/frontend/dist/unreviewed.js"):
             path = project / relative
+            path.parent.mkdir(parents=True, exist_ok=True)
             path.write_bytes(b"not a tracked input")
             with self.subTest(relative=relative), self.assertRaisesRegex(ValueError, "unmanifested project source"):
                 bundle.verify_project_bundle(project)
             path.unlink()
+
+    def test_restored_npm_contract_is_independent_of_project_checksum_rebinding(self) -> None:
+        project, manifest = self.create_project()
+        report = manifest["npm_distribution_inputs"]
+        inputs = {item["path"] for item in report["input_files"]} | {bundle.NPM_REPORT_PATH}
+        pristine_manifest = copy.deepcopy(manifest)
+        for changed in sorted(inputs):
+            path = project / changed
+            before = path.read_bytes()
+            path.write_bytes(before + b"tampered")
+            manifest = copy.deepcopy(pristine_manifest)
+            record = next(item for item in manifest["project_sources"] if item["path"] == changed)
+            record["sha256"] = bundle.digest(path)
+            (project / bundle.MANIFEST_PATH).write_bytes(json.dumps(manifest).encode())
+            with self.subTest(changed=changed), self.assertRaises(ValueError):
+                bundle.verify_project_bundle(project)
+            path.write_bytes(before)
+
+    def test_restored_manifest_requires_npm_source_witness_and_false_frontend_claims(self) -> None:
+        project, manifest = self.create_project()
+        pristine = copy.deepcopy(manifest)
+        changes = (
+            lambda: manifest.update(scope="rust_workspace_native_grammars_and_fuzz"),
+            lambda: manifest.update(npm_distribution_inputs_verified=False),
+            lambda: manifest.update(npm_distribution_inputs_verified=1),
+            lambda: manifest.update(frontend_external_source_closure_verified=True),
+            lambda: manifest["npm_distribution_inputs"].update(installation_verified=True),
+            lambda: manifest["npm_distribution_inputs"].update(archive_count=99),
+            lambda: manifest.pop("npm_distribution_inputs"),
+        )
+        for change in changes:
+            manifest = copy.deepcopy(pristine)
+            change()
+            (project / bundle.MANIFEST_PATH).write_bytes(json.dumps(manifest).encode())
+            with self.subTest(change=changes.index(change)), self.assertRaises(ValueError):
+                bundle.verify_project_bundle(project)
+
+    def test_restored_npm_sources_cannot_be_removed_from_the_project_allowlist(self) -> None:
+        project, manifest = self.create_project()
+        pristine = copy.deepcopy(manifest)
+        for omitted in (bundle.NPM_REPORT_PATH, npm.UPSTREAM_LOCK, npm.DISTRIBUTIONS_MANIFEST,
+                        *manifest["npm_distribution_inputs"]["archive_paths"],
+                        *manifest["npm_distribution_inputs"]["provenance_paths"], *bundle.FRONTEND_PATHS):
+            manifest = copy.deepcopy(pristine)
+            manifest["project_sources"] = [record for record in manifest["project_sources"] if record["path"] != omitted]
+            (project / bundle.MANIFEST_PATH).write_bytes(json.dumps(manifest).encode())
+            with self.subTest(omitted=omitted), self.assertRaises(ValueError):
+                bundle.verify_project_bundle(project)
+
+    def test_npm_data_modes_are_authoritative_and_authored_git_modes_are_preserved(self) -> None:
+        source, inventory = self.create_checkout()
+        inventory = [(name, True if name.startswith("source-inputs/npm/") or name.endswith("package.json") else executable)
+                     for name, executable in inventory]
+        project, manifest = self.export_project(source, inventory)
+        for name, _executable in inventory:
+            if name.startswith("source-inputs/npm/"):
+                self.assertEqual(manifest["file_modes"][name], 0o644)
+                self.assertIs(next(record["executable"] for record in manifest["project_sources"] if record["path"] == name), False)
+        authored = "apps/rootlight-web/frontend/package.json"
+        self.assertEqual(manifest["file_modes"][authored], 0o755)
+        self.assertIs(next(record["executable"] for record in manifest["project_sources"] if record["path"] == authored), True)
+        self.assertEqual(bundle.verify_project_bundle(project), manifest)
+
+    def test_npm_data_execute_claims_cannot_be_rebound_in_restored_manifest(self) -> None:
+        project, manifest = self.create_project()
+        pristine = copy.deepcopy(manifest)
+        for name in (bundle.NPM_REPORT_PATH, npm.UPSTREAM_LOCK, npm.DISTRIBUTIONS_MANIFEST,
+                     *manifest["npm_distribution_inputs"]["archive_paths"],
+                     *manifest["npm_distribution_inputs"]["provenance_paths"]):
+            manifest = copy.deepcopy(pristine)
+            manifest["file_modes"][name] = 0o755
+            next(record for record in manifest["project_sources"] if record["path"] == name)["executable"] = True
+            (project / bundle.MANIFEST_PATH).write_bytes(json.dumps(manifest).encode())
+            with self.subTest(name=name), self.assertRaisesRegex(ValueError, "authenticated npm inputs"):
+                bundle.verify_project_bundle(project)
+
+    @unittest.skipIf(os.name == "nt", "POSIX permission modes are not exposed by the Windows filesystem")
+    def test_restored_npm_data_requires_exact_644_not_just_absence_of_execute_bits(self) -> None:
+        project, _manifest = self.create_project()
+        path = project / bundle.NPM_REPORT_PATH
+        path.chmod(0o600)
+        with self.assertRaisesRegex(ValueError, "restored npm data modes"):
+            bundle.verify_project_bundle(project)
 
     def test_restored_dependency_input_cannot_be_removed_from_project_manifest(self) -> None:
         project, manifest = self.create_project()

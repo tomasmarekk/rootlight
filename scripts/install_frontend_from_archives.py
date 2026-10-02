@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Install a canonical frontend lock from authenticated versioned npm archives.
 
-The caller must deny network access before invocation. A newly populated cache is
-derived build output, not evidence of preferred-source or OS-denied acceptance.
+The all-local canonical lock retains authored relative archive paths. The caller
+must deny network access; derived cache output is not OS-denied acceptance.
 """
 
 from __future__ import annotations
@@ -17,16 +17,18 @@ import stat
 import subprocess
 from typing import Any
 
-from verify_npm_source_bundle import verify_bundle
+from verify_local_npm_sources import verify_local_bundle
 
 
 FRONTEND = "apps/rootlight-web/frontend/"
 MANIFEST = "rust-source-bundle.json"
 REPORT = "source-inputs/npm/npm-source-closure.json"
 ARCHIVES = "source-inputs/npm/archives"
+UPSTREAM_LOCK = "source-inputs/npm/upstream-package-lock.json"
+LOCAL_MANIFEST = "source-inputs/npm/local-distributions.json"
+LOCAL_DISTRIBUTIONS = "source-inputs/npm/local-distributions"
 NODE_VERSION = "v24.11.1"
 NPM_VERSION = "11.6.2"
-_BATCH_SIZE = 8
 _FALSE_REPORT_FIELDS = (
     "installation_verified", "build_and_packaging_acceptance_verified",
     "os_denied_acceptance_verified",
@@ -67,9 +69,9 @@ def _regular(path: Path, *, directory: bool = False) -> Path:
     return path
 
 
-def _stamp(path: Path) -> tuple[int, int, int, int]:
+def _stamp(path: Path) -> tuple[int, int, int, int, int]:
     metadata = path.stat()
-    return metadata.st_dev, metadata.st_ino, metadata.st_size, metadata.st_mtime_ns
+    return metadata.st_dev, metadata.st_ino, metadata.st_size, metadata.st_mtime_ns, stat.S_IMODE(metadata.st_mode)
 
 
 def _read(path: Path) -> bytes:
@@ -113,6 +115,24 @@ def _directory_ids(paths: list[Path]) -> dict[Path, tuple[int, int]]:
     return result
 
 
+def _npm_inventory(source_root: Path) -> dict[str, tuple[str, int, int]]:
+    observed = {}
+    pending = [source_root / ARCHIVES, source_root / LOCAL_DISTRIBUTIONS]
+    while pending:
+        directory = _regular(pending.pop(), directory=True)
+        metadata = directory.stat()
+        observed[directory.relative_to(source_root).as_posix()] = ("directory", metadata.st_dev, metadata.st_ino)
+        for entry in directory.iterdir():
+            metadata = entry.lstat()
+            if stat.S_ISDIR(metadata.st_mode):
+                _regular(entry, directory=True)
+                pending.append(entry)
+            else:
+                _regular(entry)
+                observed[entry.relative_to(source_root).as_posix()] = ("file", metadata.st_dev, metadata.st_ino)
+    return observed
+
+
 def _environment(work: Path, cache: Path, node: Path) -> dict[str, str]:
     home, temporary = work / "home", work / "tmp"
     home.mkdir()
@@ -143,14 +163,17 @@ def install_frontend(source_root: Path, work: Path, cache: Path, node: Path, npm
 
     Args:
         source_root: Immutable exported project with its source manifest, canonical
-            frontend inputs, original archives and exact versioned npm report.
+            frontend inputs, local archive projection, upstream lock, modification
+            provenance, and exact versioned npm report.
         work: Existing empty non-linked directory outside the exported sources.
         cache: Separate existing empty non-linked external npm cache directory.
         node: Explicit declared Node executable; only its exact version is accepted.
         npm_cli: Explicit declared npm CLI JavaScript entry point, run through node.
 
     Returns:
-        Bounded input hashes/counts and npm-ci completion evidence. Installation
+        Bounded input hashes/counts and npm-ci completion evidence. Frontend files
+        remain at ``work/apps/rootlight-web/frontend`` so canonical relative file
+        resolutions reach the staged archives without rewriting the lock. Installation
         identity, preferred sources, OS denial and packaging acceptance remain false.
 
     Raises:
@@ -190,7 +213,7 @@ def install_frontend(source_root: Path, work: Path, cache: Path, node: Path, npm
         records[name] = record
     selected = sorted(name for name in records if _frontend_source(name))
     required = {FRONTEND + name for name in ("package.json", "package-lock.json", ".npmrc")}
-    if not required.issubset(selected) or REPORT not in records:
+    if not required.issubset(selected) or not {REPORT, UPSTREAM_LOCK, LOCAL_MANIFEST}.issubset(records):
         raise FrontendInstallationError("source manifest omits required frontend inputs")
     original = {}
     stamps = {}
@@ -201,6 +224,9 @@ def install_frontend(source_root: Path, work: Path, cache: Path, node: Path, npm
         digest = hashlib.sha256(value).hexdigest()
         if name != MANIFEST and (name not in records or digest != records[name]["sha256"]):
             raise FrontendInstallationError("source differs from manifest: " + name)
+        # Windows cannot attest POSIX execute bits; the export carries that intent.
+        if os.name != "nt" and name != MANIFEST and bool(path.stat().st_mode & 0o111) != records[name]["executable"]:
+            raise FrontendInstallationError("source executable mode differs from manifest: " + name)
         original[name], stamps[name] = digest, _stamp(path)
         return value
 
@@ -217,18 +243,38 @@ def install_frontend(source_root: Path, work: Path, cache: Path, node: Path, npm
     if any(line.strip() not in allowed_config for line in npmrc.splitlines() if line.strip()):
         raise FrontendInstallationError("unsupported or credential-bearing project npm configuration")
     report_bytes = retain(REPORT)
-    verified = verify_bundle(source_root / (FRONTEND + "package-lock.json"), source_root / ARCHIVES)
+    verified = verify_local_bundle(source_root)
+    if verified.get("schema") != "rootlight.npm-local-archive-bundle/1":
+        raise FrontendInstallationError("unexpected local npm verification schema")
     expected_report = {**verified, **dict.fromkeys(_FALSE_REPORT_FIELDS, False)}
-    if report_bytes != (json.dumps(expected_report, sort_keys=True, indent=2) + "\n").encode("utf-8"):
+    if report_bytes != (json.dumps(expected_report, sort_keys=True, indent=2, allow_nan=False) + "\n").encode("utf-8"):
         raise FrontendInstallationError("versioned npm report differs from verified archive inputs")
-    archive_names = sorted(record["archive_filename"] for record in verified["packages"])
-    if not archive_names:
+    archive_paths = verified["archive_paths"]
+    provenance_paths = verified["provenance_paths"]
+    if not archive_paths or archive_paths != sorted(set(archive_paths)) or provenance_paths != sorted(set(provenance_paths)):
         raise FrontendInstallationError("locked archive inventory is empty")
-    for name in archive_names:
-        retain(ARCHIVES + "/" + name)
+    verified_inputs = {}
+    for item in verified["input_files"]:
+        name = item["path"]
+        _relative(name)
+        if name in verified_inputs or not (name == FRONTEND + "package-lock.json" or name.startswith("source-inputs/npm/")):
+            raise FrontendInstallationError("unexpected local npm input identity")
+        value = retain(name)
+        if hashlib.sha256(value).hexdigest() != item["sha256"]:
+            raise FrontendInstallationError("npm verifier input differs from source manifest")
+        verified_inputs[name] = item["sha256"]
+        staged_bytes[name] = value
+    required_npm = {FRONTEND + "package-lock.json", UPSTREAM_LOCK, LOCAL_MANIFEST, *archive_paths, *provenance_paths}
+    if set(verified_inputs) != required_npm:
+        raise FrontendInstallationError("local npm verifier omits required authenticated inputs")
+    staged_bytes[REPORT] = report_bytes
+    inventory = _npm_inventory(source_root)
+    if {name for name, identity in inventory.items() if identity[0] == "file"} != set(archive_paths) | set(provenance_paths):
+        raise FrontendInstallationError("immutable archive inventory differs from authenticated paths")
     tools = {path: (hashlib.sha256(_read(path)).hexdigest(), _stamp(path)) for path in (node, npm_cli)}
-    frontend = work / "frontend"
+    frontend = work / FRONTEND
     staged = {}
+    staged_modes = {}
     controlled_configs = ()
 
     def unchanged() -> None:
@@ -241,31 +287,33 @@ def install_frontend(source_root: Path, work: Path, cache: Path, node: Path, npm
             path = source_root / name
             if hashlib.sha256(_read(path)).hexdigest() != digest or _stamp(path) != stamps[name]:
                 raise FrontendInstallationError("immutable source changed: " + name)
-        if sorted(entry.name for entry in (source_root / ARCHIVES).iterdir()) != archive_names:
+        if _npm_inventory(source_root) != inventory:
             raise FrontendInstallationError("immutable archive inventory changed")
         for path, (digest, stamp) in tools.items():
             if hashlib.sha256(_read(path)).hexdigest() != digest or _stamp(path) != stamp:
                 raise FrontendInstallationError("declared tool changed")
         for path, digest in staged.items():
-            if hashlib.sha256(_read(path)).hexdigest() != digest:
+            if hashlib.sha256(_read(path)).hexdigest() != digest or stat.S_IMODE(path.stat().st_mode) != staged_modes[path]:
                 raise FrontendInstallationError("staged authored source changed")
         for path in controlled_configs:
             if _read(path) != b"":
                 raise FrontendInstallationError("controlled npm configuration changed")
 
     unchanged()
-    frontend.mkdir()
+    frontend.mkdir(parents=True)
+    for directory in (ARCHIVES, LOCAL_DISTRIBUTIONS):
+        (work / directory).mkdir(parents=True, exist_ok=True)
     for name, value in staged_bytes.items():
-        path = frontend / name[len(FRONTEND):]
+        path = work / name
         path.parent.mkdir(parents=True, exist_ok=True)
         with path.open("xb") as stream:
             stream.write(value)
         path.chmod(0o755 if records[name]["executable"] else 0o644)
         staged[path] = original[name]
+        staged_modes[path] = stat.S_IMODE(path.stat().st_mode)
     environment = _environment(work, cache, node)
     controlled_configs = (work / "user.npmrc", work / "global.npmrc")
     unchanged()
-    phases = []
 
     def run(arguments: list[str], phase: str, *, expected_version: str | None = None) -> None:
         unchanged()
@@ -279,14 +327,10 @@ def install_frontend(source_root: Path, work: Path, cache: Path, node: Path, npm
             unchanged()
         if result.returncode != 0 or expected_version is not None and result.stdout.strip() != expected_version:
             raise FrontendInstallationError("frontend command/version failed: " + phase)
-        phases.append(phase)
 
     run([str(node), "--version"], "node-version", expected_version=NODE_VERSION)
     run([str(node), str(npm_cli), "--version"], "npm-version", expected_version=NPM_VERSION)
     policy = ["--cache", str(cache), "--offline", "--ignore-scripts", "--audit=false", "--fund=false"]
-    for start in range(0, len(archive_names), _BATCH_SIZE):
-        local_paths = [str(source_root / ARCHIVES / name) for name in archive_names[start:start + _BATCH_SIZE]]
-        run([str(node), str(npm_cli), "cache", "add", *local_paths, *policy], "cache-add")
     run([str(node), str(npm_cli), "ci", *policy, "--include=dev", "--include=optional", "--include=peer"], "npm-ci")
     return {
         "schema": "rootlight.frontend-archive-installation/1",
@@ -294,9 +338,15 @@ def install_frontend(source_root: Path, work: Path, cache: Path, node: Path, npm
         "package_json_sha256": original[FRONTEND + "package.json"],
         "package_lock_sha256": original[FRONTEND + "package-lock.json"],
         "npm_source_report_sha256": original[REPORT],
+        "upstream_lock_sha256": original[UPSTREAM_LOCK],
+        "local_distributions_manifest_sha256": original[LOCAL_MANIFEST],
         "archive_count": verified["archive_count"], "lock_record_count": verified["lock_record_count"],
-        "staged_authored_files": len(staged), "cache_add_batches": phases.count("cache-add"),
-        "frontend_subdirectory": "frontend", "npm_ci_completed": True,
+        "original_archive_count": verified["original_archive_count"],
+        "local_distribution_count": verified["local_distribution_count"],
+        "staged_authored_files": len(selected), "staged_archive_files": len(archive_paths),
+        "staged_provenance_files": len(provenance_paths), "staged_files": len(staged),
+        "cache_add_batches": 0,
+        "frontend_subdirectory": FRONTEND.rstrip("/"), "npm_ci_completed": True,
         "installed_tree_identity_verified": False, "caller_os_network_denial_required": True,
         "os_denied_acceptance_verified": False, "build_and_packaging_acceptance_verified": False,
         "preferred_source_closure_complete": False, "frontend_source_complete": False,

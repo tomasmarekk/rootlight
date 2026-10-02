@@ -10,6 +10,9 @@
 # Cargo inputs retain authenticated upstream bytes rather than local formatting.
 source-inputs/cargo/** -text whitespace=-blank-at-eol,-blank-at-eof,-space-before-tab,cr-at-eol
 source-inputs/crates/*.crate binary
+# npm archives retain their authenticated original or declared local bytes.
+source-inputs/npm/archives/*.tgz binary
+source-inputs/npm/local-distributions/*.tgz binary
 # The complete Haskell upstream tree retains its authenticated source bytes.
 third_party/tree-sitter-haskell-0.23.1/** -text
 # Upstream corpus whitespace is intentional parser input, not local formatting.

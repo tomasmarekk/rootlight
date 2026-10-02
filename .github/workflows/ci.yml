@@ -74,6 +74,13 @@ jobs:
           python scripts/test_verify_cargo_source_bundle.py
           python scripts/test_prepare_rust_source_bundle.py
           python scripts/test_source_bundle_gate.py
+          python -B -m unittest discover -s scripts -p 'test_*npm_source_bundle.py' -v
+          python -B scripts/test_patch_npm_source_fixture.py
+          python -B scripts/test_verify_local_npm_sources.py
+          python -B scripts/test_install_frontend_from_archives.py
+          python -B scripts/verify_local_npm_sources.py \
+            --project-root . \
+            --output target/npm-source-closure.actual.json
           node --check packaging/npm/rootlight.mjs
           node --check packaging/npm/rootlight-mcp.mjs
           node --check packaging/npm/run-native.mjs
@@ -199,7 +206,8 @@ jobs:
           test "$(npm --version)" = "11.6.2"
       - name: Install and validate the locked web dependency graph
         run: |
-          npm ci --ignore-scripts
+          node --test scripts/verify-local-dependency-origins.test.mjs
+          npm ci --ignore-scripts --offline --audit=false --fund=false
           npm run release:dependencies
           npm audit --omit=dev --audit-level=moderate
       - name: Build and verify target-neutral web assets
@@ -230,7 +238,7 @@ jobs:
           SOURCE_REVISION: ${{ github.sha }}
         run: |
           rm -rf node_modules dist
-          npm ci --ignore-scripts --offline
+          npm ci --ignore-scripts --offline --audit=false --fund=false
           npm run build
           npm run release:notices -- \
             --output "$GITHUB_WORKSPACE/artifacts/web-release/rootlight-web-third-party-notices-offline.txt"
@@ -307,7 +315,7 @@ jobs:
         run: |
           test "$(node --version)" = "v24.11.1"
           test "$(npm --version)" = "11.6.2"
-          npm ci --ignore-scripts
+          npm ci --ignore-scripts --offline --audit=false --fund=false
           npx playwright install --with-deps chromium firefox webkit
           npm run test:e2e
       - name: Upload source-free browser quality evidence

@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
-"""Export versioned Rust inputs without acquisition or dependency caches.
+"""Export versioned Rust and local npm inputs without acquisition or caches.
 
 The tracked registry sources and original archives cover workspace, native-test,
-and fuzz locks. Export proves neither frontend closure nor third-party authorship.
+and fuzz locks. Local npm distributions retain declared fixture provenance;
+export proves neither preferred frontend closure nor third-party authorship.
 """
 
 import argparse
@@ -18,6 +19,7 @@ import tarfile
 import tomllib
 
 from verify_cargo_source_bundle import verify_bundle
+from verify_local_npm_sources import CANONICAL_LOCK, verify_local_bundle
 
 
 LOCK_PATHS = ("Cargo.lock", "tests/native-grammars/Cargo.lock", "fuzz/Cargo.lock")
@@ -25,6 +27,10 @@ MANIFEST_PATH = "rust-source-bundle.json"
 VENDOR_PATH = "source-inputs/cargo"
 ARCHIVES_PATH = "source-inputs/crates"
 CLOSURE_PATH = "source-inputs/cargo-source-closure.json"
+NPM_REPORT_PATH = "source-inputs/npm/npm-source-closure.json"
+FRONTEND_PATHS = ("apps/rootlight-web/frontend/package.json", CANONICAL_LOCK,
+                  "apps/rootlight-web/frontend/.npmrc")
+BUNDLE_SCOPE = "rust_workspace_native_grammars_fuzz_and_local_npm_inputs"
 REGISTRY = "registry+https://github.com/rust-lang/crates.io-index"
 WINDOWS_DEVICES = {"CON", "PRN", "AUX", "NUL", "CONIN$", "CONOUT$"} | {
     f"{prefix}{number}" for prefix in ("COM", "LPT") for number in range(1, 10)
@@ -178,6 +184,23 @@ def _versioned_closure(root: Path) -> tuple[dict, dict[str, int]]:
     return closure, modes
 
 
+def _npm_distribution_inputs(root: Path) -> tuple[dict, dict[str, int], dict[str, str]]:
+    report = verify_local_bundle(root)
+    encoded = (json.dumps(report, sort_keys=True, indent=2, allow_nan=False) + "\n").encode("utf-8")
+    if regular_source(root, NPM_REPORT_PATH).read_bytes() != encoded:
+        raise ValueError("versioned npm distribution report differs from verified inputs")
+    hashes = {record["path"]: record["sha256"] for record in report["input_files"]}
+    hashes[NPM_REPORT_PATH] = hashlib.sha256(encoded).hexdigest()
+    for name in FRONTEND_PATHS:
+        actual = digest(regular_source(root, name))
+        if name in hashes and hashes[name] != actual:
+            raise ValueError("canonical frontend source changed during verification")
+        hashes[name] = actual
+    # Compressed inputs and their provenance are data, not executable package members.
+    modes = {name: 0o644 for name in hashes if name.startswith("source-inputs/npm/")}
+    return report, modes, hashes
+
+
 def tracked_files(root: Path) -> list[tuple[str, bool]]:
     """Use Git's allowlist without copying credentials, caches, or local context."""
     records = subprocess.check_output(
@@ -215,8 +238,8 @@ def create_bundle(root: Path, destination: Path, *, allow_network: bool) -> dict
     """Copy tracked project and verified dependency sources into a fresh export.
 
     Args:
-        root: Project with versioned original archives, Cargo directory sources,
-            the canonical dependency report, and the declared offline mapping.
+        root: Project with versioned Cargo and local npm distribution inputs,
+            exact dependency reports, canonical frontend files and offline mapping.
         destination: New directory with no linked ancestors.
         allow_network: Retained CLI/API compatibility flag; true is rejected.
 
@@ -229,7 +252,7 @@ def create_bundle(root: Path, destination: Path, *, allow_network: bool) -> dict
         OSError: Source reading or fresh export creation fails.
         subprocess.CalledProcessError: Read-only Git provenance inspection fails.
 
-    No dependency home is consulted and no Cargo or network command is invoked.
+    No dependency home is consulted and no Cargo, npm or network command runs.
     """
     if allow_network:
         raise ValueError("--allow-network is inappropriate for export; prepare versioned sources separately")
@@ -246,7 +269,8 @@ def create_bundle(root: Path, destination: Path, *, allow_network: bool) -> dict
     names = {entry[0] for entry in inventory}
     if len(names) != len(inventory) or MANIFEST_PATH in names:
         raise ValueError("duplicate or reserved tracked project source")
-    for name in (*LOCK_PATHS, ".cargo/config.toml", CLOSURE_PATH):
+    for name in (*LOCK_PATHS, ".cargo/config.toml", CLOSURE_PATH, NPM_REPORT_PATH,
+                 *FRONTEND_PATHS):
         if name not in names:
             raise ValueError(f"untracked required project source: {name}")
     config = regular_source(root, ".cargo/config.toml")
@@ -255,7 +279,12 @@ def create_bundle(root: Path, destination: Path, *, allow_network: bool) -> dict
     missing = sorted(set(cargo_modes) - names)
     if missing:
         raise ValueError(f"untracked Cargo source inputs: {missing}")
+    npm_inputs, npm_modes, npm_hashes = _npm_distribution_inputs(root)
+    if not set(npm_hashes).issubset(names):
+        raise ValueError("untracked npm distribution or frontend inputs")
     source_hashes = {name: digest(regular_source(root, name)) for name, _executable in inventory}
+    if any(source_hashes[name] != checksum for name, checksum in npm_hashes.items()):
+        raise ValueError("npm distribution inputs changed before export")
     revision = subprocess.check_output(
         ["git", "rev-parse", "HEAD"], cwd=root, text=True,
     ).strip()
@@ -274,8 +303,8 @@ def create_bundle(root: Path, destination: Path, *, allow_network: bool) -> dict
             while chunk := input_stream.read(1024 * 1024):
                 output_stream.write(chunk)
         # Original archive intent survives Windows Git modes and host chmod.
-        mode = cargo_modes.get(name, 0o644 if name == CLOSURE_PATH else
-                               (0o755 if executable else 0o644))
+        mode = npm_modes.get(name, cargo_modes.get(name, 0o644 if name == CLOSURE_PATH else
+                                                  (0o755 if executable else 0o644)))
         executable = bool(mode & 0o111)
         target.chmod(mode)
         checksum = digest(target)
@@ -287,15 +316,21 @@ def create_bundle(root: Path, destination: Path, *, allow_network: bool) -> dict
     exported_closure, _exported_modes = _versioned_closure(destination)
     if exported_closure != closure:
         raise ValueError("exported Cargo source closure differs from versioned inputs")
+    for check_root in (root, destination):
+        checked_report, checked_modes, checked_hashes = _npm_distribution_inputs(check_root)
+        if checked_report != npm_inputs or checked_modes != npm_modes or checked_hashes != npm_hashes:
+            raise ValueError("npm distribution inputs changed during export")
     manifest = {
         "schema": "rootlight.rust-source-bundle/1",
-        "scope": "rust_workspace_native_grammars_and_fuzz",
+        "scope": BUNDLE_SCOPE,
         "source_revision": revision,
         "project_sources_match_revision": tree_status == 0,
         "project_sources": source_files,
         "file_modes": file_modes,
         "cargo_config_sha256": digest(destination / ".cargo/config.toml"),
         "cargo_source_closure": closure,
+        "npm_distribution_inputs": npm_inputs,
+        "npm_distribution_inputs_verified": True,
         "frontend_external_source_closure_verified": False,
     }
     (destination / MANIFEST_PATH).write_text(
@@ -307,10 +342,14 @@ def create_bundle(root: Path, destination: Path, *, allow_network: bool) -> dict
 
 
 def verify_project_bundle(root: Path) -> dict:
-    """Recheck restored project bytes and the complete Cargo input directory."""
+    """Recheck exact restored project bytes, modes and Cargo/local npm inputs."""
     manifest = json.loads(regular_source(root, MANIFEST_PATH).read_bytes())
     if manifest.get("schema") != "rootlight.rust-source-bundle/1":
         raise ValueError("unsupported Rust source bundle manifest")
+    if (manifest.get("scope") != BUNDLE_SCOPE
+        or manifest.get("npm_distribution_inputs_verified") is not True
+        or manifest.get("frontend_external_source_closure_verified") is not False):
+        raise ValueError("unsupported project source scope or npm input claims")
     expected = {MANIFEST_PATH}
     for record in manifest["project_sources"]:
         name = record["path"]
@@ -320,7 +359,8 @@ def verify_project_bundle(root: Path) -> dict:
         actual = digest(regular_source(root, name))
         if actual != record["sha256"]:
             raise ValueError(f"changed project source: {name}")
-    required = {*LOCK_PATHS, ".cargo/config.toml", CLOSURE_PATH}
+    required = {*LOCK_PATHS, ".cargo/config.toml", CLOSURE_PATH, NPM_REPORT_PATH,
+                *FRONTEND_PATHS}
     if not required.issubset(expected):
         raise ValueError("bundle manifest omits required versioned project inputs")
     config = regular_source(root, ".cargo/config.toml")
@@ -340,16 +380,27 @@ def verify_project_bundle(root: Path) -> dict:
     closure, cargo_modes = _versioned_closure(root)
     if closure != manifest["cargo_source_closure"]:
         raise ValueError("Cargo source closure differs from bundle manifest")
+    npm_inputs, npm_modes, npm_hashes = _npm_distribution_inputs(root)
+    if not set(npm_hashes).issubset(expected):
+        raise ValueError("bundle manifest omits required npm input sources")
+    if (json.dumps(npm_inputs, sort_keys=True, allow_nan=False)
+        != json.dumps(manifest.get("npm_distribution_inputs"), sort_keys=True, allow_nan=False)):
+        raise ValueError("npm distribution inputs differ from bundle manifest")
     modes = {name: 0o755 if record["executable"] else 0o644
              for record in manifest["project_sources"] for name in [record["path"]]}
     if any(modes.get(name) != mode for name, mode in cargo_modes.items()) or modes.get(CLOSURE_PATH) != 0o644:
         raise ValueError("project executable modes differ from authenticated Cargo inputs")
+    if any(modes.get(name) != mode for name, mode in npm_modes.items()):
+        raise ValueError("project executable modes differ from authenticated npm inputs")
     if modes != manifest["file_modes"]:
         raise ValueError("bundle executable modes differ from authoritative source inputs")
     if os.name != "nt":
         for name, mode in modes.items():
             if bool(regular_source(root, name).stat().st_mode & 0o111) != bool(mode & 0o111):
                 raise ValueError(f"restored executable mode differs from source inputs: {name}")
+        if any(stat.S_IMODE(regular_source(root, name).stat().st_mode) != mode
+               for name, mode in npm_modes.items()):
+            raise ValueError("restored npm data modes differ from authenticated inputs")
     return manifest
 
 
