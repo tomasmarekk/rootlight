@@ -11,7 +11,6 @@ publish = false
 rootlight-ids = { path = "../rootlight-ids" }
 schemars = { workspace = true, optional = true }
 serde.workspace = true
-thiserror.workspace = true
 
 [features]
 default = []

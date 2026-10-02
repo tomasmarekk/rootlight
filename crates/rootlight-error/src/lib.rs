@@ -850,32 +850,90 @@ impl PublicErrorBuilder {
 }
 
 /// Failures encountered while constructing safe public diagnostics.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PublicErrorBuildError {
     /// The static message is empty, oversized, or outside the safe template alphabet.
-    #[error("public error message violates the safe template policy")]
     InvalidMessageTemplate,
     /// A detail key violates the public allow-list.
-    #[error("invalid public error detail key")]
     InvalidDetailKey,
     /// A label violates the public allow-list.
-    #[error("invalid public error safe label")]
     InvalidSafeLabel,
     /// The detail map exceeds its item bound.
-    #[error("public error has too many details")]
     TooManyDetails,
     /// The remediation list exceeds its item bound.
-    #[error("public error has too many next actions")]
     TooManyNextActions,
     /// The retry delay exceeds 24 hours or cannot fit the wire integer.
-    #[error("public error retry delay exceeds its limit")]
     RetryDelayTooLong,
 }
+
+impl fmt::Display for PublicErrorBuildError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(match self {
+            Self::InvalidMessageTemplate => {
+                "public error message violates the safe template policy"
+            }
+            Self::InvalidDetailKey => "invalid public error detail key",
+            Self::InvalidSafeLabel => "invalid public error safe label",
+            Self::TooManyDetails => "public error has too many details",
+            Self::TooManyNextActions => "public error has too many next actions",
+            Self::RetryDelayTooLong => "public error retry delay exceeds its limit",
+        })
+    }
+}
+
+impl std::error::Error for PublicErrorBuildError {}
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use rootlight_ids::derive_repository;
+
+    #[test]
+    fn build_errors_preserve_exact_messages_and_empty_sources() {
+        for (error, message) in [
+            (
+                PublicErrorBuildError::InvalidMessageTemplate,
+                "public error message violates the safe template policy",
+            ),
+            (
+                PublicErrorBuildError::InvalidDetailKey,
+                "invalid public error detail key",
+            ),
+            (
+                PublicErrorBuildError::InvalidSafeLabel,
+                "invalid public error safe label",
+            ),
+            (
+                PublicErrorBuildError::TooManyDetails,
+                "public error has too many details",
+            ),
+            (
+                PublicErrorBuildError::TooManyNextActions,
+                "public error has too many next actions",
+            ),
+            (
+                PublicErrorBuildError::RetryDelayTooLong,
+                "public error retry delay exceeds its limit",
+            ),
+        ] {
+            assert_eq!(error.to_string(), message);
+            assert!(std::error::Error::source(&error).is_none());
+        }
+    }
+
+    #[test]
+    fn build_errors_preserve_public_error_traits_and_downcasts() {
+        fn require_traits<T: std::error::Error + Send + Sync + Clone + Copy + Eq + 'static>() {}
+        require_traits::<PublicErrorBuildError>();
+        let error = PublicErrorBuildError::InvalidSafeLabel;
+        let borrowed: &(dyn std::error::Error + Send + Sync) = &error;
+        assert_eq!(
+            borrowed.downcast_ref::<PublicErrorBuildError>(),
+            Some(&error)
+        );
+        let owned: Box<dyn std::error::Error + Send + Sync> = Box::new(error);
+        assert_eq!(*owned.downcast::<PublicErrorBuildError>().unwrap(), error);
+    }
 
     #[test]
     fn serializes_stable_machine_semantics() {
