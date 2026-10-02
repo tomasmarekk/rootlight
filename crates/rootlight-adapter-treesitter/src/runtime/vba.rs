@@ -716,14 +716,15 @@ fn body_candidates(
                     "vba.value_identifier",
                     false,
                 )?,
-                // Numeric and Boolean nodes have no captures in the current query
-                // pack; quoted strings use the shared lexical-trivia scan below.
+                // Numeric, Boolean and Nothing atoms have no query captures;
+                // quoted strings use the shared lexical-trivia scan below.
                 ModuleScalarValueKind::UnsignedDecimal
                 | ModuleScalarValueKind::UnsignedHexadecimal
                 | ModuleScalarValueKind::UnsignedOctal
                 | ModuleScalarValueKind::UnsignedFloat
                 | ModuleScalarValueKind::String
-                | ModuleScalarValueKind::Boolean => {}
+                | ModuleScalarValueKind::Boolean
+                | ModuleScalarValueKind::Nothing => {}
             }
         }
         ModuleBodyStatement::ApplicationAssignment(assignment) if include_optional => {
@@ -771,7 +772,8 @@ fn body_candidates(
                     | ModuleScalarValueKind::UnsignedOctal
                     | ModuleScalarValueKind::UnsignedFloat
                     | ModuleScalarValueKind::String
-                    | ModuleScalarValueKind::Boolean => {}
+                    | ModuleScalarValueKind::Boolean
+                    | ModuleScalarValueKind::Nothing => {}
                 }
             }
         }
@@ -883,7 +885,8 @@ fn body_candidates(
                     | ModuleScalarValueKind::UnsignedOctal
                     | ModuleScalarValueKind::UnsignedFloat
                     | ModuleScalarValueKind::String
-                    | ModuleScalarValueKind::Boolean => {}
+                    | ModuleScalarValueKind::Boolean
+                    | ModuleScalarValueKind::Nothing => {}
                 }
             }
         }
@@ -1362,8 +1365,9 @@ mod tests {
         assert_eq!(
             actual.facts,
             expected.facts,
-            "exact source facts for {language}, {:?}",
-            request.source().bytes()
+            "exact source facts for {language}, {:?}; native tree: {}",
+            String::from_utf8_lossy(request.source().bytes()),
+            native.tree.root_node().to_sexp()
         );
     }
 
@@ -7048,7 +7052,8 @@ mod tests {
                             | ModuleScalarValueKind::UnsignedHexadecimal
                             | ModuleScalarValueKind::UnsignedOctal
                             | ModuleScalarValueKind::String
-                            | ModuleScalarValueKind::Boolean => {
+                            | ModuleScalarValueKind::Boolean
+                            | ModuleScalarValueKind::Nothing => {
                                 panic!("fixture has only FLOAT atoms and two name reads")
                             }
                         }
@@ -7346,7 +7351,8 @@ mod tests {
                                 }
                                 ModuleScalarValueKind::UnsignedFloat
                                 | ModuleScalarValueKind::String
-                                | ModuleScalarValueKind::Boolean => {
+                                | ModuleScalarValueKind::Boolean
+                                | ModuleScalarValueKind::Nothing => {
                                     panic!(
                                         "the written fixture has only numeric atoms and two name reads"
                                     );
@@ -8026,6 +8032,72 @@ mod tests {
     }
 
     #[test]
+    fn first_party_vba_nothing_values_match_complete_native_facts() {
+        let bodies = [
+            "Set item = nOtHiNg",
+            "Let item = Nothing",
+            "item = NOTHING",
+            "Call Consume(Nothing, [Nothing], \"Nothing\", Nothing0, Nothing_)",
+            "item = Outer(Nothing)",
+            "item = Outer(Nothing, Inner(Nothing))",
+            "Call Consume((Nothing), Inner(Nothing))",
+            "item = (Nothing)",
+            "item = Not (item Is Nothing)",
+            "item = Nothing + 1",
+            "item = Not Nothing",
+            "Set item = Outer((Nothing), item Is Nothing)",
+            "Consume Nothing",
+            "Outer (Nothing)",
+        ];
+        for body in bodies {
+            for newline in ["\n", "\r\n"] {
+                let source = format!("Sub Run()\n{body}\nEnd Sub\n").replace('\n', newline);
+                for language in ["vba", "visual-basic-classic"] {
+                    let native_fixture = Fixture::new(&source);
+                    let request = native_fixture.request(language, &[]);
+                    let native = native_fixture
+                        .provider
+                        .prepare_tree(
+                            &request,
+                            None,
+                            &[],
+                            native_fixture.provider.config.default_settings(),
+                            &Cancellation::new(),
+                        )
+                        .unwrap();
+                    assert!(native.traversal.fully_traversed);
+                    assert_eq!(
+                        native.traversal.coverage,
+                        CoverageStatus::Complete,
+                        "native coverage for {language}: {body}"
+                    );
+                    assert!(
+                        !native.tree.root_node().has_error(),
+                        "native syntax for {language}: {body}"
+                    );
+                }
+            }
+        }
+        for body in bodies {
+            for newline in ["\n", "\r\n"] {
+                let source = format!("Sub Run()\n{body}\nEnd Sub\n").replace('\n', newline);
+                for language in ["vba", "visual-basic-classic"] {
+                    compare_native(&Fixture::new(&source), language, &[]);
+                }
+            }
+        }
+        for newline in ["\n", "\r\n"] {
+            let source = format!(
+                "Sub Run(ByVal item As Object){newline}Dim [Nothing] As Object, Nothing0 As Object, Nothing_ As Object{newline}{}{newline}End Sub{newline}",
+                bodies.join(newline)
+            );
+            for language in ["vba", "visual-basic-classic"] {
+                compare_native(&Fixture::new(&source), language, &[]);
+            }
+        }
+    }
+
+    #[test]
     fn first_party_vba_scalar_body_boundaries_keep_whole_native_fallback() {
         for body in [
             "Dim value As Long\nCall Run(Nested(1).member)",
@@ -8038,7 +8110,7 @@ mod tests {
             "Const seed As Long = value",
             "Dim value As Long\nvalue = #1/1/2000#",
             "Dim value As Long\nvalue = &H10%%",
-            "Dim value As Long\nvalue = Nothing",
+            "Dim value As Long\nvalue = Nothing.Member",
             "Dim value As Long\nvalue = Me",
             "Dim value As Long\nMe = value",
             "Dim value As Long\nIf True Then\nvalue = 1\nEnd If",

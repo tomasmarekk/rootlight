@@ -11774,7 +11774,11 @@ fn statement_value_applications_preserve_formals_and_durable_source_lifetimes() 
                 ExpressionStatementSource {
                     statement: &format!("Target ({})", state.arguments),
                     callee_offset: 0,
-                    role: ExpressionStatementRole::ValueApplication,
+                    role: if state.argument_count == 1 {
+                        ExpressionStatementRole::Call
+                    } else {
+                        ExpressionStatementRole::ValueApplication
+                    },
                 },
             );
         };
@@ -11876,6 +11880,580 @@ fn statement_value_applications_preserve_formals_and_durable_source_lifetimes() 
 #[test]
 fn statement_value_applications_preserve_array_rank_and_local_shadow_lifetimes() {
     assert_value_application_layout_lifetimes(ValueApplicationLayout::Statement);
+}
+
+#[derive(Debug, Clone, Copy)]
+enum NothingValueState {
+    Literal,
+    GroupedLiteral,
+    BracketedName,
+    GroupedBracketedName,
+    String,
+    JoinedName,
+    MissingBracketedName,
+    ExtraArgument,
+    NativeDate,
+    MixedCaseLet,
+}
+
+impl NothingValueState {
+    fn rhs(self) -> &'static str {
+        match self {
+            Self::Literal | Self::GroupedLiteral | Self::ExtraArgument => "Nothing",
+            Self::BracketedName | Self::GroupedBracketedName | Self::MissingBracketedName => {
+                "[Nothing]"
+            }
+            Self::String => "\"Nothing\"",
+            Self::JoinedName => "NothingValue",
+            Self::NativeDate => "#1/1/2000#",
+            Self::MixedCaseLet => "nOtHiNg",
+        }
+    }
+
+    fn keyword(self) -> &'static str {
+        if matches!(self, Self::MixedCaseLet) {
+            "lEt"
+        } else {
+            "Set"
+        }
+    }
+
+    fn consume_statement(self) -> (String, usize) {
+        let rhs = self.rhs();
+        if matches!(self, Self::GroupedLiteral | Self::GroupedBracketedName) {
+            (format!("Consume ({rhs})"), 0)
+        } else {
+            (format!("Call Consume({rhs})"), 5)
+        }
+    }
+}
+
+fn nothing_value_source(state: NothingValueState) -> String {
+    let rhs = state.rhs();
+    let bracketed = if matches!(state, NothingValueState::MissingBracketedName) {
+        ""
+    } else {
+        ", [Nothing] As Variant"
+    };
+    let arguments = if matches!(state, NothingValueState::ExtraArgument) {
+        format!("{rhs}, {rhs}")
+    } else {
+        rhs.to_owned()
+    };
+    let source = format!(
+        "Attribute VB_Name = \"WrittenValues\"\nFunction Echo(ByVal value As Variant) As Variant\nEcho = value\nEnd Function\nSub Consume(ByVal value As Variant)\nEnd Sub\nSub Run()\nDim sink As Variant{bracketed}, NothingValue As Variant\n{} sink = {rhs}\nsink = Echo({arguments})\n{}\nsink = (sink Is Nothing)\nEnd Sub\n",
+        state.keyword(),
+        state.consume_statement().0
+    );
+    if matches!(state, NothingValueState::MixedCaseLet) {
+        source.replace('\n', "\r\n")
+    } else {
+        source
+    }
+}
+
+fn assert_nothing_value_contract(
+    service: &FirstSliceService,
+    receipt: &FirstSliceIndexReceipt,
+    source: &str,
+    language: &str,
+    state: NothingValueState,
+) {
+    assert_source_and_identity_for_language(service, receipt, source, language);
+    let snapshot = service
+        .loaded_generation_snapshot(receipt.generation)
+        .unwrap();
+    let document = snapshot.document();
+    let file = &document.files[0];
+    let run = document
+        .entities
+        .iter()
+        .find(|entity| entity.canonical_name == "Run")
+        .unwrap();
+    let sink = document
+        .entities
+        .iter()
+        .find(|entity| {
+            entity.canonical_name == "sink"
+                && entity.container == Some(rootlight_ir::ContainerRef::Entity(run.id))
+        })
+        .unwrap();
+    let rhs = state.rhs();
+    let first_statement = format!("{} sink = {rhs}", state.keyword());
+    let first_start = source.find(&first_statement).unwrap();
+    let destination_start = first_start + state.keyword().len() + 1;
+    let destination = document
+        .occurrences
+        .iter()
+        .find(|site| {
+            site.source.span().start_byte() == u64::try_from(destination_start).unwrap()
+                && site.source.span().end_byte() == u64::try_from(destination_start + 4).unwrap()
+                && site.syntax_kind
+                    == if matches!(state, NothingValueState::MixedCaseLet) {
+                        "vba.let_identifier.reference"
+                    } else {
+                        "vba.set_identifier.reference"
+                    }
+        })
+        .unwrap();
+    assert_eq!(destination.role, OccurrenceRole::Reference);
+    assert_eq!(destination.enclosing, Some(run.id));
+    assert_eq!(
+        destination.target,
+        OccurrenceTarget::Resolved { symbol: sink.id }
+    );
+    assert_exact_parameter_source(
+        service,
+        receipt,
+        source,
+        &destination.source,
+        destination_start..destination_start + 4,
+    );
+    let destination_relations: Vec<_> = document
+        .relations
+        .iter()
+        .filter(|relation| relation.subject == RelationEndpoint::Occurrence(destination.id))
+        .collect();
+    assert_eq!(destination_relations.len(), 1);
+    assert_eq!(
+        destination_relations[0].predicate,
+        RelationPredicate::RefersTo
+    );
+    assert_eq!(
+        destination_relations[0].object,
+        RelationEndpoint::Entity(sink.id)
+    );
+    assert_eq!(
+        destination_relations[0].evidence.source.as_ref(),
+        Some(&destination.source)
+    );
+    let arguments = if matches!(state, NothingValueState::ExtraArgument) {
+        format!("{rhs}, {rhs}")
+    } else {
+        rhs.to_owned()
+    };
+    let (consume, consume_offset) = state.consume_statement();
+    for (name, expression, callee_offset, syntax) in [
+        (
+            "Echo",
+            format!("Echo({arguments})"),
+            0,
+            "vba.invoked_get_identifier.reference",
+        ),
+        (
+            "Consume",
+            consume,
+            consume_offset,
+            "vba.invoked_identifier.reference",
+        ),
+    ] {
+        let start = source.find(&expression).unwrap();
+        let end = start + expression.len();
+        let target = document
+            .entities
+            .iter()
+            .find(|entity| entity.canonical_name == name)
+            .unwrap();
+        let formal = document
+            .entities
+            .iter()
+            .find(|entity| {
+                entity.kind == EntityKind::Parameter
+                    && entity.container == Some(rootlight_ir::ContainerRef::Entity(target.id))
+            })
+            .unwrap();
+        let proven = name != "Echo" || !matches!(state, NothingValueState::ExtraArgument);
+        let application = document
+            .occurrences
+            .iter()
+            .find(|site| {
+                site.syntax_kind == "vba.application.reference"
+                    && site.source.span().start_byte() == u64::try_from(start).unwrap()
+                    && site.source.span().end_byte() == u64::try_from(end).unwrap()
+            })
+            .unwrap();
+        assert_eq!(application.role, OccurrenceRole::Reference);
+        assert_eq!(application.enclosing, Some(run.id));
+        assert_exact_parameter_source(service, receipt, source, &application.source, start..end);
+        if proven {
+            assert_eq!(
+                application.target,
+                OccurrenceTarget::Resolved { symbol: target.id }
+            );
+        } else {
+            assert!(matches!(
+                application.target,
+                OccurrenceTarget::Unresolved { .. }
+            ));
+        }
+        let proof = document
+            .provenance
+            .iter()
+            .find(|proof| proof.id == application.provenance)
+            .unwrap();
+        assert_eq!(
+            proof
+                .derivation_parents
+                .contains(&FactRef::Entity(formal.id)),
+            proven
+        );
+        if proven {
+            let clause = formal.evidence.source.as_ref().unwrap();
+            assert!(proof.input_sources.contains(clause));
+            assert!(proof.evidence_sources.contains(clause));
+        }
+        assert_eq!(
+            document
+                .relations
+                .iter()
+                .filter(|relation| {
+                    relation.subject == RelationEndpoint::Occurrence(application.id)
+                        && relation.predicate == RelationPredicate::RefersTo
+                        && relation.object == RelationEndpoint::Entity(target.id)
+                })
+                .count(),
+            usize::from(proven)
+        );
+        assert!(!document.relations.iter().any(|relation| {
+            relation.subject == RelationEndpoint::Occurrence(application.id)
+                && relation.predicate == RelationPredicate::Calls
+        }));
+        assert_eq!(
+            document.skipped_regions.iter().any(|gap| {
+                gap.source == application.source
+                    && gap.detail == "vba-call-or-index-target-unavailable"
+            }),
+            !proven
+        );
+        let callee_start = start + callee_offset;
+        let callee = document
+            .occurrences
+            .iter()
+            .find(|site| {
+                site.syntax_kind == syntax
+                    && site.source.span().start_byte() == u64::try_from(callee_start).unwrap()
+                    && site.source.span().end_byte()
+                        == u64::try_from(callee_start + name.len()).unwrap()
+            })
+            .unwrap();
+        assert_eq!(callee.role, OccurrenceRole::CallSite);
+        assert_eq!(callee.enclosing, Some(run.id));
+        assert_eq!(
+            callee.target,
+            OccurrenceTarget::Resolved { symbol: target.id }
+        );
+        assert_exact_parameter_source(
+            service,
+            receipt,
+            source,
+            &callee.source,
+            callee_start..callee_start + name.len(),
+        );
+        let calls: Vec<_> = document
+            .relations
+            .iter()
+            .filter(|relation| {
+                relation.subject == RelationEndpoint::Occurrence(callee.id)
+                    && relation.predicate == RelationPredicate::Calls
+            })
+            .collect();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].object, RelationEndpoint::Entity(target.id));
+        assert_eq!(calls[0].evidence.source.as_ref(), Some(&callee.source));
+    }
+    assert_eq!(
+        document
+            .relations
+            .iter()
+            .filter(|relation| relation.predicate == RelationPredicate::Calls)
+            .count(),
+        2
+    );
+    let mut rhs_count = 0;
+    for (offset, _) in source[first_start..].match_indices(rhs) {
+        let start = first_start + offset;
+        let end = start + rhs.len();
+        rhs_count += 1;
+        let reference = SourceRef::new(
+            receipt.repository,
+            receipt.generation,
+            SourceSpan::new(
+                file.id,
+                u64::try_from(start).unwrap(),
+                u64::try_from(end).unwrap(),
+            )
+            .unwrap(),
+            content_hash(source.as_bytes()),
+            None,
+        );
+        assert_exact_parameter_source(service, receipt, source, &reference, start..end);
+        let sites: Vec<_> = document
+            .occurrences
+            .iter()
+            .filter(|site| {
+                site.source.span().start_byte() >= u64::try_from(start).unwrap()
+                    && site.source.span().end_byte() <= u64::try_from(end).unwrap()
+            })
+            .collect();
+        match state {
+            NothingValueState::Literal
+            | NothingValueState::GroupedLiteral
+            | NothingValueState::ExtraArgument
+            | NothingValueState::MixedCaseLet
+            | NothingValueState::NativeDate => {
+                assert!(
+                    sites.is_empty(),
+                    "literal source does not imply an occurrence: {state:?}"
+                );
+                assert!(
+                    !document
+                        .skipped_regions
+                        .iter()
+                        .any(|gap| gap.source == reference)
+                );
+            }
+            NothingValueState::String => {
+                assert_eq!(sites.len(), 1);
+                assert_eq!(sites[0].role, OccurrenceRole::StringEvidence);
+                assert_exact_parameter_source(
+                    service,
+                    receipt,
+                    source,
+                    &sites[0].source,
+                    start..end,
+                );
+            }
+            NothingValueState::BracketedName
+            | NothingValueState::GroupedBracketedName
+            | NothingValueState::JoinedName
+            | NothingValueState::MissingBracketedName => {
+                assert_eq!(sites.len(), 1);
+                let site = sites[0];
+                assert_eq!(site.role, OccurrenceRole::Reference);
+                assert_eq!(site.enclosing, Some(run.id));
+                assert_eq!(site.syntax_kind, "vba.value_identifier.reference");
+                assert_exact_parameter_source(service, receipt, source, &site.source, start..end);
+                let missing = matches!(state, NothingValueState::MissingBracketedName);
+                let target_name = if matches!(state, NothingValueState::JoinedName) {
+                    "NothingValue"
+                } else {
+                    "Nothing"
+                };
+                let target = document.entities.iter().find(|entity| {
+                    entity.canonical_name == target_name
+                        && entity.container == Some(rootlight_ir::ContainerRef::Entity(run.id))
+                });
+                if let Some(target) = target {
+                    assert!(!missing);
+                    assert_eq!(
+                        site.target,
+                        OccurrenceTarget::Resolved { symbol: target.id }
+                    );
+                    assert!(document.relations.iter().any(|relation| {
+                        relation.subject == RelationEndpoint::Occurrence(site.id)
+                            && relation.predicate == RelationPredicate::RefersTo
+                            && relation.object == RelationEndpoint::Entity(target.id)
+                            && relation.evidence.source.as_ref() == Some(&site.source)
+                    }));
+                } else {
+                    assert!(missing);
+                    assert!(matches!(site.target, OccurrenceTarget::Unresolved { .. }));
+                    assert!(!document.relations.iter().any(|relation| {
+                        relation.subject == RelationEndpoint::Occurrence(site.id)
+                            && relation.predicate == RelationPredicate::RefersTo
+                    }));
+                }
+                assert!(!document.relations.iter().any(|relation| {
+                    relation.subject == RelationEndpoint::Occurrence(site.id)
+                        && relation.predicate == RelationPredicate::Calls
+                }));
+                assert_eq!(
+                    document.skipped_regions.iter().any(|gap| {
+                        gap.source == site.source && gap.detail == "vba-binding-target-unavailable"
+                    }),
+                    missing
+                );
+            }
+        }
+    }
+    assert_eq!(
+        rhs_count,
+        if matches!(
+            state,
+            NothingValueState::Literal | NothingValueState::GroupedLiteral
+        ) {
+            4
+        } else if matches!(state, NothingValueState::ExtraArgument) {
+            5
+        } else {
+            3
+        }
+    );
+    for name in ["sink", "NothingValue", "Nothing", "Echo", "Consume"] {
+        let located = service
+            .code_locate(
+                receipt.generation,
+                name.to_owned(),
+                LocateMode::Exact,
+                10,
+                0,
+                &deadline(),
+            )
+            .unwrap();
+        let expected: Vec<_> = document
+            .entities
+            .iter()
+            .filter(|entity| entity.canonical_name == name)
+            .collect();
+        let hits: Vec<_> = located
+            .data
+            .hits
+            .iter()
+            .filter(|hit| hit.symbol.is_some())
+            .collect();
+        assert_eq!(hits.len(), expected.len());
+        for entity in expected {
+            let hit = hits
+                .iter()
+                .find(|hit| hit.symbol == Some(entity.id))
+                .unwrap();
+            assert_eq!(hit.source.as_ref(), entity.evidence.source.as_ref());
+            assert_exact_parameter_source(
+                service,
+                receipt,
+                source,
+                hit.source.as_ref().unwrap(),
+                usize::try_from(hit.source.as_ref().unwrap().span().start_byte()).unwrap()
+                    ..usize::try_from(hit.source.as_ref().unwrap().span().end_byte()).unwrap(),
+            );
+        }
+    }
+}
+
+#[test]
+fn nothing_value_edits_preserve_references_calls_and_durable_source_lifetimes() {
+    let states = [
+        NothingValueState::Literal,
+        NothingValueState::GroupedLiteral,
+        NothingValueState::BracketedName,
+        NothingValueState::GroupedBracketedName,
+        NothingValueState::String,
+        NothingValueState::JoinedName,
+        NothingValueState::MissingBracketedName,
+        NothingValueState::ExtraArgument,
+        NothingValueState::NativeDate,
+        NothingValueState::MixedCaseLet,
+        NothingValueState::Literal,
+    ];
+    for language in ["visual-basic-classic", "vba"] {
+        let current = std::env::current_dir().unwrap();
+        let repository = tempfile::tempdir_in(&current).unwrap();
+        let storage = tempfile::tempdir_in(&current).unwrap();
+        let paths = rootlight_runtime::RuntimePaths::new(
+            storage.path().join("state"),
+            storage.path().join("runtime"),
+        )
+        .unwrap();
+        paths.prepare_owner().unwrap();
+        let configuration = (language == "vba").then_some("version='1.3'\n[extensions.source-languages]\nversion='1.0'\ncritical=true\n[extensions.source-languages.data.extensions]\nbas='vba'\n");
+        let policy = FirstSliceStoragePolicy::resolve_user_config(configuration, 4).unwrap();
+        assert_eq!(policy.retained_generations(), 2);
+        let mut previous: Option<(FirstSliceIndexReceipt, String, NothingValueState)> = None;
+        let mut initial_logical = None;
+        for (position, state) in states.into_iter().enumerate() {
+            let source = nothing_value_source(state);
+            fs::write(repository.path().join("module.bas"), &source).unwrap();
+            let mut service = FirstSliceService::new_durable_with_policy(
+                policy.clone(),
+                paths.state_dir(),
+                &deadline(),
+            )
+            .unwrap();
+            let prepared = service
+                .prepare_repository(repository.path(), &deadline())
+                .unwrap();
+            let committed = service
+                .publish_prepared_with_metrics(prepared, &deadline())
+                .unwrap();
+            assert_eq!(committed.evidence().rebuilt_files, 1);
+            assert_eq!(committed.evidence().reused_files, 0);
+            if position > 0 {
+                assert_eq!(committed.evidence().changed_files, 1);
+            }
+            let receipt = committed.receipt().clone();
+            assert_nothing_value_contract(&service, &receipt, &source, language, state);
+            assert_eq!(
+                receipt,
+                service
+                    .index_repository(repository.path(), &deadline())
+                    .unwrap()
+            );
+            if let Some((old_receipt, old_source, old_state)) = &previous {
+                assert_ne!(receipt.generation, old_receipt.generation);
+                assert_ne!(
+                    content_hash(source.as_bytes()),
+                    content_hash(old_source.as_bytes())
+                );
+                assert!(receipt.logical_snapshot.is_some());
+                assert_ne!(receipt.logical_snapshot, old_receipt.logical_snapshot);
+                assert_nothing_value_contract(
+                    &service,
+                    old_receipt,
+                    old_source,
+                    language,
+                    *old_state,
+                );
+            }
+            drop(service);
+            let mut service = FirstSliceService::new_durable_with_policy(
+                policy.clone(),
+                paths.state_dir(),
+                &deadline(),
+            )
+            .unwrap();
+            assert_eq!(
+                receipt,
+                service
+                    .index_repository(repository.path(), &deadline())
+                    .unwrap()
+            );
+            assert_nothing_value_contract(&service, &receipt, &source, language, state);
+            if let Some((old_receipt, old_source, old_state)) = &previous {
+                assert_nothing_value_contract(
+                    &service,
+                    old_receipt,
+                    old_source,
+                    language,
+                    *old_state,
+                );
+            }
+            let prepared = service
+                .prepare_repository_with_options(
+                    repository.path(),
+                    FirstSliceIndexOptions::clean_rebuild(FirstSliceIndexMode::Structural),
+                    &deadline(),
+                )
+                .unwrap();
+            let committed = service
+                .publish_prepared_with_metrics(prepared, &deadline())
+                .unwrap();
+            assert_eq!(committed.evidence().rebuilt_files, 1);
+            assert_eq!(committed.evidence().reused_files, 0);
+            let rebuilt = committed.receipt().clone();
+            assert_ne!(receipt.generation, rebuilt.generation);
+            assert!(receipt.logical_snapshot.is_some());
+            assert_eq!(receipt.logical_snapshot, rebuilt.logical_snapshot);
+            assert_nothing_value_contract(&service, &rebuilt, &source, language, state);
+            if position == 0 {
+                initial_logical = receipt.logical_snapshot.clone();
+            }
+            if position + 1 == states.len() {
+                assert_eq!(source, nothing_value_source(NothingValueState::Literal));
+                assert_eq!(receipt.logical_snapshot, initial_logical);
+            }
+            previous = Some((rebuilt, source, state));
+        }
+    }
 }
 
 #[test]

@@ -361,6 +361,9 @@ pub(super) fn reference_syntax(
             || (parent.kind() == "call_statement"
                 && parent.child_by_field_name("callee") == Some(expression))
     }) || split_output_argument_is_invoked(expression, source);
+    if invoked && !instance && separated_grouped_statement_call(expression, source, cancellation)? {
+        return Ok("vba.invoked_identifier");
+    }
     if let Some(ty) = child
         .parent()
         .filter(|node| node.kind() == "type_expression")
@@ -832,6 +835,81 @@ enum PropertyAccess {
     Set,
 }
 
+fn separated_grouped_statement_call(
+    expression: Node<'_>,
+    source: &[u8],
+    cancellation: &Cancellation,
+) -> Result<bool, AdapterError> {
+    if expression.kind() != "identifier" {
+        return Ok(false);
+    }
+    let Some(application) = expression.parent().filter(|parent| {
+        parent.kind() == "call_expression"
+            && parent.child_by_field_name("function") == Some(expression)
+    }) else {
+        return Ok(false);
+    };
+    let Some(statement) = application.parent().filter(|parent| {
+        parent.kind() == "call_statement"
+            && parent.child_by_field_name("callee") == Some(application)
+            && parent.child_by_field_name("arguments").is_none()
+            && !parent.has_error()
+            && parent.start_byte() == expression.start_byte()
+            && parent.end_byte() == application.end_byte()
+    }) else {
+        return Ok(false);
+    };
+    let Some(arguments) = application.child_by_field_name("arguments") else {
+        return Ok(false);
+    };
+    if arguments.kind() != "argument_list" || arguments.named_child_count() != 1 {
+        return Ok(false);
+    }
+    let mut cursor = arguments.walk();
+    for child in arguments.children(&mut cursor) {
+        cancellation.check()?;
+        if matches!(
+            child.kind(),
+            "," | ";" | "named_argument" | "byval_argument"
+        ) {
+            return Ok(false);
+        }
+    }
+    let Some(gap) = source.get(expression.end_byte()..arguments.start_byte()) else {
+        return Ok(false);
+    };
+    let mut check = || cancellation.check().map_err(AdapterError::from);
+    if gap.is_empty() || rootlight_vba::logical_whitespace_len(gap, &mut check)? != gap.len() {
+        return Ok(false);
+    }
+    let Some(group) = source.get(arguments.byte_range()) else {
+        return Ok(false);
+    };
+    if rootlight_vba::parenthesized_expression_end(group, &mut check)? != Some(group.len()) {
+        return Ok(false);
+    }
+    let mut before = statement.start_byte();
+    while before > 0 {
+        check()?;
+        match source.get(before - 1) {
+            Some(b' ' | b'\t' | b'\x0c') => before -= 1,
+            Some(b'\r' | b'\n' | b':') => break,
+            _ => return Ok(false),
+        }
+    }
+    let Some(tail) = source.get(statement.end_byte()..) else {
+        return Ok(false);
+    };
+    let whitespace = rootlight_vba::logical_whitespace_len(tail, &mut check)?;
+    // MS-VBAL 5.4.2.1 treats a separated parenthesized expression as one
+    // statement argument. Native GLR can instead wrap the callee in a value
+    // application; that partition must not select Get or hide a callable Sub.
+    Ok(matches!(
+        tail.get(whitespace),
+        None | Some(b'\r' | b'\n' | b':' | b'\'')
+    ))
+}
+
 fn property_access(mut expression: Node<'_>) -> Option<PropertyAccess> {
     let mut parent = expression.parent()?;
     if parent.kind() == "call_expression"
@@ -910,6 +988,126 @@ pub(super) fn header_end(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn separated_grouped_calls_do_not_depend_on_native_partition() {
+        let family = super::super::GrammarFamily::Vba;
+        let pack = super::super::QueryPack::compile(family, include_str!("../../queries/vba.scm"))
+            .unwrap();
+        for newline in ["\n", "\r\n"] {
+            for prefix in ["", "Earlier Nothing\n"] {
+                for (body, expected) in [
+                    ("Target (Nothing)", Some("vba.invoked_identifier")),
+                    ("Target\t((value))", Some("vba.invoked_identifier")),
+                    ("Target (value + 1)", Some("vba.invoked_identifier")),
+                    (
+                        "Target (Inner(value, other))",
+                        Some("vba.invoked_identifier"),
+                    ),
+                    ("Target (\"a,b\")", Some("vba.invoked_identifier")),
+                    ("Target _\n (Nothing)", Some("vba.invoked_identifier")),
+                    ("Target(Nothing)", None),
+                    ("Target ()", None),
+                    ("Target (Nothing, value)", None),
+                    ("Target (value,)", None),
+                    ("Target (value:=1)", None),
+                    ("Target (ByVal value)", None),
+                    ("Target (value) extra", None),
+                    ("Target (value).Member", None),
+                    ("Call Target(Nothing)", Some("vba.invoked_identifier")),
+                    (
+                        "sink = Target (Nothing)",
+                        Some("vba.invoked_get_identifier"),
+                    ),
+                    (
+                        "Earlier _\n Target (Nothing)",
+                        Some("vba.invoked_get_identifier"),
+                    ),
+                    (
+                        "sink = _\n Target (Nothing)",
+                        Some("vba.invoked_get_identifier"),
+                    ),
+                    (
+                        "Call Earlier _\n (Target (Nothing))",
+                        Some("vba.invoked_get_identifier"),
+                    ),
+                    (
+                        "' continuation-like comment _\nTarget (Nothing)",
+                        Some("vba.invoked_identifier"),
+                    ),
+                ] {
+                    let source =
+                        format!("Sub Run()\n{prefix}{body}\nEnd Sub\n").replace('\n', newline);
+                    let mut parser = tree_sitter::Parser::new();
+                    parser
+                        .set_language(&tree_sitter_vba::LANGUAGE.into())
+                        .unwrap();
+                    let tree = parser.parse(&source, None).unwrap();
+                    assert!(!tree.root_node().has_error(), "{source}");
+                    let extraction = pack
+                        .extract(
+                            family,
+                            &tree,
+                            source.as_bytes(),
+                            10_000,
+                            1024,
+                            &Cancellation::new(),
+                        )
+                        .unwrap();
+                    assert!(extraction.limit.is_none());
+                    let start = source.find("Target").unwrap();
+                    let references: Vec<_> = extraction
+                        .candidates
+                        .iter()
+                        .filter(|candidate| {
+                            candidate.role == StructuralRole::Reference
+                                && candidate.start == start
+                                && candidate.end == start + 6
+                        })
+                        .collect();
+                    assert_eq!(references.len(), 1, "{source}: {references:?}");
+                    if let Some(expected) = expected {
+                        assert_eq!(
+                            references[0].syntax,
+                            expected,
+                            "{source}: {}",
+                            tree.root_node().to_sexp()
+                        );
+                        if expected == "vba.invoked_get_identifier" {
+                            let name = tree
+                                .root_node()
+                                .named_descendant_for_byte_range(start, start + 6)
+                                .unwrap();
+                            assert!(
+                                !separated_grouped_statement_call(
+                                    name,
+                                    source.as_bytes(),
+                                    &Cancellation::new(),
+                                )
+                                .unwrap(),
+                                "{source}: {}",
+                                tree.root_node().to_sexp()
+                            );
+                        }
+                    } else {
+                        let name = tree
+                            .root_node()
+                            .named_descendant_for_byte_range(start, start + 6)
+                            .unwrap();
+                        assert_eq!(name.kind(), "identifier");
+                        assert!(
+                            !separated_grouped_statement_call(
+                                name,
+                                source.as_bytes(),
+                                &Cancellation::new(),
+                            )
+                            .unwrap()
+                        );
+                    }
+                }
+            }
+        }
+    }
 
     #[test]
     fn member_access_modes_follow_value_and_assignment_contexts() {

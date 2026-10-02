@@ -8,8 +8,8 @@ use super::{
     logical_whitespace_len,
     module::ModuleError,
     module_body::{
-        ModuleAssignmentMode, ModuleScalarValue, ModuleScalarValueKind, atomic_value,
-        radix_integer_prefix,
+        AtomicValueContext, ModuleAssignmentMode, ModuleScalarValue, ModuleScalarValueKind,
+        atomic_value, radix_integer_prefix,
     },
 };
 
@@ -121,6 +121,9 @@ impl ModuleExpressionCall {
 /// One complete source-written parenthesized value application used as a statement.
 ///
 /// Unlike [`ModuleExpressionCall`], its outer callee is a value-application target.
+/// A whitespace-separated single parenthesized expression instead belongs to
+/// [`ModuleExpressionCall`] as one grouped argument. Adjacent, empty and
+/// multiargument statement forms retain this bounded syntax extension.
 /// Get/index syntax does not prove a procedure call, array access, formal-parameter
 /// correspondence, runtime type or successful evaluation. The inventory starts
 /// with the exact outer application, followed by its nested applications.
@@ -131,6 +134,12 @@ pub struct ModuleValueApplication {
     callee: Range<usize>,
     arguments: Range<usize>,
     inventory: ModuleExpressionInventory,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) enum ParenthesizedStatement {
+    ValueApplication(ModuleValueApplication),
+    GroupedCall(ModuleExpressionCall),
 }
 
 impl ModuleValueApplication {
@@ -442,6 +451,8 @@ struct Parser<'a> {
     explicit_callee: Option<Range<usize>>,
     implicit_callee: Option<Range<usize>>,
     implicit_group_assignment: bool,
+    statement_group_argument: bool,
+    single_statement_argument: Option<usize>,
     set_assignment: bool,
 }
 
@@ -449,7 +460,7 @@ struct Parsed {
     inventory: ModuleExpressionInventory,
     span: Range<usize>,
     root_kind: NodeKind,
-    implicit_single_group: bool,
+    grouped_statement_call: bool,
     implicit_group_assignment: bool,
     #[cfg(test)]
     nodes: Vec<Node>,
@@ -474,6 +485,8 @@ impl<'a> Parser<'a> {
             explicit_callee: None,
             implicit_callee: None,
             implicit_group_assignment: false,
+            statement_group_argument: false,
+            single_statement_argument: None,
             set_assignment: false,
         }
     }
@@ -765,8 +778,13 @@ impl<'a> Parser<'a> {
                     });
                     continue;
                 }
-                let Some(value) = atomic_value(self.source, &mut self.cursor, true, check)
-                    .map_err(ModuleError::Cancelled)?
+                let Some(value) = atomic_value(
+                    self.source,
+                    &mut self.cursor,
+                    AtomicValueContext::Value,
+                    check,
+                )
+                .map_err(ModuleError::Cancelled)?
                 else {
                     return Ok(None);
                 };
@@ -794,7 +812,8 @@ impl<'a> Parser<'a> {
                     }
                     ModuleScalarValueKind::Name
                     | ModuleScalarValueKind::String
-                    | ModuleScalarValueKind::Boolean => false,
+                    | ModuleScalarValueKind::Boolean
+                    | ModuleScalarValueKind::Nothing => false,
                 };
                 if adjacent_suffix {
                     return Ok(None);
@@ -895,6 +914,16 @@ impl<'a> Parser<'a> {
                         self.close(node, None, check)?;
                     }
                     FrameKind::Application { node, application } => {
+                        if self.statement_group_argument
+                            && self.frames.len() == 2
+                            && application == 0
+                            && self
+                                .applications
+                                .get(application)
+                                .is_some_and(|record| record.argument_expressions.is_empty())
+                        {
+                            self.single_statement_argument = Some(child);
+                        }
                         self.argument(application, child, check)?;
                         self.close(node, Some(application), check)?;
                     }
@@ -908,7 +937,6 @@ impl<'a> Parser<'a> {
                 let Some(mut root) = self.finish_segment(check)? else {
                     return Ok(None);
                 };
-                let mut implicit_single_group = false;
                 if let Some(Frame {
                     kind: FrameKind::ImplicitApplication { node, application },
                     ..
@@ -916,14 +944,6 @@ impl<'a> Parser<'a> {
                 {
                     let node = *node;
                     let application = *application;
-                    implicit_single_group = self
-                        .applications
-                        .get(application)
-                        .is_some_and(|record| record.argument_expressions.is_empty())
-                        && self
-                            .nodes
-                            .get(root)
-                            .is_some_and(|record| matches!(record.kind, NodeKind::Group(_)));
                     self.argument(application, root, check)?;
                     let end = self.nodes[root].span.end;
                     self.nodes[node].kind = NodeKind::Application(application);
@@ -937,6 +957,46 @@ impl<'a> Parser<'a> {
                 };
                 let span = root_node.span.clone();
                 let root_kind = root_node.kind;
+                let mut grouped_statement_call = false;
+                if root_kind == NodeKind::Application(0)
+                    && let Some(child) = self.single_statement_argument
+                {
+                    check().map_err(ModuleError::Cancelled)?;
+                    let Some(application) = self.applications.first() else {
+                        return Ok(None);
+                    };
+                    let group = application.arguments.clone();
+                    if application.argument_expressions.len() != 1
+                        || self.nodes.get(child).is_none_or(|node| {
+                            application.argument_expressions.first() != Some(&node.span)
+                                || node.span.start <= group.start
+                                || node.span.end >= group.end
+                        })
+                        || group.end != span.end
+                        || self.source.get(group.clone()).is_none()
+                        || self.source.get(group.start) != Some(&b'(')
+                        || group
+                            .end
+                            .checked_sub(1)
+                            .and_then(|end| self.source.get(end))
+                            != Some(&b')')
+                    {
+                        return Ok(None);
+                    }
+                    // MS-VBAL 5.4.2.1: separated parentheses contain one grouped
+                    // implicit-call argument, not evidence of a get/index target.
+                    // Charge its real group node only after complete-root proof.
+                    self.node(NodeKind::Group(child), group.clone(), check)?;
+                    let Some(argument) = self
+                        .applications
+                        .first_mut()
+                        .and_then(|application| application.argument_expressions.first_mut())
+                    else {
+                        return Ok(None);
+                    };
+                    *argument = group;
+                    grouped_statement_call = true;
+                }
                 // Verify flat indices without walking a recursive tree. Pending
                 // placeholders must never reach an admitted source inventory.
                 for node in &self.nodes {
@@ -968,7 +1028,7 @@ impl<'a> Parser<'a> {
                     inventory,
                     span,
                     root_kind,
-                    implicit_single_group,
+                    grouped_statement_call,
                     implicit_group_assignment: self.implicit_group_assignment,
                     #[cfg(test)]
                     nodes: self.nodes,
@@ -1203,14 +1263,14 @@ pub(super) fn assignment_inventory<E>(
     rebase_inventory(parsed, source_range, check).map(Some)
 }
 
-pub(super) fn value_application_statement<E>(
+pub(super) fn parenthesized_statement_application<E>(
     source: &[u8],
     callee: Range<usize>,
     source_range: Range<usize>,
     maximum_nodes: usize,
     maximum_arguments: usize,
     check: &mut impl FnMut() -> Result<(), E>,
-) -> Result<Option<ModuleValueApplication>, ModuleError<E>> {
+) -> Result<Option<ParenthesizedStatement>, ModuleError<E>> {
     check().map_err(ModuleError::Cancelled)?;
     if source_range.end.checked_sub(source_range.start) != Some(source.len())
         || callee.start != 0
@@ -1233,8 +1293,9 @@ pub(super) fn value_application_statement<E>(
     {
         return Ok(None);
     }
-    let Some(parsed) = Parser::new(source, 0, maximum_nodes, maximum_arguments).parse(check)?
-    else {
+    let mut parser = Parser::new(source, 0, maximum_nodes, maximum_arguments);
+    parser.statement_group_argument = callee.end < cursor;
+    let Some(parsed) = parser.parse(check)? else {
         return Ok(None);
     };
     if parsed.root_kind != NodeKind::Application(0)
@@ -1253,19 +1314,32 @@ pub(super) fn value_application_statement<E>(
     {
         return Ok(None);
     }
+    let grouped_statement_call = parsed.grouped_statement_call;
     let (application, inventory) = rebase_inventory(parsed, &source_range, check)?;
     let Some(outer) = inventory.applications.first() else {
         return Ok(None);
     };
     let callee = outer.callee();
     let arguments = outer.arguments();
-    Ok(Some(ModuleValueApplication {
-        statement: source_range,
-        application,
-        callee,
-        arguments,
-        inventory,
-    }))
+    if grouped_statement_call {
+        return Ok(Some(ParenthesizedStatement::GroupedCall(
+            ModuleExpressionCall {
+                statement: source_range,
+                callee,
+                arguments,
+                inventory,
+            },
+        )));
+    }
+    Ok(Some(ParenthesizedStatement::ValueApplication(
+        ModuleValueApplication {
+            statement: source_range,
+            application,
+            callee,
+            arguments,
+            inventory,
+        },
+    )))
 }
 
 pub(super) fn implicit_expression_call<E>(
@@ -1320,10 +1394,9 @@ pub(super) fn implicit_expression_call<E>(
     {
         return Ok(None);
     }
-    // A complete grouped argument has a native value-application callee role;
-    // a leading group followed by '=' instead needs indexed-write evidence.
-    // Other grouped operator operands remain statement-call arguments.
-    if parsed.implicit_single_group || parsed.implicit_group_assignment {
+    // A leading group followed by '=' needs indexed-write evidence rather
+    // than an inferred comparison-call argument.
+    if parsed.implicit_group_assignment {
         return Ok(None);
     }
     let (_, inventory) = rebase_inventory(parsed, &source_range, check)?;
@@ -1702,10 +1775,10 @@ mod tests {
     }
 
     #[test]
-    fn value_application_private_reader_requires_exact_head_root_and_source_boundaries() {
+    fn parenthesized_statement_reader_requires_exact_head_root_and_source_boundaries() {
         let source = b"Target\t (value, Inner(other)) ";
         let read = |callee, range| {
-            value_application_statement(
+            parenthesized_statement_application(
                 source,
                 callee,
                 range,
@@ -1715,7 +1788,11 @@ mod tests {
             )
             .unwrap()
         };
-        let application = read(0..6, 42..42 + source.len()).unwrap();
+        let ParenthesizedStatement::ValueApplication(application) =
+            read(0..6, 42..42 + source.len()).unwrap()
+        else {
+            panic!("the multiargument extension remains a value application");
+        };
         assert_eq!(application.statement(), 42..42 + source.len());
         assert_eq!(application.callee(), 42..48);
         assert_eq!(application.application(), 42..41 + source.len());
@@ -1750,7 +1827,7 @@ mod tests {
             b"Target (value) _\r\n\t ",
         ] {
             assert!(
-                value_application_statement(
+                parenthesized_statement_application(
                     source,
                     0..6,
                     0..source.len(),
@@ -1875,13 +1952,13 @@ mod tests {
     }
 
     #[test]
-    fn implicit_single_leading_groups_cannot_claim_a_statement_application_role() {
-        for tail in [
-            "(value)",
-            "((value))",
-            "(Inner(value, other))",
-            "(\"a,b\")",
-            "(value + 1)",
+    fn implicit_single_leading_groups_retain_one_grouped_statement_call_argument() {
+        for (tail, nodes, arguments, values) in [
+            ("(value)", 4, 1, vec!["value"]),
+            ("((value))", 5, 1, vec!["value"]),
+            ("(Inner(value, other))", 7, 3, vec!["value", "other"]),
+            ("(\"a,b\")", 4, 1, vec!["\"a,b\""]),
+            ("(value + 1)", 6, 1, vec!["value", "1"]),
         ] {
             for newline in ["\n", "\r\n"] {
                 for source in [
@@ -1889,19 +1966,35 @@ mod tests {
                     format!("[Target] _{newline} {tail}"),
                 ] {
                     let arguments_start = source.find(tail).unwrap();
-                    assert!(
-                        implicit_expression_call(
-                            source.as_bytes(),
-                            0..8,
-                            arguments_start,
-                            42..42 + source.len(),
-                            source.len(),
-                            source.len(),
-                            &mut || Ok::<(), ()>(()),
-                        )
-                        .unwrap()
-                        .is_none(),
-                        "{source:?}"
+                    let call = implicit_expression_call(
+                        source.as_bytes(),
+                        0..8,
+                        arguments_start,
+                        42..42 + source.len(),
+                        nodes,
+                        arguments,
+                        &mut || Ok::<(), ()>(()),
+                    )
+                    .unwrap_or_else(|error| panic!("{source:?}: {error:?}"))
+                    .unwrap();
+                    assert_eq!(call.statement(), 42..42 + source.len());
+                    assert_eq!(call.callee(), 42..50);
+                    assert_eq!(call.arguments(), 42 + arguments_start..42 + source.len());
+                    assert_eq!(call.argument_expressions().len(), 1);
+                    assert_eq!(call.argument_expressions()[0], call.arguments());
+                    assert_eq!(
+                        &source[call.arguments().start - 42..call.arguments().end - 42],
+                        tail
+                    );
+                    assert_eq!(call.inventory().work_nodes(), nodes);
+                    assert_eq!(call.inventory().argument_count(), arguments);
+                    assert_eq!(
+                        call.inventory()
+                            .values()
+                            .iter()
+                            .map(|value| &source[value.span().start - 42..value.span().end - 42])
+                            .collect::<Vec<_>>(),
+                        values
                     );
                 }
             }
@@ -2739,7 +2832,7 @@ mod tests {
             "#1/1/2000#",
             "value$+1",
             "Me+1",
-            "Nothing+1",
+            "Nothing.member+1",
             "\"open",
             "\"physical\nline\"",
             "\"continued _\n",

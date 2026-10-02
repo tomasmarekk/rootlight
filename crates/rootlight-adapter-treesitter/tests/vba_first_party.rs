@@ -684,7 +684,7 @@ fn radix_call_limits_preserve_mandatory_identity_and_typed_cancellation() {
         format!("&H{}", "F".repeat(2048)),
         format!("&{}", "7".repeat(2048)),
     ]) {
-        assert_radix_call_limits(&literal);
+        assert_literal_call_limits(&literal);
     }
 }
 
@@ -692,7 +692,7 @@ fn radix_call_limits_preserve_mandatory_identity_and_typed_cancellation() {
 fn integer_suffix_call_limits_preserve_mandatory_identity_and_typed_cancellation() {
     for literal in ["007", "&Hf", "&h0A", "&O7", "&o0007", "&77"] {
         for suffix in ['%', '&', '^'] {
-            assert_radix_call_limits(&format!("{literal}{suffix}"));
+            assert_literal_call_limits(&format!("{literal}{suffix}"));
         }
     }
 }
@@ -703,17 +703,24 @@ fn float_call_limits_preserve_mandatory_identity_and_typed_cancellation() {
         "1.5", ".5", "5.", "1E3", "1e+3", "1D-3", "1d+3", "7!", "7#", "7@", "1.5!", "1e-3#",
         "1D+3@",
     ] {
-        assert_radix_call_limits(literal);
+        assert_literal_call_limits(literal);
     }
     for literal in [
         format!("{}.5D+1@", "7".repeat(2048)),
         format!(".{}e-1!", "5".repeat(2048)),
     ] {
-        assert_radix_call_limits(&literal);
+        assert_literal_call_limits(&literal);
     }
 }
 
-fn assert_radix_call_limits(literal: &str) {
+#[test]
+fn nothing_call_limits_preserve_mandatory_identity_and_typed_cancellation() {
+    for literal in ["Nothing", "nOtHiNg", "NOTHING"] {
+        assert_literal_call_limits(literal);
+    }
+}
+
+fn assert_literal_call_limits(literal: &str) {
     let source =
         format!("Sub Run(ByVal value As Long)\nCall Target({literal}, &O2, &3)\nEnd Sub\n");
     for language in ["vba", "visual-basic-classic"] {
@@ -2618,6 +2625,237 @@ fn implicit_call_raw_continuation_boundary_matches_forced_native_without_fabrica
 }
 
 #[test]
+fn nothing_values_preserve_exact_native_facts_and_source_identity() {
+    let statements = [
+        "Set item = nOtHiNg",
+        "Let item = Nothing",
+        "item = NOTHING",
+        "Call Consume(Nothing, [Nothing], \"Nothing\", Nothing0, Nothing_)",
+        "item = Outer(Nothing)",
+        "item = Outer(Nothing, Inner(Nothing))",
+        "Call Consume((Nothing), Inner(Nothing))",
+        "item = (Nothing)",
+        "item = Not (item Is Nothing)",
+        "item = Nothing + 1",
+        "item = Not Nothing",
+        "Set item = Outer((Nothing), item Is Nothing)",
+        "Consume Nothing",
+        "Outer (Nothing)",
+    ];
+    for newline in ["\n", "\r\n"] {
+        let source = format!(
+            "Sub Run(ByVal item As Object){newline}Dim [Nothing] As Object, Nothing0 As Object, Nothing_ As Object{newline}{}{newline}End Sub{newline}",
+            statements.join(newline)
+        );
+        let bytes = source.as_bytes();
+        for language in ["vba", "visual-basic-classic"] {
+            let fixture = Fixture::new(bytes);
+            let first_party = provider();
+            let native = provider();
+            let budget = limits(4096);
+            let request = fixture.request(&budget, language, Vec::new());
+            let required = first_party
+                .required_syntax_fact_count(&request, &deadline())
+                .unwrap();
+            let output = parse(&first_party, &request);
+            let reference = parse(
+                &native,
+                &fixture.request(
+                    &budget,
+                    language,
+                    vec![IncludedRange::new(
+                        fixture.source.span(),
+                        LanguageId::new(language).unwrap(),
+                    )],
+                ),
+            );
+            assert_eq!(output.facts(), reference.facts(), "{language}: {source}");
+            assert_eq!(output.diagnostics(), reference.diagnostics());
+            assert!(output.diagnostics().is_empty());
+            assert_eq!(
+                output.report().coverage().status(),
+                CoverageStatus::Complete
+            );
+            assert_eq!(
+                output.report().coverage().covered_source_bytes(),
+                bytes.len()
+            );
+            assert_eq!(
+                fixture.source.content_hash(),
+                rootlight_ids::content_hash(bytes)
+            );
+            assert!(native.stats().pooled_parsers > 0);
+            let mut bare_literals = 0;
+            for (start, _) in source.to_ascii_lowercase().match_indices("nothing") {
+                let preceding = start.checked_sub(1).and_then(|index| bytes.get(index));
+                let following = bytes.get(start + 7);
+                if preceding.is_some_and(|byte| {
+                    byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'[' | b'"')
+                }) || following.is_some_and(|byte| byte.is_ascii_alphanumeric() || *byte == b'_')
+                {
+                    continue;
+                }
+                bare_literals += 1;
+                let literal_start = u64::try_from(start).unwrap();
+                assert!(
+                    !output.facts().iter().any(|fact| {
+                        fact.kind() == SyntaxFactKind::Occurrence
+                            && fact.span().start_byte() >= literal_start
+                            && fact.span().end_byte() <= literal_start + 7
+                    }),
+                    "no literal occurrence: {language}: {start}"
+                );
+            }
+            assert_eq!(bare_literals, 17);
+            for token in [b"[Nothing]".as_slice(), b"Nothing0", b"Nothing_"] {
+                assert_eq!(
+                    output
+                        .facts()
+                        .iter()
+                        .filter(|fact| {
+                            fact.syntax_kind().as_str() == "vba.value_identifier.reference"
+                                && bytes_at(bytes, fact.span()) == token
+                        })
+                        .count(),
+                    1
+                );
+            }
+            assert_eq!(
+                output
+                    .facts()
+                    .iter()
+                    .filter(|fact| {
+                        fact.syntax_kind().as_str() == "vba.string.string"
+                            && bytes_at(bytes, fact.span()) == b"\"Nothing\""
+                    })
+                    .count(),
+                1
+            );
+            let exact = parse(
+                &first_party,
+                &fixture.request(&limits(required), language, Vec::new()),
+            );
+            assert_eq!(exact.facts().len(), required);
+            let identity = |parsed: &ParseOutput| {
+                parsed
+                    .facts()
+                    .iter()
+                    .filter(|fact| {
+                        matches!(
+                            fact.syntax_kind().as_str(),
+                            "vba.file.root"
+                                | "vba.file.module"
+                                | "vba.file.scope"
+                                | "vba.sub_function.declaration"
+                                | "vba.sub_function.scope"
+                                | "vba.sub_function.signature"
+                                | "vba.parameter.declaration"
+                                | "vba.variable.declaration"
+                                | "vba.identifier.definition"
+                        )
+                    })
+                    .map(|fact| {
+                        let parent = fact.parent().map(|id| {
+                            let parent = parsed
+                                .facts()
+                                .iter()
+                                .find(|candidate| candidate.local_id() == id)
+                                .unwrap();
+                            (
+                                parent.kind(),
+                                parent.span(),
+                                parent.syntax_kind().as_str().to_owned(),
+                                parent.depth(),
+                            )
+                        });
+                        (
+                            fact.kind(),
+                            fact.span(),
+                            fact.syntax_kind().as_str().to_owned(),
+                            fact.depth(),
+                            parent,
+                        )
+                    })
+                    .collect::<Vec<_>>()
+            };
+            assert_eq!(identity(&output).len(), required);
+            assert_eq!(identity(&exact), identity(&output));
+            assert_eq!(exact.report().coverage().status(), CoverageStatus::Bounded);
+            assert!(
+                exact
+                    .diagnostics()
+                    .iter()
+                    .any(|diagnostic| diagnostic.code().as_str() == "syntax-extraction-limit")
+            );
+            let short = limits(required - 1);
+            assert_eq!(
+                execute_parse(
+                    &first_party,
+                    &fixture.request(&short, language, Vec::new()),
+                    MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
+                    &deadline()
+                )
+                .unwrap_err(),
+                AdapterError::Sink(SinkError::StreamLimit {
+                    resource: ResourceKind::RequiredSyntaxFacts,
+                    observed: required,
+                    limit: required - 1
+                })
+            );
+            assert_eq!(first_party.stats().pooled_parsers, 0);
+            assert_eq!(first_party.stats().checked_out_parsers, 0);
+            assert_eq!(first_party.stats().cache.entries, 0);
+        }
+    }
+}
+
+#[test]
+fn nothing_initializer_and_richer_tails_preserve_whole_native_fallback() {
+    for tail in [
+        "Const Seed = Nothing\n",
+        "Sub Run(Optional item As Object = Nothing)\nEnd Sub\n",
+        "Sub Run()\nDim slots(Nothing) As Long\nEnd Sub\n",
+        "Sub Run()\nSet sink = Nothing()\nEnd Sub\n",
+        "Sub Run()\nSet sink = Nothing.Member\nEnd Sub\n",
+        "Sub Run()\nCall Consume(Nothing.Member)\nEnd Sub\n",
+        "Sub Run()\nsink = Outer(Nothing, value:=1)\nEnd Sub\n",
+        "Sub Run()\nsink = (Nothing) extra\nEnd Sub\n",
+    ] {
+        let source = format!("Sub First()\nSet sink = Nothing\nEnd Sub\n{tail}");
+        for language in ["vba", "visual-basic-classic"] {
+            let fixture = Fixture::new(source.as_bytes());
+            let routed = provider();
+            let native = provider();
+            let budget = limits(4096);
+            let output = parse(&routed, &fixture.request(&budget, language, Vec::new()));
+            let reference = parse(
+                &native,
+                &fixture.request(
+                    &budget,
+                    language,
+                    vec![IncludedRange::new(
+                        fixture.source.span(),
+                        LanguageId::new(language).unwrap(),
+                    )],
+                ),
+            );
+            assert!(routed.stats().pooled_parsers > 0, "{language}: {tail}");
+            assert_eq!(routed.stats().checked_out_parsers, 0);
+            assert_eq!(output.facts(), reference.facts(), "{language}: {tail}");
+            assert_eq!(
+                output.diagnostics(),
+                reference.diagnostics(),
+                "{language}: {tail}"
+            );
+            assert!(output.facts().iter().any(|fact| {
+                fact.syntax_kind().as_str() == "vba.identifier.definition"
+                    && bytes_at(source.as_bytes(), fact.span()) == b"First"
+            }));
+        }
+    }
+}
+
+#[test]
 fn authored_assignment_modes_preserve_exact_native_facts_and_source_identity() {
     for newline in ["\n", "\r\n"] {
         for language in ["vba", "visual-basic-classic"] {
@@ -2885,7 +3123,7 @@ fn authored_set_octal_sources_remain_complete_without_native_parser_work() {
 #[test]
 fn unsupported_set_tails_preserve_whole_native_facts_and_diagnostics() {
     for statement in [
-        "Set sink = Nothing",
+        "Set sink = Nothing.Member",
         "Set sink = Me",
         "Set sink = New Worker",
         "Set sink = AddressOf Worker",
@@ -2938,21 +3176,24 @@ fn unsupported_set_tails_preserve_whole_native_facts_and_diagnostics() {
 }
 
 #[test]
-fn statement_value_applications_preserve_exact_native_source_roles() {
+fn parenthesized_statements_preserve_exact_native_source_roles() {
     for newline in ["\n", "\r\n"] {
-        for statement in [
-            "Target (value)".to_owned(),
-            "Target (value + 1)".to_owned(),
-            "[Target] ((value))".to_owned(),
-            "Target (Inner(value, other))".to_owned(),
-            "Target (\"a,b\")".to_owned(),
-            format!("[Target] _{newline} (value _{newline} + 1)"),
-            "Target(value, other)".to_owned(),
-            "Target (value, other)".to_owned(),
-            "Target()".to_owned(),
-            "[Target] ( )".to_owned(),
-            "Target ((value + 1), Inner(other) * -2)".to_owned(),
-            format!("[Target] _{newline} (value, _{newline} Inner(other))"),
+        for (statement, grouped_call) in [
+            ("Target (value)".to_owned(), true),
+            ("Target (value + 1)".to_owned(), true),
+            ("[Target] ((value))".to_owned(), true),
+            ("Target (Inner(value, other))".to_owned(), true),
+            ("Target (\"a,b\")".to_owned(), true),
+            (format!("[Target] _{newline} (value _{newline} + 1)"), true),
+            ("Target(value, other)".to_owned(), false),
+            ("Target (value, other)".to_owned(), false),
+            ("Target()".to_owned(), false),
+            ("[Target] ( )".to_owned(), false),
+            ("Target ((value + 1), Inner(other) * -2)".to_owned(), false),
+            (
+                format!("[Target] _{newline} (value, _{newline} Inner(other))"),
+                false,
+            ),
         ] {
             let source = format!(
                 "Sub First(){newline}Target value+1{newline}End Sub{newline}Sub Run(ByVal value As Long){newline}{statement} ' ignored (value), other{newline}End Sub{newline}"
@@ -3006,13 +3247,23 @@ fn statement_value_applications_preserve_exact_native_source_roles() {
                     fact.span().start_byte() == u64::try_from(start).unwrap()
                         && fact.span().end_byte() == u64::try_from(start + callee.len()).unwrap()
                 };
+                let (expected, excluded) = if grouped_call {
+                    (
+                        "vba.invoked_identifier.reference",
+                        "vba.invoked_get_identifier.reference",
+                    )
+                } else {
+                    (
+                        "vba.invoked_get_identifier.reference",
+                        "vba.invoked_identifier.reference",
+                    )
+                };
                 assert_eq!(
                     output
                         .facts()
                         .iter()
                         .filter(matches_callee)
-                        .filter(|fact| fact.syntax_kind().as_str()
-                            == "vba.invoked_get_identifier.reference")
+                        .filter(|fact| fact.syntax_kind().as_str() == expected)
                         .count(),
                     1,
                     "{language}: {statement}"
@@ -3022,8 +3273,7 @@ fn statement_value_applications_preserve_exact_native_source_roles() {
                         .facts()
                         .iter()
                         .filter(matches_callee)
-                        .any(|fact| fact.syntax_kind().as_str()
-                            == "vba.invoked_identifier.reference")
+                        .any(|fact| fact.syntax_kind().as_str() == excluded)
                 );
                 assert_eq!(
                     output
@@ -3045,19 +3295,29 @@ fn statement_value_applications_preserve_exact_native_source_roles() {
 }
 
 #[test]
-fn statement_value_application_arguments_preserve_parentheses_and_inner_expression_boundaries() {
+fn parenthesized_statement_arguments_preserve_group_and_application_boundaries() {
     for newline in ["\n", "\r\n"] {
-        for (statement, expected_arguments) in [
-            ("Target()".to_owned(), Vec::new()),
-            ("Target (value)".to_owned(), vec!["value".to_owned()]),
-            ("[Target] ((value))".to_owned(), vec!["(value)".to_owned()]),
+        for (statement, expected_arguments, grouped_call) in [
+            ("Target()".to_owned(), Vec::new(), false),
+            (
+                "Target (value)".to_owned(),
+                vec!["(value)".to_owned()],
+                true,
+            ),
+            (
+                "[Target] ((value))".to_owned(),
+                vec!["((value))".to_owned()],
+                true,
+            ),
             (
                 "Target (value + 1, Inner(other) * -2)".to_owned(),
                 vec!["value + 1".to_owned(), "Inner(other) * -2".to_owned()],
+                false,
             ),
             (
                 format!("[Target] _{newline} (value _{newline} + 1, _{newline} Inner(other))"),
                 vec![format!("value _{newline} + 1"), "Inner(other)".to_owned()],
+                false,
             ),
         ] {
             let source = format!(
@@ -3069,13 +3329,38 @@ fn statement_value_application_arguments_preserve_parentheses_and_inner_expressi
                 &mut || Ok::<(), ()>(()),
             )
             .unwrap();
-            let [rootlight_vba::ModuleBodyStatement::ValueApplication(application)] =
-                inventory.procedures()[0].statements()
-            else {
-                panic!(
-                    "the complete parenthesized statement must retain its value-application role: {statement}"
-                );
+            let [written] = inventory.procedures()[0].statements() else {
+                panic!("one complete parenthesized statement is required");
             };
+            let (statement_range, callee_range, parentheses, arguments, expressions, actual_call) =
+                match written {
+                    rootlight_vba::ModuleBodyStatement::ValueApplication(application) => (
+                        application.statement(),
+                        application.callee(),
+                        application.arguments(),
+                        application.argument_expressions(),
+                        application.inventory(),
+                        false,
+                    ),
+                    rootlight_vba::ModuleBodyStatement::ExpressionCall(call) => (
+                        call.statement(),
+                        call.callee(),
+                        call.arguments(),
+                        call.argument_expressions(),
+                        call.inventory(),
+                        true,
+                    ),
+                    rootlight_vba::ModuleBodyStatement::Declaration(_)
+                    | rootlight_vba::ModuleBodyStatement::Variables(_)
+                    | rootlight_vba::ModuleBodyStatement::Assignment(_)
+                    | rootlight_vba::ModuleBodyStatement::ApplicationAssignment(_)
+                    | rootlight_vba::ModuleBodyStatement::ExpressionAssignment(_)
+                    | rootlight_vba::ModuleBodyStatement::Call(_)
+                    | rootlight_vba::ModuleBodyStatement::ProcedureExit(_) => {
+                        panic!("complete parenthesized statement expected: {statement}")
+                    }
+                };
+            assert_eq!(actual_call, grouped_call, "{statement}");
             let start = source.find(&statement).unwrap();
             let end = start + statement.len();
             let callee = if statement.starts_with('[') {
@@ -3083,36 +3368,28 @@ fn statement_value_application_arguments_preserve_parentheses_and_inner_expressi
             } else {
                 "Target"
             };
-            assert_eq!(application.statement(), start..end);
-            assert_eq!(application.application(), start..end);
-            assert_eq!(&source[application.callee()], callee);
-            let parentheses = application.arguments();
+            assert_eq!(statement_range, start..end);
+            assert_eq!(&source[callee_range.clone()], callee);
             assert_eq!(
                 &source[parentheses.clone()],
                 &statement[statement.find('(').unwrap()..]
             );
             assert_eq!(source.as_bytes()[parentheses.start], b'(');
             assert_eq!(source.as_bytes()[parentheses.end - 1], b')');
-            assert_eq!(
-                application.argument_expressions().len(),
-                expected_arguments.len()
-            );
-            for (range, expected) in application
-                .argument_expressions()
-                .iter()
-                .zip(&expected_arguments)
-            {
-                assert!(parentheses.start < range.start && range.end < parentheses.end);
+            assert_eq!(arguments.len(), expected_arguments.len());
+            for (range, expected) in arguments.iter().zip(&expected_arguments) {
+                if grouped_call {
+                    assert_eq!(range, &parentheses);
+                } else {
+                    assert!(parentheses.start < range.start && range.end < parentheses.end);
+                }
                 assert_eq!(&source[range.clone()], expected);
             }
-            let root = &application.inventory().applications()[0];
-            assert_eq!(root.application(), application.application());
-            assert_eq!(root.callee(), application.callee());
-            assert_eq!(root.arguments(), application.arguments());
-            assert_eq!(
-                root.argument_expressions(),
-                application.argument_expressions()
-            );
+            let root = &expressions.applications()[0];
+            assert_eq!(root.application(), statement_range);
+            assert_eq!(root.callee(), callee_range);
+            assert_eq!(root.arguments(), parentheses);
+            assert_eq!(root.argument_expressions(), arguments);
         }
     }
 }

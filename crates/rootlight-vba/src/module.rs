@@ -519,10 +519,15 @@ impl<E: std::error::Error + 'static> std::error::Error for ModuleError<E> {
 /// Plain comparison chains
 /// stay on the native route, including those inside groups or argument lists.
 /// Logical tails alone do not separate the outer Set comparison scope.
-/// Const values are INTEGER or FLOAT tokens with an optional
-/// unary minus, physically closed doubled-quote strings or True/False; assignments additionally
-/// admit names, grouped expressions, unary signs/Not, ordinary arithmetic,
-/// concatenation, comparison and logical operators, and nested simple-name applications.
+/// Const values are INTEGER or FLOAT tokens with an optional unary minus,
+/// physically closed doubled-quote strings or True/False. Assignments additionally
+/// admit source-written Nothing, names, grouped expressions, unary signs/Not,
+/// arithmetic, concatenation, comparison and logical operators, and nested
+/// simple-name applications.
+/// Nothing is a literal in value expressions and positional arguments, not a name
+/// reference, inferred object identity or runtime result. Const initializers and
+/// optional parameter defaults do not gain Nothing admission; array bounds remain
+/// numeric-only. Bracketed `[Nothing]` remains an ordinary name.
 /// Applications retain complete positional expression ranges without deciding whether
 /// their targets are procedures or arrays. Old scalar and standalone scalar-application
 /// records remain distinct. Explicit Call statements admit a simple callee and optional
@@ -531,10 +536,13 @@ impl<E: std::error::Error + 'static> std::error::Error for ModuleError<E> {
 /// that callee separated by logical trivia from a complete comma-separated list
 /// of the same expressions. Parentheses in that list remain expression groups,
 /// not an inferred outer Call list or evidence of ByRef behavior. A complete
-/// standalone simple-name application with authored parentheses is retained as a
-/// separate ValueApplication statement, with its root and nested get/index syntax;
-/// it is not reclassified as a statement call. Empty and positional expression
-/// lists are admitted without target, type or formal-parameter inference. Grouped
+/// standalone simple-name application with adjacent parentheses is retained as a
+/// separate ValueApplication statement, with its root and nested get/index syntax.
+/// A whitespace-separated single parenthesized expression is one grouped implicit
+/// call argument, including its authored parentheses and a charged group node.
+/// Empty and multiargument parenthesized statement lists retain the existing
+/// ValueApplication extension even when separated; this is not complete VBA call
+/// syntax. No target, type or formal-parameter inference is performed. Grouped
 /// operands in implicit operator tails and outer comma lists remain statement calls.
 /// A leading complete group followed by '=' remains on the native
 /// route because indexed assignments and comparison calls can share those bytes;
@@ -1749,6 +1757,255 @@ mod tests {
     }
 
     #[test]
+    fn nothing_value_contexts_preserve_module_order_and_exact_aggregate_ceilings() {
+        for newline in ["\n", "\r\n"] {
+            let bodies = [
+                "Set sink=nOtHiNg",
+                "Let sink=[Nothing]",
+                "sink=\"Nothing\"",
+                "Call Target(Nothing,[Nothing])",
+                "sink=Read(Nothing,[Nothing])",
+                "sink=Outer(Inner(Nothing),[Nothing])",
+                "sink=other Is Nothing",
+                "Target(Nothing,[Nothing])",
+            ];
+            let source = format!(
+                "Sub First(){newline}{}{newline}End Sub{newline}Sub Later(){newline}sink=Nothing0{newline}End Sub{newline}",
+                bodies.join(newline)
+            );
+            let limits = ModuleLimits::new(source.len(), 13, 2)
+                .with_max_arguments(9)
+                .with_max_expression_nodes(13);
+            let mut checkpoints = 0;
+            let inventory = module_inventory(source.as_bytes(), limits, &mut || {
+                checkpoints += 1;
+                Ok::<(), ()>(())
+            })
+            .unwrap();
+            assert_eq!(inventory.statement_count(), 13);
+            assert_eq!(inventory.procedures().len(), 2);
+            let statements = inventory.procedures()[0].statements();
+            assert_eq!(statements.len(), bodies.len());
+            let mut previous_end = 0;
+            for (statement, written) in statements.iter().zip(bodies) {
+                let start = previous_end + source[previous_end..].find(written).unwrap();
+                assert_eq!(statement.statement(), start..start + written.len());
+                assert!(statement.statement().start > previous_end);
+                previous_end = statement.statement().end;
+            }
+            let ModuleBodyStatement::Assignment(nothing) = &statements[0] else {
+                panic!("literal assignment expected");
+            };
+            assert_eq!(nothing.assignment_mode(), Some(ModuleAssignmentMode::Set));
+            assert_eq!(&source[nothing.assignment_keyword_range().unwrap()], "Set");
+            assert_eq!(nothing.value().kind(), ModuleScalarValueKind::Nothing);
+            assert_eq!(&source[nothing.value().span()], "nOtHiNg");
+            let ModuleBodyStatement::Assignment(name) = &statements[1] else {
+                panic!("quoted-name assignment expected");
+            };
+            assert_eq!(name.assignment_mode(), Some(ModuleAssignmentMode::Let));
+            assert_eq!(name.value().kind(), ModuleScalarValueKind::Name);
+            assert_eq!(&source[name.value().span()], "[Nothing]");
+            let ModuleBodyStatement::Assignment(string) = &statements[2] else {
+                panic!("string assignment expected");
+            };
+            assert_eq!(string.assignment_mode(), None);
+            assert_eq!(string.value().kind(), ModuleScalarValueKind::String);
+            assert_eq!(&source[string.value().span()], "\"Nothing\"");
+            let ModuleBodyStatement::Call(call) = &statements[3] else {
+                panic!("atomic Call expected");
+            };
+            let ModuleBodyStatement::ApplicationAssignment(application) = &statements[4] else {
+                panic!("atomic application assignment expected");
+            };
+            for values in [call.argument_values(), application.argument_values()] {
+                assert_eq!(values.len(), 2);
+                assert_eq!(values[0].kind(), ModuleScalarValueKind::Nothing);
+                assert_eq!(values[1].kind(), ModuleScalarValueKind::Name);
+                assert_eq!(&source[values[0].span()], "Nothing");
+                assert_eq!(&source[values[1].span()], "[Nothing]");
+            }
+            let ModuleBodyStatement::ExpressionAssignment(nested) = &statements[5] else {
+                panic!("nested application assignment expected");
+            };
+            assert_eq!(nested.inventory().work_nodes(), 6);
+            assert_eq!(nested.inventory().argument_count(), 3);
+            assert_eq!(
+                nested
+                    .inventory()
+                    .values()
+                    .iter()
+                    .map(|value| value.kind())
+                    .collect::<Vec<_>>(),
+                [ModuleScalarValueKind::Nothing, ModuleScalarValueKind::Name]
+            );
+            assert_eq!(
+                nested
+                    .inventory()
+                    .values()
+                    .iter()
+                    .map(|value| &source[value.span()])
+                    .collect::<Vec<_>>(),
+                ["Nothing", "[Nothing]"]
+            );
+            assert_eq!(
+                nested
+                    .inventory()
+                    .applications()
+                    .iter()
+                    .map(|application| &source[application.callee()])
+                    .collect::<Vec<_>>(),
+                ["Outer", "Inner"]
+            );
+            let ModuleBodyStatement::ExpressionAssignment(comparison) = &statements[6] else {
+                panic!("structured comparison assignment expected");
+            };
+            assert_eq!(comparison.inventory().work_nodes(), 3);
+            assert_eq!(comparison.inventory().argument_count(), 0);
+            assert_eq!(
+                comparison
+                    .inventory()
+                    .values()
+                    .iter()
+                    .map(|value| value.kind())
+                    .collect::<Vec<_>>(),
+                [ModuleScalarValueKind::Name, ModuleScalarValueKind::Nothing]
+            );
+            assert_eq!(
+                comparison
+                    .inventory()
+                    .values()
+                    .iter()
+                    .map(|value| &source[value.span()])
+                    .collect::<Vec<_>>(),
+                ["other", "Nothing"]
+            );
+            let ModuleBodyStatement::ValueApplication(value_application) = &statements[7] else {
+                panic!("standalone value application expected");
+            };
+            assert_eq!(value_application.inventory().work_nodes(), 4);
+            assert_eq!(value_application.inventory().argument_count(), 2);
+            assert_eq!(
+                value_application
+                    .inventory()
+                    .values()
+                    .iter()
+                    .map(|value| value.kind())
+                    .collect::<Vec<_>>(),
+                [ModuleScalarValueKind::Nothing, ModuleScalarValueKind::Name]
+            );
+            assert_eq!(&source[value_application.application()], bodies[7]);
+            let later = inventory.procedures()[1].statements();
+            assert_eq!(later.len(), 1);
+            let ModuleBodyStatement::Assignment(joined) = &later[0] else {
+                panic!("joined ordinary-name assignment expected");
+            };
+            assert_eq!(joined.value().kind(), ModuleScalarValueKind::Name);
+            assert_eq!(&source[joined.value().span()], "Nothing0");
+            assert!(joined.statement().start > previous_end);
+            assert_eq!(
+                module_inventory(
+                    source.as_bytes(),
+                    limits.with_max_arguments(8),
+                    &mut || Ok::<(), ()>(())
+                ),
+                Err(ModuleError::ArgumentLimit)
+            );
+            assert_eq!(
+                module_inventory(
+                    source.as_bytes(),
+                    limits.with_max_expression_nodes(12),
+                    &mut || Ok::<(), ()>(())
+                ),
+                Err(ModuleError::ExpressionLimit)
+            );
+            assert_eq!(
+                module_inventory(
+                    source.as_bytes(),
+                    ModuleLimits::new(source.len(), 12, 2)
+                        .with_max_arguments(9)
+                        .with_max_expression_nodes(13),
+                    &mut || Ok::<(), ()>(())
+                ),
+                Err(ModuleError::StatementLimit)
+            );
+            for cancelled_at in 1..=checkpoints {
+                let mut calls = 0;
+                assert_eq!(
+                    module_inventory(source.as_bytes(), limits, &mut || {
+                        calls += 1;
+                        if calls == cancelled_at {
+                            Err("stop")
+                        } else {
+                            Ok(())
+                        }
+                    }),
+                    Err(ModuleError::Cancelled("stop")),
+                    "checkpoint {cancelled_at}"
+                );
+                assert_eq!(calls, cancelled_at);
+            }
+        }
+    }
+
+    #[test]
+    fn nothing_does_not_expand_initializers_bounds_or_partial_value_tails() {
+        for newline in ["\n", "\r\n"] {
+            for tail in [
+                "Const Seed As Object=Nothing",
+                "Const Seed As Object=-Nothing",
+                "Dim values(Nothing) As Long",
+                "Dim values(1 To Nothing) As Long",
+                "Dim values([Nothing]) As Long",
+                "Set sink=Nothing()",
+                "sink=Nothing.member",
+                "sink=Nothing$",
+                "sink=Nothing extra",
+                "sink=Nothing +",
+                "sink=Read(Nothing,)",
+                "sink=Outer(Nothing())",
+                "Call Target(Nothing.member)",
+                "Call Nothing()",
+                "Nothing=other",
+            ] {
+                let source = format!(
+                    "Sub First(){newline}Set sink=Nothing{newline}End Sub{newline}Sub Later(){newline}Call Target(Nothing){newline}{tail}{newline}End Sub{newline}"
+                );
+                let start = source.find(tail).unwrap();
+                assert_eq!(
+                    parse(source.as_bytes()),
+                    Err(ModuleError::Unsupported {
+                        range: start..start + tail.len()
+                    }),
+                    "{tail}"
+                );
+            }
+            for tail in [
+                "Const Seed=Nothing",
+                "Public Const Seed As Object=Nothing",
+                "Sub Later(Optional value=Nothing)",
+            ] {
+                let ending = if tail.starts_with("Sub") {
+                    format!("{newline}End Sub{newline}")
+                } else {
+                    newline.to_owned()
+                };
+                let source = format!(
+                    "Sub First(){newline}Set sink=Nothing{newline}End Sub{newline}{tail}{ending}"
+                );
+                let start = source.find(tail).unwrap();
+                assert_eq!(
+                    parse(source.as_bytes()),
+                    Err(ModuleError::Unsupported {
+                        range: start..start + tail.len()
+                    }),
+                    "{tail}"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn assignment_modes_preserve_whole_module_source_order_comments_and_later_procedures() {
         for newline in ["\n", "\r\n"] {
             let scalar = format!("sEt _{newline} [item] _{newline} = _{newline} other");
@@ -1976,7 +2233,7 @@ mod tests {
     #[test]
     fn unsupported_set_assignment_tails_reject_all_prior_module_records() {
         for tail in [
-            "Set item=Nothing",
+            "Set item=Nothing.member",
             "Set item=New Other",
             "Set item=AddressOf Other",
             "Set item=other.member",
@@ -2008,6 +2265,188 @@ mod tests {
                 }),
                 "{tail}"
             );
+        }
+    }
+
+    #[test]
+    fn separated_single_groups_preserve_module_roles_order_and_exact_aggregate_limits() {
+        for newline in ["\n", "\r\n"] {
+            let later = format!("[Target] _{newline} ((Nothing))");
+            let first = [
+                "Target(Nothing)",
+                "Target (Nothing)",
+                "Target (Nothing,[Nothing])",
+                "Target ()",
+            ];
+            let source = format!(
+                "Sub First(){newline}{}{newline}End Sub{newline}Sub Later(){newline}{later}{newline}End Sub{newline}",
+                first.join(newline)
+            );
+            let limits = ModuleLimits::new(source.len(), 9, 2)
+                .with_max_arguments(5)
+                .with_max_expression_nodes(18);
+            let mut checkpoints = 0;
+            let inventory = module_inventory(source.as_bytes(), limits, &mut || {
+                checkpoints += 1;
+                Ok::<(), ()>(())
+            })
+            .unwrap();
+            assert_eq!(inventory.statement_count(), 9);
+            assert_eq!(inventory.procedures().len(), 2);
+            assert_eq!(inventory.procedures()[0].statements().len(), 4);
+            assert_eq!(inventory.procedures()[1].statements().len(), 1);
+            let mut previous_end = 0;
+            for (statement, written, grouped_call, nodes, arguments, expected_expressions) in [
+                (
+                    &inventory.procedures()[0].statements()[0],
+                    first[0],
+                    false,
+                    3,
+                    1,
+                    vec!["Nothing"],
+                ),
+                (
+                    &inventory.procedures()[0].statements()[1],
+                    first[1],
+                    true,
+                    4,
+                    1,
+                    vec!["(Nothing)"],
+                ),
+                (
+                    &inventory.procedures()[0].statements()[2],
+                    first[2],
+                    false,
+                    4,
+                    2,
+                    vec!["Nothing", "[Nothing]"],
+                ),
+                (
+                    &inventory.procedures()[0].statements()[3],
+                    first[3],
+                    false,
+                    2,
+                    0,
+                    vec![],
+                ),
+                (
+                    &inventory.procedures()[1].statements()[0],
+                    later.as_str(),
+                    true,
+                    5,
+                    1,
+                    vec!["((Nothing))"],
+                ),
+            ] {
+                let start = previous_end + source[previous_end..].find(written).unwrap();
+                assert_eq!(statement.statement(), start..start + written.len());
+                assert!(statement.statement().start > previous_end);
+                previous_end = statement.statement().end;
+                let (callee, argument_range, expressions, values) = match statement {
+                    ModuleBodyStatement::ValueApplication(application) => {
+                        assert!(!grouped_call, "{written:?}");
+                        assert_eq!(application.application(), application.statement());
+                        assert_eq!(application.inventory().work_nodes(), nodes);
+                        assert_eq!(application.inventory().argument_count(), arguments);
+                        (
+                            application.callee(),
+                            application.arguments(),
+                            application.argument_expressions(),
+                            application.inventory().values(),
+                        )
+                    }
+                    ModuleBodyStatement::ExpressionCall(call) => {
+                        assert!(grouped_call, "{written:?}");
+                        assert_eq!(call.inventory().work_nodes(), nodes);
+                        assert_eq!(call.inventory().argument_count(), arguments);
+                        assert_eq!(
+                            call.inventory().applications()[0].application(),
+                            call.statement()
+                        );
+                        assert_eq!(call.argument_expressions().len(), 1);
+                        assert_eq!(call.argument_expressions()[0], call.arguments());
+                        (
+                            call.callee(),
+                            call.arguments(),
+                            call.argument_expressions(),
+                            call.inventory().values(),
+                        )
+                    }
+                    _ => panic!("{written:?}: complete parenthesized statement expected"),
+                };
+                let callee_len = if written.starts_with('[') { 8 } else { 6 };
+                assert_eq!(callee, start..start + callee_len);
+                assert_eq!(
+                    argument_range,
+                    start + written.find('(').unwrap()..start + written.len()
+                );
+                assert_eq!(
+                    expressions
+                        .iter()
+                        .map(|span| &source[span.clone()])
+                        .collect::<Vec<_>>(),
+                    expected_expressions
+                );
+                if arguments == 0 {
+                    assert!(values.is_empty());
+                } else {
+                    assert_eq!(values[0].kind(), ModuleScalarValueKind::Nothing);
+                    assert_eq!(&source[values[0].span()], "Nothing");
+                    assert_eq!(values.len(), arguments);
+                    if arguments == 2 {
+                        assert_eq!(values[1].kind(), ModuleScalarValueKind::Name);
+                        assert_eq!(&source[values[1].span()], "[Nothing]");
+                    }
+                }
+            }
+            for maximum in 0..18 {
+                assert_eq!(
+                    module_inventory(
+                        source.as_bytes(),
+                        limits.with_max_expression_nodes(maximum),
+                        &mut || Ok::<(), ()>(())
+                    ),
+                    Err(ModuleError::ExpressionLimit),
+                    "nodes {maximum}"
+                );
+            }
+            for maximum in 0..5 {
+                assert_eq!(
+                    module_inventory(
+                        source.as_bytes(),
+                        limits.with_max_arguments(maximum),
+                        &mut || Ok::<(), ()>(())
+                    ),
+                    Err(ModuleError::ArgumentLimit),
+                    "arguments {maximum}"
+                );
+            }
+            assert_eq!(
+                module_inventory(
+                    source.as_bytes(),
+                    ModuleLimits::new(source.len(), 8, 2)
+                        .with_max_arguments(5)
+                        .with_max_expression_nodes(18),
+                    &mut || Ok::<(), ()>(())
+                ),
+                Err(ModuleError::StatementLimit)
+            );
+            for cancelled_at in 1..=checkpoints {
+                let mut calls = 0;
+                assert_eq!(
+                    module_inventory(source.as_bytes(), limits, &mut || {
+                        calls += 1;
+                        if calls == cancelled_at {
+                            Err("stop")
+                        } else {
+                            Ok(())
+                        }
+                    }),
+                    Err(ModuleError::Cancelled("stop")),
+                    "checkpoint {cancelled_at}"
+                );
+                assert_eq!(calls, cancelled_at);
+            }
         }
     }
 
@@ -8388,7 +8827,7 @@ mod tests {
             "Dim item As Product",
             "Dim value As Long=1",
             "value=Me",
-            "value=Nothing",
+            "value=Nothing()",
             "value=Null",
             "value=Empty",
             "Load=1",

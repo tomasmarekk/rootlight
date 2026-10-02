@@ -426,6 +426,9 @@ pub enum ModuleScalarValueKind {
     String,
     /// An unbracketed True or False keyword, without coercion or evaluation.
     Boolean,
+    /// An unbracketed Nothing keyword in a value context, without runtime evaluation.
+    /// This is not an ordinary name, inferred object identity or initializer value.
+    Nothing,
     /// One ASCII name, retaining authored brackets and requiring later binding.
     Name,
 }
@@ -755,8 +758,8 @@ fn scalar_assignment<E>(
     maximum_arguments: usize,
     check: &mut impl FnMut() -> Result<(), E>,
 ) -> Result<Option<ModuleBodyStatement>, ModuleError<E>> {
-    let Some(value) =
-        atomic_value(text, &mut cursor, true, check).map_err(ModuleError::Cancelled)?
+    let Some(value) = atomic_value(text, &mut cursor, AtomicValueContext::Value, check)
+        .map_err(ModuleError::Cancelled)?
     else {
         return Ok(None);
     };
@@ -841,7 +844,7 @@ fn implicit_call<E>(
         return atomic_call(text, range, arguments_start, callee, 0, check);
     }
     if text.get(arguments_start) == Some(&b'(')
-        && let Some(application) = module_expression::value_application_statement(
+        && let Some(application) = module_expression::parenthesized_statement_application(
             text,
             callee.clone(),
             range.clone(),
@@ -850,7 +853,14 @@ fn implicit_call<E>(
             check,
         )?
     {
-        return Ok(Some(ModuleBodyStatement::ValueApplication(application)));
+        return Ok(Some(match application {
+            module_expression::ParenthesizedStatement::ValueApplication(application) => {
+                ModuleBodyStatement::ValueApplication(application)
+            }
+            module_expression::ParenthesizedStatement::GroupedCall(call) => {
+                ModuleBodyStatement::ExpressionCall(call)
+            }
+        }));
     }
     if arguments_start == name_end {
         return Ok(None);
@@ -989,8 +999,8 @@ fn scalar_arguments<E>(
         if values.len() >= maximum {
             return Err(ModuleError::ArgumentLimit);
         }
-        let Some(value) =
-            atomic_value(text, cursor, true, check).map_err(ModuleError::Cancelled)?
+        let Some(value) = atomic_value(text, cursor, AtomicValueContext::Value, check)
+            .map_err(ModuleError::Cancelled)?
         else {
             return Ok(None);
         };
@@ -1180,6 +1190,13 @@ enum InitializerContext {
     ParameterDefault,
 }
 
+#[derive(Clone, Copy)]
+pub(super) enum AtomicValueContext {
+    Value,
+    LiteralInitializer,
+    ParameterDefault,
+}
+
 fn initializer_value<E>(
     text: &[u8],
     cursor: &mut usize,
@@ -1212,7 +1229,10 @@ fn initializer_value<E>(
         atomic_value(
             text,
             &mut end,
-            matches!(context, InitializerContext::ParameterDefault),
+            match context {
+                InitializerContext::Literal => AtomicValueContext::LiteralInitializer,
+                InitializerContext::ParameterDefault => AtomicValueContext::ParameterDefault,
+            },
             check,
         )?
     };
@@ -1228,7 +1248,7 @@ fn initializer_value<E>(
 pub(super) fn atomic_value<E>(
     text: &[u8],
     cursor: &mut usize,
-    allow_name: bool,
+    context: AtomicValueContext,
     check: &mut impl FnMut() -> Result<(), E>,
 ) -> Result<Option<ModuleScalarValue>, E> {
     let start = *cursor;
@@ -1261,7 +1281,15 @@ pub(super) fn atomic_value<E>(
         let keyword = word(text, cursor, check)?;
         if keyword.eq_ignore_ascii_case(b"True") || keyword.eq_ignore_ascii_case(b"False") {
             ModuleScalarValueKind::Boolean
-        } else if allow_name {
+        } else if matches!(context, AtomicValueContext::Value)
+            && keyword.eq_ignore_ascii_case(b"Nothing")
+        {
+            // Value admission must not expand Const or optional-default syntax.
+            ModuleScalarValueKind::Nothing
+        } else if matches!(
+            context,
+            AtomicValueContext::Value | AtomicValueContext::ParameterDefault
+        ) {
             *cursor = start;
             if simple_name(text, cursor, check)?.is_none() {
                 return Ok(None);
@@ -1562,6 +1590,416 @@ mod tests {
         statement(text, 0..text.len(), text.len(), &mut || Ok::<(), ()>(())).unwrap()
     }
 
+    fn value_statement_inventory(
+        statement: &ModuleBodyStatement,
+    ) -> (&'static str, Vec<&ModuleScalarValue>, usize, usize) {
+        let (kind, inventory) = match statement {
+            ModuleBodyStatement::Assignment(assignment) => {
+                return ("assignment", vec![assignment.value()], 0, 0);
+            }
+            ModuleBodyStatement::ApplicationAssignment(assignment) => {
+                return (
+                    "application-assignment",
+                    assignment.argument_values().iter().collect(),
+                    0,
+                    assignment.argument_values().len(),
+                );
+            }
+            ModuleBodyStatement::Call(call) => {
+                return (
+                    "call",
+                    call.argument_values().iter().collect(),
+                    0,
+                    call.argument_values().len(),
+                );
+            }
+            ModuleBodyStatement::ExpressionAssignment(assignment) => {
+                ("expression-assignment", assignment.inventory())
+            }
+            ModuleBodyStatement::ExpressionCall(call) => ("expression-call", call.inventory()),
+            ModuleBodyStatement::ValueApplication(application) => {
+                ("value-application", application.inventory())
+            }
+            ModuleBodyStatement::Declaration(_)
+            | ModuleBodyStatement::Variables(_)
+            | ModuleBodyStatement::ProcedureExit(_) => {
+                panic!("a complete value-bearing statement is required")
+            }
+        };
+        (
+            kind,
+            inventory.values().iter().collect(),
+            inventory.work_nodes(),
+            inventory.argument_count(),
+        )
+    }
+
+    #[test]
+    fn nothing_value_atoms_preserve_literal_name_and_string_categories() {
+        for newline in ["\n", "\r\n"] {
+            for (prefix, mode) in [
+                ("", None),
+                ("Let", Some(ModuleAssignmentMode::Let)),
+                ("Set", Some(ModuleAssignmentMode::Set)),
+            ] {
+                for (spelling, kind) in [
+                    ("Nothing", ModuleScalarValueKind::Nothing),
+                    ("nOtHiNg", ModuleScalarValueKind::Nothing),
+                    ("[Nothing]", ModuleScalarValueKind::Name),
+                    ("Nothing0", ModuleScalarValueKind::Name),
+                    ("Nothing_", ModuleScalarValueKind::Name),
+                    ("\"Nothing\"", ModuleScalarValueKind::String),
+                ] {
+                    let head = if prefix.is_empty() {
+                        String::new()
+                    } else {
+                        format!("{prefix} _{newline} ")
+                    };
+                    let text = format!("{head}[sink] _{newline} = _{newline} {spelling}");
+                    let source = format!("prefix\n{text}\ntail");
+                    let range = 7..7 + text.len();
+                    let parsed = statement_with_expression_limits(
+                        source.as_bytes(),
+                        range.clone(),
+                        0,
+                        0,
+                        &mut || Ok::<(), ()>(()),
+                    )
+                    .unwrap()
+                    .unwrap();
+                    let ModuleBodyStatement::Assignment(assignment) = parsed else {
+                        panic!("complete scalar assignment expected");
+                    };
+                    assert_eq!(assignment.statement(), range.clone());
+                    assert_eq!(assignment.assignment_mode(), mode);
+                    assert_eq!(assignment.assignment_keyword_range(), mode.map(|_| 7..10));
+                    assert_eq!(assignment.destination(), 7 + head.len()..13 + head.len());
+                    let value = assignment.value();
+                    assert_eq!(value.kind(), kind);
+                    assert_eq!(value.span(), range.end - spelling.len()..range.end);
+                    assert_eq!(&source[value.span()], spelling);
+                    assert_eq!(value.integer_suffix(), None);
+                    assert_eq!(value.float_suffix(), None);
+                    assert_eq!(value.unary_minus_span(), None);
+                    assert_eq!(value.initializer_span(), value.span());
+                    assert_eq!(value.initializer_work_nodes(), 0);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn nothing_value_contexts_retain_all_statement_routes_and_complete_source_inventory() {
+        for newline in ["\n", "\r\n"] {
+            for spelling in ["Nothing", "nOtHiNg"] {
+                let atoms = || {
+                    vec![
+                        (spelling, ModuleScalarValueKind::Nothing),
+                        ("[Nothing]", ModuleScalarValueKind::Name),
+                    ]
+                };
+                for (text, expected_kind, work, arguments, expected_values) in [
+                    (
+                        format!("Call Target({spelling}, _{newline} [Nothing])"),
+                        "call",
+                        0,
+                        2,
+                        atoms(),
+                    ),
+                    (
+                        format!("Target {spelling}, _{newline} [Nothing]"),
+                        "expression-call",
+                        4,
+                        2,
+                        atoms(),
+                    ),
+                    (
+                        format!("sink=Read({spelling}, _{newline} [Nothing])"),
+                        "application-assignment",
+                        0,
+                        2,
+                        atoms(),
+                    ),
+                    (
+                        format!("Set sink=Read({spelling}, _{newline} [Nothing])"),
+                        "application-assignment",
+                        0,
+                        2,
+                        atoms(),
+                    ),
+                    (
+                        format!("sink=Outer(Inner({spelling}), _{newline} [Nothing])"),
+                        "expression-assignment",
+                        6,
+                        3,
+                        atoms(),
+                    ),
+                    (
+                        format!("Set sink=other Is _{newline} {spelling}"),
+                        "expression-assignment",
+                        3,
+                        0,
+                        vec![
+                            ("other", ModuleScalarValueKind::Name),
+                            (spelling, ModuleScalarValueKind::Nothing),
+                        ],
+                    ),
+                    (
+                        format!("Let sink=({spelling})"),
+                        "expression-assignment",
+                        2,
+                        0,
+                        vec![(spelling, ModuleScalarValueKind::Nothing)],
+                    ),
+                    (
+                        format!("Call Target({spelling} Is [Nothing])"),
+                        "expression-call",
+                        5,
+                        1,
+                        atoms(),
+                    ),
+                    (
+                        format!("Target {spelling} Is [Nothing]"),
+                        "expression-call",
+                        5,
+                        1,
+                        atoms(),
+                    ),
+                    (
+                        format!("Target({spelling}, _{newline} [Nothing])"),
+                        "value-application",
+                        4,
+                        2,
+                        atoms(),
+                    ),
+                    (
+                        format!("Target ({spelling})"),
+                        "expression-call",
+                        4,
+                        1,
+                        vec![(spelling, ModuleScalarValueKind::Nothing)],
+                    ),
+                    (
+                        format!("sink={spelling}+1"),
+                        "expression-assignment",
+                        3,
+                        0,
+                        vec![
+                            (spelling, ModuleScalarValueKind::Nothing),
+                            ("1", ModuleScalarValueKind::UnsignedDecimal),
+                        ],
+                    ),
+                    (
+                        format!("sink=Not {spelling}"),
+                        "expression-assignment",
+                        2,
+                        0,
+                        vec![(spelling, ModuleScalarValueKind::Nothing)],
+                    ),
+                ] {
+                    let source = format!("prefix\n{text}\ntail");
+                    let range = 7..7 + text.len();
+                    let parsed = statement_with_expression_limits(
+                        source.as_bytes(),
+                        range.clone(),
+                        arguments,
+                        work,
+                        &mut || Ok::<(), ()>(()),
+                    )
+                    .unwrap_or_else(|error| panic!("{text:?}: {error:?}"))
+                    .unwrap_or_else(|| panic!("{text:?}: complete value statement expected"));
+                    assert_eq!(parsed.statement(), range.clone());
+                    let (kind, values, actual_work, actual_arguments) =
+                        value_statement_inventory(&parsed);
+                    assert_eq!(
+                        (kind, actual_work, actual_arguments),
+                        (expected_kind, work, arguments),
+                        "{text:?}"
+                    );
+                    assert_eq!(values.len(), expected_values.len());
+                    let mut cursor = range.start;
+                    for (value, (written, expected)) in values.iter().zip(expected_values) {
+                        let start = cursor + source[cursor..range.end].find(written).unwrap();
+                        assert_eq!(value.kind(), expected, "{text:?}");
+                        assert_eq!(value.span(), start..start + written.len());
+                        assert_eq!(&source[value.span()], written);
+                        assert_eq!(value.integer_suffix(), None);
+                        assert_eq!(value.float_suffix(), None);
+                        assert_eq!(value.unary_minus_span(), None);
+                        cursor = value.span().end;
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn nothing_value_literals_do_not_become_callees_destinations_or_suffixed_names() {
+        for suffix in b"%&^!#@$" {
+            let text = format!("Set sink=Nothing{}", char::from(*suffix));
+            assert!(read(text.as_bytes()).is_none(), "{text}");
+        }
+        for text in [
+            "Nothing=other",
+            "Nothing",
+            "Nothing()",
+            "Call Nothing()",
+            "Set sink=Nothing()",
+            "Set sink=Nothing.member",
+            "Set sink=Nothing extra",
+            "Call Target(Nothing())",
+            "sink=Read(Nothing.member)",
+        ] {
+            assert!(read(text.as_bytes()).is_none(), "{text}");
+        }
+        for text in [
+            "[Nothing]=Nothing",
+            "Call [Nothing](Nothing)",
+            "[Nothing](Nothing)",
+        ] {
+            assert!(read(text.as_bytes()).is_some(), "{text}");
+        }
+    }
+
+    #[test]
+    fn nothing_initializer_rejections_preserve_cursor_and_every_cancellation_checkpoint() {
+        for spelling in [
+            "Nothing",
+            "nOtHiNg",
+            "Nothing()",
+            "Nothing.member",
+            "-Nothing",
+        ] {
+            let source = format!("prefix:{spelling},tail");
+            for context in [
+                InitializerContext::Literal,
+                InitializerContext::ParameterDefault,
+            ] {
+                let mut cursor = 7;
+                let mut checkpoints = 0;
+                assert_eq!(
+                    initializer_value(source.as_bytes(), &mut cursor, context, &mut || {
+                        checkpoints += 1;
+                        Ok::<(), ()>(())
+                    }),
+                    Ok(None)
+                );
+                assert_eq!(cursor, 7);
+                for cancelled_at in 1..=checkpoints {
+                    let mut cursor = 7;
+                    let mut calls = 0;
+                    assert_eq!(
+                        initializer_value(source.as_bytes(), &mut cursor, context, &mut || {
+                            calls += 1;
+                            if calls == cancelled_at {
+                                Err("stop")
+                            } else {
+                                Ok(())
+                            }
+                        }),
+                        Err("stop")
+                    );
+                    assert_eq!(cursor, 7);
+                    assert_eq!(calls, cancelled_at);
+                }
+            }
+        }
+        let source = b"prefix:[Nothing],tail";
+        let mut cursor = 7;
+        let value = parameter_default_value(source, &mut cursor, &mut || Ok::<(), ()>(()))
+            .unwrap()
+            .unwrap();
+        assert_eq!(value.kind(), ModuleScalarValueKind::Name);
+        assert_eq!(value.span(), 7..16);
+        assert_eq!(cursor, 16);
+        let mut cursor = 7;
+        assert_eq!(
+            literal_value(source, &mut cursor, &mut || Ok::<(), ()>(())),
+            Ok(None)
+        );
+        assert_eq!(cursor, 7);
+    }
+
+    #[test]
+    fn nothing_value_contexts_keep_typed_ceilings_and_every_cancellation_checkpoint() {
+        for (text, work, arguments) in [
+            ("Set sink=Nothing", 0, 0),
+            ("Call Target(Nothing,[Nothing])", 0, 2),
+            ("Target Nothing,[Nothing]", 4, 2),
+            ("Set sink=Read(Nothing,[Nothing])", 0, 2),
+            ("Set sink=Outer(Inner(Nothing),[Nothing])", 6, 3),
+            ("Call Target(Nothing Is [Nothing])", 5, 1),
+            ("Target(Nothing,[Nothing])", 4, 2),
+            ("Target (Nothing)", 4, 1),
+        ] {
+            let source = format!("prefix\n{text}\ntail");
+            let range = 7..7 + text.len();
+            for maximum in 0..work {
+                assert_eq!(
+                    statement_with_expression_limits(
+                        source.as_bytes(),
+                        range.clone(),
+                        arguments,
+                        maximum,
+                        &mut || Ok::<(), ()>(())
+                    ),
+                    Err(ModuleError::ExpressionLimit),
+                    "{text}: nodes {maximum}"
+                );
+            }
+            for maximum in 0..arguments {
+                assert_eq!(
+                    statement_with_expression_limits(
+                        source.as_bytes(),
+                        range.clone(),
+                        maximum,
+                        work,
+                        &mut || Ok::<(), ()>(())
+                    ),
+                    Err(ModuleError::ArgumentLimit),
+                    "{text}: arguments {maximum}"
+                );
+            }
+            let mut checkpoints = 0;
+            let parsed = statement_with_expression_limits(
+                source.as_bytes(),
+                range.clone(),
+                arguments,
+                work,
+                &mut || {
+                    checkpoints += 1;
+                    Ok::<(), ()>(())
+                },
+            )
+            .unwrap()
+            .unwrap();
+            let (_, _, actual_work, actual_arguments) = value_statement_inventory(&parsed);
+            assert_eq!((actual_work, actual_arguments), (work, arguments));
+            for cancelled_at in 1..=checkpoints {
+                let mut calls = 0;
+                assert_eq!(
+                    statement_with_expression_limits(
+                        source.as_bytes(),
+                        range.clone(),
+                        arguments,
+                        work,
+                        &mut || {
+                            calls += 1;
+                            if calls == cancelled_at {
+                                Err("stop")
+                            } else {
+                                Ok(())
+                            }
+                        }
+                    ),
+                    Err(ModuleError::Cancelled("stop")),
+                    "{text}: checkpoint {cancelled_at}"
+                );
+                assert_eq!(calls, cancelled_at);
+            }
+        }
+    }
+
     #[test]
     fn assignment_modes_retain_authored_keywords_and_all_existing_rhs_source_contracts() {
         for (prefix, mode) in [
@@ -1702,7 +2140,7 @@ mod tests {
             "Set item=other extra",
             "Set item=other, value",
             "Set item=Me",
-            "Set item=Nothing",
+            "Set item=Nothing.member",
             "Set item=New Other",
             "Set item=AddressOf Other",
             "Set item=other.member",
@@ -1849,7 +2287,7 @@ mod tests {
     }
 
     #[test]
-    fn value_application_statements_retain_parentheses_arguments_and_complete_source_inventory() {
+    fn parenthesized_statements_retain_source_roles_arguments_and_complete_inventory() {
         for (list, arguments, values, callees, work, count) in [
             ("()", vec![], vec![], vec!["[Target]"], 2, 0),
             (
@@ -1900,43 +2338,84 @@ mod tests {
                 3,
                 1,
             ),
+            (
+                "(Nothing)",
+                vec!["Nothing"],
+                vec!["Nothing"],
+                vec!["[Target]"],
+                3,
+                1,
+            ),
         ] {
             for gap in ["", "\t ", " _\n ", " _\r\n "] {
+                let grouped_call = !gap.is_empty() && arguments.len() == 1;
+                let work = work + if grouped_call { 1 } else { 0 };
+                let expected_arguments = if grouped_call {
+                    vec![list]
+                } else {
+                    arguments.clone()
+                };
                 let text = format!("[Target]{gap}{list} ");
                 let source = [b"prefix\n".as_slice(), text.as_bytes(), b"\ntail"].concat();
                 let range = 7..7 + text.len();
-                let ModuleBodyStatement::ValueApplication(application) =
-                    statement_with_expression_limits(
-                        &source,
-                        range.clone(),
-                        count,
-                        work,
-                        &mut || Ok::<(), ()>(()),
-                    )
-                    .unwrap()
-                    .unwrap()
-                else {
-                    panic!("standalone value application expected: {text:?}");
+                let parsed = statement_with_expression_limits(
+                    &source,
+                    range.clone(),
+                    count,
+                    work,
+                    &mut || Ok::<(), ()>(()),
+                )
+                .unwrap()
+                .unwrap();
+                let (
+                    statement,
+                    callee,
+                    application,
+                    argument_range,
+                    argument_expressions,
+                    inventory,
+                ) = match &parsed {
+                    ModuleBodyStatement::ValueApplication(application) => {
+                        assert!(!grouped_call, "{text:?}");
+                        (
+                            application.statement(),
+                            application.callee(),
+                            application.application(),
+                            application.arguments(),
+                            application.argument_expressions(),
+                            application.inventory(),
+                        )
+                    }
+                    ModuleBodyStatement::ExpressionCall(call) => {
+                        assert!(grouped_call, "{text:?}");
+                        (
+                            call.statement(),
+                            call.callee(),
+                            call.inventory().applications()[0].application(),
+                            call.arguments(),
+                            call.argument_expressions(),
+                            call.inventory(),
+                        )
+                    }
+                    _ => panic!("complete parenthesized statement expected: {text:?}"),
                 };
-                assert_eq!(application.statement(), range.clone());
-                assert_eq!(application.callee(), 7..15);
-                assert_eq!(application.application(), 7..range.end - 1);
-                assert_eq!(application.arguments(), 15 + gap.len()..range.end - 1);
-                assert_eq!(&source[application.arguments()], list.as_bytes());
-                assert_eq!(application.inventory().work_nodes(), work);
-                assert_eq!(application.inventory().argument_count(), count);
+                assert_eq!(statement, range.clone());
+                assert_eq!(callee, 7..15);
+                assert_eq!(application, 7..range.end - 1);
+                assert_eq!(argument_range, 15 + gap.len()..range.end - 1);
+                assert_eq!(&source[argument_range.clone()], list.as_bytes());
+                assert_eq!(inventory.work_nodes(), work);
+                assert_eq!(inventory.argument_count(), count);
                 assert_eq!(
-                    application
-                        .argument_expressions()
+                    argument_expressions
                         .iter()
                         .map(|span| { std::str::from_utf8(&source[span.clone()]).unwrap() })
                         .collect::<Vec<_>>(),
-                    arguments,
+                    expected_arguments,
                     "{text:?}"
                 );
                 assert_eq!(
-                    application
-                        .inventory()
+                    inventory
                         .values()
                         .iter()
                         .map(|value| { std::str::from_utf8(&source[value.span()]).unwrap() })
@@ -1945,8 +2424,7 @@ mod tests {
                     "{text:?}"
                 );
                 assert_eq!(
-                    application
-                        .inventory()
+                    inventory
                         .applications()
                         .iter()
                         .map(|nested| { std::str::from_utf8(&source[nested.callee()]).unwrap() })
@@ -1954,18 +2432,113 @@ mod tests {
                     callees,
                     "{text:?}"
                 );
-                let outer = &application.inventory().applications()[0];
-                assert_eq!(outer.application(), application.application());
-                assert_eq!(outer.callee(), application.callee());
-                assert_eq!(outer.arguments(), application.arguments());
-                assert_eq!(
-                    outer.argument_expressions(),
-                    application.argument_expressions()
-                );
-                assert!(application.inventory().values().iter().all(|value| {
-                    value.span().start > application.arguments().start
-                        && value.span().end < application.arguments().end
+                let outer = &inventory.applications()[0];
+                assert_eq!(outer.application(), application);
+                assert_eq!(outer.callee(), callee);
+                assert_eq!(outer.arguments(), argument_range);
+                assert_eq!(outer.argument_expressions(), argument_expressions);
+                assert!(inventory.values().iter().all(|value| {
+                    value.span().start > argument_range.start
+                        && value.span().end < argument_range.end
                 }));
+            }
+        }
+    }
+
+    #[test]
+    fn separated_single_groups_preserve_real_group_work_and_typed_failures() {
+        for newline in ["\n", "\r\n"] {
+            for gap in [" ".to_owned(), "\t ".to_owned(), format!(" _{newline} ")] {
+                for (tail, nodes, arguments) in [
+                    ("(Nothing)", 4, 1),
+                    ("(value)", 4, 1),
+                    ("((value))", 5, 1),
+                    ("(value + 1)", 6, 1),
+                    ("(Inner(value, other))", 7, 3),
+                    ("(\"a,b:\"\"()\")", 4, 1),
+                ] {
+                    let text = format!("[Target]{gap}{tail} ");
+                    let source = format!("prefix\n{text}\ntail");
+                    let range = 7..7 + text.len();
+                    for maximum in 0..nodes {
+                        assert_eq!(
+                            statement_with_expression_limits(
+                                source.as_bytes(),
+                                range.clone(),
+                                arguments,
+                                maximum,
+                                &mut || Ok::<(), ()>(())
+                            ),
+                            Err(ModuleError::ExpressionLimit),
+                            "{text:?}: nodes {maximum}"
+                        );
+                    }
+                    for maximum in 0..arguments {
+                        assert_eq!(
+                            statement_with_expression_limits(
+                                source.as_bytes(),
+                                range.clone(),
+                                maximum,
+                                nodes,
+                                &mut || Ok::<(), ()>(())
+                            ),
+                            Err(ModuleError::ArgumentLimit),
+                            "{text:?}: arguments {maximum}"
+                        );
+                    }
+                    let mut checkpoints = 0;
+                    let ModuleBodyStatement::ExpressionCall(call) =
+                        statement_with_expression_limits(
+                            source.as_bytes(),
+                            range.clone(),
+                            arguments,
+                            nodes,
+                            &mut || {
+                                checkpoints += 1;
+                                Ok::<(), ()>(())
+                            },
+                        )
+                        .unwrap()
+                        .unwrap()
+                    else {
+                        panic!("{text:?}: separated grouped statement call expected");
+                    };
+                    assert_eq!(call.statement(), range.clone());
+                    assert_eq!(call.callee(), 7..15);
+                    assert_eq!(call.arguments(), 15 + gap.len()..range.end - 1);
+                    assert_eq!(&source[call.arguments()], tail);
+                    assert_eq!(call.argument_expressions().len(), 1);
+                    assert_eq!(call.argument_expressions()[0], call.arguments());
+                    assert_eq!(call.inventory().work_nodes(), nodes);
+                    assert_eq!(call.inventory().argument_count(), arguments);
+                    let outer = &call.inventory().applications()[0];
+                    assert_eq!(outer.application(), range.start..range.end - 1);
+                    assert_eq!(outer.callee(), call.callee());
+                    assert_eq!(outer.arguments(), call.arguments());
+                    assert_eq!(outer.argument_expressions(), call.argument_expressions());
+                    for cancelled_at in 1..=checkpoints {
+                        let mut calls = 0;
+                        assert_eq!(
+                            statement_with_expression_limits(
+                                source.as_bytes(),
+                                range.clone(),
+                                arguments,
+                                nodes,
+                                &mut || {
+                                    calls += 1;
+                                    if calls == cancelled_at {
+                                        Err("stop")
+                                    } else {
+                                        Ok(())
+                                    }
+                                }
+                            ),
+                            Err(ModuleError::Cancelled("stop")),
+                            "{text:?}: checkpoint {cancelled_at}"
+                        );
+                        assert_eq!(calls, cancelled_at);
+                    }
+                }
             }
         }
     }
@@ -2025,7 +2598,7 @@ mod tests {
         ] {
             assert!(read(text.as_bytes()).is_none(), "{text:?}");
         }
-        for text in ["[Name](value)", "[Line] (value)", "[Print](value)"] {
+        for text in ["[Name](value)", "[Print](value)"] {
             assert!(
                 matches!(
                     read(text.as_bytes()),
@@ -2034,6 +2607,16 @@ mod tests {
                 "{text}"
             );
         }
+        let text = "[Line] (value)";
+        let ModuleBodyStatement::ExpressionCall(call) = read(text.as_bytes()).unwrap() else {
+            panic!("the bracketed callee retains its separated grouped argument");
+        };
+        assert_eq!(call.callee(), 0..6);
+        assert_eq!(call.arguments(), 7..text.len());
+        assert_eq!(call.argument_expressions().len(), 1);
+        assert_eq!(call.argument_expressions()[0], call.arguments());
+        assert_eq!(call.inventory().work_nodes(), 4);
+        assert_eq!(call.inventory().argument_count(), 1);
         for spelling in ["Finish", "Call_Finish", "ExitSub", "Exit0Function"] {
             let text = format!("{spelling}()");
             let ModuleBodyStatement::ValueApplication(application) = read(text.as_bytes()).unwrap()
@@ -2864,7 +3447,12 @@ mod tests {
         }
         let mut cursor = 0;
         assert_eq!(
-            atomic_value(b"-1", &mut cursor, true, &mut || Ok::<(), ()>(())),
+            atomic_value(b"-1", &mut cursor, AtomicValueContext::Value, &mut || Ok::<
+                (),
+                (),
+            >(
+                ()
+            )),
             Ok(None)
         );
         assert_eq!(cursor, 0);
@@ -3108,9 +3696,14 @@ mod tests {
             );
             assert_eq!(cursor, 0);
             assert!(
-                atomic_value(text, &mut cursor, true, &mut || Ok::<(), ()>(()))
-                    .unwrap()
-                    .is_none()
+                atomic_value(text, &mut cursor, AtomicValueContext::Value, &mut || Ok::<
+                    (),
+                    (),
+                >(
+                    ()
+                ))
+                .unwrap()
+                .is_none()
             );
         }
     }
@@ -3597,9 +4190,12 @@ mod tests {
         ] {
             let source = format!("prefix:{spelling},tail");
             let mut cursor = 7;
-            let value = atomic_value(source.as_bytes(), &mut cursor, false, &mut || {
-                Ok::<(), ()>(())
-            })
+            let value = atomic_value(
+                source.as_bytes(),
+                &mut cursor,
+                AtomicValueContext::LiteralInitializer,
+                &mut || Ok::<(), ()>(()),
+            )
             .unwrap()
             .unwrap();
             assert_eq!(value.kind(), kind);
@@ -4489,7 +5085,7 @@ mod tests {
             "value$",
             "value!",
             "True$",
-            "Nothing",
+            "Nothing()",
             "Null",
             "Empty",
             "Me",
@@ -4870,7 +5466,7 @@ mod tests {
             "10.5d+ +2",
             "#1/1/2000#",
             "Me+1",
-            "Nothing",
+            "Nothing.member",
             "target.member",
         ] {
             let source = format!("Call Target({expression})");
@@ -5298,7 +5894,7 @@ mod tests {
             "count = target()()",
             "count = target.member",
             "count = Me",
-            "count = Nothing",
+            "count = Nothing()",
             "count = Empty",
             "count = Null",
             "count = Not",
@@ -5592,7 +6188,7 @@ mod tests {
             "1&&",
             "value$",
             "value!",
-            "Nothing",
+            "Nothing()",
             "Null",
             "Empty",
             "Me",
