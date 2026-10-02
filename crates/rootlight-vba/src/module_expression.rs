@@ -7,7 +7,10 @@ use std::ops::Range;
 use super::{
     logical_whitespace_len,
     module::ModuleError,
-    module_body::{ModuleScalarValue, ModuleScalarValueKind, atomic_value, radix_integer_prefix},
+    module_body::{
+        ModuleAssignmentMode, ModuleScalarValue, ModuleScalarValueKind, atomic_value,
+        radix_integer_prefix,
+    },
 };
 
 /// A complete simple-name assignment with a structured expression right-hand side.
@@ -17,16 +20,17 @@ pub struct ModuleExpressionAssignment {
     pub(super) destination: Range<usize>,
     pub(super) expression: Range<usize>,
     pub(super) inventory: ModuleExpressionInventory,
+    pub(super) assignment_keyword: Option<(ModuleAssignmentMode, Range<usize>)>,
 }
 
 impl ModuleExpressionAssignment {
-    /// Returns the complete trimmed statement, including an optional Let prefix.
+    /// Returns the complete trimmed statement, including an authored Let or Set prefix.
     #[must_use]
     pub fn statement(&self) -> Range<usize> {
         self.statement.clone()
     }
 
-    /// Returns the exact simple destination name, excluding Let and trivia.
+    /// Returns the exact simple destination name, excluding the prefix and trivia.
     #[must_use]
     pub fn destination(&self) -> Range<usize> {
         self.destination.clone()
@@ -42,6 +46,24 @@ impl ModuleExpressionAssignment {
     #[must_use]
     pub fn inventory(&self) -> &ModuleExpressionInventory {
         &self.inventory
+    }
+
+    /// Returns the authored Let/Set mode, or None when no keyword was written.
+    /// Omission is source absence, not an inferred Let mode.
+    #[must_use]
+    pub const fn assignment_mode(&self) -> Option<ModuleAssignmentMode> {
+        match &self.assignment_keyword {
+            Some((mode, _)) => Some(*mode),
+            None => None,
+        }
+    }
+
+    /// Returns the exact authored Let/Set keyword, excluding following trivia.
+    #[must_use]
+    pub fn assignment_keyword_range(&self) -> Option<Range<usize>> {
+        self.assignment_keyword
+            .as_ref()
+            .map(|(_, range)| range.clone())
     }
 }
 
@@ -289,6 +311,27 @@ impl Operator {
     const fn unary(self) -> bool {
         matches!(self, Self::Positive | Self::Negative | Self::Not)
     }
+
+    const fn comparison(self) -> bool {
+        matches!(
+            self,
+            Self::Equal
+                | Self::NotEqual
+                | Self::Less
+                | Self::LessEqual
+                | Self::Greater
+                | Self::GreaterEqual
+                | Self::Is
+                | Self::Like
+        )
+    }
+
+    const fn logical(self) -> bool {
+        matches!(
+            self,
+            Self::And | Self::Or | Self::Xor | Self::Eqv | Self::Imp
+        )
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -312,6 +355,8 @@ struct Node {
 struct PendingOperator {
     operator: Operator,
     start: usize,
+    comparison_seen: bool,
+    previous_not_scope: Option<usize>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -328,6 +373,8 @@ struct Frame {
     value_base: usize,
     operator_base: usize,
     has_argument: bool,
+    comparison_seen: bool,
+    not_scope: Option<usize>,
 }
 
 #[derive(Clone, Copy)]
@@ -395,6 +442,7 @@ struct Parser<'a> {
     explicit_callee: Option<Range<usize>>,
     implicit_callee: Option<Range<usize>>,
     implicit_group_assignment: bool,
+    set_assignment: bool,
 }
 
 struct Parsed {
@@ -426,6 +474,7 @@ impl<'a> Parser<'a> {
             explicit_callee: None,
             implicit_callee: None,
             implicit_group_assignment: false,
+            set_assignment: false,
         }
     }
 
@@ -474,6 +523,12 @@ impl<'a> Parser<'a> {
         let Some(pending) = self.operators.pop() else {
             return Ok(false);
         };
+        if self.set_assignment && pending.operator == Operator::Not {
+            let Some(frame) = self.frames.last_mut() else {
+                return Ok(false);
+            };
+            frame.not_scope = pending.previous_not_scope;
+        }
         let base = self.frames.last().map_or(0, |frame| frame.value_base);
         if self.operands.len() <= base {
             return Ok(false);
@@ -525,6 +580,43 @@ impl<'a> Parser<'a> {
             return Ok(None);
         }
         Ok(self.operands.pop())
+    }
+
+    fn set_operator_admitted(&mut self, operator: Operator) -> bool {
+        let Some(frame) = self.frames.last_mut() else {
+            return false;
+        };
+        // Groups and source-normalized application arguments admit logical
+        // comparison combinations, even when the native argument tree splits.
+        // The Set root and ungrouped Not operands have no such comparison list.
+        let separates_comparisons = match frame.kind {
+            FrameKind::Group { .. }
+            | FrameKind::Application { .. }
+            | FrameKind::ImplicitApplication { .. } => operator.logical(),
+            FrameKind::Root => false,
+        };
+        if separates_comparisons {
+            frame.comparison_seen = false;
+        }
+        if !operator.comparison() {
+            return true;
+        }
+        let seen = if let Some(index) = frame.not_scope {
+            let Some(pending) = self.operators.get_mut(index) else {
+                return false;
+            };
+            if pending.operator != Operator::Not {
+                return false;
+            }
+            &mut pending.comparison_seen
+        } else {
+            &mut frame.comparison_seen
+        };
+        if *seen {
+            return false;
+        }
+        *seen = true;
+        true
     }
 
     fn argument<E>(
@@ -604,6 +696,8 @@ impl<'a> Parser<'a> {
             value_base: 0,
             operator_base: 0,
             has_argument: false,
+            comparison_seen: false,
+            not_scope: None,
         });
         let mut need_operand = true;
         loop {
@@ -635,10 +729,20 @@ impl<'a> Parser<'a> {
                         Ceiling::Nodes,
                         check,
                     )?;
+                    let previous_not_scope = self.frames.last().and_then(|frame| frame.not_scope);
+                    let not_scope = self.operators.len();
                     self.operators.push(PendingOperator {
                         operator,
                         start: self.cursor,
+                        comparison_seen: false,
+                        previous_not_scope,
                     });
+                    if self.set_assignment && operator == Operator::Not {
+                        let Some(frame) = self.frames.last_mut() else {
+                            return Ok(None);
+                        };
+                        frame.not_scope = Some(not_scope);
+                    }
                     self.cursor += length;
                     continue;
                 }
@@ -656,6 +760,8 @@ impl<'a> Parser<'a> {
                         value_base: self.operands.len(),
                         operator_base: self.operators.len(),
                         has_argument: false,
+                        comparison_seen: false,
+                        not_scope: None,
                     });
                     continue;
                 }
@@ -732,6 +838,8 @@ impl<'a> Parser<'a> {
                         value_base: self.operands.len(),
                         operator_base: self.operators.len(),
                         has_argument: false,
+                        comparison_seen: false,
+                        not_scope: None,
                     });
                     continue;
                 }
@@ -759,6 +867,8 @@ impl<'a> Parser<'a> {
                 self.argument(application, node, check)?;
                 if let Some(frame) = self.frames.last_mut() {
                     frame.has_argument = true;
+                    frame.comparison_seen = false;
+                    frame.not_scope = None;
                 }
                 self.cursor += 1;
                 need_operand = true;
@@ -883,6 +993,12 @@ impl<'a> Parser<'a> {
                     return Ok(None);
                 }
             }
+            // Not remains pending below comparison precedence and owns its
+            // operand's comparison scope. Charge only after reductions restore
+            // the enclosing scope; generic AST shape need not match native syntax.
+            if self.set_assignment && !self.set_operator_admitted(operator) {
+                return Ok(None);
+            }
             // `Target (index) = value` has an indexed-assignment destination,
             // not a proven implicit call with a comparison argument. Inspect
             // the reduced left operand before later RHS operators hide it.
@@ -913,6 +1029,8 @@ impl<'a> Parser<'a> {
             self.operators.push(PendingOperator {
                 operator,
                 start: self.cursor,
+                comparison_seen: false,
+                previous_not_scope: None,
             });
             self.cursor += length;
             need_operand = true;
@@ -1047,6 +1165,39 @@ pub(super) fn inventory<E>(
     }
     let Some(parsed) = Parser::new(source, start, maximum_nodes, maximum_arguments).parse(check)?
     else {
+        return Ok(None);
+    };
+    rebase_inventory(parsed, source_range, check).map(Some)
+}
+
+pub(super) fn assignment_inventory<E>(
+    source: &[u8],
+    start: usize,
+    source_range: &Range<usize>,
+    mode: Option<ModuleAssignmentMode>,
+    maximum_nodes: usize,
+    maximum_arguments: usize,
+    check: &mut impl FnMut() -> Result<(), E>,
+) -> Result<Option<(Range<usize>, ModuleExpressionInventory)>, ModuleError<E>> {
+    if mode != Some(ModuleAssignmentMode::Set) {
+        return inventory(
+            source,
+            start,
+            source_range,
+            maximum_nodes,
+            maximum_arguments,
+            check,
+        );
+    }
+    check().map_err(ModuleError::Cancelled)?;
+    if source_range.end.checked_sub(source_range.start) != Some(source.len())
+        || start > source.len()
+    {
+        return Ok(None);
+    }
+    let mut parser = Parser::new(source, start, maximum_nodes, maximum_arguments);
+    parser.set_assignment = true;
+    let Some(parsed) = parser.parse(check)? else {
         return Ok(None);
     };
     rebase_inventory(parsed, source_range, check).map(Some)
@@ -1295,6 +1446,259 @@ mod tests {
             .parse(&mut || Ok::<(), ()>(()))
             .unwrap()
             .expect("complete expression")
+    }
+
+    #[test]
+    fn set_assignment_comparison_scopes_preserve_not_and_normalized_argument_contracts() {
+        for (expression, admitted) in [
+            ("left < right", true),
+            ("left < right And flag", true),
+            ("flag And left < right", true),
+            ("Not left = right", true),
+            ("left And right", true),
+            ("(left < right) And (third > last)", true),
+            ("(left < right And third > last)", true),
+            ("left = (right = third)", true),
+            ("Outer(left = right, third > last)", true),
+            ("left < right And Not third > last", true),
+            ("left = Not right = third", true),
+            ("Not left < right And Not third > last", true),
+            ("left < right Or Not third > last", true),
+            ("left = Not Not right = third", true),
+            ("Not left = right And third = last", true),
+            ("(left = right Xor third = last)", true),
+            ("Outer(left = right And third = last)", true),
+            ("Outer(left = right Or third = last)", true),
+            ("Outer(Not left = right, third = last)", true),
+            ("Not Outer(left = right, third = last) = flag", true),
+            ("left = Not Outer(right = third, other = last)", true),
+            ("Not (left = right And third = last) = flag", true),
+            ("left = right = third", false),
+            ("left < right And third > last", false),
+            ("left Like right Or third Is last", false),
+            ("left < right + third < last", false),
+            ("Not left = right + third = last", false),
+            ("(left = right = third)", false),
+            ("Outer(left = right = third)", false),
+            ("Outer((left = right = third))", false),
+            ("(left < right And third > last = extra)", false),
+            ("Outer(left = right Xor third = last)", true),
+            ("Outer(left = right Eqv third = last)", true),
+            ("Outer(left = right Imp third = last)", true),
+            ("Outer(left = right Xor third = last = extra)", false),
+            ("Outer(Not left = right + third = last)", false),
+        ] {
+            let source = expression.as_bytes();
+            let range = 42..42 + source.len();
+            let read = |mode| {
+                assignment_inventory(
+                    source,
+                    0,
+                    &range,
+                    mode,
+                    source.len(),
+                    source.len(),
+                    &mut || Ok::<(), ()>(()),
+                )
+                .unwrap()
+            };
+            assert_eq!(
+                read(Some(ModuleAssignmentMode::Set)).is_some(),
+                admitted,
+                "{expression}"
+            );
+            let omitted = read(None).unwrap();
+            assert_eq!(read(Some(ModuleAssignmentMode::Let)), Some(omitted.clone()));
+            if admitted {
+                assert_eq!(read(Some(ModuleAssignmentMode::Set)), Some(omitted));
+            }
+        }
+        let source = b"left = right = third";
+        let mut checkpoints = 0;
+        assert!(
+            assignment_inventory(
+                source,
+                0,
+                &(0..source.len()),
+                Some(ModuleAssignmentMode::Set),
+                source.len(),
+                0,
+                &mut || {
+                    checkpoints += 1;
+                    Ok::<(), ()>(())
+                }
+            )
+            .unwrap()
+            .is_none()
+        );
+        for cancelled_at in 1..=checkpoints {
+            let mut calls = 0;
+            assert_eq!(
+                assignment_inventory(
+                    source,
+                    0,
+                    &(0..source.len()),
+                    Some(ModuleAssignmentMode::Set),
+                    source.len(),
+                    0,
+                    &mut || {
+                        calls += 1;
+                        if calls == cancelled_at {
+                            Err("stop")
+                        } else {
+                            Ok(())
+                        }
+                    }
+                ),
+                Err(ModuleError::Cancelled("stop")),
+                "checkpoint {cancelled_at}"
+            );
+            assert_eq!(calls, cancelled_at);
+        }
+        assert_eq!(
+            assignment_inventory(
+                source,
+                0,
+                &(0..source.len()),
+                Some(ModuleAssignmentMode::Set),
+                0,
+                0,
+                &mut || Ok::<(), ()>(())
+            ),
+            Err(ModuleError::ExpressionLimit)
+        );
+    }
+
+    #[test]
+    fn set_comparison_scopes_preserve_typed_limits_and_cancel_at_every_checkpoint() {
+        for (expression, work, arguments) in [
+            ("left = Not Not right = third", 7, 0),
+            ("Outer(left = right And third = last)", 9, 1),
+            ("Outer(left = right Xor third = last)", 9, 1),
+            ("Outer(Not left = right, third = last)", 9, 2),
+        ] {
+            let source = expression.as_bytes();
+            let range = 19..19 + source.len();
+            for maximum in 0..work {
+                assert_eq!(
+                    assignment_inventory(
+                        source,
+                        0,
+                        &range,
+                        Some(ModuleAssignmentMode::Set),
+                        maximum,
+                        arguments,
+                        &mut || Ok::<(), ()>(())
+                    ),
+                    Err(ModuleError::ExpressionLimit),
+                    "{expression}: nodes {maximum}",
+                );
+            }
+            for maximum in 0..arguments {
+                assert_eq!(
+                    assignment_inventory(
+                        source,
+                        0,
+                        &range,
+                        Some(ModuleAssignmentMode::Set),
+                        work,
+                        maximum,
+                        &mut || Ok::<(), ()>(())
+                    ),
+                    Err(ModuleError::ArgumentLimit),
+                    "{expression}: arguments {maximum}",
+                );
+            }
+            let mut checkpoints = 0;
+            let (span, inventory) = assignment_inventory(
+                source,
+                0,
+                &range,
+                Some(ModuleAssignmentMode::Set),
+                work,
+                arguments,
+                &mut || {
+                    checkpoints += 1;
+                    Ok::<(), ()>(())
+                },
+            )
+            .unwrap()
+            .unwrap();
+            assert_eq!(span, range.clone());
+            assert_eq!(inventory.work_nodes(), work);
+            assert_eq!(inventory.argument_count(), arguments);
+            for cancelled_at in 1..=checkpoints {
+                let mut calls = 0;
+                assert_eq!(
+                    assignment_inventory(
+                        source,
+                        0,
+                        &range,
+                        Some(ModuleAssignmentMode::Set),
+                        work,
+                        arguments,
+                        &mut || {
+                            calls += 1;
+                            if calls == cancelled_at {
+                                Err("stop")
+                            } else {
+                                Ok(())
+                            }
+                        }
+                    ),
+                    Err(ModuleError::Cancelled("stop")),
+                    "{expression}: checkpoint {cancelled_at}",
+                );
+                assert_eq!(calls, cancelled_at);
+            }
+        }
+        for expression in [
+            "Not left = right + third = last",
+            "Outer((left = right = third))",
+        ] {
+            let source = expression.as_bytes();
+            let mut checkpoints = 0;
+            assert!(
+                assignment_inventory(
+                    source,
+                    0,
+                    &(0..source.len()),
+                    Some(ModuleAssignmentMode::Set),
+                    source.len(),
+                    source.len(),
+                    &mut || {
+                        checkpoints += 1;
+                        Ok::<(), ()>(())
+                    }
+                )
+                .unwrap()
+                .is_none()
+            );
+            for cancelled_at in 1..=checkpoints {
+                let mut calls = 0;
+                assert_eq!(
+                    assignment_inventory(
+                        source,
+                        0,
+                        &(0..source.len()),
+                        Some(ModuleAssignmentMode::Set),
+                        source.len(),
+                        source.len(),
+                        &mut || {
+                            calls += 1;
+                            if calls == cancelled_at {
+                                Err("stop")
+                            } else {
+                                Ok(())
+                            }
+                        }
+                    ),
+                    Err(ModuleError::Cancelled("stop")),
+                    "{expression}: checkpoint {cancelled_at}"
+                );
+                assert_eq!(calls, cancelled_at);
+            }
+        }
     }
 
     #[test]
@@ -2829,6 +3233,8 @@ mod tests {
             value_base: 0,
             operator_base: 0,
             has_argument: false,
+            comparison_seen: false,
+            not_scope: None,
         });
         parser.frames.push(Frame {
             kind: FrameKind::Application {
@@ -2838,6 +3244,8 @@ mod tests {
             value_base: 0,
             operator_base: 0,
             has_argument: false,
+            comparison_seen: false,
+            not_scope: None,
         });
         assert!(matches!(
             parser.close(9, Some(0), &mut || Ok::<(), ()>(())),

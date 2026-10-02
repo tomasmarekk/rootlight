@@ -510,7 +510,16 @@ impl<E: std::error::Error + 'static> std::error::Error for ModuleError<E> {
 /// No reachability or executed control flow is inferred. Exit Property, Exit For,
 /// Exit Do and Return remain outside this closed procedural slice.
 /// Local Const still admits one typed scalar per statement. Assignments have
-/// an optional Let prefix. Const values are INTEGER or FLOAT tokens with an optional
+/// an optional authored Let or Set prefix, retaining its exact keyword separately
+/// from the destination. Omission is not an inferred Let mode.
+/// Set admits at most one comparison per outer expression or Not operand scope.
+/// Grouped conditions and application arguments may separate comparisons with
+/// logical operators. Arguments follow the source-normalized value-application
+/// contract, including complete applications recovered from split native trees.
+/// Plain comparison chains
+/// stay on the native route, including those inside groups or argument lists.
+/// Logical tails alone do not separate the outer Set comparison scope.
+/// Const values are INTEGER or FLOAT tokens with an optional
 /// unary minus, physically closed doubled-quote strings or True/False; assignments additionally
 /// admit names, grouped expressions, unary signs/Not, ordinary arithmetic,
 /// concatenation, comparison and logical operators, and nested simple-name applications.
@@ -548,7 +557,7 @@ impl<E: std::error::Error + 'static> std::error::Error for ModuleError<E> {
 /// Bare `Name` explicit Call callees stay outside this subset; bracketed `[Name]` is admitted.
 /// Implicit heads also exclude bare `Name`, `Line` and statement keywords; their
 /// bracketed spellings remain ordinary simple names.
-/// Without explicit `Let`, bare statement-keyword assignment destinations are excluded.
+/// Without explicit `Let` or `Set`, bare statement-keyword assignment destinations are excluded.
 /// All other statements, inline Rem tails, directives, class
 /// members, continued-comment forms and incomplete boundaries reject the entire input.
 /// Colon boundaries are allowed only after a procedure opener or within its body.
@@ -1711,7 +1720,9 @@ fn word<'a, E>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{ModuleFloatSuffix, ModuleIntegerSuffix, ModuleScalarValueKind};
+    use crate::{
+        ModuleAssignmentMode, ModuleFloatSuffix, ModuleIntegerSuffix, ModuleScalarValueKind,
+    };
 
     fn parse(source: &[u8]) -> Result<ModuleInventory, ModuleError<()>> {
         module_inventory(
@@ -1735,6 +1746,269 @@ mod tests {
         assert_eq!(value.integer_suffix(), None);
         assert_eq!(value.float_suffix(), None);
         assert_eq!(value.initializer_work_nodes(), 1);
+    }
+
+    #[test]
+    fn assignment_modes_preserve_whole_module_source_order_comments_and_later_procedures() {
+        for newline in ["\n", "\r\n"] {
+            let scalar = format!("sEt _{newline} [item] _{newline} = _{newline} other");
+            let application = "lEt [item]=Read(1,other)";
+            let expression = "Set [item]=Read(value+1,Inner(other)*-2)";
+            let source = format!(
+                "Sub First(){newline}  {scalar} ' ignored Set item=Nothing{newline}{application}:{expression}{newline}End Sub{newline}Sub Later(){newline}[Set]=other{newline}End Sub{newline}"
+            );
+            let inventory = parse(source.as_bytes()).unwrap();
+            assert_eq!(inventory.procedures().len(), 2);
+            let statements = inventory.procedures()[0].statements();
+            assert_eq!(statements.len(), 3);
+            for (statement, written, mode, keyword) in [
+                (
+                    &statements[0],
+                    scalar.as_str(),
+                    ModuleAssignmentMode::Set,
+                    "sEt",
+                ),
+                (
+                    &statements[1],
+                    application,
+                    ModuleAssignmentMode::Let,
+                    "lEt",
+                ),
+                (&statements[2], expression, ModuleAssignmentMode::Set, "Set"),
+            ] {
+                let start = source.find(written).unwrap();
+                let (actual_mode, span, destination) = match statement {
+                    ModuleBodyStatement::Assignment(assignment) => {
+                        assert_eq!(&source[assignment.value().span()], "other");
+                        (
+                            assignment.assignment_mode(),
+                            assignment.assignment_keyword_range(),
+                            assignment.destination(),
+                        )
+                    }
+                    ModuleBodyStatement::ApplicationAssignment(assignment) => {
+                        assert_eq!(&source[assignment.application()], "Read(1,other)");
+                        assert_eq!(assignment.argument_values().len(), 2);
+                        (
+                            assignment.assignment_mode(),
+                            assignment.assignment_keyword_range(),
+                            assignment.destination(),
+                        )
+                    }
+                    ModuleBodyStatement::ExpressionAssignment(assignment) => {
+                        assert_eq!(
+                            &source[assignment.expression()],
+                            "Read(value+1,Inner(other)*-2)"
+                        );
+                        assert_eq!(assignment.inventory().work_nodes(), 11);
+                        assert_eq!(assignment.inventory().argument_count(), 3);
+                        assert_eq!(
+                            assignment
+                                .inventory()
+                                .applications()
+                                .iter()
+                                .map(|nested| &source[nested.callee()])
+                                .collect::<Vec<_>>(),
+                            ["Read", "Inner"]
+                        );
+                        assert_eq!(
+                            assignment
+                                .inventory()
+                                .values()
+                                .iter()
+                                .map(|value| &source[value.span()])
+                                .collect::<Vec<_>>(),
+                            ["value", "1", "other", "2"]
+                        );
+                        (
+                            assignment.assignment_mode(),
+                            assignment.assignment_keyword_range(),
+                            assignment.destination(),
+                        )
+                    }
+                    _ => panic!("source-written assignment expected"),
+                };
+                assert_eq!(statement.statement(), start..start + written.len());
+                assert_eq!(actual_mode, Some(mode));
+                assert_eq!(span, Some(start..start + keyword.len()));
+                assert_eq!(&source[span.unwrap()], keyword);
+                assert_eq!(&source[destination], "[item]");
+            }
+            assert!(statements[0].statement().end < statements[1].statement().start);
+            assert!(statements[1].statement().end < statements[2].statement().start);
+            let ModuleBodyStatement::Assignment(assignment) =
+                &inventory.procedures()[1].statements()[0]
+            else {
+                panic!("later ordinary assignment expected");
+            };
+            assert_eq!(&source[assignment.statement()], "[Set]=other");
+            assert_eq!(&source[assignment.destination()], "[Set]");
+            assert_eq!(assignment.assignment_mode(), None);
+            assert_eq!(assignment.assignment_keyword_range(), None);
+        }
+    }
+
+    #[test]
+    fn assignment_modes_share_existing_aggregate_ceilings_and_cancel_without_prefix_inventory() {
+        let source = b"Sub Run()\nSet item=other\nLet item=Read(1,other)\nSet item=Read(value+1,Inner(other)*-2)\nitem=(value)\nEnd Sub\n";
+        let limits = ModuleLimits::new(source.len(), 6, 1)
+            .with_max_arguments(5)
+            .with_max_expression_nodes(13);
+        let mut checkpoints = 0;
+        let inventory = module_inventory(source, limits, &mut || {
+            checkpoints += 1;
+            Ok::<(), ()>(())
+        })
+        .unwrap();
+        assert_eq!(inventory.statement_count(), 6);
+        assert_eq!(inventory.procedures()[0].statements().len(), 4);
+        assert_eq!(
+            module_inventory(source, limits.with_max_arguments(4), &mut || Ok::<(), ()>(
+                ()
+            )),
+            Err(ModuleError::ArgumentLimit)
+        );
+        assert_eq!(
+            module_inventory(source, limits.with_max_expression_nodes(12), &mut || Ok::<
+                (),
+                (),
+            >(
+                ()
+            )),
+            Err(ModuleError::ExpressionLimit)
+        );
+        assert_eq!(
+            module_inventory(
+                source,
+                ModuleLimits::new(source.len(), 5, 1)
+                    .with_max_arguments(5)
+                    .with_max_expression_nodes(13),
+                &mut || Ok::<(), ()>(())
+            ),
+            Err(ModuleError::StatementLimit)
+        );
+        for cancelled_at in 1..=checkpoints {
+            let mut calls = 0;
+            assert_eq!(
+                module_inventory(source, limits, &mut || {
+                    calls += 1;
+                    if calls == cancelled_at {
+                        Err("stop")
+                    } else {
+                        Ok(())
+                    }
+                }),
+                Err(ModuleError::Cancelled("stop")),
+                "checkpoint {cancelled_at}"
+            );
+            assert_eq!(calls, cancelled_at);
+        }
+    }
+
+    #[test]
+    fn set_logical_application_arguments_retain_complete_normalized_source_inventory() {
+        for operator in ["And", "Or", "Xor", "Eqv", "Imp"] {
+            let argument = format!("left=right {operator} third=last");
+            let expression = format!("Outer({argument})");
+            let written = format!("Set item={expression}");
+            let source = format!("Sub Run()\n{written}\nEnd Sub\n");
+            let inventory = module_inventory(
+                source.as_bytes(),
+                ModuleLimits::new(source.len(), 3, 1)
+                    .with_max_arguments(1)
+                    .with_max_expression_nodes(9),
+                &mut || Ok::<(), ()>(()),
+            )
+            .unwrap();
+            assert_eq!(inventory.procedures().len(), 1);
+            let statements = inventory.procedures()[0].statements();
+            assert_eq!(statements.len(), 1);
+            let ModuleBodyStatement::ExpressionAssignment(assignment) = &statements[0] else {
+                panic!("complete source-normalized application assignment expected");
+            };
+            let start = "Sub Run()\n".len();
+            let expression_start = start + "Set item=".len();
+            let expression_end = expression_start + expression.len();
+            assert_eq!(assignment.statement(), start..start + written.len());
+            assert_eq!(
+                assignment.assignment_mode(),
+                Some(ModuleAssignmentMode::Set)
+            );
+            assert_eq!(
+                assignment.assignment_keyword_range(),
+                Some(start..start + 3)
+            );
+            assert_eq!(assignment.destination(), start + 4..start + 8);
+            assert_eq!(&source[assignment.destination()], "item");
+            assert_eq!(assignment.expression(), expression_start..expression_end);
+            let expression_inventory = assignment.inventory();
+            assert_eq!(expression_inventory.work_nodes(), 9);
+            assert_eq!(expression_inventory.argument_count(), 1);
+            assert_eq!(
+                expression_inventory
+                    .values()
+                    .iter()
+                    .map(|value| &source[value.span()])
+                    .collect::<Vec<_>>(),
+                ["left", "right", "third", "last"]
+            );
+            assert_eq!(expression_inventory.applications().len(), 1);
+            let application = &expression_inventory.applications()[0];
+            assert_eq!(application.application(), assignment.expression());
+            assert_eq!(application.callee(), expression_start..expression_start + 5);
+            assert_eq!(&source[application.callee()], "Outer");
+            assert_eq!(
+                application.arguments(),
+                expression_start + 5..expression_end
+            );
+            assert_eq!(application.argument_expressions().len(), 1);
+            assert_eq!(
+                application.argument_expressions()[0],
+                expression_start + 6..expression_end - 1
+            );
+            assert_eq!(
+                &source[application.argument_expressions()[0].clone()],
+                argument
+            );
+        }
+    }
+
+    #[test]
+    fn unsupported_set_assignment_tails_reject_all_prior_module_records() {
+        for tail in [
+            "Set item=Nothing",
+            "Set item=New Other",
+            "Set item=AddressOf Other",
+            "Set item=other.member",
+            "Set item=Read().member",
+            "Set item=Read()(other)",
+            "Set item=Read(value:=1)",
+            "Set item(0)=other",
+            "Set holder.item=other",
+            "Set item=other +",
+            "Set item=other extra",
+            "Set item=other, value",
+            "Set item=left=right=third",
+            "Set item=left<right And third>last",
+            "Set item=(left=right=third)",
+            "Set item=Outer(left=right=third)",
+            "Set item=Outer((left=right=third))",
+            "Set item=(left<right And third>last=extra)",
+            "Set item=Outer(left=right Xor third=last=extra)",
+            "Set item=Not left=right+third=last",
+        ] {
+            let source = format!(
+                "Sub First()\nSet item=other\nEnd Sub\nSub Second()\nLet item=Read(1)\n{tail}\nEnd Sub\n"
+            );
+            let start = source.find(tail).unwrap();
+            assert_eq!(
+                parse(source.as_bytes()),
+                Err(ModuleError::Unsupported {
+                    range: start..start + tail.len()
+                }),
+                "{tail}"
+            );
+        }
     }
 
     #[test]

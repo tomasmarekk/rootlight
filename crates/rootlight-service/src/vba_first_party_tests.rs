@@ -5254,6 +5254,8 @@ fn assert_value_application_contract(
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ValueApplicationLayout {
     Assignment,
+    LetAssignment,
+    SetAssignment,
     Statement,
 }
 
@@ -5603,6 +5605,47 @@ fn assert_value_application_contract_with_statements(
             .count(),
         formals.len()
     );
+    if statements.layout == ValueApplicationLayout::SetAssignment {
+        for (written, token, target) in [
+            ("Set Fetch = value", "Fetch", fetch.id),
+            ("Set value = value", "value", formals[0].0.id),
+        ] {
+            let start = source.find(written).unwrap() + "Set ".len();
+            let end = start + token.len();
+            let destination = document
+                .occurrences
+                .iter()
+                .find(|site| {
+                    site.source.span().start_byte() == u64::try_from(start).unwrap()
+                        && site.source.span().end_byte() == u64::try_from(end).unwrap()
+                })
+                .unwrap();
+            assert_eq!(destination.syntax_kind, "vba.set_identifier.reference");
+            assert_eq!(
+                destination.target,
+                OccurrenceTarget::Resolved { symbol: target }
+            );
+            assert_eq!(destination.role, OccurrenceRole::Reference);
+            assert_eq!(destination.enclosing, Some(fetch.id));
+            assert_exact_parameter_source(
+                service,
+                receipt,
+                source,
+                &destination.source,
+                start..end,
+            );
+            assert!(document.relations.iter().any(|relation| {
+                relation.subject == RelationEndpoint::Occurrence(destination.id)
+                    && relation.predicate == RelationPredicate::RefersTo
+                    && relation.object == RelationEndpoint::Entity(target)
+                    && relation.evidence.source.as_ref() == Some(&destination.source)
+            }));
+            assert!(!document.relations.iter().any(|relation| {
+                relation.subject == RelationEndpoint::Occurrence(destination.id)
+                    && relation.predicate == RelationPredicate::Calls
+            }));
+        }
+    }
     let local = |name: &str| {
         document
             .entities
@@ -5738,16 +5781,76 @@ fn assert_value_application_contract_with_statements(
     {
         let prefix = match statements.layout {
             ValueApplicationLayout::Assignment => "sink = ",
+            ValueApplicationLayout::LetAssignment => "Let sink = ",
+            ValueApplicationLayout::SetAssignment => "Set sink = ",
             ValueApplicationLayout::Statement => "",
         };
         let statement = if ordinal == probes.len() {
-            assert_eq!(statements.layout, ValueApplicationLayout::Assignment);
+            assert_ne!(statements.layout, ValueApplicationLayout::Statement);
             format!("{prefix}{expression} + 1\n")
         } else {
             format!("{prefix}{expression}\n")
         };
         let start = source.find(&statement).unwrap() + prefix.len();
         let end = start + expression.len();
+        if statements.layout != ValueApplicationLayout::Statement {
+            let keyword_bytes = match statements.layout {
+                ValueApplicationLayout::Assignment => 0,
+                ValueApplicationLayout::LetAssignment | ValueApplicationLayout::SetAssignment => 4,
+                ValueApplicationLayout::Statement => unreachable!(),
+            };
+            let destination_start = start - prefix.len() + keyword_bytes;
+            let sink = document
+                .entities
+                .iter()
+                .find(|entity| {
+                    entity.canonical_name == "sink"
+                        && entity.kind == EntityKind::Variable
+                        && entity.container == Some(rootlight_ir::ContainerRef::Entity(run.id))
+                })
+                .unwrap();
+            let destination = document
+                .occurrences
+                .iter()
+                .find(|site| {
+                    site.source.span().start_byte() == u64::try_from(destination_start).unwrap()
+                        && site.source.span().end_byte()
+                            == u64::try_from(destination_start + 4).unwrap()
+                })
+                .unwrap();
+            assert_eq!(
+                destination.syntax_kind,
+                if statements.layout == ValueApplicationLayout::SetAssignment {
+                    "vba.set_identifier.reference"
+                } else {
+                    "vba.let_identifier.reference"
+                }
+            );
+            assert_eq!(
+                destination.target,
+                OccurrenceTarget::Resolved { symbol: sink.id }
+            );
+            assert_eq!(destination.role, OccurrenceRole::Reference);
+            assert_eq!(destination.enclosing, Some(run.id));
+            assert_eq!(destination.provenance, parser.id);
+            assert_exact_parameter_source(
+                service,
+                receipt,
+                source,
+                &destination.source,
+                destination_start..destination_start + 4,
+            );
+            assert!(document.relations.iter().any(|relation| {
+                relation.subject == RelationEndpoint::Occurrence(destination.id)
+                    && relation.predicate == RelationPredicate::RefersTo
+                    && relation.object == RelationEndpoint::Entity(sink.id)
+                    && relation.evidence.source.as_ref() == Some(&destination.source)
+            }));
+            assert!(!document.relations.iter().any(|relation| {
+                relation.subject == RelationEndpoint::Occurrence(destination.id)
+                    && relation.predicate == RelationPredicate::Calls
+            }));
+        }
         let receiver = match name {
             "Buffer" => buffer_receiver,
             "Grid" => Some(grid.id),
@@ -11772,6 +11875,15 @@ fn statement_value_applications_preserve_formals_and_durable_source_lifetimes() 
 
 #[test]
 fn statement_value_applications_preserve_array_rank_and_local_shadow_lifetimes() {
+    assert_value_application_layout_lifetimes(ValueApplicationLayout::Statement);
+}
+
+#[test]
+fn set_assignments_preserve_array_rank_arity_and_source_lifetimes() {
+    assert_value_application_layout_lifetimes(ValueApplicationLayout::SetAssignment);
+}
+
+fn assert_value_application_layout_lifetimes(layout: ValueApplicationLayout) {
     let initial = ValueApplicationState {
         declarations_source: "Private Buffer(2) As Long, Grid(0 To 2, 1 To 3) As Long\n",
         declarations: &[
@@ -11781,7 +11893,7 @@ fn statement_value_applications_preserve_array_rank_and_local_shadow_lifetimes()
         buffer: ExpectedBufferApplication::Fixed(1),
         arithmetic_fallback: false,
     };
-    let states = [
+    let mut states = vec![
         (initial, None),
         (
             initial,
@@ -11867,6 +11979,19 @@ fn statement_value_applications_preserve_array_rank_and_local_shadow_lifetimes()
         ),
         (initial, None),
     ];
+    if layout == ValueApplicationLayout::SetAssignment {
+        states.insert(
+            states.len() - 1,
+            (
+                ValueApplicationState {
+                    arithmetic_fallback: true,
+                    ..initial
+                },
+                None,
+            ),
+        );
+        states.insert(states.len() - 1, (initial, None));
+    }
     for language in ["visual-basic-classic", "vba"] {
         let current = std::env::current_dir().unwrap();
         let repository = tempfile::tempdir_in(&current).unwrap();
@@ -11898,10 +12023,36 @@ fn statement_value_applications_preserve_array_rank_and_local_shadow_lifetimes()
         )> = None;
         let mut initial_source = None;
         let mut initial_logical = None;
-        for (position, (state, local_array)) in states.into_iter().enumerate() {
+        for (position, (state, local_array)) in states.iter().copied().enumerate() {
             let explicit_source = value_application_source(state);
-            assert_eq!(explicit_source.matches("\nsink = ").count(), 12);
-            let source = explicit_source.replace("\nsink = ", "\n");
+            assert_eq!(
+                explicit_source.matches("\nsink = ").count(),
+                12 + usize::from(state.arithmetic_fallback)
+            );
+            let current_layout = if layout == ValueApplicationLayout::SetAssignment
+                && position + 2 == states.len()
+            {
+                ValueApplicationLayout::LetAssignment
+            } else {
+                layout
+            };
+            let prefix = match current_layout {
+                ValueApplicationLayout::Assignment => "\nsink = ",
+                ValueApplicationLayout::LetAssignment => "\nLet sink = ",
+                ValueApplicationLayout::SetAssignment => "\nSet sink = ",
+                ValueApplicationLayout::Statement => "\n",
+            };
+            let source = explicit_source.replace("\nsink = ", prefix);
+            let source = if current_layout == ValueApplicationLayout::SetAssignment {
+                assert_eq!(source.matches("\nFetch = value\n").count(), 1);
+                source.replacen(
+                    "\nFetch = value\n",
+                    "\nSet value = value\nSet Fetch = value\n",
+                    1,
+                )
+            } else {
+                source
+            };
             let source = if let Some(array) = local_array {
                 source.replacen(
                     "Dim value As Long\n",
@@ -11912,7 +12063,7 @@ fn statement_value_applications_preserve_array_rank_and_local_shadow_lifetimes()
                 source
             };
             let statements = ValueApplicationStatements {
-                layout: ValueApplicationLayout::Statement,
+                layout: current_layout,
                 local_array,
             };
             fs::write(repository.path().join("module.bas"), &source).unwrap();

@@ -874,6 +874,7 @@ fn property_access(mut expression: Node<'_>) -> Option<PropertyAccess> {
             | "unary_expression"
             | "parenthesized_expression"
             | "logical_value_expression"
+            | "condition_binary_expression"
             | "argument_list"
             | "unparenthesized_argument_list"
     ) || parent.child_by_field_name("condition") == Some(expression)

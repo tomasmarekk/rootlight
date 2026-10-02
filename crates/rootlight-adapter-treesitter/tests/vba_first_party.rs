@@ -2618,6 +2618,326 @@ fn implicit_call_raw_continuation_boundary_matches_forced_native_without_fabrica
 }
 
 #[test]
+fn authored_assignment_modes_preserve_exact_native_facts_and_source_identity() {
+    for newline in ["\n", "\r\n"] {
+        for language in ["vba", "visual-basic-classic"] {
+            let source = format!(
+                "Sub Run(ByVal value As Long){newline}Dim sink As Variant{newline}sEt [sink] = value{newline}Set sink = Buffer(value){newline}Set _{newline} sink = Outer(Inner(value + 1), 2) + value{newline}Set sink = (value < 1 And other > 2 And flag){newline}Let sink = value{newline}sink = value{newline}[Set] = [Let]{newline}End Sub{newline}"
+            );
+            let fixture = Fixture::new(source.as_bytes());
+            let first_party = provider();
+            let native = provider();
+            let budget = limits(4096);
+            let request = fixture.request(&budget, language, Vec::new());
+            let required = first_party
+                .required_syntax_fact_count(&request, &deadline())
+                .unwrap();
+            let output = parse(&first_party, &request);
+            let reference = parse(
+                &native,
+                &fixture.request(
+                    &budget,
+                    language,
+                    vec![IncludedRange::new(
+                        fixture.source.span(),
+                        LanguageId::new(language).unwrap(),
+                    )],
+                ),
+            );
+            assert_eq!(first_party.stats().pooled_parsers, 0);
+            assert_eq!(first_party.stats().checked_out_parsers, 0);
+            assert_eq!(first_party.stats().cache.entries, 0);
+            assert!(native.stats().pooled_parsers > 0);
+            assert_eq!(output.facts(), reference.facts(), "{language}: {source}");
+            assert_eq!(output.diagnostics(), reference.diagnostics());
+            assert!(output.diagnostics().is_empty());
+            assert_eq!(
+                output.report().coverage().status(),
+                CoverageStatus::Complete
+            );
+            assert_eq!(
+                output.report().coverage().covered_source_bytes(),
+                source.len()
+            );
+            assert_eq!(
+                fixture.source.content_hash(),
+                rootlight_ids::content_hash(source.as_bytes())
+            );
+            let destinations: Vec<_> = output
+                .facts()
+                .iter()
+                .filter(|fact| {
+                    matches!(
+                        fact.syntax_kind().as_str(),
+                        "vba.set_identifier.reference" | "vba.let_identifier.reference"
+                    )
+                })
+                .collect();
+            assert_eq!(destinations.len(), 7);
+            assert_eq!(
+                destinations
+                    .iter()
+                    .filter(|fact| fact.syntax_kind().as_str() == "vba.set_identifier.reference")
+                    .count(),
+                4
+            );
+            for fact in destinations {
+                assert!(matches!(
+                    bytes_at(source.as_bytes(), fact.span()),
+                    b"sink" | b"[sink]" | b"[Set]"
+                ));
+                assert_eq!(fact.span().file(), fixture.source.span().file());
+            }
+            let exact_budget = limits(required);
+            let exact = parse(
+                &first_party,
+                &fixture.request(&exact_budget, language, Vec::new()),
+            );
+            assert_eq!(exact.facts().len(), required);
+            let mandatory_identity = |parsed: &ParseOutput| {
+                parsed
+                    .facts()
+                    .iter()
+                    .filter(|fact| {
+                        matches!(
+                            fact.syntax_kind().as_str(),
+                            "vba.file.root"
+                                | "vba.file.module"
+                                | "vba.file.scope"
+                                | "vba.sub_function.declaration"
+                                | "vba.sub_function.scope"
+                                | "vba.sub_function.signature"
+                                | "vba.parameter.declaration"
+                                | "vba.variable.declaration"
+                                | "vba.identifier.definition"
+                        )
+                    })
+                    .map(|fact| {
+                        let parent = fact.parent().map(|id| {
+                            let parent = parsed
+                                .facts()
+                                .iter()
+                                .find(|candidate| candidate.local_id() == id)
+                                .unwrap();
+                            (
+                                parent.kind(),
+                                parent.span(),
+                                parent.syntax_kind().as_str().to_owned(),
+                                parent.depth(),
+                            )
+                        });
+                        (
+                            fact.kind(),
+                            fact.span(),
+                            fact.syntax_kind().as_str().to_owned(),
+                            fact.depth(),
+                            parent,
+                        )
+                    })
+                    .collect::<Vec<_>>()
+            };
+            let mandatory = mandatory_identity(&output);
+            assert_eq!(mandatory.len(), required);
+            assert_eq!(mandatory_identity(&exact), mandatory);
+            assert_eq!(exact.report().coverage().status(), CoverageStatus::Bounded);
+            assert!(
+                exact
+                    .diagnostics()
+                    .iter()
+                    .any(|diagnostic| diagnostic.code().as_str() == "syntax-extraction-limit")
+            );
+            assert_eq!(
+                first_party
+                    .required_syntax_fact_count(
+                        &fixture.request(&exact_budget, language, Vec::new()),
+                        &deadline()
+                    )
+                    .unwrap(),
+                required
+            );
+            let short_budget = limits(required - 1);
+            assert_eq!(
+                execute_parse(
+                    &first_party,
+                    &fixture.request(&short_budget, language, Vec::new()),
+                    MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
+                    &deadline(),
+                )
+                .unwrap_err(),
+                AdapterError::Sink(SinkError::StreamLimit {
+                    resource: ResourceKind::RequiredSyntaxFacts,
+                    observed: required,
+                    limit: required - 1,
+                })
+            );
+            assert_eq!(first_party.stats().pooled_parsers, 0);
+        }
+    }
+}
+
+#[test]
+fn set_logical_arguments_preserve_source_recovered_native_application_facts() {
+    for operator in ["And", "Or", "Xor", "Eqv", "Imp"] {
+        for newline in ["\n", "\r\n"] {
+            let expression = format!("Outer(left < right {operator} third > last)");
+            let source =
+                format!("Sub Run(){newline}Set sink = {expression}{newline}End Sub{newline}");
+            for language in ["vba", "visual-basic-classic"] {
+                let fixture = Fixture::new(source.as_bytes());
+                let first_party = provider();
+                let native = provider();
+                let budget = limits(4096);
+                let actual = parse(
+                    &first_party,
+                    &fixture.request(&budget, language, Vec::new()),
+                );
+                let reference = parse(
+                    &native,
+                    &fixture.request(
+                        &budget,
+                        language,
+                        vec![IncludedRange::new(
+                            fixture.source.span(),
+                            LanguageId::new(language).unwrap(),
+                        )],
+                    ),
+                );
+                assert_eq!(actual.facts(), reference.facts(), "{language}: {source}");
+                assert_eq!(actual.diagnostics(), reference.diagnostics());
+                assert!(actual.diagnostics().is_empty());
+                assert_eq!(
+                    actual.report().coverage().status(),
+                    CoverageStatus::Complete
+                );
+                assert_eq!(
+                    actual.report().coverage().covered_source_bytes(),
+                    source.len()
+                );
+                assert_eq!(first_party.stats().pooled_parsers, 0);
+                assert_eq!(first_party.stats().checked_out_parsers, 0);
+                assert_eq!(first_party.stats().cache.entries, 0);
+                assert!(native.stats().pooled_parsers > 0);
+                let start = u64::try_from(source.find(&expression).unwrap()).unwrap();
+                assert_eq!(
+                    actual
+                        .facts()
+                        .iter()
+                        .filter(|fact| {
+                            fact.syntax_kind().as_str() == "vba.application.reference"
+                                && fact.span().start_byte() == start
+                                && fact.span().end_byte()
+                                    == start + u64::try_from(expression.len()).unwrap()
+                        })
+                        .count(),
+                    1
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn authored_set_octal_sources_remain_complete_without_native_parser_work() {
+    for newline in ["\n", "\r\n"] {
+        let source = format!(
+            "Sub Run(){newline}Dim sink As Variant{newline}sEt _{newline} [sink] = &O017{newline}End Sub{newline}"
+        );
+        for language in ["vba", "visual-basic-classic"] {
+            let fixture = Fixture::new(source.as_bytes());
+            let first_party = provider();
+            let budget = limits(4096);
+            let output = parse(
+                &first_party,
+                &fixture.request(&budget, language, Vec::new()),
+            );
+            assert!(output.diagnostics().is_empty());
+            assert_eq!(
+                output.report().coverage().status(),
+                CoverageStatus::Complete
+            );
+            assert_eq!(
+                output.report().coverage().covered_source_bytes(),
+                source.len()
+            );
+            assert_eq!(first_party.stats().pooled_parsers, 0);
+            assert_eq!(first_party.stats().checked_out_parsers, 0);
+            assert_eq!(first_party.stats().cache.entries, 0);
+            let destination = output
+                .facts()
+                .iter()
+                .find(|fact| fact.syntax_kind().as_str() == "vba.set_identifier.reference")
+                .unwrap();
+            assert_eq!(bytes_at(source.as_bytes(), destination.span()), b"[sink]");
+            let literal_start = u64::try_from(source.find("&O017").unwrap()).unwrap();
+            assert!(!output.facts().iter().any(|fact| {
+                fact.syntax_kind().as_str().ends_with(".reference")
+                    && fact.span().start_byte() >= literal_start
+                    && fact.span().end_byte() <= literal_start + 5
+            }));
+            assert_eq!(
+                fixture.source.content_hash(),
+                rootlight_ids::content_hash(source.as_bytes())
+            );
+        }
+    }
+}
+
+#[test]
+fn unsupported_set_tails_preserve_whole_native_facts_and_diagnostics() {
+    for statement in [
+        "Set sink = Nothing",
+        "Set sink = Me",
+        "Set sink = New Worker",
+        "Set sink = AddressOf Worker",
+        "Set holder.sink = value",
+        "Set sink(0) = value",
+        "Set sink = Outer(value:=1)",
+        "Set sink = Outer(,1)",
+        "Set sink = Outer(1)(2)",
+        "Set sink = value.Member",
+        "Set sink = left < 1 And right > 2",
+        "Set sink = left = middle = right",
+        "Set sink = (left = middle = right)",
+        "Set sink = Outer(left = middle = right)",
+        "Set sink = Not left = middle + right = last",
+        "Set sink = -(value + 1) extra",
+    ] {
+        let source = format!(
+            "Sub First()\nSet sink = value\nEnd Sub\nSub Run()\nSet sink = Buffer(0)\n{statement}\nEnd Sub\n"
+        );
+        for language in ["vba", "visual-basic-classic"] {
+            let fixture = Fixture::new(source.as_bytes());
+            let routed = provider();
+            let native = provider();
+            let budget = limits(4096);
+            let output = parse(&routed, &fixture.request(&budget, language, Vec::new()));
+            let reference = parse(
+                &native,
+                &fixture.request(
+                    &budget,
+                    language,
+                    vec![IncludedRange::new(
+                        fixture.source.span(),
+                        LanguageId::new(language).unwrap(),
+                    )],
+                ),
+            );
+            assert!(routed.stats().pooled_parsers > 0, "{language}: {statement}");
+            assert_eq!(routed.stats().checked_out_parsers, 0);
+            assert_eq!(output.facts(), reference.facts(), "{language}: {statement}");
+            assert_eq!(
+                output.diagnostics(),
+                reference.diagnostics(),
+                "{language}: {statement}"
+            );
+            assert!(output.facts().iter().any(|fact| fact.syntax_kind().as_str()
+                == "vba.identifier.definition"
+                && bytes_at(source.as_bytes(), fact.span()) == b"First"));
+        }
+    }
+}
+
+#[test]
 fn statement_value_applications_preserve_exact_native_source_roles() {
     for newline in ["\n", "\r\n"] {
         for statement in [

@@ -6,9 +6,9 @@ use std::ops::Range;
 
 use rootlight_adapter_sdk::NativeVbaModuleKind;
 use rootlight_vba::{
-    ModuleBodyStatement, ModuleConstantVisibility, ModuleError, ModuleExpressionInventory,
-    ModuleInventory, ModuleLimits, ModuleLocalKind, ModuleScalarValueKind,
-    ModuleVariableVisibility, ProcedureKind,
+    ModuleAssignmentMode, ModuleBodyStatement, ModuleConstantVisibility, ModuleError,
+    ModuleExpressionInventory, ModuleInventory, ModuleLimits, ModuleLocalKind,
+    ModuleScalarValueKind, ModuleVariableVisibility, ProcedureKind,
 };
 
 use super::*;
@@ -703,7 +703,7 @@ fn body_candidates(
                 cancellation,
                 assignment.destination(),
                 StructuralRole::Reference,
-                "vba.let_identifier",
+                assignment_destination_syntax(assignment.assignment_mode()),
                 false,
             )?;
             match assignment.value().kind() {
@@ -733,7 +733,7 @@ fn body_candidates(
                 cancellation,
                 assignment.destination(),
                 StructuralRole::Reference,
-                "vba.let_identifier",
+                assignment_destination_syntax(assignment.assignment_mode()),
                 false,
             )?;
             push_body_candidate(
@@ -782,7 +782,7 @@ fn body_candidates(
                 cancellation,
                 assignment.destination(),
                 StructuralRole::Reference,
-                "vba.let_identifier",
+                assignment_destination_syntax(assignment.assignment_mode()),
                 false,
             )?;
             value_application_candidates(assignment.inventory(), output, maximum, cancellation)?;
@@ -896,6 +896,13 @@ fn body_candidates(
         | ModuleBodyStatement::ProcedureExit(_) => {}
     }
     Ok(())
+}
+
+fn assignment_destination_syntax(mode: Option<ModuleAssignmentMode>) -> &'static str {
+    match mode {
+        Some(ModuleAssignmentMode::Set) => "vba.set_identifier",
+        Some(ModuleAssignmentMode::Let) | None => "vba.let_identifier",
+    }
 }
 
 fn value_application_candidates(
@@ -4615,7 +4622,7 @@ mod tests {
             "sink = holder.Buffer(0)",
             "holder.sink = Buffer(0)",
             "sink(0) = Buffer(0)",
-            "Set sink = Buffer(0)",
+            "Set sink = holder.Buffer(0)",
             "sink = Buffer(index:=0)",
             "sink = Buffer(ByVal index)",
             "sink = Buffer(,0)",
@@ -5073,6 +5080,202 @@ mod tests {
                 compare_native(&Fixture::new(source), language, &[]);
             }
         }
+    }
+
+    #[test]
+    fn first_party_vba_set_nested_comparison_chains_keep_whole_native_recovery() {
+        let bodies = [
+            "Set sink = (left = right = third)",
+            "Set sink = Outer(left = right = third)",
+            "Set sink = Outer((left = right = third))",
+            "Set sink = (left < right And third > last = extra)",
+            "Set sink = Not left = right + third = last",
+        ];
+        for body in bodies {
+            let source = format!("Sub Run()\n{body}\nEnd Sub\n");
+            for language in ["vba", "visual-basic-classic"] {
+                let native_fixture = Fixture::new(&source);
+                let request = native_fixture.request(language, &[]);
+                let native = native_fixture
+                    .provider
+                    .prepare_tree(
+                        &request,
+                        None,
+                        &[],
+                        native_fixture.provider.config.default_settings(),
+                        &Cancellation::new(),
+                    )
+                    .unwrap();
+                assert_ne!(
+                    native.traversal.coverage,
+                    CoverageStatus::Complete,
+                    "{body}: {}",
+                    native.tree.root_node().to_sexp()
+                );
+            }
+        }
+        for body in bodies {
+            let source = format!("Sub Run()\n{body}\nEnd Sub\n");
+            for language in ["vba", "visual-basic-classic"] {
+                let fixture = Fixture::new(&source);
+                assert!(
+                    prepare(
+                        &fixture.provider,
+                        &fixture.request(language, &[]),
+                        None,
+                        &[],
+                        fixture.provider.config.default_settings(),
+                        &Cancellation::new()
+                    )
+                    .unwrap()
+                    .is_none(),
+                    "{body}"
+                );
+                assert_eq!(fixture.provider.stats().pooled_parsers, 0);
+            }
+        }
+    }
+
+    #[test]
+    fn first_party_vba_set_arguments_match_source_recovered_native_applications() {
+        for operator in ["Xor", "Eqv", "Imp"] {
+            let expression = format!("Outer(left < right {operator} third > last)");
+            let source = format!("Sub Run()\nSet sink = {expression}\nEnd Sub\n");
+            for language in ["vba", "visual-basic-classic"] {
+                let fixture = Fixture::new(&source);
+                let request = fixture.request(language, &[]);
+                let native = fixture
+                    .provider
+                    .prepare_tree(
+                        &request,
+                        None,
+                        &[],
+                        fixture.provider.config.default_settings(),
+                        &Cancellation::new(),
+                    )
+                    .unwrap();
+                assert_eq!(native.traversal.coverage, CoverageStatus::Complete);
+                let pack = fixture
+                    .provider
+                    .query_packs
+                    .get_for_source(native.family, request.source().path().as_str())
+                    .unwrap();
+                let extracted = pack
+                    .extract(
+                        native.family,
+                        &native.tree,
+                        source.as_bytes(),
+                        4096,
+                        4096,
+                        &Cancellation::new(),
+                    )
+                    .unwrap();
+                assert!(extracted.limit.is_none());
+                let start = source.find(&expression).unwrap();
+                assert!(
+                    extracted.candidates.iter().any(|candidate| {
+                        candidate.syntax == "vba.application"
+                            && candidate.start == start
+                            && candidate.end == start + expression.len()
+                    }),
+                    "source recovery retains the complete application despite the native split: {source}"
+                );
+                compare_native(&Fixture::new(&source), language, &[]);
+            }
+        }
+    }
+
+    #[test]
+    fn first_party_vba_nested_not_comparisons_match_the_private_native_route() {
+        let bodies = [
+            "Set sink = left < right And Not third > last",
+            "Set sink = left = Not right = third",
+            "Set sink = Not left < right And Not third > last",
+            "Set sink = left < right Or Not third > last",
+            "Set sink = left = Not Not right = third",
+            "Set sink = Not left = right And third = last",
+            "Set sink = (left < right Xor third > last)",
+            "Set sink = (left < right Eqv third > last)",
+            "Set sink = (left < right Imp third > last)",
+            "Set sink = Outer(left < right And third > last)",
+            "Set sink = Outer(left < right Or third > last)",
+            "Set sink = Outer(Not left = right Xor third = last)",
+        ];
+        for body in bodies {
+            let source = format!("Sub Run()\n{body}\nEnd Sub\n");
+            let fixture = Fixture::new(&source);
+            let request = fixture.request("vba", &[]);
+            let native = fixture
+                .provider
+                .prepare_tree(
+                    &request,
+                    None,
+                    &[],
+                    fixture.provider.config.default_settings(),
+                    &Cancellation::new(),
+                )
+                .unwrap();
+            assert_eq!(
+                native.traversal.coverage,
+                CoverageStatus::Complete,
+                "{body}: {}",
+                native.tree.root_node().to_sexp()
+            );
+        }
+        for body in bodies {
+            compare_native_procedural_body(body);
+        }
+    }
+
+    #[test]
+    fn first_party_vba_authored_assignments_match_the_private_native_route() {
+        for prefix in ["Set", "sEt", "Let", "lEt", ""] {
+            for expression in [
+                "value",
+                "[Nothing]",
+                "[Me]",
+                "007",
+                "&H2A",
+                "1.25",
+                "True",
+                "\"a,\"\"b\"",
+                "Buffer()",
+                "Buffer(value)",
+                "Outer(Inner(value + 1), 2)",
+                "-(value + 1)",
+                "Not value",
+                "left < right",
+                "Not left < right",
+                "left < right And flag",
+                "flag And left < right",
+                "(left < right) And (third > last)",
+                "(flag And left < right)",
+                "(left < right And third > last)",
+                "(left < right And third > last And flag)",
+                "(left < right And third > last And Fetch(value))",
+                "Outer(left < right And third > last, (value + 1))",
+            ] {
+                compare_native_procedural_body(&format!("{prefix} sink = {expression}"));
+            }
+            for operator in [
+                "+", "-", "*", "/", "\\", "^", "Mod", "&", "=", "<>", "<", "<=", ">", ">=", "Is",
+                "Like", "And", "Or", "Xor", "Eqv", "Imp",
+            ] {
+                compare_native_procedural_body(&format!("{prefix} sink = left {operator} right"));
+                compare_native_procedural_body(&format!(
+                    "{prefix} sink = LeftValue(left {operator} right) + 1"
+                ));
+            }
+        }
+        for newline in ["\n", "\r\n"] {
+            let source = format!(
+                "Sub Run(){newline}sEt _{newline} [sink] = Outer(Inner(value _{newline} + 1), 2): Let [sink] = value ' retained trivia{newline}End Sub{newline}"
+            );
+            for language in ["vba", "visual-basic-classic"] {
+                compare_native(&Fixture::new(&source), language, &[]);
+            }
+        }
+        compare_native_procedural_body("[Set] = [Let]: Set0item = value: Set Load = value");
     }
 
     #[test]

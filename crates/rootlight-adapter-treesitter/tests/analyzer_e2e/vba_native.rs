@@ -5049,6 +5049,73 @@ fn vba_unqualified_properties_select_source_bound_accessors() {
 }
 
 #[test]
+fn vba_grouped_conditions_select_getters_without_overriding_local_values() {
+    for arguments in ["", "(0)"] {
+        let parameters = if arguments.is_empty() {
+            ""
+        } else {
+            "ByVal index As Long"
+        };
+        for prefix in ["", "Let ", "Set "] {
+            for shadow in ["", "Dim Item(2) As Variant\n"] {
+                let statement =
+                    format!("{prefix}value = (value < 1 And other > 2 And [iTeM]{arguments})");
+                let source = format!(
+                    "Property Get Item({parameters}) As Variant\nItem = 1\nEnd Property\nSub Run(ByVal value As Variant)\n{shadow}{statement}\nEnd Sub\n"
+                );
+                let result = output(&source);
+                let document = result.document();
+                let target = document
+                    .entities
+                    .iter()
+                    .find(|entity| {
+                        entity.canonical_name == "Item"
+                            && entity.kind
+                                == if shadow.is_empty() {
+                                    EntityKind::Property
+                                } else {
+                                    EntityKind::Variable
+                                }
+                    })
+                    .unwrap();
+                let start = u64::try_from(source.find("[iTeM]").unwrap()).unwrap();
+                let site = document
+                    .occurrences
+                    .iter()
+                    .find(|site| {
+                        site.source.span().start_byte() == start
+                            && site.source.span().end_byte() == start + 6
+                    })
+                    .unwrap();
+                assert_eq!(
+                    site.target,
+                    OccurrenceTarget::Resolved { symbol: target.id },
+                    "{source}"
+                );
+                assert_eq!(
+                    site.role,
+                    if shadow.is_empty() {
+                        OccurrenceRole::CallSite
+                    } else {
+                        OccurrenceRole::Reference
+                    },
+                    "{source}"
+                );
+                assert_eq!(
+                    document.relations.iter().any(|edge| {
+                        edge.predicate == RelationPredicate::Calls
+                            && edge.subject == RelationEndpoint::Occurrence(site.id)
+                            && edge.object == RelationEndpoint::Entity(target.id)
+                    }),
+                    shadow.is_empty(),
+                    "{source}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
 fn vba_unqualified_properties_respect_local_array_proofs_and_dynamic_index_gaps() {
     for (parameter, local) in [
         ("", "Dim Item(2) As Variant\n"),

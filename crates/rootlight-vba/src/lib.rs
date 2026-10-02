@@ -46,10 +46,10 @@ pub use module::{
     ModuleVariableVisibility, module_inventory,
 };
 pub use module_body::{
-    ModuleApplicationAssignment, ModuleBodyStatement, ModuleCall, ModuleFloatSuffix,
-    ModuleIntegerSuffix, ModuleLocalDeclaration, ModuleLocalKind, ModuleLocalVariable,
-    ModuleLocalVariables, ModuleProcedureExit, ModuleProcedureExitKind, ModuleScalarAssignment,
-    ModuleScalarValue, ModuleScalarValueKind, ModuleZeroArgumentCall,
+    ModuleApplicationAssignment, ModuleAssignmentMode, ModuleBodyStatement, ModuleCall,
+    ModuleFloatSuffix, ModuleIntegerSuffix, ModuleLocalDeclaration, ModuleLocalKind,
+    ModuleLocalVariable, ModuleLocalVariables, ModuleProcedureExit, ModuleProcedureExitKind,
+    ModuleScalarAssignment, ModuleScalarValue, ModuleScalarValueKind, ModuleZeroArgumentCall,
 };
 pub use module_expression::{
     ModuleExpressionApplication, ModuleExpressionAssignment, ModuleExpressionCall,

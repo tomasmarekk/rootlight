@@ -234,6 +234,64 @@ mod tests {
     use std::convert::Infallible;
 
     #[test]
+    fn grouped_conditions_preserve_value_and_invoked_get_contexts() {
+        use super::super::QueryPackRegistry;
+        use crate::{GrammarFamily, registry::language_for};
+        use rootlight_cancel::Cancellation;
+
+        let registry = QueryPackRegistry::audited().unwrap();
+        let pack = registry.get(GrammarFamily::Vba).unwrap();
+        for prefix in ["", "Let ", "Set "] {
+            for (operand, syntax) in [
+                ("[iTeM]", "vba.value_identifier"),
+                ("[iTeM](0)", "vba.invoked_get_identifier"),
+            ] {
+                let source = format!(
+                    "Sub Run()\n{prefix}sink = (value < 1 And other > 2 And {operand})\nEnd Sub\n"
+                );
+                let mut parser = tree_sitter::Parser::new();
+                parser
+                    .set_language(&language_for(GrammarFamily::Vba))
+                    .unwrap();
+                let tree = parser.parse(&source, None).unwrap();
+                assert!(
+                    !tree.root_node().has_error(),
+                    "{}",
+                    tree.root_node().to_sexp()
+                );
+                let extraction = pack
+                    .extract(
+                        GrammarFamily::Vba,
+                        &tree,
+                        source.as_bytes(),
+                        10_000,
+                        1024,
+                        &Cancellation::new(),
+                    )
+                    .unwrap();
+                assert!(extraction.limit.is_none());
+                let start = source.find("[iTeM]").unwrap();
+                let references: Vec<_> = extraction
+                    .candidates
+                    .iter()
+                    .filter(|candidate| {
+                        candidate.role == StructuralRole::Reference
+                            && candidate.start == start
+                            && candidate.end == start + 6
+                    })
+                    .collect();
+                assert_eq!(references.len(), 1, "{source}: {references:?}");
+                assert_eq!(
+                    references[0].syntax,
+                    syntax,
+                    "{source}: {}",
+                    tree.root_node().to_sexp()
+                );
+            }
+        }
+    }
+
+    #[test]
     fn construction_capture_owns_the_full_type_path_without_reference_fragments() {
         use super::super::QueryPackRegistry;
         use crate::{GrammarFamily, registry::language_for};

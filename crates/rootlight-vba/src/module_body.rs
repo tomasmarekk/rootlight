@@ -224,22 +224,33 @@ impl ModuleLocalVariable {
     }
 }
 
+/// The source-written keyword introducing one completely admitted assignment.
+/// This retains authored syntax, not inferred target or runtime assignment semantics.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ModuleAssignmentMode {
+    /// The statement explicitly carries `Let`.
+    Let,
+    /// The statement explicitly carries `Set`.
+    Set,
+}
+
 /// One complete scalar assignment to a simple source-written name.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ModuleScalarAssignment {
     statement: Range<usize>,
     destination: Range<usize>,
     value: ModuleScalarValue,
+    assignment_keyword: Option<(ModuleAssignmentMode, Range<usize>)>,
 }
 
 impl ModuleScalarAssignment {
-    /// Returns the whole trimmed statement, including an optional Let prefix.
+    /// Returns the whole trimmed statement, including an authored Let or Set prefix.
     #[must_use]
     pub fn statement(&self) -> Range<usize> {
         self.statement.clone()
     }
 
-    /// Returns the destination's exact name token, excluding Let and trivia.
+    /// Returns the destination's exact name token, excluding the prefix and trivia.
     #[must_use]
     pub fn destination(&self) -> Range<usize> {
         self.destination.clone()
@@ -249,6 +260,24 @@ impl ModuleScalarAssignment {
     #[must_use]
     pub fn value(&self) -> &ModuleScalarValue {
         &self.value
+    }
+
+    /// Returns the authored Let/Set mode, or None when no keyword was written.
+    /// Omission is source absence, not an inferred Let mode.
+    #[must_use]
+    pub const fn assignment_mode(&self) -> Option<ModuleAssignmentMode> {
+        match &self.assignment_keyword {
+            Some((mode, _)) => Some(*mode),
+            None => None,
+        }
+    }
+
+    /// Returns the exact authored Let/Set keyword, excluding following trivia.
+    #[must_use]
+    pub fn assignment_keyword_range(&self) -> Option<Range<usize>> {
+        self.assignment_keyword
+            .as_ref()
+            .map(|(_, range)| range.clone())
     }
 }
 
@@ -265,16 +294,17 @@ pub struct ModuleApplicationAssignment {
     callee: Range<usize>,
     arguments: Range<usize>,
     argument_values: Vec<ModuleScalarValue>,
+    assignment_keyword: Option<(ModuleAssignmentMode, Range<usize>)>,
 }
 
 impl ModuleApplicationAssignment {
-    /// Returns the complete trimmed statement, including an optional Let prefix.
+    /// Returns the complete trimmed statement, including an authored Let or Set prefix.
     #[must_use]
     pub fn statement(&self) -> Range<usize> {
         self.statement.clone()
     }
 
-    /// Returns the exact destination name, excluding Let and surrounding trivia.
+    /// Returns the exact destination name, excluding the prefix and surrounding trivia.
     #[must_use]
     pub fn destination(&self) -> Range<usize> {
         self.destination.clone()
@@ -303,6 +333,24 @@ impl ModuleApplicationAssignment {
     #[must_use]
     pub fn argument_values(&self) -> &[ModuleScalarValue] {
         &self.argument_values
+    }
+
+    /// Returns the authored Let/Set mode, or None when no keyword was written.
+    /// Omission is source absence, not an inferred Let mode.
+    #[must_use]
+    pub const fn assignment_mode(&self) -> Option<ModuleAssignmentMode> {
+        match &self.assignment_keyword {
+            Some((mode, _)) => Some(*mode),
+            None => None,
+        }
+    }
+
+    /// Returns the exact authored Let/Set keyword, excluding following trivia.
+    #[must_use]
+    pub fn assignment_keyword_range(&self) -> Option<Range<usize>> {
+        self.assignment_keyword
+            .as_ref()
+            .map(|(_, range)| range.clone())
     }
 }
 
@@ -630,8 +678,15 @@ fn scalar_statement<E>(
             Ok(None)
         };
     }
-    let explicit_let = first.eq_ignore_ascii_case(b"Let");
-    if explicit_let {
+    let assignment_mode = if first.eq_ignore_ascii_case(b"Let") {
+        Some(ModuleAssignmentMode::Let)
+    } else if first.eq_ignore_ascii_case(b"Set") {
+        Some(ModuleAssignmentMode::Set)
+    } else {
+        None
+    };
+    let assignment_keyword = assignment_mode.map(|mode| (mode, absolute(&range, 0..cursor)));
+    if assignment_mode.is_some() {
         if !separator(text, &mut cursor, check).map_err(ModuleError::Cancelled)? {
             return Ok(None);
         }
@@ -645,12 +700,12 @@ fn scalar_statement<E>(
     };
     // Native statement-keyword paths can recover an apparent assignment at its
     // head. This guard stays contextual; other name positions are independent.
-    if !explicit_let && text.get(destination.clone()).is_some_and(statement_keyword) {
+    if assignment_mode.is_none() && text.get(destination.clone()).is_some_and(statement_keyword) {
         return Ok(None);
     }
     let name_end = cursor;
     if !equals(text, &mut cursor, check).map_err(ModuleError::Cancelled)? {
-        return if explicit_let {
+        return if assignment_mode.is_some() {
             Ok(None)
         } else {
             implicit_call(text, range, destination, name_end, cursor, limits, check)
@@ -662,15 +717,17 @@ fn scalar_statement<E>(
         range.clone(),
         cursor,
         destination.clone(),
+        assignment_keyword.clone(),
         limits.arguments,
         check,
     )? {
         return Ok(Some(statement));
     }
-    let Some((expression, inventory)) = module_expression::inventory(
+    let Some((expression, inventory)) = module_expression::assignment_inventory(
         text,
         expression_start,
         &range,
+        assignment_mode,
         limits.expression_nodes,
         limits.arguments,
         check,
@@ -683,6 +740,7 @@ fn scalar_statement<E>(
             destination: absolute(&range, destination),
             expression,
             inventory,
+            assignment_keyword,
             statement: range,
         },
     )))
@@ -693,6 +751,7 @@ fn scalar_assignment<E>(
     range: Range<usize>,
     mut cursor: usize,
     destination: Range<usize>,
+    assignment_keyword: Option<(ModuleAssignmentMode, Range<usize>)>,
     maximum_arguments: usize,
     check: &mut impl FnMut() -> Result<(), E>,
 ) -> Result<Option<ModuleBodyStatement>, ModuleError<E>> {
@@ -735,6 +794,7 @@ fn scalar_assignment<E>(
                 callee: absolute(&range, value.span),
                 arguments: absolute(&range, arguments_start..application_end),
                 argument_values,
+                assignment_keyword,
                 statement: range,
             },
         )));
@@ -753,6 +813,7 @@ fn scalar_assignment<E>(
                 span: absolute(&range, value.span),
             },
             statement: range,
+            assignment_keyword,
         },
     )))
 }
@@ -1499,6 +1560,292 @@ mod tests {
 
     fn read(text: &[u8]) -> Option<ModuleBodyStatement> {
         statement(text, 0..text.len(), text.len(), &mut || Ok::<(), ()>(())).unwrap()
+    }
+
+    #[test]
+    fn assignment_modes_retain_authored_keywords_and_all_existing_rhs_source_contracts() {
+        for (prefix, mode) in [
+            ("", None),
+            ("lEt", Some(ModuleAssignmentMode::Let)),
+            ("sEt", Some(ModuleAssignmentMode::Set)),
+        ] {
+            for newline in ["\n", "\r\n"] {
+                for (rhs, values, callees, work, arguments) in [
+                    ("other", vec!["other"], vec![], 0, 0),
+                    ("7", vec!["7"], vec![], 0, 0),
+                    ("Read(1, other)", vec!["1", "other"], vec!["Read"], 0, 2),
+                    ("other + 1", vec!["other", "1"], vec![], 3, 0),
+                    (
+                        "Outer(Inner(other))",
+                        vec!["other"],
+                        vec!["Outer", "Inner"],
+                        5,
+                        2,
+                    ),
+                    ("(other)", vec!["other"], vec![], 2, 0),
+                    ("other And True", vec!["other", "True"], vec![], 3, 0),
+                    ("other = value", vec!["other", "value"], vec![], 3, 0),
+                ] {
+                    let head = if prefix.is_empty() {
+                        String::new()
+                    } else {
+                        format!("{prefix} _{newline} ")
+                    };
+                    let text = format!("{head}[sink] _{newline} = _{newline} {rhs} ");
+                    let source = format!("prefix\n{text}\ntail");
+                    let range = 7..7 + text.len();
+                    let parsed = statement_with_expression_limits(
+                        source.as_bytes(),
+                        range.clone(),
+                        arguments,
+                        work,
+                        &mut || Ok::<(), ()>(()),
+                    )
+                    .unwrap()
+                    .unwrap();
+                    let (actual_mode, keyword, destination) = match &parsed {
+                        ModuleBodyStatement::Assignment(assignment) => {
+                            assert!(rhs == "other" || rhs == "7");
+                            assert_eq!(vec![&source[assignment.value().span()]], values);
+                            (
+                                assignment.assignment_mode(),
+                                assignment.assignment_keyword_range(),
+                                assignment.destination(),
+                            )
+                        }
+                        ModuleBodyStatement::ApplicationAssignment(assignment) => {
+                            assert_eq!(rhs, "Read(1, other)");
+                            assert_eq!(&source[assignment.application()], rhs);
+                            assert_eq!(&source[assignment.arguments()], "(1, other)");
+                            assert_eq!(&source[assignment.callee()], "Read");
+                            assert_eq!(
+                                assignment
+                                    .argument_values()
+                                    .iter()
+                                    .map(|value| &source[value.span()])
+                                    .collect::<Vec<_>>(),
+                                values
+                            );
+                            (
+                                assignment.assignment_mode(),
+                                assignment.assignment_keyword_range(),
+                                assignment.destination(),
+                            )
+                        }
+                        ModuleBodyStatement::ExpressionAssignment(assignment) => {
+                            assert_eq!(&source[assignment.expression()], rhs);
+                            assert_eq!(assignment.inventory().work_nodes(), work);
+                            assert_eq!(assignment.inventory().argument_count(), arguments);
+                            assert_eq!(
+                                assignment
+                                    .inventory()
+                                    .values()
+                                    .iter()
+                                    .map(|value| &source[value.span()])
+                                    .collect::<Vec<_>>(),
+                                values
+                            );
+                            assert_eq!(
+                                assignment
+                                    .inventory()
+                                    .applications()
+                                    .iter()
+                                    .map(|application| &source[application.callee()])
+                                    .collect::<Vec<_>>(),
+                                callees
+                            );
+                            (
+                                assignment.assignment_mode(),
+                                assignment.assignment_keyword_range(),
+                                assignment.destination(),
+                            )
+                        }
+                        _ => panic!("complete assignment expected: {text:?}"),
+                    };
+                    assert_eq!(parsed.statement(), range);
+                    assert_eq!(actual_mode, mode);
+                    assert_eq!(keyword, mode.map(|_| 7..10));
+                    assert_eq!(keyword.map(|span| &source[span]), mode.map(|_| prefix));
+                    assert_eq!(destination, 7 + head.len()..13 + head.len());
+                    assert_eq!(&source[destination], "[sink]");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn assignment_mode_heads_require_exact_keywords_without_widening_names_or_tails() {
+        for destination in [
+            "[Set]", "[Let]", "Set0item", "Set_item", "Let0item", "Let_item",
+        ] {
+            let text = format!("{destination}=other");
+            let ModuleBodyStatement::Assignment(assignment) = read(text.as_bytes()).unwrap() else {
+                panic!("ordinary destination expected");
+            };
+            assert_eq!(assignment.assignment_mode(), None);
+            assert_eq!(assignment.assignment_keyword_range(), None);
+            assert_eq!(
+                &text.as_bytes()[assignment.destination()],
+                destination.as_bytes()
+            );
+        }
+        for text in [
+            "Set",
+            "Set=other",
+            "Set[item]=other",
+            "Set\x0bitem=other",
+            "Set\x0citem=other",
+            "Set\nitem=other",
+            "Set Let item=other",
+            "Let Set item=other",
+            "Set item=",
+            "Set item=other extra",
+            "Set item=other, value",
+            "Set item=Me",
+            "Set item=Nothing",
+            "Set item=New Other",
+            "Set item=AddressOf Other",
+            "Set item=other.member",
+            "Set item=Read().member",
+            "Set item=Read()(other)",
+            "Set item=Read(value:=1)",
+            "Set item=Read(ByVal other)",
+            "Set item(0)=other",
+            "Set holder.item=other",
+            "Set item$=other",
+            "Set item=other$",
+            "Set item=other +",
+        ] {
+            assert!(read(text.as_bytes()).is_none(), "{text:?}");
+        }
+        for text in ["Set [Let]=[Set]", "Let [Set]=[Let]"] {
+            assert!(
+                matches!(
+                    read(text.as_bytes()),
+                    Some(ModuleBodyStatement::Assignment(_))
+                ),
+                "{text}"
+            );
+        }
+    }
+
+    #[test]
+    fn authored_set_octal_scalar_retains_first_party_kind_and_exact_source_ranges() {
+        for newline in ["\n", "\r\n"] {
+            let text = format!("sEt _{newline} [item] = &O17");
+            let source = format!("prefix\n{text}\ntail");
+            let range = 7..7 + text.len();
+            let parsed = statement_with_expression_limits(
+                source.as_bytes(),
+                range.clone(),
+                0,
+                0,
+                &mut || Ok::<(), ()>(()),
+            )
+            .unwrap()
+            .unwrap();
+            let ModuleBodyStatement::Assignment(assignment) = parsed else {
+                panic!("authored octal atom must keep the scalar assignment route");
+            };
+            assert_eq!(assignment.statement(), range.clone());
+            assert_eq!(
+                assignment.assignment_mode(),
+                Some(ModuleAssignmentMode::Set)
+            );
+            assert_eq!(assignment.assignment_keyword_range(), Some(7..10));
+            assert_eq!(
+                &source[assignment.assignment_keyword_range().unwrap()],
+                "sEt"
+            );
+            let destination_start = 7 + text.find("[item]").unwrap();
+            assert_eq!(
+                assignment.destination(),
+                destination_start..destination_start + 6
+            );
+            assert_eq!(&source[assignment.destination()], "[item]");
+            let value = assignment.value();
+            assert_eq!(value.kind(), ModuleScalarValueKind::UnsignedOctal);
+            assert_eq!(value.span(), range.end - 4..range.end);
+            assert_eq!(&source[value.span()], "&O17");
+            assert_eq!(value.integer_suffix(), None);
+            assert_eq!(value.float_suffix(), None);
+            assert_eq!(value.unary_minus_span(), None);
+        }
+    }
+
+    #[test]
+    fn assignment_modes_preserve_exact_argument_node_limits_and_every_cancellation_checkpoint() {
+        for prefix in ["Set", "Let"] {
+            let text = format!("{prefix} _\r\n [sink] = Read(value + 1, Inner(other) * -2)");
+            let source = format!("prefix\n{text}\ntail");
+            let range = 7..7 + text.len();
+            for maximum in 0..11 {
+                assert_eq!(
+                    statement_with_expression_limits(
+                        source.as_bytes(),
+                        range.clone(),
+                        3,
+                        maximum,
+                        &mut || Ok::<(), ()>(())
+                    ),
+                    Err(ModuleError::ExpressionLimit),
+                    "nodes {maximum}"
+                );
+            }
+            for maximum in 0..3 {
+                assert_eq!(
+                    statement_with_expression_limits(
+                        source.as_bytes(),
+                        range.clone(),
+                        maximum,
+                        11,
+                        &mut || Ok::<(), ()>(())
+                    ),
+                    Err(ModuleError::ArgumentLimit),
+                    "arguments {maximum}"
+                );
+            }
+            let mut checkpoints = 0;
+            let parsed = statement_with_expression_limits(
+                source.as_bytes(),
+                range.clone(),
+                3,
+                11,
+                &mut || {
+                    checkpoints += 1;
+                    Ok::<(), ()>(())
+                },
+            )
+            .unwrap()
+            .unwrap();
+            let ModuleBodyStatement::ExpressionAssignment(assignment) = parsed else {
+                panic!("complete nested assignment expected");
+            };
+            assert_eq!(assignment.inventory().work_nodes(), 11);
+            assert_eq!(assignment.inventory().argument_count(), 3);
+            for cancelled_at in 1..=checkpoints {
+                let mut calls = 0;
+                assert_eq!(
+                    statement_with_expression_limits(
+                        source.as_bytes(),
+                        range.clone(),
+                        3,
+                        11,
+                        &mut || {
+                            calls += 1;
+                            if calls == cancelled_at {
+                                Err("stop")
+                            } else {
+                                Ok(())
+                            }
+                        }
+                    ),
+                    Err(ModuleError::Cancelled("stop")),
+                    "checkpoint {cancelled_at}"
+                );
+                assert_eq!(calls, cancelled_at);
+            }
+        }
     }
 
     #[test]
@@ -4966,7 +5313,7 @@ mod tests {
             "count$ = 1",
             "count(0) = 1",
             "item.member = count",
-            "Set item = other",
+            "Set item = other.member",
             "If flag Then",
             "Let = 1",
             "count = TrueValue extra",
@@ -5289,7 +5636,7 @@ mod tests {
             "count=Nothing()",
             "count(1)=Read()",
             "item.member=Read()",
-            "Set item=Read()",
+            "Set item=Read().member",
             "Load=Read()",
             "count=Read(\n)",
             "count=Read(\r\n)",
