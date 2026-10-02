@@ -53,7 +53,7 @@ pub use module_body::{
 };
 pub use module_expression::{
     ModuleExpressionApplication, ModuleExpressionAssignment, ModuleExpressionCall,
-    ModuleExpressionInventory,
+    ModuleExpressionInventory, ModuleValueApplication,
 };
 pub use parameter::{
     array_parameter_modifiers, parameter_declarations_cover, parameter_trivia_len,

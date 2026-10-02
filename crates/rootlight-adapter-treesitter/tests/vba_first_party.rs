@@ -35,6 +35,7 @@ const APPLICATION_ASSIGNMENT_MODULE: &[u8] = b"Private items(2) As Long\r\nSub R
 const EXPRESSION_ASSIGNMENT_MODULE: &[u8] = b"Sub Run(ByVal value As Long)\r\nDim result As Variant\r\nresult = -(value + 007) * +2 ^ 3 ^ 4\r\nresult = Not (value = 1) And True Or False Xor True Eqv False Imp True\r\nresult = \"a,\"\"b\"\":()\" & \"x\"\r\nresult = Outer(Inner(value + 1), items(-(value - 2))) + value\r\nEnd Sub\r\n";
 const EXPRESSION_CALL_MODULE: &[u8] = b"Sub Run(ByVal value As Long, ByVal other As Long)\r\nCall Target(value + 1, Inner(other) * -2)\r\nEnd Sub\r\n";
 const IMPLICIT_CALL_MODULE: &[u8] = b"Sub Run(ByVal value As Long, ByVal other As Long)\r\nTarget value + 1, Inner(other) * -2\r\nEnd Sub\r\n";
+const STATEMENT_VALUE_APPLICATION_MODULE: &[u8] = b"Sub Run(ByVal value As Long, ByVal other As Long)\r\nTarget (value + 1, Inner(other) * -2)\r\nEnd Sub\r\n";
 const OPTIONAL_PARAMETER_MODULE: &[u8] = b"Attribute VB_Name = \"Authored\"\r\nSub Accept(required As Long, Optional ByVal count As Long = 007, Optional [text] As String = \"a,\"\"b\"\":()\", Optional flag As Boolean = False, Optional unset As Long)\r\ncount = required\r\n[text] = [text]\r\nEnd Sub\r\n";
 const OMITTED_TYPE_MODULE: &[u8] = b"Attribute VB_Name = \"Authored\"\r\nSub Accept(required, ByVal typed As Long, Optional ByVal count = 007, Optional [text] = \"a,\"\"b\"\":()\", Optional flag = False, Optional unset)\r\ncount = required\r\n[text] = [text]\r\nEnd Sub\r\nFunction Echo(ByRef value) As Long\r\nEcho = value\r\nEnd Function\r\n";
 const RADIX_MODULE: &str = "Attribute VB_Name = \"Radix\"\nConst ModuleSeed As Long = &H0A\nPrivate slots(-&O1 To +&H2, &3) As Long\nSub Target(ByVal first As Long, Optional ByVal second As Long = &o7)\nEnd Sub\nFunction Inner(ByVal value As Long) As Long\nInner = &H1\nEnd Function\nSub Run()\nDim local As Long, grid(-&H1 To +&O2, &3) As Long\nConst LocalSeed As Long = &O7\nlocal = &hF\nLet local = &77\nlocal = LocalSeed\nlocal = grid(&H0, &O1)\nCall Target(&H1, &o2)\nCall Target(local + &H2, Inner(&3) * -&H1)\nEnd Sub\n";
@@ -2617,7 +2618,7 @@ fn implicit_call_raw_continuation_boundary_matches_forced_native_without_fabrica
 }
 
 #[test]
-fn implicit_single_leading_groups_preserve_native_value_application_roles() {
+fn statement_value_applications_preserve_exact_native_source_roles() {
     for newline in ["\n", "\r\n"] {
         for statement in [
             "Target (value)".to_owned(),
@@ -2626,16 +2627,25 @@ fn implicit_single_leading_groups_preserve_native_value_application_roles() {
             "Target (Inner(value, other))".to_owned(),
             "Target (\"a,b\")".to_owned(),
             format!("[Target] _{newline} (value _{newline} + 1)"),
+            "Target(value, other)".to_owned(),
+            "Target (value, other)".to_owned(),
+            "Target()".to_owned(),
+            "[Target] ( )".to_owned(),
+            "Target ((value + 1), Inner(other) * -2)".to_owned(),
+            format!("[Target] _{newline} (value, _{newline} Inner(other))"),
         ] {
             let source = format!(
                 "Sub First(){newline}Target value+1{newline}End Sub{newline}Sub Run(ByVal value As Long){newline}{statement} ' ignored (value), other{newline}End Sub{newline}"
             );
             for language in ["vba", "visual-basic-classic"] {
                 let fixture = Fixture::new(source.as_bytes());
-                let fallback = provider();
+                let first_party = provider();
                 let native = provider();
                 let budget = limits(4096);
-                let output = parse(&fallback, &fixture.request(&budget, language, Vec::new()));
+                let output = parse(
+                    &first_party,
+                    &fixture.request(&budget, language, Vec::new()),
+                );
                 let reference = parse(
                     &native,
                     &fixture.request(
@@ -2647,19 +2657,31 @@ fn implicit_single_leading_groups_preserve_native_value_application_roles() {
                         )],
                     ),
                 );
-                assert!(
-                    fallback.stats().pooled_parsers > 0,
+                assert_eq!(
+                    first_party.stats().pooled_parsers,
+                    0,
                     "{language}: {statement}"
                 );
-                assert_eq!(fallback.stats().checked_out_parsers, 0);
+                assert_eq!(first_party.stats().checked_out_parsers, 0);
+                assert_eq!(first_party.stats().cache.entries, 0);
+                assert!(native.stats().pooled_parsers > 0);
                 assert_eq!(output.facts(), reference.facts(), "{language}: {statement}");
                 assert_eq!(output.diagnostics(), reference.diagnostics());
+                assert!(output.diagnostics().is_empty(), "{language}: {statement}");
                 assert_eq!(
                     output.report().coverage().status(),
                     CoverageStatus::Complete
                 );
+                assert_eq!(
+                    output.report().coverage().covered_source_bytes(),
+                    source.len()
+                );
                 let start = source.find(&statement).unwrap();
-                let callee = statement.split_ascii_whitespace().next().unwrap();
+                let callee = if statement.starts_with('[') {
+                    "[Target]"
+                } else {
+                    "Target"
+                };
                 let matches_callee = |fact: &&SyntaxFact| {
                     fact.span().start_byte() == u64::try_from(start).unwrap()
                         && fact.span().end_byte() == u64::try_from(start + callee.len()).unwrap()
@@ -2683,7 +2705,94 @@ fn implicit_single_leading_groups_preserve_native_value_application_roles() {
                         .any(|fact| fact.syntax_kind().as_str()
                             == "vba.invoked_identifier.reference")
                 );
+                assert_eq!(
+                    output
+                        .facts()
+                        .iter()
+                        .filter(|fact| {
+                            fact.syntax_kind().as_str() == "vba.application.reference"
+                                && fact.span().start_byte() == u64::try_from(start).unwrap()
+                                && fact.span().end_byte()
+                                    == u64::try_from(start + statement.len()).unwrap()
+                        })
+                        .count(),
+                    1,
+                    "{language}: {statement}"
+                );
             }
+        }
+    }
+}
+
+#[test]
+fn statement_value_application_arguments_preserve_parentheses_and_inner_expression_boundaries() {
+    for newline in ["\n", "\r\n"] {
+        for (statement, expected_arguments) in [
+            ("Target()".to_owned(), Vec::new()),
+            ("Target (value)".to_owned(), vec!["value".to_owned()]),
+            ("[Target] ((value))".to_owned(), vec!["(value)".to_owned()]),
+            (
+                "Target (value + 1, Inner(other) * -2)".to_owned(),
+                vec!["value + 1".to_owned(), "Inner(other) * -2".to_owned()],
+            ),
+            (
+                format!("[Target] _{newline} (value _{newline} + 1, _{newline} Inner(other))"),
+                vec![format!("value _{newline} + 1"), "Inner(other)".to_owned()],
+            ),
+        ] {
+            let source = format!(
+                "Sub Run(ByVal value As Long, ByVal other As Long){newline}{statement} ' ignored (other){newline}End Sub{newline}"
+            );
+            let inventory = rootlight_vba::module_inventory(
+                source.as_bytes(),
+                rootlight_vba::ModuleLimits::new(source.len(), 4096, 4096),
+                &mut || Ok::<(), ()>(()),
+            )
+            .unwrap();
+            let [rootlight_vba::ModuleBodyStatement::ValueApplication(application)] =
+                inventory.procedures()[0].statements()
+            else {
+                panic!(
+                    "the complete parenthesized statement must retain its value-application role: {statement}"
+                );
+            };
+            let start = source.find(&statement).unwrap();
+            let end = start + statement.len();
+            let callee = if statement.starts_with('[') {
+                "[Target]"
+            } else {
+                "Target"
+            };
+            assert_eq!(application.statement(), start..end);
+            assert_eq!(application.application(), start..end);
+            assert_eq!(&source[application.callee()], callee);
+            let parentheses = application.arguments();
+            assert_eq!(
+                &source[parentheses.clone()],
+                &statement[statement.find('(').unwrap()..]
+            );
+            assert_eq!(source.as_bytes()[parentheses.start], b'(');
+            assert_eq!(source.as_bytes()[parentheses.end - 1], b')');
+            assert_eq!(
+                application.argument_expressions().len(),
+                expected_arguments.len()
+            );
+            for (range, expected) in application
+                .argument_expressions()
+                .iter()
+                .zip(&expected_arguments)
+            {
+                assert!(parentheses.start < range.start && range.end < parentheses.end);
+                assert_eq!(&source[range.clone()], expected);
+            }
+            let root = &application.inventory().applications()[0];
+            assert_eq!(root.application(), application.application());
+            assert_eq!(root.callee(), application.callee());
+            assert_eq!(root.arguments(), application.arguments());
+            assert_eq!(
+                root.argument_expressions(),
+                application.argument_expressions()
+            );
         }
     }
 }
@@ -2782,179 +2891,180 @@ fn implicit_grouped_assignment_candidates_preserve_exact_native_classification()
 }
 
 #[test]
-fn implicit_call_budgets_preserve_mandatory_identity_and_never_retry_typed_failures() {
-    for language in ["vba", "visual-basic-classic"] {
-        let fixture = Fixture::new(IMPLICIT_CALL_MODULE);
-        let provider = provider();
-        let base = limits(4096);
-        let request = fixture.request(&base, language, Vec::new());
-        let full = parse(&provider, &request);
-        let required = provider
-            .required_syntax_fact_count(&request, &deadline())
-            .unwrap();
-        assert_eq!(required, 11);
-        assert_eq!(full.report().resources().syntax_nodes(), 18);
-        let mandatory_identity = |output: &ParseOutput| {
-            output
-                .facts()
-                .iter()
-                .filter(|fact| {
-                    matches!(
-                        fact.syntax_kind().as_str(),
-                        "vba.file.root"
-                            | "vba.file.module"
-                            | "vba.file.scope"
-                            | "vba.sub_function.declaration"
-                            | "vba.sub_function.scope"
-                            | "vba.sub_function.signature"
-                            | "vba.parameter.declaration"
-                            | "vba.identifier.definition"
-                    )
-                })
-                .map(|fact| {
-                    let parent = fact.parent().map(|id| {
+fn implicit_and_value_application_budgets_preserve_mandatory_identity_without_native_retry() {
+    for source in [IMPLICIT_CALL_MODULE, STATEMENT_VALUE_APPLICATION_MODULE] {
+        for language in ["vba", "visual-basic-classic"] {
+            let fixture = Fixture::new(source);
+            let provider = provider();
+            let base = limits(4096);
+            let request = fixture.request(&base, language, Vec::new());
+            let full = parse(&provider, &request);
+            let required = provider
+                .required_syntax_fact_count(&request, &deadline())
+                .unwrap();
+            assert_eq!(required, 11);
+            assert_eq!(full.report().resources().syntax_nodes(), 18);
+            let mandatory_identity = |output: &ParseOutput| {
+                output
+                    .facts()
+                    .iter()
+                    .filter(|fact| {
+                        matches!(
+                            fact.syntax_kind().as_str(),
+                            "vba.file.root"
+                                | "vba.file.module"
+                                | "vba.file.scope"
+                                | "vba.sub_function.declaration"
+                                | "vba.sub_function.scope"
+                                | "vba.sub_function.signature"
+                                | "vba.parameter.declaration"
+                                | "vba.identifier.definition"
+                        )
+                    })
+                    .map(|fact| {
+                        let parent = fact.parent().map(|id| {
+                            let parent = output
+                                .facts()
+                                .iter()
+                                .find(|candidate| candidate.local_id() == id)
+                                .expect("mandatory parent remains in the output");
+                            (
+                                parent.kind(),
+                                parent.span(),
+                                parent.syntax_kind().as_str().to_owned(),
+                                parent.depth(),
+                            )
+                        });
+                        (
+                            fact.kind(),
+                            fact.span(),
+                            fact.syntax_kind().as_str().to_owned(),
+                            fact.depth(),
+                            parent,
+                        )
+                    })
+                    .collect::<Vec<_>>()
+            };
+            let mandatory = mandatory_identity(&full);
+            assert_eq!(mandatory.len(), required);
+            for capacity in required..=full.facts().len() {
+                let budget = limits(capacity);
+                let bounded = fixture.request(&budget, language, Vec::new());
+                let output = parse(&provider, &bounded);
+                assert_eq!(output.facts().len(), capacity);
+                assert_eq!(
+                    provider
+                        .required_syntax_fact_count(&bounded, &deadline())
+                        .unwrap(),
+                    required
+                );
+                assert_eq!(
+                    output.report().coverage().status(),
+                    if capacity == full.facts().len() {
+                        CoverageStatus::Complete
+                    } else {
+                        CoverageStatus::Bounded
+                    }
+                );
+                assert_eq!(
+                    output.diagnostics().iter().any(|diagnostic| {
+                        diagnostic.code().as_str() == "syntax-extraction-limit"
+                    }),
+                    capacity < full.facts().len()
+                );
+                // Local ordinals are assigned after optional retention. Compare all
+                // mandatory source records and their owning source records instead.
+                assert_eq!(mandatory_identity(&output), mandatory);
+                for (index, fact) in output.facts().iter().enumerate() {
+                    assert_eq!(fact.local_id(), u64::try_from(index + 1).unwrap());
+                    assert_eq!(fact.span().file(), fixture.source.span().file());
+                    if let Some(id) = fact.parent() {
+                        assert_ne!(id, fact.local_id());
                         let parent = output
                             .facts()
                             .iter()
                             .find(|candidate| candidate.local_id() == id)
-                            .expect("mandatory parent remains in the output");
-                        (
-                            parent.kind(),
-                            parent.span(),
-                            parent.syntax_kind().as_str().to_owned(),
-                            parent.depth(),
-                        )
-                    });
-                    (
-                        fact.kind(),
-                        fact.span(),
-                        fact.syntax_kind().as_str().to_owned(),
-                        fact.depth(),
-                        parent,
-                    )
+                            .expect("every local parent identity is retained");
+                        assert_eq!(fact.depth(), parent.depth() + 1);
+                        assert!(parent.span().start_byte() <= fact.span().start_byte());
+                        assert!(parent.span().end_byte() >= fact.span().end_byte());
+                    } else {
+                        assert_eq!(fact.depth(), 0);
+                    }
+                }
+                if capacity == required {
+                    assert_eq!(mandatory_identity(&output).len(), output.facts().len());
+                }
+                assert_eq!(parse(&provider, &bounded).facts(), output.facts());
+            }
+            let short = limits(required - 1);
+            let short_request = fixture.request(&short, language, Vec::new());
+            assert_eq!(
+                execute_parse(
+                    &provider,
+                    &short_request,
+                    MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
+                    &deadline()
+                )
+                .unwrap_err(),
+                AdapterError::Sink(SinkError::StreamLimit {
+                    resource: ResourceKind::RequiredSyntaxFacts,
+                    observed: required,
+                    limit: required - 1
                 })
-                .collect::<Vec<_>>()
-        };
-        let mandatory = mandatory_identity(&full);
-        assert_eq!(mandatory.len(), required);
-        for capacity in required..=full.facts().len() {
-            let budget = limits(capacity);
+            );
+            let budget = AnalysisLimits::new(
+                base.max_source_bytes(),
+                17,
+                base.max_syntax_depth(),
+                base.max_embedded_ranges(),
+                base.max_reported_memory_bytes(),
+                base.syntax_stream().clone(),
+                base.ir_stream().clone(),
+                base.ir().clone(),
+            )
+            .unwrap();
             let bounded = fixture.request(&budget, language, Vec::new());
-            let output = parse(&provider, &bounded);
-            assert_eq!(output.facts().len(), capacity);
             assert_eq!(
-                provider
-                    .required_syntax_fact_count(&bounded, &deadline())
-                    .unwrap(),
-                required
+                execute_parse(
+                    &provider,
+                    &bounded,
+                    MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
+                    &deadline()
+                )
+                .unwrap_err(),
+                AdapterError::RejectedRequest(rootlight_adapter_sdk::RequestError::ProviderLimit {
+                    resource: ResourceKind::SyntaxNodes,
+                    observed: 18,
+                    limit: 17
+                })
             );
-            assert_eq!(
-                output.report().coverage().status(),
-                if capacity == full.facts().len() {
-                    CoverageStatus::Complete
-                } else {
-                    CoverageStatus::Bounded
-                }
-            );
-            assert_eq!(
-                output
-                    .diagnostics()
-                    .iter()
-                    .any(|diagnostic| { diagnostic.code().as_str() == "syntax-extraction-limit" }),
-                capacity < full.facts().len()
-            );
-            // Local ordinals are assigned after optional retention. Compare all
-            // mandatory source records and their owning source records instead.
-            assert_eq!(mandatory_identity(&output), mandatory);
-            for (index, fact) in output.facts().iter().enumerate() {
-                assert_eq!(fact.local_id(), u64::try_from(index + 1).unwrap());
-                assert_eq!(fact.span().file(), fixture.source.span().file());
-                if let Some(id) = fact.parent() {
-                    assert_ne!(id, fact.local_id());
-                    let parent = output
-                        .facts()
-                        .iter()
-                        .find(|candidate| candidate.local_id() == id)
-                        .expect("every local parent identity is retained");
-                    assert_eq!(fact.depth(), parent.depth() + 1);
-                    assert!(parent.span().start_byte() <= fact.span().start_byte());
-                    assert!(parent.span().end_byte() >= fact.span().end_byte());
-                } else {
-                    assert_eq!(fact.depth(), 0);
-                }
-            }
-            if capacity == required {
-                assert_eq!(mandatory_identity(&output).len(), output.facts().len());
-            }
-            assert_eq!(parse(&provider, &bounded).facts(), output.facts());
+            let cancelled = deadline();
+            cancelled.cancel(CancellationReason::ClientRequest);
+            assert!(matches!(
+                execute_parse(
+                    &provider,
+                    &request,
+                    MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
+                    &cancelled
+                ),
+                Err(AdapterError::Cancelled {
+                    reason: CancellationReason::ClientRequest
+                })
+            ));
+            assert_eq!(parse(&provider, &request).facts(), full.facts());
+            assert_eq!(provider.stats().pooled_parsers, 0);
+            assert_eq!(provider.stats().checked_out_parsers, 0);
+            assert_eq!(provider.stats().cache.entries, 0);
         }
-        let short = limits(required - 1);
-        let short_request = fixture.request(&short, language, Vec::new());
-        assert_eq!(
-            execute_parse(
-                &provider,
-                &short_request,
-                MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
-                &deadline()
-            )
-            .unwrap_err(),
-            AdapterError::Sink(SinkError::StreamLimit {
-                resource: ResourceKind::RequiredSyntaxFacts,
-                observed: required,
-                limit: required - 1
-            })
-        );
-        let budget = AnalysisLimits::new(
-            base.max_source_bytes(),
-            17,
-            base.max_syntax_depth(),
-            base.max_embedded_ranges(),
-            base.max_reported_memory_bytes(),
-            base.syntax_stream().clone(),
-            base.ir_stream().clone(),
-            base.ir().clone(),
-        )
-        .unwrap();
-        let bounded = fixture.request(&budget, language, Vec::new());
-        assert_eq!(
-            execute_parse(
-                &provider,
-                &bounded,
-                MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
-                &deadline()
-            )
-            .unwrap_err(),
-            AdapterError::RejectedRequest(rootlight_adapter_sdk::RequestError::ProviderLimit {
-                resource: ResourceKind::SyntaxNodes,
-                observed: 18,
-                limit: 17
-            })
-        );
-        let cancelled = deadline();
-        cancelled.cancel(CancellationReason::ClientRequest);
-        assert!(matches!(
-            execute_parse(
-                &provider,
-                &request,
-                MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
-                &cancelled
-            ),
-            Err(AdapterError::Cancelled {
-                reason: CancellationReason::ClientRequest
-            })
-        ));
-        assert_eq!(parse(&provider, &request).facts(), full.facts());
-        assert_eq!(provider.stats().pooled_parsers, 0);
-        assert_eq!(provider.stats().checked_out_parsers, 0);
-        assert_eq!(provider.stats().cache.entries, 0);
     }
 }
 
 #[test]
 fn implicit_calls_keep_unsupported_heads_and_complete_tails_on_the_whole_native_route() {
     for statement in [
-        "Target(value, other)",
-        "Target (value, other)",
+        "Target(named:=value, other)",
+        "Target (value, other,)",
         "Target value,",
         "Target ,value",
         "Target value,,other",

@@ -6,8 +6,9 @@ use std::ops::Range;
 
 use rootlight_adapter_sdk::NativeVbaModuleKind;
 use rootlight_vba::{
-    ModuleBodyStatement, ModuleConstantVisibility, ModuleError, ModuleInventory, ModuleLimits,
-    ModuleLocalKind, ModuleScalarValueKind, ModuleVariableVisibility, ProcedureKind,
+    ModuleBodyStatement, ModuleConstantVisibility, ModuleError, ModuleExpressionInventory,
+    ModuleInventory, ModuleLimits, ModuleLocalKind, ModuleScalarValueKind,
+    ModuleVariableVisibility, ProcedureKind,
 };
 
 use super::*;
@@ -151,6 +152,9 @@ pub(super) fn prepare(
                     assignment.inventory().work_nodes()
                 }
                 ModuleBodyStatement::ExpressionCall(call) => call.inventory().work_nodes(),
+                ModuleBodyStatement::ValueApplication(application) => {
+                    application.inventory().work_nodes()
+                }
                 ModuleBodyStatement::Declaration(declaration) => declaration
                     .value()
                     .map_or(0, rootlight_vba::ModuleScalarValue::initializer_work_nodes),
@@ -354,6 +358,7 @@ fn candidates(
                 | ModuleBodyStatement::ExpressionAssignment(_)
                 | ModuleBodyStatement::Call(_)
                 | ModuleBodyStatement::ExpressionCall(_)
+                | ModuleBodyStatement::ValueApplication(_)
                 | ModuleBodyStatement::ProcedureExit(_) => 0,
             };
             count = declarations
@@ -780,41 +785,10 @@ fn body_candidates(
                 "vba.let_identifier",
                 false,
             )?;
-            for application in assignment.inventory().applications() {
-                cancellation.check()?;
-                push_body_candidate(
-                    output,
-                    maximum,
-                    cancellation,
-                    application.application(),
-                    StructuralRole::Reference,
-                    "vba.application",
-                    false,
-                )?;
-                push_body_candidate(
-                    output,
-                    maximum,
-                    cancellation,
-                    application.callee(),
-                    StructuralRole::Reference,
-                    "vba.invoked_get_identifier",
-                    false,
-                )?;
-            }
-            for value in assignment.inventory().values() {
-                cancellation.check()?;
-                if value.kind() == ModuleScalarValueKind::Name {
-                    push_body_candidate(
-                        output,
-                        maximum,
-                        cancellation,
-                        value.span(),
-                        StructuralRole::Reference,
-                        "vba.value_identifier",
-                        false,
-                    )?;
-                }
-            }
+            value_application_candidates(assignment.inventory(), output, maximum, cancellation)?;
+        }
+        ModuleBodyStatement::ValueApplication(application) if include_optional => {
+            value_application_candidates(application.inventory(), output, maximum, cancellation)?;
         }
         ModuleBodyStatement::ExpressionCall(call) if include_optional => {
             push_body_candidate(
@@ -917,8 +891,53 @@ fn body_candidates(
         | ModuleBodyStatement::ApplicationAssignment(_)
         | ModuleBodyStatement::ExpressionAssignment(_)
         | ModuleBodyStatement::ExpressionCall(_)
+        | ModuleBodyStatement::ValueApplication(_)
         | ModuleBodyStatement::Call(_)
         | ModuleBodyStatement::ProcedureExit(_) => {}
+    }
+    Ok(())
+}
+
+fn value_application_candidates(
+    inventory: &ModuleExpressionInventory,
+    output: &mut Vec<QueryCandidate>,
+    maximum: usize,
+    cancellation: &Cancellation,
+) -> Result<(), AdapterError> {
+    for application in inventory.applications() {
+        cancellation.check()?;
+        push_body_candidate(
+            output,
+            maximum,
+            cancellation,
+            application.application(),
+            StructuralRole::Reference,
+            "vba.application",
+            false,
+        )?;
+        push_body_candidate(
+            output,
+            maximum,
+            cancellation,
+            application.callee(),
+            StructuralRole::Reference,
+            "vba.invoked_get_identifier",
+            false,
+        )?;
+    }
+    for value in inventory.values() {
+        cancellation.check()?;
+        if value.kind() == ModuleScalarValueKind::Name {
+            push_body_candidate(
+                output,
+                maximum,
+                cancellation,
+                value.span(),
+                StructuralRole::Reference,
+                "vba.value_identifier",
+                false,
+            )?;
+        }
     }
     Ok(())
 }
@@ -4631,6 +4650,143 @@ mod tests {
                 assert_eq!(fixture.provider.stats().pooled_parsers, 0);
                 assert_eq!(fixture.provider.stats().cache.entries, 0);
             }
+        }
+    }
+
+    #[test]
+    fn first_party_vba_statement_value_applications_match_the_private_native_route() {
+        for body in [
+            "Target(value)",
+            "Target (value)",
+            "[Target] ((value))",
+            "Target (value + 1)",
+            "Target(Inner(value, other))",
+            "Target(value, other)",
+            "Target()",
+            "[Target] ( )",
+            "Target ((value + 1), Inner(other) * -2)",
+            "[Target] _\n (value, _\n Inner(other))",
+        ] {
+            compare_native_procedural_body(body);
+        }
+    }
+
+    #[test]
+    fn first_party_vba_statement_value_application_work_and_candidates_are_exact() {
+        let source = "Sub Run()\nTarget (value + 1, Inner(other) * -2)\nEnd Sub\n";
+        for language in ["vba", "visual-basic-classic"] {
+            let mut fixture = Fixture::new(source);
+            let cancellation = Cancellation::new();
+            let request = fixture.request(language, &[]);
+            let prepared = prepare(
+                &fixture.provider,
+                &request,
+                None,
+                &[],
+                fixture.provider.config.default_settings(),
+                &cancellation,
+            )
+            .unwrap()
+            .unwrap();
+            assert_eq!(prepared.processed_nodes, 16);
+            let ModuleBodyStatement::ValueApplication(application) =
+                &prepared.inventory.procedures()[0].statements()[0]
+            else {
+                panic!("the complete parenthesized root retains a value application");
+            };
+            assert_eq!(application.inventory().work_nodes(), 11);
+            assert_eq!(application.inventory().argument_count(), 3);
+            assert_eq!(application.argument_expressions().len(), 2);
+            assert_eq!(application.inventory().applications().len(), 2);
+            assert_eq!(&source[application.callee()], "Target");
+            assert_eq!(application.application(), application.statement());
+            assert_eq!(
+                &source[application.arguments()],
+                "(value + 1, Inner(other) * -2)"
+            );
+            for (optional, exact) in [(false, 7), (true, 14)] {
+                let all = candidates(
+                    &prepared.inventory,
+                    request.source().bytes(),
+                    optional,
+                    exact,
+                    &cancellation,
+                )
+                .unwrap();
+                assert_eq!(all.len(), exact);
+                let normalized =
+                    normalize_query_candidates(all, &request, usize::MAX, &cancellation).unwrap();
+                assert_eq!(normalized.required, 7);
+                assert_eq!(
+                    normalized
+                        .facts
+                        .iter()
+                        .filter(|fact| fact.syntax_kind().as_str()
+                            == "vba.invoked_get_identifier.reference")
+                        .count(),
+                    usize::from(optional) * 2
+                );
+                assert!(normalized.facts.iter().all(|fact| {
+                    fact.syntax_kind().as_str() != "vba.invoked_identifier.reference"
+                }));
+                for (limit, observed) in [(exact - 1, exact), (0, 7)] {
+                    assert_eq!(
+                        candidates(
+                            &prepared.inventory,
+                            request.source().bytes(),
+                            optional,
+                            limit,
+                            &cancellation,
+                        )
+                        .unwrap_err(),
+                        AdapterError::RejectedRequest(RequestError::ProviderLimit {
+                            resource: ResourceKind::SyntaxNodes,
+                            observed,
+                            limit,
+                        })
+                    );
+                }
+            }
+            for limit in [16, 15, 10] {
+                fixture.limits = with_maximum_nodes(&fixture.limits, limit);
+                let request = fixture.request(language, &[]);
+                let result = prepare(
+                    &fixture.provider,
+                    &request,
+                    None,
+                    &[],
+                    fixture.provider.config.default_settings(),
+                    &cancellation,
+                );
+                if limit == 16 {
+                    assert_eq!(result.unwrap().unwrap().processed_nodes, 16);
+                } else {
+                    assert_eq!(
+                        result.err().unwrap(),
+                        AdapterError::RejectedRequest(RequestError::ProviderLimit {
+                            resource: ResourceKind::SyntaxNodes,
+                            observed: limit + 1,
+                            limit,
+                        })
+                    );
+                }
+            }
+            assert!(cancellation.cancel(rootlight_cancel::CancellationReason::ClientRequest));
+            let request = fixture.request(language, &[]);
+            assert!(matches!(
+                candidates(
+                    &prepared.inventory,
+                    request.source().bytes(),
+                    true,
+                    100,
+                    &cancellation,
+                ),
+                Err(AdapterError::Cancelled {
+                    reason: rootlight_cancel::CancellationReason::ClientRequest
+                })
+            ));
+            assert_eq!(fixture.provider.stats().pooled_parsers, 0);
+            assert_eq!(fixture.provider.stats().cache.entries, 0);
         }
     }
 

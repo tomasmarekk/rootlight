@@ -521,10 +521,13 @@ impl<E: std::error::Error + 'static> std::error::Error for ModuleError<E> {
 /// space/tab-based logical trivia. Implicit calls admit a bare simple callee, or
 /// that callee separated by logical trivia from a complete comma-separated list
 /// of the same expressions. Parentheses in that list remain expression groups,
-/// not an inferred outer Call list or evidence of ByRef behavior. A single fully
-/// parenthesized argument remains unsupported because its native value-application
-/// callee role differs; grouped operands in operator tails and multiargument lists
-/// remain admitted. A leading complete group followed by '=' remains on the native
+/// not an inferred outer Call list or evidence of ByRef behavior. A complete
+/// standalone simple-name application with authored parentheses is retained as a
+/// separate ValueApplication statement, with its root and nested get/index syntax;
+/// it is not reclassified as a statement call. Empty and positional expression
+/// lists are admitted without target, type or formal-parameter inference. Grouped
+/// operands in implicit operator tails and outer comma lists remain statement calls.
+/// A leading complete group followed by '=' remains on the native
 /// route because indexed assignments and comparison calls can share those bytes;
 /// native classification, including logical-right-side ambiguity, is preserved.
 /// Named, omitted and ByVal arguments, and explicit Call with
@@ -692,6 +695,9 @@ pub fn module_inventory<E>(
                 let implicit_head = match &statement {
                     ModuleBodyStatement::Call(call) => call.callee().start == range.start,
                     ModuleBodyStatement::ExpressionCall(call) => call.callee().start == range.start,
+                    ModuleBodyStatement::ValueApplication(application) => {
+                        application.callee().start == range.start
+                    }
                     _ => false,
                 };
                 if implicit_head
@@ -728,6 +734,9 @@ pub fn module_inventory<E>(
                         assignment.inventory().argument_count()
                     }
                     ModuleBodyStatement::ExpressionCall(call) => call.inventory().argument_count(),
+                    ModuleBodyStatement::ValueApplication(application) => {
+                        application.inventory().argument_count()
+                    }
                     ModuleBodyStatement::Declaration(_)
                     | ModuleBodyStatement::Variables(_)
                     | ModuleBodyStatement::Assignment(_)
@@ -741,6 +750,9 @@ pub fn module_inventory<E>(
                         assignment.inventory().work_nodes()
                     }
                     ModuleBodyStatement::ExpressionCall(call) => call.inventory().work_nodes(),
+                    ModuleBodyStatement::ValueApplication(application) => {
+                        application.inventory().work_nodes()
+                    }
                     ModuleBodyStatement::Declaration(declaration) => declaration
                         .value()
                         .map_or(0, ModuleScalarValue::initializer_work_nodes),
@@ -763,6 +775,7 @@ pub fn module_inventory<E>(
                     | ModuleBodyStatement::ExpressionAssignment(_)
                     | ModuleBodyStatement::Call(_)
                     | ModuleBodyStatement::ExpressionCall(_)
+                    | ModuleBodyStatement::ValueApplication(_)
                     | ModuleBodyStatement::ProcedureExit(_) => 1,
                 };
                 if retained_records > remaining_records {
@@ -1725,6 +1738,208 @@ mod tests {
     }
 
     #[test]
+    fn value_applications_retain_whole_module_order_ranges_and_complete_nested_inventory() {
+        for newline in ["\n", "\r\n"] {
+            let written =
+                format!("[Target] _{newline} (value _{newline} + 1, [Inner](other) * -2)");
+            let source = format!(
+                "Attribute VB_Name = \"Applications\"{newline}Sub Run(){newline}  {written} ' ignored Target(): End Sub{newline}Target(): Target (value), other{newline}End Sub{newline}Sub Later(){newline}Target((value)){newline}End Sub{newline}"
+            );
+            let inventory = parse(source.as_bytes()).unwrap();
+            assert_eq!(inventory.procedures().len(), 2);
+            let statements = inventory.procedures()[0].statements();
+            assert_eq!(statements.len(), 3);
+            let ModuleBodyStatement::ValueApplication(application) = &statements[0] else {
+                panic!("standalone parenthesized application expected");
+            };
+            let start = source.find(&written).unwrap();
+            assert_eq!(application.statement(), start..start + written.len());
+            assert_eq!(application.application(), application.statement());
+            assert_eq!(application.callee(), start..start + 8);
+            assert_eq!(
+                application.arguments(),
+                start + written.find('(').unwrap()..start + written.len()
+            );
+            assert_eq!(application.argument_expressions().len(), 2);
+            assert_eq!(
+                &source[application.argument_expressions()[0].clone()],
+                format!("value _{newline} + 1")
+            );
+            assert_eq!(
+                &source[application.argument_expressions()[1].clone()],
+                "[Inner](other) * -2"
+            );
+            assert_eq!(application.inventory().work_nodes(), 11);
+            assert_eq!(application.inventory().argument_count(), 3);
+            assert_eq!(
+                application
+                    .inventory()
+                    .applications()
+                    .iter()
+                    .map(|nested| { &source[nested.callee()] })
+                    .collect::<Vec<_>>(),
+                ["[Target]", "[Inner]"]
+            );
+            assert_eq!(
+                application
+                    .inventory()
+                    .values()
+                    .iter()
+                    .map(|value| { &source[value.span()] })
+                    .collect::<Vec<_>>(),
+                ["value", "1", "other", "2"]
+            );
+            let ModuleBodyStatement::ValueApplication(empty) = &statements[1] else {
+                panic!("adjacent empty value application expected");
+            };
+            assert_eq!(&source[empty.statement()], "Target()");
+            assert_eq!(&source[empty.arguments()], "()");
+            assert!(empty.argument_expressions().is_empty());
+            assert_eq!(empty.inventory().work_nodes(), 2);
+            assert_eq!(empty.inventory().argument_count(), 0);
+            let ModuleBodyStatement::ExpressionCall(call) = &statements[2] else {
+                panic!("outer comma must remain a statement call");
+            };
+            assert_eq!(&source[call.statement()], "Target (value), other");
+            assert_eq!(&source[call.arguments()], "(value), other");
+            assert_eq!(call.argument_expressions().len(), 2);
+            let ModuleBodyStatement::ValueApplication(grouped) =
+                &inventory.procedures()[1].statements()[0]
+            else {
+                panic!("later procedure application expected");
+            };
+            assert_eq!(&source[grouped.statement()], "Target((value))");
+            assert_eq!(
+                &source[grouped.argument_expressions()[0].clone()],
+                "(value)"
+            );
+            assert_eq!(grouped.inventory().work_nodes(), 4);
+            assert_eq!(grouped.inventory().argument_count(), 1);
+            assert!(application.statement().end < empty.statement().start);
+            assert!(empty.statement().end < call.statement().start);
+            assert!(call.statement().end < grouped.statement().start);
+        }
+    }
+
+    #[test]
+    fn value_applications_share_aggregate_node_argument_and_statement_ceilings() {
+        let source = b"Sub Run()\nCall Ready(1)\nTarget(value+1,Inner(other)*-2)\nTarget()\nTarget (value+1),other\nEnd Sub\n";
+        let limits = ModuleLimits::new(source.len(), 6, 1)
+            .with_max_arguments(6)
+            .with_max_expression_nodes(20);
+        let inventory = module_inventory(source, limits, &mut || Ok::<(), ()>(())).unwrap();
+        assert_eq!(inventory.statement_count(), 6);
+        assert_eq!(inventory.procedures()[0].statements().len(), 4);
+        assert!(matches!(
+            inventory.procedures()[0].statements()[0],
+            ModuleBodyStatement::Call(_)
+        ));
+        assert!(matches!(
+            inventory.procedures()[0].statements()[1],
+            ModuleBodyStatement::ValueApplication(_)
+        ));
+        assert!(matches!(
+            inventory.procedures()[0].statements()[2],
+            ModuleBodyStatement::ValueApplication(_)
+        ));
+        assert!(matches!(
+            inventory.procedures()[0].statements()[3],
+            ModuleBodyStatement::ExpressionCall(_)
+        ));
+        assert_eq!(
+            module_inventory(source, limits.with_max_arguments(5), &mut || Ok::<(), ()>(
+                ()
+            )),
+            Err(ModuleError::ArgumentLimit)
+        );
+        assert_eq!(
+            module_inventory(source, limits.with_max_expression_nodes(19), &mut || Ok::<
+                (),
+                (),
+            >(
+                ()
+            )),
+            Err(ModuleError::ExpressionLimit)
+        );
+        assert_eq!(
+            module_inventory(
+                source,
+                ModuleLimits::new(source.len(), 5, 1)
+                    .with_max_arguments(6)
+                    .with_max_expression_nodes(20),
+                &mut || Ok::<(), ()>(())
+            ),
+            Err(ModuleError::StatementLimit)
+        );
+    }
+
+    #[test]
+    fn value_application_cancellation_and_dangling_raw_tails_never_return_prefix_inventory() {
+        let source = b"Sub First()\nTarget()\nEnd Sub\nSub Second()\nTarget(value+1,Inner(other)*-2)\nEnd Sub\n";
+        let limits = ModuleLimits::new(source.len(), 6, 2)
+            .with_max_arguments(3)
+            .with_max_expression_nodes(13);
+        let mut checkpoints = 0;
+        module_inventory(source, limits, &mut || {
+            checkpoints += 1;
+            Ok::<(), ()>(())
+        })
+        .unwrap();
+        for cancelled_at in 1..=checkpoints {
+            let mut calls = 0;
+            assert_eq!(
+                module_inventory(source, limits, &mut || {
+                    calls += 1;
+                    if calls == cancelled_at {
+                        Err("stop")
+                    } else {
+                        Ok(())
+                    }
+                }),
+                Err(ModuleError::Cancelled("stop")),
+                "checkpoint {cancelled_at}"
+            );
+            assert_eq!(calls, cancelled_at);
+        }
+        for newline in ["\n", "\r\n"] {
+            for gap in ["", " "] {
+                let tail = format!("Target{gap}(value) _{newline}\t ");
+                let source = format!(
+                    "Sub First(){newline}Target(){newline}End Sub{newline}Sub Second(){newline}{tail}{newline}End Sub{newline}"
+                );
+                let start = source.find(&tail).unwrap();
+                // The incomplete underscore fails before a retained record's raw-tail guard.
+                let rejected = format!("Target{gap}(value) _");
+                let range = start..start + tail.trim_ascii_end().len();
+                assert_eq!(&source[range.clone()], rejected);
+                assert_eq!(
+                    parse(source.as_bytes()),
+                    Err(ModuleError::Unsupported { range }),
+                    "{tail:?}"
+                );
+            }
+        }
+        for tail in [
+            "Target(value).member",
+            "Target(value)(other)",
+            "Target(value) trailing",
+            "Target (value) = other",
+            "Target (value) = other And True",
+            "Target(value,,other)",
+        ] {
+            let source = format!("Sub First()\nTarget()\nEnd Sub\nSub Second()\n{tail}\nEnd Sub\n");
+            let start = source.find(tail).unwrap();
+            assert_eq!(
+                parse(source.as_bytes()),
+                Err(ModuleError::Unsupported {
+                    range: start..start + tail.len(),
+                }),
+                "{tail}"
+            );
+        }
+    }
+
+    #[test]
     fn implicit_calls_retain_whole_module_ranges_comments_colon_siblings_and_later_procedures() {
         for newline in ["\n", "\r\n"] {
             let written = format!("[Target] _{newline} (value + 1), _{newline} Inner(other) * -2");
@@ -1768,11 +1983,11 @@ mod tests {
     #[test]
     fn implicit_call_unsupported_late_heads_and_tails_reject_all_prior_module_records() {
         for tail in [
-            "Target(value,other)",
-            "Target (value, other)",
-            "Target (value)",
-            "Target ((value))",
-            "Target (value + 1)",
+            "Target(value,,other)",
+            "Target (value, other).member",
+            "Target (value) trailing",
+            "Target ((value)",
+            "Target (value + 1)(other)",
             "Target (value) = other",
             "Target ((value)) = other + 1",
             "Target (value + 1) = other And True",
@@ -2121,6 +2336,7 @@ mod tests {
                 | ModuleBodyStatement::ExpressionAssignment(_)
                 | ModuleBodyStatement::Call(_)
                 | ModuleBodyStatement::ExpressionCall(_)
+                | ModuleBodyStatement::ValueApplication(_)
                 | ModuleBodyStatement::ProcedureExit(_) => 1,
             })
             .sum();
@@ -7439,6 +7655,7 @@ mod tests {
                     | ModuleBodyStatement::ApplicationAssignment(_)
                     | ModuleBodyStatement::ExpressionAssignment(_)
                     | ModuleBodyStatement::ExpressionCall(_)
+                    | ModuleBodyStatement::ValueApplication(_)
                     | ModuleBodyStatement::ProcedureExit(_) => None,
                 })
                 .collect();
@@ -7715,7 +7932,7 @@ mod tests {
             "Call Finish(\n)",
             "Call Finish _\n",
             "Call Finish ' continued _\nCall Finish",
-            "Finish()",
+            "Finish(,)",
             "End Function",
         ] {
             let source = format!("Sub Run()\nCall Finish()\n{body}\nEnd Sub\n");
@@ -8089,6 +8306,7 @@ mod tests {
                 | ModuleBodyStatement::ExpressionAssignment(_)
                 | ModuleBodyStatement::Call(_)
                 | ModuleBodyStatement::ExpressionCall(_)
+                | ModuleBodyStatement::ValueApplication(_)
                 | ModuleBodyStatement::ProcedureExit(_) => 1,
             })
             .sum();

@@ -1,4 +1,4 @@
-//! Iterative, source-bound expression inventory for assignments and explicit calls.
+//! Iterative source-bound expressions, statement calls and standalone value applications.
 //! Flat temporary nodes preserve precedence without recursive parsing or dropping.
 //! The retained inventory is syntax only, not evaluation, type or binding evidence.
 
@@ -90,6 +90,62 @@ impl ModuleExpressionCall {
     }
 
     /// Returns source records, with the statement's outer application at index zero.
+    #[must_use]
+    pub fn inventory(&self) -> &ModuleExpressionInventory {
+        &self.inventory
+    }
+}
+
+/// One complete source-written parenthesized value application used as a statement.
+///
+/// Unlike [`ModuleExpressionCall`], its outer callee is a value-application target.
+/// Get/index syntax does not prove a procedure call, array access, formal-parameter
+/// correspondence, runtime type or successful evaluation. The inventory starts
+/// with the exact outer application, followed by its nested applications.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ModuleValueApplication {
+    statement: Range<usize>,
+    application: Range<usize>,
+    callee: Range<usize>,
+    arguments: Range<usize>,
+    inventory: ModuleExpressionInventory,
+}
+
+impl ModuleValueApplication {
+    /// Returns the complete statement, excluding a trailing comment or separator.
+    #[must_use]
+    pub fn statement(&self) -> Range<usize> {
+        self.statement.clone()
+    }
+
+    /// Returns the callee through its authored closing parenthesis, without trailing trivia.
+    #[must_use]
+    pub fn application(&self) -> Range<usize> {
+        self.application.clone()
+    }
+
+    /// Returns the exact simple value-application target, retaining authored brackets.
+    #[must_use]
+    pub fn callee(&self) -> Range<usize> {
+        self.callee.clone()
+    }
+
+    /// Returns the complete authored argument list, including both parentheses.
+    #[must_use]
+    pub fn arguments(&self) -> Range<usize> {
+        self.arguments.clone()
+    }
+
+    /// Returns positional expression spans inside the parentheses, excluding surrounding trivia.
+    #[must_use]
+    pub fn argument_expressions(&self) -> &[Range<usize>] {
+        self.inventory
+            .applications
+            .first()
+            .map_or(&[], |application| application.argument_expressions())
+    }
+
+    /// Returns the complete root and nested application syntax without resolving targets.
     #[must_use]
     pub fn inventory(&self) -> &ModuleExpressionInventory {
         &self.inventory
@@ -996,6 +1052,71 @@ pub(super) fn inventory<E>(
     rebase_inventory(parsed, source_range, check).map(Some)
 }
 
+pub(super) fn value_application_statement<E>(
+    source: &[u8],
+    callee: Range<usize>,
+    source_range: Range<usize>,
+    maximum_nodes: usize,
+    maximum_arguments: usize,
+    check: &mut impl FnMut() -> Result<(), E>,
+) -> Result<Option<ModuleValueApplication>, ModuleError<E>> {
+    check().map_err(ModuleError::Cancelled)?;
+    if source_range.end.checked_sub(source_range.start) != Some(source.len())
+        || callee.start != 0
+        || callee.end >= source.len()
+    {
+        return Ok(None);
+    }
+    let mut cursor = 0;
+    if super::module_body::simple_name(source, &mut cursor, check)
+        .map_err(ModuleError::Cancelled)?
+        != Some(callee.clone())
+    {
+        return Ok(None);
+    }
+    cursor += logical_whitespace_len(source.get(cursor..).unwrap_or_default(), check)
+        .map_err(ModuleError::Cancelled)?;
+    if source.get(cursor) != Some(&b'(')
+        || !super::module_body::implicit_call_tail_is_complete(source, check)
+            .map_err(ModuleError::Cancelled)?
+    {
+        return Ok(None);
+    }
+    let Some(parsed) = Parser::new(source, 0, maximum_nodes, maximum_arguments).parse(check)?
+    else {
+        return Ok(None);
+    };
+    if parsed.root_kind != NodeKind::Application(0)
+        || parsed.inventory.applications.first().is_none_or(|outer| {
+            outer.callee != callee
+                || outer.application != parsed.span
+                || outer.arguments.start != cursor
+                || outer.arguments.end != parsed.span.end
+                || outer
+                    .arguments
+                    .end
+                    .checked_sub(1)
+                    .and_then(|end| source.get(end))
+                    != Some(&b')')
+        })
+    {
+        return Ok(None);
+    }
+    let (application, inventory) = rebase_inventory(parsed, &source_range, check)?;
+    let Some(outer) = inventory.applications.first() else {
+        return Ok(None);
+    };
+    let callee = outer.callee();
+    let arguments = outer.arguments();
+    Ok(Some(ModuleValueApplication {
+        statement: source_range,
+        application,
+        callee,
+        arguments,
+        inventory,
+    }))
+}
+
 pub(super) fn implicit_expression_call<E>(
     source: &[u8],
     callee: Range<usize>,
@@ -1174,6 +1295,70 @@ mod tests {
             .parse(&mut || Ok::<(), ()>(()))
             .unwrap()
             .expect("complete expression")
+    }
+
+    #[test]
+    fn value_application_private_reader_requires_exact_head_root_and_source_boundaries() {
+        let source = b"Target\t (value, Inner(other)) ";
+        let read = |callee, range| {
+            value_application_statement(
+                source,
+                callee,
+                range,
+                source.len(),
+                source.len(),
+                &mut || Ok::<(), ()>(()),
+            )
+            .unwrap()
+        };
+        let application = read(0..6, 42..42 + source.len()).unwrap();
+        assert_eq!(application.statement(), 42..42 + source.len());
+        assert_eq!(application.callee(), 42..48);
+        assert_eq!(application.application(), 42..41 + source.len());
+        assert_eq!(application.arguments(), 50..41 + source.len());
+        assert_eq!(application.inventory().applications().len(), 2);
+        assert_eq!(application.inventory().values().len(), 2);
+        assert_eq!(application.inventory().work_nodes(), 6);
+        assert_eq!(application.inventory().argument_count(), 3);
+        for callee in [0..0, 0..5, 0..7, 1..6, 0..source.len() + 1] {
+            assert!(
+                read(callee.clone(), 0..source.len()).is_none(),
+                "{callee:?}"
+            );
+        }
+        for range in [
+            0..source.len() - 1,
+            0..source.len() + 1,
+            usize::MAX..usize::MAX,
+        ] {
+            assert!(read(0..6, range.clone()).is_none(), "{range:?}");
+        }
+        for source in [
+            b"Target value".as_slice(),
+            b"Target (value), other",
+            b"Target (value) * -2",
+            b"Target (value) + Inner(other)",
+            b"Target (value) = other And True",
+            b"Target (value) trailing",
+            b"Target (value).member",
+            b"Target (value)(other)",
+            b"Target (value) _\n",
+            b"Target (value) _\r\n\t ",
+        ] {
+            assert!(
+                value_application_statement(
+                    source,
+                    0..6,
+                    0..source.len(),
+                    source.len(),
+                    source.len(),
+                    &mut || Ok::<(), ()>(()),
+                )
+                .unwrap()
+                .is_none(),
+                "{source:?}"
+            );
+        }
     }
 
     #[test]

@@ -24,6 +24,8 @@ pub enum ModuleBodyStatement {
     Call(ModuleCall),
     /// One explicit or implicit call with complete positional expressions.
     ExpressionCall(module_expression::ModuleExpressionCall),
+    /// One standalone parenthesized value application, distinct from a statement call.
+    ValueApplication(module_expression::ModuleValueApplication),
     /// One complete Exit Sub or Exit Function statement with source-written keywords.
     ProcedureExit(ModuleProcedureExit),
 }
@@ -40,6 +42,7 @@ impl ModuleBodyStatement {
             Self::ExpressionAssignment(assignment) => assignment.statement(),
             Self::Call(call) => call.statement(),
             Self::ExpressionCall(call) => call.statement(),
+            Self::ValueApplication(application) => application.statement(),
             Self::ProcedureExit(exit) => exit.statement(),
         }
     }
@@ -776,6 +779,18 @@ fn implicit_call<E>(
         }
         return atomic_call(text, range, arguments_start, callee, 0, check);
     }
+    if text.get(arguments_start) == Some(&b'(')
+        && let Some(application) = module_expression::value_application_statement(
+            text,
+            callee.clone(),
+            range.clone(),
+            limits.expression_nodes,
+            limits.arguments,
+            check,
+        )?
+    {
+        return Ok(Some(ModuleBodyStatement::ValueApplication(application)));
+    }
     if arguments_start == name_end {
         return Ok(None);
     }
@@ -1487,6 +1502,343 @@ mod tests {
     }
 
     #[test]
+    fn value_application_statements_retain_parentheses_arguments_and_complete_source_inventory() {
+        for (list, arguments, values, callees, work, count) in [
+            ("()", vec![], vec![], vec!["[Target]"], 2, 0),
+            (
+                "(value)",
+                vec!["value"],
+                vec!["value"],
+                vec!["[Target]"],
+                3,
+                1,
+            ),
+            (
+                "(value, other)",
+                vec!["value", "other"],
+                vec!["value", "other"],
+                vec!["[Target]"],
+                4,
+                2,
+            ),
+            (
+                "((value))",
+                vec!["(value)"],
+                vec!["value"],
+                vec!["[Target]"],
+                4,
+                1,
+            ),
+            (
+                "(Inner(value, other))",
+                vec!["Inner(value, other)"],
+                vec!["value", "other"],
+                vec!["[Target]", "Inner"],
+                6,
+                3,
+            ),
+            (
+                "(value + 1, Inner(other) * -2)",
+                vec!["value + 1", "Inner(other) * -2"],
+                vec!["value", "1", "other", "2"],
+                vec!["[Target]", "Inner"],
+                11,
+                3,
+            ),
+            (
+                "(\"a,b:\"\"()\")",
+                vec!["\"a,b:\"\"()\""],
+                vec!["\"a,b:\"\"()\""],
+                vec!["[Target]"],
+                3,
+                1,
+            ),
+        ] {
+            for gap in ["", "\t ", " _\n ", " _\r\n "] {
+                let text = format!("[Target]{gap}{list} ");
+                let source = [b"prefix\n".as_slice(), text.as_bytes(), b"\ntail"].concat();
+                let range = 7..7 + text.len();
+                let ModuleBodyStatement::ValueApplication(application) =
+                    statement_with_expression_limits(
+                        &source,
+                        range.clone(),
+                        count,
+                        work,
+                        &mut || Ok::<(), ()>(()),
+                    )
+                    .unwrap()
+                    .unwrap()
+                else {
+                    panic!("standalone value application expected: {text:?}");
+                };
+                assert_eq!(application.statement(), range.clone());
+                assert_eq!(application.callee(), 7..15);
+                assert_eq!(application.application(), 7..range.end - 1);
+                assert_eq!(application.arguments(), 15 + gap.len()..range.end - 1);
+                assert_eq!(&source[application.arguments()], list.as_bytes());
+                assert_eq!(application.inventory().work_nodes(), work);
+                assert_eq!(application.inventory().argument_count(), count);
+                assert_eq!(
+                    application
+                        .argument_expressions()
+                        .iter()
+                        .map(|span| { std::str::from_utf8(&source[span.clone()]).unwrap() })
+                        .collect::<Vec<_>>(),
+                    arguments,
+                    "{text:?}"
+                );
+                assert_eq!(
+                    application
+                        .inventory()
+                        .values()
+                        .iter()
+                        .map(|value| { std::str::from_utf8(&source[value.span()]).unwrap() })
+                        .collect::<Vec<_>>(),
+                    values,
+                    "{text:?}"
+                );
+                assert_eq!(
+                    application
+                        .inventory()
+                        .applications()
+                        .iter()
+                        .map(|nested| { std::str::from_utf8(&source[nested.callee()]).unwrap() })
+                        .collect::<Vec<_>>(),
+                    callees,
+                    "{text:?}"
+                );
+                let outer = &application.inventory().applications()[0];
+                assert_eq!(outer.application(), application.application());
+                assert_eq!(outer.callee(), application.callee());
+                assert_eq!(outer.arguments(), application.arguments());
+                assert_eq!(
+                    outer.argument_expressions(),
+                    application.argument_expressions()
+                );
+                assert!(application.inventory().values().iter().all(|value| {
+                    value.span().start > application.arguments().start
+                        && value.span().end < application.arguments().end
+                }));
+            }
+        }
+    }
+
+    #[test]
+    fn value_application_admission_preserves_statement_call_and_assignment_boundaries() {
+        for text in [
+            "Target (value), other",
+            "Target ((value)), Inner(other)",
+            "Target (value) * -2",
+            "Target (value) + Inner(other)",
+            "Target (value) + 1 = other",
+            "Target other, (value) = other",
+        ] {
+            assert!(
+                matches!(
+                    read(text.as_bytes()),
+                    Some(ModuleBodyStatement::ExpressionCall(_))
+                ),
+                "{text}"
+            );
+        }
+        for text in [
+            "Call Target(value)",
+            "Call Target((value))",
+            "Call Target()",
+        ] {
+            assert!(
+                matches!(
+                    read(text.as_bytes()),
+                    Some(ModuleBodyStatement::Call(_) | ModuleBodyStatement::ExpressionCall(_))
+                ),
+                "{text}"
+            );
+        }
+        for text in [
+            "Target (value) = other",
+            "Target ((value)) = other + 1",
+            "Target (value + 1) = other And True",
+            "Target(value) + 1",
+            "Target(value), other",
+            "Target(value).member",
+            "Target(value)(other)",
+            "Target(value:=1)",
+            "Target(ByVal value)",
+            "Target(value,,other)",
+            "Target(value,)",
+            "Target((value)",
+            "Target(value))",
+            "Target(value) trailing",
+            "Target(value) _\n",
+            "Target(value) _\r\n\t ",
+            "Target (value) _\n",
+            "Name(value)",
+            "Line(value)",
+            "Print(value)",
+        ] {
+            assert!(read(text.as_bytes()).is_none(), "{text:?}");
+        }
+        for text in ["[Name](value)", "[Line] (value)", "[Print](value)"] {
+            assert!(
+                matches!(
+                    read(text.as_bytes()),
+                    Some(ModuleBodyStatement::ValueApplication(_))
+                ),
+                "{text}"
+            );
+        }
+        for spelling in ["Finish", "Call_Finish", "ExitSub", "Exit0Function"] {
+            let text = format!("{spelling}()");
+            let ModuleBodyStatement::ValueApplication(application) = read(text.as_bytes()).unwrap()
+            else {
+                panic!("keyword-shaped ordinary name must remain a value application");
+            };
+            assert_eq!(application.callee(), 0..spelling.len());
+            assert_eq!(application.arguments(), spelling.len()..text.len());
+            assert!(application.argument_expressions().is_empty());
+        }
+    }
+
+    #[test]
+    fn value_application_node_argument_and_cancellation_failures_remain_typed() {
+        let source = b"[Target] _\r\n (value + 1, Inner(other) * -2)";
+        for maximum in 0..11 {
+            assert_eq!(
+                statement_with_expression_limits(
+                    source,
+                    0..source.len(),
+                    3,
+                    maximum,
+                    &mut || Ok::<(), ()>(())
+                ),
+                Err(ModuleError::ExpressionLimit),
+                "nodes {maximum}"
+            );
+        }
+        for maximum in 0..3 {
+            assert_eq!(
+                statement_with_expression_limits(
+                    source,
+                    0..source.len(),
+                    maximum,
+                    11,
+                    &mut || Ok::<(), ()>(())
+                ),
+                Err(ModuleError::ArgumentLimit),
+                "arguments {maximum}"
+            );
+        }
+        let mut checkpoints = 0;
+        let parsed = statement_with_expression_limits(source, 0..source.len(), 3, 11, &mut || {
+            checkpoints += 1;
+            Ok::<(), ()>(())
+        })
+        .unwrap()
+        .unwrap();
+        assert!(matches!(parsed, ModuleBodyStatement::ValueApplication(_)));
+        for cancelled_at in 1..=checkpoints {
+            let mut calls = 0;
+            assert_eq!(
+                statement_with_expression_limits(source, 0..source.len(), 3, 11, &mut || {
+                    calls += 1;
+                    if calls == cancelled_at {
+                        Err("stop")
+                    } else {
+                        Ok(())
+                    }
+                }),
+                Err(ModuleError::Cancelled("stop")),
+                "checkpoint {cancelled_at}"
+            );
+            assert_eq!(calls, cancelled_at);
+        }
+        assert!(matches!(
+            statement_with_expression_limits(b"Target()", 0..8, 0, 2, &mut || Ok::<(), ()>(())),
+            Ok(Some(ModuleBodyStatement::ValueApplication(_)))
+        ));
+    }
+
+    #[test]
+    fn value_application_probes_preserve_typed_implicit_fallback_limits_and_cancellation() {
+        for (source, arguments, nodes) in [
+            (b"Target (value) * -2".as_slice(), 1, 7),
+            (b"Target (value + 1), other".as_slice(), 2, 7),
+        ] {
+            for maximum in 0..nodes {
+                assert_eq!(
+                    statement_with_expression_limits(
+                        source,
+                        0..source.len(),
+                        arguments,
+                        maximum,
+                        &mut || Ok::<(), ()>(())
+                    ),
+                    Err(ModuleError::ExpressionLimit),
+                    "nodes {maximum}: {source:?}"
+                );
+            }
+            for maximum in 0..arguments {
+                assert_eq!(
+                    statement_with_expression_limits(
+                        source,
+                        0..source.len(),
+                        maximum,
+                        nodes,
+                        &mut || Ok::<(), ()>(())
+                    ),
+                    Err(ModuleError::ArgumentLimit),
+                    "arguments {maximum}: {source:?}"
+                );
+            }
+            let mut checkpoints = 0;
+            let ModuleBodyStatement::ExpressionCall(call) = statement_with_expression_limits(
+                source,
+                0..source.len(),
+                arguments,
+                nodes,
+                &mut || {
+                    checkpoints += 1;
+                    Ok::<(), ()>(())
+                },
+            )
+            .unwrap()
+            .unwrap() else {
+                panic!("a non-application root or outer comma must retain the implicit route");
+            };
+            assert_eq!(call.inventory().work_nodes(), nodes);
+            assert_eq!(call.inventory().argument_count(), arguments);
+            assert_eq!(call.inventory().applications().len(), 1);
+            assert_eq!(call.inventory().applications()[0].callee(), 0..6);
+            assert_eq!(
+                call.inventory().applications()[0].arguments(),
+                call.arguments()
+            );
+            for cancelled_at in 1..=checkpoints {
+                let mut calls = 0;
+                assert_eq!(
+                    statement_with_expression_limits(
+                        source,
+                        0..source.len(),
+                        arguments,
+                        nodes,
+                        &mut || {
+                            calls += 1;
+                            if calls == cancelled_at {
+                                Err("stop")
+                            } else {
+                                Ok(())
+                            }
+                        }
+                    ),
+                    Err(ModuleError::Cancelled("stop")),
+                    "checkpoint {cancelled_at}: {source:?}"
+                );
+                assert_eq!(calls, cancelled_at);
+            }
+        }
+    }
+
+    #[test]
     fn implicit_calls_retain_bare_heads_and_complete_positional_expression_ranges() {
         for spelling in [
             "Target", "tArGeT", "[Target]", "[Name]", "[Line]", "[Print]",
@@ -1625,17 +1977,17 @@ mod tests {
             "Return",
             "Dim",
             "Let Target value",
-            "Target()",
-            "Target(value)",
-            "Target(1,2)",
-            "Target (value, other)",
-            "Target (value)",
-            "Target ((value))",
-            "Target (value + 1)",
+            "Target(value:=1)",
+            "Target (ByVal value)",
+            "Target(1,,2)",
+            "Target (value, other).member",
+            "Target (value) trailing",
+            "Target ((value)",
+            "Target (value + 1)(other)",
             "Target (value) = other",
             "Target ((value)) = other + 1",
             "Target (value + 1) = other And True",
-            "Target ()",
+            "Target (,)",
             "Target ,value",
             "Target value,",
             "Target value,,other",
@@ -1898,7 +2250,7 @@ mod tests {
     fn procedure_exit_tail_closure_does_not_hijack_authored_assignments() {
         for text in [
             "Exit",
-            "ExitSub()",
+            "ExitSub(,)",
             "Exit FunctionExtra",
             "Exit Sub1",
             "Exit [Sub]",
@@ -2184,6 +2536,7 @@ mod tests {
                 | ModuleBodyStatement::Assignment(_)
                 | ModuleBodyStatement::ApplicationAssignment(_)
                 | ModuleBodyStatement::Call(_)
+                | ModuleBodyStatement::ValueApplication(_)
                 | ModuleBodyStatement::ProcedureExit(_) => {
                     panic!("unary operator must stay in a structured expression")
                 }
@@ -4055,33 +4408,96 @@ mod tests {
     #[test]
     fn expression_call_separator_callee_and_closed_statement_byte_boundaries_are_exact() {
         for byte in 0..=u8::MAX {
-            for (prefix, suffix, expected) in [
+            let identifier_byte = byte.is_ascii_alphanumeric() || byte == b'_';
+            for (index, (prefix, suffix, expected, expected_callee, expected_arguments)) in [
                 (
                     b"Call".as_slice(),
                     b"Target(1+2)".as_slice(),
-                    matches!(byte, b' ' | b'\t'),
+                    identifier_byte || matches!(byte, b' ' | b'\t'),
+                    if identifier_byte { 0..11 } else { 5..11 },
+                    11..16,
                 ),
                 (
                     b"Call Target",
                     b"(1+2)",
-                    byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b' ' | b'\t'),
+                    identifier_byte || matches!(byte, b' ' | b'\t'),
+                    5..11 + usize::from(identifier_byte),
+                    12..17,
                 ),
-                (b"Call Target(1+2)", b"", matches!(byte, b' ' | b'\t')),
-            ] {
+                (
+                    b"Call Target(1+2)",
+                    b"",
+                    matches!(byte, b' ' | b'\t'),
+                    5..11,
+                    11..16,
+                ),
+            ]
+            .into_iter()
+            .enumerate()
+            {
                 let source = [prefix, &[byte], suffix].concat();
                 let parsed = read(&source);
-                assert_eq!(
-                    parsed.is_some(),
-                    expected,
-                    "{prefix:?} byte {byte} {suffix:?}"
-                );
-                if let Some(ModuleBodyStatement::ExpressionCall(call)) = parsed {
-                    assert_eq!(call.statement(), 0..source.len());
-                    assert_eq!(call.inventory().work_nodes(), 5);
-                    assert_eq!(call.inventory().argument_count(), 1);
-                    assert_eq!(&source[call.argument_expressions()[0].clone()], b"1+2");
-                    assert_eq!(call.inventory().applications().len(), 1);
+                if !expected {
+                    assert!(parsed.is_none(), "{prefix:?} byte {byte} {suffix:?}");
+                    continue;
                 }
+                let (inventory, callee, arguments, argument_expressions) = if index == 0
+                    && identifier_byte
+                {
+                    let Some(ModuleBodyStatement::ValueApplication(application)) = &parsed else {
+                        panic!(
+                            "joined ordinary callee expected: {prefix:?} byte {byte} {suffix:?}"
+                        );
+                    };
+                    assert_eq!(application.statement(), 0..source.len());
+                    assert_eq!(application.application(), 0..source.len());
+                    (
+                        application.inventory(),
+                        application.callee(),
+                        application.arguments(),
+                        application.argument_expressions(),
+                    )
+                } else {
+                    let Some(ModuleBodyStatement::ExpressionCall(call)) = &parsed else {
+                        panic!(
+                            "explicit expression Call expected: {prefix:?} byte {byte} {suffix:?}"
+                        );
+                    };
+                    assert_eq!(call.statement(), 0..source.len());
+                    (
+                        call.inventory(),
+                        call.callee(),
+                        call.arguments(),
+                        call.argument_expressions(),
+                    )
+                };
+                assert_eq!(callee, expected_callee);
+                assert_eq!(arguments, expected_arguments);
+                assert_eq!(&source[arguments.clone()], b"(1+2)");
+                assert_eq!(argument_expressions.len(), 1);
+                assert_eq!(
+                    argument_expressions[0],
+                    arguments.start + 1..arguments.end - 1
+                );
+                assert_eq!(inventory.work_nodes(), 5);
+                assert_eq!(inventory.argument_count(), 1);
+                assert_eq!(inventory.applications().len(), 1);
+                let outer = &inventory.applications()[0];
+                assert_eq!(outer.application(), callee.start..arguments.end);
+                assert_eq!(outer.callee(), callee);
+                assert_eq!(outer.arguments(), arguments.clone());
+                assert_eq!(outer.argument_expressions(), argument_expressions);
+                assert_eq!(inventory.values().len(), 2);
+                assert_eq!(
+                    inventory.values()[0].span(),
+                    arguments.start + 1..arguments.start + 2
+                );
+                assert_eq!(
+                    inventory.values()[1].span(),
+                    arguments.end - 2..arguments.end - 1
+                );
+                assert_eq!(&source[inventory.values()[0].span()], b"1");
+                assert_eq!(&source[inventory.values()[1].span()], b"2");
             }
         }
     }
@@ -4349,7 +4765,7 @@ mod tests {
             "Call\x0cFinish()",
             "Call\x0bFinish()",
             "Call\nFinish()",
-            "Call_Finish()",
+            "Call_Finish(,)",
             "Call 1",
             "Call \"Finish\"",
             "Call [open",
@@ -4390,7 +4806,7 @@ mod tests {
             "Call Finish() trailing",
             "Call Finish:other=1",
             "Call Finish ' comment",
-            "Finish()",
+            "Finish(,)",
         ] {
             assert!(read(source.as_bytes()).is_none(), "{source}");
         }
@@ -4413,22 +4829,48 @@ mod tests {
         assert_eq!(&source[call.arguments().unwrap()], b"( _\r\n )");
         for byte in 0..=u8::MAX {
             let separator = [b"Call".as_slice(), &[byte], b"Finish()"].concat();
-            assert_eq!(
-                read(&separator).is_some(),
-                matches!(byte, b' ' | b'\t'),
-                "separator byte {byte}"
-            );
+            let parsed = read(&separator);
+            if matches!(byte, b' ' | b'\t') {
+                let Some(ModuleBodyStatement::Call(call)) = parsed else {
+                    panic!("explicit atomic Call expected for separator byte {byte}");
+                };
+                assert_eq!(call.statement(), 0..separator.len());
+                assert_eq!(call.callee(), 5..11);
+                assert_eq!(call.arguments(), Some(11..13));
+                assert!(call.argument_values().is_empty());
+            } else if byte.is_ascii_alphanumeric() || byte == b'_' {
+                let Some(ModuleBodyStatement::ValueApplication(application)) = parsed else {
+                    panic!("joined ordinary callee expected for separator byte {byte}");
+                };
+                assert_eq!(application.statement(), 0..separator.len());
+                assert_eq!(application.application(), 0..separator.len());
+                assert_eq!(application.callee(), 0..11);
+                assert_eq!(application.arguments(), 11..13);
+                assert!(application.argument_expressions().is_empty());
+                assert_eq!(application.inventory().work_nodes(), 2);
+                assert_eq!(application.inventory().argument_count(), 0);
+                assert!(application.inventory().values().is_empty());
+                assert_eq!(application.inventory().applications().len(), 1);
+                let outer = &application.inventory().applications()[0];
+                assert_eq!(outer.application(), application.application());
+                assert_eq!(outer.callee(), application.callee());
+                assert_eq!(outer.arguments(), application.arguments());
+                assert!(outer.argument_expressions().is_empty());
+            } else {
+                assert!(parsed.is_none(), "separator byte {byte}");
+            }
             let suffix = [b"Call Finish()".as_slice(), &[byte]].concat();
             let result = read(&suffix);
-            assert_eq!(
-                result.is_some(),
-                matches!(byte, b' ' | b'\t'),
-                "suffix byte {byte}"
-            );
-            if let Some(ModuleBodyStatement::Call(call)) = result {
-                assert!(call.statement().end <= suffix.len());
-                assert!(call.callee().end <= suffix.len());
-                assert!(call.arguments().unwrap().end <= suffix.len());
+            if matches!(byte, b' ' | b'\t') {
+                let Some(ModuleBodyStatement::Call(call)) = result else {
+                    panic!("explicit atomic Call expected for suffix byte {byte}");
+                };
+                assert_eq!(call.statement(), 0..suffix.len());
+                assert_eq!(call.callee(), 5..11);
+                assert_eq!(call.arguments(), Some(11..13));
+                assert!(call.argument_values().is_empty());
+            } else {
+                assert!(result.is_none(), "suffix byte {byte}");
             }
         }
     }
