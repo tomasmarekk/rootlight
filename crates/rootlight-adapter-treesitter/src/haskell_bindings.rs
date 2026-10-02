@@ -237,7 +237,10 @@ impl<'a> HaskellBindings<'a> {
                 return Ok(None);
             }
             if current.kind() != SyntaxFactKind::Occurrence
-                || current.syntax_kind().as_str() != "haskell.application.call"
+                || !matches!(
+                    current.syntax_kind().as_str(),
+                    "haskell.application.call" | "haskell.infix_application.call"
+                )
             {
                 return Ok(None);
             }
@@ -558,6 +561,223 @@ mod tests {
             plan.resolve(cycle.last().unwrap(), "x", &Cancellation::new())
                 .is_err()
         );
+    }
+
+    #[test]
+    fn infix_call_parents_preserve_clause_identity_and_all_lookup_barriers() {
+        const INFIX_SOURCE: &[u8] = b"f x = x + 1\nf x = x + 1\n";
+        let mut original = Vec::new();
+        for (base, start) in [(1, 0), (6, 12)] {
+            original.extend([
+                fact(
+                    base,
+                    None,
+                    SyntaxFactKind::Declaration,
+                    "haskell.function.declaration",
+                    start,
+                    start + 11,
+                ),
+                fact(
+                    base + 1,
+                    Some(base),
+                    SyntaxFactKind::Scope,
+                    CLAUSE,
+                    start,
+                    start + 11,
+                ),
+                fact(
+                    base + 2,
+                    Some(base + 1),
+                    SyntaxFactKind::Declaration,
+                    "haskell.parameter.declaration",
+                    start + 2,
+                    start + 3,
+                ),
+                fact(
+                    base + 3,
+                    Some(base + 2),
+                    SyntaxFactKind::Occurrence,
+                    "haskell.binding_name.definition",
+                    start + 2,
+                    start + 3,
+                ),
+                fact(
+                    base + 4,
+                    Some(base + 100),
+                    SyntaxFactKind::Occurrence,
+                    READ,
+                    start + 6,
+                    start + 7,
+                ),
+                fact(
+                    base + 19,
+                    Some(base),
+                    SyntaxFactKind::Signature,
+                    MATCH,
+                    start + 4,
+                    start + 11,
+                ),
+                fact(
+                    base + 100,
+                    Some(base + 1),
+                    SyntaxFactKind::Occurrence,
+                    "haskell.infix_application.call",
+                    start + 6,
+                    start + 11,
+                ),
+                fact(
+                    base + 200,
+                    Some(base + 100),
+                    SyntaxFactKind::Occurrence,
+                    "haskell.operator_name.reference",
+                    start + 8,
+                    start + 9,
+                ),
+                fact(
+                    base + 201,
+                    Some(base + 100),
+                    SyntaxFactKind::Occurrence,
+                    "haskell.identifier.reference",
+                    start + 6,
+                    start + 7,
+                ),
+            ]);
+        }
+        for case in 0..14 {
+            let mut facts = original.clone();
+            let mut symbols = symbols();
+            let maximum_name_bytes = if case == 9 { 0 } else { 64 };
+            match case {
+                0 => {}
+                1 => {
+                    symbols.remove(&4);
+                }
+                2 => facts.retain(|fact| fact.local_id() != 4),
+                3 => facts.extend([
+                    fact(
+                        11,
+                        Some(2),
+                        SyntaxFactKind::Declaration,
+                        "haskell.parameter.declaration",
+                        2,
+                        3,
+                    ),
+                    fact(
+                        12,
+                        Some(11),
+                        SyntaxFactKind::Occurrence,
+                        "haskell.binding_name.definition",
+                        2,
+                        3,
+                    ),
+                ]),
+                4 => {
+                    symbols.insert(9, symbols[&4]);
+                }
+                5 | 6 | 7 | 8 | 13 => {
+                    facts.retain(|fact| fact.local_id() != 101);
+                    let (parent, label, start) = match case {
+                        5 => (7, "haskell.infix_application.call", 6),
+                        6 => (99, "haskell.infix_application.call", 6),
+                        7 => (2, "haskell.unknown.call", 6),
+                        8 => {
+                            facts.push(fact(
+                                300,
+                                Some(2),
+                                SyntaxFactKind::Scope,
+                                "haskell.lambda.scope",
+                                0,
+                                11,
+                            ));
+                            (300, "haskell.infix_application.call", 6)
+                        }
+                        13 => (2, "haskell.infix_application.call", 8),
+                        _ => unreachable!(),
+                    };
+                    facts.push(fact(
+                        101,
+                        Some(parent),
+                        SyntaxFactKind::Occurrence,
+                        label,
+                        start,
+                        11,
+                    ));
+                }
+                9 => {}
+                10 => facts.retain(|fact| fact.local_id() != 20),
+                11 => facts.push(fact(300, Some(1), SyntaxFactKind::Signature, MATCH, 4, 11)),
+                12 => {
+                    facts.retain(|fact| fact.local_id() != 5);
+                    facts.push(fact(
+                        5,
+                        Some(101),
+                        SyntaxFactKind::Occurrence,
+                        "haskell.operator_name.reference",
+                        6,
+                        7,
+                    ));
+                }
+                _ => unreachable!(),
+            }
+            for _ in 0..2 {
+                let plan = HaskellBindings::new(
+                    &facts,
+                    INFIX_SOURCE,
+                    &symbols,
+                    maximum_name_bytes,
+                    &Cancellation::new(),
+                )
+                .unwrap();
+                for (read, expected) in [
+                    (5, (case == 0).then(|| symbols[&4])),
+                    (10, (!matches!(case, 4 | 9)).then(|| symbols[&9])),
+                ] {
+                    let reference = facts.iter().find(|fact| fact.local_id() == read).unwrap();
+                    assert_eq!(
+                        plan.resolve(reference, "x", &Cancellation::new()).unwrap(),
+                        expected,
+                        "case {case}: read {read}"
+                    );
+                }
+                for non_read in facts.iter().filter(|fact| {
+                    fact.syntax_kind().as_str() == "haskell.infix_application.call"
+                        || fact.syntax_kind().as_str() == "haskell.identifier.reference"
+                        || fact.local_id() == 201
+                        || fact.local_id() == 206
+                }) {
+                    assert_eq!(
+                        plan.resolve(non_read, "x", &Cancellation::new()).unwrap(),
+                        None
+                    );
+                }
+                facts.reverse();
+            }
+        }
+        let mut cyclic = original.clone();
+        cyclic.retain(|fact| fact.local_id() != 101);
+        cyclic.push(fact(
+            101,
+            Some(101),
+            SyntaxFactKind::Occurrence,
+            "haskell.infix_application.call",
+            6,
+            11,
+        ));
+        let plan =
+            HaskellBindings::new(&cyclic, INFIX_SOURCE, &symbols(), 64, &Cancellation::new())
+                .unwrap();
+        let reference = cyclic.iter().find(|fact| fact.local_id() == 5).unwrap();
+        assert!(plan.resolve(reference, "x", &Cancellation::new()).is_err());
+        let cancelled = Cancellation::new();
+        cancelled.cancel(CancellationReason::ClientRequest);
+        assert!(matches!(
+            HaskellBindings::new(&original, INFIX_SOURCE, &symbols(), 64, &cancelled),
+            Err(AdapterError::Cancelled { .. })
+        ));
+        assert!(matches!(
+            plan.resolve(reference, "x", &cancelled),
+            Err(AdapterError::Cancelled { .. })
+        ));
     }
 
     #[test]

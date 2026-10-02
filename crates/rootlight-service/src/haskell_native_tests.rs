@@ -257,98 +257,122 @@ fn assert_generation(
         .find(|file| file.path == "Peer.hs")
         .unwrap();
     let peer_helper = function(document, peer_file.id, "helper");
-    let clause = "helper value = value";
-    assert_eq!(peer.matches(clause).count(), 1);
-    let start = u64::try_from(peer.find(clause).unwrap()).unwrap();
-    let span = |prefix: &str| {
-        let start = start + u64::try_from(prefix.len()).unwrap();
-        rootlight_ir::SourceSpan::new(peer_file.id, start, start + 5).unwrap()
-    };
-    let formal_span = span("helper ");
-    let read_span = span("helper value = ");
-    let parameters: Vec<_> = document
-        .entities
-        .iter()
-        .filter(|entity| {
-            entity.kind == EntityKind::Parameter
-                && entity.canonical_name == "value"
-                && entity
-                    .evidence
-                    .source
-                    .as_ref()
-                    .is_some_and(|source| source.span() == formal_span)
-        })
-        .collect();
-    assert_eq!(parameters.len(), 1);
-    let parameter = parameters[0];
-    assert_eq!(
-        parameter.container,
-        Some(ContainerRef::Entity(peer_helper.id))
-    );
-    let definitions: Vec<_> = document
-        .occurrences
-        .iter()
-        .filter(|site| site.role == OccurrenceRole::Definition && site.source.span() == formal_span)
-        .collect();
-    assert_eq!(definitions.len(), 1);
-    assert_eq!(
-        definitions[0].syntax_kind,
-        "haskell.binding_name.definition"
-    );
-    assert_eq!(
-        definitions[0].target,
-        OccurrenceTarget::Resolved {
-            symbol: parameter.id
-        }
-    );
-    let reads: Vec<_> = uses
-        .iter()
-        .filter(|site| {
-            site.file == peer_file.id
-                && site.role == OccurrenceRole::Reference
-                && site.source.span() == read_span
-        })
-        .collect();
-    assert_eq!(reads.len(), 1);
-    let read = reads[0];
-    assert_eq!(read.syntax_kind, "haskell.equation_rhs_read.reference");
-    assert_eq!(
-        read.target,
-        OccurrenceTarget::Resolved {
-            symbol: parameter.id
-        }
-    );
-    assert_eq!(read.syntactic_text_hash, content_hash(b"value"));
-    assert_eq!(
-        read.id,
-        rootlight_ir::derive_occurrence_record_id(read).unwrap()
-    );
-    exact_source(service, &read.source, b"value");
+    let mut resolved_read_ids = BTreeSet::new();
+    let mut formal_relation_ids = BTreeSet::new();
+    for (text, file, owner, clause, formal_prefix, read_prefix) in [
+        (
+            peer,
+            peer_file.id,
+            peer_helper.id,
+            "helper value = value",
+            "helper ",
+            "helper value = ",
+        ),
+        (
+            sample,
+            sample_file.id,
+            adjust.id,
+            "adjust value = helper (",
+            "adjust ",
+            "adjust value = helper (",
+        ),
+    ] {
+        assert_eq!(text.matches(clause).count(), 1);
+        let start = u64::try_from(text.find(clause).unwrap()).unwrap();
+        let span = |prefix: &str| {
+            let start = start + u64::try_from(prefix.len()).unwrap();
+            rootlight_ir::SourceSpan::new(file, start, start + 5).unwrap()
+        };
+        let formal_span = span(formal_prefix);
+        let read_span = span(read_prefix);
+        let parameters: Vec<_> = document
+            .entities
+            .iter()
+            .filter(|entity| {
+                entity.kind == EntityKind::Parameter
+                    && entity.canonical_name == "value"
+                    && entity
+                        .evidence
+                        .source
+                        .as_ref()
+                        .is_some_and(|source| source.span() == formal_span)
+            })
+            .collect();
+        assert_eq!(parameters.len(), 1);
+        let parameter = parameters[0];
+        assert_eq!(parameter.container, Some(ContainerRef::Entity(owner)));
+        let definitions: Vec<_> = document
+            .occurrences
+            .iter()
+            .filter(|site| {
+                site.role == OccurrenceRole::Definition && site.source.span() == formal_span
+            })
+            .collect();
+        assert_eq!(definitions.len(), 1);
+        assert_eq!(
+            definitions[0].syntax_kind,
+            "haskell.binding_name.definition"
+        );
+        assert_eq!(
+            definitions[0].target,
+            OccurrenceTarget::Resolved {
+                symbol: parameter.id
+            }
+        );
+        let reads: Vec<_> = uses
+            .iter()
+            .filter(|site| {
+                site.file == file
+                    && site.role == OccurrenceRole::Reference
+                    && site.source.span() == read_span
+            })
+            .collect();
+        assert_eq!(reads.len(), 1);
+        let read = reads[0];
+        assert_eq!(read.syntax_kind, "haskell.equation_rhs_read.reference");
+        assert_eq!(
+            read.target,
+            OccurrenceTarget::Resolved {
+                symbol: parameter.id
+            }
+        );
+        assert_eq!(read.syntactic_text_hash, content_hash(b"value"));
+        assert_eq!(
+            read.id,
+            rootlight_ir::derive_occurrence_record_id(read).unwrap()
+        );
+        exact_source(service, &read.source, b"value");
+        assert!(resolved_read_ids.insert(read.id));
+        let references: Vec<_> = document
+            .relations
+            .iter()
+            .filter(|relation| relation.subject == RelationEndpoint::Occurrence(read.id))
+            .collect();
+        assert_eq!(references.len(), 1);
+        let reference = references[0];
+        assert_eq!(reference.predicate, RelationPredicate::RefersTo);
+        assert_eq!(reference.object, RelationEndpoint::Entity(parameter.id));
+        assert_eq!(reference.evidence.source.as_ref(), Some(&read.source));
+        assert_eq!(reference.evidence_kind, rootlight_ir::EvidenceKind::Derived);
+        assert_eq!(reference.provenance, read.provenance);
+        assert_eq!(reference.repository, receipt.repository);
+        assert_eq!(reference.generation, receipt.generation);
+        assert_eq!(
+            reference.id,
+            rootlight_ir::derive_relation_record_id(reference).unwrap()
+        );
+        assert!(formal_relation_ids.insert(reference.id));
+        assert!(!document.skipped_regions.iter().any(|gap| {
+            gap.detail == "haskell-binding-target-unavailable" && gap.source.span() == read_span
+        }));
+    }
+    assert_eq!(resolved_read_ids.len(), 2);
+    assert_eq!(formal_relation_ids.len(), 2);
     assert!(
         uses.iter()
-            .filter(|site| site.id != read.id)
-            .all(|site| matches!(site.target, OccurrenceTarget::Unresolved { .. }))
+            .filter(|site| !resolved_read_ids.contains(&site.id))
+            .all(|site| { matches!(site.target, OccurrenceTarget::Unresolved { .. }) })
     );
-    let references: Vec<_> = document
-        .relations
-        .iter()
-        .filter(|relation| relation.subject == RelationEndpoint::Occurrence(read.id))
-        .collect();
-    assert_eq!(references.len(), 1);
-    let reference = references[0];
-    assert_eq!(reference.predicate, RelationPredicate::RefersTo);
-    assert_eq!(reference.object, RelationEndpoint::Entity(parameter.id));
-    assert_eq!(reference.evidence.source.as_ref(), Some(&read.source));
-    assert_eq!(reference.provenance, read.provenance);
-    assert_eq!(reference.repository, receipt.repository);
-    assert_eq!(reference.generation, receipt.generation);
-    assert_eq!(
-        reference.id,
-        rootlight_ir::derive_relation_record_id(reference).unwrap()
-    );
-    assert!(!document.skipped_regions.iter().any(|gap| {
-        gap.detail == "haskell-binding-target-unavailable" && gap.source.span() == read_span
-    }));
     for written in [
         sample
             .split("adjust value = ")
@@ -380,7 +404,7 @@ fn assert_generation(
             RelationPredicate::Contains
                 | RelationPredicate::Declares
                 | RelationPredicate::DefinesAt
-        ) || relation.id == reference.id
+        ) || formal_relation_ids.contains(&relation.id)
     }));
     let gaps: Vec<_> = document
         .skipped_regions

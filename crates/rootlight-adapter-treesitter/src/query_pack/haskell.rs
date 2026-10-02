@@ -34,6 +34,63 @@ fn ordinary_prefix_equation(node: Node<'_>) -> bool {
         })
 }
 
+fn simple_binary_infix(node: Node<'_>, cancellation: &Cancellation) -> Result<bool, AdapterError> {
+    cancellation.check()?;
+    let (Some(left), Some(operator), Some(right)) = (
+        node.child_by_field_name("left_operand"),
+        node.child_by_field_name("operator"),
+        node.child_by_field_name("right_operand"),
+    ) else {
+        return Ok(false);
+    };
+    if node.kind() != "infix"
+        || node.has_error()
+        || [left, operator, right]
+            .into_iter()
+            .any(|child| child.is_missing() || child.start_byte() == child.end_byte())
+        || left.end_byte() > operator.start_byte()
+        || operator.end_byte() > right.start_byte()
+    {
+        return Ok(false);
+    }
+    let written_operator = match operator.kind() {
+        // Literal star and hash-head tokens are unnamed operator children;
+        // named descendants would introduce a shape outside symbolic dispatch.
+        "operator" => operator.named_child_count() == 0,
+        "infix_id" if operator.named_child_count() == 1 => operator
+            .named_child(0)
+            .is_some_and(|name| name.kind() == "variable" && name.child_count() == 0),
+        _ => false,
+    };
+    if !written_operator {
+        return Ok(false);
+    }
+    // The grammar shares infix nodes with patterns and types, including repeated
+    // operator fields. The closed RHS walk admits only this exact binary shape.
+    let mut cursor = node.walk();
+    let mut seen = 0u8;
+    for child in node.children(&mut cursor) {
+        cancellation.check()?;
+        if child.is_extra() {
+            continue;
+        }
+        let bit = if child == left {
+            1
+        } else if child == operator {
+            2
+        } else if child == right {
+            4
+        } else {
+            return Ok(false);
+        };
+        if seen & bit != 0 {
+            return Ok(false);
+        }
+        seen |= bit;
+    }
+    Ok(seen == 7)
+}
+
 fn simple_function_clause(
     node: Node<'_>,
     cancellation: &Cancellation,
@@ -101,6 +158,16 @@ fn simple_function_clause(
             match current.kind() {
                 "variable" | "integer" | "float" | "char" | "string" => false,
                 "literal" if current.named_child_count() == 1 => true,
+                "infix" if simple_binary_infix(current, cancellation)? => true,
+                // A backticked formal is dispatch syntax, not an operand read.
+                "operator" | "infix_id"
+                    if current.parent().is_some_and(|parent| {
+                        parent.kind() == "infix"
+                            && parent.child_by_field_name("operator") == Some(current)
+                    }) =>
+                {
+                    false
+                }
                 "apply"
                     if current.child_by_field_name("function").is_some()
                         && current.child_by_field_name("argument").is_some() =>
@@ -143,6 +210,9 @@ fn equation_rhs_read(node: Node<'_>, cancellation: &Cancellation) -> Result<bool
         cancellation.check()?;
         match parent.kind() {
             "parens" if parent.child_by_field_name("expression") == Some(current) => {}
+            "infix"
+                if parent.child_by_field_name("left_operand") == Some(current)
+                    || parent.child_by_field_name("right_operand") == Some(current) => {}
             "conditional"
                 if parent.child_by_field_name("if") == Some(current)
                     || parent.child_by_field_name("then") == Some(current)
@@ -1102,7 +1172,7 @@ mod tests {
             ("blocked xs = [x | x <- xs]\n", false),
             ("blocked x = Module.x\n", false),
             ("blocked x = Record { field = x }\n", false),
-            ("blocked x = x + 1\n", false),
+            ("blocked x = (x +)\n", false),
             ("blocked x = (x :: Int)\n", false),
             ("blocked x = [| x |]\n", false),
             ("blocked x = Just x\n", false),
@@ -1167,7 +1237,7 @@ mod tests {
             ("blocked flag x = if flag then x else (\\x -> x)\n", false),
             ("blocked flag x = if flag then x else (x :: Int)\n", false),
             ("blocked flag x = if Module.flag then x else x\n", false),
-            ("blocked flag x = if flag then x + 1 else x\n", false),
+            ("blocked flag x = if flag then (x +) else x\n", false),
             ("blocked flag x = if flag then Just x else x\n", false),
             (
                 "blocked flag x = if flag then x else x where\n  x = 1\n",
@@ -1218,6 +1288,102 @@ mod tests {
                 .collect::<Vec<_>>();
             assert_eq!(actual, expected, "{source}");
         }
+    }
+
+    #[test]
+    fn binary_infix_operands_exclude_operator_dispatch_and_unknown_shapes() {
+        let cancellation = Cancellation::new();
+        for (source, eligible) in [
+            ("add x = x + 1\n", true),
+            ("multiply x = x * 1\n", true),
+            ("hash x = x # 1\n", true),
+            ("hashes x = x ## 1\n", true),
+            ("hash_pipe x = x #| 1\n", true),
+            ("mixed left right x = (left + right) * x\n", true),
+            ("forward x = unknown $ other x\n", true),
+            ("tick left right = left `unknown` right\n", true),
+            (
+                "dispatch operation left right = left `operation` right\n",
+                true,
+            ),
+            ("conditional flag x = if flag then x + 1 else x\n", true),
+            ("blocked x = (x +)\n", false),
+            ("blocked x = (+ x)\n", false),
+            ("blocked x = x Module.+ 1\n", false),
+            ("blocked x = x `Module.combine` x\n", false),
+            ("blocked x = x : x\n", false),
+            ("blocked x = x `Just` x\n", false),
+            ("blocked x = x + (let x = 1 in x)\n", false),
+            ("blocked x = x + (\\x -> x)\n", false),
+            ("blocked x = x + (x :: Int)\n", false),
+            ("blocked x = x + 1 where\n  x = 1\n", false),
+            ("blocked x | x = x + 1\n", false),
+        ] {
+            let tree = parse(source);
+            let clause = nodes(tree.root_node(), "function")
+                .into_iter()
+                .find(|node| equation(*node))
+                .unwrap();
+            assert_eq!(
+                simple_function_clause(clause, &cancellation).unwrap(),
+                eligible,
+                "{source}: {}",
+                clause.to_sexp()
+            );
+        }
+        for (source, expected) in [
+            ("add x = x + 1\n", vec!["x"]),
+            (
+                "mixed left right x = (left + right) * x\n",
+                vec!["left", "right", "x"],
+            ),
+            ("forward x = unknown $ other x\n", vec!["unknown", "x"]),
+            (
+                "tick left right = left `unknown` right\n",
+                vec!["left", "right"],
+            ),
+            (
+                "dispatch operation left right = left `operation` right\n",
+                vec!["left", "right"],
+            ),
+            ("callee operation x = operation x + 1\n", vec!["x"]),
+            (
+                "conditional flag x = if flag then x + 1 else x\n",
+                vec!["flag", "x", "x"],
+            ),
+        ] {
+            let tree = parse(source);
+            let actual = nodes(tree.root_node(), "variable")
+                .into_iter()
+                .filter(|node| equation_rhs_read(*node, &cancellation).unwrap())
+                .map(|node| node.utf8_text(source.as_bytes()).unwrap())
+                .collect::<Vec<_>>();
+            assert_eq!(actual, expected, "{source}");
+        }
+        let source = format!("chain x = {}\n", vec!["x"; 24].join(" + "));
+        let tree = parse(&source);
+        let clause = nodes(tree.root_node(), "function")
+            .into_iter()
+            .find(|node| equation(*node))
+            .unwrap();
+        assert!(simple_function_clause(clause, &cancellation).unwrap());
+        let variables = nodes(tree.root_node(), "variable")
+            .into_iter()
+            .filter(|node| equation_rhs_read(*node, &cancellation).unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(variables.len(), 24);
+        let infix = nodes(tree.root_node(), "infix").into_iter().next().unwrap();
+        assert!(simple_binary_infix(infix, &cancellation).unwrap());
+        let cancelled = Cancellation::new();
+        cancelled.cancel(CancellationReason::ClientRequest);
+        assert!(matches!(
+            simple_binary_infix(infix, &cancelled),
+            Err(AdapterError::Cancelled { .. })
+        ));
+        assert!(matches!(
+            equation_rhs_read(variables[0], &cancelled),
+            Err(AdapterError::Cancelled { .. })
+        ));
     }
 
     #[test]

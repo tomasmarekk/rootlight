@@ -915,6 +915,206 @@ fn exact_native_clause_labels_resolve_only_with_complete_parse_and_available_ide
 }
 
 #[test]
+fn exact_infix_operand_reads_keep_complete_identity_and_resource_requirements() {
+    let fixture = Fixture::new("module Sample where\npick value = value + 1\n");
+    for (status, missing_definition, resolved) in [
+        (CoverageStatus::Complete, false, true),
+        (CoverageStatus::Bounded, false, false),
+        (CoverageStatus::Complete, true, false),
+    ] {
+        let mut facts = fixture.module();
+        facts.extend([
+            fixture.fact(
+                10,
+                Some(4),
+                SyntaxFactKind::Declaration,
+                ("pick value = value + 1", 0),
+                3,
+                "haskell.function.declaration",
+            ),
+            fixture.fact(
+                11,
+                Some(10),
+                SyntaxFactKind::Occurrence,
+                ("pick", 0),
+                4,
+                "haskell.binding_name.definition",
+            ),
+            fixture.fact(
+                12,
+                Some(10),
+                SyntaxFactKind::Signature,
+                ("pick value", 0),
+                4,
+                "haskell.function.signature",
+            ),
+            fixture.fact(
+                13,
+                Some(10),
+                SyntaxFactKind::Scope,
+                ("pick value = value + 1", 0),
+                4,
+                "haskell.function_clause.scope",
+            ),
+            fixture.fact(
+                14,
+                Some(13),
+                SyntaxFactKind::Declaration,
+                ("value", 0),
+                5,
+                "haskell.parameter.declaration",
+            ),
+            fixture.fact(
+                15,
+                Some(14),
+                SyntaxFactKind::Occurrence,
+                ("value", 0),
+                6,
+                "haskell.binding_name.definition",
+            ),
+            fixture.fact(
+                16,
+                Some(13),
+                SyntaxFactKind::Signature,
+                ("= value + 1", 0),
+                5,
+                "haskell.simple_equation_match.signature",
+            ),
+            fixture.fact(
+                17,
+                Some(13),
+                SyntaxFactKind::Occurrence,
+                ("value + 1", 0),
+                5,
+                "haskell.infix_application.call",
+            ),
+            fixture.fact(
+                18,
+                Some(17),
+                SyntaxFactKind::Occurrence,
+                ("value", 1),
+                6,
+                "haskell.equation_rhs_read.reference",
+            ),
+            fixture.fact(
+                19,
+                Some(17),
+                SyntaxFactKind::Occurrence,
+                ("+", 0),
+                6,
+                "haskell.operator_name.reference",
+            ),
+        ]);
+        if missing_definition {
+            facts.retain(|fact| fact.local_id() != 15);
+        }
+        let output = fixture
+            .analyze(facts.clone(), IrLimits::default(), status, &deadline())
+            .unwrap();
+        let document = output.document();
+        let read = document
+            .occurrences
+            .iter()
+            .find(|site| {
+                site.role == OccurrenceRole::Reference
+                    && site.source.span() == fixture.span("value", 1)
+            })
+            .unwrap();
+        assert_eq!(
+            matches!(read.target, OccurrenceTarget::Resolved { .. }),
+            resolved
+        );
+        assert_eq!(
+            read.id,
+            rootlight_ir::derive_occurrence_record_id(read).unwrap()
+        );
+        let relations = document
+            .relations
+            .iter()
+            .filter(|relation| relation.subject == RelationEndpoint::Occurrence(read.id))
+            .collect::<Vec<_>>();
+        assert_eq!(relations.len(), usize::from(resolved));
+        if let OccurrenceTarget::Resolved { symbol } = &read.target {
+            let parameter = document
+                .entities
+                .iter()
+                .find(|entity| entity.id == *symbol)
+                .unwrap();
+            assert_eq!(parameter.kind, EntityKind::Parameter);
+            assert_eq!(parameter.canonical_name, "value");
+            assert_eq!(relations[0].predicate, RelationPredicate::RefersTo);
+            assert_eq!(relations[0].object, RelationEndpoint::Entity(*symbol));
+            assert_eq!(
+                relations[0].evidence_kind,
+                rootlight_ir::EvidenceKind::Derived
+            );
+            assert_eq!(relations[0].evidence.source.as_ref(), Some(&read.source));
+        }
+        assert_eq!(
+            document.skipped_regions.iter().any(|gap| {
+                gap.detail == "haskell-binding-target-unavailable"
+                    && gap.source.span() == read.source.span()
+            }),
+            !resolved
+        );
+        for (role, written) in [
+            (OccurrenceRole::CallSite, "value + 1"),
+            (OccurrenceRole::Reference, "+"),
+        ] {
+            let sites = document
+                .occurrences
+                .iter()
+                .filter(|site| site.role == role && site.source.span() == fixture.span(written, 0))
+                .collect::<Vec<_>>();
+            assert_eq!(sites.len(), 1);
+            assert!(matches!(
+                sites[0].target,
+                OccurrenceTarget::Unresolved { .. }
+            ));
+            assert_eq!(
+                sites[0].source.content_hash(),
+                fixture.source.content_hash()
+            );
+            assert_eq!(sites[0].source.generation(), fixture.source.generation());
+            assert!(
+                document.relations.iter().all(|relation| {
+                    relation.subject != RelationEndpoint::Occurrence(sites[0].id)
+                })
+            );
+        }
+        assert!(
+            document
+                .relations
+                .iter()
+                .all(|relation| relation.predicate != RelationPredicate::Calls)
+        );
+        if resolved {
+            for resource in 0..3 {
+                let mut limits = IrLimits::default();
+                match resource {
+                    0 => limits.max_entities = 0,
+                    1 => limits.max_occurrences = 0,
+                    2 => limits.max_relations = 0,
+                    _ => unreachable!(),
+                }
+                assert!(matches!(
+                    fixture.analyze(facts.clone(), limits, status, &deadline()),
+                    Err(AdapterError::Sink(
+                        rootlight_adapter_sdk::SinkError::StreamLimit { .. }
+                    ))
+                ));
+            }
+            let cancelled = deadline();
+            cancelled.cancel(CancellationReason::ClientRequest);
+            assert!(matches!(
+                fixture.analyze(facts, IrLimits::default(), status, &cancelled),
+                Err(AdapterError::Cancelled { .. })
+            ));
+        }
+    }
+}
+
+#[test]
 fn calls_types_and_imports_keep_exact_unresolved_sources_even_with_matching_entities() {
     let fixture = Fixture::new(
         "module Sample where\nimport Peer\nf :: Number -> Number\nf x = x\nuse = f 1\n",
