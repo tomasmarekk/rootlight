@@ -216,29 +216,6 @@ mod tests {
             for (range, declaration) in ranges.iter().zip(declarations) {
                 assert_eq!(&source[range.clone()], declaration);
             }
-            let header = format!("Sub Run({source}){newline}End Sub{newline}");
-            let inventory = crate::module_inventory(
-                header.as_bytes(),
-                crate::ModuleLimits::new(header.len(), 2, 1).with_max_parameters(4),
-                &mut || Ok::<(), ()>(()),
-            )
-            .unwrap();
-            let interior_start = "Sub Run(".len();
-            let actual_ranges = inventory.procedures()[0]
-                .parameters()
-                .iter()
-                .map(|parameter| {
-                    let range = parameter.declaration();
-                    Ok(range.start - interior_start..range.end - interior_start)
-                });
-            assert!(
-                parameter_declarations_cover(
-                    source.as_bytes(),
-                    actual_ranges,
-                    &mut || Ok::<(), ()>(())
-                )
-                .unwrap()
-            );
         }
         assert!(cover(b"a,b", &[0..1, 2..3]));
         assert!(cover(b"a", &[Range { start: 0, end: 1 }]));

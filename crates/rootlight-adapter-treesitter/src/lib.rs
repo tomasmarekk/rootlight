@@ -1,4 +1,4 @@
-//! Native grammars and closed first-party syntax behind the parser-independent SDK.
+//! Native grammars behind the parser-independent SDK.
 //!
 //! The public surface exposes checked Rootlight metadata only. Native parser
 //! values remain private to this crate so grammar upgrades cannot leak into IR.
@@ -48,36 +48,3 @@ pub const ADAPTER_VERSION: &str = env!("CARGO_PKG_VERSION");
 /// The workspace dependency is exact-pinned; keeping this adjacent to the
 /// adapter API makes evidence producers record the runtime they actually use.
 pub const TREE_SITTER_RUNTIME_VERSION: &str = "0.26.11";
-
-/// Revision of the first-party, whole-module procedural VBA parser route.
-///
-/// Unsupported modules still use the retained native grammar. This revision
-/// identifies only the closed first-party syntax inventory, not full VBA support.
-pub const VBA_PROCEDURAL_FRONTEND_VERSION: &str = "rootlight-vba-procedural-1";
-
-/// Returns the source-derived identity of the first-party VBA route.
-///
-/// Consumers combine this digest with the retained grammar identity while both
-/// routes exist. It invalidates persisted parser artifacts when a reviewed
-/// local parser input changes; it is not a hash of an installed executable.
-#[must_use]
-pub fn vba_procedural_frontend_digest() -> rootlight_ids::ContentHash {
-    let mut hasher = blake3::Hasher::new();
-    hasher.update(b"rootlight.vba.procedural-frontend/1\0");
-    for source in [
-        VBA_PROCEDURAL_FRONTEND_VERSION.as_bytes(),
-        include_bytes!("runtime.rs").as_slice(),
-        include_bytes!("runtime/vba.rs").as_slice(),
-        include_bytes!("../../rootlight-vba/src/lib.rs").as_slice(),
-        include_bytes!("../../rootlight-vba/src/module.rs").as_slice(),
-        include_bytes!("../../rootlight-vba/src/module_body.rs").as_slice(),
-        include_bytes!("../../rootlight-vba/src/module_expression.rs").as_slice(),
-        include_bytes!("../../rootlight-vba/src/parameter.rs").as_slice(),
-        include_bytes!("../../rootlight-vba/src/procedure.rs").as_slice(),
-        include_bytes!("../../rootlight-vba/src/with_blocks.rs").as_slice(),
-        include_bytes!("../../rootlight-vba/src/group.rs").as_slice(),
-    ] {
-        hasher.update(blake3::hash(source).as_bytes());
-    }
-    rootlight_ids::ContentHash::from_bytes(*hasher.finalize().as_bytes())
-}

@@ -9,7 +9,6 @@ mod embedded;
 mod expression;
 mod markdown;
 mod perl;
-mod vba;
 
 #[cfg(test)]
 mod native_context_tests;
@@ -113,7 +112,7 @@ const PARSE_PROGRESS_CHECKS_PER_SYNTAX_NODE: usize = 4;
 const PARSE_PROGRESS_CHECKS_PER_SYNTAX_DEPTH: usize = 1024;
 static NEXT_PROVIDER_ID: AtomicU64 = AtomicU64::new(1);
 
-/// Bounded first-party Tree-sitter parser provider.
+/// Bounded Tree-sitter parser provider.
 ///
 /// HTML script and style bodies use the JavaScript and CSS grammars under
 /// the host file's shared node, range and output budgets.
@@ -201,16 +200,6 @@ impl TreeSitterProvider {
         request: &ParseRequest<'_>,
         cancellation: &Cancellation,
     ) -> Result<usize, AdapterError> {
-        if let Some(prepared) = vba::prepare(
-            self,
-            request,
-            None,
-            &[],
-            self.config.default_settings(),
-            cancellation,
-        )? {
-            return vba::required_facts(prepared, request, cancellation);
-        }
         let mut prepared = self.prepare_tree(
             request,
             None,
@@ -306,19 +295,6 @@ impl TreeSitterProvider {
         sink: &mut dyn SyntaxFactSink,
         cancellation: &Cancellation,
     ) -> Result<RawParseWithPrevious, AdapterError> {
-        if let Some(prepared) =
-            vba::prepare(self, request, previous, edits, settings, cancellation)?
-        {
-            return vba::emit(
-                prepared,
-                request,
-                previous,
-                edits,
-                settings,
-                sink,
-                cancellation,
-            );
-        }
         let PreparedParse {
             family,
             identity,

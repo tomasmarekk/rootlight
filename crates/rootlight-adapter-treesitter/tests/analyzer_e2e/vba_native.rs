@@ -42,10 +42,10 @@ fn vba_procedure_exits_keep_later_declarations_reads_and_independent_call_proofs
                         });
                 assert_eq!(source.len(), baseline.len());
                 for language in ["vba", "visual-basic-classic"] {
-                    let output = radix_own_proof_output(&source, language);
+                    let output = native_source_proof_output(&source, language);
                     let document = output.document();
                     assert_radix_ir_source_identity(document, &source, language);
-                    let baseline_output = radix_own_proof_output(&baseline, language);
+                    let baseline_output = native_source_proof_output(&baseline, language);
                     let baseline_document = baseline_output.document();
                     assert_eq!(document.entities.len(), baseline_document.entities.len());
                     assert_eq!(
@@ -410,7 +410,7 @@ fn application_proof_output(
     )
 }
 
-fn radix_own_proof_output(source: &str, language: &'static str) -> AnalysisOutput {
+fn native_source_proof_output(source: &str, language: &'static str) -> AnalysisOutput {
     let provider = Arc::new(provider());
     let case = LanguageCase {
         name: language,
@@ -428,7 +428,9 @@ fn radix_own_proof_output(source: &str, language: &'static str) -> AnalysisOutpu
     .unwrap();
     assert_eq!(
         parsed.report().coverage().status(),
-        CoverageStatus::Complete
+        CoverageStatus::Complete,
+        "{language}: {source}\n{:?}",
+        parsed.diagnostics()
     );
     assert_eq!(
         parsed.report().coverage().covered_source_bytes(),
@@ -443,9 +445,8 @@ fn radix_own_proof_output(source: &str, language: &'static str) -> AnalysisOutpu
         &deadline(),
     )
     .unwrap();
-    assert_eq!(provider.stats().pooled_parsers, 0);
+    assert!(provider.stats().pooled_parsers > 0);
     assert_eq!(provider.stats().checked_out_parsers, 0);
-    assert_eq!(provider.stats().cache.entries, 0);
     output
 }
 
@@ -752,9 +753,8 @@ fn assert_numeric_initializer_source_proofs(literal: &str, initializer: &str, ne
         )
         .unwrap();
         assert_eq!(repeated.document(), document);
-        assert_eq!(provider.stats().pooled_parsers, 0);
+        assert!(provider.stats().pooled_parsers > 0);
         assert_eq!(provider.stats().checked_out_parsers, 0);
-        assert_eq!(provider.stats().cache.entries, 0);
     }
 }
 
@@ -785,7 +785,7 @@ fn vba_signed_defaults_preserve_written_arity_and_local_shadow_boundaries() {
         for newline in ["\n", "\r\n"] {
             let source = source.replace('\n', newline);
             for language in ["vba", "visual-basic-classic"] {
-                let output = radix_own_proof_output(&source, language);
+                let output = native_source_proof_output(&source, language);
                 let document = output.document();
                 assert_radix_ir_source_identity(document, &source, language);
                 let parser = document.files[0].provenance;
@@ -1074,7 +1074,7 @@ fn assert_radix_array_source_proofs(
             "Function grid(ByVal index As Long) As Long\nEnd Function\nSub Ready(ByVal value As Long)\nEnd Sub\nSub Run()\nDim result, {clause}\nresult = {indexed}\n{ready}\nEnd Sub\n"
         ).replace('\n', newline);
     for language in ["vba", "visual-basic-classic"] {
-        let output = radix_own_proof_output(&source, language);
+        let output = native_source_proof_output(&source, language);
         let document = output.document();
         assert_radix_ir_source_identity(document, &source, language);
         let run = document
@@ -1241,7 +1241,7 @@ fn assert_radix_duplicate_source_proofs(literal: &str, newline: &str) {
             "Public stored As Long\nSub Ready(ByVal value As Long)\nEnd Sub\nSub Run()\nDim {first}, {second}, other\nstored = stored\n{ready}\nEnd Sub\n"
         ).replace('\n', newline);
     for language in ["vba", "visual-basic-classic"] {
-        let output = radix_own_proof_output(&source, language);
+        let output = native_source_proof_output(&source, language);
         let document = output.document();
         assert_radix_ir_source_identity(document, &source, language);
         let run = document
@@ -1351,7 +1351,7 @@ fn assert_radix_duplicate_source_proofs(literal: &str, newline: &str) {
 fn vba_application_proofs_retain_exact_materialized_formals_and_parser_parent() {
     const RULE: &str = "vba-procedure-application-v1.source";
     for language in ["vba", "visual-basic-classic"] {
-        for native in [false, true] {
+        for include_date_literal in [false, true] {
             for (parameters, arguments, clauses) in [
                 ("", "", Vec::<&str>::new()),
                 ("ByVal value As Long", "1", vec!["ByVal value As Long"]),
@@ -1456,7 +1456,7 @@ fn vba_application_proofs_retain_exact_materialized_formals_and_parser_parent() 
                     vec!["Optional first = False", "Optional second = \"text\""],
                 ),
             ] {
-                let body = if native {
+                let body = if include_date_literal {
                     "local = #1/1/2000#\n"
                 } else {
                     "local = 2\n"
@@ -3157,14 +3157,14 @@ fn vba_member_invocation_context_does_not_prove_a_call() {
         ("worker.Apply", "vba.invoked_member.reference", 0),
         ("worker.Apply", "vba.invoked_member.reference", 1),
         ("worker.Compute", "vba.invoked_get_member.reference", 0),
-        ("worker.Item", "vba.member.reference", 0),
+        ("worker.Item", "vba.invoked_let_member.reference", 0),
         ("worker.Item", "vba.invoked_set_member.reference", 1),
         ("worker.Item", "vba.get_member.reference", 2),
         ("worker.[Apply]", "vba.invoked_member.reference", 0),
         ("worker.Check", "vba.invoked_member.reference", 0),
         ("worker.Check", "vba.invoked_member.reference", 1),
         ("worker.Check", "vba.invoked_member.reference", 2),
-        ("worker.Item", "vba.member.reference", 3),
+        ("worker.Item", "vba.invoked_let_member.reference", 3),
     ] {
         let start = source.match_indices(text).nth(ordinal).unwrap().0;
         let site = result
@@ -3227,7 +3227,14 @@ fn vba_visibility_does_not_infer_defaults_from_body_text() {
     use rootlight_ir::EntityVisibility;
     let source = "Attribute VB_Name = \"Boundary\"\n' Public\nDim stored As Long\nSub Run(ByVal value As Long)\nDim text As String\ntext = \"Private Public Friend\"\nEnd Sub\nFriend Sub InvalidFriend()\nEnd Sub\n";
     let result = output(source);
-    for name in ["stored", "Run", "value", "text", "InvalidFriend"] {
+    let stored = result
+        .document()
+        .entities
+        .iter()
+        .find(|entity| entity.canonical_name == "stored")
+        .unwrap();
+    assert_eq!(stored.visibility, EntityVisibility::Private);
+    for name in ["Run", "value", "text", "InvalidFriend"] {
         let entity = result
             .document()
             .entities
@@ -5817,7 +5824,7 @@ fn vba_declared_array_application_binds_without_guessing_object_defaults() {
         .occurrences
         .iter()
         .find(|site| {
-            site.syntax_kind == "vba.invoked_identifier.reference"
+            site.syntax_kind == "vba.invoked_let_identifier.reference"
                 && site.source.span().start_byte() == assignment_start
         })
         .unwrap();
@@ -7897,6 +7904,24 @@ fn vba_incomplete_declaration_retains_explicit_parse_gaps() {
         CoverageStatus::Complete
     );
     assert!(!result.document().skipped_regions.is_empty());
+
+    let result = output("Attribute VB_Name = \"Boundary\"\nDim stored As\n");
+    assert_ne!(
+        result.report().coverage().status(),
+        CoverageStatus::Complete
+    );
+    assert!(
+        result
+            .document()
+            .skipped_regions
+            .iter()
+            .any(|gap| gap.detail == "syntax-error-recovery")
+    );
+    // Recovery may omit the declaration entirely; it cannot prove private access.
+    assert!(result.document().entities.iter().all(|entity| {
+        entity.kind != EntityKind::Variable
+            || entity.visibility == rootlight_ir::EntityVisibility::Unknown
+    }));
 }
 
 #[test]
@@ -9247,24 +9272,48 @@ fn vba_numeric_statement_labels_compare_values_and_preserve_error_policy_zero() 
 }
 
 #[test]
-fn vba_unparsed_octal_labels_remain_explicit_without_fabricated_bindings() {
-    let source = "Sub Run()\nGoTo &O12\n10:\nEnd Sub\n";
-    let result = output(source);
-    assert!(
-        result
-            .document()
-            .skipped_regions
+fn vba_octal_statement_labels_retain_exact_reference_proofs() {
+    for literal in ["&O12", "&o12", "&12"] {
+        let source = format!("Sub Run()\nGoTo {literal}\n10:\nEnd Sub\n");
+        let result = output(&source);
+        let document = result.document();
+        assert_eq!(
+            result.report().coverage().status(),
+            CoverageStatus::Complete
+        );
+        assert!(document.skipped_regions.is_empty());
+        let label = document
+            .entities
             .iter()
-            .any(|gap| gap.reason == rootlight_ir::SkippedRegionReason::ParseError)
-    );
-    assert!(
-        !result
-            .document()
-            .occurrences
+            .find(|entity| entity.kind == EntityKind::StatementLabel)
+            .unwrap();
+        assert_eq!(label.canonical_name, "10");
+        let site = label_reference_at(document, &source, literal);
+        assert_eq!(site.role, OccurrenceRole::Reference);
+        assert_eq!(site.target, OccurrenceTarget::Resolved { symbol: label.id });
+        assert_eq!(site.source.repository(), document.repository);
+        assert_eq!(site.source.generation(), document.generation);
+        assert_eq!(site.source.content_hash(), content_hash(source.as_bytes()));
+        let start = source.find(literal).unwrap();
+        assert_eq!(
+            site.source.span().start_byte(),
+            u64::try_from(start).unwrap()
+        );
+        assert_eq!(
+            site.source.span().end_byte(),
+            u64::try_from(start + literal.len()).unwrap()
+        );
+        let references = document
+            .relations
             .iter()
-            .any(|site| site.role != OccurrenceRole::Definition
-                && matches!(site.target, OccurrenceTarget::Resolved { .. }))
-    );
+            .filter(|edge| edge.subject == RelationEndpoint::Occurrence(site.id))
+            .collect::<Vec<_>>();
+        assert_eq!(references.len(), 1);
+        assert_eq!(references[0].predicate, RelationPredicate::RefersTo);
+        assert_eq!(references[0].object, RelationEndpoint::Entity(label.id));
+        assert_eq!(references[0].provenance, site.provenance);
+        assert_eq!(references[0].evidence.source.as_ref(), Some(&site.source));
+    }
 }
 
 #[test]
@@ -9957,14 +10006,14 @@ fn vba_accessor_parameters_remain_separate_environments() {
 #[test]
 fn vba_duplicate_module_variables_retain_written_definitions_without_unique_value_binding() {
     for language in ["vba", "visual-basic-classic"] {
-        for native in [false, true] {
+        for include_date_literal in [false, true] {
             for (declaration, declarator, written_name) in [
                 ("Dim stored As Long", "stored As Long", "stored"),
                 ("Public stored As Long", "stored As Long", "stored"),
                 ("Dim stored", "stored", "stored"),
                 ("Private [stored]", "[stored]", "[stored]"),
             ] {
-                let body = if native {
+                let body = if include_date_literal {
                     "local = #1/1/2000#"
                 } else {
                     "local = 3"
@@ -10070,12 +10119,12 @@ fn vba_duplicate_module_variables_retain_written_definitions_without_unique_valu
 #[test]
 fn vba_module_variable_constant_collisions_do_not_choose_a_default_target() {
     for language in ["vba", "visual-basic-classic"] {
-        for native in [false, true] {
+        for include_date_literal in [false, true] {
             for declarations in [
                 "Dim stored As Long\nConst stored = 7",
                 "Const stored = 7\nDim stored As Long",
             ] {
-                let body = if native {
+                let body = if include_date_literal {
                     "local = #1/1/2000#"
                 } else {
                     "local = 3"
@@ -10133,9 +10182,9 @@ fn vba_module_variable_constant_collisions_do_not_choose_a_default_target() {
 fn vba_grouped_module_variables_keep_independent_evidence_and_ambiguous_duplicates() {
     use rootlight_ir::EntityVisibility;
     for language in ["vba", "visual-basic-classic"] {
-        for native in [false, true] {
+        for include_date_literal in [false, true] {
             for (prefix, visibility) in [
-                ("Dim", EntityVisibility::Unknown),
+                ("Dim", EntityVisibility::Private),
                 ("Public", EntityVisibility::Public),
                 ("Private", EntityVisibility::Private),
             ] {
@@ -10182,7 +10231,7 @@ fn vba_grouped_module_variables_keep_independent_evidence_and_ambiguous_duplicat
                         .map(|(clause, _)| *clause)
                         .collect::<Vec<_>>()
                         .join(", ");
-                    let body = if native {
+                    let body = if include_date_literal {
                         "scratch=#1/1/2000#"
                     } else {
                         "scratch=7"
@@ -10371,7 +10420,7 @@ fn vba_grouped_module_variables_keep_independent_evidence_and_ambiguous_duplicat
 #[test]
 fn vba_module_numeric_arrays_preserve_call_and_index_boundaries() {
     for language in ["vba", "visual-basic-classic"] {
-        for native in [false, true] {
+        for include_date_literal in [false, true] {
             for (designator, indices, proven) in [
                 ("", "", false),
                 ("()", "", true),
@@ -10389,7 +10438,7 @@ fn vba_module_numeric_arrays_preserve_call_and_index_boundaries() {
                 let declaration = format!("items{designator} As Long");
                 let invocation = format!("Call items({indices})");
                 let indexed = format!("items({indices})");
-                let body = if native {
+                let body = if include_date_literal {
                     format!("scratch = #1/1/2000#\nscratch = {indexed}")
                 } else {
                     format!("scratch = 3\nscratch = {indexed}")
@@ -10582,10 +10631,14 @@ fn vba_rhs_array_applications_preserve_missing_duplicate_and_shadow_barriers() {
         ),
     ] {
         for language in ["vba", "visual-basic-classic"] {
-            for native in [false, true] {
-                let native_tail = if native { "result = #1/1/2000#\n" } else { "" };
+            for include_date_literal in [false, true] {
+                let date_control = if include_date_literal {
+                    "result = #1/1/2000#\n"
+                } else {
+                    ""
+                };
                 let source = format!(
-                    "Attribute VB_Name = \"Arrays\"\n{declarations}Sub Run({parameters})\nDim result As Variant\n{locals}{native_tail}result = items(0)\nEnd Sub\n"
+                    "Attribute VB_Name = \"Arrays\"\n{declarations}Sub Run({parameters})\nDim result As Variant\n{locals}{date_control}result = items(0)\nEnd Sub\n"
                 );
                 let output =
                     application_proof_output(&source, language, IrLimits::default(), &deadline())
@@ -10693,11 +10746,15 @@ fn vba_rhs_array_applications_preserve_missing_duplicate_and_shadow_barriers() {
 #[test]
 fn vba_rhs_array_reads_keep_case_bracket_and_scalar_argument_source_identity() {
     for language in ["vba", "visual-basic-classic"] {
-        for native in [false, true] {
-            let native_tail = if native { "result = #1/1/2000#\n" } else { "" };
+        for include_date_literal in [false, true] {
+            let date_control = if include_date_literal {
+                "result = #1/1/2000#\n"
+            } else {
+                ""
+            };
             let expression = "[ItEmS](slot, [slot])";
             let source = format!(
-                "Attribute VB_Name = \"Arrays\"\nPrivate items(-2 To +3, 004) As Long\nSub Run(ByVal slot As Long)\nDim result As Variant\n{native_tail}result = {expression}\nEnd Sub\n"
+                "Attribute VB_Name = \"Arrays\"\nPrivate items(-2 To +3, 004) As Long\nSub Run(ByVal slot As Long)\nDim result As Variant\n{date_control}result = {expression}\nEnd Sub\n"
             );
             let output =
                 application_proof_output(&source, language, IrLimits::default(), &deadline())
@@ -10839,11 +10896,15 @@ fn vba_rhs_function_applications_require_written_formal_proofs() {
         ("Optional value As Long = 7", "", true),
     ] {
         for language in ["vba", "visual-basic-classic"] {
-            for native in [false, true] {
-                let native_tail = if native { "result = #1/1/2000#\n" } else { "" };
+            for include_date_literal in [false, true] {
+                let date_control = if include_date_literal {
+                    "result = #1/1/2000#\n"
+                } else {
+                    ""
+                };
                 let expression = format!("Measure({arguments})");
                 let source = format!(
-                    "Function Measure({parameter}) As Long\nMeasure = 7\nEnd Function\nSub Run()\nDim result As Long\n{native_tail}result = {expression}\nEnd Sub\n"
+                    "Function Measure({parameter}) As Long\nMeasure = 7\nEnd Function\nSub Run()\nDim result As Long\n{date_control}result = {expression}\nEnd Sub\n"
                 );
                 let output =
                     application_proof_output(&source, language, IrLimits::default(), &deadline())
@@ -10981,10 +11042,14 @@ fn vba_rhs_function_applications_require_written_formal_proofs() {
 fn vba_expression_operands_preserve_values_and_implicit_function_calls() {
     let expression = "-(stored + local) * Seed + Count + Maybe + Needs";
     for language in ["vba", "visual-basic-classic"] {
-        for native in [false, true] {
-            let native_tail = if native { "result = #1/1/2000#\n" } else { "" };
+        for include_date_literal in [false, true] {
+            let date_control = if include_date_literal {
+                "result = #1/1/2000#\n"
+            } else {
+                ""
+            };
             let source = format!(
-                "Attribute VB_Name = \"Values\"\nPrivate stored As Long\nConst Seed As Long = 7\nFunction Count() As Long\nCount = Count + Seed\nEnd Function\nFunction Maybe(Optional amount As Long = 1) As Long\nMaybe = amount + 1\nEnd Function\nFunction Needs(ByVal amount As Long) As Long\nNeeds = amount + 1\nEnd Function\nSub Run(ByVal stored As Long)\nDim local As Long\nDim result As Variant\n{native_tail}result = {expression}\nEnd Sub\n"
+                "Attribute VB_Name = \"Values\"\nPrivate stored As Long\nConst Seed As Long = 7\nFunction Count() As Long\nCount = Count + Seed\nEnd Function\nFunction Maybe(Optional amount As Long = 1) As Long\nMaybe = amount + 1\nEnd Function\nFunction Needs(ByVal amount As Long) As Long\nNeeds = amount + 1\nEnd Function\nSub Run(ByVal stored As Long)\nDim local As Long\nDim result As Variant\n{date_control}result = {expression}\nEnd Sub\n"
             );
             let output =
                 application_proof_output(&source, language, IrLimits::default(), &deadline())
@@ -11162,10 +11227,14 @@ fn vba_expression_reads_preserve_missing_duplicate_and_shadow_barriers() {
         ),
     ] {
         for language in ["vba", "visual-basic-classic"] {
-            for native in [false, true] {
-                let native_tail = if native { "result = #1/1/2000#\n" } else { "" };
+            for include_date_literal in [false, true] {
+                let date_control = if include_date_literal {
+                    "result = #1/1/2000#\n"
+                } else {
+                    ""
+                };
                 let source = format!(
-                    "Attribute VB_Name = \"Values\"\n{declarations}Sub Run({parameters})\nDim result As Variant\n{locals}{native_tail}result = -([stored] + 1) * 2\nEnd Sub\n"
+                    "Attribute VB_Name = \"Values\"\n{declarations}Sub Run({parameters})\nDim result As Variant\n{locals}{date_control}result = -([stored] + 1) * 2\nEnd Sub\n"
                 );
                 let output =
                     application_proof_output(&source, language, IrLimits::default(), &deadline())
@@ -11275,7 +11344,8 @@ fn vba_comparison_chains_and_logical_mixes_bind_exact_scalar_reads() {
             assert_eq!(
                 parsed.report().coverage().status(),
                 CoverageStatus::Complete,
-                "{language}: {expression}"
+                "{language}: {expression}\n{:?}",
+                parsed.diagnostics()
             );
             assert_eq!(
                 parsed.report().coverage().covered_source_bytes(),
@@ -11396,9 +11466,8 @@ fn vba_comparison_chains_and_logical_mixes_bind_exact_scalar_reads() {
                         && edge.predicate == RelationPredicate::Calls
                 }));
             }
-            assert_eq!(provider.stats().pooled_parsers, 0);
+            assert!(provider.stats().pooled_parsers > 0);
             assert_eq!(provider.stats().checked_out_parsers, 0);
-            assert_eq!(provider.stats().cache.entries, 0);
         }
     }
 }
@@ -11441,16 +11510,20 @@ fn vba_nested_expression_applications_retain_formal_and_array_provenance() {
             0,
         ),
     ];
-    // The native grammar is not an oracle for the admitted comparison-chain forms.
-    for (expression, applications, native) in [
+    for (expression, applications, include_date_literal) in [
         (arithmetic, arithmetic_applications, false),
         (arithmetic, arithmetic_applications, true),
         (comparative, comparative_applications, false),
+        (comparative, comparative_applications, true),
     ] {
         for language in ["vba", "visual-basic-classic"] {
-            let native_tail = if native { "result = #1/1/2000#\n" } else { "" };
+            let date_control = if include_date_literal {
+                "result = #1/1/2000#\n"
+            } else {
+                ""
+            };
             let source = format!(
-                "Attribute VB_Name = \"Expressions\"\nPrivate items(-2 To +2) As Long\nFunction Inner(ByVal value As Long) As Long\nInner = value + 1\nEnd Function\nFunction Outer(ByVal value As Long, Optional ByVal other As Long = 0) As Long\nOuter = value + other\nEnd Function\nSub Run(ByVal slot As Long)\nDim result As Long\n{native_tail}result = {expression}\nEnd Sub\n"
+                "Attribute VB_Name = \"Expressions\"\nPrivate items(-2 To +2) As Long\nFunction Inner(ByVal value As Long) As Long\nInner = value + 1\nEnd Function\nFunction Outer(ByVal value As Long, Optional ByVal other As Long = 0) As Long\nOuter = value + other\nEnd Function\nSub Run(ByVal slot As Long)\nDim result As Long\n{date_control}result = {expression}\nEnd Sub\n"
             );
             let provider = Arc::new(provider());
             let case = LanguageCase {
@@ -11460,25 +11533,23 @@ fn vba_nested_expression_applications_retain_formal_and_array_provenance() {
             let fixture = Fixture::new(case, source.as_bytes());
             let budget = limits();
             let request = request(&fixture.snapshot, &fixture.source, case, &budget);
-            if !native {
-                let parsed = rootlight_adapter_sdk::execute_parse(
-                    provider.as_ref(),
-                    &request.to_parse_request(),
-                    MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
-                    &deadline(),
-                )
-                .unwrap();
-                assert_eq!(
-                    parsed.report().coverage().status(),
-                    CoverageStatus::Complete,
-                    "{language}: {expression}"
-                );
-                assert_eq!(
-                    parsed.report().coverage().covered_source_bytes(),
-                    source.len()
-                );
-                assert!(parsed.diagnostics().is_empty());
-            }
+            let parsed = rootlight_adapter_sdk::execute_parse(
+                provider.as_ref(),
+                &request.to_parse_request(),
+                MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
+                &deadline(),
+            )
+            .unwrap();
+            assert_eq!(
+                parsed.report().coverage().status(),
+                CoverageStatus::Complete,
+                "{language}: {expression}"
+            );
+            assert_eq!(
+                parsed.report().coverage().covered_source_bytes(),
+                source.len()
+            );
+            assert!(parsed.diagnostics().is_empty());
             let output = execute_analysis(
                 &analyzer(&provider, case),
                 &request,
@@ -11487,38 +11558,33 @@ fn vba_nested_expression_applications_retain_formal_and_array_provenance() {
                 &deadline(),
             )
             .unwrap();
-            if !native {
-                assert_eq!(provider.stats().pooled_parsers, 0);
-                assert_eq!(provider.stats().checked_out_parsers, 0);
-                assert_eq!(provider.stats().cache.entries, 0);
-            }
+            assert!(provider.stats().pooled_parsers > 0);
+            assert_eq!(provider.stats().checked_out_parsers, 0);
             let document = output.document();
             let parser = document.files[0].provenance;
-            if !native {
-                if language == "vba" {
-                    assert_eq!(
-                        output.report().coverage().status(),
-                        CoverageStatus::Complete
-                    );
-                    assert!(document.skipped_regions.is_empty());
-                } else {
-                    assert_eq!(output.report().coverage().status(), CoverageStatus::Bounded);
-                    assert_eq!(document.skipped_regions.len(), 1);
-                    let gap = &document.skipped_regions[0];
-                    assert_eq!(gap.detail, "visual-basic-dialect-unproven");
-                    assert_eq!(gap.domain, FactDomain::Relations);
-                    assert_eq!(gap.reason, SkippedRegionReason::UnsupportedConstruct);
-                    assert_eq!(gap.provenance, parser);
-                    assert_eq!(gap.source, fixture.source);
-                    assert_eq!(gap.source.repository(), document.repository);
-                    assert_eq!(gap.source.generation(), document.generation);
-                    assert_eq!(gap.source.content_hash(), content_hash(source.as_bytes()));
-                    assert_eq!(gap.source.span().start_byte(), 0);
-                    assert_eq!(
-                        gap.source.span().end_byte(),
-                        u64::try_from(source.len()).unwrap()
-                    );
-                }
+            if language == "vba" {
+                assert_eq!(
+                    output.report().coverage().status(),
+                    CoverageStatus::Complete
+                );
+                assert!(document.skipped_regions.is_empty());
+            } else {
+                assert_eq!(output.report().coverage().status(), CoverageStatus::Bounded);
+                assert_eq!(document.skipped_regions.len(), 1);
+                let gap = &document.skipped_regions[0];
+                assert_eq!(gap.detail, "visual-basic-dialect-unproven");
+                assert_eq!(gap.domain, FactDomain::Relations);
+                assert_eq!(gap.reason, SkippedRegionReason::UnsupportedConstruct);
+                assert_eq!(gap.provenance, parser);
+                assert_eq!(gap.source, fixture.source);
+                assert_eq!(gap.source.repository(), document.repository);
+                assert_eq!(gap.source.generation(), document.generation);
+                assert_eq!(gap.source.content_hash(), content_hash(source.as_bytes()));
+                assert_eq!(gap.source.span().start_byte(), 0);
+                assert_eq!(
+                    gap.source.span().end_byte(),
+                    u64::try_from(source.len()).unwrap()
+                );
             }
             let run = document
                 .entities
@@ -11759,17 +11825,14 @@ fn vba_explicit_expression_calls_retain_exact_formal_proofs_without_duplicate_ca
         "Call Target(value < 1 < 2, Inner(other = 1 Xor other <> 2))",
     ] {
         for language in ["vba", "visual-basic-classic"] {
-            for native in [false, true] {
-                if native && statement.contains("< 1 < 2") {
-                    continue;
-                }
-                let native_tail = if native {
+            for include_date_literal in [false, true] {
+                let date_control = if include_date_literal {
                     "Dim scratch As Long\nscratch = #1/1/2000#\n"
                 } else {
                     ""
                 };
                 let source = format!(
-                    "Sub Target(ByVal first As Long, ByVal second As Long)\nEnd Sub\nFunction Inner(ByVal item As Long) As Long\nEnd Function\nSub Run(ByVal value As Long, ByVal other As Long)\n{native_tail}{statement}\nEnd Sub\n"
+                    "Sub Target(ByVal first As Long, ByVal second As Long)\nEnd Sub\nFunction Inner(ByVal item As Long) As Long\nEnd Function\nSub Run(ByVal value As Long, ByVal other As Long)\n{date_control}{statement}\nEnd Sub\n"
                 );
                 let provider = Arc::new(provider());
                 let case = LanguageCase {
@@ -11779,24 +11842,22 @@ fn vba_explicit_expression_calls_retain_exact_formal_proofs_without_duplicate_ca
                 let fixture = Fixture::new(case, source.as_bytes());
                 let budget = limits();
                 let request = request(&fixture.snapshot, &fixture.source, case, &budget);
-                if !native {
-                    let parsed = rootlight_adapter_sdk::execute_parse(
-                        provider.as_ref(),
-                        &request.to_parse_request(),
-                        MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
-                        &deadline(),
-                    )
-                    .unwrap();
-                    assert_eq!(
-                        parsed.report().coverage().status(),
-                        CoverageStatus::Complete
-                    );
-                    assert_eq!(
-                        parsed.report().coverage().covered_source_bytes(),
-                        source.len()
-                    );
-                    assert!(parsed.diagnostics().is_empty());
-                }
+                let parsed = rootlight_adapter_sdk::execute_parse(
+                    provider.as_ref(),
+                    &request.to_parse_request(),
+                    MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
+                    &deadline(),
+                )
+                .unwrap();
+                assert_eq!(
+                    parsed.report().coverage().status(),
+                    CoverageStatus::Complete
+                );
+                assert_eq!(
+                    parsed.report().coverage().covered_source_bytes(),
+                    source.len()
+                );
+                assert!(parsed.diagnostics().is_empty());
                 let output = execute_analysis(
                     &analyzer(&provider, case),
                     &request,
@@ -11807,26 +11868,23 @@ fn vba_explicit_expression_calls_retain_exact_formal_proofs_without_duplicate_ca
                 .unwrap();
                 let document = output.document();
                 let parser = document.files[0].provenance;
-                if !native {
-                    assert_eq!(provider.stats().pooled_parsers, 0);
-                    assert_eq!(provider.stats().checked_out_parsers, 0);
-                    assert_eq!(provider.stats().cache.entries, 0);
-                    if language == "vba" {
-                        assert_eq!(
-                            output.report().coverage().status(),
-                            CoverageStatus::Complete
-                        );
-                        assert!(document.skipped_regions.is_empty());
-                    } else {
-                        assert_eq!(output.report().coverage().status(), CoverageStatus::Bounded);
-                        assert_eq!(document.skipped_regions.len(), 1);
-                        let gap = &document.skipped_regions[0];
-                        assert_eq!(gap.detail, "visual-basic-dialect-unproven");
-                        assert_eq!(gap.domain, FactDomain::Relations);
-                        assert_eq!(gap.reason, SkippedRegionReason::UnsupportedConstruct);
-                        assert_eq!(gap.source, fixture.source);
-                        assert_eq!(gap.provenance, parser);
-                    }
+                assert!(provider.stats().pooled_parsers > 0);
+                assert_eq!(provider.stats().checked_out_parsers, 0);
+                if language == "vba" {
+                    assert_eq!(
+                        output.report().coverage().status(),
+                        CoverageStatus::Complete
+                    );
+                    assert!(document.skipped_regions.is_empty());
+                } else {
+                    assert_eq!(output.report().coverage().status(), CoverageStatus::Bounded);
+                    assert_eq!(document.skipped_regions.len(), 1);
+                    let gap = &document.skipped_regions[0];
+                    assert_eq!(gap.detail, "visual-basic-dialect-unproven");
+                    assert_eq!(gap.domain, FactDomain::Relations);
+                    assert_eq!(gap.reason, SkippedRegionReason::UnsupportedConstruct);
+                    assert_eq!(gap.source, fixture.source);
+                    assert_eq!(gap.provenance, parser);
                 }
                 assert_explicit_expression_application_proof(
                     document,
@@ -12301,8 +12359,8 @@ fn vba_explicit_expression_array_arguments_preserve_rank_barriers_without_callab
 fn vba_local_dim_lists_preserve_exact_lexical_identity_without_sibling_type_inference() {
     let source = "Attribute VB_Name = \"LocalLists\"\nPublic stored As Long\nSub Target(ByVal first As Long, ByVal second As Long)\nEnd Sub\nSub Run()\nDim stored, typed As Long, grid(-1 To +2,003) As Long, pending()\nDim [Rem] As String, _\n [other]\nstored = typed: typed = stored\ntyped = grid(0,1)\nCall Target(typed, grid(0,1))\nEnd Sub\n";
     for language in ["vba", "visual-basic-classic"] {
-        for native in [false, true] {
-            let source = if native {
+        for include_date_literal in [false, true] {
+            let source = if include_date_literal {
                 source.replace("typed = grid(0,1)", "typed = grid(0,1)\ntyped = #1/1/2000#")
             } else {
                 source.to_owned()
@@ -12736,7 +12794,7 @@ fn vba_local_dim_array_rank_shadows_functions_without_fabricated_call_edges() {
 fn vba_module_variables_preserve_value_ownership_without_constant_or_call_proofs() {
     use rootlight_ir::EntityVisibility;
     for language in ["vba", "visual-basic-classic"] {
-        for native in [false, true] {
+        for include_date_literal in [false, true] {
             for (declaration, declarator, name, visibility) in [
                 (
                     "Public stored As Long",
@@ -12750,15 +12808,15 @@ fn vba_module_variables_preserve_value_ownership_without_constant_or_call_proofs
                     "[stored]",
                     EntityVisibility::Private,
                 ),
-                ("Dim stored", "stored", "stored", EntityVisibility::Unknown),
+                ("Dim stored", "stored", "stored", EntityVisibility::Private),
                 (
                     "Dim stored As Variant",
                     "stored As Variant",
                     "stored",
-                    EntityVisibility::Unknown,
+                    EntityVisibility::Private,
                 ),
             ] {
-                let body = if native {
+                let body = if include_date_literal {
                     "local = #1/1/2000#"
                 } else {
                     "local = 3"
@@ -12964,7 +13022,7 @@ fn vba_module_variables_preserve_value_ownership_without_constant_or_call_proofs
 fn vba_parameter_defaults_bind_module_constants_not_body_parameters() {
     use rootlight_ir::EntityVisibility;
     for language in ["vba", "visual-basic-classic"] {
-        for native in [false, true] {
+        for include_date_literal in [false, true] {
             for (declaration, name, declarator, visibility, clause) in [
                 (
                     "Private Const Fallback As Long = 3",
@@ -12995,7 +13053,7 @@ fn vba_parameter_defaults_bind_module_constants_not_body_parameters() {
                     "Optional Fallback As Variant = [FALLBACK]",
                 ),
             ] {
-                let body = if native {
+                let body = if include_date_literal {
                     "local = #1/1/2000#"
                 } else {
                     "local = 3"
@@ -13143,8 +13201,8 @@ fn vba_parameter_defaults_bind_module_constants_not_body_parameters() {
 #[test]
 fn vba_duplicate_module_constants_keep_written_definitions_and_default_ambiguity() {
     for language in ["vba", "visual-basic-classic"] {
-        for native in [false, true] {
-            let body = if native {
+        for include_date_literal in [false, true] {
+            let body = if include_date_literal {
                 "local = #1/1/2000#"
             } else {
                 "local = 3"
@@ -13551,13 +13609,13 @@ fn vba_duplicate_variable_visibility_agreement_preserves_every_source_order() {
     let cases: &[(&[&str], EntityVisibility)] = &[
         (&["Public", "Public"], EntityVisibility::Public),
         (&["Private", "Private"], EntityVisibility::Private),
-        (&["Dim", "Dim"], EntityVisibility::Unknown),
+        (&["Dim", "Dim"], EntityVisibility::Private),
         (&["Public", "Private"], EntityVisibility::Unknown),
         (&["Private", "Public"], EntityVisibility::Unknown),
         (&["Public", "Dim"], EntityVisibility::Unknown),
         (&["Dim", "Public"], EntityVisibility::Unknown),
-        (&["Private", "Dim"], EntityVisibility::Unknown),
-        (&["Dim", "Private"], EntityVisibility::Unknown),
+        (&["Private", "Dim"], EntityVisibility::Private),
+        (&["Dim", "Private"], EntityVisibility::Private),
         (&["Public", "Private", "Public"], EntityVisibility::Unknown),
     ];
     for language in ["vba", "visual-basic-classic"] {

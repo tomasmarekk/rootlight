@@ -241,7 +241,7 @@ pub enum ReuseInvalidation {
     Language,
     /// The generated grammar version changed.
     GrammarVersion,
-    /// The current source was parsed by a first-party route without a native tree.
+    /// A previous frontend route cannot supply a reusable native tree.
     FrontendRoute,
     /// The declared source encoding changed.
     Encoding,

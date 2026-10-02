@@ -1,12 +1,6 @@
 //! Reads source-written VBA names, declaration prefixes and expression boundaries.
 //! No parser runtime is required. Identifier paths retain argument boundaries;
 //! procedure categories come from source, never from an uncontinued following line.
-//! Closed whole-module inventories reject unsupported syntax without partial facts.
-//! Numeric atoms retain integer radix or FLOAT spelling and an optional authored
-//! suffix without evaluating magnitudes, signed values or runtime types.
-//! Nothing is retained as a source-only value literal, distinct from bracketed names.
-//! A sole parenthesized statement argument retains implicit-call grouping regardless
-//! of its gap from the callee.
 
 #![forbid(unsafe_code)]
 
@@ -19,9 +13,6 @@ mod construction;
 mod group;
 mod lifecycle;
 mod member_attribute;
-mod module;
-mod module_body;
-mod module_expression;
 mod parameter;
 mod procedure;
 mod value_reads;
@@ -43,21 +34,6 @@ pub use construction::constructed_type_range;
 pub use group::parenthesized_expression_end;
 pub use lifecycle::{ClassInitializer, class_initializer};
 pub use member_attribute::{MemberDispatchAttribute, member_dispatch_attribute};
-pub use module::{
-    ModuleConstant, ModuleConstantVisibility, ModuleError, ModuleInventory, ModuleLimits,
-    ModuleParameter, ModuleParameterPassingMode, ModuleProcedure, ModuleVariable,
-    ModuleVariableVisibility, module_inventory,
-};
-pub use module_body::{
-    ModuleApplicationAssignment, ModuleAssignmentMode, ModuleBodyStatement, ModuleCall,
-    ModuleFloatSuffix, ModuleIntegerSuffix, ModuleLocalDeclaration, ModuleLocalKind,
-    ModuleLocalVariable, ModuleLocalVariables, ModuleProcedureExit, ModuleProcedureExitKind,
-    ModuleScalarAssignment, ModuleScalarValue, ModuleScalarValueKind, ModuleZeroArgumentCall,
-};
-pub use module_expression::{
-    ModuleExpressionApplication, ModuleExpressionAssignment, ModuleExpressionCall,
-    ModuleExpressionInventory, ModuleValueApplication,
-};
 pub use parameter::{
     array_parameter_modifiers, parameter_declarations_cover, parameter_trivia_len,
 };

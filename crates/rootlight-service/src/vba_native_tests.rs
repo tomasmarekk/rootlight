@@ -1,6 +1,6 @@
-//! Durable service contracts for switching procedural VBA parser routes.
-//! First-party and native fallback facts share the existing generation-bound
-//! query/source contract without retaining a stale parser artifact.
+//! Durable VBA analysis contracts for the standard Tree-sitter parser route.
+//! Relationships and queries retain precise generation-bound source evidence
+//! across mutation, restart, retained generations and clean rebuilds.
 
 use super::*;
 use rootlight_ir::OccurrenceTarget;
@@ -56,10 +56,6 @@ fn assert_source_and_identity_for_language(
             record.producer_kind == ProducerKind::Parser && record.language == file.language
         })
         .unwrap();
-    assert_eq!(
-        parser.frontend_version.as_deref(),
-        Some("rootlight-vba-procedural-1+tree-sitter-vba-0.14.1")
-    );
     let registry = GrammarRegistry::audited().unwrap();
     let family = match language {
         "vba" => GrammarFamily::Vba,
@@ -71,6 +67,10 @@ fn assert_source_and_identity_for_language(
         .iter()
         .find(|descriptor| descriptor.family() == family)
         .unwrap();
+    assert_eq!(
+        parser.frontend_version.as_deref(),
+        Some(format!("tree-sitter-vba-{}", descriptor.grammar_version()).as_str())
+    );
     assert_eq!(
         parser.binary_digest,
         grammar_binary_digest(descriptor).unwrap()
@@ -100,7 +100,7 @@ fn assert_source_and_identity_for_language(
 }
 
 #[test]
-fn procedural_route_changes_survive_noop_reopen_and_match_clean_rebuild() {
+fn vba_edits_survive_noop_reopen_and_match_clean_rebuild() {
     let current = std::env::current_dir().unwrap();
     let repository = tempfile::tempdir_in(&current).unwrap();
     let storage = tempfile::tempdir_in(&current).unwrap();
@@ -112,10 +112,10 @@ fn procedural_route_changes_survive_noop_reopen_and_match_clean_rebuild() {
     paths.prepare_owner().unwrap();
     let empty = "Attribute VB_Name = \"Authored\"\nOption Explicit\nSub Run()\nEnd Sub\n";
     let populated = "Attribute VB_Name = \"Authored\"\nOption Explicit\nSub Run()\nDim value As Long\nConst Limit As Long = 7\nvalue = Limit\nLet value = 1\nEnd Sub\n";
-    let native = "Attribute VB_Name = \"Authored\"\nOption Explicit\nSub Run()\nDim value As Long\nvalue = #1/1/2000#\nEnd Sub\n";
+    let date_literal = "Attribute VB_Name = \"Authored\"\nOption Explicit\nSub Run()\nDim value As Long\nvalue = #1/1/2000#\nEnd Sub\n";
     let mut first_empty = None;
     let mut previous_generation = None;
-    for source in [empty, populated, native, populated, empty] {
+    for source in [empty, populated, date_literal, populated, empty] {
         fs::write(repository.path().join("module.bas"), source).unwrap();
         let mut service =
             FirstSliceService::new_durable(4, paths.state_dir(), &deadline()).unwrap();
@@ -184,7 +184,7 @@ fn procedural_route_changes_survive_noop_reopen_and_match_clean_rebuild() {
 }
 
 #[test]
-fn procedural_frontend_identity_includes_both_local_and_retained_parser_inputs() {
+fn vba_frontend_identity_uses_pinned_native_inputs() {
     let registry = GrammarRegistry::audited().unwrap();
     for family in [GrammarFamily::Vba, GrammarFamily::VisualBasicClassic] {
         let descriptor = registry
@@ -192,7 +192,7 @@ fn procedural_frontend_identity_includes_both_local_and_retained_parser_inputs()
             .iter()
             .find(|descriptor| descriptor.family() == family)
             .unwrap();
-        let legacy = hash_static_components(&[
+        let native = hash_static_components(&[
             ANALYZER_BINARY_SEED,
             descriptor.language().as_str().as_bytes(),
             descriptor.grammar_version().as_bytes(),
@@ -204,16 +204,7 @@ fn procedural_frontend_identity_includes_both_local_and_retained_parser_inputs()
                 .as_bytes(),
         ])
         .unwrap();
-        assert_ne!(grammar_binary_digest(descriptor).unwrap(), legacy);
-        assert_eq!(
-            grammar_binary_digest(descriptor).unwrap(),
-            hash_static_components(&[
-                legacy.as_bytes(),
-                VBA_PROCEDURAL_FRONTEND_VERSION.as_bytes(),
-                vba_procedural_frontend_digest().as_bytes(),
-            ])
-            .unwrap()
-        );
+        assert_eq!(grammar_binary_digest(descriptor).unwrap(), native);
     }
 }
 
@@ -2739,8 +2730,8 @@ fn named_optional_defaults_preserve_module_constant_namespace_and_source_lifetim
             },
             ..initial
         },
-        // An unsupported own-body expression selects the native fallback. The
-        // composite parser identity alone is not evidence of which route ran.
+        // Changing an authored date expression must preserve the independent
+        // default-parameter and call evidence after a durable update.
         NamedDefaultState {
             body: "value = #1/1/2000#\n",
             ..initial
@@ -3049,7 +3040,9 @@ fn assert_module_variable_contract(
         );
         let visibility = if state.declarations_source.starts_with("Public ") {
             rootlight_ir::EntityVisibility::Public
-        } else if state.declarations_source.starts_with("Private ") {
+        } else if state.declarations_source.starts_with("Private ")
+            || state.declarations_source.starts_with("Dim ")
+        {
             rootlight_ir::EntityVisibility::Private
         } else {
             rootlight_ir::EntityVisibility::Unknown
@@ -3887,9 +3880,8 @@ fn assert_module_array_contract(
         let prefix_end = line_start + prefix.len();
         assert!(prefix_end <= start);
         let visibility = match prefix {
-            "Private " => rootlight_ir::EntityVisibility::Private,
+            "Private " | "Dim " => rootlight_ir::EntityVisibility::Private,
             "Public " => rootlight_ir::EntityVisibility::Public,
-            "Dim " => rootlight_ir::EntityVisibility::Unknown,
             _ => panic!("an authored module variable prefix is required"),
         };
         assert_eq!(variable.visibility, visibility);
@@ -4130,7 +4122,7 @@ fn assert_module_array_contract(
         }
     }
     if state.indexed_body {
-        // The separately authored date statement retains native fallback.
+        // A separate date statement must not change source-bound array rank proof.
         // Declared rank proves indexing shape, not runtime bounds or element types.
         for (expression, name, proven) in [
             ("Buffer()", "Buffer", true),
@@ -5209,7 +5201,7 @@ struct ValueApplicationState {
     declarations_source: &'static str,
     declarations: WrittenParameters<'static>,
     buffer: ExpectedBufferApplication,
-    arithmetic_fallback: bool,
+    include_date_arithmetic: bool,
 }
 
 fn value_application_source(state: ValueApplicationState) -> String {
@@ -5218,9 +5210,9 @@ fn value_application_source(state: ValueApplicationState) -> String {
     } else {
         ""
     };
-    // Date arguments remain outside the first-party expression slice;
-    // this separately retained application keeps native rank evidence alive.
-    let arithmetic = if state.arithmetic_fallback {
+    // The date argument is present source evidence, not a numeric coercion
+    // or runtime array-bounds proof.
+    let arithmetic = if state.include_date_arithmetic {
         "sink = Buffer(#1/1/2000#) + 1\n"
     } else {
         ""
@@ -5768,13 +5760,13 @@ fn assert_value_application_contract_with_statements(
             .iter()
             .filter(|site| { site.syntax_kind == "vba.application.reference" })
             .count(),
-        probes.len() + usize::from(state.arithmetic_fallback)
+        probes.len() + usize::from(state.include_date_arithmetic)
     );
     for (ordinal, (expression, name, argument_count, is_function)) in probes
         .into_iter()
         .chain(
             state
-                .arithmetic_fallback
+                .include_date_arithmetic
                 .then_some(("Buffer(#1/1/2000#)", "Buffer", 1, false)),
         )
         .enumerate()
@@ -6188,7 +6180,7 @@ fn assignment_value_applications_preserve_arrays_formals_and_source_lifetimes() 
             ("Grid(0 To 2, 1 To 3) As Long", "Grid"),
         ],
         buffer: ExpectedBufferApplication::Fixed(1),
-        arithmetic_fallback: false,
+        include_date_arithmetic: false,
     };
     let states = [
         initial,
@@ -6243,7 +6235,7 @@ fn assignment_value_applications_preserve_arrays_formals_and_source_lifetimes() 
             ..initial
         },
         ValueApplicationState {
-            arithmetic_fallback: true,
+            include_date_arithmetic: true,
             ..initial
         },
         initial,
@@ -6302,7 +6294,7 @@ fn assignment_value_applications_preserve_arrays_formals_and_source_lifetimes() 
                 } else {
                     expected
                 };
-                let expected = if state.arithmetic_fallback {
+                let expected = if state.include_date_arithmetic {
                     expected.replace(
                         "sink = Fetch(value, 7, 8)\n",
                         "sink = Fetch(value, 7, 8)\nsink = Buffer(#1/1/2000#) + 1\n",
@@ -6391,7 +6383,7 @@ struct ExpressionSourceState {
     buffer: ExpectedBufferApplication,
     function: ExpressionFunctionTarget,
     operand: &'static str,
-    native_fallback: bool,
+    include_date_control: bool,
 }
 
 fn expression_assignment_source(state: ExpressionSourceState) -> String {
@@ -6413,20 +6405,18 @@ fn expression_assignment_source(state: ExpressionSourceState) -> String {
     } else {
         ""
     };
-    let fallback = if state.native_fallback {
+    let date_control = if state.include_date_control {
         "sink = #1/1/2000#\n"
     } else {
         ""
     };
-    // The retained grammar recovers these source-valid comparison combinations;
-    // the date control must remain a native-valid whole module independently.
-    let comparisons = if state.native_fallback {
+    let comparisons = if state.include_date_control {
         ""
     } else {
         "sink = value = 0 Xor index <> 1\nsink = value < 2 Eqv index >= 0 Imp value <> index\nsink = value = 0 Or index = 1 And value > index\nsink = value < index < 2\n"
     };
     format!(
-        "Attribute VB_Name = \"Authored\"\nOption Explicit\n{}{functions}Sub Run()\nDim sink As Long\nDim index As Long\nDim value As Long\n{shadow}index = 0\nvalue = 1\nsink = -(value + {}) * 3 ^ 2 / 4 \\ 2 Mod 2\nsink = Not (value = 0) And True Or False Xor True Eqv False Imp True\n{comparisons}sink = \"left\" & \"right\"\nsink = (Buffer(index) + Grid(0, value)) * Fetch(value)\nsink = Fetch(Buffer(index), Fetch(value + 1)) + Fetch()\nsink = (Fetch(value, 7, 8))\n{fallback}End Sub\n",
+        "Attribute VB_Name = \"Authored\"\nOption Explicit\n{}{functions}Sub Run()\nDim sink As Long\nDim index As Long\nDim value As Long\n{shadow}index = 0\nvalue = 1\nsink = -(value + {}) * 3 ^ 2 / 4 \\ 2 Mod 2\nsink = Not (value = 0) And True Or False Xor True Eqv False Imp True\n{comparisons}sink = \"left\" & \"right\"\nsink = (Buffer(index) + Grid(0, value)) * Fetch(value)\nsink = Fetch(Buffer(index), Fetch(value + 1)) + Fetch()\nsink = (Fetch(value, 7, 8))\n{date_control}End Sub\n",
         state.declarations_source, state.operand
     )
 }
@@ -6558,7 +6548,13 @@ fn assert_expression_assignment_contract(
             .iter()
             .find(|entity| entity.canonical_name == name)
             .unwrap();
-        assert_eq!(entity.visibility, rootlight_ir::EntityVisibility::Private);
+        assert_eq!(
+            entity.visibility,
+            rootlight_ir::EntityVisibility::Private,
+            "{language}: {state:?}, variable {} at {range:?}\n{source}\n{:?}",
+            entity.canonical_name,
+            document.skipped_regions
+        );
         let token_length = if written.starts_with('[') {
             written.find(']').unwrap() + 1
         } else {
@@ -7361,7 +7357,7 @@ fn expression_assignments_preserve_nested_proofs_and_generation_lifetimes() {
         buffer: ExpectedBufferApplication::Fixed(1),
         function: ExpressionFunctionTarget::Unique,
         operand: "2",
-        native_fallback: false,
+        include_date_control: false,
     };
     let states = [
         initial,
@@ -7401,7 +7397,7 @@ fn expression_assignments_preserve_nested_proofs_and_generation_lifetimes() {
             ..initial
         },
         ExpressionSourceState {
-            native_fallback: true,
+            include_date_control: true,
             ..initial
         },
         initial,
@@ -8537,14 +8533,14 @@ struct LocalDimState {
     declarations_source: &'static str,
     declarations: WrittenParameters<'static>,
     buffer: ExpectedBufferApplication,
-    native_fallback: bool,
+    include_date_control: bool,
 }
 
 fn local_dim_source(state: LocalDimState) -> String {
     format!(
         "Attribute VB_Name = \"Authored\"\nOption Explicit\nPrivate Buffer(2) As Long\nFunction Fetch(ByVal value As Long, Optional extra As Long = 7) As Long\nFetch = value\nEnd Function\nSub Run()\n{}index = 0\nsink = spare\nsink = Buffer()\nsink = Buffer(index)\nsink = Buffer(index, 1)\nsink = dynamic(index)\nsink = dynamic(index, 1)\nsink = Grid(0)\nsink = Grid(0, 1)\nsink = Fetch()\nsink = Fetch(index)\nsink = Fetch(index, 7, 8)\n{}End Sub\n",
         state.declarations_source,
-        if state.native_fallback {
+        if state.include_date_control {
             "sink = #1/1/2000#\n"
         } else {
             ""
@@ -9294,7 +9290,7 @@ fn local_dim_lists_and_arrays_preserve_scope_and_generation_lifetimes() {
             ("Grid(0 To 2, 3) As Long", "Grid"),
         ],
         buffer: ExpectedBufferApplication::Fixed(1),
-        native_fallback: false,
+        include_date_control: false,
     };
     let grouped = LocalDimState {
         declarations_source: "Dim sink As Long, index As Long, spare As Long\nDim Buffer(2) As Long, dynamic() As Long, Grid(0 To 2, 3) As Long\n",
@@ -9367,9 +9363,9 @@ fn local_dim_lists_and_arrays_preserve_scope_and_generation_lifetimes() {
             buffer: ExpectedBufferApplication::Ambiguous,
             ..initial
         },
-        // A date atom remains outside the first-party body subset.
+        // Include a date value to vary source without changing declaration identity.
         LocalDimState {
-            native_fallback: true,
+            include_date_control: true,
             ..grouped
         },
         initial,
@@ -9424,9 +9420,9 @@ fn local_dim_lists_and_arrays_preserve_scope_and_generation_lifetimes() {
                 assert_ne!(receipt.logical_snapshot, old_receipt.logical_snapshot);
                 let expected =
                     old_source.replace(old_state.declarations_source, state.declarations_source);
-                let expected = if state.native_fallback {
+                let expected = if state.include_date_control {
                     expected.replace("End Sub\n", "sink = #1/1/2000#\nEnd Sub\n")
-                } else if old_state.native_fallback {
+                } else if old_state.include_date_control {
                     expected.replace("sink = #1/1/2000#\n", "")
                 } else {
                     expected
@@ -9489,7 +9485,7 @@ struct RadixLiteralState {
     local_rank: usize,
     index: &'static str,
     second_index: &'static str,
-    native_fallback: bool,
+    include_date_control: bool,
     shadow_ready: bool,
 }
 
@@ -9507,7 +9503,7 @@ fn radix_literal_source(state: RadixLiteralState) -> String {
         } else {
             ""
         },
-        fallback = if state.native_fallback {
+        fallback = if state.include_date_control {
             "sink = #1/1/2000#\n"
         } else {
             ""
@@ -9958,11 +9954,11 @@ fn assert_radix_literal_contract(
             assert_eq!(
                 application.target,
                 OccurrenceTarget::Resolved { symbol: target.id },
-                "{language}: {expression}; literal={}, rank={}, index={}, native_fallback={}, shadow_ready={}",
+                "{language}: {expression}; literal={}, rank={}, index={}, include_date_control={}, shadow_ready={}",
                 state.literal,
                 state.local_rank,
                 state.index,
-                state.native_fallback,
+                state.include_date_control,
                 state.shadow_ready,
             );
         } else {
@@ -10230,7 +10226,7 @@ fn radix_literal_edits_preserve_atom_sources_and_rank_arity_proofs() {
         local_rank: 1,
         index: "0",
         second_index: "1",
-        native_fallback: false,
+        include_date_control: false,
         shadow_ready: false,
     };
     let hexadecimal = RadixLiteralState {
@@ -10241,7 +10237,7 @@ fn radix_literal_edits_preserve_atom_sources_and_rank_arity_proofs() {
         local_rank: 1,
         index: "&H0",
         second_index: "&h1",
-        native_fallback: false,
+        include_date_control: false,
         shadow_ready: false,
     };
     let states = [
@@ -10255,7 +10251,7 @@ fn radix_literal_edits_preserve_atom_sources_and_rank_arity_proofs() {
             local_rank: 1,
             index: "&O0",
             second_index: "&o1",
-            native_fallback: false,
+            include_date_control: false,
             shadow_ready: false,
         },
         RadixLiteralState {
@@ -10266,13 +10262,13 @@ fn radix_literal_edits_preserve_atom_sources_and_rank_arity_proofs() {
             local_rank: 2,
             index: "&0",
             second_index: "&1",
-            native_fallback: false,
+            include_date_control: false,
             shadow_ready: false,
         },
         // The retained VBA grammar does not admit every octal spelling. The
-        // fallback fixture therefore keeps independently native-valid hex syntax.
+        // date-control fixture therefore retains independently native-valid hex syntax.
         RadixLiteralState {
-            native_fallback: true,
+            include_date_control: true,
             ..hexadecimal
         },
         initial,
@@ -10399,7 +10395,7 @@ fn integer_suffix_edits_preserve_source_tokens_and_rank_arity_proofs() {
         local_rank: 2,
         index: "&0",
         second_index: "&o1",
-        native_fallback: false,
+        include_date_control: false,
         shadow_ready: false,
     };
     // Suffix-only edits preserve radix, signs, rank and callable contracts. Their
@@ -10414,7 +10410,7 @@ fn integer_suffix_edits_preserve_source_tokens_and_rank_arity_proofs() {
             local_rank: 2,
             index: "&0%",
             second_index: "&o1%",
-            native_fallback: false,
+            include_date_control: false,
             shadow_ready: false,
         },
         RadixLiteralState {
@@ -10425,7 +10421,7 @@ fn integer_suffix_edits_preserve_source_tokens_and_rank_arity_proofs() {
             local_rank: 2,
             index: "&0&",
             second_index: "&o1&",
-            native_fallback: false,
+            include_date_control: false,
             shadow_ready: false,
         },
         RadixLiteralState {
@@ -10436,10 +10432,10 @@ fn integer_suffix_edits_preserve_source_tokens_and_rank_arity_proofs() {
             local_rank: 2,
             index: "&0^",
             second_index: "&o1^",
-            native_fallback: false,
+            include_date_control: false,
             shadow_ready: false,
         },
-        // The genuine date fallback keeps only native-compatible
+        // The date-control module keeps only native-compatible
         // decimal/hex tokens; octal admission is not a native-oracle assumption.
         RadixLiteralState {
             literal: "7^",
@@ -10449,7 +10445,7 @@ fn integer_suffix_edits_preserve_source_tokens_and_rank_arity_proofs() {
             local_rank: 2,
             index: "&H0^",
             second_index: "&h1^",
-            native_fallback: true,
+            include_date_control: true,
             shadow_ready: false,
         },
         initial,
@@ -10467,7 +10463,7 @@ fn float_literal_edits_preserve_source_tokens_and_rank_arity_proofs() {
         local_rank: 1,
         index: "0.",
         second_index: "1.",
-        native_fallback: false,
+        include_date_control: false,
         shadow_ready: false,
     };
     let fraction = RadixLiteralState {
@@ -10490,7 +10486,7 @@ fn float_literal_edits_preserve_source_tokens_and_rank_arity_proofs() {
         local_rank: 2,
         index: "0.#",
         second_index: "1e0#",
-        native_fallback: false,
+        include_date_control: false,
         shadow_ready: false,
     };
     let currency_suffix = RadixLiteralState {
@@ -10501,7 +10497,7 @@ fn float_literal_edits_preserve_source_tokens_and_rank_arity_proofs() {
         local_rank: 2,
         index: "0@",
         second_index: "1d0@",
-        native_fallback: false,
+        include_date_control: false,
         shadow_ready: false,
     };
     // These bounds and suffixes prove source spelling and rank, not literal
@@ -10526,7 +10522,7 @@ fn float_literal_edits_preserve_source_tokens_and_rank_arity_proofs() {
         RadixLiteralState {
             literal: "7.250E+0#",
             local_bounds: "-1.E+0# To +2.0#, 3E0#",
-            native_fallback: true,
+            include_date_control: true,
             ..mixed_double
         },
         initial,
@@ -11231,7 +11227,7 @@ const PROCEDURE_EXIT_LITERALS: RadixLiteralState = RadixLiteralState {
     local_rank: 1,
     index: "0",
     second_index: "1",
-    native_fallback: false,
+    include_date_control: false,
     shadow_ready: false,
 };
 
@@ -11900,7 +11896,56 @@ fn statement_value_applications_preserve_array_rank_and_local_shadow_lifetimes()
 }
 
 #[derive(Debug, Clone, Copy)]
-enum NothingValueState {
+enum KeywordValueKind {
+    Nothing,
+    Empty,
+    Null,
+}
+
+impl KeywordValueKind {
+    fn spelling(self) -> &'static str {
+        match self {
+            Self::Nothing => "Nothing",
+            Self::Empty => "Empty",
+            Self::Null => "Null",
+        }
+    }
+
+    fn mixed_case(self) -> &'static str {
+        match self {
+            Self::Nothing => "nOtHiNg",
+            Self::Empty => "eMpTy",
+            Self::Null => "nUlL",
+        }
+    }
+
+    fn bracketed_name(self) -> &'static str {
+        match self {
+            Self::Nothing => "[Nothing]",
+            Self::Empty => "[Empty]",
+            Self::Null => "[Null]",
+        }
+    }
+
+    fn quoted(self) -> &'static str {
+        match self {
+            Self::Nothing => "\"Nothing\"",
+            Self::Empty => "\"Empty\"",
+            Self::Null => "\"Null\"",
+        }
+    }
+
+    fn joined_name(self) -> &'static str {
+        match self {
+            Self::Nothing => "NothingValue",
+            Self::Empty => "EmptyValue",
+            Self::Null => "NullValue",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+enum KeywordValueState {
     Literal,
     GroupedLiteral,
     AdjacentLiteral,
@@ -11911,24 +11956,27 @@ enum NothingValueState {
     JoinedName,
     MissingBracketedName,
     ExtraArgument,
+    EmptyArguments,
     NativeDate,
     MixedCaseLet,
 }
 
-impl NothingValueState {
-    fn rhs(self) -> &'static str {
+impl KeywordValueState {
+    fn rhs(self, keyword: KeywordValueKind) -> &'static str {
         match self {
-            Self::Literal | Self::GroupedLiteral | Self::AdjacentLiteral | Self::ExtraArgument => {
-                "Nothing"
-            }
+            Self::Literal
+            | Self::GroupedLiteral
+            | Self::AdjacentLiteral
+            | Self::ExtraArgument
+            | Self::EmptyArguments => keyword.spelling(),
             Self::BracketedName
             | Self::GroupedBracketedName
             | Self::AdjacentBracketedName
-            | Self::MissingBracketedName => "[Nothing]",
-            Self::String => "\"Nothing\"",
-            Self::JoinedName => "NothingValue",
+            | Self::MissingBracketedName => keyword.bracketed_name(),
+            Self::String => keyword.quoted(),
+            Self::JoinedName => keyword.joined_name(),
             Self::NativeDate => "#1/1/2000#",
-            Self::MixedCaseLet => "nOtHiNg",
+            Self::MixedCaseLet => keyword.mixed_case(),
         }
     }
 
@@ -11940,9 +11988,11 @@ impl NothingValueState {
         }
     }
 
-    fn consume_statement(self) -> (String, usize) {
-        let rhs = self.rhs();
-        if matches!(self, Self::AdjacentLiteral | Self::AdjacentBracketedName) {
+    fn consume_statement(self, keyword: KeywordValueKind) -> (String, usize) {
+        let rhs = self.rhs(keyword);
+        if matches!(self, Self::EmptyArguments) {
+            ("Call Consume()".to_owned(), 5)
+        } else if matches!(self, Self::AdjacentLiteral | Self::AdjacentBracketedName) {
             (format!("Consume({rhs})"), 0)
         } else if matches!(self, Self::GroupedLiteral | Self::GroupedBracketedName) {
             (format!("Consume ({rhs})"), 0)
@@ -11952,36 +12002,46 @@ impl NothingValueState {
     }
 }
 
-fn nothing_value_source(state: NothingValueState) -> String {
-    let rhs = state.rhs();
-    let bracketed = if matches!(state, NothingValueState::MissingBracketedName) {
-        ""
+fn keyword_value_source(keyword: KeywordValueKind, state: KeywordValueState) -> String {
+    let rhs = state.rhs(keyword);
+    let literal = keyword.spelling();
+    let joined = keyword.joined_name();
+    let operator = if matches!(keyword, KeywordValueKind::Nothing) {
+        "Is"
     } else {
-        ", [Nothing] As Variant"
+        "="
     };
-    let arguments = if matches!(state, NothingValueState::ExtraArgument) {
+    let bracketed = if matches!(state, KeywordValueState::MissingBracketedName) {
+        String::new()
+    } else {
+        format!(", {} As Variant", keyword.bracketed_name())
+    };
+    let arguments = if matches!(state, KeywordValueState::ExtraArgument) {
         format!("{rhs}, {rhs}")
+    } else if matches!(state, KeywordValueState::EmptyArguments) {
+        String::new()
     } else {
         rhs.to_owned()
     };
     let source = format!(
-        "Attribute VB_Name = \"WrittenValues\"\nFunction Echo(ByVal value As Variant) As Variant\nEcho = value\nEnd Function\nSub Consume(ByVal value As Variant)\nEnd Sub\nSub Run()\nDim sink As Variant{bracketed}, NothingValue As Variant\n{} sink = {rhs}\nsink = Echo({arguments})\n{}\nsink = (sink Is Nothing)\nEnd Sub\n",
+        "Attribute VB_Name = \"WrittenValues\"\nFunction Echo(ByVal value As Variant) As Variant\nEcho = value\nEnd Function\nSub Consume(ByVal value As Variant)\nEnd Sub\nSub Run()\nDim sink As Variant{bracketed}, {joined} As Variant\n{} sink = {rhs}\nsink = Echo({arguments})\n{}\nsink = (sink {operator} {literal})\nEnd Sub\n",
         state.keyword(),
-        state.consume_statement().0
+        state.consume_statement(keyword).0
     );
-    if matches!(state, NothingValueState::MixedCaseLet) {
+    if matches!(state, KeywordValueState::MixedCaseLet) {
         source.replace('\n', "\r\n")
     } else {
         source
     }
 }
 
-fn assert_nothing_value_contract(
+fn assert_keyword_value_contract(
     service: &FirstSliceService,
     receipt: &FirstSliceIndexReceipt,
     source: &str,
     language: &str,
-    state: NothingValueState,
+    keyword: KeywordValueKind,
+    state: KeywordValueState,
 ) {
     assert_source_and_identity_for_language(service, receipt, source, language);
     let snapshot = service
@@ -12002,7 +12062,7 @@ fn assert_nothing_value_contract(
                 && entity.container == Some(rootlight_ir::ContainerRef::Entity(run.id))
         })
         .unwrap();
-    let rhs = state.rhs();
+    let rhs = state.rhs(keyword);
     let first_statement = format!("{} sink = {rhs}", state.keyword());
     let first_start = source.find(&first_statement).unwrap();
     let destination_start = first_start + state.keyword().len() + 1;
@@ -12013,7 +12073,7 @@ fn assert_nothing_value_contract(
             site.source.span().start_byte() == u64::try_from(destination_start).unwrap()
                 && site.source.span().end_byte() == u64::try_from(destination_start + 4).unwrap()
                 && site.syntax_kind
-                    == if matches!(state, NothingValueState::MixedCaseLet) {
+                    == if matches!(state, KeywordValueState::MixedCaseLet) {
                         "vba.let_identifier.reference"
                     } else {
                         "vba.set_identifier.reference"
@@ -12051,12 +12111,14 @@ fn assert_nothing_value_contract(
         destination_relations[0].evidence.source.as_ref(),
         Some(&destination.source)
     );
-    let arguments = if matches!(state, NothingValueState::ExtraArgument) {
+    let arguments = if matches!(state, KeywordValueState::ExtraArgument) {
         format!("{rhs}, {rhs}")
+    } else if matches!(state, KeywordValueState::EmptyArguments) {
+        String::new()
     } else {
         rhs.to_owned()
     };
-    let (consume, consume_offset) = state.consume_statement();
+    let (consume, consume_offset) = state.consume_statement(keyword);
     for (name, expression, callee_offset, syntax) in [
         (
             "Echo",
@@ -12086,7 +12148,8 @@ fn assert_nothing_value_contract(
                     && entity.container == Some(rootlight_ir::ContainerRef::Entity(target.id))
             })
             .unwrap();
-        let proven = name != "Echo" || !matches!(state, NothingValueState::ExtraArgument);
+        let proven = !matches!(state, KeywordValueState::EmptyArguments)
+            && (name != "Echo" || !matches!(state, KeywordValueState::ExtraArgument));
         let application = document
             .occurrences
             .iter()
@@ -12220,12 +12283,13 @@ fn assert_nothing_value_contract(
             })
             .collect();
         match state {
-            NothingValueState::Literal
-            | NothingValueState::GroupedLiteral
-            | NothingValueState::AdjacentLiteral
-            | NothingValueState::ExtraArgument
-            | NothingValueState::MixedCaseLet
-            | NothingValueState::NativeDate => {
+            KeywordValueState::Literal
+            | KeywordValueState::GroupedLiteral
+            | KeywordValueState::AdjacentLiteral
+            | KeywordValueState::ExtraArgument
+            | KeywordValueState::EmptyArguments
+            | KeywordValueState::MixedCaseLet
+            | KeywordValueState::NativeDate => {
                 assert!(
                     sites.is_empty(),
                     "literal source does not imply an occurrence: {state:?}"
@@ -12237,7 +12301,7 @@ fn assert_nothing_value_contract(
                         .any(|gap| gap.source == reference)
                 );
             }
-            NothingValueState::String => {
+            KeywordValueState::String => {
                 assert_eq!(sites.len(), 1);
                 assert_eq!(sites[0].role, OccurrenceRole::StringEvidence);
                 assert_exact_parameter_source(
@@ -12248,22 +12312,22 @@ fn assert_nothing_value_contract(
                     start..end,
                 );
             }
-            NothingValueState::BracketedName
-            | NothingValueState::GroupedBracketedName
-            | NothingValueState::AdjacentBracketedName
-            | NothingValueState::JoinedName
-            | NothingValueState::MissingBracketedName => {
+            KeywordValueState::BracketedName
+            | KeywordValueState::GroupedBracketedName
+            | KeywordValueState::AdjacentBracketedName
+            | KeywordValueState::JoinedName
+            | KeywordValueState::MissingBracketedName => {
                 assert_eq!(sites.len(), 1);
                 let site = sites[0];
                 assert_eq!(site.role, OccurrenceRole::Reference);
                 assert_eq!(site.enclosing, Some(run.id));
                 assert_eq!(site.syntax_kind, "vba.value_identifier.reference");
                 assert_exact_parameter_source(service, receipt, source, &site.source, start..end);
-                let missing = matches!(state, NothingValueState::MissingBracketedName);
-                let target_name = if matches!(state, NothingValueState::JoinedName) {
-                    "NothingValue"
+                let missing = matches!(state, KeywordValueState::MissingBracketedName);
+                let target_name = if matches!(state, KeywordValueState::JoinedName) {
+                    keyword.joined_name()
                 } else {
-                    "Nothing"
+                    keyword.spelling()
                 };
                 let target = document.entities.iter().find(|entity| {
                     entity.canonical_name == target_name
@@ -12306,18 +12370,26 @@ fn assert_nothing_value_contract(
         rhs_count,
         if matches!(
             state,
-            NothingValueState::Literal
-                | NothingValueState::GroupedLiteral
-                | NothingValueState::AdjacentLiteral
+            KeywordValueState::Literal
+                | KeywordValueState::GroupedLiteral
+                | KeywordValueState::AdjacentLiteral
         ) {
             4
-        } else if matches!(state, NothingValueState::ExtraArgument) {
+        } else if matches!(state, KeywordValueState::ExtraArgument) {
             5
+        } else if matches!(state, KeywordValueState::EmptyArguments) {
+            2
         } else {
             3
         }
     );
-    for name in ["sink", "NothingValue", "Nothing", "Echo", "Consume"] {
+    for name in [
+        "sink",
+        keyword.joined_name(),
+        keyword.spelling(),
+        "Echo",
+        "Consume",
+    ] {
         let located = service
             .code_locate(
                 receipt.generation,
@@ -12360,21 +12432,387 @@ fn assert_nothing_value_contract(
 
 #[test]
 fn nothing_value_edits_preserve_references_calls_and_durable_source_lifetimes() {
-    let states = [
-        NothingValueState::Literal,
-        NothingValueState::GroupedLiteral,
-        NothingValueState::AdjacentLiteral,
-        NothingValueState::BracketedName,
-        NothingValueState::GroupedBracketedName,
-        NothingValueState::AdjacentBracketedName,
-        NothingValueState::String,
-        NothingValueState::JoinedName,
-        NothingValueState::MissingBracketedName,
-        NothingValueState::ExtraArgument,
-        NothingValueState::NativeDate,
-        NothingValueState::MixedCaseLet,
-        NothingValueState::Literal,
+    assert_keyword_value_lifetimes(KeywordValueKind::Nothing);
+}
+
+#[test]
+fn variant_literal_edits_preserve_references_calls_and_durable_source_lifetimes() {
+    for keyword in [KeywordValueKind::Empty, KeywordValueKind::Null] {
+        assert_keyword_value_lifetimes(keyword);
+    }
+}
+
+#[test]
+fn variant_literals_preserve_array_rank_and_nested_formal_bindings() {
+    for language in ["visual-basic-classic", "vba"] {
+        for keyword in [KeywordValueKind::Empty, KeywordValueKind::Null] {
+            for newline in ["\n", "\r\n"] {
+                let literal = keyword.spelling();
+                let other = match keyword {
+                    KeywordValueKind::Empty => "Null",
+                    KeywordValueKind::Null => "Empty",
+                    KeywordValueKind::Nothing => unreachable!(),
+                };
+                let statements = [
+                    format!("sink = Buffer({literal})"),
+                    format!("sink = Buffer(({literal}))"),
+                    "sink = Buffer()".to_owned(),
+                    format!("sink = Buffer({literal}, {other})"),
+                    format!("sink = Outer(Inner({literal}))"),
+                    format!("Call Consume(Inner({literal}))"),
+                    format!("Consume (Inner({literal}))"),
+                    format!("Consume(Inner({literal}))"),
+                ];
+                let source = format!(
+                    "Attribute VB_Name = \"ValueApplications\"\nFunction Inner(ByVal value As Variant) As Variant\nInner = value\nEnd Function\nFunction Outer(ByVal value As Variant) As Variant\nOuter = value\nEnd Function\nSub Consume(ByVal value As Variant)\nEnd Sub\nSub Run()\nDim sink As Variant, Buffer(0 To 2) As Variant\n{}\nEnd Sub\n",
+                    statements.join("\n")
+                )
+                .replace('\n', newline);
+                let current = std::env::current_dir().unwrap();
+                let repository = tempfile::tempdir_in(&current).unwrap();
+                let storage = tempfile::tempdir_in(&current).unwrap();
+                let paths = rootlight_runtime::RuntimePaths::new(
+                    storage.path().join("state"),
+                    storage.path().join("runtime"),
+                )
+                .unwrap();
+                paths.prepare_owner().unwrap();
+                fs::write(repository.path().join("module.bas"), &source).unwrap();
+                let configuration = (language == "vba").then_some("version='1.3'\n[extensions.source-languages]\nversion='1.0'\ncritical=true\n[extensions.source-languages.data.extensions]\nbas='vba'\n");
+                let policy =
+                    FirstSliceStoragePolicy::resolve_user_config(configuration, 4).unwrap();
+                let mut service = FirstSliceService::new_durable_with_policy(
+                    policy,
+                    paths.state_dir(),
+                    &deadline(),
+                )
+                .unwrap();
+                let receipt = service
+                    .index_repository(repository.path(), &deadline())
+                    .unwrap();
+                assert_source_and_identity_for_language(&service, &receipt, &source, language);
+                let snapshot = service
+                    .loaded_generation_snapshot(receipt.generation)
+                    .unwrap();
+                let document = snapshot.document();
+                let run = document
+                    .entities
+                    .iter()
+                    .find(|entity| entity.canonical_name == "Run")
+                    .unwrap();
+                let parser = document
+                    .provenance
+                    .iter()
+                    .find(|proof| proof.id == run.provenance)
+                    .unwrap();
+                assert_eq!(parser.producer_kind, ProducerKind::Parser);
+                assert_eq!(parser.rule, None);
+                let mut probes = Vec::new();
+                let mut cursor = source.find(&statements[0]).unwrap();
+                for (ordinal, statement) in statements.iter().enumerate() {
+                    let start = cursor + source[cursor..].find(statement).unwrap();
+                    cursor = start + statement.len() + newline.len();
+                    let offset = usize::from(statement.starts_with("sink = ")) * 7;
+                    let name = if ordinal < 4 {
+                        "Buffer"
+                    } else if ordinal == 4 {
+                        "Outer"
+                    } else {
+                        "Consume"
+                    };
+                    probes.push((
+                        name,
+                        start + offset..start + statement.len(),
+                        usize::from(statement.starts_with("Call ")) * 5,
+                        ordinal >= 4,
+                        ordinal != 3,
+                    ));
+                    if ordinal >= 4 {
+                        let expression = format!("Inner({literal})");
+                        let inner_start = start + statement.find(&expression).unwrap();
+                        probes.push((
+                            "Inner",
+                            inner_start..inner_start + expression.len(),
+                            0,
+                            true,
+                            true,
+                        ));
+                    }
+                }
+                assert_eq!(probes.len(), 12);
+                for (name, range, callee_offset, is_function, proven) in probes {
+                    let target = document
+                        .entities
+                        .iter()
+                        .find(|entity| entity.canonical_name == name)
+                        .unwrap();
+                    let applications: Vec<_> = document
+                        .occurrences
+                        .iter()
+                        .filter(|site| {
+                            site.syntax_kind == "vba.application.reference"
+                                && site.source.span().start_byte()
+                                    == u64::try_from(range.start).unwrap()
+                                && site.source.span().end_byte()
+                                    == u64::try_from(range.end).unwrap()
+                        })
+                        .collect();
+                    assert_eq!(applications.len(), 1, "{name}: {range:?}");
+                    let application = applications[0];
+                    assert_eq!(application.role, OccurrenceRole::Reference);
+                    assert_eq!(application.enclosing, Some(run.id));
+                    assert_exact_parameter_source(
+                        &service,
+                        &receipt,
+                        &source,
+                        &application.source,
+                        range.clone(),
+                    );
+                    if proven {
+                        assert_eq!(
+                            application.target,
+                            OccurrenceTarget::Resolved { symbol: target.id }
+                        );
+                    } else {
+                        assert!(matches!(
+                            application.target,
+                            OccurrenceTarget::Unresolved { .. }
+                        ));
+                    }
+                    let refers: Vec<_> = document
+                        .relations
+                        .iter()
+                        .filter(|relation| {
+                            relation.subject == RelationEndpoint::Occurrence(application.id)
+                                && relation.predicate == RelationPredicate::RefersTo
+                        })
+                        .collect();
+                    assert_eq!(refers.len(), usize::from(proven));
+                    if proven {
+                        assert_eq!(refers[0].object, RelationEndpoint::Entity(target.id));
+                        assert_eq!(refers[0].provenance, application.provenance);
+                        assert_eq!(
+                            refers[0].evidence.source.as_ref(),
+                            Some(&application.source)
+                        );
+                    }
+                    assert!(!document.relations.iter().any(|relation| {
+                        relation.subject == RelationEndpoint::Occurrence(application.id)
+                            && relation.predicate == RelationPredicate::Calls
+                    }));
+                    assert_eq!(
+                        document
+                            .skipped_regions
+                            .iter()
+                            .filter(|gap| {
+                                gap.source == application.source
+                                    && gap.detail == "vba-call-or-index-target-unavailable"
+                            })
+                            .count(),
+                        usize::from(!proven)
+                    );
+                    let proof = document
+                        .provenance
+                        .iter()
+                        .find(|proof| proof.id == application.provenance)
+                        .unwrap();
+                    if is_function {
+                        let formal = document
+                            .entities
+                            .iter()
+                            .find(|entity| {
+                                entity.kind == EntityKind::Parameter
+                                    && entity.container
+                                        == Some(rootlight_ir::ContainerRef::Entity(target.id))
+                            })
+                            .unwrap();
+                        assert!(
+                            proof
+                                .derivation_parents
+                                .contains(&FactRef::Entity(target.id))
+                        );
+                        assert!(
+                            proof
+                                .derivation_parents
+                                .contains(&FactRef::Entity(formal.id))
+                        );
+                        let clause = formal.evidence.source.as_ref().unwrap();
+                        assert!(proof.input_sources.contains(clause));
+                        assert!(proof.evidence_sources.contains(clause));
+                        assert!(proof.evidence_sources.contains(&application.source));
+                        assert_eq!(
+                            proof.rule.as_deref(),
+                            Some("vba-procedure-application-v1.source")
+                        );
+                    } else {
+                        assert_eq!(proof.id, parser.id);
+                        assert_eq!(proof.rule, None);
+                    }
+                    for reference in proof.input_sources.iter().chain(&proof.evidence_sources) {
+                        assert_eq!(reference.repository(), receipt.repository);
+                        assert_eq!(reference.generation(), receipt.generation);
+                        assert_eq!(reference.content_hash(), content_hash(source.as_bytes()));
+                        assert_eq!(reference.span().file(), document.files[0].id);
+                        assert!(
+                            reference.span().end_byte() <= u64::try_from(source.len()).unwrap()
+                        );
+                    }
+                    let callee_start = range.start + callee_offset;
+                    let callees: Vec<_> = document
+                        .occurrences
+                        .iter()
+                        .filter(|site| {
+                            site.source.span().start_byte() == u64::try_from(callee_start).unwrap()
+                                && site.source.span().end_byte()
+                                    == u64::try_from(callee_start + name.len()).unwrap()
+                        })
+                        .collect();
+                    assert_eq!(callees.len(), 1);
+                    let callee = callees[0];
+                    assert_eq!(
+                        callee.role,
+                        if is_function {
+                            OccurrenceRole::CallSite
+                        } else {
+                            OccurrenceRole::Reference
+                        }
+                    );
+                    assert_eq!(callee.enclosing, Some(run.id));
+                    assert_eq!(callee.provenance, parser.id);
+                    assert_eq!(
+                        callee.target,
+                        OccurrenceTarget::Resolved { symbol: target.id }
+                    );
+                    assert_exact_parameter_source(
+                        &service,
+                        &receipt,
+                        &source,
+                        &callee.source,
+                        callee_start..callee_start + name.len(),
+                    );
+                    for predicate in [RelationPredicate::RefersTo, RelationPredicate::Calls] {
+                        let relations: Vec<_> = document
+                            .relations
+                            .iter()
+                            .filter(|relation| {
+                                relation.subject == RelationEndpoint::Occurrence(callee.id)
+                                    && relation.predicate == predicate
+                            })
+                            .collect();
+                        let present = if is_function {
+                            predicate == RelationPredicate::Calls
+                        } else {
+                            predicate == RelationPredicate::RefersTo
+                        };
+                        assert_eq!(relations.len(), usize::from(present));
+                        if present {
+                            assert_eq!(relations[0].object, RelationEndpoint::Entity(target.id));
+                            assert_eq!(relations[0].evidence.source.as_ref(), Some(&callee.source));
+                        }
+                    }
+                }
+                assert_eq!(
+                    document
+                        .occurrences
+                        .iter()
+                        .filter(|site| site.syntax_kind == "vba.application.reference")
+                        .count(),
+                    12
+                );
+                assert_eq!(
+                    document
+                        .relations
+                        .iter()
+                        .filter(|relation| relation.predicate == RelationPredicate::Calls)
+                        .count(),
+                    8
+                );
+                let mismatch_start = source.find(&statements[3]).unwrap() + "sink = ".len();
+                let mismatch_end = mismatch_start + statements[3].len() - "sink = ".len();
+                let mut target_gaps: Vec<_> = document
+                    .skipped_regions
+                    .iter()
+                    .filter(|gap| gap.detail == "vba-call-or-index-target-unavailable")
+                    .map(|gap| (gap.source.span().start_byte(), gap.source.span().end_byte()))
+                    .collect();
+                target_gaps.sort_unstable();
+                // Receiver identity does not prove the mismatched index application.
+                assert_eq!(
+                    target_gaps,
+                    [
+                        (
+                            u64::try_from(mismatch_start).unwrap(),
+                            u64::try_from(mismatch_start + "Buffer".len()).unwrap()
+                        ),
+                        (
+                            u64::try_from(mismatch_start).unwrap(),
+                            u64::try_from(mismatch_end).unwrap()
+                        ),
+                    ]
+                );
+                let body_start = source.find(&statements[0]).unwrap();
+                let mut literal_count = 0;
+                for spelling in [literal, other] {
+                    for (offset, _) in source[body_start..].match_indices(spelling) {
+                        let start = body_start + offset;
+                        let end = start + spelling.len();
+                        literal_count += 1;
+                        assert!(!document.occurrences.iter().any(|site| {
+                            site.source.span().start_byte() >= u64::try_from(start).unwrap()
+                                && site.source.span().end_byte() <= u64::try_from(end).unwrap()
+                        }));
+                        let reference = SourceRef::new(
+                            receipt.repository,
+                            receipt.generation,
+                            SourceSpan::new(
+                                document.files[0].id,
+                                u64::try_from(start).unwrap(),
+                                u64::try_from(end).unwrap(),
+                            )
+                            .unwrap(),
+                            content_hash(source.as_bytes()),
+                            None,
+                        );
+                        assert_exact_parameter_source(
+                            &service,
+                            &receipt,
+                            &source,
+                            &reference,
+                            start..end,
+                        );
+                        assert!(
+                            !document
+                                .skipped_regions
+                                .iter()
+                                .any(|gap| gap.source == reference)
+                        );
+                    }
+                }
+                assert_eq!(literal_count, 8);
+            }
+        }
+    }
+}
+
+fn assert_keyword_value_lifetimes(keyword: KeywordValueKind) {
+    let mut states = vec![
+        KeywordValueState::Literal,
+        KeywordValueState::GroupedLiteral,
+        KeywordValueState::AdjacentLiteral,
+        KeywordValueState::BracketedName,
+        KeywordValueState::GroupedBracketedName,
+        KeywordValueState::AdjacentBracketedName,
+        KeywordValueState::String,
+        KeywordValueState::JoinedName,
+        KeywordValueState::MissingBracketedName,
+        KeywordValueState::ExtraArgument,
+        KeywordValueState::NativeDate,
+        KeywordValueState::MixedCaseLet,
+        KeywordValueState::Literal,
     ];
+    if !matches!(keyword, KeywordValueKind::Nothing) {
+        states.insert(10, KeywordValueState::EmptyArguments);
+    }
     for language in ["visual-basic-classic", "vba"] {
         let current = std::env::current_dir().unwrap();
         let repository = tempfile::tempdir_in(&current).unwrap();
@@ -12388,10 +12826,10 @@ fn nothing_value_edits_preserve_references_calls_and_durable_source_lifetimes() 
         let configuration = (language == "vba").then_some("version='1.3'\n[extensions.source-languages]\nversion='1.0'\ncritical=true\n[extensions.source-languages.data.extensions]\nbas='vba'\n");
         let policy = FirstSliceStoragePolicy::resolve_user_config(configuration, 4).unwrap();
         assert_eq!(policy.retained_generations(), 2);
-        let mut previous: Option<(FirstSliceIndexReceipt, String, NothingValueState)> = None;
+        let mut previous: Option<(FirstSliceIndexReceipt, String, KeywordValueState)> = None;
         let mut initial_logical = None;
-        for (position, state) in states.into_iter().enumerate() {
-            let source = nothing_value_source(state);
+        for (position, state) in states.iter().copied().enumerate() {
+            let source = keyword_value_source(keyword, state);
             fs::write(repository.path().join("module.bas"), &source).unwrap();
             let mut service = FirstSliceService::new_durable_with_policy(
                 policy.clone(),
@@ -12411,7 +12849,7 @@ fn nothing_value_edits_preserve_references_calls_and_durable_source_lifetimes() 
                 assert_eq!(committed.evidence().changed_files, 1);
             }
             let receipt = committed.receipt().clone();
-            assert_nothing_value_contract(&service, &receipt, &source, language, state);
+            assert_keyword_value_contract(&service, &receipt, &source, language, keyword, state);
             assert_eq!(
                 receipt,
                 service
@@ -12426,11 +12864,12 @@ fn nothing_value_edits_preserve_references_calls_and_durable_source_lifetimes() 
                 );
                 assert!(receipt.logical_snapshot.is_some());
                 assert_ne!(receipt.logical_snapshot, old_receipt.logical_snapshot);
-                assert_nothing_value_contract(
+                assert_keyword_value_contract(
                     &service,
                     old_receipt,
                     old_source,
                     language,
+                    keyword,
                     *old_state,
                 );
             }
@@ -12447,13 +12886,14 @@ fn nothing_value_edits_preserve_references_calls_and_durable_source_lifetimes() 
                     .index_repository(repository.path(), &deadline())
                     .unwrap()
             );
-            assert_nothing_value_contract(&service, &receipt, &source, language, state);
+            assert_keyword_value_contract(&service, &receipt, &source, language, keyword, state);
             if let Some((old_receipt, old_source, old_state)) = &previous {
-                assert_nothing_value_contract(
+                assert_keyword_value_contract(
                     &service,
                     old_receipt,
                     old_source,
                     language,
+                    keyword,
                     *old_state,
                 );
             }
@@ -12473,12 +12913,15 @@ fn nothing_value_edits_preserve_references_calls_and_durable_source_lifetimes() 
             assert_ne!(receipt.generation, rebuilt.generation);
             assert!(receipt.logical_snapshot.is_some());
             assert_eq!(receipt.logical_snapshot, rebuilt.logical_snapshot);
-            assert_nothing_value_contract(&service, &rebuilt, &source, language, state);
+            assert_keyword_value_contract(&service, &rebuilt, &source, language, keyword, state);
             if position == 0 {
                 initial_logical = receipt.logical_snapshot.clone();
             }
             if position + 1 == states.len() {
-                assert_eq!(source, nothing_value_source(NothingValueState::Literal));
+                assert_eq!(
+                    source,
+                    keyword_value_source(keyword, KeywordValueState::Literal)
+                );
                 assert_eq!(receipt.logical_snapshot, initial_logical);
             }
             previous = Some((rebuilt, source, state));
@@ -12499,7 +12942,7 @@ fn assert_value_application_layout_lifetimes(layout: ValueApplicationLayout) {
             ("Grid(0 To 2, 1 To 3) As Long", "Grid"),
         ],
         buffer: ExpectedBufferApplication::Fixed(1),
-        arithmetic_fallback: false,
+        include_date_arithmetic: false,
     };
     let mut states = vec![
         (initial, None),
@@ -12592,7 +13035,7 @@ fn assert_value_application_layout_lifetimes(layout: ValueApplicationLayout) {
             states.len() - 1,
             (
                 ValueApplicationState {
-                    arithmetic_fallback: true,
+                    include_date_arithmetic: true,
                     ..initial
                 },
                 None,
@@ -12635,7 +13078,7 @@ fn assert_value_application_layout_lifetimes(layout: ValueApplicationLayout) {
             let explicit_source = value_application_source(state);
             assert_eq!(
                 explicit_source.matches("\nsink = ").count(),
-                12 + usize::from(state.arithmetic_fallback)
+                12 + usize::from(state.include_date_arithmetic)
             );
             let current_layout = if layout == ValueApplicationLayout::SetAssignment
                 && position + 2 == states.len()
