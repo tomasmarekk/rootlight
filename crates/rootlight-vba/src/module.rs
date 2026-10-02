@@ -518,8 +518,18 @@ impl<E: std::error::Error + 'static> std::error::Error for ModuleError<E> {
 /// their targets are procedures or arrays. Old scalar and standalone scalar-application
 /// records remain distinct. Explicit Call statements admit a simple callee and optional
 /// parentheses containing a complete positional list of admitted expressions, with
-/// space/tab-based logical trivia. Named, omitted, ByVal and nonparenthesized
-/// arguments are unsupported. Integer literals may retain one authored `%`, `&`
+/// space/tab-based logical trivia. Implicit calls admit a bare simple callee, or
+/// that callee separated by logical trivia from a complete comma-separated list
+/// of the same expressions. Parentheses in that list remain expression groups,
+/// not an inferred outer Call list or evidence of ByRef behavior. A single fully
+/// parenthesized argument remains unsupported because its native value-application
+/// callee role differs; grouped operands in operator tails and multiargument lists
+/// remain admitted. A leading complete group followed by '=' remains on the native
+/// route because indexed assignments and comparison calls can share those bytes;
+/// native classification, including logical-right-side ambiguity, is preserved.
+/// Named, omitted and ByVal arguments, and explicit Call with
+/// nonparenthesized arguments, remain
+/// unsupported. Integer literals may retain one authored `%`, `&`
 /// or `^` suffix; FLOAT tokens retain a point, E/e/D/d exponent or one `!`, `#` or `@`
 /// suffix without value, range, rounding or type evaluation. Repeated and ordinary-name
 /// suffixes stay outside this slice rather than being reinterpreted as operators.
@@ -533,6 +543,8 @@ impl<E: std::error::Error + 'static> std::error::Error for ModuleError<E> {
 /// without deciding type compatibility or runtime results. Every body statement
 /// must be consumed completely.
 /// Bare `Name` explicit Call callees stay outside this subset; bracketed `[Name]` is admitted.
+/// Implicit heads also exclude bare `Name`, `Line` and statement keywords; their
+/// bracketed spellings remain ordinary simple names.
 /// Without explicit `Let`, bare statement-keyword assignment destinations are excluded.
 /// All other statements, inline Rem tails, directives, class
 /// members, continued-comment forms and incomplete boundaries reject the entire input.
@@ -609,8 +621,9 @@ pub fn module_inventory<E>(
         if inventory.statement_count >= limits.max_statements {
             return Err(ModuleError::StatementLimit);
         }
-        let Some((range, next)) = super::with_blocks::statement(source, cursor, false, check)
-            .map_err(ModuleError::Cancelled)?
+        let Some((range, next, content_end)) =
+            super::with_blocks::statement_with_boundary(source, cursor, false, check)
+                .map_err(ModuleError::Cancelled)?
         else {
             return Err(ModuleError::Unsupported {
                 range: cursor..source.len(),
@@ -676,6 +689,22 @@ pub fn module_inventory<E>(
                 else {
                     return Err(ModuleError::Unsupported { range });
                 };
+                let implicit_head = match &statement {
+                    ModuleBodyStatement::Call(call) => call.callee().start == range.start,
+                    ModuleBodyStatement::ExpressionCall(call) => call.callee().start == range.start,
+                    _ => false,
+                };
+                if implicit_head
+                    && !super::module_body::implicit_call_tail_is_complete(
+                        source.get(range.start..content_end).unwrap_or_default(),
+                        check,
+                    )
+                    .map_err(ModuleError::Cancelled)?
+                {
+                    return Err(ModuleError::Unsupported {
+                        range: range.start..content_end,
+                    });
+                }
                 if let ModuleBodyStatement::ProcedureExit(exit) = &statement {
                     let matches_procedure = match procedure.kind {
                         ProcedureKind::Sub => exit.kind() == ModuleProcedureExitKind::Sub,
@@ -1696,6 +1725,175 @@ mod tests {
     }
 
     #[test]
+    fn implicit_calls_retain_whole_module_ranges_comments_colon_siblings_and_later_procedures() {
+        for newline in ["\n", "\r\n"] {
+            let written = format!("[Target] _{newline} (value + 1), _{newline} Inner(other) * -2");
+            let source = format!(
+                "Attribute VB_Name = \"Implicit\"{newline}Sub Run(){newline}  {written} ' ignored End Sub: Target(){newline}Target: value=1{newline}End Sub{newline}Sub Later(){newline}[Name] True, \"a,''b:()\"{newline}End Sub{newline}"
+            );
+            let inventory = parse(source.as_bytes()).unwrap();
+            assert_eq!(inventory.procedures().len(), 2);
+            let statements = inventory.procedures()[0].statements();
+            assert_eq!(statements.len(), 3);
+            let ModuleBodyStatement::ExpressionCall(call) = &statements[0] else {
+                panic!("complete implicit call expected");
+            };
+            let start = source.find(&written).unwrap();
+            assert_eq!(call.statement(), start..start + written.len());
+            assert_eq!(&source[call.callee()], "[Target]");
+            assert_eq!(call.argument_expressions().len(), 2);
+            assert_eq!(
+                &source[call.argument_expressions()[0].clone()],
+                "(value + 1)"
+            );
+            assert_eq!(
+                &source[call.argument_expressions()[1].clone()],
+                "Inner(other) * -2"
+            );
+            assert_eq!(call.inventory().work_nodes(), 12);
+            assert_eq!(call.inventory().argument_count(), 3);
+            let ModuleBodyStatement::Call(bare) = &statements[1] else {
+                panic!("bare implicit call expected");
+            };
+            assert_eq!(&source[bare.statement()], "Target");
+            assert_eq!(bare.statement(), bare.callee());
+            assert!(matches!(statements[2], ModuleBodyStatement::Assignment(_)));
+            assert!(matches!(
+                inventory.procedures()[1].statements()[0],
+                ModuleBodyStatement::ExpressionCall(_)
+            ));
+        }
+    }
+
+    #[test]
+    fn implicit_call_unsupported_late_heads_and_tails_reject_all_prior_module_records() {
+        for tail in [
+            "Target(value,other)",
+            "Target (value, other)",
+            "Target (value)",
+            "Target ((value))",
+            "Target (value + 1)",
+            "Target (value) = other",
+            "Target ((value)) = other + 1",
+            "Target (value + 1) = other And True",
+            "Target value,",
+            "Target ,value",
+            "Target value,,other",
+            "Target value:=1",
+            "Target ByVal value",
+            "holder.Target value",
+            "Target value.member",
+            "Target #1/1/2000#",
+            "Target value$",
+            "Target 1.0e+",
+            "Target Inner(value)(other)",
+            "Target (value))",
+            "Target value other",
+            "Target value +",
+            "Target = value,other",
+            "Call Target value",
+            "Name value",
+            "Line (value), other",
+            "Print value",
+            "Return",
+            "Target _\n",
+            "Target \"physical\nline\"",
+        ] {
+            let source = format!(
+                "Const Seed=7\nSub Accepted()\nTarget value+1,Inner(other)*-2\nEnd Sub\nSub Rejected()\nvalue=1\n{tail}\nEnd Sub\n"
+            );
+            assert!(
+                matches!(
+                    parse(source.as_bytes()),
+                    Err(ModuleError::Unsupported { .. })
+                ),
+                "{tail:?}"
+            );
+        }
+        assert!(matches!(
+            parse(b"Target value\nSub Run()\nEnd Sub\n"),
+            Err(ModuleError::Unsupported { .. })
+        ));
+    }
+
+    #[test]
+    fn implicit_calls_share_aggregate_argument_expression_and_statement_limits() {
+        let source = b"Sub Run()\nCall Ready(1)\nvalue=1+2\nTarget value+1,Inner(other)*-2\nTarget\nEnd Sub\n";
+        let limits = ModuleLimits::new(source.len(), 6, 1)
+            .with_max_arguments(4)
+            .with_max_expression_nodes(14);
+        let inventory = module_inventory(source, limits, &mut || Ok::<(), ()>(())).unwrap();
+        assert_eq!(inventory.statement_count(), 6);
+        assert_eq!(inventory.procedures()[0].statements().len(), 4);
+        assert_eq!(
+            module_inventory(source, limits.with_max_arguments(3), &mut || Ok::<(), ()>(
+                ()
+            )),
+            Err(ModuleError::ArgumentLimit)
+        );
+        assert_eq!(
+            module_inventory(source, limits.with_max_expression_nodes(13), &mut || Ok::<
+                (),
+                (),
+            >(
+                ()
+            )),
+            Err(ModuleError::ExpressionLimit)
+        );
+        assert_eq!(
+            module_inventory(
+                source,
+                ModuleLimits::new(source.len(), 5, 1)
+                    .with_max_arguments(4)
+                    .with_max_expression_nodes(14),
+                &mut || Ok::<(), ()>(())
+            ),
+            Err(ModuleError::StatementLimit)
+        );
+        let bare = b"Sub Run()\nTarget\nEnd Sub\n";
+        assert!(
+            module_inventory(
+                bare,
+                ModuleLimits::new(bare.len(), 3, 1)
+                    .with_max_arguments(0)
+                    .with_max_expression_nodes(0),
+                &mut || Ok::<(), ()>(())
+            )
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn implicit_module_call_cancellation_never_returns_prefix_inventory() {
+        let source = b"Sub First()\nTarget\nEnd Sub\nSub Second()\nTarget (value + 1), Inner(other) * -2\nEnd Sub\n";
+        let limits = ModuleLimits::new(source.len(), 6, 2)
+            .with_max_arguments(3)
+            .with_max_expression_nodes(12);
+        let mut checkpoints = 0;
+        module_inventory(source, limits, &mut || {
+            checkpoints += 1;
+            Ok::<(), ()>(())
+        })
+        .unwrap();
+        for cancelled_at in 1..=checkpoints {
+            let mut calls = 0;
+            assert_eq!(
+                module_inventory(source, limits, &mut || {
+                    calls += 1;
+                    if calls == cancelled_at {
+                        Err("stop")
+                    } else {
+                        Ok(())
+                    }
+                }),
+                Err(ModuleError::Cancelled("stop")),
+                "checkpoint {cancelled_at}"
+            );
+            assert_eq!(calls, cancelled_at);
+        }
+    }
+
+    #[test]
     fn procedure_exits_keep_original_ranges_comments_colon_siblings_and_later_statements() {
         for newline in ["\n", "\r\n"] {
             let first_exit = format!("eXiT _{newline} SuB");
@@ -1799,20 +1997,38 @@ mod tests {
                     let tail = format!("\nEnd {category}\n");
                     let source = [header.as_bytes(), body.as_slice(), tail.as_bytes()].concat();
                     let parsed = parse(&source);
+                    let bare_call =
+                        prefix == b"Exit" && (byte.is_ascii_alphanumeric() || byte == b'_');
                     assert_eq!(
                         parsed.is_ok(),
-                        accepted,
+                        accepted || bare_call,
                         "{category}, {prefix:?}, byte {byte}"
                     );
                     if let Ok(inventory) = parsed {
                         let statements = inventory.procedures()[0].statements();
                         assert_eq!(statements.len(), 1);
-                        let ModuleBodyStatement::ProcedureExit(exit) = &statements[0] else {
-                            panic!("exit boundary cannot publish another statement kind")
-                        };
-                        assert_eq!(exit.exit_keyword(), header.len()..header.len() + 4);
-                        assert_eq!(&source[exit.kind_keyword()], category.as_bytes());
-                        assert!(exit.statement().end <= header.len() + body.len());
+                        match &statements[0] {
+                            ModuleBodyStatement::ProcedureExit(exit) => {
+                                assert!(accepted);
+                                assert_eq!(exit.exit_keyword(), header.len()..header.len() + 4);
+                                assert_eq!(&source[exit.kind_keyword()], category.as_bytes());
+                                assert!(exit.statement().end <= header.len() + body.len());
+                            }
+                            ModuleBodyStatement::Call(call) => {
+                                assert!(bare_call);
+                                assert_eq!(
+                                    call.statement(),
+                                    header.len()..header.len() + body.len()
+                                );
+                                assert_eq!(call.callee(), call.statement());
+                                assert_eq!(&source[call.callee()], body.as_slice());
+                                assert_eq!(call.arguments(), None);
+                                assert!(call.argument_values().is_empty());
+                            }
+                            _ => panic!(
+                                "exit boundary must retain its exact exit or ordinary-name call kind"
+                            ),
+                        }
                     }
                 }
             }
@@ -7975,7 +8191,7 @@ mod tests {
             "other extra",
             "other\0",
             "other\r extra",
-            "other\nthird",
+            "other\nthird,",
         ] {
             let source = format!(
                 "Dim module_field\nSub Accepted()\nDim previous, array(2) As Long\nEnd Sub\nSub Rejected()\nDim valid, second(-1 To +2,3) As Long, {tail}\nEnd Sub\n"
@@ -7992,7 +8208,7 @@ mod tests {
             "Public value",
             "Private value As Long",
             "Static value As Long",
-            "Shared value",
+            "Shared value,",
             "Dim value As Product",
             "Dim value As Long=1",
             "Const first As Long=1,second As Long=2",
@@ -8007,6 +8223,81 @@ mod tests {
                 ),
                 "{body}"
             );
+        }
+    }
+
+    #[test]
+    fn local_dim_and_ordinary_keyword_shaped_calls_keep_distinct_complete_records() {
+        let declaration = "Dim valid, second(-1 To +2,3) As Long, other";
+        let source = format!(
+            "Sub Run()\n{declaration}\nthird\nShared value\nExitSub\nExit0Sub\nDim0first\nEnd Sub\n"
+        );
+        let inventory = parse(source.as_bytes()).unwrap();
+        assert_eq!(inventory.statement_count(), 8);
+        let statements = inventory.procedures()[0].statements();
+        assert_eq!(statements.len(), 6);
+        let ModuleBodyStatement::Variables(variables) = &statements[0] else {
+            panic!("complete declaration group must precede independent call statements");
+        };
+        assert_eq!(&source[variables.statement()], declaration);
+        assert_eq!(variables.variables().len(), 3);
+        assert_eq!(
+            variables
+                .variables()
+                .iter()
+                .map(|variable| &source[variable.name()])
+                .collect::<Vec<_>>(),
+            ["valid", "second", "other"]
+        );
+        for (statement, written) in [
+            (&statements[1], "third"),
+            (&statements[3], "ExitSub"),
+            (&statements[4], "Exit0Sub"),
+            (&statements[5], "Dim0first"),
+        ] {
+            let ModuleBodyStatement::Call(call) = statement else {
+                panic!("ordinary simple name must remain a bare call: {written}");
+            };
+            assert_eq!(&source[call.statement()], written);
+            assert_eq!(call.callee(), call.statement());
+            assert_eq!(call.arguments(), None);
+            assert!(call.argument_values().is_empty());
+        }
+        let ModuleBodyStatement::ExpressionCall(call) = &statements[2] else {
+            panic!("Shared is an ordinary implicit callee, not a declaration modifier");
+        };
+        assert_eq!(&source[call.statement()], "Shared value");
+        assert_eq!(&source[call.callee()], "Shared");
+        assert_eq!(&source[call.arguments()], "value");
+        assert_eq!(call.argument_expressions(), &[call.arguments()]);
+        assert_eq!(call.inventory().argument_count(), 1);
+        assert_eq!(call.inventory().work_nodes(), 3);
+        assert_eq!(call.inventory().values().len(), 1);
+        assert_eq!(&source[call.inventory().values()[0].span()], "value");
+    }
+
+    #[test]
+    fn implicit_call_continuation_boundary_cannot_be_trimmed_into_an_underscore_argument() {
+        for newline in ["\n", "\r\n"] {
+            for (remainder, raw_trivia) in [
+                (newline.to_owned(), ""),
+                (format!("\t ' comment{newline}"), "\t "),
+                (String::new(), ""),
+            ] {
+                let written = format!("Target _{newline}");
+                let source = format!("Sub Run(){newline}{written}{remainder}");
+                let source = if remainder.is_empty() {
+                    source
+                } else {
+                    format!("{source}End Sub{newline}")
+                };
+                let Err(ModuleError::Unsupported { range }) = parse(source.as_bytes()) else {
+                    panic!(
+                        "a consumed continuation must never become an ordinary underscore argument"
+                    );
+                };
+                assert_eq!(&source[range], format!("{written}{raw_trivia}"));
+            }
         }
     }
 

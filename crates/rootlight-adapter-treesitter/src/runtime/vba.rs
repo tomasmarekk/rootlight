@@ -836,7 +836,7 @@ fn body_candidates(
                 false,
             )?;
             // The leaf retains its proven root application for argument evidence;
-            // explicit Call already emitted that root with its complete statement.
+            // the statement call already emitted that root with its complete source.
             for application in call.inventory().applications().iter().skip(1) {
                 cancellation.check()?;
                 push_body_candidate(
@@ -5576,6 +5576,75 @@ mod tests {
     }
 
     #[test]
+    fn first_party_vba_implicit_names_and_arguments_match_complete_native_facts() {
+        for (source, callee, argument_count) in [
+            (
+                "Sub Run()\nDim value As Long\nvalue = 7\nCall_Target\nEnd Sub\n",
+                "Call_Target",
+                0,
+            ),
+            (
+                "Sub First()\nEnd Sub\nSub Last()\nExitSub\nEnd Sub\n",
+                "ExitSub",
+                0,
+            ),
+            (
+                "Sub Run()\nDim value As Long\nRun value\nEnd Sub\n",
+                "Run",
+                1,
+            ),
+        ] {
+            for language in ["vba", "visual-basic-classic"] {
+                let fixture = Fixture::new(source);
+                let request = fixture.request(language, &[]);
+                let prepared = prepare(
+                    &fixture.provider,
+                    &request,
+                    None,
+                    &[],
+                    fixture.provider.config.default_settings(),
+                    &Cancellation::new(),
+                )
+                .unwrap()
+                .expect("complete implicit source remains on the first-party route");
+                let calls = prepared
+                    .inventory
+                    .procedures()
+                    .iter()
+                    .flat_map(|procedure| procedure.statements())
+                    .filter(|statement| {
+                        matches!(
+                            statement,
+                            ModuleBodyStatement::Call(_) | ModuleBodyStatement::ExpressionCall(_)
+                        )
+                    })
+                    .collect::<Vec<_>>();
+                assert_eq!(calls.len(), 1);
+                match calls[0] {
+                    ModuleBodyStatement::Call(call) => {
+                        assert_eq!(argument_count, 0);
+                        assert_eq!(&source[call.callee()], callee);
+                        assert_eq!(&source[call.statement()], callee);
+                        assert!(call.argument_values().is_empty());
+                        assert_eq!(call.arguments(), None);
+                    }
+                    ModuleBodyStatement::ExpressionCall(call) => {
+                        assert_eq!(argument_count, 1);
+                        assert_eq!(&source[call.callee()], callee);
+                        assert_eq!(&source[call.statement()], "Run value");
+                        assert_eq!(call.argument_expressions().len(), argument_count);
+                        assert_eq!(&source[call.argument_expressions()[0].clone()], "value");
+                    }
+                    _ => unreachable!("only complete call records were retained"),
+                }
+                assert_eq!(fixture.provider.stats().pooled_parsers, 0);
+                assert_eq!(fixture.provider.stats().cache.entries, 0);
+                compare_native(&fixture, language, &[]);
+            }
+        }
+    }
+
+    #[test]
     fn first_party_vba_zero_argument_call_boundaries_keep_whole_native_fallback() {
         for call in [
             "Call Target(1 +)",
@@ -5590,7 +5659,7 @@ mod tests {
             "Call Target)",
             "Call Target(())",
             "Call[Target]",
-            "Call_Target",
+            "Call_Target ,",
             "Call\x0cTarget()",
             "Call\nTarget()",
             "Call Target$()",
@@ -6141,7 +6210,7 @@ mod tests {
             ("Sub", "Exit Function"),
             ("Function", "Exit Sub"),
             ("Sub", "Exit"),
-            ("Sub", "ExitSub"),
+            ("Sub", "ExitSub ,"),
             ("Sub", "Exit Submarine"),
             ("Sub", "Exit Sub extra"),
             ("Sub", "Exit Sub(1)"),
@@ -7601,7 +7670,7 @@ mod tests {
     fn first_party_vba_scalar_body_boundaries_keep_whole_native_fallback() {
         for body in [
             "Dim value As Long\nCall Run(Nested(1).member)",
-            "Dim value As Long\nRun value",
+            "Dim value As Long\nRun value,",
             "Dim value As Long\nholder.Value = 1",
             "Dim values(Limit) As Long",
             "Dim first As Long, second As UserType",

@@ -11,7 +11,7 @@ use std::{
 use rootlight_adapter_sdk::{
     AdapterError, AnalysisLimits, AnalysisRequest, BatchThresholds, EncodingId,
     GenerationBoundSnapshot, IncludedRange, LanguageId, MemoryAdmissionPolicy, NativeVbaModuleKind,
-    ParseOutput, ParseRequest, ResourceKind, SinkError, StreamLimits, SyntaxFactKind,
+    ParseOutput, ParseRequest, ResourceKind, SinkError, StreamLimits, SyntaxFact, SyntaxFactKind,
     execute_parse,
 };
 use rootlight_adapter_treesitter::{
@@ -34,6 +34,7 @@ const CALL_ARGUMENT_MODULE: &[u8] = b"Attribute VB_Name = \"Authored\"\r\nSub Ru
 const APPLICATION_ASSIGNMENT_MODULE: &[u8] = b"Private items(2) As Long\r\nSub Run()\r\nDim result As Variant\r\nDim value As Long\r\nresult = items()\r\nLet [result] = [items]( 007 )\r\nresult = items(value, True, False, \"a,\"\"b\"\":()\", [value])\r\nresult = items ( value )\r\nresult = items( _\r\n value, _\r\n 7)\r\nEnd Sub\r\n";
 const EXPRESSION_ASSIGNMENT_MODULE: &[u8] = b"Sub Run(ByVal value As Long)\r\nDim result As Variant\r\nresult = -(value + 007) * +2 ^ 3 ^ 4\r\nresult = Not (value = 1) And True Or False Xor True Eqv False Imp True\r\nresult = \"a,\"\"b\"\":()\" & \"x\"\r\nresult = Outer(Inner(value + 1), items(-(value - 2))) + value\r\nEnd Sub\r\n";
 const EXPRESSION_CALL_MODULE: &[u8] = b"Sub Run(ByVal value As Long, ByVal other As Long)\r\nCall Target(value + 1, Inner(other) * -2)\r\nEnd Sub\r\n";
+const IMPLICIT_CALL_MODULE: &[u8] = b"Sub Run(ByVal value As Long, ByVal other As Long)\r\nTarget value + 1, Inner(other) * -2\r\nEnd Sub\r\n";
 const OPTIONAL_PARAMETER_MODULE: &[u8] = b"Attribute VB_Name = \"Authored\"\r\nSub Accept(required As Long, Optional ByVal count As Long = 007, Optional [text] As String = \"a,\"\"b\"\":()\", Optional flag As Boolean = False, Optional unset As Long)\r\ncount = required\r\n[text] = [text]\r\nEnd Sub\r\n";
 const OMITTED_TYPE_MODULE: &[u8] = b"Attribute VB_Name = \"Authored\"\r\nSub Accept(required, ByVal typed As Long, Optional ByVal count = 007, Optional [text] = \"a,\"\"b\"\":()\", Optional flag = False, Optional unset)\r\ncount = required\r\n[text] = [text]\r\nEnd Sub\r\nFunction Echo(ByRef value) As Long\r\nEcho = value\r\nEnd Function\r\n";
 const RADIX_MODULE: &str = "Attribute VB_Name = \"Radix\"\nConst ModuleSeed As Long = &H0A\nPrivate slots(-&O1 To +&H2, &3) As Long\nSub Target(ByVal first As Long, Optional ByVal second As Long = &o7)\nEnd Sub\nFunction Inner(ByVal value As Long) As Long\nInner = &H1\nEnd Function\nSub Run()\nDim local As Long, grid(-&H1 To +&O2, &3) As Long\nConst LocalSeed As Long = &O7\nlocal = &hF\nLet local = &77\nlocal = LocalSeed\nlocal = grid(&H0, &O1)\nCall Target(&H1, &o2)\nCall Target(local + &H2, Inner(&3) * -&H1)\nEnd Sub\n";
@@ -2410,6 +2411,593 @@ fn richer_rhs_applications_keep_whole_native_fallback() {
 }
 
 #[test]
+fn implicit_calls_match_native_reference_identity_for_the_same_complete_source() {
+    for newline in ["\n", "\r\n"] {
+        for statement in [
+            "Target",
+            "[Target]",
+            "ExitSub",
+            "ExitFunction",
+            "Exit0Sub",
+            "Exit0Function",
+            "Dim0first",
+            "third",
+            "Shared value",
+            "Target value",
+            "Target _",
+            "Target +value",
+            "Target -value",
+            "Target value, other",
+            "Target value + 1, Inner(other) * -2",
+            "Target Not True, -other",
+            "Target (value + 1), other",
+            "[Target] (value), Inner(other)",
+            "Target (value) * -2",
+            "Target (value) + Inner(other)",
+            "Target value = other",
+            "Target (value) + 1 = other",
+            "Target -(value) = other",
+            "Target Not (value) = other",
+            "Target other, (value) = other",
+            "Target value And (other) = value",
+            "Target \"(value)\"",
+            "[Name] value",
+            "[Line] value",
+            "Target \"a,\"\"b\"\":()\", True, &H2, 1.25E-2",
+        ] {
+            let source = format!(
+                "Sub Run(ByVal value As Long, ByVal other As Long){newline}  {statement} ' ignored End Sub: Target(){newline}value=1{newline}End Sub{newline}"
+            );
+            for language in ["vba", "visual-basic-classic"] {
+                let fixture = Fixture::new(source.as_bytes());
+                let first_party = provider();
+                let native = provider();
+                let budget = limits(4096);
+                let first_request = fixture.request(&budget, language, Vec::new());
+                let native_request = fixture.request(
+                    &budget,
+                    language,
+                    vec![IncludedRange::new(
+                        fixture.source.span(),
+                        LanguageId::new(language).unwrap(),
+                    )],
+                );
+                let first_output = parse(&first_party, &first_request);
+                let native_output = parse(&native, &native_request);
+                assert_eq!(
+                    first_output.report().coverage().status(),
+                    CoverageStatus::Complete
+                );
+                assert!(
+                    first_output.diagnostics().is_empty(),
+                    "{language}: {statement}"
+                );
+                assert!(
+                    native_output.diagnostics().is_empty(),
+                    "native {language}: {statement}"
+                );
+                assert_eq!(
+                    first_party.stats().pooled_parsers,
+                    0,
+                    "{language}: {statement}"
+                );
+                assert_eq!(first_party.stats().checked_out_parsers, 0);
+                assert_eq!(first_party.stats().cache.entries, 0);
+                assert!(native.stats().pooled_parsers > 0);
+                let references = |output: &ParseOutput| {
+                    let mut records = output
+                        .facts()
+                        .iter()
+                        .filter(|fact| {
+                            fact.kind() == SyntaxFactKind::Occurrence
+                                && fact.syntax_kind().as_str().ends_with(".reference")
+                        })
+                        .map(|fact| {
+                            (
+                                fact.span().start_byte(),
+                                fact.span().end_byte(),
+                                fact.syntax_kind().as_str().to_owned(),
+                                fact.local_id(),
+                                fact.parent(),
+                                fact.depth(),
+                            )
+                        })
+                        .collect::<Vec<_>>();
+                    records.sort();
+                    records
+                };
+                assert_eq!(
+                    references(&first_output),
+                    references(&native_output),
+                    "{language}: {statement}"
+                );
+                let start = source.find(statement).unwrap();
+                for (syntax, length) in [
+                    ("vba.application.reference", statement.len()),
+                    (
+                        "vba.invoked_identifier.reference",
+                        statement.split_ascii_whitespace().next().unwrap().len(),
+                    ),
+                ] {
+                    assert_eq!(
+                        first_output
+                            .facts()
+                            .iter()
+                            .filter(|fact| {
+                                fact.syntax_kind().as_str() == syntax
+                                    && fact.span().start_byte() == u64::try_from(start).unwrap()
+                                    && fact.span().end_byte()
+                                        == u64::try_from(start + length).unwrap()
+                            })
+                            .count(),
+                        1,
+                        "{language}: {statement}: {syntax}"
+                    );
+                }
+            }
+        }
+        let statement =
+            format!("[Target] _{newline} (value _{newline} + 1), _{newline} Inner(other) * -2");
+        let source = format!(
+            "Sub Run(ByVal value As Long, ByVal other As Long){newline}{statement}{newline}End Sub{newline}"
+        );
+        for language in ["vba", "visual-basic-classic"] {
+            let fixture = Fixture::new(source.as_bytes());
+            let provider = provider();
+            let budget = limits(4096);
+            let output = parse(&provider, &fixture.request(&budget, language, Vec::new()));
+            assert_eq!(
+                output.report().coverage().covered_source_bytes(),
+                source.len()
+            );
+            assert!(output.facts().iter().any(|fact| fact.syntax_kind().as_str()
+                == "vba.application.reference"
+                && bytes_at(source.as_bytes(), fact.span()) == statement.as_bytes()));
+            assert_eq!(provider.stats().pooled_parsers, 0);
+            assert_eq!(provider.stats().cache.entries, 0);
+        }
+    }
+}
+
+#[test]
+fn implicit_call_raw_continuation_boundary_matches_forced_native_without_fabricated_arguments() {
+    for newline in ["\n", "\r\n"] {
+        let source = format!("Sub Run(){newline}Target _{newline}{newline}End Sub{newline}");
+        let Err(rootlight_vba::ModuleError::Unsupported { range }) =
+            rootlight_vba::module_inventory(
+                source.as_bytes(),
+                rootlight_vba::ModuleLimits::new(source.len(), 4096, 4096),
+                &mut || Ok::<(), ()>(()),
+            )
+        else {
+            panic!("the complete raw continuation must stay on whole-module native fallback");
+        };
+        assert_eq!(&source[range], format!("Target _{newline}"));
+        for language in ["vba", "visual-basic-classic"] {
+            let fixture = Fixture::new(source.as_bytes());
+            let fallback = provider();
+            let forced_native = provider();
+            let budget = limits(4096);
+            let fallback_output = parse(&fallback, &fixture.request(&budget, language, Vec::new()));
+            let native_output = parse(
+                &forced_native,
+                &fixture.request(
+                    &budget,
+                    language,
+                    vec![IncludedRange::new(
+                        fixture.source.span(),
+                        LanguageId::new(language).unwrap(),
+                    )],
+                ),
+            );
+            assert!(fallback.stats().pooled_parsers > 0);
+            assert!(forced_native.stats().pooled_parsers > 0);
+            assert_eq!(fallback_output.facts(), native_output.facts());
+            assert!(
+                !native_output
+                    .facts()
+                    .iter()
+                    .any(
+                        |fact| fact.syntax_kind().as_str() == "vba.value_identifier.reference"
+                            && bytes_at(source.as_bytes(), fact.span()) == b"_"
+                    )
+            );
+            assert_eq!(
+                native_output
+                    .facts()
+                    .iter()
+                    .filter(|fact| fact.syntax_kind().as_str()
+                        == "vba.invoked_identifier.reference"
+                        && bytes_at(source.as_bytes(), fact.span()) == b"Target")
+                    .count(),
+                1
+            );
+        }
+    }
+}
+
+#[test]
+fn implicit_single_leading_groups_preserve_native_value_application_roles() {
+    for newline in ["\n", "\r\n"] {
+        for statement in [
+            "Target (value)".to_owned(),
+            "Target (value + 1)".to_owned(),
+            "[Target] ((value))".to_owned(),
+            "Target (Inner(value, other))".to_owned(),
+            "Target (\"a,b\")".to_owned(),
+            format!("[Target] _{newline} (value _{newline} + 1)"),
+        ] {
+            let source = format!(
+                "Sub First(){newline}Target value+1{newline}End Sub{newline}Sub Run(ByVal value As Long){newline}{statement} ' ignored (value), other{newline}End Sub{newline}"
+            );
+            for language in ["vba", "visual-basic-classic"] {
+                let fixture = Fixture::new(source.as_bytes());
+                let fallback = provider();
+                let native = provider();
+                let budget = limits(4096);
+                let output = parse(&fallback, &fixture.request(&budget, language, Vec::new()));
+                let reference = parse(
+                    &native,
+                    &fixture.request(
+                        &budget,
+                        language,
+                        vec![IncludedRange::new(
+                            fixture.source.span(),
+                            LanguageId::new(language).unwrap(),
+                        )],
+                    ),
+                );
+                assert!(
+                    fallback.stats().pooled_parsers > 0,
+                    "{language}: {statement}"
+                );
+                assert_eq!(fallback.stats().checked_out_parsers, 0);
+                assert_eq!(output.facts(), reference.facts(), "{language}: {statement}");
+                assert_eq!(output.diagnostics(), reference.diagnostics());
+                assert_eq!(
+                    output.report().coverage().status(),
+                    CoverageStatus::Complete
+                );
+                let start = source.find(&statement).unwrap();
+                let callee = statement.split_ascii_whitespace().next().unwrap();
+                let matches_callee = |fact: &&SyntaxFact| {
+                    fact.span().start_byte() == u64::try_from(start).unwrap()
+                        && fact.span().end_byte() == u64::try_from(start + callee.len()).unwrap()
+                };
+                assert_eq!(
+                    output
+                        .facts()
+                        .iter()
+                        .filter(matches_callee)
+                        .filter(|fact| fact.syntax_kind().as_str()
+                            == "vba.invoked_get_identifier.reference")
+                        .count(),
+                    1,
+                    "{language}: {statement}"
+                );
+                assert!(
+                    !output
+                        .facts()
+                        .iter()
+                        .filter(matches_callee)
+                        .any(|fact| fact.syntax_kind().as_str()
+                            == "vba.invoked_identifier.reference")
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn implicit_grouped_assignment_candidates_preserve_exact_native_classification() {
+    for newline in ["\n", "\r\n"] {
+        // Both language profiles select the call reading for the logical RHS.
+        // Preserve exact source classification without inferring runtime legality.
+        for (statement, expected_callee) in [
+            (
+                "Target (0) = value".to_owned(),
+                "vba.invoked_let_identifier.reference",
+            ),
+            (
+                "Target ((0)) = value".to_owned(),
+                "vba.invoked_let_identifier.reference",
+            ),
+            (
+                "[Target] (0) = value + 1".to_owned(),
+                "vba.invoked_let_identifier.reference",
+            ),
+            (
+                "Target (0) = value And True".to_owned(),
+                "vba.invoked_identifier.reference",
+            ),
+            (
+                "Target (Inner(value)) = value".to_owned(),
+                "vba.invoked_let_identifier.reference",
+            ),
+            (
+                format!("Target _{newline} (0) _{newline} = value"),
+                "vba.invoked_let_identifier.reference",
+            ),
+        ] {
+            let source = format!(
+                "Sub Target(ByVal flag As Boolean){newline}End Sub{newline}Sub Run(ByVal value As Long){newline}{statement}{newline}End Sub{newline}"
+            );
+            for language in ["vba", "visual-basic-classic"] {
+                let fixture = Fixture::new(source.as_bytes());
+                let fallback = provider();
+                let native = provider();
+                let budget = limits(4096);
+                let output = parse(&fallback, &fixture.request(&budget, language, Vec::new()));
+                let reference = parse(
+                    &native,
+                    &fixture.request(
+                        &budget,
+                        language,
+                        vec![IncludedRange::new(
+                            fixture.source.span(),
+                            LanguageId::new(language).unwrap(),
+                        )],
+                    ),
+                );
+                assert!(
+                    fallback.stats().pooled_parsers > 0,
+                    "{language}: {statement}"
+                );
+                assert_eq!(fallback.stats().checked_out_parsers, 0);
+                assert_eq!(output.facts(), reference.facts(), "{language}: {statement}");
+                assert_eq!(output.diagnostics(), reference.diagnostics());
+                assert_eq!(
+                    output.report().coverage().status(),
+                    CoverageStatus::Complete
+                );
+                let start = source.find(&statement).unwrap();
+                let callee = statement.split_ascii_whitespace().next().unwrap();
+                let start = u64::try_from(start).unwrap();
+                let end = start + u64::try_from(callee.len()).unwrap();
+                let actual = output
+                    .facts()
+                    .iter()
+                    .filter(|fact| {
+                        fact.span().start_byte() == start && fact.span().end_byte() == end
+                    })
+                    .map(|fact| {
+                        (
+                            fact.kind(),
+                            fact.syntax_kind().as_str().to_owned(),
+                            start,
+                            end,
+                        )
+                    })
+                    .collect::<Vec<_>>();
+                let expected = vec![(
+                    SyntaxFactKind::Occurrence,
+                    expected_callee.to_owned(),
+                    start,
+                    end,
+                )];
+                assert_eq!(actual, expected, "{language}: {statement}");
+            }
+        }
+    }
+}
+
+#[test]
+fn implicit_call_budgets_preserve_mandatory_identity_and_never_retry_typed_failures() {
+    for language in ["vba", "visual-basic-classic"] {
+        let fixture = Fixture::new(IMPLICIT_CALL_MODULE);
+        let provider = provider();
+        let base = limits(4096);
+        let request = fixture.request(&base, language, Vec::new());
+        let full = parse(&provider, &request);
+        let required = provider
+            .required_syntax_fact_count(&request, &deadline())
+            .unwrap();
+        assert_eq!(required, 11);
+        assert_eq!(full.report().resources().syntax_nodes(), 18);
+        let mandatory_identity = |output: &ParseOutput| {
+            output
+                .facts()
+                .iter()
+                .filter(|fact| {
+                    matches!(
+                        fact.syntax_kind().as_str(),
+                        "vba.file.root"
+                            | "vba.file.module"
+                            | "vba.file.scope"
+                            | "vba.sub_function.declaration"
+                            | "vba.sub_function.scope"
+                            | "vba.sub_function.signature"
+                            | "vba.parameter.declaration"
+                            | "vba.identifier.definition"
+                    )
+                })
+                .map(|fact| {
+                    let parent = fact.parent().map(|id| {
+                        let parent = output
+                            .facts()
+                            .iter()
+                            .find(|candidate| candidate.local_id() == id)
+                            .expect("mandatory parent remains in the output");
+                        (
+                            parent.kind(),
+                            parent.span(),
+                            parent.syntax_kind().as_str().to_owned(),
+                            parent.depth(),
+                        )
+                    });
+                    (
+                        fact.kind(),
+                        fact.span(),
+                        fact.syntax_kind().as_str().to_owned(),
+                        fact.depth(),
+                        parent,
+                    )
+                })
+                .collect::<Vec<_>>()
+        };
+        let mandatory = mandatory_identity(&full);
+        assert_eq!(mandatory.len(), required);
+        for capacity in required..=full.facts().len() {
+            let budget = limits(capacity);
+            let bounded = fixture.request(&budget, language, Vec::new());
+            let output = parse(&provider, &bounded);
+            assert_eq!(output.facts().len(), capacity);
+            assert_eq!(
+                provider
+                    .required_syntax_fact_count(&bounded, &deadline())
+                    .unwrap(),
+                required
+            );
+            assert_eq!(
+                output.report().coverage().status(),
+                if capacity == full.facts().len() {
+                    CoverageStatus::Complete
+                } else {
+                    CoverageStatus::Bounded
+                }
+            );
+            assert_eq!(
+                output
+                    .diagnostics()
+                    .iter()
+                    .any(|diagnostic| { diagnostic.code().as_str() == "syntax-extraction-limit" }),
+                capacity < full.facts().len()
+            );
+            // Local ordinals are assigned after optional retention. Compare all
+            // mandatory source records and their owning source records instead.
+            assert_eq!(mandatory_identity(&output), mandatory);
+            for (index, fact) in output.facts().iter().enumerate() {
+                assert_eq!(fact.local_id(), u64::try_from(index + 1).unwrap());
+                assert_eq!(fact.span().file(), fixture.source.span().file());
+                if let Some(id) = fact.parent() {
+                    assert_ne!(id, fact.local_id());
+                    let parent = output
+                        .facts()
+                        .iter()
+                        .find(|candidate| candidate.local_id() == id)
+                        .expect("every local parent identity is retained");
+                    assert_eq!(fact.depth(), parent.depth() + 1);
+                    assert!(parent.span().start_byte() <= fact.span().start_byte());
+                    assert!(parent.span().end_byte() >= fact.span().end_byte());
+                } else {
+                    assert_eq!(fact.depth(), 0);
+                }
+            }
+            if capacity == required {
+                assert_eq!(mandatory_identity(&output).len(), output.facts().len());
+            }
+            assert_eq!(parse(&provider, &bounded).facts(), output.facts());
+        }
+        let short = limits(required - 1);
+        let short_request = fixture.request(&short, language, Vec::new());
+        assert_eq!(
+            execute_parse(
+                &provider,
+                &short_request,
+                MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
+                &deadline()
+            )
+            .unwrap_err(),
+            AdapterError::Sink(SinkError::StreamLimit {
+                resource: ResourceKind::RequiredSyntaxFacts,
+                observed: required,
+                limit: required - 1
+            })
+        );
+        let budget = AnalysisLimits::new(
+            base.max_source_bytes(),
+            17,
+            base.max_syntax_depth(),
+            base.max_embedded_ranges(),
+            base.max_reported_memory_bytes(),
+            base.syntax_stream().clone(),
+            base.ir_stream().clone(),
+            base.ir().clone(),
+        )
+        .unwrap();
+        let bounded = fixture.request(&budget, language, Vec::new());
+        assert_eq!(
+            execute_parse(
+                &provider,
+                &bounded,
+                MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
+                &deadline()
+            )
+            .unwrap_err(),
+            AdapterError::RejectedRequest(rootlight_adapter_sdk::RequestError::ProviderLimit {
+                resource: ResourceKind::SyntaxNodes,
+                observed: 18,
+                limit: 17
+            })
+        );
+        let cancelled = deadline();
+        cancelled.cancel(CancellationReason::ClientRequest);
+        assert!(matches!(
+            execute_parse(
+                &provider,
+                &request,
+                MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
+                &cancelled
+            ),
+            Err(AdapterError::Cancelled {
+                reason: CancellationReason::ClientRequest
+            })
+        ));
+        assert_eq!(parse(&provider, &request).facts(), full.facts());
+        assert_eq!(provider.stats().pooled_parsers, 0);
+        assert_eq!(provider.stats().checked_out_parsers, 0);
+        assert_eq!(provider.stats().cache.entries, 0);
+    }
+}
+
+#[test]
+fn implicit_calls_keep_unsupported_heads_and_complete_tails_on_the_whole_native_route() {
+    for statement in [
+        "Target(value, other)",
+        "Target (value, other)",
+        "Target value,",
+        "Target ,value",
+        "Target value,,other",
+        "Target value:=1",
+        "Target ByVal value",
+        "holder.Target value",
+        "Target value.member",
+        "Target #1/1/2000#",
+        "Target value$",
+        "Target 1E+",
+        "Target Inner(value)(other)",
+        "Target value other",
+        "Target value +",
+        "Target (value))",
+        "Target = value, other",
+        "Call Target value",
+        "Name value",
+        "Line (value), other",
+        "Print value",
+        "Return",
+        "Target _\n",
+    ] {
+        let source = format!(
+            "Sub First()\nTarget value+1\nEnd Sub\nSub Run(ByVal value As Long)\n{statement}\nEnd Sub\n"
+        );
+        for language in ["vba", "visual-basic-classic"] {
+            let fixture = Fixture::new(source.as_bytes());
+            let provider = provider();
+            let budget = limits(4096);
+            let output = parse(&provider, &fixture.request(&budget, language, Vec::new()));
+            assert!(
+                provider.stats().pooled_parsers > 0,
+                "{language}: {statement}"
+            );
+            assert_eq!(provider.stats().checked_out_parsers, 0);
+            assert!(output.facts().iter().any(|fact| fact.syntax_kind().as_str()
+                == "vba.identifier.definition"
+                && bytes_at(source.as_bytes(), fact.span()) == b"First"));
+        }
+    }
+}
+
+#[test]
 fn expression_calls_preserve_exact_application_callee_and_read_identity() {
     const STATEMENT: &str = "Call Target(value + 1, Inner(other) * -2)";
     let source = std::str::from_utf8(EXPRESSION_CALL_MODULE).unwrap();
@@ -4733,6 +5321,64 @@ fn procedure_exits_charge_statement_work_without_new_required_facts() {
 }
 
 #[test]
+fn implicit_bare_callees_preserve_later_mandatory_declarations() {
+    for newline in ["\n", "\r\n"] {
+        let source = "Sub First()\nEnd Sub\nSub Run()\nExitSub\nDim later As Long\nEnd Sub\n"
+            .replace('\n', newline);
+        let declaration_start = u64::try_from(source.find("later").unwrap()).unwrap();
+        for language in ["vba", "visual-basic-classic"] {
+            let fixture = Fixture::new(source.as_bytes());
+            let first_party = provider();
+            let native = provider();
+            let budget = limits(4096);
+            let request = fixture.request(&budget, language, Vec::new());
+            let output = parse(&first_party, &request);
+            let reference = parse(
+                &native,
+                &fixture.request(
+                    &budget,
+                    language,
+                    vec![IncludedRange::new(
+                        fixture.source.span(),
+                        LanguageId::new(language).unwrap(),
+                    )],
+                ),
+            );
+            assert_eq!(first_party.stats().pooled_parsers, 0);
+            assert_eq!(first_party.stats().checked_out_parsers, 0);
+            assert_eq!(first_party.stats().cache.entries, 0);
+            assert!(native.stats().pooled_parsers > 0);
+            assert_eq!(
+                output.report().coverage().status(),
+                CoverageStatus::Complete
+            );
+            assert_eq!(output.facts(), reference.facts());
+            assert!(output.diagnostics().is_empty());
+            assert_eq!(output.diagnostics(), reference.diagnostics());
+            assert_eq!(
+                first_party
+                    .required_syntax_fact_count(&request, &deadline())
+                    .unwrap(),
+                13
+            );
+            assert_eq!(
+                output
+                    .facts()
+                    .iter()
+                    .filter(|fact| {
+                        fact.syntax_kind().as_str() == "vba.identifier.definition"
+                            && fact.span().start_byte() == declaration_start
+                            && fact.span().end_byte() == declaration_start + 5
+                            && bytes_at(source.as_bytes(), fact.span()) == b"later"
+                    })
+                    .count(),
+                1
+            );
+        }
+    }
+}
+
+#[test]
 fn unsupported_procedure_exit_forms_preserve_whole_module_native_fallback() {
     for (header, terminator, body) in [
         ("Sub Run()", "End Sub", "Exit Function"),
@@ -4740,7 +5386,7 @@ fn unsupported_procedure_exit_forms_preserve_whole_module_native_fallback() {
         ("Sub Run()", "End Sub", "Exit"),
         ("Sub Run()", "End Sub", "Exit Sub trailing"),
         ("Sub Run()", "End Sub", "Exit Sub()"),
-        ("Sub Run()", "End Sub", "ExitSub"),
+        ("Sub Run()", "End Sub", "ExitSub ,"),
         ("Sub Run()", "End Sub", "Exit Property"),
         ("Sub Run()", "End Sub", "Exit Do"),
         ("Sub Run()", "End Sub", "Exit For"),

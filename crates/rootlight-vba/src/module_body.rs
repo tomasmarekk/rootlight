@@ -1,4 +1,4 @@
-//! Complete local declarations, expressions, explicit calls and procedural exits
+//! Complete local declarations, expressions, procedure calls and procedural exits
 //! for the closed first-party module inventory.
 //! Records own only original byte ranges; declaration identity and reference roles
 //! remain obligations of the adapter's existing structural normalization boundary.
@@ -20,9 +20,9 @@ pub enum ModuleBodyStatement {
     ApplicationAssignment(ModuleApplicationAssignment),
     /// A simple destination assigned one completely admitted structured expression.
     ExpressionAssignment(module_expression::ModuleExpressionAssignment),
-    /// One explicit Call with a simple callee and a complete scalar argument list.
+    /// One explicit scalar Call or implicit bare simple-name call.
     Call(ModuleCall),
-    /// One explicit Call with a complete parenthesized positional expression list.
+    /// One explicit or implicit call with complete positional expressions.
     ExpressionCall(module_expression::ModuleExpressionCall),
     /// One complete Exit Sub or Exit Function statement with source-written keywords.
     ProcedureExit(ModuleProcedureExit),
@@ -303,10 +303,11 @@ impl ModuleApplicationAssignment {
     }
 }
 
-/// One complete explicit Call retaining syntax without establishing a target.
+/// One complete explicit scalar Call or implicit bare call without a proven target.
 ///
-/// The callee is a simple ASCII name, optionally bracketed. Parentheses contain
-/// zero or more complete positional scalar atoms. Target identity, parameter
+/// The callee is a simple ASCII name, optionally bracketed. Explicit Call parentheses
+/// contain zero or more complete positional scalar atoms; an implicit bare call has
+/// no argument bytes. Target identity, parameter
 /// correspondence, arity and type compatibility remain separate binding obligations.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ModuleCall {
@@ -323,7 +324,7 @@ pub struct ModuleCall {
 pub type ModuleZeroArgumentCall = ModuleCall;
 
 impl ModuleCall {
-    /// Returns the complete trimmed statement, including the Call keyword.
+    /// Returns the complete trimmed statement, including Call when authored.
     #[must_use]
     pub fn statement(&self) -> Range<usize> {
         self.statement.clone()
@@ -344,7 +345,7 @@ impl ModuleCall {
     }
 
     /// Returns every complete positional scalar atom in authored source order.
-    /// An empty slice covers bare or explicitly empty Call syntax. These records
+    /// An empty slice covers bare calls or explicitly empty Call syntax. These records
     /// prove neither formal-parameter identity nor runtime type compatibility.
     #[must_use]
     pub fn argument_values(&self) -> &[ModuleScalarValue] {
@@ -644,8 +645,13 @@ fn scalar_statement<E>(
     if !explicit_let && text.get(destination.clone()).is_some_and(statement_keyword) {
         return Ok(None);
     }
+    let name_end = cursor;
     if !equals(text, &mut cursor, check).map_err(ModuleError::Cancelled)? {
-        return Ok(None);
+        return if explicit_let {
+            Ok(None)
+        } else {
+            implicit_call(text, range, destination, name_end, cursor, limits, check)
+        };
     }
     let expression_start = cursor;
     if let Some(statement) = scalar_assignment(
@@ -746,6 +752,62 @@ fn scalar_assignment<E>(
             statement: range,
         },
     )))
+}
+
+fn implicit_call<E>(
+    text: &[u8],
+    range: Range<usize>,
+    callee: Range<usize>,
+    name_end: usize,
+    arguments_start: usize,
+    limits: BodyLimits,
+    check: &mut impl FnMut() -> Result<(), E>,
+) -> Result<Option<ModuleBodyStatement>, ModuleError<E>> {
+    // These bare names have native statement-specific syntax, unlike their
+    // bracketed spellings. An implicit head must not bypass that boundary.
+    if text.get(callee.clone()).is_some_and(|spelling| {
+        spelling.eq_ignore_ascii_case(b"Name") || spelling.eq_ignore_ascii_case(b"Line")
+    }) {
+        return Ok(None);
+    }
+    if arguments_start == text.len() {
+        if !implicit_call_tail_is_complete(text, check).map_err(ModuleError::Cancelled)? {
+            return Ok(None);
+        }
+        return atomic_call(text, range, arguments_start, callee, 0, check);
+    }
+    if arguments_start == name_end {
+        return Ok(None);
+    }
+    module_expression::implicit_expression_call(
+        text,
+        callee,
+        arguments_start,
+        range,
+        limits.expression_nodes,
+        limits.arguments,
+        check,
+    )
+    .map(|call| call.map(ModuleBodyStatement::ExpressionCall))
+}
+
+pub(super) fn implicit_call_tail_is_complete<E>(
+    text: &[u8],
+    check: &mut impl FnMut() -> Result<(), E>,
+) -> Result<bool, E> {
+    // Ordinary trailing space/tab is harmless. A final physical newline can
+    // only have been consumed as a continuation, which still needs source.
+    for chunk in text.rchunks(512) {
+        check()?;
+        for byte in chunk.iter().rev() {
+            match byte {
+                b' ' | b'\t' => {}
+                b'\r' | b'\n' => return Ok(false),
+                _ => return Ok(true),
+            }
+        }
+    }
+    Ok(false)
 }
 
 fn explicit_call<E>(
@@ -1425,6 +1487,307 @@ mod tests {
     }
 
     #[test]
+    fn implicit_calls_retain_bare_heads_and_complete_positional_expression_ranges() {
+        for spelling in [
+            "Target", "tArGeT", "[Target]", "[Name]", "[Line]", "[Print]",
+        ] {
+            let text = format!("{spelling}\t ");
+            let ModuleBodyStatement::Call(call) = read(text.as_bytes()).unwrap() else {
+                panic!("bare implicit call expected: {text}");
+            };
+            assert_eq!(call.statement(), 0..text.len());
+            assert_eq!(&text.as_bytes()[call.callee()], spelling.as_bytes());
+            assert_eq!(call.arguments(), None);
+            assert!(call.argument_values().is_empty());
+        }
+        for (tail, arguments, work, count) in [
+            ("value", vec!["value"], 3, 1),
+            ("1, value, True", vec!["1", "value", "True"], 5, 3),
+            ("Not True", vec!["Not True"], 4, 1),
+            (
+                "value + 1, Inner(other) * -2",
+                vec!["value + 1", "Inner(other) * -2"],
+                11,
+                3,
+            ),
+            ("(value + 1), other", vec!["(value + 1)", "other"], 7, 2),
+            ("(value) * -2", vec!["(value) * -2"], 7, 1),
+            ("value = other", vec!["value = other"], 5, 1),
+            ("(value) + 1 = other", vec!["(value) + 1 = other"], 8, 1),
+            (
+                "other, (value) = other",
+                vec!["other", "(value) = other"],
+                7,
+                2,
+            ),
+            (
+                "(value) + Inner(other)",
+                vec!["(value) + Inner(other)"],
+                8,
+                2,
+            ),
+            (
+                "Outer(Inner(value)), \"a,\"\"b\"\":()\"",
+                vec!["Outer(Inner(value))", "\"a,\"\"b\"\":()\""],
+                8,
+                4,
+            ),
+        ] {
+            let text = format!("[Target]\t {tail} ");
+            let source = [b"prefix\n".as_slice(), text.as_bytes(), b"\ntail"].concat();
+            let range = 7..7 + text.len();
+            let ModuleBodyStatement::ExpressionCall(call) =
+                statement_with_expression_limits(&source, range.clone(), count, work, &mut || {
+                    Ok::<(), ()>(())
+                })
+                .unwrap()
+                .unwrap()
+            else {
+                panic!("complete implicit argument list expected: {text}");
+            };
+            assert_eq!(call.statement(), range);
+            assert_eq!(&source[call.callee()], b"[Target]");
+            assert_eq!(&source[call.arguments()], tail.as_bytes());
+            assert_eq!(call.inventory().work_nodes(), work);
+            assert_eq!(call.inventory().argument_count(), count);
+            assert_eq!(
+                call.argument_expressions()
+                    .iter()
+                    .map(|span| std::str::from_utf8(&source[span.clone()]).unwrap())
+                    .collect::<Vec<_>>(),
+                arguments
+            );
+            let outer = &call.inventory().applications()[0];
+            assert_eq!(outer.callee(), call.callee());
+            assert_eq!(outer.arguments(), call.arguments());
+            assert_eq!(outer.argument_expressions(), call.argument_expressions());
+            assert_eq!(
+                outer.application(),
+                call.callee().start..call.arguments().end
+            );
+            assert!(
+                call.inventory()
+                    .values()
+                    .iter()
+                    .all(|value| value.span().start >= call.arguments().start)
+            );
+        }
+    }
+
+    #[test]
+    fn implicit_calls_preserve_logical_continuations_and_nested_value_roles() {
+        for newline in ["\n", "\r\n"] {
+            let first = format!("(value _{newline} + 1)");
+            let second = format!("[Inner] _{newline} (other) * -&H2");
+            let tail = format!("{first}, _{newline} {second}");
+            let text = format!("[Target] _{newline} {tail}");
+            let ModuleBodyStatement::ExpressionCall(call) = read(text.as_bytes()).unwrap() else {
+                panic!("logical implicit call expected");
+            };
+            assert_eq!(&text.as_bytes()[call.arguments()], tail.as_bytes());
+            assert_eq!(
+                &text.as_bytes()[call.argument_expressions()[0].clone()],
+                first.as_bytes()
+            );
+            assert_eq!(
+                &text.as_bytes()[call.argument_expressions()[1].clone()],
+                second.as_bytes()
+            );
+            assert_eq!(call.inventory().applications().len(), 2);
+            assert_eq!(
+                &text.as_bytes()[call.inventory().applications()[1].callee()],
+                b"[Inner]"
+            );
+            assert_eq!(
+                call.inventory()
+                    .values()
+                    .iter()
+                    .map(|value| &text.as_bytes()[value.span()])
+                    .collect::<Vec<_>>(),
+                [b"value".as_slice(), b"1", b"other", b"&H2"]
+            );
+            assert_eq!(call.inventory().work_nodes(), 12);
+            assert_eq!(call.inventory().argument_count(), 3);
+        }
+    }
+
+    #[test]
+    fn implicit_calls_reject_keyword_heads_omissions_and_incomplete_or_richer_tails() {
+        for text in [
+            "Name",
+            "nAmE value",
+            "Line",
+            "Line (value), other",
+            "Print value",
+            "Beep",
+            "Rem value",
+            "If value",
+            "Return",
+            "Dim",
+            "Let Target value",
+            "Target()",
+            "Target(value)",
+            "Target(1,2)",
+            "Target (value, other)",
+            "Target (value)",
+            "Target ((value))",
+            "Target (value + 1)",
+            "Target (value) = other",
+            "Target ((value)) = other + 1",
+            "Target (value + 1) = other And True",
+            "Target ()",
+            "Target ,value",
+            "Target value,",
+            "Target value,,other",
+            "Target value:=1",
+            "Target ByVal value",
+            "Target 1, ByVal value",
+            "Target value.member",
+            "holder.Target value",
+            ".Target value",
+            "Target #1/1/2000#",
+            "Target value$",
+            "Target 1.0e+",
+            "Target &H",
+            "Target value +",
+            "Target Inner(value:=1)",
+            "Target Inner(value).member",
+            "Target Inner(value)(other)",
+            "Target value other",
+            "Target (value))",
+            "Target 1;2",
+            "Target 1:other=2",
+            "Target value ' comment",
+            "Target\x0bvalue",
+            "Target\x0cvalue",
+            "Target\nvalue",
+            "Target _\n",
+            "Target _\r\n\t ",
+            "Target value _\n",
+            "Target value _\r\n\t ",
+            "Target = value +",
+            "Target = value, other",
+            "Target = #1/1/2000#",
+        ] {
+            assert!(read(text.as_bytes()).is_none(), "{text:?}");
+        }
+        for text in [
+            "Target = value",
+            "Target=value+1",
+            "Let Target = Inner(value)+1",
+            "Name=1",
+            "Line=1",
+        ] {
+            assert!(
+                matches!(
+                    read(text.as_bytes()),
+                    Some(
+                        ModuleBodyStatement::Assignment(_)
+                            | ModuleBodyStatement::ExpressionAssignment(_)
+                    )
+                ),
+                "{text}"
+            );
+        }
+    }
+
+    #[test]
+    fn implicit_call_argument_and_expression_limits_are_exact_and_typed() {
+        let source = b"Target value + 1, Inner(other) * -2";
+        for (arguments, work, expected) in [
+            (2, 11, ModuleError::ArgumentLimit),
+            (3, 10, ModuleError::ExpressionLimit),
+            (3, 0, ModuleError::ExpressionLimit),
+        ] {
+            assert_eq!(
+                statement_with_expression_limits(
+                    source,
+                    0..source.len(),
+                    arguments,
+                    work,
+                    &mut || Ok::<(), ()>(())
+                ),
+                Err(expected)
+            );
+        }
+        assert!(
+            statement_with_expression_limits(source, 0..source.len(), 3, 11, &mut || Ok::<(), ()>(
+                ()
+            ))
+            .unwrap()
+            .is_some()
+        );
+        assert!(matches!(
+            statement_with_expression_limits(b"Target", 0..6, 0, 0, &mut || Ok::<(), ()>(())),
+            Ok(Some(ModuleBodyStatement::Call(_)))
+        ));
+    }
+
+    #[test]
+    fn implicit_call_head_separator_and_tail_byte_boundaries_are_exact() {
+        for byte in 0..=u8::MAX {
+            let source = [b"[Target]".as_slice(), &[byte], b"value + 1"].concat();
+            assert_eq!(
+                matches!(read(&source), Some(ModuleBodyStatement::ExpressionCall(_))),
+                matches!(byte, b' ' | b'\t'),
+                "head separator {byte}"
+            );
+            if byte == b'=' {
+                assert!(matches!(
+                    read(&source),
+                    Some(ModuleBodyStatement::ExpressionAssignment(_))
+                ));
+            }
+            let source = [b"Target value + 1".as_slice(), &[byte]].concat();
+            assert_eq!(
+                read(&source).is_some(),
+                byte.is_ascii_digit()
+                    || matches!(
+                        byte,
+                        b' ' | b'\t' | b'.' | b'%' | b'&' | b'^' | b'!' | b'#' | b'@'
+                    ),
+                "tail {byte}"
+            );
+        }
+    }
+
+    #[test]
+    fn implicit_call_cancellation_propagates_at_every_parse_reserve_and_rebase_checkpoint() {
+        for text in [
+            b"[Target]".as_slice(),
+            b"[Target] _\r\n (value + 007), Inner(\"a\"\"b\" & [True])",
+        ] {
+            let source = [b"prefix\n".as_slice(), text, b"\ntail"].concat();
+            let range = 7..7 + text.len();
+            let mut checkpoints = 0;
+            assert!(
+                statement(&source, range.clone(), 3, &mut || {
+                    checkpoints += 1;
+                    Ok::<(), ()>(())
+                })
+                .unwrap()
+                .is_some()
+            );
+            for cancelled_at in 1..=checkpoints {
+                let mut calls = 0;
+                assert_eq!(
+                    statement(&source, range.clone(), 3, &mut || {
+                        calls += 1;
+                        if calls == cancelled_at {
+                            Err("stop")
+                        } else {
+                            Ok(())
+                        }
+                    }),
+                    Err(ModuleError::Cancelled("stop")),
+                    "checkpoint {cancelled_at}"
+                );
+                assert_eq!(calls, cancelled_at);
+            }
+        }
+    }
+
+    #[test]
     fn procedure_exit_keywords_preserve_written_case_continuations_and_rebased_ranges() {
         for (first, second, kind) in [
             ("Exit", "Sub", ModuleProcedureExitKind::Sub),
@@ -1484,15 +1847,34 @@ mod tests {
                         byte.eq_ignore_ascii_case(&text[position])
                     };
                     let parsed = read(&source);
-                    assert_eq!(parsed.is_some(), accepted, "{text:?}, {position}, {byte}");
+                    let bare_call =
+                        text[position] == b' ' && (byte.is_ascii_alphanumeric() || byte == b'_');
+                    assert_eq!(
+                        parsed.is_some(),
+                        accepted || bare_call,
+                        "{text:?}, {position}, {byte}"
+                    );
                     if let Some(statement) = parsed {
-                        let ModuleBodyStatement::ProcedureExit(exit) = statement else {
-                            panic!("keyword mutation must not fabricate a different statement")
-                        };
-                        assert_eq!(exit.kind(), kind);
-                        assert_eq!(exit.exit_keyword(), 0..4);
-                        assert_eq!(exit.kind_keyword(), 5..source.len());
-                        assert_eq!(exit.statement(), 0..source.len());
+                        match statement {
+                            ModuleBodyStatement::ProcedureExit(exit) => {
+                                assert!(accepted);
+                                assert_eq!(exit.kind(), kind);
+                                assert_eq!(exit.exit_keyword(), 0..4);
+                                assert_eq!(exit.kind_keyword(), 5..source.len());
+                                assert_eq!(exit.statement(), 0..source.len());
+                            }
+                            ModuleBodyStatement::Call(call) => {
+                                assert!(bare_call);
+                                assert_eq!(call.statement(), 0..source.len());
+                                assert_eq!(call.callee(), call.statement());
+                                assert_eq!(&source[call.callee()], source.as_slice());
+                                assert_eq!(call.arguments(), None);
+                                assert!(call.argument_values().is_empty());
+                            }
+                            _ => panic!(
+                                "keyword mutation must retain its exact exit or ordinary-name call kind"
+                            ),
+                        }
                     }
                 }
             }
@@ -1516,7 +1898,7 @@ mod tests {
     fn procedure_exit_tail_closure_does_not_hijack_authored_assignments() {
         for text in [
             "Exit",
-            "ExitSub",
+            "ExitSub()",
             "Exit FunctionExtra",
             "Exit Sub1",
             "Exit [Sub]",
@@ -1544,6 +1926,16 @@ mod tests {
             "Return",
         ] {
             assert!(read(text.as_bytes()).is_none(), "{text}");
+        }
+        for text in ["ExitSub", "ExitFunction", "Exit0Sub", "Exit0Function"] {
+            let ModuleBodyStatement::Call(call) = read(text.as_bytes()).unwrap() else {
+                panic!("joined keyword-shaped name must remain an ordinary call");
+            };
+            assert_eq!(call.statement(), 0..text.len());
+            assert_eq!(call.callee(), call.statement());
+            assert_eq!(&text.as_bytes()[call.callee()], text.as_bytes());
+            assert_eq!(call.arguments(), None);
+            assert!(call.argument_values().is_empty());
         }
         for destination in [
             "[Exit]",
@@ -3070,18 +3462,29 @@ mod tests {
             ] {
                 let source = [prefix, &[byte], suffix].concat();
                 let parsed = read(&source);
+                let bare_call = prefix == b"Dim" && (byte.is_ascii_alphanumeric() || byte == b'_');
                 assert_eq!(
                     parsed.is_some(),
-                    expected,
+                    expected || bare_call,
                     "{prefix:?} byte {byte} {suffix:?}"
                 );
                 if let Some(ModuleBodyStatement::Variables(list)) = parsed {
+                    assert!(expected);
                     assert_eq!(list.statement(), 0..source.len());
                     for variable in list.variables() {
                         assert!(variable.declarator().start < variable.declarator().end);
                         assert!(variable.declarator().end <= source.len());
                         assert!(variable.name().end <= variable.declarator().end);
                     }
+                } else if let Some(ModuleBodyStatement::Call(call)) = parsed {
+                    assert!(bare_call);
+                    assert_eq!(call.statement(), 0..source.len());
+                    assert_eq!(call.callee(), call.statement());
+                    assert_eq!(&source[call.callee()], source.as_slice());
+                    assert_eq!(call.arguments(), None);
+                    assert!(call.argument_values().is_empty());
+                } else {
+                    assert!(parsed.is_none(), "unexpected statement kind: {source:?}");
                 }
             }
         }
@@ -3987,7 +4390,6 @@ mod tests {
             "Call Finish() trailing",
             "Call Finish:other=1",
             "Call Finish ' comment",
-            "Finish",
             "Finish()",
         ] {
             assert!(read(source.as_bytes()).is_none(), "{source}");

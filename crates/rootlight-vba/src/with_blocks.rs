@@ -144,6 +144,19 @@ pub(crate) fn statement<E>(
     reject_inline_with: bool,
     check: &mut impl FnMut() -> Result<(), E>,
 ) -> Result<Option<(Range<usize>, usize)>, E> {
+    statement_with_boundary(source, start, reject_inline_with, check)
+        .map(|statement| statement.map(|(range, next, _)| (range, next)))
+}
+
+/// Retains the untrimmed content boundary alongside the legacy statement range.
+/// A CR paired with the delimiting LF is excluded; consumed continuation bytes
+/// remain available so a closed consumer cannot reinterpret their trimmed tail.
+pub(crate) fn statement_with_boundary<E>(
+    source: &[u8],
+    start: usize,
+    reject_inline_with: bool,
+    check: &mut impl FnMut() -> Result<(), E>,
+) -> Result<Option<(Range<usize>, usize, usize)>, E> {
     let mut cursor = start;
     let mut first = start;
     while source
@@ -187,13 +200,24 @@ pub(crate) fn statement<E>(
                 return Ok(Some((
                     trimmed(source, start, end),
                     cursor + usize::from(cursor < source.len()),
+                    end,
                 )));
             }
             b'\n' | b':' if byte == b'\n' || source.get(cursor + 1) != Some(&b'=') => {
                 if depth != 0 {
                     return Ok(None);
                 }
-                return Ok(Some((trimmed(source, start, cursor), cursor + 1)));
+                let content_end =
+                    if byte == b'\n' && source.get(cursor.wrapping_sub(1)) == Some(&b'\r') {
+                        cursor - 1
+                    } else {
+                        cursor
+                    };
+                return Ok(Some((
+                    trimmed(source, start, cursor),
+                    cursor + 1,
+                    content_end,
+                )));
             }
             b'(' => {
                 depth += 1;
@@ -261,6 +285,7 @@ pub(crate) fn statement<E>(
                     return Ok(Some((
                         trimmed(source, start, end),
                         cursor + usize::from(cursor < source.len()),
+                        end,
                     )));
                 }
                 // An inline control statement must not close an outer block
@@ -286,7 +311,7 @@ pub(crate) fn statement<E>(
             _ => cursor += 1,
         }
     }
-    Ok((depth == 0).then(|| (trimmed(source, start, cursor), cursor)))
+    Ok((depth == 0).then(|| (trimmed(source, start, cursor), cursor, cursor)))
 }
 
 fn trimmed(source: &[u8], start: usize, end: usize) -> Range<usize> {
@@ -298,6 +323,33 @@ fn trimmed(source: &[u8], start: usize, end: usize) -> Range<usize> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn statement_boundaries_preserve_continuation_bytes_without_changing_legacy_ranges() {
+        for (source, raw, trimmed) in [
+            ("  Target _\n\nnext", "  Target _\n", "Target _"),
+            ("  Target _\r\n\r\nnext", "  Target _\r\n", "Target _"),
+            (
+                "  Target _\n\t ' comment\nnext",
+                "  Target _\n\t ",
+                "Target _",
+            ),
+            ("  Target\t \r\nnext", "  Target\t ", "Target"),
+            ("  Target\t :next", "  Target\t ", "Target"),
+            ("  Target _\n", "  Target _\n", "Target _"),
+        ] {
+            let (range, next, content_end) =
+                statement_with_boundary(source.as_bytes(), 0, false, &mut || Ok::<(), ()>(()))
+                    .unwrap()
+                    .unwrap();
+            assert_eq!(&source[..content_end], raw);
+            assert_eq!(&source[range.clone()], trimmed);
+            assert_eq!(
+                statement(source.as_bytes(), 0, false, &mut || Ok::<(), ()>(())).unwrap(),
+                Some((range, next))
+            );
+        }
+    }
 
     #[test]
     fn float_trailing_point_hash_suffix_preserves_exact_statement_boundaries() {
