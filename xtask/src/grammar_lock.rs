@@ -16,7 +16,7 @@ const GRAMMAR_LOCK_PATH: &str = "adapters/grammars.lock";
 const CARGO_LOCK_PATH: &str = "Cargo.lock";
 const ADAPTER_PACKAGE: &str = "rootlight-adapter-treesitter";
 const GRAMMAR_LOCK_SHA256: &str =
-    "d216eb642396f35c6d743d4a94a800713cd390a537a51bdddc199926e43ff854";
+    "c2716cbf7879ba4415bf46a4257b9c21ced0bf0bd8926a4c97da74cc194d9cd5";
 const JAVA_LICENSE_PATH: &str = "adapters/licenses/tree-sitter-java-0.23.5-LICENSE";
 const JAVA_LICENSE_SHA256: &str =
     "52ed137b039cd9c46409bc22e89938af911c95b157feae2d040b51e6084369a7";
@@ -36,7 +36,7 @@ const RUBY_LICENSE_PATH: &str = "adapters/licenses/tree-sitter-ruby-0.23.1-LICEN
 const RUBY_LICENSE_SHA256: &str =
     "ee006f02a3d856df282e409be2a86e24a65bb573a98b9c28343771141351bb6b";
 
-const EXPECTED_PACKAGES: [(&str, &str, &str); 33] = [
+const EXPECTED_PACKAGES: [(&str, &str, &str); 34] = [
     (
         "tree-sitter",
         "0.26.11",
@@ -202,6 +202,11 @@ const EXPECTED_PACKAGES: [(&str, &str, &str); 33] = [
         "1.2.13",
         "4eacf8875b70879f0cb670c60b233ad0b68752d9e1474e6c3ef168eea8a90b25",
     ),
+    (
+        "tree-sitter-haskell",
+        "0.23.1",
+        "977c51e504548cba13fc27cb5a2edab2124cf6716a1934915d07ab99523b05a4",
+    ),
 ];
 
 const EXPECTED_LOCAL_PACKAGES: [(&str, &str, &str, &str); 1] = [(
@@ -337,6 +342,11 @@ pub(crate) fn check(metadata: &Metadata, root: &Path) -> Result<(), GrammarLockE
         "adapters/licenses/tree-sitter-swift-0.7.3-LICENSE",
         "3533cec129bb4bba015c0d61d86dd7c3b7e82110e4d2ff7837a01eff5bad5ccc",
     )?;
+    validate_local_license(
+        root,
+        "adapters/licenses/tree-sitter-haskell-0.23.1-LICENSE",
+        "2e0110e07abef7c2548b26ec9d6969775617ca539a0dc8dbeeb14d6452c711d1",
+    )?;
     Ok(())
 }
 
@@ -357,7 +367,7 @@ fn validate_manifest(manifest: &GrammarLock) -> Result<(), GrammarLockError> {
         ));
     }
     validate_runtime(&manifest.runtime)?;
-    if manifest.grammars.len() != 34 {
+    if manifest.grammars.len() != 35 {
         return Err(GrammarLockError::GrammarCount(manifest.grammars.len()));
     }
     let mut languages = BTreeSet::new();
@@ -391,6 +401,7 @@ fn validate_manifest(manifest: &GrammarLock) -> Result<(), GrammarLockError> {
         "dart",
         "go",
         "groovy",
+        "haskell",
         "html",
         "sql",
         "java",
@@ -1063,7 +1074,7 @@ pub(crate) enum GrammarLockError {
     InvalidDigest { label: &'static str },
     #[error("grammar lock field {0} must not be empty")]
     EmptyField(&'static str),
-    #[error("grammar lock contains {0} grammars instead of 34")]
+    #[error("grammar lock contains {0} grammars instead of 35")]
     GrammarCount(usize),
     #[error("grammar lock repeats language {0}")]
     DuplicateLanguage(String),

@@ -20457,7 +20457,7 @@
   },
   "frontend_external_source_closure_verified": false,
   "licensing_scope": "supplied metadata and present files; not a completeness or authorship assessment",
-  "local_package_count": 70,
+  "local_package_count": 71,
   "local_packages": [
     {
       "name": "dekobon-tree-sitter-groovy",
@@ -20672,6 +20672,10 @@
       "version": "0.25.0"
     },
     {
+      "name": "tree-sitter-haskell",
+      "version": "0.23.1"
+    },
+    {
       "name": "tree-sitter-html",
       "version": "0.23.2"
     },
@@ -20742,10 +20746,10 @@
   ],
   "lockfiles": [
     {
-      "local_package_count": 68,
+      "local_package_count": 69,
       "path": "Cargo.lock",
       "registry_package_count": 303,
-      "sha256": "54638d9d1b638671d1685df6b5aa731fd0cd5f19278e823bd5505169215ff049"
+      "sha256": "a3c0ef158615c74f8fc95d5125ffbe3a68afa215f47c927db1eb0d3351385663"
     },
     {
       "local_package_count": 12,
@@ -20754,10 +20758,10 @@
       "sha256": "88671decb8b9314d1568945739eeaed397723d9ec1ebb75e5b0c3ac50b67348a"
     },
     {
-      "local_package_count": 20,
+      "local_package_count": 21,
       "path": "tests/native-grammars/Cargo.lock",
       "registry_package_count": 32,
-      "sha256": "f9cf71c056f980445939550bfdd4eec29c76700beb5a08f4a9506eed3995a0d9"
+      "sha256": "bb3cb880fbe30ca0e33ced7e9c15a28772dfd32588a1f2e24d7e222d4cce0a67"
     }
   ],
   "package_count": 345,
