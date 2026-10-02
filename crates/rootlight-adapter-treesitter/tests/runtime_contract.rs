@@ -89,7 +89,12 @@ fn incremental_executor_enforces_deadline_and_explicit_memory_admission() {
 
 #[test]
 fn every_audited_grammar_parses_a_clean_representative_file() {
-    let cases: [(&str, &str, &[u8]); 35] = [
+    let cases: [(&str, &str, &[u8]); 36] = [
+        (
+            "Sample.hs",
+            "haskell",
+            b"module Sample where\npick :: Int -> Int\npick 0 = 1\npick value = value\n",
+        ),
         (
             "measure.bas",
             "vba",

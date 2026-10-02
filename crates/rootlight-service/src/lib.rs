@@ -13,6 +13,8 @@ mod coverage_languages;
 mod durable;
 #[cfg(test)]
 mod embedded_resolution_tests;
+#[cfg(test)]
+mod haskell_native_tests;
 pub mod office_package;
 mod refinement;
 pub mod source_archive;
@@ -221,7 +223,7 @@ const PROJECT_FACTS_TRUNCATED_CODE: &str = "project-adapter-facts-truncated";
 const PROJECT_FACTS_TRUNCATED_MESSAGE: &str =
     "additional project semantic facts were omitted by aggregate resource limits";
 const AGGREGATE_DIAGNOSTICS_TRUNCATED_CODE: &str = "aggregate-diagnostics-truncated";
-const ANALYZER_BINARY_SEED: &[u8] = b"rootlight.first-slice.treesitter-structural/191";
+const ANALYZER_BINARY_SEED: &[u8] = b"rootlight.first-slice.treesitter-structural/192";
 const RESOLVER_BINARY_SEED: &[u8] = b"rootlight.first-slice.resolve/93";
 const INCREMENTAL_PROVIDER_SEED: &[u8] = b"rootlight.first-slice.incremental-provider/1";
 const LANGUAGE_DISPOSITION_PROVIDER_SEED: &[u8] = b"rootlight.first-slice.language-disposition/5";

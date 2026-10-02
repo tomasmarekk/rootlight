@@ -21,6 +21,7 @@ use crate::{
 mod dart;
 mod ecmascript;
 mod groovy;
+mod haskell;
 mod markdown;
 mod matlab;
 mod nix;
@@ -678,6 +679,11 @@ impl QueryPack {
                 {
                     continue;
                 }
+                if input.family == GrammarFamily::Haskell
+                    && !haskell::retain_capture(capture.node, role, input.cancellation)?
+                {
+                    continue;
+                }
                 if input.family.is_classic_basic()
                     && role == StructuralRole::Reference
                     && vba::is_pointer_fragment(capture.node, input.source, input.cancellation)?
@@ -1194,6 +1200,10 @@ fn candidate_for_capture(
         }
         _ if family == GrammarFamily::Nix => nix::syntax(capture.node, role, source, cancellation)?
             .ok_or_else(|| query_failure("query-nix-kind"))?,
+        _ if family == GrammarFamily::Haskell => {
+            haskell::syntax(capture.node, role, source, cancellation)?
+                .ok_or_else(|| query_failure("query-haskell-kind"))?
+        }
         _ if family == GrammarFamily::ObjectiveC => objective_c::capture_syntax(capture.node, role)
             .ok_or_else(|| query_failure("query-objective-c-kind"))?,
         StructuralRole::Declaration if family == GrammarFamily::Dart => {
@@ -1382,6 +1392,7 @@ fn candidate_for_capture(
             GrammarFamily::Matlab => return Err(query_failure("query-matlab-ambiguous-call")),
             GrammarFamily::Perl => return Err(query_failure("query-perl-unresolved-call")),
             GrammarFamily::Groovy => "groovy.call",
+            GrammarFamily::Haskell => "haskell.application",
             GrammarFamily::Vba | GrammarFamily::VisualBasicClassic => {
                 return Err(query_failure("query-vba-ambiguous-call"));
             }
@@ -1391,6 +1402,12 @@ fn candidate_for_capture(
     };
     let mut start = capture.node.start_byte();
     let mut end = capture.node.end_byte();
+    if family == GrammarFamily::Haskell {
+        let range = haskell::capture_range(capture.node, role, cancellation)?
+            .ok_or_else(|| query_failure("query-haskell-range"))?;
+        start = range.start;
+        end = range.end;
+    }
     if family == GrammarFamily::Matlab && end == source.len().saturating_add(1) {
         // MATLAB's parser-only EOF delimiter cannot become source evidence.
         end = source.len();
@@ -1541,17 +1558,44 @@ fn candidate_for_capture(
         // shared static-name boundary rather than aliasing an instance method.
         start = receiver.start_byte();
     }
+    let mut capture_depth = if matches!(
+        family,
+        GrammarFamily::Perl | GrammarFamily::Groovy | GrammarFamily::Haskell
+    ) {
+        native_depth(capture.node, cancellation)?
+    } else {
+        0
+    };
+    if family == GrammarFamily::Haskell
+        && role == StructuralRole::Scope
+        && matches!(
+            capture.node.kind(),
+            "function"
+                | "bind"
+                | "data_type"
+                | "newtype"
+                | "type_synomym"
+                | "class"
+                | "data_constructor"
+                | "newtype_constructor"
+                | "gadt_constructor"
+        )
+        && haskell::retain_capture(capture.node, StructuralRole::Declaration, cancellation)?
+    {
+        // One native node owns both its binding and its lexical environment.
+        // The environment must be inside that binding so repeated equations
+        // share a callable identity without merging their formal parameters.
+        capture_depth = capture_depth
+            .checked_add(1)
+            .ok_or_else(|| query_failure("query-native-depth"))?;
+    }
     Ok(QueryCandidate {
         start,
         end,
         role,
         syntax,
         required: false,
-        native_depth: if matches!(family, GrammarFamily::Perl | GrammarFamily::Groovy) {
-            native_depth(capture.node, cancellation)?
-        } else {
-            0
-        },
+        native_depth: capture_depth,
     })
 }
 
@@ -1683,6 +1727,7 @@ const fn supports_terminal_call_name(family: GrammarFamily) -> bool {
             | GrammarFamily::PowerShell
             | GrammarFamily::Nix
             | GrammarFamily::Groovy
+            | GrammarFamily::Haskell
     )
 }
 
@@ -2194,7 +2239,7 @@ impl QueryPackRegistry {
     }
 
     fn compile_audited() -> Result<Self, GrammarFamily> {
-        let mut packs = Vec::with_capacity(35);
+        let mut packs = Vec::with_capacity(36);
         for (family, source) in [
             (GrammarFamily::Rust, include_str!("../queries/rust.scm")),
             (GrammarFamily::Python, include_str!("../queries/python.scm")),
@@ -2237,6 +2282,10 @@ impl QueryPackRegistry {
             (GrammarFamily::Matlab, include_str!("../queries/matlab.scm")),
             (GrammarFamily::Perl, include_str!("../queries/perl.scm")),
             (GrammarFamily::Groovy, include_str!("../queries/groovy.scm")),
+            (
+                GrammarFamily::Haskell,
+                include_str!("../queries/haskell.scm"),
+            ),
             (GrammarFamily::Vba, include_str!("../queries/vba.scm")),
             (
                 GrammarFamily::VisualBasicClassic,
@@ -2350,6 +2399,7 @@ mod tests {
             GrammarFamily::Groovy,
             GrammarFamily::Vba,
             GrammarFamily::VisualBasicClassic,
+            GrammarFamily::Haskell,
         ] {
             let pack = registry.get(family).expect("family has a query pack");
             let mut names = pack.identity_query.capture_names().to_vec();

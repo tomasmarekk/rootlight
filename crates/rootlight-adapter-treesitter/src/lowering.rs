@@ -59,6 +59,8 @@ const ENTITY_IDENTITY_GUARD_CONTEXT: &str = "rootlight/treesitter-entity-identit
 const STABLE_SCOPE_IDENTITY_UNAVAILABLE: &str = "stable-scope-identity-unavailable";
 const VBA_CONDITIONAL_EVALUATION_UNAVAILABLE: &str =
     "vba-conditional-compilation-evaluation-unavailable";
+const HASKELL_BINDING_UNAVAILABLE: &str = "haskell-binding-target-unavailable";
+const HASKELL_ANNOTATION_UNAVAILABLE: &str = "haskell-annotation-owner-unavailable";
 type ApplicationProofKey = (u64, u64, SymbolId, u64, u64);
 
 /// Tree-sitter syntax analyzer backed by an injected parser-independent provider.
@@ -964,6 +966,25 @@ fn preflight_lowering_limits(
                 limits,
             )?;
         }
+        if is_haskell_annotation_name(fact) {
+            occurrence_candidates = checked_add(occurrence_candidates, 1)?;
+            extension_candidates = checked_add(extension_candidates, 1)?;
+            skipped_candidates = checked_add(skipped_candidates, 2)?;
+            for detail in [
+                HASKELL_ANNOTATION_UNAVAILABLE,
+                "lexical-evidence-resource-limit",
+            ] {
+                account_string(&mut string_bytes, detail.len(), limits)?;
+            }
+            account_string(&mut string_bytes, fact.syntax_kind().as_str().len(), limits)?;
+        }
+        if is_haskell_type_annotation(fact) {
+            account_string(
+                &mut string_bytes,
+                HASKELL_ANNOTATION_UNAVAILABLE.len(),
+                limits,
+            )?;
+        }
         if occurrence_role(fact).is_some() {
             occurrence_candidates = checked_add(occurrence_candidates, 1)?;
             account_string(&mut string_bytes, fact.syntax_kind().as_str().len(), limits)?;
@@ -1775,6 +1796,124 @@ impl<'context, 'source> Lowering<'context, 'source> {
         for (index, fact) in self.parse_output.facts().iter().enumerate() {
             check_periodically(index, cancellation)?;
             let source = source_for_span(self.full_source, fact.span());
+            if entity_plan
+                .haskell_orphan_signatures
+                .contains(&fact.local_id())
+            {
+                let gap = skipped_region(
+                    self.full_source,
+                    fact.span(),
+                    FactDomain::Entities,
+                    SkippedRegionReason::UnsupportedConstruct,
+                    HASKELL_ANNOTATION_UNAVAILABLE,
+                    provenance_id,
+                )?;
+                skipped.insert(gap.id, gap);
+            }
+            if let Some(annotation) = entity_plan.haskell_annotations.get(&fact.local_id()) {
+                let Some(definition) = annotation.definition.and_then(|id| facts_by_id.get(&id))
+                else {
+                    let gap = skipped_region(
+                        self.full_source,
+                        fact.span(),
+                        FactDomain::Entities,
+                        SkippedRegionReason::UnsupportedConstruct,
+                        HASKELL_ANNOTATION_UNAVAILABLE,
+                        provenance_id,
+                    )?;
+                    skipped.insert(gap.id, gap);
+                    continue;
+                };
+                let target = annotation.target.and_then(|id| materialized.get(&id));
+                let enclosing = annotation
+                    .enclosing
+                    .and_then(|id| materialized.get(&id))
+                    .map(|entity| entity.record.id);
+                let mut occurrence = unresolved_occurrence(
+                    definition,
+                    OccurrenceRole::Declaration,
+                    enclosing,
+                    provenance_id,
+                    syntax_confidence,
+                    source_for_span(self.full_source, definition.span()),
+                    self.text_for_span(definition.span())?,
+                )?;
+                if let Some(target) = target {
+                    occurrence.target = OccurrenceTarget::Resolved {
+                        symbol: target.record.id,
+                    };
+                } else {
+                    let gap = skipped_region(
+                        self.full_source,
+                        fact.span(),
+                        FactDomain::Entities,
+                        SkippedRegionReason::UnsupportedConstruct,
+                        HASKELL_ANNOTATION_UNAVAILABLE,
+                        provenance_id,
+                    )?;
+                    skipped.insert(gap.id, gap);
+                }
+                let signature_source = annotation
+                    .signature
+                    .map(|span| source_for_span(self.full_source, span));
+                if let Some(signature_source) = &signature_source {
+                    occurrence.evidence = direct_evidence(signature_source.clone());
+                }
+                occurrence.id = derive_occurrence_record_id(&occurrence)
+                    .map_err(|_| provider_failure("treesitter-occurrence-identity"))?;
+                if let Some(signature_source) = signature_source {
+                    let span = signature_source.span();
+                    let lexical = LexicalEvidenceV1::from_complete_text(
+                        LexicalEvidenceKind::Signature,
+                        FactRef::Fact(occurrence.id),
+                        LexicalEvidenceFormat::SourceText,
+                        self.text_for_span(span)?,
+                    )
+                    .ok();
+                    let envelope = lexical.and_then(|lexical| {
+                        new_lexical_evidence_envelope(
+                            self.full_source.repository(),
+                            self.full_source.generation(),
+                            provenance_id,
+                            signature_source,
+                            &lexical,
+                        )
+                        .ok()
+                    });
+                    let retained = match envelope {
+                        Some(envelope) => insert_optional_extension(
+                            envelope,
+                            &mut extensions,
+                            &mut extension_bytes,
+                            self.request.limits().ir(),
+                        )?,
+                        None => false,
+                    };
+                    if !retained {
+                        let gap = skipped_region(
+                            self.full_source,
+                            span,
+                            FactDomain::Extensions,
+                            SkippedRegionReason::ResourceLimit,
+                            "lexical-evidence-resource-limit",
+                            provenance_id,
+                        )?;
+                        skipped.insert(gap.id, gap);
+                    }
+                } else {
+                    let gap = skipped_region(
+                        self.full_source,
+                        fact.span(),
+                        FactDomain::Extensions,
+                        SkippedRegionReason::UnsupportedConstruct,
+                        HASKELL_ANNOTATION_UNAVAILABLE,
+                        provenance_id,
+                    )?;
+                    skipped.insert(gap.id, gap);
+                }
+                occurrences.insert(occurrence.id, occurrence);
+                continue;
+            }
             if entity_plan.groovy_name_gaps.contains(&fact.local_id()) {
                 let region = skipped_region(
                     self.full_source,
@@ -3114,7 +3253,7 @@ impl<'context, 'source> Lowering<'context, 'source> {
             let parent_declaration = fact
                 .parent()
                 .and_then(|parent| nearest_declaration.get(&parent).copied().flatten());
-            if structural_entity_kind(fact).is_some() {
+            if structural_entity_kind(fact).is_some() || is_haskell_annotation_name(fact) {
                 nearest_declaration.insert(fact.local_id(), Some(fact.local_id()));
                 captures.entry(fact.local_id()).or_default();
             } else {
@@ -3134,7 +3273,7 @@ impl<'context, 'source> Lowering<'context, 'source> {
                             .or_default()
                             .definition_parts
                             .push(*fact);
-                    } else if is_signature_capture(fact) {
+                    } else if is_signature_capture(fact) && !is_haskell_type_annotation(fact) {
                         captures.entry(owner).or_default().signatures.push(*fact);
                     }
                 }
@@ -3174,6 +3313,7 @@ impl<'context, 'source> Lowering<'context, 'source> {
         let mut ecmascript_declarations = HashMap::<(Option<u64>, String, String), u64>::new();
         let mut written_declarations = HashMap::<(Option<u64>, String, String), u64>::new();
         let mut written_scopes = HashMap::<Option<u64>, u64>::new();
+        let mut haskell_clause_positions = HashMap::<HaskellClauseKey, u64>::new();
         let matlab_scope_names = matlab::named_scopes(
             self.parse_output.facts(),
             &captures,
@@ -3183,6 +3323,7 @@ impl<'context, 'source> Lowering<'context, 'source> {
         )?;
         let mut matlab_named_scopes = HashMap::<(Option<u64>, &str, &str), u64>::new();
         let mut anonymous_scopes = HashMap::<Option<u64>, u64>::new();
+        let mut haskell_annotation_drafts = Vec::new();
         for (index, fact) in ordered_facts.into_iter().enumerate() {
             check_periodically(index, cancellation)?;
             let mut parent_entity = fact.parent().and_then(|parent| {
@@ -3194,6 +3335,17 @@ impl<'context, 'source> Lowering<'context, 'source> {
             let mut parent_scope = fact
                 .parent()
                 .and_then(|parent| nearest_scope_ancestor.get(&parent).cloned().flatten());
+            if self.language_for_fact(fact) == "haskell"
+                && fact.kind() == SyntaxFactKind::Scope
+                && parent_scope.is_none()
+                && let Some(parent) = fact.parent().and_then(|parent| drafts.get(&parent))
+            {
+                parent_scope = Some(ScopeContext {
+                    stable_identity: parent.scope_identity,
+                    collision_guard: parent.scope_collision_guard,
+                    ..ScopeContext::default()
+                });
+            }
             if fact.syntax_kind().as_str() == "vba.compilation_constant.declaration" {
                 // Compiler constants belong to their source module even when
                 // written inside a procedure or an excluded conditional branch.
@@ -3286,14 +3438,43 @@ impl<'context, 'source> Lowering<'context, 'source> {
                 // Alternate VBA branches need separate source identities without selecting one.
                 let written_scope_identity = if matches!(
                     self.language_for_fact(fact),
-                    "r" | "powershell" | "nix" | "matlab" | "perl" | "groovy"
+                    "r" | "powershell" | "nix" | "matlab" | "perl" | "groovy" | "haskell"
                 ) || fact.syntax_kind().as_str()
                     == "vba.preprocessor_branch.scope"
                 {
                     // Named MATLAB workspaces survive unrelated sibling insertion;
                     // only indistinguishable same-name siblings need an ordinal.
                     let name = matlab_scope_names.get(&fact.span()).copied().flatten();
-                    let next = if let Some(name) = name {
+                    let next = if self.language_for_fact(fact) == "haskell"
+                        && let Some(owner) = fact.parent().and_then(|parent| drafts.get(&parent))
+                    {
+                        // Equations share their callable entity, not their formal
+                        // parameter or local-binding environments. Count clauses
+                        // under the written binding rather than parser-local IDs.
+                        let key = (
+                            owner.parent_entity,
+                            owner.scope_identity,
+                            haskell_owned_text(fact.syntax_kind().as_str(), cancellation)?,
+                            haskell_owned_text(&owner.name, cancellation)?,
+                        );
+                        if !haskell_clause_positions.contains_key(&key) {
+                            cancellation.check()?;
+                            haskell_clause_positions
+                                .try_reserve(1)
+                                .map_err(|_| SinkError::AllocationFailed)?;
+                            account_string(
+                                total_string_bytes,
+                                key.2.len(),
+                                self.request.limits().ir(),
+                            )?;
+                            account_string(
+                                total_string_bytes,
+                                key.3.len(),
+                                self.request.limits().ir(),
+                            )?;
+                        }
+                        haskell_clause_positions.entry(key).or_default()
+                    } else if let Some(name) = name {
                         matlab_named_scopes
                             .entry((fact.parent(), fact.syntax_kind().as_str(), name))
                             .or_default()
@@ -3456,6 +3637,27 @@ impl<'context, 'source> Lowering<'context, 'source> {
                 };
                 nearest_entity_ancestor.insert(fact.local_id(), parent_entity);
                 nearest_scope_ancestor.insert(fact.local_id(), Some(context));
+                continue;
+            }
+            if is_haskell_annotation_name(fact) {
+                cancellation.check()?;
+                haskell_annotation_drafts
+                    .try_reserve(1)
+                    .map_err(|_| SinkError::AllocationFailed)?;
+                haskell_annotation_drafts.push(HaskellAnnotationDraft {
+                    local_id: fact.local_id(),
+                    definition: captures
+                        .get(&fact.local_id())
+                        .and_then(|capture| select_unique_capture(&capture.definitions))
+                        .map(SyntaxFact::local_id),
+                    parent_entity,
+                    scope_identity: parent_scope
+                        .as_ref()
+                        .and_then(|scope| scope.stable_identity),
+                    span: fact.span(),
+                });
+                nearest_entity_ancestor.insert(fact.local_id(), parent_entity);
+                nearest_scope_ancestor.insert(fact.local_id(), parent_scope);
                 continue;
             }
             let declaration_text = self.text_for_span(fact.span())?;
@@ -3942,6 +4144,14 @@ impl<'context, 'source> Lowering<'context, 'source> {
             self.request.limits().ir(),
             cancellation,
         )?;
+        let (haskell_annotations, haskell_orphan_signatures) = self.haskell_annotations(
+            &drafts,
+            haskell_annotation_drafts,
+            &nearest_entity_ancestor,
+            &nearest_scope_ancestor,
+            total_string_bytes,
+            cancellation,
+        )?;
         let mut drafts: Vec<_> = drafts.into_values().collect();
         drafts.sort_by(|left, right| {
             (
@@ -3962,6 +4172,8 @@ impl<'context, 'source> Lowering<'context, 'source> {
                 ))
         });
         Ok(EntityPlan {
+            haskell_annotations,
+            haskell_orphan_signatures,
             perl,
             matlab,
             drafts,
@@ -3988,6 +4200,184 @@ impl<'context, 'source> Lowering<'context, 'source> {
         self.source_text
             .get(start..end)
             .ok_or_else(|| provider_failure("treesitter-lowering-span"))
+    }
+
+    fn haskell_annotations(
+        &self,
+        drafts: &HashMap<u64, EntityDraft>,
+        annotations: Vec<HaskellAnnotationDraft>,
+        owners: &HashMap<u64, Option<u64>>,
+        scopes: &HashMap<u64, Option<ScopeContext>>,
+        total_string_bytes: &mut usize,
+        cancellation: &Cancellation,
+    ) -> Result<(HashMap<u64, HaskellAnnotation>, BTreeSet<u64>), AdapterError> {
+        if self.request.language().as_str() != "haskell" {
+            return Ok((HashMap::new(), BTreeSet::new()));
+        }
+        let mut bindings = HashMap::new();
+        cancellation.check()?;
+        bindings
+            .try_reserve(drafts.len())
+            .map_err(|_| SinkError::AllocationFailed)?;
+        cancellation.check()?;
+        for draft in drafts.values() {
+            cancellation.check()?;
+            if draft.language != "haskell"
+                || !matches!(
+                    draft.kind,
+                    EntityKind::Function | EntityKind::Method | EntityKind::Variable
+                )
+            {
+                continue;
+            }
+            let key = (
+                draft.parent_entity,
+                draft.scope_identity,
+                draft.name.as_str(),
+            );
+            bindings
+                .entry(key)
+                .and_modify(|target: &mut Option<(u64, EntityKind)>| {
+                    if target.is_some_and(|(_, kind)| kind != draft.kind) {
+                        *target = None;
+                    } else if let Some((local, _)) = target
+                        && drafts.get(local).is_some_and(|existing| {
+                            (draft.span.start_byte(), draft.span.end_byte())
+                                < (existing.span.start_byte(), existing.span.end_byte())
+                        })
+                    {
+                        *local = draft.local_id;
+                    }
+                })
+                .or_insert(Some((draft.local_id, draft.kind)));
+        }
+        let mut signatures = Vec::new();
+        for fact in self.parse_output.facts() {
+            cancellation.check()?;
+            if is_haskell_type_annotation(fact) {
+                signatures
+                    .try_reserve(1)
+                    .map_err(|_| SinkError::AllocationFailed)?;
+                signatures.push(fact);
+            }
+        }
+        crate::runtime::sort_cancellable_by(&mut signatures, cancellation, |left, right| {
+            (left.span().start_byte(), left.span().end_byte())
+                .cmp(&(right.span().start_byte(), right.span().end_byte()))
+        })?;
+        let mut invalid_signatures = HashMap::new();
+        invalid_signatures
+            .try_reserve(signatures.len())
+            .map_err(|_| SinkError::AllocationFailed)?;
+        let mut active: Option<&SyntaxFact> = None;
+        for signature in &signatures {
+            cancellation.check()?;
+            if let Some(previous) = active
+                && previous.span() != signature.span()
+                && previous.span().end_byte() > signature.span().start_byte()
+            {
+                invalid_signatures.insert(previous.local_id(), ());
+                invalid_signatures.insert(signature.local_id(), ());
+            }
+            if active
+                .is_none_or(|previous| previous.span().end_byte() < signature.span().end_byte())
+            {
+                active = Some(signature);
+            }
+        }
+        let mut facts = HashMap::new();
+        facts
+            .try_reserve(self.parse_output.facts().len())
+            .map_err(|_| SinkError::AllocationFailed)?;
+        for fact in self.parse_output.facts() {
+            cancellation.check()?;
+            facts.insert(fact.local_id(), fact);
+        }
+        let mut result = HashMap::new();
+        result
+            .try_reserve(annotations.len())
+            .map_err(|_| SinkError::AllocationFailed)?;
+        let mut represented_signatures = BTreeSet::new();
+        for annotation in annotations {
+            cancellation.check()?;
+            let definition = annotation.definition.and_then(|id| facts.get(&id)).copied();
+            let name = definition
+                .map(|fact| {
+                    let text = self.text_for_span(fact.span())?;
+                    Ok::<_, AdapterError>(rootlight_adapter_sdk::structural_captured_name_for_fact(
+                        "haskell",
+                        fact,
+                        text,
+                        self.request.limits().ir().max_string_bytes,
+                    ))
+                })
+                .transpose()?
+                .flatten();
+            let target = name
+                .as_deref()
+                .and_then(|name| {
+                    bindings.get(&(annotation.parent_entity, annotation.scope_identity, name))
+                })
+                .copied()
+                .flatten()
+                .map(|(local, _)| local)
+                .filter(|_| {
+                    self.parse_output.report().coverage().status() == CoverageStatus::Complete
+                });
+            let end = signatures
+                .partition_point(|fact| fact.span().start_byte() <= annotation.span.start_byte());
+            let signature_fact = end
+                .checked_sub(1)
+                .and_then(|index| signatures.get(index))
+                .filter(|fact| !invalid_signatures.contains_key(&fact.local_id()))
+                .filter(|fact| span_contains(fact.span(), annotation.span))
+                .filter(|fact| {
+                    owners.get(&fact.local_id()).copied().flatten() == annotation.parent_entity
+                        && scopes
+                            .get(&fact.local_id())
+                            .and_then(Option::as_ref)
+                            .and_then(|scope| scope.stable_identity)
+                            == annotation.scope_identity
+                });
+            let signature = match signature_fact.map(|fact| fact.span()) {
+                Some(span)
+                    if self.text_for_span(span)?.len()
+                        <= self.request.limits().ir().max_string_bytes =>
+                {
+                    account_string(
+                        total_string_bytes,
+                        self.text_for_span(span)?.len(),
+                        self.request.limits().ir(),
+                    )?;
+                    if name.is_some()
+                        && let Some(fact) = signature_fact
+                    {
+                        represented_signatures.insert(fact.local_id());
+                    }
+                    Some(span)
+                }
+                _ => None,
+            };
+            result.insert(
+                annotation.local_id,
+                HaskellAnnotation {
+                    definition: definition
+                        .filter(|_| name.is_some())
+                        .map(SyntaxFact::local_id),
+                    signature,
+                    target: target.filter(|_| signature.is_some()),
+                    enclosing: annotation.parent_entity,
+                },
+            );
+        }
+        let mut orphan_signatures = BTreeSet::new();
+        for fact in signatures {
+            cancellation.check()?;
+            if !represented_signatures.contains(&fact.local_id()) {
+                orphan_signatures.insert(fact.local_id());
+            }
+        }
+        Ok((result, orphan_signatures))
     }
 
     fn stable_scope_header(
@@ -4107,6 +4497,8 @@ struct AssociatedCaptures<'a> {
 }
 
 struct EntityPlan {
+    haskell_annotations: HashMap<u64, HaskellAnnotation>,
+    haskell_orphan_signatures: BTreeSet<u64>,
     perl: perl::Plan,
     matlab: matlab::Plan,
     nix_path_gaps: BTreeSet<u64>,
@@ -4241,6 +4633,34 @@ struct MaterializedEntity {
     definition_local_id: Option<u64>,
     signature_evidence: Option<SignatureEvidence>,
     signature_span: Option<SourceSpan>,
+}
+
+struct HaskellAnnotationDraft {
+    local_id: u64,
+    definition: Option<u64>,
+    parent_entity: Option<u64>,
+    scope_identity: Option<[u8; 32]>,
+    span: SourceSpan,
+}
+
+type HaskellClauseKey = (Option<u64>, Option<[u8; 32]>, String, String);
+
+fn haskell_owned_text(text: &str, cancellation: &Cancellation) -> Result<String, AdapterError> {
+    cancellation.check()?;
+    let mut owned = String::new();
+    owned
+        .try_reserve_exact(text.len())
+        .map_err(|_| SinkError::AllocationFailed)?;
+    cancellation.check()?;
+    owned.push_str(text);
+    Ok(owned)
+}
+
+struct HaskellAnnotation {
+    definition: Option<u64>,
+    signature: Option<SourceSpan>,
+    target: Option<u64>,
+    enclosing: Option<u64>,
 }
 
 #[derive(Clone, Default)]
@@ -4389,13 +4809,24 @@ fn materialize_entity(
     }
     debug_assert_eq!(qualified_name.len(), draft.qualified_length);
     let semantic_kind = entity_kind_identity_label(draft.kind);
+    // Repeated Haskell equations are one written lexical binding. Pattern heads
+    // and type annotations remain evidence, not overload or arity identities.
+    let signature_discriminator = if draft.language == "haskell"
+        && matches!(
+            draft.kind,
+            EntityKind::Function | EntityKind::Method | EntityKind::Variable
+        ) {
+        &[][..]
+    } else {
+        draft.signature.as_bytes()
+    };
     let identity_guard = entity_identity_guard(
         full_source.repository(),
         &draft.language,
         semantic_kind,
         &container_identity,
         &draft.name,
-        draft.signature.as_bytes(),
+        signature_discriminator,
         build_context.digest().as_bytes(),
         draft.scope_collision_guard.as_ref(),
     )?;
@@ -4405,7 +4836,7 @@ fn materialize_entity(
         semantic_kind,
         container_identity: &container_identity,
         declared_identity: &draft.name,
-        signature_discriminator: draft.signature.as_bytes(),
+        signature_discriminator,
         build_context_discriminator: build_context.digest().as_bytes(),
     })
     .id();
@@ -4451,7 +4882,7 @@ fn materialize_entity(
         container: record.container,
         container_identity,
         declared_identity: draft.name.clone(),
-        signature_discriminator: draft.signature.as_bytes().to_vec(),
+        signature_discriminator: signature_discriminator.to_vec(),
         build_context_discriminator: build_context.digest().as_bytes().to_vec(),
     };
     let entity = MaterializedEntity {
@@ -4802,6 +5233,8 @@ fn written_source_identity(
         "rootlight.groovy-source-occurrence/1"
     } else if language == "vba" {
         "rootlight.vba-preprocessor-branch/1"
+    } else if language == "haskell" {
+        "rootlight.haskell-source-scope/1"
     } else {
         "rootlight.powershell-source-occurrence/1"
     };
@@ -5562,6 +5995,7 @@ fn language_for_fact<'a>(request: &'a AnalysisRequest<'_>, fact: &'a SyntaxFact)
                 | "go"
                 | "java"
                 | "groovy"
+                | "haskell"
                 | "kotlin"
                 | "lua"
                 | "php"
@@ -5694,6 +6128,7 @@ fn is_explicit_file_module(fact: &SyntaxFact, language: &str) -> bool {
                 | "matlab.file.module"
                 | "perl.file.module"
                 | "groovy.file.module"
+                | "haskell.file.module"
                 | "vba.file.module"
                 | "vba.class.module"
                 | "solidity.file.module"
@@ -5729,6 +6164,7 @@ fn is_explicit_file_module(fact: &SyntaxFact, language: &str) -> bool {
                 | "powershell"
                 | "markdown"
                 | "groovy"
+                | "haskell"
                 | "vba"
                 | "visual-basic-classic"
                 | "astro"
@@ -5753,6 +6189,16 @@ fn span_contains(container: SourceSpan, child: SourceSpan) -> bool {
     container.file() == child.file()
         && container.start_byte() <= child.start_byte()
         && container.end_byte() >= child.end_byte()
+}
+
+fn is_haskell_annotation_name(fact: &SyntaxFact) -> bool {
+    fact.kind() == SyntaxFactKind::Declaration
+        && fact.syntax_kind().as_str() == "haskell.signature_name.declaration"
+}
+
+fn is_haskell_type_annotation(fact: &SyntaxFact) -> bool {
+    fact.kind() == SyntaxFactKind::Signature
+        && fact.syntax_kind().as_str() == "haskell.written_signature.signature"
 }
 
 fn is_signature_capture(fact: &SyntaxFact) -> bool {
@@ -5790,7 +6236,8 @@ fn select_unique_capture<'a>(captures: &[&'a SyntaxFact]) -> Option<&'a SyntaxFa
 fn supports_signature(kind: EntityKind, language: &str) -> bool {
     // Classic BASIC accessors share a name but have distinct Get/Let/Set headers.
     // The same rule governs identity, evidence emission and admission accounting.
-    (kind == EntityKind::Property && matches!(language, "vba" | "visual-basic-classic"))
+    (kind == EntityKind::Variable && language == "haskell")
+        || (kind == EntityKind::Property && matches!(language, "vba" | "visual-basic-classic"))
         || matches!(
             kind,
             EntityKind::Function
@@ -5833,6 +6280,13 @@ fn automatic_instantiation_gap(fact: &SyntaxFact) -> Option<&'static str> {
 }
 
 fn source_reference_gap(fact: &SyntaxFact) -> Option<&'static str> {
+    if fact.syntax_kind().as_str().starts_with("haskell.")
+        && fact.kind() == SyntaxFactKind::Occurrence
+        && !is_definition_capture(fact)
+        && !is_call_name_capture(fact)
+    {
+        return Some(HASKELL_BINDING_UNAVAILABLE);
+    }
     match fact.syntax_kind().as_str() {
         "vba.procedure_pointer.reference"
         | "vba.qualified_procedure_pointer.reference"
@@ -5982,6 +6436,13 @@ fn occurrence_role(fact: &SyntaxFact) -> Option<OccurrenceRole> {
             None
         }
         SyntaxFactKind::Occurrence if is_call_name_capture(fact) => None,
+        SyntaxFactKind::Occurrence
+            if fact.syntax_kind().as_str().starts_with("haskell.")
+                && (fact.syntax_kind().as_str().contains("type")
+                    || fact.syntax_kind().as_str() == "haskell.instance_class_name.reference") =>
+        {
+            Some(OccurrenceRole::TypeUse)
+        }
         SyntaxFactKind::Occurrence
             if matches!(
                 fact.syntax_kind().as_str(),

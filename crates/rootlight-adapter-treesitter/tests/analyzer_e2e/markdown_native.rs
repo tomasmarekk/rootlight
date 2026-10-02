@@ -1794,6 +1794,15 @@ fn markdown_fenced_definitions_match_standalone_language_evidence() {
             groovy_native::GROOVY,
             vba_native::VBA,
             LanguageCase {
+                name: "haskell",
+                path: "src/Example.hs",
+                frontend: "tree-sitter-haskell-0.23.1",
+                source: "module Example where\npick :: Int -> Int\npick 0 = 1\npick value = value\n",
+                generated: false,
+                body_before: "pick 0 = 1",
+                body_after: "pick 0 = 2",
+            },
+            LanguageCase {
                 name: "visual-basic-classic",
                 ..vba_native::VBA
             },

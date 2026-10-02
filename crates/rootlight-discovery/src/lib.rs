@@ -1767,6 +1767,14 @@ const LANGUAGE_CAPABILITIES: &[LanguageCapability] = &[
         analyzers: &["treesitter"],
     },
     LanguageCapability {
+        language: "haskell",
+        suffixes: &[".hs"],
+        aliases: &[],
+        detectors: &["extension"],
+        maximum_tier: "tier_d",
+        analyzers: &["treesitter"],
+    },
+    LanguageCapability {
         language: "html",
         suffixes: &[".htm", ".html"],
         aliases: &[],
@@ -3541,6 +3549,118 @@ max_source_file_bytes = 2097152
         assert_eq!(capability.analyzers, ["treesitter"]);
         assert_eq!(capability.maximum_tier, "tier_d");
         assert_eq!(capability.detectors, ["extension", "filename", "shebang"]);
+    }
+
+    #[test]
+    fn haskell_source_suffixes_advertise_native_structural_analysis() {
+        let capability = language_capabilities()
+            .iter()
+            .find(|entry| entry.language == "haskell")
+            .expect("Haskell capability is declared");
+        assert_eq!(capability.suffixes, [".hs"]);
+        assert!(capability.aliases.is_empty());
+        assert_eq!(capability.detectors, ["extension"]);
+        assert_eq!(capability.analyzers, ["treesitter"]);
+        assert_eq!(capability.maximum_tier, "tier_d");
+        assert_eq!(canonical_language("haskell"), Some("haskell"));
+        for path in ["Main.hs", "src/Library.hs", "src/LIBRARY.HS"] {
+            assert_eq!(extension_language(path), Some("haskell"), "{path}");
+            let (class, signals) = classify(
+                &RelativePath::parse(Path::new(path)).expect("fixture path is valid"),
+                b"module Example where\nvalue = 1\n",
+            );
+            assert_eq!(class, InputClass::Source);
+            assert_eq!(
+                signals,
+                vec![LanguageSignal {
+                    language: "haskell".to_owned(),
+                    evidence: LanguageEvidence::Extension,
+                }],
+                "{path}"
+            );
+        }
+        for path in [
+            "Main.lhs",
+            "Main.hsc",
+            "Main.hs.bak",
+            "Main.hs.txt",
+            "Main.hi",
+            "Main.o",
+        ] {
+            assert_eq!(extension_language(path), None, "{path}");
+            let (_, signals) = classify(
+                &RelativePath::parse(Path::new(path)).expect("fixture path is valid"),
+                b"module Example where\nvalue = 1\n",
+            );
+            assert!(signals.is_empty(), "{path}: {signals:?}");
+        }
+    }
+
+    #[test]
+    fn haskell_discovery_retains_unknown_text_and_excludes_binary_content() {
+        let temporary = local_tempdir();
+        let sources = [
+            (
+                "src/Main.hs",
+                b"module Example where\nvalue = 1\n".as_slice(),
+                Some("haskell"),
+            ),
+            (
+                "docs/Main.lhs",
+                b"> module Example where\n> value = 1\n".as_slice(),
+                None,
+            ),
+            (
+                "src/Foreign.hsc",
+                b"module Example where\nvalue = #{const 1}\n".as_slice(),
+                None,
+            ),
+        ];
+        for &(path, content, _) in &sources {
+            write_fixture(&temporary, path, content);
+        }
+        write_fixture(&temporary, "src/binary.hs", b"\0opaque payload");
+        let root = fixture_root(&temporary, b"haskell-input-accounting");
+        let policy = DiscoveryPolicy::build(Vec::new(), true).unwrap();
+        let (manifest, snapshots) = discover_with_snapshots_at_limit(
+            &root,
+            &config(),
+            &policy,
+            limits(),
+            BTreeMap::new(),
+            4096,
+            &Cancellation::new(),
+        )
+        .unwrap()
+        .into_parts();
+        assert_eq!(manifest.inputs.len(), sources.len());
+        assert_eq!(snapshots.len(), sources.len());
+        assert_eq!(manifest.coverage.included, 3);
+        assert_eq!(manifest.exclusions.len(), 1);
+        assert_eq!(manifest.exclusions[0].path, "src/binary.hs");
+        assert_eq!(manifest.exclusions[0].reason, ExclusionReason::Binary);
+        for (path, content, language) in sources {
+            let input = manifest
+                .inputs
+                .iter()
+                .find(|input| input.path == path)
+                .unwrap();
+            assert_eq!(input.class, InputClass::Source);
+            assert_eq!(input.encoding, "utf-8");
+            assert_eq!(input.bytes, u64::try_from(content.len()).unwrap());
+            assert_eq!(input.content_hash, content_hash(content));
+            assert_eq!(snapshots[&input.file].content(), content);
+            assert_eq!(
+                input.language_signals,
+                language
+                    .into_iter()
+                    .map(|language| LanguageSignal {
+                        language: language.to_owned(),
+                        evidence: LanguageEvidence::Extension,
+                    })
+                    .collect::<Vec<_>>()
+            );
+        }
     }
 
     #[test]

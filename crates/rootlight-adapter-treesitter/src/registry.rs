@@ -83,6 +83,8 @@ pub enum GrammarFamily {
     Vba,
     /// Shared classic Visual Basic syntax without a proven VBA or VB6 dialect.
     VisualBasicClassic,
+    /// Haskell written declarations; type checking and class dispatch remain separate.
+    Haskell,
 }
 
 impl GrammarFamily {
@@ -171,7 +173,7 @@ impl GrammarRegistry {
     /// Returns [`RegistryError`] if an SDK label is invalid or a linked grammar
     /// falls outside Tree-sitter's supported ABI interval.
     pub fn audited() -> Result<Self, RegistryError> {
-        let mut descriptors = Vec::with_capacity(35);
+        let mut descriptors = Vec::with_capacity(36);
         for family in [
             GrammarFamily::Rust,
             GrammarFamily::Python,
@@ -208,6 +210,7 @@ impl GrammarRegistry {
             GrammarFamily::Groovy,
             GrammarFamily::Vba,
             GrammarFamily::VisualBasicClassic,
+            GrammarFamily::Haskell,
         ] {
             let language = language_for(family);
             let abi_version = language.abi_version();
@@ -338,6 +341,7 @@ pub(crate) fn language_for(family: GrammarFamily) -> Language {
         GrammarFamily::Perl => ts_parser_perl::LANGUAGE.into(),
         GrammarFamily::Groovy => dekobon_tree_sitter_groovy::LANGUAGE.into(),
         GrammarFamily::Vba | GrammarFamily::VisualBasicClassic => tree_sitter_vba::LANGUAGE.into(),
+        GrammarFamily::Haskell => tree_sitter_haskell::LANGUAGE.into(),
     }
 }
 
@@ -352,6 +356,15 @@ struct GrammarIdentity {
 
 const fn identity_for(family: GrammarFamily) -> GrammarIdentity {
     match family {
+        GrammarFamily::Haskell => GrammarIdentity {
+            language_id: "haskell",
+            grammar_version: "0.23.1",
+            source_package_sha256: "977c51e504548cba13fc27cb5a2edab2124cf6716a1934915d07ab99523b05a4",
+            parser_sha256: "f05f34d3cabb3c4a0397a2ac29d4cf4212f814dec98199042228d1850055db93",
+            scanner_sha256: Some(
+                "b42bc2b8ed15d8ea72dbd5806efa6072115c019b893a00cf1d014f3b9a7abec2",
+            ),
+        },
         GrammarFamily::VisualBasicClassic => GrammarIdentity {
             language_id: "visual-basic-classic",
             ..identity_for(GrammarFamily::Vba)
@@ -696,7 +709,7 @@ mod tests {
     fn registry_contains_each_audited_family_once_with_checked_abi() {
         let registry = GrammarRegistry::audited().expect("audited grammars initialize");
 
-        assert_eq!(registry.descriptors().len(), 35);
+        assert_eq!(registry.descriptors().len(), 36);
         for family in [
             GrammarFamily::Rust,
             GrammarFamily::Python,
@@ -733,6 +746,7 @@ mod tests {
             GrammarFamily::Groovy,
             GrammarFamily::Vba,
             GrammarFamily::VisualBasicClassic,
+            GrammarFamily::Haskell,
         ] {
             let descriptor = registry.get(family).expect("family is registered");
             assert!(
@@ -828,6 +842,7 @@ mod tests {
             (GrammarFamily::Nix, "nix", "tree-sitter-nix"),
             (GrammarFamily::Matlab, "matlab", "tree-sitter-matlab"),
             (GrammarFamily::Vba, "vba", "tree-sitter-vba"),
+            (GrammarFamily::Haskell, "haskell", "tree-sitter-haskell"),
             (GrammarFamily::Perl, "perl", "ts-parser-perl"),
             (
                 GrammarFamily::Groovy,

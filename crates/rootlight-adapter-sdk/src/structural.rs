@@ -220,6 +220,20 @@ pub fn structural_entity_kind(fact: &SyntaxFact) -> Option<EntityKind> {
         SyntaxFactKind::Declaration if label == "elm.port.declaration" => {
             Some(EntityKind::Function)
         }
+        SyntaxFactKind::Declaration
+            if matches!(
+                label,
+                "haskell.data_type.declaration" | "haskell.newtype.declaration"
+            ) =>
+        {
+            Some(EntityKind::Enum)
+        }
+        SyntaxFactKind::Declaration if label == "haskell.class.declaration" => {
+            Some(EntityKind::Trait)
+        }
+        SyntaxFactKind::Declaration if label == "haskell.type_synonym.declaration" => {
+            Some(EntityKind::TypeAlias)
+        }
         SyntaxFactKind::Declaration if label == "agda.data.declaration" => Some(EntityKind::Enum),
         SyntaxFactKind::Declaration
             if matches!(
@@ -357,6 +371,8 @@ pub fn structural_captured_name(text: &str, maximum_bytes: usize) -> Option<&str
 /// unavailable; canonical spelling does not infer runtime binding equivalence.
 /// Scala removes enclosing identifier backticks without changing their contents;
 /// grammar-reviewed symbolic names retain their exact spelling, including `/`.
+/// Haskell terminal names retain exact identifier and operator spelling. Captures
+/// exclude prefix/infix wrappers; this boundary does not infer lexical binding.
 /// Dart removes trivia between qualified name components and additionally retains
 /// its grammar-reviewed division and bracket operators, without resolving receivers.
 /// PowerShell preserves written names, including braced variables, without runtime
@@ -389,6 +405,15 @@ pub fn structural_captured_name_for_language<'a>(
             .or_else(|| structural_captured_name(text, maximum_bytes).map(Cow::Borrowed))
     } else if language == "groovy" {
         crate::groovy_names::canonical_groovy_name(text, maximum_bytes)
+    } else if language == "haskell" {
+        (!text.is_empty()
+            && text.len() <= maximum_bytes
+            && text.chars().all(|ch| {
+                !ch.is_control()
+                    && !ch.is_whitespace()
+                    && !matches!(ch, '(' | ')' | '{' | '}' | '[' | ']' | '`' | '"')
+            }))
+        .then_some(Cow::Borrowed(text))
     } else if language == "scala" {
         let candidate = text.trim();
         if candidate.is_empty() || candidate.len() > maximum_bytes {
@@ -817,6 +842,42 @@ mod tests {
     }
 
     #[test]
+    fn haskell_declaration_kinds_do_not_infer_signature_callability() {
+        use crate::SyntaxKindLabel;
+        use rootlight_ids::FileId;
+        use rootlight_ir::SourceSpan;
+
+        for (syntax, expected) in [
+            ("haskell.data_type.declaration", Some(EntityKind::Enum)),
+            ("haskell.newtype.declaration", Some(EntityKind::Enum)),
+            ("haskell.class.declaration", Some(EntityKind::Trait)),
+            (
+                "haskell.type_synonym.declaration",
+                Some(EntityKind::TypeAlias),
+            ),
+            ("haskell.function.declaration", Some(EntityKind::Function)),
+            ("haskell.variable.declaration", Some(EntityKind::Variable)),
+            (
+                "haskell.constructor.declaration",
+                Some(EntityKind::Constructor),
+            ),
+            ("haskell.field.declaration", Some(EntityKind::Field)),
+            ("haskell.parameter.declaration", Some(EntityKind::Parameter)),
+            ("haskell.signature_name.declaration", None),
+        ] {
+            let fact = SyntaxFact::new(
+                1,
+                None,
+                SyntaxFactKind::Declaration,
+                SourceSpan::new(FileId::from_bytes([3; 20]), 0, 1).unwrap(),
+                0,
+                SyntaxKindLabel::new(syntax).unwrap(),
+            );
+            assert_eq!(structural_entity_kind(&fact), expected, "{syntax}");
+        }
+    }
+
+    #[test]
     fn elm_port_declarations_retain_function_identity() {
         use crate::SyntaxKindLabel;
         use rootlight_ids::FileId;
@@ -1006,6 +1067,29 @@ mod tests {
             );
             assert!(display.len() <= written.len());
         }
+    }
+
+    #[test]
+    fn haskell_terminal_names_preserve_exact_bounded_spelling() {
+        for source in ["name'", "Data.Map.lookup", "/", "/=", ":+", "λ", "⊕"] {
+            assert_eq!(
+                structural_captured_name_for_language("haskell", source, source.len()).as_deref(),
+                Some(source)
+            );
+            assert!(
+                structural_captured_name_for_language("haskell", source, source.len() - 1)
+                    .is_none()
+            );
+        }
+        for source in [
+            "", "`name`", "(+)", "()", "[]", "a b", " name", "name\n", "\"name\"",
+        ] {
+            assert!(
+                structural_captured_name_for_language("haskell", source, 64).is_none(),
+                "{source:?}"
+            );
+        }
+        assert!(structural_captured_name_for_language("rust", "/", 1).is_none());
     }
 
     #[test]

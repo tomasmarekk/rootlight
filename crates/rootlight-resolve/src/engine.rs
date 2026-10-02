@@ -1298,6 +1298,11 @@ pub(crate) fn resolvable_occurrence(occurrence: &OccurrenceRecord) -> bool {
     if occurrence.syntax_kind.starts_with("nix.") {
         return false;
     }
+    // Haskell imports, type classes and local pattern bindings need lexical and
+    // type evidence. Matching a written name cannot establish those targets.
+    if occurrence.syntax_kind.starts_with("haskell.") {
+        return false;
+    }
     // MATLAB applications can index arrays or call functions. Only source-owned
     // primary function files may be offered as uncertain cross-file candidates.
     if occurrence.syntax_kind.starts_with("matlab.") {
