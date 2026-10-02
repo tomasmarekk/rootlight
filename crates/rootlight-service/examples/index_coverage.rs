@@ -16,7 +16,10 @@ use std::{
 };
 
 use rootlight_cancel::Cancellation;
-use rootlight_ir::{FileRecord, OccurrenceTarget, SourceMappingKind, SourceRef, SourceSpan};
+use rootlight_ir::{
+    FileRecord, OccurrenceRecord, OccurrenceTarget, SkippedRegion, SourceMappingKind, SourceRef,
+    SourceSpan,
+};
 use rootlight_runtime::RuntimePaths;
 use rootlight_service::{
     FirstSliceBudget, FirstSliceIndexMode, FirstSliceIndexProgress, FirstSliceService,
@@ -121,8 +124,18 @@ fn main() -> Result<(), Box<dyn Error>> {
         )?;
     } else {
         let report = inspect(&repository, &state, config.as_deref(), mode)?;
-        println!("{}", serde_json::to_string_pretty(&report)?);
+        write_pretty_report(&report, &mut std::io::stdout().lock())?;
     }
+    Ok(())
+}
+
+fn write_pretty_report(
+    report: &serde_json::Value,
+    output: &mut impl Write,
+) -> Result<(), Box<dyn Error>> {
+    serde_json::to_writer_pretty(&mut *output, report)?;
+    output.write_all(b"\n")?;
+    output.flush()?;
     Ok(())
 }
 
@@ -224,15 +237,17 @@ impl DiagnosticSession {
                 Some(cold.generation),
                 &deadline()?,
                 |snapshot| -> Result<_, Box<dyn Error>> {
-                    let mut evidence = binding_proofs::export_binding_proofs(snapshot.document())?;
+                    let mut evidence = binding_proofs::select_report_evidence(snapshot.document())?;
+                    let rows = inspect_files(
+                        snapshot,
+                        service,
+                        repository,
+                        cold.generation,
+                        &mut evidence,
+                    )?;
+                    evidence.finish(snapshot.document())?;
                     Ok((
-                        inspect_files(
-                            snapshot,
-                            service,
-                            repository,
-                            cold.generation,
-                            &mut evidence,
-                        )?,
+                        rows,
                         snapshot.metadata().configuration_hash(),
                         (evidence.provenance, evidence.fact_identities),
                     ))
@@ -253,6 +268,7 @@ impl DiagnosticSession {
             "exported_provenance":exported_provenance,
             "exported_fact_identities":exported_fact_identities,
             "exported_fact_identity_scope":"terminal_source_witnesses_not_semantic_records",
+            "exported_fact_root_scope":"emitted_normalized_files_gaps_matching_occurrences_and_bindings",
             "installed_mcp_qualified":false
         });
         match lifetime {
@@ -353,6 +369,13 @@ fn index_with_timing(
     ))
 }
 
+fn occurrence_matches_gap(site: &OccurrenceRecord, gap: &SkippedRegion) -> bool {
+    site.source.span() == gap.source.span()
+        && site.source.repository() == gap.source.repository()
+        && site.source.generation() == gap.source.generation()
+        && site.source.content_hash() == gap.source.content_hash()
+}
+
 fn inspect_files(
     snapshot: &rootlight_storage::GenerationSnapshot,
     service: &FirstSliceService,
@@ -373,12 +396,12 @@ fn inspect_files(
     }
     let mut verified_containers = BTreeSet::new();
     let mut rows = Vec::new();
-    for file in document.files.iter().chain(
+    for (file, normalized) in document.files.iter().map(|file| (file, true)).chain(
         snapshot
             .source_files()
             .entries()
             .iter()
-            .map(|entry| entry.file()),
+            .map(|entry| (entry.file(), false)),
     ) {
         let source = file
             .evidence
@@ -528,24 +551,23 @@ fn inspect_files(
             .filter(|gap| gap.source.span().file() == file.id)
             .map(|gap| {
                 let mut value = serde_json::to_value(gap)?;
+                evidence.admit_gap(gap);
                 // A callee and its application can share a span but disagree on
                 // resolution. Retain all matches instead of guessing gap ownership.
                 let matching: Vec<_> = sites_by_span
                     .get(&gap.source.span())
                     .into_iter()
                     .flatten()
-                    .filter(|site| {
-                        site.source.repository() == gap.source.repository()
-                            && site.source.generation() == gap.source.generation()
-                            && site.source.content_hash() == gap.source.content_hash()
-                    })
+                    .filter(|site| occurrence_matches_gap(site, gap))
                     .map(|site| {
-                        json!({
+                        let target_provenance = evidence.admit_occurrence(document, site)?;
+                        Ok::<_, Box<dyn Error>>(json!({
                             "id":site.id, "syntax_kind":site.syntax_kind,
-                            "role":site.role, "target":site.target,
-                        })
+                            "role":site.role, "target":site.target, "provenance":site.provenance,
+                            "target_provenance":target_provenance,
+                        }))
                     })
-                    .collect();
+                    .collect::<Result<_, _>>()?;
                 value["matching_occurrences"] = json!(matching);
                 value["source_text"] = gap_text.evidence(
                     usize::try_from(gap.source.span().start_byte())?,
@@ -559,8 +581,12 @@ fn inspect_files(
                 .find_file(reference.span().file())
                 .map(|container| container.path.as_str())
         });
+        if normalized {
+            evidence.admit_file(file);
+        }
         rows.push(json!({
             "file":file,
+            "normalized_proof_status":if normalized { "exported" } else { "unavailable_source_only" },
             "source_exact":live.is_some(),
             "source_read_exact":true,
             "extracted_from":origin,
@@ -593,6 +619,639 @@ fn chunk_end(text: &str, start: usize) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    type ProofKey = (String, String);
+
+    fn inspected_document(repository: &Path, state: &Path) -> rootlight_ir::NormalizedIrDocument {
+        let session = DiagnosticSession::open(repository, state, None, StateMode::Resume).unwrap();
+        let registered = session
+            .service
+            .registered_repository_for_root(repository, &deadline().unwrap())
+            .unwrap()
+            .unwrap();
+        let generation = session
+            .service
+            .repository_status(registered, None)
+            .unwrap()
+            .resolved_generation;
+        session
+            .service
+            .inspect_generation(
+                registered,
+                Some(generation),
+                &deadline().unwrap(),
+                |snapshot| snapshot.document().clone(),
+            )
+            .unwrap()
+    }
+
+    fn emitted_field_roots(
+        report: &serde_json::Value,
+        document: &rootlight_ir::NormalizedIrDocument,
+    ) -> BTreeSet<ProofKey> {
+        let identities: BTreeMap<_, _> = report["exported_fact_identities"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|identity| {
+                (
+                    (
+                        identity["kind"].as_str().unwrap(),
+                        identity["id"].as_str().unwrap(),
+                    ),
+                    identity,
+                )
+            })
+            .collect();
+        let proofs: BTreeMap<_, _> = report["exported_provenance"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|proof| (proof["id"].as_str().unwrap(), proof))
+            .collect();
+        let expected_proofs: BTreeMap<_, _> = document
+            .provenance
+            .iter()
+            .map(|proof| (proof.id.to_string(), serde_json::to_value(proof).unwrap()))
+            .collect();
+        let mut roots = BTreeSet::new();
+        let mut admit = |kind: &str, record: &serde_json::Value, subtype: Option<&str>| {
+            let id = record["id"].as_str().unwrap();
+            let source = record
+                .get("source")
+                .unwrap_or(&record["evidence"]["source"]);
+            let mut expected = json!({
+                "kind":kind, "id":id, "repository":record["repository"],
+                "generation":record["generation"], "source":source,
+            });
+            if let Some(subtype) = subtype {
+                expected["subtype"] = json!(subtype);
+            }
+            assert_eq!(
+                identities[&(kind, id)],
+                &expected,
+                "emitted field identity {kind}:{id}"
+            );
+            let provenance = record["provenance"].as_str().unwrap();
+            assert_eq!(proofs[provenance], &expected_proofs[provenance]);
+            roots.extend([
+                (kind.to_owned(), id.to_owned()),
+                ("fact".to_owned(), provenance.to_owned()),
+            ]);
+        };
+        for row in report["files"].as_array().unwrap() {
+            let file = document
+                .files
+                .iter()
+                .find(|file| json!(file.id) == row["file"]["id"]);
+            if let Some(file) = file {
+                assert_eq!(row["normalized_proof_status"], "exported");
+                assert_eq!(row["file"], serde_json::to_value(file).unwrap());
+                admit("file", &row["file"], None);
+            } else {
+                assert_eq!(row["normalized_proof_status"], "unavailable_source_only");
+                assert!(!identities.contains_key(&("file", row["file"]["id"].as_str().unwrap())));
+                assert!(row["gaps"].as_array().unwrap().is_empty());
+            }
+            for gap in row["gaps"].as_array().unwrap() {
+                let actual = document
+                    .skipped_regions
+                    .iter()
+                    .find(|record| json!(record.id) == gap["id"])
+                    .unwrap();
+                let mut normalized_gap = gap.clone();
+                normalized_gap
+                    .as_object_mut()
+                    .unwrap()
+                    .remove("matching_occurrences");
+                normalized_gap
+                    .as_object_mut()
+                    .unwrap()
+                    .remove("source_text");
+                assert_eq!(normalized_gap, serde_json::to_value(actual).unwrap());
+                admit("fact", &normalized_gap, Some("skipped_region"));
+                for matching in gap["matching_occurrences"].as_array().unwrap() {
+                    let site = document
+                        .occurrences
+                        .iter()
+                        .find(|site| json!(site.id) == matching["id"])
+                        .unwrap();
+                    assert!(occurrence_matches_gap(site, actual));
+                    let targets: &[rootlight_ids::SymbolId] = match &site.target {
+                        OccurrenceTarget::Resolved { symbol } => std::slice::from_ref(symbol),
+                        OccurrenceTarget::Candidates { symbols, .. } => symbols,
+                        OccurrenceTarget::Unresolved { .. } => &[],
+                    };
+                    let target_provenance: Vec<_> = targets
+                        .iter()
+                        .map(|symbol| {
+                            let entity = document
+                                .entities
+                                .iter()
+                                .find(|entity| entity.id == *symbol)
+                                .unwrap();
+                            json!({"symbol":entity.id, "provenance":entity.provenance})
+                        })
+                        .collect();
+                    assert_eq!(
+                        *matching,
+                        json!({
+                            "id":site.id, "syntax_kind":site.syntax_kind, "role":site.role,
+                            "target":site.target, "provenance":site.provenance,
+                            "target_provenance":target_provenance,
+                        })
+                    );
+                    admit(
+                        "fact",
+                        &serde_json::to_value(site).unwrap(),
+                        Some("occurrence"),
+                    );
+                    for symbol in targets {
+                        let entity = document
+                            .entities
+                            .iter()
+                            .find(|entity| entity.id == *symbol)
+                            .unwrap();
+                        admit("entity", &serde_json::to_value(entity).unwrap(), None);
+                    }
+                }
+            }
+        }
+        roots
+    }
+
+    fn artifact_field_roots(report: &serde_json::Value) -> BTreeSet<ProofKey> {
+        let mut roots = BTreeSet::new();
+        let mut admit = |kind: &str, id: &serde_json::Value, provenance: &serde_json::Value| {
+            roots.extend([
+                (kind.to_owned(), id.as_str().unwrap().to_owned()),
+                ("fact".to_owned(), provenance.as_str().unwrap().to_owned()),
+            ]);
+        };
+        for row in report["files"].as_array().unwrap() {
+            if row["normalized_proof_status"] == "exported" {
+                admit("file", &row["file"]["id"], &row["file"]["provenance"]);
+            }
+            for gap in row["gaps"].as_array().unwrap() {
+                admit("fact", &gap["id"], &gap["provenance"]);
+                for matching in gap["matching_occurrences"].as_array().unwrap() {
+                    admit("fact", &matching["id"], &matching["provenance"]);
+                    let targets: Vec<_> = match matching["target"]["kind"].as_str().unwrap() {
+                        "resolved" => vec![matching["target"]["symbol"].as_str().unwrap()],
+                        "candidates" => matching["target"]["symbols"]
+                            .as_array()
+                            .unwrap()
+                            .iter()
+                            .map(|id| id.as_str().unwrap())
+                            .collect(),
+                        "unresolved" => Vec::new(),
+                        kind => panic!("unexpected target kind: {kind}"),
+                    };
+                    let witnesses = matching["target_provenance"].as_array().unwrap();
+                    assert_eq!(witnesses.len(), targets.len());
+                    for (witness, symbol) in witnesses.iter().zip(targets) {
+                        assert_eq!(witness["symbol"], symbol);
+                        admit("entity", &witness["symbol"], &witness["provenance"]);
+                    }
+                }
+            }
+        }
+        roots
+    }
+
+    fn assert_exact_proof_closure(
+        report: &serde_json::Value,
+        document: &rootlight_ir::NormalizedIrDocument,
+        mut pending: BTreeSet<ProofKey>,
+    ) {
+        let proofs: BTreeMap<_, _> = report["exported_provenance"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|proof| (proof["id"].as_str().unwrap().to_owned(), proof))
+            .collect();
+        let identities: BTreeMap<_, _> = report["exported_fact_identities"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|identity| {
+                (
+                    (
+                        identity["kind"].as_str().unwrap().to_owned(),
+                        identity["id"].as_str().unwrap().to_owned(),
+                    ),
+                    identity,
+                )
+            })
+            .collect();
+        let expected_proofs: BTreeMap<_, _> = document
+            .provenance
+            .iter()
+            .map(|proof| (proof.id.to_string(), serde_json::to_value(proof).unwrap()))
+            .collect();
+        assert_eq!(
+            proofs.len(),
+            report["exported_provenance"].as_array().unwrap().len()
+        );
+        assert_eq!(
+            identities.len(),
+            report["exported_fact_identities"].as_array().unwrap().len()
+        );
+        let mut visited = BTreeSet::new();
+        while let Some(key) = pending.pop_first() {
+            if !visited.insert(key.clone()) {
+                continue;
+            }
+            if key.0 == "fact"
+                && let Some(proof) = proofs.get(&key.1)
+            {
+                assert_eq!(*proof, &expected_proofs[&key.1]);
+                for parent in proof["derivation_parents"].as_array().unwrap() {
+                    pending.insert((
+                        parent["kind"].as_str().unwrap().to_owned(),
+                        parent["id"].as_str().unwrap().to_owned(),
+                    ));
+                }
+                for source in proof["input_sources"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .chain(proof["evidence_sources"].as_array().unwrap())
+                {
+                    pending.insert((
+                        "file".to_owned(),
+                        source["span"]["file"].as_str().unwrap().to_owned(),
+                    ));
+                }
+            } else {
+                let identity = identities
+                    .get(&key)
+                    .expect("all terminal source witnesses are exported");
+                if !identity["source"].is_null() {
+                    pending.insert((
+                        "file".to_owned(),
+                        identity["source"]["span"]["file"]
+                            .as_str()
+                            .unwrap()
+                            .to_owned(),
+                    ));
+                }
+            }
+        }
+        let exported: BTreeSet<_> = identities
+            .keys()
+            .cloned()
+            .chain(proofs.keys().map(|id| ("fact".to_owned(), id.clone())))
+            .collect();
+        assert_eq!(
+            visited, exported,
+            "exact closure of admitted report fields, with no extra roots"
+        );
+    }
+
+    #[test]
+    fn emitted_gap_fields_export_exact_roots_without_binding_records() {
+        let directory = tempfile::tempdir().unwrap();
+        let repository = directory.path().join("repository");
+        fs::create_dir(&repository).unwrap();
+        fs::write(repository.join("Module.bas"), "Attribute VB_Name = \"Module\"\nSub Visit(ByVal required As Long)\nEnd Sub\nSub Run()\nVisit\nEnd Sub\n").unwrap();
+        fs::write(repository.join("notes.asset"), "unknown language source\n").unwrap();
+        let state = directory.path().join("state");
+        let report = inspect(&repository, &state, None, StateMode::Fresh).unwrap();
+        assert_eq!(
+            report["exported_fact_root_scope"],
+            "emitted_normalized_files_gaps_matching_occurrences_and_bindings"
+        );
+        assert_eq!(report["full_semantic_completeness_proven"], false);
+        assert_eq!(report["installed_mcp_qualified"], false);
+        for row in report["files"].as_array().unwrap() {
+            assert!(row["external_bindings"].as_array().unwrap().is_empty());
+            assert!(row["supplemental_calls"].as_array().unwrap().is_empty());
+            assert_eq!(row["source_read_exact"], true);
+        }
+        let module = report["files"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|row| row["file"]["path"] == "Module.bas")
+            .unwrap();
+        let matches = module["gaps"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|gap| gap["source_text"]["text"] == "Visit")
+            .unwrap()["matching_occurrences"]
+            .as_array()
+            .unwrap();
+        assert_eq!(matches.len(), 2);
+        assert_eq!(matches[0]["syntax_kind"], "vba.application.reference");
+        assert_eq!(matches[0]["target"]["kind"], "unresolved");
+        assert_eq!(
+            matches[1]["syntax_kind"],
+            "vba.invoked_identifier.reference"
+        );
+        assert_eq!(matches[1]["role"], "call_site");
+        assert_eq!(matches[1]["target"]["kind"], "resolved");
+        assert_ne!(matches[0]["id"], matches[1]["id"]);
+        assert_ne!(matches[0]["role"], matches[1]["role"]);
+        assert!(matches.iter().all(|site| site["provenance"].is_string()));
+        assert_eq!(matches[0]["target_provenance"], json!([]));
+        assert_eq!(matches[1]["target_provenance"].as_array().unwrap().len(), 1);
+        assert_eq!(
+            matches[1]["target_provenance"][0]["symbol"],
+            matches[1]["target"]["symbol"]
+        );
+        let retained = report["files"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|row| row["file"]["path"] == "notes.asset")
+            .unwrap();
+        assert_eq!(retained["normalized_proof_status"], "exported");
+        let document = inspected_document(&repository, &state);
+        let notes = document
+            .files
+            .iter()
+            .find(|file| file.path == "notes.asset")
+            .unwrap();
+        assert_eq!(retained["file"], serde_json::to_value(notes).unwrap());
+        assert!(document.files.iter().all(|file| file.language != "haskell"));
+        let roots = emitted_field_roots(&report, &document);
+        assert_eq!(roots, artifact_field_roots(&report));
+        assert!(!roots.is_empty());
+        assert!(!report["exported_provenance"].as_array().unwrap().is_empty());
+        assert_exact_proof_closure(&report, &document, artifact_field_roots(&report));
+        let restored = inspect(&repository, &state, None, StateMode::Resume).unwrap();
+        for field in [
+            "files",
+            "exported_provenance",
+            "exported_fact_identities",
+            "exported_fact_root_scope",
+        ] {
+            assert_eq!(report[field], restored[field], "reopened {field}");
+        }
+    }
+
+    #[test]
+    fn exact_gap_matching_rejects_other_spans_owners_and_content() {
+        let directory = tempfile::tempdir().unwrap();
+        let repository = directory.path().join("repository");
+        fs::create_dir(&repository).unwrap();
+        fs::write(
+            repository.join("Module.bas"),
+            "Attribute VB_Name = \"Module\"\nSub Run()\nMissing\nEnd Sub\n",
+        )
+        .unwrap();
+        let state = directory.path().join("state");
+        let report = inspect(&repository, &state, None, StateMode::Fresh).unwrap();
+        let document = inspected_document(&repository, &state);
+        let gap = document
+            .skipped_regions
+            .iter()
+            .find(|gap| {
+                document
+                    .occurrences
+                    .iter()
+                    .any(|site| occurrence_matches_gap(site, gap))
+            })
+            .unwrap();
+        let site = document
+            .occurrences
+            .iter()
+            .find(|site| occurrence_matches_gap(site, gap))
+            .unwrap();
+        assert!(occurrence_matches_gap(site, gap));
+        let source = &site.source;
+        let span = source.span();
+        let other_repository = rootlight_ids::RepositoryId::from_bytes([201; 16]);
+        let other_generation = rootlight_ids::GenerationId::from_bytes([202; 20]);
+        let other_file = rootlight_ids::FileId::from_bytes([203; 20]);
+        for changed in [
+            SourceRef::new(
+                other_repository,
+                source.generation(),
+                span,
+                source.content_hash(),
+                None,
+            ),
+            SourceRef::new(
+                source.repository(),
+                other_generation,
+                span,
+                source.content_hash(),
+                None,
+            ),
+            SourceRef::new(
+                source.repository(),
+                source.generation(),
+                span,
+                rootlight_ids::content_hash(b"other"),
+                None,
+            ),
+            SourceRef::new(
+                source.repository(),
+                source.generation(),
+                SourceSpan::new(other_file, span.start_byte(), span.end_byte()).unwrap(),
+                source.content_hash(),
+                None,
+            ),
+            SourceRef::new(
+                source.repository(),
+                source.generation(),
+                SourceSpan::new(span.file(), span.start_byte(), span.end_byte() + 1).unwrap(),
+                source.content_hash(),
+                None,
+            ),
+        ] {
+            let mut changed_site = site.clone();
+            changed_site.source = changed;
+            assert!(!occurrence_matches_gap(&changed_site, gap));
+        }
+        assert_exact_proof_closure(&report, &document, emitted_field_roots(&report, &document));
+    }
+
+    #[test]
+    fn candidate_field_targets_root_actual_entities_and_missing_targets_fail() {
+        let directory = tempfile::tempdir().unwrap();
+        let repository = directory.path().join("repository");
+        fs::create_dir(&repository).unwrap();
+        fs::write(
+            repository.join("value.rs"),
+            "pub fn first() {}\npub fn second() {}\n",
+        )
+        .unwrap();
+        let state = directory.path().join("state");
+        inspect(&repository, &state, None, StateMode::Fresh).unwrap();
+        let mut document = inspected_document(&repository, &state);
+        let targets: Vec<_> = document
+            .entities
+            .iter()
+            .take(2)
+            .map(|entity| entity.id)
+            .collect();
+        assert_eq!(targets.len(), 2);
+        let mut site = document.occurrences.first().unwrap().clone();
+        site.target = OccurrenceTarget::Candidates {
+            symbols: targets.clone(),
+            total_count: 2,
+            completeness: rootlight_ir::CoverageStatus::Complete,
+        };
+        site.id = rootlight_ir::derive_occurrence_record_id(&site).unwrap();
+        document.occurrences.push(site.clone());
+        let mut evidence = binding_proofs::select_report_evidence(&document).unwrap();
+        let witnesses = evidence.admit_occurrence(&document, &site).unwrap();
+        let expected: Vec<_> = targets
+            .iter()
+            .map(|symbol| {
+                let entity = document
+                    .entities
+                    .iter()
+                    .find(|entity| entity.id == *symbol)
+                    .unwrap();
+                json!({"symbol":entity.id, "provenance":entity.provenance})
+            })
+            .collect();
+        assert_eq!(
+            witnesses, expected,
+            "candidate order and actual provenance linkage"
+        );
+        evidence.finish(&document).unwrap();
+        for id in &targets {
+            let entity = document
+                .entities
+                .iter()
+                .find(|entity| entity.id == *id)
+                .unwrap();
+            assert!(
+                evidence
+                    .fact_identities
+                    .iter()
+                    .any(|identity| identity["kind"] == "entity" && identity["id"] == json!(id))
+            );
+            assert!(
+                evidence
+                    .provenance
+                    .iter()
+                    .any(|proof| proof["id"] == json!(entity.provenance))
+            );
+        }
+        document.entities.retain(|entity| entity.id != targets[0]);
+        let failure = binding_proofs::select_report_evidence(&document)
+            .unwrap()
+            .admit_occurrence(&document, &site)
+            .err()
+            .unwrap();
+        assert_eq!(
+            failure.to_string(),
+            "diagnostic occurrence has no target entity"
+        );
+    }
+
+    #[test]
+    fn normalized_file_field_proofs_reject_missing_owners_and_source_drift() {
+        let directory = tempfile::tempdir().unwrap();
+        let repository = directory.path().join("repository");
+        fs::create_dir(&repository).unwrap();
+        fs::write(repository.join("value.rs"), "pub fn value() {}\n").unwrap();
+        let state = directory.path().join("state");
+        inspect(&repository, &state, None, StateMode::Fresh).unwrap();
+        let original = inspected_document(&repository, &state);
+        let file = original.files.first().unwrap();
+        let check = |document: &rootlight_ir::NormalizedIrDocument| {
+            let mut evidence = binding_proofs::select_report_evidence(document).unwrap();
+            evidence.admit_file(file);
+            evidence.finish(document).err().unwrap().to_string()
+        };
+        let mut missing = original.clone();
+        missing
+            .provenance
+            .retain(|proof| proof.id != file.provenance);
+        assert_eq!(
+            check(&missing),
+            "external binding proof has a missing parent"
+        );
+        let mut duplicate = original.clone();
+        duplicate.files.push(file.clone());
+        assert_eq!(
+            check(&duplicate),
+            "external binding proof has a duplicate identity"
+        );
+        let mut foreign = original.clone();
+        foreign
+            .provenance
+            .iter_mut()
+            .find(|proof| proof.id == file.provenance)
+            .unwrap()
+            .generation = rootlight_ids::GenerationId::from_bytes([204; 20]);
+        assert_eq!(
+            check(&foreign),
+            "external binding proof belongs to a different generation"
+        );
+        let mut drift = original.clone();
+        let changed = drift
+            .files
+            .iter_mut()
+            .find(|entry| entry.id == file.id)
+            .unwrap();
+        let source = changed.evidence.source.as_ref().unwrap();
+        changed.evidence.source = Some(SourceRef::new(
+            source.repository(),
+            source.generation(),
+            source.span(),
+            rootlight_ids::content_hash(b"other"),
+            None,
+        ));
+        assert_eq!(
+            check(&drift),
+            "external binding proof source differs from its file identity"
+        );
+        let mut oversized = original.clone();
+        let changed = oversized
+            .files
+            .iter_mut()
+            .find(|entry| entry.id == file.id)
+            .unwrap();
+        let source = changed.evidence.source.as_ref().unwrap();
+        changed.evidence.source = Some(SourceRef::new(
+            source.repository(),
+            source.generation(),
+            SourceSpan::new(file.id, 0, file.byte_length + 1).unwrap(),
+            source.content_hash(),
+            None,
+        ));
+        assert_eq!(
+            check(&oversized),
+            "external binding proof source differs from its file identity"
+        );
+    }
+
+    #[test]
+    fn pretty_report_stream_preserves_json_and_propagates_write_errors() {
+        let report = json!({"source":"λ", "values":[1, null, true]});
+        let mut output = Vec::new();
+        write_pretty_report(&report, &mut output).unwrap();
+        assert_eq!(
+            String::from_utf8(output.clone()).unwrap(),
+            format!("{}\n", serde_json::to_string_pretty(&report).unwrap())
+        );
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&output).unwrap(),
+            report
+        );
+        struct RejectWrite;
+        impl Write for RejectWrite {
+            fn write(&mut self, _: &[u8]) -> std::io::Result<usize> {
+                Err(std::io::Error::other("rejected write"))
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let failure = write_pretty_report(&report, &mut RejectWrite)
+            .err()
+            .unwrap();
+        assert!(failure.to_string().contains("rejected write"));
+    }
 
     #[test]
     fn external_function_evidence_distinguishes_references_and_calls() {
@@ -784,7 +1443,9 @@ mod tests {
             .unwrap()
             .derivation_parents
             .push(rootlight_ir::FactRef::Fact(missing));
-        let failure = binding_proofs::export_binding_proofs(&document)
+        let failure = binding_proofs::select_report_evidence(&document)
+            .unwrap()
+            .finish(&document)
             .err()
             .unwrap();
         assert_eq!(
@@ -800,7 +1461,9 @@ mod tests {
             .retain(|parent| *parent != rootlight_ir::FactRef::Fact(missing));
         let duplicate = document.occurrences.first().unwrap().clone();
         document.occurrences.push(duplicate);
-        let failure = binding_proofs::export_binding_proofs(&document)
+        let failure = binding_proofs::select_report_evidence(&document)
+            .unwrap()
+            .finish(&document)
             .err()
             .unwrap();
         assert_eq!(
@@ -1047,6 +1710,11 @@ mod tests {
             assert_eq!(proofs[id], &expected_proofs[id], "root provenance {name}");
             pending.insert(("fact".to_owned(), id.to_owned()));
         }
+        assert_eq!(
+            emitted_field_roots(&report, &document),
+            artifact_field_roots(&report)
+        );
+        pending.extend(artifact_field_roots(&report));
         let mut visited = BTreeSet::new();
         while let Some(key) = pending.pop_first() {
             if !visited.insert(key.clone()) {

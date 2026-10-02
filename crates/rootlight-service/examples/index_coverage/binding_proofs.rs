@@ -1,4 +1,4 @@
-//! Selects report bindings and exports their deduplicated provenance closure.
+//! Roots emitted diagnostic fields and their deduplicated provenance closure.
 //! Base fact identities are terminal source witnesses, not copies of their
 //! semantic records; complete proof records retain their derivation parents.
 
@@ -7,10 +7,11 @@ use std::{
     error::Error,
 };
 
-use rootlight_ids::{FileId, GenerationId, RepositoryId};
+use rootlight_ids::{FactId, FileId, GenerationId, RepositoryId};
 use rootlight_ir::{
-    EntityKind, FactRef, NormalizedIrDocument, OccurrenceRole, OccurrenceTarget, ProvenanceRecord,
-    RelationEndpoint, RelationPredicate, SourceRef,
+    EntityKind, FactRef, FileRecord, NormalizedIrDocument, OccurrenceRecord, OccurrenceRole,
+    OccurrenceTarget, ProvenanceRecord, RelationEndpoint, RelationPredicate, SkippedRegion,
+    SourceRef,
 };
 use serde_json::{Value, json};
 
@@ -34,6 +35,106 @@ pub(super) struct BindingEvidence {
     pub(super) supplemental_calls: BTreeMap<FileId, Vec<Value>>,
     pub(super) provenance: Vec<Value>,
     pub(super) fact_identities: Vec<Value>,
+    roots: BTreeSet<FactRef>,
+}
+
+impl BindingEvidence {
+    /// Roots a normalized file and its actual provenance after row admission.
+    pub(super) fn admit_file(&mut self, file: &FileRecord) {
+        self.admit(FactRef::File(file.id), file.provenance);
+    }
+
+    /// Roots an emitted normalized gap and its actual provenance.
+    pub(super) fn admit_gap(&mut self, gap: &SkippedRegion) {
+        self.admit(FactRef::Fact(gap.id), gap.provenance);
+    }
+
+    /// Roots an exact occurrence and returns its printed target/provenance pairs.
+    ///
+    /// # Errors
+    /// Rejects missing targets or allocation failure for their bounded witnesses.
+    pub(super) fn admit_occurrence(
+        &mut self,
+        document: &NormalizedIrDocument,
+        occurrence: &OccurrenceRecord,
+    ) -> Result<Vec<Value>, Box<dyn Error>> {
+        self.admit(FactRef::Fact(occurrence.id), occurrence.provenance);
+        let targets: &[rootlight_ids::SymbolId] = match &occurrence.target {
+            OccurrenceTarget::Resolved { symbol } => std::slice::from_ref(symbol),
+            OccurrenceTarget::Candidates { symbols, .. } => symbols,
+            OccurrenceTarget::Unresolved { .. } => &[],
+        };
+        let mut target_provenance = Vec::new();
+        target_provenance.try_reserve_exact(targets.len())?;
+        for symbol in targets {
+            let target = document
+                .entities
+                .binary_search_by_key(symbol, |entity| entity.id)
+                .ok()
+                .and_then(|index| document.entities.get(index))
+                .ok_or("diagnostic occurrence has no target entity")?;
+            self.admit(FactRef::Entity(target.id), target.provenance);
+            target_provenance.push(json!({"symbol":target.id, "provenance":target.provenance}));
+        }
+        Ok(target_provenance)
+    }
+
+    fn admit(&mut self, identity: FactRef, provenance: FactId) {
+        // Base identities are terminal witnesses. Root their actual provenance
+        // explicitly rather than pretending the terminal record contains it.
+        self.roots.extend([identity, FactRef::Fact(provenance)]);
+    }
+
+    /// Finalizes the complete proof closure after all emitted fields are admitted.
+    ///
+    /// # Errors
+    /// Rejects duplicate identities, missing parents, foreign owners, and sources
+    /// whose identity or byte range differs from the inspected generation.
+    pub(super) fn finish(&mut self, document: &NormalizedIrDocument) -> Result<(), Box<dyn Error>> {
+        let mut pending = std::mem::take(&mut self.roots);
+        if pending.is_empty() {
+            return Ok(());
+        }
+        let nodes = index_nodes(document)?;
+        let mut visited = BTreeSet::new();
+        // Each typed snapshot identity is admitted once. Cyclic or shared input
+        // references cannot grow the walk beyond the finite inspected snapshot.
+        while let Some(reference) = pending.pop_first() {
+            if !visited.insert(reference) {
+                continue;
+            }
+            match nodes
+                .get(&reference)
+                .ok_or("external binding proof has a missing parent")?
+            {
+                Node::Proof(proof) => {
+                    check_owner(document, proof.repository, proof.generation)?;
+                    pending.extend(proof.derivation_parents.iter().copied());
+                    for source in proof.input_sources.iter().chain(&proof.evidence_sources) {
+                        check_source(document, source)?;
+                        pending.insert(FactRef::File(source.span().file()));
+                    }
+                    self.provenance.push(serde_json::to_value(proof)?);
+                }
+                Node::Identity(identity) => {
+                    check_owner(document, identity.repository, identity.generation)?;
+                    if let Some(source) = identity.source {
+                        check_source(document, source)?;
+                        pending.insert(FactRef::File(source.span().file()));
+                    }
+                    let mut value = serde_json::to_value(reference)?;
+                    value["repository"] = json!(identity.repository);
+                    value["generation"] = json!(identity.generation);
+                    value["source"] = json!(identity.source);
+                    if let Some(subtype) = identity.subtype {
+                        value["subtype"] = json!(subtype);
+                    }
+                    self.fact_identities.push(value);
+                }
+            }
+        }
+        Ok(())
+    }
 }
 
 struct SelectedBindings {
@@ -42,70 +143,28 @@ struct SelectedBindings {
     roots: BTreeSet<FactRef>,
 }
 
-/// Returns admitted external bindings and supplemental calls with their proofs.
+/// Selects binding records before emitted file fields add their proof roots.
 ///
-/// Record selection and proof roots share one pass. Reachable provenance is
-/// complete; base identities remain compact terminal source witnesses.
+/// Binding selection and its roots share one pass. Call `finish` only after
+/// admitting normalized files, gaps, and their exact matching occurrences.
 ///
 /// # Errors
-/// Rejects duplicate identities, missing parents, foreign owners, and sources
-/// whose identity or byte range differs from the inspected generation.
-pub(super) fn export_binding_proofs(
+/// Rejects binding records without their required target, relation or provenance.
+pub(super) fn select_report_evidence(
     document: &NormalizedIrDocument,
 ) -> Result<BindingEvidence, Box<dyn Error>> {
     let SelectedBindings {
         external_bindings,
         supplemental_calls,
-        roots: mut pending,
+        roots,
     } = select_bindings(document)?;
-    let mut evidence = BindingEvidence {
+    Ok(BindingEvidence {
         external_bindings,
         supplemental_calls,
         provenance: Vec::new(),
         fact_identities: Vec::new(),
-    };
-    if pending.is_empty() {
-        return Ok(evidence);
-    }
-    let nodes = index_nodes(document)?;
-    let mut visited = BTreeSet::new();
-    // Each typed snapshot identity is admitted once. Cyclic or shared input
-    // references cannot grow the walk beyond the finite inspected snapshot.
-    while let Some(reference) = pending.pop_first() {
-        if !visited.insert(reference) {
-            continue;
-        }
-        match nodes
-            .get(&reference)
-            .ok_or("external binding proof has a missing parent")?
-        {
-            Node::Proof(proof) => {
-                check_owner(document, proof.repository, proof.generation)?;
-                pending.extend(proof.derivation_parents.iter().copied());
-                for source in proof.input_sources.iter().chain(&proof.evidence_sources) {
-                    check_source(document, source)?;
-                    pending.insert(FactRef::File(source.span().file()));
-                }
-                evidence.provenance.push(serde_json::to_value(proof)?);
-            }
-            Node::Identity(identity) => {
-                check_owner(document, identity.repository, identity.generation)?;
-                if let Some(source) = identity.source {
-                    check_source(document, source)?;
-                    pending.insert(FactRef::File(source.span().file()));
-                }
-                let mut value = serde_json::to_value(reference)?;
-                value["repository"] = json!(identity.repository);
-                value["generation"] = json!(identity.generation);
-                value["source"] = json!(identity.source);
-                if let Some(subtype) = identity.subtype {
-                    value["subtype"] = json!(subtype);
-                }
-                evidence.fact_identities.push(value);
-            }
-        }
-    }
-    Ok(evidence)
+        roots,
+    })
 }
 
 fn select_bindings(document: &NormalizedIrDocument) -> Result<SelectedBindings, Box<dyn Error>> {
