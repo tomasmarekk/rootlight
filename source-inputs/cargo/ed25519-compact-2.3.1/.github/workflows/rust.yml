@@ -1,0 +1,26 @@
+name: GitHub CI
+
+on:
+  push:
+    branches: [ master ]
+  pull_request:
+    branches: [ master ]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+
+    runs-on: ubuntu-latest
+
+    steps:
+    - uses: actions/checkout@v2
+    - name: Build
+      run: cargo test --verbose
+    - name: Build with nostd
+      run: cargo build --verbose --no-default-features
+    - name: Build with extra features
+      run: cargo test --verbose --features=pem,traits,self-verify,blind-keys,opt_size
+    - name: Build without signatures
+      run: cargo build --verbose --features=disable-signatures

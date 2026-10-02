@@ -71,6 +71,9 @@ jobs:
           python scripts/test_publish_npm_packages.py
           python scripts/test_verify_installed_web.py
           python scripts/test_verify_npm_install.py
+          python scripts/test_verify_cargo_source_bundle.py
+          python scripts/test_prepare_rust_source_bundle.py
+          python scripts/test_source_bundle_gate.py
           node --check packaging/npm/rootlight.mjs
           node --check packaging/npm/rootlight-mcp.mjs
           node --check packaging/npm/run-native.mjs
@@ -756,6 +759,8 @@ jobs:
             > artifacts/osv-report.json
       - name: Secret scan
         run: gitleaks git --redact=100 --no-banner --no-color --log-level warn .
+      - name: Verify exact upstream secret exceptions
+        run: python scripts/test_gitleaks_policy.py
       - name: Security negative controls
         run: bash scripts/policy-negative-controls.sh
       - name: Unsafe inventory
@@ -880,12 +885,29 @@ jobs:
           persist-credentials: false
       - name: Install pinned Rust
         run: rustup show active-toolchain
-      - name: Fetch locked inputs without compiling project code
+      - name: Export complete versioned Rust sources without acquisition
         run: bash scripts/prepare-offline.sh
-      - name: Build and test after kernel-enforced egress denial
+      - name: Restore portable sources and create empty build caches
         run: |
+          mkdir "$RUNNER_TEMP/rootlight-restored-rust-sources"
+          tar -xzf target/rust-source-bundle/rootlight-rust-sources.tar.gz \
+            -C "$RUNNER_TEMP/rootlight-restored-rust-sources"
+          mkdir "$RUNNER_TEMP/rootlight-empty-cargo" "$RUNNER_TEMP/rootlight-empty-target"
+      - name: Build and test restored sources after kernel-enforced egress denial
+        run: |
+          cd "$RUNNER_TEMP/rootlight-restored-rust-sources/rootlight"
           sudo RUNNER_HOME="$HOME" RUNNER_PATH="$PATH" \
+            RUNNER_CARGO_HOME="$RUNNER_TEMP/rootlight-empty-cargo" \
+            RUNNER_TARGET_DIR="$RUNNER_TEMP/rootlight-empty-target" \
             bash scripts/run-in-network-namespace.sh scripts/run-offline-tests.sh
+      - name: Upload reviewed Rust source bundle
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: rootlight-rust-source-bundle
+          path: target/rust-source-bundle/rootlight-rust-sources.tar.gz
+          if-no-files-found: error
+          retention-days: 7
+          overwrite: false
 
   parser-evidence:
     name: parser fallback evidence / linux

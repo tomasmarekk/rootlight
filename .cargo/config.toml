@@ -3,3 +3,10 @@ xtask = "run --quiet --package xtask --"
 
 [net]
 git-fetch-with-cli = true
+offline = true
+
+[source.crates-io]
+replace-with = "rootlight-local-sources"
+
+[source.rootlight-local-sources]
+directory = "source-inputs/cargo"

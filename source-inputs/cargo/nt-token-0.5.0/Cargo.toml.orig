@@ -1,0 +1,28 @@
+[package]
+name = "nt-token"
+version = "0.5.0"
+edition = "2024"
+authors = ["Mack Straight <mack@str.rs>"]
+license = "MIT"
+repository = "https://github.com/eiz/nt-token"
+documentation = "https://docs.rs/nt-token"
+homepage = "https://github.com/eiz/nt-token"
+description = "Ergonomic wrapper for Windows NT access tokens"
+
+# Instruct docs.rs to build documentation using the Windows MSVC target,
+# since this crate is Windows-only.
+[package.metadata.docs.rs]
+targets = ["x86_64-pc-windows-msvc"]
+
+[dependencies]
+windows = { version = "0.61", features = [
+     "Win32_Foundation",
+     "Win32_Security",
+     "Win32_Security_Authorization",
+     "Win32_System_Threading",
+     "Win32_System_Memory",
+     "Win32_System_SystemServices",
+] }
+
+[dev-dependencies]
+once_cell = "1"

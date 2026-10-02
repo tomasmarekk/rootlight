@@ -1,0 +1,66 @@
+name: Rust
+
+on:
+  push:
+    branches: [master]
+  pull_request: null
+
+jobs:
+
+  # On Windows, make sure that we work across all Rust versions
+  # On Linux, just make sure nothing goes catastrophically wrong
+  test:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        include:
+          - os: windows-latest
+            rust: stable
+          - os: windows-latest
+            rust: beta
+          - os: windows-latest
+            rust: nightly
+          - os: ubuntu-latest
+            rust: stable
+    steps:
+      - uses: actions/checkout@v2
+      - uses: actions-rs/toolchain@v1
+        with:
+          profile: minimal
+          toolchain: ${{ matrix.rust }}
+          override: true
+      - uses: actions-rs/cargo@v1
+        with:
+          command: test
+
+  # Check rustfmt status
+  fmt:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v2
+      - uses: actions-rs/toolchain@v1
+        with:
+          profile: minimal
+          toolchain: stable
+          override: true
+          components: 'rustfmt'
+      - uses: actions-rs/cargo@v1
+        with:
+          command: fmt
+          args: '--all -- --check'
+
+  # Lint with a full-strength clippy
+  clippy:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v2
+      - uses: actions-rs/toolchain@v1
+        with:
+          profile: minimal
+          toolchain: stable
+          override: true
+          components: 'clippy'
+      - uses: actions-rs/cargo@v1
+        with:
+          command: clippy
+          args: '-- -D warnings'

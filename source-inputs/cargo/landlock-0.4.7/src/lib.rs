@@ -1,0 +1,800 @@
+// SPDX-License-Identifier: Apache-2.0 OR MIT
+
+//! Landlock is a security feature available since Linux 5.13.
+//! The goal is to enable to restrict ambient rights
+//! (e.g., global filesystem access)
+//! for a set of processes by creating safe security sandboxes as new security layers
+//! in addition to the existing system-wide access-controls.
+//! This kind of sandbox is expected to help mitigate the security impact of bugs,
+//! unexpected or malicious behaviors in applications.
+//! Landlock empowers any process, including unprivileged ones, to securely restrict themselves.
+//! More information about Landlock can be found in the [official website](https://landlock.io).
+//!
+//! This crate provides a safe abstraction for the Landlock system calls, along with some helpers.
+//!
+//! Minimum Supported Rust Version (MSRV): 1.71
+//!
+//! # Use cases
+//!
+//! This crate is especially useful to protect users' data by sandboxing:
+//! * trusted applications dealing with potentially malicious data
+//!   (e.g., complex file format, network request) that could exploit security vulnerabilities;
+//! * sandbox managers, container runtimes or shells launching untrusted applications.
+//!
+//! # Examples
+//!
+//! A simple example can be found with the [`path_beneath_rules()`] helper.
+//! More complex examples can be found with the [`Ruleset` documentation](Ruleset)
+//! and the [sandboxer example](https://github.com/landlock-lsm/rust-landlock/blob/master/examples/sandboxer.rs).
+//!
+//! # Current limitations
+//!
+//! This crate exposes the Landlock features available as of Linux 7.1
+//! (Landlock [ABI v9](ABI::V9))
+//! and then inherits some [kernel limitations](https://www.kernel.org/doc/html/latest/userspace-api/landlock.html#current-limitations)
+//! that will be addressed with future kernel releases
+//! (e.g., arbitrary mounts are always denied).
+//!
+//! # Compatibility
+//!
+//! Types defined in this crate are designed to enable the strictest Landlock configuration
+//! for the given kernel on which the program runs.
+//! In the default [best-effort](CompatLevel::BestEffort) mode,
+//! [`Ruleset`] will determine compatibility
+//! with the intersection of the currently running kernel's features
+//! and those required by the caller.
+//! This way, callers can distinguish between
+//! Landlock compatibility issues inherent to the current system
+//! (e.g., file names that don't exist)
+//! and misconfiguration that should be fixed in the program
+//! (e.g., empty or inconsistent access rights).
+//! [`RulesetError`] identifies such kind of errors.
+//!
+//! With [`set_compatibility(CompatLevel::BestEffort)`](Compatible::set_compatibility),
+//! users of the crate may mark Landlock features that are deemed required
+//! and other features that may be downgraded to use lower security on systems
+//! where they can't be enforced.
+//! It is discouraged to compare the system's provided [Landlock ABI](ABI) version directly,
+//! as it is difficult to track detailed ABI differences
+//! which are handled thanks to the [`Compatible`] trait.
+//!
+//! To make it easier to migrate to a new version of this library,
+//! we use the builder pattern
+//! and designed objects to require the minimal set of method arguments.
+//! Most `enum` are marked as `non_exhaustive` to enable backward-compatible evolutions.
+//!
+//! ## Test strategy
+//!
+//! Developers should test their sandboxed applications
+//! with a kernel that supports all requested Landlock features
+//! and check that [`RulesetCreated::restrict_self()`] returns a status matching
+//! [`Ok(RestrictionStatus { ruleset: RulesetStatus::FullyEnforced, no_new_privs: true, })`](RestrictionStatus)
+//! to make sure everything works as expected in an enforced sandbox.
+//! Alternatively, using [`set_compatibility(CompatLevel::HardRequirement)`](Compatible::set_compatibility)
+//! will immediately inform about unsupported Landlock features.
+//! These configurations should only depend on the test environment
+//! (e.g. [by checking an environment variable](https://github.com/landlock-lsm/rust-landlock/search?q=LANDLOCK_CRATE_TEST_ABI)).
+//! However, applications should only check that no error is returned (i.e. `Ok(_)`)
+//! and optionally log and inform users that the application is not fully sandboxed
+//! because of missing features from the running kernel.
+//!
+//! ## Audit logging
+//!
+//! Landlock ABI v7 adds control over audit logging through boolean setters, especially
+//! [`log_new_exec()`](RulesetCreatedAttr::log_new_exec)) which is useful (but noisy) for sandboxer
+//! tools.
+//!
+//! ## Multithreaded processes
+//!
+//! By default `landlock_restrict_self()` only restricts the calling thread.
+//! Landlock ABI v8 adds [`all_threads()`](RestrictSelfAttr::all_threads) to
+//! atomically enforce the configuration on every thread of the process.  On
+//! an older kernel this is silently dropped in the default best-effort mode,
+//! leaving sibling and parent threads unrestricted, so multithreaded programs
+//! that need this guarantee should require it (see
+//! [`all_threads()`](RestrictSelfAttr::all_threads)).
+
+#[cfg(test)]
+#[macro_use]
+extern crate lazy_static;
+
+pub use access::{Access, HandledAccess};
+pub use compat::{CompatLevel, Compatible, LandlockStatus, ABI};
+pub use enumflags2::{make_bitflags, BitFlags};
+pub use errata::Erratum;
+pub use errors::{
+    AccessError, AddRuleError, AddRulesError, CompatError, CreateRulesetError, Errno,
+    HandleAccessError, HandleAccessesError, PathBeneathError, PathFdError, RestrictSelfError,
+    RulesetError, ScopeError, SyscallFlagError,
+};
+pub use flags::{RestrictSelfFlag, SyscallFlag};
+pub use fs::{path_beneath_rules, AccessFs, PathBeneath, PathFd};
+pub use net::{AccessNet, NetPort};
+pub use restrict_self::{RestrictSelf, RestrictSelfAttr, RestrictSelfStatus};
+pub use ruleset::{
+    RestrictionStatus, Rule, Ruleset, RulesetAttr, RulesetCreated, RulesetCreatedAttr,
+    RulesetStatus,
+};
+pub use scope::Scope;
+
+use access::PrivateHandledAccess;
+use compat::{CompatResult, CompatState, Compatibility, TailoredCompatLevel, TryCompat};
+use ruleset::PrivateRule;
+
+#[cfg(test)]
+use compat::{can_emulate, get_errno_from_landlock_status};
+#[cfg(test)]
+use errors::TestRulesetError;
+#[cfg(test)]
+use strum::IntoEnumIterator;
+
+mod access;
+mod compat;
+mod errata;
+mod errors;
+mod flags;
+mod fs;
+mod net;
+mod prctl;
+mod restrict_self;
+mod ruleset;
+mod scope;
+mod uapi;
+
+// Makes sure private traits cannot be implemented outside of this crate.
+mod private {
+    pub trait Sealed {}
+
+    impl Sealed for crate::AccessFs {}
+    impl Sealed for crate::AccessNet {}
+    impl Sealed for crate::Scope {}
+    impl Sealed for crate::RestrictSelfFlag {}
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::*;
+
+    // These integration tests exercise the full builder-to-syscall path via
+    // check_ruleset_support().  Other tests in compat.rs and errata.rs make
+    // read-only kernel queries (LandlockStatus::current(), Erratum::current())
+    // but do not create rulesets or restrict threads.  All remaining tests use
+    // Ruleset::from(ABI) to exercise the builder logic and compatibility
+    // engine without kernel interaction.
+
+    // Emulate old kernel supports.  Iterates each ABI variant, mocks the
+    // builder via B::from(abi), runs the closure on a dedicated thread, and
+    // dispatches to the caller's assertion closures based on whether the
+    // mocked ABI is emulatable on the running kernel.
+    fn check_support<B, S, F, OkFn, ErrFn>(
+        partial: ABI,
+        full: Option<ABI>,
+        check: F,
+        assert_ok: OkFn,
+        assert_err: ErrFn,
+    ) where
+        B: From<ABI> + Send + 'static,
+        F: Fn(B) -> Result<S, TestRulesetError> + Send + Copy + 'static,
+        S: std::fmt::Debug + Send + 'static,
+        OkFn: Fn(ABI, Result<S, TestRulesetError>),
+        ErrFn: Fn(Result<S, TestRulesetError>),
+    {
+        // If there is no partial support, it means that `full == partial`.
+        assert!(partial <= full.unwrap_or(partial));
+        for abi in ABI::iter() {
+            // Ensures restrict_self() is called on a dedicated thread to avoid inconsistent tests.
+            let ret = std::thread::spawn(move || check(B::from(abi)))
+                .join()
+                .unwrap();
+
+            // Useful for failed tests and with cargo test -- --show-output
+            println!("Checking ABI {abi:?}: received {ret:#?}");
+            if can_emulate(abi, partial, full) {
+                assert_ok(abi, ret);
+            } else {
+                assert_err(ret);
+            }
+        }
+    }
+
+    fn check_ruleset_support<F>(
+        partial: ABI,
+        full: Option<ABI>,
+        check: F,
+        error_if_abi_lt_partial: bool,
+    ) where
+        F: Fn(Ruleset) -> Result<RestrictionStatus, TestRulesetError> + Send + Copy + 'static,
+    {
+        check_support(
+            partial,
+            full,
+            check,
+            |abi, ret| {
+                if abi < partial && error_if_abi_lt_partial {
+                    // TODO: Check exact error type; this may require better error types.
+                    assert!(matches!(ret, Err(TestRulesetError::Ruleset(_))));
+                } else {
+                    let full_support = if let Some(full_inner) = full {
+                        abi >= full_inner
+                    } else {
+                        false
+                    };
+                    let ruleset_status = if full_support {
+                        RulesetStatus::FullyEnforced
+                    } else if abi >= partial {
+                        RulesetStatus::PartiallyEnforced
+                    } else {
+                        RulesetStatus::NotEnforced
+                    };
+                    let landlock_status = abi.into();
+                    println!("Expecting ruleset status {ruleset_status:?}");
+                    println!("Expecting Landlock status {landlock_status:?}");
+                    assert!(matches!(
+                        ret,
+                        Ok(RestrictionStatus {
+                            ruleset,
+                            landlock,
+                            no_new_privs: true,
+                            ..
+                        }) if ruleset == ruleset_status && landlock == landlock_status
+                    ))
+                }
+            },
+            |ret| {
+                // The errno value should be ENOSYS, EOPNOTSUPP, EINVAL (e.g. when an unknown
+                // access right is provided), or E2BIG (e.g. when there is an unknown field in a
+                // Landlock syscall attribute).
+                let errno = get_errno_from_landlock_status();
+                println!("Expecting error {errno:?}");
+                match ret {
+                    Err(
+                        ref error @ TestRulesetError::Ruleset(RulesetError::CreateRuleset(
+                            CreateRulesetError::CreateRulesetCall { ref source },
+                        )),
+                    ) => {
+                        assert_eq!(source.raw_os_error(), Some(*Errno::from(error)));
+                        match (source.raw_os_error(), errno) {
+                            (Some(e1), Some(e2)) => assert_eq!(e1, e2),
+                            (Some(e1), None) => assert!(matches!(e1, libc::EINVAL | libc::E2BIG)),
+                            _ => unreachable!(),
+                        }
+                    }
+                    // restrict_self flags may be rejected by the kernel with EINVAL
+                    // when the mock ABI is higher than the running kernel's ABI.
+                    Err(TestRulesetError::Ruleset(RulesetError::RestrictSelf(
+                        RestrictSelfError::RestrictSelfCall { ref source },
+                    ))) => {
+                        assert_eq!(source.raw_os_error(), Some(libc::EINVAL));
+                    }
+                    _ => unreachable!(),
+                }
+            },
+        );
+    }
+
+    // Emulate old kernel supports for the domain-less RestrictSelf builder.
+    //
+    // Unlike check_ruleset_support, RestrictSelf does not create a Landlock domain, so there is no
+    // ruleset enforcement status to assert.  We verify the kernel probe (status.landlock) and
+    // propagate any syscall error.  RestrictSelf::apply() enforces PR_SET_NO_NEW_PRIVS by default.
+    fn check_restrict_self_support<F>(partial: ABI, full: Option<ABI>, check: F)
+    where
+        F: Fn(RestrictSelf) -> Result<RestrictSelfStatus, TestRulesetError> + Send + Copy + 'static,
+    {
+        check_support(
+            partial,
+            full,
+            check,
+            |abi, ret| {
+                let landlock_status: LandlockStatus = abi.into();
+                println!("Expecting Landlock status {landlock_status:?}");
+                assert!(matches!(
+                    ret,
+                    Ok(RestrictSelfStatus { landlock, .. }) if landlock == landlock_status
+                ));
+            },
+            |ret| {
+                // The errno value should be ENOSYS, EOPNOTSUPP, or EINVAL (e.g. when actual_flags
+                // carries bits unknown to the running kernel).  Unlike check_ruleset_support,
+                // landlock_restrict_self() is the first syscall here, so ENOSYS is possible when
+                // Landlock is unavailable.
+                let errno = get_errno_from_landlock_status();
+                println!("Expecting error {errno:?}");
+                match ret {
+                    Err(
+                        ref error @ TestRulesetError::Ruleset(RulesetError::RestrictSelf(
+                            RestrictSelfError::RestrictSelfCall { ref source },
+                        )),
+                    ) => {
+                        assert_eq!(source.raw_os_error(), Some(*Errno::from(error)));
+                        match (source.raw_os_error(), errno) {
+                            (Some(e1), Some(e2)) => assert_eq!(e1, e2),
+                            (Some(e1), None) => assert!(matches!(e1, libc::EINVAL | libc::E2BIG)),
+                            _ => unreachable!(),
+                        }
+                    }
+                    _ => unreachable!(),
+                }
+            },
+        );
+    }
+
+    #[test]
+    fn allow_root_compat() {
+        let abi = ABI::V1;
+
+        check_ruleset_support(
+            abi,
+            Some(abi),
+            move |ruleset: Ruleset| -> _ {
+                Ok(ruleset
+                    .handle_access(AccessFs::from_all(abi))?
+                    .create()?
+                    .add_rule(PathBeneath::new(PathFd::new("/")?, AccessFs::from_all(abi)))?
+                    .restrict_self()?)
+            },
+            false,
+        );
+    }
+
+    #[test]
+    fn too_much_access_rights_for_a_file() {
+        let abi = ABI::V1;
+
+        check_ruleset_support(
+            abi,
+            Some(abi),
+            move |ruleset: Ruleset| -> _ {
+                Ok(ruleset
+                    .handle_access(AccessFs::from_all(abi))?
+                    .create()?
+                    // Same code as allow_root_compat() but with /etc/passwd instead of /
+                    .add_rule(PathBeneath::new(
+                        PathFd::new("/etc/passwd")?,
+                        // Only allow legitimate access rights on a file.
+                        AccessFs::from_file(abi),
+                    ))?
+                    .restrict_self()?)
+            },
+            false,
+        );
+
+        check_ruleset_support(
+            abi,
+            None,
+            move |ruleset: Ruleset| -> _ {
+                Ok(ruleset
+                    .handle_access(AccessFs::from_all(abi))?
+                    .create()?
+                    // Same code as allow_root_compat() but with /etc/passwd instead of /
+                    .add_rule(PathBeneath::new(
+                        PathFd::new("/etc/passwd")?,
+                        // Tries to allow all access rights on a file.
+                        AccessFs::from_all(abi),
+                    ))?
+                    .restrict_self()?)
+            },
+            false,
+        );
+    }
+
+    #[test]
+    fn path_beneath_rules_with_too_much_access_rights_for_a_file() {
+        let abi = ABI::V1;
+
+        check_ruleset_support(
+            abi,
+            Some(abi),
+            move |ruleset: Ruleset| -> _ {
+                Ok(ruleset
+                    .handle_access(AccessFs::from_all(ABI::V1))?
+                    .create()?
+                    // Same code as too_much_access_rights_for_a_file() but using path_beneath_rules()
+                    .add_rules(path_beneath_rules(["/etc/passwd"], AccessFs::from_all(abi)))?
+                    .restrict_self()?)
+            },
+            false,
+        );
+    }
+
+    #[test]
+    fn allow_root_fragile() {
+        let abi = ABI::V1;
+
+        check_ruleset_support(
+            abi,
+            Some(abi),
+            move |ruleset: Ruleset| -> _ {
+                // Sets default support requirement: abort the whole sandboxing for any Landlock error.
+                Ok(ruleset
+                    // Must have at least the execute check…
+                    .set_compatibility(CompatLevel::HardRequirement)
+                    .handle_access(AccessFs::Execute)?
+                    // …and possibly others.
+                    .set_compatibility(CompatLevel::BestEffort)
+                    .handle_access(AccessFs::from_all(abi))?
+                    .create()?
+                    .no_new_privs(true)
+                    .add_rule(PathBeneath::new(PathFd::new("/")?, AccessFs::from_all(abi)))?
+                    .restrict_self()?)
+            },
+            true,
+        );
+    }
+
+    #[test]
+    fn ruleset_enforced() {
+        let abi = ABI::V1;
+
+        check_ruleset_support(
+            abi,
+            Some(abi),
+            move |ruleset: Ruleset| -> _ {
+                Ok(ruleset
+                    // Restricting without rule exceptions is legitimate to forbid a set of actions.
+                    .handle_access(AccessFs::Execute)?
+                    .create()?
+                    .restrict_self()?)
+            },
+            false,
+        );
+    }
+
+    #[test]
+    fn abi_v2_exec_refer() {
+        check_ruleset_support(
+            ABI::V1,
+            Some(ABI::V2),
+            move |ruleset: Ruleset| -> _ {
+                Ok(ruleset
+                    .handle_access(AccessFs::Execute)?
+                    // AccessFs::Refer is not supported by ABI::V1 (best-effort).
+                    .handle_access(AccessFs::Refer)?
+                    .create()?
+                    .restrict_self()?)
+            },
+            false,
+        );
+    }
+
+    #[test]
+    fn abi_v2_refer_only() {
+        // When no access is handled, do not try to create a ruleset without access.
+        check_ruleset_support(
+            ABI::V2,
+            Some(ABI::V2),
+            move |ruleset: Ruleset| -> _ {
+                Ok(ruleset
+                    .handle_access(AccessFs::Refer)?
+                    .create()?
+                    .restrict_self()?)
+            },
+            false,
+        );
+    }
+
+    #[test]
+    fn abi_v3_truncate() {
+        check_ruleset_support(
+            ABI::V2,
+            Some(ABI::V3),
+            move |ruleset: Ruleset| -> _ {
+                Ok(ruleset
+                    .handle_access(AccessFs::Refer)?
+                    .handle_access(AccessFs::Truncate)?
+                    .create()?
+                    .add_rule(PathBeneath::new(PathFd::new("/")?, AccessFs::Refer))?
+                    .restrict_self()?)
+            },
+            false,
+        );
+    }
+
+    #[test]
+    fn ruleset_created_try_clone() {
+        check_ruleset_support(
+            ABI::V1,
+            Some(ABI::V1),
+            move |ruleset: Ruleset| -> _ {
+                Ok(ruleset
+                    .handle_access(AccessFs::Execute)?
+                    .create()?
+                    .add_rule(PathBeneath::new(PathFd::new("/")?, AccessFs::Execute))?
+                    .try_clone()?
+                    .restrict_self()?)
+            },
+            false,
+        );
+    }
+
+    #[test]
+    fn abi_v4_tcp() {
+        check_ruleset_support(
+            ABI::V3,
+            Some(ABI::V4),
+            move |ruleset: Ruleset| -> _ {
+                Ok(ruleset
+                    .handle_access(AccessFs::Truncate)?
+                    .handle_access(AccessNet::BindTcp | AccessNet::ConnectTcp)?
+                    .create()?
+                    .add_rule(NetPort::new(1, AccessNet::ConnectTcp))?
+                    .restrict_self()?)
+            },
+            false,
+        );
+    }
+
+    #[test]
+    fn abi_v5_ioctl_dev() {
+        check_ruleset_support(
+            ABI::V4,
+            Some(ABI::V5),
+            move |ruleset: Ruleset| -> _ {
+                Ok(ruleset
+                    .handle_access(AccessNet::BindTcp)?
+                    .handle_access(AccessFs::IoctlDev)?
+                    .create()?
+                    .add_rule(PathBeneath::new(PathFd::new("/")?, AccessFs::IoctlDev))?
+                    .restrict_self()?)
+            },
+            false,
+        );
+    }
+
+    #[test]
+    fn abi_v6_scope_mix() {
+        check_ruleset_support(
+            ABI::V5,
+            Some(ABI::V6),
+            move |ruleset: Ruleset| -> _ {
+                Ok(ruleset
+                    .handle_access(AccessFs::IoctlDev)?
+                    .scope(Scope::AbstractUnixSocket | Scope::Signal)?
+                    .create()?
+                    .restrict_self()?)
+            },
+            false,
+        );
+    }
+
+    #[test]
+    fn abi_v6_scope_only() {
+        check_ruleset_support(
+            ABI::V6,
+            Some(ABI::V6),
+            move |ruleset: Ruleset| -> _ {
+                Ok(ruleset
+                    .scope(Scope::AbstractUnixSocket | Scope::Signal)?
+                    .create()?
+                    .restrict_self()?)
+            },
+            false,
+        );
+    }
+
+    #[test]
+    fn abi_v7_log_flags() {
+        // Uses Scope::Signal to get partial enforcement at V6 (scopes supported
+        // but log flags not).
+        check_ruleset_support(
+            ABI::V6,
+            Some(ABI::V7),
+            move |ruleset: Ruleset| -> _ {
+                let status = ruleset
+                    .scope(Scope::Signal)?
+                    .create()?
+                    .log_same_exec(false)?
+                    .log_new_exec(true)?
+                    .log_subdomains(false)?
+                    .restrict_self()?;
+
+                if status.ruleset == RulesetStatus::FullyEnforced {
+                    assert!(!status.log_same_exec);
+                    assert!(status.log_new_exec);
+                    assert!(!status.log_subdomains);
+                } else {
+                    assert!(status.log_same_exec);
+                    assert!(!status.log_new_exec);
+                    assert!(status.log_subdomains);
+                }
+
+                Ok(status)
+            },
+            false,
+        );
+    }
+
+    #[test]
+    fn ruleset_created_try_clone_ownedfd() {
+        use std::os::unix::io::{AsRawFd, OwnedFd};
+
+        let abi = ABI::V1;
+        check_ruleset_support(
+            abi,
+            Some(abi),
+            move |ruleset: Ruleset| -> _ {
+                let ruleset1 = ruleset.handle_access(AccessFs::from_all(abi))?.create()?;
+                let ruleset2 = ruleset1.try_clone().unwrap();
+                let ruleset3 = ruleset2.try_clone().unwrap();
+
+                let some1: Option<OwnedFd> = ruleset1.into();
+                if let Some(fd1) = some1 {
+                    assert!(fd1.as_raw_fd() >= 0);
+
+                    let some2: Option<OwnedFd> = ruleset2.into();
+                    let fd2 = some2.unwrap();
+                    assert!(fd2.as_raw_fd() >= 0);
+
+                    assert_ne!(fd1.as_raw_fd(), fd2.as_raw_fd());
+                }
+                Ok(ruleset3.restrict_self()?)
+            },
+            false,
+        );
+    }
+
+    #[test]
+    fn restrict_self_log_subdomains() {
+        check_restrict_self_support(ABI::V7, Some(ABI::V7), move |rs: RestrictSelf| -> _ {
+            Ok(rs.log_subdomains(false)?.apply()?)
+        });
+    }
+
+    // ABI v8's LANDLOCK_RESTRICT_SELF_TSYNC (exposed as all_threads()) applies
+    // the domain to every thread of the process, not just the calling one.
+    // Enforcing that in the cargo-test runner would restrict every test thread,
+    // so each all_threads() setting runs in its own forked child (restrict_self
+    // is irreversible and, with TSYNC, process-wide) that hosts exactly two
+    // threads: its main thread and one sibling.  Both threads list "/" (which
+    // needs AccessFs::ReadDir, handled by from_all(ABI::V1)) before and after
+    // enforcement.
+    //
+    // Expected outcomes are pinned from TEST_ABI, the running kernel's Landlock
+    // ABI: set per kernel by CI, auto-detected locally, and asserted to match
+    // the kernel by current_kernel_abi().  It is an oracle independent of the
+    // restrict_self() status under test: the calling thread must be denied iff
+    // Landlock is enforced at all, and the sibling must be denied iff TSYNC is
+    // both requested and supported (ABI v8+).  Both the kernel's real behavior
+    // and the crate's reported status are checked against this truth, so a
+    // silently dropped or otherwise ineffective TSYNC is caught on every kernel
+    // in the CI matrix, from unsupported up to v8.
+    #[test]
+    fn abi_v8_all_threads() {
+        use crate::compat::TEST_ABI;
+        use std::sync::{Arc, Barrier};
+        use std::thread;
+
+        // Child exit code: OK, the OR of the mismatched checks, or PANICKED.
+        const OK: i32 = 0;
+        const MAIN_BEFORE_DENIED: i32 = 1 << 0;
+        const SIBLING_BEFORE_DENIED: i32 = 1 << 1;
+        const MAIN_AFTER_MISMATCH: i32 = 1 << 2;
+        const SIBLING_AFTER_MISMATCH: i32 = 1 << 3;
+        const STATUS_RULESET_MISMATCH: i32 = 1 << 4;
+        const STATUS_TSYNC_MISMATCH: i32 = 1 << 5;
+        const PANICKED: i32 = 1 << 6;
+
+        // Listing "/" needs AccessFs::ReadDir: allowed before enforcement,
+        // denied afterwards for every thread the domain covers.
+        fn can_list_root() -> bool {
+            std::fs::read_dir("/").is_ok()
+        }
+
+        // Ground truth for the running kernel, independent of the status object.
+        let landlock_supported = *TEST_ABI != ABI::Unsupported;
+        let tsync_supported = *TEST_ABI >= ABI::V8;
+
+        for all_threads in [false, true] {
+            // The sibling is covered only when TSYNC is requested and supported.
+            let expect_sibling_denied = all_threads && tsync_supported;
+
+            match unsafe { libc::fork() } {
+                -1 => panic!("fork() failed: {}", std::io::Error::last_os_error()),
+                0 => {
+                    // Any panic (builder error, spawn/join failure) becomes a
+                    // non-zero code rather than being swallowed as a pass.
+                    let code = std::panic::catch_unwind(|| {
+                        let barrier = Arc::new(Barrier::new(2));
+                        let sibling = {
+                            let barrier = Arc::clone(&barrier);
+                            thread::spawn(move || {
+                                let before = can_list_root();
+                                // Both threads probed before enforcing.
+                                barrier.wait();
+                                // Main has called restrict_self().
+                                barrier.wait();
+                                (before, can_list_root())
+                            })
+                        };
+
+                        let main_before = can_list_root();
+                        barrier.wait();
+
+                        let status = Ruleset::default()
+                            .handle_access(AccessFs::from_all(ABI::V1))
+                            .unwrap()
+                            .create()
+                            .unwrap()
+                            .all_threads(all_threads)
+                            .unwrap()
+                            .restrict_self()
+                            .unwrap();
+                        barrier.wait();
+
+                        let main_denied = !can_list_root();
+                        let (sibling_before, sibling_after) = sibling.join().unwrap();
+                        let sibling_denied = !sibling_after;
+                        let ruleset_enforced = status.ruleset != RulesetStatus::NotEnforced;
+
+                        let mut code = OK;
+                        // Both threads can list "/" before enforcement.
+                        if !main_before {
+                            code |= MAIN_BEFORE_DENIED;
+                        }
+                        if !sibling_before {
+                            code |= SIBLING_BEFORE_DENIED;
+                        }
+                        // Kernel reality matches the independent expectation.
+                        if main_denied != landlock_supported {
+                            code |= MAIN_AFTER_MISMATCH;
+                        }
+                        if sibling_denied != expect_sibling_denied {
+                            code |= SIBLING_AFTER_MISMATCH;
+                        }
+                        // The crate's reported status matches it too.
+                        if ruleset_enforced != landlock_supported {
+                            code |= STATUS_RULESET_MISMATCH;
+                        }
+                        if status.all_threads != expect_sibling_denied {
+                            code |= STATUS_TSYNC_MISMATCH;
+                        }
+                        code
+                    })
+                    .unwrap_or(PANICKED);
+                    // _exit avoids atexit handlers and destructors inherited from
+                    // the test harness.
+                    unsafe { libc::_exit(code) };
+                }
+                pid => {
+                    let mut wstatus: libc::c_int = 0;
+                    let ret = unsafe { libc::waitpid(pid, &mut wstatus, 0) };
+                    assert_eq!(ret, pid);
+                    assert!(libc::WIFEXITED(wstatus));
+                    assert_eq!(libc::WEXITSTATUS(wstatus), OK, "all_threads({all_threads})");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn abi_v9_resolve_unix() {
+        // ResolveUnix is the only access right added in ABI v9, and ABI v8 added
+        // no filesystem access right, so there is no access from a lower ABI to
+        // combine it with while keeping `partial` and `full` adjacent.  It is
+        // therefore tested on its own with partial == full == V9, like
+        // abi_v2_refer_only.  Pairing it with a non-adjacent lower right (e.g.
+        // IoctlDev from V5) would leave mocked ABIs V6..=V8 where only that lower
+        // right is enforced (PartiallyEnforced); can_emulate() expects an error
+        // whenever the runner kernel's ABI is below the mocked one, so such a
+        // test would pass or fail depending on the runner kernel.
+        //
+        // For a mocked ABI below V9, ResolveUnix is dropped by best-effort
+        // compatibility: no access is handled, create() builds no kernel ruleset
+        // and add_rule() is a no-op, so restrict_self() reports NotEnforced (not
+        // an error).  At mocked ABI V9 the ruleset is fully enforced on a v9
+        // kernel, or the create()/add_rule() syscall is rejected on an older one
+        // (asserted through can_emulate()'s error path).
+        check_ruleset_support(
+            ABI::V9,
+            Some(ABI::V9),
+            move |ruleset: Ruleset| -> _ {
+                Ok(ruleset
+                    .handle_access(AccessFs::ResolveUnix)?
+                    .create()?
+                    .add_rule(PathBeneath::new(PathFd::new("/")?, AccessFs::ResolveUnix))?
+                    .restrict_self()?)
+            },
+            false,
+        );
+    }
+}

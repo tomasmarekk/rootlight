@@ -7,6 +7,15 @@
 *.pdf binary
 *.bin binary
 *.desc binary
+# Cargo inputs retain authenticated upstream bytes rather than local formatting.
+source-inputs/cargo/** -text whitespace=-blank-at-eol,-blank-at-eof,-space-before-tab,cr-at-eol
+source-inputs/crates/*.crate binary
+# Published Setext headings are not unresolved merge markers.
+source-inputs/cargo/autocfg-1.5.1/README.md conflict-marker-size=32
+source-inputs/cargo/globset-0.4.19/README.md conflict-marker-size=32
+source-inputs/cargo/ref-cast-1.0.25/README.md conflict-marker-size=32
+source-inputs/cargo/ref-cast-1.0.26/README.md conflict-marker-size=32
+source-inputs/cargo/walkdir-2.5.0/README.md conflict-marker-size=32
 # Preserve the audited upstream license bytes, including its final blank line.
 adapters/licenses/tree-sitter-ruby-0.23.1-LICENSE whitespace=-blank-at-eof
 # Vendored query bytes are pinned to the published upstream archive.

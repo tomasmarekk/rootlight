@@ -19,6 +19,8 @@ fi
 
 runner_home="${RUNNER_HOME:?RUNNER_HOME is required}"
 runner_path="${RUNNER_PATH:?RUNNER_PATH is required}"
+runner_cargo_home="${RUNNER_CARGO_HOME:?RUNNER_CARGO_HOME is required}"
+runner_target_dir="${RUNNER_TARGET_DIR:?RUNNER_TARGET_DIR is required}"
 
 exec unshare --net -- \
     setpriv \
@@ -32,8 +34,12 @@ exec unshare --net -- \
         env \
             HOME="$runner_home" \
             PATH="$runner_path" \
-            CARGO_HOME="$runner_home/.cargo" \
-            RUSTUP_HOME="$runner_home/.rustup" \
+            CARGO_HOME="$runner_cargo_home" \
+            CARGO_TARGET_DIR="$runner_target_dir" \
+            RUSTUP_HOME="${RUNNER_RUSTUP_HOME:-$runner_home/.rustup}" \
+            CARGO_BUILD_JOBS="${RUNNER_BUILD_JOBS:-2}" \
+            RUST_TEST_THREADS=2 \
+            PYTHONDONTWRITEBYTECODE=1 \
             CARGO_NET_OFFLINE=true \
             CARGO_HTTP_TIMEOUT=1 \
             CARGO_NET_RETRY=0 \
