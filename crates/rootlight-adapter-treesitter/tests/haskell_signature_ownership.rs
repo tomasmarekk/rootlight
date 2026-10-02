@@ -3,6 +3,7 @@
 //! callable; source syntax does not establish use-site dispatch or inferred types.
 
 use std::{
+    collections::BTreeSet,
     fs,
     path::Path,
     sync::Arc,
@@ -74,6 +75,14 @@ impl Fixture {
     }
 
     fn analyze(&self, ir: IrLimits) -> (ParseOutput, AnalysisOutput) {
+        self.analyze_with_formal_reads(ir, &[])
+    }
+
+    fn analyze_with_formal_reads(
+        &self,
+        ir: IrLimits,
+        expected_reads: &[(SourceSpan, SourceSpan)],
+    ) -> (ParseOutput, AnalysisOutput) {
         let provider = Arc::new(
             TreeSitterProvider::new(
                 RuntimeConfig::new(
@@ -173,12 +182,63 @@ impl Fixture {
                 rootlight_ir::derive_occurrence_record_id(occurrence).unwrap()
             );
         }
-        assert!(output.document().relations.iter().all(|relation| matches!(
-            relation.predicate,
-            RelationPredicate::Contains
-                | RelationPredicate::Declares
-                | RelationPredicate::DefinesAt
-        )));
+        let document = output.document();
+        let mut expected_references = BTreeSet::new();
+        let mut expected_relations = BTreeSet::new();
+        for &(read_span, definition_span) in expected_reads {
+            let parameter = defined_entity(document, definition_span);
+            assert_eq!(parameter.kind, EntityKind::Parameter);
+            let reads: Vec<_> = document
+                .occurrences
+                .iter()
+                .filter(|site| {
+                    site.role == OccurrenceRole::Reference && site.source.span() == read_span
+                })
+                .collect();
+            assert_eq!(reads.len(), 1);
+            let read = reads[0];
+            assert_eq!(
+                read.target,
+                OccurrenceTarget::Resolved {
+                    symbol: parameter.id
+                }
+            );
+            assert_eq!(read.source.generation(), self.source.generation());
+            assert_eq!(read.source.content_hash(), self.source.content_hash());
+            assert!(expected_references.insert(read.id));
+            let relations: Vec<_> = document
+                .relations
+                .iter()
+                .filter(|relation| {
+                    relation.subject == rootlight_ir::RelationEndpoint::Occurrence(read.id)
+                })
+                .collect();
+            assert_eq!(relations.len(), 1);
+            let relation = relations[0];
+            assert_eq!(relation.predicate, RelationPredicate::RefersTo);
+            assert_eq!(
+                relation.object,
+                rootlight_ir::RelationEndpoint::Entity(parameter.id)
+            );
+            assert_eq!(relation.evidence_kind, rootlight_ir::EvidenceKind::Derived);
+            assert_eq!(relation.evidence.source.as_ref(), Some(&read.source));
+            assert_eq!(
+                relation.id,
+                rootlight_ir::derive_relation_record_id(relation).unwrap()
+            );
+            assert!(expected_relations.insert(relation.id));
+            assert!(!document.skipped_regions.iter().any(|gap| {
+                gap.detail == "haskell-binding-target-unavailable" && gap.source.span() == read_span
+            }));
+        }
+        assert!(document.relations.iter().all(|relation| {
+            matches!(
+                relation.predicate,
+                RelationPredicate::Contains
+                    | RelationPredicate::Declares
+                    | RelationPredicate::DefinesAt
+            ) || expected_relations.contains(&relation.id)
+        }));
         assert!(
             output
                 .document()
@@ -191,7 +251,10 @@ impl Fixture {
                         | OccurrenceRole::TypeUse
                         | OccurrenceRole::ImportUse
                 ))
-                .all(|site| matches!(site.target, OccurrenceTarget::Unresolved { .. }))
+                .all(|site| {
+                    matches!(site.target, OccurrenceTarget::Unresolved { .. })
+                        || expected_references.contains(&site.id)
+                })
         );
         (syntax, output)
     }
@@ -262,8 +325,18 @@ fn written_dotted_module_and_exports_retain_exact_definition() {
         let fixture = Fixture::new(
             format!("{header}\ndata Item = Item\nidentity value = value\n").replace('\n', newline),
         );
-        let (_, output) = fixture.analyze(IrLimits::default());
+        let (_, output) = fixture.analyze_with_formal_reads(
+            IrLimits::default(),
+            &[(fixture.span("value", 1), fixture.span("value", 0))],
+        );
         let document = output.document();
+        let function = defined_entity(document, fixture.span("identity", 1));
+        assert_eq!(function.kind, EntityKind::Function);
+        let parameter = defined_entity(document, fixture.span("value", 0));
+        assert_eq!(
+            parameter.container,
+            Some(rootlight_ir::ContainerRef::Entity(function.id))
+        );
         let module = defined_entity(document, fixture.span("Example.Deep.Path", 0));
         assert_eq!(module.kind, EntityKind::Module);
         assert_eq!(module.canonical_name, "Example.Deep.Path");
