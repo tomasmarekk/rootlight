@@ -108,6 +108,13 @@ fn simple_function_clause(
                     true
                 }
                 "parens" if current.child_by_field_name("expression").is_some() => true,
+                "conditional"
+                    if current.child_by_field_name("if").is_some()
+                        && current.child_by_field_name("then").is_some()
+                        && current.child_by_field_name("else").is_some() =>
+                {
+                    true
+                }
                 _ => return Ok(false),
             }
         };
@@ -136,6 +143,10 @@ fn equation_rhs_read(node: Node<'_>, cancellation: &Cancellation) -> Result<bool
         cancellation.check()?;
         match parent.kind() {
             "parens" if parent.child_by_field_name("expression") == Some(current) => {}
+            "conditional"
+                if parent.child_by_field_name("if") == Some(current)
+                    || parent.child_by_field_name("then") == Some(current)
+                    || parent.child_by_field_name("else") == Some(current) => {}
             "apply"
                 if parent.child_by_field_name("argument") == Some(current)
                     || current.kind() == "apply"
@@ -1125,6 +1136,88 @@ mod tests {
             equation_rhs_read(tree.root_node(), &cancellation),
             Err(AdapterError::Cancelled { .. })
         ));
+    }
+
+    #[test]
+    fn conditional_fields_extend_only_the_closed_equation_read_frontier() {
+        let cancellation = Cancellation::new();
+        for (source, eligible) in [
+            (
+                "choose flag left right = if flag then left else right\n",
+                true,
+            ),
+            (
+                "nested flag other left right = if flag then (if other then left else right) else right\n",
+                true,
+            ),
+            ("group flag value = (if (flag) then (value) else 0)\n", true),
+            (
+                "forward flag value = if flag then unknown value else value\n",
+                true,
+            ),
+            ("free flag value = if missing then value else 0\n", true),
+            (
+                "dispatch flag first second value = (if flag then first else second) value\n",
+                true,
+            ),
+            (
+                "blocked flag x = if flag then let x = 1 in x else x\n",
+                false,
+            ),
+            ("blocked flag x = if flag then x else (\\x -> x)\n", false),
+            ("blocked flag x = if flag then x else (x :: Int)\n", false),
+            ("blocked flag x = if Module.flag then x else x\n", false),
+            ("blocked flag x = if flag then x + 1 else x\n", false),
+            ("blocked flag x = if flag then Just x else x\n", false),
+            (
+                "blocked flag x = if flag then x else x where\n  x = 1\n",
+                false,
+            ),
+            ("blocked flag x | flag = if flag then x else x\n", false),
+            ("blocked flag x = if | flag -> x\n", false),
+        ] {
+            let tree = parse(source);
+            assert!(!tree.root_node().has_error(), "{source}");
+            let clause = nodes(tree.root_node(), "function")
+                .into_iter()
+                .find(|node| equation(*node))
+                .unwrap();
+            assert_eq!(
+                simple_function_clause(clause, &cancellation).unwrap(),
+                eligible,
+                "{source}"
+            );
+        }
+        for (source, expected) in [
+            (
+                "choose flag left right = if flag then left else right\n",
+                vec!["flag", "left", "right"],
+            ),
+            (
+                "nested flag other left right = if flag then (if other then left else right) else right\n",
+                vec!["flag", "other", "left", "right", "right"],
+            ),
+            (
+                "forward flag value = if flag then unknown value else value\n",
+                vec!["flag", "value", "value"],
+            ),
+            (
+                "group flag value = (if (flag) then (value) else 0)\n",
+                vec!["flag", "value"],
+            ),
+            (
+                "dispatch flag first second value = (if flag then first else second) value\n",
+                vec!["value"],
+            ),
+        ] {
+            let tree = parse(source);
+            let actual = nodes(tree.root_node(), "variable")
+                .into_iter()
+                .filter(|node| equation_rhs_read(*node, &cancellation).unwrap())
+                .map(|node| node.utf8_text(source.as_bytes()).unwrap())
+                .collect::<Vec<_>>();
+            assert_eq!(actual, expected, "{source}");
+        }
     }
 
     #[test]
