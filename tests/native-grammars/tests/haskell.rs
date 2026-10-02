@@ -447,6 +447,39 @@ fn declarations_imports_signatures_and_operator_heads_keep_exact_source_ranges()
 }
 
 #[test]
+fn string_gaps_keep_exact_source_ranges_with_lf_and_crlf() {
+    for newline in ["\n", "\r\n"] {
+        let literal = format!("\"left\\{newline}    \\right\"");
+        let source = format!(
+            "module StringGap where{newline}message = {literal}{newline}control = \"plain\"{newline}"
+        );
+        let tree = bounded_parse(&mut parser(), source.as_bytes(), None);
+        assert!(
+            !tree.root_node().has_error(),
+            "newline {newline:?}: {}",
+            tree.root_node().to_sexp()
+        );
+        assert_eq!(tree.root_node().kind(), "haskell");
+        let inventory = signature(&tree, source.as_bytes());
+        assert!(inventory.iter().all(|node| !node.4 && !node.5));
+        let strings = nodes(tree.root_node(), "string");
+        assert_eq!(strings.len(), 2, "newline {newline:?}");
+        exact(
+            strings[0],
+            &source,
+            &literal,
+            source.find(&literal).unwrap(),
+        );
+        exact(
+            strings[1],
+            &source,
+            "\"plain\"",
+            source.find("\"plain\"").unwrap(),
+        );
+    }
+}
+
+#[test]
 fn layout_braces_recovery_and_parser_reuse_do_not_leak_prior_document_state() {
     let mut reused = parser();
     for newline in ["\n", "\r\n"] {

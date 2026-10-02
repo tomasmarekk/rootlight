@@ -360,7 +360,7 @@ const fn identity_for(family: GrammarFamily) -> GrammarIdentity {
             language_id: "haskell",
             grammar_version: "0.23.1",
             source_package_sha256: "977c51e504548cba13fc27cb5a2edab2124cf6716a1934915d07ab99523b05a4",
-            parser_sha256: "f05f34d3cabb3c4a0397a2ac29d4cf4212f814dec98199042228d1850055db93",
+            parser_sha256: "279817dd609a854a610bd777a4bbfb8f56ec235568f30be21dbf0de2562aa825",
             scanner_sha256: Some(
                 "b42bc2b8ed15d8ea72dbd5806efa6072115c019b893a00cf1d014f3b9a7abec2",
             ),

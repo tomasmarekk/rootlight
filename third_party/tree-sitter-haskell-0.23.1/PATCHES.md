@@ -42,7 +42,31 @@ files are retained for provenance, not invoked by an ordinary Cargo build.
 
 The ordinary native wire layout, byte order, valid field domains and zero-state
 behavior are unchanged. Snapshots remain process-local, not portable serialized
-documents. The parser, grammar, tokens and language ABI are unmodified.
+documents. The scanner snapshot patch does not change ordinary token scanning,
+and the language ABI remains 14.
+
+## CRLF string gaps
+
+`grammar/literal.js` accepts LF or CRLF immediately after the opening backslash
+of a string gap. The native string node retains the full authored bytes and
+range; source is not normalized before parsing. The generated grammar JSON and
+C parser come from that authored input rather than hand-edited generated code.
+Original upstream and published file identities remain in their provenance
+inventories, separately from the local override hashes.
+
+Preparation used Tree-sitter CLI 0.24.4 with Node.js 24.11.1 and explicit ABI 14.
+Regenerating the unchanged grammar reproduced all 107 local source files
+byte-for-byte. Two independent copies of the corrected grammar produced identical
+inventories; only `grammar/literal.js`, `src/grammar.json` and `src/parser.c`
+changed relative to that baseline. Node types, headers and the patched scanner
+were unchanged. Ordinary builds still compile checked-in inputs without invoking
+this generator.
+
+The generator binary was acquired from the official 0.24.4 Windows release.
+The release supplied no binary digest or signature asset; its recorded hashes
+identify acquired bytes, not independent signature verification. The exact
+generator version, commit, URLs and acquisition hashes are retained in
+`SOURCE-PROVENANCE.json`.
 
 The isolated `tests/native-grammars/tests/haskell.rs` tests exercise the ordinary
 scanner ABI and native syntax without evaluating Haskell. They do not establish

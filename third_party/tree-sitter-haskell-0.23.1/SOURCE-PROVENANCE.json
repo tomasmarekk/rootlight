@@ -898,9 +898,7 @@
     "queries/highlights.scm",
     "queries/injections.scm",
     "queries/locals.scm",
-    "src/grammar.json",
     "src/node-types.json",
-    "src/parser.c",
     "src/tree_sitter/alloc.h",
     "src/tree_sitter/array.h",
     "src/tree_sitter/parser.h",
@@ -915,6 +913,21 @@
       "local_sha256": "9389a8b4ec5e7aef3cf2cd3ae0b63a9ec0f6e53048b76e207654b00e4705cb5e",
       "changes": "additive source/license/provenance package include list"
     },
+    "grammar/literal.js": {
+      "original_sha256": "759554548a48a151205e61274e9aa27608dcc61d4cc5235740fdc2d04c8250a2",
+      "local_sha256": "10c2bf96c66e1d38bac596370a9da4d95689db5f9d4c5073f81c435a5c5658d5",
+      "changes": "accept LF and CRLF string gaps without normalizing authored source bytes"
+    },
+    "src/grammar.json": {
+      "original_sha256": "509bd0c498d149234296d0cf6a5e93de3320679371ead4ce97d1c266b3102c3e",
+      "local_sha256": "71cd895c4bf51c6cf85b29e801e3473acd69b29fd91ba61c1e9dbde51bd30810",
+      "changes": "regenerated from authored grammar.js with Tree-sitter CLI 0.24.4 and ABI 14"
+    },
+    "src/parser.c": {
+      "original_sha256": "f05f34d3cabb3c4a0397a2ac29d4cf4212f814dec98199042228d1850055db93",
+      "local_sha256": "279817dd609a854a610bd777a4bbfb8f56ec235568f30be21dbf0de2562aa825",
+      "changes": "regenerated from authored grammar.js with Tree-sitter CLI 0.24.4 and ABI 14"
+    },
     "src/scanner.c": {
       "original_upstream": "src/scanner.c.orig",
       "original_sha256": "344cd5c8161dbfafdf76438343672e035f20c62d0cbba63fd1e62c730b016c67",
@@ -922,7 +935,22 @@
       "changes": "bounded unaligned snapshot serialization/deserialization and debug framing validation"
     }
   },
-  "generated_parser_modified": false,
+  "local_generation": {
+    "generator": "tree-sitter-cli",
+    "version": "0.24.4",
+    "commit": "fc8c1863e2e5724a0c40bb6e6cfc8631bfe5908b",
+    "release_url": "https://github.com/tree-sitter/tree-sitter/releases/tag/v0.24.4",
+    "binary_archive_url": "https://github.com/tree-sitter/tree-sitter/releases/download/v0.24.4/tree-sitter-windows-x64.gz",
+    "binary_archive_sha256": "1fa29eb05f82b1d473e14ecce83b6204671765807d096fe5cea1ccd8cfa90c5b",
+    "binary_sha256": "02ade24b9eca7c23b5a5c41de6599df7540da8ae9f3ac6668d0ca1646ed76323",
+    "official_binary_digest_provided": false,
+    "binary_signature_independently_verified": false,
+    "javascript_runtime": "Node.js 24.11.1",
+    "command": "tree-sitter generate --abi 14 --js-runtime node grammar.js",
+    "unchanged_baseline_byte_identical": true,
+    "independent_regenerations_byte_identical": true
+  },
+  "generated_parser_modified": true,
   "generated_parser_language_abi": 14,
   "original_executable_files": [],
   "complete_product_source_closure_proven": false,
