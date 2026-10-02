@@ -36,8 +36,10 @@ class GitleaksPolicyTests(unittest.TestCase):
         if cls.scanner is None:
             raise RuntimeError("the installed policy tool is required; tests cannot skip")
 
-    def scan(self, files: dict[str, bytes]) -> list[dict]:
-        """Scan isolated files and return only a fully redacted report."""
+    def scan(self, files: dict[str, bytes], mode: str = "dir") -> list[dict]:
+        """Scan isolated files or their Git additions and return a redacted report."""
+        if mode not in {"dir", "git"}:
+            raise ValueError("unsupported scanner mode")
         with tempfile.TemporaryDirectory() as temporary:
             base = Path(temporary)
             source = base / "source"
@@ -46,9 +48,27 @@ class GitleaksPolicyTests(unittest.TestCase):
                 destination = source / name
                 destination.parent.mkdir(parents=True, exist_ok=True)
                 destination.write_bytes(content)
+            if mode == "git":
+                # Diff scanning has separate chunk boundaries from directory scanning.
+                # Both must exercise exact exceptions with no inherited hook execution.
+                def run_git(*arguments: str) -> None:
+                    result = subprocess.run(
+                        ["git", "-c", "core.hooksPath=" + str(base / "no-hooks"),
+                         "-c", "core.autocrlf=false", "-c", "commit.gpgSign=false",
+                         "-c", "user.name=rootlight-policy-fixture",
+                         "-c", "user.email=rootlight-policy-fixture@example.invalid",
+                         *arguments],
+                        cwd=source, stdout=subprocess.DEVNULL,
+                        stderr=subprocess.PIPE, check=False,
+                    )
+                    self.assertEqual(result.returncode, 0, "isolated Git fixture failed")
+
+                run_git("init", "--quiet")
+                run_git("add", "--", *files)
+                run_git("commit", "--quiet", "-m", "fixture")
             report = base / "redacted.json"
             result = subprocess.run(
-                [self.scanner, "dir", "--config", str(CONFIG),
+                [self.scanner, mode, "--config", str(CONFIG),
                  "--redact=100", "--no-banner", "--no-color", "--log-level", "error",
                  "--report-format", "json", "--report-path", str(report), "."],
                 cwd=source,
@@ -93,8 +113,9 @@ class GitleaksPolicyTests(unittest.TestCase):
                                   "generic-api-key")
 
     def test_known_identifier_outside_its_upstream_path_is_detected(self) -> None:
-        self.assert_rule_detected("src/credentials.rs", b'api_key = "soft_heap_limit64"\n',
-                                  "generic-api-key")
+        identifier = b"soft_heap_" + b"limit64"
+        content = b'api_' + b'key = "' + identifier + b'"\n'
+        self.assert_rule_detected("src/credentials.rs", content, "generic-api-key")
 
     def test_fixed_websocket_nonce_outside_upstream_path_is_detected(self) -> None:
         self.assert_rule_detected("src/websocket.rs", (ROOT / WEBSOCKET).read_bytes(),
@@ -112,6 +133,22 @@ class GitleaksPolicyTests(unittest.TestCase):
         for name in (CHECKSUM, SQLITE, LINUX, PEM, WEBSOCKET):
             with self.subTest(path=name):
                 self.assert_rule_detected(name, credential, "gitlab-pat")
+
+    def test_authenticated_upstream_git_additions_scan_clean(self) -> None:
+        paths = [CHECKSUM, PEM, WEBSOCKET, SQLITE, LINUX,
+                 "source-inputs/cargo/winapi-x86_64-pc-windows-gnu-0.4.0/.cargo-checksum.json",
+                 "source-inputs/cargo/winapi-i686-pc-windows-gnu-0.4.0/.cargo-checksum.json"]
+        self.assertFalse(self.scan({name: (ROOT / name).read_bytes() for name in paths}, "git"),
+                         "authenticated Git additions require exact exceptions")
+
+    def test_original_negative_control_match_is_the_only_policy_script_exception(self) -> None:
+        identifier = b"soft_heap_" + b"limit64"
+        known = b'api_' + b'key = "' + identifier + b'"\n'
+        name = "scripts/test_gitleaks_policy.py"
+        self.assertFalse(self.scan({name: known}, "git"), "known inert history must scan clean")
+        synthetic = hashlib.sha256(b"rootlight synthetic policy-script credential").hexdigest()
+        self.assert_rule_detected(name, f'api_key = "{synthetic}"\n'.encode(),
+                                  "generic-api-key")
 
 
 if __name__ == "__main__":

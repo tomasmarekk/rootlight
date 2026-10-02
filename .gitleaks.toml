@@ -1,6 +1,16 @@
 [extend]
 useDefault = true
 
+# The original negative control assigned a public API identifier literally.
+# Its historical diff remains visible; no other value or path is exempted.
+[[allowlists]]
+description = "Known API identifier in the original negative control"
+condition = "AND"
+targetRules = ["generic-api-key"]
+regexTarget = "match"
+paths = ['''^scripts/test_gitleaks_policy\.py$''']
+regexes = ['''^\x61\x70\x69\x5f\x6b\x65\x79\x20\x3d\x20\x22\x73\x6f\x66\x74\x5f\x68\x65\x61\x70\x5f\x6c\x69\x6d\x69\x74\x36\x34\x22$''']
+
 [[allowlists]]
 description = "Rootlight protocol literals that resemble generic API keys"
 regexes = [
@@ -1551,6 +1561,7 @@ regexes = [
   '''^cb13a8b7974bb247d497f56f1322a9d9926bfa7b0d3f083a323415e6f78704ab$''',
   '''^cb7cfb28a777c5f9e8cde3067d98fad5ccb3526acc5d9bbdd5d2d1bf981c37e0$''',
   '''^cc44baa98a5414a6a5ccbda8a0de5a2e618e8beff3a241cd9002739eb051cde1$''',
+  '''^cd61467bd26c2f04263a328e8f24a0eab68b5b4aadbfbe3783434ea3863a84e8$''',
   '''^cd804de66b5dfaea2f78175c341e0498799256d20e91a14333fd81deb697115e$''',
   '''^cdae05efccc1fb56df272f9b4368db1943e23f299fdefa106fd8522c33935a2b$''',
   '''^ceacde478768ba266891473df34530edcbace3f0d2f63fd4ebc77f2db5ae035e$''',
@@ -1625,6 +1636,7 @@ regexes = [
   '''^eb5b920b6f24c96a0cf522adc25fe75f511ccf765f1d8ca35bb617f89397812a$''',
   '''^eb8c67a0fd619b75d4a097da6c535e36092dc31833da11976f4ea9737736c27c$''',
   '''^ebf84b310b64ac901848e585bb2dc70052555685e327de26af717bde7d4edeb4$''',
+  '''^ec1329fa5a61a3b6cd84a3073aaada7b8785a77f63ac11f1d360caa1ae202bff$''',
   '''^ec17d91e47de2d55dd4043318800415591832c9424cf9ed0350a4cb17c6eced2$''',
   '''^ec3c64ef5b250ec3721b9c8a500e580f0e52873a0ab3071ad9a07717e898243b$''',
   '''^ec5d7b695f29b86a185ee392050a6845c19890afbd7ff517746ba51b833e0b61$''',
