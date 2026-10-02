@@ -1,6 +1,7 @@
 //! Real Haskell native captures must preserve lexical binding ownership.
-//! Equation grouping and written annotations are structural evidence, not proof
-//! of type inference, application dispatch, or use-site name resolution.
+//! Equation grouping and written annotations remain structural evidence.
+//! Only the closed simple-equation frontier proves formal reads; application
+//! dispatch, inferred types and other use-site names remain unavailable.
 
 use std::{
     collections::BTreeSet,
@@ -354,7 +355,24 @@ fn assert_unproven_uses(fixture: &Fixture, document: &NormalizedIrDocument) {
         })
         .collect();
     assert!(!uses.is_empty());
+    let exact_read_span = fixture.span("value", 1);
+    let exact_parameter = defined_entity(document, fixture.span("value", 0));
+    let mut exact_reads = 0;
     for site in uses {
+        if site.source.span() == exact_read_span {
+            exact_reads += 1;
+            assert_eq!(site.role, OccurrenceRole::Reference);
+            assert_eq!(
+                site.target,
+                OccurrenceTarget::Resolved {
+                    symbol: exact_parameter.id
+                }
+            );
+            assert_eq!(site.syntactic_text_hash, content_hash(b"value"));
+            assert_eq!(site.source.generation(), fixture.source.generation());
+            assert_eq!(site.source.content_hash(), fixture.source.content_hash());
+            continue;
+        }
         assert!(
             matches!(site.target, OccurrenceTarget::Unresolved { .. }),
             "{site:?}"
@@ -379,10 +397,40 @@ fn assert_unproven_uses(fixture: &Fixture, document: &NormalizedIrDocument) {
         assert_eq!(site.source.generation(), fixture.source.generation());
         assert_eq!(site.source.content_hash(), fixture.source.content_hash());
     }
+    assert_eq!(exact_reads, 1);
+    let exact_read = document
+        .occurrences
+        .iter()
+        .find(|site| {
+            site.role == OccurrenceRole::Reference && site.source.span() == exact_read_span
+        })
+        .unwrap();
+    let exact_relations = document
+        .relations
+        .iter()
+        .filter(|relation| relation.subject == RelationEndpoint::Occurrence(exact_read.id))
+        .collect::<Vec<_>>();
+    assert_eq!(exact_relations.len(), 1);
+    assert_eq!(exact_relations[0].predicate, RelationPredicate::RefersTo);
+    assert_eq!(
+        exact_relations[0].object,
+        RelationEndpoint::Entity(exact_parameter.id)
+    );
+    assert_eq!(
+        exact_relations[0].evidence.source.as_ref(),
+        Some(&exact_read.source)
+    );
     assert!(document.relations.iter().all(|relation| matches!(
         relation.predicate,
         RelationPredicate::Contains | RelationPredicate::Declares | RelationPredicate::DefinesAt
-    )));
+    ) || relation.id == exact_relations[0].id));
+    assert!(
+        !document
+            .skipped_regions
+            .iter()
+            .any(|gap| gap.detail == "haskell-binding-target-unavailable"
+                && gap.source.span() == exact_read_span)
+    );
     assert!(
         document
             .skipped_regions
@@ -473,5 +521,214 @@ fn native_equations_annotations_and_generators_preserve_lexical_owners() {
             2
         );
         assert_unproven_uses(&fixture, document);
+    }
+}
+
+#[test]
+fn unguarded_equation_reads_use_only_their_own_written_simple_formals() {
+    for newline in ["\n", "\r\n"] {
+        let fixture = Fixture::new(
+            concat!(
+                "module Exact where\n",
+                "identity x = x\n",
+                "choose x y = x\n",
+                "choose x y = y\n",
+                "forward x = unknown x\n",
+                "group x = (x)\n",
+                "literals x = unknown 1 1.5 'a' \"text\" x\n",
+                "free x = missing\n",
+            )
+            .replace('\n', newline),
+        );
+        let output = fixture.analyze();
+        let document = output.document();
+        let mut choose_parameters = BTreeSet::new();
+        for (clause, name) in [
+            ("identity x = x", "x"),
+            ("choose x y = x", "x"),
+            ("choose x y = y", "y"),
+            ("forward x = unknown x", "x"),
+            ("group x = (x)", "x"),
+            ("literals x = unknown 1 1.5 'a' \"text\" x", "x"),
+        ] {
+            let start = fixture.span(clause, 0).start_byte();
+            let span = |offset| {
+                SourceSpan::new(
+                    fixture.snapshot.file(),
+                    start + u64::try_from(offset).unwrap(),
+                    start + u64::try_from(offset + name.len()).unwrap(),
+                )
+                .unwrap()
+            };
+            let parameter = defined_entity(document, span(clause.find(name).unwrap()));
+            assert_eq!(parameter.kind, EntityKind::Parameter);
+            if clause.starts_with("choose") {
+                assert!(choose_parameters.insert(parameter.id));
+            }
+            let read_span = span(clause.rfind(name).unwrap());
+            let reads = document
+                .occurrences
+                .iter()
+                .filter(|site| {
+                    site.role == OccurrenceRole::Reference && site.source.span() == read_span
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(reads.len(), 1, "{clause}");
+            let read = reads[0];
+            assert_eq!(
+                read.target,
+                OccurrenceTarget::Resolved {
+                    symbol: parameter.id
+                }
+            );
+            assert_eq!(
+                read.id,
+                rootlight_ir::derive_occurrence_record_id(read).unwrap()
+            );
+            assert_eq!(read.syntactic_text_hash, content_hash(name.as_bytes()));
+            assert_eq!(read.source.generation(), fixture.source.generation());
+            assert_eq!(read.source.content_hash(), fixture.source.content_hash());
+            let relations = document
+                .relations
+                .iter()
+                .filter(|relation| relation.subject == RelationEndpoint::Occurrence(read.id))
+                .collect::<Vec<_>>();
+            assert_eq!(relations.len(), 1);
+            assert_eq!(relations[0].predicate, RelationPredicate::RefersTo);
+            assert_eq!(relations[0].object, RelationEndpoint::Entity(parameter.id));
+            assert_eq!(relations[0].evidence.source.as_ref(), Some(&read.source));
+            assert_eq!(
+                relations[0].id,
+                rootlight_ir::derive_relation_record_id(relations[0]).unwrap()
+            );
+            assert!(
+                !document
+                    .skipped_regions
+                    .iter()
+                    .any(|gap| gap.detail == "haskell-binding-target-unavailable"
+                        && gap.source.span() == read_span)
+            );
+        }
+        assert_eq!(choose_parameters.len(), 2);
+        let mut pair_ids = BTreeSet::new();
+        let mut choose_owner = None;
+        for clause in ["choose x y = x", "choose x y = y"] {
+            let function = defined_entity(document, fixture.head(clause, 0, "choose"));
+            assert_eq!(*choose_owner.get_or_insert(function.id), function.id);
+            for name in ["x", "y"] {
+                let start = fixture.span(clause, 0).start_byte()
+                    + u64::try_from(clause.find(name).unwrap()).unwrap();
+                let parameter = defined_entity(
+                    document,
+                    SourceSpan::new(
+                        fixture.snapshot.file(),
+                        start,
+                        start + u64::try_from(name.len()).unwrap(),
+                    )
+                    .unwrap(),
+                );
+                assert_eq!(parameter.container, Some(ContainerRef::Entity(function.id)));
+                assert!(
+                    pair_ids.insert(parameter.id),
+                    "same-spelled formals must remain clause-owned"
+                );
+            }
+        }
+        assert_eq!(pair_ids.len(), 4);
+        for site in document.occurrences.iter().filter(|site| {
+            site.role == OccurrenceRole::CallSite
+                || site.source.span() == fixture.span("missing", 0)
+        }) {
+            assert!(matches!(site.target, OccurrenceTarget::Unresolved { .. }));
+        }
+        assert!(
+            document
+                .occurrences
+                .iter()
+                .any(|site| site.role == OccurrenceRole::CallSite)
+        );
+        assert!(
+            document
+                .relations
+                .iter()
+                .all(|relation| relation.predicate != RelationPredicate::Calls)
+        );
+    }
+}
+
+#[test]
+fn unsupported_equation_binders_and_rhs_shapes_keep_all_use_sites_unresolved() {
+    for body in [
+        "blocked x = x where\n  x = 1\n",
+        "blocked x | True = x\n",
+        "blocked (Just x) = x\n",
+        "blocked (extract -> x) = x\n",
+        "blocked x = (\\x -> x)\n",
+        "blocked x = let x = 1 in x\n",
+        "blocked x = case x of { Just y -> y }\n",
+        "blocked x = do { y <- pure x; pure y }\n",
+        "blocked xs = [x | x <- xs]\n",
+        "blocked x = Module.x\n",
+        "blocked x = Record { field = x }\n",
+        "blocked x = x + 1\n",
+        "blocked x = (x :: Int)\n",
+        "blocked x = [| x |]\n",
+        "blocked x = Just x\n",
+        "blocked x = unknown (\\y -> y) x\n",
+    ] {
+        let fixture = Fixture::new(format!("module Negative where\n{body}"));
+        let output = fixture.analyze();
+        let document = output.document();
+        let uses = document
+            .occurrences
+            .iter()
+            .filter(|site| {
+                matches!(
+                    site.role,
+                    OccurrenceRole::Reference | OccurrenceRole::CallSite | OccurrenceRole::TypeUse
+                )
+            })
+            .collect::<Vec<_>>();
+        assert!(!uses.is_empty(), "{body}");
+        assert!(
+            uses.iter()
+                .all(|site| matches!(site.target, OccurrenceTarget::Unresolved { .. })),
+            "{body}"
+        );
+        assert!(
+            document
+                .relations
+                .iter()
+                .all(|relation| relation.predicate != RelationPredicate::RefersTo
+                    && relation.predicate != RelationPredicate::Calls),
+            "{body}"
+        );
+    }
+}
+
+#[test]
+fn body_only_admission_changes_preserve_function_and_clause_formal_identities() {
+    let mut original = None;
+    for body in ["x", "unknown y x", "let z = x in z"] {
+        let fixture = Fixture::new(format!("module Stable where\npick x y = {body}\n"));
+        let output = fixture.analyze();
+        let document = output.document();
+        let function = defined_entity(document, fixture.span("pick", 0));
+        assert_eq!(function.kind, EntityKind::Function);
+        let mut identities = vec![(function.kind, function.canonical_name.clone(), function.id)];
+        for name in ["x", "y"] {
+            let parameter = defined_entity(document, fixture.span(name, 0));
+            assert_eq!(parameter.kind, EntityKind::Parameter);
+            assert_eq!(parameter.container, Some(ContainerRef::Entity(function.id)));
+            identities.push((
+                parameter.kind,
+                parameter.canonical_name.clone(),
+                parameter.id,
+            ));
+        }
+        assert_eq!(
+            original.get_or_insert_with(|| identities.clone()),
+            &identities
+        );
     }
 }

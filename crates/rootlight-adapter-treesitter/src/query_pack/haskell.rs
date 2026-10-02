@@ -15,6 +15,144 @@ fn equation(node: Node<'_>) -> bool {
         && node.child_by_field_name("arrow").is_none()
 }
 
+fn ordinary_prefix_equation(node: Node<'_>) -> bool {
+    node.kind() == "function"
+        && equation(node)
+        && !node.has_error()
+        && !node.is_missing()
+        && node
+            .child_by_field_name("name")
+            .is_some_and(|name| name.kind() == "variable")
+        && node.child_by_field_name("patterns").is_some()
+        && node.child_by_field_name("binds").is_none()
+        && node.child_by_field_name("parens").is_none()
+        && node.parent().is_some_and(|declarations| {
+            declarations.kind() == "declarations"
+                && declarations
+                    .parent()
+                    .is_some_and(|root| root.kind() == "haskell")
+        })
+}
+
+fn simple_function_clause(
+    node: Node<'_>,
+    cancellation: &Cancellation,
+) -> Result<bool, AdapterError> {
+    cancellation.check()?;
+    if !ordinary_prefix_equation(node) {
+        return Ok(false);
+    }
+    let Some(patterns) = node.child_by_field_name("patterns") else {
+        return Ok(false);
+    };
+    let mut cursor = patterns.walk();
+    let mut formals = 0usize;
+    for pattern in patterns.named_children(&mut cursor) {
+        cancellation.check()?;
+        if pattern.is_extra() {
+            continue;
+        }
+        if pattern.kind() != "variable"
+            || pattern.is_missing()
+            || pattern.start_byte() == pattern.end_byte()
+        {
+            return Ok(false);
+        }
+        formals = formals
+            .checked_add(1)
+            .ok_or_else(|| super::query_failure("haskell-formal-count"))?;
+    }
+    if formals == 0 {
+        return Ok(false);
+    }
+    let Some(matched) = node.child_by_field_name("match") else {
+        return Ok(false);
+    };
+    let mut cursor = node.walk();
+    for child in node.children(&mut cursor) {
+        cancellation.check()?;
+        if child.kind() == "where" || child.kind() == "match" && child != matched {
+            return Ok(false);
+        }
+        if child.is_named()
+            && !child.is_extra()
+            && Some(child) != node.child_by_field_name("name")
+            && child != patterns
+            && child != matched
+        {
+            return Ok(false);
+        }
+    }
+    if matched.child_by_field_name("guards").is_some() {
+        return Ok(false);
+    }
+    let Some(expression) = matched.child_by_field_name("expression") else {
+        return Ok(false);
+    };
+    // This eligibility marker is projected once per clause. Reads do not repeatedly
+    // scan siblings to infer absent binders; every unsupported RHS node closes it.
+    let mut cursor = expression.walk();
+    loop {
+        cancellation.check()?;
+        let current = cursor.node();
+        let descend = if !current.is_named() || current.is_extra() {
+            false
+        } else {
+            match current.kind() {
+                "variable" | "integer" | "float" | "char" | "string" => false,
+                "literal" if current.named_child_count() == 1 => true,
+                "apply"
+                    if current.child_by_field_name("function").is_some()
+                        && current.child_by_field_name("argument").is_some() =>
+                {
+                    true
+                }
+                "parens" if current.child_by_field_name("expression").is_some() => true,
+                _ => return Ok(false),
+            }
+        };
+        if descend && cursor.goto_first_child() {
+            continue;
+        }
+        loop {
+            cancellation.check()?;
+            if cursor.goto_next_sibling() {
+                break;
+            }
+            if !cursor.goto_parent() {
+                return Ok(true);
+            }
+        }
+    }
+}
+
+fn equation_rhs_read(node: Node<'_>, cancellation: &Cancellation) -> Result<bool, AdapterError> {
+    cancellation.check()?;
+    if node.kind() != "variable" || node.is_missing() || node.start_byte() == node.end_byte() {
+        return Ok(false);
+    }
+    let mut current = node;
+    while let Some(parent) = current.parent() {
+        cancellation.check()?;
+        match parent.kind() {
+            "parens" if parent.child_by_field_name("expression") == Some(current) => {}
+            "apply"
+                if parent.child_by_field_name("argument") == Some(current)
+                    || current.kind() == "apply"
+                        && parent.child_by_field_name("function") == Some(current) => {}
+            "match"
+                if parent.child_by_field_name("expression") == Some(current)
+                    && parent.child_by_field_name("guards").is_none() =>
+            {
+                return Ok(parent.parent().is_some_and(ordinary_prefix_equation));
+            }
+            _ => return Ok(false),
+        }
+        current = parent;
+    }
+    Ok(false)
+}
+
 fn declaration_signature(node: Node<'_>) -> bool {
     node.kind() == "signature"
         && (node.child_by_field_name("name").is_some()
@@ -354,6 +492,10 @@ pub(super) fn retain_capture(
     if role == StructuralRole::Signature {
         return Ok(match node.kind() {
             "signature" => declaration_signature(node),
+            "match" => match node.parent() {
+                Some(clause) => simple_function_clause(clause, cancellation)?,
+                None => false,
+            },
             "field" => node.child_by_field_name("name").is_some(),
             _ => true,
         });
@@ -393,6 +535,9 @@ fn reference_syntax(
     node: Node<'_>,
     cancellation: &Cancellation,
 ) -> Result<&'static str, AdapterError> {
+    if equation_rhs_read(node, cancellation)? {
+        return Ok("haskell.equation_rhs_read");
+    }
     let mut current = node;
     while let Some(parent) = current.parent() {
         cancellation.check()?;
@@ -456,6 +601,7 @@ pub(super) fn syntax(
     if role == StructuralRole::Signature {
         return Ok(Some(match node.kind() {
             "function" => "haskell.function_header",
+            "match" => "haskell.simple_equation_match",
             "bind" => "haskell.binding_header",
             "signature" => "haskell.written_signature",
             "field" => "haskell.field_signature",
@@ -521,7 +667,7 @@ pub(super) fn capture_range(
     if role == StructuralRole::Reference {
         return Ok(Some(unwrapped_name(node, cancellation)?.byte_range()));
     }
-    if role != StructuralRole::Signature {
+    if role != StructuralRole::Signature || node.kind() == "match" {
         return Ok(Some(node.byte_range()));
     }
     let mut end = node.end_byte();
@@ -920,6 +1066,65 @@ mod tests {
                 assert_eq!(scopes[0].native_depth, declarations[0].native_depth + 1);
             }
         }
+    }
+
+    #[test]
+    fn exact_equation_frontier_excludes_binder_changing_and_unknown_rhs_syntax() {
+        let cancellation = Cancellation::new();
+        for (source, eligible) in [
+            ("identity x = x\n", true),
+            ("choose x y = unknown x y\n", true),
+            ("group x = (x)\n", true),
+            ("value x = 1\n", true),
+            ("value x = 1.5\n", true),
+            ("value x = 'a'\n", true),
+            ("value x = \"text\"\n", true),
+            ("value x = unknown 1 1.5 'a' \"text\" x\n", true),
+            ("blocked x = x where\n  x = 1\n", false),
+            ("blocked x | True = x\n", false),
+            ("blocked (Just x) = x\n", false),
+            ("blocked (extract -> x) = x\n", false),
+            ("blocked x = (\\x -> x)\n", false),
+            ("blocked x = let x = 1 in x\n", false),
+            ("blocked x = case x of { Just y -> y }\n", false),
+            ("blocked x = do { y <- pure x; pure y }\n", false),
+            ("blocked xs = [x | x <- xs]\n", false),
+            ("blocked x = Module.x\n", false),
+            ("blocked x = Record { field = x }\n", false),
+            ("blocked x = x + 1\n", false),
+            ("blocked x = (x :: Int)\n", false),
+            ("blocked x = [| x |]\n", false),
+            ("blocked x = Just x\n", false),
+            ("blocked x = unknown (\\y -> y) x\n", false),
+        ] {
+            let tree = parse(source);
+            let clause = nodes(tree.root_node(), "function")
+                .into_iter()
+                .find(|node| equation(*node))
+                .unwrap();
+            assert_eq!(
+                simple_function_clause(clause, &cancellation).unwrap(),
+                eligible,
+                "{source}"
+            );
+        }
+        let tree = parse("forward x = unknown x\n");
+        let variables = nodes(tree.root_node(), "variable");
+        let marked = variables
+            .into_iter()
+            .filter(|node| equation_rhs_read(*node, &cancellation).unwrap())
+            .map(|node| node.utf8_text(b"forward x = unknown x\n").unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(marked, ["x"]);
+        cancellation.cancel(CancellationReason::ClientRequest);
+        assert!(matches!(
+            simple_function_clause(tree.root_node(), &cancellation),
+            Err(AdapterError::Cancelled { .. })
+        ));
+        assert!(matches!(
+            equation_rhs_read(tree.root_node(), &cancellation),
+            Err(AdapterError::Cancelled { .. })
+        ));
     }
 
     #[test]

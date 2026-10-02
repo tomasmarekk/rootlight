@@ -10,6 +10,7 @@ mod groovy_bindings;
 mod groovy_callables;
 mod groovy_calls;
 mod groovy_members;
+mod haskell_bindings;
 mod incremental;
 mod lowering;
 mod lua_bindings;

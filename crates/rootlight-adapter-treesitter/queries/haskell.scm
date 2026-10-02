@@ -10,6 +10,9 @@
 [(data_constructor) (newtype_constructor) (gadt_constructor)] @declaration @definition @signature
 [(function) (bind) (data_type) (newtype) (type_synomym) (class) (data_constructor) (newtype_constructor) (gadt_constructor)] @scope
 (signature) @signature
+; The separately retained match marker proves a closed formal-read frontier.
+; It must not change clause scope identity or declaration-header evidence.
+(match) @signature
 (field) @signature
 [(variable) (operator) (constructor_operator) (constructor) (name)] @declaration @definition
 [(variable) (operator) (constructor_operator) (constructor) (name) (qualified) (prefix_id) (infix_id) (field_name) (module)] @reference

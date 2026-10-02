@@ -1,7 +1,7 @@
 //! Source-owned Haskell equation and annotation lowering contracts.
 //!
-//! Authored syntax providers isolate grouping from native grammar extraction;
-//! they do not establish name resolution, type inference, or callable dispatch.
+//! Authored syntax providers isolate grouping and exact formal-identity barriers;
+//! native admission is covered separately. No types or call dispatch are inferred.
 
 use std::{
     fs,
@@ -806,6 +806,112 @@ fn incomplete_capture_plans_do_not_claim_annotation_binding_and_limits_stay_hard
         ),
         Err(AdapterError::Cancelled { .. })
     ));
+}
+
+#[test]
+fn exact_native_clause_labels_resolve_only_with_complete_parse_and_available_identity() {
+    let fixture = Fixture::new(
+        "module Sample where\npick :: Int -> Int\npick 0 = 1\npick value = value\npick value = 2\n",
+    );
+    for (status, missing_definition, marker_parent, resolved) in [
+        (CoverageStatus::Complete, false, 20, true),
+        (CoverageStatus::Complete, false, 23, true),
+        (CoverageStatus::Bounded, false, 20, false),
+        (CoverageStatus::Complete, true, 20, false),
+    ] {
+        let mut facts = equation_facts(&fixture);
+        facts
+            .retain(|fact| fact.local_id() != 40 && !(missing_definition && fact.local_id() == 25));
+        facts.extend([
+            fixture.fact(
+                41,
+                Some(marker_parent),
+                SyntaxFactKind::Signature,
+                ("= value", 0),
+                if marker_parent == 23 { 5 } else { 4 },
+                "haskell.simple_equation_match.signature",
+            ),
+            fixture.fact(
+                40,
+                Some(23),
+                SyntaxFactKind::Occurrence,
+                ("value", 1),
+                5,
+                "haskell.equation_rhs_read.reference",
+            ),
+        ]);
+        let output = fixture
+            .analyze(facts.clone(), IrLimits::default(), status, &deadline())
+            .unwrap();
+        let document = output.document();
+        let read = document
+            .occurrences
+            .iter()
+            .find(|site| {
+                site.role == OccurrenceRole::Reference
+                    && site.source.span() == fixture.span("value", 1)
+            })
+            .unwrap();
+        assert_eq!(
+            matches!(read.target, OccurrenceTarget::Resolved { .. }),
+            resolved
+        );
+        let relations = document
+            .relations
+            .iter()
+            .filter(|relation| relation.subject == RelationEndpoint::Occurrence(read.id))
+            .collect::<Vec<_>>();
+        assert_eq!(relations.len(), usize::from(resolved));
+        if let OccurrenceTarget::Resolved { symbol } = &read.target {
+            let parameter = document
+                .entities
+                .iter()
+                .find(|entity| entity.id == *symbol)
+                .unwrap();
+            assert_eq!(parameter.kind, EntityKind::Parameter);
+            assert_eq!(parameter.canonical_name, "value");
+            assert_eq!(relations[0].predicate, RelationPredicate::RefersTo);
+            assert_eq!(relations[0].object, RelationEndpoint::Entity(*symbol));
+            assert_eq!(relations[0].evidence.source.as_ref(), Some(&read.source));
+        }
+        assert_eq!(
+            document
+                .skipped_regions
+                .iter()
+                .any(|gap| gap.detail == "haskell-binding-target-unavailable"
+                    && gap.source.span() == read.source.span()),
+            !resolved
+        );
+        assert!(
+            document
+                .relations
+                .iter()
+                .all(|relation| relation.predicate != RelationPredicate::Calls)
+        );
+        if resolved && marker_parent == 20 {
+            for resource in 0..3 {
+                let mut limits = IrLimits::default();
+                match resource {
+                    0 => limits.max_entities = 0,
+                    1 => limits.max_occurrences = 0,
+                    2 => limits.max_relations = 0,
+                    _ => unreachable!(),
+                }
+                assert!(matches!(
+                    fixture.analyze(facts.clone(), limits, status, &deadline()),
+                    Err(AdapterError::Sink(
+                        rootlight_adapter_sdk::SinkError::StreamLimit { .. }
+                    ))
+                ));
+            }
+            let cancelled = deadline();
+            cancelled.cancel(CancellationReason::ClientRequest);
+            assert!(matches!(
+                fixture.analyze(facts, IrLimits::default(), status, &cancelled),
+                Err(AdapterError::Cancelled { .. })
+            ));
+        }
+    }
 }
 
 #[test]

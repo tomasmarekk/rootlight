@@ -1492,6 +1492,33 @@ impl<'context, 'source> Lowering<'context, 'source> {
             None
         };
 
+        let haskell_bindings = if self.request.language().as_str() == "haskell"
+            && self.parse_output.report().coverage().status() == CoverageStatus::Complete
+        {
+            let mut symbols = HashMap::new();
+            symbols
+                .try_reserve(materialized.len())
+                .map_err(|_| AdapterError::Sink(SinkError::AllocationFailed))?;
+            for entity in materialized.values() {
+                cancellation.check()?;
+                if entity.record.kind == EntityKind::Parameter
+                    && let Some(definition) = entity.definition_local_id
+                    && symbols.insert(definition, entity.record.id).is_some()
+                {
+                    return Err(provider_failure("haskell-formal-identity-conflict"));
+                }
+            }
+            Some(crate::haskell_bindings::HaskellBindings::new(
+                self.parse_output.facts(),
+                self.request.source().bytes(),
+                &symbols,
+                self.request.limits().ir().max_string_bytes,
+                cancellation,
+            )?)
+        } else {
+            None
+        };
+
         let vba_bindings = if self.parse_output.report().coverage().status()
             == CoverageStatus::Complete
             && self
@@ -2468,6 +2495,15 @@ impl<'context, 'source> Lowering<'context, 'source> {
                     }
                     relations.insert(relation.id, relation);
                 }
+                if let Some(bindings) = &haskell_bindings
+                    && let Some(symbol) = bindings.resolve(fact, text, cancellation)?
+                {
+                    occurrence.target = OccurrenceTarget::Resolved { symbol };
+                    occurrence.id = derive_occurrence_record_id(&occurrence)
+                        .map_err(|_| provider_failure("treesitter-occurrence-identity"))?;
+                    let relation = lexical_reference_relation(&occurrence, symbol)?;
+                    relations.insert(relation.id, relation);
+                }
                 if let Some(bindings) = &lua_bindings
                     && let Some(symbol) = bindings.resolve(fact, text, cancellation)?
                 {
@@ -3335,7 +3371,10 @@ impl<'context, 'source> Lowering<'context, 'source> {
                             .or_default()
                             .definition_parts
                             .push(*fact);
-                    } else if is_signature_capture(fact) && !is_haskell_type_annotation(fact) {
+                    } else if is_signature_capture(fact)
+                        && !is_haskell_type_annotation(fact)
+                        && fact.syntax_kind().as_str() != "haskell.simple_equation_match.signature"
+                    {
                         if fact.syntax_kind().as_str() == "haskell.field_signature.signature" {
                             cancellation.check()?;
                             haskell_field_signatures
