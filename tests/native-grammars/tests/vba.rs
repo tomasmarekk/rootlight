@@ -177,6 +177,150 @@ fn redim_type_clause_belongs_to_each_array_declarator() {
 }
 
 #[test]
+fn numeric_tokens_keep_exact_literals_in_initializers_defaults_and_arguments() {
+    for literal in ["1D-3", "1d+3", "1D+3@", "&7", "&77", "&O7", "&o0007^"] {
+        for newline in ["\n", "\r\n"] {
+            let source = format!(
+                "Const Seed As Variant = -{literal}{newline}Sub Target(Optional ByVal value As Variant = -{literal}){newline}End Sub{newline}Sub Run(){newline}Dim result As Variant{newline}result = {literal}{newline}Call Target({literal}){newline}End Sub{newline}"
+            );
+            let tree = bounded_parse(&mut parser(), source.as_bytes(), None);
+            assert!(
+                !tree.root_node().has_error(),
+                "{}",
+                tree.root_node().to_sexp()
+            );
+            signature(&tree, source.as_bytes());
+            for initializer in nodes_of_kind(tree.root_node(), "initializer") {
+                assert_eq!(
+                    initializer
+                        .child_by_field_name("value")
+                        .unwrap()
+                        .utf8_text(source.as_bytes())
+                        .unwrap(),
+                    format!("-{literal}")
+                );
+            }
+            assert_eq!(nodes_of_kind(tree.root_node(), "initializer").len(), 2);
+            let numbers = nodes_of_kind(tree.root_node(), "number_literal");
+            for clause in [
+                format!("result = {literal}"),
+                format!("Call Target({literal})"),
+            ] {
+                let start = source.find(&clause).unwrap() + clause.find(literal).unwrap();
+                assert_eq!(
+                    numbers
+                        .iter()
+                        .filter(|node| {
+                            node.start_byte() == start
+                                && node.end_byte() == start + literal.len()
+                                && node.utf8_text(source.as_bytes()).unwrap() == literal
+                        })
+                        .count(),
+                    1
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn comparison_chains_are_left_nested_in_assignments_and_call_arguments() {
+    for (expression, left, operator) in [
+        ("slot < 1 < 2", "slot < 1", "<"),
+        ("slot = 1 <> 2", "slot = 1", "<>"),
+    ] {
+        for newline in ["\n", "\r\n"] {
+            let source = format!(
+                "Sub Run(ByVal slot As Variant){newline}Dim result As Variant{newline}result = {expression}{newline}Call Target({expression}){newline}End Sub{newline}"
+            );
+            let tree = bounded_parse(&mut parser(), source.as_bytes(), None);
+            assert!(
+                !tree.root_node().has_error(),
+                "{}",
+                tree.root_node().to_sexp()
+            );
+            signature(&tree, source.as_bytes());
+            let chains = nodes_of_kind(tree.root_node(), "comparison_expression");
+            assert_eq!(chains.len(), 4);
+            let outer = chains
+                .iter()
+                .filter(|node| node.utf8_text(source.as_bytes()).unwrap() == expression)
+                .collect::<Vec<_>>();
+            assert_eq!(outer.len(), 2);
+            for node in outer {
+                let operand = node.child_by_field_name("left").unwrap();
+                assert_eq!(operand.kind(), "comparison_expression");
+                assert_eq!(operand.utf8_text(source.as_bytes()).unwrap(), left);
+                assert_eq!(
+                    node.child_by_field_name("operator")
+                        .unwrap()
+                        .utf8_text(source.as_bytes())
+                        .unwrap(),
+                    operator
+                );
+                assert_eq!(
+                    node.child_by_field_name("right")
+                        .unwrap()
+                        .utf8_text(source.as_bytes())
+                        .unwrap(),
+                    "2"
+                );
+            }
+            let assignment = nodes_of_kind(tree.root_node(), "assignment_statement");
+            assert_eq!(assignment.len(), 1);
+            assert_eq!(
+                assignment[0]
+                    .child_by_field_name("right")
+                    .unwrap()
+                    .utf8_text(source.as_bytes())
+                    .unwrap(),
+                expression
+            );
+            let calls = nodes_of_kind(tree.root_node(), "call_statement");
+            assert_eq!(calls.len(), 1);
+            assert_eq!(
+                calls[0].utf8_text(source.as_bytes()).unwrap(),
+                format!("Call Target({expression})")
+            );
+        }
+    }
+}
+
+#[test]
+fn indexed_comparison_assignments_remain_distinct_from_implicit_calls() {
+    for statement in [
+        "items(index) = value",
+        "items(index) = value > 0",
+        "items(index) = value > 0 > 1",
+    ] {
+        for newline in ["\n", "\r\n"] {
+            let source = format!("Sub Run(){newline}{statement}{newline}End Sub{newline}");
+            let tree = bounded_parse(&mut parser(), source.as_bytes(), None);
+            assert!(
+                !tree.root_node().has_error(),
+                "{}",
+                tree.root_node().to_sexp()
+            );
+            signature(&tree, source.as_bytes());
+            let assignments = nodes_of_kind(tree.root_node(), "assignment_statement");
+            assert_eq!(assignments.len(), 1);
+            assert_eq!(
+                assignments[0].utf8_text(source.as_bytes()).unwrap(),
+                statement
+            );
+            let target = assignments[0].child_by_field_name("left").unwrap();
+            assert_eq!(target.kind(), "call_expression");
+            assert_eq!(target.utf8_text(source.as_bytes()).unwrap(), "items(index)");
+            assert!(nodes_of_kind(tree.root_node(), "call_statement").is_empty());
+        }
+    }
+    let source = "Sub Run()\nTarget value > 0 > 1\nEnd Sub\n";
+    assert_statement(source, "call_statement", "Target value > 0 > 1");
+    let tree = bounded_parse(&mut parser(), source.as_bytes(), None);
+    assert!(nodes_of_kind(tree.root_node(), "assignment_statement").is_empty());
+}
+
+#[test]
 fn exported_class_and_procedure_names_retain_exact_bytes_across_line_endings() {
     for newline in ["\n", "\r\n"] {
         for (source, expectations) in [

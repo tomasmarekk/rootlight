@@ -8747,40 +8747,101 @@
       ]
     },
     "assignment_statement": {
-      "type": "SEQ",
+      "type": "CHOICE",
       "members": [
         {
-          "type": "FIELD",
-          "name": "left",
+          "type": "PREC_DYNAMIC",
+          "value": 1,
           "content": {
-            "type": "SYMBOL",
-            "name": "_assignable_expression"
-          }
-        },
-        {
-          "type": "STRING",
-          "value": "="
-        },
-        {
-          "type": "FIELD",
-          "name": "right",
-          "content": {
-            "type": "CHOICE",
+            "type": "SEQ",
             "members": [
               {
-                "type": "SYMBOL",
-                "name": "logical_value_expression"
+                "type": "FIELD",
+                "name": "left",
+                "content": {
+                  "type": "SYMBOL",
+                  "name": "call_expression"
+                }
               },
               {
-                "type": "SYMBOL",
-                "name": "comparison_expression"
+                "type": "STRING",
+                "value": "="
               },
               {
-                "type": "SYMBOL",
-                "name": "_expression"
+                "type": "FIELD",
+                "name": "right",
+                "content": {
+                  "type": "CHOICE",
+                  "members": [
+                    {
+                      "type": "SYMBOL",
+                      "name": "logical_value_expression"
+                    },
+                    {
+                      "type": "SYMBOL",
+                      "name": "comparison_expression"
+                    },
+                    {
+                      "type": "SYMBOL",
+                      "name": "_expression"
+                    }
+                  ]
+                }
               }
             ]
           }
+        },
+        {
+          "type": "SEQ",
+          "members": [
+            {
+              "type": "FIELD",
+              "name": "left",
+              "content": {
+                "type": "CHOICE",
+                "members": [
+                  {
+                    "type": "SYMBOL",
+                    "name": "_callable_expression"
+                  },
+                  {
+                    "type": "ALIAS",
+                    "content": {
+                      "type": "PATTERN",
+                      "value": "[lL][iI][nN][eE]"
+                    },
+                    "named": true,
+                    "value": "identifier"
+                  }
+                ]
+              }
+            },
+            {
+              "type": "STRING",
+              "value": "="
+            },
+            {
+              "type": "FIELD",
+              "name": "right",
+              "content": {
+                "type": "CHOICE",
+                "members": [
+                  {
+                    "type": "SYMBOL",
+                    "name": "logical_value_expression"
+                  },
+                  {
+                    "type": "SYMBOL",
+                    "name": "comparison_expression"
+                  },
+                  {
+                    "type": "SYMBOL",
+                    "name": "_expression"
+                  }
+                ]
+              }
+            }
+          ]
         }
       ]
     },
@@ -9713,6 +9774,10 @@
         {
           "type": "SYMBOL",
           "name": "binary_expression"
+        },
+        {
+          "type": "SYMBOL",
+          "name": "comparison_expression"
         }
       ]
     },
@@ -11054,7 +11119,11 @@
           },
           {
             "type": "PATTERN",
-            "value": "-?(?:\\d+\\.\\d*|\\.\\d+|\\d+)(?:[Ee][+-]?\\d+)?[$%&!#@^]?"
+            "value": "-?&[Oo]?[0-7]+[$%&!#@^]?"
+          },
+          {
+            "type": "PATTERN",
+            "value": "-?(?:\\d+\\.\\d*|\\.\\d+|\\d+)(?:[DdEe][+-]?\\d+)?[$%&!#@^]?"
           }
         ]
       }

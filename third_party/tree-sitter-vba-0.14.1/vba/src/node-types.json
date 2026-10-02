@@ -1232,6 +1232,10 @@
             "named": true
           },
           {
+            "type": "comparison_expression",
+            "named": true
+          },
+          {
             "type": "date_literal",
             "named": true
           },

@@ -1989,10 +1989,10 @@ module.exports = function defineGrammar(dialect) {
         ),
 
       // `arr(i) = x` is also readable as a call to `arr` with the comparison `(i) = x`
-      // as its argument, and GLR holds both to the end of the line. The base breaks
-      // that tie by tree shape, so vba keeps whatever it produced before. VB6 has no
-      // consumers to keep stable and takes the assignment, prec.dynamic 1, which the
-      // spaced-first-argument call (prec.dynamic 2) still outranks for `Foo .Bar = 1`.
+      // as its argument, and GLR holds both to the end of the line. Chained
+      // comparisons make that call reading viable for `arr(i) = x > 0` too.
+      // Both dialects prefer the assignment with prec.dynamic 1; the VB6
+      // spaced-first-argument call (prec.dynamic 2) still wins for `Foo .Bar = 1`.
       // The bonus is confined to a call-shaped target: on a plain name it would also
       // steer error recovery, turning `x = Foo(` from a MISSING `)` into an ERROR.
       assignment_statement: ($) => {
@@ -2019,7 +2019,14 @@ module.exports = function defineGrammar(dialect) {
             ),
           );
         }
-        return seq(field("left", $._assignable_expression), "=", right);
+        return choice(
+          prec.dynamic(1, seq(field("left", $.call_expression), "=", right)),
+          seq(
+            field("left", choice($._callable_expression, alias(caseInsensitive("Line"), $.identifier))),
+            "=",
+            right,
+          ),
+        );
       },
 
       coordinate_pair: ($) =>
@@ -2311,17 +2318,14 @@ module.exports = function defineGrammar(dialect) {
 
       // A comparison may itself be the left operand (`a = b <> 0`, `x Is Nothing = False`);
       // prec.left 7 on comparison_expression makes the chain left-associative.
-      // VB6 only for the chained form `a = b > c`. Admitting it in vba makes the call
-      // reading of `arr(i) = x > 0` viable, callee `arr` with the single argument
-      // `(i) = x > 0`, and it then wins the tie against the assignment; the base
-      // grammar cannot parse the chain, so the call reading dies at `>` and the
-      // assignment is the only tree left. Keeping vba on the base rule keeps that.
+      // A call-shaped assignment target has its own dynamic precedence so this
+      // recursion does not turn `arr(i) = x > 0` into an implicit call to arr.
       _comparison_operand: ($) =>
         choice(
           $._primary_expression,
           $._signed_unary_expression,
           $.binary_expression,
-          ...(isVB6 ? [$.comparison_expression] : []),
+          $.comparison_expression,
         ),
 
       logical_value_expression: ($) =>
@@ -2593,8 +2597,8 @@ module.exports = function defineGrammar(dialect) {
         token(
           choice(
             /-?&[Hh][0-9A-Fa-f]+[$%&!#@^]?/,
-            ...(isVB6 ? [/-?&[Oo][0-7]+[$%&!#@^]?/] : []),
-            /-?(?:\d+\.\d*|\.\d+|\d+)(?:[Ee][+-]?\d+)?[$%&!#@^]?/,
+            /-?&[Oo]?[0-7]+[$%&!#@^]?/,
+            /-?(?:\d+\.\d*|\.\d+|\d+)(?:[DdEe][+-]?\d+)?[$%&!#@^]?/,
           ),
         ),
 

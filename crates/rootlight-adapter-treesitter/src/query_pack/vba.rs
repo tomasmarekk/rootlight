@@ -297,9 +297,8 @@ pub(super) fn declared_visibility(
     } else {
         node
     };
-    // This is the written access modifier, not proof of project membership or
-    // external accessibility. Defaults and enclosing-module restrictions need
-    // their own source evidence before cross-file resolution may consume them.
+    // Written access metadata is not proof of project membership or external
+    // accessibility; enclosing-module restrictions still need source evidence.
     if header.has_error() {
         return Ok("vba.visibility_unknown");
     }
@@ -312,6 +311,21 @@ pub(super) fn declared_visibility(
         parent = ancestor.parent();
     }
     let Some(visibility) = header.child_by_field_name("visibility") else {
+        // MS-VBAL 5.2.3.1 makes module-level Dim a private declaration, not
+        // an unspecified default. Procedure-local declarations returned above.
+        // The grammar hides _dim_keyword, so children do not retain its token.
+        // https://learn.microsoft.com/en-us/openspecs/microsoft_general_purpose_programming_languages/ms-vbal/0f9113df-fd9c-485a-9583-fdb0e9d68e1b
+        if header.kind() == "variable_declaration"
+            && source.get(header.byte_range()).is_some_and(|text| {
+                text.get(..3)
+                    .is_some_and(|keyword| keyword.eq_ignore_ascii_case(b"Dim"))
+                    && text
+                        .get(3)
+                        .is_some_and(|byte| byte.is_ascii_whitespace() || *byte == b'[')
+            })
+        {
+            return Ok("vba.private");
+        }
         return Ok("vba.visibility_unknown");
     };
     Ok(match source.get(visibility.byte_range()) {
@@ -988,6 +1002,53 @@ pub(super) fn header_end(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn module_dim_visibility_uses_the_authored_hidden_keyword() {
+        for (source, expected, declarations) in [
+            ("Dim stored As Long\n", "vba.private", 1),
+            ("\tdIm [stored] As Long, other As Long\n", "vba.private", 2),
+            ("Dim[stored] As Long\n", "vba.private", 1),
+            ("Dim\t[stored] As Long\n", "vba.private", 1),
+            ("Dim _\n [stored] As Long\n", "vba.private", 1),
+            ("Dim _\r\n stored As Long\n", "vba.private", 1),
+            ("Public Dim stored As Long\n", "vba.public", 1),
+            ("Private stored As Long\n", "vba.private", 1),
+            (
+                "' Dim\nStatic stored As Long\n",
+                "vba.visibility_unknown",
+                1,
+            ),
+            (
+                "Sub Run()\nDim stored As Long\nstored = \"Dim Public Private\"\nEnd Sub\n",
+                "vba.visibility_unknown",
+                1,
+            ),
+        ] {
+            let mut parser = tree_sitter::Parser::new();
+            parser
+                .set_language(&tree_sitter_vba::LANGUAGE.into())
+                .unwrap();
+            let tree = parser.parse(source, None).unwrap();
+            assert!(!tree.root_node().has_error(), "{source}");
+            let mut pending = vec![tree.root_node()];
+            let mut observed = 0;
+            while let Some(node) = pending.pop() {
+                if node.kind() == "variable_declarator" {
+                    observed += 1;
+                    assert_eq!(
+                        declared_visibility(node, source.as_bytes(), &Cancellation::new()).unwrap(),
+                        expected,
+                        "{source}: {}",
+                        tree.root_node().to_sexp()
+                    );
+                }
+                let mut cursor = node.walk();
+                pending.extend(node.named_children(&mut cursor));
+            }
+            assert_eq!(observed, declarations, "{source}");
+        }
+    }
 
     #[test]
     fn single_grouped_calls_do_not_depend_on_native_partition() {

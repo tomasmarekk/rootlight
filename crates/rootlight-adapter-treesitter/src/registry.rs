@@ -9,7 +9,7 @@ use tree_sitter::Language;
 const TREE_SITTER_MIN_ABI: usize = 13;
 const TREE_SITTER_MAX_ABI: usize = 15;
 
-/// A first-party grammar family audited for Rootlight's syntax fallback.
+/// A native grammar family audited for Rootlight's syntax fallback.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[non_exhaustive]
 pub enum GrammarFamily {
@@ -368,8 +368,8 @@ const fn identity_for(family: GrammarFamily) -> GrammarIdentity {
         GrammarFamily::Vba => GrammarIdentity {
             language_id: "vba",
             grammar_version: "0.14.1",
-            source_package_sha256: "8338b17d797a1b3c8dfc17cf0ff4b8017bea93e866e306c284bd52df23bcd42f",
-            parser_sha256: "128dbbadf386ddb224a885415416684c8a1db91ff60fb950a069d4d976dc5a79",
+            source_package_sha256: "058debd1085c94a23989976f4c9289e30bbde00ee5b4e729f8185362ba972560",
+            parser_sha256: "98c6aefc3367726224e385adf66b275736a9baa8c9b51cef41719e2646d32451",
             scanner_sha256: None,
         },
         GrammarFamily::Perl => GrammarIdentity {

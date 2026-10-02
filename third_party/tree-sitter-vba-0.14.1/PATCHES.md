@@ -45,3 +45,22 @@ exported class and procedure identities, malformed syntax, byte-edit/recovery
 equivalence, and native cancellation/reset. No global runtime limits change.
 The other upstream dialect gates remain unchanged; native parse success is not
 proof of full VBA/VB6 coverage or installed Rootlight semantic support.
+
+## Numeric tokens and comparison associativity
+
+The numeric token rule includes `D`/`d` exponents and octal prefixes with an
+optional `O`/`o`, including bare `&77`. These are literal spellings in Microsoft
+[MS-VBAL section 3.3.2 Number Tokens](https://learn.microsoft.com/en-us/openspecs/microsoft_general_purpose_programming_languages/ms-vbal/685ad840-accb-4bdb-8bfd-f3d88498547a),
+not extensions inferred from string-to-number coercion.
+
+VBA comparisons may be left operands of subsequent comparisons, matching
+[MS-VBAL section 5.6.9.1 Operator Precedence and Associativity](https://learn.microsoft.com/en-us/openspecs/microsoft_general_purpose_programming_languages/ms-vbal/24cb214a-ef26-4e36-973d-43f715c8b127).
+The existing VB6 call-target assignment precedence also applies to VBA so
+`items(index) = value > 0` remains an assignment rather than an implicit call
+with `(index) = value > 0` as its argument. The precedence is limited to
+call-shaped targets; plain-name assignment recovery is unchanged.
+
+The authored native contracts check exact numeric spans in initializers,
+defaults, assignments and arguments, left-nested comparison nodes, and
+assignment versus implicit-call identity. These corrections do not evaluate
+numeric values, perform coercion, or prove runtime array or call targets.

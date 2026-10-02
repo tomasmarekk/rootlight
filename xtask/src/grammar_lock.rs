@@ -16,7 +16,7 @@ const GRAMMAR_LOCK_PATH: &str = "adapters/grammars.lock";
 const CARGO_LOCK_PATH: &str = "Cargo.lock";
 const ADAPTER_PACKAGE: &str = "rootlight-adapter-treesitter";
 const GRAMMAR_LOCK_SHA256: &str =
-    "d4f9d36e652088950c5f39c3644540d2735c0fc0fd6afbde1cfce31ad3967177";
+    "f69e32ee94a5e8845a372e254c51f616088a7b538a223657d89ec90ac6a1a04d";
 const JAVA_LICENSE_PATH: &str = "adapters/licenses/tree-sitter-java-0.23.5-LICENSE";
 const JAVA_LICENSE_SHA256: &str =
     "52ed137b039cd9c46409bc22e89938af911c95b157feae2d040b51e6084369a7";
@@ -208,7 +208,7 @@ const EXPECTED_LOCAL_PACKAGES: [(&str, &str, &str, &str); 1] = [(
     "tree-sitter-vba",
     "0.14.1",
     "third_party/tree-sitter-vba-0.14.1",
-    "8338b17d797a1b3c8dfc17cf0ff4b8017bea93e866e306c284bd52df23bcd42f",
+    "058debd1085c94a23989976f4c9289e30bbde00ee5b4e729f8185362ba972560",
 )];
 
 pub(crate) fn check(metadata: &Metadata, root: &Path) -> Result<(), GrammarLockError> {
