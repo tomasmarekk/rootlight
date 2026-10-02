@@ -5992,16 +5992,33 @@ fn assert_value_application_contract_with_statements(
             assert_eq!(reference.span().file(), file.id);
             assert!(reference.span().end_byte() <= u64::try_from(source.len()).unwrap());
         }
+        let expected_callee_syntax =
+            if statements.layout == ValueApplicationLayout::Statement && argument_count == 1 {
+                "vba.invoked_identifier.reference"
+            } else {
+                "vba.invoked_get_identifier.reference"
+            };
+        let excluded_callee_syntax = if expected_callee_syntax == "vba.invoked_identifier.reference"
+        {
+            "vba.invoked_get_identifier.reference"
+        } else {
+            "vba.invoked_identifier.reference"
+        };
         let callees = document
             .occurrences
             .iter()
             .filter(|site| {
-                site.syntax_kind == "vba.invoked_get_identifier.reference"
+                site.syntax_kind == expected_callee_syntax
                     && site.source.span().start_byte() == u64::try_from(start).unwrap()
                     && site.source.span().end_byte() == u64::try_from(start + name.len()).unwrap()
             })
             .collect::<Vec<_>>();
         assert_eq!(callees.len(), 1, "value receiver: {statement}");
+        assert!(!document.occurrences.iter().any(|site| {
+            site.syntax_kind == excluded_callee_syntax
+                && site.source.span().start_byte() == u64::try_from(start).unwrap()
+                && site.source.span().end_byte() == u64::try_from(start + name.len()).unwrap()
+        }));
         let callee = callees[0];
         assert_eq!(
             callee.role,
@@ -11886,8 +11903,10 @@ fn statement_value_applications_preserve_array_rank_and_local_shadow_lifetimes()
 enum NothingValueState {
     Literal,
     GroupedLiteral,
+    AdjacentLiteral,
     BracketedName,
     GroupedBracketedName,
+    AdjacentBracketedName,
     String,
     JoinedName,
     MissingBracketedName,
@@ -11899,10 +11918,13 @@ enum NothingValueState {
 impl NothingValueState {
     fn rhs(self) -> &'static str {
         match self {
-            Self::Literal | Self::GroupedLiteral | Self::ExtraArgument => "Nothing",
-            Self::BracketedName | Self::GroupedBracketedName | Self::MissingBracketedName => {
-                "[Nothing]"
+            Self::Literal | Self::GroupedLiteral | Self::AdjacentLiteral | Self::ExtraArgument => {
+                "Nothing"
             }
+            Self::BracketedName
+            | Self::GroupedBracketedName
+            | Self::AdjacentBracketedName
+            | Self::MissingBracketedName => "[Nothing]",
             Self::String => "\"Nothing\"",
             Self::JoinedName => "NothingValue",
             Self::NativeDate => "#1/1/2000#",
@@ -11920,7 +11942,9 @@ impl NothingValueState {
 
     fn consume_statement(self) -> (String, usize) {
         let rhs = self.rhs();
-        if matches!(self, Self::GroupedLiteral | Self::GroupedBracketedName) {
+        if matches!(self, Self::AdjacentLiteral | Self::AdjacentBracketedName) {
+            (format!("Consume({rhs})"), 0)
+        } else if matches!(self, Self::GroupedLiteral | Self::GroupedBracketedName) {
             (format!("Consume ({rhs})"), 0)
         } else {
             (format!("Call Consume({rhs})"), 5)
@@ -12198,6 +12222,7 @@ fn assert_nothing_value_contract(
         match state {
             NothingValueState::Literal
             | NothingValueState::GroupedLiteral
+            | NothingValueState::AdjacentLiteral
             | NothingValueState::ExtraArgument
             | NothingValueState::MixedCaseLet
             | NothingValueState::NativeDate => {
@@ -12225,6 +12250,7 @@ fn assert_nothing_value_contract(
             }
             NothingValueState::BracketedName
             | NothingValueState::GroupedBracketedName
+            | NothingValueState::AdjacentBracketedName
             | NothingValueState::JoinedName
             | NothingValueState::MissingBracketedName => {
                 assert_eq!(sites.len(), 1);
@@ -12280,7 +12306,9 @@ fn assert_nothing_value_contract(
         rhs_count,
         if matches!(
             state,
-            NothingValueState::Literal | NothingValueState::GroupedLiteral
+            NothingValueState::Literal
+                | NothingValueState::GroupedLiteral
+                | NothingValueState::AdjacentLiteral
         ) {
             4
         } else if matches!(state, NothingValueState::ExtraArgument) {
@@ -12335,8 +12363,10 @@ fn nothing_value_edits_preserve_references_calls_and_durable_source_lifetimes() 
     let states = [
         NothingValueState::Literal,
         NothingValueState::GroupedLiteral,
+        NothingValueState::AdjacentLiteral,
         NothingValueState::BracketedName,
         NothingValueState::GroupedBracketedName,
+        NothingValueState::AdjacentBracketedName,
         NothingValueState::String,
         NothingValueState::JoinedName,
         NothingValueState::MissingBracketedName,

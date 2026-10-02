@@ -5,7 +5,8 @@
 //! Numeric atoms retain integer radix or FLOAT spelling and an optional authored
 //! suffix without evaluating magnitudes, signed values or runtime types.
 //! Nothing is retained as a source-only value literal, distinct from bracketed names.
-//! A separated sole parenthesized statement argument retains implicit-call grouping.
+//! A sole parenthesized statement argument retains implicit-call grouping regardless
+//! of its gap from the callee.
 
 #![forbid(unsafe_code)]
 

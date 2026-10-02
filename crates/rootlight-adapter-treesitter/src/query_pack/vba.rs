@@ -361,7 +361,7 @@ pub(super) fn reference_syntax(
             || (parent.kind() == "call_statement"
                 && parent.child_by_field_name("callee") == Some(expression))
     }) || split_output_argument_is_invoked(expression, source);
-    if invoked && !instance && separated_grouped_statement_call(expression, source, cancellation)? {
+    if invoked && !instance && single_grouped_statement_call(expression, source, cancellation)? {
         return Ok("vba.invoked_identifier");
     }
     if let Some(ty) = child
@@ -835,7 +835,7 @@ enum PropertyAccess {
     Set,
 }
 
-fn separated_grouped_statement_call(
+fn single_grouped_statement_call(
     expression: Node<'_>,
     source: &[u8],
     cancellation: &Cancellation,
@@ -879,7 +879,7 @@ fn separated_grouped_statement_call(
         return Ok(false);
     };
     let mut check = || cancellation.check().map_err(AdapterError::from);
-    if gap.is_empty() || rootlight_vba::logical_whitespace_len(gap, &mut check)? != gap.len() {
+    if rootlight_vba::logical_whitespace_len(gap, &mut check)? != gap.len() {
         return Ok(false);
     }
     let Some(group) = source.get(arguments.byte_range()) else {
@@ -901,8 +901,8 @@ fn separated_grouped_statement_call(
         return Ok(false);
     };
     let whitespace = rootlight_vba::logical_whitespace_len(tail, &mut check)?;
-    // MS-VBAL 5.4.2.1 treats a separated parenthesized expression as one
-    // statement argument. Native GLR can instead wrap the callee in a value
+    // MS-VBAL 3.3 and 5.4.2.1 allow a sole grouped statement argument with or
+    // without separating trivia. Native GLR can wrap the callee in a value
     // application; that partition must not select Get or hide a callable Sub.
     Ok(matches!(
         tail.get(whitespace),
@@ -990,7 +990,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn separated_grouped_calls_do_not_depend_on_native_partition() {
+    fn single_grouped_calls_do_not_depend_on_native_partition() {
         let family = super::super::GrammarFamily::Vba;
         let pack = super::super::QueryPack::compile(family, include_str!("../../queries/vba.scm"))
             .unwrap();
@@ -1006,7 +1006,22 @@ mod tests {
                     ),
                     ("Target (\"a,b\")", Some("vba.invoked_identifier")),
                     ("Target _\n (Nothing)", Some("vba.invoked_identifier")),
-                    ("Target(Nothing)", None),
+                    ("Target(Nothing)", Some("vba.invoked_identifier")),
+                    ("Target(value)", Some("vba.invoked_identifier")),
+                    ("Target((value))", Some("vba.invoked_identifier")),
+                    ("Target(value + 1)", Some("vba.invoked_identifier")),
+                    (
+                        "Target(Inner(value, other))",
+                        Some("vba.invoked_identifier"),
+                    ),
+                    ("Target(\"a,b\")", Some("vba.invoked_identifier")),
+                    ("Target()", None),
+                    ("Target(Nothing, value)", None),
+                    ("Target(value,)", None),
+                    ("Target(value:=1)", None),
+                    ("Target(ByVal value)", None),
+                    ("Target(value) extra", None),
+                    ("Target(value).Member", None),
                     ("Target ()", None),
                     ("Target (Nothing, value)", None),
                     ("Target (value,)", None),
@@ -1019,8 +1034,13 @@ mod tests {
                         "sink = Target (Nothing)",
                         Some("vba.invoked_get_identifier"),
                     ),
+                    ("sink = Target(Nothing)", Some("vba.invoked_get_identifier")),
                     (
                         "Earlier _\n Target (Nothing)",
+                        Some("vba.invoked_get_identifier"),
+                    ),
+                    (
+                        "Earlier _\n Target(Nothing)",
                         Some("vba.invoked_get_identifier"),
                     ),
                     (
@@ -1028,11 +1048,23 @@ mod tests {
                         Some("vba.invoked_get_identifier"),
                     ),
                     (
+                        "sink = _\n Target(Nothing)",
+                        Some("vba.invoked_get_identifier"),
+                    ),
+                    (
                         "Call Earlier _\n (Target (Nothing))",
                         Some("vba.invoked_get_identifier"),
                     ),
                     (
+                        "Call Earlier _\n (Target(Nothing))",
+                        Some("vba.invoked_get_identifier"),
+                    ),
+                    (
                         "' continuation-like comment _\nTarget (Nothing)",
+                        Some("vba.invoked_identifier"),
+                    ),
+                    (
+                        "' continuation-like comment _\nTarget(Nothing)",
                         Some("vba.invoked_identifier"),
                     ),
                 ] {
@@ -1079,7 +1111,7 @@ mod tests {
                                 .named_descendant_for_byte_range(start, start + 6)
                                 .unwrap();
                             assert!(
-                                !separated_grouped_statement_call(
+                                !single_grouped_statement_call(
                                     name,
                                     source.as_bytes(),
                                     &Cancellation::new(),
@@ -1096,7 +1128,7 @@ mod tests {
                             .unwrap();
                         assert_eq!(name.kind(), "identifier");
                         assert!(
-                            !separated_grouped_statement_call(
+                            !single_grouped_statement_call(
                                 name,
                                 source.as_bytes(),
                                 &Cancellation::new(),

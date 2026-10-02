@@ -536,10 +536,10 @@ impl<E: std::error::Error + 'static> std::error::Error for ModuleError<E> {
 /// that callee separated by logical trivia from a complete comma-separated list
 /// of the same expressions. Parentheses in that list remain expression groups,
 /// not an inferred outer Call list or evidence of ByRef behavior. A complete
-/// standalone simple-name application with adjacent parentheses is retained as a
-/// separate ValueApplication statement, with its root and nested get/index syntax.
-/// A whitespace-separated single parenthesized expression is one grouped implicit
-/// call argument, including its authored parentheses and a charged group node.
+/// standalone simple-name statement with a single parenthesized expression retains
+/// that expression as one grouped implicit-call argument, whether adjacent or
+/// separated from its callee, including its authored parentheses and a charged
+/// group node.
 /// Empty and multiargument parenthesized statement lists retain the existing
 /// ValueApplication extension even when separated; this is not complete VBA call
 /// syntax. No target, type or formal-parameter inference is performed. Grouped
@@ -2269,7 +2269,7 @@ mod tests {
     }
 
     #[test]
-    fn separated_single_groups_preserve_module_roles_order_and_exact_aggregate_limits() {
+    fn single_groups_preserve_module_roles_order_and_exact_aggregate_limits() {
         for newline in ["\n", "\r\n"] {
             let later = format!("[Target] _{newline} ((Nothing))");
             let first = [
@@ -2277,33 +2277,34 @@ mod tests {
                 "Target (Nothing)",
                 "Target (Nothing,[Nothing])",
                 "Target ()",
+                "[Target]((Nothing))",
             ];
             let source = format!(
                 "Sub First(){newline}{}{newline}End Sub{newline}Sub Later(){newline}{later}{newline}End Sub{newline}",
                 first.join(newline)
             );
-            let limits = ModuleLimits::new(source.len(), 9, 2)
-                .with_max_arguments(5)
-                .with_max_expression_nodes(18);
+            let limits = ModuleLimits::new(source.len(), 10, 2)
+                .with_max_arguments(6)
+                .with_max_expression_nodes(24);
             let mut checkpoints = 0;
             let inventory = module_inventory(source.as_bytes(), limits, &mut || {
                 checkpoints += 1;
                 Ok::<(), ()>(())
             })
             .unwrap();
-            assert_eq!(inventory.statement_count(), 9);
+            assert_eq!(inventory.statement_count(), 10);
             assert_eq!(inventory.procedures().len(), 2);
-            assert_eq!(inventory.procedures()[0].statements().len(), 4);
+            assert_eq!(inventory.procedures()[0].statements().len(), 5);
             assert_eq!(inventory.procedures()[1].statements().len(), 1);
             let mut previous_end = 0;
             for (statement, written, grouped_call, nodes, arguments, expected_expressions) in [
                 (
                     &inventory.procedures()[0].statements()[0],
                     first[0],
-                    false,
-                    3,
+                    true,
+                    4,
                     1,
-                    vec!["Nothing"],
+                    vec!["(Nothing)"],
                 ),
                 (
                     &inventory.procedures()[0].statements()[1],
@@ -2328,6 +2329,14 @@ mod tests {
                     2,
                     0,
                     vec![],
+                ),
+                (
+                    &inventory.procedures()[0].statements()[4],
+                    first[4],
+                    true,
+                    5,
+                    1,
+                    vec!["((Nothing))"],
                 ),
                 (
                     &inventory.procedures()[1].statements()[0],
@@ -2399,7 +2408,7 @@ mod tests {
                     }
                 }
             }
-            for maximum in 0..18 {
+            for maximum in 0..24 {
                 assert_eq!(
                     module_inventory(
                         source.as_bytes(),
@@ -2410,7 +2419,7 @@ mod tests {
                     "nodes {maximum}"
                 );
             }
-            for maximum in 0..5 {
+            for maximum in 0..6 {
                 assert_eq!(
                     module_inventory(
                         source.as_bytes(),
@@ -2424,9 +2433,9 @@ mod tests {
             assert_eq!(
                 module_inventory(
                     source.as_bytes(),
-                    ModuleLimits::new(source.len(), 8, 2)
-                        .with_max_arguments(5)
-                        .with_max_expression_nodes(18),
+                    ModuleLimits::new(source.len(), 9, 2)
+                        .with_max_arguments(6)
+                        .with_max_expression_nodes(24),
                     &mut || Ok::<(), ()>(())
                 ),
                 Err(ModuleError::StatementLimit)
@@ -2516,17 +2525,17 @@ mod tests {
             assert_eq!(&source[call.statement()], "Target (value), other");
             assert_eq!(&source[call.arguments()], "(value), other");
             assert_eq!(call.argument_expressions().len(), 2);
-            let ModuleBodyStatement::ValueApplication(grouped) =
+            let ModuleBodyStatement::ExpressionCall(grouped) =
                 &inventory.procedures()[1].statements()[0]
             else {
-                panic!("later procedure application expected");
+                panic!("later grouped statement call expected");
             };
             assert_eq!(&source[grouped.statement()], "Target((value))");
             assert_eq!(
                 &source[grouped.argument_expressions()[0].clone()],
-                "(value)"
+                "((value))"
             );
-            assert_eq!(grouped.inventory().work_nodes(), 4);
+            assert_eq!(grouped.inventory().work_nodes(), 5);
             assert_eq!(grouped.inventory().argument_count(), 1);
             assert!(application.statement().end < empty.statement().start);
             assert!(empty.statement().end < call.statement().start);

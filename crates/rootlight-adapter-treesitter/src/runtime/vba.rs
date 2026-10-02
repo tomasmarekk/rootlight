@@ -4683,6 +4683,62 @@ mod tests {
     }
 
     #[test]
+    fn first_party_vba_adjacent_single_groups_preserve_complete_native_facts() {
+        let bodies = [
+            "Target(value)",
+            "[Target]((value))",
+            "Target(Nothing)",
+            "Target(value + 1)",
+            "Target(Inner(value, other))",
+            "Target(\"a,b\")",
+            "Target((Nothing))",
+            "[Target](value _\n + 1)",
+        ];
+        let mut sources = Vec::new();
+        for newline in ["\n", "\r\n"] {
+            for prefix in ["", "Earlier Nothing\n"] {
+                for body in bodies {
+                    sources.push(
+                        format!("Sub Run(ByVal value As Long, ByVal other As Long)\n{prefix}{body}\nEnd Sub\n")
+                            .replace('\n', newline),
+                    );
+                }
+            }
+            sources.push(
+                format!(
+                    "Sub Run(ByVal value As Long, ByVal other As Long)\n{}\nEnd Sub\n",
+                    bodies.join("\n")
+                )
+                .replace('\n', newline),
+            );
+        }
+        for source in &sources {
+            for language in ["vba", "visual-basic-classic"] {
+                let fixture = Fixture::new(source);
+                let request = fixture.request(language, &[]);
+                let native = fixture
+                    .provider
+                    .prepare_tree(
+                        &request,
+                        None,
+                        &[],
+                        fixture.provider.config.default_settings(),
+                        &Cancellation::new(),
+                    )
+                    .unwrap();
+                assert!(native.traversal.fully_traversed);
+                assert_eq!(native.traversal.coverage, CoverageStatus::Complete);
+                assert!(!native.tree.root_node().has_error(), "{language}: {source}");
+            }
+        }
+        for source in &sources {
+            for language in ["vba", "visual-basic-classic"] {
+                compare_native(&Fixture::new(source), language, &[]);
+            }
+        }
+    }
+
+    #[test]
     fn first_party_vba_statement_value_application_work_and_candidates_are_exact() {
         let source = "Sub Run()\nTarget (value + 1, Inner(other) * -2)\nEnd Sub\n";
         for language in ["vba", "visual-basic-classic"] {

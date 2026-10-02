@@ -36,6 +36,7 @@ const EXPRESSION_ASSIGNMENT_MODULE: &[u8] = b"Sub Run(ByVal value As Long)\r\nDi
 const EXPRESSION_CALL_MODULE: &[u8] = b"Sub Run(ByVal value As Long, ByVal other As Long)\r\nCall Target(value + 1, Inner(other) * -2)\r\nEnd Sub\r\n";
 const IMPLICIT_CALL_MODULE: &[u8] = b"Sub Run(ByVal value As Long, ByVal other As Long)\r\nTarget value + 1, Inner(other) * -2\r\nEnd Sub\r\n";
 const STATEMENT_VALUE_APPLICATION_MODULE: &[u8] = b"Sub Run(ByVal value As Long, ByVal other As Long)\r\nTarget (value + 1, Inner(other) * -2)\r\nEnd Sub\r\n";
+const ADJACENT_GROUPED_CALL_MODULE: &[u8] = b"Sub Run(ByVal value As Long, ByVal other As Long)\r\n[Target](Inner(value, other))\r\nEnd Sub\r\n";
 const OPTIONAL_PARAMETER_MODULE: &[u8] = b"Attribute VB_Name = \"Authored\"\r\nSub Accept(required As Long, Optional ByVal count As Long = 007, Optional [text] As String = \"a,\"\"b\"\":()\", Optional flag As Boolean = False, Optional unset As Long)\r\ncount = required\r\n[text] = [text]\r\nEnd Sub\r\n";
 const OMITTED_TYPE_MODULE: &[u8] = b"Attribute VB_Name = \"Authored\"\r\nSub Accept(required, ByVal typed As Long, Optional ByVal count = 007, Optional [text] = \"a,\"\"b\"\":()\", Optional flag = False, Optional unset)\r\ncount = required\r\n[text] = [text]\r\nEnd Sub\r\nFunction Echo(ByRef value) As Long\r\nEcho = value\r\nEnd Function\r\n";
 const RADIX_MODULE: &str = "Attribute VB_Name = \"Radix\"\nConst ModuleSeed As Long = &H0A\nPrivate slots(-&O1 To +&H2, &3) As Long\nSub Target(ByVal first As Long, Optional ByVal second As Long = &o7)\nEnd Sub\nFunction Inner(ByVal value As Long) As Long\nInner = &H1\nEnd Function\nSub Run()\nDim local As Long, grid(-&H1 To +&O2, &3) As Long\nConst LocalSeed As Long = &O7\nlocal = &hF\nLet local = &77\nlocal = LocalSeed\nlocal = grid(&H0, &O1)\nCall Target(&H1, &o2)\nCall Target(local + &H2, Inner(&3) * -&H1)\nEnd Sub\n";
@@ -3180,11 +3181,18 @@ fn parenthesized_statements_preserve_exact_native_source_roles() {
     for newline in ["\n", "\r\n"] {
         for (statement, grouped_call) in [
             ("Target (value)".to_owned(), true),
+            ("Target(value)".to_owned(), true),
+            ("Target(Nothing)".to_owned(), true),
             ("Target (value + 1)".to_owned(), true),
+            ("Target(value + 1)".to_owned(), true),
             ("[Target] ((value))".to_owned(), true),
+            ("[Target]((value))".to_owned(), true),
             ("Target (Inner(value, other))".to_owned(), true),
+            ("Target(Inner(value, other))".to_owned(), true),
             ("Target (\"a,b\")".to_owned(), true),
+            ("Target(\"a,b\")".to_owned(), true),
             (format!("[Target] _{newline} (value _{newline} + 1)"), true),
+            (format!("[Target](value _{newline} + 1)"), true),
             ("Target(value, other)".to_owned(), false),
             ("Target (value, other)".to_owned(), false),
             ("Target()".to_owned(), false),
@@ -3304,9 +3312,30 @@ fn parenthesized_statement_arguments_preserve_group_and_application_boundaries()
                 vec!["(value)".to_owned()],
                 true,
             ),
+            ("Target(value)".to_owned(), vec!["(value)".to_owned()], true),
+            (
+                "Target(Nothing)".to_owned(),
+                vec!["(Nothing)".to_owned()],
+                true,
+            ),
             (
                 "[Target] ((value))".to_owned(),
                 vec!["((value))".to_owned()],
+                true,
+            ),
+            (
+                "[Target]((value))".to_owned(),
+                vec!["((value))".to_owned()],
+                true,
+            ),
+            (
+                "Target(Inner(value, other))".to_owned(),
+                vec!["(Inner(value, other))".to_owned()],
+                true,
+            ),
+            (
+                format!("[Target](value _{newline} + 1)"),
+                vec![format!("(value _{newline} + 1)")],
                 true,
             ),
             (
@@ -3489,7 +3518,11 @@ fn implicit_grouped_assignment_candidates_preserve_exact_native_classification()
 
 #[test]
 fn implicit_and_value_application_budgets_preserve_mandatory_identity_without_native_retry() {
-    for source in [IMPLICIT_CALL_MODULE, STATEMENT_VALUE_APPLICATION_MODULE] {
+    for (source, expected_work) in [
+        (IMPLICIT_CALL_MODULE, 18),
+        (STATEMENT_VALUE_APPLICATION_MODULE, 18),
+        (ADJACENT_GROUPED_CALL_MODULE, 14),
+    ] {
         for language in ["vba", "visual-basic-classic"] {
             let fixture = Fixture::new(source);
             let provider = provider();
@@ -3500,7 +3533,7 @@ fn implicit_and_value_application_budgets_preserve_mandatory_identity_without_na
                 .required_syntax_fact_count(&request, &deadline())
                 .unwrap();
             assert_eq!(required, 11);
-            assert_eq!(full.report().resources().syntax_nodes(), 18);
+            assert_eq!(full.report().resources().syntax_nodes(), expected_work);
             let mandatory_identity = |output: &ParseOutput| {
                 output
                     .facts()
@@ -3612,7 +3645,7 @@ fn implicit_and_value_application_budgets_preserve_mandatory_identity_without_na
             );
             let budget = AnalysisLimits::new(
                 base.max_source_bytes(),
-                17,
+                expected_work - 1,
                 base.max_syntax_depth(),
                 base.max_embedded_ranges(),
                 base.max_reported_memory_bytes(),
@@ -3632,8 +3665,8 @@ fn implicit_and_value_application_budgets_preserve_mandatory_identity_without_na
                 .unwrap_err(),
                 AdapterError::RejectedRequest(rootlight_adapter_sdk::RequestError::ProviderLimit {
                     resource: ResourceKind::SyntaxNodes,
-                    observed: 18,
-                    limit: 17
+                    observed: expected_work,
+                    limit: expected_work - 1
                 })
             );
             let cancelled = deadline();

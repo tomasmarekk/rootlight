@@ -2348,7 +2348,7 @@ mod tests {
             ),
         ] {
             for gap in ["", "\t ", " _\n ", " _\r\n "] {
-                let grouped_call = !gap.is_empty() && arguments.len() == 1;
+                let grouped_call = arguments.len() == 1;
                 let work = work + if grouped_call { 1 } else { 0 };
                 let expected_arguments = if grouped_call {
                     vec![list]
@@ -2446,97 +2446,109 @@ mod tests {
     }
 
     #[test]
-    fn separated_single_groups_preserve_real_group_work_and_typed_failures() {
+    fn single_groups_preserve_real_group_work_and_typed_failures() {
         for newline in ["\n", "\r\n"] {
-            for gap in [" ".to_owned(), "\t ".to_owned(), format!(" _{newline} ")] {
-                for (tail, nodes, arguments) in [
-                    ("(Nothing)", 4, 1),
-                    ("(value)", 4, 1),
-                    ("((value))", 5, 1),
-                    ("(value + 1)", 6, 1),
-                    ("(Inner(value, other))", 7, 3),
-                    ("(\"a,b:\"\"()\")", 4, 1),
-                ] {
-                    let text = format!("[Target]{gap}{tail} ");
-                    let source = format!("prefix\n{text}\ntail");
-                    let range = 7..7 + text.len();
-                    for maximum in 0..nodes {
-                        assert_eq!(
-                            statement_with_expression_limits(
-                                source.as_bytes(),
-                                range.clone(),
-                                arguments,
-                                maximum,
-                                &mut || Ok::<(), ()>(())
-                            ),
-                            Err(ModuleError::ExpressionLimit),
-                            "{text:?}: nodes {maximum}"
-                        );
-                    }
-                    for maximum in 0..arguments {
-                        assert_eq!(
-                            statement_with_expression_limits(
-                                source.as_bytes(),
-                                range.clone(),
-                                maximum,
-                                nodes,
-                                &mut || Ok::<(), ()>(())
-                            ),
-                            Err(ModuleError::ArgumentLimit),
-                            "{text:?}: arguments {maximum}"
-                        );
-                    }
-                    let mut checkpoints = 0;
-                    let ModuleBodyStatement::ExpressionCall(call) =
-                        statement_with_expression_limits(
-                            source.as_bytes(),
-                            range.clone(),
-                            arguments,
-                            nodes,
-                            &mut || {
-                                checkpoints += 1;
-                                Ok::<(), ()>(())
-                            },
-                        )
-                        .unwrap()
-                        .unwrap()
-                    else {
-                        panic!("{text:?}: separated grouped statement call expected");
-                    };
-                    assert_eq!(call.statement(), range.clone());
-                    assert_eq!(call.callee(), 7..15);
-                    assert_eq!(call.arguments(), 15 + gap.len()..range.end - 1);
-                    assert_eq!(&source[call.arguments()], tail);
-                    assert_eq!(call.argument_expressions().len(), 1);
-                    assert_eq!(call.argument_expressions()[0], call.arguments());
-                    assert_eq!(call.inventory().work_nodes(), nodes);
-                    assert_eq!(call.inventory().argument_count(), arguments);
-                    let outer = &call.inventory().applications()[0];
-                    assert_eq!(outer.application(), range.start..range.end - 1);
-                    assert_eq!(outer.callee(), call.callee());
-                    assert_eq!(outer.arguments(), call.arguments());
-                    assert_eq!(outer.argument_expressions(), call.argument_expressions());
-                    for cancelled_at in 1..=checkpoints {
-                        let mut calls = 0;
-                        assert_eq!(
+            for gap in [
+                "".to_owned(),
+                " ".to_owned(),
+                "\t ".to_owned(),
+                format!(" _{newline} "),
+            ] {
+                for callee in ["Target", "[Target]"] {
+                    for (tail, nodes, arguments) in [
+                        ("(Nothing)", 4, 1),
+                        ("(value)", 4, 1),
+                        ("((value))", 5, 1),
+                        ("(value + 1)", 6, 1),
+                        ("(Inner(value, other))", 7, 3),
+                        ("(\"a,b:\"\"()\")", 4, 1),
+                    ] {
+                        let text = format!("{callee}{gap}{tail} ");
+                        let source = format!("prefix{newline}{text}{newline}tail");
+                        let start = "prefix".len() + newline.len();
+                        let range = start..start + text.len();
+                        for maximum in 0..nodes {
+                            assert_eq!(
+                                statement_with_expression_limits(
+                                    source.as_bytes(),
+                                    range.clone(),
+                                    arguments,
+                                    maximum,
+                                    &mut || Ok::<(), ()>(())
+                                ),
+                                Err(ModuleError::ExpressionLimit),
+                                "{text:?}: nodes {maximum}"
+                            );
+                        }
+                        for maximum in 0..arguments {
+                            assert_eq!(
+                                statement_with_expression_limits(
+                                    source.as_bytes(),
+                                    range.clone(),
+                                    maximum,
+                                    nodes,
+                                    &mut || Ok::<(), ()>(())
+                                ),
+                                Err(ModuleError::ArgumentLimit),
+                                "{text:?}: arguments {maximum}"
+                            );
+                        }
+                        let mut checkpoints = 0;
+                        let ModuleBodyStatement::ExpressionCall(call) =
                             statement_with_expression_limits(
                                 source.as_bytes(),
                                 range.clone(),
                                 arguments,
                                 nodes,
                                 &mut || {
-                                    calls += 1;
-                                    if calls == cancelled_at {
-                                        Err("stop")
-                                    } else {
-                                        Ok(())
-                                    }
-                                }
-                            ),
-                            Err(ModuleError::Cancelled("stop")),
-                            "{text:?}: checkpoint {cancelled_at}"
+                                    checkpoints += 1;
+                                    Ok::<(), ()>(())
+                                },
+                            )
+                            .unwrap()
+                            .unwrap()
+                        else {
+                            panic!("{text:?}: grouped statement call expected");
+                        };
+                        assert_eq!(call.statement(), range.clone());
+                        assert_eq!(call.callee(), start..start + callee.len());
+                        assert_eq!(
+                            call.arguments(),
+                            start + callee.len() + gap.len()..range.end - 1
                         );
-                        assert_eq!(calls, cancelled_at);
+                        assert_eq!(&source[call.callee()], callee);
+                        assert_eq!(&source[call.arguments()], tail);
+                        assert_eq!(call.argument_expressions().len(), 1);
+                        assert_eq!(call.argument_expressions()[0], call.arguments());
+                        assert_eq!(call.inventory().work_nodes(), nodes);
+                        assert_eq!(call.inventory().argument_count(), arguments);
+                        let outer = &call.inventory().applications()[0];
+                        assert_eq!(outer.application(), range.start..range.end - 1);
+                        assert_eq!(outer.callee(), call.callee());
+                        assert_eq!(outer.arguments(), call.arguments());
+                        assert_eq!(outer.argument_expressions(), call.argument_expressions());
+                        for cancelled_at in 1..=checkpoints {
+                            let mut calls = 0;
+                            assert_eq!(
+                                statement_with_expression_limits(
+                                    source.as_bytes(),
+                                    range.clone(),
+                                    arguments,
+                                    nodes,
+                                    &mut || {
+                                        calls += 1;
+                                        if calls == cancelled_at {
+                                            Err("stop")
+                                        } else {
+                                            Ok(())
+                                        }
+                                    }
+                                ),
+                                Err(ModuleError::Cancelled("stop")),
+                                "{text:?}: checkpoint {cancelled_at}"
+                            );
+                            assert_eq!(calls, cancelled_at);
+                        }
                     }
                 }
             }
@@ -2602,7 +2614,7 @@ mod tests {
             assert!(
                 matches!(
                     read(text.as_bytes()),
-                    Some(ModuleBodyStatement::ValueApplication(_))
+                    Some(ModuleBodyStatement::ExpressionCall(_))
                 ),
                 "{text}"
             );
@@ -5387,18 +5399,21 @@ mod tests {
                 let (inventory, callee, arguments, argument_expressions) = if index == 0
                     && identifier_byte
                 {
-                    let Some(ModuleBodyStatement::ValueApplication(application)) = &parsed else {
+                    let Some(ModuleBodyStatement::ExpressionCall(call)) = &parsed else {
                         panic!(
                             "joined ordinary callee expected: {prefix:?} byte {byte} {suffix:?}"
                         );
                     };
-                    assert_eq!(application.statement(), 0..source.len());
-                    assert_eq!(application.application(), 0..source.len());
+                    assert_eq!(call.statement(), 0..source.len());
+                    assert_eq!(
+                        call.inventory().applications()[0].application(),
+                        0..source.len()
+                    );
                     (
-                        application.inventory(),
-                        application.callee(),
-                        application.arguments(),
-                        application.argument_expressions(),
+                        call.inventory(),
+                        call.callee(),
+                        call.arguments(),
+                        call.argument_expressions(),
                     )
                 } else {
                     let Some(ModuleBodyStatement::ExpressionCall(call)) = &parsed else {
@@ -5420,9 +5435,16 @@ mod tests {
                 assert_eq!(argument_expressions.len(), 1);
                 assert_eq!(
                     argument_expressions[0],
-                    arguments.start + 1..arguments.end - 1
+                    if index == 0 && identifier_byte {
+                        arguments.clone()
+                    } else {
+                        arguments.start + 1..arguments.end - 1
+                    }
                 );
-                assert_eq!(inventory.work_nodes(), 5);
+                assert_eq!(
+                    inventory.work_nodes(),
+                    if index == 0 && identifier_byte { 6 } else { 5 }
+                );
                 assert_eq!(inventory.argument_count(), 1);
                 assert_eq!(inventory.applications().len(), 1);
                 let outer = &inventory.applications()[0];

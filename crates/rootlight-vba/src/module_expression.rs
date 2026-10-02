@@ -121,9 +121,9 @@ impl ModuleExpressionCall {
 /// One complete source-written parenthesized value application used as a statement.
 ///
 /// Unlike [`ModuleExpressionCall`], its outer callee is a value-application target.
-/// A whitespace-separated single parenthesized expression instead belongs to
-/// [`ModuleExpressionCall`] as one grouped argument. Adjacent, empty and
-/// multiargument statement forms retain this bounded syntax extension.
+/// A single parenthesized expression instead belongs to [`ModuleExpressionCall`]
+/// as one grouped argument, whether adjacent or separated from its callee. Empty
+/// and multiargument statement forms retain this bounded syntax extension.
 /// Get/index syntax does not prove a procedure call, array access, formal-parameter
 /// correspondence, runtime type or successful evaluation. The inventory starts
 /// with the exact outer application, followed by its nested applications.
@@ -983,8 +983,9 @@ impl<'a> Parser<'a> {
                     {
                         return Ok(None);
                     }
-                    // MS-VBAL 5.4.2.1: separated parentheses contain one grouped
-                    // implicit-call argument, not evidence of a get/index target.
+                    // MS-VBAL 5.4.2.1: a sole parenthesized expression is one
+                    // implicit-call argument regardless of the callee's gap,
+                    // not evidence of a get/index target.
                     // Charge its real group node only after complete-root proof.
                     self.node(NodeKind::Group(child), group.clone(), check)?;
                     let Some(argument) = self
@@ -1294,7 +1295,7 @@ pub(super) fn parenthesized_statement_application<E>(
         return Ok(None);
     }
     let mut parser = Parser::new(source, 0, maximum_nodes, maximum_arguments);
-    parser.statement_group_argument = callee.end < cursor;
+    parser.statement_group_argument = true;
     let Some(parsed) = parser.parse(check)? else {
         return Ok(None);
     };
