@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Exercise Cargo/local npm input exports using authored fixtures and mocked Git.
+"""Exercise Cargo/local npm/producer exports using authored fixtures and mocked Git.
 
 No Cargo, npm, registry or product process runs; the portable export retains
 strict source/mode boundaries without claiming installation or OS isolation.
@@ -20,11 +20,14 @@ import unittest
 from unittest.mock import patch
 
 import prepare_rust_source_bundle as bundle
+import import_lightning_producer_sources as producer_import
 import patch_npm_source_fixture as fixture
+import verify_lightning_producer_sources as producer
 import verify_local_npm_sources as npm
 import verify_npm_source_bundle as original_npm
 import vendor_rust_sources as vendor
 from test_verify_local_npm_sources import _archive as npm_archive
+from test_verify_lightning_producer_sources import AuthoredFixture, archive as producer_archive
 
 
 class RustSourceBundleTests(unittest.TestCase):
@@ -306,6 +309,9 @@ class RustSourceBundleTests(unittest.TestCase):
         self.assertFalse(manifest["frontend_external_source_closure_verified"])
         self.assertEqual(manifest["scope"], bundle.BUNDLE_SCOPE)
         self.assertIs(manifest["npm_distribution_inputs_verified"], True)
+        self.assertIsNone(manifest["lightning_producer_inputs"])
+        self.assertIs(manifest["lightning_producer_inputs_verified"], False)
+        self.assertEqual(manifest["source_input_empty_directories"], {})
         npm_inputs = manifest["npm_distribution_inputs"]
         self.assertEqual((npm_inputs["archive_count"], npm_inputs["lock_record_count"],
                           npm_inputs["original_archive_count"], npm_inputs["local_distribution_count"]),
@@ -688,6 +694,254 @@ class RustSourceBundleTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "already exists"):
             bundle.create_bundle(self.root, destination, allow_network=False)
         self.assertEqual(sentinel.read_bytes(), b"existing data")
+
+    def test_absent_producer_requires_explicit_null_evidence_and_false_verified_flag(self) -> None:
+        project, pristine = self.create_project()
+        self.assertEqual(bundle._producer_source_inputs(project), (None, {}, {}, set()))
+        for field, value in (("lightning_producer_inputs", {}), ("lightning_producer_inputs_verified", True),
+                             ("lightning_producer_inputs_verified", 0)):
+            manifest = copy.deepcopy(pristine)
+            manifest[field] = value
+            (project / bundle.MANIFEST_PATH).write_bytes(producer.json_bytes(manifest))
+            with self.subTest(field=field, value=value), self.assertRaisesRegex(ValueError, "producer source inputs"):
+                bundle.verify_project_bundle(project)
+        manifest = copy.deepcopy(pristine)
+        del manifest["lightning_producer_inputs"]
+        (project / bundle.MANIFEST_PATH).write_bytes(producer.json_bytes(manifest))
+        with self.assertRaisesRegex(ValueError, "producer source inputs"):
+            bundle.verify_project_bundle(project)
+
+
+class ProducerSourceExportTests(AuthoredFixture, unittest.TestCase):
+    """Exercise real producer verification on complete authored inert inputs."""
+
+    def setUp(self) -> None:
+        RustSourceBundleTests.setUp(self)
+        AuthoredFixture.setUp(self)
+        empty = tarfile.TarInfo(producer.ROOT + "/documentation/empty")
+        empty.type, empty.mode = tarfile.DIRTYPE, 0o775
+        self.payload = producer_archive(self.files, [empty])
+        pin = patch.object(producer, "ARCHIVE_SHA256", producer.digest(self.payload))
+        pin.start()
+        self.addCleanup(pin.stop)
+        self.write_prepared()
+        producer_import.import_bundle(self.project, self.prepared, self.capture, self.destination)
+        checksum = RustSourceBundleTests.write_archive(self)
+        lock = ('version = 4\n[[package]]\nname = "sample"\nversion = "1.0.0"\n'
+                f'source = "{bundle.REGISTRY}"\nchecksum = "{checksum}"\n').encode()
+        for name, content in {**{name: lock for name in bundle.LOCK_PATHS},
+                              ".cargo/config.toml": RustSourceBundleTests._local_config(self)}.items():
+            path = self.project / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(content)
+        retained = self.project / bundle.ARCHIVES_PATH
+        retained.mkdir()
+        archive = retained / self.archive.name
+        archive.write_bytes(self.archive.read_bytes())
+        modes = bundle.materialize_archive(archive, self.project / bundle.VENDOR_PATH,
+                                           "sample", "1.0.0", checksum)
+        modes[f"{bundle.ARCHIVES_PATH}/{self.archive.name}"] = 0o644
+        closure = bundle.verify_bundle(self.project / bundle.VENDOR_PATH,
+                                       [self.project / name for name in bundle.LOCK_PATHS], archives=retained)
+        report = {**closure, "file_modes": dict(sorted(modes.items())),
+                  "frontend_external_source_closure_verified": False,
+                  "build_and_packaging_acceptance_verified": False}
+        (self.project / bundle.CLOSURE_PATH).write_bytes(producer.json_bytes(report))
+        frontend = (self.project / npm.CANONICAL_LOCK).parent
+        package = json.loads((self.project / npm.CANONICAL_LOCK).read_bytes())["packages"][""]
+        (frontend / "package.json").write_bytes(producer.json_bytes(package))
+        (frontend / ".npmrc").write_bytes(b"fund=false\npackage-lock=true\n")
+        self.inventory = sorted((path.relative_to(self.project).as_posix(), False)
+                                for path in self.project.rglob("*") if path.is_file()
+                                and self.prepared not in path.parents and path != self.capture)
+
+    def export(self, *, inventory=None, destination=None):
+        return RustSourceBundleTests.export_project(
+            self, self.project, self.inventory if inventory is None else inventory, destination)
+
+    def test_complete_producer_bytes_modes_reports_and_empty_directories_survive_transport(self) -> None:
+        before = {name: (self.project / name).read_bytes() for name, _mode in self.inventory}
+        exported, manifest = self.export()
+        self.assertIs(manifest["lightning_producer_inputs_verified"], True)
+        evidence = producer.verify_bundle(exported, exported / bundle.LIGHTNING_PRODUCER_PATH)
+        self.assertEqual(manifest["lightning_producer_inputs"], evidence)
+        for key in producer.FALSE_CLAIMS:
+            self.assertIs(evidence[key], False)
+        self.assertIs(manifest["frontend_external_source_closure_verified"], False)
+        for name, payload in before.items():
+            self.assertEqual((exported / name).read_bytes(), payload)
+            self.assertEqual((self.project / name).read_bytes(), payload)
+        tool = bundle.LIGHTNING_PRODUCER_PATH + "/tree/scripts/build.js"
+        self.assertEqual(manifest["file_modes"][tool], 0o755)
+        self.assertTrue(next(row for row in manifest["project_sources"] if row["path"] == tool)["executable"])
+        empty = bundle.LIGHTNING_PRODUCER_PATH + "/tree/documentation/empty"
+        self.assertEqual(manifest["source_input_empty_directories"],
+                         {empty: 0o755, npm.LOCAL_DISTRIBUTIONS: 0o755})
+        self.assertEqual(list((exported / empty).iterdir()), [])
+        first, second = self.root / "producer-first.tar.gz", self.root / "producer-second.tar.gz"
+        bundle.archive_bundle(exported, first)
+        bundle.archive_bundle(exported, second)
+        self.assertEqual(first.read_bytes(), second.read_bytes())
+        restored = self.root / "producer-restored"
+        restored.mkdir()
+        with tarfile.open(first) as tar:
+            names = tar.getnames()
+            self.assertEqual(len(names), len(set(names)))
+            self.assertEqual(names, sorted(names))
+            member = tar.getmember("rootlight/" + empty)
+            self.assertTrue(member.isdir())
+            self.assertEqual((member.mode, member.uid, member.gid, member.mtime), (0o755, 0, 0, 0))
+            self.assertEqual(tar.getmember("rootlight/" + tool).mode, 0o755)
+            directories = {item.name for item in tar.getmembers() if item.isdir()}
+            self.assertEqual(directories, {"rootlight/" + empty, "rootlight/" + npm.LOCAL_DISTRIBUTIONS})
+            files = {item.name for item in tar.getmembers() if item.isfile()}
+            expected_files = {"rootlight/" + row["path"] for row in manifest["project_sources"]}
+            self.assertEqual(files, expected_files | {"rootlight/" + bundle.MANIFEST_PATH})
+            tar.extractall(restored, filter="data")
+        self.assertEqual(bundle.verify_project_bundle(restored / "rootlight"), manifest)
+        self.assertEqual(list((restored / "rootlight" / empty).iterdir()), [])
+
+    def test_every_producer_file_must_be_tracked_before_destination_creation(self) -> None:
+        _report, _modes, hashes, _directories = bundle._producer_source_inputs(self.project)
+        controls = (bundle.LIGHTNING_PRODUCER_PATH + "/source-tree.json",
+                    bundle.LIGHTNING_PRODUCER_PATH + "/publisher-capture.json",
+                    bundle.LIGHTNING_PRODUCER_PATH + "/" + producer.ARCHIVE_NAME,
+                    bundle.LIGHTNING_PRODUCER_PATH + "/tree/.gitignore",
+                    bundle.LIGHTNING_PRODUCER_PATH + "/tree/selectors/LICENSE")
+        self.assertTrue(set(controls).issubset(hashes))
+        for index, name in enumerate(controls):
+            destination = self.root / f"untracked-producer-{index}"
+            inventory = [row for row in self.inventory if row[0] != name]
+            with self.subTest(name=name), self.assertRaisesRegex(ValueError, "untracked producer"):
+                self.export(inventory=inventory, destination=destination)
+            self.assertFalse(destination.exists())
+
+    def test_changed_source_and_original_evidence_reject_before_copy(self) -> None:
+        controls = ("tree/src/value.rs", "source-tree.json", "publisher-capture.json", producer.ARCHIVE_NAME)
+        for index, name in enumerate(controls):
+            path = self.destination / name
+            original = path.read_bytes()
+            path.write_bytes(original + b"changed")
+            destination = self.root / f"tampered-producer-{index}"
+            with self.subTest(name=name), self.assertRaises(ValueError):
+                self.export(destination=destination)
+            self.assertFalse(destination.exists())
+            path.write_bytes(original)
+
+    def test_present_empty_foreign_partial_or_extra_namespace_never_counts_as_absent(self) -> None:
+        parent = self.destination.parent
+        foreign = parent / "unreviewed-producer"
+        foreign.mkdir()
+        with self.assertRaisesRegex(ValueError, "namespace inventory"):
+            bundle._producer_source_inputs(self.project)
+        foreign.rmdir()
+        self.destination.rename(self.root / "saved-producer")
+        with self.assertRaisesRegex(ValueError, "namespace inventory"):
+            bundle._producer_source_inputs(self.project)
+        self.destination.mkdir()
+        with self.assertRaisesRegex(ValueError, "stored producer inventory"):
+            bundle._producer_source_inputs(self.project)
+        self.destination.rmdir()
+        (self.root / "saved-producer").rename(self.destination)
+        empty = self.destination / "tree/foreign-empty"
+        empty.mkdir()
+        with self.assertRaisesRegex(ValueError, "source path inventory"):
+            bundle._producer_source_inputs(self.project)
+
+    def test_missing_authored_empty_directory_is_not_silently_reconstructed(self) -> None:
+        (self.destination / "tree/documentation/empty").rmdir()
+        destination = self.root / "missing-empty-directory"
+        with self.assertRaisesRegex(ValueError, "source path inventory"):
+            self.export(destination=destination)
+        self.assertFalse(destination.exists())
+
+    def test_restored_empty_directory_inventory_modes_and_extras_cannot_be_rebound(self) -> None:
+        exported, pristine = self.export()
+        empty = bundle.LIGHTNING_PRODUCER_PATH + "/tree/documentation/empty"
+        manifest_path = exported / bundle.MANIFEST_PATH
+        for value in ({}, {empty: 0o755}, {empty: True, npm.LOCAL_DISTRIBUTIONS: 0o755},
+                      {empty: 0o700, npm.LOCAL_DISTRIBUTIONS: 0o755},
+                      {**pristine["source_input_empty_directories"], "source-inputs/foreign": 0o755}):
+            manifest = copy.deepcopy(pristine)
+            manifest["source_input_empty_directories"] = value
+            manifest_path.write_bytes(producer.json_bytes(manifest))
+            with self.subTest(value=value), self.assertRaisesRegex(ValueError, "empty directories"):
+                bundle.verify_project_bundle(exported)
+        manifest_path.write_bytes(producer.json_bytes(pristine))
+        (exported / empty).rmdir()
+        with self.assertRaisesRegex(ValueError, "source path inventory"):
+            bundle.verify_project_bundle(exported)
+
+    def test_restored_evidence_flags_modes_and_rebound_tree_reject(self) -> None:
+        exported, original = self.export()
+        manifest_path = exported / bundle.MANIFEST_PATH
+        for key, value in (("lightning_producer_inputs", None), ("lightning_producer_inputs_verified", False),
+                           ("lightning_producer_inputs_verified", 1)):
+            manifest = copy.deepcopy(original)
+            manifest[key] = value
+            manifest_path.write_bytes(producer.json_bytes(manifest))
+            with self.subTest(key=key, value=value), self.assertRaisesRegex(ValueError, "producer source inputs"):
+                bundle.verify_project_bundle(exported)
+        tool = bundle.LIGHTNING_PRODUCER_PATH + "/tree/scripts/build.js"
+        manifest = copy.deepcopy(original)
+        manifest["file_modes"][tool] = 0o644
+        next(row for row in manifest["project_sources"] if row["path"] == tool)["executable"] = False
+        manifest_path.write_bytes(producer.json_bytes(manifest))
+        with self.assertRaisesRegex(ValueError, "authenticated producer inputs"):
+            bundle.verify_project_bundle(exported)
+        changed = bundle.LIGHTNING_PRODUCER_PATH + "/tree/src/value.rs"
+        (exported / changed).write_bytes(b"rebound source bytes\n")
+        manifest = copy.deepcopy(original)
+        next(row for row in manifest["project_sources"] if row["path"] == changed)["sha256"] = bundle.digest(exported / changed)
+        manifest_path.write_bytes(producer.json_bytes(manifest))
+        with self.assertRaisesRegex(ValueError, "stored source bytes"):
+            bundle.verify_project_bundle(exported)
+
+    def test_source_mutation_after_initial_producer_verification_is_detected(self) -> None:
+        original = bundle._producer_source_inputs
+        calls = 0
+
+        def changed_after_verification(root):
+            nonlocal calls
+            result = original(root)
+            calls += 1
+            if calls == 1:
+                path = self.destination / "tree/src/value.rs"
+                path.write_bytes(path.read_bytes() + b"mutation")
+            return result
+
+        destination = self.root / "late-producer-mutation"
+        with patch.object(bundle, "_producer_source_inputs", side_effect=changed_after_verification):
+            with self.assertRaisesRegex(ValueError, "producer source inputs changed before export"):
+                self.export(destination=destination)
+        self.assertFalse(destination.exists())
+
+    def test_export_rechecks_source_and_copied_producer_tree_before_manifest_publication(self) -> None:
+        original = bundle._versioned_closure
+        source = self.destination / "tree/src/value.rs"
+        before = source.read_bytes()
+        for phase in ("source", "copied"):
+            destination = self.root / ("producer-post-copy-" + phase)
+
+            def changed_after_copy(root):
+                result = original(root)
+                if root == destination:
+                    target = source if phase == "source" else destination / bundle.LIGHTNING_PRODUCER_PATH / "tree/src/value.rs"
+                    target.write_bytes(target.read_bytes() + b"mutation")
+                return result
+
+            with self.subTest(phase=phase), patch.object(bundle, "_versioned_closure", side_effect=changed_after_copy):
+                with self.assertRaisesRegex(ValueError, "stored source bytes"):
+                    self.export(destination=destination)
+            self.assertFalse((destination / bundle.MANIFEST_PATH).exists())
+            source.write_bytes(before)
+
+    def test_linked_producer_parent_is_not_an_optional_absence(self) -> None:
+        original = bundle.linked_path
+        parent = self.destination.parent
+        with patch.object(bundle, "linked_path", side_effect=lambda path: path == parent or original(path)):
+            with self.assertRaisesRegex(ValueError, "linked producer"):
+                bundle._producer_source_inputs(self.project)
 
 
 if __name__ == "__main__":

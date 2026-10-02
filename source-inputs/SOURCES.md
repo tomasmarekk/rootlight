@@ -71,6 +71,28 @@ sources for native, WASI, or bundled implementations. Their reports deliberately
 leave preferred-source, frontend, signature, and build/packaging acceptance
 claims false. Retained binaries are not implementation-source completeness.
 
+## Native producer inputs
+
+`producers/lightningcss-1d680fa14e9a089c92dc0929f869d6757ae91c30/`
+retains the original source archive and complete authored tree associated with
+the exact locked Lightning CSS distribution. Both supplied MPL-2.0 licenses,
+upstream patches, Cargo manifests and lock, and the raw Yarn lock are preserved.
+Upstream ignore files are inert data, not rules for excluding producer sources.
+
+`scripts/import_lightning_producer_sources.py` publishes only already reviewed
+local inputs into a fresh declared namespace. It does not acquire, compile or
+execute producer code. `scripts/verify_lightning_producer_sources.py` rederives
+the exact report, source inventory and archive-derived executable file intent;
+unrecognized fields, changed inputs, extra files and traversal errors fail closed.
+Raw archive directory modes are provenance, not Git-restored directory permissions.
+
+Retained publisher metadata matches the authenticated local npm distribution
+pins. Its separate capture is a caller observation, not independently proved
+transport, a signature check or source-to-binary reproduction. The Yarn lock is
+hash-bound authored input, not a verified transitive source closure. Missing
+producer dependencies and other native implementation sources remain open;
+this inventory does not qualify frontend or full-product source completeness.
+
 ## Acceptance boundaries
 
 Rust archive and directory-source verification proves the published input

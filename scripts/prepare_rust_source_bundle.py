@@ -3,7 +3,8 @@
 
 The tracked registry sources and original archives cover workspace, native-test,
 and fuzz locks. Local npm distributions retain declared fixture provenance;
-export proves neither preferred frontend closure nor third-party authorship.
+Optional producer trees retain authored source and publisher association evidence;
+export proves neither transitive preferred closure nor third-party authorship.
 """
 
 import argparse
@@ -19,7 +20,14 @@ import tarfile
 import tomllib
 
 from verify_cargo_source_bundle import verify_bundle
-from verify_local_npm_sources import CANONICAL_LOCK, verify_local_bundle
+from verify_lightning_producer_sources import (
+    COMMIT as LIGHTNING_COMMIT, PACKAGE as LIGHTNING_PACKAGE, ROOT as LIGHTNING_ARCHIVE_ROOT,
+    verify_bundle as verify_lightning_producer_bundle,
+)
+from verify_local_npm_sources import (
+    CANONICAL_LOCK, LOCAL_DISTRIBUTIONS as NPM_LOCAL_DISTRIBUTIONS,
+    ORIGINAL_ARCHIVES as NPM_ORIGINAL_ARCHIVES, verify_local_bundle,
+)
 
 
 LOCK_PATHS = ("Cargo.lock", "tests/native-grammars/Cargo.lock", "fuzz/Cargo.lock")
@@ -28,6 +36,8 @@ VENDOR_PATH = "source-inputs/cargo"
 ARCHIVES_PATH = "source-inputs/crates"
 CLOSURE_PATH = "source-inputs/cargo-source-closure.json"
 NPM_REPORT_PATH = "source-inputs/npm/npm-source-closure.json"
+PRODUCERS_PATH = "source-inputs/producers"
+LIGHTNING_PRODUCER_PATH = f"{PRODUCERS_PATH}/{LIGHTNING_PACKAGE}-{LIGHTNING_COMMIT}"
 FRONTEND_PATHS = ("apps/rootlight-web/frontend/package.json", CANONICAL_LOCK,
                   "apps/rootlight-web/frontend/.npmrc")
 BUNDLE_SCOPE = "rust_workspace_native_grammars_fuzz_and_local_npm_inputs"
@@ -201,6 +211,68 @@ def _npm_distribution_inputs(root: Path) -> tuple[dict, dict[str, int], dict[str
     return report, modes, hashes
 
 
+def _producer_source_inputs(root: Path) -> tuple[dict | None, dict[str, int], dict[str, str], set[str]]:
+    """Bind an optional complete producer namespace to its offline verifier.
+
+    Only complete absence supports older Rust/npm-only exports. A present parent
+    must contain exactly the reviewed producer. Authored directories, including
+    empty ones, are source inventory; their raw modes remain report metadata,
+    not a guarantee of restored directory permissions or binary reproduction.
+    """
+    parent = root / PRODUCERS_PATH
+    if any(linked_path(path) for path in (parent, *parent.parents)):
+        raise ValueError("linked producer source namespace")
+    if not parent.exists():
+        return None, {}, {}, set()
+    if not parent.is_dir() or {entry.name for entry in parent.iterdir()} != {
+        PurePosixPath(LIGHTNING_PRODUCER_PATH).name
+    }:
+        raise ValueError("producer namespace inventory differs from reviewed inputs")
+    report = verify_lightning_producer_bundle(root, root / LIGHTNING_PRODUCER_PATH)
+    hashes = {f"{LIGHTNING_PRODUCER_PATH}/{name}": record["sha256"]
+              for name, record in report["retained_inputs"].items()}
+    encoded = (json.dumps(report, sort_keys=True, indent=2, allow_nan=False) + "\n").encode("utf-8")
+    report_path = f"{LIGHTNING_PRODUCER_PATH}/source-tree.json"
+    if regular_source(root, report_path).read_bytes() != encoded:
+        raise ValueError("producer tree report differs from verified inputs")
+    hashes[report_path] = hashlib.sha256(encoded).hexdigest()
+    modes = {name: 0o644 for name in hashes}
+    directories = {PRODUCERS_PATH, LIGHTNING_PRODUCER_PATH, f"{LIGHTNING_PRODUCER_PATH}/tree"}
+    for record in report["source_inventory"]["members"]:
+        if record["path"] == LIGHTNING_ARCHIVE_ROOT:
+            continue
+        relative = record["path"].removeprefix(LIGHTNING_ARCHIVE_ROOT + "/")
+        name = f"{LIGHTNING_PRODUCER_PATH}/tree/{relative}"
+        relative_path(name)
+        if record["kind"] == "directory":
+            directories.add(name)
+        else:
+            hashes[name] = record["sha256"]
+            modes[name] = 0o755 if record["archive_mode"] & 0o111 else 0o644
+    for name, checksum in hashes.items():
+        if digest(regular_source(root, name)) != checksum:
+            raise ValueError("producer source inputs changed before export")
+        directories.update(str(path) for path in PurePosixPath(name).parents
+                           if str(path).startswith(PRODUCERS_PATH + "/"))
+    return report, dict(sorted(modes.items())), dict(sorted(hashes.items())), directories
+
+
+def _source_input_empty_directories(root: Path, producer_directories: set[str]) -> dict[str, int]:
+    """Retain only verified empty source directories with canonical transport modes.
+
+    Nonempty directories are reconstructed from file/empty-directory ancestors.
+    These transport modes do not assert raw archive directory permission parity.
+    """
+    empty = {}
+    for name in sorted(producer_directories | {NPM_ORIGINAL_ARCHIVES, NPM_LOCAL_DISTRIBUTIONS}):
+        path = root / relative_path(name)
+        if linked_path(path) or not path.is_dir():
+            raise ValueError("missing or linked source input directory")
+        if not any(path.iterdir()):
+            empty[name] = 0o755
+    return empty
+
+
 def tracked_files(root: Path) -> list[tuple[str, bool]]:
     """Use Git's allowlist without copying credentials, caches, or local context."""
     records = subprocess.check_output(
@@ -282,9 +354,15 @@ def create_bundle(root: Path, destination: Path, *, allow_network: bool) -> dict
     npm_inputs, npm_modes, npm_hashes = _npm_distribution_inputs(root)
     if not set(npm_hashes).issubset(names):
         raise ValueError("untracked npm distribution or frontend inputs")
+    producer_inputs, producer_modes, producer_hashes, producer_directories = _producer_source_inputs(root)
+    if not set(producer_hashes).issubset(names):
+        raise ValueError("untracked producer source inputs")
+    empty_directories = _source_input_empty_directories(root, producer_directories)
     source_hashes = {name: digest(regular_source(root, name)) for name, _executable in inventory}
     if any(source_hashes[name] != checksum for name, checksum in npm_hashes.items()):
         raise ValueError("npm distribution inputs changed before export")
+    if any(source_hashes[name] != checksum for name, checksum in producer_hashes.items()):
+        raise ValueError("producer source inputs changed before export")
     revision = subprocess.check_output(
         ["git", "rev-parse", "HEAD"], cwd=root, text=True,
     ).strip()
@@ -293,6 +371,8 @@ def create_bundle(root: Path, destination: Path, *, allow_network: bool) -> dict
     if tree_status not in (0, 1):
         raise ValueError("cannot attribute working-tree sources to the recorded revision")
     destination.mkdir(parents=True)
+    for name in sorted(producer_directories | {NPM_ORIGINAL_ARCHIVES, NPM_LOCAL_DISTRIBUTIONS}):
+        (destination / relative_path(name)).mkdir(parents=True, exist_ok=True)
     source_files = []
     file_modes = {}
     for name, executable in inventory:
@@ -303,8 +383,8 @@ def create_bundle(root: Path, destination: Path, *, allow_network: bool) -> dict
             while chunk := input_stream.read(1024 * 1024):
                 output_stream.write(chunk)
         # Original archive intent survives Windows Git modes and host chmod.
-        mode = npm_modes.get(name, cargo_modes.get(name, 0o644 if name == CLOSURE_PATH else
-                                                  (0o755 if executable else 0o644)))
+        mode = producer_modes.get(name, npm_modes.get(name, cargo_modes.get(
+            name, 0o644 if name == CLOSURE_PATH else (0o755 if executable else 0o644))))
         executable = bool(mode & 0o111)
         target.chmod(mode)
         checksum = digest(target)
@@ -320,6 +400,12 @@ def create_bundle(root: Path, destination: Path, *, allow_network: bool) -> dict
         checked_report, checked_modes, checked_hashes = _npm_distribution_inputs(check_root)
         if checked_report != npm_inputs or checked_modes != npm_modes or checked_hashes != npm_hashes:
             raise ValueError("npm distribution inputs changed during export")
+        if _producer_source_inputs(check_root) != (
+            producer_inputs, producer_modes, producer_hashes, producer_directories
+        ):
+            raise ValueError("producer source inputs changed during export")
+        if _source_input_empty_directories(check_root, producer_directories) != empty_directories:
+            raise ValueError("source input empty directories changed during export")
     manifest = {
         "schema": "rootlight.rust-source-bundle/1",
         "scope": BUNDLE_SCOPE,
@@ -331,6 +417,9 @@ def create_bundle(root: Path, destination: Path, *, allow_network: bool) -> dict
         "cargo_source_closure": closure,
         "npm_distribution_inputs": npm_inputs,
         "npm_distribution_inputs_verified": True,
+        "lightning_producer_inputs": producer_inputs,
+        "lightning_producer_inputs_verified": producer_inputs is not None,
+        "source_input_empty_directories": empty_directories,
         "frontend_external_source_closure_verified": False,
     }
     (destination / MANIFEST_PATH).write_text(
@@ -386,12 +475,27 @@ def verify_project_bundle(root: Path) -> dict:
     if (json.dumps(npm_inputs, sort_keys=True, allow_nan=False)
         != json.dumps(manifest.get("npm_distribution_inputs"), sort_keys=True, allow_nan=False)):
         raise ValueError("npm distribution inputs differ from bundle manifest")
+    producer_inputs, producer_modes, producer_hashes, producer_directories = _producer_source_inputs(root)
+    if not set(producer_hashes).issubset(expected):
+        raise ValueError("bundle manifest omits required producer sources")
+    if ("lightning_producer_inputs" not in manifest
+        or manifest.get("lightning_producer_inputs_verified") is not (producer_inputs is not None)
+        or json.dumps(producer_inputs, sort_keys=True, allow_nan=False)
+        != json.dumps(manifest["lightning_producer_inputs"], sort_keys=True, allow_nan=False)):
+        raise ValueError("producer source inputs differ from bundle manifest")
+    empty_directories = _source_input_empty_directories(root, producer_directories)
+    if ("source_input_empty_directories" not in manifest
+        or json.dumps(empty_directories, sort_keys=True, allow_nan=False)
+        != json.dumps(manifest["source_input_empty_directories"], sort_keys=True, allow_nan=False)):
+        raise ValueError("source input empty directories differ from bundle manifest")
     modes = {name: 0o755 if record["executable"] else 0o644
              for record in manifest["project_sources"] for name in [record["path"]]}
     if any(modes.get(name) != mode for name, mode in cargo_modes.items()) or modes.get(CLOSURE_PATH) != 0o644:
         raise ValueError("project executable modes differ from authenticated Cargo inputs")
     if any(modes.get(name) != mode for name, mode in npm_modes.items()):
         raise ValueError("project executable modes differ from authenticated npm inputs")
+    if any(modes.get(name) != mode for name, mode in producer_modes.items()):
+        raise ValueError("project executable modes differ from authenticated producer inputs")
     if modes != manifest["file_modes"]:
         raise ValueError("bundle executable modes differ from authoritative source inputs")
     if os.name != "nt":
@@ -407,15 +511,19 @@ def verify_project_bundle(root: Path) -> dict:
 def archive_bundle(root: Path, archive: Path) -> None:
     """Write reproducible transport bytes without host ownership or timestamps."""
     manifest = verify_project_bundle(root)
+    empty_directories = manifest.get("source_input_empty_directories", {})
+    files = {path.relative_to(root).as_posix() for path in root.rglob("*") if path.is_file()}
     with archive.open("xb") as output:
         with gzip.GzipFile(filename="", fileobj=output, mode="wb", mtime=0) as compressed:
             with tarfile.open(fileobj=compressed, mode="w|", format=tarfile.PAX_FORMAT) as tar:
-                for path in sorted(root.rglob("*"), key=lambda entry: entry.relative_to(root).as_posix()):
-                    if not path.is_file():
+                for relative in sorted(files | set(empty_directories)):
+                    info = tarfile.TarInfo("rootlight/" + relative)
+                    if relative in empty_directories:
+                        info.type, info.mode = tarfile.DIRTYPE, empty_directories[relative]
+                        tar.addfile(info)
                         continue
-                    info = tarfile.TarInfo("rootlight/" + path.relative_to(root).as_posix())
+                    path = root / relative_path(relative)
                     info.size = path.stat().st_size
-                    relative = path.relative_to(root).as_posix()
                     info.mode = (0o644 if relative == MANIFEST_PATH else manifest["file_modes"][relative])
                     with path.open("rb") as stream:
                         tar.addfile(info, stream)
