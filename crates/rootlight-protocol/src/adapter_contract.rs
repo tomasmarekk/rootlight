@@ -5,7 +5,7 @@
 
 use std::{
     collections::{BTreeMap, BTreeSet},
-    mem,
+    fmt, mem,
 };
 
 use prost::Message;
@@ -962,52 +962,62 @@ pub const fn frame_kind(frame: &AdapterFrame) -> &'static str {
 }
 
 /// Source-redacted adapter protocol contract failure.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum AdapterContractError {
     /// A required protobuf message or oneof was absent.
-    #[error("adapter protocol field is missing")]
     MissingField,
     /// Adapter binary identity labels or digest were invalid.
-    #[error("adapter binary identity is invalid")]
     InvalidIdentity,
     /// The expected and advertised binary identities differ.
-    #[error("adapter binary identity does not match")]
     IdentityMismatch,
     /// Host and adapter protocol ranges do not overlap.
-    #[error("adapter protocol version is unsupported")]
     ProtocolMismatch,
     /// Capability labels were malformed, duplicated, or unavailable.
-    #[error("adapter capability contract is invalid")]
     CapabilityMismatch,
     /// Extension declarations were malformed, duplicated, or unavailable.
-    #[error("adapter extension contract is invalid")]
     ExtensionMismatch,
     /// Trust level was absent or unknown.
-    #[error("adapter trust level is invalid")]
     InvalidTrust,
     /// Adapter trust exceeds the host policy.
-    #[error("adapter trust exceeds host policy")]
     TrustMismatch,
     /// Resource limits were zero, excessive, or exceeded the child ceiling.
-    #[error("adapter resource limits are invalid")]
     QuotaMismatch,
     /// The host requires cooperative cancellation.
-    #[error("adapter cancellation capability is required")]
     CancellationRequired,
     /// Session or request correlation was malformed or stale.
-    #[error("adapter session correlation is invalid")]
     SessionMismatch,
     /// Encoded frame was empty or exceeded the pipe ceiling.
-    #[error("adapter frame size is invalid")]
     FrameSize,
     /// Protobuf frame bytes were malformed.
-    #[error("adapter frame encoding is invalid")]
     MalformedFrame,
     /// The bounded frame buffer could not be reserved.
-    #[error("adapter frame capacity is unavailable")]
     FrameCapacity,
 }
+
+impl fmt::Display for AdapterContractError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let message = match self {
+            Self::MissingField => "adapter protocol field is missing",
+            Self::InvalidIdentity => "adapter binary identity is invalid",
+            Self::IdentityMismatch => "adapter binary identity does not match",
+            Self::ProtocolMismatch => "adapter protocol version is unsupported",
+            Self::CapabilityMismatch => "adapter capability contract is invalid",
+            Self::ExtensionMismatch => "adapter extension contract is invalid",
+            Self::InvalidTrust => "adapter trust level is invalid",
+            Self::TrustMismatch => "adapter trust exceeds host policy",
+            Self::QuotaMismatch => "adapter resource limits are invalid",
+            Self::CancellationRequired => "adapter cancellation capability is required",
+            Self::SessionMismatch => "adapter session correlation is invalid",
+            Self::FrameSize => "adapter frame size is invalid",
+            Self::MalformedFrame => "adapter frame encoding is invalid",
+            Self::FrameCapacity => "adapter frame capacity is unavailable",
+        };
+        formatter.write_str(message)
+    }
+}
+
+impl std::error::Error for AdapterContractError {}
 
 fn select_protocol(range: &VersionRange) -> Result<ContractVersion, AdapterContractError> {
     let minimum = range
@@ -1236,6 +1246,100 @@ mod tests {
         adapter::v1::{GeneratedOrigin, ProjectInput},
         common::v1::{ContentHash, FileId, GenerationId, RepositoryId},
     };
+
+    #[test]
+    fn adapter_contract_errors_preserve_public_traits_and_exact_messages() {
+        fn assert_traits<T: std::error::Error + Copy + Clone + Eq + Send + Sync + 'static>() {}
+        assert_traits::<AdapterContractError>();
+        let cases: [(AdapterContractError, &str, &str); 14] = [
+            (
+                AdapterContractError::MissingField,
+                "MissingField",
+                "adapter protocol field is missing",
+            ),
+            (
+                AdapterContractError::InvalidIdentity,
+                "InvalidIdentity",
+                "adapter binary identity is invalid",
+            ),
+            (
+                AdapterContractError::IdentityMismatch,
+                "IdentityMismatch",
+                "adapter binary identity does not match",
+            ),
+            (
+                AdapterContractError::ProtocolMismatch,
+                "ProtocolMismatch",
+                "adapter protocol version is unsupported",
+            ),
+            (
+                AdapterContractError::CapabilityMismatch,
+                "CapabilityMismatch",
+                "adapter capability contract is invalid",
+            ),
+            (
+                AdapterContractError::ExtensionMismatch,
+                "ExtensionMismatch",
+                "adapter extension contract is invalid",
+            ),
+            (
+                AdapterContractError::InvalidTrust,
+                "InvalidTrust",
+                "adapter trust level is invalid",
+            ),
+            (
+                AdapterContractError::TrustMismatch,
+                "TrustMismatch",
+                "adapter trust exceeds host policy",
+            ),
+            (
+                AdapterContractError::QuotaMismatch,
+                "QuotaMismatch",
+                "adapter resource limits are invalid",
+            ),
+            (
+                AdapterContractError::CancellationRequired,
+                "CancellationRequired",
+                "adapter cancellation capability is required",
+            ),
+            (
+                AdapterContractError::SessionMismatch,
+                "SessionMismatch",
+                "adapter session correlation is invalid",
+            ),
+            (
+                AdapterContractError::FrameSize,
+                "FrameSize",
+                "adapter frame size is invalid",
+            ),
+            (
+                AdapterContractError::MalformedFrame,
+                "MalformedFrame",
+                "adapter frame encoding is invalid",
+            ),
+            (
+                AdapterContractError::FrameCapacity,
+                "FrameCapacity",
+                "adapter frame capacity is unavailable",
+            ),
+        ];
+        for (index, (error, variant, message)) in cases.into_iter().enumerate() {
+            assert!(
+                cases[..index]
+                    .iter()
+                    .all(|(previous, _, _)| previous != &error)
+            );
+            assert_eq!(format!("{error:?}"), variant);
+            assert_eq!(error.to_string(), message);
+            assert_eq!(format!("{error:#}"), message);
+            let erased: &(dyn std::error::Error + Send + Sync) = &error;
+            assert!(erased.source().is_none());
+            assert!(erased.is::<AdapterContractError>());
+            assert_eq!(erased.downcast_ref::<AdapterContractError>(), Some(&error));
+            let boxed: Box<dyn std::error::Error + Send + Sync> = Box::new(error);
+            assert_eq!(*boxed.downcast::<AdapterContractError>().unwrap(), error);
+        }
+    }
 
     fn append_varint(mut value: u64, encoded: &mut Vec<u8>) {
         while value >= 0x80 {

@@ -2065,7 +2065,6 @@ dependencies = [
  "prost-types",
  "rootlight-error",
  "serde",
- "thiserror 2.0.18",
 ]
 
 [[package]]

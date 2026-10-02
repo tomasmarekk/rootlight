@@ -3,6 +3,8 @@
 //! The same closed bounds are applied before daemon transport and after client
 //! decoding so malformed length, ordinal, and dictionary combinations fail closed.
 
+use std::fmt;
+
 use prost::Message as _;
 
 use crate::generated::ui::graph::v1 as graph;
@@ -29,27 +31,37 @@ pub const MAX_GRAPH_PAGE_BYTES: usize = 1024 * 1_024;
 const GRAPH_PAGE_CHECKSUM_BYTES: usize = 32;
 
 /// Compact graph page validation failure.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GraphPageError {
     /// The page selected an unsupported schema revision.
-    #[error("graph page schema is invalid")]
     Schema,
     /// A page collection or string exceeded a closed bound.
-    #[error("graph page bounds are invalid")]
     Bounds,
     /// A dictionary index did not address a valid entry.
-    #[error("graph page dictionary is invalid")]
     Dictionary,
     /// A node ordinal or edge endpoint violated cumulative ordering.
-    #[error("graph page ordinals are invalid")]
     Ordinals,
     /// A closed enum or fixed-point value was invalid.
-    #[error("graph page value is invalid")]
     Value,
     /// The page integrity checksum was missing or did not match.
-    #[error("graph page checksum is invalid")]
     Checksum,
 }
+
+impl fmt::Display for GraphPageError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let message = match self {
+            Self::Schema => "graph page schema is invalid",
+            Self::Bounds => "graph page bounds are invalid",
+            Self::Dictionary => "graph page dictionary is invalid",
+            Self::Ordinals => "graph page ordinals are invalid",
+            Self::Value => "graph page value is invalid",
+            Self::Checksum => "graph page checksum is invalid",
+        };
+        formatter.write_str(message)
+    }
+}
+
+impl std::error::Error for GraphPageError {}
 
 /// Validates and seals one graph page with a deterministic BLAKE3 checksum.
 ///
@@ -216,6 +228,60 @@ fn valid_dictionary_index(index: u32, dictionary_len: usize) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn graph_page_errors_preserve_public_traits_and_exact_messages() {
+        fn assert_traits<T: std::error::Error + Copy + Clone + Eq + Send + Sync + 'static>() {}
+        assert_traits::<GraphPageError>();
+        let cases: [(GraphPageError, &str, &str); 6] = [
+            (
+                GraphPageError::Schema,
+                "Schema",
+                "graph page schema is invalid",
+            ),
+            (
+                GraphPageError::Bounds,
+                "Bounds",
+                "graph page bounds are invalid",
+            ),
+            (
+                GraphPageError::Dictionary,
+                "Dictionary",
+                "graph page dictionary is invalid",
+            ),
+            (
+                GraphPageError::Ordinals,
+                "Ordinals",
+                "graph page ordinals are invalid",
+            ),
+            (
+                GraphPageError::Value,
+                "Value",
+                "graph page value is invalid",
+            ),
+            (
+                GraphPageError::Checksum,
+                "Checksum",
+                "graph page checksum is invalid",
+            ),
+        ];
+        for (index, (error, variant, message)) in cases.into_iter().enumerate() {
+            assert!(
+                cases[..index]
+                    .iter()
+                    .all(|(previous, _, _)| previous != &error)
+            );
+            assert_eq!(format!("{error:?}"), variant);
+            assert_eq!(error.to_string(), message);
+            assert_eq!(format!("{error:#}"), message);
+            let erased: &(dyn std::error::Error + Send + Sync) = &error;
+            assert!(erased.source().is_none());
+            assert!(erased.is::<GraphPageError>());
+            assert_eq!(erased.downcast_ref::<GraphPageError>(), Some(&error));
+            let boxed: Box<dyn std::error::Error + Send + Sync> = Box::new(error);
+            assert_eq!(*boxed.downcast::<GraphPageError>().unwrap(), error);
+        }
+    }
 
     fn valid_page() -> graph::GraphPage {
         graph::GraphPage {
