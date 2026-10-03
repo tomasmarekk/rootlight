@@ -29,6 +29,11 @@
     "src/tree_sitter/parser.h": "8e819abdeba5866bf1aaf6e7b97522241c903d94a18395c6a75ed02984270ee8"
   },
   "local_overrides": {
+    "grammar.js": {
+      "original_upstream": "grammar.js.orig",
+      "local_sha256": "0354e8aec927c7165a5412799339b855e1e9781fa864f52d6657a78d91affdf2",
+      "changes": "case-insensitive x/X literal prefix and LINE SEQUENTIAL organization; existing payload policy and organization alternatives preserved"
+    },
     "Cargo.toml": "lowercase unpublished package and modern local binding; original retained as Cargo.toml.orig",
     "bindings/rust/build.rs": "compile retained tables twice with explicit fixed/free scanner exports; original retained with .orig suffix",
     "bindings/rust/lib.rs": "static LanguageFn handles replace obsolete runtime-by-value FFI; original retained with .orig suffix",
@@ -38,7 +43,38 @@
       "changes": "bounded EOF/keyword/fixed-line scanning, whole authored literal and comment spans, immutable free profile; see PATCHES.md"
     }
   },
-  "generated_parser_modified": false,
+  "local_generation": {
+    "generator": "tree-sitter-cli",
+    "version": "0.24.4",
+    "commit": "fc8c1863e2e5724a0c40bb6e6cfc8631bfe5908b",
+    "release_url": "https://github.com/tree-sitter/tree-sitter/releases/tag/v0.24.4",
+    "binary_archive_url": "https://github.com/tree-sitter/tree-sitter/releases/download/v0.24.4/tree-sitter-windows-x64.gz",
+    "binary_archive_sha256": "1fa29eb05f82b1d473e14ecce83b6204671765807d096fe5cea1ccd8cfa90c5b",
+    "binary_sha256": "02ade24b9eca7c23b5a5c41de6599df7540da8ae9f3ac6668d0ca1646ed76323",
+    "official_binary_digest_provided": false,
+    "binary_signature_independently_verified": false,
+    "javascript_runtime": "Node.js 26.2.0",
+    "javascript_runtime_binary_sha256": "96f768b95e8e9d443f5eead1cb2d199744923320bb8240d2c3129362e7ae2a5d",
+    "command": "tree-sitter generate --abi 14 --js-runtime node grammar.js",
+    "preparation_only": true,
+    "original_generator_version_known": false,
+    "unchanged_baseline_byte_identical": false,
+    "unchanged_baseline_normalized_grammar_rules_equal": true,
+    "unchanged_baseline_authored_native_contracts_passed": 24,
+    "unchanged_baseline_all_tree_behavioral_equivalence_proven": false,
+    "independent_regenerations_byte_identical": true,
+    "generated_output_sha256": {
+      "src/grammar.json": "8ea4e645833f0d8441c7c0454eda2eb9b36d30f0fbb38c529b2f22165455ee47",
+      "src/node-types.json": "3aae50d0b119646c7cb92e03433c5e476b462ebccf22534d384a3f163f0e27a5",
+      "src/parser.c": "343ccd5816708dcd34a1e2207658859a6c84d77e0ddf08a726493a2102ba734c",
+      "src/tree_sitter/alloc.h": "b29c1c9fb7cc82f58c84b376df1297d6e2737a1d655fd356db0859e3c29c2fea",
+      "src/tree_sitter/array.h": "4ff743903dc46f5db6aa54f31c6b4d160a8a9779e5b2ab1ee59ae7ebcd850ea1",
+      "src/tree_sitter/parser.h": "a1f6ef161fbaf48a0e10fca90ef5290a062462b307b3898aa562993853b9f80a"
+    },
+    "original_generated_copies": ["src/grammar.json.orig", "src/node-types.json.orig", "src/parser.c.orig", "src/tree_sitter/parser.h.orig"],
+    "new_generator_headers": ["src/tree_sitter/alloc.h", "src/tree_sitter/array.h"]
+  },
+  "generated_parser_modified": true,
   "generated_parser_language_abi": 14,
   "generation_at_build_time": false,
   "source_download_at_build_time": false,

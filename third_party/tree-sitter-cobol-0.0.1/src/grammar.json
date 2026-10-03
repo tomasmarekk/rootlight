@@ -1,4 +1,5 @@
 {
+  "$schema": "https://tree-sitter.github.io/tree-sitter/assets/schemas/grammar.schema.json",
   "name": "COBOL",
   "word": "_WORD",
   "rules": {
@@ -2883,6 +2884,19 @@
                       "type": "BLANK"
                     }
                   ]
+                },
+                {
+                  "type": "SYMBOL",
+                  "name": "SEQUENTIAL"
+                }
+              ]
+            },
+            {
+              "type": "SEQ",
+              "members": [
+                {
+                  "type": "SYMBOL",
+                  "name": "LINE"
                 },
                 {
                   "type": "SYMBOL",
@@ -16075,11 +16089,11 @@
       "members": [
         {
           "type": "PATTERN",
-          "value": "X'[^'\\n]*'"
+          "value": "[xX]'[^'\\n]*'"
         },
         {
           "type": "PATTERN",
-          "value": "X\"[^\"\\n]*\""
+          "value": "[xX]\"[^\"\\n]*\""
         }
       ]
     },

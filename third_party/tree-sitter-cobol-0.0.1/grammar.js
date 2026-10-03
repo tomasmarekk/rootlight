@@ -636,6 +636,7 @@ module.exports = grammar({
       choice(
         $.INDEXED,
         seq($.RECORD, optional($._BINARY), $.SEQUENTIAL),
+        seq($.LINE, $.SEQUENTIAL),
         $.SEQUENTIAL,
         $.RELATIVE,
       )
@@ -2807,8 +2808,8 @@ module.exports = grammar({
     ),
 
     x_string: $ => choice(
-      /X'[^'\n]*'/,
-      /X"[^"\n]*"/,
+      /[xX]'[^'\n]*'/,
+      /[xX]"[^"\n]*"/,
     ),
 
     h_string: $ => choice(

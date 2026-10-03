@@ -217,6 +217,23 @@ impl Fixture {
     }
 }
 
+fn fixture_at_eof(lines: &[&str], language: &str, ending: &str, final_newline: bool) -> Fixture {
+    let prefix = if language == "cobol-fixed" {
+        "       "
+    } else {
+        ""
+    };
+    let mut text = String::new();
+    for (index, line) in lines.iter().enumerate() {
+        text.push_str(prefix);
+        text.push_str(line);
+        if final_newline || index + 1 < lines.len() {
+            text.push_str(ending);
+        }
+    }
+    Fixture::from_text(text)
+}
+
 fn definition(document: &NormalizedIrDocument, span: SourceSpan) -> &EntityRecord {
     let sites: Vec<_> = document
         .occurrences
@@ -531,6 +548,266 @@ fn file_descriptors_keep_exact_headers_program_owners_and_record_independence() 
                     assert_ne!(&fixture.source.content_hash(), hash);
                 }
                 previous = Some((descriptor_ids, fixture.source.content_hash()));
+            }
+        }
+    }
+}
+
+#[test]
+fn prefixed_literals_keep_public_string_and_storage_evidence_across_profiles() {
+    for language in ["cobol-fixed", "cobol-free"] {
+        for ending in ["\n", "\r\n"] {
+            for final_newline in [false, true] {
+                for prefix in ['x', 'X'] {
+                    for quote in ['\'', '"'] {
+                        let literal = format!("{prefix}{quote}0aF1{quote}");
+                        let declaration = format!("01 Stored pic x(4) value {literal}");
+                        let fixture = fixture_at_eof(
+                            &[
+                                "identification division.",
+                                "program-id. Literals.",
+                                "data division.",
+                                "working-storage section.",
+                                &format!("{declaration}."),
+                                "procedure division.",
+                                &format!("move {literal} to Stored."),
+                                "display Stored.",
+                                "goback.",
+                                "end program Literals.",
+                            ],
+                            language,
+                            ending,
+                            final_newline,
+                        );
+                        let output = fixture.analyze(language);
+                        let document = output.document();
+                        assert_eq!(output.report().coverage().status(), CoverageStatus::Bounded);
+                        assert!(document.diagnostics.is_empty());
+                        assert_eq!(document.entities.len(), 2);
+                        let program = definition(document, fixture.span("Literals", 0));
+                        assert_eq!(program.kind, EntityKind::Module);
+                        assert_eq!(program.language, language);
+                        assert_eq!(
+                            program.container,
+                            Some(ContainerRef::File(fixture.snapshot.file()))
+                        );
+                        let item = definition(document, fixture.span("Stored", 0));
+                        assert_eq!(item.kind, EntityKind::Variable);
+                        assert_eq!(item.canonical_name, "Stored");
+                        assert_eq!(item.language, language);
+                        assert_eq!(item.container, Some(ContainerRef::Entity(program.id)));
+                        let evidence = item.evidence.source.as_ref().unwrap();
+                        assert_eq!(evidence.span(), fixture.span(&declaration, 0));
+                        assert_eq!(evidence.content_hash(), fixture.source.content_hash());
+                        assert_eq!(evidence.generation(), fixture.source.generation());
+                        let strings: Vec<_> = document
+                            .occurrences
+                            .iter()
+                            .filter(|site| site.role == OccurrenceRole::StringEvidence)
+                            .collect();
+                        assert_eq!(strings.len(), 2);
+                        for occurrence in 0..2 {
+                            let span = fixture.span(&literal, occurrence);
+                            let sites: Vec<_> = strings
+                                .iter()
+                                .filter(|site| site.source.span() == span)
+                                .collect();
+                            assert_eq!(sites.len(), 1);
+                            assert_eq!(sites[0].syntax_kind, "cobol.string.string");
+                            assert_eq!(
+                                sites[0].syntactic_text_hash,
+                                content_hash(literal.as_bytes())
+                            );
+                            assert_eq!(sites[0].provenance, document.provenance[0].id);
+                            assert!(matches!(
+                                sites[0].target,
+                                OccurrenceTarget::Unresolved { .. }
+                            ));
+                        }
+                        for (written, occurrence, syntax) in [
+                            ("Stored", 1, "cobol.storage.reference"),
+                            ("Stored", 2, "cobol.storage.reference"),
+                            ("Literals", 1, "cobol.end_program_name.reference"),
+                        ] {
+                            let span = fixture.span(written, occurrence);
+                            let sites: Vec<_> = document
+                                .occurrences
+                                .iter()
+                                .filter(|site| site.source.span() == span)
+                                .collect();
+                            assert_eq!(sites.len(), 1);
+                            assert_eq!(sites[0].syntax_kind, syntax);
+                            assert_eq!(sites[0].role, OccurrenceRole::Reference);
+                            assert_eq!(
+                                sites[0].syntactic_text_hash,
+                                content_hash(written.as_bytes())
+                            );
+                            assert!(matches!(
+                                sites[0].target,
+                                OccurrenceTarget::Unresolved { .. }
+                            ));
+                            assert!(document.skipped_regions.iter().any(|region| {
+                                region.detail == "cobol-binding-target-unavailable"
+                                    && region.source.span() == span
+                                    && region.domain == FactDomain::Relations
+                                    && region.reason == SkippedRegionReason::UnsupportedConstruct
+                            }));
+                        }
+                        assert_eq!(document.occurrences.len(), 7);
+                        assert_eq!(document.skipped_regions.len(), 3);
+                        assert!(document.relations.iter().all(|edge| matches!(
+                            edge.predicate,
+                            RelationPredicate::Contains
+                                | RelationPredicate::Declares
+                                | RelationPredicate::DefinesAt
+                        )));
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn line_sequential_files_keep_source_owned_entities_without_file_bindings() {
+    for language in ["cobol-fixed", "cobol-free"] {
+        for ending in ["\n", "\r\n"] {
+            for final_newline in [false, true] {
+                for clause in [
+                    "organization is line sequential",
+                    "ORGANIZATION IS LINE SEQUENTIAL",
+                    "OrGaNiZaTiOn Is LiNe SeQuEnTiAl",
+                ] {
+                    let fixture = fixture_at_eof(
+                        &[
+                            "identification division.",
+                            "program-id. FileLayout.",
+                            "environment division.",
+                            "input-output section.",
+                            "file-control.",
+                            "select Input-File",
+                            "assign to 'records.dat'",
+                            &format!("{clause}."),
+                            "data division.",
+                            "file section.",
+                            "fd Input-File.",
+                            "01 Input-Record pic x(4).",
+                            "procedure division.",
+                            "open input Input-File.",
+                            "read Input-File.",
+                            "move Input-Record to Input-Record.",
+                            "close Input-File.",
+                            "goback.",
+                            "end program FileLayout.",
+                        ],
+                        language,
+                        ending,
+                        final_newline,
+                    );
+                    let output = fixture.analyze(language);
+                    let document = output.document();
+                    assert_eq!(output.report().coverage().status(), CoverageStatus::Bounded);
+                    assert!(document.diagnostics.is_empty());
+                    assert_eq!(document.entities.len(), 3);
+                    let program = definition(document, fixture.span("FileLayout", 0));
+                    assert_eq!(program.kind, EntityKind::Module);
+                    assert_eq!(program.language, language);
+                    for (name, occurrence, header, syntax) in [
+                        (
+                            "Input-File",
+                            1,
+                            "Input-File.",
+                            "cobol.file_descriptor_name.definition",
+                        ),
+                        (
+                            "Input-Record",
+                            0,
+                            "01 Input-Record pic x(4)",
+                            "cobol.data_name.definition",
+                        ),
+                    ] {
+                        let span = fixture.span(name, occurrence);
+                        let item = definition(document, span);
+                        assert_eq!(item.kind, EntityKind::Variable);
+                        assert_eq!(item.canonical_name, name);
+                        assert_eq!(item.language, language);
+                        assert_eq!(item.container, Some(ContainerRef::Entity(program.id)));
+                        let evidence = item.evidence.source.as_ref().unwrap();
+                        assert_eq!(evidence.span(), fixture.span(header, 0));
+                        assert_eq!(evidence.content_hash(), fixture.source.content_hash());
+                        assert_eq!(evidence.generation(), fixture.source.generation());
+                        let sites: Vec<_> = document
+                            .occurrences
+                            .iter()
+                            .filter(|site| {
+                                site.role == OccurrenceRole::Definition
+                                    && site.source.span() == span
+                            })
+                            .collect();
+                        assert_eq!(sites.len(), 1);
+                        assert_eq!(sites[0].syntax_kind, syntax);
+                        assert_eq!(sites[0].syntactic_text_hash, content_hash(name.as_bytes()));
+                    }
+                    for (written, occurrence, syntax) in [
+                        ("Input-Record", 1, "cobol.storage.reference"),
+                        ("Input-Record", 2, "cobol.storage.reference"),
+                        ("FileLayout", 1, "cobol.end_program_name.reference"),
+                    ] {
+                        let span = fixture.span(written, occurrence);
+                        let sites: Vec<_> = document
+                            .occurrences
+                            .iter()
+                            .filter(|site| site.source.span() == span)
+                            .collect();
+                        assert_eq!(sites.len(), 1);
+                        assert_eq!(sites[0].role, OccurrenceRole::Reference);
+                        assert_eq!(sites[0].syntax_kind, syntax);
+                        assert_eq!(
+                            sites[0].syntactic_text_hash,
+                            content_hash(written.as_bytes())
+                        );
+                        assert!(matches!(
+                            sites[0].target,
+                            OccurrenceTarget::Unresolved { .. }
+                        ));
+                        assert!(document.skipped_regions.iter().any(|region| {
+                            region.detail == "cobol-binding-target-unavailable"
+                                && region.source.span() == span
+                                && region.domain == FactDomain::Relations
+                                && region.reason == SkippedRegionReason::UnsupportedConstruct
+                        }));
+                    }
+                    // SELECT and file-I/O WORD operands do not establish binding facts.
+                    for occurrence in [0, 2, 3, 4] {
+                        assert!(document.occurrences.iter().all(|site| {
+                            site.source.span() != fixture.span("Input-File", occurrence)
+                        }));
+                    }
+                    let strings: Vec<_> = document
+                        .occurrences
+                        .iter()
+                        .filter(|site| site.role == OccurrenceRole::StringEvidence)
+                        .collect();
+                    assert_eq!(strings.len(), 1);
+                    assert_eq!(strings[0].source.span(), fixture.span("'records.dat'", 0));
+                    assert_eq!(strings[0].syntax_kind, "cobol.string.string");
+                    assert_eq!(
+                        strings[0].syntactic_text_hash,
+                        content_hash(b"'records.dat'")
+                    );
+                    assert!(matches!(
+                        strings[0].target,
+                        OccurrenceTarget::Unresolved { .. }
+                    ));
+                    assert_eq!(document.occurrences.len(), 7);
+                    assert_eq!(document.skipped_regions.len(), 3);
+                    assert!(document.relations.iter().all(|edge| matches!(
+                        edge.predicate,
+                        RelationPredicate::Contains
+                            | RelationPredicate::Declares
+                            | RelationPredicate::DefinesAt
+                    )));
+                }
             }
         }
     }

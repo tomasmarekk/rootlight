@@ -375,8 +375,8 @@ const fn identity_for(family: GrammarFamily) -> GrammarIdentity {
         GrammarFamily::CobolFixed => GrammarIdentity {
             language_id: "cobol-fixed",
             grammar_version: "0.0.1",
-            source_package_sha256: "29049149b3c4778a792b947b6938d286c7630ef23a47dca50c63dcdd0d0aa696",
-            parser_sha256: "d40a31d4854a2d82977c74d33c3ee9c004d9e63743176ebc84159a1734db7b2b",
+            source_package_sha256: "491c1cc730505a80d4796e75b4b033ef6e9dc452204fe589e590fe900360f7a9",
+            parser_sha256: "343ccd5816708dcd34a1e2207658859a6c84d77e0ddf08a726493a2102ba734c",
             scanner_sha256: Some(
                 "76964e7341aff6215906a39ab8864d0c7a2b5423de7234cb913e98a2b0fd8f7b",
             ),

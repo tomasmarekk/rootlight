@@ -12,8 +12,10 @@ The retained upstream subset contains the authored standalone `grammar.js`,
 generated grammar/node metadata, original ABI14 parser table/header, scanner,
 license and original Rust build/binding/manifest inputs. It is not a complete
 copy of the upstream repository. No Node binding, CI script, fixture, cache or
-unneeded build system is invoked by this package. The C tables are unchanged;
-compilation requires only these local inputs and the versioned `cc` and
+unneeded build system is invoked by this package. The preferred grammar has the
+bounded syntax corrections described below; its generated C table and headers
+are retained along with exact upstream originals. Compilation requires only
+these local inputs and the versioned `cc` and
 `tree-sitter-language` dependency sources with the declared C/Rust toolchain.
 The original changed files have `.orig` copies. Acquisition association and
 original source hashes are recorded in `SOURCE-PROVENANCE.json`.
@@ -24,6 +26,37 @@ separate immutable factories from the same table. `FIXED` preserves the scanner'
 fixed text-area rules; `FREE` disables prefix/suffix/indicator handling and fixed
 continuation inference. Distinct language identities prevent cross-format cache
 reuse. Neither profile pads, truncates, joins or normalizes the input buffer.
+
+## Preferred grammar corrections and generation
+
+The literal rule accepts either `x` or `X` immediately before a single- or
+double-quoted payload, matching the case-insensitive COBOL prefix. The rule
+preserves its prior lexical payload policy; it does not validate or decode
+hexadecimal bytes. An ordinary storage operand named `x` remains a separate
+word when separated from a following literal. File organization additionally
+admits `LINE SEQUENTIAL`, including the existing optional `ORGANIZATION IS`
+keywords and original physical-line boundaries. Existing organization choices
+are unchanged. These forms are documented in the
+[GnuCOBOL Programmer's Guide](https://gnucobol.sourceforge.io/HTML/gnucobpg.html).
+
+Tree-sitter CLI 0.24.4 generates ABI14 outputs from the complete local
+`grammar.js` using an explicit local Node.js runtime during source preparation
+only. The command, tool hashes and output hashes are pinned in
+`SOURCE-PROVENANCE.json`; compilation never executes either tool. Repeated
+generation from independent copies of the preferred grammar produces identical
+outputs. The upstream generator version is unknown, and regenerating the
+unchanged upstream grammar with this CLI is not byte-identical to its original
+tables. That unchanged-generation baseline preserves the normalized grammar
+rules and passes the existing authored native contracts; it is not a proof of
+all-tree behavioral equivalence. Exact original grammar, generated metadata,
+table and header bytes remain available as `.orig` files.
+
+The authored `cobol_literals_and_files.rs` regressions distinguish clean and
+recovered native trees, exact literal/query spans and file-clause ownership for
+both profiles, LF/CRLF and EOF with or without a final newline. Malformed
+prefixes and incomplete organization forms must retain native recovery, even
+when a missing leaf is invisible through the public cursor. This is bounded
+syntax evidence, not literal decoding or file/runtime semantics.
 
 ## Scanner corrections
 
