@@ -1894,10 +1894,35 @@ module.exports = grammar({
       ),
 
     union_type_cases: ($) =>
-      seq(
-        optional("|"),
-        $.union_type_case,
-        repeat(seq(optional($._newline), "|", $.union_type_case)),
+      choice(
+        seq(
+          "|",
+          $.union_type_case,
+          repeat(seq(optional($._newline), "|", $.union_type_case)),
+        ),
+        seq(
+          alias($._bare_union_type_case, $.union_type_case),
+          repeat1(seq(optional($._newline), "|", $.union_type_case)),
+        ),
+        seq(
+          alias($._union_type_case_with_payload, $.union_type_case),
+          repeat(seq(optional($._newline), "|", $.union_type_case)),
+        ),
+      ),
+
+    _bare_union_type_case: ($) =>
+      prec(8, seq(optional($.attributes), $.identifier)),
+
+    // A bare unmarked RHS is a type abbreviation in the compiler's syntax
+    // frontier. Reinterpreting it as a union requires later name resolution.
+    _union_type_case_with_payload: ($) =>
+      prec(
+        8,
+        seq(
+          optional($.attributes),
+          $.identifier,
+          choice(seq("of", $.union_type_fields), seq(":", $._type)),
+        ),
       ),
 
     union_type_case: ($) =>

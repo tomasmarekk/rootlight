@@ -259,6 +259,48 @@ fn implementation_headers_names_and_bodies_keep_original_ranges_at_line_endings_
 }
 
 #[test]
+fn type_abbreviation_syntax_does_not_invent_an_unmarked_union_case() {
+    // Bare RHS names can be reinterpreted semantically by the compiler. These
+    // controls pin only its syntax frontier, never type-environment resolution.
+    for (written, kind) in [
+        ("Alias = string", "type_abbrev_defn"),
+        ("Alias = Known", "type_abbrev_defn"),
+        ("Alias = ``known type``", "type_abbrev_defn"),
+        ("Self = Self", "type_abbrev_defn"),
+        ("Alias = System.String", "type_abbrev_defn"),
+        ("Alias = list<int>", "type_abbrev_defn"),
+        ("Alias = (string)", "type_abbrev_defn"),
+        ("Alias = (int * string)", "type_abbrev_defn"),
+        ("Alias = int list", "type_abbrev_defn"),
+        ("Alias = int -> string", "type_abbrev_defn"),
+        ("Wrapper = Wrapped of int", "union_type_defn"),
+        ("Marker = | Marker", "union_type_defn"),
+        ("Choice = Left | Right", "union_type_defn"),
+        ("Choice = Left (* separator *) | Right", "union_type_defn"),
+        ("Choice = Left of int | Right", "union_type_defn"),
+        ("Lower = | ``lower case``", "union_type_defn"),
+        ("Lower = lower of int", "union_type_defn"),
+        ("Typed = Case : int -> Typed", "union_type_defn"),
+    ] {
+        for signature in [false, true] {
+            for newline in ["\n", "\r\n"] {
+                for trailing_newline in [false, true] {
+                    let fixture = format!("module Shapes\ntype {written}\n");
+                    let source = source_variant(&fixture, newline, trailing_newline);
+                    let tree = bounded_parse(&mut parser(signature), source.as_bytes(), None);
+                    clean(&tree, source.as_bytes());
+                    exact_node(&tree, kind, &source, written);
+                    if kind == "type_abbrev_defn" {
+                        assert!(nodes(&tree, "union_type_case").is_empty());
+                        assert!(nodes(&tree, "union_type_defn").is_empty());
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[test]
 fn signature_values_records_and_unions_keep_written_declaration_and_header_ranges() {
     for newline in ["\n", "\r\n"] {
         for trailing_newline in [false, true] {

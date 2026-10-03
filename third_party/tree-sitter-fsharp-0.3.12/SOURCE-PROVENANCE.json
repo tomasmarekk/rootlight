@@ -832,14 +832,14 @@
       "sha256": "6caedca3908cd49138c6b0bbcf01f055cd0d04d2954e42ceff5ceadd82030d97"
     },
     "fsharp/grammar.js": {
-      "bytes": 82945,
+      "bytes": 83757,
       "archive_mode": 436,
-      "sha256": "300a392f1c87e30ccc9575894bc3f08ef7cb61f7ac84ca5d46ede38cddc9403b"
+      "sha256": "5f09f8c01d96cb353a89dfc04a6c33f7918760a65f32c264b920f443d824c582"
     },
     "fsharp/src/grammar.json": {
-      "bytes": 275195,
+      "bytes": 279297,
       "archive_mode": 436,
-      "sha256": "f4ffc3722c8f97726e8e9b473c369799882b53cdf95e4ea3c45b4d2395a2e805"
+      "sha256": "21eff891492c671e858b4c8b88cb13247d8bb4ebbfeeeca049b905c8c67a7f73"
     },
     "fsharp/src/node-types.json": {
       "bytes": 96401,
@@ -847,9 +847,9 @@
       "sha256": "112897be95befe217c7e7286b8df4a61b4538ef4f23b656e0389eb58661cc926"
     },
     "fsharp/src/parser.c": {
-      "bytes": 55879633,
+      "bytes": 55997126,
       "archive_mode": 436,
-      "sha256": "c1818692b883636a992d7648023c29cda96d3af0ebe798bca6b7ec6d31b9f45c"
+      "sha256": "026b70543cd7ed836b45954a1c7ef872335f1783bdfce0a132d1a54804515a99"
     },
     "fsharp/src/scanner.c": {
       "bytes": 998,
@@ -877,9 +877,9 @@
       "sha256": "0b87fe1afee8f63f04684e69715d6fa61043813fed28ea119e6f7893b6830016"
     },
     "fsharp_signature/src/grammar.json": {
-      "bytes": 269663,
+      "bytes": 273765,
       "archive_mode": 436,
-      "sha256": "a20571b591cdc91152bf0872baa3cb6ed76ae4ade018199c424ceed502ecebe0"
+      "sha256": "534964feb3fb1997e8814bb0b8441067f76d7ab60429b6838792ebf5a69773ba"
     },
     "fsharp_signature/src/node-types.json": {
       "bytes": 117957,
@@ -887,9 +887,9 @@
       "sha256": "4ba092e9d304c8b51280d4d6d1fc6f016039d7cadd7ab2ed18f739583aa44458"
     },
     "fsharp_signature/src/parser.c": {
-      "bytes": 12960606,
+      "bytes": 13050592,
       "archive_mode": 436,
-      "sha256": "5edb723c3065d010aaee0a245a0492db7098f12376e92b7dc834c9f794251944"
+      "sha256": "7f5bed44a8a508052d54850ef6b49ddee207c1e5b2a561f94e8e2ce29b385186"
     },
     "fsharp_signature/src/scanner.c": {
       "bytes": 918,
@@ -942,13 +942,25 @@
       "original_sha256": "5e14db207730d34e7f054df0afbb294f8798c9b8214734df025b239ef41e7592",
       "local_sha256": "6caedca3908cd49138c6b0bbcf01f055cd0d04d2954e42ceff5ceadd82030d97"
     },
+    "fsharp/grammar.js": {
+      "original_sha256": "300a392f1c87e30ccc9575894bc3f08ef7cb61f7ac84ca5d46ede38cddc9403b",
+      "local_sha256": "5f09f8c01d96cb353a89dfc04a6c33f7918760a65f32c264b920f443d824c582"
+    },
+    "fsharp/src/grammar.json": {
+      "original_sha256": "f4ffc3722c8f97726e8e9b473c369799882b53cdf95e4ea3c45b4d2395a2e805",
+      "local_sha256": "21eff891492c671e858b4c8b88cb13247d8bb4ebbfeeeca049b905c8c67a7f73"
+    },
+    "fsharp/src/parser.c": {
+      "original_sha256": "c1818692b883636a992d7648023c29cda96d3af0ebe798bca6b7ec6d31b9f45c",
+      "local_sha256": "026b70543cd7ed836b45954a1c7ef872335f1783bdfce0a132d1a54804515a99"
+    },
     "fsharp_signature/grammar.js": {
       "original_sha256": "e0a696ab5fd43c665634c1f17b20562b7e6719fc49eca0e261533b1c9148c63c",
       "local_sha256": "0b87fe1afee8f63f04684e69715d6fa61043813fed28ea119e6f7893b6830016"
     },
     "fsharp_signature/src/grammar.json": {
       "original_sha256": "c804cd49d95e02b49c18190fa3deb87fd0b0bd28a71644fd7c2ed869b46ef4a1",
-      "local_sha256": "a20571b591cdc91152bf0872baa3cb6ed76ae4ade018199c424ceed502ecebe0"
+      "local_sha256": "534964feb3fb1997e8814bb0b8441067f76d7ab60429b6838792ebf5a69773ba"
     },
     "fsharp_signature/src/node-types.json": {
       "original_sha256": "519ea69a0762c4c0bdee71038d4c9f73bbb5ced6a72e302f82ec565135ad8d82",
@@ -956,7 +968,7 @@
     },
     "fsharp_signature/src/parser.c": {
       "original_sha256": "5b9d1ae7e270d46e284c5b5614db77a1f16d580f8280d72413d0eb59b6bb17a6",
-      "local_sha256": "5edb723c3065d010aaee0a245a0492db7098f12376e92b7dc834c9f794251944"
+      "local_sha256": "7f5bed44a8a508052d54850ef6b49ddee207c1e5b2a561f94e8e2ce29b385186"
     }
   },
   "signature_generation": {
@@ -979,15 +991,21 @@
     "original_signature_six_outputs_byte_reproduced": true,
     "patched_signature_six_outputs_independently_byte_reproduced": true,
     "producer_is_preparation_only": true,
-    "producer_complete_versioned_source_closure_verified": false
+    "producer_complete_versioned_source_closure_verified": false,
+    "profiles": [
+      "fsharp",
+      "fsharp_signature"
+    ],
+    "original_implementation_six_outputs_byte_reproduced": true,
+    "patched_implementation_six_outputs_independently_byte_reproduced": true
   },
   "native_qualification": {
-    "implementation_and_signature_groups": 10,
+    "implementation_and_signature_groups": 11,
     "scanner_groups": 10,
     "platform": "x86_64-pc-windows-msvc",
     "tree_sitter_runtime": "0.26.11",
     "parser_abi": 15,
-    "parser_test_sha256": "e5e37598be3261ce33d52901dee8f7dc8422b5bf2cd04aaf54d4b60da122c095",
+    "parser_test_sha256": "51a10fd0125fbfd7fdfd8d6dd0ea2b5efda3da64d9b150fac24eeb07ea77a044",
     "scanner_test_sha256": "77e4c531ea4e891091ba92494b01a4c72647161356b965976c8f0561729e38af",
     "full_language_semantics_verified": false,
     "installed_product_acceptance_verified": false,
