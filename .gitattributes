@@ -18,6 +18,10 @@ source-inputs/producers/**/tree/** -text whitespace=-blank-at-eol,-blank-at-eof,
 source-inputs/producers/**/*.tar.gz binary
 # The complete Haskell upstream tree retains its authenticated source bytes.
 third_party/tree-sitter-haskell-0.23.1/** -text
+# Retained COBOL preferred sources and originals preserve exact source bytes.
+third_party/tree-sitter-cobol-0.0.1/** -text
+# Retained Kotlin registry inputs and scanner originals remain byte-exact.
+third_party/tree-sitter-kotlin-ng-1.1.0/** -text
 # Upstream corpus whitespace is intentional parser input, not local formatting.
 third_party/tree-sitter-haskell-0.23.1/test/corpus/** whitespace=-blank-at-eol,-blank-at-eof,-space-before-tab
 # Published Setext headings are not unresolved merge markers.

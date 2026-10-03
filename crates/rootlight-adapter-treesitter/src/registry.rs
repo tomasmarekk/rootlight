@@ -85,11 +85,19 @@ pub enum GrammarFamily {
     VisualBasicClassic,
     /// Haskell written declarations; type checking and class dispatch remain separate.
     Haskell,
+    /// Explicit fixed-column COBOL syntax without compiler or dispatch inference.
+    CobolFixed,
+    /// Explicit free-format COBOL syntax without fixed-column filtering.
+    CobolFree,
 }
 
 impl GrammarFamily {
     pub(crate) const fn is_classic_basic(self) -> bool {
         matches!(self, Self::Vba | Self::VisualBasicClassic)
+    }
+
+    pub(crate) const fn is_cobol(self) -> bool {
+        matches!(self, Self::CobolFixed | Self::CobolFree)
     }
 }
 
@@ -173,7 +181,7 @@ impl GrammarRegistry {
     /// Returns [`RegistryError`] if an SDK label is invalid or a linked grammar
     /// falls outside Tree-sitter's supported ABI interval.
     pub fn audited() -> Result<Self, RegistryError> {
-        let mut descriptors = Vec::with_capacity(36);
+        let mut descriptors = Vec::with_capacity(38);
         for family in [
             GrammarFamily::Rust,
             GrammarFamily::Python,
@@ -211,6 +219,8 @@ impl GrammarRegistry {
             GrammarFamily::Vba,
             GrammarFamily::VisualBasicClassic,
             GrammarFamily::Haskell,
+            GrammarFamily::CobolFixed,
+            GrammarFamily::CobolFree,
         ] {
             let language = language_for(family);
             let abi_version = language.abi_version();
@@ -342,6 +352,8 @@ pub(crate) fn language_for(family: GrammarFamily) -> Language {
         GrammarFamily::Groovy => dekobon_tree_sitter_groovy::LANGUAGE.into(),
         GrammarFamily::Vba | GrammarFamily::VisualBasicClassic => tree_sitter_vba::LANGUAGE.into(),
         GrammarFamily::Haskell => tree_sitter_haskell::LANGUAGE.into(),
+        GrammarFamily::CobolFixed => tree_sitter_cobol::FIXED.into(),
+        GrammarFamily::CobolFree => tree_sitter_cobol::FREE.into(),
     }
 }
 
@@ -356,6 +368,19 @@ struct GrammarIdentity {
 
 const fn identity_for(family: GrammarFamily) -> GrammarIdentity {
     match family {
+        GrammarFamily::CobolFree => GrammarIdentity {
+            language_id: "cobol-free",
+            ..identity_for(GrammarFamily::CobolFixed)
+        },
+        GrammarFamily::CobolFixed => GrammarIdentity {
+            language_id: "cobol-fixed",
+            grammar_version: "0.0.1",
+            source_package_sha256: "29049149b3c4778a792b947b6938d286c7630ef23a47dca50c63dcdd0d0aa696",
+            parser_sha256: "d40a31d4854a2d82977c74d33c3ee9c004d9e63743176ebc84159a1734db7b2b",
+            scanner_sha256: Some(
+                "76964e7341aff6215906a39ab8864d0c7a2b5423de7234cb913e98a2b0fd8f7b",
+            ),
+        },
         GrammarFamily::Haskell => GrammarIdentity {
             language_id: "haskell",
             grammar_version: "0.23.1",
@@ -649,7 +674,7 @@ const fn identity_for(family: GrammarFamily) -> GrammarIdentity {
             source_package_sha256: "e800ebbda938acfbf224f4d2c34947a31994b1295ee6e819b65226c7b51b4450",
             parser_sha256: "9ff65161845b9e9c9d62c12e9a4e4b8d8628bdc31c681ec7e6b4bd3bd6444cb3",
             scanner_sha256: Some(
-                "164c2bb928d23765ed38c3a322deaef9b52d6e147cec7cdf45add90d4fa6101c",
+                "5af71032fe989585df36794613be243d4b2987aa954ec2d975a60fc97e1dd48b",
             ),
         },
         GrammarFamily::Php => GrammarIdentity {
@@ -709,7 +734,7 @@ mod tests {
     fn registry_contains_each_audited_family_once_with_checked_abi() {
         let registry = GrammarRegistry::audited().expect("audited grammars initialize");
 
-        assert_eq!(registry.descriptors().len(), 36);
+        assert_eq!(registry.descriptors().len(), 38);
         for family in [
             GrammarFamily::Rust,
             GrammarFamily::Python,
@@ -747,6 +772,8 @@ mod tests {
             GrammarFamily::Vba,
             GrammarFamily::VisualBasicClassic,
             GrammarFamily::Haskell,
+            GrammarFamily::CobolFixed,
+            GrammarFamily::CobolFree,
         ] {
             let descriptor = registry.get(family).expect("family is registered");
             assert!(
@@ -761,6 +788,33 @@ mod tests {
                     .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
             );
         }
+    }
+
+    #[test]
+    fn cobol_formats_keep_distinct_factories_and_declared_identities() {
+        let registry = GrammarRegistry::audited().unwrap();
+        let fixed = registry.get(GrammarFamily::CobolFixed).unwrap();
+        let free = registry.get(GrammarFamily::CobolFree).unwrap();
+        assert_eq!(fixed.language().as_str(), "cobol-fixed");
+        assert_eq!(free.language().as_str(), "cobol-free");
+        assert_eq!(fixed.grammar_source_sha256(), free.grammar_source_sha256());
+        assert_eq!(fixed.parser_sha256(), free.parser_sha256());
+        assert_eq!(fixed.scanner_sha256(), free.scanner_sha256());
+        assert_eq!(fixed.abi_version(), 14);
+        assert_eq!(free.abi_version(), 14);
+        assert_ne!(
+            language_for(GrammarFamily::CobolFixed),
+            language_for(GrammarFamily::CobolFree)
+        );
+        for family in [GrammarFamily::CobolFixed, GrammarFamily::CobolFree] {
+            for path in ["source.cbl", "source.cob", "unqualified.txt"] {
+                assert_eq!(native_family_for_source(family, path), family);
+            }
+        }
+        assert_eq!(
+            registry.family_for_language(&LanguageId::new("cobol").unwrap()),
+            None
+        );
     }
 
     #[test]
@@ -843,6 +897,12 @@ mod tests {
             (GrammarFamily::Matlab, "matlab", "tree-sitter-matlab"),
             (GrammarFamily::Vba, "vba", "tree-sitter-vba"),
             (GrammarFamily::Haskell, "haskell", "tree-sitter-haskell"),
+            (
+                GrammarFamily::CobolFixed,
+                "cobol-fixed",
+                "tree-sitter-cobol",
+            ),
+            (GrammarFamily::CobolFree, "cobol-free", "tree-sitter-cobol"),
             (GrammarFamily::Perl, "perl", "ts-parser-perl"),
             (
                 GrammarFamily::Groovy,
@@ -870,7 +930,7 @@ mod tests {
             assert_eq!(
                 quoted_field(
                     grammar,
-                    if family == GrammarFamily::Vba {
+                    if family == GrammarFamily::Vba || family.is_cobol() {
                         "vendored_source_sha256"
                     } else {
                         "crates_io_checksum"

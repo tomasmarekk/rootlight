@@ -17,6 +17,7 @@ rootlight-unicode = { path = "../rootlight-unicode" }
 rootlight-vba = { path = "../rootlight-vba" }
 thiserror.workspace = true
 tree-sitter.workspace = true
+tree-sitter-cobol.workspace = true
 tree-sitter-haskell.workspace = true
 tree-sitter-bash.workspace = true
 tree-sitter-json.workspace = true

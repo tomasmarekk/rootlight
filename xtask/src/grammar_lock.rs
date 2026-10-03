@@ -16,7 +16,7 @@ const GRAMMAR_LOCK_PATH: &str = "adapters/grammars.lock";
 const CARGO_LOCK_PATH: &str = "Cargo.lock";
 const ADAPTER_PACKAGE: &str = "rootlight-adapter-treesitter";
 const GRAMMAR_LOCK_SHA256: &str =
-    "1e4efc8f802d322595487ae406599cb0894f36a7b4d296b926527b6a14aaa440";
+    "655833420b2c1c890582ff9f2f8381768eccc85104b0e5e619ef64840a8f4e58";
 const JAVA_LICENSE_PATH: &str = "adapters/licenses/tree-sitter-java-0.23.5-LICENSE";
 const JAVA_LICENSE_SHA256: &str =
     "52ed137b039cd9c46409bc22e89938af911c95b157feae2d040b51e6084369a7";
@@ -209,12 +209,20 @@ const EXPECTED_PACKAGES: [(&str, &str, &str); 34] = [
     ),
 ];
 
-const EXPECTED_LOCAL_PACKAGES: [(&str, &str, &str, &str); 1] = [(
-    "tree-sitter-vba",
-    "0.14.1",
-    "third_party/tree-sitter-vba-0.14.1",
-    "058debd1085c94a23989976f4c9289e30bbde00ee5b4e729f8185362ba972560",
-)];
+const EXPECTED_LOCAL_PACKAGES: [(&str, &str, &str, &str); 2] = [
+    (
+        "tree-sitter-vba",
+        "0.14.1",
+        "third_party/tree-sitter-vba-0.14.1",
+        "058debd1085c94a23989976f4c9289e30bbde00ee5b4e729f8185362ba972560",
+    ),
+    (
+        "tree-sitter-cobol",
+        "0.0.1",
+        "third_party/tree-sitter-cobol-0.0.1",
+        "29049149b3c4778a792b947b6938d286c7630ef23a47dca50c63dcdd0d0aa696",
+    ),
+];
 
 pub(crate) fn check(metadata: &Metadata, root: &Path) -> Result<(), GrammarLockError> {
     let path = root.join(GRAMMAR_LOCK_PATH);
@@ -367,7 +375,7 @@ fn validate_manifest(manifest: &GrammarLock) -> Result<(), GrammarLockError> {
         ));
     }
     validate_runtime(&manifest.runtime)?;
-    if manifest.grammars.len() != 35 {
+    if manifest.grammars.len() != 37 {
         return Err(GrammarLockError::GrammarCount(manifest.grammars.len()));
     }
     let mut languages = BTreeSet::new();
@@ -395,6 +403,8 @@ fn validate_manifest(manifest: &GrammarLock) -> Result<(), GrammarLockError> {
         "astro",
         "bash",
         "c",
+        "cobol-fixed",
+        "cobol-free",
         "cpp",
         "csharp",
         "css",
@@ -439,25 +449,32 @@ fn validate_manifest(manifest: &GrammarLock) -> Result<(), GrammarLockError> {
         }
     }
     for (name, version, directory, checksum) in EXPECTED_LOCAL_PACKAGES {
-        let grammar = manifest
+        let grammars: Vec<_> = manifest
             .grammars
             .iter()
-            .find(|grammar| grammar.crate_name == name)
-            .ok_or_else(|| GrammarLockError::PackageEvidence {
-                package: name.to_owned(),
-            })?;
-        if grammar.crate_version != version
-            || grammar.crates_io_checksum.is_some()
-            || grammar.vendored_source_sha256.as_deref() != Some(checksum)
-            || grammar
-                .vendored
-                .as_ref()
-                .map(|vendored| vendored.manifest_path.as_str())
-                != Some(format!("{directory}/Cargo.toml").as_str())
-        {
+            .filter(|grammar| grammar.crate_name == name)
+            .collect();
+        if grammars.is_empty() {
             return Err(GrammarLockError::PackageEvidence {
                 package: name.to_owned(),
             });
+        }
+        // Multi-profile bindings must retain one complete source identity for
+        // every language record, not only the first matching package entry.
+        for grammar in grammars {
+            if grammar.crate_version != version
+                || grammar.crates_io_checksum.is_some()
+                || grammar.vendored_source_sha256.as_deref() != Some(checksum)
+                || grammar
+                    .vendored
+                    .as_ref()
+                    .map(|vendored| vendored.manifest_path.as_str())
+                    != Some(format!("{directory}/Cargo.toml").as_str())
+            {
+                return Err(GrammarLockError::PackageEvidence {
+                    package: name.to_owned(),
+                });
+            }
         }
     }
     Ok(())
@@ -1074,7 +1091,7 @@ pub(crate) enum GrammarLockError {
     InvalidDigest { label: &'static str },
     #[error("grammar lock field {0} must not be empty")]
     EmptyField(&'static str),
-    #[error("grammar lock contains {0} grammars instead of 35")]
+    #[error("grammar lock contains {0} grammars instead of 37")]
     GrammarCount(usize),
     #[error("grammar lock repeats language {0}")]
     DuplicateLanguage(String),
@@ -1120,6 +1137,26 @@ mod tests {
         let manifest: GrammarLock = toml::from_str(include_str!("../../adapters/grammars.lock"))
             .expect("grammar lock parses");
         validate_manifest(&manifest).expect("reviewed runtime and grammar identities agree");
+    }
+
+    #[test]
+    fn local_multi_profile_records_require_one_reviewed_source_tree() {
+        for language in ["cobol-fixed", "cobol-free"] {
+            let mut manifest: GrammarLock =
+                toml::from_str(include_str!("../../adapters/grammars.lock")).unwrap();
+            let grammar = manifest
+                .grammars
+                .iter_mut()
+                .find(|grammar| grammar.language == language)
+                .unwrap();
+            let files = &mut grammar.vendored.as_mut().unwrap().files;
+            files.insert("PATCHES.md".into(), sha256_hex(b"different source review"));
+            grammar.vendored_source_sha256 = Some(vendored_source_digest(files).unwrap());
+            validate_grammar(grammar)
+                .expect("self-consistent manifest is not the reviewed source pin");
+            assert!(matches!(validate_manifest(&manifest),
+                Err(GrammarLockError::PackageEvidence { package }) if package == "tree-sitter-cobol"));
+        }
     }
 
     #[test]

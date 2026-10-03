@@ -1703,6 +1703,30 @@ const LANGUAGE_CAPABILITIES: &[LanguageCapability] = &[
         analyzers: &["source-fallback"],
     },
     LanguageCapability {
+        language: "cobol",
+        suffixes: &[".cbl", ".cob"],
+        aliases: &[],
+        detectors: &["extension"],
+        maximum_tier: "tier_d",
+        analyzers: &["source-fallback"],
+    },
+    LanguageCapability {
+        language: "cobol-fixed",
+        suffixes: &[],
+        aliases: &[],
+        detectors: &["configuration"],
+        maximum_tier: "tier_d",
+        analyzers: &["treesitter"],
+    },
+    LanguageCapability {
+        language: "cobol-free",
+        suffixes: &[],
+        aliases: &[],
+        detectors: &["configuration"],
+        maximum_tier: "tier_d",
+        analyzers: &["treesitter"],
+    },
+    LanguageCapability {
         language: "cpp",
         suffixes: &[".cc", ".cpp", ".cxx", ".hh", ".hpp", ".hxx"],
         aliases: &["cplusplus"],
@@ -3208,6 +3232,107 @@ max_source_file_bytes = 2097152
                     && signal.evidence == LanguageEvidence::Configuration)
         );
         assert_eq!(manifest.configuration_hash, config.hash());
+    }
+
+    #[test]
+    fn cobol_formats_require_configuration_without_suffix_inference() {
+        let generic = language_capabilities()
+            .iter()
+            .find(|capability| capability.language == "cobol")
+            .unwrap();
+        assert_eq!(generic.suffixes, [".cbl", ".cob"]);
+        assert_eq!(generic.analyzers, ["source-fallback"]);
+        for language in ["cobol-fixed", "cobol-free"] {
+            let capability = language_capabilities()
+                .iter()
+                .find(|capability| capability.language == language)
+                .unwrap();
+            assert!(capability.suffixes.is_empty());
+            assert!(capability.aliases.is_empty());
+            assert_eq!(capability.detectors, ["configuration"]);
+            assert_eq!(capability.analyzers, ["treesitter"]);
+            assert_eq!(capability.maximum_tier, "tier_d");
+            assert_eq!(canonical_language(language), Some(language));
+        }
+        assert_eq!(canonical_language("cobol"), Some("cobol"));
+        let source = b"       IDENTIFICATION DIVISION.\n       PROGRAM-ID. SAMPLE.\n";
+        for path in [
+            "sample.cbl",
+            "src/SAMPLE.CBL",
+            "sample.cob",
+            "src/SAMPLE.COB",
+        ] {
+            assert_eq!(extension_language(path), Some("cobol"));
+            let (class, signals) = classify(&RelativePath::parse(Path::new(path)).unwrap(), source);
+            assert_eq!(class, InputClass::Source);
+            assert_eq!(
+                signals,
+                vec![LanguageSignal {
+                    language: "cobol".to_owned(),
+                    evidence: LanguageEvidence::Extension,
+                }],
+                "{path}"
+            );
+        }
+        for path in ["sample.cbl.bak", "sample.cob.txt", "sample.cobol-fixed"] {
+            assert_eq!(extension_language(path), None);
+        }
+    }
+
+    #[test]
+    fn configured_cobol_formats_preserve_detection_and_binary_exclusions() {
+        for newline in ["\n", "\r\n"] {
+            let temporary = local_tempdir();
+            let source = "       IDENTIFICATION DIVISION.\n       PROGRAM-ID. SAMPLE.\n"
+                .replace('\n', newline);
+            for path in ["fixed.cbl", "free.cob", "generic.cbl"] {
+                write_fixture(&temporary, path, source.as_bytes());
+            }
+            write_fixture(&temporary, "binary.cbl", b"\0binary");
+            let config = ConfigSnapshot::resolve(&[rootlight_config::ConfigLayer {
+                source: rootlight_config::ConfigSource::User,
+                contents: "version='1.3'\n[extensions.source-languages]\nversion='1.0'\ncritical=true\n[extensions.source-languages.data.extensions]\ncbl='cobol-fixed'\n[extensions.source-languages.data.paths]\n'free.cob'='cobol-free'\n'generic.cbl'='cobol'\n",
+            }])
+            .unwrap();
+            let root = fixture_root(&temporary, b"configured-cobol");
+            let manifest = discover(
+                &root,
+                &config,
+                &DiscoveryPolicy::build(Vec::new(), true).unwrap(),
+                DiscoveryLimits::from_config(&config),
+                &Cancellation::new(),
+            )
+            .unwrap();
+            assert_eq!(manifest.configuration_hash, config.hash());
+            assert_eq!(manifest.inputs.len(), 3);
+            assert!(manifest.exclusions.iter().any(|entry| {
+                entry.path == "binary.cbl" && entry.reason == ExclusionReason::Binary
+            }));
+            for (path, configured) in [
+                ("fixed.cbl", "cobol-fixed"),
+                ("free.cob", "cobol-free"),
+                ("generic.cbl", "cobol"),
+            ] {
+                let input = manifest
+                    .inputs
+                    .iter()
+                    .find(|input| input.path == path)
+                    .unwrap();
+                assert_eq!(input.class, InputClass::Source);
+                assert_eq!(input.bytes, u64::try_from(source.len()).unwrap());
+                assert_eq!(input.content_hash, content_hash(source.as_bytes()));
+                let configuration: Vec<_> = input
+                    .language_signals
+                    .iter()
+                    .filter(|signal| signal.evidence == LanguageEvidence::Configuration)
+                    .collect();
+                assert_eq!(configuration.len(), 1);
+                assert_eq!(configuration[0].language, configured);
+                assert!(input.language_signals.iter().any(|signal| {
+                    signal.language == "cobol" && signal.evidence == LanguageEvidence::Extension
+                }));
+            }
+        }
     }
 
     #[test]

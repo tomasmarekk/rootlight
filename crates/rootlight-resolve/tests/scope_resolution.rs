@@ -701,6 +701,113 @@ fn language_owned_targets_are_not_promoted_or_replaced_by_name_scoring() {
 }
 
 #[test]
+fn cobol_targets_require_language_owned_evidence_in_all_apply_paths() {
+    for language in ["cobol-fixed", "cobol-free"] {
+        for (syntax, role, kind) in [
+            (
+                "cobol.storage.reference",
+                OccurrenceRole::Reference,
+                EntityKind::Variable,
+            ),
+            (
+                "cobol.using_name.reference",
+                OccurrenceRole::Reference,
+                EntityKind::Variable,
+            ),
+            (
+                "cobol.call_target.reference",
+                OccurrenceRole::CallSite,
+                EntityKind::Function,
+            ),
+            (
+                "cobol.perform_target.reference",
+                OccurrenceRole::CallSite,
+                EntityKind::Function,
+            ),
+            (
+                "cobol.end_program_name.reference",
+                OccurrenceRole::Reference,
+                EntityKind::Module,
+            ),
+            (
+                "cobol.copy.import",
+                OccurrenceRole::ImportUse,
+                EntityKind::Module,
+            ),
+        ] {
+            let mut fixture = Fixture::new();
+            fixture.document.files[0].language = language.to_owned();
+            fixture.document.files[0].path = "src/sample.cob".to_owned();
+            fixture.document.provenance[0].language = language.to_owned();
+            fixture.document.provenance[0].tier = AnalysisTier::TierD;
+            let symbol = fixture.add_entity(10, "anchor", fixture.primary_file, kind, None);
+            fixture.document.entities[0].language = language.to_owned();
+            fixture.document.entities[0].tier = AnalysisTier::TierD;
+            fixture.add_occurrence(20, "anchor", fixture.primary_file, role, None);
+            fixture.document.occurrences[0].syntax_kind = syntax.to_owned();
+            for target in [
+                OccurrenceTarget::Unresolved {
+                    text_hash: content_hash(b"anchor"),
+                },
+                OccurrenceTarget::Candidates {
+                    symbols: vec![symbol],
+                    total_count: 1,
+                    completeness: CoverageStatus::Complete,
+                },
+                OccurrenceTarget::Resolved { symbol },
+            ] {
+                fixture.document.occurrences[0].target = target;
+                fixture.validate();
+                let engine = ResolutionEngine::default();
+                let cancellation = Cancellation::new();
+                assert_eq!(
+                    engine
+                        .estimate_work(&fixture.document, &cancellation)
+                        .unwrap()
+                        .required,
+                    0,
+                    "{language}: {syntax}"
+                );
+                assert!(
+                    engine
+                        .resolve(&fixture.document, &cancellation)
+                        .unwrap()
+                        .decisions
+                        .is_empty(),
+                    "{language}: {syntax}"
+                );
+                let applied = engine
+                    .apply(
+                        fixture.document.clone(),
+                        ResolverFactContext::new(fixture.content_hash),
+                        &cancellation,
+                    )
+                    .unwrap();
+                let streamed = engine
+                    .apply_document(
+                        fixture.document.clone(),
+                        ResolverFactContext::new(fixture.content_hash),
+                        &cancellation,
+                    )
+                    .unwrap();
+                let (bounded, estimate) = engine
+                    .apply_document_bounded(
+                        fixture.document.clone(),
+                        ResolverFactContext::new(fixture.content_hash),
+                        &cancellation,
+                    )
+                    .unwrap();
+                assert_eq!(estimate.required, 0);
+                assert_eq!(streamed, applied.document);
+                assert_eq!(bounded, streamed);
+                assert_eq!(bounded, fixture.document, "{language}: {syntax}");
+                assert!(bounded.relations.is_empty());
+            }
+        }
+    }
+}
+
+#[test]
 fn matlab_primary_functions_remain_uncertain_cross_file_candidates() {
     let mut fixture = Fixture::new();
     fixture.document.files[0].path = "main.m".to_owned();

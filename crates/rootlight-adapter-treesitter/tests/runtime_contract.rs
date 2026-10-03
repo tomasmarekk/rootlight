@@ -89,7 +89,17 @@ fn incremental_executor_enforces_deadline_and_explicit_memory_admission() {
 
 #[test]
 fn every_audited_grammar_parses_a_clean_representative_file() {
-    let cases: [(&str, &str, &[u8]); 36] = [
+    let cases: [(&str, &str, &[u8]); 38] = [
+        (
+            "sample-fixed.cbl",
+            "cobol-fixed",
+            b"000100 IDENTIFICATION DIVISION.\n000200 PROGRAM-ID. SAMPLE.\n000300 PROCEDURE DIVISION.\n000400     STOP RUN.\n",
+        ),
+        (
+            "sample-free.cbl",
+            "cobol-free",
+            b"IDENTIFICATION DIVISION.\nPROGRAM-ID. SAMPLE.\nPROCEDURE DIVISION.\n    STOP RUN.\n",
+        ),
         (
             "Sample.hs",
             "haskell",
@@ -486,6 +496,116 @@ fn incremental_edit_reuses_only_an_exact_previous_identity() {
     assert!(!format!("{:?}", second.reuse_key()).contains("two"));
     assert_eq!(provider.stats().checked_out_parsers, 0);
     assert_eq!(provider.stats().available_parsers, 1);
+}
+
+#[test]
+fn cobol_formats_invalidate_reuse_without_changing_source_identity() {
+    let fixture = Fixture::new(
+        "format.cbl",
+        b"       IDENTIFICATION DIVISION.\n       PROGRAM-ID. SAMPLE.\n       PROCEDURE DIVISION.\n           STOP RUN.\n",
+    );
+    let limits = limits(MAX_SOURCE_BYTES, 1024, 64);
+    let provider = provider(MAX_SOURCE_BYTES, 1024, 64, 2 * 1024 * 1024);
+    let settings = ParserSettings::new(64).unwrap();
+    let mut previous = None;
+    for (language, family, expected) in [
+        (
+            "cobol-fixed",
+            rootlight_adapter_treesitter::GrammarFamily::CobolFixed,
+            ReuseStatus::Fresh,
+        ),
+        (
+            "cobol-fixed",
+            rootlight_adapter_treesitter::GrammarFamily::CobolFixed,
+            ReuseStatus::Reused { changed_ranges: 0 },
+        ),
+        (
+            "cobol-free",
+            rootlight_adapter_treesitter::GrammarFamily::CobolFree,
+            ReuseStatus::Invalidated(ReuseInvalidation::Language),
+        ),
+        (
+            "cobol-free",
+            rootlight_adapter_treesitter::GrammarFamily::CobolFree,
+            ReuseStatus::Reused { changed_ranges: 0 },
+        ),
+        (
+            "cobol-fixed",
+            rootlight_adapter_treesitter::GrammarFamily::CobolFixed,
+            ReuseStatus::Invalidated(ReuseInvalidation::Language),
+        ),
+    ] {
+        let request = request(
+            &fixture.snapshot,
+            &fixture.source,
+            &limits,
+            language,
+            Vec::new(),
+        );
+        let parsed = provider
+            .execute_with_previous(
+                &request,
+                previous.as_ref(),
+                &[],
+                settings,
+                MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
+                &deadline(Duration::from_secs(30)),
+            )
+            .unwrap();
+        assert_eq!(parsed.reuse_status(), expected);
+        assert_eq!(parsed.reuse_key().family(), family);
+        assert_eq!(parsed.reuse_key().native_family(), family);
+        assert_eq!(
+            parsed.reuse_key().current_content_hash(),
+            fixture.source.content_hash()
+        );
+        assert!(parsed.output().diagnostics().is_empty());
+        previous = parsed.previous().cloned();
+        assert!(previous.is_some());
+    }
+    assert_eq!(provider.stats().checked_out_parsers, 0);
+}
+
+#[test]
+fn cobol_included_ranges_are_rejected_before_native_work() {
+    let fixture = Fixture::new(
+        "ranges.cbl",
+        b"       IDENTIFICATION DIVISION.\n       PROGRAM-ID. SAMPLE.\n",
+    );
+    let limits = limits(MAX_SOURCE_BYTES, 1024, 64);
+    let provider = provider(MAX_SOURCE_BYTES, 1024, 64, 2 * 1024 * 1024);
+    for language in ["cobol-fixed", "cobol-free"] {
+        for ranges in [vec![(0, 29)], vec![(0, 7), (30, 37)]] {
+            let ranges = ranges
+                .into_iter()
+                .map(|(start, end)| {
+                    IncludedRange::new(
+                        SourceSpan::new(fixture.snapshot.file(), start, end).unwrap(),
+                        LanguageId::new(language).unwrap(),
+                    )
+                })
+                .collect();
+            let request = request(
+                &fixture.snapshot,
+                &fixture.source,
+                &limits,
+                language,
+                ranges,
+            );
+            assert_eq!(
+                execute_parse(
+                    &provider,
+                    &request,
+                    MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
+                    &deadline(Duration::from_secs(30)),
+                )
+                .unwrap_err(),
+                AdapterError::RejectedRequest(RequestError::EmbeddedRangesUnsupported)
+            );
+            assert_eq!(provider.stats().cache.entries, 0);
+            assert_eq!(provider.stats().checked_out_parsers, 0);
+        }
+    }
 }
 
 #[test]

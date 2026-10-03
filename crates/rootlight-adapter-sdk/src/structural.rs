@@ -20,6 +20,25 @@ pub fn structural_entity_kind(fact: &SyntaxFact) -> Option<EntityKind> {
         SyntaxFactKind::Declaration if label == "haskell.module.declaration" => {
             Some(EntityKind::Module)
         }
+        SyntaxFactKind::Declaration if label == "cobol.program.declaration" => {
+            Some(EntityKind::Module)
+        }
+        SyntaxFactKind::Declaration
+            if matches!(
+                label,
+                "cobol.data_item.declaration" | "cobol.file_descriptor.declaration"
+            ) =>
+        {
+            Some(EntityKind::Variable)
+        }
+        SyntaxFactKind::Declaration
+            if matches!(
+                label,
+                "cobol.section.declaration" | "cobol.paragraph.declaration"
+            ) =>
+        {
+            Some(EntityKind::Function)
+        }
         SyntaxFactKind::Declaration
             if matches!(
                 label,
@@ -505,6 +524,8 @@ pub fn structural_captured_name_for_language<'a>(
 /// This spelling projection does not establish case-insensitive binding identity.
 /// SCSS style-rule selectors retain authored lists and whitespace without
 /// claiming that interpolation has been expanded.
+/// COBOL names preserve written ASCII word or numeric-header spelling; quoted
+/// program names remain unsupported rather than being decoded into bindings.
 /// Other roles use
 /// [`structural_captured_name_for_language`]. The caller retains
 /// the original source span and validates its association with its declaration.
@@ -515,6 +536,14 @@ pub fn structural_captured_name_for_fact<'a>(
     text: &'a str,
     maximum_bytes: usize,
 ) -> Option<Cow<'a, str>> {
+    if matches!(language, "cobol-fixed" | "cobol-free") {
+        return (!text.is_empty()
+            && text.len() <= maximum_bytes
+            && text
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-'))
+        .then_some(Cow::Borrowed(text));
+    }
     if language == "ini"
         && matches!(
             fact.syntax_kind().as_str(),
@@ -841,6 +870,65 @@ mod tests {
             );
             assert_eq!(structural_entity_kind(&fact), Some(base), "{label}");
             assert_eq!(structural_type_member_kind(&fact, base), member, "{label}");
+        }
+    }
+
+    #[test]
+    fn cobol_written_declarations_and_names_preserve_source_spelling() {
+        use crate::SyntaxKindLabel;
+        use rootlight_ids::FileId;
+        use rootlight_ir::SourceSpan;
+
+        for (label, expected) in [
+            ("cobol.program.declaration", EntityKind::Module),
+            ("cobol.data_item.declaration", EntityKind::Variable),
+            ("cobol.file_descriptor.declaration", EntityKind::Variable),
+            ("cobol.section.declaration", EntityKind::Function),
+            ("cobol.paragraph.declaration", EntityKind::Function),
+        ] {
+            let fact = SyntaxFact::new(
+                1,
+                None,
+                SyntaxFactKind::Declaration,
+                SourceSpan::new(FileId::from_bytes([3; 20]), 0, 1).unwrap(),
+                0,
+                SyntaxKindLabel::new(label).unwrap(),
+            );
+            assert_eq!(structural_entity_kind(&fact), Some(expected), "{label}");
+        }
+        let definition = SyntaxFact::new(
+            1,
+            None,
+            SyntaxFactKind::Occurrence,
+            SourceSpan::new(FileId::from_bytes([3; 20]), 0, 1).unwrap(),
+            0,
+            SyntaxKindLabel::new("cobol.program_name.definition").unwrap(),
+        );
+        for language in ["cobol-fixed", "cobol-free"] {
+            for written in ["Mixed-Name", "1Entry", "100"] {
+                assert_eq!(
+                    structural_captured_name_for_fact(language, &definition, written, 64)
+                        .as_deref(),
+                    Some(written)
+                );
+            }
+            for unsupported in [
+                "",
+                "'Quoted'",
+                "\"Quoted\"",
+                "two names",
+                "name.member",
+                "é",
+                "x\0y",
+            ] {
+                assert!(
+                    structural_captured_name_for_fact(language, &definition, unsupported, 64)
+                        .is_none()
+                );
+            }
+            assert!(
+                structural_captured_name_for_fact(language, &definition, "Mixed-Name", 4).is_none()
+            );
         }
     }
 

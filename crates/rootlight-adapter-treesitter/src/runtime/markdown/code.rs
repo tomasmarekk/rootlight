@@ -48,12 +48,19 @@ impl TreeSitterProvider {
             else {
                 continue;
             };
+            let family = self
+                .registry
+                .family_for_language(&language)
+                .ok_or_else(|| provider_failure("markdown-code-language"))?;
             let classic = language.as_str() == "visual-basic-classic";
             let mut cursor = block.walk();
             let body = block
                 .named_children(&mut cursor)
                 .find(|node| node.kind() == "code_fence_content");
             let Some(body) = body else {
+                if family.is_cobol() {
+                    continue;
+                }
                 candidates[index].syntax = if classic {
                     "markdown.classic_code_parsed"
                 } else {
@@ -61,6 +68,11 @@ impl TreeSitterProvider {
                 };
                 continue;
             };
+            if family.is_cobol()
+                && !cobol_physical_body(block, body, request.source().bytes(), cancellation)?
+            {
+                continue;
+            }
             let remaining_nodes = request
                 .limits()
                 .max_syntax_nodes()
@@ -70,6 +82,16 @@ impl TreeSitterProvider {
                 limited.context = true;
                 continue;
             };
+            if family.is_cobol()
+                && !(ranges.len() == 1
+                    && ranges.first().is_some_and(|range| {
+                        usize::try_from(range.span().start_byte()).ok() == Some(body.start_byte())
+                            && usize::try_from(range.span().end_byte()).ok()
+                                == Some(body.end_byte())
+                    }))
+            {
+                continue;
+            }
             if remaining_nodes == 0 || context.remaining_progress_checks == 0 {
                 candidates[index].syntax = "markdown.code_limit";
                 limited.context = true;
@@ -79,10 +101,6 @@ impl TreeSitterProvider {
             // fragment cap for this tree and its nested replacements, while
             // syntax-node and native-work credit remain shared by the document.
             let mut used_ranges = ranges.len();
-            let family = self
-                .registry
-                .family_for_language(&language)
-                .ok_or_else(|| provider_failure("markdown-code-language"))?;
             let native_family = native_family_for_source(family, request.source().path().as_str());
             let ranges = ranges
                 .into_iter()
@@ -147,11 +165,7 @@ impl TreeSitterProvider {
                     _ => CoverageStatus::Bounded,
                 };
                 candidates[index].syntax = if child.fully_traversed {
-                    if classic {
-                        "markdown.classic_code_error"
-                    } else {
-                        "markdown.code_error"
-                    }
+                    embedded_fence_marker(family, classic, true)
                 } else {
                     "markdown.code_limit"
                 };
@@ -160,11 +174,7 @@ impl TreeSitterProvider {
                     continue;
                 }
             } else {
-                candidates[index].syntax = if classic {
-                    "markdown.classic_code_parsed"
-                } else {
-                    "markdown.code_parsed"
-                };
+                candidates[index].syntax = embedded_fence_marker(family, classic, false);
             }
             let pack = self
                 .query_packs
@@ -223,6 +233,81 @@ impl TreeSitterProvider {
             candidates.extend(captures);
         }
         Ok(limited)
+    }
+}
+
+fn cobol_physical_body(
+    block: Node<'_>,
+    body: Node<'_>,
+    source: &[u8],
+    cancellation: &Cancellation,
+) -> Result<bool, AdapterError> {
+    cancellation.check()?;
+    let opening = block.start_byte();
+    let start = body.start_byte();
+    let end = body.end_byte();
+    if block.start_position().column != 0
+        || block.has_error()
+        || block.is_missing()
+        || body.has_error()
+        || body.is_missing()
+        || (opening != 0 && source.get(opening - 1) != Some(&b'\n'))
+        || !source
+            .get(opening)
+            .is_some_and(|byte| matches!(*byte, b'`' | b'~'))
+        || start >= end
+        || source.get(start..end).is_none()
+        || body.start_position().column != 0
+        || (start != 0 && source.get(start - 1) != Some(&b'\n'))
+        || (end != source.len() && source.get(end - 1) != Some(&b'\n'))
+    {
+        return Ok(false);
+    }
+    let mut ancestor = block.parent();
+    loop {
+        cancellation.check()?;
+        match ancestor {
+            Some(parent) if parent.kind() == "document" => break,
+            Some(parent) if parent.kind() == "section" => ancestor = parent.parent(),
+            Some(parent)
+                if parent.is_error()
+                    && parent.parent().is_none()
+                    && parent.byte_range() == (0..source.len())
+                    && parent.start_position() == Point::new(0, 0)
+                    && parent.named_child_count() == 1
+                    && parent.named_child(0) == Some(block)
+                    && block.byte_range() == (0..source.len())
+                    && end == source.len() =>
+            {
+                // An unclosed EOF fence can be clean beneath the host's sole
+                // root recovery node. Child parsing never clears that host gap.
+                break;
+            }
+            _ => return Ok(false),
+        }
+    }
+    // Fixed-column scanning cannot consume deindented or disjoint container
+    // fragments as if they were a physical document. Keep those fences opaque.
+    let mut cursor = body.walk();
+    for child in body.named_children(&mut cursor) {
+        cancellation.check()?;
+        if child.kind() != "block_continuation" || child.start_byte() != child.end_byte() {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+fn embedded_fence_marker(family: GrammarFamily, classic: bool, error: bool) -> &'static str {
+    match (family, classic, error) {
+        (GrammarFamily::CobolFixed, _, false) => "markdown.cobol_fixed_code_parsed",
+        (GrammarFamily::CobolFixed, _, true) => "markdown.cobol_fixed_code_error",
+        (GrammarFamily::CobolFree, _, false) => "markdown.cobol_free_code_parsed",
+        (GrammarFamily::CobolFree, _, true) => "markdown.cobol_free_code_error",
+        (_, true, false) => "markdown.classic_code_parsed",
+        (_, true, true) => "markdown.classic_code_error",
+        (_, false, false) => "markdown.code_parsed",
+        (_, false, true) => "markdown.code_error",
     }
 }
 

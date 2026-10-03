@@ -464,6 +464,11 @@ impl TreeSitterProvider {
             .family_for_language(request.language())
             .ok_or(RequestError::UnsupportedLanguage)?;
         let native_family = native_family_for_source(family, request.source().path().as_str());
+        // Arbitrary public ranges can join unrelated physical text. Markdown
+        // separately admits only a qualified complete physical-line body.
+        if native_family.is_cobol() && !request.included_ranges().is_empty() {
+            return Err(RequestError::EmbeddedRangesUnsupported.into());
+        }
         if request.encoding().as_str() != "utf-8" {
             return Err(RequestError::UnsupportedEncoding.into());
         }
@@ -2639,6 +2644,7 @@ fn traverse_syntax(
 ) -> Result<SyntaxTraversal, AdapterError> {
     cancellation.check()?;
     let root = tree.root_node();
+    let tree_has_error = root.has_error();
     let mut stack = vec![(root, 0usize)];
     let mut processed_nodes = 0usize;
     let mut observed_depth = 0usize;
@@ -2671,13 +2677,25 @@ fn traverse_syntax(
             limited_depth = true;
             continue;
         }
-        limited_nodes |= push_children_bounded(
+        let check_child_errors = error_span.is_none()
+            && tree_has_error
+            && !node.is_error()
+            && !node.is_missing()
+            && node.has_error();
+        let (children_limited, visible_error_child) = push_children_bounded(
             node,
             depth,
             &mut stack,
             max_nodes.saturating_sub(processed_nodes),
+            check_child_errors,
             cancellation,
         )?;
+        limited_nodes |= children_limited;
+        // Invisible missing leaves can raise an ancestor's error cost without
+        // appearing in child(). Explicit visible recovery keeps its own handling.
+        if check_child_errors && !children_limited && !visible_error_child {
+            error_span = Some((node.start_byte(), node.end_byte()));
+        }
     }
     cancellation.check()?;
     Ok(SyntaxTraversal {
@@ -2694,12 +2712,14 @@ fn push_children_bounded<'tree>(
     depth: usize,
     stack: &mut Vec<(Node<'tree>, usize)>,
     remaining: usize,
+    check_child_errors: bool,
     cancellation: &Cancellation,
-) -> Result<bool, AdapterError> {
+) -> Result<(bool, bool), AdapterError> {
     cancellation.check()?;
     let child_capacity = remaining.saturating_sub(stack.len());
     let total_children = node.child_count();
     let child_count = total_children.min(child_capacity);
+    let mut visible_error_child = false;
     try_reserve_cancellable(
         stack,
         child_count,
@@ -2714,11 +2734,14 @@ fn push_children_bounded<'tree>(
             continue;
         };
         if let Some(child) = node.child(index) {
+            if check_child_errors {
+                visible_error_child |= child.has_error();
+            }
             stack.push((child, depth.saturating_add(1)));
         }
     }
     cancellation.check()?;
-    Ok(total_children > child_capacity)
+    Ok((total_children > child_capacity, visible_error_child))
 }
 
 fn emit_primary_diagnostic(

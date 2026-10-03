@@ -7,6 +7,8 @@
 #![forbid(unsafe_code)]
 
 pub mod catalog;
+#[cfg(test)]
+mod cobol_native_tests;
 mod compression;
 mod container_sources;
 mod coverage_languages;
@@ -223,7 +225,7 @@ const PROJECT_FACTS_TRUNCATED_CODE: &str = "project-adapter-facts-truncated";
 const PROJECT_FACTS_TRUNCATED_MESSAGE: &str =
     "additional project semantic facts were omitted by aggregate resource limits";
 const AGGREGATE_DIAGNOSTICS_TRUNCATED_CODE: &str = "aggregate-diagnostics-truncated";
-const ANALYZER_BINARY_SEED: &[u8] = b"rootlight.first-slice.treesitter-structural/192";
+const ANALYZER_BINARY_SEED: &[u8] = b"rootlight.first-slice.treesitter-structural/193";
 const RESOLVER_BINARY_SEED: &[u8] = b"rootlight.first-slice.resolve/93";
 const INCREMENTAL_PROVIDER_SEED: &[u8] = b"rootlight.first-slice.incremental-provider/1";
 const LANGUAGE_DISPOSITION_PROVIDER_SEED: &[u8] = b"rootlight.first-slice.language-disposition/5";
@@ -29380,6 +29382,41 @@ mod tests {
             .unwrap();
         assert_eq!(classic.language, "visual-basic-classic");
         mapped.insert(classic.language.as_str());
+        // A COBOL suffix identifies source, not a fixed/free parser format.
+        for language in ["cobol-fixed", "cobol-free"] {
+            let capability = language_capabilities()
+                .iter()
+                .find(|capability| capability.language == language)
+                .unwrap();
+            assert!(capability.suffixes.is_empty());
+            assert_eq!(capability.detectors, ["configuration"]);
+            let mut input = ManifestInput {
+                file: classic.id,
+                path: "sample.cbl".to_owned(),
+                content_hash: content_hash(b""),
+                bytes: 0,
+                encoding: "utf-8".to_owned(),
+                class: InputClass::Source,
+                language_signals: vec![
+                    rootlight_discovery::LanguageSignal {
+                        language: "cobol".to_owned(),
+                        evidence: LanguageEvidence::Extension,
+                    },
+                    rootlight_discovery::LanguageSignal {
+                        language: language.to_owned(),
+                        evidence: LanguageEvidence::Configuration,
+                    },
+                ],
+                decisive_rule: None,
+            };
+            assert_eq!(
+                supported_source_language(&input, &service.analyzers),
+                Some(language)
+            );
+            input.language_signals.pop();
+            assert_eq!(supported_source_language(&input, &service.analyzers), None);
+            mapped.insert(language);
+        }
         let registered = registry
             .descriptors()
             .iter()
@@ -34192,7 +34229,7 @@ mod tests {
             PARSER_PROVIDER_SET_SEED,
             TREE_SITTER_ADAPTER_VERSION.as_bytes(),
             TREE_SITTER_RUNTIME_VERSION.as_bytes(),
-            b"rootlight.first-slice.treesitter-structural/154",
+            b"rootlight.first-slice.treesitter-structural/192",
             grammar.as_bytes(),
         ])
         .unwrap();

@@ -1,0 +1,59 @@
+{
+  "schema": "rootlight.cobol-source-provenance.v1",
+  "package": "tree-sitter-cobol",
+  "version": "0.0.1",
+  "local_unpublished_binding": true,
+  "upstream_package_name": "tree-sitter-COBOL",
+  "repository": "https://github.com/yutaro-sakamoto/tree-sitter-cobol",
+  "commit": "550020ddf42ef9b718ad897868a9308d2afcda35",
+  "commit_object_identity_verified": false,
+  "signature_independently_verified": false,
+  "upstream_archive": {
+    "url": "https://codeload.github.com/yutaro-sakamoto/tree-sitter-cobol/tar.gz/550020ddf42ef9b718ad897868a9308d2afcda35",
+    "bytes": 5383874,
+    "sha256": "229908b34ab36492c6e0c040589d551deb8f70ad75d90f57eefa7aa431babdad",
+    "sha256_independently_pinned": false,
+    "association": "immutable-commit URL over HTTPS; not signed Git-object verification"
+  },
+  "retention_scope": "preferred grammar and exact local compilation inputs, license, original modified files; not the full upstream repository or fixture collection",
+  "original_sources": {
+    "Cargo.toml": "b52b07334267ab832f25166569d3a0a4da072947063f7677c324bb05588a61f5",
+    "LICENSE": "ecf2612a5720b96131812080bd78e726f661a5e30014bdc06b39ff9f67d523cc",
+    "bindings/rust/build.rs": "bbbb5cf8882de8573faa4e7f20270b2f136da4e2e5df1dfe1ea51dfabdd8efeb",
+    "bindings/rust/lib.rs": "31ed962d03053648514b2fa323b50a69a0a84c59e47c847089ae040a26864200",
+    "grammar.js": "a4a83f4d0012f022900be8da247e71aec77de637011823778661475a6538a3be",
+    "src/grammar.json": "5ddb58fbfefca22dbbcae0f6b5a8d2ad406dc507b392106e26f2b5fd711010af",
+    "src/node-types.json": "e93c4b781b2087e065b4af4aa8af5547e991df00ce51216818f1cde1cfba34a7",
+    "src/parser.c": "d40a31d4854a2d82977c74d33c3ee9c004d9e63743176ebc84159a1734db7b2b",
+    "src/scanner.c": "7d9e24b1ba0c134997a58dbfaf4441bad68a3eaaec83dd5ba84bb7a13b5caa72",
+    "src/tree_sitter/parser.h": "8e819abdeba5866bf1aaf6e7b97522241c903d94a18395c6a75ed02984270ee8"
+  },
+  "local_overrides": {
+    "Cargo.toml": "lowercase unpublished package and modern local binding; original retained as Cargo.toml.orig",
+    "bindings/rust/build.rs": "compile retained tables twice with explicit fixed/free scanner exports; original retained with .orig suffix",
+    "bindings/rust/lib.rs": "static LanguageFn handles replace obsolete runtime-by-value FFI; original retained with .orig suffix",
+    "src/scanner.c": {
+      "original_upstream": "src/scanner.c.orig",
+      "local_sha256": "76964e7341aff6215906a39ab8864d0c7a2b5423de7234cb913e98a2b0fd8f7b",
+      "changes": "bounded EOF/keyword/fixed-line scanning, whole authored literal and comment spans, immutable free profile; see PATCHES.md"
+    }
+  },
+  "generated_parser_modified": false,
+  "generated_parser_language_abi": 14,
+  "generation_at_build_time": false,
+  "source_download_at_build_time": false,
+  "upstream_fixture_collection_retained": false,
+  "contiguous_physical_line_range_qualification": {
+    "test": "tests/native-grammars/tests/cobol_embedding.rs",
+    "profiles": ["cobol-fixed", "cobol-free"],
+    "newline_styles": ["LF", "CRLF"],
+    "original_source_bytes_preserved": true,
+    "scope": "one complete physical-line body; native child/capture equivalence, original EOF, fixed comments/continued literals, neighboring fences, cancellation/reset",
+    "markdown_admission": "unindented opening, qualified document ownership, exact complete body; sole clean whole-snapshot EOF fence preserves host error-root recovery coverage",
+    "public_included_range_admission": false
+  },
+  "disjoint_included_ranges_qualified": false,
+  "complete_product_source_closure_proven": false,
+  "full_cobol_conformance_proven": false,
+  "installed_semantic_acceptance_verified": false
+}

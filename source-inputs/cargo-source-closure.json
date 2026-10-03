@@ -21730,23 +21730,6 @@
     "source-inputs/cargo/tree-sitter-java-0.23.5/src/tree_sitter/array.h": 420,
     "source-inputs/cargo/tree-sitter-java-0.23.5/src/tree_sitter/parser.h": 420,
     "source-inputs/cargo/tree-sitter-java-0.23.5/tree-sitter.json": 420,
-    "source-inputs/cargo/tree-sitter-kotlin-ng-1.1.0/.cargo-checksum.json": 420,
-    "source-inputs/cargo/tree-sitter-kotlin-ng-1.1.0/.cargo_vcs_info.json": 420,
-    "source-inputs/cargo/tree-sitter-kotlin-ng-1.1.0/Cargo.lock": 420,
-    "source-inputs/cargo/tree-sitter-kotlin-ng-1.1.0/Cargo.toml": 420,
-    "source-inputs/cargo/tree-sitter-kotlin-ng-1.1.0/Cargo.toml.orig": 420,
-    "source-inputs/cargo/tree-sitter-kotlin-ng-1.1.0/README.md": 420,
-    "source-inputs/cargo/tree-sitter-kotlin-ng-1.1.0/bindings/rust/build.rs": 420,
-    "source-inputs/cargo/tree-sitter-kotlin-ng-1.1.0/bindings/rust/lib.rs": 420,
-    "source-inputs/cargo/tree-sitter-kotlin-ng-1.1.0/grammar.js": 420,
-    "source-inputs/cargo/tree-sitter-kotlin-ng-1.1.0/src/grammar.json": 420,
-    "source-inputs/cargo/tree-sitter-kotlin-ng-1.1.0/src/node-types.json": 420,
-    "source-inputs/cargo/tree-sitter-kotlin-ng-1.1.0/src/parser.c": 420,
-    "source-inputs/cargo/tree-sitter-kotlin-ng-1.1.0/src/scanner.c": 420,
-    "source-inputs/cargo/tree-sitter-kotlin-ng-1.1.0/src/tree_sitter/alloc.h": 420,
-    "source-inputs/cargo/tree-sitter-kotlin-ng-1.1.0/src/tree_sitter/array.h": 420,
-    "source-inputs/cargo/tree-sitter-kotlin-ng-1.1.0/src/tree_sitter/parser.h": 420,
-    "source-inputs/cargo/tree-sitter-kotlin-ng-1.1.0/tree-sitter.json": 420,
     "source-inputs/cargo/tree-sitter-language-0.1.7/.cargo-checksum.json": 420,
     "source-inputs/cargo/tree-sitter-language-0.1.7/.cargo_vcs_info.json": 420,
     "source-inputs/cargo/tree-sitter-language-0.1.7/Cargo.lock": 420,
@@ -31898,7 +31881,6 @@
     "source-inputs/crates/tree-sitter-dart-0.2.0.crate": 420,
     "source-inputs/crates/tree-sitter-go-0.25.0.crate": 420,
     "source-inputs/crates/tree-sitter-java-0.23.5.crate": 420,
-    "source-inputs/crates/tree-sitter-kotlin-ng-1.1.0.crate": 420,
     "source-inputs/crates/tree-sitter-language-0.1.7.crate": 420,
     "source-inputs/crates/tree-sitter-lua-0.5.0.crate": 420,
     "source-inputs/crates/tree-sitter-php-0.24.2.crate": 420,
@@ -31990,7 +31972,7 @@
   },
   "frontend_external_source_closure_verified": false,
   "licensing_scope": "supplied metadata and present files; not a completeness or authorship assessment",
-  "local_package_count": 79,
+  "local_package_count": 81,
   "local_packages": [
     {
       "name": "dekobon-tree-sitter-groovy",
@@ -32233,6 +32215,10 @@
       "version": "0.25.1"
     },
     {
+      "name": "tree-sitter-cobol",
+      "version": "0.0.1"
+    },
+    {
       "name": "tree-sitter-css",
       "version": "0.25.0"
     },
@@ -32247,6 +32233,10 @@
     {
       "name": "tree-sitter-json",
       "version": "0.24.8"
+    },
+    {
+      "name": "tree-sitter-kotlin-ng",
+      "version": "1.1.0"
     },
     {
       "name": "tree-sitter-matlab",
@@ -32311,10 +32301,10 @@
   ],
   "lockfiles": [
     {
-      "local_package_count": 69,
+      "local_package_count": 71,
       "path": "Cargo.lock",
-      "registry_package_count": 303,
-      "sha256": "a3c0ef158615c74f8fc95d5125ffbe3a68afa215f47c927db1eb0d3351385663"
+      "registry_package_count": 302,
+      "sha256": "f87c0be8a8b54a400946feccea69536cc5bded9955e41e0c74f781aa8cb58426"
     },
     {
       "local_package_count": 12,
@@ -32329,13 +32319,13 @@
       "sha256": "907581b789997511b0e60ec6eea0e9e42f29cea5705bf641c5b7a112b2731794"
     },
     {
-      "local_package_count": 21,
+      "local_package_count": 23,
       "path": "tests/native-grammars/Cargo.lock",
       "registry_package_count": 32,
-      "sha256": "bb3cb880fbe30ca0e33ced7e9c15a28772dfd32588a1f2e24d7e222d4cce0a67"
+      "sha256": "057547839a45470932f5238b0fe7ef35b26065b3720c6d09c5ea0989c277f808"
     }
   ],
-  "package_count": 544,
+  "package_count": 543,
   "packages": [
     {
       "archive": {
@@ -174957,124 +174947,6 @@
       "source_files_sha256": "7441566a5d4632de48decd6aae68fb29dba99820d316b75f668344fa8677fc59",
       "vendor_path": "tree-sitter-java-0.23.5",
       "version": "0.23.5"
-    },
-    {
-      "archive": {
-        "bytes": 1113824,
-        "path": "tree-sitter-kotlin-ng-1.1.0.crate",
-        "sha256": "e800ebbda938acfbf224f4d2c34947a31994b1295ee6e819b65226c7b51b4450"
-      },
-      "archive_executable_files": [],
-      "cargo_toml_sha256": "2ffcb705b94bccdf7132ea58216a1508f9f1f341ce4b17d4ad84648cf74f0bf0",
-      "checksum_manifest_sha256": "28dc18347f55631e9ace95a31f73e52d2ec6a5b3755537abf0d97566d170a071",
-      "file_count": 16,
-      "files": [
-        {
-          "archive_mode": 420,
-          "bytes": 94,
-          "path": ".cargo_vcs_info.json",
-          "sha256": "579eb2833d4fa188732c3ab1e991b4af13ce7fa5958e28260d110af0501e9e82"
-        },
-        {
-          "archive_mode": 420,
-          "bytes": 2486,
-          "path": "Cargo.lock",
-          "sha256": "83844554efc3ed0c3fcc62097918dd929d1285aa51297bbd93b08d53cfac7729"
-        },
-        {
-          "archive_mode": 420,
-          "bytes": 1329,
-          "path": "Cargo.toml",
-          "sha256": "2ffcb705b94bccdf7132ea58216a1508f9f1f341ce4b17d4ad84648cf74f0bf0"
-        },
-        {
-          "archive_mode": 420,
-          "bytes": 697,
-          "path": "Cargo.toml.orig",
-          "sha256": "01257b59d82a946bd4a4ee7fd3e63ee80ecf405ed3df22f5ee1b0e7f1f2ccb23"
-        },
-        {
-          "archive_mode": 420,
-          "bytes": 1180,
-          "path": "README.md",
-          "sha256": "f70427a2d63503273c0fc0d48eb8e460f966e9af017efa5629c4121b7048f164"
-        },
-        {
-          "archive_mode": 420,
-          "bytes": 638,
-          "path": "bindings/rust/build.rs",
-          "sha256": "8f497bb1459c09529efecfb9ae0dbc6e6f3c5892911e535f6551e15337d2cd6c"
-        },
-        {
-          "archive_mode": 420,
-          "bytes": 1667,
-          "path": "bindings/rust/lib.rs",
-          "sha256": "1e3ede5fbdb4106d84452424d796facd175b130e0c55d6b3887809e9642d0fcc"
-        },
-        {
-          "archive_mode": 420,
-          "bytes": 25319,
-          "path": "grammar.js",
-          "sha256": "1f6260635f96071fe1a164a3acbdaaf9d670dc2b35766e438c91f58ed2d50a7f"
-        },
-        {
-          "archive_mode": 420,
-          "bytes": 147560,
-          "path": "src/grammar.json",
-          "sha256": "c795af096c42fef46ca242a7d1eee1830e2d95fe462ccacefe04cda91885822a"
-        },
-        {
-          "archive_mode": 420,
-          "bytes": 51889,
-          "path": "src/node-types.json",
-          "sha256": "0f21509031ad37902dc05d5828f178fed3545c466ffcf38ef30d969cb64e8e9d"
-        },
-        {
-          "archive_mode": 420,
-          "bytes": 22443237,
-          "path": "src/parser.c",
-          "sha256": "9ff65161845b9e9c9d62c12e9a4e4b8d8628bdc31c681ec7e6b4bd3bd6444cb3"
-        },
-        {
-          "archive_mode": 420,
-          "bytes": 15179,
-          "path": "src/scanner.c",
-          "sha256": "164c2bb928d23765ed38c3a322deaef9b52d6e147cec7cdf45add90d4fa6101c"
-        },
-        {
-          "archive_mode": 420,
-          "bytes": 985,
-          "path": "src/tree_sitter/alloc.h",
-          "sha256": "b29c1c9fb7cc82f58c84b376df1297d6e2737a1d655fd356db0859e3c29c2fea"
-        },
-        {
-          "archive_mode": 420,
-          "bytes": 10431,
-          "path": "src/tree_sitter/array.h",
-          "sha256": "5bdf6ed1a78e3409fd443e085ca967a64c188a5d082aaf7f819bccd53a471c94"
-        },
-        {
-          "archive_mode": 420,
-          "bytes": 7039,
-          "path": "src/tree_sitter/parser.h",
-          "sha256": "a1f6ef161fbaf48a0e10fca90ef5290a062462b307b3898aa562993853b9f80a"
-        },
-        {
-          "archive_mode": 420,
-          "bytes": 772,
-          "path": "tree-sitter.json",
-          "sha256": "d4f3dd0850836457ede7ee82e3f1b8803bd40343b9b17af7e02741ff4daf6fcb"
-        }
-      ],
-      "license": "MIT",
-      "license_file": null,
-      "license_files": [],
-      "name": "tree-sitter-kotlin-ng",
-      "package_checksum": "e800ebbda938acfbf224f4d2c34947a31994b1295ee6e819b65226c7b51b4450",
-      "source": "registry+https://github.com/rust-lang/crates.io-index",
-      "source_files_sha256": "6150cd8e62bae9f1d7f28d88770218c4258fd829cd645298bab5ae8ec5646c03",
-      "vendor_path": "tree-sitter-kotlin-ng-1.1.0",
-      "version": "1.1.0"
     },
     {
       "archive": {

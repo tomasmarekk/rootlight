@@ -26,6 +26,465 @@ fn output(source: &str) -> AnalysisOutput {
     result
 }
 
+fn cobol_markdown_body(language: &str, ending: &str) -> String {
+    let prefix = if language == "cobol-fixed" {
+        "       "
+    } else {
+        ""
+    };
+    [
+        "identification division.",
+        "program-id. Example.",
+        "data division.",
+        "working-storage section.",
+        "01 Stored pic 9.",
+        "procedure division.",
+        "Main.",
+        "move Stored to Stored.",
+        "goback.",
+        "end program Example.",
+    ]
+    .iter()
+    .map(|line| format!("{prefix}{line}{ending}"))
+    .collect()
+}
+
+#[test]
+fn markdown_cobol_physical_fences_preserve_profiles_host_evidence_and_replay() {
+    for ending in ["\n", "\r\n"] {
+        let mut source = format!("# Examples λ😀{ending}{ending}");
+        let mut fences = Vec::new();
+        for language in ["cobol-fixed", "cobol-free", "cobol-fixed", "cobol-free"] {
+            let fence_start = source.len();
+            source.push_str(&format!("~~~{language}{ending}"));
+            let body_start = source.len();
+            source.push_str(&cobol_markdown_body(language, ending));
+            let body_end = source.len();
+            source.push_str(&format!("~~~{ending}"));
+            fences.push((language, fence_start..source.len(), body_start..body_end));
+            source.push_str(ending);
+        }
+        let provider = Arc::new(provider());
+        let analyzer = analyzer(&provider, MARKDOWN);
+        let fixture = Fixture::new(MARKDOWN, source.as_bytes());
+        let budget = limits();
+        let initial = request(&fixture.snapshot, &fixture.source, MARKDOWN, &budget);
+        let demand = provider
+            .required_syntax_fact_count(&initial.to_parse_request(), &deadline())
+            .unwrap();
+        let (result, artifact) = analyzer
+            .analyze_and_capture(
+                &initial,
+                ExtensionSupport::default(),
+                MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
+                &deadline(),
+            )
+            .unwrap();
+        validate_ir_document(result.document(), budget.ir(), &ExtensionSupport::default()).unwrap();
+        assert_eq!(
+            artifact.required_syntax_fact_count(&deadline()).unwrap(),
+            demand
+        );
+        let document = result.document();
+        let mut identities = BTreeSet::new();
+        for (language, fence, body) in &fences {
+            let local = |span: SourceSpan| {
+                span.start_byte() >= u64::try_from(body.start).unwrap()
+                    && span.end_byte() <= u64::try_from(body.end).unwrap()
+            };
+            let entities: Vec<_> = document
+                .entities
+                .iter()
+                .filter(|entity| {
+                    entity.language == *language
+                        && entity
+                            .evidence
+                            .source
+                            .as_ref()
+                            .is_some_and(|source| local(source.span()))
+                })
+                .collect();
+            assert_eq!(
+                entities.len(),
+                3,
+                "{language}: {:?}",
+                document.skipped_regions
+            );
+            assert_eq!(
+                entities
+                    .iter()
+                    .map(|entity| entity.canonical_name.as_str())
+                    .collect::<BTreeSet<_>>(),
+                BTreeSet::from(["Example", "Stored", "Main"])
+            );
+            for entity in &entities {
+                assert!(
+                    identities.insert(entity.id),
+                    "neighboring fences have separate owners"
+                );
+            }
+            let definitions: Vec<_> = document
+                .occurrences
+                .iter()
+                .filter(|site| site.role == OccurrenceRole::Definition && local(site.source.span()))
+                .collect();
+            assert_eq!(definitions.len(), 3);
+            for site in definitions {
+                let OccurrenceTarget::Resolved { symbol } = site.target else {
+                    panic!("written definition must retain its own entity");
+                };
+                let entity = entities.iter().find(|entity| entity.id == symbol).unwrap();
+                let span = site.source.span();
+                let text = &source[usize::try_from(span.start_byte()).unwrap()
+                    ..usize::try_from(span.end_byte()).unwrap()];
+                assert_eq!(text, entity.canonical_name);
+                assert_eq!(site.syntactic_text_hash, content_hash(text.as_bytes()));
+                assert_eq!(site.source.content_hash(), fixture.source.content_hash());
+                assert_eq!(site.source.generation(), fixture.source.generation());
+                assert_eq!(site.source.span().file(), fixture.source.span().file());
+                assert_eq!(
+                    site.id,
+                    rootlight_ir::derive_occurrence_record_id(site).unwrap()
+                );
+            }
+            let program = entities
+                .iter()
+                .find(|entity| entity.canonical_name == "Example")
+                .unwrap();
+            let prefix = if *language == "cobol-fixed" {
+                "       "
+            } else {
+                ""
+            };
+            let header = format!("identification division.{ending}{prefix}program-id. Example.");
+            let header_start = body.start + prefix.len();
+            let signatures: Vec<_> = document
+                .extensions
+                .iter()
+                .filter_map(|envelope| {
+                    if envelope.namespace != rootlight_ir::LEXICAL_EXTENSION_NAMESPACE {
+                        return None;
+                    }
+                    let evidence =
+                        rootlight_ir::decode_lexical_evidence_envelope(envelope).unwrap();
+                    (evidence.kind() == rootlight_ir::LexicalEvidenceKind::Signature
+                        && evidence.subject() == rootlight_ir::FactRef::Entity(program.id))
+                    .then_some((envelope, evidence))
+                })
+                .collect();
+            assert_eq!(signatures.len(), 1);
+            assert_eq!(signatures[0].1.text(), header);
+            let header_source = signatures[0].0.evidence.source.as_ref().unwrap();
+            assert_eq!(
+                header_source.span().start_byte(),
+                u64::try_from(header_start).unwrap()
+            );
+            assert_eq!(
+                header_source.span().end_byte(),
+                u64::try_from(header_start + header.len()).unwrap()
+            );
+            assert_eq!(header_source.content_hash(), fixture.source.content_hash());
+            assert!(document.skipped_regions.iter().any(|gap| {
+                gap.detail == "markdown-code-semantics-unavailable"
+                    && gap.domain == FactDomain::Relations
+                    && gap.source.span().start_byte() == u64::try_from(fence.start).unwrap()
+                    && gap.source.span().end_byte() == u64::try_from(fence.end).unwrap()
+            }));
+            assert!(!document.skipped_regions.iter().any(|gap| {
+                gap.detail == "signature-capture-unavailable" && local(gap.source.span())
+            }));
+        }
+        assert_eq!(identities.len(), 12);
+        assert!(
+            document
+                .occurrences
+                .iter()
+                .filter(|site| site.syntax_kind.starts_with("cobol.")
+                    && site.role != OccurrenceRole::Definition)
+                .all(|site| matches!(site.target, OccurrenceTarget::Unresolved { .. }))
+        );
+        assert!(document.relations.iter().all(|edge| matches!(
+            edge.predicate,
+            RelationPredicate::Contains
+                | RelationPredicate::Declares
+                | RelationPredicate::DefinesAt
+        )));
+        let changed = fixture.next_generation();
+        let next = request(&changed.snapshot, &changed.source, MARKDOWN, &budget);
+        let replay = analyzer
+            .analyze_from_artifact(
+                &next,
+                &artifact,
+                ExtensionSupport::default(),
+                MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
+                &deadline(),
+            )
+            .unwrap();
+        let (fresh, _) = analyzer
+            .analyze_and_capture(
+                &next,
+                ExtensionSupport::default(),
+                MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
+                &deadline(),
+            )
+            .unwrap();
+        assert_eq!(replay.document(), fresh.document());
+        assert_eq!(replay.report(), fresh.report());
+    }
+}
+
+#[test]
+fn markdown_cobol_container_and_deindented_fences_remain_scoped_opaque_source() {
+    for language in ["cobol-fixed", "cobol-free"] {
+        for ending in ["\n", "\r\n"] {
+            let body = cobol_markdown_body(language, ending);
+            for (opening, prefix, closing) in [
+                ("> ~~~", "> ", "> ~~~"),
+                ("- ~~~", "  ", "  ~~~"),
+                ("   ~~~", "   ", "   ~~~"),
+            ] {
+                let mut source = format!("# Examples{ending}{ending}{opening}{language}{ending}");
+                for line in body.split_terminator(ending) {
+                    source.push_str(&format!("{prefix}{line}{ending}"));
+                }
+                source.push_str(&format!("{closing}{ending}{ending}"));
+                let healthy_start = source.len();
+                source.push_str(&format!("~~~{language}{ending}{body}~~~{ending}"));
+                let provider = provider();
+                let fixture = Fixture::new(MARKDOWN, source.as_bytes());
+                let budget = limits();
+                let initial = request(&fixture.snapshot, &fixture.source, MARKDOWN, &budget);
+                let parsed = rootlight_adapter_sdk::execute_parse(
+                    &provider,
+                    &initial.to_parse_request(),
+                    MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
+                    &deadline(),
+                )
+                .unwrap();
+                let opaque: Vec<_> = parsed
+                    .facts()
+                    .iter()
+                    .filter(|fact| {
+                        fact.syntax_kind().as_str() == "markdown.code_block.signature"
+                            && fact.span().end_byte() <= u64::try_from(healthy_start).unwrap()
+                    })
+                    .collect();
+                assert_eq!(opaque.len(), 1, "{language}: {opening}");
+                assert!(!parsed.facts().iter().any(|fact| {
+                    fact.syntax_kind().as_str().starts_with("cobol.")
+                        && fact.span().start_byte() < u64::try_from(healthy_start).unwrap()
+                }));
+                let result = output(&source);
+                let document = result.document();
+                let gaps: Vec<_> = document
+                    .skipped_regions
+                    .iter()
+                    .filter(|gap| {
+                        gap.detail == "markdown-embedded-analysis-unavailable"
+                            && gap.source.span() == opaque[0].span()
+                    })
+                    .collect();
+                assert_eq!(gaps.len(), 1);
+                assert_eq!(gaps[0].domain, FactDomain::Entities);
+                assert_eq!(gaps[0].reason, SkippedRegionReason::UnsupportedConstruct);
+                assert_eq!(
+                    gaps[0].source.content_hash(),
+                    content_hash(source.as_bytes())
+                );
+                let entities: Vec<_> = document
+                    .entities
+                    .iter()
+                    .filter(|entity| entity.language == language)
+                    .collect();
+                assert_eq!(entities.len(), 3);
+                assert!(entities.iter().all(|entity| {
+                    entity.evidence.source.as_ref().unwrap().span().start_byte()
+                        >= u64::try_from(healthy_start).unwrap()
+                }));
+                assert_eq!(
+                    document
+                        .occurrences
+                        .iter()
+                        .filter(|site| site.role == OccurrenceRole::Definition
+                            && site.syntax_kind.starts_with("cobol."))
+                        .count(),
+                    3
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn markdown_cobol_eof_and_error_markers_keep_exact_profile_and_neighbor_sources() {
+    for language in ["cobol-fixed", "cobol-free"] {
+        for ending in ["\n", "\r\n"] {
+            let body = cobol_markdown_body(language, ending);
+            for trailing_newline in [false, true] {
+                let body = if trailing_newline {
+                    body.as_str()
+                } else {
+                    body.strip_suffix(ending).unwrap()
+                };
+                let source = format!("~~~{language}{ending}{body}");
+                let provider = provider();
+                let fixture = Fixture::new(MARKDOWN, source.as_bytes());
+                let budget = limits();
+                let initial = request(&fixture.snapshot, &fixture.source, MARKDOWN, &budget);
+                let parsed = rootlight_adapter_sdk::execute_parse(
+                    &provider,
+                    &initial.to_parse_request(),
+                    MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
+                    &deadline(),
+                )
+                .unwrap();
+                let mut host_parser = tree_sitter::Parser::new();
+                host_parser
+                    .set_language(&tree_sitter_md::LANGUAGE.into())
+                    .unwrap();
+                let host = host_parser.parse(&source, None).unwrap();
+                let result = output(&source);
+                assert_eq!(
+                    result
+                        .document()
+                        .entities
+                        .iter()
+                        .filter(|entity| entity.language == language)
+                        .count(),
+                    3,
+                    "{language}, ending={ending:?}, trailing_newline={trailing_newline}, host={}",
+                    host.root_node().kind()
+                );
+                let marker = if language == "cobol-fixed" {
+                    "markdown.cobol_fixed_code_parsed.signature"
+                } else {
+                    "markdown.cobol_free_code_parsed.signature"
+                };
+                let markers: Vec<_> = parsed
+                    .facts()
+                    .iter()
+                    .filter(|fact| fact.syntax_kind().as_str() == marker)
+                    .collect();
+                assert_eq!(markers.len(), 1);
+                assert_eq!(markers[0].span(), fixture.source.span());
+                let definitions: Vec<_> = result
+                    .document()
+                    .occurrences
+                    .iter()
+                    .filter(|site| {
+                        site.role == OccurrenceRole::Definition
+                            && site.syntax_kind.starts_with("cobol.")
+                    })
+                    .collect();
+                assert_eq!(definitions.len(), 3);
+                assert_eq!(
+                    definitions
+                        .iter()
+                        .map(|site| {
+                            assert_eq!(site.source.content_hash(), fixture.source.content_hash());
+                            assert_eq!(site.source.generation(), fixture.source.generation());
+                            assert!(matches!(site.target, OccurrenceTarget::Resolved { .. }));
+                            let span = site.source.span();
+                            &source[usize::try_from(span.start_byte()).unwrap()
+                                ..usize::try_from(span.end_byte()).unwrap()]
+                        })
+                        .collect::<BTreeSet<_>>(),
+                    BTreeSet::from(["Example", "Stored", "Main"])
+                );
+                if host.root_node().is_error() {
+                    assert_eq!(parsed.report().coverage().status(), CoverageStatus::Unknown);
+                    assert_eq!(result.report().coverage().status(), CoverageStatus::Unknown);
+                    assert!(result.document().skipped_regions.iter().any(|gap| {
+                        gap.detail == "syntax-error-recovery"
+                            && gap.domain == FactDomain::Diagnostics
+                            && gap.reason == SkippedRegionReason::ParseError
+                            && gap.source == fixture.source
+                    }));
+                }
+                assert!(
+                    !result
+                        .document()
+                        .skipped_regions
+                        .iter()
+                        .any(|gap| gap.detail == "markdown-embedded-analysis-unavailable"
+                            || gap.detail == "markdown-code-parse-unavailable")
+                );
+            }
+            let broken = body.replace("goback.", "@@@.");
+            let source = format!(
+                "~~~{language}{ending}{broken}~~~{ending}{ending}~~~{language}{ending}{body}~~~{ending}"
+            );
+            let healthy_start = source
+                .find(&format!("~~~{language}{ending}{body}"))
+                .unwrap();
+            let provider = provider();
+            let fixture = Fixture::new(MARKDOWN, source.as_bytes());
+            let budget = limits();
+            let initial = request(&fixture.snapshot, &fixture.source, MARKDOWN, &budget);
+            let parsed = rootlight_adapter_sdk::execute_parse(
+                &provider,
+                &initial.to_parse_request(),
+                MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
+                &deadline(),
+            )
+            .unwrap();
+            let marker = if language == "cobol-fixed" {
+                "markdown.cobol_fixed_code_error.signature"
+            } else {
+                "markdown.cobol_free_code_error.signature"
+            };
+            let errors: Vec<_> = parsed
+                .facts()
+                .iter()
+                .filter(|fact| fact.syntax_kind().as_str() == marker)
+                .collect();
+            assert_eq!(errors.len(), 1);
+            let result = output(&source);
+            let document = result.document();
+            let gap = document
+                .skipped_regions
+                .iter()
+                .find(|gap| gap.detail == "markdown-code-parse-unavailable")
+                .unwrap();
+            assert_eq!(gap.source.span(), errors[0].span());
+            assert_eq!(gap.reason, SkippedRegionReason::ParseError);
+            assert_eq!(gap.source.content_hash(), content_hash(source.as_bytes()));
+            let programs: Vec<_> = document
+                .entities
+                .iter()
+                .filter(|entity| {
+                    entity.language == language
+                        && entity.kind == EntityKind::Module
+                        && entity.canonical_name == "Example"
+                })
+                .collect();
+            assert_eq!(
+                programs.len(),
+                2,
+                "healthy native headers survive a body error"
+            );
+            assert!(programs.iter().any(|entity| {
+                entity.evidence.source.as_ref().unwrap().span().start_byte()
+                    < u64::try_from(healthy_start).unwrap()
+            }));
+            assert!(programs.iter().any(|entity| {
+                entity.evidence.source.as_ref().unwrap().span().start_byte()
+                    >= u64::try_from(healthy_start).unwrap()
+            }));
+            assert!(
+                !document
+                    .entities
+                    .iter()
+                    .any(|entity| entity.language == "markdown"
+                        && matches!(
+                            entity.canonical_name.as_str(),
+                            "Example" | "Stored" | "Main"
+                        ))
+            );
+        }
+    }
+}
+
 #[test]
 fn markdown_matlab_bindings_keep_host_spans_and_separate_examples() {
     let source = "# Variables λ😀\r\n```matlab\r\nvalue = 1;\r\nvalue = value + 1;\r\n```\r\n```matlab\r\nvalue = 2;\r\nvalue = value + 2;\r\n```\r\n```matlab\r\nresult = value;\r\n```\r\n";
@@ -1805,6 +2264,46 @@ fn markdown_fenced_definitions_match_standalone_language_evidence() {
             LanguageCase {
                 name: "visual-basic-classic",
                 ..vba_native::VBA
+            },
+            LanguageCase {
+                name: "cobol-fixed",
+                path: "src/Example.cbl",
+                frontend: "tree-sitter-cobol-fixed-0.0.1",
+                source: concat!(
+                    "       identification division.\n",
+                    "       program-id. Example.\n",
+                    "       data division.\n",
+                    "       working-storage section.\n",
+                    "       01 Stored pic 9.\n",
+                    "       procedure division.\n",
+                    "       Main.\n",
+                    "       display 'first'.\n",
+                    "       goback.\n",
+                    "       end program Example.\n",
+                ),
+                generated: false,
+                body_before: "display 'first'.",
+                body_after: "display 'second'.",
+            },
+            LanguageCase {
+                name: "cobol-free",
+                path: "src/Example.cbl",
+                frontend: "tree-sitter-cobol-free-0.0.1",
+                source: concat!(
+                    "identification division.\n",
+                    "program-id. Example.\n",
+                    "data division.\n",
+                    "working-storage section.\n",
+                    "01 Stored pic 9.\n",
+                    "procedure division.\n",
+                    "Main.\n",
+                    "display 'first'.\n",
+                    "goback.\n",
+                    "end program Example.\n",
+                ),
+                generated: false,
+                body_before: "display 'first'.",
+                body_after: "display 'second'.",
             },
         ])
         .collect();

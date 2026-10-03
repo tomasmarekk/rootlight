@@ -18,6 +18,7 @@ use crate::{
     registry::{language_for, native_family_for_source},
 };
 
+mod cobol;
 mod dart;
 mod ecmascript;
 mod groovy;
@@ -339,6 +340,9 @@ impl QueryPack {
         let mut identity_query = Query::new(&language, source).map_err(|_| family)?;
         let mut optional_query = Query::new(&language, source).map_err(|_| family)?;
         let mut expected = EXPECTED_CAPTURES.to_vec();
+        if matches!(family, GrammarFamily::CobolFixed | GrammarFamily::CobolFree) {
+            expected.retain(|name| !matches!(*name, "call" | "module" | "documentation"));
+        }
         if family == GrammarFamily::Perl {
             expected.retain(|name| !matches!(*name, "call" | "import"));
         }
@@ -682,6 +686,17 @@ impl QueryPack {
                 if input.family == GrammarFamily::Haskell
                     && !haskell::retain_capture(capture.node, role, input.cancellation)?
                 {
+                    continue;
+                }
+                if matches!(
+                    input.family,
+                    GrammarFamily::CobolFixed | GrammarFamily::CobolFree
+                ) && !cobol::retain_capture(
+                    capture.node,
+                    role,
+                    input.source,
+                    input.cancellation,
+                )? {
                     continue;
                 }
                 if input.family.is_classic_basic()
@@ -1219,6 +1234,9 @@ fn candidate_for_capture(
             haskell::syntax(capture.node, role, source, cancellation)?
                 .ok_or_else(|| query_failure("query-haskell-kind"))?
         }
+        _ if matches!(family, GrammarFamily::CobolFixed | GrammarFamily::CobolFree) => {
+            cobol::syntax(capture.node, role).ok_or_else(|| query_failure("query-cobol-kind"))?
+        }
         _ if family == GrammarFamily::ObjectiveC => objective_c::capture_syntax(capture.node, role)
             .ok_or_else(|| query_failure("query-objective-c-kind"))?,
         StructuralRole::Declaration if family == GrammarFamily::Dart => {
@@ -1408,6 +1426,9 @@ fn candidate_for_capture(
             GrammarFamily::Perl => return Err(query_failure("query-perl-unresolved-call")),
             GrammarFamily::Groovy => "groovy.call",
             GrammarFamily::Haskell => "haskell.application",
+            GrammarFamily::CobolFixed | GrammarFamily::CobolFree => {
+                return Err(query_failure("query-cobol-unproven-call"));
+            }
             GrammarFamily::Vba | GrammarFamily::VisualBasicClassic => {
                 return Err(query_failure("query-vba-ambiguous-call"));
             }
@@ -1420,6 +1441,12 @@ fn candidate_for_capture(
     if family == GrammarFamily::Haskell {
         let range = haskell::capture_range(capture.node, role, cancellation)?
             .ok_or_else(|| query_failure("query-haskell-range"))?;
+        start = range.start;
+        end = range.end;
+    }
+    if matches!(family, GrammarFamily::CobolFixed | GrammarFamily::CobolFree) {
+        let range = cobol::capture_range(capture.node, role, source, cancellation)?
+            .ok_or_else(|| query_failure("query-cobol-range"))?;
         start = range.start;
         end = range.end;
     }
@@ -1575,12 +1602,25 @@ fn candidate_for_capture(
     }
     let mut capture_depth = if matches!(
         family,
-        GrammarFamily::Perl | GrammarFamily::Groovy | GrammarFamily::Haskell
+        GrammarFamily::Perl
+            | GrammarFamily::Groovy
+            | GrammarFamily::Haskell
+            | GrammarFamily::CobolFixed
+            | GrammarFamily::CobolFree
     ) {
         native_depth(capture.node, cancellation)?
     } else {
         0
     };
+    if matches!(family, GrammarFamily::CobolFixed | GrammarFamily::CobolFree)
+        && role == StructuralRole::Scope
+        && capture.node.kind() == "program_definition"
+    {
+        // A program's environment belongs beneath its same-node declaration.
+        capture_depth = capture_depth
+            .checked_add(1)
+            .ok_or_else(|| query_failure("query-native-depth"))?;
+    }
     if family == GrammarFamily::Haskell
         && role == StructuralRole::Scope
         && matches!(
@@ -2254,7 +2294,7 @@ impl QueryPackRegistry {
     }
 
     fn compile_audited() -> Result<Self, GrammarFamily> {
-        let mut packs = Vec::with_capacity(36);
+        let mut packs = Vec::with_capacity(38);
         for (family, source) in [
             (GrammarFamily::Rust, include_str!("../queries/rust.scm")),
             (GrammarFamily::Python, include_str!("../queries/python.scm")),
@@ -2300,6 +2340,14 @@ impl QueryPackRegistry {
             (
                 GrammarFamily::Haskell,
                 include_str!("../queries/haskell.scm"),
+            ),
+            (
+                GrammarFamily::CobolFixed,
+                include_str!("../queries/cobol.scm"),
+            ),
+            (
+                GrammarFamily::CobolFree,
+                include_str!("../queries/cobol.scm"),
             ),
             (GrammarFamily::Vba, include_str!("../queries/vba.scm")),
             (
@@ -2415,11 +2463,16 @@ mod tests {
             GrammarFamily::Vba,
             GrammarFamily::VisualBasicClassic,
             GrammarFamily::Haskell,
+            GrammarFamily::CobolFixed,
+            GrammarFamily::CobolFree,
         ] {
             let pack = registry.get(family).expect("family has a query pack");
             let mut names = pack.identity_query.capture_names().to_vec();
             names.sort_unstable();
             let mut expected = EXPECTED_CAPTURES.to_vec();
+            if matches!(family, GrammarFamily::CobolFixed | GrammarFamily::CobolFree) {
+                expected.retain(|name| !matches!(*name, "call" | "module" | "documentation"));
+            }
             if family == GrammarFamily::Perl {
                 expected.retain(|name| !matches!(*name, "call" | "import"));
             }

@@ -1303,6 +1303,11 @@ pub(crate) fn resolvable_occurrence(occurrence: &OccurrenceRecord) -> bool {
     if occurrence.syntax_kind.starts_with("haskell.") {
         return false;
     }
+    // COBOL storage qualification, CALL/PERFORM targets and COPY inputs need
+    // language-owned evidence; matching a written name proves none of them.
+    if occurrence.syntax_kind.starts_with("cobol.") {
+        return false;
+    }
     // MATLAB applications can index arrays or call functions. Only source-owned
     // primary function files may be offered as uncertain cross-file candidates.
     if occurrence.syntax_kind.starts_with("matlab.") {
