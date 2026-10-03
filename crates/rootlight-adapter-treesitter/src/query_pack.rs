@@ -691,6 +691,17 @@ impl QueryPack {
                     continue;
                 }
                 if input.family.is_classic_basic()
+                    && role == StructuralRole::Expression
+                    && capture.node.kind() == "assignment_statement"
+                    && !vba::implicit_comparison_statement(
+                        capture.node,
+                        input.source,
+                        input.cancellation,
+                    )?
+                {
+                    continue;
+                }
+                if input.family.is_classic_basic()
                     && !vba::retain_capture(capture.node, role, input.source)
                 {
                     continue;
@@ -1160,7 +1171,11 @@ fn candidate_for_capture(
         }
         _ if family.is_classic_basic() => {
             if role == StructuralRole::Expression {
-                vba::declared_visibility(capture.node, source, cancellation)?
+                if capture.node.kind() == "assignment_statement" {
+                    "vba.implicit_comparison_statement"
+                } else {
+                    vba::declared_visibility(capture.node, source, cancellation)?
+                }
             } else if role == StructuralRole::Module
                 && capture.node.kind() == "source_file"
                 && vba::class_header(capture.node, source, cancellation)?.is_some()

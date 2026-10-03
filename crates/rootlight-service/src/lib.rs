@@ -42953,12 +42953,12 @@ mod tests {
             ),
             ("Set items(13) = New Slot", "items(13)", "Set", false),
             ("Let items(14) = 7 _\n + 8", "items(14)", "Let", true),
-            ("items(21) = 3", "items(21) = 3", "Let", true),
+            ("items(21) = 3", "items(21)", "Let", true),
             ("items(22, 23) = 4", "items(22, 23)", "Let", false),
-            ("automatic(24) = 5", "automatic(24) = 5", "Let", true),
-            ("items.child(25) = 6", "items.child(25) = 6", "Let", true),
-            ("arrayItems(26) = 7", "arrayItems(26) = 7", "Let", false),
-            ("items (27) = 9", "items (27) = 9", "Let", true),
+            ("automatic(24) = 5", "automatic(24)", "Let", true),
+            ("items.child(25) = 6", "items.child(25)", "Let", true),
+            ("arrayItems(26) = 7", "arrayItems(26)", "Let", false),
+            ("items (27) = 9", "items (27)", "Let", true),
             ("items(28) <> 2", "items(28) <> 2", "Let", false),
         ];
         let mut client = "Attribute VB_Name = \"Client\"\nSub Run(ByVal items As Slot, ByVal other As Object, ByVal dynamic As Object)\nDim automatic As New Slot\nDim arrayItems(1) As Slot\n".to_owned();
@@ -42998,7 +42998,7 @@ mod tests {
                 .unwrap();
             for (statement, expression, accessor, valid) in cases {
                 let expected = attribute == 0 && access == "Public" && valid;
-                let array = expression == "arrayItems(26) = 7";
+                let array = expression == "arrayItems(26)";
                 let start = u64::try_from(
                     client.find(statement).unwrap() + statement.find(expression).unwrap(),
                 )
@@ -43013,7 +43013,19 @@ mod tests {
                             && site.source.span().end_byte()
                                 == start + u64::try_from(expression.len()).unwrap()
                     })
-                    .unwrap_or_else(|| panic!("missing application: {statement}"));
+                    .unwrap_or_else(|| {
+                        let actual = document
+                            .occurrences
+                            .iter()
+                            .filter(|site| {
+                                site.file == file.id
+                                    && site.syntax_kind == "vba.application.reference"
+                                    && site.source.span().start_byte() == start
+                            })
+                            .map(|site| site.source.span().end_byte() - start)
+                            .collect::<Vec<_>>();
+                        panic!("missing application: {statement}; same-start lengths: {actual:?}")
+                    });
                 let target = document
                     .entities
                     .iter()
@@ -43078,6 +43090,7 @@ mod tests {
                                 "vba.invoked_let_identifier.reference"
                                     | "vba.invoked_set_identifier.reference"
                                     | "vba.invoked_identifier.reference"
+                                    | "vba.invoked_let_member.reference"
                                     | "vba.member.reference"
                             )
                     })
@@ -43089,13 +43102,36 @@ mod tests {
                 assert!(!document.relations.iter().any(|edge| edge.subject
                     == RelationEndpoint::Occurrence(callee.id)
                     && edge.predicate == RelationPredicate::Calls));
+                let member_receiver = matches!(
+                    callee.syntax_kind.as_str(),
+                    "vba.member.reference" | "vba.invoked_let_member.reference"
+                );
+                if expression == "items.child(25)" {
+                    assert_eq!(callee.syntax_kind, "vba.invoked_let_member.reference");
+                    assert_eq!(callee.role, OccurrenceRole::Reference);
+                    assert_eq!(callee.source.span().end_byte(), start + 11);
+                    let fields: Vec<_> = document
+                        .entities
+                        .iter()
+                        .filter(|entity| {
+                            entity.kind == EntityKind::Field && entity.canonical_name == "child"
+                        })
+                        .collect();
+                    assert_eq!(fields.len(), 1);
+                    assert_eq!(
+                        callee.target,
+                        OccurrenceTarget::Resolved {
+                            symbol: fields[0].id
+                        }
+                    );
+                }
                 assert_eq!(
                     document
                         .skipped_regions
                         .iter()
                         .any(|gap| gap.source == callee.source
                             && gap.detail == "vba-call-or-index-target-unavailable"),
-                    !expected && !array && callee.syntax_kind != "vba.member.reference",
+                    !expected && !array && !member_receiver,
                     "receiver: {statement}"
                 );
                 let labels: Vec<_> = document

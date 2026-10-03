@@ -5,6 +5,159 @@ use super::*;
 use rootlight_ir::{ContainerRef, FactRef};
 
 #[test]
+fn native_indexed_assignment_partition_preserves_typed_comparison_calls() {
+    for newline in ["\n", "\r\n"] {
+        for language in ["vba", "visual-basic-classic"] {
+            for shadow in [false, true] {
+                let source = format!(
+                    "Attribute VB_Name = \"Authored\"\nSub Run()\n{}Dim storage(1) As Boolean\nAccept (1) = 1\nCompare(2) = 2\nLet Accept(3) = 3\nSet Accept(4) = Nothing\nAccept(value:=5) = 5\nAccept(ByVal 6) = 6\nAccept(7, 8) = 9\nRequiresTwo(10) = 10\nstorage(11) = True\nUnknown(12) = 12\nSlot(13) = 14\nEnd Sub\nSub Accept(ByVal value As Boolean)\nEnd Sub\nFunction Compare(ByVal value As Boolean) As Boolean\nEnd Function\nSub RequiresTwo(ByVal value As Boolean, ByVal other As Boolean)\nEnd Sub\nProperty Let Slot(ByVal offset As Long, ByVal value As Long)\nEnd Property\n",
+                    if shadow { "Dim Accept As Boolean\n" } else { "" },
+                ).replace('\n', newline);
+                let output = native_source_proof_output(&source, language);
+                let document = output.document();
+                assert_radix_ir_source_identity(document, &source, language);
+                for (written, name, resolved) in [
+                    ("Accept (1) = 1", "Accept", !shadow),
+                    ("Compare(2) = 2", "Compare", false),
+                ] {
+                    let start = u64::try_from(source.find(written).unwrap()).unwrap();
+                    let target = document
+                        .entities
+                        .iter()
+                        .find(|entity| {
+                            entity.kind == EntityKind::Function && entity.canonical_name == name
+                        })
+                        .unwrap();
+                    let callee = document
+                        .occurrences
+                        .iter()
+                        .find(|site| {
+                            site.source.span().start_byte() == start
+                                && site.source.span().end_byte()
+                                    == start + u64::try_from(name.len()).unwrap()
+                        })
+                        .unwrap();
+                    let application = document
+                        .occurrences
+                        .iter()
+                        .find(|site| {
+                            site.syntax_kind == "vba.application.reference"
+                                && site.source.span().start_byte() == start
+                        })
+                        .unwrap();
+                    let calls = document
+                        .relations
+                        .iter()
+                        .filter(|edge| {
+                            edge.subject == RelationEndpoint::Occurrence(callee.id)
+                                && edge.predicate == RelationPredicate::Calls
+                        })
+                        .count();
+                    assert_eq!(calls, usize::from(resolved), "{written}: {language}");
+                    if resolved {
+                        assert_eq!(callee.syntax_kind, "vba.invoked_identifier.reference");
+                        assert_eq!(callee.role, OccurrenceRole::CallSite);
+                        assert_eq!(
+                            callee.target,
+                            OccurrenceTarget::Resolved { symbol: target.id }
+                        );
+                        assert_eq!(
+                            application.target,
+                            OccurrenceTarget::Resolved { symbol: target.id }
+                        );
+                        assert_eq!(application.role, OccurrenceRole::Reference);
+                        assert!(!document.relations.iter().any(|edge| {
+                            edge.subject == RelationEndpoint::Occurrence(application.id)
+                                && edge.predicate == RelationPredicate::Calls
+                        }));
+                        for site in [callee, application] {
+                            let proof = document
+                                .provenance
+                                .iter()
+                                .find(|proof| proof.id == site.provenance)
+                                .unwrap();
+                            assert_eq!(
+                                proof.rule.as_deref(),
+                                Some("vba-procedure-application-v1.source")
+                            );
+                            assert!(proof.evidence_sources.iter().any(|reference| {
+                                reference.span().start_byte() == start
+                                    && reference.span().end_byte()
+                                        == start + u64::try_from(written.len()).unwrap()
+                                    && reference.content_hash() == content_hash(source.as_bytes())
+                            }));
+                            let formal = document
+                                .entities
+                                .iter()
+                                .find(|entity| {
+                                    entity.kind == EntityKind::Parameter
+                                        && entity.container == Some(ContainerRef::Entity(target.id))
+                                })
+                                .unwrap();
+                            assert!(
+                                proof
+                                    .derivation_parents
+                                    .contains(&FactRef::Entity(formal.id))
+                            );
+                        }
+                    } else {
+                        assert_ne!(callee.role, OccurrenceRole::CallSite);
+                        assert!(matches!(
+                            application.target,
+                            OccurrenceTarget::Unresolved { .. }
+                        ));
+                    }
+                }
+                for written in [
+                    "Let Accept(3) = 3",
+                    "Set Accept(4) = Nothing",
+                    "Accept(value:=5) = 5",
+                    "Accept(ByVal 6) = 6",
+                    "Accept(7, 8) = 9",
+                    "RequiresTwo(10) = 10",
+                    "storage(11) = True",
+                    "Unknown(12) = 12",
+                ] {
+                    let start = source.find(written).unwrap();
+                    let callee_start = start
+                        + if written.starts_with("Let ") || written.starts_with("Set ") {
+                            4
+                        } else {
+                            0
+                        };
+                    assert!(
+                        !document.occurrences.iter().any(|site| {
+                            site.source.span().start_byte() == u64::try_from(callee_start).unwrap()
+                                && site.role == OccurrenceRole::CallSite
+                        }),
+                        "{written}: {language}"
+                    );
+                }
+                let property_start = u64::try_from(source.find("Slot(13) = 14").unwrap()).unwrap();
+                let setter = document
+                    .entities
+                    .iter()
+                    .find(|entity| entity.canonical_name == "Slot")
+                    .unwrap();
+                let property = document
+                    .occurrences
+                    .iter()
+                    .find(|site| {
+                        site.source.span().start_byte() == property_start
+                            && site.syntax_kind == "vba.invoked_let_identifier.reference"
+                    })
+                    .unwrap();
+                assert_eq!(
+                    property.target,
+                    OccurrenceTarget::Resolved { symbol: setter.id }
+                );
+                assert_eq!(property.role, OccurrenceRole::CallSite);
+            }
+        }
+    }
+}
+
+#[test]
 fn vba_procedure_exits_keep_later_declarations_reads_and_independent_call_proofs() {
     let clauses = ["ByVal required As Long", "Optional extra As Long = 7"];
     for (sub_exit, function_exit) in [
@@ -6069,17 +6222,58 @@ fn vba_array_write_resolution_keeps_dynamic_and_procedure_barriers() {
                 && site.source.span().start_byte() == start
         })
         .unwrap();
-    assert!(matches!(
+    let target = document
+        .entities
+        .iter()
+        .find(|entity| entity.canonical_name == "Accept")
+        .unwrap();
+    let callee = document
+        .occurrences
+        .iter()
+        .find(|site| {
+            site.source.span().start_byte() == start && site.source.span().end_byte() == start + 6
+        })
+        .unwrap();
+    assert_eq!(
         application.target,
-        OccurrenceTarget::Unresolved { .. }
-    ));
-    assert!(
-        document
-            .skipped_regions
-            .iter()
-            .any(|gap| gap.source == application.source
-                && gap.detail == "vba-call-or-index-target-unavailable")
+        OccurrenceTarget::Resolved { symbol: target.id }
     );
+    assert_eq!(application.role, OccurrenceRole::Reference);
+    assert_eq!(callee.target, application.target);
+    assert_eq!(callee.role, OccurrenceRole::CallSite);
+    assert_eq!(callee.syntax_kind, "vba.invoked_identifier.reference");
+    assert_eq!(
+        document
+            .relations
+            .iter()
+            .filter(|edge| {
+                edge.subject == RelationEndpoint::Occurrence(callee.id)
+                    && edge.predicate == RelationPredicate::Calls
+                    && edge.object == RelationEndpoint::Entity(target.id)
+            })
+            .count(),
+        1
+    );
+    assert!(!document.relations.iter().any(|edge| {
+        edge.subject == RelationEndpoint::Occurrence(application.id)
+            && edge.predicate == RelationPredicate::Calls
+    }));
+    for site in [callee, application] {
+        let proof = document
+            .provenance
+            .iter()
+            .find(|proof| proof.id == site.provenance)
+            .unwrap();
+        assert_eq!(
+            proof.rule.as_deref(),
+            Some("vba-procedure-application-v1.source")
+        );
+        assert!(proof.evidence_sources.iter().any(|reference| {
+            reference.span().start_byte() == start
+                && reference.span().end_byte() == start + 18
+                && reference.content_hash() == content_hash(source.as_bytes())
+        }));
+    }
 }
 
 #[test]

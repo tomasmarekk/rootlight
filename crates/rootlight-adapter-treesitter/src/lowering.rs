@@ -2459,6 +2459,14 @@ impl<'context, 'source> Lowering<'context, 'source> {
                         symbol: binding.symbol,
                     };
                     if let Some(evidence) = application_evidence {
+                        if binding.is_call && evidence.implicit_statement.is_some() {
+                            // The full grouped comparison argument and materialized
+                            // ordinary formals, not GLR's assignment hint, prove dispatch.
+                            occurrence.syntax_kind.clear();
+                            occurrence
+                                .syntax_kind
+                                .push_str("vba.invoked_identifier.reference");
+                        }
                         occurrence.provenance = self.application_provenance(
                             fact,
                             binding.symbol,
@@ -3128,6 +3136,10 @@ impl<'context, 'source> Lowering<'context, 'source> {
             .ok_or_else(|| provider_failure("vba-application-proof-target"))?;
         if !span_contains(self.full_source.span(), application.span())
             || !span_contains(self.full_source.span(), evidence.scope.span())
+            || evidence.implicit_statement.is_some_and(|statement| {
+                !span_contains(self.full_source.span(), statement.span())
+                    || !span_contains(statement.span(), application.span())
+            })
             || parser.id != target_entity.provenance
         {
             return Err(provider_failure("vba-application-proof-source"));
@@ -3158,7 +3170,10 @@ impl<'context, 'source> Lowering<'context, 'source> {
         let scope_source = source_for_span(self.full_source, evidence.scope.span());
         let distinct_target_source = *target_source != scope_source;
         let evidence_count = checked_add(
-            checked_add(2, usize::from(distinct_target_source))?,
+            checked_add(
+                checked_add(2, usize::from(distinct_target_source))?,
+                usize::from(evidence.implicit_statement.is_some()),
+            )?,
             evidence
                 .parameters
                 .len()
@@ -3208,6 +3223,9 @@ impl<'context, 'source> Lowering<'context, 'source> {
             .try_reserve_exact(evidence_count)
             .map_err(|_| SinkError::AllocationFailed)?;
         evidence_sources.push(source_for_span(self.full_source, application.span()));
+        if let Some(statement) = evidence.implicit_statement {
+            evidence_sources.push(source_for_span(self.full_source, statement.span()));
+        }
         evidence_sources.push(scope_source);
         if distinct_target_source {
             evidence_sources.push(target_source.clone());

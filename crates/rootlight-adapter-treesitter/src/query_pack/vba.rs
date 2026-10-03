@@ -849,6 +849,87 @@ enum PropertyAccess {
     Set,
 }
 
+pub(super) fn implicit_comparison_statement(
+    statement: Node<'_>,
+    source: &[u8],
+    cancellation: &Cancellation,
+) -> Result<bool, AdapterError> {
+    cancellation.check()?;
+    if statement.kind() != "assignment_statement" || statement.has_error() {
+        return Ok(false);
+    }
+    let Some(application) = statement.child_by_field_name("left") else {
+        return Ok(false);
+    };
+    let Some(right) = statement.child_by_field_name("right") else {
+        return Ok(false);
+    };
+    let Some(callee) = application.child_by_field_name("function") else {
+        return Ok(false);
+    };
+    let Some(arguments) = application.child_by_field_name("arguments") else {
+        return Ok(false);
+    };
+    if application.kind() != "call_expression"
+        || callee.kind() != "identifier"
+        || callee.is_missing()
+        || right.is_missing()
+        || arguments.kind() != "argument_list"
+        || arguments.named_child_count() != 1
+        || statement.start_byte() != callee.start_byte()
+        || application.end_byte() >= right.start_byte()
+        || statement.end_byte() != right.end_byte()
+    {
+        return Ok(false);
+    }
+    let mut cursor = arguments.walk();
+    for child in arguments.children(&mut cursor) {
+        cancellation.check()?;
+        if matches!(
+            child.kind(),
+            "," | ";" | "named_argument" | "byval_argument"
+        ) {
+            return Ok(false);
+        }
+    }
+    let mut cursor = statement.walk();
+    for child in statement.named_children(&mut cursor) {
+        cancellation.check()?;
+        if child != application && child != right {
+            return Ok(false);
+        }
+    }
+    let mut check = || cancellation.check().map_err(AdapterError::from);
+    let Some(gap) = source.get(callee.end_byte()..arguments.start_byte()) else {
+        return Ok(false);
+    };
+    let Some(group) = source.get(arguments.byte_range()) else {
+        return Ok(false);
+    };
+    if rootlight_vba::logical_whitespace_len(gap, &mut check)? != gap.len()
+        || rootlight_vba::parenthesized_expression_end(group, &mut check)? != Some(group.len())
+    {
+        return Ok(false);
+    }
+    let mut before = statement.start_byte();
+    while before > 0 {
+        check()?;
+        match source.get(before - 1) {
+            Some(b' ' | b'\t' | b'\x0c') => before -= 1,
+            Some(b'\r' | b'\n' | b':') => break,
+            _ => return Ok(false),
+        }
+    }
+    let Some(tail) = source.get(statement.end_byte()..) else {
+        return Ok(false);
+    };
+    let whitespace = rootlight_vba::logical_whitespace_len(tail, &mut check)?;
+    Ok(matches!(
+        tail.get(whitespace),
+        None | Some(b'\r' | b'\n' | b':' | b'\'')
+    ))
+}
+
 fn single_grouped_statement_call(
     expression: Node<'_>,
     source: &[u8],
@@ -1048,6 +1129,91 @@ mod tests {
             }
             assert_eq!(observed, declarations, "{source}");
         }
+    }
+
+    #[test]
+    fn implicit_comparison_markers_require_one_complete_simple_group() {
+        for newline in ["\n", "\r\n"] {
+            for (body, expected) in [
+                ("Accept (1) = 1", true),
+                ("Accept(1) = 1", true),
+                ("[Accept]((value)) = other", true),
+                ("Accept _\n (1) = 1", true),
+                ("Accept(value:=1) = 1", false),
+                ("Accept(ByVal value) = 1", false),
+                ("Accept(1, 2) = 1", false),
+                ("Accept() = 1", false),
+                ("owner.Accept(1) = 1", false),
+                ("Accept(1)(2) = 1", false),
+                ("Let Accept(1) = 1", false),
+                ("Set Accept(1) = Nothing", false),
+            ] {
+                let source = format!("Sub Run()\n{body}\nEnd Sub\n").replace('\n', newline);
+                let mut parser = tree_sitter::Parser::new();
+                parser
+                    .set_language(&tree_sitter_vba::LANGUAGE.into())
+                    .unwrap();
+                let tree = parser.parse(&source, None).unwrap();
+                assert!(
+                    !tree.root_node().has_error(),
+                    "{source}: {}",
+                    tree.root_node().to_sexp()
+                );
+                let mut pending = vec![tree.root_node()];
+                let mut admitted = 0;
+                while let Some(node) = pending.pop() {
+                    if matches!(
+                        node.kind(),
+                        "assignment_statement" | "let_statement" | "set_statement"
+                    ) && implicit_comparison_statement(
+                        node,
+                        source.as_bytes(),
+                        &Cancellation::new(),
+                    )
+                    .unwrap()
+                    {
+                        admitted += 1;
+                    }
+                    let mut cursor = node.walk();
+                    pending.extend(node.named_children(&mut cursor));
+                }
+                assert_eq!(
+                    admitted,
+                    usize::from(expected),
+                    "{source}: {}",
+                    tree.root_node().to_sexp()
+                );
+            }
+        }
+        let malformed = "Sub Run()\nAccept(1) =\nEnd Sub\n";
+        let mut parser = tree_sitter::Parser::new();
+        parser
+            .set_language(&tree_sitter_vba::LANGUAGE.into())
+            .unwrap();
+        let tree = parser.parse(malformed, None).unwrap();
+        assert!(tree.root_node().has_error());
+        let mut pending = vec![tree.root_node()];
+        while let Some(node) = pending.pop() {
+            assert!(
+                !implicit_comparison_statement(node, malformed.as_bytes(), &Cancellation::new(),)
+                    .unwrap()
+            );
+            let mut cursor = node.walk();
+            pending.extend(node.named_children(&mut cursor));
+        }
+        let cancellation = Cancellation::new();
+        cancellation.cancel(rootlight_cancel::CancellationReason::ClientRequest);
+        let mut parser = tree_sitter::Parser::new();
+        parser
+            .set_language(&tree_sitter_vba::LANGUAGE.into())
+            .unwrap();
+        let tree = parser
+            .parse("Sub Run()\nAccept(1) = 1\nEnd Sub\n", None)
+            .unwrap();
+        assert!(matches!(
+            implicit_comparison_statement(tree.root_node(), b"", &cancellation),
+            Err(AdapterError::Cancelled { .. })
+        ));
     }
 
     #[test]

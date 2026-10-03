@@ -48,6 +48,10 @@
 (call_expression) @reference
 (new_expression) @reference
 (call_statement) @reference
+; GLR may retain a grouped comparison argument as an indexed assignment.
+; This optional source witness cannot choose call dispatch without typed formals.
+(assignment_statement
+  left: (call_expression function: (identifier) arguments: (argument_list))) @expression
 (comment) @comment
 (string_literal) @string
 

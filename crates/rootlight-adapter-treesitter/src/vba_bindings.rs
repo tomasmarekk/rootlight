@@ -99,6 +99,12 @@ impl PropertyAccessors {
     }
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum InvocationContext {
+    Native,
+    ImplicitComparison,
+}
+
 pub(super) struct ResolvedBinding {
     pub(super) symbol: SymbolId,
     pub(super) is_call: bool,
@@ -107,6 +113,7 @@ pub(super) struct ResolvedBinding {
 pub(super) struct ProcedureApplicationEvidence<'a> {
     pub(super) scope: &'a SyntaxFact,
     pub(super) parameters: &'a [(&'a SyntaxFact, &'a SyntaxFact, SymbolId)],
+    pub(super) implicit_statement: Option<&'a SyntaxFact>,
 }
 
 #[derive(Clone, Copy)]
@@ -136,6 +143,7 @@ pub(super) struct VbaBindings<'a> {
     applications: BTreeMap<u64, Vec<&'a SyntaxFact>>,
     invocations: BTreeMap<u64, Vec<&'a SyntaxFact>>,
     array_only_invocations: BTreeMap<u64, Vec<&'a SyntaxFact>>,
+    implicit_comparison_statements: HashMap<u64, Option<&'a SyntaxFact>>,
     member_references: BTreeMap<u64, u64>,
     callable_scopes: BTreeMap<SymbolId, u64>,
     named_parameters: BTreeMap<u64, BTreeMap<String, Option<SymbolId>>>,
@@ -190,6 +198,7 @@ impl<'a> VbaBindings<'a> {
             applications: BTreeMap::new(),
             invocations: BTreeMap::new(),
             array_only_invocations: BTreeMap::new(),
+            implicit_comparison_statements: HashMap::new(),
             member_references: BTreeMap::new(),
             callable_scopes: BTreeMap::new(),
             named_parameters: BTreeMap::new(),
@@ -230,6 +239,17 @@ impl<'a> VbaBindings<'a> {
                 return Err(invalid_capture());
             }
             match fact.syntax_kind().as_str() {
+                "vba.implicit_comparison_statement.expression" => {
+                    result
+                        .implicit_comparison_statements
+                        .try_reserve(1)
+                        .map_err(|_| rootlight_adapter_sdk::SinkError::AllocationFailed)?;
+                    result
+                        .implicit_comparison_statements
+                        .entry(fact.span().start_byte())
+                        .and_modify(|prior| *prior = None)
+                        .or_insert(Some(fact));
+                }
                 "vba.application.reference" => result
                     .applications
                     .entry(fact.span().start_byte())
@@ -1539,6 +1559,141 @@ impl<'a> VbaBindings<'a> {
                     .get(&scope)
                     .map(Vec::as_slice)
                     .unwrap_or_default(),
+                implicit_statement: None,
+            },
+        )))
+    }
+
+    fn implicit_comparison_procedure(
+        &self,
+        fact: &SyntaxFact,
+        cancellation: &Cancellation,
+    ) -> Result<Option<(ResolvedBinding, ProcedureApplicationEvidence<'_>)>, AdapterError> {
+        if !matches!(
+            fact.syntax_kind().as_str(),
+            "vba.application.reference" | "vba.invoked_let_identifier.reference"
+        ) {
+            return Ok(None);
+        }
+        let start = fact.span().start_byte();
+        let Some(statement) = self
+            .implicit_comparison_statements
+            .get(&start)
+            .copied()
+            .flatten()
+        else {
+            return Ok(None);
+        };
+        let Some(applications) = self.applications.get(&start) else {
+            return Ok(None);
+        };
+        let [application] = applications.as_slice() else {
+            return Ok(None);
+        };
+        if application.span().end_byte() >= statement.span().end_byte()
+            || (fact.syntax_kind().as_str() == "vba.application.reference"
+                && fact.local_id() != application.local_id())
+        {
+            return Ok(None);
+        }
+        let Some(owner) = self.scope(application.parent(), cancellation)? else {
+            return Ok(None);
+        };
+        if statement.kind() != SyntaxFactKind::Signature
+            || self.scope(statement.parent(), cancellation)? != Some(owner)
+        {
+            return Ok(None);
+        }
+        let Some(invocations) = self.array_only_invocations.get(&start) else {
+            return Ok(None);
+        };
+        let [callee] = invocations.as_slice() else {
+            return Ok(None);
+        };
+        if callee.syntax_kind().as_str() != "vba.invoked_let_identifier.reference"
+            || callee.span().end_byte() >= application.span().end_byte()
+            || self.scope(callee.parent(), cancellation)? != Some(owner)
+            || (fact.syntax_kind().as_str() != "vba.application.reference"
+                && fact.local_id() != callee.local_id())
+        {
+            return Ok(None);
+        }
+        let start = usize::try_from(start).map_err(|_| invalid_capture())?;
+        let callee_end =
+            usize::try_from(callee.span().end_byte()).map_err(|_| invalid_capture())?;
+        let end = usize::try_from(statement.span().end_byte()).map_err(|_| invalid_capture())?;
+        let Some(text) = self
+            .source
+            .get(start..callee_end)
+            .and_then(|bytes| std::str::from_utf8(bytes).ok())
+            .filter(|text| !text.ends_with(['$', '%', '&', '#', '@', '^', '!']))
+        else {
+            return Ok(None);
+        };
+        let Some(written) = self
+            .source
+            .get(start..end)
+            .and_then(|bytes| std::str::from_utf8(bytes).ok())
+        else {
+            return Ok(None);
+        };
+        if !self.reference_admitted(statement, written, cancellation)? {
+            return Ok(None);
+        }
+        let Some(binding) = self
+            .resolve_inner(
+                callee,
+                text,
+                cancellation,
+                InvocationContext::ImplicitComparison,
+            )?
+            .filter(|binding| binding.is_call)
+        else {
+            return Ok(None);
+        };
+        let Some(&scope) = self.callable_scopes.get(&binding.symbol) else {
+            return Ok(None);
+        };
+        // A Function result may still dispatch through a returned object's default
+        // member. Only a unique ordinary Sub and complete formals disambiguate
+        // this native assignment partition without a result-type proof.
+        if self.incomplete_parameter_scopes.contains(&scope)
+            || self.fact(scope)?.syntax_kind().as_str() != "vba.sub_function.scope"
+        {
+            return Ok(None);
+        }
+        let mut check = || cancellation.check().map_err(AdapterError::from);
+        let Some(arguments) = rootlight_vba::argument_list(
+            self.source
+                .get(callee_end..end)
+                .ok_or_else(invalid_capture)?,
+            self.maximum_name_bytes,
+            &mut check,
+        )?
+        else {
+            return Ok(None);
+        };
+        if arguments.len() != 1
+            || arguments
+                .first()
+                .is_some_and(|argument| argument.name().is_some())
+            || !self.procedure_arguments_match(scope, &arguments, cancellation)?
+        {
+            return Ok(None);
+        }
+        Ok(Some((
+            ResolvedBinding {
+                symbol: binding.symbol,
+                is_call: fact.local_id() == callee.local_id(),
+            },
+            ProcedureApplicationEvidence {
+                scope: self.fact(scope)?,
+                parameters: self
+                    .parameters
+                    .get(&scope)
+                    .map(Vec::as_slice)
+                    .unwrap_or_default(),
+                implicit_statement: Some(statement),
             },
         )))
     }
@@ -2005,6 +2160,11 @@ impl<'a> VbaBindings<'a> {
     ) -> Result<Option<(ResolvedBinding, Option<ProcedureApplicationEvidence<'_>>)>, AdapterError>
     {
         if fact.syntax_kind().as_str() != "vba.application.reference" {
+            if let Some((binding, evidence)) =
+                self.implicit_comparison_procedure(fact, cancellation)?
+            {
+                return Ok(Some((binding, Some(evidence))));
+            }
             return Ok(self
                 .resolve(fact, text, cancellation)?
                 .map(|binding| (binding, None)));
@@ -2014,6 +2174,9 @@ impl<'a> VbaBindings<'a> {
         }
         if let Some(binding) = self.array_application(fact, cancellation)? {
             return Ok(Some((binding, None)));
+        }
+        if let Some((binding, evidence)) = self.implicit_comparison_procedure(fact, cancellation)? {
+            return Ok(Some((binding, Some(evidence))));
         }
         Ok(self
             .procedure_application_with_evidence(fact, text, cancellation)?
@@ -2025,6 +2188,16 @@ impl<'a> VbaBindings<'a> {
         fact: &SyntaxFact,
         text: &str,
         cancellation: &Cancellation,
+    ) -> Result<Option<ResolvedBinding>, AdapterError> {
+        self.resolve_inner(fact, text, cancellation, InvocationContext::Native)
+    }
+
+    fn resolve_inner(
+        &self,
+        fact: &SyntaxFact,
+        text: &str,
+        cancellation: &Cancellation,
+        context: InvocationContext,
     ) -> Result<Option<ResolvedBinding>, AdapterError> {
         if !self.reference_admitted(fact, text, cancellation)? {
             return Ok(None);
@@ -2156,13 +2329,14 @@ impl<'a> VbaBindings<'a> {
                 | "vba.self_invoked_let_member.reference"
                 | "vba.self_invoked_set_member.reference"
         );
-        let invoked = matches!(
-            fact.syntax_kind().as_str(),
-            "vba.invoked_identifier.reference"
-                | "vba.invoked_get_identifier.reference"
-                | "vba.self_invoked_member.reference"
-                | "vba.self_invoked_get_member.reference"
-        );
+        let invoked = context == InvocationContext::ImplicitComparison
+            || matches!(
+                fact.syntax_kind().as_str(),
+                "vba.invoked_identifier.reference"
+                    | "vba.invoked_get_identifier.reference"
+                    | "vba.self_invoked_member.reference"
+                    | "vba.self_invoked_get_member.reference"
+            );
         let value_use = matches!(
             fact.syntax_kind().as_str(),
             "vba.value_identifier.reference" | "vba.self_get_member.reference"
@@ -3649,6 +3823,140 @@ mod tests {
                 "{mode}"
             );
         }
+
+        let implicit_source = source.replace("Call Accept(1)", "Accept(1) = 1");
+        let implicit_end = u64::try_from(implicit_source.len()).unwrap();
+        let mut implicit = original.clone();
+        for fact in &mut implicit {
+            *fact = match fact.local_id() {
+                1 | 7 | 8 => SyntaxFact::new(
+                    fact.local_id(),
+                    fact.parent(),
+                    fact.kind(),
+                    SourceSpan::new(fact.span().file(), fact.span().start_byte(), implicit_end)
+                        .unwrap(),
+                    fact.depth(),
+                    fact.syntax_kind().clone(),
+                ),
+                10 => super::tests::fact(
+                    10,
+                    Some(7),
+                    SyntaxFactKind::Occurrence,
+                    "vba.application.reference",
+                    call,
+                    call + 9,
+                ),
+                11 => super::tests::fact(
+                    11,
+                    Some(10),
+                    SyntaxFactKind::Occurrence,
+                    "vba.invoked_let_identifier.reference",
+                    call,
+                    call + 6,
+                ),
+                _ => fact.clone(),
+            };
+        }
+        implicit.push(fact(
+            12,
+            Some(7),
+            SyntaxFactKind::Signature,
+            "vba.implicit_comparison_statement.expression",
+            call,
+            call + 13,
+        ));
+        let bindings = VbaBindings::new(
+            &implicit,
+            implicit_source.as_bytes(),
+            &symbols,
+            4096,
+            &cancellation,
+        )
+        .unwrap();
+        for (id, is_call) in [(10, false), (11, true)] {
+            let site = implicit.iter().find(|fact| fact.local_id() == id).unwrap();
+            let (binding, evidence) = bindings
+                .resolve_with_application_evidence(
+                    site,
+                    if is_call { "Accept" } else { "Accept(1)" },
+                    &cancellation,
+                )
+                .unwrap()
+                .unwrap();
+            assert_eq!(binding.symbol, target);
+            assert_eq!(binding.is_call, is_call);
+            assert_eq!(evidence.unwrap().implicit_statement.unwrap().local_id(), 12);
+        }
+        for mode in [
+            "missing-marker",
+            "duplicate-marker",
+            "wrong-marker-scope",
+            "missing-application",
+            "missing-definition",
+            "unmaterialized-definition",
+        ] {
+            let mut facts = implicit.clone();
+            let mut available = symbols.clone();
+            match mode {
+                "missing-marker" => facts.retain(|fact| fact.local_id() != 12),
+                "duplicate-marker" => facts.push(fact(
+                    13,
+                    Some(7),
+                    SyntaxFactKind::Signature,
+                    "vba.implicit_comparison_statement.expression",
+                    call,
+                    call + 13,
+                )),
+                "wrong-marker-scope" => {
+                    *facts.iter_mut().find(|fact| fact.local_id() == 12).unwrap() = fact(
+                        12,
+                        Some(2),
+                        SyntaxFactKind::Signature,
+                        "vba.implicit_comparison_statement.expression",
+                        call,
+                        call + 13,
+                    );
+                }
+                "missing-application" => {
+                    facts.retain(|fact| fact.local_id() != 10);
+                    *facts.iter_mut().find(|fact| fact.local_id() == 11).unwrap() = fact(
+                        11,
+                        Some(7),
+                        SyntaxFactKind::Occurrence,
+                        "vba.invoked_let_identifier.reference",
+                        call,
+                        call + 6,
+                    );
+                }
+                "missing-definition" => facts.retain(|fact| fact.local_id() != 6),
+                "unmaterialized-definition" => {
+                    available.remove(&6);
+                }
+                _ => unreachable!(),
+            }
+            let bindings = VbaBindings::new(
+                &facts,
+                implicit_source.as_bytes(),
+                &available,
+                4096,
+                &cancellation,
+            )
+            .unwrap();
+            let callee = facts.iter().find(|fact| fact.local_id() == 11).unwrap();
+            assert!(
+                bindings
+                    .resolve_with_application_evidence(callee, "Accept", &cancellation)
+                    .unwrap()
+                    .is_none(),
+                "{mode}"
+            );
+        }
+        let cancelled = Cancellation::new();
+        cancelled.cancel(CancellationReason::ClientRequest);
+        assert!(matches!(
+            bindings.resolve_with_application_evidence(&implicit[10], "Accept", &cancelled),
+            Err(AdapterError::Cancelled { .. })
+        ));
     }
 
     #[test]
