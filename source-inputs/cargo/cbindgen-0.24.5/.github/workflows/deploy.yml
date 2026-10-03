@@ -1,0 +1,49 @@
+name: deploy
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+
+jobs:
+
+  linux-binaries:
+
+    runs-on: ubuntu-latest
+
+    steps:
+    - uses: actions/checkout@v3
+
+    - name: Install stable
+      uses: dtolnay/rust-toolchain@stable
+
+    - name: Build cbindgen
+      run: |
+        cargo build --release
+
+    - name: Strip cbindgen
+      run: |
+        strip target/release/cbindgen
+
+    - name: Handle release data and files
+      id: tagName
+      run: |
+        VERSION=$(cargo pkgid | cut -d# -f2 | cut -d: -f2)
+        echo "::set-output name=version::$VERSION"
+        # Steps to extract the last release notes from CHANGES:
+        #   1. Remove the first three lines
+        #   2. Stop at the next heading level
+        #   3. Remove the last line
+        #   4. Deindent the bullet points to avoid a markdown code block
+        tail -n +3 CHANGES | sed '/^##/q' |
+        sed '$ d' | awk '{$1=$1};1' > CHANGES.txt
+
+    - name: Create a release
+      uses: softprops/action-gh-release@v1
+      with:
+        name: v${{ steps.tagName.outputs.version }}
+        body_path: CHANGES.txt
+        files: |
+          target/release/cbindgen
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

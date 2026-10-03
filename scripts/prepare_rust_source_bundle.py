@@ -2,7 +2,8 @@
 """Export versioned Rust and local npm inputs without acquisition or caches.
 
 The tracked registry sources and original archives cover workspace, native-test,
-and fuzz locks. Local npm distributions retain declared fixture provenance;
+and fuzz locks, plus the reviewed producer lock when its complete tree is present.
+Local npm distributions retain declared fixture provenance;
 Optional producer trees retain authored source and publisher association evidence;
 export proves neither transitive preferred closure nor third-party authorship.
 """
@@ -38,6 +39,7 @@ CLOSURE_PATH = "source-inputs/cargo-source-closure.json"
 NPM_REPORT_PATH = "source-inputs/npm/npm-source-closure.json"
 PRODUCERS_PATH = "source-inputs/producers"
 LIGHTNING_PRODUCER_PATH = f"{PRODUCERS_PATH}/{LIGHTNING_PACKAGE}-{LIGHTNING_COMMIT}"
+LIGHTNING_LOCK_PATH = f"{LIGHTNING_PRODUCER_PATH}/tree/Cargo.lock"
 FRONTEND_PATHS = ("apps/rootlight-web/frontend/package.json", CANONICAL_LOCK,
                   "apps/rootlight-web/frontend/.npmrc")
 BUNDLE_SCOPE = "rust_workspace_native_grammars_fuzz_and_local_npm_inputs"
@@ -77,11 +79,15 @@ def linked_path(path: Path) -> bool:
     )
 
 
-def registry_inputs(root: Path) -> dict[tuple[str, str], str]:
+def registry_inputs(root: Path, *, lock_paths: tuple[str, ...] = LOCK_PATHS) -> dict[tuple[str, str], str]:
     """Read immutable archive identities without executing dependency code."""
+    if (not isinstance(lock_paths, (list, tuple)) or not lock_paths
+        or any(not isinstance(name, str) for name in lock_paths)
+        or len(set(lock_paths)) != len(lock_paths)):
+        raise ValueError("lock paths must be a nonempty distinct project-relative list")
     packages = {}
-    for lock in LOCK_PATHS:
-        for package in tomllib.loads((root / lock).read_text(encoding="utf-8"))["package"]:
+    for lock in lock_paths:
+        for package in tomllib.loads(regular_source(root, lock).read_text(encoding="utf-8"))["package"]:
             if "source" not in package:
                 continue
             if package["source"] != REGISTRY:
@@ -181,8 +187,8 @@ def _cargo_file_modes(closure: dict) -> dict[str, int]:
     return dict(sorted(modes.items()))
 
 
-def _versioned_closure(root: Path) -> tuple[dict, dict[str, int]]:
-    locks = [regular_source(root, name) for name in LOCK_PATHS]
+def _versioned_closure(root: Path, *, lock_paths: tuple[str, ...] = LOCK_PATHS) -> tuple[dict, dict[str, int]]:
+    locks = [regular_source(root, name) for name in lock_paths]
     closure = verify_bundle(root / VENDOR_PATH, locks, archives=root / ARCHIVES_PATH)
     modes = _cargo_file_modes(closure)
     report = {**closure, "file_modes": modes,
@@ -347,14 +353,15 @@ def create_bundle(root: Path, destination: Path, *, allow_network: bool) -> dict
             raise ValueError(f"untracked required project source: {name}")
     config = regular_source(root, ".cargo/config.toml")
     bundle_cargo_config(config.read_text(encoding="utf-8"))
-    closure, cargo_modes = _versioned_closure(root)
+    producer_inputs, producer_modes, producer_hashes, producer_directories = _producer_source_inputs(root)
+    lock_paths = (*LOCK_PATHS, LIGHTNING_LOCK_PATH) if producer_inputs is not None else LOCK_PATHS
+    closure, cargo_modes = _versioned_closure(root, lock_paths=lock_paths)
     missing = sorted(set(cargo_modes) - names)
     if missing:
         raise ValueError(f"untracked Cargo source inputs: {missing}")
     npm_inputs, npm_modes, npm_hashes = _npm_distribution_inputs(root)
     if not set(npm_hashes).issubset(names):
         raise ValueError("untracked npm distribution or frontend inputs")
-    producer_inputs, producer_modes, producer_hashes, producer_directories = _producer_source_inputs(root)
     if not set(producer_hashes).issubset(names):
         raise ValueError("untracked producer source inputs")
     empty_directories = _source_input_empty_directories(root, producer_directories)
@@ -393,7 +400,7 @@ def create_bundle(root: Path, destination: Path, *, allow_network: bool) -> dict
         source_files.append({"path": name, "sha256": checksum,
                              "executable": executable})
         file_modes[name] = mode
-    exported_closure, _exported_modes = _versioned_closure(destination)
+    exported_closure, _exported_modes = _versioned_closure(destination, lock_paths=lock_paths)
     if exported_closure != closure:
         raise ValueError("exported Cargo source closure differs from versioned inputs")
     for check_root in (root, destination):
@@ -466,7 +473,9 @@ def verify_project_bundle(root: Path) -> dict:
             relative = path.relative_to(root).as_posix()
             if relative not in expected:
                 raise ValueError(f"unmanifested project source: {relative}")
-    closure, cargo_modes = _versioned_closure(root)
+    producer_inputs, producer_modes, producer_hashes, producer_directories = _producer_source_inputs(root)
+    lock_paths = (*LOCK_PATHS, LIGHTNING_LOCK_PATH) if producer_inputs is not None else LOCK_PATHS
+    closure, cargo_modes = _versioned_closure(root, lock_paths=lock_paths)
     if closure != manifest["cargo_source_closure"]:
         raise ValueError("Cargo source closure differs from bundle manifest")
     npm_inputs, npm_modes, npm_hashes = _npm_distribution_inputs(root)
@@ -475,7 +484,6 @@ def verify_project_bundle(root: Path) -> dict:
     if (json.dumps(npm_inputs, sort_keys=True, allow_nan=False)
         != json.dumps(manifest.get("npm_distribution_inputs"), sort_keys=True, allow_nan=False)):
         raise ValueError("npm distribution inputs differ from bundle manifest")
-    producer_inputs, producer_modes, producer_hashes, producer_directories = _producer_source_inputs(root)
     if not set(producer_hashes).issubset(expected):
         raise ValueError("bundle manifest omits required producer sources")
     if ("lightning_producer_inputs" not in manifest

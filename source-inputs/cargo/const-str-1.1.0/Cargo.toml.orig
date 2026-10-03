@@ -1,0 +1,36 @@
+[package]
+name = "const-str"
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+description.workspace = true
+license.workspace = true
+repository.workspace = true
+keywords.workspace = true
+categories.workspace = true
+readme.workspace = true
+rust-version.workspace = true
+
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]
+
+[features]
+default = []
+std = []
+proc = ["dep:const-str-proc-macro"]
+regex = ["proc", "const-str-proc-macro?/regex", "dep:regex"]
+http = ["proc", "const-str-proc-macro?/http", "dep:http"]
+case = ["proc", "const-str-proc-macro?/heck", "dep:heck"]
+all = ["std", "proc", "regex", "http", "case"]
+unstable = []
+
+[dependencies]
+heck = { workspace = true, optional = true }
+http = { workspace = true, optional = true }
+regex = { workspace = true, optional = true }
+
+[dependencies.const-str-proc-macro]
+version = "1.1.0"
+path = "../const-str-proc-macro"
+optional = true

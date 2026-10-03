@@ -72,6 +72,7 @@ jobs:
           python scripts/test_verify_installed_web.py
           python scripts/test_verify_npm_install.py
           python scripts/test_verify_cargo_source_bundle.py
+          python -B scripts/test_vendor_rust_sources.py
           python scripts/test_prepare_rust_source_bundle.py
           python scripts/test_source_bundle_gate.py
           python -B -m unittest discover -s scripts -p 'test_*npm_source_bundle.py' -v

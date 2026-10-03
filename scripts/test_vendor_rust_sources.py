@@ -68,6 +68,19 @@ class VendorRustSourcesTests(unittest.TestCase):
         return {path.relative_to(self.root).as_posix(): path.read_bytes() if path.is_file() else None
                 for path in self.root.rglob("*")}
 
+    def _additional_lock(self) -> tuple[str, ...]:
+        identity = ("charlie", "3.0.0")
+        checksum = self._archive(*identity)
+        name = "producer/Cargo.lock"
+        path = self.root / name
+        path.parent.mkdir()
+        path.write_text('version = 4\n[[package]]\nname = "producer-local"\nversion = "0.1.0"\n'
+                        '\n[[package]]\nname = "alpha"\nversion = "1.0.0"\n'
+                        f'source = "{REGISTRY}"\nchecksum = "{self.checksums[self.identities[0]]}"\n'
+                        '\n[[package]]\nname = "charlie"\nversion = "3.0.0"\n'
+                        f'source = "{REGISTRY}"\nchecksum = "{checksum}"\n', encoding="utf-8")
+        return (*vendor.LOCK_PATHS, name)
+
     def test_imports_the_exact_lock_union_original_bytes_and_verified_evidence(self) -> None:
         before = {name: (self.root / name).read_bytes() for name in vendor.LOCK_PATHS}
         unrelated_home = self.base / "empty-cargo-home"
@@ -122,6 +135,163 @@ class VendorRustSourcesTests(unittest.TestCase):
         self.assertEqual(first, second)
         self.assertEqual((self.root / "source-inputs" / vendor.REPORT_NAME).read_bytes(),
                          (second_root / "source-inputs" / vendor.REPORT_NAME).read_bytes())
+
+    def test_explicit_four_lock_union_publishes_only_fresh_cargo_inputs(self) -> None:
+        locks = self._additional_lock()
+        existing = self.root / "source-inputs"
+        existing.mkdir()
+        (existing / "other-source").write_bytes(b"preserve unrelated input")
+        before = self._snapshot()
+        original_archives = {path.name: path.read_bytes() for path in self.archives.iterdir()}
+        destination = self.base / "cargo-union"
+        empty_home = self.base / "empty-four-lock-cargo-home"
+        empty_home.mkdir()
+        with patch.dict(os.environ, {"CARGO_HOME": str(empty_home)}), \
+                patch("prepare_rust_source_bundle.subprocess.run", side_effect=AssertionError), \
+                patch("prepare_rust_source_bundle.subprocess.check_output", side_effect=AssertionError):
+            result = vendor.vendor_sources(self.root, self.archives, lock_paths=locks,
+                                           destination=destination)
+        self.assertEqual(self._snapshot(), before)
+        self.assertEqual(list(empty_home.iterdir()), [])
+        self.assertEqual({path.name: path.read_bytes() for path in self.archives.iterdir()}, original_archives)
+        self.assertEqual({path.name for path in destination.iterdir()}, {"cargo", "crates", vendor.REPORT_NAME})
+        self.assertEqual(result["package_count"], 3)
+        self.assertEqual(result["local_package_count"], 2)
+        self.assertEqual([row["path"] for row in result["lockfiles"]], sorted(locks))
+        self.assertEqual(len([row for row in result["packages"] if row["name"] == "alpha"]), 1)
+        checked = vendor.verify_bundle(destination / "cargo", [self.root / name for name in locks],
+                                       archives=destination / "crates")
+        for key, value in checked.items():
+            self.assertEqual(result[key], value)
+        self.assertEqual(json.loads((destination / vendor.REPORT_NAME).read_bytes()), result)
+        self.assertEqual(result["file_modes"]["source-inputs/cargo/charlie-3.0.0/bin/check"], 0o755)
+        self.assertFalse(result["frontend_external_source_closure_verified"])
+        self.assertFalse(result["build_and_packaging_acceptance_verified"])
+
+    def test_default_lock_union_does_not_silently_include_additional_sources(self) -> None:
+        self._additional_lock()
+        with self.assertRaisesRegex(vendor.PreparationError, "extra=.*charlie"):
+            vendor.vendor_sources(self.root, self.archives)
+        self.assertFalse((self.root / "source-inputs").exists())
+
+    def test_explicit_union_report_is_independent_of_lock_list_order(self) -> None:
+        locks = self._additional_lock()
+        first = vendor.vendor_sources(self.root, self.archives, lock_paths=locks,
+                                      destination=self.base / "first-union")
+        second = vendor.vendor_sources(self.root, self.archives, lock_paths=tuple(reversed(locks)),
+                                       destination=self.base / "second-union")
+        self.assertEqual(first, second)
+        self.assertEqual((self.base / "first-union" / vendor.REPORT_NAME).read_bytes(),
+                         (self.base / "second-union" / vendor.REPORT_NAME).read_bytes())
+
+    def test_additional_lock_conflicts_and_foreign_sources_never_publish(self) -> None:
+        locks = self._additional_lock()
+        path = self.root / locks[-1]
+        original = path.read_text(encoding="utf-8")
+        for content, expected in (
+            (original.replace(self.checksums[self.identities[0]], "0" * 64), "conflicting locked checksum"),
+            (original.replace(REGISTRY, "git+https://example.invalid/repository#" + "a" * 40), "unsupported source"),
+        ):
+            path.write_text(content, encoding="utf-8")
+            destination = self.base / "rejected-additional-lock"
+            with self.subTest(expected=expected), self.assertRaisesRegex(vendor.PreparationError, expected):
+                vendor.vendor_sources(self.root, self.archives, lock_paths=locks, destination=destination)
+            self.assertFalse(destination.exists())
+            self.assertFalse(list(self.base.glob(".rust-source-inputs-*")))
+        path.write_text(original, encoding="utf-8")
+
+    def test_explicit_lock_lists_reject_missing_root_duplicates_and_unsafe_paths(self) -> None:
+        locks = self._additional_lock()
+        for selected in ((), (locks[-1],), (*locks, locks[-1]), (*locks, "../outside"),
+                         (*locks, "/outside"), (*locks, "producer\\Cargo.lock"),
+                         (*locks, "producer/absent.lock")):
+            destination = self.base / "invalid-lock-output"
+            before = self._snapshot()
+            with self.subTest(selected=selected), self.assertRaises(vendor.PreparationError):
+                vendor.vendor_sources(self.root, self.archives, lock_paths=selected,
+                                      destination=destination)
+            self.assertFalse(destination.exists())
+            self.assertEqual(self._snapshot(), before)
+        # Identity inspection alone can inspect a nested lock without relabeling
+        # a published verifier report as the project's root Cargo.lock.
+        self.assertEqual(len(vendor.registry_inputs(self.root, lock_paths=(locks[-1],))), 2)
+
+    def test_explicit_output_missing_or_tampered_additional_archive_never_publishes(self) -> None:
+        locks = self._additional_lock()
+        source = self.archives / "charlie-3.0.0.crate"
+        original = source.read_bytes()
+        for state in ("missing", "tampered"):
+            if state == "missing":
+                source.unlink()
+            else:
+                source.write_bytes(original + b"changed")
+            destination = self.base / state
+            before = self._snapshot()
+            with self.subTest(state=state), self.assertRaises(vendor.PreparationError):
+                vendor.vendor_sources(self.root, self.archives, lock_paths=locks, destination=destination)
+            self.assertFalse(destination.exists())
+            self.assertEqual(self._snapshot(), before)
+
+    def test_explicit_destination_controls_preserve_inputs_and_existing_output(self) -> None:
+        existing = self.base / "existing-output"
+        existing.mkdir()
+        (existing / "keep").write_bytes(b"existing output")
+        file = self.base / "existing-file"
+        file.write_bytes(b"existing file")
+        for destination in (existing, file, self.base / "absent-parent/output",
+                            self.base / ".." / self.base.name / "escaped",
+                            self.archives / "new-output"):
+            before = self._snapshot()
+            with self.subTest(destination=destination), self.assertRaises(vendor.PreparationError):
+                vendor.vendor_sources(self.root, self.archives, destination=destination)
+            self.assertEqual(self._snapshot(), before)
+        self.assertEqual((existing / "keep").read_bytes(), b"existing output")
+        self.assertEqual(file.read_bytes(), b"existing file")
+
+    def test_linked_explicit_output_parent_is_rejected_before_staging(self) -> None:
+        parent = self.base / "output-parent"
+        parent.mkdir()
+        original = vendor.linked_path
+        with patch.object(vendor, "linked_path", side_effect=lambda path: path == parent or original(path)):
+            with self.assertRaisesRegex(vendor.PreparationError, "non-link directory"):
+                vendor.vendor_sources(self.root, self.archives, destination=parent / "fresh")
+        self.assertEqual(list(parent.iterdir()), [])
+
+    def test_additional_lock_mutation_and_archive_mutation_fail_before_explicit_publication(self) -> None:
+        locks = self._additional_lock()
+        original = vendor.verify_bundle
+        lock = self.root / locks[-1]
+        archive = self.archives / "charlie-3.0.0.crate"
+        for changed in (lock, archive):
+            payload = changed.read_bytes()
+            destination = self.base / ("lock-change" if changed == lock else "archive-change")
+
+            def mutate_after_verification(sources, paths, *, archives):
+                result = original(sources, paths, archives=archives)
+                changed.write_bytes(payload + b"\n")
+                return result
+
+            with self.subTest(changed=changed), patch.object(vendor, "verify_bundle", side_effect=mutate_after_verification):
+                with self.assertRaisesRegex(vendor.PreparationError, "changed during preparation"):
+                    vendor.vendor_sources(self.root, self.archives, lock_paths=locks, destination=destination)
+            self.assertFalse(destination.exists())
+            self.assertFalse(list(self.base.glob(".rust-source-inputs-*")))
+            changed.write_bytes(payload)
+
+    def test_cli_explicit_locks_and_fresh_destination_preserve_default_inputs(self) -> None:
+        locks = self._additional_lock()
+        existing = self.root / "source-inputs"
+        existing.mkdir()
+        destination = self.base / "cli-output"
+        arguments = ["--root", str(self.root), "--archives", str(self.archives),
+                     "--destination", str(destination)]
+        for name in locks:
+            arguments.extend(("--lock", name))
+        with contextlib.redirect_stdout(io.StringIO()) as output:
+            self.assertEqual(vendor.main(arguments), 0)
+        self.assertEqual(json.loads(output.getvalue())["package_count"], 3)
+        self.assertEqual(list(existing.iterdir()), [])
+        self.assertEqual(len(json.loads((destination / vendor.REPORT_NAME).read_bytes())["lockfiles"]), 4)
 
     def test_missing_archive_leaves_project_unchanged(self) -> None:
         before = self._snapshot()

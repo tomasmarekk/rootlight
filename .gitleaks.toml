@@ -1,6 +1,333 @@
 [extend]
 useDefault = true
 
+
+[[allowlists]]
+description = "Published Cargo digests: aho-corasick-1.1.3"
+targetRules = ["generic-api-key"]
+condition = "AND"
+regexTarget = "secret"
+paths = ['''^source-inputs/cargo/aho-corasick-1\.1\.3/\.cargo-checksum\.json$''']
+regexes = [
+  '''^160d3b10823316f7b0924e13c3afd222c8a7db5c0a00432401f311ef27d6a1b7$''',
+]
+
+[[allowlists]]
+description = "Published Cargo digests: anes-0.1.6"
+targetRules = ["generic-api-key"]
+condition = "AND"
+regexTarget = "secret"
+paths = ['''^source-inputs/cargo/anes-0\.1\.6/\.cargo-checksum\.json$''']
+regexes = [
+  '''^5251732569eb1cf9f602fa9f47de33290ed33e4636ae572dfee04d1f272a81ef$''',
+]
+
+[[allowlists]]
+description = "Published Cargo digests: bitvec-1.0.1"
+targetRules = ["generic-api-key"]
+condition = "AND"
+regexTarget = "secret"
+paths = ['''^source-inputs/cargo/bitvec-1\.0\.1/\.cargo-checksum\.json$''']
+regexes = [
+  '''^1cc39133160cdaeb4e30d2d7fe6d0c19e3c2fcbf5d09da59f4638e54e18b7ac2$''',
+  '''^2def298d4a2f609d0e3ec9b1ebb312a3f5439a8612c8699c428efa09a795020a$''',
+  '''^44b663a43a9cb5c8d90a8037f880390c58f5628abae979f241cc830c9353c596$''',
+  '''^4f0b3b0a4b6cff1577f7de40fcf1e4b76db914cfb530f0e870c9176b5f752c09$''',
+  '''^58983a0a2a8cf4b75412d47bb2239bc957f701d72e97413402656076a7714720$''',
+  '''^769f2f2dda2385f434e68369b41684fa44a583cc44ab02614c32c5cb3c9523df$''',
+  '''^7fbf976805b0abefb8868df615f76bc5217f65630ce7021ef7ec888daa6bf7fb$''',
+  '''^84075fa1e647739728bb2d1078bd125ba527e2d2debefaf7a32a2d607125d95b$''',
+  '''^8c610eae441cf82410498e5a21ed3678d4f5d689b37e5853434d8f7aa702b8a3$''',
+  '''^bf951757e72571ff8525b04c349de128f1e4e72d97719fe3a4446736a3abce04$''',
+  '''^cd22ad477bb2d18fd1583657a22feb4a56d484b20ccf97ddcfc53df08095bae5$''',
+  '''^e0403a10fe5395281e538616acfe364494cbb5580c94ace87b531f51ab9064d9$''',
+]
+
+[[allowlists]]
+description = "Published Cargo digests: browserslist-rs-0.19.0"
+targetRules = ["generic-api-key"]
+condition = "AND"
+regexTarget = "secret"
+paths = ['''^source-inputs/cargo/browserslist-rs-0\.19\.0/\.cargo-checksum\.json$''']
+regexes = [
+  '''^0ecd49b7d71b05080ebfa3e93900da970a71b44c85da37f0530fee6ceac7ac50$''',
+  '''^1e518675121914d1adbc2d590cd160d826ae9d73e479f8b72c9c47acf0b30f26$''',
+  '''^33539b9c4e4a5db19bc2cb311d708eb0c106a4eb47ef41724231d6105c1257b7$''',
+  '''^39114ea78ee34e9bf4ca457d6fa69dd31eb60657f42bdb877e6807a215720153$''',
+  '''^3c91407b2560a90d28095c55e74e0c240d42e435e5ccd54d9bfa591ea78ddd49$''',
+  '''^3cda5e73635b647f25e24ff302b04007e306e9b987502b741a1371c71b7e4309$''',
+  '''^44c48fcbaeb998ecd24631bda7a67a989a4b1b737083735ef7e280d7170fa203$''',
+  '''^7806573c1c83721eb60e042525d8a1ed6aad96ef003dd2f1e3c083f2106dbfad$''',
+  '''^b1ccfd1bb2818f476d5e8ea63f0aa023c579d255bca3b679e2bc80f2ca17411e$''',
+  '''^c03fb2b8d466487cdde1b985e86ac3ed5c2eb25c04245a1cc43562d0b7ba6456$''',
+  '''^ca4f1fc609c111674c9c65769072fcc6bb770cfaa378263c9be0503a7afb24fd$''',
+  '''^d8fd06515577cccef9d1e5c234a070e5a63838e1a7208ff0c286f21bfe3142e3$''',
+  '''^f1c72ae483177649ebe9596d0024aabf317773068f230487e6c6293c1e7c4a90$''',
+]
+
+[[allowlists]]
+description = "Published Cargo digests: cc-1.2.5"
+targetRules = ["generic-api-key"]
+condition = "AND"
+regexTarget = "secret"
+paths = ['''^source-inputs/cargo/cc-1\.2\.5/\.cargo-checksum\.json$''']
+regexes = [
+  '''^018a01cb00182270bbcb68e31e7a7c5c621a95f086e4c68cfa2bf557ac24e5f2$''',
+  '''^250d51c1826d1a2329e9889dd9f058cfce253dbf2a678b076147c6cdb5db046c$''',
+]
+
+[[allowlists]]
+description = "Published Cargo digests: clap-3.2.25"
+targetRules = ["generic-api-key"]
+condition = "AND"
+regexTarget = "secret"
+paths = ['''^source-inputs/cargo/clap-3\.2\.25/\.cargo-checksum\.json$''']
+regexes = [
+  '''^3565a5bae5d6cdcf8ba41a24eb602c510a14e150c4a6d3085ad72a35778e9c5f$''',
+]
+
+[[allowlists]]
+description = "Published Cargo digests: clap_builder-4.5.60"
+targetRules = ["generic-api-key"]
+condition = "AND"
+regexTarget = "secret"
+paths = ['''^source-inputs/cargo/clap_builder-4\.5\.60/\.cargo-checksum\.json$''']
+regexes = [
+  '''^f91cf154bd531a05f81f34a552b33d17f551228d827f2b944f45dae3caf0522f$''',
+]
+
+[[allowlists]]
+description = "Published Cargo digests: codspeed-criterion-compat-walltime-4.6.0"
+targetRules = ["generic-api-key"]
+condition = "AND"
+regexTarget = "secret"
+paths = ['''^source-inputs/cargo/codspeed-criterion-compat-walltime-4\.6\.0/\.cargo-checksum\.json$''']
+regexes = [
+  '''^03f561025f773ce31947fe2e889a2a71fa8bac24621a90d112507dd19ceab72c$''',
+]
+
+[[allowlists]]
+description = "Published Cargo digests: core-foundation-sys-0.8.7"
+targetRules = ["generic-api-key"]
+condition = "AND"
+regexTarget = "secret"
+paths = ['''^source-inputs/cargo/core-foundation-sys-0\.8\.7/\.cargo-checksum\.json$''']
+regexes = [
+  '''^0da4ae1a841591871602f21cc1c9b51289a0514a255b269e4b61afdeb0097c10$''',
+]
+
+[[allowlists]]
+description = "Published Cargo digests: criterion-plot-0.5.0"
+targetRules = ["generic-api-key"]
+condition = "AND"
+regexTarget = "secret"
+paths = ['''^source-inputs/cargo/criterion-plot-0\.5\.0/\.cargo-checksum\.json$''']
+regexes = [
+  '''^98586d40633bccc4b414d5b4e39f5135b10884e15834ee43ac2b260b7900505e$''',
+]
+
+[[allowlists]]
+description = "Published Cargo digests: cssparser-0.37.0"
+targetRules = ["generic-api-key"]
+condition = "AND"
+regexTarget = "secret"
+paths = ['''^source-inputs/cargo/cssparser-0\.37\.0/\.cargo-checksum\.json$''']
+regexes = [
+  '''^0be69dc2fb909133a4e3148e1f70b5fae4328175ad49634b465f4126f5351ebd$''',
+]
+
+[[allowlists]]
+description = "Published Cargo digests: indexmap-1.9.3"
+targetRules = ["generic-api-key"]
+condition = "AND"
+regexTarget = "secret"
+paths = ['''^source-inputs/cargo/indexmap-1\.9\.3/\.cargo-checksum\.json$''']
+regexes = [
+  '''^a919065b59000286eb11c7d46f6896bf0a1d484c9dac5e61d80bb8990c9fbedb$''',
+]
+
+[[allowlists]]
+description = "Published Cargo digests: log-0.4.22"
+targetRules = ["generic-api-key"]
+condition = "AND"
+regexTarget = "secret"
+paths = ['''^source-inputs/cargo/log-0\.4\.22/\.cargo-checksum\.json$''']
+regexes = [
+  '''^9439e91c3ab3f9574a6a11a0347c7b63fdf1652384a6b28411136e4373de2970$''',
+  '''^da677f1e29e3cb135c971247031bc0eb20324294ab5c1c74c5118f87e45518ae$''',
+]
+
+[[allowlists]]
+description = "Published Cargo digests: napi-derive-2.16.13"
+targetRules = ["generic-api-key"]
+condition = "AND"
+regexTarget = "secret"
+paths = ['''^source-inputs/cargo/napi-derive-2\.16\.13/\.cargo-checksum\.json$''']
+regexes = [
+  '''^45816c7bfbb8f3d4096c30171bbd4d13e699ff4ddc925e27b1999dd3519564bd$''',
+]
+
+[[allowlists]]
+description = "Published Cargo digests: parking_lot_core-0.9.10"
+targetRules = ["generic-api-key"]
+condition = "AND"
+regexTarget = "secret"
+paths = ['''^source-inputs/cargo/parking_lot_core-0\.9\.10/\.cargo-checksum\.json$''']
+regexes = [
+  '''^12b72b70ad9d58d943b51246621ac73223debb0b37abff990fa0f895c575f7c7$''',
+]
+
+[[allowlists]]
+description = "Published Cargo digests: proc-macro-error-1.0.4"
+targetRules = ["generic-api-key"]
+condition = "AND"
+regexTarget = "secret"
+paths = ['''^source-inputs/cargo/proc-macro-error-1\.0\.4/\.cargo-checksum\.json$''']
+regexes = [
+  '''^0b88e659ab214d6c7dfcd99274d327fe72da4b9bd009477e0e65165ddde65e02$''',
+  '''^74997da1fdd3bce88a04ab42866c651723861fba4f59e826ee602d905398dcca$''',
+  '''^d017a3c4cd583defe9806cdc51220bde89ced871ddd4d65b7cd089882feb1f61$''',
+  '''^e347ef1c18949711ce41957848e255095132f855c94db1e7e28d32e7d2c79a74$''',
+]
+
+[[allowlists]]
+description = "Published Cargo digests: quote-1.0.37"
+targetRules = ["generic-api-key"]
+condition = "AND"
+regexTarget = "secret"
+paths = ['''^source-inputs/cargo/quote-1\.0\.37/\.cargo-checksum\.json$''']
+regexes = [
+  '''^caca09d649e9394d37f065a41d481318c4cb86c345b9cb01f36fbf0f73868e86$''',
+]
+
+[[allowlists]]
+description = "Published Cargo digests: regex-automata-0.4.9"
+targetRules = ["generic-api-key"]
+condition = "AND"
+regexTarget = "secret"
+paths = ['''^source-inputs/cargo/regex-automata-0\.4\.9/\.cargo-checksum\.json$''']
+regexes = [
+  '''^bd4862275c52f94c6f6737bf174c97e3de30f8075ca23f43c129c72a0d0afed7$''',
+  '''^cc28e366b6bcbfcf379265acd492a92c62743c3f20e7a2b273019679aa9e1291$''',
+]
+
+[[allowlists]]
+description = "Published Cargo digests: schemars-0.8.21"
+targetRules = ["generic-api-key"]
+condition = "AND"
+regexTarget = "secret"
+paths = ['''^source-inputs/cargo/schemars-0\.8\.21/\.cargo-checksum\.json$''']
+regexes = [
+  '''^2f2b61eedde8f571fd9a8d13209f22f2689d25568cf1d07707f1b674e2ac29a3$''',
+  '''^a576e0351989245f1bda60e610213f3229cea2cc61c68e7f9ef92da0f405b2b1$''',
+  '''^e2644aa57de2e162fd8fe6de8bf88caa0179ab8f0ed40601f1963afae03dde25$''',
+]
+
+[[allowlists]]
+description = "Published Cargo digests: serde_json-1.0.149"
+targetRules = ["generic-api-key"]
+condition = "AND"
+regexTarget = "secret"
+paths = ['''^source-inputs/cargo/serde_json-1\.0\.149/\.cargo-checksum\.json$''']
+regexes = [
+  '''^18829b2af320d5cf8a0a5cd3aaf84c7e92cc874651c30e45a3acafb76c2d8b93$''',
+  '''^20cf0d2898749f3c36780fc065f5049ee809e74cb6f0ef776f43f45e01596ee3$''',
+]
+
+[[allowlists]]
+description = "Published Cargo digests: syn-1.0.109"
+targetRules = ["generic-api-key"]
+condition = "AND"
+regexTarget = "secret"
+paths = ['''^source-inputs/cargo/syn-1\.0\.109/\.cargo-checksum\.json$''']
+regexes = [
+  '''^43e56a701817e3c3bfd0cae54a457dd7a38ccb3ca19da41e2b995fdf20e6ed18$''',
+  '''^5e423a696f80e281c322f37c87577f9fdc28607e9c007e24896a2b12da62d5ad$''',
+]
+
+[[allowlists]]
+description = "Published Cargo digests: syn-2.0.90"
+targetRules = ["generic-api-key"]
+condition = "AND"
+regexTarget = "secret"
+paths = ['''^source-inputs/cargo/syn-2\.0\.90/\.cargo-checksum\.json$''']
+regexes = [
+  '''^3a5882d0b3aefbf56ca5d08c28c117e25ac2327eadf7242202d906b2ddb2232e$''',
+  '''^aa7f0e20c3f84e88810ef3ff30f71722973fdeed5cf31ce617f18a5459c758f0$''',
+  '''^f0a57f4d46b5dd4dbdf601450f6eb4db5fb5622dce3e9d17d2f021021b37fd9d$''',
+]
+
+[[allowlists]]
+description = "Published Cargo digests: toml-0.5.11"
+targetRules = ["generic-api-key"]
+condition = "AND"
+regexTarget = "secret"
+paths = ['''^source-inputs/cargo/toml-0\.5\.11/\.cargo-checksum\.json$''']
+regexes = [
+  '''^62c38be95ac994e6ae42ff983ac3ed66d3924decfd10e929455bf9168d9a1410$''',
+]
+
+[[allowlists]]
+description = "Published Cargo digests: web-sys-0.3.76"
+targetRules = ["generic-api-key"]
+condition = "AND"
+regexTarget = "secret"
+paths = ['''^source-inputs/cargo/web-sys-0\.3\.76/\.cargo-checksum\.json$''']
+regexes = [
+  '''^05ec34968e1777d16555b1d0b6aef536b255f9ec23509348e1591c7d9b20b778$''',
+  '''^06da1b15e6fd7c8288880967e1175d783623b70d7ea057c567fd8a550b69f1bb$''',
+  '''^0964e70be78c7bfc49416258faf35c12dd9cda2021b2f646c68dd25b9b757008$''',
+  '''^ff0ee2471b209ced2e1488f5ba5c6e4a74e489948650e1ca5e87c1fb1444f1fa$''',
+  '''^1e24ae32d0e65beab11cbbf497afc6d95b674fc03ebf67f43682753dc0d2f3b1$''',
+  '''^1ff46fa351e669d69d8dd1aea5030a3015f83ee812db48a3e947ec4c9c6aeef0$''',
+  '''^35cbf6d83d7c7d239c84699cb7488c41381f11ef6fabb68834081a01ba2a8c1b$''',
+  '''^3969743a4af19eaeb43ff652b84f10443d62761d3faebf8e625f57b8cadf7726$''',
+  '''^3fd69df66c37b92ec5aa827ed587c63b282ca68cd39d172f85cda42d2b4370ca$''',
+  '''^4b655d153d7a990a1dd99ed59fffb6da8909d08e281df2db68aa470c6e6800c5$''',
+  '''^5077ffa6970c4baec99fdb0c1ff1b3c18566a1cff7f576c5668a22198dd335a2$''',
+  '''^52a658dfd24cd5f4cd7c319b9edaded7938988bfedbfc9879d7812d502cd1fe3$''',
+  '''^55781e156ee7ce6d16c6ebd882768e9c9194f034d630db3a7acd8ab4c7ff3f0d$''',
+  '''^57ae671f668121ee35fb60f693f99f64056e8b0ce289e08f63b7534b10ae9a9e$''',
+  '''^5a9fa636421b579ad328100cc1571a16d12144ba485674f73bd7e7aca9c5342d$''',
+  '''^6e67d898bb130dd8768f5cc16361dd1443c4e71865bb753bd2ff7a4132a6d28c$''',
+  '''^7409d0a57b3e4d7d8495bba7a8b9ea501e76dcd88279094dc570c4c916750c65$''',
+  '''^74104ba489666402bbe9f539f6c7afa54efa5116b5fcb2370f28c18068c4491b$''',
+  '''^7c68c47230905e39632df4cf3a90579e120f0c6b021d122421baddff4a742109$''',
+  '''^7d7768714bf346d1e278637576f82fff41b731f3426f9e87a5f977cb5e6513af$''',
+  '''^84b494af1ff0f280212c4cd7a3870003b2b3dd6d81effc4c1b0d726f557776f0$''',
+  '''^90b7998fcd20ce4008e2ff262c0db74abe44ac9035d8a0745088e448d7d43443$''',
+  '''^93321cdd43a511892e7739da58d2944b2e028d55613a9d48d42fbc2c35f04a7f$''',
+  '''^93e2c0831a28c56ddc1c11ad0974df2cc5e12393bfbccb77f01c6eb97b55ae29$''',
+  '''^98007bb8ad9d1b73f636753664a647d36a3002184d429b6bc1b24198cc622ccb$''',
+  '''^9e8c4583447028582c00728ac99541b9c218ce2bda3fa9611bf994376bc57977$''',
+  '''^9ed9cdf4b20e656981bce97c163ec5fd218ed91f95bd0f5b0a915446ec828ee8$''',
+  '''^9fa694f2cf165d1d74bd88d4363c264057224115850ce26c4fba832a4c2cdf45$''',
+  '''^9fccbbaefbb8fc1d0c4d0a92a42ac0c1f7b0fb32caf1e8ad437fbf5dbe575235$''',
+  '''^a0fe65006fd67d6301524516ff5245d3658236f053ff2e6f69bc0c893ad70ebc$''',
+  '''^a21b9521fecd8514058109706ef6bb9115c1ab46658d181b152ca068da2723e4$''',
+  '''^a27c91277d6aa7d31f5a2ac6413c69ee5fccbb2fe2f537dddffee54134659ce4$''',
+  '''^a89084f9edf7063ef48849f50ff618be854f0734d9ae3d7882fbdff850cd0715$''',
+  '''^aa283b7155a36014a6e10d4e563829374c4d8b87769fd7eba225c5b8361308d5$''',
+  '''^ab2125101b98cb8aa6fcc8aa84f535472e048345cf9dba3cf4078cc22885b210$''',
+  '''^af257889cadf4b62baa91be6dd3f418e46cf3a11925a4f541effa11a98ac5740$''',
+  '''^b342779600d17ff58c8d3cd7f4b3ed93f620c332876e4163f3bb8e0208604f7c$''',
+  '''^b3cc819cf241424fc29f42d998254320ff4f1c5c19e136041509266e45e0a69f$''',
+  '''^b48fb9b552ab4d86179639aad81b9669d019c421236350ea49087481094726ce$''',
+  '''^baac9d56ea7e1ecd0537434df6ac1a2e56d201e9f3b9e469062ed37ea4afef16$''',
+  '''^c8e76953c177a672a480add45e2281fa21483eee0ba4d93d3a27e4b247f8f753$''',
+  '''^ccaa595c59ec9822876cc7f19733e4235fc8ed8757c805e2ec62b9123a3db3c2$''',
+  '''^cd971d08c4edc949ac1deed6fc5c2912d033c653dab00474904c1486320e5e1f$''',
+  '''^d2371287e9d36c62e2ef2a1ce8b1f6659a41a98c00203ab3fc623844da19f0f6$''',
+  '''^ec133a72849d444c7ac8e2be04e2dd7384ad04b2a7d4c7927b4d9eafd8bb8f6b$''',
+  '''^ec2536948165c99fa9d43364df33a4d1a5faa11c01a1c375c1be381d2603241e$''',
+  '''^f1780911036b9bca7f152b466eb3d14d0f377487550343481b78657dbfa5341e$''',
+  '''^f1ec878192a8f25cdcb82727ade4e8f8835827ea6ce858ea7d39752921565992$''',
+  '''^f922cafa04168710ef755fa3af8b0bbb4b37426265b727eefb5e7cbe01196c4d$''',
+  '''^fe7fdc8ed4f6a1c42a253ecaa0f0c54adae784f5897449186ddd254bf3c1db57$''',
+  '''^ffb97854a37defcc2b5252e13cb4f6c0108b5c429b19bfa6643cddef428266d4$''',
+]
+
+
 # The original negative control assigned a public API identifier literally.
 # Its historical diff remains visible; no other value or path is exempted.
 [[allowlists]]

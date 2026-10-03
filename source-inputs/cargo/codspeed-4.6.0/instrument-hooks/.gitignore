@@ -1,0 +1,9 @@
+.zig-cache
+zig-out
+target/
+./main
+
+**/build
+
+# Bazel output
+**/bazel-*

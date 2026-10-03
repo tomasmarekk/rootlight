@@ -698,6 +698,8 @@ class RustSourceBundleTests(unittest.TestCase):
     def test_absent_producer_requires_explicit_null_evidence_and_false_verified_flag(self) -> None:
         project, pristine = self.create_project()
         self.assertEqual(bundle._producer_source_inputs(project), (None, {}, {}, set()))
+        self.assertEqual([row["path"] for row in pristine["cargo_source_closure"]["lockfiles"]],
+                         sorted(bundle.LOCK_PATHS))
         for field, value in (("lightning_producer_inputs", {}), ("lightning_producer_inputs_verified", True),
                              ("lightning_producer_inputs_verified", 0)):
             manifest = copy.deepcopy(pristine)
@@ -718,6 +720,25 @@ class ProducerSourceExportTests(AuthoredFixture, unittest.TestCase):
     def setUp(self) -> None:
         RustSourceBundleTests.setUp(self)
         AuthoredFixture.setUp(self)
+        checksum = RustSourceBundleTests.write_archive(self)
+        self.producer_dependency = self.root / "producer-input-2.0.0.crate"
+        with tarfile.open(self.producer_dependency, "w:gz") as tar:
+            for name, content, mode in (
+                ("Cargo.toml", b'[package]\nname = "producer-input"\nversion = "2.0.0"\nlicense = "MIT"\n', 0o644),
+                ("src/lib.rs", b"pub const INPUT: u8 = 2;\r\n", 0o644),
+                ("bin/check", b"#!/bin/sh\nexit 0\n", 0o755),
+                ("LICENSE", b"authored dependency license\n", 0o644),
+            ):
+                member = tarfile.TarInfo("producer-input-2.0.0/" + name)
+                member.size, member.mode = len(content), mode
+                tar.addfile(member, io.BytesIO(content))
+        dependency_checksum = bundle.digest(self.producer_dependency)
+        sample_lock = ('version = 4\n[[package]]\nname = "sample"\nversion = "1.0.0"\n'
+                       f'source = "{bundle.REGISTRY}"\nchecksum = "{checksum}"\n').encode()
+        self.files[producer.ROOT + "/Cargo.lock"] = sample_lock + (
+            '[[package]]\nname = "producer-input"\nversion = "2.0.0"\n'
+            f'source = "{bundle.REGISTRY}"\nchecksum = "{dependency_checksum}"\n'
+            '[[package]]\nname = "local-input"\nversion = "0.1.0"\n').encode()
         empty = tarfile.TarInfo(producer.ROOT + "/documentation/empty")
         empty.type, empty.mode = tarfile.DIRTYPE, 0o775
         self.payload = producer_archive(self.files, [empty])
@@ -726,23 +747,24 @@ class ProducerSourceExportTests(AuthoredFixture, unittest.TestCase):
         self.addCleanup(pin.stop)
         self.write_prepared()
         producer_import.import_bundle(self.project, self.prepared, self.capture, self.destination)
-        checksum = RustSourceBundleTests.write_archive(self)
-        lock = ('version = 4\n[[package]]\nname = "sample"\nversion = "1.0.0"\n'
-                f'source = "{bundle.REGISTRY}"\nchecksum = "{checksum}"\n').encode()
-        for name, content in {**{name: lock for name in bundle.LOCK_PATHS},
+        for name, content in {**{name: sample_lock for name in bundle.LOCK_PATHS},
                               ".cargo/config.toml": RustSourceBundleTests._local_config(self)}.items():
             path = self.project / name
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_bytes(content)
         retained = self.project / bundle.ARCHIVES_PATH
         retained.mkdir()
-        archive = retained / self.archive.name
-        archive.write_bytes(self.archive.read_bytes())
-        modes = bundle.materialize_archive(archive, self.project / bundle.VENDOR_PATH,
-                                           "sample", "1.0.0", checksum)
-        modes[f"{bundle.ARCHIVES_PATH}/{self.archive.name}"] = 0o644
+        modes = {}
+        for source, name, version, pin in ((self.archive, "sample", "1.0.0", checksum),
+                                         (self.producer_dependency, "producer-input", "2.0.0", dependency_checksum)):
+            archive = retained / source.name
+            archive.write_bytes(source.read_bytes())
+            modes.update(bundle.materialize_archive(archive, self.project / bundle.VENDOR_PATH,
+                                                   name, version, pin))
+            modes[f"{bundle.ARCHIVES_PATH}/{source.name}"] = 0o644
         closure = bundle.verify_bundle(self.project / bundle.VENDOR_PATH,
-                                       [self.project / name for name in bundle.LOCK_PATHS], archives=retained)
+                                       [self.project / name for name in (*bundle.LOCK_PATHS, bundle.LIGHTNING_LOCK_PATH)],
+                                       archives=retained)
         report = {**closure, "file_modes": dict(sorted(modes.items())),
                   "frontend_external_source_closure_verified": False,
                   "build_and_packaging_acceptance_verified": False}
@@ -758,6 +780,62 @@ class ProducerSourceExportTests(AuthoredFixture, unittest.TestCase):
     def export(self, *, inventory=None, destination=None):
         return RustSourceBundleTests.export_project(
             self, self.project, self.inventory if inventory is None else inventory, destination)
+
+    def test_complete_producer_requires_exact_four_lock_union_and_original_archives(self) -> None:
+        exported, manifest = self.export()
+        closure = manifest["cargo_source_closure"]
+        paths = (*bundle.LOCK_PATHS, bundle.LIGHTNING_LOCK_PATH)
+        self.assertEqual([row["path"] for row in closure["lockfiles"]], sorted(paths))
+        self.assertEqual(closure["package_count"], 2)
+        self.assertEqual(closure["local_package_count"], 1)
+        self.assertTrue(closure["archives_verified"])
+        self.assertEqual([(row["name"], row["version"]) for row in closure["packages"]],
+                         [("producer-input", "2.0.0"), ("sample", "1.0.0")])
+        producer_lock = next(row for row in closure["lockfiles"] if row["path"] == bundle.LIGHTNING_LOCK_PATH)
+        self.assertEqual(producer_lock["sha256"], bundle.digest(exported / bundle.LIGHTNING_LOCK_PATH))
+        original = exported / bundle.ARCHIVES_PATH / self.producer_dependency.name
+        self.assertEqual(original.read_bytes(), self.producer_dependency.read_bytes())
+        dependency = next(row for row in closure["packages"] if row["name"] == "producer-input")
+        self.assertEqual(dependency["license"], "MIT")
+        self.assertEqual([row["path"] for row in dependency["license_files"]], ["LICENSE"])
+        self.assertEqual(manifest["file_modes"][bundle.VENDOR_PATH + "/producer-input-2.0.0/bin/check"], 0o755)
+        self.assertEqual(bundle.verify_project_bundle(exported), manifest)
+        self.assertFalse(manifest["frontend_external_source_closure_verified"])
+
+    def test_present_producer_cannot_use_a_report_omitting_its_lock_association(self) -> None:
+        path = self.project / bundle.CLOSURE_PATH
+        report = json.loads(path.read_bytes())
+        report["lockfiles"] = [row for row in report["lockfiles"] if row["path"] != bundle.LIGHTNING_LOCK_PATH]
+        path.write_bytes(producer.json_bytes(report))
+        destination = self.root / "omitted-producer-lock"
+        with self.assertRaisesRegex(ValueError, "Cargo dependency report"):
+            self.export(destination=destination)
+        self.assertFalse(destination.exists())
+
+    def test_missing_or_tampered_producer_only_inputs_reject_before_export(self) -> None:
+        controls = (self.project / bundle.ARCHIVES_PATH / self.producer_dependency.name,
+                    self.project / bundle.VENDOR_PATH / "producer-input-2.0.0/src/lib.rs")
+        for index, path in enumerate(controls):
+            payload = path.read_bytes()
+            for state in ("missing", "tampered"):
+                if state == "missing":
+                    path.unlink()
+                else:
+                    path.write_bytes(payload + b"changed")
+                destination = self.root / f"producer-dependency-{index}-{state}"
+                with self.subTest(path=path.name, state=state), self.assertRaises(ValueError):
+                    self.export(destination=destination)
+                self.assertFalse(destination.exists())
+                path.write_bytes(payload)
+
+    def test_restored_manifest_cannot_drop_the_qualified_producer_lock_association(self) -> None:
+        exported, manifest = self.export()
+        manifest["cargo_source_closure"]["lockfiles"] = [
+            row for row in manifest["cargo_source_closure"]["lockfiles"]
+            if row["path"] != bundle.LIGHTNING_LOCK_PATH]
+        (exported / bundle.MANIFEST_PATH).write_bytes(producer.json_bytes(manifest))
+        with self.assertRaisesRegex(ValueError, "Cargo source closure differs"):
+            bundle.verify_project_bundle(exported)
 
     def test_complete_producer_bytes_modes_reports_and_empty_directories_survive_transport(self) -> None:
         before = {name: (self.project / name).read_bytes() for name, _mode in self.inventory}
@@ -923,8 +1001,8 @@ class ProducerSourceExportTests(AuthoredFixture, unittest.TestCase):
         for phase in ("source", "copied"):
             destination = self.root / ("producer-post-copy-" + phase)
 
-            def changed_after_copy(root):
-                result = original(root)
+            def changed_after_copy(root, **keywords):
+                result = original(root, **keywords)
                 if root == destination:
                     target = source if phase == "source" else destination / bundle.LIGHTNING_PRODUCER_PATH / "tree/src/value.rs"
                     target.write_bytes(target.read_bytes() + b"mutation")

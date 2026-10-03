@@ -11,9 +11,11 @@ import base64
 import hashlib
 import json
 from pathlib import Path
+import re
 import shutil
 import subprocess
 import tempfile
+import tomllib
 import unittest
 
 
@@ -87,6 +89,70 @@ class GitleaksPolicyTests(unittest.TestCase):
         """Require detection without exposing synthetic scanner payloads."""
         findings = self.scan({name: content})
         self.assertIn(rule, {finding["RuleID"] for finding in findings})
+
+    def cargo_digest_exceptions(self) -> dict[str, list[str]]:
+        """Require exact metadata paths and literal SHA-256 values for every rule."""
+        policy = tomllib.loads(CONFIG.read_text(encoding="utf-8"))
+        result = {}
+        prefix = "Published Cargo digests: "
+        for rule in policy["allowlists"]:
+            description = rule.get("description", "")
+            if not description.startswith(prefix):
+                continue
+            name = "source-inputs/cargo/" + description[len(prefix):] + "/.cargo-checksum.json"
+            self.assertNotIn(name, result, "duplicate Cargo checksum exception")
+            literal_path = re.escape(name).replace(r"\-", "-")
+            self.assertEqual(rule["paths"], ["^" + literal_path + "$"])
+            self.assertEqual(rule["targetRules"], ["generic-api-key"])
+            self.assertEqual(rule["condition"], "AND")
+            self.assertEqual(rule["regexTarget"], "secret")
+            digests = rule["regexes"]
+            self.assertTrue(digests, "Cargo checksum exception must name exact values")
+            for digest in digests:
+                self.assertRegex(digest, r"\A\^[a-f0-9]{64}\$\Z")
+            result[name] = [digest[1:-1] for digest in digests]
+        self.assertTrue(result, "Cargo checksum policy is required")
+        return result
+
+    def test_all_exact_cargo_digest_exceptions_scan_clean_in_both_modes(self) -> None:
+        files = {
+            name: "".join(f'api_key = "{digest}"\n' for digest in digests).encode()
+            for name, digests in self.cargo_digest_exceptions().items()
+        }
+        for mode in ("dir", "git"):
+            with self.subTest(mode=mode):
+                self.assertFalse(self.scan(files, mode), "exact published metadata must scan clean")
+
+    def test_every_cargo_digest_exception_belongs_to_its_retained_checksum_manifest(self) -> None:
+        for name, digests in self.cargo_digest_exceptions().items():
+            with self.subTest(path=name):
+                manifest = json.loads((ROOT / name).read_bytes())
+                authenticated_values = {manifest["package"], *manifest["files"].values()}
+                self.assertTrue(set(digests).issubset(authenticated_values),
+                                "checksum exception must name a retained published digest")
+
+    def test_every_cargo_digest_path_detects_new_generic_and_typed_credentials(self) -> None:
+        synthetic = hashlib.sha256(b"rootlight synthetic checksum negative control").hexdigest()
+        content = f'api_key = "{synthetic}"\n'.encode()
+        content += b"token = 'glpat-" + b"0123456789" + b"abcdefghijkl'\n"
+        files = {name: content for name in self.cargo_digest_exceptions()}
+        for mode in ("dir", "git"):
+            with self.subTest(mode=mode):
+                findings = self.scan(files, mode)
+                detected = {(finding["File"], finding["RuleID"]) for finding in findings}
+                for name in files:
+                    self.assertIn((name, "generic-api-key"), detected)
+                    self.assertIn((name, "gitlab-pat"), detected)
+
+    def test_every_cargo_digest_exception_remains_path_bound(self) -> None:
+        files = {
+            "relocated/" + name: f'api_key = "{digests[0]}"\n'.encode()
+            for name, digests in self.cargo_digest_exceptions().items()
+        }
+        findings = self.scan(files)
+        detected = {finding["File"] for finding in findings
+                    if finding["RuleID"] == "generic-api-key"}
+        self.assertEqual(detected, set(files), "known digests elsewhere must remain detectable")
 
     def test_authenticated_upstream_samples_remain_unchanged_and_scan_clean(self) -> None:
         paths = [CHECKSUM, PEM, WEBSOCKET, SQLITE, LINUX,

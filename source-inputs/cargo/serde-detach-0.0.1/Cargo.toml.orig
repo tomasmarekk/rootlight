@@ -1,0 +1,21 @@
+[package]
+name = "serde-detach"
+version = "0.0.1"
+authors = ["Tamme Schichler <tamme@schichler.dev>"]
+edition = "2018"
+description = "Deserialise types containing e.g. Cow<str> without borrowing"
+license = "MPL-2.0"
+repository = "https://github.com/Tamschi/serde-detach"
+include = [
+	"**/*.rs",
+	"Cargo.toml",
+]
+
+[dependencies]
+serde = "1.0.115"
+wyz = "0.2.0"
+
+[dev-dependencies]
+serde = { version = "1.0.115", features = ["derive"] }
+serde_taml = "0.0.1"
+serde-object = "0.0.0-alpha.0"

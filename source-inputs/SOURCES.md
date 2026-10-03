@@ -6,8 +6,9 @@ are permitted; compilation and packaging must not acquire source code.
 ## Rust inputs
 
 `crates/` retains the original archives authenticated by the union of `Cargo.lock`,
-`tests/native-grammars/Cargo.lock`, and `fuzz/Cargo.lock`. `cargo/` contains their
-complete published file inventories and generated Cargo checksum manifests.
+`tests/native-grammars/Cargo.lock`, and `fuzz/Cargo.lock`, plus the producer's
+authored Cargo lock when its complete reviewed tree is present. `cargo/` contains
+their complete published file inventories and generated Cargo checksum manifests.
 Cargo resolves crates.io packages only through this local directory source.
 
 `cargo-source-closure.json` binds package identities, original archive checksums,
@@ -23,6 +24,9 @@ or add unrelated ignored local files. Retain license and provenance records.
 `scripts/vendor_rust_sources.py --archives <reviewed-archive-directory>` is a
 separate local preparation step. It accepts exactly the locked archive inventory,
 performs no acquisition, and refuses an existing `source-inputs/` destination.
+Repeated `--lock <project-relative-lock>` arguments select an explicit complete
+union for a separate preparation. `--destination <fresh-directory>` stages only
+Cargo inputs without replacing existing Rust, npm, or producer sources.
 `scripts/prepare_rust_source_bundle.py` exports already versioned inputs without
 consulting a dependency cache or fetching, resolving, or compiling code.
 
@@ -89,7 +93,9 @@ Raw archive directory modes are provenance, not Git-restored directory permissio
 Retained publisher metadata matches the authenticated local npm distribution
 pins. Its separate capture is a caller observation, not independently proved
 transport, a signature check or source-to-binary reproduction. The Yarn lock is
-hash-bound authored input, not a verified transitive source closure. Missing
+hash-bound authored input, not a verified transitive source closure. The retained
+Cargo registry union covers that producer lock; it does not verify the producer's
+local packages, Yarn dependencies, or source-to-binary reproduction. Missing
 producer dependencies and other native implementation sources remain open;
 this inventory does not qualify frontend or full-product source completeness.
 

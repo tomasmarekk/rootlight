@@ -1,0 +1,87 @@
+name: cbindgen
+
+on:
+  push:
+    branches:
+      - master
+  pull_request:
+    branches:
+      - master
+
+jobs:
+  rustfmt-clippy:
+
+    runs-on: ubuntu-latest
+
+    steps:
+    - uses: actions/checkout@v3
+
+    - name: Install stable
+      uses: dtolnay/rust-toolchain@stable
+      with:
+        components: "clippy, rustfmt"
+
+    - name: Run rustfmt
+      run: |
+        cargo fmt --check
+
+    - name: Run clippy
+      run: |
+        cargo clippy --workspace -- -D warnings
+
+    - name: Install minimum supported Rust version
+      id: msrv
+      uses: dtolnay/rust-toolchain@1.54
+
+    - name: Build with minimum supported Rust version
+      run: |
+        cargo +${{steps.msrv.outputs.name}} test nonexistent-test --verbose
+
+  build:
+
+    runs-on: ubuntu-latest
+
+    steps:
+    - uses: actions/checkout@v3
+
+    - name: Install stable Rust
+      uses: dtolnay/rust-toolchain@stable
+
+    - name: Install Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.8'
+
+    - name: Install Cython
+      run: |
+        python -m pip install --upgrade pip wheel
+        pip install Cython==0.29.*
+
+    - name: Build
+      run: |
+        cargo build --verbose
+
+    - name: Build no-default-features
+      run: |
+        cargo build --verbose --no-default-features
+
+    - name: Test package
+      env:
+        CBINDGEN_TEST_VERIFY: 1
+      run: |
+        cargo package --verbose
+        (cd target/package/cbindgen-$(cargo run -- --version | cut -d ' ' -f 2) && cargo test --verbose)
+
+    - name: Install nightly Rust
+      uses: dtolnay/rust-toolchain@nightly
+
+    - name: Test
+      env:
+        CBINDGEN_TEST_VERIFY: 1
+      run: |
+        cargo +nightly test --verbose
+
+    - name: Test minimal-versions
+      run: |
+        cargo +nightly update -Zminimal-versions
+        cargo +nightly test
