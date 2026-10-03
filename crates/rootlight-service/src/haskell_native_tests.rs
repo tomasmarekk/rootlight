@@ -297,6 +297,14 @@ fn assert_generation(
         (
             sample,
             sample_file.id,
+            helper.id,
+            "helper value = Other.helper value",
+            "helper ",
+            "helper value = Other.helper ",
+        ),
+        (
+            sample,
+            sample_file.id,
             section.id,
             "section operation value = operation (",
             "section operation ",
@@ -394,8 +402,8 @@ fn assert_generation(
             gap.detail == "haskell-binding-target-unavailable" && gap.source.span() == read_span
         }));
     }
-    assert_eq!(resolved_read_ids.len(), 3);
-    assert_eq!(formal_relation_ids.len(), 3);
+    assert_eq!(resolved_read_ids.len(), 4);
+    assert_eq!(formal_relation_ids.len(), 4);
     let section_start = u64::try_from(sample.find("section operation value = ").unwrap()).unwrap();
     let operation_start = section_start + u64::try_from("section ".len()).unwrap();
     let operation_span =
@@ -476,7 +484,7 @@ fn assert_generation(
             gap.detail == "haskell-binding-target-unavailable" && gap.source.span() == span
         }));
     }
-    assert_eq!(stable_symbols.len(), 7);
+    assert_eq!(stable_symbols.len(), 9);
     assert!(
         uses.iter()
             .filter(|site| !resolved_read_ids.contains(&site.id))

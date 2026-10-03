@@ -366,7 +366,10 @@ fn written_dotted_module_and_exports_retain_exact_definition() {
 fn lambda_headers_remain_scope_owned_without_poisoning_equation_headers() {
     for newline in ["\n", "\r\n"] {
         let fixture = Fixture::new("module Example where\nmapped = map (\\item -> item) values\nrun values = map (\\value -> value) values\n".replace('\n', newline));
-        let (syntax, output) = fixture.analyze(IrLimits::default());
+        let (syntax, output) = fixture.analyze_with_formal_reads(
+            IrLimits::default(),
+            &[(fixture.span("values", 2), fixture.span("values", 1))],
+        );
         let document = output.document();
         assert_signature(
             &fixture,
@@ -401,7 +404,10 @@ fn lambda_headers_remain_scope_owned_without_poisoning_equation_headers() {
         }
         assert_no_structural_header_gaps(document);
         let changed = Fixture::new(fixture.text.replace("\\item -> item", "\\item -> 2"));
-        let (_, changed_output) = changed.analyze(IrLimits::default());
+        let (_, changed_output) = changed.analyze_with_formal_reads(
+            IrLimits::default(),
+            &[(changed.span("values", 2), changed.span("values", 1))],
+        );
         for name in ["mapped", "run"] {
             assert_eq!(
                 defined_entity(document, fixture.span(name, 0)).id,

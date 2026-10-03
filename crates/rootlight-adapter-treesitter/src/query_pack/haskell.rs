@@ -66,7 +66,7 @@ fn simple_binary_infix(node: Node<'_>, cancellation: &Cancellation) -> Result<bo
         return Ok(false);
     }
     // The grammar shares infix nodes with patterns and types, including repeated
-    // operator fields. The closed RHS walk admits only this exact binary shape.
+    // operator fields. An admitted read path requires this exact binary shape.
     let mut cursor = node.walk();
     let mut seen = 0u8;
     for child in node.children(&mut cursor) {
@@ -240,68 +240,9 @@ fn simple_function_clause(
     if matched.child_by_field_name("guards").is_some() {
         return Ok(false);
     }
-    let Some(expression) = matched.child_by_field_name("expression") else {
-        return Ok(false);
-    };
-    // This eligibility marker is projected once per clause. Reads do not repeatedly
-    // scan siblings to infer absent binders; every unsupported RHS node closes it.
-    let mut cursor = expression.walk();
-    loop {
-        cancellation.check()?;
-        let current = cursor.node();
-        let descend = if !current.is_named() || current.is_extra() {
-            false
-        } else {
-            match current.kind() {
-                "variable" | "integer" | "float" | "char" | "string" => false,
-                "literal" if current.named_child_count() == 1 => true,
-                "infix" if simple_binary_infix(current, cancellation)? => true,
-                "left_section" | "right_section"
-                    if simple_operator_section(current, cancellation)? =>
-                {
-                    true
-                }
-                // A backticked formal is dispatch syntax, not an operand read.
-                "operator" | "infix_id"
-                    if current.parent().is_some_and(|parent| {
-                        matches!(parent.kind(), "infix" | "left_section")
-                            && parent.child_by_field_name("operator") == Some(current)
-                            || parent.kind() == "right_section"
-                                && parent.child_by_field_name("right_operand") != Some(current)
-                    }) =>
-                {
-                    false
-                }
-                "apply"
-                    if current.child_by_field_name("function").is_some()
-                        && current.child_by_field_name("argument").is_some() =>
-                {
-                    true
-                }
-                "parens" if current.child_by_field_name("expression").is_some() => true,
-                "conditional"
-                    if current.child_by_field_name("if").is_some()
-                        && current.child_by_field_name("then").is_some()
-                        && current.child_by_field_name("else").is_some() =>
-                {
-                    true
-                }
-                _ => return Ok(false),
-            }
-        };
-        if descend && cursor.goto_first_child() {
-            continue;
-        }
-        loop {
-            cancellation.check()?;
-            if cursor.goto_next_sibling() {
-                break;
-            }
-            if !cursor.goto_parent() {
-                return Ok(true);
-            }
-        }
-    }
+    // A nested RHS binder scopes its own subtree, not an independent sibling.
+    // The marker proves the header; each read must prove its entire native path.
+    Ok(matched.child_by_field_name("expression").is_some())
 }
 
 fn equation_rhs_read(node: Node<'_>, cancellation: &Cancellation) -> Result<bool, AdapterError> {
@@ -315,18 +256,28 @@ fn equation_rhs_read(node: Node<'_>, cancellation: &Cancellation) -> Result<bool
         match parent.kind() {
             "parens" if parent.child_by_field_name("expression") == Some(current) => {}
             "infix"
+                if (parent.child_by_field_name("left_operand") == Some(current)
+                    || parent.child_by_field_name("right_operand") == Some(current))
+                    && simple_binary_infix(parent, cancellation)? => {}
+            "left_section"
                 if parent.child_by_field_name("left_operand") == Some(current)
-                    || parent.child_by_field_name("right_operand") == Some(current) => {}
-            "left_section" if parent.child_by_field_name("left_operand") == Some(current) => {}
-            "right_section" if parent.child_by_field_name("right_operand") == Some(current) => {}
+                    && simple_operator_section(parent, cancellation)? => {}
+            "right_section"
+                if parent.child_by_field_name("right_operand") == Some(current)
+                    && simple_operator_section(parent, cancellation)? => {}
             "conditional"
-                if parent.child_by_field_name("if") == Some(current)
+                if (parent.child_by_field_name("if") == Some(current)
                     || parent.child_by_field_name("then") == Some(current)
-                    || parent.child_by_field_name("else") == Some(current) => {}
+                    || parent.child_by_field_name("else") == Some(current))
+                    && parent.child_by_field_name("if").is_some()
+                    && parent.child_by_field_name("then").is_some()
+                    && parent.child_by_field_name("else").is_some() => {}
             "apply"
-                if parent.child_by_field_name("argument") == Some(current)
+                if (parent.child_by_field_name("argument") == Some(current)
                     || current.kind() == "apply"
-                        && parent.child_by_field_name("function") == Some(current) => {}
+                        && parent.child_by_field_name("function") == Some(current))
+                    && parent.child_by_field_name("function").is_some()
+                    && parent.child_by_field_name("argument").is_some() => {}
             "match"
                 if parent.child_by_field_name("expression") == Some(current)
                     && parent.child_by_field_name("guards").is_none() =>
@@ -1256,7 +1207,7 @@ mod tests {
     }
 
     #[test]
-    fn exact_equation_frontier_excludes_binder_changing_and_unknown_rhs_syntax() {
+    fn exact_equation_marker_proves_headers_without_requiring_supported_rhs_siblings() {
         let cancellation = Cancellation::new();
         for (source, eligible) in [
             ("identity x = x\n", true),
@@ -1271,18 +1222,18 @@ mod tests {
             ("blocked x | True = x\n", false),
             ("blocked (Just x) = x\n", false),
             ("blocked (extract -> x) = x\n", false),
-            ("blocked x = (\\x -> x)\n", false),
-            ("blocked x = let x = 1 in x\n", false),
-            ("blocked x = case x of { Just y -> y }\n", false),
-            ("blocked x = do { y <- pure x; pure y }\n", false),
-            ("blocked xs = [x | x <- xs]\n", false),
-            ("blocked x = Module.x\n", false),
-            ("blocked x = Record { field = x }\n", false),
-            ("blocked x = (x Module.+)\n", false),
-            ("blocked x = (x :: Int)\n", false),
-            ("blocked x = [| x |]\n", false),
-            ("blocked x = Just x\n", false),
-            ("blocked x = unknown (\\y -> y) x\n", false),
+            ("blocked x = (\\x -> x)\n", true),
+            ("blocked x = let x = 1 in x\n", true),
+            ("blocked x = case x of { Just y -> y }\n", true),
+            ("blocked x = do { y <- pure x; pure y }\n", true),
+            ("blocked xs = [x | x <- xs]\n", true),
+            ("blocked x = Module.x\n", true),
+            ("blocked x = Record { field = x }\n", true),
+            ("blocked x = (x Module.+)\n", true),
+            ("blocked x = (x :: Int)\n", true),
+            ("blocked x = [| x |]\n", true),
+            ("blocked x = Just x\n", true),
+            ("blocked x = unknown (\\y -> y) x\n", true),
         ] {
             let tree = parse(source);
             let clause = nodes(tree.root_node(), "function")
@@ -1315,7 +1266,7 @@ mod tests {
     }
 
     #[test]
-    fn conditional_fields_extend_only_the_closed_equation_read_frontier() {
+    fn conditional_fields_qualify_reads_independently_of_unsupported_branches() {
         let cancellation = Cancellation::new();
         for (source, eligible) in [
             (
@@ -1338,19 +1289,19 @@ mod tests {
             ),
             (
                 "blocked flag x = if flag then let x = 1 in x else x\n",
-                false,
+                true,
             ),
-            ("blocked flag x = if flag then x else (\\x -> x)\n", false),
-            ("blocked flag x = if flag then x else (x :: Int)\n", false),
-            ("blocked flag x = if Module.flag then x else x\n", false),
-            ("blocked flag x = if flag then (x Module.+) else x\n", false),
-            ("blocked flag x = if flag then Just x else x\n", false),
+            ("blocked flag x = if flag then x else (\\x -> x)\n", true),
+            ("blocked flag x = if flag then x else (x :: Int)\n", true),
+            ("blocked flag x = if Module.flag then x else x\n", true),
+            ("blocked flag x = if flag then (x Module.+) else x\n", true),
+            ("blocked flag x = if flag then Just x else x\n", true),
             (
                 "blocked flag x = if flag then x else x where\n  x = 1\n",
                 false,
             ),
             ("blocked flag x | flag = if flag then x else x\n", false),
-            ("blocked flag x = if | flag -> x\n", false),
+            ("blocked flag x = if | flag -> x\n", true),
         ] {
             let tree = parse(source);
             assert!(!tree.root_node().has_error(), "{source}");
@@ -1413,15 +1364,15 @@ mod tests {
                 true,
             ),
             ("conditional flag x = if flag then x + 1 else x\n", true),
-            ("blocked x = (x Module.+)\n", false),
-            ("blocked x = (Module.+ x)\n", false),
-            ("blocked x = x Module.+ 1\n", false),
-            ("blocked x = x `Module.combine` x\n", false),
-            ("blocked x = x : x\n", false),
-            ("blocked x = x `Just` x\n", false),
-            ("blocked x = x + (let x = 1 in x)\n", false),
-            ("blocked x = x + (\\x -> x)\n", false),
-            ("blocked x = x + (x :: Int)\n", false),
+            ("blocked x = (x Module.+)\n", true),
+            ("blocked x = (Module.+ x)\n", true),
+            ("blocked x = x Module.+ 1\n", true),
+            ("blocked x = x `Module.combine` x\n", true),
+            ("blocked x = x : x\n", true),
+            ("blocked x = x `Just` x\n", true),
+            ("blocked x = x + (let x = 1 in x)\n", true),
+            ("blocked x = x + (\\x -> x)\n", true),
+            ("blocked x = x + (x :: Int)\n", true),
             ("blocked x = x + 1 where\n  x = 1\n", false),
             ("blocked x | x = x + 1\n", false),
         ] {
@@ -1508,21 +1459,21 @@ mod tests {
             ),
             ("conditional flag x = if flag then (x +) else ($ x)\n", true),
             ("nested x = unknown ((x +) $)\n", true),
-            ("blocked x = (x Module.+)\n", false),
-            ("blocked x = (Module.+ x)\n", false),
-            ("blocked x = (x :)\n", false),
-            ("blocked x = (: x)\n", false),
-            ("blocked x = (x `Module.combine`)\n", false),
-            ("blocked x = (`Module.combine` x)\n", false),
-            ("blocked x = (x `Just`)\n", false),
-            ("blocked x = (`Just` x)\n", false),
-            ("blocked x = ((let x = 1 in x) +)\n", false),
-            ("blocked x = (+ (\\x -> x))\n", false),
+            ("blocked x = (x Module.+)\n", true),
+            ("blocked x = (Module.+ x)\n", true),
+            ("blocked x = (x :)\n", true),
+            ("blocked x = (: x)\n", true),
+            ("blocked x = (x `Module.combine`)\n", true),
+            ("blocked x = (`Module.combine` x)\n", true),
+            ("blocked x = (x `Just`)\n", true),
+            ("blocked x = (`Just` x)\n", true),
+            ("blocked x = ((let x = 1 in x) +)\n", true),
+            ("blocked x = (+ (\\x -> x))\n", true),
             ("blocked x = (x +) where\n  x = 1\n", false),
             ("blocked x | x = (x +)\n", false),
-            ("blocked x = (+)\n", false),
-            ("negated x = (- x)\n", false),
-            ("blocked x = unknown (x +) (let x = 1 in x)\n", false),
+            ("blocked x = (+)\n", true),
+            ("negated x = (- x)\n", true),
+            ("blocked x = unknown (x +) (let x = 1 in x)\n", true),
         ] {
             let tree = parse(source);
             let clause = nodes(tree.root_node(), "function")
@@ -1598,6 +1549,102 @@ mod tests {
             equation_rhs_read(operand, &cancelled),
             Err(AdapterError::Cancelled { .. })
         ));
+    }
+
+    #[test]
+    fn independent_read_paths_stop_at_binder_subtrees_and_dispatch_positions() {
+        let cases: &[(&str, &[(&str, &str)])] = &[
+            ("mixed x = combine x (let x = 1 in x)\n", &[("x", "x (let")]),
+            ("mixed x = combine (let x = 1 in x) x\n", &[("x", "x\n")]),
+            ("mixed x = combine x (\\x -> x)\n", &[("x", "x (\\")]),
+            ("mixed x = combine (\\x -> x) x\n", &[("x", "x\n")]),
+            (
+                "mixed x = combine x (case input of { Just x -> x })\n",
+                &[("x", "x (case")],
+            ),
+            (
+                "mixed x = combine (case input of { Just x -> x }) x\n",
+                &[("x", "x\n")],
+            ),
+            (
+                "mixed x = combine x (do { x <- source; pure x })\n",
+                &[("x", "x (do")],
+            ),
+            (
+                "mixed x = combine (do { x <- source; pure x }) x\n",
+                &[("x", "x\n")],
+            ),
+            ("mixed x = combine x Module.x\n", &[("x", "x Module")]),
+            ("mixed x = combine Module.x x\n", &[("x", "x\n")]),
+            ("mixed x = Module.combine x\n", &[("x", "x\n")]),
+            (
+                "mixed x = combine x (Just x)\n",
+                &[("x", "x (Just"), ("x", "x)\n")],
+            ),
+            (
+                "mixed x = combine (Just x) x\n",
+                &[("x", "x) x"), ("x", "x\n")],
+            ),
+            ("mixed x = x + (let x = 1 in x)\n", &[("x", "x +")]),
+            ("mixed x = (let x = 1 in x) + x\n", &[("x", "x\n")]),
+            (
+                "mixed x = combine (x +) (let x = 1 in x)\n",
+                &[("x", "x +")],
+            ),
+            (
+                "mixed x = combine (let x = 1 in x) ($ x)\n",
+                &[("x", "x)\n")],
+            ),
+            (
+                "dispatch operation x = operation x (let x = 1 in x)\n",
+                &[("x", "x (let")],
+            ),
+            (
+                "dispatch operation x = x `operation` (let x = 1 in x)\n",
+                &[("x", "x `")],
+            ),
+            ("qualified x = x Module.+ (let x = 1 in x)\n", &[]),
+            ("constructor x = x : (let x = 1 in x)\n", &[]),
+        ];
+        let cancellation = Cancellation::new();
+        for newline in ["\n", "\r\n"] {
+            for &(source, reads) in cases {
+                let source = source.replace('\n', newline);
+                let tree = parse(&source);
+                let clause = nodes(tree.root_node(), "function")
+                    .into_iter()
+                    .find(|node| ordinary_prefix_equation(*node))
+                    .unwrap();
+                assert!(simple_function_clause(clause, &cancellation).unwrap());
+                let actual = nodes(tree.root_node(), "variable")
+                    .into_iter()
+                    .filter(|node| equation_rhs_read(*node, &cancellation).unwrap())
+                    .map(|node| node.byte_range())
+                    .collect::<Vec<_>>();
+                let expected = reads
+                    .iter()
+                    .map(|&(name, anchor)| {
+                        let anchor = anchor.replace('\n', newline);
+                        assert!(anchor.starts_with(name));
+                        let start = source.find(&anchor).unwrap();
+                        start..start + name.len()
+                    })
+                    .collect::<Vec<_>>();
+                assert_eq!(actual, expected, "{source}");
+                let cancelled = Cancellation::new();
+                cancelled.cancel(CancellationReason::ClientRequest);
+                assert!(matches!(
+                    simple_function_clause(clause, &cancelled),
+                    Err(AdapterError::Cancelled { .. })
+                ));
+                for variable in nodes(tree.root_node(), "variable") {
+                    assert!(matches!(
+                        equation_rhs_read(variable, &cancelled),
+                        Err(AdapterError::Cancelled { .. })
+                    ));
+                }
+            }
+        }
     }
 
     #[test]

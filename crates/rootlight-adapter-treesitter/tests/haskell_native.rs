@@ -1,7 +1,7 @@
 //! Real Haskell native captures must preserve lexical binding ownership.
 //! Equation grouping and written annotations remain structural evidence.
-//! Only the closed simple-equation frontier proves formal reads; application
-//! dispatch, inferred types and other use-site names remain unavailable.
+//! Complete simple headers and admitted native paths prove formal reads.
+//! Application dispatch, inferred types and other use-site names remain unavailable.
 
 use std::{
     collections::BTreeSet,
@@ -225,6 +225,156 @@ fn defined_entity(document: &NormalizedIrDocument, span: SourceSpan) -> &EntityR
         .iter()
         .find(|entity| entity.id == *symbol)
         .unwrap()
+}
+
+fn assert_exact_clause_reads(
+    fixture: &Fixture,
+    document: &NormalizedIrDocument,
+    clause: &str,
+    reads: &[(&str, &str)],
+) {
+    let mut expected_reads = BTreeSet::new();
+    let mut expected_relations = BTreeSet::new();
+    for &(name, anchor) in reads {
+        let anchor = anchor.replace(
+            '\n',
+            if clause.contains("\r\n") {
+                "\r\n"
+            } else {
+                "\n"
+            },
+        );
+        assert!(anchor.starts_with(name));
+        let (header, _) = clause.split_once(" = ").unwrap();
+        let formal_offset = header.find(&format!(" {name}")).unwrap() + 1;
+        let start = fixture.span(clause, 0).start_byte();
+        let formal_span = SourceSpan::new(
+            fixture.snapshot.file(),
+            start + u64::try_from(formal_offset).unwrap(),
+            start + u64::try_from(formal_offset + name.len()).unwrap(),
+        )
+        .unwrap();
+        let parameter = defined_entity(document, formal_span);
+        assert_eq!(parameter.kind, EntityKind::Parameter, "{clause}");
+        let function_name = header.split_whitespace().next().unwrap();
+        let function = defined_entity(document, fixture.head(clause, 0, function_name));
+        assert_eq!(parameter.container, Some(ContainerRef::Entity(function.id)));
+        let read_span = fixture.head(&anchor, 0, name);
+        let occurrences = document
+            .occurrences
+            .iter()
+            .filter(|site| {
+                site.role == OccurrenceRole::Reference && site.source.span() == read_span
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(occurrences.len(), 1, "{clause}: {anchor}");
+        let read = occurrences[0];
+        assert!(expected_reads.insert(read.id));
+        assert_eq!(
+            read.target,
+            OccurrenceTarget::Resolved {
+                symbol: parameter.id
+            }
+        );
+        assert_eq!(read.source.repository(), fixture.source.repository());
+        assert_eq!(read.source.generation(), fixture.source.generation());
+        assert_eq!(read.source.content_hash(), fixture.source.content_hash());
+        assert_eq!(read.syntactic_text_hash, content_hash(name.as_bytes()));
+        assert_eq!(
+            read.id,
+            rootlight_ir::derive_occurrence_record_id(read).unwrap()
+        );
+        let provenance = document
+            .provenance
+            .iter()
+            .find(|record| record.id == read.provenance)
+            .unwrap();
+        assert_eq!(provenance.repository, fixture.source.repository());
+        assert_eq!(provenance.generation, fixture.source.generation());
+        assert!(provenance.input_sources.iter().any(|source| {
+            source.repository() == read.source.repository()
+                && source.generation() == read.source.generation()
+                && source.content_hash() == read.source.content_hash()
+                && source.span().file() == read_span.file()
+                && source.span().start_byte() <= read_span.start_byte()
+                && read_span.end_byte() <= source.span().end_byte()
+        }));
+        let relations = document
+            .relations
+            .iter()
+            .filter(|relation| relation.subject == RelationEndpoint::Occurrence(read.id))
+            .collect::<Vec<_>>();
+        assert_eq!(relations.len(), 1, "{clause}: {anchor}");
+        let relation = relations[0];
+        assert!(expected_relations.insert(relation.id));
+        assert_eq!(relation.predicate, RelationPredicate::RefersTo);
+        assert_eq!(relation.object, RelationEndpoint::Entity(parameter.id));
+        assert_eq!(relation.evidence_kind, rootlight_ir::EvidenceKind::Derived);
+        assert_eq!(relation.provenance, read.provenance);
+        assert_eq!(relation.evidence.source.as_ref(), Some(&read.source));
+        assert_eq!(
+            relation.id,
+            rootlight_ir::derive_relation_record_id(relation).unwrap()
+        );
+        assert!(
+            !document.skipped_regions.iter().any(|gap| {
+                gap.detail == "haskell-binding-target-unavailable" && gap.source.span() == read_span
+            }),
+            "{clause}: {anchor}"
+        );
+    }
+    let uses = document
+        .occurrences
+        .iter()
+        .filter(|site| {
+            matches!(
+                site.role,
+                OccurrenceRole::Reference
+                    | OccurrenceRole::CallSite
+                    | OccurrenceRole::TypeUse
+                    | OccurrenceRole::ImportUse
+            )
+        })
+        .collect::<Vec<_>>();
+    assert!(!uses.is_empty(), "{clause}");
+    for site in uses {
+        if expected_reads.contains(&site.id) {
+            continue;
+        }
+        assert!(
+            matches!(site.target, OccurrenceTarget::Unresolved { .. }),
+            "{clause}: {site:?}"
+        );
+        if site.role != OccurrenceRole::CallSite {
+            assert!(
+                document.skipped_regions.iter().any(|gap| {
+                    gap.detail == "haskell-binding-target-unavailable"
+                        && gap.source.span() == site.source.span()
+                }),
+                "{clause}: {site:?}"
+            );
+        }
+    }
+    assert_eq!(
+        document
+            .relations
+            .iter()
+            .filter(|relation| { relation.predicate == RelationPredicate::RefersTo })
+            .map(|relation| relation.id)
+            .collect::<BTreeSet<_>>(),
+        expected_relations
+    );
+    assert!(
+        document.relations.iter().all(|relation| {
+            matches!(
+                relation.predicate,
+                RelationPredicate::Contains
+                    | RelationPredicate::Declares
+                    | RelationPredicate::DefinesAt
+            ) || expected_relations.contains(&relation.id)
+        }),
+        "{clause}"
+    );
 }
 
 fn assert_equations(
@@ -657,52 +807,33 @@ fn unguarded_equation_reads_use_only_their_own_written_simple_formals() {
 }
 
 #[test]
-fn unsupported_equation_binders_and_rhs_shapes_keep_all_use_sites_unresolved() {
-    for body in [
-        "blocked x = x where\n  x = 1\n",
-        "blocked x | True = x\n",
-        "blocked (Just x) = x\n",
-        "blocked (extract -> x) = x\n",
-        "blocked x = (\\x -> x)\n",
-        "blocked x = let x = 1 in x\n",
-        "blocked x = case x of { Just y -> y }\n",
-        "blocked x = do { y <- pure x; pure y }\n",
-        "blocked xs = [x | x <- xs]\n",
-        "blocked x = Module.x\n",
-        "blocked x = Record { field = x }\n",
-        "blocked x = (x Module.+)\n",
-        "blocked x = (x :: Int)\n",
-        "blocked x = [| x |]\n",
-        "blocked x = Just x\n",
-        "blocked x = unknown (\\y -> y) x\n",
-    ] {
-        let fixture = Fixture::new(format!("module Negative where\n{body}"));
-        let output = fixture.analyze();
-        let document = output.document();
-        let uses = document
-            .occurrences
-            .iter()
-            .filter(|site| {
-                matches!(
-                    site.role,
-                    OccurrenceRole::Reference | OccurrenceRole::CallSite | OccurrenceRole::TypeUse
-                )
-            })
-            .collect::<Vec<_>>();
-        assert!(!uses.is_empty(), "{body}");
-        assert!(
-            uses.iter()
-                .all(|site| matches!(site.target, OccurrenceTarget::Unresolved { .. })),
-            "{body}"
-        );
-        assert!(
-            document
-                .relations
-                .iter()
-                .all(|relation| relation.predicate != RelationPredicate::RefersTo
-                    && relation.predicate != RelationPredicate::Calls),
-            "{body}"
-        );
+fn unsupported_equation_subtrees_remain_unresolved_without_blocking_independent_reads() {
+    let cases: &[(&str, &[(&str, &str)])] = &[
+        ("blocked x = x where\n  x = 1\n", &[]),
+        ("blocked x | True = x\n", &[]),
+        ("blocked (Just x) = x\n", &[]),
+        ("blocked (extract -> x) = x\n", &[]),
+        ("blocked x = (\\x -> x)\n", &[]),
+        ("blocked x = let x = 1 in x\n", &[]),
+        ("blocked x = case x of { Just y -> y }\n", &[]),
+        ("blocked x = do { y <- pure x; pure y }\n", &[]),
+        ("blocked xs = [x | x <- xs]\n", &[]),
+        ("blocked x = Module.x\n", &[]),
+        ("blocked x = Record { field = x }\n", &[]),
+        ("blocked x = (x Module.+)\n", &[]),
+        ("blocked x = (x :: Int)\n", &[]),
+        ("blocked x = [| x |]\n", &[]),
+        ("blocked x = Just x\n", &[("x", "x\n")]),
+        ("blocked x = Module.combine x\n", &[("x", "x\n")]),
+        ("blocked x = unknown (\\y -> y) x\n", &[("x", "x\n")]),
+    ];
+    for newline in ["\n", "\r\n"] {
+        for &(body, reads) in cases {
+            let body = body.replace('\n', newline);
+            let fixture = Fixture::new(format!("module Negative where{newline}{body}"));
+            let output = fixture.analyze();
+            assert_exact_clause_reads(&fixture, output.document(), &body, reads);
+        }
     }
 }
 
@@ -901,54 +1032,62 @@ fn conditional_field_reads_resolve_only_their_exact_clause_formals() {
 }
 
 #[test]
-fn unsupported_conditional_children_close_the_whole_clause_read_frontier() {
-    for newline in ["\n", "\r\n"] {
-        for body in [
+fn conditional_read_paths_leave_unsupported_branches_unresolved() {
+    let cases: &[(&str, &[(&str, &str)])] = &[
+        (
             "blocked flag x = if flag then let x = 1 in x else x\n",
+            &[("flag", "flag then"), ("x", "x\n")],
+        ),
+        (
             "blocked flag x = if flag then x else (\\x -> x)\n",
+            &[("flag", "flag then"), ("x", "x else")],
+        ),
+        (
             "blocked flag x = if (let flag = x in flag) then x else x\n",
+            &[("x", "x else"), ("x", "x\n")],
+        ),
+        (
             "blocked flag x = if flag then case x of { Just y -> y } else x\n",
+            &[("flag", "flag then"), ("x", "x\n")],
+        ),
+        (
             "blocked flag x = if flag then x else do { y <- pure x; pure y }\n",
+            &[("flag", "flag then"), ("x", "x else")],
+        ),
+        (
             "blocked flag x = if flag then [y | y <- x] else x\n",
+            &[("flag", "flag then"), ("x", "x\n")],
+        ),
+        (
             "blocked flag x = if flag then (x :: Int) else x\n",
+            &[("flag", "flag then"), ("x", "x\n")],
+        ),
+        (
             "blocked flag x = if Module.flag then x else x\n",
+            &[("x", "x else"), ("x", "x\n")],
+        ),
+        (
             "blocked flag x = if flag then Just x else x\n",
+            &[("flag", "flag then"), ("x", "x else"), ("x", "x\n")],
+        ),
+        (
             "blocked flag x = if flag then (x Module.+) else x\n",
+            &[("flag", "flag then"), ("x", "x\n")],
+        ),
+        (
             "blocked flag x = if flag then x else x where\n  x = 1\n",
-            "blocked flag x | flag = if flag then x else x\n",
-            "blocked flag (Just x) = if flag then x else x\n",
-            "blocked flag x = if | flag -> x\n",
-        ] {
-            let fixture = Fixture::new(
-                format!("module NegativeConditional where\n{body}").replace('\n', newline),
-            );
+            &[],
+        ),
+        ("blocked flag x | flag = if flag then x else x\n", &[]),
+        ("blocked flag (Just x) = if flag then x else x\n", &[]),
+        ("blocked flag x = if | flag -> x\n", &[]),
+    ];
+    for newline in ["\n", "\r\n"] {
+        for &(body, reads) in cases {
+            let body = body.replace('\n', newline);
+            let fixture = Fixture::new(format!("module NegativeConditional where{newline}{body}"));
             let output = fixture.analyze();
-            let document = output.document();
-            let uses = document
-                .occurrences
-                .iter()
-                .filter(|site| {
-                    matches!(
-                        site.role,
-                        OccurrenceRole::Reference
-                            | OccurrenceRole::CallSite
-                            | OccurrenceRole::TypeUse
-                    )
-                })
-                .collect::<Vec<_>>();
-            assert!(!uses.is_empty(), "{body}");
-            assert!(
-                uses.iter()
-                    .all(|site| matches!(site.target, OccurrenceTarget::Unresolved { .. })),
-                "{body}"
-            );
-            assert!(
-                document.relations.iter().all(|relation| {
-                    relation.predicate != RelationPredicate::RefersTo
-                        && relation.predicate != RelationPredicate::Calls
-                }),
-                "{body}"
-            );
+            assert_exact_clause_reads(&fixture, output.document(), &body, reads);
         }
     }
 }
@@ -1197,55 +1336,37 @@ fn infix_operand_reads_resolve_only_their_exact_clause_formals() {
 }
 
 #[test]
-fn unsupported_infix_children_and_operator_shapes_close_the_whole_clause_frontier() {
-    for newline in ["\n", "\r\n"] {
-        for body in [
-            "blocked x = (x Module.+)\n",
-            "blocked x = (Module.+ x)\n",
-            "blocked x = x Module.+ 1\n",
-            "blocked x = x `Module.combine` x\n",
-            "blocked x = x : x\n",
-            "blocked x = x `Just` x\n",
-            "blocked x = x + (let x = 1 in x)\n",
-            "blocked x = x + (\\x -> x)\n",
+fn infix_read_paths_keep_unsupported_operands_and_dispatch_unresolved() {
+    let cases: &[(&str, &[(&str, &str)])] = &[
+        ("blocked x = (x Module.+)\n", &[]),
+        ("blocked x = (Module.+ x)\n", &[]),
+        ("blocked x = x Module.+ 1\n", &[]),
+        ("blocked x = x `Module.combine` x\n", &[]),
+        ("blocked x = x : x\n", &[]),
+        ("blocked x = x `Just` x\n", &[]),
+        ("blocked x = x + (let x = 1 in x)\n", &[("x", "x +")]),
+        ("blocked x = x + (\\x -> x)\n", &[("x", "x +")]),
+        (
             "blocked x = x + (case x of { Just y -> y })\n",
+            &[("x", "x +")],
+        ),
+        (
             "blocked x = x + (do { y <- pure x; pure y })\n",
-            "blocked x = x + [y | y <- x]\n",
-            "blocked x = x + (x :: Int)\n",
-            "blocked x = x + 1 where\n  x = 1\n",
-            "blocked x | x = x + 1\n",
-            "blocked (Just x) = x + 1\n",
-            "blocked x = x + Module.value\n",
-        ] {
-            let fixture =
-                Fixture::new(format!("module NegativeInfix where\n{body}").replace('\n', newline));
+            &[("x", "x +")],
+        ),
+        ("blocked x = x + [y | y <- x]\n", &[("x", "x +")]),
+        ("blocked x = x + (x :: Int)\n", &[("x", "x +")]),
+        ("blocked x = x + 1 where\n  x = 1\n", &[]),
+        ("blocked x | x = x + 1\n", &[]),
+        ("blocked (Just x) = x + 1\n", &[]),
+        ("blocked x = x + Module.value\n", &[("x", "x +")]),
+    ];
+    for newline in ["\n", "\r\n"] {
+        for &(body, reads) in cases {
+            let body = body.replace('\n', newline);
+            let fixture = Fixture::new(format!("module NegativeInfix where{newline}{body}"));
             let output = fixture.analyze();
-            let document = output.document();
-            let uses = document
-                .occurrences
-                .iter()
-                .filter(|site| {
-                    matches!(
-                        site.role,
-                        OccurrenceRole::Reference
-                            | OccurrenceRole::CallSite
-                            | OccurrenceRole::TypeUse
-                    )
-                })
-                .collect::<Vec<_>>();
-            assert!(!uses.is_empty(), "{body}");
-            assert!(
-                uses.iter()
-                    .all(|site| matches!(site.target, OccurrenceTarget::Unresolved { .. })),
-                "{body}"
-            );
-            assert!(
-                document.relations.iter().all(|relation| {
-                    relation.predicate != RelationPredicate::RefersTo
-                        && relation.predicate != RelationPredicate::Calls
-                }),
-                "{body}"
-            );
+            assert_exact_clause_reads(&fixture, output.document(), &body, reads);
         }
     }
 }
@@ -1485,88 +1606,236 @@ fn operator_section_reads_resolve_only_their_exact_clause_formals() {
 }
 
 #[test]
-fn unsupported_operator_sections_close_the_whole_clause_frontier() {
-    for newline in ["\n", "\r\n"] {
-        for body in [
-            "blocked x = unknown (x Module.+)\n",
-            "blocked x = unknown (Module.+ x)\n",
-            "blocked x = unknown (x :)\n",
-            "blocked x = unknown (: x)\n",
-            "blocked x = unknown (x `Module.combine`)\n",
-            "blocked x = unknown (`Module.combine` x)\n",
-            "blocked x = unknown (x `Just`)\n",
-            "blocked x = unknown (`Just` x)\n",
-            "blocked x = unknown ((let x = 1 in x) +)\n",
-            "blocked x = unknown (+ (\\x -> x))\n",
+fn operator_section_read_paths_keep_unsupported_operands_and_dispatch_unresolved() {
+    let cases: &[(&str, &[(&str, &str)])] = &[
+        ("blocked x = unknown (x Module.+)\n", &[]),
+        ("blocked x = unknown (Module.+ x)\n", &[]),
+        ("blocked x = unknown (x :)\n", &[]),
+        ("blocked x = unknown (: x)\n", &[]),
+        ("blocked x = unknown (x `Module.combine`)\n", &[]),
+        ("blocked x = unknown (`Module.combine` x)\n", &[]),
+        ("blocked x = unknown (x `Just`)\n", &[]),
+        ("blocked x = unknown (`Just` x)\n", &[]),
+        ("blocked x = unknown ((let x = 1 in x) +)\n", &[]),
+        ("blocked x = unknown (+ (\\x -> x))\n", &[]),
+        (
             "blocked x = unknown (x +) (let x = 1 in x)\n",
-        ] {
-            let fixture = Fixture::new(
-                format!("module NegativeSections where\n{body}").replace('\n', newline),
-            );
+            &[("x", "x +")],
+        ),
+    ];
+    for newline in ["\n", "\r\n"] {
+        for &(body, reads) in cases {
+            let body = body.replace('\n', newline);
+            let fixture = Fixture::new(format!("module NegativeSections where{newline}{body}"));
             let output = fixture.analyze();
-            let document = output.document();
-            let uses = document
-                .occurrences
-                .iter()
-                .filter(|site| {
-                    matches!(
-                        site.role,
-                        OccurrenceRole::Reference
-                            | OccurrenceRole::CallSite
-                            | OccurrenceRole::TypeUse
-                    )
-                })
-                .collect::<Vec<_>>();
-            assert!(!uses.is_empty(), "{body}");
-            assert!(
-                uses.iter()
-                    .all(|site| matches!(site.target, OccurrenceTarget::Unresolved { .. })),
-                "{body}"
-            );
-            assert!(
-                document.relations.iter().all(|relation| {
-                    relation.predicate != RelationPredicate::RefersTo
-                        && relation.predicate != RelationPredicate::Calls
-                }),
-                "{body}"
-            );
+            assert_exact_clause_reads(&fixture, output.document(), &body, reads);
         }
     }
 }
 
 #[test]
-fn body_only_admission_changes_preserve_function_and_clause_formal_identities() {
-    let mut original = None;
-    for body in [
-        "x",
-        "unknown y x",
-        "if x then y else x",
-        "x + 1",
-        "x `unknown` y",
-        "(x +)",
-        "($ y)",
-        "unknown (x +) ($ y)",
-        "let z = x in z",
-    ] {
-        let fixture = Fixture::new(format!("module Stable where\npick x y = {body}\n"));
-        let output = fixture.analyze();
-        let document = output.document();
-        let function = defined_entity(document, fixture.span("pick", 0));
-        assert_eq!(function.kind, EntityKind::Function);
-        let mut identities = vec![(function.kind, function.canonical_name.clone(), function.id)];
-        for name in ["x", "y"] {
-            let parameter = defined_entity(document, fixture.span(name, 0));
-            assert_eq!(parameter.kind, EntityKind::Parameter);
-            assert_eq!(parameter.container, Some(ContainerRef::Entity(function.id)));
-            identities.push((
-                parameter.kind,
-                parameter.canonical_name.clone(),
-                parameter.id,
-            ));
+fn independent_rhs_paths_resolve_exact_formals_beside_binder_and_dispatch_subtrees() {
+    let cases: &[(&str, &[(&str, &str)])] = &[
+        ("mixed x = combine x (let x = 1 in x)\n", &[("x", "x (let")]),
+        ("mixed x = combine (let x = 1 in x) x\n", &[("x", "x\n")]),
+        ("mixed x = combine x (\\x -> x)\n", &[("x", "x (\\")]),
+        ("mixed x = combine (\\x -> x) x\n", &[("x", "x\n")]),
+        (
+            "mixed x = combine x (case input of { Just x -> x })\n",
+            &[("x", "x (case")],
+        ),
+        (
+            "mixed x = combine (case input of { Just x -> x }) x\n",
+            &[("x", "x\n")],
+        ),
+        (
+            "mixed x = combine x (do { x <- source; pure x })\n",
+            &[("x", "x (do")],
+        ),
+        (
+            "mixed x = combine (do { x <- source; pure x }) x\n",
+            &[("x", "x\n")],
+        ),
+        ("mixed x = combine x Module.x\n", &[("x", "x Module")]),
+        ("mixed x = combine Module.x x\n", &[("x", "x\n")]),
+        (
+            "mixed x = combine x (Just x)\n",
+            &[("x", "x (Just"), ("x", "x)\n")],
+        ),
+        (
+            "mixed x = combine (Just x) x\n",
+            &[("x", "x) x"), ("x", "x\n")],
+        ),
+        ("mixed x = Module.combine x\n", &[("x", "x\n")]),
+        ("mixed x = x + (let x = 1 in x)\n", &[("x", "x +")]),
+        ("mixed x = (let x = 1 in x) + x\n", &[("x", "x\n")]),
+        (
+            "mixed x = combine (x +) (let x = 1 in x)\n",
+            &[("x", "x +")],
+        ),
+        (
+            "mixed x = combine (let x = 1 in x) ($ x)\n",
+            &[("x", "x)\n")],
+        ),
+        (
+            "dispatch operation x = operation x (let x = 1 in x)\n",
+            &[("x", "x (let")],
+        ),
+        (
+            "dispatch operation x = x `operation` (let x = 1 in x)\n",
+            &[("x", "x `")],
+        ),
+        (
+            "dispatch operation x = combine (x `operation`) (let x = 1 in x)\n",
+            &[("x", "x `")],
+        ),
+        ("qualified x = x Module.+ (let x = 1 in x)\n", &[]),
+        ("constructor x = x : (let x = 1 in x)\n", &[]),
+        ("duplicate x x = combine x (let y = 1 in y)\n", &[]),
+        ("guarded x | True = combine x (let y = 1 in y)\n", &[]),
+        ("trailing x = combine x (\\y -> y) where\n  x = 1\n", &[]),
+        ("patterned (Just x) = combine x (\\y -> y)\n", &[]),
+    ];
+    let witnesses: &[(&str, &str, &str)] = &[
+        ("mixed x = combine x (let x = 1 in x)\n", "x", "x)\n"),
+        ("mixed x = combine (let x = 1 in x) x\n", "x", "x) x"),
+        ("mixed x = combine x (\\x -> x)\n", "x", "x)\n"),
+        ("mixed x = combine (\\x -> x) x\n", "x", "x) x"),
+        (
+            "mixed x = combine x (case input of { Just x -> x })\n",
+            "x",
+            "x })",
+        ),
+        (
+            "mixed x = combine (case input of { Just x -> x }) x\n",
+            "x",
+            "x })",
+        ),
+        (
+            "mixed x = combine x (do { x <- source; pure x })\n",
+            "x",
+            "x })",
+        ),
+        (
+            "mixed x = combine (do { x <- source; pure x }) x\n",
+            "x",
+            "x })",
+        ),
+        ("mixed x = combine x Module.x\n", "Module.x", "Module.x\n"),
+        ("mixed x = combine x (Just x)\n", "Just", "Just x)"),
+        (
+            "mixed x = Module.combine x\n",
+            "Module.combine",
+            "Module.combine x",
+        ),
+        (
+            "dispatch operation x = operation x (let x = 1 in x)\n",
+            "operation",
+            "operation x (let",
+        ),
+        (
+            "dispatch operation x = x `operation` (let x = 1 in x)\n",
+            "operation",
+            "operation`",
+        ),
+        (
+            "dispatch operation x = combine (x `operation`) (let x = 1 in x)\n",
+            "operation",
+            "operation`)",
+        ),
+    ];
+    let mut checked_witnesses = 0;
+    for newline in ["\n", "\r\n"] {
+        for &(body, reads) in cases {
+            let authored_body = body;
+            let body = body.replace('\n', newline);
+            let fixture = Fixture::new(format!("module Independent where{newline}{body}"));
+            let output = fixture.analyze();
+            let document = output.document();
+            assert_exact_clause_reads(&fixture, document, &body, reads);
+            for &(witness_body, name, anchor) in witnesses {
+                if witness_body != authored_body {
+                    continue;
+                }
+                checked_witnesses += 1;
+                let span = fixture.head(&anchor.replace('\n', newline), 0, name);
+                let sites = document
+                    .occurrences
+                    .iter()
+                    .filter(|site| {
+                        site.role == OccurrenceRole::Reference && site.source.span() == span
+                    })
+                    .collect::<Vec<_>>();
+                assert_eq!(sites.len(), 1, "{body}: {anchor}");
+                assert!(matches!(
+                    sites[0].target,
+                    OccurrenceTarget::Unresolved { .. }
+                ));
+                assert_eq!(sites[0].source.generation(), fixture.source.generation());
+                assert_eq!(
+                    sites[0].source.content_hash(),
+                    fixture.source.content_hash()
+                );
+                assert!(
+                    document.skipped_regions.iter().any(|gap| {
+                        gap.detail == "haskell-binding-target-unavailable"
+                            && gap.source.span() == span
+                    }),
+                    "{body}: {anchor}"
+                );
+            }
         }
-        assert_eq!(
-            original.get_or_insert_with(|| identities.clone()),
-            &identities
-        );
+    }
+    assert_eq!(checked_witnesses, witnesses.len() * 2);
+}
+
+#[test]
+fn body_only_admission_changes_preserve_function_and_clause_formal_identities() {
+    for newline in ["\n", "\r\n"] {
+        let mut original = None;
+        for body in [
+            "x",
+            "unknown y x",
+            "if x then y else x",
+            "x + 1",
+            "x `unknown` y",
+            "(x +)",
+            "($ y)",
+            "unknown (x +) ($ y)",
+            "let z = x in z",
+            "unknown x (let x = 1 in x)",
+            "unknown (let x = 1 in x) x",
+            "unknown x (\\x -> x)",
+            "unknown (\\x -> x) x",
+            "unknown x (case input of { Just x -> x })",
+            "unknown (do { x <- source; pure x }) x",
+            "if x then y else (let y = 1 in y)",
+            "x + (let x = 1 in x)",
+            "unknown (x +) (let x = 1 in x)",
+        ] {
+            let fixture = Fixture::new(
+                format!("module Stable where\npick x y = {body}\n").replace('\n', newline),
+            );
+            let output = fixture.analyze();
+            let document = output.document();
+            let function = defined_entity(document, fixture.span("pick", 0));
+            assert_eq!(function.kind, EntityKind::Function);
+            let mut identities =
+                vec![(function.kind, function.canonical_name.clone(), function.id)];
+            for name in ["x", "y"] {
+                let parameter = defined_entity(document, fixture.span(name, 0));
+                assert_eq!(parameter.kind, EntityKind::Parameter);
+                assert_eq!(parameter.container, Some(ContainerRef::Entity(function.id)));
+                identities.push((
+                    parameter.kind,
+                    parameter.canonical_name.clone(),
+                    parameter.id,
+                ));
+            }
+            assert_eq!(
+                original.get_or_insert_with(|| identities.clone()),
+                &identities
+            );
+        }
     }
 }
