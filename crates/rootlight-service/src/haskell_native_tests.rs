@@ -9,7 +9,7 @@ use rootlight_ir::{
 };
 use std::fs;
 
-const SAMPLE: &str = "module Sample (adjust, Label(..)) where\nimport qualified Peer as Other\n-- λ😀 source marker\nadjust :: Int -> Int\nadjust value = helper (value + 1)\nhelper value = Other.helper value\nclass Label a where\n  label :: a -> String\ninstance Label Int where\n  label value = Other.label value\n";
+const SAMPLE: &str = "module Sample (adjust, Label(..)) where\nimport qualified Peer as Other\n-- λ😀 source marker\nadjust :: Int -> Int\nadjust value = helper (value + 1)\nhelper value = Other.helper value\nsection operation value = operation (value +)\nclass Label a where\n  label :: a -> String\ninstance Label Int where\n  label value = Other.label value\n";
 const PEER: &str = "module Peer where\nhelper :: Int -> Int\nhelper value = value\nlabel :: Int -> String\nlabel value = \"value\"\n";
 
 fn deadline() -> Cancellation {
@@ -81,7 +81,7 @@ fn assert_generation(
     receipt: &FirstSliceIndexReceipt,
     sample: &str,
     peer: &str,
-) -> (SymbolId, BTreeSet<SymbolId>, SourceRef) {
+) -> (BTreeSet<SymbolId>, BTreeSet<SymbolId>, SourceRef) {
     let snapshot = service
         .loaded_generation_snapshot(receipt.generation)
         .unwrap();
@@ -181,7 +181,12 @@ fn assert_generation(
         .unwrap();
     let adjust = function(document, sample_file.id, "adjust");
     let helper = function(document, sample_file.id, "helper");
-    for (entity, written) in [(adjust, "adjust value"), (helper, "helper value")] {
+    let section = function(document, sample_file.id, "section");
+    for (entity, written) in [
+        (adjust, "adjust value"),
+        (helper, "helper value"),
+        (section, "section operation value"),
+    ] {
         let definitions: Vec<_> = document
             .occurrences
             .iter()
@@ -257,6 +262,19 @@ fn assert_generation(
         .find(|file| file.path == "Peer.hs")
         .unwrap();
     let peer_helper = function(document, peer_file.id, "helper");
+    let section_body = sample
+        .split_once("section operation value = ")
+        .unwrap()
+        .1
+        .lines()
+        .next()
+        .unwrap();
+    let section_read_prefix = match section_body {
+        "operation (value +)" => "section operation value = operation (",
+        "operation (+ value)" => "section operation value = operation (+ ",
+        _ => panic!("unexpected authored section body"),
+    };
+    let mut stable_symbols = BTreeSet::new();
     let mut resolved_read_ids = BTreeSet::new();
     let mut formal_relation_ids = BTreeSet::new();
     for (text, file, owner, clause, formal_prefix, read_prefix) in [
@@ -275,6 +293,14 @@ fn assert_generation(
             "adjust value = helper (",
             "adjust ",
             "adjust value = helper (",
+        ),
+        (
+            sample,
+            sample_file.id,
+            section.id,
+            "section operation value = operation (",
+            "section operation ",
+            section_read_prefix,
         ),
     ] {
         assert_eq!(text.matches(clause).count(), 1);
@@ -301,6 +327,8 @@ fn assert_generation(
         assert_eq!(parameters.len(), 1);
         let parameter = parameters[0];
         assert_eq!(parameter.container, Some(ContainerRef::Entity(owner)));
+        stable_symbols.insert(owner);
+        assert!(stable_symbols.insert(parameter.id));
         let definitions: Vec<_> = document
             .occurrences
             .iter()
@@ -366,8 +394,89 @@ fn assert_generation(
             gap.detail == "haskell-binding-target-unavailable" && gap.source.span() == read_span
         }));
     }
-    assert_eq!(resolved_read_ids.len(), 2);
-    assert_eq!(formal_relation_ids.len(), 2);
+    assert_eq!(resolved_read_ids.len(), 3);
+    assert_eq!(formal_relation_ids.len(), 3);
+    let section_start = u64::try_from(sample.find("section operation value = ").unwrap()).unwrap();
+    let operation_start = section_start + u64::try_from("section ".len()).unwrap();
+    let operation_span =
+        rootlight_ir::SourceSpan::new(sample_file.id, operation_start, operation_start + 9)
+            .unwrap();
+    let parameters: Vec<_> = document
+        .entities
+        .iter()
+        .filter(|entity| {
+            entity.kind == EntityKind::Parameter
+                && entity.canonical_name == "operation"
+                && entity
+                    .evidence
+                    .source
+                    .as_ref()
+                    .is_some_and(|source| source.span() == operation_span)
+        })
+        .collect();
+    assert_eq!(parameters.len(), 1);
+    assert_eq!(
+        parameters[0].container,
+        Some(ContainerRef::Entity(section.id))
+    );
+    assert!(stable_symbols.insert(parameters[0].id));
+    let definitions: Vec<_> = document
+        .occurrences
+        .iter()
+        .filter(|site| {
+            site.role == OccurrenceRole::Definition && site.source.span() == operation_span
+        })
+        .collect();
+    assert_eq!(definitions.len(), 1);
+    assert_eq!(
+        definitions[0].syntax_kind,
+        "haskell.binding_name.definition"
+    );
+    assert_eq!(
+        definitions[0].target,
+        OccurrenceTarget::Resolved {
+            symbol: parameters[0].id
+        }
+    );
+    let rhs_start = u64::try_from(sample.find(section_body).unwrap()).unwrap();
+    assert_eq!(section_body.matches('+').count(), 1);
+    for (offset, written, syntax_kind) in [
+        (0, "operation", "haskell.identifier.reference"),
+        (
+            section_body.find('+').unwrap(),
+            "+",
+            "haskell.operator_name.reference",
+        ),
+    ] {
+        let start = rhs_start + u64::try_from(offset).unwrap();
+        let span = rootlight_ir::SourceSpan::new(
+            sample_file.id,
+            start,
+            start + u64::try_from(written.len()).unwrap(),
+        )
+        .unwrap();
+        let sites: Vec<_> = uses
+            .iter()
+            .filter(|site| site.role == OccurrenceRole::Reference && site.source.span() == span)
+            .collect();
+        assert_eq!(sites.len(), 1);
+        assert_eq!(sites[0].syntax_kind, syntax_kind);
+        assert!(matches!(
+            sites[0].target,
+            OccurrenceTarget::Unresolved { .. }
+        ));
+        exact_source(service, &sites[0].source, written.as_bytes());
+        assert!(
+            document
+                .relations
+                .iter()
+                .all(|relation| { relation.subject != RelationEndpoint::Occurrence(sites[0].id) })
+        );
+        assert!(document.skipped_regions.iter().any(|gap| {
+            gap.detail == "haskell-binding-target-unavailable" && gap.source.span() == span
+        }));
+    }
+    assert_eq!(stable_symbols.len(), 7);
     assert!(
         uses.iter()
             .filter(|site| !resolved_read_ids.contains(&site.id))
@@ -383,6 +492,7 @@ fn assert_generation(
             .unwrap(),
         "Other.helper value",
         "Other.label value",
+        section_body,
     ] {
         let start = u64::try_from(sample.find(written).unwrap()).unwrap();
         let calls: Vec<_> = uses
@@ -471,7 +581,7 @@ fn assert_generation(
         );
     }
     (
-        adjust.id,
+        stable_symbols,
         document.entities.iter().map(|entity| entity.id).collect(),
         sample_file.evidence.source.clone().unwrap(),
     )
@@ -505,7 +615,7 @@ fn haskell_native_sources_and_symbols_survive_noop_edit_reopen_and_clean_rebuild
         assert!(first.receipt().discovery_complete);
         assert_eq!(first.evidence().rebuilt_files, 2);
         let initial = first.receipt().clone();
-        let (original_symbol, original_entities, original_source) =
+        let (original_symbols, original_entities, original_source) =
             assert_generation(&service, &initial, &sample, &peer);
         let noop = index(
             &mut service,
@@ -523,7 +633,22 @@ fn haskell_native_sources_and_symbols_survive_noop_edit_reopen_and_clean_rebuild
         assert_eq!(noop.evidence().changed_files, 0);
 
         assert_eq!(sample.matches("value + 1").count(), 1);
-        let changed = sample.replace("value + 1", "value + 2");
+        assert_eq!(
+            sample
+                .matches("section operation value = operation (value +)")
+                .count(),
+            1
+        );
+        let changed = sample.replace("value + 1", "value + 2").replace(
+            "section operation value = operation (value +)",
+            "section operation value = operation (+ value)",
+        );
+        assert_eq!(
+            changed
+                .matches("section operation value = operation (+ value)")
+                .count(),
+            1
+        );
         assert_ne!(
             content_hash(sample.as_bytes()),
             content_hash(changed.as_bytes())
@@ -539,9 +664,9 @@ fn haskell_native_sources_and_symbols_survive_noop_edit_reopen_and_clean_rebuild
         assert_eq!(updated.parent, Some(initial.generation));
         assert_eq!(mutation.evidence().changed_files, 1);
         assert!(mutation.evidence().rebuilt_files > 0);
-        let (updated_symbol, updated_entities, updated_source) =
+        let (updated_symbols, updated_entities, updated_source) =
             assert_generation(&service, &updated, &changed, &peer);
-        assert_eq!(updated_symbol, original_symbol);
+        assert_eq!(updated_symbols, original_symbols);
         assert_ne!(
             updated_source.content_hash(),
             original_source.content_hash()
@@ -589,9 +714,9 @@ fn haskell_native_sources_and_symbols_survive_noop_edit_reopen_and_clean_rebuild
         );
         assert!(updated.logical_snapshot.is_some());
         assert_eq!(clean.receipt().logical_snapshot, updated.logical_snapshot);
-        let (clean_symbol, clean_entities, _) =
+        let (clean_symbols, clean_entities, _) =
             assert_generation(&reopened, clean.receipt(), &changed, &peer);
-        assert_eq!(clean_symbol, original_symbol);
+        assert_eq!(clean_symbols, original_symbols);
         assert_eq!(clean_entities, updated_entities);
         drop(reopened);
         let restored = FirstSliceService::new_durable(4, paths.state_dir(), &deadline()).unwrap();

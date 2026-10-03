@@ -29296,6 +29296,7 @@ mod tests {
             "sample.css",
             "sample.go",
             "sample.groovy",
+            "sample.hs",
             "sample.html",
             "sample.java",
             "sample.js",
