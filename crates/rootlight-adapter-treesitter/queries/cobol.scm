@@ -8,6 +8,7 @@
 [(section_header) (paragraph_header)] @declaration @definition @signature
 (copy_statement) @import
 (qualified_word) @reference
+(occurs_bound (WORD) @reference)
 (procedure_param) @reference
 (call_statement) @reference
 (perform_procedure (label) @reference)

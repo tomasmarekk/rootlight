@@ -31,8 +31,8 @@
   "local_overrides": {
     "grammar.js": {
       "original_upstream": "grammar.js.orig",
-      "local_sha256": "0354e8aec927c7165a5412799339b855e1e9781fa864f52d6657a78d91affdf2",
-      "changes": "case-insensitive x/X literal prefix and LINE SEQUENTIAL organization; existing payload policy and organization alternatives preserved"
+      "local_sha256": "396a76a3294489a0b517936713521a95bd40232b07f257b533e04d712bc2e4e0",
+      "changes": "case-insensitive x/X literal prefix, LINE SEQUENTIAL organization and dedicated integer/symbolic OCCURS bounds with contextual structural-keyword exclusion; no constant evaluation or global identifier widening"
     },
     "Cargo.toml": "lowercase unpublished package and modern local binding; original retained as Cargo.toml.orig",
     "bindings/rust/build.rs": "compile retained tables twice with explicit fixed/free scanner exports; original retained with .orig suffix",
@@ -64,9 +64,9 @@
     "unchanged_baseline_all_tree_behavioral_equivalence_proven": false,
     "independent_regenerations_byte_identical": true,
     "generated_output_sha256": {
-      "src/grammar.json": "8ea4e645833f0d8441c7c0454eda2eb9b36d30f0fbb38c529b2f22165455ee47",
-      "src/node-types.json": "3aae50d0b119646c7cb92e03433c5e476b462ebccf22534d384a3f163f0e27a5",
-      "src/parser.c": "343ccd5816708dcd34a1e2207658859a6c84d77e0ddf08a726493a2102ba734c",
+      "src/grammar.json": "075caf48f8c7c3ebdefad0914633d89a5c999d447b85a51076e58fcf956437b2",
+      "src/node-types.json": "32100c7e007d5d6dbbc4f4cf0cd0e3a3c89ec7cb7874e78cf8ded0d3d70625e1",
+      "src/parser.c": "c04d6e37a0bb7439f0b9a17a4bf21902c7c9c28d31574fe1a955e6fe930cb088",
       "src/tree_sitter/alloc.h": "b29c1c9fb7cc82f58c84b376df1297d6e2737a1d655fd356db0859e3c29c2fea",
       "src/tree_sitter/array.h": "4ff743903dc46f5db6aa54f31c6b4d160a8a9779e5b2ab1ee59ae7ebcd850ea1",
       "src/tree_sitter/parser.h": "a1f6ef161fbaf48a0e10fca90ef5290a062462b307b3898aa562993853b9f80a"

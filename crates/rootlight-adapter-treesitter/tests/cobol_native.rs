@@ -279,6 +279,49 @@ fn assert_header(
     );
 }
 
+fn assert_unproven_reference(
+    document: &NormalizedIrDocument,
+    fixture: &Fixture,
+    written: &str,
+    occurrence: usize,
+    syntax: &str,
+    enclosing: Option<&EntityRecord>,
+) {
+    let span = fixture.span(written, occurrence);
+    let sites: Vec<_> = document
+        .occurrences
+        .iter()
+        .filter(|site| site.source.span() == span)
+        .collect();
+    assert_eq!(sites.len(), 1, "{syntax}: {written} at {span:?}");
+    let site = sites[0];
+    assert_eq!(site.role, OccurrenceRole::Reference);
+    assert_eq!(site.syntax_kind, syntax);
+    assert_eq!(site.enclosing, enclosing.map(|entity| entity.id));
+    assert_eq!(site.syntactic_text_hash, content_hash(written.as_bytes()));
+    assert_eq!(
+        site.target,
+        OccurrenceTarget::Unresolved {
+            text_hash: content_hash(written.as_bytes()),
+        }
+    );
+    assert_eq!(site.provenance, document.provenance[0].id);
+    assert_eq!(site.source.repository(), fixture.source.repository());
+    assert_eq!(site.source.generation(), fixture.source.generation());
+    assert_eq!(site.source.content_hash(), fixture.source.content_hash());
+    assert_eq!(site.evidence.source.as_ref(), Some(&site.source));
+    let gaps: Vec<_> = document
+        .skipped_regions
+        .iter()
+        .filter(|gap| gap.source.span() == span && gap.detail == "cobol-binding-target-unavailable")
+        .collect();
+    assert_eq!(gaps.len(), 1);
+    assert_eq!(gaps[0].domain, FactDomain::Relations);
+    assert_eq!(gaps[0].reason, SkippedRegionReason::UnsupportedConstruct);
+    assert_eq!(gaps[0].provenance, site.provenance);
+    assert_eq!(gaps[0].source, site.source);
+}
+
 #[test]
 fn written_programs_own_data_and_header_only_procedural_entries() {
     for language in ["cobol-fixed", "cobol-free"] {
@@ -808,6 +851,304 @@ fn line_sequential_files_keep_source_owned_entities_without_file_bindings() {
                             | RelationPredicate::DefinesAt
                     )));
                 }
+            }
+        }
+    }
+}
+
+#[test]
+fn symbolic_occurs_bounds_preserve_declared_and_unknown_source_evidence() {
+    for language in ["cobol-fixed", "cobol-free"] {
+        for ending in ["\n", "\r\n"] {
+            for final_newline in [false, true] {
+                let fixture = fixture_at_eof(
+                    &[
+                        "identification division.",
+                        "program-id. BoundProof.",
+                        "data division.",
+                        "working-storage section.",
+                        "78 Lower-Limit value 1.",
+                        "78 Upper-Limit value 3.",
+                        "01 Known-Table occurs Lower-Limit to Upper-Limit times.",
+                        "05 Known-Item pic x.",
+                        "01 Unknown-Table occurs Missing-Low to Missing-High times.",
+                        "05 Unknown-Item pic x.",
+                        "01 Position pic 9.",
+                        "procedure division.",
+                        "move Known-Item(Position) to Unknown-Item(1).",
+                        "move Known-Item(Position)(1:Position) to Known-Item(2).",
+                        "end program BoundProof.",
+                    ],
+                    language,
+                    ending,
+                    final_newline,
+                );
+                let output = fixture.analyze(language);
+                assert_eq!(output.report().coverage().status(), CoverageStatus::Bounded);
+                let document = output.document();
+                assert!(document.diagnostics.is_empty());
+                let program = definition(document, fixture.span("BoundProof", 0));
+                assert_eq!(program.kind, EntityKind::Module);
+                assert_eq!(
+                    program.container,
+                    Some(ContainerRef::File(fixture.snapshot.file()))
+                );
+                assert_eq!(document.entities.len(), 8);
+                for (name, declaration) in [
+                    ("Lower-Limit", "78 Lower-Limit value 1"),
+                    ("Upper-Limit", "78 Upper-Limit value 3"),
+                    (
+                        "Known-Table",
+                        "01 Known-Table occurs Lower-Limit to Upper-Limit times",
+                    ),
+                    ("Known-Item", "05 Known-Item pic x"),
+                    (
+                        "Unknown-Table",
+                        "01 Unknown-Table occurs Missing-Low to Missing-High times",
+                    ),
+                    ("Unknown-Item", "05 Unknown-Item pic x"),
+                    ("Position", "01 Position pic 9"),
+                ] {
+                    let span = fixture.span(name, 0);
+                    let entity = definition(document, span);
+                    assert_eq!(entity.canonical_name, name);
+                    assert_eq!(entity.kind, EntityKind::Variable);
+                    assert_eq!(entity.language, language);
+                    assert_eq!(entity.container, Some(ContainerRef::Entity(program.id)));
+                    let source = entity.evidence.source.as_ref().unwrap();
+                    assert_eq!(source.span(), fixture.span(declaration, 0));
+                    assert_eq!(source.content_hash(), fixture.source.content_hash());
+                    assert_eq!(source.generation(), fixture.source.generation());
+                    let site = document
+                        .occurrences
+                        .iter()
+                        .find(|site| {
+                            site.role == OccurrenceRole::Definition && site.source.span() == span
+                        })
+                        .unwrap();
+                    assert_eq!(site.syntax_kind, "cobol.data_name.definition");
+                    assert_eq!(site.syntactic_text_hash, content_hash(name.as_bytes()));
+                    assert_eq!(site.provenance, entity.provenance);
+                }
+                let known = definition(document, fixture.span("Known-Table", 0));
+                let unknown = definition(document, fixture.span("Unknown-Table", 0));
+                for (name, occurrence, owner) in [
+                    ("Lower-Limit", 1, known),
+                    ("Upper-Limit", 1, known),
+                    ("Missing-Low", 0, unknown),
+                    ("Missing-High", 0, unknown),
+                ] {
+                    assert_unproven_reference(
+                        document,
+                        &fixture,
+                        name,
+                        occurrence,
+                        "cobol.occurs_bound.reference",
+                        Some(owner),
+                    );
+                }
+                assert!(document.entities.iter().all(|entity| {
+                    !matches!(
+                        entity.canonical_name.as_str(),
+                        "Missing-Low" | "Missing-High"
+                    )
+                }));
+                for (name, occurrence) in [
+                    ("Known-Item", 1),
+                    ("Known-Item", 2),
+                    ("Known-Item", 3),
+                    ("Unknown-Item", 1),
+                    ("Position", 1),
+                    ("Position", 2),
+                    ("Position", 3),
+                ] {
+                    assert_unproven_reference(
+                        document,
+                        &fixture,
+                        name,
+                        occurrence,
+                        "cobol.storage.reference",
+                        Some(program),
+                    );
+                }
+                assert_unproven_reference(
+                    document,
+                    &fixture,
+                    "BoundProof",
+                    1,
+                    "cobol.end_program_name.reference",
+                    Some(program),
+                );
+                assert_eq!(document.occurrences.len(), 20);
+                assert_eq!(document.skipped_regions.len(), 12);
+                assert!(document.relations.iter().all(|edge| matches!(
+                    edge.predicate,
+                    RelationPredicate::Contains
+                        | RelationPredicate::Declares
+                        | RelationPredicate::DefinesAt
+                )));
+            }
+        }
+    }
+}
+
+#[test]
+fn numeric_occurs_bounds_add_no_occurrences_and_keep_written_symbol_identity() {
+    for language in ["cobol-fixed", "cobol-free"] {
+        for ending in ["\n", "\r\n"] {
+            for final_newline in [false, true] {
+                let symbolic = fixture_at_eof(
+                    &[
+                        "identification division.",
+                        "program-id. NumericProof.",
+                        "data division.",
+                        "working-storage section.",
+                        "78 Lower-Limit value 1.",
+                        "78 Upper-Limit value 3.",
+                        "01 Known-Table occurs Lower-Limit to Upper-Limit times.",
+                        "05 Known-Item pic x.",
+                        "01 Single-Table occurs Upper-Limit times.",
+                        "05 Single-Item pic x.",
+                        "procedure division.",
+                        "move Known-Item(1) to Single-Item(2)(1:1).",
+                        "end program NumericProof.",
+                    ],
+                    language,
+                    ending,
+                    final_newline,
+                );
+                let numeric = Fixture::from_text(
+                    symbolic
+                        .text
+                        .replace("occurs Lower-Limit to Upper-Limit", "occurs 1 to 3")
+                        .replace("occurs Upper-Limit", "occurs 3"),
+                );
+                let symbolic_output = symbolic.analyze(language);
+                let numeric_output = numeric.analyze(language);
+                let named = symbolic_output.document();
+                let digits = numeric_output.document();
+                assert_eq!(digits.entities.len(), 7);
+                assert_eq!(
+                    named
+                        .entities
+                        .iter()
+                        .map(|entity| {
+                            (
+                                &entity.canonical_name,
+                                entity.id,
+                                entity.kind,
+                                &entity.container,
+                            )
+                        })
+                        .collect::<Vec<_>>(),
+                    digits
+                        .entities
+                        .iter()
+                        .map(|entity| {
+                            (
+                                &entity.canonical_name,
+                                entity.id,
+                                entity.kind,
+                                &entity.container,
+                            )
+                        })
+                        .collect::<Vec<_>>()
+                );
+                assert_eq!(
+                    named
+                        .occurrences
+                        .iter()
+                        .filter(|site| site.syntax_kind == "cobol.occurs_bound.reference")
+                        .count(),
+                    3
+                );
+                assert!(digits.occurrences.iter().all(|site| {
+                    site.syntax_kind != "cobol.occurs_bound.reference"
+                        && site.syntax_kind != "cobol.string.string"
+                }));
+                let program = definition(digits, numeric.span("NumericProof", 0));
+                for name in ["Known-Item", "Single-Item"] {
+                    assert_unproven_reference(
+                        digits,
+                        &numeric,
+                        name,
+                        1,
+                        "cobol.storage.reference",
+                        Some(program),
+                    );
+                }
+                assert_unproven_reference(
+                    digits,
+                    &numeric,
+                    "NumericProof",
+                    1,
+                    "cobol.end_program_name.reference",
+                    Some(program),
+                );
+                assert_eq!(digits.occurrences.len(), 10);
+                assert_eq!(named.occurrences.len(), digits.occurrences.len() + 3);
+                assert_eq!(digits.skipped_regions.len(), 3);
+                assert_eq!(
+                    named.skipped_regions.len(),
+                    digits.skipped_regions.len() + 3
+                );
+                assert_eq!(
+                    numeric_output.report().coverage().status(),
+                    CoverageStatus::Bounded
+                );
+                assert!(digits.relations.iter().all(|edge| matches!(
+                    edge.predicate,
+                    RelationPredicate::Contains
+                        | RelationPredicate::Declares
+                        | RelationPredicate::DefinesAt
+                )));
+            }
+        }
+    }
+}
+
+#[test]
+fn symbolic_occurs_bounds_do_not_repair_unsupported_program_identity() {
+    for language in ["cobol-fixed", "cobol-free"] {
+        for ending in ["\n", "\r\n"] {
+            for program_header in [None, Some("program-id. 'QuotedBounds'.")] {
+                let mut lines = vec!["identification division."];
+                lines.extend(program_header);
+                lines.extend([
+                    "data division.",
+                    "working-storage section.",
+                    "78 Written-Limit value 3.",
+                    "01 Orphan-Table occurs Written-Limit to Absent-Limit times.",
+                    "procedure division.",
+                    "goback.",
+                ]);
+                let fixture = Fixture::new(&lines, language, ending);
+                let output = fixture.analyze(language);
+                let document = output.document();
+                assert!(document.entities.is_empty());
+                assert!(document.occurrences.iter().all(|site| {
+                    site.role != OccurrenceRole::Definition
+                        && matches!(site.target, OccurrenceTarget::Unresolved { .. })
+                }));
+                for (name, occurrence) in [("Written-Limit", 1), ("Absent-Limit", 0)] {
+                    assert_unproven_reference(
+                        document,
+                        &fixture,
+                        name,
+                        occurrence,
+                        "cobol.occurs_bound.reference",
+                        None,
+                    );
+                }
+                assert!(document.skipped_regions.iter().any(|gap| {
+                    gap.detail == "stable-scope-identity-unavailable"
+                        && gap.source.span()
+                            == fixture.span(
+                                "01 Orphan-Table occurs Written-Limit to Absent-Limit times",
+                                0,
+                            )
+                }));
+                assert!(document.relations.is_empty());
             }
         }
     }

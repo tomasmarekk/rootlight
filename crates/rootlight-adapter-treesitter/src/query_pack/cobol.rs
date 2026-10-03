@@ -231,6 +231,19 @@ pub(super) fn retain_capture(
     if node.kind() == "file_description_entry" {
         return Ok(definition_range(node, source, cancellation)?.is_some());
     }
+    if role == StructuralRole::Reference && node.kind() == "WORD" {
+        return Ok(!node.is_missing()
+            && !node.has_error()
+            && node.start_byte() < node.end_byte()
+            && source.get(node.byte_range()).is_some()
+            && node.parent().is_some_and(|bound| {
+                bound.kind() == "occurs_bound"
+                    && !bound.is_missing()
+                    && !bound.has_error()
+                    && bound.start_byte() <= node.start_byte()
+                    && node.end_byte() <= bound.end_byte()
+            }));
+    }
     if role == StructuralRole::Reference
         && node.kind() == "qualified_word"
         && node.parent().is_some_and(|label| {
@@ -286,6 +299,14 @@ pub(super) fn syntax(node: Node<'_>, role: StructuralRole) -> Option<&'static st
         "paragraph_header" => "cobol.paragraph",
         "copy_statement" => "cobol.copy",
         "qualified_word" => "cobol.storage",
+        "WORD"
+            if role == StructuralRole::Reference
+                && node
+                    .parent()
+                    .is_some_and(|bound| bound.kind() == "occurs_bound") =>
+        {
+            "cobol.occurs_bound"
+        }
         "procedure_param" => "cobol.using_name",
         "call_statement" => "cobol.call_target",
         "label" => "cobol.perform_target",
@@ -419,6 +440,112 @@ mod tests {
         .filter(|line| !line.is_empty())
         .map(|line| format!("{prefix}{line}{ending}"))
         .collect()
+    }
+
+    #[test]
+    fn occurs_bound_words_require_native_ownership_source_and_cancellation() {
+        let source = concat!(
+            "identification division.\n",
+            "program-id. Bounds.\n",
+            "data division.\n",
+            "working-storage section.\n",
+            "01 Items occurs Lower-Limit to 9 times pic x.\n",
+            "procedure division.\n",
+            "move Lower-Limit to Items(1).\n",
+        );
+        let tree = parse(source, true);
+        let cancellation = Cancellation::new();
+        let program = child(tree.root_node(), "program_definition", &cancellation)
+            .unwrap()
+            .unwrap();
+        let data = child(program, "data_division", &cancellation)
+            .unwrap()
+            .unwrap();
+        let section = child(data, "working_storage_section", &cancellation)
+            .unwrap()
+            .unwrap();
+        let entry = child(section, "data_description", &cancellation)
+            .unwrap()
+            .unwrap();
+        let clause = child(entry, "occurs_clause", &cancellation)
+            .unwrap()
+            .unwrap();
+        let bound = child(clause, "occurs_bound", &cancellation)
+            .unwrap()
+            .unwrap();
+        let word = child(bound, "WORD", &cancellation).unwrap().unwrap();
+        let start = source.find("Lower-Limit").unwrap();
+        assert_eq!(word.byte_range(), start..start + "Lower-Limit".len());
+        assert_eq!(
+            syntax(word, StructuralRole::Reference),
+            Some("cobol.occurs_bound")
+        );
+        assert_eq!(syntax(word, StructuralRole::Declaration), None);
+        assert_eq!(syntax(word, StructuralRole::Definition), None);
+        assert!(
+            retain_capture(
+                word,
+                StructuralRole::Reference,
+                source.as_bytes(),
+                &cancellation
+            )
+            .unwrap()
+        );
+        assert_eq!(
+            capture_range(
+                word,
+                StructuralRole::Reference,
+                source.as_bytes(),
+                &cancellation
+            )
+            .unwrap(),
+            Some(word.byte_range())
+        );
+        assert!(!retain_capture(word, StructuralRole::Reference, &[], &cancellation).unwrap());
+        let procedure = child(program, "procedure_division", &cancellation)
+            .unwrap()
+            .unwrap();
+        let statement = child(procedure, "move_statement", &cancellation)
+            .unwrap()
+            .unwrap();
+        let storage = child(statement, "qualified_word", &cancellation)
+            .unwrap()
+            .unwrap();
+        let other_word = child(storage, "WORD", &cancellation).unwrap().unwrap();
+        assert_eq!(syntax(other_word, StructuralRole::Reference), None);
+        assert!(
+            !retain_capture(
+                other_word,
+                StructuralRole::Reference,
+                source.as_bytes(),
+                &cancellation
+            )
+            .unwrap()
+        );
+        let cancellation = Cancellation::new();
+        cancellation.cancel(CancellationReason::ClientRequest);
+        assert!(matches!(
+            retain_capture(
+                word,
+                StructuralRole::Reference,
+                source.as_bytes(),
+                &cancellation
+            ),
+            Err(AdapterError::Cancelled {
+                reason: CancellationReason::ClientRequest
+            })
+        ));
+        assert!(matches!(
+            capture_range(
+                word,
+                StructuralRole::Reference,
+                source.as_bytes(),
+                &cancellation
+            ),
+            Err(AdapterError::Cancelled {
+                reason: CancellationReason::ClientRequest
+            })
+        ));
     }
 
     #[test]

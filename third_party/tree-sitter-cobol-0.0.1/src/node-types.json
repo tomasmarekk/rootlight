@@ -8086,6 +8086,25 @@
     }
   },
   {
+    "type": "occurs_bound",
+    "named": true,
+    "fields": {},
+    "children": {
+      "multiple": false,
+      "required": true,
+      "types": [
+        {
+          "type": "WORD",
+          "named": true
+        },
+        {
+          "type": "integer",
+          "named": true
+        }
+      ]
+    }
+  },
+  {
     "type": "occurs_clause",
     "named": true,
     "fields": {
@@ -8114,7 +8133,7 @@
         "required": true,
         "types": [
           {
-            "type": "integer",
+            "type": "occurs_bound",
             "named": true
           }
         ]
@@ -8124,7 +8143,7 @@
         "required": false,
         "types": [
           {
-            "type": "integer",
+            "type": "occurs_bound",
             "named": true
           }
         ]

@@ -9,6 +9,34 @@ function nonempty(pattern1, pattern2) {
   )
 }
 
+// Keep structural clause keywords out of a bare symbolic bound without regex
+// assertions, which the preparation-time ABI14 generator does not support.
+function occursBoundWord() {
+  const words = [
+    'TIMES', 'TO', 'DEPENDING', 'ON', 'INDEXED', 'BY', 'ASCENDING',
+    'DESCENDING', 'KEY', 'IS', 'FUNCTION', 'OCCURS', 'REDEFINES',
+    'EXTERNAL', 'GLOBAL', 'PIC', 'PICTURE', 'USAGE', 'SIGN', 'JUSTIFIED',
+    'JUST', 'SYNCHRONIZED', 'SYNC', 'BLANK', 'BASED', 'VALUE', 'VALUES',
+    'RENAMES', 'ANY', 'LENGTH',
+  ]
+  const letters = Array.from('ABCDEFGHIJKLMNOPQRSTUVWXYZ')
+  const tail = '[a-zA-Z0-9-]*'
+  const character = c => /[A-Z]/.test(c) ? c + c.toLowerCase() : c === '-' ? '\\-' : c
+  function suffix(excluded, first) {
+    const starts = [...new Set(excluded.filter(word => word.length).map(word => word[0]))]
+    const alphabet = first ? letters : [...letters, ...Array.from('0123456789-')]
+    const other = alphabet.filter(c => !starts.includes(c))
+    const branches = !first && !excluded.includes('') ? [''] : []
+    if (other.length) branches.push('[' + other.map(character).join('') + ']' + tail)
+    for (const c of starts) {
+      branches.push('[' + character(c) + ']' + suffix(
+        excluded.filter(word => word[0] === c).map(word => word.slice(1)), false))
+    }
+    return '(' + branches.join('|') + ')'
+  }
+  return new RegExp('([0-9][a-zA-Z0-9-]*[a-zA-Z][a-zA-Z0-9-]*)|' + suffix(words, true))
+}
+
 module.exports = grammar({
   name: 'COBOL',
   word: $ => $._WORD,
@@ -1141,12 +1169,17 @@ module.exports = grammar({
 
     occurs_clause: $ => seq(
       $._OCCURS,
-      field('num', $.integer),
-      field('to', optional(seq($._TO, $.integer))),
+      field('num', $.occurs_bound),
+      field('to', optional(seq($._TO, $.occurs_bound))),
       optional($._TIMES),
       field('depending', optional(seq($._DEPENDING, optional($._ON), $.qualified_word))),
       field('key_spec', optional($.occurs_key_spec)),
     ),
+
+    // A symbolic bound is a written constant candidate, not an evaluated value.
+    occurs_bound: $ => choice($.integer, alias($._occurs_bound_word, $.WORD)),
+
+    _occurs_bound_word: $ => occursBoundWord(),
 
     occurs_key_spec: $ => choice(
       seq(repeat1($.occurs_key), optional($.occurs_indexed)),

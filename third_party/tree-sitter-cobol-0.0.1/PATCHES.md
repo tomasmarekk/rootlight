@@ -39,6 +39,16 @@ keywords and original physical-line boundaries. Existing organization choices
 are unchanged. These forms are documented in the
 [GnuCOBOL Programmer's Guide](https://gnucobol.sourceforge.io/HTML/gnucobpg.html).
 
+Both `OCCURS` bounds admit an integer or a bare symbolic constant candidate,
+including the level-78 substitution described by that guide. A dedicated
+`occurs_bound` node preserves the existing `num`/`to` fields and exact written
+integer or `WORD` leaf. A preparation-only finite-prefix expression excludes
+structural clause keywords without changing the global word or integer rules;
+keyword-prefix identifiers remain admissible. This contextual exclusion is not
+a complete reserved-word table. Unknown and noninteger names remain syntax
+candidates, not evaluated constants, cardinalities or proven storage reads.
+The adapter retains symbolic bounds as unresolved source-bound references.
+
 Tree-sitter CLI 0.24.4 generates ABI14 outputs from the complete local
 `grammar.js` using an explicit local Node.js runtime during source preparation
 only. The command, tool hashes and output hashes are pinned in
@@ -57,6 +67,12 @@ both profiles, LF/CRLF and EOF with or without a final newline. Malformed
 prefixes and incomplete organization forms must retain native recovery, even
 when a missing leaf is invisible through the public cursor. This is bounded
 syntax evidence, not literal decoding or file/runtime semantics.
+
+The authored `cobol_tables.rs` contracts cover both bound positions, numeric
+parity, physical source coordinates, clause ownership, ordinary subscript and
+reference-modification operands, malformed forms and incremental/fresh tree
+equivalence. Constant substitution, integer typing, rank, storage layout and
+table-element binding are not established by these native checks.
 
 ## Scanner corrections
 
