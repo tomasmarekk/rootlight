@@ -306,6 +306,7 @@ mod tests {
                 skipped_inputs: 0,
                 coverage_gaps: Vec::new(),
                 omitted_coverage_gap_groups: 0,
+                language_coverage: None,
                 usage: QueryUsage {
                     rows: 0,
                     edges: 0,

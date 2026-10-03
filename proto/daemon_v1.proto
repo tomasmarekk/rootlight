@@ -761,6 +761,20 @@ message FirstSliceCoverageGap {
   uint64 files = 3;
 }
 
+// Observed logical-source coverage, not exhaustive semantic relationship support.
+message FirstSliceLanguageCoverage {
+  string language = 1;
+  FirstSliceAnalysisTier tier = 2;
+  FirstSliceCoverageStatus status = 3;
+}
+
+// A complete sorted table for context.generation, bounded to 64 language rows.
+// Absence means unavailable; a present empty table is explicitly supplied.
+// Embedded ranges do not add logical files to this projection.
+message FirstSliceLanguageCoverageProjection {
+  repeated FirstSliceLanguageCoverage languages = 1;
+}
+
 // Common repository, generation, coverage, and usage correlation.
 message FirstSliceQueryContext {
   rootlight.common.v1.RepositoryId repository = 1;
@@ -775,6 +789,7 @@ message FirstSliceQueryContext {
   string semantic_freshness = 10;
   repeated FirstSliceCoverageGap coverage_gaps = 11;
   uint64 omitted_coverage_gap_groups = 12;
+  optional FirstSliceLanguageCoverageProjection language_coverage = 13;
 }
 
 // Authoritative execution-completeness state for one bounded result.

@@ -19865,6 +19865,7 @@ mod tests {
             semantic_freshness: "current".to_owned(),
             coverage_gaps: Vec::new(),
             omitted_coverage_gap_groups: 0,
+            language_coverage: None,
         }
     }
 

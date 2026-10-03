@@ -684,6 +684,21 @@ pub struct CoverageGap {
     pub files: u64,
 }
 
+/// Observed coverage of retained logical sources for one language.
+///
+/// The containing query context binds this row to its immutable generation.
+/// Embedded ranges do not add logical files, and this status does not establish
+/// exhaustive semantic relationship support.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct LanguageCoverage {
+    /// Canonical language label, without alias normalization.
+    pub language: String,
+    /// Weakest observed provenance tier.
+    pub tier: AnalysisTier,
+    /// Weakest observed file coverage.
+    pub status: CoverageStatus,
+}
+
 /// Repository, generation, coverage, and usage correlation for one query.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct QueryContext {
@@ -709,6 +724,11 @@ pub struct QueryContext {
     pub coverage_gaps: Vec<CoverageGap>,
     /// Reason/language groups omitted from the bounded list.
     pub omitted_coverage_gap_groups: u64,
+    /// Complete generation-wide logical-source table, when representable.
+    ///
+    /// `None` is unavailable, including legacy wire absence; `Some([])` is an
+    /// explicitly supplied empty table. Neither changes aggregate query coverage.
+    pub language_coverage: Option<Vec<LanguageCoverage>>,
     /// Measured query usage.
     pub usage: QueryUsage,
 }
@@ -14180,8 +14200,43 @@ fn parse_query_context(
         skipped_inputs: context.skipped_inputs,
         coverage_gaps,
         omitted_coverage_gap_groups: context.omitted_coverage_gap_groups,
+        language_coverage: parse_language_coverage(context.language_coverage)?,
         usage: parse_query_usage(context.usage)?,
     })
+}
+
+fn parse_language_coverage(
+    projection: Option<daemon::FirstSliceLanguageCoverageProjection>,
+) -> Result<Option<Vec<LanguageCoverage>>, ClientError> {
+    let Some(projection) = projection else {
+        return Ok(None);
+    };
+    if projection.languages.len() > MAX_REPOSITORY_CATALOG_LANGUAGES {
+        return Err(ClientError::InvalidResponseCorrelation);
+    }
+    let mut languages = Vec::new();
+    languages
+        .try_reserve_exact(projection.languages.len())
+        .map_err(|_| ClientError::ResponseAllocationFailed)?;
+    for row in projection.languages {
+        if row.language.is_empty()
+            || row.language.len() > MAX_REPOSITORY_CATALOG_LANGUAGE_BYTES
+            || !row.language.bytes().all(|byte| {
+                byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.' | b':' | b'+')
+            })
+            || languages
+                .last()
+                .is_some_and(|previous: &LanguageCoverage| previous.language >= row.language)
+        {
+            return Err(ClientError::InvalidResponseCorrelation);
+        }
+        languages.push(LanguageCoverage {
+            language: row.language,
+            tier: parse_analysis_tier(row.tier)?,
+            status: parse_coverage_status(row.status)?,
+        });
+    }
+    Ok(Some(languages))
 }
 
 fn safe_coverage_gap_label(value: &str) -> bool {
@@ -15735,6 +15790,7 @@ mod tests {
             semantic_freshness: "current".to_owned(),
             coverage_gaps: Vec::new(),
             omitted_coverage_gap_groups: 0,
+            language_coverage: None,
         }
     }
 
@@ -15964,6 +16020,191 @@ mod tests {
             parse_query_context(Some(context), test_repository(), GenerationSelector::Active),
             Err(ClientError::InvalidResponseCorrelation)
         ));
+    }
+
+    fn wire_language_coverage(language: &str) -> daemon::FirstSliceLanguageCoverage {
+        daemon::FirstSliceLanguageCoverage {
+            language: language.to_owned(),
+            tier: daemon::FirstSliceAnalysisTier::FirstSliceTierD as i32,
+            status: daemon::FirstSliceCoverageStatus::FirstSliceCoverageUnknown as i32,
+        }
+    }
+
+    #[tokio::test]
+    async fn query_language_projection_distinguishes_legacy_absence_from_explicit_empty() {
+        let legacy = wire_query_context(0, 0);
+        let codec = FrameCodec::default();
+        let mut encoded = Vec::new();
+        codec
+            .write_message_async(&mut encoded, &legacy)
+            .await
+            .unwrap();
+        let decoded: daemon::FirstSliceQueryContext =
+            codec.read_message(&mut encoded.as_slice()).unwrap();
+        assert_eq!(decoded, legacy);
+        let absent =
+            parse_query_context(Some(decoded), test_repository(), GenerationSelector::Active)
+                .unwrap();
+        assert_eq!(absent.language_coverage, None);
+        assert!(serde_json::to_value(&absent).unwrap()["language_coverage"].is_null());
+        let mut supplied = legacy;
+        supplied.language_coverage = Some(daemon::FirstSliceLanguageCoverageProjection {
+            languages: Vec::new(),
+        });
+        let mut encoded = Vec::new();
+        codec
+            .write_message_async(&mut encoded, &supplied)
+            .await
+            .unwrap();
+        let decoded: daemon::FirstSliceQueryContext =
+            codec.read_message(&mut encoded.as_slice()).unwrap();
+        assert_eq!(decoded, supplied);
+        let present =
+            parse_query_context(Some(decoded), test_repository(), GenerationSelector::Active)
+                .unwrap();
+        assert_eq!(present.language_coverage, Some(Vec::new()));
+        assert_eq!(
+            serde_json::to_value(&present).unwrap()["language_coverage"],
+            serde_json::json!([])
+        );
+        assert_eq!(present.coverage_status, absent.coverage_status);
+        assert_eq!(present.usage, absent.usage);
+    }
+
+    #[test]
+    fn query_language_projection_is_typed_and_bound_to_the_selected_generation() {
+        let mut context = wire_query_context(0, 0);
+        context.active_generation = false;
+        context.structural_freshness = "superseded".to_owned();
+        context.semantic_freshness = "stale".to_owned();
+        context.coverage_status =
+            daemon::FirstSliceCoverageStatus::FirstSliceCoverageUnknown as i32;
+        context.language_coverage = Some(daemon::FirstSliceLanguageCoverageProjection {
+            languages: vec![
+                wire_language_coverage("assembly"),
+                wire_language_coverage("c++"),
+                daemon::FirstSliceLanguageCoverage {
+                    language: "rust".to_owned(),
+                    tier: daemon::FirstSliceAnalysisTier::FirstSliceTierB as i32,
+                    status: daemon::FirstSliceCoverageStatus::FirstSliceCoverageComplete as i32,
+                },
+            ],
+        });
+        let parsed = parse_query_context(
+            Some(context.clone()),
+            test_repository(),
+            GenerationSelector::Generation(test_generation()),
+        )
+        .unwrap();
+        assert_eq!(parsed.generation, test_generation());
+        assert_eq!(parsed.coverage_status, CoverageStatus::Unknown);
+        assert_eq!(parsed.structural_freshness, QueryFreshness::Superseded);
+        assert_eq!(parsed.semantic_freshness, QueryFreshness::Stale);
+        assert_eq!(
+            parsed.language_coverage,
+            Some(vec![
+                LanguageCoverage {
+                    language: "assembly".to_owned(),
+                    tier: AnalysisTier::TierD,
+                    status: CoverageStatus::Unknown
+                },
+                LanguageCoverage {
+                    language: "c++".to_owned(),
+                    tier: AnalysisTier::TierD,
+                    status: CoverageStatus::Unknown
+                },
+                LanguageCoverage {
+                    language: "rust".to_owned(),
+                    tier: AnalysisTier::TierB,
+                    status: CoverageStatus::Complete
+                },
+            ])
+        );
+        assert!(matches!(
+            parse_query_context(
+                Some(context.clone()),
+                test_repository(),
+                GenerationSelector::Active
+            ),
+            Err(ClientError::InvalidResponseCorrelation)
+        ));
+        assert!(matches!(
+            parse_query_context(
+                Some(context.clone()),
+                RepositoryId::from_bytes([0xf1; 16]),
+                GenerationSelector::Generation(test_generation())
+            ),
+            Err(ClientError::InvalidResponseCorrelation)
+        ));
+        assert!(matches!(
+            parse_query_context(
+                Some(context),
+                test_repository(),
+                GenerationSelector::Generation(GenerationId::from_bytes([0xf2; 20]))
+            ),
+            Err(ClientError::InvalidResponseCorrelation)
+        ));
+    }
+
+    #[test]
+    fn query_language_projection_rejects_malformed_rows_and_checks_the_exact_ceiling() {
+        let mut context = wire_query_context(0, 0);
+        let rows = (0..64)
+            .map(|index| wire_language_coverage(&format!("language-{index:03}")))
+            .collect::<Vec<_>>();
+        context.language_coverage = Some(daemon::FirstSliceLanguageCoverageProjection {
+            languages: rows.clone(),
+        });
+        assert_eq!(
+            parse_query_context(
+                Some(context.clone()),
+                test_repository(),
+                GenerationSelector::Active
+            )
+            .unwrap()
+            .language_coverage
+            .unwrap()
+            .len(),
+            64
+        );
+        let mut invalid = vec![
+            vec![wire_language_coverage("")],
+            vec![wire_language_coverage(&"x".repeat(65))],
+            vec![wire_language_coverage("bad\nlabel")],
+            vec![wire_language_coverage("bad label")],
+            vec![wire_language_coverage("c#")],
+            vec![
+                wire_language_coverage("rust"),
+                wire_language_coverage("rust"),
+            ],
+            vec![
+                wire_language_coverage("rust"),
+                wire_language_coverage("assembly"),
+            ],
+        ];
+        let mut excessive = rows;
+        excessive.push(wire_language_coverage("language-064"));
+        invalid.push(excessive);
+        for value in [0, i32::MAX] {
+            let mut row = wire_language_coverage("rust");
+            row.tier = value;
+            invalid.push(vec![row]);
+            let mut row = wire_language_coverage("rust");
+            row.status = value;
+            invalid.push(vec![row]);
+        }
+        for rows in invalid {
+            context.language_coverage =
+                Some(daemon::FirstSliceLanguageCoverageProjection { languages: rows });
+            assert!(matches!(
+                parse_query_context(
+                    Some(context.clone()),
+                    test_repository(),
+                    GenerationSelector::Active
+                ),
+                Err(ClientError::InvalidResponseCorrelation)
+            ));
+        }
     }
 
     #[test]

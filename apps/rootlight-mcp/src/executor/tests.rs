@@ -141,7 +141,7 @@ enum FakeOutcome {
     SourceRead(Result<SourceReadPortResponse, ClientPortError>),
     SourceReadSymbolResolution {
         explain: Result<SymbolExplainPortResponse, ClientPortError>,
-        source: Result<SourceReadPortResponse, ClientPortError>,
+        source: Box<Result<SourceReadPortResponse, ClientPortError>>,
     },
     RepositoryList(Result<RepositoryList, ClientPortError>),
     RepositoryCatalogPageSequence(
@@ -589,7 +589,7 @@ impl FirstSliceClientPort for FakePort {
         let outcome = match &self.outcome {
             FakeOutcome::SourceRead(outcome) => outcome.clone(),
             FakeOutcome::BatchSourceRead { source, .. } => source.clone(),
-            FakeOutcome::SourceReadSymbolResolution { source, .. } => source.clone(),
+            FakeOutcome::SourceReadSymbolResolution { source, .. } => source.as_ref().clone(),
             _ => Err(ClientPortError::Executor),
         };
         Box::pin(async move { outcome })
@@ -1618,6 +1618,7 @@ fn context(results: u64, source_bytes: u64) -> QueryContext {
         skipped_inputs: 0,
         coverage_gaps: Vec::new(),
         omitted_coverage_gap_groups: 0,
+        language_coverage: None,
         usage: usage(results, source_bytes),
     }
 }
@@ -6881,7 +6882,7 @@ fn context_source_harness(content: Vec<u8>) -> Harness {
     chunk.content = content;
     Harness::new(FakeOutcome::SourceReadSymbolResolution {
         explain: Ok(explain),
-        source: Ok(source),
+        source: Box::new(Ok(source)),
     })
 }
 
@@ -10431,7 +10432,7 @@ async fn source_read_uses_complete_definitions_from_truncated_symbol_resolution(
     );
     let harness = Harness::new(FakeOutcome::SourceReadSymbolResolution {
         explain: Ok(explain),
-        source: Ok(source_read_response(source.clone())),
+        source: Box::new(Ok(source_read_response(source.clone()))),
     });
 
     execute(

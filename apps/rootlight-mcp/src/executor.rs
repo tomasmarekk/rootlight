@@ -4251,6 +4251,7 @@ fn explain_envelope_from_status<T>(
         skipped_inputs: 0,
         coverage_gaps: Vec::new(),
         omitted_coverage_gap_groups: 0,
+        language_coverage: None,
         usage: client::QueryUsage {
             rows: 0,
             edges: 0,

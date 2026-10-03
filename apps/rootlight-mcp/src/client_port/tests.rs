@@ -20,24 +20,26 @@ use rootlight_client::{
     HistoryCompare, HistoryCompareScope, HistoryMatchedStates, HistoryRevisionSelector, LocateHit,
     LocateMode, LogicalSnapshotIdentity as ClientLogicalSnapshotIdentity, OperationKind,
     OperationStage, OperationState, PlanChange, PlanChangeContext, PlanChangeContextPack,
-    PlanChangeImpactSummary, QueryContext, QueryUsage, RecoveryClass, RepositoryCatalogEntry,
-    RepositoryCatalogFreshness, RepositoryCatalogPage, RepositoryCatalogPageRequest,
-    RepositoryCatalogSnapshotId, RepositoryCatalogState, RepositoryCoverageEntry, RepositoryIndex,
-    RepositoryIndexAnalysisMode, RepositoryIndexDiagnostic, RepositoryIndexMode,
-    RepositoryOperationAction, RepositoryOperationStatus, RepositoryStatus,
-    RepositoryStatusRequest, RequestOptions, RequestTimeout, ResultCompleteness,
-    ResultCompletenessState, SourceChunk, SourceRead, SourceReference, SymbolExplain,
-    SymbolExplanation, SymbolRelationships, TestsSelect, TestsSelectCoverageStrategy,
+    PlanChangeImpactSummary, QueryContext, QueryFreshness, QueryUsage, RecoveryClass,
+    RepositoryCatalogEntry, RepositoryCatalogFreshness, RepositoryCatalogPage,
+    RepositoryCatalogPageRequest, RepositoryCatalogSnapshotId, RepositoryCatalogState,
+    RepositoryCoverageEntry, RepositoryIndex, RepositoryIndexAnalysisMode,
+    RepositoryIndexDiagnostic, RepositoryIndexMode, RepositoryOperationAction,
+    RepositoryOperationStatus, RepositoryStatus, RepositoryStatusRequest, RequestOptions,
+    RequestTimeout, ResultCompleteness, ResultCompletenessState, SourceChunk, SourceRead,
+    SourceReference, SymbolExplain, SymbolExplanation, SymbolRelationships, TestsSelect,
+    TestsSelectCoverageStrategy,
 };
 use rootlight_ids::{ContentHash, FileId, GenerationId, OperationId, RepositoryId, SymbolId};
+use rootlight_ir::CoverageStatus as ContractCoverageStatus;
 use rootlight_mcp_contract::{
     ErrorCode, ExposureProfile, OperationStatusOutput, PublicError, RepoIndexOutput, ToolResponse,
     VerticalTool,
     change::{ChangeImpactOutput, TestsSelectOutput},
     conditional_activity::{CodeLocateDataV1_10, SourceReadDataV1_2},
     vertical::{
-        AnalysisTier, OperationStatusToolResponse, OperationToolResponse, ReadEnvelope,
-        SymbolExplainOutput,
+        AnalysisTier, LanguageCoverage, OperationStatusToolResponse, OperationToolResponse,
+        ReadEnvelope, SymbolExplainOutput,
     },
 };
 use serde::de::DeserializeOwned;
@@ -48,11 +50,11 @@ use super::{
     AsyncClientFuture, AsyncFirstSliceClient, AuthorizedRepositoryRoot, FIRST_SLICE_PROVIDER,
     NativeFirstSliceClientPort, PROJECT_SEMANTICS_PROVIDER, UnavailableFirstSliceClientPort,
     coverage_gap_warning, locate_languages, map_client_error, map_operation_client_error,
-    read_metadata, source_languages, symbol_languages,
+    read_metadata, service_languages, service_read_metadata, source_languages, symbol_languages,
 };
 use crate::{
-    FirstSliceClientPort, FirstSliceToolExecutor, RepositoryStatusPortRequest, RequestCancellation,
-    ToolExecutionFailure, ToolExecutor,
+    ClientPortError, FirstSliceClientPort, FirstSliceToolExecutor, RepositoryStatusPortRequest,
+    RequestCancellation, ToolExecutionFailure, ToolExecutor,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1907,6 +1909,155 @@ fn empty_results_do_not_invent_language_coverage() {
 }
 
 #[test]
+fn service_language_metadata_preserves_typed_rows_and_unrelated_query_state() {
+    let mut context = query_context(
+        repository(),
+        GenerationSelector::Generation(generation()),
+        false,
+    );
+    context.semantic_freshness = QueryFreshness::Stale;
+    context.coverage_status = CoverageStatus::Unknown;
+    context.language_coverage = Some(vec![
+        rootlight_client::LanguageCoverage {
+            language: "assembly".to_owned(),
+            tier: ClientAnalysisTier::TierD,
+            status: CoverageStatus::Unknown,
+        },
+        rootlight_client::LanguageCoverage {
+            language: "c++".to_owned(),
+            tier: ClientAnalysisTier::TierD,
+            status: CoverageStatus::Unknown,
+        },
+        rootlight_client::LanguageCoverage {
+            language: "cobol-free".to_owned(),
+            tier: ClientAnalysisTier::TierD,
+            status: CoverageStatus::Bounded,
+        },
+        rootlight_client::LanguageCoverage {
+            language: "rust".to_owned(),
+            tier: ClientAnalysisTier::TierB,
+            status: CoverageStatus::Complete,
+        },
+        rootlight_client::LanguageCoverage {
+            language: "typescript".to_owned(),
+            tier: ClientAnalysisTier::TierC,
+            status: CoverageStatus::Sampled,
+        },
+    ]);
+    let original = context.clone();
+    assert_eq!(
+        service_languages(&context).unwrap(),
+        vec![
+            LanguageCoverage {
+                language: "assembly".to_owned(),
+                tier: AnalysisTier::D,
+                status: ContractCoverageStatus::Unknown
+            },
+            LanguageCoverage {
+                language: "c++".to_owned(),
+                tier: AnalysisTier::D,
+                status: ContractCoverageStatus::Unknown
+            },
+            LanguageCoverage {
+                language: "cobol-free".to_owned(),
+                tier: AnalysisTier::D,
+                status: ContractCoverageStatus::Bounded
+            },
+            LanguageCoverage {
+                language: "rust".to_owned(),
+                tier: AnalysisTier::B,
+                status: ContractCoverageStatus::Complete
+            },
+            LanguageCoverage {
+                language: "typescript".to_owned(),
+                tier: AnalysisTier::C,
+                status: ContractCoverageStatus::Sampled
+            },
+        ]
+    );
+    assert!(
+        service_read_metadata(&context)
+            .unwrap()
+            .warnings()
+            .is_empty()
+    );
+    assert_eq!(context, original);
+    assert_eq!(context.coverage_status, CoverageStatus::Unknown);
+    assert_eq!(context.usage.results, 0);
+}
+
+#[test]
+fn unavailable_language_projection_warns_without_hiding_global_coverage_gaps() {
+    let mut context = query_context(repository(), GenerationSelector::Active, true);
+    context.coverage_status = CoverageStatus::Unknown;
+    context.coverage_gaps = vec![
+        rootlight_client::CoverageGap {
+            reason: "unsupported".to_owned(),
+            language: Some("cobol-free".to_owned()),
+            files: 5,
+        },
+        rootlight_client::CoverageGap {
+            reason: "stale".to_owned(),
+            language: None,
+            files: 17,
+        },
+    ];
+    let unavailable = service_read_metadata(&context).unwrap();
+    assert!(service_languages(&context).unwrap().is_empty());
+    assert_eq!(unavailable.warnings().len(), 3);
+    assert_eq!(
+        unavailable.warnings()[0].code.as_str(),
+        "language_coverage_unavailable"
+    );
+    assert_eq!(
+        unavailable.warnings()[1].code.as_str(),
+        "coverage_unsupported"
+    );
+    assert_eq!(unavailable.warnings()[2].code.as_str(), "coverage_stale");
+    context.language_coverage = Some(Vec::new());
+    let explicit_empty = service_read_metadata(&context).unwrap();
+    assert_eq!(explicit_empty.warnings(), &unavailable.warnings()[1..]);
+    assert_eq!(context.coverage_status, CoverageStatus::Unknown);
+}
+
+#[test]
+fn service_language_projection_rejects_invalid_or_excessive_domain_rows() {
+    let row = rootlight_client::LanguageCoverage {
+        language: "rust".to_owned(),
+        tier: ClientAnalysisTier::TierB,
+        status: CoverageStatus::Complete,
+    };
+    let mut context = query_context(repository(), GenerationSelector::Active, true);
+    for invalid in [
+        vec![row.clone(), row.clone()],
+        vec![rootlight_client::LanguageCoverage {
+            language: "bad label".to_owned(),
+            ..row.clone()
+        }],
+        vec![rootlight_client::LanguageCoverage {
+            language: "c#".to_owned(),
+            ..row.clone()
+        }],
+        vec![rootlight_client::LanguageCoverage {
+            language: "x".repeat(65),
+            ..row.clone()
+        }],
+        (0..65)
+            .map(|index| rootlight_client::LanguageCoverage {
+                language: format!("language-{index:03}"),
+                ..row.clone()
+            })
+            .collect(),
+    ] {
+        context.language_coverage = Some(invalid);
+        assert!(matches!(
+            service_languages(&context),
+            Err(ClientPortError::InvalidResponse)
+        ));
+    }
+}
+
+#[test]
 fn client_errors_map_to_source_free_port_classes() {
     let public = PublicError::builder(ErrorCode::NotFound, "requested entity was not found")
         .build()
@@ -2098,6 +2249,7 @@ fn query_context(
         skipped_inputs: 0,
         coverage_gaps: Vec::new(),
         omitted_coverage_gap_groups: 0,
+        language_coverage: None,
         usage: QueryUsage {
             rows: 1,
             edges: 0,

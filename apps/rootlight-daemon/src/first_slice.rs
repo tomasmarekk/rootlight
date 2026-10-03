@@ -14524,6 +14524,15 @@ fn query_context_with_languages(
     if summary.incomplete {
         status = weaker_coverage(status, CoverageStatus::Bounded);
     }
+    let language_coverage = language_coverage_to_wire(
+        service
+            .generation_language_coverage_until(
+                generation.repository,
+                generation.generation,
+                cancellation,
+            )
+            .map_err(service_error)?,
+    )?;
     let coverage_gaps = summary
         .gaps
         .into_iter()
@@ -14559,7 +14568,33 @@ fn query_context_with_languages(
         semantic_freshness: query_freshness_label(freshness.semantic).to_owned(),
         coverage_gaps,
         omitted_coverage_gap_groups: summary.omitted_gap_groups,
+        language_coverage,
     })
+}
+
+fn language_coverage_to_wire(
+    projection: Option<Vec<rootlight_service::FirstSliceLanguageCoverage>>,
+) -> Result<Option<daemon::FirstSliceLanguageCoverageProjection>, PublicError> {
+    let Some(projection) = projection else {
+        return Ok(None);
+    };
+    if projection.len() > 64 {
+        return Ok(None);
+    }
+    let mut languages = Vec::new();
+    languages
+        .try_reserve_exact(projection.len())
+        .map_err(|_| resource_exhausted())?;
+    for row in projection {
+        languages.push(daemon::FirstSliceLanguageCoverage {
+            language: row.language,
+            tier: analysis_tier_to_wire(row.tier) as i32,
+            status: coverage_status_to_wire(row.status) as i32,
+        });
+    }
+    Ok(Some(daemon::FirstSliceLanguageCoverageProjection {
+        languages,
+    }))
 }
 
 const fn coverage_gap_label(reason: FirstSliceCoverageGapReason) -> &'static str {
@@ -22431,6 +22466,124 @@ mod tests {
             aggregate_coverage(&[], &receipt),
             (AnalysisTier::TierD, CoverageStatus::Unknown)
         );
+    }
+
+    #[test]
+    fn language_projection_wire_presence_never_truncates_a_table() {
+        assert_eq!(language_coverage_to_wire(None).unwrap(), None);
+        assert_eq!(
+            language_coverage_to_wire(Some(Vec::new()))
+                .unwrap()
+                .unwrap()
+                .languages,
+            Vec::new()
+        );
+        let excessive = (0..65)
+            .map(|index| rootlight_service::FirstSliceLanguageCoverage {
+                language: format!("language-{index:03}"),
+                tier: AnalysisTier::TierD,
+                status: CoverageStatus::Unknown,
+            })
+            .collect();
+        assert_eq!(language_coverage_to_wire(Some(excessive)).unwrap(), None);
+    }
+
+    #[test]
+    fn zero_relationship_results_keep_generation_wide_language_coverage() {
+        let fixture = TempDir::new().unwrap();
+        fs::create_dir_all(fixture.path().join("src")).unwrap();
+        fs::write(fixture.path().join("src/lib.rs"), "pub fn written() {}\n").unwrap();
+        fs::write(fixture.path().join("fallback.asm"), "opaque source\n").unwrap();
+        let mut service = FirstSliceService::new(2).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(30);
+        let cancellation = Cancellation::with_deadline(deadline);
+        let receipt = service
+            .index_repository(fixture.path(), &cancellation)
+            .unwrap();
+        let located = service
+            .code_locate(
+                receipt.generation,
+                "written".to_owned(),
+                rootlight_query::LocateMode::Exact,
+                10,
+                0,
+                &cancellation,
+            )
+            .unwrap();
+        let symbol = located.data.hits.iter().find_map(|hit| hit.symbol).unwrap();
+        let ipc = FirstSliceIpcContext {
+            client_instance_id: ClientInstanceId::from_bytes([7; 16]),
+            selected_protocol_minor: rootlight_daemon_core::PROTOCOL_MINOR,
+            cancellation,
+            deadline,
+            effective_budget: None,
+            index_admission: None,
+        };
+        let request = daemon::SymbolRelationshipsRequest {
+            schema_version: Some(schema_version()),
+            repository: Some(repository_to_wire(receipt.repository)),
+            generation: Some(daemon::GenerationSelector {
+                selector: Some(daemon::generation_selector::Selector::Generation(
+                    generation_to_wire(receipt.generation),
+                )),
+            }),
+            seeds: vec![symbol_to_wire(symbol)],
+            relations: vec!["calls".to_owned()],
+            direction: None,
+            min_confidence: None,
+            max_results: Some(10),
+            page_offset: 0,
+        };
+        let first = symbol_relationships(&service, request.clone(), &ipc).unwrap();
+        assert!(first.groups.is_empty());
+        let first_context = first.context.as_ref().unwrap();
+        assert_eq!(
+            first_context.coverage_status,
+            daemon::FirstSliceCoverageStatus::FirstSliceCoverageUnknown as i32
+        );
+        assert_eq!(first_context.usage.as_ref().unwrap().results, 0);
+        let languages = &first_context.language_coverage.as_ref().unwrap().languages;
+        assert_eq!(
+            languages
+                .iter()
+                .map(|row| row.language.as_str())
+                .collect::<Vec<_>>(),
+            ["assembly", "rust"]
+        );
+        assert_eq!(
+            languages[0].status,
+            daemon::FirstSliceCoverageStatus::FirstSliceCoverageUnknown as i32
+        );
+        assert!(
+            first_context
+                .coverage_gaps
+                .iter()
+                .any(|gap| gap.reason == "unsupported"
+                    && gap.language.as_deref() == Some("assembly"))
+        );
+        fs::write(
+            fixture.path().join("other.py"),
+            "def other():\n    return 1\n",
+        )
+        .unwrap();
+        let latest = service
+            .index_repository(fixture.path(), &ipc.cancellation)
+            .unwrap();
+        assert_ne!(latest.generation, receipt.generation);
+        let retained = symbol_relationships(&service, request, &ipc).unwrap();
+        let retained_context = retained.context.as_ref().unwrap();
+        assert_eq!(retained_context.generation, first_context.generation);
+        assert!(!retained_context.active_generation);
+        assert_eq!(retained_context.structural_freshness, "superseded");
+        assert_eq!(
+            retained_context.language_coverage,
+            first_context.language_coverage
+        );
+        assert_eq!(retained.groups, first.groups);
+        assert_eq!(retained.returned_edges, first.returned_edges);
+        assert_eq!(retained.total_edges, first.total_edges);
+        assert_eq!(retained.exact, first.exact);
+        assert_eq!(retained.truncated, first.truncated);
     }
 
     #[test]

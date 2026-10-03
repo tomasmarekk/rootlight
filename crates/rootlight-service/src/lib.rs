@@ -2045,6 +2045,20 @@ pub struct RepositoryCoverageEntryDto {
     pub indexed_files: u64,
 }
 
+/// Coverage of retained logical sources in one immutable generation.
+///
+/// Embedded ranges do not add files to this projection. The status is observed
+/// file coverage, not a claim that every semantic relationship is available.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FirstSliceLanguageCoverage {
+    /// Canonical language label without alias normalization.
+    pub language: String,
+    /// Weakest observed provenance tier for this language.
+    pub tier: AnalysisTier,
+    /// Weakest observed file coverage for this language.
+    pub status: CoverageStatus,
+}
+
 /// One repository entry in the bounded repository list.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RepositoryListEntryDto {
@@ -14049,6 +14063,73 @@ impl FirstSliceService {
             logical_snapshot: receipt.logical_snapshot.clone(),
             coverage: coverage_from_summaries(coverage),
         })
+    }
+
+    /// Returns the selected generation's bounded logical-source language table.
+    ///
+    /// `None` means the whole table cannot be represented within the existing
+    /// 64-row, 64-byte-label public coverage bounds. It never means no languages
+    /// were retained. `Some` contains the complete, sorted table, including an
+    /// explicitly empty table. Physical discovery exclusions and embedded ranges
+    /// remain outside these logical-file denominators.
+    ///
+    /// # Errors
+    /// Returns generation-selection errors, cancellation, allocation limits, or
+    /// [`FirstSliceError::CatalogCorrupt`] for inconsistent generation metadata.
+    pub fn generation_language_coverage_until(
+        &self,
+        repository: RepositoryId,
+        generation: GenerationId,
+        cancellation: &Cancellation,
+    ) -> Result<Option<Vec<FirstSliceLanguageCoverage>>, FirstSliceError> {
+        check_cancellation(cancellation)?;
+        let context = self.resolve_generation(repository, Some(generation))?;
+        self.generation_metadata(context.generation)?;
+        let summaries = self
+            .language_coverage_by_generation
+            .get(&context.generation)
+            .ok_or(FirstSliceError::CatalogCorrupt)?;
+        if summaries.len() > 64 {
+            return Ok(None);
+        }
+        let mut discovered_files = 0_u64;
+        let mut previous: Option<&str> = None;
+        for summary in summaries {
+            check_cancellation(cancellation)?;
+            if summary.language.is_empty()
+                || summary.language.len() > 64
+                || !summary.language.bytes().all(|byte| {
+                    byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.' | b':' | b'+')
+                })
+            {
+                return Ok(None);
+            }
+            if previous.is_some_and(|language| language >= summary.language.as_str())
+                || summary.indexed_files > summary.discovered_files
+            {
+                return Err(FirstSliceError::CatalogCorrupt);
+            }
+            previous = Some(&summary.language);
+            discovered_files = discovered_files
+                .checked_add(summary.discovered_files)
+                .ok_or(FirstSliceError::CatalogCorrupt)?;
+        }
+        if discovered_files != context.receipt.indexed_files {
+            return Err(FirstSliceError::CatalogCorrupt);
+        }
+        let mut coverage = Vec::new();
+        coverage
+            .try_reserve_exact(summaries.len())
+            .map_err(|_| FirstSliceError::Limits)?;
+        for summary in summaries {
+            check_cancellation(cancellation)?;
+            coverage.push(FirstSliceLanguageCoverage {
+                language: fallible_copy_string(&summary.language)?,
+                tier: summary.tier,
+                status: summary.status,
+            });
+        }
+        Ok(Some(coverage))
     }
 }
 
@@ -29231,6 +29312,24 @@ mod tests {
         assert_eq!(tiers["typescript"], "tier_d");
         assert_eq!(tiers["python"], "tier_d");
         assert_eq!(tiers["go"], "tier_d");
+        let projection = service
+            .generation_language_coverage_until(receipt.repository, receipt.generation, &deadline())
+            .unwrap()
+            .unwrap();
+        assert_eq!(projection.len(), status.coverage.len());
+        assert_eq!(
+            status
+                .coverage
+                .iter()
+                .map(|row| row.discovered_files)
+                .sum::<u64>(),
+            receipt.indexed_files
+        );
+        for (observed, expected) in projection.iter().zip(&status.coverage) {
+            assert_eq!(observed.language, expected.language);
+            assert_eq!(analysis_tier_label(observed.tier), expected.tier);
+            assert_eq!(coverage_status_label(observed.status), expected.status);
+        }
         assert_eq!(
             service.list_repositories()[0].languages,
             vec!["go", "python", "rust", "typescript"]
@@ -29266,7 +29365,227 @@ mod tests {
             Err(FirstSliceError::CatalogCorrupt)
         ));
         assert!(matches!(
+            service.generation_language_coverage_until(
+                receipt.repository,
+                receipt.generation,
+                &deadline()
+            ),
+            Err(FirstSliceError::CatalogCorrupt)
+        ));
+        assert!(matches!(
             service.support_inventory_snapshot(),
+            Err(FirstSliceError::CatalogCorrupt)
+        ));
+    }
+
+    #[test]
+    fn generation_language_projection_preserves_retained_selection_after_restart() {
+        let storage = durable_test_tempdir();
+        let paths = RuntimePaths::new(storage.path().join("state"), storage.path().join("runtime"))
+            .unwrap();
+        paths.prepare_owner().unwrap();
+        let fixture = durable_test_tempdir();
+        write_language_fixture(fixture.path(), &[("src/lib.rs", "pub fn written() {}\n")]);
+        let mut service =
+            FirstSliceService::new_durable(2, paths.state_dir(), &deadline()).unwrap();
+        let first = service
+            .index_repository(fixture.path(), &deadline())
+            .unwrap();
+        let original = service
+            .generation_language_coverage_until(first.repository, first.generation, &deadline())
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            service
+                .index_repository(fixture.path(), &deadline())
+                .unwrap(),
+            first
+        );
+        fs::write(fixture.path().join("fallback.asm"), "opaque source\n").unwrap();
+        let second = service
+            .index_repository(fixture.path(), &deadline())
+            .unwrap();
+        assert_ne!(first.generation, second.generation);
+        let current = service
+            .generation_language_coverage_until(second.repository, second.generation, &deadline())
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            original
+                .iter()
+                .map(|row| row.language.as_str())
+                .collect::<Vec<_>>(),
+            ["rust"]
+        );
+        assert_eq!(
+            current
+                .iter()
+                .map(|row| row.language.as_str())
+                .collect::<Vec<_>>(),
+            ["assembly", "rust"]
+        );
+        assert_eq!(current[0].tier, AnalysisTier::TierD);
+        assert_eq!(current[0].status, CoverageStatus::Unknown);
+        assert_eq!(
+            service
+                .generation_language_coverage_until(first.repository, first.generation, &deadline())
+                .unwrap()
+                .unwrap(),
+            original
+        );
+        drop(service);
+        let restored = FirstSliceService::new_durable(2, paths.state_dir(), &deadline()).unwrap();
+        assert_eq!(
+            restored
+                .generation_language_coverage_until(first.repository, first.generation, &deadline())
+                .unwrap()
+                .unwrap(),
+            original
+        );
+        assert_eq!(
+            restored
+                .generation_language_coverage_until(
+                    second.repository,
+                    second.generation,
+                    &deadline()
+                )
+                .unwrap()
+                .unwrap(),
+            current
+        );
+        assert!(
+            restored
+                .generation_language_coverage_until(
+                    RepositoryId::from_bytes([0xf1; 16]),
+                    first.generation,
+                    &deadline()
+                )
+                .is_err()
+        );
+        assert!(
+            restored
+                .generation_language_coverage_until(
+                    first.repository,
+                    GenerationId::from_bytes([0xf2; 20]),
+                    &deadline()
+                )
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn generation_language_projection_omits_unrepresentable_tables_without_truncation() {
+        let fixture = TempDir::new().unwrap();
+        write_language_fixture(fixture.path(), &[("src/lib.rs", "pub fn written() {}\n")]);
+        let mut service = FirstSliceService::new(2).unwrap();
+        let receipt = service
+            .index_repository(fixture.path(), &deadline())
+            .unwrap();
+        let summaries = service
+            .language_coverage_by_generation
+            .get_mut(&receipt.generation)
+            .unwrap();
+        let original = summaries.clone();
+        *summaries = (0..65)
+            .map(|index| LanguageCoverageSummary {
+                language: format!("language-{index:03}"),
+                tier: AnalysisTier::TierD,
+                status: CoverageStatus::Unknown,
+                discovered_files: 1,
+                indexed_files: 0,
+            })
+            .collect();
+        assert_eq!(
+            service
+                .generation_language_coverage_until(
+                    receipt.repository,
+                    receipt.generation,
+                    &deadline()
+                )
+                .unwrap(),
+            None
+        );
+        assert!(
+            service
+                .code_locate(
+                    receipt.generation,
+                    "written".to_owned(),
+                    LocateMode::Exact,
+                    10,
+                    0,
+                    &deadline()
+                )
+                .is_ok()
+        );
+        *service
+            .language_coverage_by_generation
+            .get_mut(&receipt.generation)
+            .unwrap() = original;
+        service
+            .language_coverage_by_generation
+            .get_mut(&receipt.generation)
+            .unwrap()[0]
+            .language = "c++".to_owned();
+        assert_eq!(
+            service
+                .generation_language_coverage_until(
+                    receipt.repository,
+                    receipt.generation,
+                    &deadline()
+                )
+                .unwrap()
+                .unwrap()[0]
+                .language,
+            "c++"
+        );
+        for label in ["x".repeat(65), "c#".to_owned()] {
+            service
+                .language_coverage_by_generation
+                .get_mut(&receipt.generation)
+                .unwrap()[0]
+                .language = label;
+            assert_eq!(
+                service
+                    .generation_language_coverage_until(
+                        receipt.repository,
+                        receipt.generation,
+                        &deadline()
+                    )
+                    .unwrap(),
+                None
+            );
+        }
+        let cancelled = deadline();
+        cancelled.cancel(CancellationReason::ClientRequest);
+        assert!(matches!(
+            service.generation_language_coverage_until(
+                receipt.repository,
+                receipt.generation,
+                &cancelled
+            ),
+            Err(FirstSliceError::Cancelled(_))
+        ));
+    }
+
+    #[test]
+    fn generation_language_projection_rejects_inconsistent_accounting() {
+        let fixture = TempDir::new().unwrap();
+        write_language_fixture(fixture.path(), &[("src/lib.rs", "pub fn written() {}\n")]);
+        let mut service = FirstSliceService::new(2).unwrap();
+        let receipt = service
+            .index_repository(fixture.path(), &deadline())
+            .unwrap();
+        service
+            .language_coverage_by_generation
+            .get_mut(&receipt.generation)
+            .unwrap()[0]
+            .discovered_files = 2;
+        assert!(matches!(
+            service.generation_language_coverage_until(
+                receipt.repository,
+                receipt.generation,
+                &deadline()
+            ),
             Err(FirstSliceError::CatalogCorrupt)
         ));
     }
@@ -49395,6 +49714,27 @@ mod tests {
                 .expect("local inspection includes file-only records");
             assert_eq!(inspected, (sources.len(), sources.len() - 1));
             assert_eq!(generation.source_files().len(), sources.len() - 1);
+            let projection = service
+                .generation_language_coverage_until(
+                    receipt.repository,
+                    receipt.generation,
+                    &deadline(),
+                )
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                projection
+                    .iter()
+                    .map(|row| row.language.as_str())
+                    .collect::<BTreeSet<_>>(),
+                sources
+                    .iter()
+                    .map(|(_, _, language, _)| *language)
+                    .collect::<BTreeSet<_>>()
+            );
+            assert!(projection.iter().all(
+                |row| row.tier == AnalysisTier::TierD && row.status == CoverageStatus::Unknown
+            ));
 
             for (path, content, language, canary) in sources {
                 let file = generation

@@ -1258,7 +1258,7 @@ impl FirstSliceClientPort for NativeFirstSliceClientPort {
                 )
                 .await
                 .map_err(map_client_error)?;
-            let metadata = read_metadata(&result.context, service_languages(&result.context))?;
+            let metadata = service_read_metadata(&result.context)?;
             Ok(SymbolRelationshipsPortResponse::new(result, metadata))
         })
     }
@@ -1287,7 +1287,7 @@ impl FirstSliceClientPort for NativeFirstSliceClientPort {
                 )
                 .await
                 .map_err(map_client_error)?;
-            let metadata = read_metadata(&result.context, service_languages(&result.context))?;
+            let metadata = service_read_metadata(&result.context)?;
             Ok(FlowTracePortResponse::new(result, metadata))
         })
     }
@@ -1313,7 +1313,7 @@ impl FirstSliceClientPort for NativeFirstSliceClientPort {
                 )
                 .await
                 .map_err(map_client_error)?;
-            let metadata = read_metadata(&result.context, service_languages(&result.context))?;
+            let metadata = service_read_metadata(&result.context)?;
             Ok(ArchitectureCyclesPortResponse::new(result, metadata))
         })
     }
@@ -1340,7 +1340,7 @@ impl FirstSliceClientPort for NativeFirstSliceClientPort {
                 )
                 .await
                 .map_err(map_client_error)?;
-            let metadata = read_metadata(&result.context, service_languages(&result.context))?;
+            let metadata = service_read_metadata(&result.context)?;
             Ok(CodeDeadPortResponse::new(result, metadata))
         })
     }
@@ -1366,7 +1366,7 @@ impl FirstSliceClientPort for NativeFirstSliceClientPort {
                 )
                 .await
                 .map_err(map_client_error)?;
-            let metadata = read_metadata(&result.context, service_languages(&result.context))?;
+            let metadata = service_read_metadata(&result.context)?;
             Ok(ArchitectureOverviewPortResponse::new(result, metadata))
         })
     }
@@ -1400,7 +1400,7 @@ impl FirstSliceClientPort for NativeFirstSliceClientPort {
                 )
                 .await
                 .map_err(map_client_error)?;
-            let metadata = read_metadata(&result.context, service_languages(&result.context))?;
+            let metadata = service_read_metadata(&result.context)?;
             Ok(TestsSelectPortResponse::new(result, metadata))
         })
     }
@@ -1436,7 +1436,7 @@ impl FirstSliceClientPort for NativeFirstSliceClientPort {
                 )
                 .await
                 .map_err(map_client_error)?;
-            let metadata = read_metadata(&result.context, service_languages(&result.context))?;
+            let metadata = service_read_metadata(&result.context)?;
             Ok(ChangeImpactPortResponse::new(result, metadata))
         })
     }
@@ -1488,7 +1488,7 @@ impl FirstSliceClientPort for NativeFirstSliceClientPort {
                 )
                 .await
                 .map_err(map_client_error)?;
-            let metadata = read_metadata(&result.context, service_languages(&result.context))?;
+            let metadata = service_read_metadata(&result.context)?;
             Ok(PlanChangePortResponse::new(result, metadata))
         })
     }
@@ -1514,7 +1514,7 @@ impl FirstSliceClientPort for NativeFirstSliceClientPort {
                 )
                 .await
                 .map_err(map_client_error)?;
-            let metadata = read_metadata(&result.context, service_languages(&result.context))?;
+            let metadata = service_read_metadata(&result.context)?;
             Ok(HistoryComparePortResponse::new(result, metadata))
         })
     }
@@ -1541,7 +1541,7 @@ impl FirstSliceClientPort for NativeFirstSliceClientPort {
                 )
                 .await
                 .map_err(map_client_error)?;
-            let metadata = read_metadata(&result.context, service_languages(&result.context))?;
+            let metadata = service_read_metadata(&result.context)?;
             Ok(QueryAdvancedPortResponse::new(result, metadata))
         })
     }
@@ -1735,12 +1735,43 @@ fn read_metadata(
     context: &rootlight_client::QueryContext,
     languages: Vec<LanguageCoverage>,
 ) -> Result<ReadResponseMetadata, ClientPortError> {
+    read_metadata_with_extra_warning(context, languages, None)
+}
+
+fn service_read_metadata(
+    context: &rootlight_client::QueryContext,
+) -> Result<ReadResponseMetadata, ClientPortError> {
+    let warning = if context.language_coverage.is_none() {
+        Some(ResponseWarning {
+            code: SafeLabel::parse("language_coverage_unavailable")
+                .map_err(|_| ClientPortError::InvalidResponse)?,
+            message: SourceFreeMessage::parse(
+                "generation-wide logical-source language coverage is unavailable",
+            )
+            .map_err(|_| ClientPortError::InvalidResponse)?,
+        })
+    } else {
+        None
+    };
+    read_metadata_with_extra_warning(context, service_languages(context)?, warning)
+}
+
+fn read_metadata_with_extra_warning(
+    context: &rootlight_client::QueryContext,
+    languages: Vec<LanguageCoverage>,
+    extra_warning: Option<ResponseWarning>,
+) -> Result<ReadResponseMetadata, ClientPortError> {
     let mut warnings = Vec::new();
     warnings
         .try_reserve_exact(
-            context.coverage_gaps.len() + usize::from(context.omitted_coverage_gap_groups > 0),
+            context.coverage_gaps.len()
+                + usize::from(context.omitted_coverage_gap_groups > 0)
+                + usize::from(extra_warning.is_some()),
         )
         .map_err(|_| ClientPortError::Executor)?;
+    if let Some(warning) = extra_warning {
+        warnings.push(warning);
+    }
     for gap in &context.coverage_gaps {
         warnings.push(coverage_gap_warning(gap)?);
     }
@@ -1884,8 +1915,43 @@ fn symbol_languages(result: &SymbolExplain) -> Result<Vec<LanguageCoverage>, Cli
     Ok(language_coverage(languages, result.context.coverage_status))
 }
 
-fn service_languages(_context: &rootlight_client::QueryContext) -> Vec<LanguageCoverage> {
-    Vec::new()
+fn service_languages(
+    context: &rootlight_client::QueryContext,
+) -> Result<Vec<LanguageCoverage>, ClientPortError> {
+    let Some(projection) = &context.language_coverage else {
+        return Ok(Vec::new());
+    };
+    if projection.len() > 64 {
+        return Err(ClientPortError::InvalidResponse);
+    }
+    let mut languages = Vec::new();
+    languages
+        .try_reserve_exact(projection.len())
+        .map_err(|_| ClientPortError::Executor)?;
+    for row in projection {
+        if row.language.is_empty()
+            || row.language.len() > 64
+            || !row.language.bytes().all(|byte| {
+                byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.' | b':' | b'+')
+            })
+            || languages
+                .last()
+                .is_some_and(|previous: &LanguageCoverage| previous.language >= row.language)
+        {
+            return Err(ClientPortError::InvalidResponse);
+        }
+        let mut language = String::new();
+        language
+            .try_reserve_exact(row.language.len())
+            .map_err(|_| ClientPortError::Executor)?;
+        language.push_str(&row.language);
+        languages.push(LanguageCoverage {
+            language,
+            tier: analysis_tier(row.tier),
+            status: coverage_status(row.status),
+        });
+    }
+    Ok(languages)
 }
 
 fn language_coverage(

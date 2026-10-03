@@ -1241,6 +1241,28 @@ pub struct FirstSliceCoverageGap {
     #[allow(missing_docs)]
     pub files: u64,
 }
+/// Observed logical-source coverage, not exhaustive semantic relationship support.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct FirstSliceLanguageCoverage {
+    #[prost(string, tag = "1")]
+    #[allow(missing_docs)]
+    pub language: ::prost::alloc::string::String,
+    #[prost(enumeration = "FirstSliceAnalysisTier", tag = "2")]
+    #[allow(missing_docs)]
+    pub tier: i32,
+    #[prost(enumeration = "FirstSliceCoverageStatus", tag = "3")]
+    #[allow(missing_docs)]
+    pub status: i32,
+}
+/// A complete sorted table for context.generation, bounded to 64 language rows.
+/// Absence means unavailable; a present empty table is explicitly supplied.
+/// Embedded ranges do not add logical files to this projection.
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct FirstSliceLanguageCoverageProjection {
+    #[prost(message, repeated, tag = "1")]
+    #[allow(missing_docs)]
+    pub languages: ::prost::alloc::vec::Vec<FirstSliceLanguageCoverage>,
+}
 /// Common repository, generation, coverage, and usage correlation.
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct FirstSliceQueryContext {
@@ -1282,6 +1304,9 @@ pub struct FirstSliceQueryContext {
     #[prost(uint64, tag = "12")]
     #[allow(missing_docs)]
     pub omitted_coverage_gap_groups: u64,
+    #[prost(message, optional, tag = "13")]
+    #[allow(missing_docs)]
+    pub language_coverage: ::core::option::Option<FirstSliceLanguageCoverageProjection>,
 }
 /// One source-free limiting-resource observation.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]

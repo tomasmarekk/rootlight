@@ -2120,6 +2120,7 @@ mod tests {
             skipped_inputs: 2,
             coverage_gaps: Vec::new(),
             omitted_coverage_gap_groups: 0,
+            language_coverage: None,
             usage: QueryUsage {
                 rows: 10,
                 edges: 5,
