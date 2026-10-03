@@ -31972,7 +31972,7 @@
   },
   "frontend_external_source_closure_verified": false,
   "licensing_scope": "supplied metadata and present files; not a completeness or authorship assessment",
-  "local_package_count": 81,
+  "local_package_count": 82,
   "local_packages": [
     {
       "name": "dekobon-tree-sitter-groovy",
@@ -32223,6 +32223,10 @@
       "version": "0.25.0"
     },
     {
+      "name": "tree-sitter-fsharp",
+      "version": "0.3.12"
+    },
+    {
       "name": "tree-sitter-haskell",
       "version": "0.23.1"
     },
@@ -32319,10 +32323,10 @@
       "sha256": "907581b789997511b0e60ec6eea0e9e42f29cea5705bf641c5b7a112b2731794"
     },
     {
-      "local_package_count": 23,
+      "local_package_count": 24,
       "path": "tests/native-grammars/Cargo.lock",
       "registry_package_count": 32,
-      "sha256": "057547839a45470932f5238b0fe7ef35b26065b3720c6d09c5ea0989c277f808"
+      "sha256": "ce9e66502932824343657a4fc9722d01127b6f2633c5bfa0a76125296baf1b25"
     }
   ],
   "package_count": 543,

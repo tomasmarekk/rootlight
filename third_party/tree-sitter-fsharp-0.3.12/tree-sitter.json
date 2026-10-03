@@ -1,0 +1,57 @@
+{
+  "$schema": "https://tree-sitter.github.io/tree-sitter/assets/schemas/config.schema.json",
+  "grammars": [
+    {
+      "name": "fsharp",
+      "camelcase": "FSharp",
+      "scope": "source.fsharp",
+      "path": "fsharp",
+      "file-types": [
+        "fs",
+        "fsx"
+      ],
+      "highlights": "queries/highlights.scm",
+      "locals": "queries/locals.scm",
+      "injections": "queries/injections.scm",
+      "tags": "queries/tags.scm",
+      "injection-regex": "^fsharp$"
+    },
+    {
+      "name": "fsharp_signature",
+      "camelcase": "FSharpSignature",
+      "scope": "source.fsharp.signature",
+      "path": "fsharp_signature",
+      "file-types": [
+        "fsi"
+      ],
+      "highlights": "fsharp_signature/queries/highlights.scm",
+      "locals": "fsharp_signature/queries/locals.scm",
+      "injections": "queries/injections.scm",
+      "tags": "fsharp_signature/queries/tags.scm",
+      "injection-regex": "^fsharp_signature$"
+    }
+  ],
+  "metadata": {
+    "version": "0.3.12",
+    "license": "MIT",
+    "description": "",
+    "authors": [
+      {
+        "name": "Nikolaj Sidorenco"
+      }
+    ],
+    "links": {
+      "repository": "https://github.com/tree-sitter/tree-sitter-fsharp"
+    }
+  },
+  "bindings": {
+    "c": true,
+    "go": true,
+    "java": false,
+    "node": true,
+    "python": true,
+    "rust": true,
+    "swift": true,
+    "zig": false
+  }
+}

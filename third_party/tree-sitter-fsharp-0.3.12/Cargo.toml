@@ -1,0 +1,34 @@
+[package]
+name = "tree-sitter-fsharp"
+description = "fsharp grammar for the tree-sitter parsing library"
+version = "0.3.12"
+keywords = ["incremental", "parsing", "fsharp"]
+categories = ["parsing", "text-editors"]
+repository = "https://github.com/ionide/tree-sitter-fsharp"
+edition = "2021"
+license = "MIT"
+readme = "bindings/rust/README.md"
+
+build = "bindings/rust/build.rs"
+include = [
+  "LICENSE",
+  "bindings/rust/*",
+  "common",
+  "fsharp/grammar.js",
+  "fsharp/src",
+  "fsharp_signature/grammar.js",
+  "fsharp_signature/src",
+  "queries"
+]
+
+[lib]
+path = "bindings/rust/lib.rs"
+
+[dependencies]
+tree-sitter-language = "0.1"
+
+[build-dependencies]
+cc = "1.2"
+
+[dev-dependencies]
+tree-sitter = "0.26.8"
