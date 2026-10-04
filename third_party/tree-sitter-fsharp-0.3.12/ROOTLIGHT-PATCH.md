@@ -120,6 +120,27 @@ Unicode byte positions, signature-only declarations, incremental edit/restore
 equivalence and independent following declarations. This is written syntax and
 source containment, not constant evaluation or semantic enum resolution.
 
+Constructed type qualifications retain a distinct `qualified_type` node with
+direct `base` and `name` fields and optional segment-owned `arguments`.
+Right-associative precedence keeps ordinary suffix arguments attached to their qualified segment.
+This bounded constructed, parenthesized and recursive subset follows the
+[compiler parser's atomic type qualification branch](https://github.com/dotnet/fsharp/blob/7e2cbf10edb6ac52b09c88214a4a39a8c774eebd/src/Compiler/pars.fsy#L6769).
+Constructed and parenthesized bases, recursive constructed segments and flexible
+type wrappers preserve their written ownership rather than flattening generic
+arguments into a dotted name. Abbreviation helpers keep the existing generic
+indentation scope open through the qualified head and its nullness, function or
+tuple continuation. A named, universally aliased head prevents recursive fields
+from leaking through hidden-node inheritance without adding a public helper node.
+Plain dotted identifiers and the existing canonical type routes remain intact.
+Explicit `qualified_type` queries expose these nodes in both profiles; ordinary
+implementation annotations retain canonical `_type` captures. The historical
+direct-abbreviation route does not provide a canonical root capture, and the
+signature profile does not declare that supertype. Controls check exact fields,
+spans, following declarations, query captures and bounded edit/restore equality;
+malformed suffix controls require recovery, not later-declaration preservation.
+These are syntax and source-ownership guarantees, not name resolution, type
+checking, constant evaluation or complete language coverage.
+
 The ten overrides are the scanner, both preferred grammars, both generated
 parser/grammar-JSON pairs, both node-type inventories, and one Rust binding
 line-wrap required by workspace Rustfmt. The binding's tokens and all its other

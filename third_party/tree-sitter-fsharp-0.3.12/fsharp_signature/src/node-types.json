@@ -184,6 +184,10 @@
           "named": true
         },
         {
+          "type": "qualified_type",
+          "named": true
+        },
+        {
           "type": "simple_type",
           "named": true
         },
@@ -453,6 +457,10 @@
           "named": true
         },
         {
+          "type": "qualified_type",
+          "named": true
+        },
+        {
           "type": "simple_type",
           "named": true
         },
@@ -552,6 +560,10 @@
         },
         {
           "type": "postfix_type",
+          "named": true
+        },
+        {
+          "type": "qualified_type",
           "named": true
         },
         {
@@ -759,6 +771,10 @@
           "named": true
         },
         {
+          "type": "qualified_type",
+          "named": true
+        },
+        {
           "type": "simple_type",
           "named": true
         },
@@ -863,6 +879,10 @@
             "named": true
           },
           {
+            "type": "qualified_type",
+            "named": true
+          },
+          {
             "type": "simple_type",
             "named": true
           },
@@ -956,6 +976,10 @@
         },
         {
           "type": "postfix_type",
+          "named": true
+        },
+        {
+          "type": "qualified_type",
           "named": true
         },
         {
@@ -1311,6 +1335,10 @@
           "named": true
         },
         {
+          "type": "qualified_type",
+          "named": true
+        },
+        {
           "type": "simple_type",
           "named": true
         },
@@ -1383,6 +1411,10 @@
         },
         {
           "type": "postfix_type",
+          "named": true
+        },
+        {
+          "type": "qualified_type",
           "named": true
         },
         {
@@ -1487,6 +1519,10 @@
           "named": true
         },
         {
+          "type": "qualified_type",
+          "named": true
+        },
+        {
           "type": "simple_type",
           "named": true
         },
@@ -1582,6 +1618,10 @@
         },
         {
           "type": "postfix_type",
+          "named": true
+        },
+        {
+          "type": "qualified_type",
           "named": true
         },
         {
@@ -1950,6 +1990,10 @@
           "named": true
         },
         {
+          "type": "qualified_type",
+          "named": true
+        },
+        {
           "type": "simple_type",
           "named": true
         },
@@ -2076,6 +2120,10 @@
         },
         {
           "type": "postfix_type",
+          "named": true
+        },
+        {
+          "type": "qualified_type",
           "named": true
         },
         {
@@ -2366,6 +2414,10 @@
           "named": true
         },
         {
+          "type": "qualified_type",
+          "named": true
+        },
+        {
           "type": "simple_type",
           "named": true
         },
@@ -2560,6 +2612,10 @@
         },
         {
           "type": "postfix_type",
+          "named": true
+        },
+        {
+          "type": "qualified_type",
           "named": true
         },
         {
@@ -2814,6 +2870,10 @@
           },
           {
             "type": "postfix_type",
+            "named": true
+          },
+          {
+            "type": "qualified_type",
             "named": true
           },
           {
@@ -3211,6 +3271,10 @@
           "named": true
         },
         {
+          "type": "qualified_type",
+          "named": true
+        },
+        {
           "type": "simple_type",
           "named": true
         },
@@ -3479,6 +3543,10 @@
           "named": true
         },
         {
+          "type": "qualified_type",
+          "named": true
+        },
+        {
           "type": "simple_type",
           "named": true
         },
@@ -3551,6 +3619,10 @@
         },
         {
           "type": "postfix_type",
+          "named": true
+        },
+        {
+          "type": "qualified_type",
           "named": true
         },
         {
@@ -3801,6 +3873,50 @@
     }
   },
   {
+    "type": "qualified_type",
+    "named": true,
+    "fields": {
+      "arguments": {
+        "multiple": false,
+        "required": false,
+        "types": [
+          {
+            "type": "type_attributes",
+            "named": true
+          }
+        ]
+      },
+      "base": {
+        "multiple": false,
+        "required": true,
+        "types": [
+          {
+            "type": "generic_type",
+            "named": true
+          },
+          {
+            "type": "paren_type",
+            "named": true
+          },
+          {
+            "type": "qualified_type",
+            "named": true
+          }
+        ]
+      },
+      "name": {
+        "multiple": false,
+        "required": true,
+        "types": [
+          {
+            "type": "long_identifier",
+            "named": true
+          }
+        ]
+      }
+    }
+  },
+  {
     "type": "record_field",
     "named": true,
     "fields": {},
@@ -3858,6 +3974,10 @@
         },
         {
           "type": "postfix_type",
+          "named": true
+        },
+        {
+          "type": "qualified_type",
           "named": true
         },
         {
@@ -4171,6 +4291,10 @@
           "named": true
         },
         {
+          "type": "qualified_type",
+          "named": true
+        },
+        {
           "type": "simple_type",
           "named": true
         },
@@ -4292,6 +4416,10 @@
           "named": true
         },
         {
+          "type": "qualified_type",
+          "named": true
+        },
+        {
           "type": "simple_type",
           "named": true
         },
@@ -4406,6 +4534,10 @@
           },
           {
             "type": "postfix_type",
+            "named": true
+          },
+          {
+            "type": "qualified_type",
             "named": true
           },
           {
@@ -4568,6 +4700,10 @@
         },
         {
           "type": "postfix_type",
+          "named": true
+        },
+        {
+          "type": "qualified_type",
           "named": true
         },
         {
@@ -4935,6 +5071,10 @@
           "named": true
         },
         {
+          "type": "qualified_type",
+          "named": true
+        },
+        {
           "type": "record_pattern",
           "named": true
         },
@@ -5031,6 +5171,10 @@
         },
         {
           "type": "postfix_type",
+          "named": true
+        },
+        {
+          "type": "qualified_type",
           "named": true
         },
         {
@@ -5193,6 +5337,10 @@
           "named": true
         },
         {
+          "type": "qualified_type",
+          "named": true
+        },
+        {
           "type": "simple_type",
           "named": true
         },
@@ -5318,6 +5466,10 @@
         },
         {
           "type": "postfix_type",
+          "named": true
+        },
+        {
+          "type": "qualified_type",
           "named": true
         },
         {

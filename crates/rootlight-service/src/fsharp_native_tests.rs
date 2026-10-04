@@ -5,8 +5,8 @@ use super::*;
 use rootlight_ir::{ContainerRef, EntityKind, OccurrenceRole, OccurrenceTarget, RelationEndpoint};
 use std::fs;
 
-const IMPLEMENTATION: &str = "module Sample.Root\nopen System\nmodule Nested =\n    let value = 3\n    let ``value with spaces`` = value\n    let add x y = x + y\n    let rec first n = n + 1\n    and second n = n + 2\ntype Record = { Name: string; mutable Count: int }\ntype Choice = | Empty | Named of name: string\ntype Sample =\n      First = 0\n    | Next = 1\ntype Alias = System.String\ntype Container(seed: int) =\n    member this.Read amount = seed + amount\n    member this.Value = seed\n    new () = Container(0)\n";
-const SIGNATURE: &str = "module Sample.Root\nopen System\nmodule Nested =\n    val value: int\n    val ``value with spaces``: int\n    val add: int -> int -> int\ntype Record = { Name: string; mutable Count: int }\ntype Choice = | Empty | Named of name: string\ntype Sample =\n      First = 0\n    | Next = 1\ntype Alias = System.String\ntype Container =\n    new: seed:int -> Container\n    member Read: amount:int -> int\n    member Value: int with get\n";
+const IMPLEMENTATION: &str = "module Sample.Root\nopen System\nmodule Nested =\n    let value = 3\n    let ``value with spaces`` = value\n    let add x y = x + y\n    let rec first n = n + 1\n    and second n = n + 2\ntype Record = { Name: string; mutable Count: int }\ntype Choice = | Empty | Named of name: string\ntype Sample =\n      First = 0\n    | Next = 1\ntype Alias = System.String\ntype Constructed<'T> = Container<'T>.Builder\ntype Container(seed: int) =\n    member this.Read amount = seed + amount\n    member this.Value = seed\n    new () = Container(0)\n";
+const SIGNATURE: &str = "module Sample.Root\nopen System\nmodule Nested =\n    val value: int\n    val ``value with spaces``: int\n    val add: int -> int -> int\ntype Record = { Name: string; mutable Count: int }\ntype Choice = | Empty | Named of name: string\ntype Sample =\n      First = 0\n    | Next = 1\ntype Alias = System.String\ntype Constructed<'T> = Container<'T>.Builder\ntype Container =\n    new: seed:int -> Container\n    member Read: amount:int -> int\n    member Value: int with get\n";
 
 fn deadline() -> Cancellation {
     Cancellation::with_deadline(Instant::now().checked_add(Duration::from_secs(30)).unwrap())
@@ -132,6 +132,7 @@ fn assert_generation(
             ("First", EntityKind::Constant),
             ("Next", EntityKind::Constant),
             ("Alias", EntityKind::TypeAlias),
+            ("Constructed", EntityKind::TypeAlias),
             ("Name", EntityKind::Field),
             ("Count", EntityKind::Field),
             ("Empty", EntityKind::Constructor),

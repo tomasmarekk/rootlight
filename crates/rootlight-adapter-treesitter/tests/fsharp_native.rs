@@ -656,6 +656,120 @@ fn anonymous_object_members_keep_owner_gaps_instead_of_binding_containers() {
 }
 
 #[test]
+fn qualified_generic_types_preserve_alias_and_binding_evidence() {
+    for written_type in [
+        "Container<'T>.Builder",
+        "Container<'T>.Middle.Builder",
+        "Container<'T>.Builder<int>",
+    ] {
+        for language in ["fsharp", "fsharp-signature"] {
+            let alias = format!("Nested<'T> = {written_type}");
+            let (binding, binding_kind, signature_label, header) = if language == "fsharp-signature"
+            {
+                (
+                    format!("val create: int -> {written_type}"),
+                    EntityKind::Variable,
+                    "fsharp.signature_val.signature",
+                    format!("val create: int -> {written_type}"),
+                )
+            } else {
+                (
+                    format!("let create input : {written_type} = null"),
+                    EntityKind::Function,
+                    "fsharp.function.signature",
+                    format!("create input : {written_type} "),
+                )
+            };
+            let following = if language == "fsharp-signature" {
+                "val following: int"
+            } else {
+                "let following = 30"
+            };
+            let canonical = format!("module TypeExample\ntype {alias}\n{binding}\n{following}");
+            for newline in ["\n", "\r\n"] {
+                for trailing_newline in [false, true] {
+                    let mut text = canonical.replace('\n', newline);
+                    if trailing_newline {
+                        text.push_str(newline);
+                    }
+                    let fixture = Fixture::new(language, &text);
+                    let parsed = fixture.parse(4096, &deadline()).unwrap();
+                    assert_eq!(
+                        parsed.report().coverage().status(),
+                        CoverageStatus::Complete,
+                        "{language}: {written_type}; newline={newline:?}; trailing_newline={trailing_newline}; diagnostics={:?}",
+                        parsed.diagnostics()
+                    );
+                    assert!(parsed.diagnostics().is_empty());
+                    for (label, written) in [
+                        ("fsharp.type_alias.declaration", alias.as_str()),
+                        (signature_label, header.as_str()),
+                    ] {
+                        let facts: Vec<_> = parsed
+                            .facts()
+                            .iter()
+                            .filter(|fact| {
+                                fact.syntax_kind().as_str() == label
+                                    && fact.span() == fixture.span(written)
+                            })
+                            .collect();
+                        assert_eq!(facts.len(), 1, "{language}: {label}");
+                        assert_eq!(facts[0].span(), fixture.span(written));
+                    }
+                    let output = fixture.analyze();
+                    let document = output.document();
+                    let named = |name: &str, kind| {
+                        let found: Vec<_> = document
+                            .entities
+                            .iter()
+                            .filter(|entity| entity.canonical_name == name && entity.kind == kind)
+                            .collect();
+                        assert_eq!(found.len(), 1, "{language}: {name}");
+                        found[0]
+                    };
+                    let module = named("TypeExample", EntityKind::Module);
+                    for (name, kind) in [
+                        ("Nested", EntityKind::TypeAlias),
+                        ("create", binding_kind),
+                        ("following", EntityKind::Variable),
+                    ] {
+                        let entity = named(name, kind);
+                        assert_eq!(entity.container, Some(ContainerRef::Entity(module.id)));
+                        let reference = entity.evidence.source.as_ref().unwrap();
+                        assert_eq!(reference.repository(), fixture.source.repository());
+                        assert_eq!(reference.generation(), fixture.source.generation());
+                        assert_eq!(reference.content_hash(), fixture.source.content_hash());
+                        let definitions: Vec<_> = document
+                            .occurrences
+                            .iter()
+                            .filter(|site| {
+                                site.role == OccurrenceRole::Definition
+                                    && site.target
+                                        == (OccurrenceTarget::Resolved { symbol: entity.id })
+                            })
+                            .collect();
+                        assert_eq!(definitions.len(), 1);
+                        assert_eq!(definitions[0].source.span(), fixture.span(name));
+                        assert_eq!(definitions[0].enclosing, Some(module.id));
+                    }
+                    assert!(!document.skipped_regions.iter().any(|gap| matches!(
+                        gap.reason,
+                        SkippedRegionReason::ParseError | SkippedRegionReason::AdapterFailure
+                    )));
+                    // Constructed spelling does not prove external type identity.
+                    assert!(document.relations.iter().all(|relation| matches!(
+                        relation.predicate,
+                        RelationPredicate::Contains
+                            | RelationPredicate::Declares
+                            | RelationPredicate::DefinesAt
+                    )));
+                }
+            }
+        }
+    }
+}
+
+#[test]
 fn body_edits_preserve_header_identity_and_signature_evidence() {
     let before_fixture = Fixture::new("fsharp", "module Stable\nlet pick value = value + 1\n");
     let after_fixture = Fixture::new("fsharp", "module Stable\nlet pick value = value + 999\n");

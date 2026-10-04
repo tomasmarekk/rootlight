@@ -1389,6 +1389,7 @@ module.exports = grammar({
       choice(
         $.simple_type,
         $.generic_type,
+        $.qualified_type,
         $.paren_type,
         $.postfix_type,
         $.list_type,
@@ -1533,6 +1534,19 @@ module.exports = grammar({
         5,
         seq($.long_identifier, "<", optional($.type_attributes), ">"),
       ),
+    // A qualified atom retains its constructed base; a dotted identifier cannot
+    // represent the generic segment in Outer<'T>.Nested. Plain paths stay identifiers.
+    // Keep optional arguments attached before the shorter atom can reduce.
+    qualified_type: ($) =>
+      prec.right(
+        6,
+        seq(
+          field("base", choice($.generic_type, $.paren_type, $.qualified_type)),
+          ".",
+          field("name", $.long_identifier),
+          optional(seq("<", optional(field("arguments", $.type_attributes)), ">")),
+        ),
+      ),
     paren_type: ($) => seq("(", $._type, ")"),
     function_type: ($) => prec.right(seq($._type, arrow(), $._type)),
     compound_type: ($) =>
@@ -1570,6 +1584,7 @@ module.exports = grammar({
         choice(
           $.simple_type,
           $.generic_type,
+          $.qualified_type,
           $.paren_type,
           $.type_argument,
           $.flexible_type,
@@ -1618,6 +1633,28 @@ module.exports = grammar({
     _multiline_generic_type_head: ($) =>
       prec.right(5, seq($.long_identifier, "<", $._indent, optional($.type_attributes), ">")),
 
+    // A named head keeps recursive fields behind their public alias boundary.
+    // Its generic scope closes outside that alias so the written range stays exact.
+    qualified_type_scope_head: ($) =>
+      prec.left(
+        6,
+        seq(
+          field(
+            "base",
+            choice(
+              alias($._multiline_generic_type_head, $.generic_type),
+              alias($.qualified_type_scope_head, $.qualified_type),
+            ),
+          ),
+          ".",
+          field("name", $.long_identifier),
+          optional(seq("<", optional(field("arguments", $.type_attributes)), ">")),
+        ),
+      ),
+
+    _multiline_qualified_type: ($) =>
+      prec.left(6, seq(alias($.qualified_type_scope_head, $.qualified_type), $._dedent)),
+
     // The abbreviation-only generic path opens a scope at '<', even on one
     // line. Nullness must be consumed before that scope's deferred dedent.
     _multiline_generic_nullable_type_head: ($) =>
@@ -1625,7 +1662,14 @@ module.exports = grammar({
         1,
         prec.right(
           6,
-          seq(alias($._multiline_generic_type_head, $.generic_type), "|", "null"),
+          seq(
+            choice(
+              alias($._multiline_generic_type_head, $.generic_type),
+              alias($.qualified_type_scope_head, $.qualified_type),
+            ),
+            "|",
+            "null",
+          ),
         ),
       ),
 
@@ -1638,6 +1682,7 @@ module.exports = grammar({
         seq(
           choice(
             alias($._multiline_generic_type_head, $.generic_type),
+            alias($.qualified_type_scope_head, $.qualified_type),
             alias($._multiline_generic_nullable_type_head, $.nullable_type),
           ),
           arrow(),
@@ -1646,8 +1691,8 @@ module.exports = grammar({
         ),
       ),
 
-    // A tuple/compound type abbreviation whose first operand is a generic type,
-    // e.g. `type T = Foo<'a> * Bar`. The generic head opens an indent scope at
+    // A tuple/compound abbreviation whose first operand starts with a generic type,
+    // e.g. `type T = Foo<'a>.Nested * Bar`. The generic head opens an indent scope at
     // '<' (see _multiline_generic_type_head); the matching _dedent is deferred
     // until after the whole compound so the single-line form composes correctly.
     _multiline_generic_compound_type: ($) =>
@@ -1656,6 +1701,7 @@ module.exports = grammar({
         seq(
           choice(
             alias($._multiline_generic_type_head, $.generic_type),
+            alias($.qualified_type_scope_head, $.qualified_type),
             alias($._multiline_generic_nullable_type_head, $.nullable_type),
           ),
           repeat1(prec.right(seq("*", $._type))),
@@ -1667,6 +1713,7 @@ module.exports = grammar({
       prec.right(
         choice(
           seq("#", $._flexible_type_atom),
+          $.qualified_type,
           $.type_argument,
           seq("(", $._type, ")"),
           $.long_identifier,
@@ -1889,6 +1936,7 @@ module.exports = grammar({
               alias($._multiline_generic_nullable_type, $.nullable_type),
               alias($._multiline_generic_function_type, $.function_type),
               alias($._multiline_generic_compound_type, $.compound_type),
+              $._multiline_qualified_type,
               $._type,
               $.measure,
               alias($._multiline_generic_type, $.generic_type),
