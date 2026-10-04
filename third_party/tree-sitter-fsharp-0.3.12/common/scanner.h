@@ -46,7 +46,9 @@ enum TokenType {
   ELEM_SEP,
   BRACE_INDENT,
   ERROR_SENTINEL,
-  ENUM_CASE_BAR
+  ENUM_CASE_BAR,
+  DO_BODY_INDENT,
+  DONE_KEYWORD
 };
 
 typedef enum {
@@ -62,6 +64,8 @@ typedef enum {
   // under-indented line still emits a NEWLINE so record/CE items keep
   // separating even when a continuation item sits left of the first one.
   INDENT_BRACE = 4,
+  // A committed do-body lets "done" close only scopes owned by that body.
+  INDENT_DO = 5,
 } IndentKind;
 
 // OR-ed into the indent_kinds byte when the scope's INDENT fired mid-line
@@ -370,6 +374,17 @@ static inline bool peek_is_type_app_indent(Scanner *scanner) {
 
 static inline bool peek_is_try_indent(Scanner *scanner) {
   return peek_indent_kind(scanner) == INDENT_TRY;
+}
+
+static inline bool has_open_do_body_before_barrier(Scanner *scanner) {
+  for (uint32_t i = scanner->indent_kinds.size; i > 1; i--) {
+    IndentKind kind =
+        (IndentKind)(*array_get(&scanner->indent_kinds, i - 1) &
+                     ~INDENT_KIND_FLAGS_MASK);
+    if (kind == INDENT_DO) return true;
+    if (kind != INDENT_NORMAL && kind != INDENT_TRY) return false;
+  }
+  return false;
 }
 
 // Peek forward from after a '<' to its matching '>' and check that the content
@@ -711,7 +726,9 @@ static bool scan(Scanner *scanner, TSLexer *lexer, const bool *valid_symbols) {
     // the enum but is a structural indent token like INDENT, so it must count
     // here — otherwise a state where only BRACE_INDENT is valid (right after a
     // record/CE '{') bails out and the token is never emitted.
-    if (valid_symbols[BRACE_INDENT] || valid_symbols[ENUM_CASE_BAR]) {
+    // Appended owner/delimiter tokens must also bypass the extra-only fast path.
+    if (valid_symbols[BRACE_INDENT] || valid_symbols[ENUM_CASE_BAR] ||
+        valid_symbols[DO_BODY_INDENT] || valid_symbols[DONE_KEYWORD]) {
       any_structural_valid = true;
     }
     if (!any_structural_valid) {
@@ -1262,7 +1279,8 @@ static bool scan(Scanner *scanner, TSLexer *lexer, const bool *valid_symbols) {
             indent_length = content_indent;
             continue;
           }
-          if ((valid_symbols[NEWLINE] || valid_symbols[INDENT]) &&
+          if ((valid_symbols[NEWLINE] || valid_symbols[INDENT] ||
+               valid_symbols[DO_BODY_INDENT]) &&
               !valid_symbols[PREPROC_IF]) {
             while (lexer->lookahead != '\n' && !lexer->eof(lexer)) {
               skip(lexer);
@@ -1370,7 +1388,7 @@ static bool scan(Scanner *scanner, TSLexer *lexer, const bool *valid_symbols) {
           found_hash_type_prefix = true;
           break;
         }
-        if (valid_symbols[INDENT]) {
+        if (valid_symbols[INDENT] || valid_symbols[DO_BODY_INDENT]) {
           if (directive == HASH_LINE_DIRECTIVE) {
             while (lexer->lookahead == ' ' || lexer->lookahead == '\t') {
               advance(lexer);
@@ -1846,12 +1864,40 @@ static bool scan(Scanner *scanner, TSLexer *lexer, const bool *valid_symbols) {
         }
       }
     }
-  } else if (lexer->lookahead == 'd' && valid_symbols[DO_KEYWORD]) {
+  } else if (lexer->lookahead == 'd' &&
+             (valid_symbols[DO_KEYWORD] ||
+              (!valid_symbols[ERROR_SENTINEL] &&
+               (valid_symbols[DONE_KEYWORD] || valid_symbols[DEDENT])))) {
     advance(lexer);
     if (lexer->lookahead == 'o') {
       advance(lexer);
-      // Exclude 'do!' so computation-expression do-bang is never claimed.
-      if (!is_word_char(lexer->lookahead) && lexer->lookahead != '!') {
+      if (lexer->lookahead == 'n') {
+        advance(lexer);
+        if (lexer->lookahead == 'e') {
+          advance(lexer);
+          // A Unicode identifier suffix must never be split into a delimiter.
+          if (!valid_symbols[ERROR_SENTINEL] &&
+              !is_hash_word_char(lexer->lookahead)) {
+            // The body already consumed its DEDENT when this tail is admitted.
+            // Consume the written delimiter before considering any outer scope.
+            if (valid_symbols[DONE_KEYWORD]) {
+              lexer->mark_end(lexer);
+              lexer->result_symbol = DONE_KEYWORD;
+              return true;
+            }
+            // Keep "done" at the original mark_end until its nearest body closes.
+            // Stray words and delimited barriers cannot force unrelated closures.
+            if (valid_symbols[DEDENT] &&
+                has_open_do_body_before_barrier(scanner)) {
+              pop_indent(scanner);
+              lexer->result_symbol = DEDENT;
+              return true;
+            }
+          }
+        }
+      } else if (valid_symbols[DO_KEYWORD] &&
+                 !is_word_char(lexer->lookahead) && lexer->lookahead != '!') {
+        // Exclude 'do!' so computation-expression do-bang is never claimed.
         lexer->mark_end(lexer);
         lexer->result_symbol = DO_KEYWORD;
         return true;
@@ -2005,7 +2051,8 @@ static bool scan(Scanner *scanner, TSLexer *lexer, const bool *valid_symbols) {
       !valid_symbols[ERROR_SENTINEL] &&
       (!found_end_of_line || indent_length >= enum_floor ||
        (scanner->indents.size > 1 &&
-        peek_indent_kind(scanner) == INDENT_NORMAL &&
+        (peek_indent_kind(scanner) == INDENT_NORMAL ||
+         peek_indent_kind(scanner) == INDENT_DO) &&
         enum_floor - indent_length <= 2));
     if (enum_bar_candidate) {
       advance(lexer);
@@ -2117,7 +2164,8 @@ static bool scan(Scanner *scanner, TSLexer *lexer, const bool *valid_symbols) {
     return true;
   }
 
-  if (valid_symbols[INDENT] && !valid_symbols[ERROR_SENTINEL] &&
+  if ((valid_symbols[INDENT] || valid_symbols[DO_BODY_INDENT]) &&
+      !valid_symbols[ERROR_SENTINEL] &&
       !found_bracket_end && !found_preprocessor_end &&
       !found_same_line_pipe_infix &&
       // A block comment trailing the current line must not anchor the new
@@ -2133,9 +2181,12 @@ static bool scan(Scanner *scanner, TSLexer *lexer, const bool *valid_symbols) {
         indent_flags |= INDENT_KIND_STRANDED_LINE_FLAG;
       }
     }
+    IndentKind kind =
+        valid_symbols[DO_BODY_INDENT] ? INDENT_DO : INDENT_NORMAL;
     if (!push_indent(scanner, indent_length,
-                     (IndentKind)(INDENT_NORMAL | indent_flags))) return false;
-    lexer->result_symbol = INDENT;
+                     (IndentKind)(kind | indent_flags))) return false;
+    lexer->result_symbol =
+        valid_symbols[DO_BODY_INDENT] ? DO_BODY_INDENT : INDENT;
     return true;
   }
 
@@ -2310,7 +2361,8 @@ static bool scan(Scanner *scanner, TSLexer *lexer, const bool *valid_symbols) {
             *array_get(&scanner->indent_kinds, scanner->indents.size - 2);
         IndentKind below_kind =
             (IndentKind)(below_kind_raw & ~INDENT_KIND_FLAGS_MASK);
-        if ((below_kind == INDENT_NORMAL || below_kind == INDENT_TRY) &&
+        if ((below_kind == INDENT_NORMAL || below_kind == INDENT_TRY ||
+             below_kind == INDENT_DO) &&
             indent_length >
                 *array_get(&scanner->indents, scanner->indents.size - 2)) {
           can_dedent_midline_anchor = false;
@@ -2440,8 +2492,10 @@ static void deserialize(Scanner *scanner, const char *buffer, unsigned length) {
   size_t size = STATE_HEADER_SIZE;
   for (uint32_t i = 0; i < indents; i++, size += 5) {
     uint8_t kind = (uint8_t)buffer[size + 4];
-    if (kind > INDENT_BRACE && kind != INDENT_KIND_MIDLINE_FLAG &&
-        kind != INDENT_KIND_FLAGS_MASK) return;
+    if (kind > INDENT_DO && kind != INDENT_KIND_MIDLINE_FLAG &&
+        kind != INDENT_KIND_FLAGS_MASK &&
+        kind != (INDENT_DO | INDENT_KIND_MIDLINE_FLAG) &&
+        kind != (INDENT_DO | INDENT_KIND_FLAGS_MASK)) return;
   }
   size += 4 * (size_t)preprocessor;
   for (uint32_t i = 0; i < kinds; i++) {

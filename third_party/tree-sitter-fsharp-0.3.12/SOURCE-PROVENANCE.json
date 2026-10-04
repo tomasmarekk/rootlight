@@ -827,19 +827,19 @@
       "sha256": "6a4bcb7c05e8d087a68383815d8b825f4b07c56a531c99c7f7ae8ad5a36a26f7"
     },
     "common/scanner.h": {
-      "bytes": 102492,
+      "bytes": 104880,
       "archive_mode": 436,
-      "sha256": "96caec9cd8e125e3bac5ab33e5da98c700e9d2b47b4f55940c6c6407ec8ab1b3"
+      "sha256": "90bb85f17014e0735f8ca40410344c94c078975ea8a70f805a4b570a3bc512fa"
     },
     "fsharp/grammar.js": {
-      "bytes": 90420,
+      "bytes": 91039,
       "archive_mode": 436,
-      "sha256": "fb5e4962ce02c00889187e0d5c79162743055cd05a5a6abefdf1acd3026627e9"
+      "sha256": "7b5a8046aef50d9f2176b4356f9e0db41f9ff9ad2ea3955ba0e624bf0ebf64e9"
     },
     "fsharp/src/grammar.json": {
-      "bytes": 295345,
+      "bytes": 298205,
       "archive_mode": 436,
-      "sha256": "ac08d618c44651717bba04a3165ab5ebfcfaf7629fcab9a2e6bf6629e89c4c0c"
+      "sha256": "181fd4147d10fcd9f049cc8d0024238a5ed0b240cce9fd3706166dd097f759be"
     },
     "fsharp/src/node-types.json": {
       "bytes": 105217,
@@ -847,9 +847,9 @@
       "sha256": "1fd7ea66d7de9fdf025145c9d162539cca5cfcc40e382aa715a9884d3a2d85a3"
     },
     "fsharp/src/parser.c": {
-      "bytes": 62686867,
+      "bytes": 63866545,
       "archive_mode": 436,
-      "sha256": "0f444ac095093f783770055eac27e77ba80a404cc59896d4c03ec129c18c7a8e"
+      "sha256": "8dc65b1dd506720d3b8a9d66f2619e412c3f8604f4bdc4708a76ed925ce61c1e"
     },
     "fsharp/src/scanner.c": {
       "bytes": 998,
@@ -872,14 +872,14 @@
       "sha256": "180b893c8734778fd32f372dfbc27bd6ad1cd2221f26150b31256ff6716320d2"
     },
     "fsharp_signature/grammar.js": {
-      "bytes": 6145,
+      "bytes": 6688,
       "archive_mode": 436,
-      "sha256": "2319a417497bd5b54c51168c00216fb714cb8d47891e9253dda88c10ee56adf0"
+      "sha256": "8a47df784b9f55abedde853c2949bd3329670dd262b2b1aa926d3d4f4587b76c"
     },
     "fsharp_signature/src/grammar.json": {
-      "bytes": 288673,
+      "bytes": 291753,
       "archive_mode": 436,
-      "sha256": "0bd068c49cb75e7060eedddad0168cc2e1f652c0598151837f60ba24f870063b"
+      "sha256": "053ef094fe812492b32feafe4ce8acf3d4ca64ea9591d3a47bc8c3c476ac3586"
     },
     "fsharp_signature/src/node-types.json": {
       "bytes": 113454,
@@ -887,9 +887,9 @@
       "sha256": "a6c94fa8c7611ff2c3c4197d02a99d23b0df9448f3541be479e0a4cd463f1962"
     },
     "fsharp_signature/src/parser.c": {
-      "bytes": 13126989,
+      "bytes": 13128400,
       "archive_mode": 436,
-      "sha256": "c11b8e19086597fa90d041d91b9be52593a366d778d3563a1f6a04bbf44c5ab5"
+      "sha256": "e22bdccf2ace378031836a4b8e1bad8ec808302d37e90c62789fa387605911b9"
     },
     "fsharp_signature/src/scanner.c": {
       "bytes": 918,
@@ -944,15 +944,15 @@
     },
     "common/scanner.h": {
       "original_sha256": "5e14db207730d34e7f054df0afbb294f8798c9b8214734df025b239ef41e7592",
-      "local_sha256": "96caec9cd8e125e3bac5ab33e5da98c700e9d2b47b4f55940c6c6407ec8ab1b3"
+      "local_sha256": "90bb85f17014e0735f8ca40410344c94c078975ea8a70f805a4b570a3bc512fa"
     },
     "fsharp/grammar.js": {
       "original_sha256": "300a392f1c87e30ccc9575894bc3f08ef7cb61f7ac84ca5d46ede38cddc9403b",
-      "local_sha256": "fb5e4962ce02c00889187e0d5c79162743055cd05a5a6abefdf1acd3026627e9"
+      "local_sha256": "7b5a8046aef50d9f2176b4356f9e0db41f9ff9ad2ea3955ba0e624bf0ebf64e9"
     },
     "fsharp/src/grammar.json": {
       "original_sha256": "f4ffc3722c8f97726e8e9b473c369799882b53cdf95e4ea3c45b4d2395a2e805",
-      "local_sha256": "ac08d618c44651717bba04a3165ab5ebfcfaf7629fcab9a2e6bf6629e89c4c0c"
+      "local_sha256": "181fd4147d10fcd9f049cc8d0024238a5ed0b240cce9fd3706166dd097f759be"
     },
     "fsharp/src/node-types.json": {
       "original_sha256": "112897be95befe217c7e7286b8df4a61b4538ef4f23b656e0389eb58661cc926",
@@ -960,15 +960,15 @@
     },
     "fsharp/src/parser.c": {
       "original_sha256": "c1818692b883636a992d7648023c29cda96d3af0ebe798bca6b7ec6d31b9f45c",
-      "local_sha256": "0f444ac095093f783770055eac27e77ba80a404cc59896d4c03ec129c18c7a8e"
+      "local_sha256": "8dc65b1dd506720d3b8a9d66f2619e412c3f8604f4bdc4708a76ed925ce61c1e"
     },
     "fsharp_signature/grammar.js": {
       "original_sha256": "e0a696ab5fd43c665634c1f17b20562b7e6719fc49eca0e261533b1c9148c63c",
-      "local_sha256": "2319a417497bd5b54c51168c00216fb714cb8d47891e9253dda88c10ee56adf0"
+      "local_sha256": "8a47df784b9f55abedde853c2949bd3329670dd262b2b1aa926d3d4f4587b76c"
     },
     "fsharp_signature/src/grammar.json": {
       "original_sha256": "c804cd49d95e02b49c18190fa3deb87fd0b0bd28a71644fd7c2ed869b46ef4a1",
-      "local_sha256": "0bd068c49cb75e7060eedddad0168cc2e1f652c0598151837f60ba24f870063b"
+      "local_sha256": "053ef094fe812492b32feafe4ce8acf3d4ca64ea9591d3a47bc8c3c476ac3586"
     },
     "fsharp_signature/src/node-types.json": {
       "original_sha256": "519ea69a0762c4c0bdee71038d4c9f73bbb5ced6a72e302f82ec565135ad8d82",
@@ -976,7 +976,7 @@
     },
     "fsharp_signature/src/parser.c": {
       "original_sha256": "5b9d1ae7e270d46e284c5b5614db77a1f16d580f8280d72413d0eb59b6bb17a6",
-      "local_sha256": "c11b8e19086597fa90d041d91b9be52593a366d778d3563a1f6a04bbf44c5ab5"
+      "local_sha256": "e22bdccf2ace378031836a4b8e1bad8ec808302d37e90c62789fa387605911b9"
     }
   },
   "signature_generation": {
@@ -1009,12 +1009,12 @@
   },
   "native_qualification": {
     "implementation_and_signature_groups": 11,
-    "scanner_groups": 13,
+    "scanner_groups": 19,
     "platform": "x86_64-pc-windows-msvc",
     "tree_sitter_runtime": "0.26.11",
     "parser_abi": 15,
     "parser_test_sha256": "51a10fd0125fbfd7fdfd8d6dd0ea2b5efda3da64d9b150fac24eeb07ea77a044",
-    "scanner_test_sha256": "104ce998b5e18e78b87334070a3c64b9cba731b874b0379deb7d433c89cdd5ae",
+    "scanner_test_sha256": "d043e5a4bd7c33bb2b8a5b09ec14a07d747ce1da1ad42dc733493f5e6338548c",
     "full_language_semantics_verified": false,
     "installed_product_acceptance_verified": false,
     "empty_cache_network_denied_build_verified": false,
@@ -1029,7 +1029,9 @@
     "enum_update_groups": 9,
     "enum_update_test_sha256": "98ad6e29fe8af24e8ac1d0399c0a036532aa0d1ef68d2cf1f8391f968e856825",
     "qualified_type_groups": 12,
-    "qualified_type_test_sha256": "39337946e4c358299dd218cd87ae794b0a982c8f1875b8c6b792476c9d65ca16"
+    "qualified_type_test_sha256": "39337946e4c358299dd218cd87ae794b0a982c8f1875b8c6b792476c9d65ca16",
+    "numeric_loop_groups": 16,
+    "numeric_loop_test_sha256": "55cef07ce9531ade5cec826d10b488698fe1ee081cd8056c14ee1f552cb44ca7"
   },
   "compilation_downloads_sources": false,
   "compilation_generates_parser": false,

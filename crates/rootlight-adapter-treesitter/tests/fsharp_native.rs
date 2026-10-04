@@ -770,6 +770,89 @@ fn qualified_generic_types_preserve_alias_and_binding_evidence() {
 }
 
 #[test]
+fn numeric_loop_wildcards_preserve_enclosing_declarations() {
+    for binder in ["_", "step"] {
+        for (direction, first, last) in [("to", "1", "limit"), ("downto", "limit", "1")] {
+            let canonical = format!(
+                "module LoopExample\nlet repeat limit =\n    for {binder} = {first} {direction} {last} do\n        ()\nlet following = 30"
+            );
+            for newline in ["\n", "\r\n"] {
+                for trailing_newline in [false, true] {
+                    let mut text = canonical.replace('\n', newline);
+                    if trailing_newline {
+                        text.push_str(newline);
+                    }
+                    let fixture = Fixture::new("fsharp", &text);
+                    let parsed = fixture.parse(4096, &deadline()).unwrap();
+                    assert_eq!(
+                        parsed.report().coverage().status(),
+                        CoverageStatus::Complete,
+                        "{binder}: {direction}; diagnostics={:?}",
+                        parsed.diagnostics()
+                    );
+                    assert!(parsed.diagnostics().is_empty());
+                    let signatures: Vec<_> = parsed
+                        .facts()
+                        .iter()
+                        .filter(|fact| {
+                            fact.syntax_kind().as_str() == "fsharp.function.signature"
+                                && fact.span() == fixture.span("repeat limit ")
+                        })
+                        .collect();
+                    assert_eq!(signatures.len(), 1);
+                    let output = fixture.analyze();
+                    let document = output.document();
+                    let module = document
+                        .entities
+                        .iter()
+                        .find(|entity| entity.canonical_name == "LoopExample")
+                        .unwrap();
+                    for (name, kind) in [
+                        ("repeat", EntityKind::Function),
+                        ("following", EntityKind::Variable),
+                    ] {
+                        let entities: Vec<_> = document
+                            .entities
+                            .iter()
+                            .filter(|entity| entity.canonical_name == name && entity.kind == kind)
+                            .collect();
+                        assert_eq!(entities.len(), 1);
+                        let entity = entities[0];
+                        assert_eq!(entity.container, Some(ContainerRef::Entity(module.id)));
+                        let reference = entity.evidence.source.as_ref().unwrap();
+                        assert_eq!(reference.repository(), fixture.source.repository());
+                        assert_eq!(reference.generation(), fixture.source.generation());
+                        assert_eq!(reference.content_hash(), fixture.source.content_hash());
+                        let definitions: Vec<_> = document
+                            .occurrences
+                            .iter()
+                            .filter(|site| {
+                                site.role == OccurrenceRole::Definition
+                                    && site.target
+                                        == (OccurrenceTarget::Resolved { symbol: entity.id })
+                            })
+                            .collect();
+                        assert_eq!(definitions.len(), 1);
+                        assert_eq!(definitions[0].source.span(), fixture.span(name));
+                        assert_eq!(definitions[0].enclosing, Some(module.id));
+                    }
+                    // A loop binder does not establish a module-level declaration.
+                    assert!(
+                        !document.entities.iter().any(|entity| {
+                            matches!(entity.canonical_name.as_str(), "_" | "step")
+                        })
+                    );
+                    assert!(!document.skipped_regions.iter().any(|gap| matches!(
+                        gap.reason,
+                        SkippedRegionReason::ParseError | SkippedRegionReason::AdapterFailure
+                    )));
+                }
+            }
+        }
+    }
+}
+
+#[test]
 fn body_edits_preserve_header_identity_and_signature_evidence() {
     let before_fixture = Fixture::new("fsharp", "module Stable\nlet pick value = value + 1\n");
     let after_fixture = Fixture::new("fsharp", "module Stable\nlet pick value = value + 999\n");

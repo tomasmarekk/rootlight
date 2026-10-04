@@ -106,6 +106,8 @@ module.exports = grammar({
 
     $._error_sentinel, // unused token to detect parser errors in external parser.
     $._enum_case_bar,
+    $._do_body_indent,
+    $._done_keyword,
   ],
 
   conflicts: ($) => [
@@ -162,7 +164,7 @@ module.exports = grammar({
   // `null` cannot fall back to a union-case identifier: doing so would invent
   // a second constructor for a nullable type alias such as `Reference | null`.
   reserved: {
-    global: (_) => ["as", "namespace", "open", "type", "null"],
+    global: (_) => ["as", "namespace", "open", "type", "null", "done"],
   },
 
   inline: ($) => [
@@ -396,7 +398,8 @@ module.exports = grammar({
         ),
       ),
 
-    do: ($) => prec(PREC.DO_EXPR + 1, seq("do", $._expression_block)),
+    // Both do ownership routes must survive the same external body admission.
+    do: ($) => prec(PREC.DO_EXPR + 1, seq("do", $._do_expression_block)),
 
     _function_or_value_defns: ($) =>
       prec.right(
@@ -637,6 +640,9 @@ module.exports = grammar({
 
     _expression_block: ($) => seq($._indent, $._expression, $._dedent),
 
+    // The dedicated indent commits the owner before an explicit "done" closes it.
+    _do_expression_block: ($) => seq($._do_body_indent, $._expression, $._dedent),
+
     // Like _expression_block, but also allows the block to be terminated by
     // the 'in' keyword instead of a dedent.  Used for let/use bindings so that
     // single-line  let x = 1 in x  works (where no newline → no DEDENT).
@@ -866,7 +872,7 @@ module.exports = grammar({
           choice(
             seq($._pattern, "in", $._expression_or_range),
             seq(
-              $.identifier,
+              choice($.identifier, alias("_", $.wildcard_pattern)),
               "=",
               $._expression,
               choice("to", "downto"),
@@ -874,8 +880,8 @@ module.exports = grammar({
             ),
           ),
           alias($._do_keyword, "do"),
-          $._expression_block,
-          optional("done"),
+          $._do_expression_block,
+          optional(choice(alias($._done_keyword, "done"), "done")),
         ),
       ),
 
@@ -886,8 +892,8 @@ module.exports = grammar({
           choice("while", "while!"),
           $._expression,
           alias($._do_keyword, "do"),
-          $._expression_block,
-          optional("done"),
+          $._do_expression_block,
+          optional(choice(alias($._done_keyword, "done"), "done")),
         ),
       ),
 
@@ -1002,7 +1008,17 @@ module.exports = grammar({
       seq("and!", $._pattern, "=", $._expression_block_for_let),
 
     do_expression: ($) =>
-      prec(PREC.DO_EXPR, seq(choice("do", "do!"), $._expression_block)),
+      prec(
+        PREC.DO_EXPR,
+        choice(
+          seq(
+            "do",
+            $._do_expression_block,
+            optional(choice(alias($._done_keyword, "done"), "done")),
+          ),
+          seq("do!", $._expression_block),
+        ),
+      ),
 
     _list_elements: ($) =>
       prec.right(

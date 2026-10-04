@@ -14,6 +14,12 @@
 module.exports = grammar(require("../fsharp/grammar"), {
   name: "fsharp_signature",
 
+  // Signature bodies omit loop tails, but done must remain a lexical keyword
+  // without adding an implementation form solely to keep its token reachable.
+  reserved: {
+    global: ($) => ["as", "namespace", "open", "type", "null", $._reserved_done],
+  },
+
   conflicts: ($) => [
     [$.long_identifier, $._identifier_or_op],
     [$._type, $._argument_type],
@@ -34,6 +40,11 @@ module.exports = grammar(require("../fsharp/grammar"), {
         repeat1($.namespace),
         repeat($._module_signature_elements),
       ),
+
+    // A regex is absorbed into a hidden lexical terminal; a hidden string rule
+    // remains a syntax variable and cannot provide this reserved terminal.
+    // Keyword extraction requires this fixed regex to outrank identifiers.
+    _reserved_done: (_) => token(prec(1, /done/)),
 
     named_module: ($, _original) =>
       seq(

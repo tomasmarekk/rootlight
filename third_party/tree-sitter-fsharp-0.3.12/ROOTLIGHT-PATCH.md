@@ -1,4 +1,4 @@
-# F# scanner state, signature and current type syntax
+# F# scanner state, signatures, type syntax and loops
 
 This directory retains the MIT-licensed preferred grammar sources, Rust binding
 and complete native compilation payload from `ionide/tree-sitter-fsharp` tag
@@ -140,6 +140,42 @@ spans, following declarations, query captures and bounded edit/restore equality;
 malformed suffix controls require recovery, not later-declaration preservation.
 These are syntax and source-ownership guarantees, not name resolution, type
 checking, constant evaluation or complete language coverage.
+
+Numeric `for` loops admit the written wildcard binder as a `wildcard_pattern`
+without treating tuple, record or arbitrary patterns as numeric-loop binders.
+The bounded identifier/wildcard subset follows the
+[compiler's numeric-loop parser branch](https://github.com/dotnet/fsharp/blob/7e2cbf10edb6ac52b09c88214a4a39a8c774eebd/src/Compiler/pars.fsy#L5749).
+Both ascending and descending forms preserve their direct binder, bounds and
+body ownership. The wildcard produces no invented module-level declaration.
+
+Loop and plain `do` expression bodies use a dedicated external indentation mark.
+An explicit written `done` closes the nearest marked body through ordinary
+dedentation before emitting its existing anonymous tail. Delimited type,
+parenthesized and braced scopes remain barriers. Declaration and expression
+`do` routes share the body mark so lexical admission cannot eliminate the
+declaration before its existing precedence decides ownership; the declaration
+route does not acquire a `done` tail. Conditional-module controls retain distinct
+declaration, module, import, loop and following-binding owners. Numeric, foreach,
+while and nested expression controls check exact tails, source bytes and bounded
+incremental edit/restore equivalence, not evaluation or compiler name resolution.
+
+The two external additions follow the existing 41-token prefix. Snapshot framing
+and capacity remain unchanged, while the validated kind domain adds marked
+`do` frames and their existing midline/stranded combinations. Old frames remain
+readable; an older reader rejects the added kind instead of decoding lost state.
+Native tree handles remain grammar/provider-private: cross-grammar snapshot or
+tree reuse is not an interoperability guarantee. Written keywords, recovery
+mode, barriers and native-created round-trip states have direct scanner controls.
+
+`done` is reserved in both profiles. The signature grammar uses a hidden,
+fixed-spelling regex with lexical priority to retain the keyword token without
+introducing implementation bodies or public helper nodes. Bare keyword names
+require recovery; longer names, backtick escapes and the qualified Unicode
+suffix controls remain identifiers. The scanner's conservative word boundary
+does not claim a complete Unicode identifier classifier. Parse-only checks from
+the pinned SDK compiler independently confirm the authored conditional, numeric
+and keyword fixtures; they neither execute/typecheck the strings nor establish
+compiler equivalence for all F# source.
 
 The ten overrides are the scanner, both preferred grammars, both generated
 parser/grammar-JSON pairs, both node-type inventories, and one Rust binding

@@ -6,7 +6,7 @@ use std::{
     ptr::NonNull,
 };
 
-const TOKEN_COUNT: usize = 41;
+const TOKEN_COUNT: usize = 43;
 const ENUM_CASE_BAR: usize = 40;
 const INDENT: usize = 1;
 const ERROR_SENTINEL: usize = 39;
@@ -188,7 +188,7 @@ impl Scanner {
             advanced_past_end: false,
             watchdog: false,
         };
-        // SAFETY: The opaque owner, complete 41-flag array, Input and non-panicking
+        // SAFETY: The opaque owner, complete 43-flag array, Input and non-panicking
         // callbacks are live for this call. The scanner does not retain lexer pointers.
         let found = unsafe {
             match self.profile {
@@ -894,6 +894,339 @@ fn comment_eof_is_not_an_embedded_nul_and_string_controls_do_not_scan() {
             assert_eq!(input.marked, None);
             assert_eq!(input.lexer.result_symbol, u16::MAX);
             assert_eq!(scanner.snapshot(), before);
+        }
+    }
+}
+
+const DO_BODY_INDENT: usize = 41;
+const DONE_KEYWORD: usize = 42;
+const BRACE_INDENT: usize = 38;
+
+fn open_do_body(scanner: &mut Scanner, column: u32) {
+    let (found, input) = scanner.scan("item", column, flags(&[DO_BODY_INDENT]));
+    assert!(found, "{:?}: do body at {column}", scanner.profile);
+    assert_eq!(
+        input.lexer.result_symbol,
+        u16::try_from(DO_BODY_INDENT).unwrap()
+    );
+    assert_eq!(input.marked, Some(0));
+    assert_eq!(input.offset, 0);
+}
+
+fn expect_done_dedent(scanner: &mut Scanner, expected: &[u8]) {
+    let (found, input) = scanner.scan("done", 16, flags(&[DEDENT]));
+    assert!(
+        found,
+        "{:?}: nearest do body did not close",
+        scanner.profile
+    );
+    assert_eq!(input.lexer.result_symbol, u16::try_from(DEDENT).unwrap());
+    assert_eq!(input.marked, Some(0));
+    // The lexical peek advances, but DEDENT still ends at the untouched delimiter.
+    assert_eq!(input.offset, 4);
+    assert_eq!(scanner.snapshot(), expected);
+}
+
+#[test]
+fn native_do_body_tags_round_trip_and_unknown_tags_reset() {
+    for profile in PROFILES {
+        let reset = Scanner::new(profile).snapshot();
+        for column in [8_u32, 257] {
+            for newline in ["", "\n", "\r\n"] {
+                let source = if newline.is_empty() {
+                    "item".to_owned()
+                } else {
+                    format!(
+                        "{newline}{}item",
+                        " ".repeat(usize::try_from(column).unwrap())
+                    )
+                };
+                let start_column = if newline.is_empty() { column } else { 0 };
+                let mut normal = Scanner::new(profile);
+                let (found, input) = normal.scan(&source, start_column, flags(&[INDENT]));
+                assert!(found);
+                assert_eq!(input.lexer.result_symbol, u16::try_from(INDENT).unwrap());
+                assert_eq!(input.marked, Some(0));
+                let normal_state = normal.snapshot();
+                let mut owned = Scanner::new(profile);
+                let (found, input) = owned.scan(&source, start_column, flags(&[DO_BODY_INDENT]));
+                assert!(found, "{profile:?}: {source:?}");
+                assert_eq!(
+                    input.lexer.result_symbol,
+                    u16::try_from(DO_BODY_INDENT).unwrap()
+                );
+                assert_eq!(input.marked, Some(0));
+                assert_eq!(input.offset, source.chars().count() - "item".len());
+                let state = owned.snapshot();
+                assert_ne!(state, reset);
+                assert_eq!(state.len(), normal_state.len());
+                let different: Vec<_> = state
+                    .iter()
+                    .zip(&normal_state)
+                    .enumerate()
+                    .filter_map(|(index, (owned, normal))| (owned != normal).then_some(index))
+                    .collect();
+                assert_eq!(
+                    different.len(),
+                    1,
+                    "do ownership changed more than its native kind"
+                );
+                let mut restored = Scanner::new(profile);
+                restored.restore(&state);
+                assert_eq!(restored.snapshot_at(1), state);
+                for scanner in [&mut owned, &mut restored] {
+                    expect_done_dedent(scanner, &reset);
+                }
+                // Locate the native kind by comparison rather than authoring a wire frame.
+                let mut unknown = state.clone();
+                unknown[different[0]] = 0x3f;
+                restored.restore(&unknown);
+                assert_eq!(
+                    restored.snapshot(),
+                    reset,
+                    "{profile:?}: unknown kind was admitted"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn nested_done_closes_body_frames_before_its_written_tail_without_popping_outer_owners() {
+    for profile in PROFILES {
+        let reset = Scanner::new(profile).snapshot();
+        let mut donor = Scanner::new(profile);
+        open_do_body(&mut donor, 8);
+        let outer = donor.snapshot();
+        open_do_body(&mut donor, 12);
+        let inner = donor.snapshot();
+        open_enum_body(&mut donor, 16);
+        let nested = donor.snapshot();
+        let mut restored = Scanner::new(profile);
+        restored.restore(&nested);
+        for scanner in [&mut donor, &mut restored] {
+            expect_done_dedent(scanner, &inner);
+            expect_done_dedent(scanner, &outer);
+            let (found, input) = scanner.scan("done next", 16, flags(&[DONE_KEYWORD, DEDENT]));
+            assert!(found);
+            assert_eq!(
+                input.lexer.result_symbol,
+                u16::try_from(DONE_KEYWORD).unwrap()
+            );
+            assert_eq!(input.offset, 4);
+            assert_eq!(input.marked, Some(4));
+            assert_eq!(input.lexer.lookahead, i32::from(b' '));
+            assert_eq!(
+                scanner.snapshot(),
+                outer,
+                "written inner done popped its outer body"
+            );
+            expect_done_dedent(scanner, &reset);
+            let (found, input) = scanner.scan("done", 16, flags(&[DONE_KEYWORD, DEDENT]));
+            assert!(found);
+            assert_eq!(
+                input.lexer.result_symbol,
+                u16::try_from(DONE_KEYWORD).unwrap()
+            );
+            assert_eq!(input.offset, 4);
+            assert_eq!(input.marked, Some(4));
+            assert_eq!(scanner.snapshot(), reset, "written done popped the base");
+        }
+    }
+}
+
+#[test]
+fn done_prefixes_stray_scopes_and_delimited_barriers_do_not_mutate_owner_state() {
+    for profile in PROFILES {
+        for text in [
+            "doneValue",
+            "undone",
+            "done_1",
+            "done'",
+            "doneλ",
+            "done\u{301}",
+            "``done``",
+        ] {
+            let mut scanner = Scanner::new(profile);
+            open_do_body(&mut scanner, 8);
+            let before = scanner.snapshot();
+            let (found, input) = scanner.scan(text, 16, flags(&[DONE_KEYWORD, DEDENT]));
+            assert!(!found, "{profile:?}: delimiter claimed identifier {text:?}");
+            assert_eq!(input.lexer.result_symbol, u16::MAX);
+            assert_eq!(scanner.snapshot(), before);
+        }
+        for scope in [None, Some(INDENT), Some(PAREN_INDENT), Some(BRACE_INDENT)] {
+            let mut scanner = Scanner::new(profile);
+            if matches!(scope, Some(PAREN_INDENT | BRACE_INDENT)) {
+                open_do_body(&mut scanner, 8);
+            }
+            if let Some(token) = scope {
+                let (found, input) = scanner.scan("item", 16, flags(&[token]));
+                assert!(found);
+                assert_eq!(input.lexer.result_symbol, u16::try_from(token).unwrap());
+                assert_eq!(input.offset, 0);
+                assert_eq!(input.marked, Some(0));
+            }
+            let before = scanner.snapshot();
+            let (found, input) = scanner.scan("done", 16, flags(&[DEDENT]));
+            assert!(!found, "{profile:?}: stray done crossed scope {scope:?}");
+            assert_eq!(input.lexer.result_symbol, u16::MAX);
+            assert_eq!(scanner.snapshot(), before);
+        }
+        for tokens in [
+            vec![DONE_KEYWORD, DEDENT, INSIDE_STRING],
+            vec![DONE_KEYWORD, DEDENT, ERROR_SENTINEL],
+        ] {
+            let mut scanner = Scanner::new(profile);
+            open_do_body(&mut scanner, 8);
+            let before = scanner.snapshot();
+            let (found, input) = scanner.scan("done", 16, flags(&tokens));
+            assert!(!found, "{profile:?}: guarded done emitted a token");
+            assert_eq!(input.lexer.result_symbol, u16::MAX);
+            assert_eq!(scanner.snapshot(), before);
+        }
+    }
+}
+
+#[test]
+fn combined_indent_admission_commits_the_do_body_owner_not_an_ordinary_scope() {
+    for profile in PROFILES {
+        for column in [8, 257] {
+            let mut normal = Scanner::new(profile);
+            open_enum_body(&mut normal, column);
+            let normal_state = normal.snapshot();
+            let mut owned = Scanner::new(profile);
+            open_do_body(&mut owned, column);
+            let owned_state = owned.snapshot();
+            assert_ne!(owned_state, normal_state);
+            let mut combined = Scanner::new(profile);
+            let (found, input) = combined.scan(
+                "item",
+                column,
+                flags(&[INDENT, DO_BODY_INDENT, PREPROC_INACTIVE]),
+            );
+            assert!(found);
+            assert_eq!(
+                input.lexer.result_symbol,
+                u16::try_from(DO_BODY_INDENT).unwrap()
+            );
+            assert_eq!(input.offset, 0);
+            assert_eq!(input.marked, Some(0));
+            assert_eq!(combined.snapshot(), owned_state);
+            assert_ne!(combined.snapshot(), normal_state);
+        }
+    }
+}
+
+fn native_do_anchor_state(profile: Profile, token: usize, anchor: &str) -> Vec<u8> {
+    let mut scanner = Scanner::new(profile);
+    let (source, column) = match anchor {
+        "scoped" => ("\n        value", 0),
+        "midline" => ("value", 8),
+        "stranded" => {
+            open_enum_body(&mut scanner, 4);
+            let (found, input) = scanner.scan("\n            value", 0, flags(&[INDENT]));
+            assert!(found);
+            assert_eq!(input.lexer.result_symbol, u16::try_from(INDENT).unwrap());
+            let source = "\n        value";
+            let (found, input) = scanner.scan(source, 0, flags(&[DEDENT]));
+            assert!(found);
+            assert_eq!(input.lexer.result_symbol, u16::try_from(DEDENT).unwrap());
+            assert_eq!(input.marked, Some(0));
+            let (found, input) = scanner.scan(source, 0, flags(&[NEWLINE]));
+            assert!(found);
+            assert_eq!(input.lexer.result_symbol, u16::try_from(NEWLINE).unwrap());
+            assert_eq!(input.marked, Some(0));
+            // The parser consumes the line's prefix before the same-line body marker.
+            ("value", 20)
+        }
+        other => panic!("unexpected anchor {other}"),
+    };
+    let (found, input) = scanner.scan(source, column, flags(&[token]));
+    assert!(found, "{profile:?}: {anchor} marker {token}");
+    assert_eq!(input.lexer.result_symbol, u16::try_from(token).unwrap());
+    assert_eq!(input.marked, Some(0));
+    assert_eq!(input.offset, source.chars().count() - "value".len());
+    scanner.snapshot()
+}
+
+#[test]
+fn native_stranded_do_state_round_trips_and_every_unknown_raw_kind_resets() {
+    let domain = [0_u8, 1, 2, 3, 4, 5, 128, 133, 192, 197];
+    for profile in PROFILES {
+        let reset = Scanner::new(profile).snapshot();
+        for (anchor, expected_kind) in [("scoped", 5), ("midline", 133), ("stranded", 197)] {
+            let normal = native_do_anchor_state(profile, INDENT, anchor);
+            let owned = native_do_anchor_state(profile, DO_BODY_INDENT, anchor);
+            assert_eq!(normal.len(), owned.len());
+            let different: Vec<_> = owned
+                .iter()
+                .zip(&normal)
+                .enumerate()
+                .filter_map(|(index, (owned, normal))| (owned != normal).then_some(index))
+                .collect();
+            assert_eq!(
+                different.len(),
+                1,
+                "{profile:?}: {anchor} owner tag difference"
+            );
+            let kind_index = different[0];
+            assert_eq!(
+                owned[kind_index], expected_kind,
+                "{profile:?}: native {anchor}"
+            );
+            let mut restored = Scanner::new(profile);
+            restored.restore(&owned);
+            assert_eq!(restored.snapshot_at(1), owned);
+            for unknown in u8::MIN..=u8::MAX {
+                if domain.contains(&unknown) {
+                    continue;
+                }
+                // Only rejection inputs alter an observed native kind; accepted states are genuine.
+                let mut invalid = owned.clone();
+                invalid[kind_index] = unknown;
+                restored.restore(&owned);
+                restored.restore(&invalid);
+                assert_eq!(
+                    restored.snapshot(),
+                    reset,
+                    "{profile:?}: {anchor} accepted raw kind {unknown}"
+                );
+            }
+        }
+    }
+}
+
+const TYPE_APP_INDENT: usize = 31;
+
+#[test]
+fn type_application_barrier_blocks_done_until_its_own_written_closer() {
+    for profile in PROFILES {
+        for newline in ["\n", "\r\n"] {
+            let mut scanner = Scanner::new(profile);
+            open_do_body(&mut scanner, 8);
+            let outer = scanner.snapshot();
+            let source = format!("{newline}                Type");
+            let (found, input) = scanner.scan(&source, 0, flags(&[TYPE_APP_INDENT]));
+            assert!(found);
+            assert_eq!(
+                input.lexer.result_symbol,
+                u16::try_from(TYPE_APP_INDENT).unwrap()
+            );
+            assert_eq!(input.marked, Some(0));
+            assert_eq!(input.offset, source.chars().count() - "Type".len());
+            let barrier = scanner.snapshot();
+            assert_ne!(barrier, outer);
+            let (found, input) = scanner.scan("done", 16, flags(&[DEDENT]));
+            assert!(!found, "{profile:?}: done crossed a type application");
+            assert_eq!(input.lexer.result_symbol, u16::MAX);
+            assert_eq!(scanner.snapshot(), barrier);
+            let (found, input) = scanner.scan(">", 16, flags(&[DEDENT]));
+            assert!(found);
+            assert_eq!(input.lexer.result_symbol, u16::try_from(DEDENT).unwrap());
+            assert_eq!(input.marked, Some(0));
+            assert_eq!(input.offset, 0);
+            assert_eq!(scanner.snapshot(), outer);
         }
     }
 }
