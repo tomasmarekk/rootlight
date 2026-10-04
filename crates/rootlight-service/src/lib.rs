@@ -7624,7 +7624,9 @@ impl FirstSliceService {
             _ => FirstSliceError::Discovery,
         })?;
         let policy = DiscoveryPolicy::build(Vec::new(), false)
-            .and_then(|policy| policy.with_tracked_files_in_root(&root, tracked_paths, cancellation))
+            .and_then(|policy| {
+                policy.with_tracked_files_in_root(&root, tracked_paths, cancellation)
+            })
             .map_err(|error| match error {
                 rootlight_discovery::DiscoveryError::Cancelled(cancelled) => {
                     FirstSliceError::Cancelled(cancelled.reason())

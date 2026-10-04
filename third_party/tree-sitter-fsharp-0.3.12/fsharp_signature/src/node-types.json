@@ -1771,6 +1771,10 @@
         {
           "type": "identifier",
           "named": true
+        },
+        {
+          "type": "paren_expression",
+          "named": true
         }
       ]
     }
@@ -2299,6 +2303,25 @@
       "types": [
         {
           "type": "long_identifier",
+          "named": true
+        }
+      ]
+    }
+  },
+  {
+    "type": "infix_expression",
+    "named": true,
+    "fields": {},
+    "children": {
+      "multiple": true,
+      "required": true,
+      "types": [
+        {
+          "type": "const",
+          "named": true
+        },
+        {
+          "type": "infix_op",
           "named": true
         }
       ]
@@ -3390,6 +3413,10 @@
       "types": [
         {
           "type": "const",
+          "named": true
+        },
+        {
+          "type": "infix_expression",
           "named": true
         },
         {
@@ -5935,6 +5962,10 @@
   },
   {
     "type": "identifier",
+    "named": true
+  },
+  {
+    "type": "infix_op",
     "named": true
   },
   {

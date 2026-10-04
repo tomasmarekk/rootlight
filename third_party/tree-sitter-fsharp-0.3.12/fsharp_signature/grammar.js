@@ -214,6 +214,26 @@ module.exports = grammar(require("../fsharp/grammar"), {
 
     tuple_expression: ($, _original) =>
       prec.left(seq($._expression, ",", $._expression, repeat(seq(",", $._expression)))),
+
+    // Enum values need their own bounded route, not broader signature bodies.
+    _enum_parenthesized_rhs: ($, _original) =>
+      alias($._enum_parenthesized_expression, $.paren_expression),
+
+    _enum_parenthesized_expression: ($) =>
+      prec(
+        1,
+        seq("(", $._enum_rhs_expression, ")"),
+      ),
+
+    _enum_rhs_expression: ($) =>
+      choice(
+        $.const,
+        $._enum_parenthesized_rhs,
+        alias($._enum_literal_shift, $.infix_expression),
+      ),
+
+    _enum_literal_shift: ($) =>
+      seq($.const, alias("<<<", $.infix_op), $.const),
   },
 });
 

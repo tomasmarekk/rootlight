@@ -7716,10 +7716,28 @@
           "value": "="
         },
         {
-          "type": "SYMBOL",
-          "name": "const"
+          "type": "CHOICE",
+          "members": [
+            {
+              "type": "SYMBOL",
+              "name": "const"
+            },
+            {
+              "type": "SYMBOL",
+              "name": "_enum_parenthesized_rhs"
+            }
+          ]
         }
       ]
+    },
+    "_enum_parenthesized_rhs": {
+      "type": "ALIAS",
+      "content": {
+        "type": "SYMBOL",
+        "name": "_enum_parenthesized_expression"
+      },
+      "named": true,
+      "value": "paren_expression"
     },
     "_union_type_defn_inner": {
       "type": "SEQ",
@@ -12408,6 +12426,71 @@
             "type": "SYMBOL",
             "name": "curried_spec"
           }
+        }
+      ]
+    },
+    "_enum_parenthesized_expression": {
+      "type": "PREC",
+      "value": 1,
+      "content": {
+        "type": "SEQ",
+        "members": [
+          {
+            "type": "STRING",
+            "value": "("
+          },
+          {
+            "type": "SYMBOL",
+            "name": "_enum_rhs_expression"
+          },
+          {
+            "type": "STRING",
+            "value": ")"
+          }
+        ]
+      }
+    },
+    "_enum_rhs_expression": {
+      "type": "CHOICE",
+      "members": [
+        {
+          "type": "SYMBOL",
+          "name": "const"
+        },
+        {
+          "type": "SYMBOL",
+          "name": "_enum_parenthesized_rhs"
+        },
+        {
+          "type": "ALIAS",
+          "content": {
+            "type": "SYMBOL",
+            "name": "_enum_literal_shift"
+          },
+          "named": true,
+          "value": "infix_expression"
+        }
+      ]
+    },
+    "_enum_literal_shift": {
+      "type": "SEQ",
+      "members": [
+        {
+          "type": "SYMBOL",
+          "name": "const"
+        },
+        {
+          "type": "ALIAS",
+          "content": {
+            "type": "STRING",
+            "value": "<<<"
+          },
+          "named": true,
+          "value": "infix_op"
+        },
+        {
+          "type": "SYMBOL",
+          "name": "const"
         }
       ]
     }

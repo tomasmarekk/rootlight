@@ -832,24 +832,24 @@
       "sha256": "90bb85f17014e0735f8ca40410344c94c078975ea8a70f805a4b570a3bc512fa"
     },
     "fsharp/grammar.js": {
-      "bytes": 91039,
+      "bytes": 91217,
       "archive_mode": 436,
-      "sha256": "7b5a8046aef50d9f2176b4356f9e0db41f9ff9ad2ea3955ba0e624bf0ebf64e9"
+      "sha256": "cf80a6d4c7306c54cd7273f1dbfd164793c5ef1c5abb1709c04e04545aea60a5"
     },
     "fsharp/src/grammar.json": {
-      "bytes": 298205,
+      "bytes": 298510,
       "archive_mode": 436,
-      "sha256": "181fd4147d10fcd9f049cc8d0024238a5ed0b240cce9fd3706166dd097f759be"
+      "sha256": "e9cc04e57c0cb1fe28f33ac27d3517db782e9c41e174b68f367b001f618ca312"
     },
     "fsharp/src/node-types.json": {
-      "bytes": 105217,
+      "bytes": 105300,
       "archive_mode": 436,
-      "sha256": "1fd7ea66d7de9fdf025145c9d162539cca5cfcc40e382aa715a9884d3a2d85a3"
+      "sha256": "9c6134f9e6de960cbade03ef669f1ad637d45c9c8746037aaf51b6d71673ee05"
     },
     "fsharp/src/parser.c": {
-      "bytes": 63866545,
+      "bytes": 63920331,
       "archive_mode": 436,
-      "sha256": "8dc65b1dd506720d3b8a9d66f2619e412c3f8604f4bdc4708a76ed925ce61c1e"
+      "sha256": "6c076cd9d36a1a2a9387fef19ae90f76d3426e09792f99d1d49b60fcd69e1b16"
     },
     "fsharp/src/scanner.c": {
       "bytes": 998,
@@ -872,24 +872,24 @@
       "sha256": "180b893c8734778fd32f372dfbc27bd6ad1cd2221f26150b31256ff6716320d2"
     },
     "fsharp_signature/grammar.js": {
-      "bytes": 6688,
+      "bytes": 7260,
       "archive_mode": 436,
-      "sha256": "8a47df784b9f55abedde853c2949bd3329670dd262b2b1aa926d3d4f4587b76c"
+      "sha256": "5b42207ecb920cd3bde4bb748bee46291db99f24c2e42dab3673e7728727cc44"
     },
     "fsharp_signature/src/grammar.json": {
-      "bytes": 291753,
+      "bytes": 293510,
       "archive_mode": 436,
-      "sha256": "053ef094fe812492b32feafe4ce8acf3d4ca64ea9591d3a47bc8c3c476ac3586"
+      "sha256": "ea303ad90890fb1e4921bfd8e0a3ed08225ce07137b1a18543b22b579e57e7a6"
     },
     "fsharp_signature/src/node-types.json": {
-      "bytes": 113454,
+      "bytes": 113992,
       "archive_mode": 436,
-      "sha256": "a6c94fa8c7611ff2c3c4197d02a99d23b0df9448f3541be479e0a4cd463f1962"
+      "sha256": "bd9819acbe125cf861c4653c434fadf64b66ba76cdae3b52e02c4b1457a87f4d"
     },
     "fsharp_signature/src/parser.c": {
-      "bytes": 13128400,
+      "bytes": 13171454,
       "archive_mode": 436,
-      "sha256": "e22bdccf2ace378031836a4b8e1bad8ec808302d37e90c62789fa387605911b9"
+      "sha256": "5d3f9d1beaf4015bafba03a7f948027fa6b4c5ab3c9c834299e4c8b550f9fc10"
     },
     "fsharp_signature/src/scanner.c": {
       "bytes": 918,
@@ -948,35 +948,35 @@
     },
     "fsharp/grammar.js": {
       "original_sha256": "300a392f1c87e30ccc9575894bc3f08ef7cb61f7ac84ca5d46ede38cddc9403b",
-      "local_sha256": "7b5a8046aef50d9f2176b4356f9e0db41f9ff9ad2ea3955ba0e624bf0ebf64e9"
+      "local_sha256": "cf80a6d4c7306c54cd7273f1dbfd164793c5ef1c5abb1709c04e04545aea60a5"
     },
     "fsharp/src/grammar.json": {
       "original_sha256": "f4ffc3722c8f97726e8e9b473c369799882b53cdf95e4ea3c45b4d2395a2e805",
-      "local_sha256": "181fd4147d10fcd9f049cc8d0024238a5ed0b240cce9fd3706166dd097f759be"
+      "local_sha256": "e9cc04e57c0cb1fe28f33ac27d3517db782e9c41e174b68f367b001f618ca312"
     },
     "fsharp/src/node-types.json": {
       "original_sha256": "112897be95befe217c7e7286b8df4a61b4538ef4f23b656e0389eb58661cc926",
-      "local_sha256": "1fd7ea66d7de9fdf025145c9d162539cca5cfcc40e382aa715a9884d3a2d85a3"
+      "local_sha256": "9c6134f9e6de960cbade03ef669f1ad637d45c9c8746037aaf51b6d71673ee05"
     },
     "fsharp/src/parser.c": {
       "original_sha256": "c1818692b883636a992d7648023c29cda96d3af0ebe798bca6b7ec6d31b9f45c",
-      "local_sha256": "8dc65b1dd506720d3b8a9d66f2619e412c3f8604f4bdc4708a76ed925ce61c1e"
+      "local_sha256": "6c076cd9d36a1a2a9387fef19ae90f76d3426e09792f99d1d49b60fcd69e1b16"
     },
     "fsharp_signature/grammar.js": {
       "original_sha256": "e0a696ab5fd43c665634c1f17b20562b7e6719fc49eca0e261533b1c9148c63c",
-      "local_sha256": "8a47df784b9f55abedde853c2949bd3329670dd262b2b1aa926d3d4f4587b76c"
+      "local_sha256": "5b42207ecb920cd3bde4bb748bee46291db99f24c2e42dab3673e7728727cc44"
     },
     "fsharp_signature/src/grammar.json": {
       "original_sha256": "c804cd49d95e02b49c18190fa3deb87fd0b0bd28a71644fd7c2ed869b46ef4a1",
-      "local_sha256": "053ef094fe812492b32feafe4ce8acf3d4ca64ea9591d3a47bc8c3c476ac3586"
+      "local_sha256": "ea303ad90890fb1e4921bfd8e0a3ed08225ce07137b1a18543b22b579e57e7a6"
     },
     "fsharp_signature/src/node-types.json": {
       "original_sha256": "519ea69a0762c4c0bdee71038d4c9f73bbb5ced6a72e302f82ec565135ad8d82",
-      "local_sha256": "a6c94fa8c7611ff2c3c4197d02a99d23b0df9448f3541be479e0a4cd463f1962"
+      "local_sha256": "bd9819acbe125cf861c4653c434fadf64b66ba76cdae3b52e02c4b1457a87f4d"
     },
     "fsharp_signature/src/parser.c": {
       "original_sha256": "5b9d1ae7e270d46e284c5b5614db77a1f16d580f8280d72413d0eb59b6bb17a6",
-      "local_sha256": "e22bdccf2ace378031836a4b8e1bad8ec808302d37e90c62789fa387605911b9"
+      "local_sha256": "5d3f9d1beaf4015bafba03a7f948027fa6b4c5ab3c9c834299e4c8b550f9fc10"
     }
   },
   "signature_generation": {
@@ -1031,7 +1031,13 @@
     "qualified_type_groups": 12,
     "qualified_type_test_sha256": "39337946e4c358299dd218cd87ae794b0a982c8f1875b8c6b792476c9d65ca16",
     "numeric_loop_groups": 16,
-    "numeric_loop_test_sha256": "55cef07ce9531ade5cec826d10b488698fe1ee081cd8056c14ee1f552cb44ca7"
+    "numeric_loop_test_sha256": "55cef07ce9531ade5cec826d10b488698fe1ee081cd8056c14ee1f552cb44ca7",
+    "enum_atomic_rhs_groups": 7,
+    "enum_atomic_rhs_test_sha256": "21d61cac19cfb8b6ec2afa5dde9cad003b8fff7ccfce0993501a4be7f760dba0",
+    "enum_atomic_rhs_implementation_parse_calls": 104,
+    "enum_atomic_rhs_signature_parse_calls": 104,
+    "enum_atomic_rhs_compiler_parse_oracle_controls": 16,
+    "enum_atomic_rhs_typechecking_or_evaluation_verified": false
   },
   "compilation_downloads_sources": false,
   "compilation_generates_parser": false,

@@ -2018,7 +2018,11 @@ module.exports = grammar({
     enum_type_cases: ($) =>
       seq(optional("|"), $.enum_type_case, repeat(seq(choice("|", alias($._enum_case_bar, "|")), $.enum_type_case))),
 
-    enum_type_case: ($) => seq($.identifier, "=", $.const),
+    enum_type_case: ($) =>
+      seq($.identifier, "=", choice($.const, $._enum_parenthesized_rhs)),
+
+    // The root stays atomic; parentheses retain ordinary expression ownership.
+    _enum_parenthesized_rhs: ($) => $.paren_expression,
 
     _union_type_defn_inner: ($) =>
       seq(

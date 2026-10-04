@@ -371,6 +371,162 @@ fn fsharp_profiles_preserve_source_and_identity_across_recovery() {
 }
 
 #[test]
+fn fsharp_parenthesized_enum_sources_survive_durable_reopen() {
+    for newline in ["\n", "\r\n"] {
+        let current = std::env::current_dir().unwrap();
+        let repository = tempfile::tempdir_in(&current).unwrap();
+        let storage = tempfile::tempdir_in(&current).unwrap();
+        let paths = rootlight_runtime::RuntimePaths::new(
+            storage.path().join("state"),
+            storage.path().join("runtime"),
+        )
+        .unwrap();
+        paths.prepare_owner().unwrap();
+        let sources = [
+            ("Values.fs", "fsharp", "let following = 30"),
+            ("Values.fsi", "fsharp-signature", "val following: int"),
+        ]
+        .map(|(path, language, following)| {
+            let source = format!(
+                "module EnumValues\ntype Flags =\n    | First = (1u)\n    | Next = (1u <<< 0)\n{following}\n"
+            )
+            .replace('\n', newline);
+            fs::write(repository.path().join(path), &source).unwrap();
+            (path, language, source)
+        });
+        let mut original = None;
+        for lifetime in 0..2 {
+            let mut service = FirstSliceService::new_durable_with_policy(
+                policy(),
+                paths.state_dir(),
+                &deadline(),
+            )
+            .unwrap();
+            let commit = index(
+                &mut service,
+                repository.path(),
+                FirstSliceIndexOptions::incremental(FirstSliceIndexMode::Structural),
+            );
+            let receipt = commit.receipt();
+            assert_eq!(receipt.discovered_inputs, 2);
+            assert_eq!(receipt.indexed_files, 2);
+            assert!(receipt.discovery_complete);
+            if lifetime == 0 {
+                assert_eq!(commit.evidence().rebuilt_files, 2);
+                original = Some(receipt.clone());
+            } else {
+                assert_eq!(Some(receipt), original.as_ref());
+                assert_eq!(commit.evidence().rebuilt_files, 0);
+                assert_eq!(commit.evidence().rebuilt_facts, 0);
+            }
+            let snapshot = service
+                .loaded_generation_snapshot(receipt.generation)
+                .unwrap();
+            let document = snapshot.document();
+            assert_eq!(document.files.len(), 2);
+            assert!(!document.skipped_regions.iter().any(|gap| {
+                matches!(
+                    gap.reason,
+                    SkippedRegionReason::ParseError | SkippedRegionReason::AdapterFailure
+                )
+            }));
+            for (path, language, source) in &sources {
+                let file = document
+                    .files
+                    .iter()
+                    .find(|file| file.path == *path)
+                    .unwrap();
+                assert_eq!(file.language, *language);
+                let full = file.evidence.source.as_ref().unwrap();
+                assert_eq!(full.repository(), receipt.repository);
+                assert_eq!(full.generation(), receipt.generation);
+                assert_eq!(full.content_hash(), content_hash(source.as_bytes()));
+                exact_source(&service, full, language, source.as_bytes());
+                let coverage = service
+                    .source_file_coverage_until(receipt.generation, file.id, &deadline())
+                    .unwrap();
+                assert_eq!(coverage.language, *language);
+                // Complete written declarations remain structural tier D;
+                // this fixture does not prove enum evaluation or name resolution.
+                assert_eq!(coverage.tier, AnalysisTier::TierD);
+                assert_eq!(coverage.status, CoverageStatus::Complete);
+                assert_eq!(coverage.reason, None);
+                let unique = |name: &str, kind| {
+                    let entities: Vec<_> = document
+                        .entities
+                        .iter()
+                        .filter(|entity| {
+                            entity.language == *language
+                                && entity.canonical_name == name
+                                && entity.kind == kind
+                                && entity.evidence.source.as_ref().unwrap().span().file() == file.id
+                        })
+                        .collect();
+                    assert_eq!(entities.len(), 1, "{language}: {name}");
+                    entities[0]
+                };
+                let enumeration = unique("Flags", EntityKind::Enum);
+                for (name, written) in [("First", "First = (1u)"), ("Next", "Next = (1u <<< 0)")] {
+                    let case = unique(name, EntityKind::Constant);
+                    assert_eq!(case.container, Some(ContainerRef::Entity(enumeration.id)));
+                    assert_eq!(
+                        case.evidence.source.as_ref().unwrap().generation(),
+                        receipt.generation
+                    );
+                    exact_source(
+                        &service,
+                        case.evidence.source.as_ref().unwrap(),
+                        language,
+                        written.as_bytes(),
+                    );
+                    let definitions: Vec<_> = document
+                        .occurrences
+                        .iter()
+                        .filter(|site| {
+                            site.file == file.id
+                                && site.role == OccurrenceRole::Definition
+                                && site.target == (OccurrenceTarget::Resolved { symbol: case.id })
+                        })
+                        .collect();
+                    assert_eq!(definitions.len(), 1);
+                    assert_eq!(definitions[0].enclosing, Some(enumeration.id));
+                    exact_source(&service, &definitions[0].source, language, name.as_bytes());
+                    assert!(document.relations.iter().any(|relation| {
+                        relation.predicate == RelationPredicate::Contains
+                            && relation.subject == RelationEndpoint::Entity(enumeration.id)
+                            && relation.object == RelationEndpoint::Entity(case.id)
+                    }));
+                    let located = service
+                        .code_locate(
+                            receipt.generation,
+                            name.to_owned(),
+                            LocateMode::Exact,
+                            20,
+                            0,
+                            &deadline(),
+                        )
+                        .unwrap();
+                    assert!(
+                        located
+                            .data
+                            .hits
+                            .iter()
+                            .any(|hit| hit.symbol == Some(case.id) && hit.file == file.id)
+                    );
+                }
+                unique("following", EntityKind::Variable);
+            }
+            assert!(document.relations.iter().all(|relation| matches!(
+                relation.predicate,
+                RelationPredicate::Contains
+                    | RelationPredicate::Declares
+                    | RelationPredicate::DefinesAt
+            )));
+        }
+    }
+}
+
+#[test]
 fn fsharp_shared_suffix_keeps_unproven_source_and_rejects_binary_input() {
     let current = std::env::current_dir().unwrap();
     let repository = tempfile::tempdir_in(current).unwrap();

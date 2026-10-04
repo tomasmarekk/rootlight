@@ -283,6 +283,110 @@ fn both_native_profiles_retain_exact_declaration_names_and_no_call_captures() {
 }
 
 #[test]
+fn parenthesized_enum_values_preserve_case_identity_and_exact_sources() {
+    for language in ["fsharp", "fsharp-signature"] {
+        let following = if language == "fsharp-signature" {
+            "val following: int"
+        } else {
+            "let following = 30"
+        };
+        let declaration = "Flags =\n    | First = (1u)\n    | Next = (1u <<< 0)";
+        let canonical = format!("module EnumValues\ntype {declaration}\n{following}");
+        for newline in ["\n", "\r\n"] {
+            for trailing in [false, true] {
+                let mut text = canonical.replace('\n', newline);
+                if trailing {
+                    text.push_str(newline);
+                }
+                let fixture = Fixture::new(language, &text);
+                let parsed = fixture.parse(4096, &deadline()).unwrap();
+                assert_eq!(
+                    parsed.report().coverage().status(),
+                    CoverageStatus::Complete
+                );
+                assert!(parsed.diagnostics().is_empty());
+                for written in ["First = (1u)", "Next = (1u <<< 0)"] {
+                    assert_eq!(
+                        parsed
+                            .facts()
+                            .iter()
+                            .filter(|fact| {
+                                fact.syntax_kind().as_str() == "fsharp.enum_constant.declaration"
+                                    && fact.span() == fixture.span(written)
+                            })
+                            .count(),
+                        1
+                    );
+                }
+                let output = fixture.analyze();
+                let document = output.document();
+                let unique = |name: &str, kind| {
+                    let matches: Vec<_> = document
+                        .entities
+                        .iter()
+                        .filter(|entity| entity.canonical_name == name && entity.kind == kind)
+                        .collect();
+                    assert_eq!(matches.len(), 1, "{language}: {name}");
+                    matches[0]
+                };
+                let module = unique("EnumValues", EntityKind::Module);
+                let enumeration = unique("Flags", EntityKind::Enum);
+                assert_eq!(enumeration.container, Some(ContainerRef::Entity(module.id)));
+                assert_eq!(
+                    enumeration.evidence.source.as_ref().unwrap().span(),
+                    fixture.span(&declaration.replace('\n', newline))
+                );
+                for (name, written) in [("First", "First = (1u)"), ("Next", "Next = (1u <<< 0)")] {
+                    let case = unique(name, EntityKind::Constant);
+                    assert_eq!(case.container, Some(ContainerRef::Entity(enumeration.id)));
+                    let source = case.evidence.source.as_ref().unwrap();
+                    assert_eq!(source.span(), fixture.span(written));
+                    assert_eq!(source.generation(), fixture.source.generation());
+                    assert_eq!(source.repository(), fixture.source.repository());
+                    assert_eq!(source.content_hash(), fixture.source.content_hash());
+                    let definitions: Vec<_> = document
+                        .occurrences
+                        .iter()
+                        .filter(|site| {
+                            site.role == OccurrenceRole::Definition
+                                && site.target == (OccurrenceTarget::Resolved { symbol: case.id })
+                        })
+                        .collect();
+                    assert_eq!(definitions.len(), 1);
+                    assert_eq!(definitions[0].source.span(), fixture.span(name));
+                    assert_eq!(definitions[0].enclosing, Some(enumeration.id));
+                    assert!(document.relations.iter().any(|relation| {
+                        relation.predicate == RelationPredicate::Contains
+                            && relation.subject == RelationEndpoint::Entity(enumeration.id)
+                            && relation.object == RelationEndpoint::Entity(case.id)
+                            && relation.evidence.source.as_ref().unwrap().span()
+                                == fixture.span(written)
+                    }));
+                }
+                assert_eq!(
+                    unique("following", EntityKind::Variable).container,
+                    Some(ContainerRef::Entity(module.id))
+                );
+                assert!(!document.skipped_regions.iter().any(|gap| {
+                    matches!(
+                        gap.reason,
+                        SkippedRegionReason::ParseError | SkippedRegionReason::AdapterFailure
+                    )
+                }));
+                assert!(document.relations.iter().all(|relation| {
+                    matches!(
+                        relation.predicate,
+                        RelationPredicate::Contains
+                            | RelationPredicate::Declares
+                            | RelationPredicate::DefinesAt
+                    )
+                }));
+            }
+        }
+    }
+}
+
+#[test]
 fn shallower_enum_case_bars_preserve_exact_symbols_and_enum_ownership() {
     for language in ["fsharp", "fsharp-signature"] {
         for nested in [false, true] {

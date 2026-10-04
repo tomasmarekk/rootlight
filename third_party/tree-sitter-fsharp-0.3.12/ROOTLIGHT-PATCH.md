@@ -1,4 +1,4 @@
-# F# scanner state, signatures, type syntax and loops
+# F# scanner state, signatures, type syntax, enums and loops
 
 This directory retains the MIT-licensed preferred grammar sources, Rust binding
 and complete native compilation payload from `ionide/tree-sitter-fsharp` tag
@@ -119,6 +119,19 @@ unchanged. Controls pin direct case names and constant spellings, comments,
 Unicode byte positions, signature-only declarations, incremental edit/restore
 equivalence and independent following declarations. This is written syntax and
 source containment, not constant evaluation or semantic enum resolution.
+
+Parenthesized enum values retain the complete existing `paren_expression` owner
+instead of failing the enum's formerly constant-only RHS. The implementation
+profile delegates this enum-private route to its existing expression parser.
+The signature profile admits only constants, nested parentheses, and one literal
+`<<<` shift within that route, with the existing `infix_expression` and `infix_op`
+node vocabulary. Its ordinary signature expression, tuple, value-body, operator,
+type, and scanner rules remain unchanged. Direct case identifiers and whole-case
+source spans remain intact; private enum helpers do not become public node kinds.
+Authored controls cover parentheses, shifts, comments, newlines, following
+declarations, recovery, queries, and incremental edit/restore equivalence. These
+are bounded parse and source-ownership guarantees, not constant evaluation,
+operator resolution, typing, exhaustive enum syntax, or complete F# semantics.
 
 Constructed type qualifications retain a distinct `qualified_type` node with
 direct `base` and `name` fields and optional segment-owned `arguments`.
