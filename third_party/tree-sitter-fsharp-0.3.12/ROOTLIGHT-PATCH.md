@@ -74,6 +74,18 @@ follow the complete curried specification, and structured signature conditional
 branches use signature declarations rather than implementation bodies. A local
 dynamic preference retains complete typed function heads without resolving names.
 
+Noninterpolated regular, verbatim and triple-quoted string type leaves retain a
+distinct `static_constant_type` node in both profiles. A non-inline triple-string
+helper preserves the complete written literal rather than aliasing only one
+delimiter. The lower-priority leaf keeps the existing generic static-parameter
+`const` ownership when both alternatives admit the literal. This bounded subset
+follows the compiler's
+[raw constant type branch](https://github.com/dotnet/fsharp/blob/7e2cbf10edb6ac52b09c88214a4a39a8c774eebd/src/Compiler/pars.fsy#L6703).
+Controls retain the single-clause ownership of inline nullable function-type
+annotations, and reject expression-only unit and interpolated strings as these
+type leaves. They do not qualify all raw constants, static providers, typing,
+evaluation, operator resolution or generic multi-arm expression layout.
+
 Flexible `#` types consume an atomic operand. Array/postfix suffixes and nullness
 remain outside that operand unless written parentheses place them inside it;
 constrained-type right-hand sides still accept complete types. Discriminated-union

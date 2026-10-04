@@ -188,6 +188,10 @@
           "named": true
         },
         {
+          "type": "static_constant_type",
+          "named": true
+        },
+        {
           "type": "static_type",
           "named": true
         },
@@ -453,6 +457,10 @@
           "named": true
         },
         {
+          "type": "static_constant_type",
+          "named": true
+        },
+        {
           "type": "static_type",
           "named": true
         },
@@ -548,6 +556,10 @@
         },
         {
           "type": "simple_type",
+          "named": true
+        },
+        {
+          "type": "static_constant_type",
           "named": true
         },
         {
@@ -751,6 +763,10 @@
           "named": true
         },
         {
+          "type": "static_constant_type",
+          "named": true
+        },
+        {
           "type": "static_type",
           "named": true
         },
@@ -851,6 +867,10 @@
             "named": true
           },
           {
+            "type": "static_constant_type",
+            "named": true
+          },
+          {
             "type": "static_type",
             "named": true
           },
@@ -940,6 +960,10 @@
         },
         {
           "type": "simple_type",
+          "named": true
+        },
+        {
+          "type": "static_constant_type",
           "named": true
         },
         {
@@ -1291,6 +1315,10 @@
           "named": true
         },
         {
+          "type": "static_constant_type",
+          "named": true
+        },
+        {
           "type": "static_type",
           "named": true
         },
@@ -1359,6 +1387,10 @@
         },
         {
           "type": "simple_type",
+          "named": true
+        },
+        {
+          "type": "static_constant_type",
           "named": true
         },
         {
@@ -1459,6 +1491,10 @@
           "named": true
         },
         {
+          "type": "static_constant_type",
+          "named": true
+        },
+        {
           "type": "static_type",
           "named": true
         },
@@ -1550,6 +1586,10 @@
         },
         {
           "type": "simple_type",
+          "named": true
+        },
+        {
+          "type": "static_constant_type",
           "named": true
         },
         {
@@ -2043,6 +2083,10 @@
           "named": true
         },
         {
+          "type": "static_constant_type",
+          "named": true
+        },
+        {
           "type": "static_type",
           "named": true
         },
@@ -2326,6 +2370,10 @@
           "named": true
         },
         {
+          "type": "static_constant_type",
+          "named": true
+        },
+        {
           "type": "static_type",
           "named": true
         },
@@ -2516,6 +2564,10 @@
         },
         {
           "type": "simple_type",
+          "named": true
+        },
+        {
+          "type": "static_constant_type",
           "named": true
         },
         {
@@ -2766,6 +2818,10 @@
           },
           {
             "type": "simple_type",
+            "named": true
+          },
+          {
+            "type": "static_constant_type",
             "named": true
           },
           {
@@ -3159,6 +3215,10 @@
           "named": true
         },
         {
+          "type": "static_constant_type",
+          "named": true
+        },
+        {
           "type": "static_type",
           "named": true
         },
@@ -3423,6 +3483,10 @@
           "named": true
         },
         {
+          "type": "static_constant_type",
+          "named": true
+        },
+        {
           "type": "static_type",
           "named": true
         },
@@ -3491,6 +3555,10 @@
         },
         {
           "type": "simple_type",
+          "named": true
+        },
+        {
+          "type": "static_constant_type",
           "named": true
         },
         {
@@ -3797,6 +3865,10 @@
           "named": true
         },
         {
+          "type": "static_constant_type",
+          "named": true
+        },
+        {
           "type": "static_type",
           "named": true
         },
@@ -4005,6 +4077,29 @@
     }
   },
   {
+    "type": "static_constant_type",
+    "named": true,
+    "fields": {},
+    "children": {
+      "multiple": false,
+      "required": true,
+      "types": [
+        {
+          "type": "string",
+          "named": true
+        },
+        {
+          "type": "triple_quoted_string",
+          "named": true
+        },
+        {
+          "type": "verbatim_string",
+          "named": true
+        }
+      ]
+    }
+  },
+  {
     "type": "static_parameter_value",
     "named": true,
     "fields": {},
@@ -4077,6 +4172,10 @@
         },
         {
           "type": "simple_type",
+          "named": true
+        },
+        {
+          "type": "static_constant_type",
           "named": true
         },
         {
@@ -4197,6 +4296,10 @@
           "named": true
         },
         {
+          "type": "static_constant_type",
+          "named": true
+        },
+        {
           "type": "static_type",
           "named": true
         },
@@ -4307,6 +4410,10 @@
           },
           {
             "type": "simple_type",
+            "named": true
+          },
+          {
+            "type": "static_constant_type",
             "named": true
           },
           {
@@ -4465,6 +4572,10 @@
         },
         {
           "type": "simple_type",
+          "named": true
+        },
+        {
+          "type": "static_constant_type",
           "named": true
         },
         {
@@ -4836,6 +4947,10 @@
           "named": true
         },
         {
+          "type": "static_constant_type",
+          "named": true
+        },
+        {
           "type": "static_type",
           "named": true
         },
@@ -4920,6 +5035,10 @@
         },
         {
           "type": "simple_type",
+          "named": true
+        },
+        {
+          "type": "static_constant_type",
           "named": true
         },
         {
@@ -5078,6 +5197,10 @@
           "named": true
         },
         {
+          "type": "static_constant_type",
+          "named": true
+        },
+        {
           "type": "static_type",
           "named": true
         },
@@ -5199,6 +5322,10 @@
         },
         {
           "type": "simple_type",
+          "named": true
+        },
+        {
+          "type": "static_constant_type",
           "named": true
         },
         {

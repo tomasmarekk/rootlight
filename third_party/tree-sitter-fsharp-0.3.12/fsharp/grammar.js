@@ -1392,6 +1392,7 @@ module.exports = grammar({
         $.postfix_type,
         $.list_type,
         $.static_type,
+        $.static_constant_type,
         $.type_argument,
         $.constrained_type,
         $.flexible_type,
@@ -1545,6 +1546,20 @@ module.exports = grammar({
     // (token.immediate) so it is not confused with the '&' infix/pattern op.
     byref_type: ($) => prec.left(4, seq($._type_suffix_base, token.immediate("&"))),
     static_type: ($) => prec(10, seq($._type_suffix_base, $.type_arguments)),
+    // Compiler atomType admits raw string constants; interpolated strings and
+    // unit are expression forms instead. Keep generic static-parameter ownership
+    // when its existing const alternative also accepts the written literal.
+    static_constant_type: ($) =>
+      prec(
+        -1,
+        choice(
+          alias($._string_literal, $.string),
+          $.verbatim_string,
+          alias($._static_triple_quoted_string, $.triple_quoted_string),
+        ),
+      ),
+    _static_triple_quoted_string: ($) =>
+      prec(-1, seq('"""', $._triple_quoted_content, '"""')),
     constrained_type: ($) => prec.right(seq($.type_argument, ":>", $._type)),
     // HASH consumes atomType in the compiler grammar. Application suffixes
     // and nullness belong outside the hash unless its operand is parenthesized.

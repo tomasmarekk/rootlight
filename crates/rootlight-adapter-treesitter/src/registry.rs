@@ -378,14 +378,14 @@ const fn identity_for(family: GrammarFamily) -> GrammarIdentity {
     match family {
         GrammarFamily::FSharpSignature => GrammarIdentity {
             language_id: "fsharp-signature",
-            parser_sha256: "a8f521d9981b0f11b7569f375cd52443139b3d706ad4725780d747f4f4cf9bf4",
+            parser_sha256: "d314098ae656abca3e31a3c2afe46062f40f4e4c120461eaf05c6d3f02470168",
             ..identity_for(GrammarFamily::FSharp)
         },
         GrammarFamily::FSharp => GrammarIdentity {
             language_id: "fsharp",
             grammar_version: "0.3.12",
-            source_package_sha256: "8264954b81c46cefe7e1a0e88efede895fbe671c31c20ba296de6324e106b1a2",
-            parser_sha256: "d0c1d9d7aba5f0aacf6e40c6dd4fd76118229770388bcf460471ea964f299c86",
+            source_package_sha256: "c11bfea61dfa8eee401cfc3e7b4b2077ae20eb09752695e03eda20c5b3eb4275",
+            parser_sha256: "1a4e63bdc3e55cd3126407cf69f907c3aceab085f6b01d66ee9db4fed3efd548",
             scanner_sha256: Some(
                 "41d0b5bee88b7180481a426e95e92a9a2b251c612c5d2ec71ac2e022fb8431f4",
             ),

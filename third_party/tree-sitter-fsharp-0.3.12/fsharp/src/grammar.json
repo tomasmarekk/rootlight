@@ -4750,6 +4750,10 @@
         },
         {
           "type": "SYMBOL",
+          "name": "static_constant_type"
+        },
+        {
+          "type": "SYMBOL",
           "name": "type_argument"
         },
         {
@@ -5338,6 +5342,58 @@
           {
             "type": "SYMBOL",
             "name": "type_arguments"
+          }
+        ]
+      }
+    },
+    "static_constant_type": {
+      "type": "PREC",
+      "value": -1,
+      "content": {
+        "type": "CHOICE",
+        "members": [
+          {
+            "type": "ALIAS",
+            "content": {
+              "type": "SYMBOL",
+              "name": "_string_literal"
+            },
+            "named": true,
+            "value": "string"
+          },
+          {
+            "type": "SYMBOL",
+            "name": "verbatim_string"
+          },
+          {
+            "type": "ALIAS",
+            "content": {
+              "type": "SYMBOL",
+              "name": "_static_triple_quoted_string"
+            },
+            "named": true,
+            "value": "triple_quoted_string"
+          }
+        ]
+      }
+    },
+    "_static_triple_quoted_string": {
+      "type": "PREC",
+      "value": -1,
+      "content": {
+        "type": "SEQ",
+        "members": [
+          {
+            "type": "STRING",
+            "value": "\"\"\""
+          },
+          {
+            "type": "SYMBOL",
+            "name": "_triple_quoted_content"
+          },
+          {
+            "type": "STRING",
+            "value": "\"\"\""
           }
         ]
       }
