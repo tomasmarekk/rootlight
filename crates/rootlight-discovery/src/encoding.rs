@@ -11,6 +11,7 @@ use crate::{DiscoveryError, MAX_CLASSIFICATION_BYTES};
 pub(super) struct SourceClassification {
     pub(super) encoding: &'static str,
     pub(super) decoded_prefix: Option<String>,
+    pub(super) prefix_truncated: bool,
 }
 
 pub(super) fn classify(
@@ -24,6 +25,7 @@ pub(super) fn classify(
             (!sample.is_some_and(|sample| sample.contains(&0))).then_some(SourceClassification {
                 encoding: "utf-8",
                 decoded_prefix: None,
+                prefix_truncated: content.len() > MAX_CLASSIFICATION_BYTES,
             }),
         );
     }
@@ -35,6 +37,9 @@ pub(super) fn classify(
         .try_reserve_exact(MAX_CLASSIFICATION_BYTES)
         .map_err(|_| DiscoveryError::Vfs(VfsError::MemoryUnavailable))?;
     let mut original_offset = 2_usize;
+    // Either byte budget can stop decoding below the UTF-8 sample length;
+    // downstream evidence must not mistake that prefix for a true EOF.
+    let mut prefix_truncated = false;
     for character in text.chars() {
         original_offset = original_offset
             .checked_add(text.encoding().character_bytes(character))
@@ -42,6 +47,7 @@ pub(super) fn classify(
         if original_offset > MAX_CLASSIFICATION_BYTES
             || prefix.len().saturating_add(character.len_utf8()) > MAX_CLASSIFICATION_BYTES
         {
+            prefix_truncated = true;
             break;
         }
         prefix.push(character);
@@ -50,6 +56,7 @@ pub(super) fn classify(
     Ok(Some(SourceClassification {
         encoding: text.encoding().as_str(),
         decoded_prefix: Some(prefix),
+        prefix_truncated,
     }))
 }
 
@@ -78,11 +85,13 @@ mod tests {
             let classified = classify(&bytes, &Cancellation::new()).unwrap().unwrap();
             assert_eq!(classified.encoding, label);
             assert_eq!(classified.decoded_prefix.as_deref(), Some(text));
+            assert!(!classified.prefix_truncated);
             assert_eq!(bytes, encoded(text, little_endian));
             let empty = classify(&encoded("", little_endian), &Cancellation::new())
                 .unwrap()
                 .unwrap();
             assert_eq!(empty.decoded_prefix.as_deref(), Some(""));
+            assert!(!empty.prefix_truncated);
         }
     }
 
@@ -112,6 +121,7 @@ mod tests {
         for little_endian in [true, false] {
             let mut bytes = encoded(&text, little_endian);
             let classified = classify(&bytes, &Cancellation::new()).unwrap().unwrap();
+            assert!(classified.prefix_truncated);
             assert_eq!(
                 classified.decoded_prefix.unwrap().len(),
                 (MAX_CLASSIFICATION_BYTES - 2) / 2
@@ -129,7 +139,36 @@ mod tests {
         )
         .unwrap()
         .unwrap();
+        assert!(expanded.prefix_truncated);
         assert!(expanded.decoded_prefix.unwrap().len() <= MAX_CLASSIFICATION_BYTES);
+    }
+
+    #[test]
+    fn bounded_prefix_completeness_distinguishes_true_eof_and_split_scalars() {
+        let complete = "a".repeat((MAX_CLASSIFICATION_BYTES - 2) / 2);
+        for little_endian in [true, false] {
+            let classified = classify(&encoded(&complete, little_endian), &Cancellation::new())
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                classified.decoded_prefix.as_deref(),
+                Some(complete.as_str())
+            );
+            assert!(!classified.prefix_truncated);
+
+            let mut incomplete = complete.clone();
+            incomplete.pop();
+            let expected = incomplete.clone();
+            incomplete.push('𝑥');
+            let classified = classify(&encoded(&incomplete, little_endian), &Cancellation::new())
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                classified.decoded_prefix.as_deref(),
+                Some(expected.as_str())
+            );
+            assert!(classified.prefix_truncated);
+        }
     }
 
     #[test]
@@ -138,6 +177,7 @@ mod tests {
             let classified = classify(content, &Cancellation::new()).unwrap().unwrap();
             assert_eq!(classified.encoding, "utf-8");
             assert!(classified.decoded_prefix.is_none());
+            assert!(!classified.prefix_truncated);
         }
         let cancellation = Cancellation::with_deadline(std::time::Instant::now());
         assert!(classify(&encoded("hello", true), &cancellation).is_err());

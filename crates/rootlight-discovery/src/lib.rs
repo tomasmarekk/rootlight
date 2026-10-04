@@ -42,7 +42,7 @@ pub use incremental::{
 };
 
 /// Current deterministic manifest and source-classification revision.
-pub const DISCOVERY_MANIFEST_VERSION: &str = "1.21";
+pub const DISCOVERY_MANIFEST_VERSION: &str = "1.22";
 /// Stable source-free diagnostic emitted when the entry budget truncates discovery.
 pub const DISCOVERY_ENTRY_LIMIT_DIAGNOSTIC_CODE: &str = "DISCOVERY_ENTRY_LIMIT";
 /// Stable source-free diagnostic emitted when retained source bytes truncate discovery.
@@ -1302,6 +1302,7 @@ impl<'a> DiscoveryState<'a> {
             Some(encoding::SourceClassification {
                 encoding: "binary",
                 decoded_prefix: None,
+                prefix_truncated: false,
             })
         } else {
             encoding::classify(snapshot.content(), self.cancellation)?
@@ -1314,13 +1315,14 @@ impl<'a> DiscoveryState<'a> {
             .decoded_prefix
             .as_ref()
             .map_or(snapshot.content(), |prefix| prefix.as_bytes());
-        let (class, mut language_signals) = classify(
+        let (class, mut language_signals) = classify_prefix(
             &path,
             if container_format.is_some() {
                 b""
             } else {
                 classification_content
             },
+            classification.prefix_truncated,
         );
         if let Some(format) = container_format {
             language_signals.clear();
@@ -1514,7 +1516,16 @@ fn read_directory_with_entry_budget(
         .map_err(DiscoveryError::Vfs)
 }
 
+#[cfg(test)]
 fn classify(path: &RelativePath, content: &[u8]) -> (InputClass, Vec<LanguageSignal>) {
+    classify_prefix(path, content, content.len() > MAX_CLASSIFICATION_BYTES)
+}
+
+fn classify_prefix(
+    path: &RelativePath,
+    content: &[u8],
+    prefix_truncated: bool,
+) -> (InputClass, Vec<LanguageSignal>) {
     let normalized = path.as_str().to_ascii_lowercase();
     let class = if generated_path(&normalized) || generated_content(content) {
         InputClass::Generated
@@ -1557,7 +1568,7 @@ fn classify(path: &RelativePath, content: &[u8]) -> (InputClass, Vec<LanguageSig
     {
         fsharp::has_content_hint(
             &content[..content.len().min(MAX_CLASSIFICATION_BYTES)],
-            content.len() > MAX_CLASSIFICATION_BYTES,
+            prefix_truncated,
         )
         .then_some("fsharp")
     } else if is_ambiguous_perl_prolog_source(&normalized)
@@ -3842,6 +3853,165 @@ max_source_file_bytes = 2097152
         let mut outside = vec![b' '; MAX_CLASSIFICATION_BYTES];
         outside.extend_from_slice(source);
         assert!(classify(&path, &outside).1.is_empty());
+    }
+
+    #[test]
+    fn fsharp_multiline_shared_suffix_retains_only_source_shaped_evidence() {
+        let path = RelativePath::parse(Path::new("Library.fs")).unwrap();
+        for source in [
+            "module Example\nlet value =\n    1",
+            "namespace Example\ntype Entry =\n    { Count: int }\n",
+            "module Example =\n    let add left right =\n        left + right\n",
+            "module Example\nmodule Inner =\n    type Choice =\n        | Empty\n",
+        ] {
+            assert_eq!(
+                classify(&path, source.as_bytes()).1,
+                vec![LanguageSignal {
+                    language: "fsharp".to_owned(),
+                    evidence: LanguageEvidence::Content,
+                }],
+                "{source:?}"
+            );
+            let text_path = RelativePath::parse(Path::new("Library.txt")).unwrap();
+            assert!(classify(&text_path, source.as_bytes()).1.is_empty());
+        }
+        for source in [
+            "module Example\nlet value =\n1\n",
+            "module Example\nlet value =\n    = 1\n",
+            "module Example\nlet value =\n    // no expression\n",
+            "module Example\nlet value =\n    : square dup * ;\n",
+            "let value =\n    1\n",
+        ] {
+            assert!(
+                classify(&path, source.as_bytes()).1.is_empty(),
+                "{source:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn fsharp_decoded_prefix_does_not_promote_partial_final_lines() {
+        fn encode(source: &str, little_endian: bool) -> Vec<u8> {
+            std::iter::once(0xfeff_u16)
+                .chain(source.encode_utf16())
+                .flat_map(|unit| {
+                    if little_endian {
+                        unit.to_le_bytes()
+                    } else {
+                        unit.to_be_bytes()
+                    }
+                })
+                .collect()
+        }
+
+        fn original_byte_limited(prefix: &str, tail: &str) -> String {
+            let mut source = prefix.to_owned();
+            let decoded_limit = (MAX_CLASSIFICATION_BYTES - 2) / 2;
+            source.push_str(&" ".repeat(decoded_limit - source.len() - tail.len()));
+            source.push_str(tail);
+            source
+        }
+
+        fn decoded_byte_limited(prefix: &str, tail: &str) -> String {
+            let mut source = format!("{prefix}//");
+            let filler_end = MAX_CLASSIFICATION_BYTES - 1 - 1 - tail.len();
+            source.push_str(&"界".repeat((filler_end - source.len()) / 3));
+            source.push_str(&" ".repeat(filler_end - source.len()));
+            source.push('\n');
+            source.push_str(tail);
+            source
+        }
+
+        let original_tail = original_byte_limited("module Example\n", "let value = 1");
+        let original_rhs = original_byte_limited("module Example\nlet value =\n", "1");
+        let prior_evidence =
+            original_byte_limited("module Example\nlet prior = 1\n", "let value = 1");
+        let decoded_tail = decoded_byte_limited("module Example\n", "let value = variable");
+        let decoded_prior =
+            decoded_byte_limited("module Example\nlet prior = 1\n", "let value = variable");
+        let mut scalar_tail = original_byte_limited("module Example\n", "let value = variable");
+        scalar_tail.remove("module Example\n".len());
+        let mut cases = vec![
+            ("OriginalTail.fs", format!("{original_tail} + 2\n"), false),
+            ("OriginalRhs.fs", format!("{original_rhs} + 2\n"), false),
+            ("OriginalScalar.fs", format!("{scalar_tail}𝑥\n"), false),
+            ("DecodedTail.fs", format!("{decoded_tail}λ\n"), false),
+            ("PriorEvidence.fs", format!("{prior_evidence} + 2\n"), true),
+            ("DecodedPrior.fs", format!("{decoded_prior}λ\n"), true),
+            ("KnownEof.fs", original_tail, true),
+            ("KnownRhsEof.fs", original_rhs, true),
+            (
+                "Multiline.fs",
+                "module Example\r\nlet value =\r\n    1".to_owned(),
+                true,
+            ),
+            ("Headerless.fs", "let value =\n    1\n".to_owned(), false),
+            (
+                "Forth.fs",
+                "module Example\nlet value =\n    : square dup * ;\n".to_owned(),
+                false,
+            ),
+        ];
+        for (path, tail, remainder) in [
+            ("PriorString.fs", "let next = \"unfinished", "\"\n"),
+            ("PriorComment.fs", "(* unfinished", " *)\n"),
+            ("PriorName.fs", "let ``unfinished", "`` = 2\n"),
+        ] {
+            let source = original_byte_limited("module Example\nlet prior = 1\n", tail);
+            cases.push((path, format!("{source}{remainder}"), true));
+        }
+        for little_endian in [true, false] {
+            let temporary = local_tempdir();
+            for (path, source, _) in &cases {
+                write_fixture(&temporary, path, &encode(source, little_endian));
+            }
+            let config = ConfigSnapshot::resolve(&[]).unwrap();
+            let root = fixture_root(&temporary, b"fsharp-decoded-prefix");
+            let policy = DiscoveryPolicy::build(Vec::new(), true).unwrap();
+            let result = discover_with_snapshots(
+                &root,
+                &config,
+                &policy,
+                DiscoveryLimits::from_config(&config),
+                BTreeMap::new(),
+                &Cancellation::new(),
+            )
+            .unwrap();
+            assert_eq!(result.manifest.inputs.len(), cases.len());
+            assert!(result.manifest.exclusions.is_empty());
+            for (path, source, expected_hint) in &cases {
+                let input = result
+                    .manifest
+                    .inputs
+                    .iter()
+                    .find(|input| input.path == *path)
+                    .unwrap();
+                let bytes = encode(source, little_endian);
+                assert_eq!(
+                    input.encoding,
+                    if little_endian {
+                        "utf-16le"
+                    } else {
+                        "utf-16be"
+                    }
+                );
+                assert_eq!(input.content_hash, content_hash(&bytes));
+                assert_eq!(input.bytes, u64::try_from(bytes.len()).unwrap());
+                assert_eq!(result.snapshots.get(&input.file).unwrap().content(), bytes);
+                let expected = if *expected_hint {
+                    vec![LanguageSignal {
+                        language: "fsharp".to_owned(),
+                        evidence: LanguageEvidence::Content,
+                    }]
+                } else {
+                    Vec::new()
+                };
+                assert_eq!(
+                    input.language_signals, expected,
+                    "{path}; little endian={little_endian}"
+                );
+            }
+        }
     }
 
     #[test]

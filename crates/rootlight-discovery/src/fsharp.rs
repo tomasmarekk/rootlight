@@ -33,16 +33,27 @@ pub(super) fn has_content_hint(source: &[u8], truncated: bool) -> bool {
     };
     let mut lines = evidence
         .lines()
-        .map(str::trim)
-        .filter(|line| !line.is_empty());
-    if !lines.next().is_some_and(module_or_namespace) {
+        .filter(|line| !line.trim().is_empty())
+        .peekable();
+    if !lines
+        .next()
+        .is_some_and(|line| module_or_namespace(line.trim()))
+    {
         return false;
     }
     let forth_definition = source.lines().any(|line| {
         let mut words = line.split_whitespace();
         words.next() == Some(":") && words.next().is_some()
     }) && (truncated || source.split_whitespace().any(|word| word == ";"));
-    !forth_definition && !has_forth_product_terminator(source) && lines.any(declaration)
+    if forth_definition || has_forth_product_terminator(source) {
+        return false;
+    }
+    while let Some(line) = lines.next() {
+        if declaration(line, lines.peek().copied()) {
+            return true;
+        }
+    }
+    false
 }
 
 fn has_forth_product_terminator(source: &str) -> bool {
@@ -82,8 +93,8 @@ fn module_or_namespace(line: &str) -> bool {
     name.split('.').all(identifier)
 }
 
-fn declaration(line: &str) -> bool {
-    let Some((keyword, rest)) = line.split_once(char::is_whitespace) else {
+fn declaration(line: &str, next_line: Option<&str>) -> bool {
+    let Some((keyword, rest)) = line.trim().split_once(char::is_whitespace) else {
         return false;
     };
     if !matches!(keyword, "let" | "type") {
@@ -93,7 +104,7 @@ fn declaration(line: &str) -> bool {
         return false;
     };
     let right = right.trim();
-    if right.is_empty() || right.starts_with('=') {
+    if right.starts_with('=') {
         return false;
     }
     let mut words = left.split_whitespace();
@@ -106,7 +117,32 @@ fn declaration(line: &str) -> bool {
     }) {
         name = words.next();
     }
-    name.is_some_and(identifier)
+    if !name.is_some_and(identifier) {
+        return false;
+    }
+    if !right.is_empty() {
+        return true;
+    }
+    let Some(next_line) = next_line else {
+        return false;
+    };
+    if next_line.trim_start().starts_with('=') {
+        return false;
+    }
+    // Tabs have no declared offside width in this source-only recognizer.
+    // Guessing one could turn an undecidable body into language evidence.
+    match (space_indentation(line), space_indentation(next_line)) {
+        (Some(head), Some(body)) => body > head,
+        _ => false,
+    }
+}
+
+fn space_indentation(line: &str) -> Option<usize> {
+    let prefix = line.get(..line.len() - line.trim_start().len())?;
+    prefix
+        .bytes()
+        .all(|byte| byte == b' ')
+        .then_some(prefix.len())
 }
 
 fn identifier(name: &str) -> bool {
@@ -228,6 +264,79 @@ fn string_end(source: &[u8], start: usize) -> Option<usize> {
 #[cfg(test)]
 mod tests {
     use super::has_content_hint;
+
+    #[test]
+    fn fsharp_content_accepts_complete_indented_multiline_declarations() {
+        for declaration in [
+            "let value =\n    1",
+            "let add left right =\n    left + right",
+            "let rec private visit value =\n    value",
+            "type Entry =\n    { Count: int }",
+            "type Choice =\n    | Empty\n    | Item of int",
+            "module Inner =\n    let value =\n        1",
+            "let value = (* a complete comment *)\n\n    // no declaration evidence\n    (* outer (* nested *) comment *)\n    1",
+            "let text =\n    \"module Ghost\\nlet ghost = 1\"",
+            "let ``quoted value`` =\n    1",
+        ] {
+            let source = format!("module Example\n{declaration}");
+            for ending in ["", "\n"] {
+                for newline in ["\n", "\r\n"] {
+                    let source = format!("{source}{ending}").replace('\n', newline);
+                    assert!(has_content_hint(source.as_bytes(), false), "{source:?}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn fsharp_multiline_evidence_does_not_complete_missing_or_conflicting_rhs() {
+        for declaration in [
+            "let value =",
+            "let value =\n    // no expression",
+            "let value =\n    (* only a comment *)",
+            "let value =\n1",
+            "    let value =\n    1",
+            "    let value =\n  1",
+            "\tlet value =\n\t\t1",
+            "let value =\n\t1",
+            "let value =\n \t1",
+            "let value =\n    = 1",
+            "let value =\n    == 1",
+            "let value =\n    \"unfinished",
+            "let value =\n    (* unfinished",
+            "let ``unfinished =\n    1",
+            "let 1value =\n    1",
+            "let value =\n    : square dup * ;",
+            "type Entry =\n    : square dup * ;",
+            "let value =\n    (* no expression *)\nmodule Other",
+        ] {
+            let source = format!("module Example\n{declaration}\n");
+            assert!(!has_content_hint(source.as_bytes(), false), "{source:?}");
+        }
+        assert!(!has_content_hint(b"let value =\n    1\n", false));
+        assert!(!has_content_hint(
+            b"module Example\nlet value =\n    1",
+            true
+        ));
+        assert!(!has_content_hint(
+            b"module Example\nlet value =\n    \"unfinished\n",
+            true,
+        ));
+        assert!(!has_content_hint(
+            b"module Example\nlet value =\n    (* unfinished\n",
+            true,
+        ));
+        assert!(!has_content_hint(
+            b"module Example\nlet value =\n    ``unfinished\n",
+            true,
+        ));
+        let mut outside = vec![b' '; super::super::MAX_CLASSIFICATION_BYTES];
+        outside.extend_from_slice(b"module Example\nlet value =\n    1\n");
+        assert!(!has_content_hint(
+            &outside[..super::super::MAX_CLASSIFICATION_BYTES],
+            true,
+        ));
+    }
 
     #[test]
     fn fsharp_content_keeps_complete_evidence_before_a_bounded_tail() {
