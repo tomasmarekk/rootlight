@@ -37,6 +37,8 @@ use rootlight_ir::{
 pub mod platform;
 mod space;
 mod text;
+#[cfg(windows)]
+mod windows_handle;
 
 pub use space::available_space;
 pub use text::{SourceText, TextEncoding};
@@ -936,6 +938,119 @@ impl RepositoryRoot {
             path_identity: path.identity_bytes(),
         })
         .id()
+    }
+
+    /// Resolves the existing spelling of one regular repository path on Windows.
+    ///
+    /// Resolution opens no-follow capabilities, reads only handle metadata and
+    /// names, and reopens the result beneath this root. Full-width native object
+    /// identity and stable handle-bound names must agree. Non-Windows targets
+    /// return the original exact path without filesystem access. No case-folded
+    /// equivalence is assumed, including inside Windows case-sensitive trees.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`VfsError`] for cancellation, unavailable bounded memory, or
+    /// unresolved, linked, non-regular, oversized-name, or unstable Windows paths.
+    pub fn resolve_regular_path(
+        &self,
+        path: &RelativePath,
+        cancellation: &Cancellation,
+    ) -> Result<RelativePath, VfsError> {
+        let check = || {
+            cancellation
+                .check()
+                .map_err(|cancelled| VfsError::Cancelled(cancelled.reason()))
+        };
+        check()?;
+        #[cfg(windows)]
+        let result = {
+            let mut operation_check = check;
+            self.resolve_regular_path_with_check(path, &mut operation_check)
+        };
+        #[cfg(not(windows))]
+        let result = Ok(path.clone());
+        check()?;
+        result
+    }
+
+    #[cfg(windows)]
+    fn resolve_regular_path_with_check(
+        &self,
+        path: &RelativePath,
+        check: &mut impl FnMut() -> Result<(), VfsError>,
+    ) -> Result<RelativePath, VfsError> {
+        let root_name = windows_handle::normalized_name(&self.directory, check)?;
+        let original = self.open_regular_file(path, check)?;
+        let identity = windows_handle::identity(&original, check)?;
+        let name = windows_handle::normalized_name(&original, check)?;
+        let suffix = name
+            .strip_prefix(&root_name)
+            .map_err(|_| VfsError::UnstableFile)?;
+        let mut components = Vec::new();
+        for component in suffix.components() {
+            check()?;
+            let Component::Normal(component) = component else {
+                return Err(VfsError::InvalidRelativePath);
+            };
+            if components.len() >= MAX_PATH_COMPONENTS {
+                return Err(VfsError::TooManyPathComponents {
+                    maximum: MAX_PATH_COMPONENTS,
+                });
+            }
+            components
+                .try_reserve(1)
+                .map_err(|_| VfsError::MemoryUnavailable)?;
+            let mut owned = OsString::new();
+            controlled(check, || {
+                owned
+                    .try_reserve_exact(component.len())
+                    .map_err(|_| VfsError::MemoryUnavailable)
+            })?;
+            owned.push(component);
+            components.push(owned);
+        }
+        let resolved = controlled(check, || RelativePath::from_components(components))?;
+        let reopened = self.open_regular_file(&resolved, check)?;
+        if !windows_handle::same_object_and_name(
+            identity,
+            &name,
+            windows_handle::identity(&reopened, check)?,
+            &windows_handle::normalized_name(&reopened, check)?,
+        ) || windows_handle::normalized_name(&original, check)? != name
+            || windows_handle::normalized_name(&self.directory, check)? != root_name
+        {
+            return Err(VfsError::UnstableFile);
+        }
+        check()?;
+        Ok(resolved)
+    }
+
+    #[cfg(windows)]
+    fn open_regular_file(
+        &self,
+        path: &RelativePath,
+        check: &mut impl FnMut() -> Result<(), VfsError>,
+    ) -> Result<File, VfsError> {
+        let parent = self.open_parent(path, check)?;
+        let mut options = OpenOptions::new();
+        options.read(true).follow(FollowSymlinks::No);
+        let file = controlled(check, || {
+            parent
+                .open_with(path.file_name(), &options)
+                .map_err(|source| VfsError::OpenFile { source })
+        })?;
+        let metadata = controlled(check, || {
+            file.metadata()
+                .map_err(|source| VfsError::ReadFile { source })
+        })?;
+        if is_reparse_point(&metadata) {
+            return Err(VfsError::LinkedPath);
+        }
+        if !metadata.is_file() {
+            return Err(VfsError::NotRegularFile);
+        }
+        Ok(file)
     }
 
     /// Enumerates one directory within an inherited entry and cancellation budget.
@@ -2216,6 +2331,194 @@ mod tests {
         let root = RepositoryRoot::open(repository, temporary.path())
             .expect("temporary directory is a valid repository root");
         (temporary, root)
+    }
+
+    #[test]
+    fn regular_path_resolution_observes_cancellation_before_filesystem_access() {
+        let (_temporary, root) = fixture();
+        let path = RelativePath::parse(Path::new("missing.fs")).expect("valid path");
+        let cancellation = Cancellation::new();
+        assert!(cancellation.cancel(CancellationReason::ClientRequest));
+        assert!(matches!(
+            root.resolve_regular_path(&path, &cancellation),
+            Err(VfsError::Cancelled(CancellationReason::ClientRequest)),
+        ));
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn regular_path_resolution_keeps_exact_non_windows_keys_without_access() {
+        let (_temporary, root) = fixture();
+        let path = RelativePath::parse(Path::new("Missing/Unit.fs")).expect("valid path");
+        assert_eq!(
+            root.resolve_regular_path(&path, &Cancellation::new())
+                .unwrap(),
+            path
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn regular_path_resolution_preserves_existing_spelling_and_hardlink_path() {
+        let (temporary, root) = fixture();
+        fs::create_dir_all(temporary.path().join("Cache/Deep")).expect("directories are created");
+        fs::write(temporary.path().join("Cache/Deep/Unit.fs"), b"not read")
+            .expect("file is created");
+        fs::hard_link(
+            temporary.path().join("Cache/Deep/Unit.fs"),
+            temporary.path().join("Cache/Deep/Other.fs"),
+        )
+        .expect("hardlink is created");
+        for (input, expected) in [
+            ("cache/deep/unit.fs", "Cache/Deep/Unit.fs"),
+            ("cache/deep/other.fs", "Cache/Deep/Other.fs"),
+        ] {
+            let input = RelativePath::parse(Path::new(input)).expect("input path");
+            let resolved = root
+                .resolve_regular_path(&input, &Cancellation::new())
+                .expect("path resolves");
+            assert_eq!(resolved.as_str(), expected);
+            let expected = RelativePath::parse(Path::new(expected)).expect("expected path");
+            assert_eq!(root.file_id(&resolved), root.file_id(&expected));
+            assert_ne!(root.file_id(&resolved), root.file_id(&input));
+        }
+        for missing in ["cache/deep/missing.fs", "missing/unit.fs"] {
+            assert!(
+                root.resolve_regular_path(
+                    &RelativePath::parse(Path::new(missing)).expect("missing path"),
+                    &Cancellation::new(),
+                )
+                .is_err()
+            );
+        }
+        assert!(
+            root.resolve_regular_path(
+                &RelativePath::parse(Path::new("Cache/Deep")).expect("directory path"),
+                &Cancellation::new(),
+            )
+            .is_err()
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn regular_path_resolution_rejects_reparse_routes_and_leaves() {
+        use std::os::windows::fs::{symlink_dir, symlink_file};
+        let (temporary, root) = fixture();
+        let outside = local_tempdir();
+        fs::write(outside.path().join("Unit.fs"), b"outside").expect("outside file exists");
+        match symlink_dir(outside.path(), temporary.path().join("Linked")) {
+            Ok(()) => {}
+            Err(error) if error.raw_os_error() == Some(1_314) => return,
+            Err(error) => panic!("directory reparse point is created: {error}"),
+        }
+        symlink_file(
+            outside.path().join("Unit.fs"),
+            temporary.path().join("Unit.fs"),
+        )
+        .expect("file reparse point is created");
+        for input in ["linked/unit.fs", "unit.fs"] {
+            assert!(
+                root.resolve_regular_path(
+                    &RelativePath::parse(Path::new(input)).expect("input path"),
+                    &Cancellation::new(),
+                )
+                .is_err()
+            );
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn regular_path_resolution_checks_cancellation_after_native_observation() {
+        let (_temporary, root) = fixture();
+        let path = RelativePath::parse(Path::new("missing.fs")).expect("valid path");
+        let calls = Cell::new(0);
+        let mut check = || {
+            calls.set(calls.get() + 1);
+            if calls.get() == 2 {
+                Err(VfsError::Cancelled(CancellationReason::ClientRequest))
+            } else {
+                Ok(())
+            }
+        };
+        assert!(matches!(
+            root.resolve_regular_path_with_check(&path, &mut check),
+            Err(VfsError::Cancelled(CancellationReason::ClientRequest)),
+        ));
+        assert_eq!(calls.get(), 2);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn regular_path_resolution_bounds_long_handle_names_without_truncation() {
+        let (temporary, root) = fixture();
+        let components = (0..8)
+            .map(|index| format!("Directory{index}_{}", "x".repeat(60)))
+            .collect::<Vec<_>>();
+        let relative = format!("{}/Unit.fs", components.join("/"));
+        let file = temporary.path().join(&relative);
+        fs::create_dir_all(file.parent().expect("file has a parent")).expect("directories exist");
+        fs::write(&file, b"not read").expect("long-path file exists");
+        let input =
+            RelativePath::parse(Path::new(&relative.to_ascii_lowercase())).expect("input path");
+        let resolved = root
+            .resolve_regular_path(&input, &Cancellation::new())
+            .expect("long path resolves");
+        assert_eq!(resolved.as_str(), relative);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    #[ignore = "requires NTFS directory case-sensitivity setup permission"]
+    fn regular_path_resolution_keeps_case_sensitive_objects_and_hardlinks_distinct() {
+        let (temporary, root) = fixture();
+        let sensitive = temporary.path().join("Sensitive");
+        fs::create_dir(&sensitive).expect("empty fixture directory exists");
+        let setup = std::process::Command::new("fsutil.exe")
+            .args(["file", "setCaseSensitiveInfo"])
+            .arg(&sensitive)
+            .arg("enable")
+            .output()
+            .expect("Windows filesystem utility starts");
+        assert!(
+            setup.status.success(),
+            "case-sensitive fixture setup requires permission"
+        );
+        fs::write(sensitive.join("Unit.fs"), b"upper").expect("upper object exists");
+        fs::write(sensitive.join("unit.fs"), b"lower").expect("lower object exists");
+        fs::write(sensitive.join("missing.fs"), b"lower-only").expect("lower-only object exists");
+        for alias in ["Alias.fs", "alias.fs"] {
+            fs::hard_link(sensitive.join("Unit.fs"), sensitive.join(alias))
+                .expect("hardlink exists");
+        }
+        let mut identities = Vec::new();
+        for input in ["Unit.fs", "unit.fs", "Alias.fs", "alias.fs"] {
+            let path =
+                RelativePath::parse(Path::new(&format!("Sensitive/{input}"))).expect("exact path");
+            assert_eq!(
+                root.resolve_regular_path(&path, &Cancellation::new())
+                    .unwrap(),
+                path
+            );
+            let mut check = || Ok(());
+            let handle = root
+                .open_regular_file(&path, &mut check)
+                .expect("exact object opens");
+            identities
+                .push(windows_handle::identity(&handle, &mut check).expect("object identity"));
+        }
+        assert_ne!(identities[0], identities[1]);
+        assert_eq!(identities[0], identities[2]);
+        assert_eq!(identities[0], identities[3]);
+        assert!(
+            root.resolve_regular_path(
+                &RelativePath::parse(Path::new("Sensitive/Missing.fs"))
+                    .expect("missing uppercase path"),
+                &Cancellation::new(),
+            )
+            .is_err()
+        );
     }
 
     fn capture(root: &RepositoryRoot, path: &RelativePath) -> Capture {

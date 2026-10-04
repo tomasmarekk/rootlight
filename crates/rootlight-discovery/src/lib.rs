@@ -42,7 +42,7 @@ pub use incremental::{
 };
 
 /// Current deterministic manifest and source-classification revision.
-pub const DISCOVERY_MANIFEST_VERSION: &str = "1.20";
+pub const DISCOVERY_MANIFEST_VERSION: &str = "1.21";
 /// Stable source-free diagnostic emitted when the entry budget truncates discovery.
 pub const DISCOVERY_ENTRY_LIMIT_DIAGNOSTIC_CODE: &str = "DISCOVERY_ENTRY_LIMIT";
 /// Stable source-free diagnostic emitted when retained source bytes truncate discovery.
@@ -280,6 +280,53 @@ impl DiscoveryPolicy {
         for path in paths {
             cancellation.check()?;
             let path = RelativePath::parse(Path::new(&path))?;
+            self.tracked_files.insert(path.as_str().to_owned());
+        }
+        cancellation.check()?;
+        Ok(self)
+    }
+
+    /// Retains tracked files using their capability-attested existing spelling.
+    ///
+    /// Windows resolves each regular tracked path through `root` without reading
+    /// source content. Missing or unresolvable entries retain only their original
+    /// exact policy key; they never confer case-folded or inode-wide admission.
+    /// Non-Windows admission remains exact. All other policy layers and VFS
+    /// exclusions remain authoritative.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`DiscoveryError`] for excessive inventory size, invalid input
+    /// paths, cancellation, or unavailable bounded VFS memory. No partially
+    /// validated policy is returned.
+    pub fn with_tracked_files_in_root(
+        mut self,
+        root: &RepositoryRoot,
+        paths: BTreeSet<String>,
+        cancellation: &Cancellation,
+    ) -> Result<Self, DiscoveryError> {
+        if paths.len() > MAX_DISCOVERY_ENTRIES {
+            return Err(DiscoveryError::EntryLimit {
+                maximum: MAX_DISCOVERY_ENTRIES,
+            });
+        }
+        for path in paths {
+            cancellation.check()?;
+            let path = RelativePath::parse(Path::new(&path))?;
+            #[cfg(windows)]
+            let path = {
+                let resolved = root.resolve_regular_path(&path, cancellation);
+                cancellation.check()?;
+                match resolved {
+                    Ok(path) => path,
+                    Err(error @ (VfsError::MemoryUnavailable | VfsError::Cancelled(_))) => {
+                        return Err(error.into());
+                    }
+                    Err(_) => path,
+                }
+            };
+            #[cfg(not(windows))]
+            let _ = root;
             self.tracked_files.insert(path.as_str().to_owned());
         }
         cancellation.check()?;
@@ -4693,6 +4740,208 @@ max_source_file_bytes = 2097152
             &RelativePath::parse(Path::new("cache")).expect("path"),
             true
         ));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn tracked_admission_resolves_existing_casing_without_admitting_siblings() {
+        let temporary = local_tempdir();
+        write_fixture(&temporary, ".gitignore", b"[Cc]ache/\n*.fs\n");
+        for path in [
+            "Cache/Deep/Unit.fs",
+            "Cache/Deep/Untracked.fs",
+            "Cache/Deep/Denied.fs",
+            "Cache/Deep/RepositoryDenied.fs",
+            "target/Kept.fs",
+        ] {
+            write_fixture(&temporary, path, b"module Unit\nlet value = 1\n");
+        }
+        std::fs::hard_link(
+            temporary.path().join("Cache/Deep/Unit.fs"),
+            temporary.path().join("Cache/Deep/UntrackedLink.fs"),
+        )
+        .expect("untracked hardlink is created");
+        let root = fixture_root(&temporary, b"tracked-path-casing");
+        let policy = DiscoveryPolicy::build(
+            vec![
+                PolicyRule {
+                    layer: PolicyLayer::Repository,
+                    pattern: "**/RepositoryDenied.fs".to_owned(),
+                    source: "repository".to_owned(),
+                },
+                PolicyRule {
+                    layer: PolicyLayer::Operation,
+                    pattern: "**/Denied.fs".to_owned(),
+                    source: "operation".to_owned(),
+                },
+            ],
+            true,
+        )
+        .expect("policy builds")
+        .with_tracked_files_in_root(
+            &root,
+            [
+                "cache/deep/unit.fs",
+                "cache/deep/denied.fs",
+                "cache/deep/repositorydenied.fs",
+                "target/kept.fs",
+                "cache/deep/missing.fs",
+            ]
+            .map(str::to_owned)
+            .into(),
+            &Cancellation::new(),
+        )
+        .expect("tracked paths validate");
+        let config = ConfigSnapshot::resolve(&[rootlight_config::ConfigLayer {
+            source: rootlight_config::ConfigSource::User,
+            contents: "version='1.3'\n[extensions.source-languages]\nversion='1.0'\ncritical=true\n[extensions.source-languages.data.paths]\n'Cache/Deep/Unit.fs'='actual-configuration'\n'cache/deep/unit.fs'='lowercase-configuration'\n",
+        }]).expect("exact source-language configuration resolves");
+        let manifest = discover(&root, &config, &policy, limits(), &Cancellation::new())
+            .expect("tracked discovery succeeds");
+        assert_eq!(
+            manifest
+                .inputs
+                .iter()
+                .map(|input| input.path.as_str())
+                .collect::<Vec<_>>(),
+            [".gitignore", "Cache/Deep/Unit.fs"]
+        );
+        let retained = manifest
+            .inputs
+            .iter()
+            .find(|input| input.path == "Cache/Deep/Unit.fs")
+            .expect("existing spelling is retained");
+        let actual = RelativePath::parse(Path::new("Cache/Deep/Unit.fs")).expect("actual path");
+        assert_eq!(retained.file, root.file_id(&actual));
+        assert!(retained.language_signals.iter().any(|signal| {
+            signal.language == "actual-configuration"
+                && signal.evidence == LanguageEvidence::Configuration
+        }));
+        assert!(
+            !retained
+                .language_signals
+                .iter()
+                .any(|signal| signal.language == "lowercase-configuration")
+        );
+        assert!(policy.admits_tracked_path(
+            &RelativePath::parse(Path::new("cache/deep/missing.fs")).expect("missing exact key"),
+            false,
+        ));
+        assert!(
+            !policy.admits_tracked_path(
+                &RelativePath::parse(Path::new("Cache/Deep/Missing.fs"))
+                    .expect("unresolved alternate key"),
+                false,
+            )
+        );
+        assert!(!policy.admits_tracked_path(
+            &RelativePath::parse(Path::new("Cache/Deep/UntrackedLink.fs")).expect("hardlink path"),
+            false,
+        ));
+    }
+
+    #[test]
+    fn tracked_capability_admission_rejects_invalid_input_and_cancellation() {
+        let temporary = local_tempdir();
+        let root = fixture_root(&temporary, b"tracked-input-validation");
+        for invalid in ["../escape.fs", "/absolute.fs", "alias\\file.fs", ""] {
+            assert!(
+                DiscoveryPolicy::build(Vec::new(), false)
+                    .expect("policy builds")
+                    .with_tracked_files_in_root(
+                        &root,
+                        [invalid.to_owned()].into(),
+                        &Cancellation::new()
+                    )
+                    .is_err()
+            );
+        }
+        let cancellation = Cancellation::new();
+        assert!(cancellation.cancel(rootlight_cancel::CancellationReason::ClientRequest));
+        assert!(matches!(
+            DiscoveryPolicy::build(Vec::new(), false)
+                .expect("policy builds")
+                .with_tracked_files_in_root(&root, ["missing.fs".to_owned()].into(), &cancellation),
+            Err(DiscoveryError::Cancelled(_)),
+        ));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    #[ignore = "requires NTFS directory case-sensitivity setup permission"]
+    fn tracked_admission_keeps_case_sensitive_objects_and_hardlinks_distinct() {
+        let temporary = local_tempdir();
+        let sensitive = temporary.path().join("Sensitive");
+        std::fs::create_dir(&sensitive).expect("empty fixture directory exists");
+        let setup = std::process::Command::new("fsutil.exe")
+            .args(["file", "setCaseSensitiveInfo"])
+            .arg(&sensitive)
+            .arg("enable")
+            .output()
+            .expect("Windows filesystem utility starts");
+        assert!(
+            setup.status.success(),
+            "case-sensitive fixture setup requires permission"
+        );
+        write_fixture(&temporary, ".gitignore", b"Sensitive/\n");
+        for (path, source) in [
+            ("Sensitive/Unit.fs", b"module Upper\n".as_slice()),
+            ("Sensitive/unit.fs", b"module Lower\n".as_slice()),
+            ("Sensitive/missing.fs", b"module Missing\n".as_slice()),
+        ] {
+            write_fixture(&temporary, path, source);
+        }
+        assert_ne!(
+            std::fs::read(sensitive.join("Unit.fs")).unwrap(),
+            std::fs::read(sensitive.join("unit.fs")).unwrap(),
+        );
+        for alias in ["Alias.fs", "alias.fs"] {
+            std::fs::hard_link(sensitive.join("Unit.fs"), sensitive.join(alias))
+                .expect("case-distinct hardlink is created");
+        }
+        let root = fixture_root(&temporary, b"case-sensitive-tracked-admission");
+        let policy = DiscoveryPolicy::build(Vec::new(), true)
+            .expect("policy builds")
+            .with_tracked_files_in_root(
+                &root,
+                [
+                    "Sensitive/Unit.fs",
+                    "Sensitive/Alias.fs",
+                    "Sensitive/Missing.fs",
+                ]
+                .map(str::to_owned)
+                .into(),
+                &Cancellation::new(),
+            )
+            .expect("tracked paths validate");
+        let manifest = discover(&root, &config(), &policy, limits(), &Cancellation::new())
+            .expect("discovery succeeds");
+        assert_eq!(
+            manifest
+                .inputs
+                .iter()
+                .map(|input| input.path.as_str())
+                .collect::<Vec<_>>(),
+            [".gitignore", "Sensitive/Alias.fs", "Sensitive/Unit.fs"]
+        );
+        for untracked in [
+            "Sensitive/unit.fs",
+            "Sensitive/alias.fs",
+            "Sensitive/missing.fs",
+        ] {
+            assert!(!policy.admits_tracked_path(
+                &RelativePath::parse(Path::new(untracked)).expect("untracked path"),
+                false,
+            ));
+        }
+        assert!(
+            root.resolve_regular_path(
+                &RelativePath::parse(Path::new("Sensitive/Missing.fs"))
+                    .expect("missing uppercase path"),
+                &Cancellation::new(),
+            )
+            .is_err()
+        );
     }
 
     #[test]
