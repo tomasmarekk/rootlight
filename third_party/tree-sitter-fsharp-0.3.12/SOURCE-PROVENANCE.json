@@ -827,9 +827,9 @@
       "sha256": "6a4bcb7c05e8d087a68383815d8b825f4b07c56a531c99c7f7ae8ad5a36a26f7"
     },
     "common/scanner.h": {
-      "bytes": 101260,
+      "bytes": 101401,
       "archive_mode": 436,
-      "sha256": "74e18975978747310b4b688df12c31181e4a9c60f72ee56a94ea869b8ffab36d"
+      "sha256": "41d0b5bee88b7180481a426e95e92a9a2b251c612c5d2ec71ac2e022fb8431f4"
     },
     "fsharp/grammar.js": {
       "bytes": 88009,
@@ -940,7 +940,7 @@
   "local_overrides": {
     "common/scanner.h": {
       "original_sha256": "5e14db207730d34e7f054df0afbb294f8798c9b8214734df025b239ef41e7592",
-      "local_sha256": "74e18975978747310b4b688df12c31181e4a9c60f72ee56a94ea869b8ffab36d"
+      "local_sha256": "41d0b5bee88b7180481a426e95e92a9a2b251c612c5d2ec71ac2e022fb8431f4"
     },
     "fsharp/grammar.js": {
       "original_sha256": "300a392f1c87e30ccc9575894bc3f08ef7cb61f7ac84ca5d46ede38cddc9403b",
@@ -1019,7 +1019,9 @@
     "installed_product_acceptance_verified": false,
     "empty_cache_network_denied_build_verified": false,
     "current_syntax_groups": 13,
-    "current_syntax_test_sha256": "d38e4ba572b111c2741d0c6f6443742da8c3324f94c99660b2afc45429ff6500"
+    "current_syntax_test_sha256": "d38e4ba572b111c2741d0c6f6443742da8c3324f94c99660b2afc45429ff6500",
+    "conditional_layout_groups": 3,
+    "conditional_layout_test_sha256": "b03fa1520d19e30fec58cc955fc014724b66eaf600a2ed6ba630207b1ef235b9"
   },
   "compilation_downloads_sources": false,
   "compilation_generates_parser": false,

@@ -48,6 +48,13 @@ into inactive trivia, but it does not consume the first program character.
 This preserves the written bytes, not separate documentation facts or evaluated
 conditional-compilation semantics.
 
+Same-column siblings may close a deeper declaration body while preserving the
+enclosing conditional's indentation boundary. Authored controls pin declaration
+siblings, attributed members and nested directive ownership under LF/CRLF and
+EOF variants. They do not qualify every owner family, conditional expression
+continuations, nested alternative layout, leading block-comment layout, or
+complete conditional-compilation syntax.
+
 The signature grammar inherited implementation constructors and member bodies.
 Its local rules now accept written constructor/member signatures, including
 static, abstract, generic and accessor forms, without implementation bodies or

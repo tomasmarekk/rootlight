@@ -2236,7 +2236,9 @@ static bool scan(Scanner *scanner, TSLexer *lexer, const bool *valid_symbols) {
       if (scanner->preprocessor_indents.size > 0) {
         uint32_t current_preproc_length =
             *array_back(&scanner->preprocessor_indents);
-        can_dedent_preproc = current_preproc_length < indent_length;
+        // Same-column siblings must close their deeper body without escaping
+        // below the enclosing conditional's layout boundary.
+        can_dedent_preproc = current_preproc_length <= indent_length;
       } else {
         can_dedent_preproc = true;
       }

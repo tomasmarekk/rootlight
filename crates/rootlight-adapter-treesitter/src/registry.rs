@@ -384,10 +384,10 @@ const fn identity_for(family: GrammarFamily) -> GrammarIdentity {
         GrammarFamily::FSharp => GrammarIdentity {
             language_id: "fsharp",
             grammar_version: "0.3.12",
-            source_package_sha256: "f1e1ae1630c3d4f81e000df3863a7331d51d667e5f602cb761c7954e9b5a1ac0",
+            source_package_sha256: "8264954b81c46cefe7e1a0e88efede895fbe671c31c20ba296de6324e106b1a2",
             parser_sha256: "d0c1d9d7aba5f0aacf6e40c6dd4fd76118229770388bcf460471ea964f299c86",
             scanner_sha256: Some(
-                "74e18975978747310b4b688df12c31181e4a9c60f72ee56a94ea869b8ffab36d",
+                "41d0b5bee88b7180481a426e95e92a9a2b251c612c5d2ec71ac2e022fb8431f4",
             ),
         },
         GrammarFamily::CobolFree => GrammarIdentity {
