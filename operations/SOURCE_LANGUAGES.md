@@ -35,6 +35,14 @@ semantic completeness. Binary, linked, unreadable, excluded or oversized sources
 remain subject to the normal discovery safety policy. Assigning a language does
 not add support for extracting binary containers such as MATLAB live scripts.
 
+F# uses `fsharp` for implementation sources and `fsharp-signature` for signature
+contracts. Unambiguous `.fsx` and `.fsi` filenames select those distinct profiles.
+The `.fs` suffix is also used by Forth: automatic F# routing requires bounded
+module/namespace and declaration evidence, with conflicting content kept as
+unsupported source. This hint is not universal language recognition. Use narrow
+path assignments for headerless, nonstandard or otherwise unproven `.fs` inputs,
+and assign signature contracts explicitly when their filenames use `.fs`.
+
 The highest-authority layer supplying this extension replaces the entire rule
 set; maps from different layers are not merged. Supply empty `data = {}` to
 clear prior rules. The payload contributes to the configuration hash, so changed

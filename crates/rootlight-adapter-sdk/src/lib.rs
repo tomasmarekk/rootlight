@@ -73,10 +73,11 @@ pub use sink::{
     execute_project_analysis,
 };
 pub use structural::{
-    structural_captured_name, structural_captured_name_for_fact,
+    StructuralClassificationGap, structural_captured_name, structural_captured_name_for_fact,
     structural_captured_name_for_language, structural_display_name_for_language,
-    structural_entity_kind, structural_entity_kind_from_source, structural_syntax_fact_order,
-    structural_type_member_kind, vba_module_name,
+    structural_entity_classification_gap, structural_entity_kind,
+    structural_entity_kind_from_source, structural_syntax_fact_order, structural_type_member_kind,
+    vba_module_name,
 };
 pub use structural_identity::derive_structural_occurrence_identity;
 pub use typescript_bindings::{TypeScriptInferBinding, typescript_infer_bindings};

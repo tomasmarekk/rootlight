@@ -32305,10 +32305,10 @@
   ],
   "lockfiles": [
     {
-      "local_package_count": 71,
+      "local_package_count": 72,
       "path": "Cargo.lock",
       "registry_package_count": 302,
-      "sha256": "f87c0be8a8b54a400946feccea69536cc5bded9955e41e0c74f781aa8cb58426"
+      "sha256": "0fa5ba814476b63a93af9ba8556cbd05c5b0f30f92b920019a67c7186d968e7f"
     },
     {
       "local_package_count": 12,

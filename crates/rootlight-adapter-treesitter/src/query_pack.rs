@@ -21,6 +21,7 @@ use crate::{
 mod cobol;
 mod dart;
 mod ecmascript;
+mod fsharp;
 mod groovy;
 mod haskell;
 mod markdown;
@@ -345,6 +346,17 @@ impl QueryPack {
         }
         if family == GrammarFamily::Perl {
             expected.retain(|name| !matches!(*name, "call" | "import"));
+        }
+        if matches!(
+            family,
+            GrammarFamily::FSharp | GrammarFamily::FSharpSignature
+        ) {
+            expected.retain(|name| {
+                !matches!(
+                    *name,
+                    "call" | "comment" | "documentation" | "reference" | "string"
+                )
+            });
         }
         if family == GrammarFamily::Matlab || family.is_classic_basic() {
             expected.retain(|name| !matches!(*name, "call" | "import" | "documentation"));
@@ -685,6 +697,13 @@ impl QueryPack {
                 }
                 if input.family == GrammarFamily::Haskell
                     && !haskell::retain_capture(capture.node, role, input.cancellation)?
+                {
+                    continue;
+                }
+                if matches!(
+                    input.family,
+                    GrammarFamily::FSharp | GrammarFamily::FSharpSignature
+                ) && !fsharp::retain_capture(capture.node, role, input.cancellation)?
                 {
                     continue;
                 }
@@ -1234,6 +1253,14 @@ fn candidate_for_capture(
             haskell::syntax(capture.node, role, source, cancellation)?
                 .ok_or_else(|| query_failure("query-haskell-kind"))?
         }
+        _ if matches!(
+            family,
+            GrammarFamily::FSharp | GrammarFamily::FSharpSignature
+        ) =>
+        {
+            fsharp::syntax(capture.node, role, source, cancellation)?
+                .ok_or_else(|| query_failure("query-fsharp-kind"))?
+        }
         _ if matches!(family, GrammarFamily::CobolFixed | GrammarFamily::CobolFree) => {
             cobol::syntax(capture.node, role).ok_or_else(|| query_failure("query-cobol-kind"))?
         }
@@ -1426,6 +1453,9 @@ fn candidate_for_capture(
             GrammarFamily::Perl => return Err(query_failure("query-perl-unresolved-call")),
             GrammarFamily::Groovy => "groovy.call",
             GrammarFamily::Haskell => "haskell.application",
+            GrammarFamily::FSharp | GrammarFamily::FSharpSignature => {
+                return Err(query_failure("query-fsharp-unproven-call"));
+            }
             GrammarFamily::CobolFixed | GrammarFamily::CobolFree => {
                 return Err(query_failure("query-cobol-unproven-call"));
             }
@@ -1438,6 +1468,15 @@ fn candidate_for_capture(
     };
     let mut start = capture.node.start_byte();
     let mut end = capture.node.end_byte();
+    if matches!(
+        family,
+        GrammarFamily::FSharp | GrammarFamily::FSharpSignature
+    ) {
+        let range = fsharp::capture_range(capture.node, role, cancellation)?
+            .ok_or_else(|| query_failure("query-fsharp-range"))?;
+        start = range.start;
+        end = range.end;
+    }
     if family == GrammarFamily::Haskell {
         let range = haskell::capture_range(capture.node, role, cancellation)?
             .ok_or_else(|| query_failure("query-haskell-range"))?;
@@ -1605,6 +1644,8 @@ fn candidate_for_capture(
         GrammarFamily::Perl
             | GrammarFamily::Groovy
             | GrammarFamily::Haskell
+            | GrammarFamily::FSharp
+            | GrammarFamily::FSharpSignature
             | GrammarFamily::CobolFixed
             | GrammarFamily::CobolFree
     ) {
@@ -1640,6 +1681,17 @@ fn candidate_for_capture(
         // One native node owns both its binding and its lexical environment.
         // The environment must be inside that binding so repeated equations
         // share a callable identity without merging their formal parameters.
+        capture_depth = capture_depth
+            .checked_add(1)
+            .ok_or_else(|| query_failure("query-native-depth"))?;
+    }
+    if matches!(
+        family,
+        GrammarFamily::FSharp | GrammarFamily::FSharpSignature
+    ) && role == StructuralRole::Scope
+        && fsharp::scope_below_declaration(capture.node)
+    {
+        // Same-span lexical environments belong below their named declaration.
         capture_depth = capture_depth
             .checked_add(1)
             .ok_or_else(|| query_failure("query-native-depth"))?;
@@ -2294,7 +2346,7 @@ impl QueryPackRegistry {
     }
 
     fn compile_audited() -> Result<Self, GrammarFamily> {
-        let mut packs = Vec::with_capacity(38);
+        let mut packs = Vec::with_capacity(40);
         for (family, source) in [
             (GrammarFamily::Rust, include_str!("../queries/rust.scm")),
             (GrammarFamily::Python, include_str!("../queries/python.scm")),
@@ -2340,6 +2392,11 @@ impl QueryPackRegistry {
             (
                 GrammarFamily::Haskell,
                 include_str!("../queries/haskell.scm"),
+            ),
+            (GrammarFamily::FSharp, include_str!("../queries/fsharp.scm")),
+            (
+                GrammarFamily::FSharpSignature,
+                include_str!("../queries/fsharp_signature.scm"),
             ),
             (
                 GrammarFamily::CobolFixed,
@@ -2463,6 +2520,8 @@ mod tests {
             GrammarFamily::Vba,
             GrammarFamily::VisualBasicClassic,
             GrammarFamily::Haskell,
+            GrammarFamily::FSharp,
+            GrammarFamily::FSharpSignature,
             GrammarFamily::CobolFixed,
             GrammarFamily::CobolFree,
         ] {
@@ -2475,6 +2534,17 @@ mod tests {
             }
             if family == GrammarFamily::Perl {
                 expected.retain(|name| !matches!(*name, "call" | "import"));
+            }
+            if matches!(
+                family,
+                GrammarFamily::FSharp | GrammarFamily::FSharpSignature
+            ) {
+                expected.retain(|name| {
+                    !matches!(
+                        *name,
+                        "call" | "comment" | "documentation" | "reference" | "string"
+                    )
+                });
             }
             if family == GrammarFamily::Matlab || family.is_classic_basic() {
                 expected.retain(|name| !matches!(*name, "call" | "import" | "documentation"));

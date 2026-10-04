@@ -89,7 +89,17 @@ fn incremental_executor_enforces_deadline_and_explicit_memory_admission() {
 
 #[test]
 fn every_audited_grammar_parses_a_clean_representative_file() {
-    let cases: [(&str, &str, &[u8]); 38] = [
+    let cases: [(&str, &str, &[u8]); 40] = [
+        (
+            "Sample.fs",
+            "fsharp",
+            b"module Sample\nlet measure value = value\n",
+        ),
+        (
+            "Sample.fsi",
+            "fsharp-signature",
+            b"module Sample\nval measure: int -> int\n",
+        ),
         (
             "sample-fixed.cbl",
             "cobol-fixed",
@@ -496,6 +506,74 @@ fn incremental_edit_reuses_only_an_exact_previous_identity() {
     assert!(!format!("{:?}", second.reuse_key()).contains("two"));
     assert_eq!(provider.stats().checked_out_parsers, 0);
     assert_eq!(provider.stats().available_parsers, 1);
+}
+
+#[test]
+fn fsharp_profiles_invalidate_reuse_without_changing_source_identity() {
+    let fixture = Fixture::new(
+        "profile.fs",
+        b"module Sample\ntype State = | Ready | Done\n",
+    );
+    let limits = limits(MAX_SOURCE_BYTES, 1024, 64);
+    let provider = provider(MAX_SOURCE_BYTES, 1024, 64, 2 * 1024 * 1024);
+    let settings = ParserSettings::new(64).unwrap();
+    let mut previous = None;
+    for (language, family, expected) in [
+        (
+            "fsharp",
+            rootlight_adapter_treesitter::GrammarFamily::FSharp,
+            ReuseStatus::Fresh,
+        ),
+        (
+            "fsharp",
+            rootlight_adapter_treesitter::GrammarFamily::FSharp,
+            ReuseStatus::Reused { changed_ranges: 0 },
+        ),
+        (
+            "fsharp-signature",
+            rootlight_adapter_treesitter::GrammarFamily::FSharpSignature,
+            ReuseStatus::Invalidated(ReuseInvalidation::Language),
+        ),
+        (
+            "fsharp-signature",
+            rootlight_adapter_treesitter::GrammarFamily::FSharpSignature,
+            ReuseStatus::Reused { changed_ranges: 0 },
+        ),
+        (
+            "fsharp",
+            rootlight_adapter_treesitter::GrammarFamily::FSharp,
+            ReuseStatus::Invalidated(ReuseInvalidation::Language),
+        ),
+    ] {
+        let request = request(
+            &fixture.snapshot,
+            &fixture.source,
+            &limits,
+            language,
+            Vec::new(),
+        );
+        let parsed = provider
+            .execute_with_previous(
+                &request,
+                previous.as_ref(),
+                &[],
+                settings,
+                MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
+                &deadline(Duration::from_secs(30)),
+            )
+            .expect("F# profile parsing succeeds");
+        assert_eq!(parsed.reuse_status(), expected);
+        assert_eq!(parsed.reuse_key().family(), family);
+        assert_eq!(parsed.reuse_key().native_family(), family);
+        assert_eq!(
+            parsed.reuse_key().current_content_hash(),
+            fixture.source.content_hash()
+        );
+        assert!(parsed.output().diagnostics().is_empty());
+        previous = parsed.previous().cloned();
+        assert!(previous.is_some());
+    }
+    assert_eq!(provider.stats().checked_out_parsers, 0);
 }
 
 #[test]

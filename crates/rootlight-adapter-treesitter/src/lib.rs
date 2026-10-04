@@ -36,8 +36,8 @@ pub use lowering::{
 };
 pub use registry::{GrammarDescriptor, GrammarFamily, GrammarRegistry, RegistryError};
 pub use rootlight_adapter_sdk::{
-    structural_captured_name, structural_entity_kind, structural_entity_kind_from_source,
-    structural_syntax_fact_order,
+    StructuralClassificationGap, structural_captured_name, structural_entity_classification_gap,
+    structural_entity_kind, structural_entity_kind_from_source, structural_syntax_fact_order,
 };
 pub use runtime::{CacheStats, RuntimeStats, TreeSitterProvider};
 

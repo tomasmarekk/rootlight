@@ -6,14 +6,24 @@ use rootlight_ir::EntityKind;
 
 use crate::{SyntaxFact, SyntaxFactKind};
 
+#[path = "structural_fsharp.rs"]
+mod fsharp;
+
+pub use fsharp::StructuralClassificationGap;
+
 /// Returns the grammar-reviewed base entity kind for one structural syntax fact.
 ///
 /// File and project lowering share this base classifier and refine direct
 /// type members with [`structural_type_member_kind`]. Rust `impl` ownership
 /// additionally requires the caller's language-specific scope evidence.
+/// Unsupported F# declaration shapes return `None`; callers must retain the
+/// corresponding [`structural_entity_classification_gap`] in entity coverage.
 #[must_use]
 pub fn structural_entity_kind(fact: &SyntaxFact) -> Option<EntityKind> {
     let label = fact.syntax_kind().as_str();
+    if label.starts_with("fsharp.") {
+        return fsharp::entity_kind(fact).ok().flatten();
+    }
     match fact.kind() {
         SyntaxFactKind::Module if label == "vba.class.module" => Some(EntityKind::Class),
         SyntaxFactKind::Module => Some(EntityKind::Module),
@@ -305,6 +315,21 @@ pub fn structural_entity_kind(fact: &SyntaxFact) -> Option<EntityKind> {
     }
 }
 
+/// Returns the source-backed gap for a declaration whose entity kind is unknown.
+///
+/// Reviewed F# ambiguous type representations, unrefined member specifications
+/// and unsupported declaration labels retain their exact span as an Entities
+/// [`rootlight_ir::SkippedRegionReason::UnsupportedConstruct`] region. Callers
+/// must account for the gap before omitting an unclassified declaration.
+/// Non-declarations, reviewed F# kinds and facts outside the exact `fsharp.`
+/// label namespace return `None`; unrelated language policies are unchanged.
+#[must_use]
+pub fn structural_entity_classification_gap(
+    fact: &SyntaxFact,
+) -> Option<StructuralClassificationGap> {
+    fsharp::entity_kind(fact).err()
+}
+
 /// Refines a structural kind when the caller has proven a direct type owner.
 ///
 /// Both file and project lowering use this rule. External VBA declarations
@@ -526,6 +551,10 @@ pub fn structural_captured_name_for_language<'a>(
 /// claiming that interpolation has been expanded.
 /// COBOL names preserve written ASCII word or numeric-header spelling; quoted
 /// program names remain unsupported rather than being decoded into bindings.
+/// F# definition occurrences retain exact quoted, qualified and operator source
+/// spelling only for reviewed capture labels in `fsharp` or `fsharp-signature`.
+/// All source bytes, including delimiters and spaces, count against the limit;
+/// this does not infer resolved name equivalence or admit other capture roles.
 /// Other roles use
 /// [`structural_captured_name_for_language`]. The caller retains
 /// the original source span and validates its association with its declaration.
@@ -536,6 +565,12 @@ pub fn structural_captured_name_for_fact<'a>(
     text: &'a str,
     maximum_bytes: usize,
 ) -> Option<Cow<'a, str>> {
+    if matches!(language, "fsharp" | "fsharp-signature") {
+        if fact.kind() != SyntaxFactKind::Occurrence {
+            return None;
+        }
+        return fsharp::captured_name(language, fact.syntax_kind().as_str(), text, maximum_bytes);
+    }
     if matches!(language, "cobol-fixed" | "cobol-free") {
         return (!text.is_empty()
             && text.len() <= maximum_bytes

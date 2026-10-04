@@ -16,6 +16,8 @@ mod durable;
 #[cfg(test)]
 mod embedded_resolution_tests;
 #[cfg(test)]
+mod fsharp_native_tests;
+#[cfg(test)]
 mod haskell_native_tests;
 pub mod office_package;
 mod refinement;
@@ -225,10 +227,10 @@ const PROJECT_FACTS_TRUNCATED_CODE: &str = "project-adapter-facts-truncated";
 const PROJECT_FACTS_TRUNCATED_MESSAGE: &str =
     "additional project semantic facts were omitted by aggregate resource limits";
 const AGGREGATE_DIAGNOSTICS_TRUNCATED_CODE: &str = "aggregate-diagnostics-truncated";
-const ANALYZER_BINARY_SEED: &[u8] = b"rootlight.first-slice.treesitter-structural/193";
-const RESOLVER_BINARY_SEED: &[u8] = b"rootlight.first-slice.resolve/93";
+const ANALYZER_BINARY_SEED: &[u8] = b"rootlight.first-slice.treesitter-structural/194";
+const RESOLVER_BINARY_SEED: &[u8] = b"rootlight.first-slice.resolve/94";
 const INCREMENTAL_PROVIDER_SEED: &[u8] = b"rootlight.first-slice.incremental-provider/1";
-const LANGUAGE_DISPOSITION_PROVIDER_SEED: &[u8] = b"rootlight.first-slice.language-disposition/5";
+const LANGUAGE_DISPOSITION_PROVIDER_SEED: &[u8] = b"rootlight.first-slice.language-disposition/6";
 const SOURCE_FILE_FALLBACK_PROVIDER_SEED: &[u8] = b"rootlight.source-file-fallback/4";
 const INCREMENTAL_UNIT_SEED: &str = "rootlight.first-slice.repository-unit";
 const INCREMENTAL_FILE_UNIT_SEED: &str = "rootlight.first-slice.file-unit";
@@ -16114,6 +16116,10 @@ fn supported_source_language<'a>(
         let language = basic_content_language(input)?;
         return analyzers.contains_key(language).then_some(language);
     }
+    if is_shared_fsharp_source(&input.path) {
+        let language = fsharp_content_language(input)?;
+        return analyzers.contains_key(language).then_some(language);
+    }
     if is_ambiguous_perl_prolog_source(&input.path) && prolog_content_language(input).is_some() {
         let language = detected_source_language(input)?;
         return analyzers.contains_key(language).then_some(language);
@@ -16209,6 +16215,9 @@ fn detected_source_language(input: &ManifestInput) -> Option<&str> {
     if is_ambiguous_basic_source(&input.path) {
         return basic_content_language(input);
     }
+    if is_shared_fsharp_source(&input.path) {
+        return fsharp_content_language(input);
+    }
     if is_ambiguous_perl_prolog_source(&input.path)
         && let Some(language) = prolog_content_language(input)
     {
@@ -16277,6 +16286,35 @@ fn prolog_content_language(input: &ManifestInput) -> Option<&str> {
         (signal.evidence == LanguageEvidence::Content && signal.language == "prolog")
             .then_some(signal.language.as_str())
     })
+}
+
+fn is_shared_fsharp_source(path: &str) -> bool {
+    Path::new(path)
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("fs"))
+}
+
+fn fsharp_content_language(input: &ManifestInput) -> Option<&str> {
+    let mut content = input
+        .language_signals
+        .iter()
+        .filter(|signal| signal.evidence == LanguageEvidence::Content);
+    let language = content.next()?;
+    if language.language != "fsharp"
+        || content.any(|other| other.language != language.language)
+        || input.language_signals.iter().any(|signal| {
+            matches!(
+                signal.evidence,
+                LanguageEvidence::Extension
+                    | LanguageEvidence::Filename
+                    | LanguageEvidence::Shebang
+            ) && signal.language != language.language
+        })
+    {
+        return None;
+    }
+    Some(language.language.as_str())
 }
 
 fn analysis_tier_for_language(language: &str) -> AnalysisTier {
@@ -29615,6 +29653,8 @@ mod tests {
             "sample.cpp",
             "sample.cs",
             "sample.css",
+            "sample.fsx",
+            "sample.fsi",
             "sample.go",
             "sample.groovy",
             "sample.hs",
@@ -29649,6 +29689,7 @@ mod tests {
         // The shared suffix is admitted only through manifest evidence, never
         // the unconditional path route used for unambiguous source languages.
         assert_eq!(source_language_from_path("sample.m"), None);
+        assert_eq!(source_language_from_path("sample.fs"), None);
         mapped.insert(extension_language("sample.m").expect("shared suffix is declared"));
         let fixture = TempDir::new().expect("fixture root exists");
         write_language_fixture(

@@ -1303,6 +1303,11 @@ pub(crate) fn resolvable_occurrence(occurrence: &OccurrenceRecord) -> bool {
     if occurrence.syntax_kind.starts_with("haskell.") {
         return false;
     }
+    // F# open declarations and member/type targets require language-owned name
+    // resolution. A spelling score cannot establish those bindings.
+    if occurrence.syntax_kind.starts_with("fsharp.") {
+        return false;
+    }
     // COBOL storage qualification, CALL/PERFORM targets and COPY inputs need
     // language-owned evidence; matching a written name proves none of them.
     if occurrence.syntax_kind.starts_with("cobol.") {

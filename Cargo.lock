@@ -1649,6 +1649,7 @@ dependencies = [
  "tree-sitter-cpp",
  "tree-sitter-css",
  "tree-sitter-dart",
+ "tree-sitter-fsharp",
  "tree-sitter-go",
  "tree-sitter-haskell",
  "tree-sitter-html",
@@ -3030,6 +3031,14 @@ name = "tree-sitter-dart"
 version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "325dd1e24ee9ee21111e9c43680ae7d6010aaa9f282b048a99b9c7163c1cf553"
+dependencies = [
+ "cc",
+ "tree-sitter-language",
+]
+
+[[package]]
+name = "tree-sitter-fsharp"
+version = "0.3.12"
 dependencies = [
  "cc",
  "tree-sitter-language",

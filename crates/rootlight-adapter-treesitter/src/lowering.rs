@@ -23,8 +23,8 @@ use rootlight_adapter_sdk::{
     ParseProvider, ProducerDescriptor, RequestError, ResourceKind, ResourceUsage, SinkError,
     StreamEnd, StreamUsage, SyntaxFact, SyntaxFactKind,
     derive_structural_occurrence_identity as source_occurrence_identity, execute_analysis,
-    execute_parse, structural_entity_kind, structural_entity_kind_from_source,
-    structural_syntax_fact_order, structural_type_member_kind,
+    execute_parse, structural_entity_classification_gap, structural_entity_kind,
+    structural_entity_kind_from_source, structural_syntax_fact_order, structural_type_member_kind,
 };
 use rootlight_cancel::Cancellation;
 use rootlight_ids::{
@@ -830,7 +830,7 @@ fn preflight_lowering_limits(
     parse_output: &ParseOutput,
     producer: &ProducerIdentity,
     frontend_version: &str,
-    cobol_fences: &[CobolFence],
+    profile_fences: &[ProfileFence],
     cancellation: &Cancellation,
 ) -> Result<LoweringBudget, AdapterError> {
     let limits = request.limits().ir();
@@ -896,7 +896,7 @@ fn preflight_lowering_limits(
             skipped_candidates = checked_add(skipped_candidates, 1)?;
             account_string(&mut string_bytes, detail.len(), limits)?;
         }
-        if language_for_fact_with_cobol_fences(request, fact, cobol_fences) == "yaml"
+        if language_for_fact_with_profile_fences(request, fact, profile_fences) == "yaml"
             && fact.syntax_kind().as_str() == "yaml.tag.signature"
         {
             // Tag construction can be unavailable even when lexical signature
@@ -908,7 +908,7 @@ fn preflight_lowering_limits(
                 limits,
             )?;
         }
-        if language_for_fact_with_cobol_fences(request, fact, cobol_fences) == "yaml"
+        if language_for_fact_with_profile_fences(request, fact, profile_fences) == "yaml"
             && matches!(
                 fact.syntax_kind().as_str(),
                 "yaml.document.scope" | "yaml.node_key.definition"
@@ -950,7 +950,7 @@ fn preflight_lowering_limits(
             )?;
             if supports_signature(
                 kind,
-                language_for_fact_with_cobol_fences(request, fact, cobol_fences),
+                language_for_fact_with_profile_fences(request, fact, profile_fences),
             ) {
                 skipped_candidates = checked_add(skipped_candidates, 1)?;
                 account_string(
@@ -966,7 +966,10 @@ fn preflight_lowering_limits(
             skipped_candidates = checked_add(skipped_candidates, 1)?;
             account_string(
                 &mut string_bytes,
-                "declaration-name-unavailable".len(),
+                structural_entity_classification_gap(fact)
+                    .map_or("declaration-name-unavailable".len(), |gap| {
+                        gap.detail().len()
+                    }),
                 limits,
             )?;
         }
@@ -1010,13 +1013,13 @@ fn preflight_lowering_limits(
         if occurrence_role(fact).is_some() {
             occurrence_candidates = checked_add(occurrence_candidates, 1)?;
             account_string(&mut string_bytes, fact.syntax_kind().as_str().len(), limits)?;
-            if language_for_fact_with_cobol_fences(request, fact, cobol_fences) == "lua"
+            if language_for_fact_with_profile_fences(request, fact, profile_fences) == "lua"
                 && parse_output.report().coverage().status() == CoverageStatus::Complete
                 && fact.syntax_kind().as_str() == "lua.identifier.reference"
             {
                 lexical_relation_candidates = checked_add(lexical_relation_candidates, 1)?;
             }
-            if language_for_fact_with_cobol_fences(request, fact, cobol_fences) == "groovy"
+            if language_for_fact_with_profile_fences(request, fact, profile_fences) == "groovy"
                 && parse_output.report().coverage().status() == CoverageStatus::Complete
                 && matches!(
                     fact.syntax_kind().as_str(),
@@ -1027,7 +1030,7 @@ fn preflight_lowering_limits(
             {
                 lexical_relation_candidates = checked_add(lexical_relation_candidates, 1)?;
             }
-            if language_for_fact_with_cobol_fences(request, fact, cobol_fences) == "yaml"
+            if language_for_fact_with_profile_fences(request, fact, profile_fences) == "yaml"
                 && fact.syntax_kind().as_str() == "yaml.alias.reference"
             {
                 lexical_relation_candidates = checked_add(lexical_relation_candidates, 1)?;
@@ -1245,7 +1248,7 @@ struct Lowering<'context, 'source> {
     source_text: &'context str,
     full_source: &'context SourceRef,
     classic_fences: Vec<SourceSpan>,
-    cobol_fences: Vec<CobolFence>,
+    profile_fences: Vec<ProfileFence>,
 }
 
 impl<'context, 'source> Lowering<'context, 'source> {
@@ -1263,7 +1266,7 @@ impl<'context, 'source> Lowering<'context, 'source> {
             source_text,
             full_source: request.source().source_ref(),
             classic_fences: Vec::new(),
-            cobol_fences: Vec::new(),
+            profile_fences: Vec::new(),
         })
     }
 
@@ -1281,19 +1284,19 @@ impl<'context, 'source> Lowering<'context, 'source> {
                 return "visual-basic-classic";
             }
         }
-        language_for_fact_with_cobol_fences(self.request, fact, &self.cobol_fences)
+        language_for_fact_with_profile_fences(self.request, fact, &self.profile_fences)
     }
 
     fn lower(mut self, cancellation: &Cancellation) -> Result<LoweredOutput, AdapterError> {
         if self.request.language().as_str() == "markdown" {
-            self.cobol_fences = cobol_fence_spans(self.parse_output.facts(), cancellation)?;
+            self.profile_fences = profile_fence_spans(self.parse_output.facts(), cancellation)?;
         }
         let mut budget = preflight_lowering_limits(
             self.request,
             self.parse_output,
             self.analyzer.descriptor.identity(),
             &self.analyzer.frontend_version,
-            &self.cobol_fences,
+            &self.profile_fences,
             cancellation,
         )?;
         let mut total_string_bytes = budget.string_bytes;
@@ -2875,6 +2878,18 @@ impl<'context, 'source> Lowering<'context, 'source> {
                 fact.kind(),
                 SyntaxFactKind::Declaration | SyntaxFactKind::Module
             ) {
+                if let Some(gap) = structural_entity_classification_gap(fact) {
+                    let region = skipped_region(
+                        self.full_source,
+                        gap.span(),
+                        gap.domain(),
+                        gap.reason(),
+                        gap.detail(),
+                        provenance_id,
+                    )?;
+                    skipped.insert(region.id, region);
+                    continue;
+                }
                 let detail = if entity_plan
                     .unsupported_scope_entities
                     .contains(&fact.local_id())
@@ -3373,7 +3388,10 @@ impl<'context, 'source> Lowering<'context, 'source> {
             let parent_declaration = fact
                 .parent()
                 .and_then(|parent| nearest_declaration.get(&parent).copied().flatten());
-            if structural_entity_kind(fact).is_some() || is_haskell_annotation_name(fact) {
+            if structural_entity_kind(fact).is_some()
+                || is_haskell_annotation_name(fact)
+                || structural_entity_classification_gap(fact).is_some()
+            {
                 if self.language_for_fact(fact) == "haskell" {
                     cancellation.check()?;
                     haskell_declarations
@@ -3813,6 +3831,23 @@ impl<'context, 'source> Lowering<'context, 'source> {
                 continue;
             }
             let declaration_text = self.text_for_span(fact.span())?;
+            if structural_entity_classification_gap(fact).is_some() {
+                // Unknown owners must not turn nested declarations into apparent
+                // file-owned methods or leak their definitions into a named parent.
+                if !matches!(
+                    fact.syntax_kind().as_str(),
+                    "fsharp.unsupported_parameters.declaration"
+                        | "fsharp.unsupported_anonymous_record_field.declaration"
+                        | "fsharp.unsupported_union_field.declaration"
+                ) {
+                    parent_scope
+                        .get_or_insert_with(ScopeContext::default)
+                        .unsupported_semantic_identity = true;
+                }
+                nearest_entity_ancestor.insert(fact.local_id(), parent_entity);
+                nearest_scope_ancestor.insert(fact.local_id(), parent_scope);
+                continue;
+            }
             let Some(mut kind) = structural_entity_kind_from_source(fact, declaration_text) else {
                 nearest_entity_ancestor.insert(fact.local_id(), parent_entity);
                 nearest_scope_ancestor.insert(fact.local_id(), parent_scope);
@@ -3839,20 +3874,22 @@ impl<'context, 'source> Lowering<'context, 'source> {
             {
                 kind = EntityKind::Method;
             }
-            if fact.syntax_kind().as_str() != "groovy.anonymous_function.declaration"
-                && parent_entity
-                    .and_then(|parent| drafts.get(&parent))
-                    .is_some_and(|parent| {
-                        matches!(
-                            parent.kind,
-                            EntityKind::Class
-                                | EntityKind::Struct
-                                | EntityKind::Enum
-                                | EntityKind::Trait
-                                | EntityKind::Interface
-                                | EntityKind::Protocol
-                        )
-                    })
+            if !matches!(
+                fact.syntax_kind().as_str(),
+                "groovy.anonymous_function.declaration" | "fsharp.function.declaration"
+            ) && parent_entity
+                .and_then(|parent| drafts.get(&parent))
+                .is_some_and(|parent| {
+                    matches!(
+                        parent.kind,
+                        EntityKind::Class
+                            | EntityKind::Struct
+                            | EntityKind::Enum
+                            | EntityKind::Trait
+                            | EntityKind::Interface
+                            | EntityKind::Protocol
+                    )
+                })
             {
                 kind = structural_type_member_kind(fact, kind);
             }
@@ -3886,8 +3923,11 @@ impl<'context, 'source> Lowering<'context, 'source> {
                     )
                 };
                 let Some(name) = name else {
-                    if fact.syntax_kind().as_str() == "cobol.program.declaration" {
-                        // Unsupported program identity cannot turn its children
+                    if fact.syntax_kind().as_str() == "cobol.program.declaration"
+                        || (matches!(self.language_for_fact(fact), "fsharp" | "fsharp-signature")
+                            && fact.syntax_kind().as_str().starts_with("fsharp."))
+                    {
+                        // Unsupported owner identity cannot turn its children
                         // into independent file-owned declarations.
                         parent_scope
                             .get_or_insert_with(ScopeContext::default)
@@ -3943,7 +3983,10 @@ impl<'context, 'source> Lowering<'context, 'source> {
                 // Separate examples own separate declarations, not one shared program.
                 (std::borrow::Cow::Borrowed("<code-block>"), None)
             } else {
-                if fact.syntax_kind().as_str() == "cobol.program.declaration" {
+                if fact.syntax_kind().as_str() == "cobol.program.declaration"
+                    || (matches!(self.language_for_fact(fact), "fsharp" | "fsharp-signature")
+                        && fact.syntax_kind().as_str().starts_with("fsharp."))
+                {
                     parent_scope
                         .get_or_insert_with(ScopeContext::default)
                         .unsupported_semantic_identity = true;
@@ -5593,12 +5636,16 @@ fn source_coverage_gap(fact: &SyntaxFact) -> Option<(FactDomain, &'static str)> 
         }
         "markdown.code_error.signature"
         | "markdown.classic_code_error.signature"
+        | "markdown.fsharp_code_error.signature"
+        | "markdown.fsharp_signature_code_error.signature"
         | "markdown.cobol_fixed_code_error.signature"
         | "markdown.cobol_free_code_error.signature" => {
             Some((FactDomain::Entities, "markdown-code-parse-unavailable"))
         }
         "markdown.code_parsed.signature"
         | "markdown.classic_code_parsed.signature"
+        | "markdown.fsharp_code_parsed.signature"
+        | "markdown.fsharp_signature_code_parsed.signature"
         | "markdown.cobol_fixed_code_parsed.signature"
         | "markdown.cobol_free_code_parsed.signature" => {
             Some((FactDomain::Relations, "markdown-code-semantics-unavailable"))
@@ -6350,19 +6397,24 @@ fn validate_fact_graph(
 }
 
 #[derive(Clone, Copy)]
-struct CobolFence {
+struct ProfileFence {
     span: SourceSpan,
     language: &'static str,
 }
 
-fn cobol_fence_spans(
+fn profile_fence_spans(
     facts: &[SyntaxFact],
     cancellation: &Cancellation,
-) -> Result<Vec<CobolFence>, AdapterError> {
+) -> Result<Vec<ProfileFence>, AdapterError> {
     let mut fences = Vec::new();
     for fact in facts {
         cancellation.check()?;
         let language = match fact.syntax_kind().as_str() {
+            "markdown.fsharp_code_parsed.signature" | "markdown.fsharp_code_error.signature" => {
+                "fsharp"
+            }
+            "markdown.fsharp_signature_code_parsed.signature"
+            | "markdown.fsharp_signature_code_error.signature" => "fsharp-signature",
             "markdown.cobol_fixed_code_parsed.signature"
             | "markdown.cobol_fixed_code_error.signature" => "cobol-fixed",
             "markdown.cobol_free_code_parsed.signature"
@@ -6372,7 +6424,7 @@ fn cobol_fence_spans(
         fences
             .try_reserve(1)
             .map_err(|_| SinkError::AllocationFailed)?;
-        fences.push(CobolFence {
+        fences.push(ProfileFence {
             span: fact.span(),
             language,
         });
@@ -6391,13 +6443,19 @@ fn cobol_fence_spans(
     Ok(fences)
 }
 
-fn language_for_fact_with_cobol_fences<'a>(
+fn language_for_fact_with_profile_fences<'a>(
     request: &'a AnalysisRequest<'_>,
     fact: &'a SyntaxFact,
-    fences: &[CobolFence],
+    fences: &[ProfileFence],
 ) -> &'a str {
     if request.language().as_str() == "markdown"
-        && fact.syntax_kind().as_str().starts_with("cobol.")
+        && matches!(
+            fact.syntax_kind()
+                .as_str()
+                .split_once('.')
+                .map(|(prefix, _)| prefix),
+            Some("cobol" | "fsharp")
+        )
     {
         let position =
             fences.partition_point(|fence| fence.span.start_byte() <= fact.span().start_byte());
@@ -6405,6 +6463,17 @@ fn language_for_fact_with_cobol_fences<'a>(
             && let Some(fence) = fences.get(index)
             && fact.span().file() == fence.span.file()
             && fact.span().end_byte() <= fence.span.end_byte()
+            && matches!(
+                (
+                    fact.syntax_kind()
+                        .as_str()
+                        .split_once('.')
+                        .map(|(prefix, _)| prefix),
+                    fence.language
+                ),
+                (Some("cobol"), "cobol-fixed" | "cobol-free")
+                    | (Some("fsharp"), "fsharp" | "fsharp-signature")
+            )
         {
             return fence.language;
         }
@@ -6618,6 +6687,7 @@ fn is_explicit_file_module(fact: &SyntaxFact, language: &str) -> bool {
                 | "perl.file.module"
                 | "groovy.file.module"
                 | "haskell.file.module"
+                | "fsharp.file.module"
                 | "vba.file.module"
                 | "vba.class.module"
                 | "solidity.file.module"
@@ -6654,6 +6724,8 @@ fn is_explicit_file_module(fact: &SyntaxFact, language: &str) -> bool {
                 | "markdown"
                 | "groovy"
                 | "haskell"
+                | "fsharp"
+                | "fsharp-signature"
                 | "vba"
                 | "visual-basic-classic"
                 | "astro"
@@ -6759,6 +6831,11 @@ fn supports_declaration_signature(
     declaration: &SyntaxFact,
     definition: Option<&SyntaxFact>,
 ) -> bool {
+    if matches!(language, "fsharp" | "fsharp-signature")
+        && declaration.syntax_kind().as_str() == "fsharp.file.module"
+    {
+        return false;
+    }
     if language == "haskell" {
         if kind == EntityKind::Variable {
             // Pattern leaves have the exact name span; equations also contain their match.
@@ -6774,7 +6851,8 @@ fn supports_declaration_signature(
 fn supports_signature(kind: EntityKind, language: &str) -> bool {
     // Classic BASIC accessors share a name but have distinct Get/Let/Set headers.
     // The same rule governs identity, evidence emission and admission accounting.
-    (kind == EntityKind::Variable && language == "haskell")
+    matches!(language, "fsharp" | "fsharp-signature")
+        || (kind == EntityKind::Variable && language == "haskell")
         || (kind == EntityKind::Property && matches!(language, "vba" | "visual-basic-classic"))
         || (kind == EntityKind::Module && matches!(language, "cobol-fixed" | "cobol-free"))
         || matches!(

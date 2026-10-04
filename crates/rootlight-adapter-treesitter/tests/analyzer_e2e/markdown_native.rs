@@ -2262,6 +2262,24 @@ fn markdown_fenced_definitions_match_standalone_language_evidence() {
                 body_after: "pick 0 = 2",
             },
             LanguageCase {
+                name: "fsharp",
+                path: "src/Example.fsx",
+                frontend: "tree-sitter-fsharp-0.3.12",
+                source: "module Example\nlet pick value = value + 1\n",
+                generated: false,
+                body_before: "value + 1",
+                body_after: "value + 2",
+            },
+            LanguageCase {
+                name: "fsharp-signature",
+                path: "src/Example.fsi",
+                frontend: "tree-sitter-fsharp-signature-0.3.12",
+                source: "module Example\nval pick : int -> int\n",
+                generated: false,
+                body_before: "int -> int",
+                body_after: "int -> string",
+            },
+            LanguageCase {
                 name: "visual-basic-classic",
                 ..vba_native::VBA
             },
@@ -2370,6 +2388,82 @@ fn markdown_fenced_definitions_match_standalone_language_evidence() {
         let expected = definitions(&standalone, case.source);
         assert!(!expected.is_empty(), "{}", case.name);
         assert_eq!(definitions(&embedded, &source), expected, "{}", case.name);
+    }
+}
+
+#[test]
+fn markdown_fsharp_profiles_keep_separate_written_identities_and_coverage() {
+    let fixture = concat!(
+        "~~~fsharp\nmodule Shared\nlet pick value = value + 1\n~~~\n\n",
+        "~~~fsharp-signature\nmodule Shared\nval pick : int -> int\n~~~\n\n",
+        "~~~fsharp\nmodule Shared\nlet pick value = value + 2\n~~~\n",
+    );
+    for ending in ["\n", "\r\n"] {
+        let source = fixture.replace('\n', ending);
+        let result = output(&source);
+        let document = result.document();
+        let written: Vec<_> = document
+            .entities
+            .iter()
+            .filter(|entity| entity.canonical_name == "pick")
+            .collect();
+        assert_eq!(written.len(), 3);
+        assert_eq!(
+            written
+                .iter()
+                .map(|entity| entity.id)
+                .collect::<BTreeSet<_>>()
+                .len(),
+            3
+        );
+        for (language, kind, count) in [
+            ("fsharp", EntityKind::Function, 2),
+            ("fsharp-signature", EntityKind::Variable, 1),
+        ] {
+            assert_eq!(
+                written
+                    .iter()
+                    .filter(|entity| entity.language == language && entity.kind == kind)
+                    .count(),
+                count
+            );
+        }
+        for entity in written {
+            let definitions: Vec<_> = document
+                .occurrences
+                .iter()
+                .filter(|occurrence| {
+                    occurrence.role == OccurrenceRole::Definition
+                        && occurrence.target == OccurrenceTarget::Resolved { symbol: entity.id }
+                })
+                .collect();
+            assert_eq!(definitions.len(), 1);
+            let span = definitions[0].source.span();
+            assert_eq!(
+                source.get(
+                    usize::try_from(span.start_byte()).unwrap()
+                        ..usize::try_from(span.end_byte()).unwrap()
+                ),
+                Some("pick")
+            );
+        }
+        assert_eq!(
+            document
+                .skipped_regions
+                .iter()
+                .filter(|gap| {
+                    gap.domain == FactDomain::Relations
+                        && gap.detail == "markdown-code-semantics-unavailable"
+                })
+                .count(),
+            3
+        );
+        assert!(document.relations.iter().all(|relation| matches!(
+            relation.predicate,
+            RelationPredicate::Contains
+                | RelationPredicate::Declares
+                | RelationPredicate::DefinesAt
+        )));
     }
 }
 

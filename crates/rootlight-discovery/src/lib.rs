@@ -26,6 +26,7 @@ use rootlight_vfs::{
 use serde::{Deserialize, Serialize};
 
 mod encoding;
+mod fsharp;
 mod incremental;
 mod matlab;
 mod objective_c;
@@ -41,7 +42,7 @@ pub use incremental::{
 };
 
 /// Current deterministic manifest and source-classification revision.
-pub const DISCOVERY_MANIFEST_VERSION: &str = "1.18";
+pub const DISCOVERY_MANIFEST_VERSION: &str = "1.19";
 /// Stable source-free diagnostic emitted when the entry budget truncates discovery.
 pub const DISCOVERY_ENTRY_LIMIT_DIAGNOSTIC_CODE: &str = "DISCOVERY_ENTRY_LIMIT";
 /// Stable source-free diagnostic emitted when retained source bytes truncate discovery.
@@ -1502,7 +1503,14 @@ fn classify(path: &RelativePath, content: &[u8]) -> (InputClass, Vec<LanguageSig
             evidence: LanguageEvidence::Shebang,
         });
     }
-    let content_hint = if is_ambiguous_perl_prolog_source(&normalized)
+    let content_hint = if Path::new(&normalized)
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("fs"))
+    {
+        fsharp::has_content_hint(&content[..content.len().min(MAX_CLASSIFICATION_BYTES)])
+            .then_some("fsharp")
+    } else if is_ambiguous_perl_prolog_source(&normalized)
         && prolog::has_content_hint(&content[..content.len().min(MAX_CLASSIFICATION_BYTES)])
     {
         Some("prolog")
@@ -1773,6 +1781,23 @@ const LANGUAGE_CAPABILITIES: &[LanguageCapability] = &[
         detectors: &["extension"],
         maximum_tier: "tier_d",
         analyzers: &["native"],
+    },
+    LanguageCapability {
+        language: "fsharp",
+        // `.fs` also denotes Forth; a bounded content hint or assignment is required.
+        suffixes: &[".fsx"],
+        aliases: &[],
+        detectors: &["content", "extension", "configuration"],
+        maximum_tier: "tier_d",
+        analyzers: &["treesitter"],
+    },
+    LanguageCapability {
+        language: "fsharp-signature",
+        suffixes: &[".fsi"],
+        aliases: &[],
+        detectors: &["extension", "configuration"],
+        maximum_tier: "tier_d",
+        analyzers: &["treesitter"],
     },
     LanguageCapability {
         language: "go",
@@ -3718,6 +3743,167 @@ max_source_file_bytes = 2097152
                 b"module Example where\nvalue = 1\n",
             );
             assert!(signals.is_empty(), "{path}: {signals:?}");
+        }
+    }
+
+    #[test]
+    fn fsharp_shared_suffix_uses_bounded_content_without_suffix_or_peer_promotion() {
+        let source = b"module Example.Core\nlet value = 1\n";
+        for name in ["Library.fs", "src/LIBRARY.FS"] {
+            let path = RelativePath::parse(Path::new(name)).unwrap();
+            assert_eq!(extension_language(name), None);
+            assert_eq!(
+                classify(&path, source).1,
+                vec![LanguageSignal {
+                    language: "fsharp".to_owned(),
+                    evidence: LanguageEvidence::Content,
+                }]
+            );
+        }
+        for name in ["Library.fs.bak", "Library.txt", ".fs", "dir/.fs"] {
+            let path = RelativePath::parse(Path::new(name)).unwrap();
+            assert!(classify(&path, source).1.is_empty(), "{name}");
+        }
+        for (name, language) in [
+            ("Library.fsx", "fsharp"),
+            ("Library.fsi", "fsharp-signature"),
+        ] {
+            let path = RelativePath::parse(Path::new(name)).unwrap();
+            assert_eq!(
+                classify(&path, source).1,
+                vec![LanguageSignal {
+                    language: language.to_owned(),
+                    evidence: LanguageEvidence::Extension,
+                }]
+            );
+        }
+        let path = RelativePath::parse(Path::new("Library.fs")).unwrap();
+        for source in [
+            b": square dup * ;\n".as_slice(),
+            b"// module Example\n// let value = 1\n",
+            b"module Example\nlet value = 1\n: square dup * ;\n",
+            b"module Example\nlet value = 1 : square dup * ;\n",
+            b"module Example\nlet value = 1\n0 [if] : square dup * ; [then]\n",
+            b"module Example\nlet value =\n",
+            b"",
+        ] {
+            assert!(classify(&path, source).1.is_empty());
+        }
+        let mut outside = vec![b' '; MAX_CLASSIFICATION_BYTES];
+        outside.extend_from_slice(source);
+        assert!(classify(&path, &outside).1.is_empty());
+    }
+
+    #[test]
+    fn fsharp_routes_keep_implementation_and_signature_profiles_distinct() {
+        for (language, suffix) in [("fsharp", ".fsx"), ("fsharp-signature", ".fsi")] {
+            let capability = language_capabilities()
+                .iter()
+                .find(|entry| entry.language == language)
+                .unwrap();
+            assert_eq!(capability.suffixes, [suffix]);
+            let detectors: &[&str] = if language == "fsharp" {
+                &["content", "extension", "configuration"]
+            } else {
+                &["extension", "configuration"]
+            };
+            assert_eq!(capability.detectors, detectors);
+            assert_eq!(capability.analyzers, ["treesitter"]);
+            assert_eq!(capability.maximum_tier, "tier_d");
+            assert_eq!(canonical_language(language), Some(language));
+            for path in [
+                format!("Sample{suffix}"),
+                format!("src/SAMPLE{suffix}").to_uppercase(),
+            ] {
+                assert_eq!(extension_language(&path), Some(language));
+            }
+        }
+        for path in ["sample.fs", "sample.FS", "sample.fsx.bak", "sample.fsi.txt"] {
+            assert_eq!(extension_language(path), None, "{path}");
+        }
+    }
+
+    #[test]
+    fn configured_fsharp_preserves_source_bytes_and_binary_exclusions() {
+        for newline in ["\n", "\r\n"] {
+            let temporary = local_tempdir();
+            let implementation = "module Sample\nlet value = 1\n".replace('\n', newline);
+            let signature = "module Sample\nval value: int\n".replace('\n', newline);
+            for (path, source) in [
+                ("Library.fs", implementation.as_str()),
+                ("Script.fsx", implementation.as_str()),
+                ("Contract.fs", signature.as_str()),
+                ("Contract.fsi", signature.as_str()),
+            ] {
+                write_fixture(&temporary, path, source.as_bytes());
+            }
+            write_fixture(&temporary, "binary.fs", b"\0binary");
+            let config = ConfigSnapshot::resolve(&[rootlight_config::ConfigLayer {
+                source: rootlight_config::ConfigSource::User,
+                contents: "version='1.3'\n[extensions.source-languages]\nversion='1.0'\ncritical=true\n[extensions.source-languages.data.extensions]\nfs='fsharp'\n[extensions.source-languages.data.paths]\n'Contract.fs'='fsharp-signature'\n",
+            }])
+            .unwrap();
+            let root = fixture_root(&temporary, b"configured-fsharp");
+            let (manifest, snapshots) = discover_with_snapshots_at_limit(
+                &root,
+                &config,
+                &DiscoveryPolicy::build(Vec::new(), true).unwrap(),
+                DiscoveryLimits::from_config(&config),
+                BTreeMap::new(),
+                4096,
+                &Cancellation::new(),
+            )
+            .unwrap()
+            .into_parts();
+            assert_eq!(manifest.configuration_hash, config.hash());
+            assert_eq!(manifest.inputs.len(), 4);
+            assert_eq!(snapshots.len(), 4);
+            assert_eq!(manifest.exclusions.len(), 1);
+            assert_eq!(manifest.exclusions[0].path, "binary.fs");
+            assert_eq!(manifest.exclusions[0].reason, ExclusionReason::Binary);
+            for (path, language, content, evidence) in [
+                (
+                    "Library.fs",
+                    "fsharp",
+                    implementation.as_bytes(),
+                    LanguageEvidence::Configuration,
+                ),
+                (
+                    "Script.fsx",
+                    "fsharp",
+                    implementation.as_bytes(),
+                    LanguageEvidence::Extension,
+                ),
+                (
+                    "Contract.fs",
+                    "fsharp-signature",
+                    signature.as_bytes(),
+                    LanguageEvidence::Configuration,
+                ),
+                (
+                    "Contract.fsi",
+                    "fsharp-signature",
+                    signature.as_bytes(),
+                    LanguageEvidence::Extension,
+                ),
+            ] {
+                let input = manifest
+                    .inputs
+                    .iter()
+                    .find(|input| input.path == path)
+                    .unwrap();
+                assert_eq!(input.class, InputClass::Source);
+                assert_eq!(input.encoding, "utf-8");
+                assert_eq!(input.bytes, u64::try_from(content.len()).unwrap());
+                assert_eq!(input.content_hash, content_hash(content));
+                assert_eq!(snapshots[&input.file].content(), content);
+                assert!(
+                    input
+                        .language_signals
+                        .iter()
+                        .any(|signal| signal.language == language && signal.evidence == evidence)
+                );
+            }
         }
     }
 

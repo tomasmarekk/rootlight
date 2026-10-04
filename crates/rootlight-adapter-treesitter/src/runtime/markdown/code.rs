@@ -300,6 +300,10 @@ fn cobol_physical_body(
 
 fn embedded_fence_marker(family: GrammarFamily, classic: bool, error: bool) -> &'static str {
     match (family, classic, error) {
+        (GrammarFamily::FSharp, _, false) => "markdown.fsharp_code_parsed",
+        (GrammarFamily::FSharp, _, true) => "markdown.fsharp_code_error",
+        (GrammarFamily::FSharpSignature, _, false) => "markdown.fsharp_signature_code_parsed",
+        (GrammarFamily::FSharpSignature, _, true) => "markdown.fsharp_signature_code_error",
         (GrammarFamily::CobolFixed, _, false) => "markdown.cobol_fixed_code_parsed",
         (GrammarFamily::CobolFixed, _, true) => "markdown.cobol_fixed_code_error",
         (GrammarFamily::CobolFree, _, false) => "markdown.cobol_free_code_parsed",

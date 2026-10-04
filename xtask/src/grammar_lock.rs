@@ -16,7 +16,7 @@ const GRAMMAR_LOCK_PATH: &str = "adapters/grammars.lock";
 const CARGO_LOCK_PATH: &str = "Cargo.lock";
 const ADAPTER_PACKAGE: &str = "rootlight-adapter-treesitter";
 const GRAMMAR_LOCK_SHA256: &str =
-    "3096a6a48ee5598be817f279ac5d0a5605e1e00f52da943ca849b3fcd58eafb0";
+    "4f558af7f46b21a6c13c6388ea6186491378f095ddca7c3db107a8945e91205b";
 const JAVA_LICENSE_PATH: &str = "adapters/licenses/tree-sitter-java-0.23.5-LICENSE";
 const JAVA_LICENSE_SHA256: &str =
     "52ed137b039cd9c46409bc22e89938af911c95b157feae2d040b51e6084369a7";
@@ -209,7 +209,7 @@ const EXPECTED_PACKAGES: [(&str, &str, &str); 34] = [
     ),
 ];
 
-const EXPECTED_LOCAL_PACKAGES: [(&str, &str, &str, &str); 2] = [
+const EXPECTED_LOCAL_PACKAGES: [(&str, &str, &str, &str); 3] = [
     (
         "tree-sitter-vba",
         "0.14.1",
@@ -221,6 +221,12 @@ const EXPECTED_LOCAL_PACKAGES: [(&str, &str, &str, &str); 2] = [
         "0.0.1",
         "third_party/tree-sitter-cobol-0.0.1",
         "de05274f23c60ac2cb9a90af56d9eedb6f7aa94e77a1407b87c178202e6eafb8",
+    ),
+    (
+        "tree-sitter-fsharp",
+        "0.3.12",
+        "third_party/tree-sitter-fsharp-0.3.12",
+        "f1e1ae1630c3d4f81e000df3863a7331d51d667e5f602cb761c7954e9b5a1ac0",
     ),
 ];
 
@@ -375,7 +381,7 @@ fn validate_manifest(manifest: &GrammarLock) -> Result<(), GrammarLockError> {
         ));
     }
     validate_runtime(&manifest.runtime)?;
-    if manifest.grammars.len() != 37 {
+    if manifest.grammars.len() != 39 {
         return Err(GrammarLockError::GrammarCount(manifest.grammars.len()));
     }
     let mut languages = BTreeSet::new();
@@ -409,6 +415,8 @@ fn validate_manifest(manifest: &GrammarLock) -> Result<(), GrammarLockError> {
         "csharp",
         "css",
         "dart",
+        "fsharp",
+        "fsharp-signature",
         "go",
         "groovy",
         "haskell",
@@ -1091,7 +1099,7 @@ pub(crate) enum GrammarLockError {
     InvalidDigest { label: &'static str },
     #[error("grammar lock field {0} must not be empty")]
     EmptyField(&'static str),
-    #[error("grammar lock contains {0} grammars instead of 37")]
+    #[error("grammar lock contains {0} grammars instead of 39")]
     GrammarCount(usize),
     #[error("grammar lock repeats language {0}")]
     DuplicateLanguage(String),
@@ -1141,7 +1149,16 @@ mod tests {
 
     #[test]
     fn local_multi_profile_records_require_one_reviewed_source_tree() {
-        for language in ["cobol-fixed", "cobol-free"] {
+        for (language, package, review_path) in [
+            ("cobol-fixed", "tree-sitter-cobol", "PATCHES.md"),
+            ("cobol-free", "tree-sitter-cobol", "PATCHES.md"),
+            ("fsharp", "tree-sitter-fsharp", "ROOTLIGHT-PATCH.md"),
+            (
+                "fsharp-signature",
+                "tree-sitter-fsharp",
+                "ROOTLIGHT-PATCH.md",
+            ),
+        ] {
             let mut manifest: GrammarLock =
                 toml::from_str(include_str!("../../adapters/grammars.lock")).unwrap();
             let grammar = manifest
@@ -1150,12 +1167,71 @@ mod tests {
                 .find(|grammar| grammar.language == language)
                 .unwrap();
             let files = &mut grammar.vendored.as_mut().unwrap().files;
-            files.insert("PATCHES.md".into(), sha256_hex(b"different source review"));
+            files.insert(review_path.into(), sha256_hex(b"different source review"));
             grammar.vendored_source_sha256 = Some(vendored_source_digest(files).unwrap());
             validate_grammar(grammar)
                 .expect("self-consistent manifest is not the reviewed source pin");
             assert!(matches!(validate_manifest(&manifest),
-                Err(GrammarLockError::PackageEvidence { package }) if package == "tree-sitter-cobol"));
+                Err(GrammarLockError::PackageEvidence { package: observed }) if observed == package));
+        }
+    }
+
+    #[test]
+    fn fsharp_profiles_authenticate_shared_sources_and_distinct_parser_paths() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
+        let manifest: GrammarLock =
+            toml::from_str(include_str!("../../adapters/grammars.lock")).unwrap();
+        let implementation = manifest
+            .grammars
+            .iter()
+            .find(|grammar| grammar.language == "fsharp")
+            .unwrap();
+        let signature = manifest
+            .grammars
+            .iter()
+            .find(|grammar| grammar.language == "fsharp-signature")
+            .unwrap();
+        let implementation_sources = implementation.vendored.as_ref().unwrap();
+        let signature_sources = signature.vendored.as_ref().unwrap();
+        assert_eq!(implementation_sources.files, signature_sources.files);
+        assert_eq!(implementation_sources.files.len(), 33);
+        assert_eq!(
+            implementation_sources.parser_path.as_deref(),
+            Some("fsharp/src/parser.c")
+        );
+        assert_eq!(
+            signature_sources.parser_path.as_deref(),
+            Some("fsharp_signature/src/parser.c")
+        );
+        assert_ne!(implementation.parser_sha256, signature.parser_sha256);
+        for grammar in [implementation, signature] {
+            let sources = grammar.vendored.as_ref().unwrap();
+            assert_eq!(sources.scanner_path.as_deref(), Some("common/scanner.h"));
+            assert_eq!(
+                sources.files.get("common/scanner.h"),
+                Some(&grammar.scanner_sha256)
+            );
+            for path in [
+                "common/scanner.h.orig",
+                "fsharp/grammar.js.orig",
+                "fsharp_signature/grammar.js.orig",
+                "fsharp/src/scanner.c",
+                "fsharp_signature/src/scanner.c",
+                "SOURCE-PROVENANCE.json",
+                "ROOTLIGHT-PATCH.md",
+                "LICENSE",
+            ] {
+                assert!(
+                    sources.files.contains_key(path),
+                    "missing retained input: {path}"
+                );
+            }
+            validate_vendored_tree(
+                &root.join("third_party/tree-sitter-fsharp-0.3.12"),
+                grammar,
+                sources,
+            )
+            .expect("both profiles authenticate the complete reviewed source tree");
         }
     }
 
