@@ -604,6 +604,31 @@ fn fsharp_content_routes_default_sources_without_promoting_mixed_suffix_peers() 
             "fsharp",
         ),
         (
+            "MultilineValue.fs",
+            "module Example.Core\nlet multilineValue =\n    1",
+            "fsharp",
+        ),
+        (
+            "MultilineFunction.fs",
+            "module Example.Core\nlet identity input =\n    input\n",
+            "fsharp",
+        ),
+        (
+            "MultilineRecord.fs",
+            "namespace Example.Core\r\ntype Entry =\r\n    { Count: int }",
+            "fsharp",
+        ),
+        (
+            "MultilineUnion.fs",
+            "namespace Example.Core\ntype Choice =\n    | Empty\n    | Item of int\n",
+            "fsharp",
+        ),
+        (
+            "MultilineNested.fs",
+            "module Example.Core\nmodule Inner =\n    let nestedValue =\n        2\n",
+            "fsharp",
+        ),
+        (
             "Bom.fs",
             "\u{feff}module Example.Core\r\nlet bomValue = 1\r\n",
             "fsharp",
@@ -787,37 +812,68 @@ fn fsharp_content_routes_default_sources_without_promoting_mixed_suffix_peers() 
                         && gap.reason == SkippedRegionReason::ParseError)
             );
         }
-        if path == "Full.fs" {
-            for (name, kind) in [
+        let expected_declarations: &[(&str, EntityKind)] = match path {
+            "Full.fs" => &[
                 ("value", EntityKind::Variable),
                 ("Record", EntityKind::Struct),
                 ("Read", EntityKind::Method),
-            ] {
-                let entity = document
-                    .entities
+            ],
+            "MultilineValue.fs" => &[("multilineValue", EntityKind::Variable)],
+            "MultilineFunction.fs" => &[("identity", EntityKind::Function)],
+            "MultilineRecord.fs" => &[("Entry", EntityKind::Struct)],
+            "MultilineUnion.fs" => &[("Choice", EntityKind::Union)],
+            "MultilineNested.fs" => &[
+                ("Inner", EntityKind::Module),
+                ("nestedValue", EntityKind::Variable),
+            ],
+            _ => &[],
+        };
+        for (name, kind) in expected_declarations.iter().copied() {
+            let entity = document
+                .entities
+                .iter()
+                .find(|entity| {
+                    entity.language == "fsharp"
+                        && entity.canonical_name == name
+                        && entity.kind == kind
+                        && entity
+                            .evidence
+                            .source
+                            .as_ref()
+                            .is_some_and(|reference| reference.span().file() == file.id)
+                })
+                .unwrap();
+            let site = document
+                .occurrences
+                .iter()
+                .find(|site| {
+                    site.file == file.id
+                        && site.role == OccurrenceRole::Definition
+                        && site.target == (OccurrenceTarget::Resolved { symbol: entity.id })
+                })
+                .unwrap();
+            exact_source(&service, &site.source, "fsharp", name.as_bytes());
+            assert_eq!(site.source.generation(), receipt.generation);
+            let located = service
+                .code_locate_with_filters_and_budget(
+                    receipt.generation,
+                    name.to_owned(),
+                    LocateMode::Exact,
+                    Vec::new(),
+                    vec![path.to_owned()],
+                    8,
+                    0,
+                    FirstSliceBudget::default(),
+                    &deadline(),
+                )
+                .unwrap();
+            assert!(
+                located
+                    .data
+                    .hits
                     .iter()
-                    .find(|entity| {
-                        entity.language == "fsharp"
-                            && entity.canonical_name == name
-                            && entity.kind == kind
-                            && entity
-                                .evidence
-                                .source
-                                .as_ref()
-                                .is_some_and(|reference| reference.span().file() == file.id)
-                    })
-                    .unwrap();
-                let site = document
-                    .occurrences
-                    .iter()
-                    .find(|site| {
-                        site.file == file.id
-                            && site.role == OccurrenceRole::Definition
-                            && site.target == (OccurrenceTarget::Resolved { symbol: entity.id })
-                    })
-                    .unwrap();
-                exact_source(&service, &site.source, "fsharp", name.as_bytes());
-            }
+                    .any(|hit| hit.symbol == Some(entity.id) && hit.file == file.id)
+            );
         }
         exact_source(
             &service,
