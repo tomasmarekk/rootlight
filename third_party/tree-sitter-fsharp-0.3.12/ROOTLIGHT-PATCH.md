@@ -1,4 +1,4 @@
-# F# scanner state, signature and type-form patches
+# F# scanner state, signature and current type syntax
 
 This directory retains the MIT-licensed preferred grammar sources, Rust binding
 and complete native compilation payload from `ionide/tree-sitter-fsharp` tag
@@ -6,7 +6,7 @@ and complete native compilation payload from `ionide/tree-sitter-fsharp` tag
 archive is retained in `upstream/`; its SHA-256 is
 `5c40b126e9c4641ac8775d2cd9d390503fd3ec1307531412143969f263b0f0ad`.
 `SOURCE-PROVENANCE.json` records all 129 original regular members, the selected
-payload, preserved license, and eight bounded local overrides. HTTPS acquisition
+payload, preserved license, and nine bounded local overrides. HTTPS acquisition
 and a commit-addressed URL do not independently authenticate a signed Git object
 or publisher digest. This is not the complete upstream repository: example
 submodule contents are absent and unrelated fixtures/bindings are not compiled.
@@ -29,6 +29,25 @@ Existing inside-string and operator-reference controls remain intact. Inactive
 preprocessor branches may still be treated as trivia; a clean parse is not proof
 that declarations in every conditional branch were structurally analyzed.
 
+Hash-prefix lookahead preserves the pending layout mark before `#`. Only complete
+directive names may change directive state; directive-like identifier prefixes
+must remain intact for type syntax. Named external conditional-directive tokens
+prevent the internal lexer from adopting a shorter directive prefix. Structured
+tokens end at the directive keyword, not its condition or the first branch token.
+The internal `#line` and `#light` rules share the initial hash with type syntax
+instead of greedily consuming directive-like type-name prefixes. Their existing
+anonymous directive leaves cover the hash; the parent directive, argument nodes
+and public node vocabulary retain their written ownership.
+The signature profile uses the inherited directive extras consistently with the
+implementation profile. Its redundant ordinary compiler-directive alternative
+is removed from the signature-element supertype; the named directive node and
+its arguments remain available as extras. Tests pin directive spans and extra
+status together with surrounding declarations and structured branches.
+An inline stray-directive peek may coalesce following whitespace and comments
+into inactive trivia, but it does not consume the first program character.
+This preserves the written bytes, not separate documentation facts or evaluated
+conditional-compilation semantics.
+
 The signature grammar inherited implementation constructors and member bodies.
 Its local rules now accept written constructor/member signatures, including
 static, abstract, generic and accessor forms, without implementation bodies or
@@ -38,6 +57,25 @@ constant value. These changes follow the
 and [namespace/module signature specification](https://fsharp.github.io/fslang-spec/namespace-and-module-signatures/).
 They do not establish compiler acceptance, `.fsi`/`.fs` conformance, typechecking,
 name resolution, dispatch, or exhaustive F# syntax support.
+
+Current nullness syntax has a distinct `nullable_type` node instead of invented
+union constructors. Application types may carry `| null`; function and tuple
+operands require parentheses, and subsequent application suffixes cannot consume
+an unparenthesized nullable operand. Generic constraints distinguish `not null`
+from the existing `null` and `not struct` forms. Signature value constraints
+follow the complete curried specification, and structured signature conditional
+branches use signature declarations rather than implementation bodies. A local
+dynamic preference retains complete typed function heads without resolving names.
+
+Flexible `#` types consume an atomic operand. Array/postfix suffixes and nullness
+remain outside that operand unless written parentheses place them inside it;
+constrained-type right-hand sides still accept complete types. Discriminated-union
+payloads retain their application-type frontier, including parenthesized nullable
+forms, instead of swallowing a case separator into a false nullable field.
+These boundaries follow the
+[compiler parser's type syntax](https://github.com/dotnet/fsharp/blob/7e2cbf10edb6ac52b09c88214a4a39a8c774eebd/src/Compiler/pars.fsy#L6533).
+Authored controls check exact node ownership and source spans, not successful
+typechecking or runtime null safety.
 
 The shared type grammar also accepted an unmarked single RHS identifier as a
 union case, creating false constructor evidence for abbreviation-shaped syntax.
@@ -51,10 +89,10 @@ allows a single-name RHS to be reinterpreted as a union by later name resolution
 The patch does not prove semantic alias-target or union resolution; lowering must
 preserve that limitation rather than treating a native node kind as typechecking.
 
-The eight overrides are the scanner, both preferred grammars, both generated
-parser/grammar-JSON pairs, and the signature node-type inventory. The
-implementation node-type inventory, `tree_sitter/{alloc,array,parser}.h` headers,
-Rust binding, build script and license remain byte-exact. Original scanner and
+The nine overrides are the scanner, both preferred grammars, both generated
+parser/grammar-JSON pairs, and both node-type inventories. The
+`tree_sitter/{alloc,array,parser}.h` headers, Rust binding, build script and license
+remain byte-exact. Original scanner and
 both preferred grammar inputs are also retained as `.orig` files. Both profiles
 were generated with the source-built `tree-sitter-generate` 0.27.0 API, ABI 15 and
 Node.js 24.11.1 as a declared preparation tool. All six original outputs for each

@@ -150,12 +150,53 @@ static inline bool is_word_char(int32_t c) {
          (c >= '0' && c <= '9') || c == '_' || c == '\'';
 }
 
+// Hash directives share a prefix with Unicode type identifiers. Keep their
+// boundary conservative without changing the scanner's other keyword rules.
+static inline bool is_hash_word_char(int32_t c) {
+  return is_word_char(c) || c >= 0x80;
+}
+
 static inline bool keyword_equals(const char *word, const char *keyword) {
   size_t i = 0;
   while (word[i] != '\0' && word[i] == keyword[i]) {
     i++;
   }
   return word[i] == '\0' && keyword[i] == '\0';
+}
+
+typedef enum {
+  HASH_TYPE_PREFIX = 0,
+  HASH_OTHER_DIRECTIVE,
+  HASH_LINE_DIRECTIVE,
+  HASH_LIGHT_DIRECTIVE,
+} HashDirectiveKind;
+
+// Only complete directive names suppress layout. The bounded peek leaves
+// mark_end unchanged so an ordinary hash type can still open its pending scope.
+static HashDirectiveKind other_hash_directive_ahead(TSLexer *lexer) {
+  if (lexer->lookahead >= '0' && lexer->lookahead <= '9') {
+    return HASH_LINE_DIRECTIVE;
+  }
+  if (lexer->lookahead == '!') return HASH_OTHER_DIRECTIVE;
+  char word[7];
+  size_t length = 0;
+  while (is_hash_word_char(lexer->lookahead)) {
+    if (length == sizeof(word) - 1) return HASH_TYPE_PREFIX;
+    if (lexer->lookahead >= 0x80) return HASH_TYPE_PREFIX;
+    word[length++] = (char)lexer->lookahead;
+    advance(lexer);
+  }
+  word[length] = '\0';
+  if (keyword_equals(word, "line")) return HASH_LINE_DIRECTIVE;
+  if (keyword_equals(word, "light")) {
+    return HASH_LIGHT_DIRECTIVE;
+  }
+  static const char *const directives[] = {
+      "r", "load", "time", "I", "help", "quit", "nowarn", "warnon"};
+  for (size_t i = 0; i < sizeof(directives) / sizeof(directives[0]); i++) {
+    if (keyword_equals(word, directives[i])) return HASH_OTHER_DIRECTIVE;
+  }
+  return HASH_TYPE_PREFIX;
 }
 
 static inline bool push_indent(Scanner *scanner, uint32_t indent_length,
@@ -265,7 +306,7 @@ static inline void swallow_inactive_region(TSLexer *lexer) {
       advance(lexer);
       if (lexer->lookahead == 'f') {
         advance(lexer);
-        if (!is_word_char(lexer->lookahead)) {
+        if (!is_hash_word_char(lexer->lookahead)) {
           depth++;
         }
       }
@@ -279,7 +320,7 @@ static inline void swallow_inactive_region(TSLexer *lexer) {
             advance(lexer);
             if (lexer->lookahead == 'f') {
               advance(lexer);
-              if (!is_word_char(lexer->lookahead)) {
+              if (!is_hash_word_char(lexer->lookahead)) {
                 depth--;
                 if (depth == 0) {
                   while (lexer->lookahead != '\n' && !lexer->eof(lexer)) {
@@ -686,7 +727,7 @@ static bool scan(Scanner *scanner, TSLexer *lexer, const bool *valid_symbols) {
         advance(lexer);
         if (lexer->lookahead != 'f') return false;
         advance(lexer);
-        if (is_word_char(lexer->lookahead)) return false;
+        if (is_hash_word_char(lexer->lookahead)) return false;
         if (!push_preproc_kind(scanner, PREPROC_STRAY)) return false;
         while (lexer->lookahead != '\n' && !lexer->eof(lexer)) {
           advance(lexer);
@@ -705,7 +746,7 @@ static bool scan(Scanner *scanner, TSLexer *lexer, const bool *valid_symbols) {
         advance(lexer);
         if (lexer->lookahead != 'e') return false;
         advance(lexer);
-        if (is_word_char(lexer->lookahead) || !top_preproc_is_stray(scanner)) {
+        if (is_hash_word_char(lexer->lookahead) || !top_preproc_is_stray(scanner)) {
           return false;
         }
         pop_preproc_kind(scanner);
@@ -722,7 +763,7 @@ static bool scan(Scanner *scanner, TSLexer *lexer, const bool *valid_symbols) {
         advance(lexer);
         if (lexer->lookahead != 'f') return false;
         advance(lexer);
-        if (is_word_char(lexer->lookahead) || !top_preproc_is_stray(scanner)) {
+        if (is_hash_word_char(lexer->lookahead) || !top_preproc_is_stray(scanner)) {
           return false;
         }
         pop_preproc_kind(scanner);
@@ -977,6 +1018,8 @@ static bool scan(Scanner *scanner, TSLexer *lexer, const bool *valid_symbols) {
   bool found_preprocessor_end = false;
   bool found_preproc_if = false;
   bool found_preproc_else = false;
+  bool found_hash_type_prefix = false;
+  bool found_other_hash_directive = false;
   bool found_comment_start = false;
   bool advanced_in_ws_walk = false;
   bool skipped_open_paren = false;
@@ -1021,6 +1064,7 @@ static bool scan(Scanner *scanner, TSLexer *lexer, const bool *valid_symbols) {
       }
     } else if (lexer->lookahead == '#') {
       advanced_in_ws_walk = true;
+      bool recognized_hash_directive = false;
       advance(lexer);
       if (lexer->lookahead == 'e') {
         advance(lexer);
@@ -1032,6 +1076,11 @@ static bool scan(Scanner *scanner, TSLexer *lexer, const bool *valid_symbols) {
               advance(lexer);
               if (lexer->lookahead == 'f') {
                 advance(lexer);
+                if (is_hash_word_char(lexer->lookahead)) {
+                  found_hash_type_prefix = true;
+                  break;
+                }
+                recognized_hash_directive = true;
                 // The innermost open directive was consumed as trivia (no
                 // grammar rule at its position), so this `#endif` closes it
                 // textually: consume it as an inactive-trivia extra instead
@@ -1066,6 +1115,11 @@ static bool scan(Scanner *scanner, TSLexer *lexer, const bool *valid_symbols) {
             advance(lexer);
             if (lexer->lookahead == 'e') {
               advance(lexer);
+              if (is_hash_word_char(lexer->lookahead)) {
+                found_hash_type_prefix = true;
+                break;
+              }
+              recognized_hash_directive = true;
               // The innermost open directive was consumed as trivia, so its
               // `#else` branch is inactive: swallow everything through the
               // matching `#endif` as a single extra token. Only the active
@@ -1102,8 +1156,21 @@ static bool scan(Scanner *scanner, TSLexer *lexer, const bool *valid_symbols) {
           // directive with no grammar rule. Swallow the whole line as
           // inactive trivia (adding it to the grammar instead costs ~1 MB
           // of parser tables for two real-world occurrences).
-          if (match_keyword_rest(lexer, "ndent") &&
-              !valid_symbols[ERROR_SENTINEL]) {
+          if (match_keyword_rest(lexer, "ndent")) {
+            if (is_hash_word_char(lexer->lookahead)) {
+              found_hash_type_prefix = true;
+              break;
+            }
+            if (valid_symbols[ERROR_SENTINEL]) return false;
+            // The legacy directive has a quoted argument. A bare hash word
+            // remains a type operand even after its pending INDENT was emitted.
+            while (lexer->lookahead == ' ' || lexer->lookahead == '\t') {
+              advance(lexer);
+            }
+            if (lexer->lookahead != '"') {
+              found_hash_type_prefix = true;
+              break;
+            }
             while (lexer->lookahead != '\n' && !lexer->eof(lexer)) {
               advance(lexer);
             }
@@ -1111,10 +1178,16 @@ static bool scan(Scanner *scanner, TSLexer *lexer, const bool *valid_symbols) {
             lexer->result_symbol = PREPROC_INACTIVE;
             return true;
           }
-          return false;
+          found_hash_type_prefix = true;
+          break;
         }
         if (lexer->lookahead == 'f') {
           advance(lexer);
+          if (is_hash_word_char(lexer->lookahead)) {
+            found_hash_type_prefix = true;
+            break;
+          }
+          recognized_hash_directive = true;
           found_preproc_if = true;
           // If an indented block is still open above this line AND the first
           // content line after the '#if' sits outside that block (less
@@ -1215,21 +1288,34 @@ static bool scan(Scanner *scanner, TSLexer *lexer, const bool *valid_symbols) {
           } else {
             if (scanner->indents.size > 0) {
               if (valid_symbols[PREPROC_IF]) {
-                if (!valid_symbols[ERROR_SENTINEL] &&
-                    !is_word_char(lexer->lookahead)) {
+                if (!valid_symbols[ERROR_SENTINEL]) {
+                  // Structured tokens end at the whole keyword. Peeking the
+                  // branch must not move that mark unless STRAY is selected.
+                  lexer->mark_end(lexer);
+                  if (top_preproc_is_structured(scanner)) {
+                    // Keep nested active content inline without stealing the
+                    // enclosing structured close. This path consumes only
+                    // the directive header, not its following comment lines.
+                    while (lexer->lookahead != '\n' && !lexer->eof(lexer)) {
+                      advance(lexer);
+                    }
+                    if (!push_preproc_kind(scanner, PREPROC_STRAY)) return false;
+                    lexer->mark_end(lexer);
+                    lexer->result_symbol = PREPROC_INACTIVE;
+                    return true;
+                  }
                   // The grammar can adopt the directive here, but peek the
                   // first branch line: if it starts with a token that can
                   // never begin an expression or declaration (a fluent-chain
                   // '.', a match-arm '|', a closing bracket, a tuple ','),
                   // the structured branch could not parse and would split
-                  // the surrounding construct. Consume the directive line as
-                  // inactive trivia instead: the branch content then parses
-                  // inline as part of the enclosing construct, and a later
-                  // stray `#else` swallows the alternative branch.
+                  // the surrounding construct. Consume the header and its
+                  // leading whitespace/line comments as inactive trivia,
+                  // stopping before the first body character. The body then
+                  // parses inline, and stray `#else` swallows its alternative.
                   while (lexer->lookahead != '\n' && !lexer->eof(lexer)) {
                     advance(lexer);
                   }
-                  lexer->mark_end(lexer);
                   int32_t branch_start = 0;
                   while (!lexer->eof(lexer)) {
                     if (lexer->lookahead == '\n' || lexer->lookahead == '\r' ||
@@ -1249,29 +1335,21 @@ static bool scan(Scanner *scanner, TSLexer *lexer, const bool *valid_symbols) {
                       break;
                     }
                   }
-                  if (top_preproc_is_structured(scanner) ||
-                      branch_start == '.' || branch_start == '|' ||
+                  if (branch_start == '.' || branch_start == '|' ||
                       branch_start == ')' || branch_start == ']' ||
                       branch_start == '}' || branch_start == ',') {
-                    // A `#if` nested inside a structured directive's active
-                    // branch is consumed as stray trivia: structured-inside-
-                    // structured mispairs the OUTER `#endif` (the nested
-                    // adoption steals the close; DataContext's indented
-                    // sibling `#if VENDOR` blocks, ProvidedTypes' nested
-                    // record/class directives). Inlining the active branch
-                    // keeps the enclosing books balanced.
                     if (!push_preproc_kind(scanner, PREPROC_STRAY)) return false;
+                    lexer->mark_end(lexer);
                     lexer->result_symbol = PREPROC_INACTIVE;
                     return true;
                   }
-                  // Branch content is expression-shaped: decline, so the
-                  // internal lexer adopts `#if` structurally. (The peek
-                  // advanced past mark_end only; declining returns it all.)
-                  return false;
+                  uint32_t current_indent_length = peek_indent_length(scanner);
+                  if (!push_preproc_indent(scanner, current_indent_length)) return false;
+                  if (!push_preproc_kind(scanner, PREPROC_STRUCTURED)) return false;
+                  lexer->result_symbol = PREPROC_IF;
+                  return true;
                 }
-                uint32_t current_indent_length = peek_indent_length(scanner);
-                if (!push_preproc_indent(scanner, current_indent_length)) return false;
-                if (!push_preproc_kind(scanner, PREPROC_STRUCTURED)) return false;
+                return false;
               } else {
                 pop_indent(scanner);
                 lexer->result_symbol = DEDENT;
@@ -1286,6 +1364,25 @@ static bool scan(Scanner *scanner, TSLexer *lexer, const bool *valid_symbols) {
           }
         }
       } else {
+        HashDirectiveKind directive = other_hash_directive_ahead(lexer);
+        if (directive == HASH_TYPE_PREFIX) {
+          found_hash_type_prefix = true;
+          break;
+        }
+        if (valid_symbols[INDENT]) {
+          if (directive == HASH_LINE_DIRECTIVE) {
+            while (lexer->lookahead == ' ' || lexer->lookahead == '\t') {
+              advance(lexer);
+            }
+          }
+          if (directive == HASH_OTHER_DIRECTIVE ||
+              (directive == HASH_LINE_DIRECTIVE &&
+               !(lexer->lookahead >= '0' && lexer->lookahead <= '9'))) {
+            found_hash_type_prefix = true;
+            break;
+          }
+        }
+        found_other_hash_directive = true;
         if (found_end_of_line) {
           if (valid_symbols[NEWLINE_NO_ALIGNED]) {
             lexer->result_symbol = NEWLINE_NO_ALIGNED;
@@ -1295,14 +1392,8 @@ static bool scan(Scanner *scanner, TSLexer *lexer, const bool *valid_symbols) {
           // indentation. Returning false resets the lexer to the scan start
           // (chars advanced past mark_end are returned to the input), so the
           // internal lexer re-reads and consumes the directive in place.
-          if (lexer->lookahead == 'l') {
-            advance(lexer);
-            if (lexer->lookahead == 'i') {
-              return false;
-            }
-          } else if (lexer->lookahead >= '0' && lexer->lookahead <= '9') {
-            return false;
-          }
+          if (directive == HASH_LINE_DIRECTIVE ||
+              directive == HASH_LIGHT_DIRECTIVE) return false;
           // Other directive lines (#r, #load, #nowarn, ...) are real syntax
           // nodes: fall through so an open indented block can DEDENT before
           // the directive token is lexed internally. Flag like a preproc line
@@ -1312,6 +1403,10 @@ static bool scan(Scanner *scanner, TSLexer *lexer, const bool *valid_symbols) {
           break;
         }
         return false;
+      }
+      if (!recognized_hash_directive) {
+        found_hash_type_prefix = true;
+        break;
       }
     } else {
       break;
@@ -1368,6 +1463,10 @@ static bool scan(Scanner *scanner, TSLexer *lexer, const bool *valid_symbols) {
   // If a dedent is pending for a same-line expression block (e.g. fun x -> x),
   // emit the dedent first and leave the quote closer for the next scan.
   bool failed_at_sign_match = false;
+  bool failed_block_opener = false;
+  // A hash peek may now sit inside its type name. Only layout decisions may
+  // inspect this scan; keyword/quote probes must never consume that remainder.
+  if (!found_hash_type_prefix && !found_other_hash_directive) {
   if (!valid_symbols[ERROR_SENTINEL] && lexer->lookahead == '@') {
     lexer->mark_end(lexer);
     advance(lexer);
@@ -1466,7 +1565,6 @@ static bool scan(Scanner *scanner, TSLexer *lexer, const bool *valid_symbols) {
     }
   }
 
-  bool failed_block_opener = false;
   {
     for (size_t i = 0; i < sizeof(block_openers) / sizeof(block_openers[0]); i++) {
       const BlockOpener *op = &block_openers[i];
@@ -1487,6 +1585,7 @@ static bool scan(Scanner *scanner, TSLexer *lexer, const bool *valid_symbols) {
       }
     }
   }
+  }
 
   // Not gated on found_preprocessor_end: when '#endif' follows, this point is
   // only reached if PREPROC_END was not a valid symbol (a valid one returns
@@ -1499,14 +1598,15 @@ static bool scan(Scanner *scanner, TSLexer *lexer, const bool *valid_symbols) {
         valid_symbols[DEDENT] && scanner->indents.size > 1 &&
         indent_length < (uint32_t)peek_indent_length(scanner) &&
         (!peek_is_paren_indent(scanner) || indent_length == 0 ||
-         lexer->eof(lexer));
+         (!found_hash_type_prefix && lexer->eof(lexer)));
     if (!dedent_first) {
       lexer->result_symbol = NEWLINE_NO_ALIGNED;
       return true;
     }
   }
 
-  if (!failed_block_opener && !failed_at_sign_match) {
+  if (!found_hash_type_prefix && !found_other_hash_directive &&
+      !failed_block_opener && !failed_at_sign_match) {
 
   if (valid_symbols[NEWLINE] && lexer->lookahead == ';') {
     advance(lexer);
@@ -1948,7 +2048,7 @@ static bool scan(Scanner *scanner, TSLexer *lexer, const bool *valid_symbols) {
     }
   }
 
-  } // end of !failed_block_opener && !failed_at_sign_match
+  } // end of ordinary-token probes
 
   if (valid_symbols[NEWLINE] && found_end_of_line_semi_colon &&
       !found_comment_start && !found_bracket_end) {
@@ -2059,7 +2159,8 @@ static bool scan(Scanner *scanner, TSLexer *lexer, const bool *valid_symbols) {
   if (valid_symbols[TYPE_APP_INDENT] && !valid_symbols[ERROR_SENTINEL] &&
       !found_bracket_end &&
       !found_preprocessor_end && !found_same_line_pipe_infix) {
-    bool is_multiline = found_end_of_line || is_multiline_type_app_ahead(lexer);
+    bool is_multiline = found_end_of_line ||
+        (!found_hash_type_prefix && is_multiline_type_app_ahead(lexer));
     if (is_multiline) {
       if (!push_indent(scanner, indent_length, INDENT_TYPE_APP)) return false;
       lexer->result_symbol = TYPE_APP_INDENT;
@@ -2074,7 +2175,8 @@ static bool scan(Scanner *scanner, TSLexer *lexer, const bool *valid_symbols) {
 
     // '>' closes a TYPE_APP_INDENT the same way ')' closes a PAREN_INDENT —
     // gated on the type-app bit so we don't pop ordinary paren scopes here.
-    bool found_type_app_close = peek_is_type_app_indent(scanner) &&
+    bool found_type_app_close = !found_hash_type_prefix &&
+                                peek_is_type_app_indent(scanner) &&
                                 lexer->lookahead == '>' &&
                                 valid_symbols[DEDENT];
 
@@ -2155,7 +2257,8 @@ static bool scan(Scanner *scanner, TSLexer *lexer, const bool *valid_symbols) {
       // continuation lines. But still allow it at true EOF / column 0 so a
       // paren indent can't get stranded forever if its closing bracket was
       // consumed by the grammar rather than seen here at the start of a line.
-      bool can_dedent_paren_indent = !(is_paren_indent || is_brace_indent) || indent_length == 0 || lexer->eof(lexer);
+      bool can_dedent_paren_indent = !(is_paren_indent || is_brace_indent) ||
+          indent_length == 0 || (!found_hash_type_prefix && lexer->eof(lexer));
 
       // A line that sits strictly DEEPER than the line which opened a
       // mid-line-anchored scope continues the anchored expression, even when

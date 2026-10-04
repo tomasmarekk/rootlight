@@ -70,9 +70,9 @@ module.exports = grammar({
     "then",
     "else",
     "elif",
-    "#if",
-    "#else",
-    "#endif",
+    $._preproc_if_keyword,
+    $._preproc_else_keyword,
+    $._preproc_endif_keyword,
     "class",
     "begin",
     $._struct_begin,
@@ -123,6 +123,16 @@ module.exports = grammar({
     [$.prefixed_expression, $._low_prec_app, $.infix_expression],
     [$._type, $._argument_type],
     [$._type, $._curried_return_type],
+    // A suffix can finish the application type while an enclosing flexible
+    // or constrained type still has a valid reduction at the same pipe.
+    [$._type, $.nullable_type],
+    [$._type, $._type_suffix_base],
+    [$._type_suffix_base, $._curried_return_type],
+    [$._type, $._union_argument_type],
+    [$._type_suffix_base, $._union_argument_type],
+    // Preserve both leading-identifier interpretations until the case name
+    // or the nullable keyword after the pipe determines the representation.
+    [$.long_identifier, $._bare_union_type_case],
     // A leading _elem_separator (fired after a file-opening extra such as a
     // doc comment) could belong to the plain module-elements repeat or open
     // named_module/namespace; both must stay alive until the header keyword
@@ -148,8 +158,10 @@ module.exports = grammar({
   //  * `val`, because the `basic long namespace` test in source_file.txt asserts
   //    a tree for `namespace test.val`, which FSC rejects ("Unexpected start of
   //    structured construct"). Reserving it would change that expected tree.
+  // `null` cannot fall back to a union-case identifier: doing so would invent
+  // a second constructor for a nullable type alias such as `Reference | null`.
   reserved: {
-    global: (_) => ["as", "namespace", "open", "type"],
+    global: (_) => ["as", "namespace", "open", "type", "null"],
   },
 
   inline: ($) => [
@@ -158,6 +170,9 @@ module.exports = grammar({
     $._record_type_defn_inner,
     $._union_type_defn_inner,
     $._then_expression,
+    // The subset must not reduce as an unranked helper before the existing
+    // type/measure precedence at their consuming rules can take effect.
+    $._type_without_null_suffix,
   ],
 
   supertypes: ($) => [
@@ -410,14 +425,19 @@ module.exports = grammar({
       ),
 
     function_declaration_left: ($) =>
-      prec.left(
-        3,
-        seq(
-          optional("inline"),
-          optional($.access_modifier),
-          prec(100, $._identifier_or_op),
-          optional($.type_arguments),
-          $.argument_patterns,
+      // A complete function head also fits identifier_pattern's argument
+      // slots. Prefer the declaration shape without restricting name resolution.
+      prec.dynamic(
+        1,
+        prec.left(
+          3,
+          seq(
+            optional("inline"),
+            optional($.access_modifier),
+            prec(100, $._identifier_or_op),
+            optional($.type_arguments),
+            $.argument_patterns,
+          ),
         ),
       ),
 
@@ -1353,20 +1373,53 @@ module.exports = grammar({
       prec(
         4,
         choice(
-          $.simple_type,
-          $.generic_type,
-          $.paren_type,
+          $._type_without_null_suffix,
+          $.nullable_type,
           $.function_type,
           $.compound_type,
-          $.postfix_type,
-          $.list_type,
           $.byref_type,
-          $.static_type,
-          $.type_argument,
-          $.constrained_type,
-          $.flexible_type,
-          $.anon_record_type,
-          $.struct_type,
+        ),
+      ),
+
+    // F# attaches nullness to application types, not directly to tuples or
+    // functions. Those shapes can still be nullable inside parentheses.
+    // https://github.com/dotnet/fsharp/blob/main/src/Compiler/pars.fsy
+    _type_without_null_suffix: ($) =>
+      choice(
+        $.simple_type,
+        $.generic_type,
+        $.paren_type,
+        $.postfix_type,
+        $.list_type,
+        $.static_type,
+        $.type_argument,
+        $.constrained_type,
+        $.flexible_type,
+        $.anon_record_type,
+        $.struct_type,
+      ),
+
+    // Existing suffix forms keep the original _type operand precedence, but a
+    // written nullable operand must be parenthesized before another suffix.
+    _type_suffix_base: ($) =>
+      prec(
+        4,
+        choice(
+          $._type_without_null_suffix,
+          $.function_type,
+          $.compound_type,
+          $.byref_type,
+        ),
+      ),
+
+    nullable_type: ($) =>
+      // A typed function head also admits an OR-pattern ending in null;
+      // prefer the complete written nullness type when both parses survive.
+      prec.dynamic(
+        1,
+        prec.left(
+          4,
+          seq(choice($._type_without_null_suffix, $.byref_type), "|", "null"),
         ),
       ),
 
@@ -1377,19 +1430,7 @@ module.exports = grammar({
     _argument_type: ($) =>
       prec(
         4,
-        choice(
-          $.simple_type,
-          $.generic_type,
-          $.paren_type,
-          $.postfix_type,
-          $.list_type,
-          $.static_type,
-          $.type_argument,
-          $.constrained_type,
-          $.flexible_type,
-          $.anon_record_type,
-          $.struct_type,
-        ),
+        choice($._type_without_null_suffix, $.nullable_type),
       ),
 
     // Like _type but excludes function_type, used as the return type in
@@ -1400,18 +1441,9 @@ module.exports = grammar({
       prec(
         4,
         choice(
-          $.simple_type,
-          $.generic_type,
-          $.paren_type,
+          $._type_without_null_suffix,
+          $.nullable_type,
           $.compound_type,
-          $.postfix_type,
-          $.list_type,
-          $.static_type,
-          $.type_argument,
-          $.constrained_type,
-          $.flexible_type,
-          $.anon_record_type,
-          $.struct_type,
         ),
       ),
 
@@ -1504,17 +1536,34 @@ module.exports = grammar({
     compound_type: ($) =>
       prec.right(seq($._type, repeat1(prec.right(seq("*", $._type))))),
     struct_type: ($) => seq("struct", $.paren_type),
-    postfix_type: ($) => prec.left(4, seq($._type, $.long_identifier)),
+    postfix_type: ($) => prec.left(4, seq($._type_suffix_base, $.long_identifier)),
     // '[]', '[,]', '[,,]', ... — multidimensional array suffixes share the
     // token so 'float[,]' lexes as one postfix rather than index syntax.
     // Interior whitespace is permitted ('int[ ]', 'float[ , ]').
-    list_type: ($) => seq($._type, alias(token(/\[[ \t]*(,[ \t]*)*\]/), "[]")),
+    list_type: ($) => seq($._type_suffix_base, alias(token(/\[[ \t]*(,[ \t]*)*\]/), "[]")),
     // Byref type: 'int&', 'float32&'. The '&' must immediately follow the type
     // (token.immediate) so it is not confused with the '&' infix/pattern op.
-    byref_type: ($) => prec.left(4, seq($._type, token.immediate("&"))),
-    static_type: ($) => prec(10, seq($._type, $.type_arguments)),
+    byref_type: ($) => prec.left(4, seq($._type_suffix_base, token.immediate("&"))),
+    static_type: ($) => prec(10, seq($._type_suffix_base, $.type_arguments)),
     constrained_type: ($) => prec.right(seq($.type_argument, ":>", $._type)),
-    flexible_type: ($) => prec.right(seq("#", $._type)),
+    // HASH consumes atomType in the compiler grammar. Application suffixes
+    // and nullness belong outside the hash unless its operand is parenthesized.
+    _flexible_type_atom: ($) =>
+      prec(
+        4,
+        choice(
+          $.simple_type,
+          $.generic_type,
+          $.paren_type,
+          $.type_argument,
+          $.flexible_type,
+          $.struct_type,
+          alias($._flexible_static_type, $.static_type),
+        ),
+      ),
+    _flexible_static_type: ($) =>
+      prec(10, seq(choice($.simple_type, $.type_argument), $.type_arguments)),
+    flexible_type: ($) => prec.right(seq("#", $._flexible_type_atom)),
     anon_record_type: ($) =>
       seq(optional("struct"), "{|", scoped($.record_fields, $._indent, $._dedent), "|}"),
     types: ($) =>
@@ -1553,11 +1602,28 @@ module.exports = grammar({
     _multiline_generic_type_head: ($) =>
       prec.right(5, seq($.long_identifier, "<", $._indent, optional($.type_attributes), ">")),
 
+    // The abbreviation-only generic path opens a scope at '<', even on one
+    // line. Nullness must be consumed before that scope's deferred dedent.
+    _multiline_generic_nullable_type_head: ($) =>
+      prec.dynamic(
+        1,
+        prec.right(
+          6,
+          seq(alias($._multiline_generic_type_head, $.generic_type), "|", "null"),
+        ),
+      ),
+
+    _multiline_generic_nullable_type: ($) =>
+      prec.right(6, seq($._multiline_generic_nullable_type_head, $._dedent)),
+
     _multiline_generic_function_type: ($) =>
       prec.right(
         6,
         seq(
-          alias($._multiline_generic_type_head, $.generic_type),
+          choice(
+            alias($._multiline_generic_type_head, $.generic_type),
+            alias($._multiline_generic_nullable_type_head, $.nullable_type),
+          ),
           arrow(),
           $._type,
           $._dedent,
@@ -1572,7 +1638,10 @@ module.exports = grammar({
       prec.right(
         6,
         seq(
-          alias($._multiline_generic_type_head, $.generic_type),
+          choice(
+            alias($._multiline_generic_type_head, $.generic_type),
+            alias($._multiline_generic_nullable_type_head, $.nullable_type),
+          ),
           repeat1(prec.right(seq("*", $._type))),
           $._dedent,
         ),
@@ -1581,7 +1650,7 @@ module.exports = grammar({
     atomic_type: ($) =>
       prec.right(
         choice(
-          seq("#", $._type),
+          seq("#", $._flexible_type_atom),
           $.type_argument,
           seq("(", $._type, ")"),
           $.long_identifier,
@@ -1595,6 +1664,7 @@ module.exports = grammar({
         choice(
           seq($.type_argument, ":>", $._type),
           seq($.type_argument, ":", "null"),
+          seq($.type_argument, ":", "not", "null"),
           seq(
             // `when (^t or ^u or ^v) : (static member M : string)` — a
             // support constraint over several typars parenthesizes them.
@@ -1800,6 +1870,7 @@ module.exports = grammar({
           seq(
             $._indent,
             choice(
+              alias($._multiline_generic_nullable_type, $.nullable_type),
               alias($._multiline_generic_function_type, $.function_type),
               alias($._multiline_generic_compound_type, $.compound_type),
               $._type,
@@ -1911,7 +1982,7 @@ module.exports = grammar({
       ),
 
     _bare_union_type_case: ($) =>
-      prec(8, seq(optional($.attributes), $.identifier)),
+      prec.dynamic(8, seq(optional($.attributes), $.identifier)),
 
     // A bare unmarked RHS is a type abbreviation in the compiler's syntax
     // frontier. Reinterpreting it as a union requires later name resolution.
@@ -1938,8 +2009,19 @@ module.exports = grammar({
     union_type_fields: ($) =>
       seq($.union_type_field, repeat(seq("*", $.union_type_field))),
 
+    // Keep the original argument-type reduction priority at case separators,
+    // without admitting an unparenthesized nullable payload.
+    _union_argument_type: ($) => prec.left(4, $._type_without_null_suffix),
+
     union_type_field: ($) =>
-      prec.left(choice($._argument_type, seq($.identifier, ":", $._argument_type))),
+      // The pipe before null must not consume the separator between DU cases;
+      // nullable payloads use a paren_type, as required by the F# parser.
+      prec.left(
+        choice(
+          $._union_argument_type,
+          seq($.identifier, ":", $._union_argument_type),
+        ),
+      ),
 
     interface_type_defn: ($) =>
       prec.left(
@@ -2607,6 +2689,8 @@ module.exports = grammar({
     xml_doc: (_) => token(/\/\/\/([^/\n\r][^\n\r]*)?/),
 
     // preprocessors
+    _preproc_light_name: () => token.immediate(/light/),
+
     compiler_directive_decl: ($) =>
       prec(
         100000,
@@ -2621,7 +2705,8 @@ module.exports = grammar({
           // the legacy verbose syntax, `#light "on"` the default. The string
           // is optional so bare `#light` keeps working.
           seq(
-            "#light",
+            alias("#", "#light"),
+            $._preproc_light_name,
             optional(alias($._string_literal, $.string)),
             $._newline_not_aligned,
           ),
@@ -2638,9 +2723,14 @@ module.exports = grammar({
         $._newline_not_aligned,
       ),
 
+    // Sharing the hash token with flexible types leaves prefix lookalikes on
+    // their identifier path instead of lexing a partial directive extra.
+    _preproc_line_name: () => token.immediate(seq("line", /[ \t]+/)),
+
     preproc_line: ($) =>
       seq(
-        alias(/#(line)?/, "#line"),
+        alias("#", "#line"),
+        optional($._preproc_line_name),
         $.int,
         optional(choice(alias($._string_literal, $.string), $.verbatim_string)),
         $._newline_not_aligned,
@@ -2789,16 +2879,18 @@ function preprocIf(suffix, content, precedence = 0) {
           // wraps the attributed declaration, e.g. `[<Literal>]` / `#if X` /
           // `let c = ...`. Other variants get ambiguous with attribute rules.
           ...(suffix === "" ? [optional($.attributes)] : []),
-          "#if",
+          // Named externals prevent a literal fallback from splitting a
+          // hash-prefixed type name at a directive-keyword prefix.
+          alias($._preproc_if_keyword, "#if"),
           field("condition", $._preproc_expression),
           $._newline_not_aligned,
           content($),
           field("alternative", optional(alternativeBlock($))),
-          "#endif",
+          alias($._preproc_endif_keyword, "#endif"),
         ),
       ),
 
     ["preproc_else" + suffix]: ($) =>
-      prec(precedence, seq("#else", content($))),
+      prec(precedence, seq(alias($._preproc_else_keyword, "#else"), content($))),
   };
 }

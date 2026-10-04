@@ -18,6 +18,10 @@ module.exports = grammar(require("../fsharp/grammar"), {
     [$.long_identifier, $._identifier_or_op],
     [$._type, $._argument_type],
     [$._type, $._curried_return_type],
+    [$._type, $.nullable_type],
+    [$._type, $._type_suffix_base],
+    [$._type, $._union_argument_type],
+    [$.long_identifier, $._bare_union_type_case],
     [$.union_type_cases],
   ],
 
@@ -72,9 +76,14 @@ module.exports = grammar(require("../fsharp/grammar"), {
         $.import_decl,
         $.module_defn,
         $.module_abbrev,
-        $.compiler_directive_decl,
+        // Compiler and line directives are inherited extras in both profiles.
+        // A main light arm would steal their shared '#' before the line name.
         $.preproc_if,
       ),
+
+    // Inherited preprocessor rules use _module_elem for both structured
+    // branches. Their contents must follow the signature profile as well.
+    _module_elem: ($, _original) => $._module_signature_elements,
 
     value_definition: ($, _original) =>
       prec.left(
@@ -85,6 +94,7 @@ module.exports = grammar(require("../fsharp/grammar"), {
           $.value_declaration_left,
           ":",
           $.curried_spec,
+          optional($.type_argument_constraints),
           optional(seq("=", field("body", $._expression_block))),
         ),
       ),
