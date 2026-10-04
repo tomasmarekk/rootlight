@@ -227,7 +227,7 @@ const PROJECT_FACTS_TRUNCATED_CODE: &str = "project-adapter-facts-truncated";
 const PROJECT_FACTS_TRUNCATED_MESSAGE: &str =
     "additional project semantic facts were omitted by aggregate resource limits";
 const AGGREGATE_DIAGNOSTICS_TRUNCATED_CODE: &str = "aggregate-diagnostics-truncated";
-const ANALYZER_BINARY_SEED: &[u8] = b"rootlight.first-slice.treesitter-structural/196";
+const ANALYZER_BINARY_SEED: &[u8] = b"rootlight.first-slice.treesitter-structural/195";
 const RESOLVER_BINARY_SEED: &[u8] = b"rootlight.first-slice.resolve/94";
 const INCREMENTAL_PROVIDER_SEED: &[u8] = b"rootlight.first-slice.incremental-provider/1";
 const LANGUAGE_DISPOSITION_PROVIDER_SEED: &[u8] = b"rootlight.first-slice.language-disposition/6";
@@ -242,7 +242,7 @@ const DERIVED_PASS_ID: &str = "first-slice.derived";
 const SEARCH_PASS_ID: &str = "first-slice.search";
 const GRAMMAR_REVISION_SEED: &[u8] = b"rootlight.first-slice.grammar-registry/3";
 const COMPILER_CONTEXT_INPUT_SEED: &[u8] = b"rootlight.first-slice.compiler-context/1";
-const SEARCH_REVISION_SEED: &[u8] = b"rootlight.first-slice.search-schema/4";
+const SEARCH_REVISION_SEED: &[u8] = b"rootlight.first-slice.search-schema/5";
 const DERIVED_PLAN_REVISION_SEED: &[u8] =
     b"rootlight.first-slice.incremental-plan/schema-1.0/graph-1";
 // The isolated project host accepts only this semantic set. Tree-sitter has
@@ -34837,13 +34837,160 @@ mod tests {
     }
 
     #[test]
+    fn lexical_revision_preserves_parser_artifact_dependencies() {
+        let cancellation = Cancellation::new();
+        let limits = PlanningLimits::default();
+        let repository = RepositoryId::from_bytes([1; 16]);
+        let file = FileId::from_bytes([2; 20]);
+        let provider = derive_fact("incremental-provider", INCREMENTAL_PROVIDER_SEED).id();
+        let adapter_key = InputKey::AdapterVersion(provider);
+        let grammar = first_slice_grammar_revision_hash().unwrap();
+
+        // A lexical migration changes generation identity, not parser dependencies.
+        let previous_parser = hash_static_components(&[
+            PARSER_PROVIDER_SET_SEED,
+            TREE_SITTER_ADAPTER_VERSION.as_bytes(),
+            TREE_SITTER_RUNTIME_VERSION.as_bytes(),
+            b"rootlight.first-slice.treesitter-structural/195",
+            grammar.as_bytes(),
+        ])
+        .unwrap();
+        let current_parser = first_slice_parser_provider_hash().unwrap();
+        let previous = InputSnapshot::new(
+            [
+                InputFingerprint::new(
+                    InputKey::FileContent(file),
+                    content_hash(b"fixture-content"),
+                ),
+                InputFingerprint::new(InputKey::FilePath(file), content_hash(b"fixture-path")),
+                InputFingerprint::new(
+                    InputKey::FileParserRoute(file),
+                    content_hash(b"fixture-parser-route"),
+                ),
+                InputFingerprint::new(
+                    InputKey::GrammarVersion(
+                        derive_fact("rootlight.first-slice.grammar-input", GRAMMAR_REVISION_SEED)
+                            .id(),
+                    ),
+                    grammar,
+                ),
+                InputFingerprint::new(adapter_key, previous_parser),
+                InputFingerprint::new(
+                    InputKey::ConfigurationRevision,
+                    content_hash(b"fixture-configuration"),
+                ),
+                InputFingerprint::new(
+                    InputKey::SearchRevision,
+                    content_hash(b"rootlight.first-slice.search-schema/4"),
+                ),
+            ],
+            limits,
+            &cancellation,
+        )
+        .unwrap();
+        let current = InputSnapshot::new(
+            previous.iter().map(|input| match input.key() {
+                key if key == adapter_key => InputFingerprint::new(key, current_parser),
+                InputKey::SearchRevision => InputFingerprint::new(
+                    InputKey::SearchRevision,
+                    content_hash(SEARCH_REVISION_SEED),
+                ),
+                _ => input,
+            }),
+            limits,
+            &cancellation,
+        )
+        .unwrap();
+        let keys = incremental_input_keys(&previous, &current, &cancellation).unwrap();
+        let files = BTreeSet::from([file]);
+        let passes = first_slice_passes().unwrap();
+        let (nodes, edges) =
+            first_slice_dependency_parts(repository, &files, &keys, &passes, &cancellation)
+                .unwrap();
+        let search = *nodes
+            .iter()
+            .find(|node| node.domain() == FactDomain::Search)
+            .unwrap();
+        let graph_limits = GraphLimits::new(5, nodes.len(), edges.len()).unwrap();
+        let registry =
+            DependencyRegistry::new(passes.declarations().unwrap(), graph_limits, &cancellation)
+                .unwrap();
+        verify_first_slice_observations(&registry, &passes).unwrap();
+        let graph =
+            DependencyGraph::new(nodes, edges, &registry, graph_limits, &cancellation).unwrap();
+
+        let artifact_id = parser_artifact_id(file);
+        let artifact = ArtifactSummary::new(
+            artifact_id,
+            [FactNode::new(file_analysis_unit(file), FactDomain::Syntax)],
+            previous
+                .iter()
+                .filter(|input| parser_artifact_depends_on(input.key(), file)),
+            limits,
+            &cancellation,
+        )
+        .unwrap();
+        let parent = GenerationSummary::new(previous, [artifact], limits, &cancellation).unwrap();
+        let plan = plan_invalidation(&parent, &current, &graph, limits, &cancellation).unwrap();
+        assert_eq!(
+            plan.changes()
+                .changes()
+                .iter()
+                .map(|change| change.key())
+                .collect::<Vec<_>>(),
+            vec![InputKey::SearchRevision]
+        );
+        assert_eq!(plan.invalidated_nodes().collect::<Vec<_>>(), vec![search]);
+        assert!(plan.fallback().is_none());
+        assert_eq!(plan.artifact_decisions().len(), 1);
+        assert_eq!(plan.artifact_decisions()[0].artifact(), artifact_id);
+        assert_eq!(
+            plan.artifact_decisions()[0].kind(),
+            ArtifactDecisionKind::Reuse
+        );
+        let retained_dependencies = parent
+            .artifacts()
+            .next()
+            .unwrap()
+            .dependencies()
+            .collect::<Vec<_>>();
+        assert_eq!(retained_dependencies.len(), 6);
+        assert_eq!(
+            retained_dependencies,
+            current
+                .iter()
+                .filter(|input| parser_artifact_depends_on(input.key(), file))
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(current_parser, previous_parser);
+
+        let previous_provider_set = hash_static_components(&[
+            PROVIDER_SET_SEED,
+            previous_parser.as_bytes(),
+            DISCOVERY_MANIFEST_VERSION.as_bytes(),
+            RESOLVER_PROVIDER_VERSION.as_bytes(),
+            RESOLVER_BINARY_SEED,
+            b"rootlight.first-slice.search-schema/4",
+            INCREMENTAL_SCHEMA_VERSION.as_bytes(),
+            DERIVED_PLAN_REVISION_SEED,
+            LANGUAGE_DISPOSITION_PROVIDER_SEED,
+            SOURCE_FILE_FALLBACK_PROVIDER_SEED,
+            container_sources::REVISION,
+        ])
+        .unwrap();
+        assert_ne!(
+            first_slice_provider_set_hash().unwrap(),
+            previous_provider_set
+        );
+    }
+
+    #[test]
     fn structural_semantic_revisions_invalidate_prior_provider_identities() {
         let grammar = first_slice_grammar_revision_hash().unwrap();
         let parser = first_slice_parser_provider_hash().unwrap();
         for previous in [
             b"rootlight.first-slice.treesitter-structural/192",
             b"rootlight.first-slice.treesitter-structural/194",
-            b"rootlight.first-slice.treesitter-structural/195",
         ] {
             let previous_parser = hash_static_components(&[
                 PARSER_PROVIDER_SET_SEED,
