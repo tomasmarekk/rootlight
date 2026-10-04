@@ -6,7 +6,7 @@ and complete native compilation payload from `ionide/tree-sitter-fsharp` tag
 archive is retained in `upstream/`; its SHA-256 is
 `5c40b126e9c4641ac8775d2cd9d390503fd3ec1307531412143969f263b0f0ad`.
 `SOURCE-PROVENANCE.json` records all 129 original regular members, the selected
-payload, preserved license, and nine bounded local overrides. HTTPS acquisition
+payload, preserved license, and ten bounded local overrides. HTTPS acquisition
 and a commit-addressed URL do not independently authenticate a signed Git object
 or publisher digest. This is not the complete upstream repository: example
 submodule contents are absent and unrelated fixtures/bindings are not compiled.
@@ -89,10 +89,11 @@ allows a single-name RHS to be reinterpreted as a union by later name resolution
 The patch does not prove semantic alias-target or union resolution; lowering must
 preserve that limitation rather than treating a native node kind as typechecking.
 
-The nine overrides are the scanner, both preferred grammars, both generated
-parser/grammar-JSON pairs, and both node-type inventories. The
-`tree_sitter/{alloc,array,parser}.h` headers, Rust binding, build script and license
-remain byte-exact. Original scanner and
+The ten overrides are the scanner, both preferred grammars, both generated
+parser/grammar-JSON pairs, both node-type inventories, and one Rust binding
+line-wrap required by workspace Rustfmt. The binding's tokens and all its other
+bytes remain unchanged. The `tree_sitter/{alloc,array,parser}.h` headers, build
+script and license remain byte-exact. Original scanner and
 both preferred grammar inputs are also retained as `.orig` files. Both profiles
 were generated with the source-built `tree-sitter-generate` 0.27.0 API, ABI 15 and
 Node.js 24.11.1 as a declared preparation tool. All six original outputs for each

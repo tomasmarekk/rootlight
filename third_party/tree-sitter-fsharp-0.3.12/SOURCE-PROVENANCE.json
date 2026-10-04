@@ -822,9 +822,9 @@
       "sha256": "547812e1b76802bee3e78153e7022f0ec7be7889080fbd30ac1dbb61ea5e5502"
     },
     "bindings/rust/lib.rs": {
-      "bytes": 3095,
+      "bytes": 3099,
       "archive_mode": 436,
-      "sha256": "116961c3403a72a2579896db5dfbb8483a2df27b683806651c484db59aecd476"
+      "sha256": "6a4bcb7c05e8d087a68383815d8b825f4b07c56a531c99c7f7ae8ad5a36a26f7"
     },
     "common/scanner.h": {
       "bytes": 101260,
@@ -973,6 +973,10 @@
     "fsharp_signature/src/parser.c": {
       "original_sha256": "5b9d1ae7e270d46e284c5b5614db77a1f16d580f8280d72413d0eb59b6bb17a6",
       "local_sha256": "a8f521d9981b0f11b7569f375cd52443139b3d706ad4725780d747f4f4cf9bf4"
+    },
+    "bindings/rust/lib.rs": {
+      "original_sha256": "116961c3403a72a2579896db5dfbb8483a2df27b683806651c484db59aecd476",
+      "local_sha256": "6a4bcb7c05e8d087a68383815d8b825f4b07c56a531c99c7f7ae8ad5a36a26f7"
     }
   },
   "signature_generation": {
@@ -1018,5 +1022,12 @@
     "current_syntax_test_sha256": "d38e4ba572b111c2741d0c6f6443742da8c3324f94c99660b2afc45429ff6500"
   },
   "compilation_downloads_sources": false,
-  "compilation_generates_parser": false
+  "compilation_generates_parser": false,
+  "rust_binding_formatting": {
+    "kind": "single-line-wrap",
+    "purpose": "workspace-rustfmt-conformance",
+    "exact_replacement_independently_verified": true,
+    "rust_tokens_changed": false,
+    "other_binding_bytes_changed": false
+  }
 }

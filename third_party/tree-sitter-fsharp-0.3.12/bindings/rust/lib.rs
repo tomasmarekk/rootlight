@@ -29,7 +29,8 @@ extern "C" {
 
 /// The tree-sitter [`LanguageFn`] for this fsharp grammar.
 pub const LANGUAGE_FSHARP: LanguageFn = unsafe { LanguageFn::from_raw(tree_sitter_fsharp) };
-pub const LANGUAGE_SIGNATURE: LanguageFn = unsafe { LanguageFn::from_raw(tree_sitter_fsharp_signature) };
+pub const LANGUAGE_SIGNATURE: LanguageFn =
+    unsafe { LanguageFn::from_raw(tree_sitter_fsharp_signature) };
 
 /// The content of the [`node-types.json`][] file for this grammar.
 /// [`node-types.json`]: https://tree-sitter.github.io/tree-sitter/using-parsers/6-static-node-types.html
