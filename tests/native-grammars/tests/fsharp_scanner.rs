@@ -6,7 +6,10 @@ use std::{
     ptr::NonNull,
 };
 
-const TOKEN_COUNT: usize = 40;
+const TOKEN_COUNT: usize = 41;
+const ENUM_CASE_BAR: usize = 40;
+const INDENT: usize = 1;
+const ERROR_SENTINEL: usize = 39;
 const NEWLINE: usize = 0;
 const DEDENT: usize = 2;
 const PREPROC_IF: usize = 6;
@@ -185,7 +188,7 @@ impl Scanner {
             advanced_past_end: false,
             watchdog: false,
         };
-        // SAFETY: The opaque owner, complete 40-flag array, Input and non-panicking
+        // SAFETY: The opaque owner, complete 41-flag array, Input and non-panicking
         // callbacks are live for this call. The scanner does not retain lexer pointers.
         let found = unsafe {
             match self.profile {
@@ -372,6 +375,127 @@ fn assert_round_trip_behavior(profile: Profile, column: u32, snapshot: &[u8]) {
             assert_eq!(input.marked, Some(0));
             assert_eq!(input.offset, 0);
             assert_eq!(scanner.snapshot(), Scanner::new(profile).snapshot());
+        }
+    }
+}
+
+fn open_enum_body(scanner: &mut Scanner, column: u32) {
+    let (found, input) = scanner.scan("First", column, flags(&[INDENT]));
+    assert!(found, "{:?}: normal enum body at {column}", scanner.profile);
+    assert_eq!(input.lexer.result_symbol, u16::try_from(INDENT).unwrap());
+    assert_eq!(input.marked, Some(0));
+    assert_eq!(input.offset, 0);
+}
+
+#[test]
+fn written_enum_bars_use_bounded_offside_grace_without_changing_the_snapshot() {
+    for profile in PROFILES {
+        for newline in ["\n", "\r\n"] {
+            for column in [4_usize, 5, 6, 8] {
+                for next in [
+                    " Next = 2",
+                    "Next = 2",
+                    "``Next`` = 2",
+                    "λ = 2",
+                    "(* gap *) Next = 2",
+                ] {
+                    let source = format!("{newline}{}|{next}", " ".repeat(column));
+                    let end = source.find('|').unwrap() + 1;
+                    let mut original = Scanner::new(profile);
+                    open_enum_body(&mut original, 6);
+                    let snapshot = original.snapshot();
+                    let mut restored = Scanner::new(profile);
+                    restored.restore(&snapshot);
+                    for scanner in [&mut original, &mut restored] {
+                        let (found, input) =
+                            scanner.scan(&source, 0, flags(&[ENUM_CASE_BAR, DEDENT]));
+                        assert!(found, "{profile:?}: {source:?}");
+                        assert_eq!(
+                            input.lexer.result_symbol,
+                            u16::try_from(ENUM_CASE_BAR).unwrap()
+                        );
+                        assert_eq!(input.offset, end);
+                        assert_eq!(input.marked, Some(end));
+                        assert_eq!(scanner.snapshot(), snapshot);
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn enum_bar_frontiers_do_not_claim_operator_recovery_or_excessive_offside() {
+    for profile in PROFILES {
+        for newline in ["\n", "\r\n"] {
+            for next in ["> value", "| value", ". value", "+ value"] {
+                let source = format!("{newline}    |{next}");
+                let mut scanner = Scanner::new(profile);
+                open_enum_body(&mut scanner, 6);
+                let before = scanner.snapshot();
+                let (found, input) = scanner.scan(&source, 0, flags(&[ENUM_CASE_BAR]));
+                assert!(!found, "{profile:?}: operator {source:?}");
+                assert_ne!(
+                    input.lexer.result_symbol,
+                    u16::try_from(ENUM_CASE_BAR).unwrap()
+                );
+                assert_eq!(scanner.snapshot(), before);
+            }
+            let mut scanner = Scanner::new(profile);
+            open_enum_body(&mut scanner, 6);
+            let reset = Scanner::new(profile).snapshot();
+            let (found, input) = scanner.scan(
+                &format!("{newline}   | Next = 2"),
+                0,
+                flags(&[ENUM_CASE_BAR, DEDENT]),
+            );
+            assert!(found);
+            assert_eq!(input.lexer.result_symbol, u16::try_from(DEDENT).unwrap());
+            assert_eq!(input.marked, Some(0));
+            assert_eq!(scanner.snapshot(), reset);
+            for recovery in [false, true] {
+                let mut scanner = Scanner::new(profile);
+                open_enum_body(&mut scanner, 6);
+                let before = scanner.snapshot();
+                let tokens = if recovery {
+                    flags(&[ENUM_CASE_BAR, ERROR_SENTINEL])
+                } else {
+                    flags(&[PREPROC_INACTIVE])
+                };
+                let (found, input) = scanner.scan(&format!("{newline}    | Next = 2"), 0, tokens);
+                assert_ne!(
+                    input.lexer.result_symbol,
+                    u16::try_from(ENUM_CASE_BAR).unwrap()
+                );
+                if recovery {
+                    assert!(found);
+                    assert_eq!(input.lexer.result_symbol, u16::try_from(DEDENT).unwrap());
+                    assert_eq!(scanner.snapshot(), reset);
+                } else {
+                    assert!(!found);
+                    assert_eq!(scanner.snapshot(), before);
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn recovery_bar_uses_the_existing_normal_offside_closure() {
+    for profile in PROFILES {
+        for newline in ["\n", "\r\n"] {
+            let mut scanner = Scanner::new(profile);
+            open_enum_body(&mut scanner, 6);
+            let reset = Scanner::new(profile).snapshot();
+            let (found, input) = scanner.scan(
+                &format!("{newline}    | Next = 2"),
+                0,
+                flags(&[ERROR_SENTINEL]),
+            );
+            assert!(found);
+            assert_eq!(input.lexer.result_symbol, u16::try_from(DEDENT).unwrap());
+            assert_eq!(input.marked, Some(0));
+            assert_eq!(scanner.snapshot(), reset);
         }
     }
 }

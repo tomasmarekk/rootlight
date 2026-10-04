@@ -108,6 +108,18 @@ allows a single-name RHS to be reinterpreted as a union by later name resolution
 The patch does not prove semantic alias-target or union resolution; lowering must
 preserve that limitation rather than treating a native node kind as typechecking.
 
+Repeated enum cases preserve the compiler's bounded offside frontier: a written
+case bar may sit up to two columns left of the first scoped case. An external
+separator, available only through the enum grammar, is emitted before ordinary
+dedentation. It aliases the existing anonymous bar rather than adding a public
+node, and the internal separator remains available for recovery. Operator bars,
+error-mode scanning, excessive outdent and the enclosing module floor retain
+their existing behavior. The scanner snapshot codec and layout kinds are
+unchanged. Controls pin direct case names and constant spellings, comments,
+Unicode byte positions, signature-only declarations, incremental edit/restore
+equivalence and independent following declarations. This is written syntax and
+source containment, not constant evaluation or semantic enum resolution.
+
 The ten overrides are the scanner, both preferred grammars, both generated
 parser/grammar-JSON pairs, both node-type inventories, and one Rust binding
 line-wrap required by workspace Rustfmt. The binding's tokens and all its other

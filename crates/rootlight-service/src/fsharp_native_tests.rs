@@ -2,11 +2,11 @@
 //! Structural declarations do not establish cross-file binding or execution.
 
 use super::*;
-use rootlight_ir::{EntityKind, OccurrenceRole, OccurrenceTarget};
+use rootlight_ir::{ContainerRef, EntityKind, OccurrenceRole, OccurrenceTarget, RelationEndpoint};
 use std::fs;
 
-const IMPLEMENTATION: &str = "module Sample.Root\nopen System\nmodule Nested =\n    let value = 3\n    let ``value with spaces`` = value\n    let add x y = x + y\n    let rec first n = n + 1\n    and second n = n + 2\ntype Record = { Name: string; mutable Count: int }\ntype Choice = | Empty | Named of name: string\ntype Alias = System.String\ntype Container(seed: int) =\n    member this.Read amount = seed + amount\n    member this.Value = seed\n    new () = Container(0)\n";
-const SIGNATURE: &str = "module Sample.Root\nopen System\nmodule Nested =\n    val value: int\n    val ``value with spaces``: int\n    val add: int -> int -> int\ntype Record = { Name: string; mutable Count: int }\ntype Choice = | Empty | Named of name: string\ntype Alias = System.String\ntype Container =\n    new: seed:int -> Container\n    member Read: amount:int -> int\n    member Value: int with get\n";
+const IMPLEMENTATION: &str = "module Sample.Root\nopen System\nmodule Nested =\n    let value = 3\n    let ``value with spaces`` = value\n    let add x y = x + y\n    let rec first n = n + 1\n    and second n = n + 2\ntype Record = { Name: string; mutable Count: int }\ntype Choice = | Empty | Named of name: string\ntype Sample =\n      First = 0\n    | Next = 1\ntype Alias = System.String\ntype Container(seed: int) =\n    member this.Read amount = seed + amount\n    member this.Value = seed\n    new () = Container(0)\n";
+const SIGNATURE: &str = "module Sample.Root\nopen System\nmodule Nested =\n    val value: int\n    val ``value with spaces``: int\n    val add: int -> int -> int\ntype Record = { Name: string; mutable Count: int }\ntype Choice = | Empty | Named of name: string\ntype Sample =\n      First = 0\n    | Next = 1\ntype Alias = System.String\ntype Container =\n    new: seed:int -> Container\n    member Read: amount:int -> int\n    member Value: int with get\n";
 
 fn deadline() -> Cancellation {
     Cancellation::with_deadline(Instant::now().checked_add(Duration::from_secs(30)).unwrap())
@@ -128,6 +128,9 @@ fn assert_generation(
             ("``value with spaces``", EntityKind::Variable),
             ("Record", EntityKind::Struct),
             ("Choice", EntityKind::Union),
+            ("Sample", EntityKind::Enum),
+            ("First", EntityKind::Constant),
+            ("Next", EntityKind::Constant),
             ("Alias", EntityKind::TypeAlias),
             ("Name", EntityKind::Field),
             ("Count", EntityKind::Field),
@@ -200,6 +203,24 @@ fn assert_generation(
                     .iter()
                     .any(|hit| hit.symbol == Some(entity.id) && hit.file == file.id)
             );
+        }
+        let enumeration = document
+            .entities
+            .iter()
+            .find(|entity| entity.language == language && entity.canonical_name == "Sample")
+            .unwrap();
+        for name in ["First", "Next"] {
+            let case = document
+                .entities
+                .iter()
+                .find(|entity| entity.language == language && entity.canonical_name == name)
+                .unwrap();
+            assert_eq!(case.container, Some(ContainerRef::Entity(enumeration.id)));
+            assert!(document.relations.iter().any(|relation| {
+                relation.predicate == RelationPredicate::Contains
+                    && relation.subject == RelationEndpoint::Entity(enumeration.id)
+                    && relation.object == RelationEndpoint::Entity(case.id)
+            }));
         }
         for site in document
             .occurrences

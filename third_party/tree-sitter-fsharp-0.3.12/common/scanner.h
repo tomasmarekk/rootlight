@@ -45,7 +45,8 @@ enum TokenType {
   PREPROC_INACTIVE,
   ELEM_SEP,
   BRACE_INDENT,
-  ERROR_SENTINEL
+  ERROR_SENTINEL,
+  ENUM_CASE_BAR
 };
 
 typedef enum {
@@ -710,7 +711,7 @@ static bool scan(Scanner *scanner, TSLexer *lexer, const bool *valid_symbols) {
     // the enum but is a structural indent token like INDENT, so it must count
     // here — otherwise a state where only BRACE_INDENT is valid (right after a
     // record/CE '{') bails out and the token is never emitted.
-    if (valid_symbols[BRACE_INDENT]) {
+    if (valid_symbols[BRACE_INDENT] || valid_symbols[ENUM_CASE_BAR]) {
       any_structural_valid = true;
     }
     if (!any_structural_valid) {
@@ -1995,8 +1996,31 @@ static bool scan(Scanner *scanner, TSLexer *lexer, const bool *valid_symbols) {
   } else if (is_infix_op_start(lexer)) {
     found_start_of_infix_op = true;
   } else if (lexer->lookahead == '|') {
-    skip(lexer);
+    // A type-case separator may sit two columns left of the body's first
+    // case. Consume its written bar before ordinary offside closure, but only
+    // in the grammar's enum continuation state; expression bars stay unchanged.
+    uint32_t enum_floor = scanner->indents.size > 0
+      ? (uint32_t)peek_indent_length(scanner) : 0;
+    bool enum_bar_candidate = valid_symbols[ENUM_CASE_BAR] &&
+      !valid_symbols[ERROR_SENTINEL] &&
+      (!found_end_of_line || indent_length >= enum_floor ||
+       (scanner->indents.size > 1 &&
+        peek_indent_kind(scanner) == INDENT_NORMAL &&
+        enum_floor - indent_length <= 2));
+    if (enum_bar_candidate) {
+      advance(lexer);
+    } else {
+      skip(lexer);
+    }
     int32_t after_pipe = lexer->lookahead;
+    if (enum_bar_candidate &&
+        (after_pipe == ' ' || after_pipe == '\t' || after_pipe == '\r' ||
+         after_pipe == '\n' || after_pipe == '`' || after_pipe == '(' ||
+         is_word_char(after_pipe) || after_pipe >= 0x80)) {
+      lexer->mark_end(lexer);
+      lexer->result_symbol = ENUM_CASE_BAR;
+      return true;
+    }
     if (after_pipe == ']' || after_pipe == '}') {
       found_bracket_end = true;
     } else if (after_pipe == '>') {

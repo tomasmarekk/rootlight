@@ -20,8 +20,8 @@ use rootlight_cancel::{Cancellation, CancellationReason};
 use rootlight_ids::{GenerationId, content_hash, derive_repository};
 use rootlight_ir::{
     AnalysisTier, BuildContextIdentity, ContainerRef, CoverageStatus, EntityKind, ExtensionSupport,
-    FactDomain, IrLimits, RelationPredicate, SkippedRegionReason, SourceRef, SourceSpan,
-    validate_ir_document,
+    FactDomain, IrLimits, OccurrenceRole, OccurrenceTarget, RelationEndpoint, RelationPredicate,
+    SkippedRegionReason, SourceRef, SourceSpan, validate_ir_document,
 };
 use rootlight_vfs::{RelativePath, RepositoryRoot, SourceSnapshot};
 use tempfile::{TempDir, tempdir_in};
@@ -278,6 +278,151 @@ fn both_native_profiles_retain_exact_declaration_names_and_no_call_captures() {
             assert!(document.entities.iter().any(
                 |entity| entity.canonical_name == "add" && entity.kind == EntityKind::Variable
             ));
+        }
+    }
+}
+
+#[test]
+fn shallower_enum_case_bars_preserve_exact_symbols_and_enum_ownership() {
+    for language in ["fsharp", "fsharp-signature"] {
+        for nested in [false, true] {
+            let (owner, prefix, declaration_indent, first_indent, bar_indent) = if nested {
+                (
+                    "Nested",
+                    "module EnumLayout\nmodule Nested =\n",
+                    "    ",
+                    "          ",
+                    "        ",
+                )
+            } else {
+                ("EnumLayout", "module EnumLayout\n", "", "      ", "    ")
+            };
+            let enumeration = format!("State =\n{first_indent}First = 0\n{bar_indent}| Next = 1");
+            let following = if language == "fsharp-signature" {
+                "val following: int"
+            } else {
+                "let following = 30"
+            };
+            let canonical = format!(
+                "{prefix}{declaration_indent}type {enumeration}\n{declaration_indent}{following}"
+            );
+            for newline in ["\n", "\r\n"] {
+                for trailing_newline in [false, true] {
+                    let mut text = canonical.replace('\n', newline);
+                    if trailing_newline {
+                        text.push_str(newline);
+                    }
+                    let fixture = Fixture::new(language, &text);
+                    let parsed = fixture.parse(4096, &deadline()).unwrap();
+                    assert_eq!(
+                        parsed.report().coverage().status(),
+                        CoverageStatus::Complete
+                    );
+                    assert!(parsed.diagnostics().is_empty());
+                    let enum_written = enumeration.replace('\n', newline);
+                    for (label, written) in [
+                        ("fsharp.enum.declaration", enum_written.as_str()),
+                        ("fsharp.enum_constant.declaration", "First = 0"),
+                        ("fsharp.enum_constant.declaration", "Next = 1"),
+                    ] {
+                        assert_eq!(
+                            parsed
+                                .facts()
+                                .iter()
+                                .filter(|fact| fact.syntax_kind().as_str() == label
+                                    && fact.span() == fixture.span(written))
+                                .count(),
+                            1,
+                            "{language}: {label} {written}"
+                        );
+                    }
+                    assert_eq!(
+                        parsed
+                            .facts()
+                            .iter()
+                            .filter(|fact| fact.syntax_kind().as_str()
+                                == "fsharp.enum_constant.declaration")
+                            .count(),
+                        2
+                    );
+                    assert!(!parsed.facts().iter().any(|fact| {
+                        let label = fact.syntax_kind().as_str();
+                        label.ends_with(".call") || label.ends_with(".reference")
+                    }));
+                    let output = fixture.analyze();
+                    let document = output.document();
+                    let unique_entity = |name: &str, kind| {
+                        let matches: Vec<_> = document
+                            .entities
+                            .iter()
+                            .filter(|entity| entity.canonical_name == name && entity.kind == kind)
+                            .collect();
+                        assert_eq!(matches.len(), 1, "{language}: {name} {kind:?}");
+                        matches[0]
+                    };
+                    let module = unique_entity(owner, EntityKind::Module);
+                    let enumeration = unique_entity("State", EntityKind::Enum);
+                    assert_eq!(enumeration.container, Some(ContainerRef::Entity(module.id)));
+                    assert_eq!(
+                        enumeration.evidence.source.as_ref().unwrap().span(),
+                        fixture.span(&enum_written)
+                    );
+                    for (name, written) in [("First", "First = 0"), ("Next", "Next = 1")] {
+                        let case = unique_entity(name, EntityKind::Constant);
+                        assert_eq!(case.container, Some(ContainerRef::Entity(enumeration.id)));
+                        let reference = case.evidence.source.as_ref().unwrap();
+                        assert_eq!(reference.span(), fixture.span(written));
+                        assert_eq!(reference.repository(), fixture.source.repository());
+                        assert_eq!(reference.generation(), fixture.source.generation());
+                        assert_eq!(reference.content_hash(), fixture.source.content_hash());
+                        let definitions: Vec<_> = document
+                            .occurrences
+                            .iter()
+                            .filter(|site| {
+                                site.role == OccurrenceRole::Definition
+                                    && site.target
+                                        == (OccurrenceTarget::Resolved { symbol: case.id })
+                            })
+                            .collect();
+                        assert_eq!(definitions.len(), 1, "{language}: {name}");
+                        assert_eq!(definitions[0].source.span(), fixture.span(name));
+                        assert_eq!(definitions[0].enclosing, Some(enumeration.id));
+                        assert!(document.relations.iter().any(|relation| {
+                            relation.predicate == RelationPredicate::Contains
+                                && relation.subject == RelationEndpoint::Entity(enumeration.id)
+                                && relation.object == RelationEndpoint::Entity(case.id)
+                                && relation.evidence.source.as_ref().unwrap().span()
+                                    == fixture.span(written)
+                        }));
+                    }
+                    let following = unique_entity("following", EntityKind::Variable);
+                    assert_eq!(following.container, Some(ContainerRef::Entity(module.id)));
+                    for (entity, name) in [(enumeration, "State"), (following, "following")] {
+                        let definitions: Vec<_> = document
+                            .occurrences
+                            .iter()
+                            .filter(|site| {
+                                site.role == OccurrenceRole::Definition
+                                    && site.target
+                                        == (OccurrenceTarget::Resolved { symbol: entity.id })
+                            })
+                            .collect();
+                        assert_eq!(definitions.len(), 1, "{language}: {name}");
+                        assert_eq!(definitions[0].source.span(), fixture.span(name));
+                        assert_eq!(definitions[0].enclosing, Some(module.id));
+                    }
+                    assert!(!document.skipped_regions.iter().any(|gap| matches!(
+                        gap.reason,
+                        SkippedRegionReason::ParseError | SkippedRegionReason::AdapterFailure
+                    )));
+                    assert!(document.relations.iter().all(|relation| matches!(
+                        relation.predicate,
+                        RelationPredicate::Contains
+                            | RelationPredicate::Declares
+                            | RelationPredicate::DefinesAt
+                    )));
+                }
+            }
         }
     }
 }

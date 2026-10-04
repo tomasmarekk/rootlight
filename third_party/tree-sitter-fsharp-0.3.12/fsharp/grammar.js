@@ -105,6 +105,7 @@ module.exports = grammar({
     $._brace_indent, // opens a '{...}' record/CE field block: closed by '}', under-indented lines still emit NEWLINE so items keep separating
 
     $._error_sentinel, // unused token to detect parser errors in external parser.
+    $._enum_case_bar,
   ],
 
   conflicts: ($) => [
@@ -1951,7 +1952,7 @@ module.exports = grammar({
       ),
 
     enum_type_cases: ($) =>
-      seq(optional("|"), $.enum_type_case, repeat(seq("|", $.enum_type_case))),
+      seq(optional("|"), $.enum_type_case, repeat(seq(choice("|", alias($._enum_case_bar, "|")), $.enum_type_case))),
 
     enum_type_case: ($) => seq($.identifier, "=", $.const),
 
