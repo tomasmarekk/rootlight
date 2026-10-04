@@ -5,6 +5,7 @@
 
 use std::{
     collections::BTreeSet,
+    fmt::Write as _,
     fs,
     path::Path,
     sync::Arc,
@@ -14,7 +15,7 @@ use std::{
 use rootlight_adapter_sdk::{
     AdapterError, AnalysisLimits, BatchThresholds, EncodingId, GenerationBoundSnapshot,
     IncludedRange, LanguageId, MemoryAdmissionPolicy, MemoryAdmissionStatus, ParseRequest,
-    RequestError, ResourceKind, SinkError, StreamLimits, execute_parse,
+    RequestError, ResourceKind, SinkError, StreamLimits, SyntaxFactKind, execute_parse,
 };
 use rootlight_adapter_treesitter::{
     GrammarRegistry, ParserSettings, ReuseInvalidation, ReuseStatus, RuntimeConfig, SourceEdit,
@@ -1067,7 +1068,136 @@ fn node_and_depth_limits_commit_explicit_partial_coverage() {
 }
 
 #[test]
-fn syntax_budgets_abort_parser_work_before_full_tree_materialization() {
+fn wide_shallow_sources_preserve_native_work_progress() {
+    let text = wide_shallow_fsharp_source();
+    assert!(text.len() < MAX_SOURCE_BYTES);
+
+    let mut parser = tree_sitter::Parser::new();
+    parser
+        .set_language(&tree_sitter_fsharp::LANGUAGE_FSHARP.into())
+        .unwrap();
+    let mut checks = 0usize;
+    let mut maximum_offset = 0usize;
+    let mut stalled_checks = 0usize;
+    let mut maximum_stalled_checks = 0usize;
+    let cancellation = deadline(Duration::from_secs(60));
+    let mut progress = |state: &tree_sitter::ParseState| {
+        if cancellation.check().is_err() {
+            return std::ops::ControlFlow::Break(());
+        }
+        checks += 1;
+        if state.current_byte_offset() > maximum_offset {
+            maximum_offset = state.current_byte_offset();
+            stalled_checks = 0;
+        } else {
+            stalled_checks += 1;
+            maximum_stalled_checks = maximum_stalled_checks.max(stalled_checks);
+        }
+        std::ops::ControlFlow::Continue(())
+    };
+    let mut input = |offset: usize, _: tree_sitter::Point| {
+        let end = offset.saturating_add(4096).min(text.len());
+        text.as_bytes().get(offset..end).unwrap_or_default()
+    };
+    let tree = parser
+        .parse_with_options(
+            &mut input,
+            None,
+            Some(tree_sitter::ParseOptions::new().progress_callback(&mut progress)),
+        )
+        .unwrap();
+    assert!(!tree.root_node().has_error());
+    let mut cursor = tree.walk();
+    let mut nodes = 0usize;
+    let mut depth = 1usize;
+    let mut maximum_depth = depth;
+    loop {
+        nodes += 1;
+        maximum_depth = maximum_depth.max(depth);
+        if cursor.goto_first_child() {
+            depth += 1;
+            continue;
+        }
+        loop {
+            if cursor.goto_next_sibling() {
+                break;
+            }
+            if !cursor.goto_parent() {
+                break;
+            }
+            depth -= 1;
+        }
+        if depth == 1 {
+            break;
+        }
+    }
+    assert!(nodes < 1_048_576);
+    assert!(maximum_depth < 16);
+    assert!(checks > 16 * 1024);
+    assert!(maximum_stalled_checks < 16 * 1024);
+    let fixture = Fixture::new("wide-source.fs", text.as_bytes());
+    let limits = limits(MAX_SOURCE_BYTES, 1_048_576, 16);
+    let provider = TreeSitterProvider::new(
+        RuntimeConfig::new(
+            MAX_SOURCE_BYTES,
+            1_048_576,
+            128,
+            16,
+            64,
+            1,
+            2 * 1024 * 1024,
+            ParserSettings::new(4096).unwrap(),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    let request = request(
+        &fixture.snapshot,
+        &fixture.source,
+        &limits,
+        "fsharp",
+        Vec::new(),
+    );
+    let required = provider
+        .required_syntax_fact_count(&request, &deadline(Duration::from_secs(60)))
+        .expect("a width-only source fits the requested syntax depth");
+    assert!(required > 0);
+    let output = execute_parse(
+        &provider,
+        &request,
+        MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
+        &deadline(Duration::from_secs(60)),
+    )
+    .expect("the same width-only request fully parses through the SDK");
+    assert_eq!(
+        output.report().coverage().status(),
+        CoverageStatus::Complete
+    );
+    assert_eq!(
+        output.report().coverage().covered_source_bytes(),
+        text.len()
+    );
+    assert!(output.diagnostics().is_empty());
+    assert_eq!(output.report().resources().syntax_nodes(), nodes);
+    let start = u64::try_from(text.find("following").unwrap()).unwrap();
+    let name = SourceSpan::new(fixture.snapshot.file(), start, start + 9).unwrap();
+    assert_eq!(
+        output
+            .facts()
+            .iter()
+            .filter(|fact| {
+                fact.kind() == SyntaxFactKind::Occurrence
+                    && fact.syntax_kind().as_str() == "fsharp.name.definition"
+                    && fact.span() == name
+            })
+            .count(),
+        1
+    );
+    assert_eq!(provider.stats().checked_out_parsers, 0);
+}
+
+#[test]
+fn node_budget_aborts_parser_work_before_full_tree_materialization() {
     let mut wide_source = b"fn wide() {\n".to_vec();
     wide_source.extend(std::iter::repeat_n(b"let value = 1;\n".as_slice(), 20_000).flatten());
     wide_source.extend_from_slice(b"}\n");
@@ -1093,7 +1223,10 @@ fn syntax_budgets_abort_parser_work_before_full_tree_materialization() {
             if code.as_str() == "syntax-node-parse-work-limit"
     ));
     assert_eq!(node_provider.stats().cache.entries, 0);
+}
 
+#[test]
+fn advancing_deep_source_commits_the_inspected_depth_boundary() {
     let mut deep_source = b"fn deep() {".to_vec();
     deep_source.extend(std::iter::repeat_n(b'(', 20_000));
     deep_source.push(b'1');
@@ -1110,17 +1243,82 @@ fn syntax_budgets_abort_parser_work_before_full_tree_materialization() {
         Vec::new(),
     );
 
+    // Byte progress is not syntax nesting; the finished tree still undergoes
+    // depth-bounded inspection before any structural facts can be extracted.
+    let output = execute_parse(
+        &depth_provider,
+        &depth_request,
+        MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
+        &deadline(Duration::from_secs(30)),
+    )
+    .expect("advancing work reaches the independent syntax-depth boundary");
+    assert_eq!(output.report().coverage().status(), CoverageStatus::Bounded);
+    assert!(output.report().resources().max_syntax_depth() <= 1);
+    assert!(output.report().resources().syntax_nodes() <= 100_000);
+    assert_eq!(output.report().coverage().covered_source_bytes(), 0);
+    assert_eq!(output.diagnostics().len(), 1);
+    assert_eq!(
+        output.diagnostics()[0].code().as_str(),
+        "syntax-depth-limit"
+    );
+    assert!(output.facts().is_empty());
+    assert_eq!(depth_provider.stats().cache.entries, 0);
+    assert_eq!(depth_provider.stats().checked_out_parsers, 0);
+}
+
+#[test]
+fn stalled_native_work_aborts_and_returns_the_parser_for_recovery() {
+    let text = wide_shallow_fsharp_source();
+    let fixture = Fixture::new("stalled-source.fs", text.as_bytes());
+    let limited = limits(MAX_SOURCE_BYTES, 1_048_576, 1);
+    let provider = provider(MAX_SOURCE_BYTES, 1_048_576, 128, 2 * 1024 * 1024);
+    let limited_request = request(
+        &fixture.snapshot,
+        &fixture.source,
+        &limited,
+        "fsharp",
+        Vec::new(),
+    );
     assert!(matches!(
         execute_parse(
-            &depth_provider,
-            &depth_request,
+            &provider,
+            &limited_request,
             MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
-            &deadline(Duration::from_secs(30)),
+            &deadline(Duration::from_secs(60)),
         ),
         Err(AdapterError::ProviderFailed { code })
             if code.as_str() == "syntax-depth-parse-work-limit"
     ));
-    assert_eq!(depth_provider.stats().cache.entries, 0);
+    assert_eq!(provider.stats().cache.entries, 0);
+    assert_eq!(provider.stats().checked_out_parsers, 0);
+    assert_eq!(provider.stats().pooled_parsers, 1);
+    let recovered = Fixture::new("recovered.fs", b"module Recovered\nlet following = 30\n");
+    let recovered_limits = limits(MAX_SOURCE_BYTES, 1_048_576, 16);
+    let recovered_request = request(
+        &recovered.snapshot,
+        &recovered.source,
+        &recovered_limits,
+        "fsharp",
+        Vec::new(),
+    );
+    let output = execute_parse(
+        &provider,
+        &recovered_request,
+        MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
+        &deadline(Duration::from_secs(30)),
+    )
+    .expect("a stalled native abort does not poison the pooled parser");
+    assert_eq!(
+        output.report().coverage().status(),
+        CoverageStatus::Complete
+    );
+    assert_eq!(
+        output.report().coverage().covered_source_bytes(),
+        recovered.snapshot.content().len()
+    );
+    assert!(output.diagnostics().is_empty());
+    assert_eq!(provider.stats().checked_out_parsers, 0);
+    assert_eq!(provider.stats().pooled_parsers, 1);
 }
 
 #[test]
@@ -1290,6 +1488,20 @@ fn deadline_aborts_a_parser_bomb_and_releases_the_permit() {
         (stats.pooled_parsers, stats.available_parsers),
         (0, 0) | (1, 1)
     ));
+}
+
+fn wide_shallow_fsharp_source() -> String {
+    let mut text = String::from("module WideSource\n");
+    let row = format!("    {}\n", "1; -1; 0; -2; ".repeat(10));
+    for index in 0..250 {
+        writeln!(&mut text, "let values{index} = [|").unwrap();
+        for _ in 0..25 {
+            text.push_str(&row);
+        }
+        text.push_str("    0\n|]\n");
+    }
+    text.push_str("let following = 30\n");
+    text
 }
 
 fn provider(

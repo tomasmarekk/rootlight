@@ -105,9 +105,9 @@ const MIN_SYNTAX_KIND_BYTES: usize = 1;
 const MIN_SYNTAX_FACT_OUTPUT_BYTES: usize = LOGICAL_SYNTAX_FACT_BYTES + MIN_SYNTAX_KIND_BYTES;
 const CANCELLATION_CHECK_INTERVAL: usize = 256;
 const CANCELLATION_BYTE_INTERVAL: usize = 64 * 1024;
-// The progress callback is the safe API's only parser-action checkpoint. These
-// multipliers allow normal grammar overhead while keeping native work
-// proportional to both caller-owned syntax budgets.
+// The safe API exposes action checkpoints, not native stack depth. Node credit
+// bounds total work; depth credit bounds work without new byte progress. Actual
+// syntax depth is checked on the completed tree.
 const PARSE_PROGRESS_CHECKS_PER_SYNTAX_NODE: usize = 4;
 const PARSE_PROGRESS_CHECKS_PER_SYNTAX_DEPTH: usize = 1024;
 static NEXT_PROVIDER_ID: AtomicU64 = AtomicU64::new(1);
@@ -547,18 +547,23 @@ impl TreeSitterProvider {
         let envelope = context
             .as_ref()
             .and_then(|context| context.expression_envelope);
-        let mut callback_limited = false;
-        let mut progress_checks = 0usize;
-        let mut progress = |_: &tree_sitter::ParseState| match cancellation.check() {
+        let mut callback_failure = None;
+        let mut native_progress = NativeParseProgress::default();
+        let mut progress = |state: &tree_sitter::ParseState| match cancellation.check() {
             Ok(()) => {
-                progress_checks = progress_checks.saturating_add(1);
+                let native_failure =
+                    native_progress.record(state.current_byte_offset(), parse_work_limit);
                 let shared_exhausted = context.as_mut().is_some_and(|context| {
                     context.remaining_progress_checks =
                         context.remaining_progress_checks.saturating_sub(1);
                     context.remaining_progress_checks == 0
                 });
-                if progress_checks >= parse_work_limit.max_progress_checks || shared_exhausted {
-                    callback_limited = true;
+                callback_failure = if shared_exhausted {
+                    Some(parse_work_limit.failure_code)
+                } else {
+                    native_failure
+                };
+                if callback_failure.is_some() {
                     ControlFlow::Break(())
                 } else {
                     ControlFlow::Continue(())
@@ -589,9 +594,9 @@ impl TreeSitterProvider {
             cancellation.check()?;
             return Err(provider_failure("parse-cancelled"));
         }
-        if callback_limited {
+        if let Some(code) = callback_failure {
             parser.reset();
-            return Err(provider_failure(parse_work_limit.failure_code));
+            return Err(provider_failure(code));
         }
         let tree = tree.ok_or_else(|| provider_failure("parse-aborted"))?;
         cancellation.check()?;
@@ -2484,8 +2489,12 @@ struct NativeParseContext {
 
 #[derive(Debug, Clone, Copy)]
 struct ParseWorkLimit {
+    // Embedded children retain the original aggregate credit independently of
+    // byte progress, so many advancing child parses cannot replenish it.
     max_progress_checks: usize,
     failure_code: &'static str,
+    max_total_progress_checks: usize,
+    max_stalled_progress_checks: usize,
 }
 
 impl ParseWorkLimit {
@@ -2496,12 +2505,45 @@ impl ParseWorkLimit {
             Self {
                 max_progress_checks: node_checks.max(1),
                 failure_code: "syntax-node-parse-work-limit",
+                max_total_progress_checks: node_checks.max(1),
+                max_stalled_progress_checks: depth_checks.max(1),
             }
         } else {
             Self {
                 max_progress_checks: depth_checks.max(1),
                 failure_code: "syntax-depth-parse-work-limit",
+                max_total_progress_checks: node_checks.max(1),
+                max_stalled_progress_checks: depth_checks.max(1),
             }
+        }
+    }
+}
+
+#[derive(Debug, Default)]
+struct NativeParseProgress {
+    total_checks: usize,
+    high_watermark_byte: usize,
+    stalled_checks: usize,
+}
+
+impl NativeParseProgress {
+    fn record(&mut self, byte_offset: usize, limit: ParseWorkLimit) -> Option<&'static str> {
+        self.total_checks = self.total_checks.saturating_add(1);
+        if byte_offset > self.high_watermark_byte {
+            self.high_watermark_byte = byte_offset;
+            self.stalled_checks = 0;
+        } else {
+            // Revisiting an earlier parse position cannot restore work credit.
+            // Native reductions and tree balancing may retain the same offset;
+            // this guards stalled work, while inspection checks actual depth.
+            self.stalled_checks = self.stalled_checks.saturating_add(1);
+        }
+        if self.total_checks >= limit.max_total_progress_checks {
+            Some("syntax-node-parse-work-limit")
+        } else if self.stalled_checks >= limit.max_stalled_progress_checks {
+            Some("syntax-depth-parse-work-limit")
+        } else {
+            None
         }
     }
 }
@@ -2857,6 +2899,114 @@ fn require_provider_limit(
 mod tests {
     use super::*;
     use std::{cell::Cell, time::Duration};
+
+    #[test]
+    fn native_work_allows_monotonic_progress_but_keeps_the_total_limit() {
+        let limit = ParseWorkLimit::from_syntax_limits(1024, 1);
+        let mut progress = NativeParseProgress::default();
+        for offset in 1..limit.max_total_progress_checks {
+            assert_eq!(progress.record(offset, limit), None);
+        }
+        assert_eq!(progress.stalled_checks, 0);
+        assert!(progress.total_checks > limit.max_stalled_progress_checks);
+        assert_eq!(
+            progress.record(limit.max_total_progress_checks, limit),
+            Some("syntax-node-parse-work-limit")
+        );
+    }
+
+    #[test]
+    fn native_work_rejects_equal_and_backtracking_offsets_without_refunding_credit() {
+        let limit = ParseWorkLimit::from_syntax_limits(1024, 1);
+        for offsets in [[0, 0, 0], [9, 1, 10]] {
+            let mut progress = NativeParseProgress::default();
+            assert_eq!(progress.record(10, limit), None);
+            for index in 0..limit.max_stalled_progress_checks - 1 {
+                assert_eq!(progress.record(offsets[index % offsets.len()], limit), None);
+            }
+            assert_eq!(progress.high_watermark_byte, 10);
+            assert_eq!(
+                progress.record(10, limit),
+                Some("syntax-depth-parse-work-limit")
+            );
+        }
+    }
+
+    #[test]
+    fn native_work_resets_only_stalled_credit_after_a_new_high_watermark() {
+        let limit = ParseWorkLimit::from_syntax_limits(1024, 1);
+        let mut progress = NativeParseProgress::default();
+        assert_eq!(progress.record(10, limit), None);
+        for _ in 0..limit.max_stalled_progress_checks - 2 {
+            assert_eq!(progress.record(9, limit), None);
+        }
+        assert_eq!(progress.record(10, limit), None);
+        assert_eq!(
+            progress.stalled_checks,
+            limit.max_stalled_progress_checks - 1
+        );
+        let total_before = progress.total_checks;
+        assert_eq!(progress.record(11, limit), None);
+        assert_eq!(progress.stalled_checks, 0);
+        assert_eq!(progress.total_checks, total_before + 1);
+        for _ in 0..limit.max_stalled_progress_checks - 1 {
+            assert_eq!(progress.record(10, limit), None);
+        }
+        assert_eq!(
+            progress.record(11, limit),
+            Some("syntax-depth-parse-work-limit")
+        );
+    }
+
+    #[test]
+    fn native_work_saturates_counters_and_preserves_shared_limit_selection() {
+        let saturated = ParseWorkLimit::from_syntax_limits(usize::MAX, usize::MAX);
+        assert_eq!(saturated.max_progress_checks, usize::MAX);
+        assert_eq!(saturated.max_total_progress_checks, usize::MAX);
+        assert_eq!(saturated.max_stalled_progress_checks, usize::MAX);
+        assert_eq!(saturated.failure_code, "syntax-node-parse-work-limit");
+        let mut total = NativeParseProgress {
+            total_checks: usize::MAX - 1,
+            ..NativeParseProgress::default()
+        };
+        assert_eq!(
+            total.record(1, saturated),
+            Some("syntax-node-parse-work-limit")
+        );
+        assert_eq!(
+            total.record(2, saturated),
+            Some("syntax-node-parse-work-limit")
+        );
+        assert_eq!(total.total_checks, usize::MAX);
+        let mut stalled = NativeParseProgress {
+            stalled_checks: usize::MAX - 1,
+            ..NativeParseProgress::default()
+        };
+        assert_eq!(
+            stalled.record(0, saturated),
+            Some("syntax-depth-parse-work-limit")
+        );
+        assert_eq!(
+            stalled.record(0, saturated),
+            Some("syntax-depth-parse-work-limit")
+        );
+        assert_eq!(stalled.stalled_checks, usize::MAX);
+        for (nodes, depth, shared_checks, code) in [
+            (1, 64, 4, "syntax-node-parse-work-limit"),
+            (1024, 1, 1024, "syntax-depth-parse-work-limit"),
+            (256, 1, 1024, "syntax-node-parse-work-limit"),
+        ] {
+            let limit = ParseWorkLimit::from_syntax_limits(nodes, depth);
+            assert_eq!(limit.max_progress_checks, shared_checks);
+            assert_eq!(limit.failure_code, code);
+        }
+        let minimum = ParseWorkLimit::from_syntax_limits(0, 0);
+        assert_eq!(minimum.max_progress_checks, 1);
+        assert_eq!(
+            NativeParseProgress::default().record(1, minimum),
+            Some("syntax-node-parse-work-limit")
+        );
+    }
 
     #[test]
     fn providers_share_immutable_queries_but_keep_runtime_state_private() {

@@ -227,7 +227,7 @@ const PROJECT_FACTS_TRUNCATED_CODE: &str = "project-adapter-facts-truncated";
 const PROJECT_FACTS_TRUNCATED_MESSAGE: &str =
     "additional project semantic facts were omitted by aggregate resource limits";
 const AGGREGATE_DIAGNOSTICS_TRUNCATED_CODE: &str = "aggregate-diagnostics-truncated";
-const ANALYZER_BINARY_SEED: &[u8] = b"rootlight.first-slice.treesitter-structural/195";
+const ANALYZER_BINARY_SEED: &[u8] = b"rootlight.first-slice.treesitter-structural/196";
 const RESOLVER_BINARY_SEED: &[u8] = b"rootlight.first-slice.resolve/94";
 const INCREMENTAL_PROVIDER_SEED: &[u8] = b"rootlight.first-slice.incremental-provider/1";
 const LANGUAGE_DISPOSITION_PROVIDER_SEED: &[u8] = b"rootlight.first-slice.language-disposition/6";
@@ -34839,7 +34839,7 @@ mod tests {
     }
 
     #[test]
-    fn lexical_revision_preserves_parser_artifact_dependencies() {
+    fn parser_artifact_dependencies_distinguish_analyzer_and_search_revisions() {
         let cancellation = Cancellation::new();
         let limits = PlanningLimits::default();
         let repository = RepositoryId::from_bytes([1; 16]);
@@ -34853,7 +34853,7 @@ mod tests {
             PARSER_PROVIDER_SET_SEED,
             TREE_SITTER_ADAPTER_VERSION.as_bytes(),
             TREE_SITTER_RUNTIME_VERSION.as_bytes(),
-            b"rootlight.first-slice.treesitter-structural/195",
+            ANALYZER_BINARY_SEED,
             grammar.as_bytes(),
         ])
         .unwrap();
@@ -34984,6 +34984,65 @@ mod tests {
             first_slice_provider_set_hash().unwrap(),
             previous_provider_set
         );
+
+        let stale_parser = hash_static_components(&[
+            PARSER_PROVIDER_SET_SEED,
+            TREE_SITTER_ADAPTER_VERSION.as_bytes(),
+            TREE_SITTER_RUNTIME_VERSION.as_bytes(),
+            b"rootlight.first-slice.treesitter-structural/195",
+            grammar.as_bytes(),
+        ])
+        .unwrap();
+        let stale_inputs = InputSnapshot::new(
+            current.iter().map(|input| {
+                if input.key() == adapter_key {
+                    InputFingerprint::new(adapter_key, stale_parser)
+                } else {
+                    input
+                }
+            }),
+            limits,
+            &cancellation,
+        )
+        .unwrap();
+        let stale_artifact = ArtifactSummary::new(
+            artifact_id,
+            [FactNode::new(file_analysis_unit(file), FactDomain::Syntax)],
+            stale_inputs
+                .iter()
+                .filter(|input| parser_artifact_depends_on(input.key(), file)),
+            limits,
+            &cancellation,
+        )
+        .unwrap();
+        let stale_parent =
+            GenerationSummary::new(stale_inputs, [stale_artifact], limits, &cancellation).unwrap();
+        let analyzer_plan =
+            plan_invalidation(&stale_parent, &current, &graph, limits, &cancellation).unwrap();
+        assert_eq!(
+            analyzer_plan
+                .changes()
+                .changes()
+                .iter()
+                .map(|change| change.key())
+                .collect::<Vec<_>>(),
+            vec![adapter_key]
+        );
+        assert!(
+            analyzer_plan
+                .invalidated_nodes()
+                .any(|node| node == FactNode::new(file_analysis_unit(file), FactDomain::Syntax))
+        );
+        assert!(analyzer_plan.fallback().is_none());
+        assert_eq!(analyzer_plan.artifact_decisions().len(), 1);
+        assert_eq!(
+            analyzer_plan.artifact_decisions()[0].artifact(),
+            artifact_id
+        );
+        assert_eq!(
+            analyzer_plan.artifact_decisions()[0].kind(),
+            ArtifactDecisionKind::Rebuild
+        );
     }
 
     #[test]
@@ -34993,6 +35052,7 @@ mod tests {
         for previous in [
             b"rootlight.first-slice.treesitter-structural/192",
             b"rootlight.first-slice.treesitter-structural/194",
+            b"rootlight.first-slice.treesitter-structural/195",
         ] {
             let previous_parser = hash_static_components(&[
                 PARSER_PROVIDER_SET_SEED,
