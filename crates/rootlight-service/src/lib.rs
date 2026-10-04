@@ -227,7 +227,7 @@ const PROJECT_FACTS_TRUNCATED_CODE: &str = "project-adapter-facts-truncated";
 const PROJECT_FACTS_TRUNCATED_MESSAGE: &str =
     "additional project semantic facts were omitted by aggregate resource limits";
 const AGGREGATE_DIAGNOSTICS_TRUNCATED_CODE: &str = "aggregate-diagnostics-truncated";
-const ANALYZER_BINARY_SEED: &[u8] = b"rootlight.first-slice.treesitter-structural/194";
+const ANALYZER_BINARY_SEED: &[u8] = b"rootlight.first-slice.treesitter-structural/195";
 const RESOLVER_BINARY_SEED: &[u8] = b"rootlight.first-slice.resolve/94";
 const INCREMENTAL_PROVIDER_SEED: &[u8] = b"rootlight.first-slice.incremental-provider/1";
 const LANGUAGE_DISPOSITION_PROVIDER_SEED: &[u8] = b"rootlight.first-slice.language-disposition/6";
@@ -34585,16 +34585,21 @@ mod tests {
     #[test]
     fn structural_semantic_revisions_invalidate_prior_provider_identities() {
         let grammar = first_slice_grammar_revision_hash().unwrap();
-        let previous_parser = hash_static_components(&[
-            PARSER_PROVIDER_SET_SEED,
-            TREE_SITTER_ADAPTER_VERSION.as_bytes(),
-            TREE_SITTER_RUNTIME_VERSION.as_bytes(),
-            b"rootlight.first-slice.treesitter-structural/192",
-            grammar.as_bytes(),
-        ])
-        .unwrap();
         let parser = first_slice_parser_provider_hash().unwrap();
-        assert_ne!(parser, previous_parser);
+        for previous in [
+            b"rootlight.first-slice.treesitter-structural/192",
+            b"rootlight.first-slice.treesitter-structural/194",
+        ] {
+            let previous_parser = hash_static_components(&[
+                PARSER_PROVIDER_SET_SEED,
+                TREE_SITTER_ADAPTER_VERSION.as_bytes(),
+                TREE_SITTER_RUNTIME_VERSION.as_bytes(),
+                previous,
+                grammar.as_bytes(),
+            ])
+            .unwrap();
+            assert_ne!(parser, previous_parser);
+        }
         let previous_resolver = hash_static_components(&[
             PROVIDER_SET_SEED,
             parser.as_bytes(),

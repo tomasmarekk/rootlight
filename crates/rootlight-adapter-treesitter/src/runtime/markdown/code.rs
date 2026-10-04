@@ -214,6 +214,7 @@ impl TreeSitterProvider {
                 )?);
             }
             captures.retain(|capture| capture.role != StructuralRole::Root);
+            ensure_embedded_data_module(family, body.byte_range(), &mut captures, cancellation)?;
             for capture in &mut captures {
                 cancellation.check()?;
                 if capture.role == StructuralRole::Module && capture.syntax.ends_with(".file") {
@@ -234,6 +235,51 @@ impl TreeSitterProvider {
         }
         Ok(limited)
     }
+}
+
+fn ensure_embedded_data_module(
+    family: GrammarFamily,
+    body: std::ops::Range<usize>,
+    captures: &mut Vec<QueryCandidate>,
+    cancellation: &Cancellation,
+) -> Result<(), AdapterError> {
+    cancellation.check()?;
+    let syntax = match family {
+        GrammarFamily::Yaml => "yaml.file",
+        GrammarFamily::Toml => "toml.file",
+        _ => return Ok(()),
+    };
+    if body.is_empty() {
+        return Ok(());
+    }
+    // Recovery may omit the native stream/document while retaining data facts.
+    // Their body-bound owner must also survive identity-only extraction.
+    let module = QueryCandidate {
+        start: body.start,
+        end: body.end,
+        role: StructuralRole::Module,
+        syntax,
+        required: true,
+        native_depth: 0,
+    };
+    let mut found = false;
+    for capture in captures.iter_mut() {
+        cancellation.check()?;
+        if capture.role == StructuralRole::Module && capture.syntax == syntax {
+            *capture = module;
+            found = true;
+        }
+    }
+    if !found {
+        try_reserve_cancellable(
+            captures,
+            1,
+            cancellation,
+            "markdown-code-captures-allocation",
+        )?;
+        captures.push(module);
+    }
+    Ok(())
 }
 
 fn cobol_physical_body(
@@ -374,6 +420,131 @@ mod tests {
         path::Path,
         time::{Duration, Instant},
     };
+
+    #[test]
+    fn embedded_data_module_is_required_with_or_without_optional_captures() {
+        for (family, syntax, comment_syntax) in [
+            (GrammarFamily::Yaml, "yaml.file", "yaml.comment"),
+            (GrammarFamily::Toml, "toml.file", "toml.comment"),
+        ] {
+            let module = QueryCandidate {
+                start: 8,
+                end: 25,
+                role: StructuralRole::Module,
+                syntax,
+                required: true,
+                native_depth: 0,
+            };
+            let comment = QueryCandidate {
+                start: 10,
+                end: 12,
+                role: StructuralRole::Comment,
+                syntax: comment_syntax,
+                required: false,
+                native_depth: 3,
+            };
+            let cancellation = Cancellation::new();
+            let mut identity = Vec::new();
+            ensure_embedded_data_module(family, 8..25, &mut identity, &cancellation).unwrap();
+            assert_eq!(identity, vec![module]);
+            let mut full = vec![comment];
+            ensure_embedded_data_module(family, 8..25, &mut full, &cancellation).unwrap();
+            assert_eq!(full, vec![comment, module]);
+            assert_eq!(
+                identity.iter().filter(|capture| capture.required).count(),
+                full.iter().filter(|capture| capture.required).count()
+            );
+        }
+    }
+
+    #[test]
+    fn embedded_data_module_reuses_existing_capture_and_body_identity() {
+        for (family, syntax, scope_syntax) in [
+            (GrammarFamily::Yaml, "yaml.file", "yaml.document"),
+            (GrammarFamily::Toml, "toml.file", "toml.array"),
+        ] {
+            let scope = QueryCandidate {
+                start: 9,
+                end: 21,
+                role: StructuralRole::Scope,
+                syntax: scope_syntax,
+                required: true,
+                native_depth: 4,
+            };
+            let existing = QueryCandidate {
+                start: 12,
+                end: 13,
+                role: StructuralRole::Module,
+                syntax,
+                required: false,
+                native_depth: 7,
+            };
+            let expected = vec![
+                scope,
+                QueryCandidate {
+                    start: 8,
+                    end: 25,
+                    required: true,
+                    native_depth: 0,
+                    ..existing
+                },
+            ];
+            let mut captures = vec![scope, existing];
+            let cancellation = Cancellation::new();
+            ensure_embedded_data_module(family, 8..25, &mut captures, &cancellation).unwrap();
+            assert_eq!(captures, expected);
+            ensure_embedded_data_module(family, 8..25, &mut captures, &cancellation).unwrap();
+            assert_eq!(captures, expected);
+        }
+    }
+
+    #[test]
+    fn embedded_data_module_does_not_change_other_languages_or_empty_bodies() {
+        let original = QueryCandidate {
+            start: 12,
+            end: 13,
+            role: StructuralRole::Module,
+            syntax: "rust.file",
+            required: false,
+            native_depth: 7,
+        };
+        for (family, body) in [
+            (GrammarFamily::Rust, 8..25),
+            (GrammarFamily::Json, 8..25),
+            (GrammarFamily::Yaml, 8..8),
+            (GrammarFamily::Toml, 8..8),
+        ] {
+            let mut captures = vec![original];
+            ensure_embedded_data_module(family, body, &mut captures, &Cancellation::new()).unwrap();
+            assert_eq!(captures, vec![original]);
+        }
+    }
+
+    #[test]
+    fn embedded_data_module_propagates_cancellation_without_mutating_captures() {
+        let cancellation = Cancellation::new();
+        assert!(cancellation.cancel(rootlight_cancel::CancellationReason::ClientRequest));
+        for captures in [
+            Vec::new(),
+            vec![QueryCandidate {
+                start: 12,
+                end: 13,
+                role: StructuralRole::Module,
+                syntax: "yaml.file",
+                required: false,
+                native_depth: 7,
+            }],
+        ] {
+            let mut actual = captures.clone();
+            assert!(matches!(
+                ensure_embedded_data_module(GrammarFamily::Yaml, 8..25, &mut actual, &cancellation),
+                Err(AdapterError::Cancelled {
+                    reason: rootlight_cancel::CancellationReason::ClientRequest
+                })
+            ));
+            assert_eq!(actual, captures);
+        }
+    }
 
     #[test]
     fn exhausted_native_work_is_not_renewed_for_the_next_fence() {

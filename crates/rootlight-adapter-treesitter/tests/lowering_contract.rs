@@ -2333,6 +2333,569 @@ fn malformed_fact_errors_and_analyzer_debug_are_source_free() {
 }
 
 #[test]
+fn markdown_embedded_data_requires_its_own_file_module() {
+    for (data_language, entry) in [
+        ("yaml", "entry: source-marker\n"),
+        ("toml", "entry = \"source-marker\"\n"),
+    ] {
+        let text = format!("# Example\n\n```{data_language}\n{entry}```\n");
+        let (_temporary, snapshot, source) =
+            source_fixture_for(&text, "docs/data.md", b"embedded-data-owner");
+        let declaration_label = format!("{data_language}.property.declaration");
+        let definition_label = format!("{data_language}.property.definition");
+        let facts = [
+            (
+                1,
+                None,
+                SyntaxFactKind::Root,
+                text.as_str(),
+                0,
+                "markdown.file.root",
+            ),
+            (
+                2,
+                Some(1),
+                SyntaxFactKind::Module,
+                text.as_str(),
+                1,
+                "markdown.file.module",
+            ),
+            (
+                3,
+                Some(2),
+                SyntaxFactKind::Declaration,
+                entry,
+                2,
+                declaration_label.as_str(),
+            ),
+            (
+                4,
+                Some(3),
+                SyntaxFactKind::Occurrence,
+                "entry",
+                3,
+                definition_label.as_str(),
+            ),
+        ]
+        .into_iter()
+        .map(|(id, parent, kind, written, depth, syntax)| {
+            SyntaxFact::new(
+                id,
+                parent,
+                kind,
+                span_in(&text, &source, written, 0),
+                depth,
+                label(syntax),
+            )
+        })
+        .collect();
+        let language = LanguageId::new("markdown").expect("fixture language is valid");
+        let analyzer =
+            custom_analyzer_with_coverage(language.clone(), facts, complete_coverage(text.len()));
+        let limits = limits(IrLimits::default());
+        let request = AnalysisRequest::new(
+            GenerationBoundSnapshot::new(&snapshot, &source).expect("fixture snapshot binds"),
+            language,
+            AnalysisTier::TierD,
+            BuildContextIdentity::new(content_hash(b"build-context")),
+            &limits,
+        )
+        .expect("fixture request is valid")
+        .with_generated_status(false);
+        let error = execute_analysis(
+            &analyzer,
+            &request,
+            ExtensionSupport::default(),
+            MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
+            &deadline(),
+        )
+        .expect_err("a Markdown module cannot substitute for the data file module");
+
+        assert_eq!(
+            error,
+            AdapterError::ProviderFailed {
+                code: DiagnosticCode::new("embedded-data-owner").expect("diagnostic code is valid"),
+            },
+            "{data_language}",
+        );
+        assert!(!error.to_string().contains("source-marker"));
+        assert!(!format!("{error:?}").contains("source-marker"));
+        assert!(!format!("{analyzer:?}").contains("source-marker"));
+    }
+}
+
+#[test]
+fn markdown_embedded_data_cannot_adopt_a_preceding_neighbor_module() {
+    for (data_language, first, second) in [
+        ("yaml", "first: 1\n", "second: source-marker\n"),
+        ("toml", "first = 1\n", "second = \"source-marker\"\n"),
+    ] {
+        let text = format!("```{data_language}\n{first}```\n\n```{data_language}\n{second}```\n");
+        let (_temporary, snapshot, source) =
+            source_fixture_for(&text, "docs/data.md", b"embedded-data-range");
+        let module_label = format!("{data_language}.file.module");
+        let declaration_label = format!("{data_language}.property.declaration");
+        let definition_label = format!("{data_language}.property.definition");
+        // The later declaration has a valid host parent, not the unrelated data module.
+        let facts = [
+            (
+                1,
+                None,
+                SyntaxFactKind::Root,
+                text.as_str(),
+                0,
+                "markdown.file.root",
+            ),
+            (
+                2,
+                Some(1),
+                SyntaxFactKind::Module,
+                text.as_str(),
+                1,
+                "markdown.file.module",
+            ),
+            (
+                3,
+                Some(2),
+                SyntaxFactKind::Module,
+                first,
+                2,
+                module_label.as_str(),
+            ),
+            (
+                4,
+                Some(2),
+                SyntaxFactKind::Declaration,
+                second,
+                2,
+                declaration_label.as_str(),
+            ),
+            (
+                5,
+                Some(4),
+                SyntaxFactKind::Occurrence,
+                "second",
+                3,
+                definition_label.as_str(),
+            ),
+        ]
+        .into_iter()
+        .map(|(id, parent, kind, written, depth, syntax)| {
+            SyntaxFact::new(
+                id,
+                parent,
+                kind,
+                span_in(&text, &source, written, 0),
+                depth,
+                label(syntax),
+            )
+        })
+        .collect();
+        let error = analyze_custom(
+            &snapshot,
+            &source,
+            LanguageId::new("markdown").expect("fixture language is valid"),
+            &limits(IrLimits::default()),
+            facts,
+        )
+        .expect_err("the previous data module does not contain the later declaration");
+
+        assert_eq!(
+            error,
+            AdapterError::ProviderFailed {
+                code: DiagnosticCode::new("embedded-data-range").expect("diagnostic code is valid"),
+            },
+            "{data_language}",
+        );
+        assert!(!error.to_string().contains("source-marker"));
+        assert!(!format!("{error:?}").contains("source-marker"));
+    }
+}
+
+#[test]
+fn markdown_yaml_aliases_require_a_unique_clean_fence_certificate() {
+    const CLEAN: (SyntaxFactKind, &str, &str) = (
+        SyntaxFactKind::Signature,
+        "markdown.code_parsed.signature",
+        MARKDOWN_YAML_ALIAS_FENCE,
+    );
+    for (markers, resolves) in [
+        (vec![CLEAN], true),
+        (Vec::new(), false),
+        (
+            vec![(CLEAN.0, "markdown.code_error.signature", CLEAN.2)],
+            false,
+        ),
+        (
+            vec![(CLEAN.0, "markdown.code_limit.signature", CLEAN.2)],
+            false,
+        ),
+        (vec![CLEAN, CLEAN], false),
+        (
+            vec![CLEAN, (CLEAN.0, "markdown.code_error.signature", CLEAN.2)],
+            false,
+        ),
+        (vec![(SyntaxFactKind::Scope, CLEAN.1, CLEAN.2)], false),
+        (vec![(CLEAN.0, CLEAN.1, "base: &entry value")], false),
+    ] {
+        let (_temporary, snapshot, source) = source_fixture_for(
+            MARKDOWN_YAML_ALIAS_SOURCE,
+            "docs/aliases.md",
+            b"markdown-yaml-certificate",
+        );
+        let facts = markdown_yaml_alias_facts(&source, &markers);
+        let analyzer = markdown_yaml_alias_analyzer(&source, facts, false);
+        let limits = limits(IrLimits::default());
+        let request = AnalysisRequest::new(
+            GenerationBoundSnapshot::new(&snapshot, &source).expect("fixture snapshot binds"),
+            LanguageId::new("markdown").expect("fixture language is valid"),
+            AnalysisTier::TierD,
+            BuildContextIdentity::new(content_hash(b"build-context")),
+            &limits,
+        )
+        .expect("fixture request is valid")
+        .with_generated_status(false);
+        let output = execute_analysis(
+            &analyzer,
+            &request,
+            ExtensionSupport::default(),
+            MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
+            &deadline(),
+        )
+        .expect("valid embedded fact graphs lower conservatively");
+        assert_markdown_yaml_alias(&output, &source, resolves);
+    }
+}
+
+#[test]
+fn markdown_yaml_extraction_limits_veto_certificates_after_artifact_replay() {
+    let (_temporary, snapshot, source) = source_fixture_for(
+        MARKDOWN_YAML_ALIAS_SOURCE,
+        "docs/aliases.md",
+        b"markdown-yaml-certificate-replay",
+    );
+    let markers = [(
+        SyntaxFactKind::Signature,
+        "markdown.code_parsed.signature",
+        MARKDOWN_YAML_ALIAS_FENCE,
+    )];
+    let successor = SourceRef::new(
+        source.repository(),
+        GenerationId::from_bytes([9; 20]),
+        source.span(),
+        source.content_hash(),
+        None,
+    );
+    let limits = limits(IrLimits::default());
+    let request_for = |source| {
+        AnalysisRequest::new(
+            GenerationBoundSnapshot::new(&snapshot, source).expect("fixture snapshot binds"),
+            LanguageId::new("markdown").expect("fixture language is valid"),
+            AnalysisTier::TierD,
+            BuildContextIdentity::new(content_hash(b"build-context")),
+            &limits,
+        )
+        .expect("fixture request is valid")
+        .with_generated_status(false)
+    };
+    for clipped in [false, true] {
+        let analyzer = markdown_yaml_alias_analyzer(
+            &source,
+            markdown_yaml_alias_facts(&source, &markers),
+            clipped,
+        );
+        let memory = MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback;
+        let (initial, artifact) = analyzer
+            .analyze_and_capture(
+                &request_for(&source),
+                ExtensionSupport::default(),
+                memory,
+                &deadline(),
+            )
+            .expect("fixture analysis captures an artifact");
+        assert_markdown_yaml_alias(&initial, &source, !clipped);
+        assert_eq!(
+            initial.document().diagnostics.len(),
+            if clipped { 2 } else { 1 }
+        );
+
+        let request = request_for(&successor);
+        let replayed = analyzer
+            .analyze_from_artifact(
+                &request,
+                &artifact,
+                ExtensionSupport::default(),
+                memory,
+                &deadline(),
+            )
+            .expect("artifact replay preserves the fragment certificate and its veto");
+        let fresh_analyzer = markdown_yaml_alias_analyzer(
+            &successor,
+            markdown_yaml_alias_facts(&successor, &markers),
+            clipped,
+        );
+        let fresh = execute_analysis(
+            &fresh_analyzer,
+            &request,
+            ExtensionSupport::default(),
+            memory,
+            &deadline(),
+        )
+        .expect("successor analysis lowers fresh");
+        assert_eq!(replayed.document(), fresh.document());
+        assert_eq!(replayed.report(), fresh.report());
+        assert_markdown_yaml_alias(&replayed, &successor, !clipped);
+        assert!(replayed.document().occurrences.iter().all(|occurrence| {
+            occurrence.source.generation() == successor.generation()
+                && occurrence.source.content_hash() == source.content_hash()
+        }));
+    }
+}
+
+const MARKDOWN_YAML_ALIAS_BODY: &str = "base: &entry value\ncopy: *entry\n";
+const MARKDOWN_YAML_ALIAS_FENCE: &str = "```yaml\nbase: &entry value\ncopy: *entry\n```\n";
+const MARKDOWN_YAML_BROKEN_FENCE: &str = "```yaml\nbroken: [\n```\n";
+const MARKDOWN_YAML_ALIAS_SOURCE: &str =
+    "# Examples\n\n```yaml\nbase: &entry value\ncopy: *entry\n```\n\n```yaml\nbroken: [\n```\n";
+
+fn markdown_yaml_alias_facts(
+    source: &SourceRef,
+    markers: &[(SyntaxFactKind, &str, &str)],
+) -> Vec<SyntaxFact> {
+    let captures = [
+        (None, "markdown.file.root", MARKDOWN_YAML_ALIAS_SOURCE, 0),
+        (
+            Some(1),
+            "markdown.file.module",
+            MARKDOWN_YAML_ALIAS_SOURCE,
+            1,
+        ),
+        (Some(2), "yaml.file.module", MARKDOWN_YAML_ALIAS_BODY, 2),
+        (Some(3), "yaml.document.scope", MARKDOWN_YAML_ALIAS_BODY, 3),
+        (Some(4), "yaml.mapping.scope", MARKDOWN_YAML_ALIAS_BODY, 4),
+        (
+            Some(5),
+            "yaml.property.declaration",
+            "base: &entry value",
+            5,
+        ),
+        (Some(6), "yaml.key.definition", "base", 6),
+        (Some(6), "yaml.anchor.declaration", "&entry value", 6),
+        (Some(8), "yaml.anchor.definition", "&entry", 7),
+        (Some(5), "yaml.property.declaration", "copy: *entry", 5),
+        (Some(10), "yaml.key.definition", "copy", 6),
+        (Some(10), "yaml.alias.reference", "*entry", 6),
+        (
+            Some(2),
+            "markdown.code_error.signature",
+            MARKDOWN_YAML_BROKEN_FENCE,
+            2,
+        ),
+    ];
+    let mut facts: Vec<_> = captures
+        .into_iter()
+        .enumerate()
+        .map(|(index, (parent, syntax, written, depth))| {
+            let kind = match syntax
+                .rsplit_once('.')
+                .expect("fixture syntax has a role")
+                .1
+            {
+                "root" => SyntaxFactKind::Root,
+                "module" => SyntaxFactKind::Module,
+                "scope" => SyntaxFactKind::Scope,
+                "definition" | "reference" => SyntaxFactKind::Occurrence,
+                "signature" => SyntaxFactKind::Signature,
+                "declaration" => SyntaxFactKind::Declaration,
+                _ => panic!("fixture syntax has a known role"),
+            };
+            let mut span = span_in(MARKDOWN_YAML_ALIAS_SOURCE, source, written, 0);
+            if matches!(syntax, "yaml.anchor.definition" | "yaml.alias.reference") {
+                span = SourceSpan::new(span.file(), span.start_byte() + 1, span.end_byte())
+                    .expect("binding-name capture excludes its indicator");
+            }
+            SyntaxFact::new(
+                u64::try_from(index).expect("fixture index fits") + 1,
+                parent,
+                kind,
+                span,
+                depth,
+                label(syntax),
+            )
+        })
+        .collect();
+    for &(kind, syntax, written) in markers {
+        facts.push(SyntaxFact::new(
+            u64::try_from(facts.len()).expect("fixture count fits") + 1,
+            Some(2),
+            kind,
+            span_in(MARKDOWN_YAML_ALIAS_SOURCE, source, written, 0),
+            2,
+            label(syntax),
+        ));
+    }
+    facts
+}
+
+fn markdown_yaml_alias_analyzer(
+    source: &SourceRef,
+    facts: Vec<SyntaxFact>,
+    clipped: bool,
+) -> TreeSitterAnalyzer {
+    let language = LanguageId::new("markdown").expect("fixture language is valid");
+    let capabilities = ParseCapabilities::new(
+        vec![language.clone()],
+        vec![EncodingId::utf8()],
+        4096,
+        4096,
+        64,
+        8,
+        true,
+        true,
+        true,
+        4,
+        MemoryEnforcement::AccountedInProcess,
+    )
+    .expect("fixture capabilities are valid");
+    let mut diagnostics = vec![AdapterDiagnostic::new(
+        DiagnosticCode::new("syntax-error-recovery").expect("diagnostic code is valid"),
+        DiagnosticSeverity::Warning,
+        Some(source_for_span(
+            source,
+            span_in(
+                MARKDOWN_YAML_ALIAS_SOURCE,
+                source,
+                MARKDOWN_YAML_BROKEN_FENCE,
+                0,
+            ),
+        )),
+        CoverageStatus::Unknown,
+    )];
+    if clipped {
+        diagnostics.push(AdapterDiagnostic::new(
+            DiagnosticCode::new("syntax-extraction-limit").expect("diagnostic code is valid"),
+            DiagnosticSeverity::Warning,
+            Some(source.clone()),
+            CoverageStatus::Bounded,
+        ));
+    }
+    let coverage = CoverageReport::new(
+        AnalysisTier::TierD,
+        CoverageStatus::Unknown,
+        MARKDOWN_YAML_ALIAS_SOURCE.len(),
+        MARKDOWN_YAML_ALIAS_SOURCE.len() - MARKDOWN_YAML_BROKEN_FENCE.len(),
+        1,
+        Vec::new(),
+    )
+    .expect("fixture coverage remains unknown");
+    TreeSitterAnalyzer::new(
+        Arc::new(MockParseProvider::new(
+            capabilities,
+            facts,
+            diagnostics,
+            coverage,
+        )),
+        ProducerIdentity::new(
+            "rootlight-treesitter-lowering",
+            "1.0",
+            content_hash(b"lowering-configuration"),
+        )
+        .expect("fixture producer identity is valid"),
+        language,
+        "tree-sitter-fixture-1.0",
+        content_hash(b"fixture-binary"),
+    )
+    .expect("fixture analyzer is valid")
+}
+
+fn assert_markdown_yaml_alias(
+    output: &rootlight_adapter_sdk::AnalysisOutput,
+    source: &SourceRef,
+    resolves: bool,
+) {
+    use rootlight_ir::{EntityKind, OccurrenceTarget, RelationEndpoint};
+
+    assert_eq!(output.report().coverage().status(), CoverageStatus::Unknown);
+    let document = output.document();
+    let aliases: Vec<_> = document
+        .occurrences
+        .iter()
+        .filter(|occurrence| occurrence.syntax_kind == "yaml.alias.reference")
+        .collect();
+    assert_eq!(aliases.len(), 1);
+    let alias = aliases[0];
+    let alias_source = source_for_span(
+        source,
+        span_in(MARKDOWN_YAML_ALIAS_SOURCE, source, "entry", 1),
+    );
+    assert_eq!(alias.source, alias_source);
+    assert_eq!(alias.evidence.source.as_ref(), Some(&alias_source));
+    assert_eq!(alias.syntactic_text_hash, content_hash(b"entry"));
+    let references: Vec<_> = document
+        .relations
+        .iter()
+        .filter(|relation| {
+            relation.subject == RelationEndpoint::Occurrence(alias.id)
+                && relation.predicate == RelationPredicate::RefersTo
+        })
+        .collect();
+    let unavailable = document.skipped_regions.iter().any(|region| {
+        region.detail == "yaml-alias-target-unavailable" && region.source == alias_source
+    });
+    if resolves {
+        let anchors: Vec<_> = document
+            .entities
+            .iter()
+            .filter(|entity| {
+                entity.kind == EntityKind::Variable
+                    && entity.language == "yaml"
+                    && entity.canonical_name == "entry"
+            })
+            .collect();
+        assert_eq!(anchors.len(), 1);
+        let anchor = anchors[0];
+        assert_eq!(
+            anchor.evidence.source,
+            Some(source_for_span(
+                source,
+                span_in(MARKDOWN_YAML_ALIAS_SOURCE, source, "&entry value", 0)
+            ))
+        );
+        assert_eq!(
+            alias.target,
+            OccurrenceTarget::Resolved { symbol: anchor.id }
+        );
+        assert_eq!(references.len(), 1);
+        assert_eq!(references[0].object, RelationEndpoint::Entity(anchor.id));
+        assert_eq!(references[0].evidence.source.as_ref(), Some(&alias_source));
+        assert!(!unavailable);
+    } else {
+        assert!(matches!(alias.target, OccurrenceTarget::Unresolved { .. }));
+        assert!(references.is_empty());
+        assert!(unavailable);
+    }
+    assert!(document.skipped_regions.iter().any(|region| {
+        region.detail == "syntax-error-recovery"
+            && region.source
+                == source_for_span(
+                    source,
+                    span_in(
+                        MARKDOWN_YAML_ALIAS_SOURCE,
+                        source,
+                        MARKDOWN_YAML_BROKEN_FENCE,
+                        0,
+                    ),
+                )
+    }));
+    let encoded = serde_json::to_vec(document).expect("fixture IR encodes");
+    assert_eq!(
+        decode_ir_document(&encoded, &IrLimits::default(), &ExtensionSupport::default())
+            .expect("fixture IR decodes within existing limits"),
+        IrDocument::NormalizedV1_1(document.clone()),
+    );
+}
+
+#[test]
 fn non_utf8_analysis_identity_is_rejected_before_parser_execution() {
     let (_temporary, snapshot, source) = source_fixture();
     let limits = limits(IrLimits::default());

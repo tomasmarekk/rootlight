@@ -2762,10 +2762,9 @@ impl<'context, 'source> Lowering<'context, 'source> {
                 if self.language_for_fact(fact) == "yaml"
                     && fact.syntax_kind().as_str() == "yaml.alias.reference"
                 {
-                    let target = (self.parse_output.report().coverage().status()
-                        == CoverageStatus::Complete)
-                        .then(|| entity_plan.yaml_aliases.get(&fact.local_id()))
-                        .flatten()
+                    let target = entity_plan
+                        .yaml_aliases
+                        .get(&fact.local_id())
                         .and_then(|local| materialized.get(local));
                     if let Some(target) = target {
                         occurrence.target = OccurrenceTarget::Resolved {
@@ -3337,18 +3336,24 @@ impl<'context, 'source> Lowering<'context, 'source> {
         };
         let mut embedded_yaml = Vec::new();
         if self.request.language().as_str() == "markdown" {
+            let completeness = embedded::YamlCompleteness::new(
+                self.parse_output.facts(),
+                self.parse_output.diagnostics(),
+                cancellation,
+            )?;
             for facts in embedded::partitions(self.parse_output.facts(), "yaml", cancellation)? {
+                let complete = completeness.certifies(&facts, cancellation)?;
                 let names = yaml::names::Names::new(
                     &facts,
                     self.source_text,
                     self.request.limits().ir().max_string_bytes,
-                    self.parse_output.report().coverage().status() == CoverageStatus::Complete,
+                    complete,
                     cancellation,
                 )?;
                 yaml_names.keys.extend(names.keys);
                 yaml_names.owners.extend(names.owners);
                 yaml_names.warnings.extend(names.warnings);
-                embedded_yaml.push((facts, names.bindings));
+                embedded_yaml.push((facts, names.bindings, complete));
             }
         }
         let rust_test_declarations = rust_test_declarations(&ordered_facts);
@@ -4314,11 +4319,18 @@ impl<'context, 'source> Lowering<'context, 'source> {
                     self.request.limits().ir(),
                     cancellation,
                 )?;
-                (plan.duplicates, plan.aliases)
+                (
+                    plan.duplicates,
+                    if self.parse_output.report().coverage().status() == CoverageStatus::Complete {
+                        plan.aliases
+                    } else {
+                        HashMap::new()
+                    },
+                )
             } else {
                 (BTreeSet::new(), HashMap::new())
             };
-        for (facts, bindings) in embedded_yaml {
+        for (facts, bindings, complete) in embedded_yaml {
             let base = facts
                 .iter()
                 .find(|fact| fact.parent().is_none())
@@ -4334,7 +4346,9 @@ impl<'context, 'source> Lowering<'context, 'source> {
                 cancellation,
             )?;
             duplicate_data_keys.extend(plan.duplicates);
-            yaml_aliases.extend(plan.aliases);
+            if complete {
+                yaml_aliases.extend(plan.aliases);
+            }
             embedded::restore_host_depths(&facts, &mut drafts, base, cancellation)?;
         }
         let nix_path_gaps = nix_paths::resolve(

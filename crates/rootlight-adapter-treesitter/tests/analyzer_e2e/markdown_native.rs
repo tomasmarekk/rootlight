@@ -2608,6 +2608,416 @@ fn markdown_data_examples_keep_addresses_and_alias_bindings_local() {
 }
 
 #[test]
+fn markdown_yaml_clean_fence_keeps_alias_key_identity_beside_recovery() {
+    let healthy = "~~~yaml\nbase: &key label\n*key : value\n~~~\n";
+    let broken = "~~~yaml\nbroken: [\n~~~\n";
+    for source in [
+        format!("{healthy}\n{broken}"),
+        format!("{broken}\n{healthy}"),
+    ] {
+        let result = output(&source);
+        assert_eq!(result.report().coverage().status(), CoverageStatus::Unknown);
+        let document = result.document();
+        let property = document
+            .entities
+            .iter()
+            .find(|entity| {
+                entity.language == "yaml"
+                    && entity.kind == EntityKind::Property
+                    && entity.canonical_name == "str:\"label\""
+            })
+            .expect("a certified clean fence retains its alias-key identity");
+        let definition = document
+            .occurrences
+            .iter()
+            .find(|occurrence| {
+                occurrence.role == OccurrenceRole::Definition
+                    && occurrence.target
+                        == (OccurrenceTarget::Resolved {
+                            symbol: property.id,
+                        })
+            })
+            .unwrap();
+        let span = definition.source.span();
+        assert_eq!(
+            source.get(
+                usize::try_from(span.start_byte()).unwrap()
+                    ..usize::try_from(span.end_byte()).unwrap()
+            ),
+            Some("*key")
+        );
+        assert!(document.occurrences.iter().any(|occurrence| {
+            occurrence.syntax_kind == "yaml.alias.reference"
+                && matches!(occurrence.target, OccurrenceTarget::Resolved { .. })
+        }));
+        assert!(document.skipped_regions.iter().any(|gap| {
+            gap.detail == "markdown-code-parse-unavailable"
+                && gap.reason == SkippedRegionReason::ParseError
+        }));
+    }
+}
+
+#[test]
+fn markdown_yaml_clean_fence_does_not_resolve_aliases_after_native_extraction_clipping() {
+    let source = format!(
+        "~~~yaml\nbase: &entry value\ncopy: *entry\n*entry : alias-key-value\npadding:\n{}~~~\n\n~~~yaml\nbroken: [\n~~~\n",
+        "  - \"optional text\"\n".repeat(100)
+    );
+    let provider = Arc::new(provider());
+    let analyzer = analyzer(&provider, MARKDOWN);
+    let fixture = Fixture::new(MARKDOWN, source.as_bytes());
+    let full_budget = limits();
+    let full_request = request(&fixture.snapshot, &fixture.source, MARKDOWN, &full_budget);
+    let demand = provider
+        .required_syntax_fact_count(&full_request.to_parse_request(), &deadline())
+        .unwrap();
+    let full_parse = rootlight_adapter_sdk::execute_parse(
+        provider.as_ref(),
+        &full_request.to_parse_request(),
+        MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
+        &deadline(),
+    )
+    .unwrap();
+    let scalar_count = |parsed: &rootlight_adapter_sdk::ParseOutput| {
+        parsed
+            .facts()
+            .iter()
+            .filter(|fact| fact.syntax_kind().as_str() == "yaml.string.string")
+            .count()
+    };
+    assert_eq!(scalar_count(&full_parse), 100);
+    let full = analyze(&analyzer, &full_request, &ExtensionSupport::default());
+    assert!(full.document().occurrences.iter().any(|occurrence| {
+        occurrence.syntax_kind == "yaml.alias.reference"
+            && matches!(occurrence.target, OccurrenceTarget::Resolved { .. })
+    }));
+    assert!(full.document().entities.iter().any(|entity| {
+        entity.language == "yaml"
+            && entity.kind == EntityKind::Property
+            && entity.canonical_name == "str:\"value\""
+    }));
+    // References outrank strings, so both probe aliases survive while the bounded
+    // partition drops nonredundant optional scalar evidence from the same fence.
+    let budget = limits_with_syntax_records(demand + 32);
+    let initial = request(&fixture.snapshot, &fixture.source, MARKDOWN, &budget);
+    let parsed = rootlight_adapter_sdk::execute_parse(
+        provider.as_ref(),
+        &initial.to_parse_request(),
+        MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
+        &deadline(),
+    )
+    .unwrap();
+    assert!(parsed.facts().iter().any(|fact| {
+        fact.syntax_kind().as_str() == "markdown.code_parsed.signature"
+            && fact.span().start_byte() == 0
+    }));
+    assert!(
+        parsed
+            .diagnostics()
+            .iter()
+            .any(|diagnostic| diagnostic.code().as_str() == "syntax-extraction-limit")
+    );
+    assert!(scalar_count(&parsed) < scalar_count(&full_parse));
+    let (clipped, artifact) = analyzer
+        .analyze_and_capture(
+            &initial,
+            ExtensionSupport::default(),
+            MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
+            &deadline(),
+        )
+        .unwrap();
+    assert_eq!(
+        clipped.report().coverage().status(),
+        CoverageStatus::Unknown
+    );
+    let aliases: Vec<_> = clipped
+        .document()
+        .occurrences
+        .iter()
+        .filter(|occurrence| occurrence.syntax_kind == "yaml.alias.reference")
+        .collect();
+    assert_eq!(aliases.len(), 2, "both probe aliases must survive clipping");
+    for alias in aliases {
+        assert!(matches!(alias.target, OccurrenceTarget::Unresolved { .. }));
+        assert!(clipped.document().skipped_regions.iter().any(|gap| {
+            gap.detail == "yaml-alias-target-unavailable" && gap.source == alias.source
+        }));
+        assert!(!clipped.document().relations.iter().any(|relation| {
+            relation.subject == RelationEndpoint::Occurrence(alias.id)
+                && relation.predicate == RelationPredicate::RefersTo
+        }));
+    }
+    assert!(!clipped.document().entities.iter().any(|entity| {
+        entity.language == "yaml"
+            && entity.kind == EntityKind::Property
+            && entity.canonical_name == "str:\"value\""
+    }));
+    assert_eq!(
+        artifact.required_syntax_fact_count(&deadline()).unwrap(),
+        demand
+    );
+    let changed = fixture.next_generation();
+    let next = request(&changed.snapshot, &changed.source, MARKDOWN, &budget);
+    let replay = analyzer
+        .analyze_from_artifact(
+            &next,
+            &artifact,
+            ExtensionSupport::default(),
+            MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
+            &deadline(),
+        )
+        .unwrap();
+    let fresh = analyze(&analyzer, &next, &ExtensionSupport::default());
+    assert_eq!(fresh.document(), replay.document());
+    assert_eq!(fresh.report(), replay.report());
+    assert!(replay.document().occurrences.iter().all(|occurrence| {
+        occurrence.source.generation() == changed.source.generation()
+            && occurrence.source.content_hash() == changed.source.content_hash()
+    }));
+}
+
+#[test]
+fn markdown_malformed_yaml_fences_keep_source_owners_and_healthy_neighbors() {
+    assert_malformed_data_fence_ownership(
+        "yaml",
+        "entry: [1,\n",
+        "name: &entry usable\ncopy: *entry\n",
+        "copy: *entry\n",
+        false,
+    );
+}
+
+#[test]
+fn markdown_malformed_yaml_after_healthy_fence_keeps_its_own_source_owner() {
+    assert_malformed_data_fence_ownership(
+        "yaml",
+        "entry: [1,\n",
+        "name: &entry usable\ncopy: *entry\n",
+        "copy: *entry\n",
+        true,
+    );
+}
+
+#[test]
+fn markdown_malformed_toml_fences_keep_source_owners_and_healthy_neighbors() {
+    assert_malformed_data_fence_ownership(
+        "toml",
+        "entry = [1,\n",
+        "[config]\nname = 'usable'\n",
+        "[config]\nname = 'neighbor'\n",
+        false,
+    );
+}
+
+fn assert_malformed_data_fence_ownership(
+    language: &str,
+    broken_body: &str,
+    healthy_body: &str,
+    neighbor_body: &str,
+    healthy_first: bool,
+) {
+    let (bodies, broken_index, healthy_index) = if healthy_first {
+        ([healthy_body, broken_body, neighbor_body], 1, 0)
+    } else {
+        ([broken_body, healthy_body, neighbor_body], 0, 1)
+    };
+    let fences = bodies.map(|body| format!("~~~{language}\n{body}~~~\n"));
+    let mut offset = 0_u64;
+    let ranges = fences.each_ref().map(|fence| {
+        let start = offset;
+        let end = start + u64::try_from(fence.len()).unwrap();
+        offset = end + 1;
+        (start, end)
+    });
+    let (broken_start, broken_end) = ranges[broken_index];
+    let (healthy_start, healthy_end) = ranges[healthy_index];
+    let source = fences.join("\n");
+    let provider = Arc::new(provider());
+    let analyzer = analyzer(&provider, MARKDOWN);
+    let fixture = Fixture::new(MARKDOWN, source.as_bytes());
+    let budget = limits();
+    let initial = request(&fixture.snapshot, &fixture.source, MARKDOWN, &budget);
+    let demand = provider
+        .required_syntax_fact_count(&initial.to_parse_request(), &deadline())
+        .expect("recoverable data fences preserve identity preflight");
+    let parsed = rootlight_adapter_sdk::execute_parse(
+        provider.as_ref(),
+        &initial.to_parse_request(),
+        MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
+        &deadline(),
+    )
+    .expect("recoverable data fences commit source-bound syntax");
+    let (result, artifact) = analyzer
+        .analyze_and_capture(
+            &initial,
+            ExtensionSupport::default(),
+            MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
+            &deadline(),
+        )
+        .expect("a malformed native data root must not orphan its fence");
+    validate_ir_document(result.document(), budget.ir(), &ExtensionSupport::default()).unwrap();
+    assert_eq!(parsed.report().coverage().status(), CoverageStatus::Unknown);
+    assert_eq!(result.report().coverage().status(), CoverageStatus::Unknown);
+    assert_eq!(artifact.syntax_fact_count(), parsed.facts().len());
+    assert_eq!(
+        artifact.required_syntax_fact_count(&deadline()).unwrap(),
+        demand
+    );
+    assert!(parsed.facts().iter().any(|fact| {
+        fact.syntax_kind().as_str() == "markdown.code_error.signature"
+            && fact.span().start_byte() == broken_start
+            && fact.span().end_byte() == broken_end
+    }));
+    assert!(result.document().skipped_regions.iter().any(|gap| {
+        gap.detail == "markdown-code-parse-unavailable"
+            && gap.reason == SkippedRegionReason::ParseError
+            && gap.source.span().start_byte() == broken_start
+            && gap.source.span().end_byte() == broken_end
+    }));
+
+    let document = result.document();
+    let mut owners = BTreeSet::new();
+    let header_length = u64::try_from(format!("~~~{language}\n").len()).unwrap();
+    for (index, (start, end)) in ranges.iter().copied().enumerate() {
+        let inside = |span: SourceSpan| start <= span.start_byte() && span.end_byte() <= end;
+        let modules: Vec<_> = document
+            .entities
+            .iter()
+            .filter(|entity| {
+                entity.language == language
+                    && entity.kind == EntityKind::Module
+                    && entity
+                        .evidence
+                        .source
+                        .as_ref()
+                        .is_some_and(|site| inside(site.span()))
+            })
+            .collect();
+        assert_eq!(
+            modules.len(),
+            1,
+            "each data fence has one source-owning file module"
+        );
+        let owner = modules[0];
+        let owner_source = owner.evidence.source.as_ref().unwrap();
+        assert_eq!(owner_source.span().start_byte(), start + header_length);
+        assert_eq!(
+            owner_source.span().end_byte(),
+            start + header_length + u64::try_from(bodies[index].len()).unwrap()
+        );
+        assert_eq!(owner_source.content_hash(), fixture.source.content_hash());
+        assert_eq!(owner_source.generation(), fixture.source.generation());
+        assert!(!document.occurrences.iter().any(|site| {
+            site.role == OccurrenceRole::Definition
+                && site.target == (OccurrenceTarget::Resolved { symbol: owner.id })
+        }));
+        owners.insert(owner.id);
+        for entity in document.entities.iter().filter(|entity| {
+            entity.language == language
+                && entity.kind != EntityKind::Module
+                && entity
+                    .evidence
+                    .source
+                    .as_ref()
+                    .is_some_and(|site| inside(site.span()))
+        }) {
+            let site = entity.evidence.source.as_ref().unwrap();
+            assert_eq!(site.content_hash(), fixture.source.content_hash());
+            assert_eq!(site.generation(), fixture.source.generation());
+            let mut current = entity;
+            for _ in 0..document.entities.len() {
+                let Some(rootlight_ir::ContainerRef::Entity(parent)) = current.container else {
+                    panic!("embedded data must retain its source-owning module");
+                };
+                current = document
+                    .entities
+                    .iter()
+                    .find(|item| item.id == parent)
+                    .unwrap();
+                assert!(inside(current.evidence.source.as_ref().unwrap().span()));
+                if current.kind == EntityKind::Module {
+                    break;
+                }
+            }
+            assert_eq!(current.id, owner.id, "data ownership must not cross fences");
+        }
+    }
+    assert_eq!(owners.len(), fences.len());
+    for (start, end) in [ranges[healthy_index], ranges[2]] {
+        assert!(document.entities.iter().any(|entity| {
+            entity.language == language
+                && entity.kind == EntityKind::Property
+                && entity.evidence.source.as_ref().is_some_and(|site| {
+                    start <= site.span().start_byte() && site.span().end_byte() <= end
+                })
+        }));
+    }
+    if language == "yaml" {
+        let aliases: Vec<_> = document
+            .occurrences
+            .iter()
+            .filter(|site| site.syntax_kind == "yaml.alias.reference")
+            .collect();
+        assert_eq!(aliases.len(), 2);
+        let neighbor_start = ranges[2].0;
+        for alias in aliases {
+            if alias.source.span().start_byte() >= neighbor_start {
+                assert!(matches!(alias.target, OccurrenceTarget::Unresolved { .. }));
+            } else {
+                let OccurrenceTarget::Resolved { symbol } = alias.target else {
+                    panic!("a healthy fence resolves its own anchor");
+                };
+                let target = document
+                    .entities
+                    .iter()
+                    .find(|entity| entity.id == symbol)
+                    .unwrap();
+                let span = target.evidence.source.as_ref().unwrap().span();
+                assert!(healthy_start <= span.start_byte() && span.end_byte() <= healthy_end);
+            }
+        }
+    }
+
+    let changed = fixture.next_generation();
+    let next = request(&changed.snapshot, &changed.source, MARKDOWN, &budget);
+    let replay = analyzer
+        .analyze_from_artifact(
+            &next,
+            &artifact,
+            ExtensionSupport::default(),
+            MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
+            &deadline(),
+        )
+        .unwrap();
+    let (fresh, _) = analyzer
+        .analyze_and_capture(
+            &next,
+            ExtensionSupport::default(),
+            MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
+            &deadline(),
+        )
+        .unwrap();
+    assert_eq!(fresh.document(), replay.document());
+    assert_eq!(fresh.report(), replay.report());
+    let edited = fixture.rewrite(source.replace("usable", "a longer usable value").as_bytes());
+    let edited_result = analyze(
+        &analyzer,
+        &request(&edited.snapshot, &edited.source, MARKDOWN, &budget),
+        &ExtensionSupport::default(),
+    );
+    let data_ids = |result: &AnalysisOutput| {
+        result
+            .document()
+            .entities
+            .iter()
+            .filter(|entity| entity.language == language)
+            .map(|entity| entity.id)
+            .collect::<BTreeSet<_>>()
+    };
+    assert_eq!(data_ids(&result), data_ids(&edited_result));
+}
+
+#[test]
 fn markdown_fenced_examples_keep_distinct_owners_and_original_coordinates() {
     let source = "# Examples\r\n\r\n> ~~~rust\r\n> fn greet() {}\r\n> ~~~\r\n\r\n~~~rust\r\nfn greet() {}\r\n~~~\r\n";
     let result = output(source);
