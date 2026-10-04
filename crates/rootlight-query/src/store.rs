@@ -4,7 +4,7 @@ use std::{
 };
 
 use rootlight_ids::{FileId, GenerationId};
-use rootlight_search::{LexicalSearch, SourceLexicalCoverage};
+use rootlight_search::{LexicalSearch, SourceLexicalCoverage, SymbolNameLexicalOmissions};
 use rootlight_storage::{GenerationMetadata, GenerationSnapshot, IdentityVerifiedGeneration};
 
 use crate::{QueryError, QueryService};
@@ -58,6 +58,13 @@ where
     #[must_use]
     pub fn source_lexical_coverage(&self, file: FileId) -> Option<SourceLexicalCoverage> {
         self.retained.search.source_coverage(file)
+    }
+
+    /// Returns generation-pinned derived name omissions without rescanning IR or source.
+    /// This accounting is independent of whole-source words and structural entities.
+    #[must_use]
+    pub fn symbol_name_lexical_omissions(&self, file: FileId) -> &[SymbolNameLexicalOmissions] {
+        self.retained.search.symbol_name_omissions(file)
     }
 }
 

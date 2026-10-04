@@ -6159,7 +6159,7 @@ fn restore_generation(
         memory_reservation: memory_reservation.take(),
     };
     if restored.memory_reservation.is_some() {
-        let memory_bytes = super::restored_generation_memory_bytes(&mut restored)?;
+        let memory_bytes = super::restored_generation_memory_bytes(&mut restored, cancellation)?;
         if let Some(reservation) = restored.memory_reservation.as_mut() {
             reservation.resize(memory_bytes, true)?;
         }

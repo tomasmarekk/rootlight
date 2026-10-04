@@ -19,26 +19,34 @@ use tantivy::{
         BytesOptions, Field, IndexRecordOption, NumericOptions, Schema, TextFieldIndexing,
         TextOptions, Value,
     },
-    tokenizer::TextAnalyzer,
+    tokenizer::{MAX_TOKEN_LEN, RemoveLongFilter, TextAnalyzer},
 };
 use tantivy_fst::{Automaton as _, Regex};
 
 use crate::{
     artifact::{ArtifactBudget, LexicalArtifactManifest, VerifiedLexicalArtifact, create_manifest},
     model::{
-        BuildBudget, BuildStats, CODE_TOKENIZER, DocumentField, LexicalDocument, QueryViolation,
-        SearchBudget, SearchError, SearchFilters, SearchHit, SearchMode, SearchOutcome,
-        SearchRequest, SourceLexicalCoverage, SourceTermProjection,
+        BuildBudget, BuildStats, CODE_TOKENIZER, DocumentField, LexicalDocument, MAX_TERM_BYTES,
+        QueryViolation, SYMBOL_NAME_TOKENIZER, SearchBudget, SearchError, SearchFilters, SearchHit,
+        SearchMode, SearchOutcome, SearchRequest, SourceLexicalCoverage, SourceTermProjection,
+        SymbolNameLexicalOmissions, SymbolNameProjection, SymbolNameTermOmissions,
     },
-    tokenizer::{CodeTokenizer, has_oversized_term, is_mark, normalize_text, token_texts},
+    tokenizer::{
+        CodeTokenizer, has_oversized_term, is_mark, normalize_text, oversized_name_tokens,
+        token_texts,
+    },
 };
 
 const FORMAT_PREFIX: &str = "rootlight.lexical";
-const FORMAT_VERSION: &str = "6";
-const STORED_HIT_VERSION: u8 = 4;
+const FORMAT_VERSION: &str = "7";
+const STORED_HIT_VERSION: u8 = 5;
 const MIN_WRITER_HEAP_BYTES: usize = 15_000_000;
 const MAX_IDENTIFIER_BYTES: usize = 512;
 const MAX_QUALIFIED_BYTES: usize = 2_048;
+// Segmented names mirror the existing normalized IR per-string ceiling. The
+// inline field, codeword, aggregate build and query budgets remain independent.
+const MAX_SEGMENTED_NAME_BYTES: usize = 32 * 1024;
+const MAX_NAME_SEGMENTS: usize = 65;
 const MAX_PATH_BYTES: usize = 4_096;
 const MAX_LABEL_BYTES: usize = 128;
 const MAX_OWNERSHIP_BYTES: usize = 512;
@@ -72,6 +80,91 @@ const MAX_LANGUAGE_FILTER_BYTES: usize = 64;
 const SORT_CHECKPOINT_STRIDE: usize = 1_024;
 
 type QueryClause = (Occur, Box<dyn Query>);
+
+/// Selects explicit symbol-name storage without changing any source spelling.
+/// File-only projections must not use this selector to enable segmented names.
+#[must_use]
+pub fn project_symbol_name_projection(
+    display: &str,
+    canonical: Option<&str>,
+    qualified: &str,
+) -> SymbolNameProjection {
+    let inline = |text: &str, limit| text.len() <= limit && !has_oversized_term(text);
+    if inline(display, MAX_IDENTIFIER_BYTES)
+        && canonical.is_none_or(|name| inline(name, MAX_IDENTIFIER_BYTES))
+        && inline(qualified, MAX_QUALIFIED_BYTES)
+    {
+        SymbolNameProjection::Inline
+    } else {
+        SymbolNameProjection::Segmented
+    }
+}
+
+/// Counts omitted name codewords while retaining complete raw name matching.
+///
+/// # Errors
+/// Returns a source-redacted invalid-document error for a name outside the
+/// segmented representation, including normalized whole-name backend overflow.
+pub fn symbol_name_term_omissions(
+    display: &str,
+    canonical: Option<&str>,
+    qualified: &str,
+) -> Result<SymbolNameTermOmissions, SearchError> {
+    validate_segmented_name(display, DocumentField::Identifier)?;
+    validate_segmented_name(qualified, DocumentField::QualifiedName)?;
+    let (display_tokens, display_bytes) = oversized_name_tokens(display);
+    let (qualified_tokens, qualified_bytes) = oversized_name_tokens(qualified);
+    let (canonical_tokens, canonical_bytes) = if let Some(name) = canonical {
+        validate_segmented_name(name, DocumentField::Identifier)?;
+        oversized_name_tokens(name)
+    } else {
+        (0, 0)
+    };
+    Ok(SymbolNameTermOmissions {
+        display_tokens,
+        canonical_tokens,
+        qualified_tokens,
+        original_token_bytes: display_bytes + canonical_bytes + qualified_bytes,
+    })
+}
+
+fn validate_segmented_name(text: &str, field: DocumentField) -> Result<(), SearchError> {
+    if text.is_empty()
+        || text.len() > MAX_SEGMENTED_NAME_BYTES
+        || text.contains('\0')
+        || normalize_exact(text).len() > MAX_TOKEN_LEN
+    {
+        return Err(SearchError::InvalidDocument { field });
+    }
+    Ok(())
+}
+
+/// Bounds sparse name-omission metadata during construction and retained reads.
+/// The scope bound may overcount entities sharing a file/language; it must not
+/// undercount distinct file/language pairs with omitted name codewords.
+///
+/// # Errors
+/// Returns a source-redacted build-budget error on checked size overflow.
+pub fn symbol_name_omission_memory_bytes(scope_bound: usize) -> Result<u64, SearchError> {
+    if scope_bound == 0 {
+        return Ok(0);
+    }
+    let entry = std::mem::size_of::<SymbolNameLexicalOmissions>()
+        .checked_add(MAX_LABEL_BYTES)
+        .ok_or(SearchError::BuildBudgetExceeded {
+            resource: "name_omission_memory",
+        })?;
+    // Include tree nodes, owned labels and the flattened vector together. The
+    // fixed allowance covers a whole first node even for a singleton map.
+    scope_bound
+        .checked_mul(entry)
+        .and_then(|bytes| bytes.checked_mul(4))
+        .and_then(|bytes| bytes.checked_add(4096))
+        .and_then(|bytes| u64::try_from(bytes).ok())
+        .ok_or(SearchError::BuildBudgetExceeded {
+            resource: "name_omission_memory",
+        })
+}
 
 /// Builds a lexical index in an already-private, empty staging directory.
 pub struct LexicalIndexBuilder;
@@ -236,6 +329,13 @@ pub trait LexicalSearch: Send + Sync {
     fn source_coverage(&self, _file: FileId) -> Option<SourceLexicalCoverage> {
         None
     }
+
+    /// Returns retained name-codeword omissions for one file, separate from source words.
+    /// An empty slice can mean accounting unavailable, not proven zero omissions.
+    /// It is never evidence of structural or semantic completeness.
+    fn symbol_name_omissions(&self, _file: FileId) -> &[SymbolNameLexicalOmissions] {
+        &[]
+    }
 }
 
 /// Validates a lexical construction budget without creating an artifact.
@@ -332,6 +432,7 @@ pub struct LexicalIndex {
     reader: IndexReader,
     _artifact: Option<VerifiedLexicalArtifact>,
     source_coverage: Vec<(FileId, SourceLexicalCoverage)>,
+    symbol_name_omissions: Vec<SymbolNameLexicalOmissions>,
 }
 
 /// Incremental in-memory lexical builder for independently bounded partitions.
@@ -348,6 +449,7 @@ pub struct EphemeralLexicalIndexBuilder {
     document_count: u64,
     text_bytes: u64,
     source_coverage: Vec<(FileId, SourceLexicalCoverage)>,
+    symbol_name_omissions: BTreeMap<(FileId, String), SymbolNameTermOmissions>,
 }
 
 impl EphemeralLexicalIndexBuilder {
@@ -382,6 +484,7 @@ impl EphemeralLexicalIndexBuilder {
             document_count: 0,
             text_bytes: 0,
             source_coverage: Vec::new(),
+            symbol_name_omissions: BTreeMap::new(),
         })
     }
 
@@ -436,6 +539,35 @@ impl EphemeralLexicalIndexBuilder {
             writer
                 .add_document(self.fields.encode(document)?)
                 .map_err(|_| operation("add_document"))?;
+            if document.symbol_name_projection == SymbolNameProjection::Segmented {
+                let omissions = symbol_name_term_omissions(
+                    &document.identifier,
+                    document.canonical_name.as_deref(),
+                    &document.qualified_name,
+                )?;
+                if !omissions.is_empty() {
+                    let total = self
+                        .symbol_name_omissions
+                        .entry((document.file_id, document.language.clone()))
+                        .or_default();
+                    for (target, value) in [
+                        (&mut total.display_tokens, omissions.display_tokens),
+                        (&mut total.canonical_tokens, omissions.canonical_tokens),
+                        (&mut total.qualified_tokens, omissions.qualified_tokens),
+                        (
+                            &mut total.original_token_bytes,
+                            omissions.original_token_bytes,
+                        ),
+                    ] {
+                        *target =
+                            target
+                                .checked_add(value)
+                                .ok_or(SearchError::BuildBudgetExceeded {
+                                    resource: "name_omission_counts",
+                                })?;
+                    }
+                }
+            }
         }
         self.targets.extend(documents.iter().map(document_target));
         self.source_coverage
@@ -480,6 +612,15 @@ impl EphemeralLexicalIndexBuilder {
             reader,
             _artifact: None,
             source_coverage: self.source_coverage,
+            symbol_name_omissions: self
+                .symbol_name_omissions
+                .into_iter()
+                .map(|((file, language), terms)| SymbolNameLexicalOmissions {
+                    file,
+                    language,
+                    terms,
+                })
+                .collect(),
         })
     }
 }
@@ -521,6 +662,7 @@ impl LexicalIndex {
             reader,
             _artifact: Some(artifact),
             source_coverage: Vec::new(),
+            symbol_name_omissions: Vec::new(),
         })
     }
 
@@ -801,6 +943,16 @@ impl LexicalSearch for LexicalIndex {
             .binary_search_by_key(&file, |(file, _)| *file)
             .ok()
             .map(|index| self.source_coverage[index].1)
+    }
+
+    fn symbol_name_omissions(&self, file: FileId) -> &[SymbolNameLexicalOmissions] {
+        let start = self
+            .symbol_name_omissions
+            .partition_point(|entry| entry.file < file);
+        let end = self
+            .symbol_name_omissions
+            .partition_point(|entry| entry.file <= file);
+        &self.symbol_name_omissions[start..end]
     }
 }
 
@@ -1100,12 +1252,17 @@ impl Fields {
                 .set_tokenizer(CODE_TOKENIZER)
                 .set_index_option(IndexRecordOption::WithFreqsAndPositions),
         );
+        let name_code = TextOptions::default().set_indexing_options(
+            TextFieldIndexing::default()
+                .set_tokenizer(SYMBOL_NAME_TOKENIZER)
+                .set_index_option(IndexRecordOption::WithFreqsAndPositions),
+        );
         let symbol_id = builder.add_bytes_field("symbol_id", identifiers.clone());
         let file_id = builder.add_bytes_field("file_id", identifiers);
         let identifier_normalized = builder.add_text_field("identifier_normalized", raw.clone());
-        let identifier_text = builder.add_text_field("identifier_text", code.clone());
+        let identifier_text = builder.add_text_field("identifier_text", name_code.clone());
         let qualified_normalized = builder.add_text_field("qualified_normalized", raw.clone());
-        let qualified_text = builder.add_text_field("qualified_text", code.clone());
+        let qualified_text = builder.add_text_field("qualified_text", name_code);
         let path_normalized = builder.add_text_field("path_normalized", raw.clone());
         let path_text = builder.add_text_field("path_text", code.clone());
         let path_scope = builder.add_text_field("path_scope", raw);
@@ -1503,9 +1660,21 @@ fn encode_stored_hit(source: &LexicalDocument) -> Result<Vec<u8>, SearchError> {
     encoded.push(u8::from(source.generated));
     encoded.push(u8::from(source.test));
     encoded.push(u8::from(source.declaration_only));
+    encoded.push(match source.symbol_name_projection {
+        SymbolNameProjection::Inline => 0,
+        SymbolNameProjection::Segmented => 1,
+    });
+    encode_hit_name(
+        &mut encoded,
+        &source.identifier,
+        source.symbol_name_projection,
+    )?;
+    encode_hit_name(
+        &mut encoded,
+        &source.qualified_name,
+        source.symbol_name_projection,
+    )?;
     for text in [
-        source.identifier.as_str(),
-        source.qualified_name.as_str(),
         source.path.as_str(),
         source.kind.as_str(),
         source.language.as_str(),
@@ -1519,14 +1688,58 @@ fn encode_stored_hit(source: &LexicalDocument) -> Result<Vec<u8>, SearchError> {
     }
     encoded.push(u8::from(source.canonical_name.is_some()));
     if let Some(canonical) = &source.canonical_name {
-        let length =
-            u32::try_from(canonical.len()).map_err(|_| SearchError::BuildBudgetExceeded {
-                resource: "stored_hit_bytes",
-            })?;
-        encoded.extend_from_slice(&length.to_be_bytes());
-        encoded.extend_from_slice(canonical.as_bytes());
+        encode_hit_name(&mut encoded, canonical, source.symbol_name_projection)?;
     }
     Ok(encoded)
+}
+
+fn name_segments(mut text: &str) -> impl Iterator<Item = &str> {
+    std::iter::from_fn(move || {
+        if text.is_empty() {
+            return None;
+        }
+        let mut end = MAX_IDENTIFIER_BYTES.min(text.len());
+        while !text.is_char_boundary(end) {
+            end -= 1;
+        }
+        let (segment, remaining) = text.split_at(end);
+        text = remaining;
+        Some(segment)
+    })
+}
+
+fn encode_hit_name(
+    encoded: &mut Vec<u8>,
+    text: &str,
+    projection: SymbolNameProjection,
+) -> Result<(), SearchError> {
+    match projection {
+        SymbolNameProjection::Inline => {
+            let length =
+                u32::try_from(text.len()).map_err(|_| SearchError::BuildBudgetExceeded {
+                    resource: "stored_hit_bytes",
+                })?;
+            encoded.extend_from_slice(&length.to_be_bytes());
+            encoded.extend_from_slice(text.as_bytes());
+        }
+        SymbolNameProjection::Segmented => {
+            validate_segmented_name(text, DocumentField::Identifier)?;
+            let count = name_segments(text).count();
+            if count == 0 || count > MAX_NAME_SEGMENTS {
+                return Err(SearchError::InvalidDocument {
+                    field: DocumentField::Identifier,
+                });
+            }
+            encoded.push(u8::try_from(count).map_err(|_| SearchError::IncompatibleIndex)?);
+            for segment in name_segments(text) {
+                let length =
+                    u32::try_from(segment.len()).map_err(|_| SearchError::IncompatibleIndex)?;
+                encoded.extend_from_slice(&length.to_be_bytes());
+                encoded.extend_from_slice(segment.as_bytes());
+            }
+        }
+    }
+    Ok(())
 }
 
 fn decode_stored_hit(bytes: &[u8], score: f32) -> Result<(SearchHit, usize), SearchError> {
@@ -1555,17 +1768,20 @@ fn decode_stored_hit(bytes: &[u8], score: f32) -> Result<(SearchHit, usize), Sea
         1 => true,
         _ => return Err(SearchError::IncompatibleIndex),
     };
-    let identifier = decoder.read_text(MAX_IDENTIFIER_BYTES, TextValidation::Tokenized)?;
-    let qualified_name = decoder.read_text(MAX_QUALIFIED_BYTES, TextValidation::Tokenized)?;
+    let name_projection = match decoder.read_u8()? {
+        0 => SymbolNameProjection::Inline,
+        1 if symbol_id.is_some() => SymbolNameProjection::Segmented,
+        _ => return Err(SearchError::IncompatibleIndex),
+    };
+    let identifier = decoder.read_name(name_projection, MAX_IDENTIFIER_BYTES)?;
+    let qualified_name = decoder.read_name(name_projection, MAX_QUALIFIED_BYTES)?;
     let path = decoder.read_text(MAX_PATH_BYTES, TextValidation::Path)?;
     let kind = decoder.read_text(MAX_LABEL_BYTES, TextValidation::Label)?;
     let language = decoder.read_text(MAX_LABEL_BYTES, TextValidation::Label)?;
     let tier = decoder.read_text(MAX_LABEL_BYTES, TextValidation::Label)?;
     let canonical_name = match decoder.read_u8()? {
         0 => None,
-        1 if symbol_id.is_some() => {
-            Some(decoder.read_text(MAX_IDENTIFIER_BYTES, TextValidation::Tokenized)?)
-        }
+        1 if symbol_id.is_some() => Some(decoder.read_name(name_projection, MAX_IDENTIFIER_BYTES)?),
         _ => return Err(SearchError::IncompatibleIndex),
     };
     if !decoder.is_finished() {
@@ -1606,6 +1822,7 @@ fn decode_stored_hit(bytes: &[u8], score: f32) -> Result<(SearchHit, usize), Sea
 #[derive(Clone, Copy)]
 enum TextValidation {
     Tokenized,
+    NameSegment,
     Label,
     Path,
 }
@@ -1653,6 +1870,7 @@ impl<'a> StoredHitDecoder<'a> {
             std::str::from_utf8(self.take(length)?).map_err(|_| SearchError::IncompatibleIndex)?;
         let valid = match validation {
             TextValidation::Tokenized => !text.contains('\0') && !has_oversized_term(text),
+            TextValidation::NameSegment => !text.contains('\0'),
             TextValidation::Label => {
                 !text.contains('\0')
                     && text.bytes().all(|byte| {
@@ -1667,6 +1885,47 @@ impl<'a> StoredHitDecoder<'a> {
             return Err(SearchError::IncompatibleIndex);
         }
         Ok(text.to_owned())
+    }
+
+    fn read_name(
+        &mut self,
+        projection: SymbolNameProjection,
+        inline_limit: usize,
+    ) -> Result<String, SearchError> {
+        if projection == SymbolNameProjection::Inline {
+            return self.read_text(inline_limit, TextValidation::Tokenized);
+        }
+        let count = usize::from(self.read_u8()?);
+        if count == 0 || count > MAX_NAME_SEGMENTS {
+            return Err(SearchError::IncompatibleIndex);
+        }
+        let mut text = String::new();
+        let mut previous_length = None;
+        for _ in 0..count {
+            let segment = self.read_text(MAX_IDENTIFIER_BYTES, TextValidation::NameSegment)?;
+            if previous_length.is_some_and(|length| {
+                segment
+                    .chars()
+                    .next()
+                    .is_none_or(|first| length + first.len_utf8() <= MAX_IDENTIFIER_BYTES)
+            }) {
+                return Err(SearchError::IncompatibleIndex);
+            }
+            let total = text
+                .len()
+                .checked_add(segment.len())
+                .ok_or(SearchError::IncompatibleIndex)?;
+            if total > MAX_SEGMENTED_NAME_BYTES {
+                return Err(SearchError::IncompatibleIndex);
+            }
+            text.try_reserve(segment.len())
+                .map_err(|_| operation("decode_name"))?;
+            text.push_str(&segment);
+            previous_length = Some(segment.len());
+        }
+        validate_segmented_name(&text, DocumentField::Identifier)
+            .map_err(|_| SearchError::IncompatibleIndex)?;
+        Ok(text)
     }
 
     fn take(&mut self, length: usize) -> Result<&'a [u8], SearchError> {
@@ -2447,7 +2706,10 @@ fn validate_document(
     document: &LexicalDocument,
     cancellation: &Cancellation,
 ) -> Result<usize, SearchError> {
-    if document.symbol_id.is_none() && document.canonical_name.is_some() {
+    if document.symbol_id.is_none()
+        && (document.canonical_name.is_some()
+            || document.symbol_name_projection != SymbolNameProjection::Inline)
+    {
         return Err(SearchError::InvalidDocument {
             field: DocumentField::Identifier,
         });
@@ -2473,27 +2735,49 @@ fn validate_document(
         });
     }
     let mut bytes = 0usize;
-    bytes = add_optional(
-        bytes,
-        document.canonical_name.as_deref(),
-        MAX_IDENTIFIER_BYTES,
-        DocumentField::Identifier,
-        true,
-    )?;
-    bytes = add_required(
-        bytes,
-        &document.identifier,
-        MAX_IDENTIFIER_BYTES,
-        DocumentField::Identifier,
-        true,
-    )?;
-    bytes = add_required(
-        bytes,
-        &document.qualified_name,
-        MAX_QUALIFIED_BYTES,
-        DocumentField::QualifiedName,
-        true,
-    )?;
+    if document.symbol_name_projection == SymbolNameProjection::Segmented {
+        for (name, field) in [
+            (
+                Some(document.identifier.as_str()),
+                DocumentField::Identifier,
+            ),
+            (
+                document.canonical_name.as_deref(),
+                DocumentField::Identifier,
+            ),
+            (
+                Some(document.qualified_name.as_str()),
+                DocumentField::QualifiedName,
+            ),
+        ] {
+            if let Some(name) = name {
+                validate_segmented_name(name, field)?;
+                bytes = checked_text_bytes(bytes, name.len())?;
+            }
+        }
+    } else {
+        bytes = add_optional(
+            bytes,
+            document.canonical_name.as_deref(),
+            MAX_IDENTIFIER_BYTES,
+            DocumentField::Identifier,
+            true,
+        )?;
+        bytes = add_required(
+            bytes,
+            &document.identifier,
+            MAX_IDENTIFIER_BYTES,
+            DocumentField::Identifier,
+            true,
+        )?;
+        bytes = add_required(
+            bytes,
+            &document.qualified_name,
+            MAX_QUALIFIED_BYTES,
+            DocumentField::QualifiedName,
+            true,
+        )?;
+    }
     validate_path(&document.path)?;
     bytes = checked_text_bytes(bytes, document.path.len())?;
     bytes = add_label(bytes, &document.kind, DocumentField::Kind)?;
@@ -2754,6 +3038,12 @@ fn register_tokenizer(index: &Index) {
     index
         .tokenizers()
         .register(CODE_TOKENIZER, TextAnalyzer::from(CodeTokenizer::default()));
+    index.tokenizers().register(
+        SYMBOL_NAME_TOKENIZER,
+        TextAnalyzer::builder(CodeTokenizer::default())
+            .filter(RemoveLongFilter::limit(MAX_TERM_BYTES + 1))
+            .build(),
+    );
 }
 
 fn normalize_exact(input: &str) -> String {
@@ -3563,6 +3853,7 @@ mod tests {
             identifier: identifier.to_owned(),
             canonical_name: None,
             qualified_name: format!("crate::{identifier}"),
+            symbol_name_projection: SymbolNameProjection::Inline,
             path: path.to_owned(),
             kind: "function".to_owned(),
             language: "rust".to_owned(),
@@ -3632,6 +3923,368 @@ mod tests {
             search(&index, "query_budget", SearchMode::Exact)[0].symbol_id,
             Some(SymbolId::from_bytes([1; 20]))
         );
+    }
+
+    #[test]
+    fn segmented_symbol_names_preserve_whole_matching_and_codeword_accounting() {
+        let display = format!("Before_{}_After", "x".repeat(520));
+        let mut source = document(1, &display, "src/names.txt");
+        source.signature = None;
+        source.canonical_name = Some(format!("Original_{}_Alias", "y".repeat(260)));
+        source.symbol_name_projection = project_symbol_name_projection(
+            &source.identifier,
+            source.canonical_name.as_deref(),
+            &source.qualified_name,
+        );
+        assert_eq!(
+            source.symbol_name_projection,
+            SymbolNameProjection::Segmented
+        );
+        let omissions = symbol_name_term_omissions(
+            &source.identifier,
+            source.canonical_name.as_deref(),
+            &source.qualified_name,
+        )
+        .unwrap();
+        assert_eq!(
+            omissions,
+            SymbolNameTermOmissions {
+                display_tokens: 1,
+                canonical_tokens: 1,
+                qualified_tokens: 1,
+                original_token_bytes: 1300,
+            }
+        );
+        let index = LexicalIndex::build_ephemeral(
+            generation(1),
+            vec![source.clone()],
+            BuildBudget::default(),
+            &Cancellation::new(),
+        )
+        .unwrap();
+        assert_eq!(
+            index.symbol_name_omissions(source.file_id),
+            &[SymbolNameLexicalOmissions {
+                file: source.file_id,
+                language: source.language.clone(),
+                terms: omissions,
+            }]
+        );
+        assert_eq!(index.source_coverage(source.file_id), None);
+        for (query, mode) in [
+            ("Before", SearchMode::Prefix),
+            ("Original", SearchMode::Prefix),
+            ("After", SearchMode::Text),
+            ("Before*After", SearchMode::Glob),
+            ("Before.*After", SearchMode::SafeRegex),
+            ("src/names.txt", SearchMode::Exact),
+        ] {
+            let hits = search(&index, query, mode);
+            assert_eq!(hits.len(), 1, "{mode:?}: {query}");
+            assert_eq!(hits[0].identifier, source.identifier);
+            assert_eq!(hits[0].canonical_name, source.canonical_name);
+            assert_eq!(hits[0].qualified_name, source.qualified_name);
+            assert_eq!(hits[0].symbol_id, source.symbol_id);
+        }
+        assert!(search(&index, "Before", SearchMode::Exact).is_empty());
+        let request = SearchRequest {
+            query: display,
+            mode: SearchMode::Exact,
+            max_results: 1,
+            page_offset: 0,
+        };
+        assert!(matches!(
+            index.search(
+                &request,
+                SearchBudget {
+                    max_query_bytes: 4096,
+                    ..SearchBudget::default()
+                },
+                &Cancellation::new()
+            ),
+            Err(SearchError::InvalidQuery(QueryViolation::TermTooLong))
+        ));
+    }
+
+    #[test]
+    fn segmented_names_do_not_relax_inline_file_or_aggregate_budgets() {
+        let cancellation = Cancellation::new();
+        let mut source = document(1, &"part_".repeat(120), "src/names.txt");
+        source.signature = None;
+        assert!(matches!(
+            validate_document(&source, &cancellation),
+            Err(SearchError::InvalidDocument {
+                field: DocumentField::Identifier
+            })
+        ));
+        source.symbol_name_projection = SymbolNameProjection::Segmented;
+        let bytes = validate_document(&source, &cancellation).unwrap();
+        assert!(matches!(
+            LexicalIndex::build_ephemeral(
+                generation(1),
+                vec![source.clone()],
+                BuildBudget {
+                    max_text_bytes: bytes - 1,
+                    ..BuildBudget::default()
+                },
+                &cancellation
+            ),
+            Err(SearchError::BuildBudgetExceeded {
+                resource: "text_bytes"
+            })
+        ));
+        source.symbol_id = None;
+        assert!(matches!(
+            validate_document(&source, &cancellation),
+            Err(SearchError::InvalidDocument {
+                field: DocumentField::Identifier
+            })
+        ));
+        source.symbol_id = Some(SymbolId::from_bytes([1; 20]));
+        for invalid in [
+            String::new(),
+            "a\0b".to_owned(),
+            "a".repeat(MAX_SEGMENTED_NAME_BYTES + 1),
+        ] {
+            source.identifier = invalid;
+            assert!(matches!(
+                validate_document(&source, &cancellation),
+                Err(SearchError::InvalidDocument {
+                    field: DocumentField::Identifier
+                })
+            ));
+        }
+    }
+
+    #[test]
+    fn segmented_names_round_trip_utf8_without_manufacturing_chunk_terms() {
+        let display = format!("{}🚀Cafe\u{301}_After", "a".repeat(511));
+        let mut source = document(1, &display, "src/names.txt");
+        source.signature = None;
+        source.symbol_name_projection = SymbolNameProjection::Segmented;
+        let (decoded, _) = decode_stored_hit(&encode_stored_hit(&source).unwrap(), 1.0).unwrap();
+        assert_eq!(decoded.identifier, display);
+        assert_eq!(decoded.qualified_name, source.qualified_name);
+        assert!(name_segments(&display).all(|segment| segment.len() <= MAX_IDENTIFIER_BYTES));
+        let maximum = "🚀".repeat(MAX_SEGMENTED_NAME_BYTES / 4);
+        source.identifier = maximum.clone();
+        source.qualified_name = maximum.clone();
+        let (decoded, _) = decode_stored_hit(&encode_stored_hit(&source).unwrap(), 1.0).unwrap();
+        assert_eq!(decoded.identifier, maximum);
+        let worst_packing = format!("{}abc", "a🚀".repeat(6553));
+        assert_eq!(worst_packing.len(), MAX_SEGMENTED_NAME_BYTES);
+        assert_eq!(name_segments(&worst_packing).count(), MAX_NAME_SEGMENTS);
+        source.identifier = worst_packing.clone();
+        source.qualified_name = worst_packing.clone();
+        let (decoded, _) = decode_stored_hit(&encode_stored_hit(&source).unwrap(), 1.0).unwrap();
+        assert_eq!(decoded.identifier, worst_packing);
+        source.identifier = display;
+        source.qualified_name = format!("crate::{}", source.identifier);
+        let index = LexicalIndex::build_ephemeral(
+            generation(1),
+            vec![source],
+            BuildBudget::default(),
+            &Cancellation::new(),
+        )
+        .unwrap();
+        assert_eq!(search(&index, "CAFÉ", SearchMode::Text).len(), 1);
+        assert!(search(&index, &"a".repeat(240), SearchMode::Exact).is_empty());
+    }
+
+    #[test]
+    fn segmented_names_preserve_long_admitted_queries_and_full_returned_bytes() {
+        let display = format!("{}tailMarker", "small_segment_".repeat(60));
+        let mut source = document(1, &display, "src/names.txt");
+        source.signature = None;
+        source.canonical_name = Some(format!("alias_{}end", "short_part_".repeat(70)));
+        source.qualified_name = format!("{}{}", "module_path_".repeat(200), source.identifier);
+        assert!(source.canonical_name.as_ref().unwrap().len() > MAX_IDENTIFIER_BYTES);
+        assert!(source.qualified_name.len() > MAX_QUALIFIED_BYTES);
+        source.symbol_name_projection = SymbolNameProjection::Segmented;
+        let index = LexicalIndex::build_ephemeral(
+            generation(1),
+            vec![source.clone()],
+            BuildBudget::default(),
+            &Cancellation::new(),
+        )
+        .unwrap();
+        assert_eq!(search(&index, "tail Marker", SearchMode::Text).len(), 1);
+        let request = SearchRequest {
+            query: display,
+            mode: SearchMode::Exact,
+            max_results: 1,
+            page_offset: 0,
+        };
+        let budget = SearchBudget {
+            max_query_bytes: 4096,
+            ..SearchBudget::default()
+        };
+        for query in [
+            source.canonical_name.as_ref().unwrap(),
+            &source.qualified_name,
+        ] {
+            let exact = SearchRequest {
+                query: query.clone(),
+                ..request.clone()
+            };
+            let outcome = index
+                .search_with_stats(&exact, budget, &Cancellation::new())
+                .unwrap();
+            assert_eq!(outcome.hits.len(), 1);
+            assert_eq!(outcome.hits[0].symbol_id, source.symbol_id);
+        }
+        let outcome = index
+            .search_with_stats(&request, budget, &Cancellation::new())
+            .unwrap();
+        assert_eq!(outcome.hits.len(), 1);
+        let (_, expected_bytes) =
+            decode_stored_hit(&encode_stored_hit(&source).unwrap(), 1.0).unwrap();
+        assert_eq!(
+            outcome.materialized_text_bytes,
+            u64::try_from(expected_bytes).unwrap()
+        );
+        assert!(matches!(
+            index.search_with_stats(
+                &request,
+                SearchBudget {
+                    max_returned_text_bytes: expected_bytes - 1,
+                    ..budget
+                },
+                &Cancellation::new()
+            ),
+            Err(SearchError::ReturnedTextBudgetExceeded)
+        ));
+    }
+
+    #[test]
+    fn segmented_name_limits_use_complete_unicode_normalization() {
+        let exact_term = "İ".repeat(80);
+        let omitted_term = "İ".repeat(81);
+        assert_eq!(normalize_exact(&exact_term).len(), MAX_TERM_BYTES);
+        assert_eq!(
+            project_symbol_name_projection(&exact_term, None, "scope"),
+            SymbolNameProjection::Inline
+        );
+        let omissions = symbol_name_term_omissions(&omitted_term, None, "scope").unwrap();
+        assert_eq!(omissions.display_tokens, 1);
+        assert_eq!(omissions.original_token_bytes, 162);
+        for (name, expected_postings) in [(&exact_term, 1), (&omitted_term, 0)] {
+            let mut source = document(1, name, "src/names.txt");
+            source.signature = None;
+            source.symbol_name_projection =
+                project_symbol_name_projection(name, None, &source.qualified_name);
+            let index = LexicalIndex::build_ephemeral(
+                generation(1),
+                vec![source],
+                BuildBudget::default(),
+                &Cancellation::new(),
+            )
+            .unwrap();
+            assert_eq!(
+                index
+                    .reader
+                    .searcher()
+                    .doc_freq(&Term::from_field_text(
+                        index.fields.identifier_text,
+                        &normalize_exact(name)
+                    ))
+                    .unwrap(),
+                expected_postings
+            );
+            assert_eq!(search(&index, "İİ", SearchMode::Prefix).len(), 1);
+        }
+        // U+0344 is composition-excluded: two source bytes become four
+        // normalized bytes. The native raw-term guard precedes backend writes.
+        let native_overflow = "\u{344}".repeat(MAX_SEGMENTED_NAME_BYTES / 2);
+        assert_eq!(native_overflow.len(), MAX_SEGMENTED_NAME_BYTES);
+        assert_eq!(normalize_exact(&native_overflow).len(), 65536);
+        assert!(matches!(
+            validate_segmented_name(&native_overflow, DocumentField::Identifier),
+            Err(SearchError::InvalidDocument {
+                field: DocumentField::Identifier
+            })
+        ));
+        let native_ceiling = format!("{}aa", "\u{344}".repeat(16382));
+        assert_eq!(normalize_exact(&native_ceiling).len(), MAX_TOKEN_LEN);
+        validate_segmented_name(&native_ceiling, DocumentField::Identifier).unwrap();
+    }
+
+    #[test]
+    fn partitioned_name_omissions_keep_file_language_scope_and_conservation() {
+        let mut first = document(1, &format!("name_{}_end", "a".repeat(260)), "src/mixed.txt");
+        first.signature = None;
+        first.symbol_name_projection = SymbolNameProjection::Segmented;
+        let mut second = first.clone();
+        second.symbol_id = Some(SymbolId::from_bytes([2; 20]));
+        second.language = "javascript".to_owned();
+        let mut third = first.clone();
+        third.symbol_id = Some(SymbolId::from_bytes([3; 20]));
+        let mut builder = EphemeralLexicalIndexBuilder::new(
+            generation(1),
+            BuildBudget::default(),
+            &Cancellation::new(),
+        )
+        .unwrap();
+        builder
+            .push_partition(vec![first.clone()], &Cancellation::new())
+            .unwrap();
+        builder
+            .push_partition(vec![second, third], &Cancellation::new())
+            .unwrap();
+        let index = builder.finish(&Cancellation::new()).unwrap();
+        let summaries = index.symbol_name_omissions(first.file_id);
+        assert_eq!(summaries.len(), 2);
+        assert_eq!(summaries[0].language, "javascript");
+        assert_eq!(summaries[0].terms.display_tokens, 1);
+        assert_eq!(summaries[1].language, "rust");
+        assert_eq!(summaries[1].terms.display_tokens, 2);
+        assert_eq!(
+            summaries
+                .iter()
+                .map(|entry| entry.terms.original_token_bytes)
+                .sum::<u64>(),
+            1560
+        );
+        assert!(
+            index
+                .symbol_name_omissions(FileId::from_bytes([99; 20]))
+                .is_empty()
+        );
+        assert_eq!(symbol_name_omission_memory_bytes(0).unwrap(), 0);
+        assert!(symbol_name_omission_memory_bytes(1).unwrap() > 4096);
+        assert!(symbol_name_omission_memory_bytes(usize::MAX).is_err());
+    }
+
+    #[test]
+    fn segmented_name_decoder_rejects_invalid_counts_totals_layout_and_utf8() {
+        for bytes in [
+            vec![0],
+            vec![66],
+            vec![1, 0, 0, 0, 0],
+            vec![1, 0, 0, 0, 1, 255],
+        ] {
+            assert!(matches!(
+                StoredHitDecoder::new(&bytes)
+                    .read_name(SymbolNameProjection::Segmented, MAX_IDENTIFIER_BYTES),
+                Err(SearchError::IncompatibleIndex)
+            ));
+        }
+        let mut bytes = vec![65];
+        for _ in 0..65 {
+            bytes.extend_from_slice(&512u32.to_be_bytes());
+            bytes.extend_from_slice(&[b'a'; 512]);
+        }
+        assert!(matches!(
+            StoredHitDecoder::new(&bytes)
+                .read_name(SymbolNameProjection::Segmented, MAX_IDENTIFIER_BYTES),
+            Err(SearchError::IncompatibleIndex)
+        ));
+        let bytes = [2, 0, 0, 0, 1, b'a', 0, 0, 0, 1, b'b'];
+        assert!(matches!(
+            StoredHitDecoder::new(&bytes)
+                .read_name(SymbolNameProjection::Segmented, MAX_IDENTIFIER_BYTES),
+            Err(SearchError::IncompatibleIndex)
+        ));
     }
 
     #[test]

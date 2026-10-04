@@ -4,8 +4,9 @@ use rootlight_cancel::Cancellation;
 use rootlight_ids::FileId;
 use rootlight_ir::{ContainerRef, EntityFlag, EntityKind, EntityRecord, NormalizedIrDocument};
 use rootlight_search::{
-    BuildBudget, LexicalDocument, SearchBudget, SearchError, project_source_terms_with_coverage,
-    select_query_source_bytes, validate_build_admission,
+    BuildBudget, LexicalDocument, SearchBudget, SearchError, SymbolNameProjection,
+    project_source_terms_with_coverage, project_symbol_name_projection, select_query_source_bytes,
+    validate_build_admission,
 };
 use rootlight_storage::GenerationSnapshot;
 use rootlight_vfs::{SourceSnapshot, SourceText};
@@ -446,6 +447,7 @@ fn project_source_document(
             identifier: try_clone(identifier)?,
             canonical_name: None,
             qualified_name: try_clone(identifier)?,
+            symbol_name_projection: SymbolNameProjection::Inline,
             path: try_clone(&file.path)?,
             kind: "file".to_owned(),
             language: try_clone(&file.language)?,
@@ -757,6 +759,12 @@ fn project_entity_document(
                 .then(|| try_clone(&entity.canonical_name))
                 .transpose()?,
             qualified_name: try_clone(&entity.qualified_name)?,
+            symbol_name_projection: project_symbol_name_projection(
+                &entity.display_name,
+                (entity.canonical_name != entity.display_name)
+                    .then_some(entity.canonical_name.as_str()),
+                &entity.qualified_name,
+            ),
             path: try_clone(&file.path)?,
             kind,
             language: try_clone(&entity.language)?,

@@ -8,6 +8,51 @@ use rootlight_vfs::TextEncoding;
 pub(crate) const MAX_TERM_BYTES: usize = 240;
 /// Tokenizer name persisted in the Tantivy schema.
 pub(crate) const CODE_TOKENIZER: &str = "rootlight_code_v2";
+pub(crate) const SYMBOL_NAME_TOKENIZER: &str = "rootlight_symbol_name_v1";
+
+/// Storage representation for complete symbol names, not a replacement spelling.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SymbolNameProjection {
+    /// Historical inline field and codeword bounds apply unchanged.
+    Inline,
+    /// Symbol-only, UTF-8-safe segments retain a complete bounded IR name.
+    /// Whole-name matching is unchanged; inadmissible codeword postings are omitted.
+    Segmented,
+}
+
+/// Codeword omissions from complete symbol names, separate from source coverage.
+/// Counts include each indexed name field; an absent duplicate alias is not counted.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct SymbolNameTermOmissions {
+    /// Excluded normalized codewords in the display name.
+    pub display_tokens: u64,
+    /// Excluded normalized codewords in the optional canonical alias.
+    pub canonical_tokens: u64,
+    /// Excluded normalized codewords in the qualified name.
+    pub qualified_tokens: u64,
+    /// Original UTF-8 bytes across excluded name-codeword occurrences.
+    /// These are derived name bytes, not omitted source-file bytes.
+    pub original_token_bytes: u64,
+}
+
+impl SymbolNameTermOmissions {
+    /// Whether any name-codeword posting was excluded by the unchanged term bound.
+    #[must_use]
+    pub const fn is_empty(self) -> bool {
+        self.display_tokens == 0 && self.canonical_tokens == 0 && self.qualified_tokens == 0
+    }
+}
+
+/// Generation-pinned name omissions for a file's independently indexed language.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SymbolNameLexicalOmissions {
+    /// Exact declaring file shared with the verified symbol projection.
+    pub file: FileId,
+    /// Entity language, which may differ from an embedded file's host language.
+    pub language: String,
+    /// Name-only accounting; structural and whole-source units are unchanged.
+    pub terms: SymbolNameTermOmissions,
+}
 
 /// Source-free accounting from one complete lexical projection scan.
 ///
@@ -56,6 +101,8 @@ pub struct LexicalDocument {
     pub canonical_name: Option<String>,
     /// Qualified source spelling, including containers.
     pub qualified_name: String,
+    /// Explicit complete-name representation; file-only documents must use inline.
+    pub symbol_name_projection: SymbolNameProjection,
     /// Repository-relative canonical display path.
     pub path: String,
     /// Closed semantic kind label.

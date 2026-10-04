@@ -80,6 +80,21 @@ pub(crate) fn token_texts(text: &str) -> Vec<String> {
         .collect()
 }
 
+pub(crate) fn oversized_name_tokens(text: &str) -> (u64, u64) {
+    let mut spans = Vec::new();
+    split_spans(text, &mut spans);
+    let mut count = 0;
+    let mut bytes = 0;
+    for span in spans {
+        if normalize_text(&text[span.start..span.end]).len() > MAX_TERM_BYTES {
+            // Callers admit at most one 32-KiB name, so both sums fit u64.
+            count += 1;
+            bytes += u64::try_from(span.end - span.start).expect("bounded name span fits u64");
+        }
+    }
+    (count, bytes)
+}
+
 /// Applies the index format's full, non-Turkic Unicode normalization.
 pub(crate) fn normalize_text(input: &str) -> String {
     canonical_case_fold(input)

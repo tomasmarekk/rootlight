@@ -1854,6 +1854,66 @@ fn locate_and_explain_use_deterministic_typed_plans() {
 }
 
 #[test]
+fn locate_preserves_long_symbol_names_and_source_identity() {
+    let original = fixture_snapshot();
+    let mut document = original.document().clone();
+    let display = format!("DistinctName_{}_Tail", "x".repeat(520));
+    let qualified = format!("Container::{}::{display}", "scope::".repeat(310));
+    let entity = &mut document.entities[0];
+    entity.display_name = display.clone();
+    entity.qualified_name = qualified.clone();
+    let expected = entity.clone();
+    let snapshot = GenerationSnapshot::new(
+        original.metadata(),
+        document,
+        &IrLimits::default(),
+        &ExtensionSupport::default(),
+    )
+    .expect("complete names satisfy the unchanged IR contract");
+    let cancellation = Cancellation::new();
+    let documents =
+        project_lexical_documents(&snapshot, BuildBudget::default(), &cancellation).unwrap();
+    let index = rootlight_search::LexicalIndex::build_ephemeral(
+        snapshot.metadata().generation(),
+        documents,
+        BuildBudget::default(),
+        &cancellation,
+    )
+    .expect("valid long symbol names must not prevent generation construction");
+    let service = QueryService::new(&snapshot, &index).unwrap();
+    for (query, mode) in [
+        (expected.canonical_name.as_str(), LocateMode::Exact),
+        ("DistinctName", LocateMode::Prefix),
+        ("Distinct Name", LocateMode::Text),
+        ("Distinct*Tail", LocateMode::Glob),
+        ("Distinct.*Tail", LocateMode::SafeRegex),
+    ] {
+        let plan = service
+            .plan_code_locate(
+                query.to_owned(),
+                mode,
+                10,
+                0,
+                SearchBudget::default(),
+                QueryBudget::new(),
+            )
+            .unwrap();
+        let response = service.execute_code_locate(&plan, &cancellation).unwrap();
+        let hit = response
+            .data
+            .hits
+            .iter()
+            .find(|hit| hit.symbol == Some(expected.id))
+            .unwrap_or_else(|| panic!("authoritative symbol hit for {mode:?}: {query}"));
+        assert_eq!(hit.identifier, display);
+        assert_eq!(hit.qualified_name, qualified);
+        assert_eq!(hit.source, expected.evidence.source);
+        assert_exact_response_accounting(&response);
+    }
+    assert_eq!(snapshot.document().entities[0], expected);
+}
+
+#[test]
 fn locate_kind_plans_filter_real_backend_and_preserve_source_evidence() {
     let snapshot = fixture_snapshot();
     let cancellation = Cancellation::new();

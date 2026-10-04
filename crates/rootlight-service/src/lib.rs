@@ -227,7 +227,7 @@ const PROJECT_FACTS_TRUNCATED_CODE: &str = "project-adapter-facts-truncated";
 const PROJECT_FACTS_TRUNCATED_MESSAGE: &str =
     "additional project semantic facts were omitted by aggregate resource limits";
 const AGGREGATE_DIAGNOSTICS_TRUNCATED_CODE: &str = "aggregate-diagnostics-truncated";
-const ANALYZER_BINARY_SEED: &[u8] = b"rootlight.first-slice.treesitter-structural/195";
+const ANALYZER_BINARY_SEED: &[u8] = b"rootlight.first-slice.treesitter-structural/196";
 const RESOLVER_BINARY_SEED: &[u8] = b"rootlight.first-slice.resolve/94";
 const INCREMENTAL_PROVIDER_SEED: &[u8] = b"rootlight.first-slice.incremental-provider/1";
 const LANGUAGE_DISPOSITION_PROVIDER_SEED: &[u8] = b"rootlight.first-slice.language-disposition/6";
@@ -900,7 +900,7 @@ impl FirstSliceDeferredRestore {
     ) -> Result<FirstSliceRestoredState, FirstSliceError> {
         for restored in &mut generations {
             check_cancellation(cancellation)?;
-            let memory_bytes = restored_generation_memory_bytes(restored)?;
+            let memory_bytes = restored_generation_memory_bytes(restored, cancellation)?;
             if let Some(reservation) = restored.memory_reservation.as_mut() {
                 reservation.resize(memory_bytes, true)?;
             } else {
@@ -4752,7 +4752,7 @@ fn prepare_restored_generations(
             .map_err(|_| FirstSliceError::Limits)?;
         let fact_count = u64::try_from(normalized_record_count(restored.verified.document())?)
             .map_err(|_| FirstSliceError::Limits)?;
-        let memory_bytes = restored_generation_memory_bytes(&mut restored)?;
+        let memory_bytes = restored_generation_memory_bytes(&mut restored, cancellation)?;
         prepared.push(PreparedRestoredGeneration {
             restored,
             language_coverage,
@@ -4766,13 +4766,18 @@ fn prepare_restored_generations(
 
 fn restored_generation_memory_bytes(
     restored: &mut RestoredGeneration,
+    cancellation: &Cancellation,
 ) -> Result<u64, FirstSliceError> {
     let serialized_document_bytes = restored.serialized_document_bytes.map_or_else(
         || normalized_document_serialized_bytes(restored.verified.document()),
         Ok,
     )?;
     restored.serialized_document_bytes = Some(serialized_document_bytes);
-    generation_resident_memory_bytes(serialized_document_bytes, restored.verified.snapshot())
+    generation_resident_memory_bytes(
+        serialized_document_bytes,
+        restored.verified.snapshot(),
+        cancellation,
+    )
 }
 
 /// Resident payload cache with normalized-IR and lexical-accounting admission charges.
@@ -6686,6 +6691,7 @@ impl FirstSliceService {
                 generation_resident_memory_bytes(
                     serialized_document_bytes,
                     restored.verified.snapshot(),
+                    cancellation,
                 )
             }) {
             Ok(memory_bytes) => memory_bytes,
@@ -8534,7 +8540,11 @@ impl FirstSliceService {
         let serialized_document_bytes = normalized_document_serialized_bytes(&document)?;
         let memory_bytes = ensure_generation_memory_admission(
             serialized_document_bytes
-                .checked_add(source_lexical_coverage_memory_bytes(document.files.len())?)
+                .checked_add(source_lexical_coverage_memory_bytes(
+                    document.files.len(),
+                    &document,
+                    cancellation,
+                )?)
                 .ok_or(FirstSliceError::Limits)?,
         )?;
         let logical_workspace_bytes =
@@ -8950,6 +8960,7 @@ impl FirstSliceService {
         let memory_bytes = source_file_fallback_resident_memory_bytes(
             serialized_document_bytes,
             verified.snapshot(),
+            cancellation,
         )?;
         memory_reservation.resize(
             memory_bytes,
@@ -13483,7 +13494,8 @@ impl FirstSliceService {
         {
             let mut observe = |reason,
                                file: Option<FileId>,
-                               source: Option<SourceSpan>|
+                               source: Option<SourceSpan>,
+                               explicit_language: Option<&str>|
              -> Result<(), FirstSliceError> {
                 if !path_prefixes.is_empty()
                     && !file
@@ -13496,14 +13508,18 @@ impl FirstSliceService {
                     .map(|span| embedded_languages.resolve(span, cancellation))
                     .transpose()?
                     .unwrap_or(coverage_languages::SourceLanguage::Host);
-                let language = match selection {
-                    coverage_languages::SourceLanguage::Host => file
-                        .and_then(|file| snapshot.find_file(file))
-                        .map(|file| file.language.clone()),
-                    coverage_languages::SourceLanguage::Embedded(language) => {
-                        Some(language.to_owned())
+                let language = if let Some(language) = explicit_language {
+                    Some(language.to_owned())
+                } else {
+                    match selection {
+                        coverage_languages::SourceLanguage::Host => file
+                            .and_then(|file| snapshot.find_file(file))
+                            .map(|file| file.language.clone()),
+                        coverage_languages::SourceLanguage::Embedded(language) => {
+                            Some(language.to_owned())
+                        }
+                        coverage_languages::SourceLanguage::Ambiguous => None,
                     }
-                    coverage_languages::SourceLanguage::Ambiguous => None,
                 };
                 if let Some(file) = file {
                     grouped.entry((reason, language)).or_default().insert(file);
@@ -13556,6 +13572,7 @@ impl FirstSliceService {
                             reason,
                             file,
                             diagnostic.source.as_ref().map(SourceRef::span),
+                            None,
                         )?;
                     }
                 }
@@ -13582,6 +13599,7 @@ impl FirstSliceService {
                         reason,
                         Some(skipped.source.span().file()),
                         Some(skipped.source.span()),
+                        None,
                     )?;
                 }
                 for file in &document.files {
@@ -13592,14 +13610,35 @@ impl FirstSliceService {
                                 && coverage.status != CoverageStatus::Complete
                         })
                     {
-                        observe(FirstSliceCoverageGapReason::Generated, Some(file.id), None)?;
+                        observe(
+                            FirstSliceCoverageGapReason::Generated,
+                            Some(file.id),
+                            None,
+                            None,
+                        )?;
                     }
                     let lexical_incomplete = lease.source_lexical_coverage(file.id).map_or(
                         file.byte_length > SOURCE_FALLBACK_TEXT_BYTES as u64,
                         |coverage| !coverage.is_complete(),
                     );
                     if lexical_incomplete {
-                        observe(FirstSliceCoverageGapReason::Truncated, Some(file.id), None)?;
+                        observe(
+                            FirstSliceCoverageGapReason::Truncated,
+                            Some(file.id),
+                            None,
+                            None,
+                        )?;
+                    }
+                    // Derived name codewords have separate cached accounting;
+                    // intact structural entities and source bytes are not omissions.
+                    for omission in lease.symbol_name_lexical_omissions(file.id) {
+                        check_cancellation(cancellation)?;
+                        observe(
+                            FirstSliceCoverageGapReason::Truncated,
+                            Some(file.id),
+                            None,
+                            Some(&omission.language),
+                        )?;
                     }
                 }
             }
@@ -16728,9 +16767,14 @@ fn source_file_fallback_preflight_memory_bytes(
 fn source_file_fallback_resident_memory_bytes(
     serialized_document_bytes: u64,
     snapshot: &rootlight_storage::GenerationSnapshot,
+    cancellation: &Cancellation,
 ) -> Result<u64, FirstSliceError> {
     let serialized_document_bytes = serialized_document_bytes
-        .checked_add(source_lexical_coverage_memory_bytes(snapshot.file_count())?)
+        .checked_add(source_lexical_coverage_memory_bytes(
+            snapshot.file_count(),
+            snapshot.document(),
+            cancellation,
+        )?)
         .ok_or(FirstSliceError::Limits)?;
     let entry_bytes = u64::try_from(snapshot.file_count())
         .map_err(|_| FirstSliceError::Limits)?
@@ -16777,32 +16821,73 @@ fn source_file_fallback_resident_memory_bytes(
     ensure_generation_memory_admission(observed)
 }
 
-fn source_lexical_coverage_memory_bytes(file_count: usize) -> Result<u64, FirstSliceError> {
+fn source_lexical_coverage_memory_bytes(
+    file_count: usize,
+    document: &NormalizedIrDocument,
+    cancellation: &Cancellation,
+) -> Result<u64, FirstSliceError> {
+    check_cancellation(cancellation)?;
     // The lexical reader retains a compact sorted accounting entry per file;
     // reserve it for legacy generations too so hydration cannot undercharge.
-    u64::try_from(file_count)
+    let source_entry = u64::try_from(std::mem::size_of::<(
+        FileId,
+        rootlight_search::SourceLexicalCoverage,
+    )>())
+    .map_err(|_| FirstSliceError::Limits)?;
+    let mut name_scope_bound = 0usize;
+    for entity in &document.entities {
+        check_cancellation(cancellation)?;
+        let alias = (entity.canonical_name != entity.display_name)
+            .then_some(entity.canonical_name.as_str());
+        if rootlight_search::project_symbol_name_projection(
+            &entity.display_name,
+            alias,
+            &entity.qualified_name,
+        ) == rootlight_search::SymbolNameProjection::Segmented
+            && !rootlight_search::symbol_name_term_omissions(
+                &entity.display_name,
+                alias,
+                &entity.qualified_name,
+            )
+            .map_err(|_| FirstSliceError::Limits)?
+            .is_empty()
+        {
+            name_scope_bound = name_scope_bound
+                .checked_add(1)
+                .ok_or(FirstSliceError::Limits)?;
+        }
+    }
+    let name_entries = rootlight_search::symbol_name_omission_memory_bytes(name_scope_bound)
+        .map_err(|_| FirstSliceError::Limits)?;
+    let entries = u64::try_from(file_count)
         .map_err(|_| FirstSliceError::Limits)?
-        .checked_mul(
-            u64::try_from(std::mem::size_of::<(
-                FileId,
-                rootlight_search::SourceLexicalCoverage,
-            )>())
-            .map_err(|_| FirstSliceError::Limits)?,
-        )
+        .checked_mul(source_entry)
+        .ok_or(FirstSliceError::Limits)?;
+    entries
+        .checked_add(name_entries)
         .ok_or(FirstSliceError::Limits)
 }
 
 fn generation_resident_memory_bytes(
     serialized_document_bytes: u64,
     snapshot: &rootlight_storage::GenerationSnapshot,
+    cancellation: &Cancellation,
 ) -> Result<u64, FirstSliceError> {
     if snapshot.source_files().is_empty() {
         let serialized_document_bytes = serialized_document_bytes
-            .checked_add(source_lexical_coverage_memory_bytes(snapshot.file_count())?)
+            .checked_add(source_lexical_coverage_memory_bytes(
+                snapshot.file_count(),
+                snapshot.document(),
+                cancellation,
+            )?)
             .ok_or(FirstSliceError::Limits)?;
         ensure_generation_memory_admission(serialized_document_bytes)
     } else {
-        source_file_fallback_resident_memory_bytes(serialized_document_bytes, snapshot)
+        source_file_fallback_resident_memory_bytes(
+            serialized_document_bytes,
+            snapshot,
+            cancellation,
+        )
     }
 }
 
@@ -29057,7 +29142,12 @@ mod tests {
                 .get(&receipt.semantic().generation),
             Some(
                 &(semantic_serialized_document_bytes
-                    + source_lexical_coverage_memory_bytes(1).expect("one file accounting charge"))
+                    + source_lexical_coverage_memory_bytes(
+                        1,
+                        restored_snapshot.document(),
+                        &cancellation
+                    )
+                    .expect("one file accounting charge"))
             )
         );
         drop(recomputed);
@@ -34583,12 +34673,177 @@ mod tests {
     }
 
     #[test]
+    fn symbol_name_metadata_accounting_honors_cancellation() {
+        let document = NormalizedIrDocument::empty(
+            derive_repository(b"name-memory-accounting").id(),
+            GenerationId::from_bytes([1; 20]),
+        );
+        let cancellation = Cancellation::new();
+        cancellation.cancel(CancellationReason::ClientRequest);
+        assert!(matches!(
+            source_lexical_coverage_memory_bytes(0, &document, &cancellation),
+            Err(FirstSliceError::Cancelled(
+                CancellationReason::ClientRequest
+            ))
+        ));
+    }
+
+    #[test]
+    fn durable_long_symbol_names_preserve_source_and_embedded_language_gaps() {
+        let fixture = TempDir::new().unwrap();
+        let state = TempDir::new().unwrap();
+        let rust_name = format!("rustLongName_{}_End", "x".repeat(520));
+        let script_name = format!("scriptLongName_{}_End", "y".repeat(520));
+        let rust_source = format!("pub fn {rust_name}() {{}}\n");
+        let html_source = format!("<script>function {script_name}() {{}}</script>\n");
+        write_language_fixture(
+            fixture.path(),
+            &[
+                ("src/long.rs", &rust_source),
+                ("src/embedded.html", &html_source),
+                ("src/clean.rs", "pub fn ordinary() {}\n"),
+            ],
+        );
+        let paths =
+            RuntimePaths::new(state.path().join("state"), state.path().join("runtime")).unwrap();
+        paths.prepare_owner().unwrap();
+        let mut service =
+            FirstSliceService::new_durable(3, paths.state_dir(), &deadline()).unwrap();
+        let receipt = service
+            .index_repository(fixture.path(), &deadline())
+            .unwrap();
+        assert_eq!(
+            service
+                .index_repository(fixture.path(), &deadline())
+                .unwrap(),
+            receipt
+        );
+        let snapshot = service
+            .loaded_generation_snapshot(receipt.generation)
+            .unwrap();
+        let expected = [&rust_name, &script_name].map(|name| {
+            snapshot
+                .document()
+                .entities
+                .iter()
+                .find(|entity| entity.canonical_name == *name)
+                .unwrap()
+                .clone()
+        });
+        drop(snapshot);
+        drop(service);
+        let restored = FirstSliceService::new_durable(3, paths.state_dir(), &deadline()).unwrap();
+        assert_eq!(
+            restored
+                .generation_freshness(receipt.repository, receipt.generation)
+                .unwrap(),
+            FirstSliceFreshnessStatus {
+                structural: FirstSliceObservedFreshness::CurrentAtLastAuthoritativeScan,
+                semantic: FirstSliceObservedFreshness::PendingSemanticRefinement,
+                publication: FirstSlicePublicationMode::DurableSingleStage,
+                two_stage: FirstSliceTwoStageAvailability::UnavailableWithoutSemanticRefinement,
+            }
+        );
+        for (entity, prefix, language, path) in [
+            (&expected[0], "rustLongName", "rust", "src/long.rs"),
+            (
+                &expected[1],
+                "scriptLongName",
+                "javascript",
+                "src/embedded.html",
+            ),
+        ] {
+            for (query, mode) in [
+                (prefix.to_owned(), LocateMode::Prefix),
+                (format!("{prefix}*End"), LocateMode::Glob),
+                (format!("{prefix}.*End"), LocateMode::SafeRegex),
+            ] {
+                let located = restored
+                    .code_locate(receipt.generation, query, mode, 10, 0, &deadline())
+                    .unwrap();
+                let hit = located
+                    .data
+                    .hits
+                    .iter()
+                    .find(|hit| hit.symbol == Some(entity.id))
+                    .unwrap();
+                assert_eq!(hit.identifier, entity.display_name);
+                assert_eq!(hit.qualified_name, entity.qualified_name);
+                assert_eq!(hit.source, entity.evidence.source);
+                let source = hit.source.clone().unwrap();
+                assert_eq!(source.generation(), receipt.generation);
+                let read = restored
+                    .source_read_with_options_and_budget(
+                        receipt.generation,
+                        vec![source],
+                        SourceReadOptions::new()
+                            .with_context_lines_before(0)
+                            .with_context_lines_after(0),
+                        FirstSliceBudget::default(),
+                        &deadline(),
+                    )
+                    .unwrap();
+                assert!(
+                    String::from_utf8(read.data.chunks[0].bytes.clone())
+                        .unwrap()
+                        .contains(&entity.display_name)
+                );
+            }
+            let gaps = restored
+                .coverage_gap_summary_for_paths_until(
+                    receipt.repository,
+                    receipt.generation,
+                    &[language.to_owned()],
+                    &[path.to_owned()],
+                    &deadline(),
+                )
+                .unwrap();
+            assert!(
+                gaps.gaps
+                    .iter()
+                    .any(|gap| gap.reason == FirstSliceCoverageGapReason::Truncated
+                        && gap.language.as_deref() == Some(language)),
+                "{gaps:?}"
+            );
+            assert_eq!(gaps.skipped_inputs, 1);
+            assert!(gaps.incomplete);
+            assert_eq!(gaps.gaps.len(), 2);
+            assert!(gaps.gaps.iter().any(|gap| {
+                gap.reason == FirstSliceCoverageGapReason::Stale
+                    && gap.language.is_none()
+                    && gap.files == receipt.indexed_files
+            }));
+        }
+        let clean = restored
+            .coverage_gap_summary_for_paths_until(
+                receipt.repository,
+                receipt.generation,
+                &["rust".to_owned()],
+                &["src/clean.rs".to_owned()],
+                &deadline(),
+            )
+            .unwrap();
+        // This structural-only constructor does not certify project semantics.
+        assert_eq!(
+            clean.gaps,
+            vec![FirstSliceCoverageGap {
+                reason: FirstSliceCoverageGapReason::Stale,
+                language: None,
+                files: receipt.indexed_files,
+            }]
+        );
+        assert_eq!(clean.skipped_inputs, 0);
+        assert!(!clean.incomplete);
+    }
+
+    #[test]
     fn structural_semantic_revisions_invalidate_prior_provider_identities() {
         let grammar = first_slice_grammar_revision_hash().unwrap();
         let parser = first_slice_parser_provider_hash().unwrap();
         for previous in [
             b"rootlight.first-slice.treesitter-structural/192",
             b"rootlight.first-slice.treesitter-structural/194",
+            b"rootlight.first-slice.treesitter-structural/195",
         ] {
             let previous_parser = hash_static_components(&[
                 PARSER_PROVIDER_SET_SEED,
