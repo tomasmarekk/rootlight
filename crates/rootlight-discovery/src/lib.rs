@@ -42,7 +42,7 @@ pub use incremental::{
 };
 
 /// Current deterministic manifest and source-classification revision.
-pub const DISCOVERY_MANIFEST_VERSION: &str = "1.19";
+pub const DISCOVERY_MANIFEST_VERSION: &str = "1.20";
 /// Stable source-free diagnostic emitted when the entry budget truncates discovery.
 pub const DISCOVERY_ENTRY_LIMIT_DIAGNOSTIC_CODE: &str = "DISCOVERY_ENTRY_LIMIT";
 /// Stable source-free diagnostic emitted when retained source bytes truncate discovery.
@@ -1508,8 +1508,11 @@ fn classify(path: &RelativePath, content: &[u8]) -> (InputClass, Vec<LanguageSig
         .and_then(|extension| extension.to_str())
         .is_some_and(|extension| extension.eq_ignore_ascii_case("fs"))
     {
-        fsharp::has_content_hint(&content[..content.len().min(MAX_CLASSIFICATION_BYTES)])
-            .then_some("fsharp")
+        fsharp::has_content_hint(
+            &content[..content.len().min(MAX_CLASSIFICATION_BYTES)],
+            content.len() > MAX_CLASSIFICATION_BYTES,
+        )
+        .then_some("fsharp")
     } else if is_ambiguous_perl_prolog_source(&normalized)
         && prolog::has_content_hint(&content[..content.len().min(MAX_CLASSIFICATION_BYTES)])
     {
@@ -3792,6 +3795,32 @@ max_source_file_bytes = 2097152
         let mut outside = vec![b' '; MAX_CLASSIFICATION_BYTES];
         outside.extend_from_slice(source);
         assert!(classify(&path, &outside).1.is_empty());
+    }
+
+    #[test]
+    fn fsharp_shared_suffix_keeps_complete_evidence_before_sample_truncation() {
+        let path = RelativePath::parse(Path::new("Library.fs")).unwrap();
+        for (tail, remainder) in [
+            ("let next = \"unfinished", "\"\n"),
+            ("(* unfinished", " *)\n"),
+            ("\u{03bb}", "\n"),
+        ] {
+            let mut source = b"module Example\nlet value = 1\n".to_vec();
+            let sampled_tail_bytes = if tail == "\u{03bb}" { 1 } else { tail.len() };
+            source.resize(MAX_CLASSIFICATION_BYTES - sampled_tail_bytes, b' ');
+            source.extend_from_slice(tail.as_bytes());
+            source.extend_from_slice(remainder.as_bytes());
+            assert_eq!(
+                classify(&path, &source).1,
+                vec![LanguageSignal {
+                    language: "fsharp".to_owned(),
+                    evidence: LanguageEvidence::Content,
+                }],
+                "{tail:?}"
+            );
+            let other = RelativePath::parse(Path::new("Library.txt")).unwrap();
+            assert!(classify(&other, &source).1.is_empty());
+        }
     }
 
     #[test]

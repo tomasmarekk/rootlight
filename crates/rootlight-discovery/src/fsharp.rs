@@ -2,21 +2,36 @@
 //! A module or namespace followed by a declaration changes routing only;
 //! literal text, comments, and mixed Forth definitions provide no such hint.
 
-pub(super) fn has_content_hint(source: &[u8]) -> bool {
-    if source.len() == super::MAX_CLASSIFICATION_BYTES && !source.ends_with(b"\n") {
+pub(super) fn has_content_hint(source: &[u8], truncated: bool) -> bool {
+    if source.len() > super::MAX_CLASSIFICATION_BYTES {
         return false;
     }
-    let Ok(source) = std::str::from_utf8(source) else {
-        return false;
+    let source = match std::str::from_utf8(source) {
+        Ok(source) => source,
+        Err(error) if truncated && error.error_len().is_none() => {
+            // Only a scalar split by the sample boundary may be ignored.
+            let Ok(source) = std::str::from_utf8(&source[..error.valid_up_to()]) else {
+                return false;
+            };
+            source
+        }
+        Err(_) => return false,
     };
     let source = source.strip_prefix('\u{feff}').unwrap_or(source);
-    let Some(masked) = mask_quoted_and_comment_contents(source.as_bytes()) else {
+    let Some(masked) = mask_quoted_and_comment_contents(source.as_bytes(), truncated) else {
         return false;
     };
     let Ok(source) = std::str::from_utf8(&masked) else {
         return false;
     };
-    let mut lines = source
+    // The partial final line still supplies conflicting evidence, but cannot
+    // supply a new declaration anchor whose end lies outside this sample.
+    let evidence = if truncated {
+        source.rfind('\n').map_or("", |end| &source[..end + 1])
+    } else {
+        source
+    };
+    let mut lines = evidence
         .lines()
         .map(str::trim)
         .filter(|line| !line.is_empty());
@@ -26,7 +41,7 @@ pub(super) fn has_content_hint(source: &[u8]) -> bool {
     let forth_definition = source.lines().any(|line| {
         let mut words = line.split_whitespace();
         words.next() == Some(":") && words.next().is_some()
-    }) && source.split_whitespace().any(|word| word == ";");
+    }) && (truncated || source.split_whitespace().any(|word| word == ";"));
     !forth_definition && !has_forth_product_terminator(source) && lines.any(declaration)
 }
 
@@ -103,7 +118,7 @@ fn identifier(name: &str) -> bool {
             .all(|character| character.is_alphanumeric() || matches!(character, '_' | '\''))
 }
 
-fn mask_quoted_and_comment_contents(source: &[u8]) -> Option<Vec<u8>> {
+fn mask_quoted_and_comment_contents(source: &[u8], truncated: bool) -> Option<Vec<u8>> {
     let mut masked = source.to_vec();
     let mut index = 0_usize;
     while let Some(tail) = source.get(index..) {
@@ -111,31 +126,40 @@ fn mask_quoted_and_comment_contents(source: &[u8]) -> Option<Vec<u8>> {
             break;
         }
         let end = if tail.starts_with(b"``") {
-            escaped_identifier_end(source, index)?
+            escaped_identifier_end(source, index)
         } else if tail.starts_with(b"//") {
-            index
-                + tail
-                    .iter()
-                    .position(|byte| *byte == b'\n')
-                    .unwrap_or(tail.len())
+            Some(
+                index
+                    + tail
+                        .iter()
+                        .position(|byte| *byte == b'\n')
+                        .unwrap_or(tail.len()),
+            )
         } else if tail.starts_with(b"(*") {
-            block_comment_end(source, index)?
+            block_comment_end(source, index)
         } else if tail.starts_with(b"\"") {
-            string_end(source, index)?
+            string_end(source, index)
         } else {
             index += 1;
             continue;
+        };
+        let complete = end.is_some();
+        let end = match end {
+            Some(end) => end,
+            // Preserve earlier evidence without completing a sampled name or literal.
+            None if truncated => source.len(),
+            None => return None,
         };
         for byte in masked.get_mut(index..end)? {
             if !matches!(*byte, b'\r' | b'\n') {
                 *byte = b' ';
             }
         }
-        if tail.starts_with(b"``") {
+        if complete && tail.starts_with(b"``") {
             // Keep the existence of a complete name without letting its
             // escaped contents create mixed-language evidence.
             *masked.get_mut(index)? = b'_';
-        } else if tail.starts_with(b"\"") {
+        } else if complete && tail.starts_with(b"\"") {
             // A complete literal can be a binding RHS; its contents cannot
             // create a header, declaration, or conflicting Forth definition.
             *masked.get_mut(index)? = b'"';
@@ -206,6 +230,52 @@ mod tests {
     use super::has_content_hint;
 
     #[test]
+    fn fsharp_content_keeps_complete_evidence_before_a_bounded_tail() {
+        let bound = super::super::MAX_CLASSIFICATION_BYTES;
+        for (tail, remainder) in [
+            ("let next = 123", "4\n"),
+            ("let next = \"unfinished", "\"\n"),
+            ("(* unfinished", " *)\n"),
+            ("let ``unfinished", "`` = 2\n"),
+        ] {
+            let mut source = b"module Example\nlet value = 1\n".to_vec();
+            source.resize(bound - tail.len(), b' ');
+            source.extend_from_slice(tail.as_bytes());
+            source.extend_from_slice(remainder.as_bytes());
+            assert!(
+                has_content_hint(&source[..bound], source.len() > bound),
+                "{tail:?}"
+            );
+        }
+        let mut source = b"module Example\nlet value = 1\n".to_vec();
+        source.resize(bound - 1, b' ');
+        source.extend_from_slice("\u{03bb}\n".as_bytes());
+        assert!(has_content_hint(&source[..bound], true));
+        assert!(!has_content_hint(&source[..bound], false));
+    }
+
+    #[test]
+    fn fsharp_bounded_tail_cannot_create_an_anchor_or_hide_visible_forth() {
+        let bound = super::super::MAX_CLASSIFICATION_BYTES;
+        for tail in [
+            "let value = 12",
+            "let value = \"unfinished",
+            "let ``unfinished",
+        ] {
+            let mut source = b"module Example\n".to_vec();
+            source.resize(bound - tail.len(), b' ');
+            source.extend_from_slice(tail.as_bytes());
+            assert!(!has_content_hint(&source, true), "{tail:?}");
+        }
+        for tail in [b": square".as_slice(), b": square dup * ;", b"\xff\n"] {
+            let mut source = b"module Example\nlet value = 1\n".to_vec();
+            source.extend_from_slice(tail);
+            source.resize(bound, b' ');
+            assert!(!has_content_hint(&source, true), "{tail:?}");
+        }
+    }
+
+    #[test]
     fn fsharp_content_requires_an_opening_header_and_real_declaration_anchor() {
         for source in [
             "module Example.Core\nlet value = 1\n",
@@ -224,7 +294,7 @@ mod tests {
             "module Example\nlet text = @\": square \"\"dup\"\" * ;\"\n",
             "module Example\nlet value = 1 (* : square dup * ; *)\n",
         ] {
-            assert!(has_content_hint(source.as_bytes()), "{source:?}");
+            assert!(has_content_hint(source.as_bytes(), false), "{source:?}");
         }
     }
 
@@ -252,7 +322,7 @@ mod tests {
             "module Example\nlet value = 1\n(* unfinished",
             "module Example\nlet value = 1\n``unfinished : square dup * ;",
         ] {
-            assert!(!has_content_hint(source.as_bytes()), "{source:?}");
+            assert!(!has_content_hint(source.as_bytes(), false), "{source:?}");
         }
     }
 
@@ -263,11 +333,11 @@ mod tests {
             let mut source = b"module Example\n".to_vec();
             source.resize(bound - 1, b' ');
             source.extend_from_slice(tail.as_bytes());
-            assert!(!has_content_hint(&source[..bound]));
+            assert!(!has_content_hint(&source[..bound], false));
         }
         let mut source = b"module Example\nlet value = 1\n".to_vec();
         source.resize(bound - 1, b' ');
         source.extend_from_slice("λ".as_bytes());
-        assert!(!has_content_hint(&source[..bound]));
+        assert!(!has_content_hint(&source[..bound], false));
     }
 }

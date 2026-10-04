@@ -804,10 +804,10 @@ fn fsharp_content_admission_rejects_conflicting_file_evidence_but_not_project_hi
 }
 
 #[test]
-fn fsharp_content_truncation_keeps_raw_sources_and_fallback_coverage() {
+fn fsharp_content_truncation_distinguishes_prior_evidence_from_late_declarations() {
     let repository = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
     let bound = rootlight_discovery::MAX_CLASSIFICATION_BYTES;
-    let mut incomplete_utf8 = "module Example\nlet value = 1\n".to_owned();
+    let mut incomplete_utf8 = "module Example\nlet value = 1\n// ".to_owned();
     incomplete_utf8.extend(std::iter::repeat_n(' ', bound - 1 - incomplete_utf8.len()));
     incomplete_utf8.push('λ');
     let mut late_declaration = "module Example\n".to_owned();
@@ -823,29 +823,58 @@ fn fsharp_content_truncation_keeps_raw_sources_and_fallback_coverage() {
     let snapshot = service
         .loaded_generation_snapshot(receipt.generation)
         .unwrap();
-    assert!(snapshot.document().entities.is_empty());
-    for (path, source) in [("Cut.fs", incomplete_utf8), ("Late.fs", late_declaration)] {
+    for (path, language, source) in [
+        ("Cut.fs", "fsharp", incomplete_utf8),
+        ("Late.fs", "unknown", late_declaration),
+    ] {
         let file = snapshot
             .document()
             .files
             .iter()
             .find(|file| file.path == path)
             .unwrap();
-        assert_eq!(file.language, "unknown");
+        assert_eq!(file.language, language);
         assert_eq!(file.content_hash, content_hash(source.as_bytes()));
         let coverage = service
             .source_file_coverage_until(receipt.generation, file.id, &deadline())
             .unwrap();
         assert_eq!(coverage.tier, AnalysisTier::TierD);
-        assert_eq!(coverage.status, CoverageStatus::Unknown);
-        assert_eq!(
-            coverage.reason,
-            Some(FirstSliceSourceCoverageReason::UnsupportedLanguage)
-        );
+        let entities = snapshot
+            .document()
+            .entities
+            .iter()
+            .filter(|entity| {
+                entity.evidence.source.as_ref().is_some_and(|reference| {
+                    reference.span().file() == file.id
+                        && reference.generation() == receipt.generation
+                })
+            })
+            .collect::<Vec<_>>();
+        if language == "unknown" {
+            assert!(entities.is_empty());
+            assert_eq!(coverage.status, CoverageStatus::Unknown);
+            assert_eq!(
+                coverage.reason,
+                Some(FirstSliceSourceCoverageReason::UnsupportedLanguage)
+            );
+        } else {
+            assert!(entities.iter().any(|entity| {
+                entity.display_name == "value"
+                    && entity.kind == EntityKind::Variable
+                    && entity.language == "fsharp"
+            }));
+            assert_ne!(
+                coverage.reason,
+                Some(FirstSliceSourceCoverageReason::UnsupportedLanguage)
+            );
+            assert!(!snapshot.document().skipped_regions.iter().any(|gap| {
+                gap.source.span().file() == file.id && gap.reason == SkippedRegionReason::ParseError
+            }));
+        }
         exact_source(
             &service,
             file.evidence.source.as_ref().unwrap(),
-            "unknown",
+            language,
             source.as_bytes(),
         );
     }
