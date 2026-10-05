@@ -27,6 +27,7 @@ use serde::{Deserialize, Serialize};
 
 mod encoding;
 mod fsharp;
+mod fsproj;
 mod incremental;
 mod matlab;
 mod objective_c;
@@ -42,7 +43,7 @@ pub use incremental::{
 };
 
 /// Current deterministic manifest and source-classification revision.
-pub const DISCOVERY_MANIFEST_VERSION: &str = "1.22";
+pub const DISCOVERY_MANIFEST_VERSION: &str = "1.23";
 /// Stable source-free diagnostic emitted when the entry budget truncates discovery.
 pub const DISCOVERY_ENTRY_LIMIT_DIAGNOSTIC_CODE: &str = "DISCOVERY_ENTRY_LIMIT";
 /// Stable source-free diagnostic emitted when retained source bytes truncate discovery.
@@ -578,6 +579,8 @@ pub enum LanguageEvidence {
     Filename,
     /// Explicit source-language assignment in the immutable configuration.
     Configuration,
+    /// Validated literal declaration from a retained local project document.
+    Project,
 }
 
 /// One language signal without a semantic-tier claim.
@@ -588,6 +591,20 @@ pub struct LanguageSignal {
     pub language: String,
     /// Evidence that produced this signal.
     pub evidence: LanguageEvidence,
+}
+
+/// Source-bound literal language declaration, not evaluated build membership.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProjectLanguageWitness {
+    /// Canonical language label declared by the project format.
+    pub language: String,
+    /// Identity of the admitted project document.
+    pub project_file: FileId,
+    /// Exact admitted repository-relative project path.
+    pub project_path: String,
+    /// Hash of the complete original project bytes that supplied the declaration.
+    pub project_content_hash: ContentHash,
 }
 
 /// Included immutable input in a discovery manifest.
@@ -609,6 +626,9 @@ pub struct ManifestInput {
     pub class: InputClass,
     /// Ordered language signals; no signal implies unknown language.
     pub language_signals: Vec<LanguageSignal>,
+    /// Complete-document project witnesses joined only to already admitted inputs.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub project_language_witnesses: Vec<ProjectLanguageWitness>,
     /// Optional decisive include rule in audit mode.
     pub decisive_rule: Option<DecisiveRule>,
 }
@@ -790,7 +810,7 @@ pub fn discover_manifest_streaming(
         cancellation,
     )?;
     state.run()?;
-    Ok(state.finish().manifest)
+    Ok(state.finish()?.manifest)
 }
 
 /// Discovers one clean manifest and reconciles its exact observation.
@@ -824,7 +844,7 @@ pub fn discover_manifest_and_reconcile_with_progress(
         cancellation,
     )?;
     state.run()?;
-    let (result, scanned) = state.finish_with_scan();
+    let (result, scanned) = state.finish_with_scan()?;
     let empty_hashed_snapshots = BTreeMap::new();
     let incremental = incremental::reconcile_manifest_scan(
         incremental::ManifestScanReconcile {
@@ -902,7 +922,7 @@ pub fn discover_with_snapshots_at_limit(
         cancellation,
     )?;
     state.run()?;
-    Ok(state.finish())
+    state.finish()
 }
 
 struct DiscoveryState<'a> {
@@ -927,6 +947,16 @@ struct DiscoveryState<'a> {
     bytes_examined: u64,
     pending_files: Vec<PendingDiscoveryFile>,
     pending_source_bytes: u64,
+    project_witnesses: Vec<PendingProjectWitness>,
+    project_member_count: usize,
+    project_member_bytes: usize,
+}
+
+struct PendingProjectWitness {
+    file: FileId,
+    path: String,
+    content_hash: ContentHash,
+    members: Vec<String>,
 }
 
 struct PendingDiscoveryFile {
@@ -1000,6 +1030,9 @@ impl<'a> DiscoveryState<'a> {
             bytes_examined: 0,
             pending_files: Vec::new(),
             pending_source_bytes: 0,
+            project_witnesses: Vec::new(),
+            project_member_count: 0,
+            project_member_bytes: 0,
         })
     }
 
@@ -1339,6 +1372,7 @@ impl<'a> DiscoveryState<'a> {
             language_signals.sort();
         }
         let file = snapshot.file();
+        self.record_project_witness(&path, &snapshot)?;
         let descriptor = FileDescriptor::new(
             file,
             content_hash(path.identity_bytes()),
@@ -1356,6 +1390,7 @@ impl<'a> DiscoveryState<'a> {
             encoding: classification.encoding.to_owned(),
             class,
             language_signals,
+            project_language_witnesses: Vec::new(),
             decisive_rule,
         });
         if self.retain_snapshots && self.snapshots.insert(file, snapshot).is_some() {
@@ -1422,16 +1457,147 @@ impl<'a> DiscoveryState<'a> {
         }
     }
 
-    fn finish(self) -> DiscoveryResult {
-        self.finish_with_scan().0
+    fn record_project_witness(
+        &mut self,
+        path: &RelativePath,
+        snapshot: &SourceSnapshot,
+    ) -> Result<(), DiscoveryError> {
+        if !Path::new(path.as_str())
+            .extension()
+            .and_then(OsStr::to_str)
+            .is_some_and(|suffix| suffix.eq_ignore_ascii_case("fsproj"))
+        {
+            return Ok(());
+        }
+        let members =
+            match fsproj::compile_members(snapshot.content(), path.as_str(), self.cancellation)? {
+                fsproj::CompileMembers::Valid(members) => members,
+                fsproj::CompileMembers::Rejected => {
+                    self.diagnostic(Some(path), "DISCOVERY_PROJECT_WITNESS_UNPROVEN");
+                    return Ok(());
+                }
+                fsproj::CompileMembers::Bounded => {
+                    self.diagnostic(Some(path), "DISCOVERY_PROJECT_WITNESS_LIMIT");
+                    return Ok(());
+                }
+            };
+        if members.is_empty() {
+            return Ok(());
+        }
+        // Charge both pending member paths and their eventual repeated project
+        // provenance before retaining anything from this document. A bound must
+        // not expose a misleading prefix of its declarations.
+        let count = self.project_member_count.checked_add(members.len());
+        let bytes = self
+            .project_member_bytes
+            .checked_add(path.as_str().len())
+            .and_then(|initial| {
+                members.iter().try_fold(initial, |total, member| {
+                    total
+                        .checked_add(member.len())?
+                        .checked_add(path.as_str().len())?
+                        .checked_add("fsharp".len() * 2)
+                })
+            });
+        let (Some(count), Some(bytes)) = (count, bytes) else {
+            self.diagnostic(Some(path), "DISCOVERY_PROJECT_WITNESS_LIMIT");
+            return Ok(());
+        };
+        if count > fsproj::MAX_PROJECT_MEMBERS
+            || bytes > fsproj::MAX_PROJECT_MEMBER_BYTES
+            || path.as_str().len() > fsproj::MAX_PROJECT_STRING_BYTES
+        {
+            self.diagnostic(Some(path), "DISCOVERY_PROJECT_WITNESS_LIMIT");
+            return Ok(());
+        }
+        self.project_witnesses
+            .try_reserve(1)
+            .map_err(|_| DiscoveryError::Vfs(VfsError::MemoryUnavailable))?;
+        self.project_witnesses.push(PendingProjectWitness {
+            file: snapshot.file(),
+            path: copy_project_string(path.as_str())?,
+            content_hash: snapshot.content_hash(),
+            members,
+        });
+        self.project_member_count = count;
+        self.project_member_bytes = bytes;
+        Ok(())
     }
 
-    fn finish_with_scan(mut self) -> (DiscoveryResult, Vec<ScannedFile>) {
+    fn apply_project_witnesses(&mut self) -> Result<(), DiscoveryError> {
+        if self.project_witnesses.is_empty() {
+            return Ok(());
+        }
+        // Match the public witness's canonical ordering before fan-out, rather
+        // than rescanning every admitted source just to sort sparse metadata.
+        let mut projects = std::mem::take(&mut self.project_witnesses);
+        projects.sort_unstable_by(|left, right| {
+            left.file
+                .cmp(&right.file)
+                .then_with(|| left.path.cmp(&right.path))
+                .then_with(|| left.content_hash.cmp(&right.content_hash))
+        });
+        for project in projects {
+            self.cancellation.check()?;
+            let mut unmatched = false;
+            for member in project.members {
+                self.cancellation.check()?;
+                // A declaration never opens a path or expands policy admission.
+                // Exact retained spelling is required; case-folding would be a
+                // new filesystem identity claim without VFS attestation.
+                let Ok(index) = self
+                    .inputs
+                    .binary_search_by(|input| input.path.cmp(&member))
+                else {
+                    unmatched = true;
+                    continue;
+                };
+                let input = &mut self.inputs[index];
+                input
+                    .project_language_witnesses
+                    .try_reserve(1)
+                    .map_err(|_| DiscoveryError::Vfs(VfsError::MemoryUnavailable))?;
+                input
+                    .project_language_witnesses
+                    .push(ProjectLanguageWitness {
+                        language: copy_project_string("fsharp")?,
+                        project_file: project.file,
+                        project_path: copy_project_string(&project.path)?,
+                        project_content_hash: project.content_hash,
+                    });
+                let signal = LanguageSignal {
+                    language: copy_project_string("fsharp")?,
+                    evidence: LanguageEvidence::Project,
+                };
+                if !input.language_signals.contains(&signal) {
+                    input
+                        .language_signals
+                        .try_reserve(1)
+                        .map_err(|_| DiscoveryError::Vfs(VfsError::MemoryUnavailable))?;
+                    input.language_signals.push(signal);
+                    input.language_signals.sort();
+                }
+            }
+            if unmatched {
+                let path = RelativePath::parse(Path::new(&project.path))?;
+                self.diagnostic(Some(&path), "DISCOVERY_PROJECT_MEMBER_NOT_ADMITTED");
+            }
+        }
+        Ok(())
+    }
+
+    fn finish(self) -> Result<DiscoveryResult, DiscoveryError> {
+        self.finish_with_scan().map(|(result, _)| result)
+    }
+
+    fn finish_with_scan(mut self) -> Result<(DiscoveryResult, Vec<ScannedFile>), DiscoveryError> {
+        self.cancellation.check()?;
         self.inputs.sort_by(|left, right| {
             left.path
                 .cmp(&right.path)
                 .then_with(|| left.file.cmp(&right.file))
         });
+        self.apply_project_witnesses()?;
         infer_shared_m_suffix_context(&mut self.inputs);
         self.exclusions.sort_by(|left, right| {
             left.path
@@ -1452,14 +1618,22 @@ impl<'a> DiscoveryState<'a> {
             diagnostics: self.diagnostics,
             coverage: self.coverage,
         };
-        (
+        Ok((
             DiscoveryResult {
                 manifest,
                 snapshots: self.snapshots,
             },
             self.scanned,
-        )
+        ))
     }
+}
+
+fn copy_project_string(value: &str) -> Result<String, DiscoveryError> {
+    let mut copy = String::new();
+    copy.try_reserve_exact(value.len())
+        .map_err(|_| DiscoveryError::Vfs(VfsError::MemoryUnavailable))?;
+    copy.push_str(value);
+    Ok(copy)
 }
 
 fn revalidate_cached_snapshot(
@@ -2526,6 +2700,279 @@ mod tests {
     fn fixture_root(temporary: &TempDir, identity: &[u8]) -> RepositoryRoot {
         let repository = derive_repository(identity).id();
         RepositoryRoot::open(repository, temporary.path()).expect("fixture root opens")
+    }
+
+    #[test]
+    fn project_witnesses_bind_complete_bytes_in_all_discovery_modes() {
+        let temporary = local_tempdir();
+        let project = b"<Project Sdk='Microsoft.NET.Sdk'><ItemGroup><Compile Include='../src/Unit.fs'/></ItemGroup></Project>";
+        write_fixture(&temporary, "project/App.fsproj", project);
+        write_fixture(&temporary, "src/Unit.fs", b"let answer = 1\n");
+        write_fixture(&temporary, "src/Other.fs", b"let other = 2\n");
+        let root = fixture_root(&temporary, b"literal-project-witness");
+        let policy = DiscoveryPolicy::build(Vec::new(), false).unwrap();
+        let config = config();
+        let cancellation = Cancellation::new();
+        let manifest = discover(&root, &config, &policy, limits(), &cancellation).unwrap();
+        let (retained, snapshots) = discover_with_snapshots(
+            &root,
+            &config,
+            &policy,
+            limits(),
+            BTreeMap::new(),
+            &cancellation,
+        )
+        .unwrap()
+        .into_parts();
+        assert_eq!(manifest, retained);
+        assert_eq!(snapshots.len(), manifest.inputs.len());
+        let context = IncrementalDiscoveryContext::new(
+            config.hash(),
+            rootlight_ids::derive_fact("test.project-provider", b"provider").id(),
+            content_hash(b"provider-revision"),
+        );
+        let (reconciled, _) = discover_manifest_and_reconcile_with_progress(
+            &root,
+            &config,
+            ManifestReconcileInputs::new(None, context),
+            &policy,
+            limits(),
+            &cancellation,
+            |_| {},
+        )
+        .unwrap();
+        assert_eq!(manifest, reconciled);
+        let project_input = manifest
+            .inputs
+            .iter()
+            .find(|input| input.path == "project/App.fsproj")
+            .unwrap();
+        let member = manifest
+            .inputs
+            .iter()
+            .find(|input| input.path == "src/Unit.fs")
+            .unwrap();
+        assert_eq!(
+            member.project_language_witnesses,
+            [ProjectLanguageWitness {
+                language: "fsharp".to_owned(),
+                project_file: project_input.file,
+                project_path: project_input.path.clone(),
+                project_content_hash: content_hash(project),
+            }]
+        );
+        assert_eq!(
+            member.language_signals,
+            [LanguageSignal {
+                language: "fsharp".to_owned(),
+                evidence: LanguageEvidence::Project,
+            }]
+        );
+        assert!(
+            manifest
+                .inputs
+                .iter()
+                .find(|input| input.path == "src/Other.fs")
+                .unwrap()
+                .project_language_witnesses
+                .is_empty()
+        );
+        assert!(project_input.project_language_witnesses.is_empty());
+
+        let audit_policy = DiscoveryPolicy::build(Vec::new(), true).unwrap();
+        let audited = discover(&root, &config, &audit_policy, limits(), &cancellation).unwrap();
+        assert_eq!(
+            audited
+                .inputs
+                .iter()
+                .map(|input| &input.project_language_witnesses)
+                .collect::<Vec<_>>(),
+            manifest
+                .inputs
+                .iter()
+                .map(|input| &input.project_language_witnesses)
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn project_witnesses_never_expand_admission_or_use_invalid_documents() {
+        let temporary = local_tempdir();
+        write_fixture(&temporary, "Unit.fs", b"let answer = 1\n");
+        write_fixture(&temporary, "cache/Hidden.fs", b"let hidden = 2\n");
+        write_fixture(&temporary, ".gitignore", b"cache/\n");
+        let root = fixture_root(&temporary, b"project-policy-boundary");
+        let policy = DiscoveryPolicy::build(Vec::new(), true).unwrap();
+        let config = config();
+        let cancellation = Cancellation::new();
+        for document in [
+            "<Project><ItemGroup><Compile Include='Unit.fs'/></ItemGroup></Project><extra/>",
+            "<Project><ItemGroup Condition='enabled'><Compile Include='Unit.fs'/></ItemGroup></Project>",
+            "<Project><ItemGroup><Compile Include='*.fs'/></ItemGroup></Project>",
+            "<Project><ItemGroup><Compile Include='Unit.fs'/><Compile Remove='Unit.fs'/></ItemGroup></Project>",
+        ] {
+            write_fixture(&temporary, "App.fsproj", document.as_bytes());
+            let manifest = discover(&root, &config, &policy, limits(), &cancellation).unwrap();
+            assert!(
+                manifest
+                    .inputs
+                    .iter()
+                    .all(|input| input.project_language_witnesses.is_empty())
+            );
+            assert!(
+                manifest
+                    .inputs
+                    .iter()
+                    .any(|input| input.path == "App.fsproj")
+            );
+            assert!(
+                manifest
+                    .diagnostics
+                    .iter()
+                    .any(
+                        |diagnostic| diagnostic.path.as_deref() == Some("App.fsproj")
+                            && diagnostic.code == "DISCOVERY_PROJECT_WITNESS_UNPROVEN"
+                    )
+            );
+        }
+        write_fixture(&temporary, "App.fsproj", b"<Project><ItemGroup><Compile Include='Unit.fs'/><Compile Include='cache/Hidden.fs'/><Compile Include='Missing.fs'/></ItemGroup></Project>");
+        let manifest = discover(&root, &config, &policy, limits(), &cancellation).unwrap();
+        assert!(manifest.inputs.iter().any(|input| input.path == "Unit.fs" && input.project_language_witnesses.len() == 1));
+        assert!(
+            !manifest
+                .inputs
+                .iter()
+                .any(|input| matches!(input.path.as_str(), "cache/Hidden.fs" | "Missing.fs"))
+        );
+        assert!(
+            manifest
+                .diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.code == "DISCOVERY_PROJECT_MEMBER_NOT_ADMITTED")
+        );
+        assert!(
+            manifest
+                .exclusions
+                .iter()
+                .any(|exclusion| exclusion.path == "cache"
+                    && exclusion.reason == ExclusionReason::Policy)
+        );
+    }
+
+    #[test]
+    fn project_witness_budget_never_publishes_a_document_prefix() {
+        let temporary = local_tempdir();
+        write_fixture(&temporary, "Unit.fs", b"let answer = 1\n");
+        let mut document = String::from("<Project><ItemGroup><Compile Include='Unit.fs'/>");
+        for index in 0..4096 {
+            use std::fmt::Write as _;
+            write!(&mut document, "<Compile Include='Missing{index}.fs'/>").unwrap();
+        }
+        document.push_str("</ItemGroup></Project>");
+        for path in ["First.fsproj", "Second.fsproj"] {
+            write_fixture(&temporary, path, document.as_bytes());
+        }
+        let root = fixture_root(&temporary, b"aggregate-project-witness-bound");
+        let policy = DiscoveryPolicy::build(Vec::new(), false).unwrap();
+        let manifest = discover(&root, &config(), &policy, limits(), &Cancellation::new()).unwrap();
+        let member = manifest
+            .inputs
+            .iter()
+            .find(|input| input.path == "Unit.fs")
+            .unwrap();
+        assert_eq!(member.project_language_witnesses.len(), 1);
+        assert_eq!(
+            member.project_language_witnesses[0].project_path,
+            "First.fsproj"
+        );
+        assert_eq!(manifest.inputs.len(), 3);
+        assert!(manifest.coverage.complete);
+        assert!(
+            manifest
+                .diagnostics
+                .iter()
+                .any(
+                    |diagnostic| diagnostic.path.as_deref() == Some("Second.fsproj")
+                        && diagnostic.code == "DISCOVERY_PROJECT_WITNESS_LIMIT"
+                )
+        );
+    }
+
+    #[test]
+    fn project_witnesses_finalize_successful_truncated_discovery() {
+        let temporary = local_tempdir();
+        write_fixture(
+            &temporary,
+            "First.fsproj",
+            b"<Project><ItemGroup><Compile Include='Unit.fs'/></ItemGroup></Project>",
+        );
+        write_fixture(&temporary, "Unit.fs", b"let answer = 1\n");
+        write_fixture(&temporary, "Zebra.fs", b"let other = 2\n");
+        let root = fixture_root(&temporary, b"truncated-project-witness");
+        let policy = DiscoveryPolicy::build(Vec::new(), false).unwrap();
+        let entry_limits = DiscoveryLimits::new(2, 16, 1024, 100).unwrap();
+        let manifest = discover(
+            &root,
+            &config(),
+            &policy,
+            entry_limits,
+            &Cancellation::new(),
+        )
+        .unwrap();
+        assert!(!manifest.coverage.complete);
+        assert_eq!(manifest.inputs.len(), 2);
+        assert_eq!(manifest.inputs[1].project_language_witnesses.len(), 1);
+    }
+
+    #[test]
+    fn project_witnesses_are_canonical_and_reject_cancelled_finalization() {
+        let temporary = local_tempdir();
+        write_fixture(&temporary, "Unit.fs", b"let answer = 1\n");
+        for path in ["First.fsproj", "Second.fsproj"] {
+            write_fixture(&temporary, path, b"<Project><ItemGroup><Compile Include='Unit.fs'/><Compile Include='./Unit.fs'/></ItemGroup></Project>");
+        }
+        let root = fixture_root(&temporary, b"canonical-project-witnesses");
+        let policy = DiscoveryPolicy::build(Vec::new(), false).unwrap();
+        let config = config();
+        let cancellation = Cancellation::new();
+        let manifest = discover(&root, &config, &policy, limits(), &cancellation).unwrap();
+        let member = manifest
+            .inputs
+            .iter()
+            .find(|input| input.path == "Unit.fs")
+            .unwrap();
+        assert_eq!(member.project_language_witnesses.len(), 2);
+        assert!(
+            member
+                .project_language_witnesses
+                .windows(2)
+                .all(|pair| pair[0] < pair[1])
+        );
+        let mut legacy = serde_json::to_value(member).unwrap();
+        legacy
+            .as_object_mut()
+            .unwrap()
+            .remove("project_language_witnesses");
+        assert!(
+            serde_json::from_value::<ManifestInput>(legacy)
+                .unwrap()
+                .project_language_witnesses
+                .is_empty()
+        );
+
+        let mut state = DiscoveryState::new(
+            &root,
+            &config,
+            &policy,
+            limits(),
+            SnapshotRetentionOptions::manifest_only(),
+            None,
+            &cancellation,
+        )
+        .unwrap();
+        state.run().unwrap();
+        assert!(cancellation.cancel(CancellationReason::ClientRequest));
+        assert!(matches!(state.finish(), Err(DiscoveryError::Cancelled(_))));
     }
 
     #[test]
@@ -3741,6 +4188,8 @@ max_source_file_bytes = 2097152
             ("content", LanguageEvidence::Content),
             ("context", LanguageEvidence::Context),
             ("filename", LanguageEvidence::Filename),
+            ("configuration", LanguageEvidence::Configuration),
+            ("project", LanguageEvidence::Project),
         ] {
             let value = serde_json::json!(label);
             assert_eq!(serde_json::to_value(evidence).unwrap(), value);

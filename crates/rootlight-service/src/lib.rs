@@ -7964,7 +7964,7 @@ impl FirstSliceService {
             .try_reserve_exact(file_claims.len().saturating_sub(source_count))
             .map_err(|_| FirstSliceError::Limits)?;
         let mut source_languages = BTreeMap::new();
-        let mut parser_route_languages = BTreeMap::new();
+        let mut parser_route_inputs = BTreeMap::new();
         for (input, claim) in manifest
             .inputs
             .iter()
@@ -7981,7 +7981,11 @@ impl FirstSliceService {
             {
                 return Err(FirstSliceError::DiscoveryDrift.into());
             }
-            let Some(language) = supported_source_language(input, &self.analyzers) else {
+            let language = supported_source_language(input, &self.analyzers);
+            if let Some(route) = file_parser_route_hash(input, language)? {
+                parser_route_inputs.insert(input.file, route);
+            }
+            let Some(language) = language else {
                 retained_sources.push(RustSourceInput {
                     snapshot,
                     generated: matches!(input.class, InputClass::Generated),
@@ -8007,13 +8011,6 @@ impl FirstSliceService {
                 .is_some()
             {
                 return Err(FirstSliceError::Identity.into());
-            }
-            if input
-                .path
-                .rsplit_once('.')
-                .is_some_and(|(_, suffix)| suffix.eq_ignore_ascii_case("m"))
-            {
-                parser_route_languages.insert(input.file, language.to_owned());
             }
             sources.push(RustSourceInput {
                 snapshot,
@@ -8067,7 +8064,7 @@ impl FirstSliceService {
                 parent_artifacts: parent_structural_artifacts,
                 discovery: &incremental,
                 source_files: &source_files,
-                parser_route_languages: &parser_route_languages,
+                parser_route_inputs: &parser_route_inputs,
                 semantic_inputs: &derived.fingerprints,
                 estimated_facts: u64::try_from(self.analysis_limits.ir().max_total_records)
                     .map_err(|_| FirstSliceError::Limits)?,
@@ -8439,7 +8436,7 @@ impl FirstSliceService {
                 parent_artifacts: parent_structural_artifacts,
                 discovery: &incremental,
                 source_files: &source_files,
-                parser_route_languages: &parser_route_languages,
+                parser_route_inputs: &parser_route_inputs,
                 semantic_inputs: &semantic_inputs,
                 estimated_facts: u64::try_from(self.analysis_limits.ir().max_total_records)
                     .map_err(|_| FirstSliceError::Limits)?,
@@ -8895,11 +8892,23 @@ impl FirstSliceService {
             SourceSnapshotRetentionRequirement::DurableCache,
             cancellation,
         )?;
+        let mut parser_route_inputs = BTreeMap::new();
+        for input in &manifest.inputs {
+            check_cancellation(cancellation)?;
+            if let Some(route) = file_parser_route_hash(input, None)?
+                && parser_route_inputs.insert(input.file, route).is_some()
+            {
+                return Err(FirstSliceError::Identity.into());
+            }
+        }
         let mut incremental_plan = prepare_file_only_incremental_state(
             parent.is_some(),
             reuse_policy,
             &incremental,
-            &source_files,
+            FirstSliceFileOnlyInputs {
+                source_files: &source_files,
+                parser_route_inputs: &parser_route_inputs,
+            },
             SOURCE_FILE_FALLBACK_NORMALIZED_FACTS,
             estimated_disk_bytes,
             cancellation,
@@ -14778,7 +14787,7 @@ struct FirstSliceIncrementalPlanningContext<'a> {
     parent_artifacts: Option<&'a StructuralGenerationArtifacts>,
     discovery: &'a IncrementalDiscovery,
     source_files: &'a BTreeSet<FileId>,
-    parser_route_languages: &'a BTreeMap<FileId, String>,
+    parser_route_inputs: &'a BTreeMap<FileId, ContentHash>,
     semantic_inputs: &'a [InputFingerprint],
     estimated_facts: u64,
     estimated_durable_bytes: u64,
@@ -14796,7 +14805,7 @@ fn prepare_incremental_state(
         parent_artifacts,
         discovery,
         source_files,
-        parser_route_languages,
+        parser_route_inputs,
         semantic_inputs,
         estimated_facts,
         estimated_durable_bytes,
@@ -14810,7 +14819,7 @@ fn prepare_incremental_state(
     let current_inputs = first_slice_input_snapshot(
         discovery,
         source_files,
-        parser_route_languages,
+        parser_route_inputs,
         semantic_inputs,
         cancellation,
     )?;
@@ -14884,18 +14893,28 @@ fn prepare_incremental_state(
     })
 }
 
+struct FirstSliceFileOnlyInputs<'a> {
+    source_files: &'a BTreeSet<FileId>,
+    parser_route_inputs: &'a BTreeMap<FileId, ContentHash>,
+}
+
 fn prepare_file_only_incremental_state(
     has_parent: bool,
     reuse_policy: FirstSliceReusePolicy,
     discovery: &IncrementalDiscovery,
-    source_files: &BTreeSet<FileId>,
+    inputs: FirstSliceFileOnlyInputs<'_>,
     estimated_facts: u64,
     estimated_durable_bytes: u64,
     cancellation: &Cancellation,
 ) -> Result<PreparedIncrementalPlan, FirstSliceError> {
     check_cancellation(cancellation)?;
-    let current_inputs =
-        first_slice_input_snapshot(discovery, source_files, &BTreeMap::new(), &[], cancellation)?;
+    let current_inputs = first_slice_input_snapshot(
+        discovery,
+        inputs.source_files,
+        inputs.parser_route_inputs,
+        &[],
+        cancellation,
+    )?;
     let mut input_counts = BTreeMap::new();
     for change in discovery.changes().changes() {
         check_cancellation(cancellation)?;
@@ -14943,7 +14962,8 @@ fn prepare_file_only_incremental_state(
         normalized_fact_work: Vec::new(),
         structural_cache_retained: false,
     };
-    let estimated_files = u64::try_from(source_files.len()).map_err(|_| FirstSliceError::Limits)?;
+    let estimated_files =
+        u64::try_from(inputs.source_files.len()).map_err(|_| FirstSliceError::Limits)?;
     let estimated_cost_units = estimated_files
         .checked_add(estimated_facts)
         .ok_or(FirstSliceError::Limits)?;
@@ -15288,7 +15308,7 @@ fn verify_first_slice_observations(
 fn first_slice_input_snapshot(
     discovery: &IncrementalDiscovery,
     source_files: &BTreeSet<FileId>,
-    parser_route_languages: &BTreeMap<FileId, String>,
+    parser_route_inputs: &BTreeMap<FileId, ContentHash>,
     semantic_inputs: &[InputFingerprint],
     cancellation: &Cancellation,
 ) -> Result<InputSnapshot, FirstSliceError> {
@@ -15296,7 +15316,7 @@ fn first_slice_input_snapshot(
     let expected = source_files
         .len()
         .checked_mul(2)
-        .and_then(|count| count.checked_add(parser_route_languages.len()))
+        .and_then(|count| count.checked_add(parser_route_inputs.len()))
         .and_then(|count| count.checked_add(semantic_inputs.len()))
         .and_then(|count| count.checked_add(7))
         .ok_or(FirstSliceError::Limits)?;
@@ -15326,15 +15346,15 @@ fn first_slice_input_snapshot(
     if !configuration_present || !adapter_present {
         return Err(FirstSliceError::Incremental);
     }
-    for (file, language) in parser_route_languages {
+    for (file, route) in parser_route_inputs {
         if !source_files.contains(file) {
             return Err(FirstSliceError::Incremental);
         }
-        // Peer evidence can change the selected parser without changing this
-        // file's own path or bytes, so retain a separate file-scoped input.
+        // Peer/project evidence can change a route without changing this file's
+        // path or bytes. Unknown routes also retain negative project evidence.
         inputs.push(InputFingerprint::new(
             InputKey::FileParserRoute(*file),
-            hash_static_components(&[b"rootlight.file-parser-route/1", language.as_bytes()])?,
+            *route,
         ));
     }
 
@@ -16158,7 +16178,7 @@ fn supported_source_language<'a>(
         return analyzers.contains_key(language).then_some(language);
     }
     if is_shared_fsharp_source(&input.path) {
-        let language = fsharp_content_language(input)?;
+        let language = fsharp_source_language(input)?;
         return analyzers.contains_key(language).then_some(language);
     }
     if is_ambiguous_perl_prolog_source(&input.path) && prolog_content_language(input).is_some() {
@@ -16257,7 +16277,7 @@ fn detected_source_language(input: &ManifestInput) -> Option<&str> {
         return basic_content_language(input);
     }
     if is_shared_fsharp_source(&input.path) {
-        return fsharp_content_language(input);
+        return fsharp_source_language(input);
     }
     if is_ambiguous_perl_prolog_source(&input.path)
         && let Some(language) = prolog_content_language(input)
@@ -16356,6 +16376,99 @@ fn fsharp_content_language(input: &ManifestInput) -> Option<&str> {
         return None;
     }
     Some(language.language.as_str())
+}
+
+fn fsharp_source_language(input: &ManifestInput) -> Option<&str> {
+    if input
+        .language_signals
+        .iter()
+        .any(|signal| signal.evidence == LanguageEvidence::Content)
+    {
+        // Project declarations cannot override contradictory source syntax.
+        return fsharp_content_language(input);
+    }
+    let mut projects = input
+        .language_signals
+        .iter()
+        .filter(|signal| signal.evidence == LanguageEvidence::Project);
+    let language = projects.next()?;
+    if language.language != "fsharp"
+        || projects.any(|other| other.language != language.language)
+        || input.project_language_witnesses.is_empty()
+        || input.project_language_witnesses.iter().any(|witness| {
+            witness.language != language.language
+                || witness.project_file == input.file
+                || !Path::new(&witness.project_path)
+                    .extension()
+                    .and_then(|extension| extension.to_str())
+                    .is_some_and(|extension| extension.eq_ignore_ascii_case("fsproj"))
+                || !RelativePath::parse(Path::new(&witness.project_path))
+                    .is_ok_and(|path| path.as_str() == witness.project_path)
+        })
+        || input.language_signals.iter().any(|signal| {
+            matches!(
+                signal.evidence,
+                LanguageEvidence::Extension
+                    | LanguageEvidence::Filename
+                    | LanguageEvidence::Shebang
+            ) && signal.language != language.language
+        })
+    {
+        return None;
+    }
+    Some(language.language.as_str())
+}
+
+fn file_parser_route_hash(
+    input: &ManifestInput,
+    language: Option<&str>,
+) -> Result<Option<ContentHash>, FirstSliceError> {
+    if input
+        .path
+        .rsplit_once('.')
+        .is_some_and(|(_, suffix)| suffix.eq_ignore_ascii_case("m"))
+    {
+        return language
+            .map(|language| {
+                hash_static_components(&[b"rootlight.file-parser-route/1", language.as_bytes()])
+            })
+            .transpose();
+    }
+    if !is_shared_fsharp_source(&input.path) {
+        return Ok(None);
+    }
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"rootlight.first-slice.static-components/1\0");
+    hash_component(
+        &mut hasher,
+        b"rootlight.file-parser-route/project-language/1",
+    )?;
+    hash_component(&mut hasher, language.unwrap_or("unknown").as_bytes())?;
+    let independent = input.language_signals.iter().any(|signal| {
+        matches!(
+            signal.evidence,
+            LanguageEvidence::Configuration | LanguageEvidence::Content
+        )
+    });
+    hash_component(
+        &mut hasher,
+        if independent {
+            b"independent"
+        } else {
+            b"project"
+        },
+    )?;
+    if !independent {
+        // Discovery attests complete local declaration bytes and canonicalizes
+        // witnesses. Bind only member-specific evidence, never a global project hash.
+        for witness in &input.project_language_witnesses {
+            hash_component(&mut hasher, witness.language.as_bytes())?;
+            hash_component(&mut hasher, witness.project_file.as_bytes())?;
+            hash_component(&mut hasher, witness.project_path.as_bytes())?;
+            hash_component(&mut hasher, witness.project_content_hash.as_bytes())?;
+        }
+    }
+    Ok(Some(ContentHash::from_bytes(*hasher.finalize().as_bytes())))
 }
 
 fn analysis_tier_for_language(language: &str) -> AnalysisTier {
@@ -29859,6 +29972,7 @@ mod tests {
                         evidence: LanguageEvidence::Configuration,
                     },
                 ],
+                project_language_witnesses: Vec::new(),
                 decisive_rule: None,
             };
             assert_eq!(

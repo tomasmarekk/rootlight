@@ -5651,6 +5651,7 @@ fn prepared_fixture(
             language: "office-open-xml".to_owned(),
             evidence: LanguageEvidence::Content,
         }],
+        project_language_witnesses: Vec::new(),
         decisive_rule: None,
     };
     let mut snapshots = BTreeMap::from([(file, snapshot)]);

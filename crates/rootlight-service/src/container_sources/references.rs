@@ -172,6 +172,7 @@ pub(super) fn prepare(
             language: "vba".to_owned(),
             evidence: LanguageEvidence::Content,
         }],
+        project_language_witnesses: Vec::new(),
         decisive_rule: None,
     });
     prepared.origins.push((file, input.file));

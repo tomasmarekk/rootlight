@@ -971,6 +971,7 @@ fn fsharp_content_admission_rejects_conflicting_file_evidence_but_not_project_hi
         encoding: "utf-8".to_owned(),
         class: InputClass::Source,
         language_signals: vec![signal("fsharp", LanguageEvidence::Content)],
+        project_language_witnesses: Vec::new(),
         decisive_rule: None,
     };
     assert_eq!(
@@ -1090,4 +1091,880 @@ fn fsharp_content_truncation_distinguishes_prior_evidence_from_late_declarations
             source.as_bytes(),
         );
     }
+}
+
+fn literal_project_input() -> ManifestInput {
+    let source = b"let answer = 1\n";
+    ManifestInput {
+        file: FileId::from_bytes([1; 20]),
+        path: "Member.fs".to_owned(),
+        content_hash: content_hash(source),
+        bytes: u64::try_from(source.len()).unwrap(),
+        encoding: "utf-8".to_owned(),
+        class: InputClass::Source,
+        language_signals: vec![rootlight_discovery::LanguageSignal {
+            language: "fsharp".to_owned(),
+            evidence: LanguageEvidence::Project,
+        }],
+        project_language_witnesses: vec![rootlight_discovery::ProjectLanguageWitness {
+            language: "fsharp".to_owned(),
+            project_file: FileId::from_bytes([2; 20]),
+            project_path: "Example.fsproj".to_owned(),
+            project_content_hash: content_hash(
+                b"<Project><ItemGroup><Compile Include=\"Member.fs\" /></ItemGroup></Project>\n",
+            ),
+        }],
+        decisive_rule: None,
+    }
+}
+
+#[test]
+fn fsharp_project_selection_requires_source_bound_unanimous_witnesses() {
+    let service = FirstSliceService::new(2).unwrap();
+    let input = literal_project_input();
+    assert_eq!(fsharp_content_language(&input), None);
+    assert_eq!(detected_source_language(&input), Some("fsharp"));
+    assert_eq!(
+        supported_source_language(&input, &service.analyzers),
+        Some("fsharp")
+    );
+    let signal = |language: &str, evidence| rootlight_discovery::LanguageSignal {
+        language: language.to_owned(),
+        evidence,
+    };
+    let mut invalid = input.clone();
+    invalid.project_language_witnesses.clear();
+    assert_eq!(detected_source_language(&invalid), None);
+    invalid = input.clone();
+    invalid.language_signals.clear();
+    assert_eq!(detected_source_language(&invalid), None);
+    for evidence in [LanguageEvidence::Manifest, LanguageEvidence::Context] {
+        invalid.language_signals = vec![signal("fsharp", evidence)];
+        assert_eq!(
+            supported_source_language(&invalid, &service.analyzers),
+            None
+        );
+    }
+    for evidence in [
+        LanguageEvidence::Project,
+        LanguageEvidence::Content,
+        LanguageEvidence::Extension,
+        LanguageEvidence::Filename,
+        LanguageEvidence::Shebang,
+    ] {
+        invalid = input.clone();
+        invalid.language_signals.push(signal("rust", evidence));
+        assert_eq!(detected_source_language(&invalid), None, "{evidence:?}");
+        assert_eq!(
+            supported_source_language(&invalid, &service.analyzers),
+            None
+        );
+    }
+    for path in [
+        "../Example.fsproj",
+        "/Example.fsproj",
+        "dir/./Example.fsproj",
+        "Example.fsproj.bak",
+        ".fsproj",
+    ] {
+        invalid = input.clone();
+        invalid.project_language_witnesses[0].project_path = path.to_owned();
+        assert_eq!(detected_source_language(&invalid), None, "{path}");
+    }
+    invalid = input.clone();
+    invalid.project_language_witnesses[0].project_file = input.file;
+    assert_eq!(detected_source_language(&invalid), None);
+    invalid = input.clone();
+    invalid.project_language_witnesses[0].language = "rust".to_owned();
+    assert_eq!(detected_source_language(&invalid), None);
+    invalid
+        .language_signals
+        .push(signal("fsharp", LanguageEvidence::Content));
+    assert_eq!(detected_source_language(&invalid), Some("fsharp"));
+    invalid
+        .language_signals
+        .push(signal("rust", LanguageEvidence::Configuration));
+    assert_eq!(
+        supported_source_language(&invalid, &service.analyzers),
+        Some("rust")
+    );
+    invalid = input;
+    invalid.encoding = "utf-16-le".to_owned();
+    assert_eq!(detected_source_language(&invalid), Some("fsharp"));
+    assert_eq!(
+        supported_source_language(&invalid, &service.analyzers),
+        None
+    );
+}
+
+#[test]
+fn fsharp_project_routes_bind_member_witnesses_without_global_project_dependencies() {
+    let input = literal_project_input();
+    let original = file_parser_route_hash(&input, Some("fsharp"))
+        .unwrap()
+        .unwrap();
+    for component in 0..4 {
+        let mut changed = input.clone();
+        let witness = &mut changed.project_language_witnesses[0];
+        match component {
+            0 => witness.language = "rust".to_owned(),
+            1 => witness.project_file = FileId::from_bytes([3; 20]),
+            2 => witness.project_path = "Renamed.fsproj".to_owned(),
+            _ => witness.project_content_hash = content_hash(b"changed project document"),
+        }
+        assert_ne!(
+            original,
+            file_parser_route_hash(&changed, Some("fsharp"))
+                .unwrap()
+                .unwrap()
+        );
+    }
+    let mut unknown = input.clone();
+    unknown.language_signals.clear();
+    unknown.project_language_witnesses.clear();
+    let unproven = file_parser_route_hash(&unknown, None).unwrap().unwrap();
+    assert_ne!(unproven, original);
+    unknown.project_language_witnesses = input.project_language_witnesses.clone();
+    assert_ne!(
+        unproven,
+        file_parser_route_hash(&unknown, None).unwrap().unwrap()
+    );
+    let mut independent = input.clone();
+    for evidence in [LanguageEvidence::Content, LanguageEvidence::Configuration] {
+        independent
+            .language_signals
+            .push(rootlight_discovery::LanguageSignal {
+                language: "fsharp".to_owned(),
+                evidence,
+            });
+        let before = file_parser_route_hash(&independent, Some("fsharp")).unwrap();
+        independent.project_language_witnesses[0].project_content_hash =
+            content_hash(b"unconsumed edit");
+        assert_eq!(
+            before,
+            file_parser_route_hash(&independent, Some("fsharp")).unwrap()
+        );
+        independent = input.clone();
+    }
+    let mut objective_c = input;
+    objective_c.path = "Example.m".to_owned();
+    assert_eq!(
+        file_parser_route_hash(&objective_c, Some("matlab")).unwrap(),
+        Some(hash_static_components(&[b"rootlight.file-parser-route/1", b"matlab"]).unwrap())
+    );
+    assert_eq!(file_parser_route_hash(&objective_c, None).unwrap(), None);
+}
+
+fn assert_project_member(
+    service: &FirstSliceService,
+    receipt: &FirstSliceIndexReceipt,
+    path: &str,
+    source: &[u8],
+    language: &str,
+    definition: Option<&str>,
+) -> FileId {
+    let snapshot = service
+        .loaded_generation_snapshot(receipt.generation)
+        .unwrap();
+    let document = snapshot.document();
+    let file = document
+        .files
+        .iter()
+        .chain(
+            snapshot
+                .source_files()
+                .entries()
+                .iter()
+                .map(|entry| entry.file()),
+        )
+        .find(|file| file.path == path)
+        .unwrap();
+    assert_eq!(file.language, language, "{path}");
+    assert_eq!(file.byte_length, u64::try_from(source.len()).unwrap());
+    assert_eq!(file.content_hash, content_hash(source));
+    let reference = file.evidence.source.as_ref().unwrap();
+    assert_eq!(reference.generation(), receipt.generation);
+    assert_eq!(reference.span().file(), file.id);
+    assert_eq!(reference.span().start_byte(), 0);
+    assert_eq!(reference.span().end_byte(), file.byte_length);
+    let read = service
+        .source_read_with_options_and_budget(
+            receipt.generation,
+            vec![reference.clone()],
+            SourceReadOptions::new()
+                .with_context_lines_before(0)
+                .with_context_lines_after(0)
+                .with_encoding(rootlight_source::SourceEncoding::Bytes),
+            FirstSliceBudget::default(),
+            &deadline(),
+        )
+        .unwrap();
+    assert_eq!(read.data.chunks.len(), 1);
+    assert_eq!(read.data.chunks[0].reference, *reference);
+    assert_eq!(read.data.chunks[0].content_hash, file.content_hash);
+    assert_eq!(read.data.chunks[0].bytes, source);
+    let coverage = service
+        .source_file_coverage_until(receipt.generation, file.id, &deadline())
+        .unwrap();
+    assert_eq!(coverage.language, language);
+    assert_eq!(coverage.tier, AnalysisTier::TierD);
+    if let Some(name) = definition {
+        assert_eq!(coverage.status, CoverageStatus::Complete);
+        assert_eq!(coverage.reason, None);
+        let entity = document
+            .entities
+            .iter()
+            .find(|entity| {
+                entity.canonical_name == name
+                    && entity.language == language
+                    && entity
+                        .evidence
+                        .source
+                        .as_ref()
+                        .is_some_and(|reference| reference.span().file() == file.id)
+            })
+            .unwrap();
+        let site = document
+            .occurrences
+            .iter()
+            .find(|site| {
+                site.file == file.id
+                    && site.role == OccurrenceRole::Definition
+                    && site.target == (OccurrenceTarget::Resolved { symbol: entity.id })
+            })
+            .unwrap();
+        assert_eq!(site.source.generation(), receipt.generation);
+        exact_source(service, &site.source, language, name.as_bytes());
+        let located = service
+            .code_locate_with_filters_and_budget(
+                receipt.generation,
+                name.to_owned(),
+                LocateMode::Exact,
+                Vec::new(),
+                vec![path.to_owned()],
+                8,
+                0,
+                FirstSliceBudget::default(),
+                &deadline(),
+            )
+            .unwrap();
+        assert!(
+            located
+                .data
+                .hits
+                .iter()
+                .any(|hit| hit.file == file.id && hit.symbol == Some(entity.id))
+        );
+    } else {
+        assert_eq!(coverage.status, CoverageStatus::Unknown);
+        let reason = if document
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == SOURCE_FILE_FALLBACK_DIAGNOSTIC_CODE)
+        {
+            FirstSliceSourceCoverageReason::ResourceBounded
+        } else if file.encoding != "utf-8" {
+            FirstSliceSourceCoverageReason::UnsupportedEncoding
+        } else {
+            FirstSliceSourceCoverageReason::UnsupportedLanguage
+        };
+        assert_eq!(coverage.reason, Some(reason));
+        assert!(!document.entities.iter().any(|entity| {
+            entity
+                .evidence
+                .source
+                .as_ref()
+                .is_some_and(|reference| reference.span().file() == file.id)
+        }));
+    }
+    file.id
+}
+
+fn retained_parser_route(
+    service: &FirstSliceService,
+    generation: GenerationId,
+    file: FileId,
+) -> ContentHash {
+    service
+        .incremental_inputs
+        .get(&generation)
+        .unwrap()
+        .value(InputKey::FileParserRoute(file))
+        .unwrap()
+}
+
+#[test]
+fn fsharp_literal_project_routes_track_add_remove_change_and_durable_reopen() {
+    let current = std::env::current_dir().unwrap();
+    let repository = tempfile::tempdir_in(&current).unwrap();
+    let storage = tempfile::tempdir_in(&current).unwrap();
+    let paths = rootlight_runtime::RuntimePaths::new(
+        storage.path().join("state"),
+        storage.path().join("runtime"),
+    )
+    .unwrap();
+    paths.prepare_owner().unwrap();
+    let member = b"let answer = 1\n";
+    let peer = b"let peer = 2\n";
+    let strong = b"module Strong\nlet stable = 3\n";
+    for (path, source) in [
+        ("Member.fs", member.as_slice()),
+        ("Peer.fs", peer.as_slice()),
+        ("Strong.fs", strong.as_slice()),
+    ] {
+        fs::write(repository.path().join(path), source).unwrap();
+    }
+    let project_path = repository.path().join("Example.fsproj");
+    let project = "<Project><ItemGroup><Compile Include=\"Member.fs\" /><Compile Include=\"Strong.fs\" /></ItemGroup></Project>\n";
+    let peer_path = repository.path().join("Peer.fsproj");
+    let peer_project =
+        "<Project><ItemGroup><Compile Include=\"Peer.fs\" /></ItemGroup></Project>\n";
+    let policy = FirstSliceStoragePolicy::resolve_user_config(
+        Some("version='1.3'\n[storage]\nretained_generations=4\n"),
+        4,
+    )
+    .unwrap();
+    let mut service =
+        FirstSliceService::new_durable_with_policy(policy.clone(), paths.state_dir(), &deadline())
+            .unwrap();
+    let options = FirstSliceIndexOptions::incremental(FirstSliceIndexMode::Structural);
+    let initial = index(&mut service, repository.path(), options);
+    let member_id = assert_project_member(
+        &service,
+        initial.receipt(),
+        "Member.fs",
+        member,
+        "unknown",
+        None,
+    );
+    let unknown_route = retained_parser_route(&service, initial.receipt().generation, member_id);
+    fs::write(&project_path, project).unwrap();
+    let added = index(&mut service, repository.path(), options);
+    assert_eq!(
+        assert_project_member(
+            &service,
+            added.receipt(),
+            "Member.fs",
+            member,
+            "fsharp",
+            Some("answer")
+        ),
+        member_id
+    );
+    assert_eq!(added.evidence().rebuilt_files, 1);
+    let added_route = retained_parser_route(&service, added.receipt().generation, member_id);
+    assert_ne!(unknown_route, added_route);
+    fs::write(&peer_path, peer_project).unwrap();
+    let paired = index(&mut service, repository.path(), options);
+    let peer_id = assert_project_member(
+        &service,
+        paired.receipt(),
+        "Peer.fs",
+        peer,
+        "fsharp",
+        Some("peer"),
+    );
+    let strong_id = assert_project_member(
+        &service,
+        paired.receipt(),
+        "Strong.fs",
+        strong,
+        "fsharp",
+        Some("stable"),
+    );
+    let strong_route = retained_parser_route(&service, paired.receipt().generation, strong_id);
+    let peer_route = retained_parser_route(&service, paired.receipt().generation, peer_id);
+    assert_eq!(
+        retained_parser_route(&service, paired.receipt().generation, member_id),
+        added_route
+    );
+    let noop = index(&mut service, repository.path(), options);
+    assert_eq!(noop.receipt().generation, paired.receipt().generation);
+    assert_eq!(noop.evidence().rebuilt_files, 0);
+    assert_eq!(noop.evidence().rebuilt_facts, 0);
+    fs::write(
+        &project_path,
+        project.replace("</Project>", "<!-- authored documentation --></Project>"),
+    )
+    .unwrap();
+    let changed = index(&mut service, repository.path(), options);
+    assert_project_member(
+        &service,
+        changed.receipt(),
+        "Member.fs",
+        member,
+        "fsharp",
+        Some("answer"),
+    );
+    let changed_route = retained_parser_route(&service, changed.receipt().generation, member_id);
+    assert_ne!(changed_route, added_route);
+    assert_eq!(
+        retained_parser_route(&service, changed.receipt().generation, peer_id),
+        peer_route
+    );
+    assert_eq!(
+        retained_parser_route(&service, changed.receipt().generation, strong_id),
+        strong_route
+    );
+    assert_eq!(changed.evidence().rebuilt_files, 1);
+    assert_eq!(changed.evidence().reused_files, 2);
+    fs::remove_file(&project_path).unwrap();
+    let removed = index(&mut service, repository.path(), options);
+    assert_project_member(
+        &service,
+        removed.receipt(),
+        "Member.fs",
+        member,
+        "unknown",
+        None,
+    );
+    assert_eq!(
+        retained_parser_route(&service, removed.receipt().generation, member_id),
+        unknown_route
+    );
+    assert_eq!(removed.evidence().rebuilt_files, 0);
+    fs::write(&project_path, project).unwrap();
+    let restored = index(&mut service, repository.path(), options);
+    assert_project_member(
+        &service,
+        restored.receipt(),
+        "Member.fs",
+        member,
+        "fsharp",
+        Some("answer"),
+    );
+    assert_eq!(
+        retained_parser_route(&service, restored.receipt().generation, member_id),
+        added_route
+    );
+    assert_eq!(restored.evidence().rebuilt_files, 1);
+    fs::write(
+        &peer_path,
+        peer_project.replace("</Project>", "<!-- peer-only documentation --></Project>"),
+    )
+    .unwrap();
+    let unrelated = index(&mut service, repository.path(), options);
+    assert_project_member(
+        &service,
+        unrelated.receipt(),
+        "Member.fs",
+        member,
+        "fsharp",
+        Some("answer"),
+    );
+    assert_eq!(
+        retained_parser_route(&service, unrelated.receipt().generation, member_id),
+        added_route
+    );
+    assert_ne!(
+        retained_parser_route(&service, unrelated.receipt().generation, peer_id),
+        peer_route
+    );
+    assert_eq!(unrelated.evidence().rebuilt_files, 1);
+    assert_eq!(unrelated.evidence().reused_files, 2);
+    let last = unrelated.receipt().clone();
+    drop(service);
+    let mut reopened =
+        FirstSliceService::new_durable_with_policy(policy, paths.state_dir(), &deadline()).unwrap();
+    assert_project_member(
+        &reopened,
+        &last,
+        "Member.fs",
+        member,
+        "fsharp",
+        Some("answer"),
+    );
+    let noop = index(&mut reopened, repository.path(), options);
+    assert_eq!(noop.receipt().generation, last.generation);
+    assert_eq!(noop.evidence().rebuilt_files, 0);
+    assert_eq!(noop.evidence().rebuilt_facts, 0);
+}
+
+#[test]
+fn fsharp_project_declarations_do_not_expand_admission_or_accept_unevaluated_expressions() {
+    let repository = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
+    let source = b"let answer = 1\n";
+    let cases = [
+        (
+            "malformed",
+            "Example.fsproj",
+            "<Project><ItemGroup><Compile Include=\"Library.fs\" /></ItemGroup></Project><broken",
+        ),
+        (
+            "conditional",
+            "Example.fsproj",
+            "<Project><ItemGroup Condition=\"true\"><Compile Include=\"Library.fs\" /></ItemGroup></Project>",
+        ),
+        (
+            "dynamic",
+            "Example.fsproj",
+            "<Project><ItemGroup><Compile Include=\"$(Source)\" /></ItemGroup></Project>",
+        ),
+        (
+            "suffix",
+            "Example.fsproj.bak",
+            "<Project><ItemGroup><Compile Include=\"Library.fs\" /></ItemGroup></Project>",
+        ),
+        (
+            "missing",
+            "Example.fsproj",
+            "<Project><ItemGroup><Compile Include=\"Missing.fs\" /></ItemGroup></Project>",
+        ),
+        (
+            "wrong-member",
+            "Example.fsproj",
+            "<Project><ItemGroup><Compile Include=\"Library.fs.bak\" /></ItemGroup></Project>",
+        ),
+    ];
+    for (directory, project_name, project) in cases {
+        let root = repository.path().join(directory);
+        fs::create_dir(&root).unwrap();
+        fs::write(root.join("Library.fs"), source).unwrap();
+        fs::write(root.join(project_name), project).unwrap();
+    }
+    fs::create_dir(repository.path().join("target")).unwrap();
+    fs::write(repository.path().join("target/Hidden.fs"), source).unwrap();
+    fs::write(
+        repository.path().join("IgnoredMember.fsproj"),
+        "<Project><ItemGroup><Compile Include=\"target/Hidden.fs\" /></ItemGroup></Project>",
+    )
+    .unwrap();
+    let mut service = FirstSliceService::new(2).unwrap();
+    let receipt = service
+        .index_repository(repository.path(), &deadline())
+        .unwrap();
+    for (directory, _, _) in cases {
+        assert_project_member(
+            &service,
+            &receipt,
+            &format!("{directory}/Library.fs"),
+            source,
+            "unknown",
+            None,
+        );
+    }
+    let snapshot = service
+        .loaded_generation_snapshot(receipt.generation)
+        .unwrap();
+    assert!(
+        !snapshot
+            .document()
+            .files
+            .iter()
+            .chain(
+                snapshot
+                    .source_files()
+                    .entries()
+                    .iter()
+                    .map(|entry| entry.file())
+            )
+            .any(|file| file.path == "target/Hidden.fs")
+    );
+}
+
+#[test]
+fn fsharp_project_routes_preserve_configuration_and_utf16_parser_boundary() {
+    let repository = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
+    let plain = b"let answer = 1\n";
+    let signature = b"val declared: int\n";
+    let encoded = [
+        vec![0xff, 0xfe],
+        "let encoded = 2\n"
+            .encode_utf16()
+            .flat_map(u16::to_le_bytes)
+            .collect(),
+    ]
+    .concat();
+    fs::write(repository.path().join("Blocked.fs"), plain).unwrap();
+    fs::write(repository.path().join("Signature.fs"), signature).unwrap();
+    fs::write(repository.path().join("Encoded.fs"), &encoded).unwrap();
+    fs::write(repository.path().join("Example.fsproj"), "<Project><ItemGroup><Compile Include=\"Blocked.fs\" /><Compile Include=\"Signature.fs\" /><Compile Include=\"Encoded.fs\" /></ItemGroup></Project>").unwrap();
+    let policy = FirstSliceStoragePolicy::resolve_user_config(Some("version='1.3'\n[extensions.source-languages]\nversion='1.0'\ncritical=true\n[extensions.source-languages.data.paths]\n'Blocked.fs'='unsupported-language'\n'Signature.fs'='fsharp-signature'\n"), 2).unwrap();
+    let mut service = FirstSliceService::new_with_storage_policy(
+        2,
+        MAX_RETAINED_SOURCE_BYTES,
+        None,
+        None,
+        policy,
+    )
+    .unwrap();
+    let receipt = service
+        .index_repository(repository.path(), &deadline())
+        .unwrap();
+    assert_project_member(
+        &service,
+        &receipt,
+        "Blocked.fs",
+        plain,
+        "unsupported-language",
+        None,
+    );
+    assert_project_member(
+        &service,
+        &receipt,
+        "Signature.fs",
+        signature,
+        "fsharp-signature",
+        Some("declared"),
+    );
+    let file_id = assert_project_member(&service, &receipt, "Encoded.fs", &encoded, "fsharp", None);
+    let snapshot = service
+        .loaded_generation_snapshot(receipt.generation)
+        .unwrap();
+    let file = snapshot
+        .document()
+        .files
+        .iter()
+        .find(|file| file.id == file_id)
+        .unwrap();
+    assert_eq!(file.encoding, "utf-16le");
+    let coverage = service
+        .source_file_coverage_until(receipt.generation, file_id, &deadline())
+        .unwrap();
+    assert_eq!(coverage.status, CoverageStatus::Unknown);
+    assert_eq!(
+        coverage.reason,
+        Some(FirstSliceSourceCoverageReason::UnsupportedEncoding)
+    );
+}
+
+#[test]
+fn fsharp_project_route_survives_zero_supported_transitions() {
+    let current = std::env::current_dir().unwrap();
+    let repository = tempfile::tempdir_in(&current).unwrap();
+    let storage = tempfile::tempdir_in(&current).unwrap();
+    let paths = rootlight_runtime::RuntimePaths::new(
+        storage.path().join("state"),
+        storage.path().join("runtime"),
+    )
+    .unwrap();
+    paths.prepare_owner().unwrap();
+    let source = b"let standalone = 1\n";
+    fs::write(repository.path().join("Member.fs"), source).unwrap();
+    let policy = FirstSliceStoragePolicy::resolve_user_config(
+        Some("version='1.3'\n[storage]\nretained_generations=4\n"),
+        4,
+    )
+    .unwrap();
+    let mut service =
+        FirstSliceService::new_durable_with_policy(policy.clone(), paths.state_dir(), &deadline())
+            .unwrap();
+    let options = FirstSliceIndexOptions::incremental(FirstSliceIndexMode::Structural);
+    let initial = index(&mut service, repository.path(), options);
+    assert_eq!(initial.evidence().rebuilt_files, 0);
+    let file = assert_project_member(
+        &service,
+        initial.receipt(),
+        "Member.fs",
+        source,
+        "unknown",
+        None,
+    );
+    let unknown_route = retained_parser_route(&service, initial.receipt().generation, file);
+    let project_path = repository.path().join("Example.fsproj");
+    fs::write(
+        &project_path,
+        "<Project><ItemGroup><Compile Include=\"Member.fs\" /></ItemGroup></Project>\n",
+    )
+    .unwrap();
+    let added = index(&mut service, repository.path(), options);
+    assert_eq!(added.evidence().rebuilt_files, 1);
+    assert_eq!(
+        assert_project_member(
+            &service,
+            added.receipt(),
+            "Member.fs",
+            source,
+            "fsharp",
+            Some("standalone")
+        ),
+        file
+    );
+    assert_ne!(
+        retained_parser_route(&service, added.receipt().generation, file),
+        unknown_route
+    );
+    let noop = index(&mut service, repository.path(), options);
+    assert_eq!(noop.receipt().generation, added.receipt().generation);
+    assert_eq!(noop.evidence().rebuilt_files, 0);
+    assert_eq!(noop.evidence().rebuilt_facts, 0);
+    fs::remove_file(&project_path).unwrap();
+    let removed = index(&mut service, repository.path(), options);
+    assert_eq!(removed.evidence().rebuilt_files, 0);
+    assert_eq!(
+        assert_project_member(
+            &service,
+            removed.receipt(),
+            "Member.fs",
+            source,
+            "unknown",
+            None
+        ),
+        file
+    );
+    assert_eq!(
+        retained_parser_route(&service, removed.receipt().generation, file),
+        unknown_route
+    );
+    let last = removed.receipt().clone();
+    drop(service);
+    let mut reopened =
+        FirstSliceService::new_durable_with_policy(policy, paths.state_dir(), &deadline()).unwrap();
+    assert_project_member(&reopened, &last, "Member.fs", source, "unknown", None);
+    assert_eq!(
+        retained_parser_route(&reopened, last.generation, file),
+        unknown_route
+    );
+    let noop = index(&mut reopened, repository.path(), options);
+    assert_eq!(noop.receipt().generation, last.generation);
+    assert_eq!(noop.evidence().rebuilt_files, 0);
+    assert_eq!(noop.evidence().rebuilt_facts, 0);
+}
+
+#[test]
+fn fsharp_project_routes_survive_resource_fallback() {
+    fn assert_fallback_member(
+        service: &FirstSliceService,
+        receipt: &FirstSliceIndexReceipt,
+        source: &[u8],
+        language: &str,
+    ) -> FileId {
+        assert!(
+            receipt
+                .diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.code == SOURCE_FILE_FALLBACK_DIAGNOSTIC_CODE)
+        );
+        assert!(receipt.discovery_complete);
+        assert_eq!(receipt.entities, 0);
+        assert_eq!(receipt.extracted_files, 0);
+        let file = assert_project_member(service, receipt, "Member.fs", source, language, None);
+        for query in ["Member.fs", "standalone"] {
+            let located = service
+                .code_locate(
+                    receipt.generation,
+                    query.to_owned(),
+                    LocateMode::Exact,
+                    8,
+                    0,
+                    &deadline(),
+                )
+                .unwrap();
+            let hit = located
+                .data
+                .hits
+                .iter()
+                .find(|hit| hit.file == file)
+                .unwrap();
+            assert_eq!(hit.kind, "file");
+            assert_eq!(hit.symbol, None);
+            let reference = hit.source.as_ref().unwrap();
+            assert_eq!(reference.generation(), receipt.generation);
+            assert_eq!(reference.span().file(), file);
+            assert_eq!(reference.content_hash(), content_hash(source));
+        }
+        file
+    }
+
+    let current = std::env::current_dir().unwrap();
+    let repository = tempfile::tempdir_in(&current).unwrap();
+    let storage = tempfile::tempdir_in(&current).unwrap();
+    let paths = rootlight_runtime::RuntimePaths::new(
+        storage.path().join("state"),
+        storage.path().join("runtime"),
+    )
+    .unwrap();
+    paths.prepare_owner().unwrap();
+    let source = b"let standalone = 1\n";
+    fs::write(repository.path().join("Member.fs"), source).unwrap();
+    fs::write(repository.path().join("Peer.fs"), b"let peer = 2\n").unwrap();
+    let policy = FirstSliceStoragePolicy::resolve_user_config(
+        Some("version='1.3'\n[storage]\nretained_generations=4\n"),
+        4,
+    )
+    .unwrap();
+    let mut service =
+        FirstSliceService::new_durable_with_policy(policy.clone(), paths.state_dir(), &deadline())
+            .unwrap();
+    let current = &service.analysis_limits;
+    let mut ir = current.ir().clone();
+    // Two admitted files force the real resource fallback, not merely an empty
+    // parser selection. Every other analysis ceiling remains unchanged.
+    ir.max_files = 1;
+    let mut limits = AnalysisLimits::new(
+        current.max_source_bytes(),
+        current.max_syntax_nodes(),
+        current.max_syntax_depth(),
+        current.max_embedded_ranges(),
+        current.max_reported_memory_bytes(),
+        current.syntax_stream().clone(),
+        current.ir_stream().clone(),
+        ir,
+    )
+    .unwrap();
+    if let Some(project) = current.project() {
+        limits = limits.with_project_limits(project);
+    }
+    service.analysis_limits = limits.clone();
+    let options = FirstSliceIndexOptions::incremental(FirstSliceIndexMode::Structural);
+    let initial = index(&mut service, repository.path(), options);
+    let file = assert_fallback_member(&service, initial.receipt(), source, "unknown");
+    let unknown_route = retained_parser_route(&service, initial.receipt().generation, file);
+    let project_path = repository.path().join("Example.fsproj");
+    let project = "<Project><ItemGroup><Compile Include=\"Member.fs\" /></ItemGroup></Project>\n";
+    fs::write(&project_path, project).unwrap();
+    let added = index(&mut service, repository.path(), options);
+    assert_eq!(
+        assert_fallback_member(&service, added.receipt(), source, "fsharp"),
+        file
+    );
+    let project_route = retained_parser_route(&service, added.receipt().generation, file);
+    assert_ne!(project_route, unknown_route);
+    let noop = index(&mut service, repository.path(), options);
+    assert_eq!(noop.receipt().generation, added.receipt().generation);
+    assert_fallback_member(&service, noop.receipt(), source, "fsharp");
+    assert_eq!(noop.evidence().rebuilt_files, 0);
+    assert_eq!(noop.evidence().rebuilt_facts, 0);
+    fs::write(
+        &project_path,
+        format!("{project}<!-- retained provenance -->\n"),
+    )
+    .unwrap();
+    let changed = index(&mut service, repository.path(), options);
+    assert_eq!(
+        assert_fallback_member(&service, changed.receipt(), source, "fsharp"),
+        file
+    );
+    assert_ne!(
+        retained_parser_route(&service, changed.receipt().generation, file),
+        project_route
+    );
+    fs::remove_file(&project_path).unwrap();
+    let removed = index(&mut service, repository.path(), options);
+    assert_eq!(
+        assert_fallback_member(&service, removed.receipt(), source, "unknown"),
+        file
+    );
+    assert_eq!(
+        retained_parser_route(&service, removed.receipt().generation, file),
+        unknown_route
+    );
+    let last = removed.receipt().clone();
+    drop(service);
+    let mut reopened =
+        FirstSliceService::new_durable_with_policy(policy, paths.state_dir(), &deadline()).unwrap();
+    reopened.analysis_limits = limits;
+    assert_eq!(
+        assert_fallback_member(&reopened, &last, source, "unknown"),
+        file
+    );
+    assert_eq!(
+        retained_parser_route(&reopened, last.generation, file),
+        unknown_route
+    );
+    let noop = index(&mut reopened, repository.path(), options);
+    assert_eq!(noop.receipt().generation, last.generation);
+    assert_fallback_member(&reopened, noop.receipt(), source, "unknown");
+    assert_eq!(noop.evidence().rebuilt_files, 0);
+    assert_eq!(noop.evidence().rebuilt_facts, 0);
 }
