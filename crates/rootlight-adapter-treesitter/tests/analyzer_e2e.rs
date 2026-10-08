@@ -7,25 +7,31 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     fs,
     path::Path,
-    sync::Arc,
+    sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    },
     time::{Duration, Instant},
 };
 
 use rootlight_adapter_sdk::{
-    AdapterError, AnalysisLimits, AnalysisOutput, AnalysisRequest, BatchThresholds, EncodingId,
-    GenerationBoundSnapshot, LanguageAnalyzer, LanguageId, MemoryAdmissionPolicy,
-    MemoryAdmissionStatus, MemoryEnforcement, ParseProvider, StreamLimits, execute_analysis,
+    AdapterDiagnostic, AdapterError, AnalysisLimits, AnalysisOutput, AnalysisRequest,
+    BatchThresholds, DiagnosticCode, EncodingId, GenerationBoundSnapshot, IncludedRange,
+    LanguageAnalyzer, LanguageId, MemoryAdmissionPolicy, MemoryAdmissionStatus, MemoryEnforcement,
+    ParseCapabilities, ParseProvider, ParseReport, ParseRequest, RequestError, ResourceKind,
+    SinkError, StreamLimits, SyntaxFactBatch, SyntaxFactSink, execute_analysis,
 };
 use rootlight_adapter_treesitter::{
     ParserSettings, RuntimeConfig, TreeSitterAnalyzer, TreeSitterProvider,
 };
-use rootlight_cancel::Cancellation;
+use rootlight_cancel::{Cancellation, CancellationReason};
 use rootlight_ids::{GenerationId, RepositoryId, SymbolId, content_hash, derive_repository};
 use rootlight_ir::{
-    AnalysisTier, BuildContextIdentity, CoverageScope, CoverageStatus, EntityFlag, EntityKind,
-    ExtensionSupport, FactDomain, FactEvidence, IrDocument, IrLimits, OccurrenceRole,
-    OccurrenceTarget, ProducerIdentity, ProducerKind, RelationEndpoint, RelationPredicate,
-    SkippedRegionReason, SourceRef, SourceSpan, decode_ir_document, validate_ir_document,
+    AnalysisTier, BuildContextIdentity, CoverageScope, CoverageStatus, DiagnosticSeverity,
+    EntityFlag, EntityKind, ExtensionSupport, FactDomain, FactEvidence, IrDocument, IrLimits,
+    OccurrenceRole, OccurrenceTarget, ProducerIdentity, ProducerKind, RelationEndpoint,
+    RelationPredicate, SkippedRegionReason, SourceRef, SourceSpan, decode_ir_document,
+    validate_ir_document,
 };
 use rootlight_vfs::{RelativePath, RepositoryRoot, SourceSnapshot};
 use tempfile::{TempDir, tempdir_in};
@@ -940,6 +946,753 @@ fn artifact_identity_demand_distinguishes_roles_with_shared_fact_kinds() {
             case.name,
         );
     }
+}
+
+#[test]
+fn prepared_artifact_exact_fit_preserves_complete_evidence_without_reparsing() {
+    for (language_name, source) in [
+        (
+            "rust",
+            "/// Reads a value.\nfn read(value: i32) -> i32 { value }\n",
+        ),
+        (
+            "python",
+            "def read(value):\n    \"\"\"Reads a value.\"\"\"\n    return value\n",
+        ),
+        (
+            "java",
+            "/** Stores values. */\nclass Store { int read(int value) { return value; } }\n",
+        ),
+    ] {
+        let case = *CASES
+            .iter()
+            .find(|case| case.name == language_name)
+            .unwrap();
+        let (analyzer, parser) = counting_analyzer(case, ParseTestBehavior::Native);
+        let fixture = Fixture::new(case, source.as_bytes());
+        let full_limits = limits();
+        let full_request = request(&fixture.snapshot, &fixture.source, case, &full_limits);
+        let artifact = analyzer
+            .prepare_artifact(&full_request, &deadline())
+            .unwrap();
+        assert_eq!(parser.invocations.load(Ordering::Relaxed), 1);
+        assert!(artifact.syntax_partition_complete(), "{language_name}");
+        assert!(
+            artifact.syntax_fact_count()
+                > artifact.required_syntax_fact_count(&deadline()).unwrap(),
+            "fixture must retain optional evidence: {language_name}"
+        );
+        let exact_limits = limits_with_syntax_records(artifact.syntax_fact_count());
+        assert!(!artifact.is_compatible_with_limits(&exact_limits));
+        assert!(artifact.is_compatible_with_prepared_limits(&exact_limits));
+        let exact_request = request(&fixture.snapshot, &fixture.source, case, &exact_limits);
+        let prepared = analyzer
+            .analyze_prepared_artifact(
+                &exact_request,
+                &artifact,
+                ExtensionSupport::default(),
+                MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
+                &deadline(),
+            )
+            .unwrap();
+        assert_eq!(parser.invocations.load(Ordering::Relaxed), 1);
+        let clean = analyze(&analyzer, &full_request, &ExtensionSupport::default());
+        assert_eq!(prepared.document(), clean.document(), "{language_name}");
+        assert_eq!(prepared.report(), clean.report(), "{language_name}");
+        assert_eq!(parser.invocations.load(Ordering::Relaxed), 2);
+
+        let successor = fixture.next_generation();
+        let successor_request =
+            request(&successor.snapshot, &successor.source, case, &exact_limits);
+        let reused = analyzer
+            .analyze_prepared_artifact(
+                &successor_request,
+                &artifact,
+                ExtensionSupport::default(),
+                MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
+                &deadline(),
+            )
+            .unwrap();
+        assert_eq!(parser.invocations.load(Ordering::Relaxed), 2);
+        let successor_full = request(&successor.snapshot, &successor.source, case, &full_limits);
+        let successor_clean = analyze(&analyzer, &successor_full, &ExtensionSupport::default());
+        assert_eq!(
+            reused.document(),
+            successor_clean.document(),
+            "{language_name}"
+        );
+        assert_eq!(reused.report(), successor_clean.report(), "{language_name}");
+        assert_eq!(parser.invocations.load(Ordering::Relaxed), 3);
+        assert!(reused.document().entities.iter().all(|entity| {
+            entity.generation == successor.source.generation()
+                && entity
+                    .evidence
+                    .source
+                    .as_ref()
+                    .is_some_and(|source| source.generation() == successor.source.generation())
+        }));
+
+        let insufficient = limits_with_syntax_records(artifact.syntax_fact_count() - 1);
+        assert!(!artifact.is_compatible_with_prepared_limits(&insufficient));
+        assert!(
+            analyzer
+                .analyze_prepared_artifact(
+                    &request(&fixture.snapshot, &fixture.source, case, &insufficient),
+                    &artifact,
+                    ExtensionSupport::default(),
+                    MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
+                    &deadline(),
+                )
+                .is_err()
+        );
+        assert_eq!(parser.invocations.load(Ordering::Relaxed), 3);
+    }
+}
+
+#[test]
+fn prepared_artifact_keeps_partition_clipping_and_required_overflow_explicit() {
+    let case = CASES[0];
+    let (analyzer, parser) = counting_analyzer(case, ParseTestBehavior::Native);
+    let fixture = Fixture::new(case, b"fn stable() { dependency(); }\n");
+    let full_limits = limits();
+    let full_request = request(&fixture.snapshot, &fixture.source, case, &full_limits);
+    let full = analyzer
+        .prepare_artifact(&full_request, &deadline())
+        .unwrap();
+    let required = full.required_syntax_fact_count(&deadline()).unwrap();
+    assert!(required > 1);
+    assert!(full.syntax_fact_count() > required);
+    let bounded_limits = limits_with_syntax_records(required);
+    let bounded_request = request(&fixture.snapshot, &fixture.source, case, &bounded_limits);
+    let bounded = analyzer
+        .prepare_artifact(&bounded_request, &deadline())
+        .unwrap();
+    assert_eq!(parser.invocations.load(Ordering::Relaxed), 2);
+    assert!(!bounded.syntax_partition_complete());
+    assert_eq!(
+        bounded.required_syntax_fact_count(&deadline()).unwrap(),
+        required
+    );
+    assert!(!bounded.is_compatible_with_prepared_limits(&full_limits));
+    assert!(bounded.is_compatible_with_prepared_limits(&bounded_limits));
+    assert!(
+        analyzer
+            .analyze_prepared_artifact(
+                &full_request,
+                &bounded,
+                ExtensionSupport::default(),
+                MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
+                &deadline(),
+            )
+            .is_err()
+    );
+    let lowered = analyzer
+        .analyze_prepared_artifact(
+            &bounded_request,
+            &bounded,
+            ExtensionSupport::default(),
+            MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
+            &deadline(),
+        )
+        .unwrap();
+    assert!(
+        lowered
+            .document()
+            .diagnostics
+            .iter()
+            .any(|diagnostic| { diagnostic.code == "syntax-extraction-limit" })
+    );
+    assert_eq!(
+        lowered.report().coverage().status(),
+        CoverageStatus::Bounded
+    );
+    assert_eq!(parser.invocations.load(Ordering::Relaxed), 2);
+    let insufficient = limits_with_syntax_records(required - 1);
+    let rejected = analyzer.prepare_artifact(
+        &request(&fixture.snapshot, &fixture.source, case, &insufficient),
+        &deadline(),
+    );
+    assert!(matches!(
+        rejected,
+        Err(AdapterError::Sink(SinkError::StreamLimit {
+            resource: ResourceKind::RequiredSyntaxFacts,
+            observed,
+            limit,
+        })) if observed == required && limit == required - 1
+    ));
+    assert_eq!(parser.invocations.load(Ordering::Relaxed), 3);
+}
+
+#[test]
+fn prepared_artifact_fsharp_identity_demand_respects_the_native_profile() {
+    let provider = Arc::new(provider());
+    let full_limits = limits();
+    for language_name in ["fsharp", "fsharp-signature"] {
+        let case = LanguageCase {
+            name: language_name,
+            path: if language_name == "fsharp" {
+                "src/example.fs"
+            } else {
+                "src/example.fsi"
+            },
+            frontend: "tree-sitter-fsharp-0.3.12",
+            ..CASES[0]
+        };
+        let analyzer = analyzer(&provider, case);
+        for source in ["", "// Written comment.\n", "open System\n"] {
+            let fixture = Fixture::new(case, source.as_bytes());
+            let full_request = request(&fixture.snapshot, &fixture.source, case, &full_limits);
+            let raw_demand = provider
+                .required_syntax_fact_count(&full_request.to_parse_request(), &deadline())
+                .unwrap();
+            let artifact = analyzer
+                .prepare_artifact(&full_request, &deadline())
+                .unwrap();
+            assert!(
+                artifact.syntax_partition_complete(),
+                "{language_name}: {source:?}"
+            );
+            assert_eq!(
+                artifact.required_syntax_fact_count(&deadline()).unwrap(),
+                raw_demand,
+                "{language_name}: {source:?}"
+            );
+            assert!(artifact.syntax_fact_count() > 0);
+            let exact_limits = limits_with_syntax_records(artifact.syntax_fact_count());
+            assert!(!artifact.is_compatible_with_limits(&exact_limits));
+            assert!(artifact.is_compatible_with_prepared_limits(&exact_limits));
+            let prepared = analyzer
+                .analyze_prepared_artifact(
+                    &request(&fixture.snapshot, &fixture.source, case, &exact_limits),
+                    &artifact,
+                    ExtensionSupport::default(),
+                    MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
+                    &deadline(),
+                )
+                .unwrap();
+            let clean = analyze(&analyzer, &full_request, &ExtensionSupport::default());
+            assert_eq!(
+                prepared.document(),
+                clean.document(),
+                "{language_name}: {source:?}"
+            );
+            assert_eq!(
+                prepared.report(),
+                clean.report(),
+                "{language_name}: {source:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn prepared_artifact_mixed_markdown_fsharp_profiles_preserve_identity_demand() {
+    let case = LanguageCase {
+        name: "markdown",
+        path: "docs/examples.md",
+        frontend: "tree-sitter-md-0.5.3",
+        ..CASES[0]
+    };
+    let provider = Arc::new(provider());
+    let analyzer = analyzer(&provider, case);
+    let full_limits = limits();
+    let mut sources = Vec::new();
+    for language_name in ["fsharp", "fsharp-signature"] {
+        for body in ["", "// Written comment.\n", "open System\n"] {
+            sources.push(format!("~~~{language_name}\n{body}~~~\n"));
+        }
+    }
+    sources.push(sources.join("\n"));
+    for source in sources {
+        let fixture = Fixture::new(case, source.as_bytes());
+        let full_request = request(&fixture.snapshot, &fixture.source, case, &full_limits);
+        let raw_demand = provider
+            .required_syntax_fact_count(&full_request.to_parse_request(), &deadline())
+            .unwrap();
+        let artifact = analyzer
+            .prepare_artifact(&full_request, &deadline())
+            .unwrap();
+        assert!(artifact.syntax_partition_complete(), "{source:?}");
+        assert_eq!(
+            artifact.required_syntax_fact_count(&deadline()).unwrap(),
+            raw_demand,
+            "{source:?}"
+        );
+        let exact_limits = limits_with_syntax_records(artifact.syntax_fact_count());
+        assert!(!artifact.is_compatible_with_limits(&exact_limits));
+        assert!(artifact.is_compatible_with_prepared_limits(&exact_limits));
+        let prepared = analyzer
+            .analyze_prepared_artifact(
+                &request(&fixture.snapshot, &fixture.source, case, &exact_limits),
+                &artifact,
+                ExtensionSupport::default(),
+                MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
+                &deadline(),
+            )
+            .unwrap();
+        let clean = analyze(&analyzer, &full_request, &ExtensionSupport::default());
+        assert_eq!(prepared.document(), clean.document(), "{source:?}");
+        assert_eq!(prepared.report(), clean.report(), "{source:?}");
+    }
+}
+
+#[test]
+fn prepared_artifact_native_fixtures_preserve_independent_identity_demand() {
+    let provider = Arc::new(provider());
+    let full_limits = limits();
+    let mut cases = Vec::from(CASES);
+    cases.extend([
+        CSS_CASE,
+        JSON_CASE,
+        TOML_CASE,
+        astro_native::ASTRO,
+        dart_native::DART,
+        groovy_native::GROOVY,
+        html_native::HTML,
+        matlab_native::MATLAB,
+        nix_native::NIX,
+        objective_c_native::OBJECTIVE_C,
+        perl_native::PERL,
+        powershell_native::POWERSHELL,
+        r_native::R,
+        scala_native::SCALA,
+        solidity_native::SOLIDITY,
+        sql_native::SQL,
+        vba_native::VBA,
+        yaml_native::YAML,
+    ]);
+    for case in cases {
+        let fixture = Fixture::new(case, case.source.as_bytes());
+        let full_request = request(&fixture.snapshot, &fixture.source, case, &full_limits);
+        let raw_demand = provider
+            .required_syntax_fact_count(&full_request.to_parse_request(), &deadline())
+            .unwrap();
+        let artifact = analyzer(&provider, case)
+            .prepare_artifact(&full_request, &deadline())
+            .unwrap();
+        assert!(artifact.syntax_partition_complete(), "{}", case.name);
+        assert_eq!(
+            artifact.required_syntax_fact_count(&deadline()).unwrap(),
+            raw_demand,
+            "{}",
+            case.name
+        );
+    }
+}
+
+#[test]
+fn prepared_artifact_rejects_batch_caps_that_drop_required_identity() {
+    let case = CASES[0];
+    let source = "fn alpha(value: i32) { value; }\nfn beta(value: i32) { value; }\nfn gamma(value: i32) { value; }\nfn omega(value: i32) { value; }\n";
+    let provider = Arc::new(provider());
+    let analyzer = analyzer(&provider, case);
+    let fixture = Fixture::new(case, source.as_bytes());
+    let defaults = limits();
+    let syntax_stream = StreamLimits::new(
+        2,
+        20,
+        defaults.syntax_stream().max_output_bytes(),
+        defaults.syntax_stream().max_diagnostics(),
+        defaults.syntax_stream().max_diagnostic_bytes(),
+        defaults.syntax_stream().max_string_bytes(),
+        BatchThresholds::new(10, 1024 * 1024, 32, 128 * 1024).unwrap(),
+    )
+    .unwrap();
+    let bounded_limits = AnalysisLimits::new(
+        defaults.max_source_bytes(),
+        defaults.max_syntax_nodes(),
+        defaults.max_syntax_depth(),
+        defaults.max_embedded_ranges(),
+        defaults.max_reported_memory_bytes(),
+        syntax_stream,
+        defaults.ir_stream().clone(),
+        defaults.ir().clone(),
+    )
+    .unwrap();
+    let bounded_request = request(&fixture.snapshot, &fixture.source, case, &bounded_limits);
+    let source_demand = provider
+        .required_syntax_fact_count(&bounded_request.to_parse_request(), &deadline())
+        .unwrap();
+    assert!(source_demand > bounded_limits.syntax_stream().batch().max_records());
+    assert!(source_demand <= bounded_limits.syntax_stream().max_records());
+    // The clipping diagnostic spends one batch. Publishing the old ten-fact
+    // prefix would lose mandatory identities rather than optional evidence.
+    assert!(matches!(
+        analyzer.prepare_artifact(&bounded_request, &deadline()),
+        Err(AdapterError::Sink(SinkError::StreamLimit {
+            resource: ResourceKind::Batches,
+            observed: 2,
+            limit: 1,
+        }))
+    ));
+    let full_request = request(&fixture.snapshot, &fixture.source, case, &defaults);
+    let artifact = analyzer
+        .prepare_artifact(&full_request, &deadline())
+        .unwrap();
+    assert!(artifact.syntax_partition_complete());
+    assert_eq!(
+        artifact.required_syntax_fact_count(&deadline()).unwrap(),
+        source_demand,
+    );
+    let prepared = analyzer
+        .analyze_prepared_artifact(
+            &full_request,
+            &artifact,
+            ExtensionSupport::default(),
+            MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
+            &deadline(),
+        )
+        .unwrap();
+    let clean = analyze(&analyzer, &full_request, &ExtensionSupport::default());
+    assert_eq!(prepared.document(), clean.document());
+    assert_eq!(prepared.report(), clean.report());
+    let functions = prepared
+        .document()
+        .entities
+        .iter()
+        .filter(|entity| entity.kind == EntityKind::Function)
+        .collect::<Vec<_>>();
+    assert_eq!(functions.len(), 4);
+    assert_eq!(
+        functions
+            .iter()
+            .map(|entity| entity.canonical_name.as_str())
+            .collect::<BTreeSet<_>>(),
+        BTreeSet::from(["alpha", "beta", "gamma", "omega"]),
+    );
+    for function in functions {
+        assert_eq!(
+            prepared
+                .document()
+                .occurrences
+                .iter()
+                .filter(|site| {
+                    site.role == OccurrenceRole::Definition
+                        && site.target
+                            == (OccurrenceTarget::Resolved {
+                                symbol: function.id,
+                            })
+                })
+                .count(),
+            1,
+        );
+    }
+    assert!(
+        !prepared
+            .document()
+            .diagnostics
+            .iter()
+            .any(|diagnostic| { diagnostic.code == "syntax-extraction-limit" })
+    );
+}
+
+#[test]
+fn prepared_artifact_does_not_lower_ir_or_relabel_parse_recovery() {
+    let case = CASES[0];
+    let (analyzer, parser) = counting_analyzer(case, ParseTestBehavior::Native);
+    let fixture = Fixture::new(case, b"fn broken(");
+    let ordinary = limits();
+    let mut ir = IrLimits::default();
+    ir.max_files = 0;
+    let parse_only_limits = AnalysisLimits::new(
+        ordinary.max_source_bytes(),
+        ordinary.max_syntax_nodes(),
+        ordinary.max_syntax_depth(),
+        ordinary.max_embedded_ranges(),
+        ordinary.max_reported_memory_bytes(),
+        ordinary.syntax_stream().clone(),
+        ordinary.ir_stream().clone(),
+        ir,
+    )
+    .unwrap();
+    let parse_only_request = request(&fixture.snapshot, &fixture.source, case, &parse_only_limits);
+    let artifact = analyzer
+        .prepare_artifact(&parse_only_request, &deadline())
+        .unwrap();
+    assert!(artifact.syntax_partition_complete());
+    assert_eq!(parser.invocations.load(Ordering::Relaxed), 1);
+    assert!(matches!(
+        analyzer.analyze_prepared_artifact(
+            &parse_only_request,
+            &artifact,
+            ExtensionSupport::default(),
+            MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
+            &deadline(),
+        ),
+        Err(AdapterError::Sink(SinkError::StreamLimit {
+            resource: ResourceKind::Records,
+            observed: 1,
+            limit: 0,
+        }))
+    ));
+    assert_eq!(parser.invocations.load(Ordering::Relaxed), 1);
+    assert!(!artifact.is_compatible_with_prepared_limits(&ordinary));
+
+    let ordinary_request = request(&fixture.snapshot, &fixture.source, case, &ordinary);
+    let recovery = analyzer
+        .prepare_artifact(&ordinary_request, &deadline())
+        .unwrap();
+    assert!(recovery.syntax_partition_complete());
+    let lowered = analyzer
+        .analyze_prepared_artifact(
+            &ordinary_request,
+            &recovery,
+            ExtensionSupport::default(),
+            MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
+            &deadline(),
+        )
+        .unwrap();
+    assert_eq!(parser.invocations.load(Ordering::Relaxed), 2);
+    let clean = analyze(&analyzer, &ordinary_request, &ExtensionSupport::default());
+    assert_eq!(lowered.document(), clean.document());
+    assert_eq!(lowered.report(), clean.report());
+    assert!(!lowered.document().diagnostics.is_empty());
+    assert_eq!(
+        lowered.report().coverage().status(),
+        CoverageStatus::Unknown
+    );
+    assert!(!lowered.document().skipped_regions.is_empty());
+}
+
+#[test]
+fn prepared_artifact_keeps_native_node_and_depth_limits_visible() {
+    let case = CASES[0];
+    for (max_nodes, max_depth, expected_code) in [
+        (2, MAX_SYNTAX_DEPTH, "syntax-node-limit"),
+        (MAX_SYNTAX_NODES, 2, "syntax-depth-limit"),
+    ] {
+        let (analyzer, parser) = counting_analyzer(case, ParseTestBehavior::Native);
+        let fixture = Fixture::new(
+            case,
+            b"fn main() { let one = 1; let two = 2; let three = 3; }\n",
+        );
+        let defaults = limits();
+        let bounded = AnalysisLimits::new(
+            defaults.max_source_bytes(),
+            max_nodes,
+            max_depth,
+            defaults.max_embedded_ranges(),
+            defaults.max_reported_memory_bytes(),
+            defaults.syntax_stream().clone(),
+            defaults.ir_stream().clone(),
+            defaults.ir().clone(),
+        )
+        .unwrap();
+        let full_request = request(&fixture.snapshot, &fixture.source, case, &bounded);
+        let artifact = analyzer
+            .prepare_artifact(&full_request, &deadline())
+            .unwrap();
+        assert!(artifact.syntax_partition_complete());
+        assert_eq!(artifact.syntax_fact_count(), 0);
+        let single_record = limits_with_syntax_records(1);
+        let lowering_limits = AnalysisLimits::new(
+            bounded.max_source_bytes(),
+            max_nodes,
+            max_depth,
+            bounded.max_embedded_ranges(),
+            bounded.max_reported_memory_bytes(),
+            single_record.syntax_stream().clone(),
+            bounded.ir_stream().clone(),
+            bounded.ir().clone(),
+        )
+        .unwrap();
+        assert!(artifact.is_compatible_with_prepared_limits(&lowering_limits));
+        let prepared = analyzer
+            .analyze_prepared_artifact(
+                &request(&fixture.snapshot, &fixture.source, case, &lowering_limits),
+                &artifact,
+                ExtensionSupport::default(),
+                MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
+                &deadline(),
+            )
+            .unwrap();
+        assert_eq!(parser.invocations.load(Ordering::Relaxed), 1);
+        let clean = analyze(&analyzer, &full_request, &ExtensionSupport::default());
+        assert_eq!(prepared.document(), clean.document());
+        assert_eq!(prepared.report(), clean.report());
+        assert_eq!(
+            prepared.report().coverage().status(),
+            CoverageStatus::Bounded
+        );
+        assert!(prepared.document().diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == expected_code
+                && diagnostic.coverage_effect == CoverageStatus::Bounded
+        }));
+        assert!(prepared.document().skipped_regions.iter().any(|gap| {
+            gap.detail == expected_code && gap.reason == SkippedRegionReason::ResourceLimit
+        }));
+    }
+}
+
+#[test]
+fn prepared_artifact_exact_fit_preserves_embedded_context_warnings() {
+    let case = LanguageCase {
+        name: "markdown",
+        path: "docs/examples.md",
+        frontend: "tree-sitter-md-0.5.3",
+        ..CASES[0]
+    };
+    let mut source = (0..40)
+        .map(|index| format!("~~~rust\nfn example_{index}() {{}}\n~~~\n\n"))
+        .collect::<String>();
+    source.push_str(&format!(
+        "> ~~~rust\n{}> ~~~\n",
+        "> let value = 1;\n".repeat(33)
+    ));
+    let (analyzer, parser) = counting_analyzer(case, ParseTestBehavior::Native);
+    let fixture = Fixture::new(case, source.as_bytes());
+    let full_limits = limits();
+    let full_request = request(&fixture.snapshot, &fixture.source, case, &full_limits);
+    let artifact = analyzer
+        .prepare_artifact(&full_request, &deadline())
+        .unwrap();
+    assert!(artifact.syntax_partition_complete());
+    let exact_limits = limits_with_syntax_records(artifact.syntax_fact_count());
+    assert!(!artifact.is_compatible_with_limits(&exact_limits));
+    assert!(artifact.is_compatible_with_prepared_limits(&exact_limits));
+    let successor = fixture.next_generation();
+    let prepared = analyzer
+        .analyze_prepared_artifact(
+            &request(&successor.snapshot, &successor.source, case, &exact_limits),
+            &artifact,
+            ExtensionSupport::default(),
+            MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
+            &deadline(),
+        )
+        .unwrap();
+    assert_eq!(parser.invocations.load(Ordering::Relaxed), 1);
+    let clean = analyze(
+        &analyzer,
+        &request(&successor.snapshot, &successor.source, case, &full_limits),
+        &ExtensionSupport::default(),
+    );
+    assert_eq!(prepared.document(), clean.document());
+    assert_eq!(prepared.report(), clean.report());
+    assert!(prepared.document().diagnostics.iter().any(|diagnostic| {
+        diagnostic.code == "syntax-context-limit"
+            && diagnostic.coverage_effect == CoverageStatus::Bounded
+            && diagnostic.generation == successor.source.generation()
+    }));
+    assert!(prepared.document().skipped_regions.iter().any(|gap| {
+        gap.detail == "markdown-code-budget-unavailable"
+            && gap.reason == SkippedRegionReason::ResourceLimit
+            && gap.source.generation() == successor.source.generation()
+    }));
+    assert_eq!(
+        prepared.report().coverage().status(),
+        CoverageStatus::Bounded
+    );
+}
+
+#[test]
+fn prepared_artifact_preserves_sdk_admission_and_transactional_cancellation() {
+    let case = CASES[0];
+    let fixture = Fixture::new(case, b"fn stable() {}\n");
+    let limits = limits();
+    let request = request(&fixture.snapshot, &fixture.source, case, &limits);
+    let (analyzer, parser) = counting_analyzer(case, ParseTestBehavior::Native);
+    assert!(matches!(
+        analyzer.prepare_artifact(&request, &Cancellation::new()),
+        Err(AdapterError::RejectedRequest(
+            RequestError::DeadlineRequired
+        ))
+    ));
+    assert_eq!(parser.invocations.load(Ordering::Relaxed), 0);
+    let cancelled = deadline();
+    assert!(cancelled.cancel(CancellationReason::ClientRequest));
+    assert!(matches!(
+        analyzer.prepare_artifact(&request, &cancelled),
+        Err(AdapterError::Cancelled {
+            reason: CancellationReason::ClientRequest
+        })
+    ));
+    assert_eq!(parser.invocations.load(Ordering::Relaxed), 0);
+
+    let (invalid_analyzer, invalid_parser) =
+        counting_analyzer(case, ParseTestBehavior::InvalidSequence);
+    assert!(matches!(
+        invalid_analyzer.prepare_artifact(&request, &deadline()),
+        Err(AdapterError::Sink(SinkError::OutOfOrder {
+            expected: 0,
+            observed: 1
+        }))
+    ));
+    assert_eq!(invalid_parser.invocations.load(Ordering::Relaxed), 1);
+    let (cancelling_analyzer, cancelling_parser) =
+        counting_analyzer(case, ParseTestBehavior::CancelAfterParse);
+    assert!(matches!(
+        cancelling_analyzer.prepare_artifact(&request, &deadline()),
+        Err(AdapterError::Cancelled {
+            reason: CancellationReason::ClientRequest
+        })
+    ));
+    assert_eq!(cancelling_parser.invocations.load(Ordering::Relaxed), 1);
+}
+
+#[test]
+fn prepared_artifact_rejects_stale_context_identity_and_cancelled_replay() {
+    let case = CASES[0];
+    let (analyzer, parser) = counting_analyzer(case, ParseTestBehavior::Native);
+    let fixture = Fixture::new(case, b"fn stable() {}\n");
+    let limits = limits();
+    let initial_request = request(&fixture.snapshot, &fixture.source, case, &limits);
+    let artifact = analyzer
+        .prepare_artifact(&initial_request, &deadline())
+        .unwrap();
+    let included = AnalysisRequest::new_with_parse_context(
+        GenerationBoundSnapshot::new(&fixture.snapshot, &fixture.source).unwrap(),
+        language(case),
+        EncodingId::utf8(),
+        vec![IncludedRange::new(fixture.source.span(), language(case))],
+        AnalysisTier::TierD,
+        build_context(),
+        &limits,
+    )
+    .unwrap()
+    .with_generated_status(case.generated);
+    let changed = fixture.rewrite(b"fn replaced() {}\n");
+    let changed_request = request(&changed.snapshot, &changed.source, case, &limits);
+    for stale in [&included, &changed_request] {
+        assert!(
+            analyzer
+                .analyze_prepared_artifact(
+                    stale,
+                    &artifact,
+                    ExtensionSupport::default(),
+                    MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
+                    &deadline(),
+                )
+                .is_err()
+        );
+    }
+    let (other_analyzer, other_parser) = counting_analyzer(case, ParseTestBehavior::Native);
+    assert!(
+        other_analyzer
+            .analyze_prepared_artifact(
+                &initial_request,
+                &artifact,
+                ExtensionSupport::default(),
+                MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
+                &deadline(),
+            )
+            .is_err()
+    );
+    assert_eq!(other_parser.invocations.load(Ordering::Relaxed), 0);
+    let cancelled = deadline();
+    assert!(cancelled.cancel(CancellationReason::ClientRequest));
+    assert!(matches!(
+        analyzer.analyze_prepared_artifact(
+            &initial_request,
+            &artifact,
+            ExtensionSupport::default(),
+            MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
+            &cancelled,
+        ),
+        Err(AdapterError::Cancelled {
+            reason: CancellationReason::ClientRequest
+        })
+    ));
+    assert_eq!(parser.invocations.load(Ordering::Relaxed), 1);
 }
 
 #[test]
@@ -3283,6 +4036,71 @@ fn symbol_ids(
         "fixture must produce semantic entities"
     );
     symbols
+}
+
+enum ParseTestBehavior {
+    Native,
+    InvalidSequence,
+    CancelAfterParse,
+}
+
+struct CountingParser {
+    inner: TreeSitterProvider,
+    invocations: AtomicUsize,
+    behavior: ParseTestBehavior,
+}
+
+impl ParseProvider for CountingParser {
+    fn capabilities(&self) -> &ParseCapabilities {
+        self.inner.capabilities()
+    }
+
+    fn parse(
+        &self,
+        request: &ParseRequest<'_>,
+        sink: &mut dyn SyntaxFactSink,
+        cancellation: &Cancellation,
+    ) -> Result<ParseReport, AdapterError> {
+        self.invocations.fetch_add(1, Ordering::Relaxed);
+        if matches!(self.behavior, ParseTestBehavior::InvalidSequence) {
+            sink.push(SyntaxFactBatch::new(
+                1,
+                Vec::new(),
+                vec![AdapterDiagnostic::new(
+                    DiagnosticCode::new("prepared-parser-sequence-violation").unwrap(),
+                    DiagnosticSeverity::Error,
+                    None,
+                    CoverageStatus::Bounded,
+                )],
+            ))?;
+        }
+        let report = self.inner.parse(request, sink, cancellation)?;
+        if matches!(self.behavior, ParseTestBehavior::CancelAfterParse) {
+            cancellation.cancel(CancellationReason::ClientRequest);
+        }
+        Ok(report)
+    }
+}
+
+fn counting_analyzer(
+    case: LanguageCase,
+    behavior: ParseTestBehavior,
+) -> (TreeSitterAnalyzer, Arc<CountingParser>) {
+    let parser = Arc::new(CountingParser {
+        inner: provider(),
+        invocations: AtomicUsize::new(0),
+        behavior,
+    });
+    let injected: Arc<dyn ParseProvider> = parser.clone();
+    let analyzer = TreeSitterAnalyzer::new(
+        injected,
+        producer_identity(),
+        language(case),
+        case.frontend,
+        content_hash(BINARY_SEED),
+    )
+    .unwrap();
+    (analyzer, parser)
 }
 
 fn analyzer(provider: &Arc<TreeSitterProvider>, case: LanguageCase) -> TreeSitterAnalyzer {

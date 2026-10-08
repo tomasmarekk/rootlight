@@ -9,16 +9,16 @@ use rootlight_cancel::{Cancellation, CancellationReason};
 use rootlight_ids::{ContentHash, FactId, FileId, GenerationId, SymbolId, content_hash};
 use rootlight_ir::{
     AnalysisTier, ContainerRef, CoverageRecord, CoverageScope, CoverageStatus, EntityFlag,
-    EntityKind, EntityVisibility, FactDomain, NormalizedIrDocument, OccurrenceTarget, ProducerKind,
-    RelationEndpoint, RelationPredicate, SourceRef,
+    EntityKind, EntityVisibility, FactDomain, NormalizedIrDocument, ProducerKind, RelationEndpoint,
+    RelationPredicate, SourceRef,
 };
 use rootlight_search::{
     LexicalSearch, SearchBudget, SearchFilters, SearchRequest,
     validate_search_request_with_entity_filters,
 };
 use rootlight_source::{
-    SourceBudget, SourceEncoding as ServiceSourceEncoding, SourceError, SourceReadOptions,
-    SourceService,
+    LosslessTextReadOptions, SourceBudget, SourceEncoding as ServiceSourceEncoding, SourceError,
+    SourceReadOptions, SourceService, SourceTextChunk, SourceTextReadResult,
 };
 use rootlight_storage::GenerationSnapshot;
 use serde::Serialize;
@@ -48,11 +48,12 @@ use crate::model::{
     QueryResponse, QueryUsage, RankedTestSelection, RelationDirection, RelationFamily,
     RelationshipEdgeTarget, RelationshipGroup, RepositoryDataTrust, ResolvedChangeRecord,
     SemanticChangeRecord, SourceChunkEncoding, SourceChunkResult, SourceReadPlan,
-    SourceReadQueryResult, SymbolExplainPlan, SymbolExplainResult, SymbolRelationshipsPlan,
-    SymbolRelationshipsResult, TestsSelectCoverage, TestsSelectGap, TestsSelectKind,
-    TestsSelectPlan, TestsSelectResult, TokenAccountingProfile, checked_add, checked_u128_to_u64,
-    checked_usize_to_u64, ensure_estimate, search_mode,
+    SourceReadQueryResult, SourceTextPrefixReadPlan, SourceTextReadPlan, SymbolExplainPlan,
+    SymbolExplainResult, SymbolRelationshipsPlan, SymbolRelationshipsResult, TestsSelectCoverage,
+    TestsSelectGap, TestsSelectKind, TestsSelectPlan, TestsSelectResult, TokenAccountingProfile,
+    checked_add, checked_u128_to_u64, checked_usize_to_u64, ensure_estimate, search_mode,
 };
+use crate::{QuerySourceTextChunk, SourceTextPrefixReadQueryResult, SourceTextReadQueryResult};
 
 /// Daemon-independent typed query service pinned to normalized IR and lexical data.
 pub struct QueryService<'generation, Search> {
@@ -78,6 +79,32 @@ where
             return Err(QueryError::GenerationMismatch);
         }
         Ok(Self { generation, search })
+    }
+
+    /// Quotes future source-prefix metadata without accepting a body reader.
+    ///
+    /// This inspects indexed identity, paths and conditional inventories only;
+    /// later reads still validate whole bodies and scalar boundaries.
+    ///
+    /// # Errors
+    /// Returns [`QueryError`] for invalid selectors or controls, bounded work,
+    /// metadata drift, unavailable memory or cancellation.
+    pub fn source_text_prefix_metadata_quote(
+        &self,
+        references: &[SourceRef],
+        options: LosslessTextReadOptions,
+        source_budget: SourceBudget,
+        budget: QueryBudget,
+        cancellation: &Cancellation,
+    ) -> Result<QueryResponse<crate::SourceTextPrefixMetadataQuoteQueryResult>, QueryError> {
+        crate::source_metadata_quote::execute(
+            self.generation,
+            references,
+            options,
+            source_budget,
+            budget,
+            cancellation,
+        )
     }
 
     /// Builds a deterministic bounded `code.locate` plan.
@@ -237,7 +264,7 @@ where
             rows: budget.max_rows,
             edges: 0,
             results: budget.max_results,
-            source_bytes: 0,
+            source_bytes: budget.max_source_bytes,
             // Repository metadata is bounded when the generation is admitted,
             // but its exact matching subset is unknown until search executes.
             memory_bytes: budget.max_memory_bytes,
@@ -253,6 +280,7 @@ where
                 QueryOperator::GenerationPin,
                 QueryOperator::LexicalSearch,
                 QueryOperator::EntityHydration,
+                QueryOperator::LexicalEvidenceScan,
                 QueryOperator::ConditionalActivityProjection,
                 QueryOperator::CoverageProjection,
                 QueryOperator::OutputBudget,
@@ -429,6 +457,7 @@ where
                 file: hit.file_id,
                 identifier: hit.identifier,
                 qualified_name: hit.qualified_name,
+                signature: None,
                 path: hit.path,
                 kind: hit.kind,
                 language: hit.language,
@@ -462,6 +491,13 @@ where
                 }
             }
         }
+        let signatures_incomplete = hydrate_locate_signatures(
+            self.generation.document(),
+            &mut located,
+            &mut tracker,
+            &control,
+            &mut limiting_resources,
+        )?;
         let activity = conditional_activity::project_locate(
             self.generation,
             &located,
@@ -481,9 +517,12 @@ where
             &control,
             &mut limiting_resources,
         )?;
-        let next_page_offset =
-            (has_more_matches && !coverage_truncated && !origins_truncated && !activity.incomplete)
-                .then_some(returned_end);
+        let next_page_offset = (has_more_matches
+            && !coverage_truncated
+            && !origins_truncated
+            && !signatures_incomplete
+            && !activity.incomplete)
+            .then_some(returned_end);
         if next_page_offset.is_some() {
             record_limit(&mut limiting_resources, QueryResource::Results)?;
         }
@@ -525,13 +564,18 @@ where
                 resource: QueryResource::Results,
             });
         }
+        // UTF-16 projections can retain two physical bytes per UTF-8 text byte.
+        let signature_source_ceiling =
+            checked_usize_to_u64(rootlight_ir::MAX_LEXICAL_SIGNATURE_BYTES)?
+                .checked_mul(2)
+                .ok_or(QueryError::PlanRejected {
+                    resource: QueryResource::SourceBytes,
+                })?;
         let estimate = PlanEstimate {
             rows: budget.max_rows,
             edges: budget.max_edges,
             results: budget.max_results,
-            source_bytes: budget.max_source_bytes.min(checked_usize_to_u64(
-                rootlight_ir::MAX_LEXICAL_SIGNATURE_BYTES,
-            )?),
+            source_bytes: budget.max_source_bytes.min(signature_source_ceiling),
             // The normalized generation bounds every record, while the query
             // memory budget remains the conservative aggregate ceiling.
             memory_bytes: budget.max_memory_bytes,
@@ -604,59 +648,61 @@ where
 
         let mut limiting_resources = Vec::new();
         let mut relations = Vec::new();
-        for relation in &document.relations {
+        for &ordinal in self.generation.relation_ordinals_for_symbol(plan.symbol) {
             control.check()?;
+            let relation = document
+                .relations
+                .get(ordinal)
+                .ok_or(QueryError::IndexDrift)?;
             if !tracker.can_add(QueryResource::Rows, 1) {
                 record_limit(&mut limiting_resources, QueryResource::Rows)?;
                 break;
             }
             tracker.add_rows(1)?;
-            if endpoint_matches(relation.subject, plan.symbol)
-                || endpoint_matches(relation.object, plan.symbol)
-            {
-                if !tracker.can_add(QueryResource::Edges, 1) {
-                    record_limit(&mut limiting_resources, QueryResource::Edges)?;
+            if !tracker.can_add(QueryResource::Edges, 1) {
+                record_limit(&mut limiting_resources, QueryResource::Edges)?;
+                break;
+            }
+            tracker.add_edges(1)?;
+            if !tracker.can_add(QueryResource::Results, 1) {
+                record_limit(&mut limiting_resources, QueryResource::Results)?;
+                break;
+            }
+            let bytes = serialized_size(relation, u64::MAX, &control)?;
+            if !tracker.can_add(QueryResource::MemoryBytes, bytes) {
+                record_limit(&mut limiting_resources, QueryResource::MemoryBytes)?;
+                break;
+            }
+            tracker.add_results(1)?;
+            tracker.add_memory(bytes)?;
+            try_push(&mut relations, relation.clone())?;
+        }
+
+        let mut occurrences = Vec::new();
+        if !limits_optional_results(&limiting_resources) {
+            for &ordinal in self.generation.occurrence_ordinals_for_symbol(plan.symbol) {
+                control.check()?;
+                let occurrence = document
+                    .occurrences
+                    .get(ordinal)
+                    .ok_or(QueryError::IndexDrift)?;
+                if !tracker.can_add(QueryResource::Rows, 1) {
+                    record_limit(&mut limiting_resources, QueryResource::Rows)?;
                     break;
                 }
-                tracker.add_edges(1)?;
+                tracker.add_rows(1)?;
                 if !tracker.can_add(QueryResource::Results, 1) {
                     record_limit(&mut limiting_resources, QueryResource::Results)?;
                     break;
                 }
-                let bytes = serialized_size(relation, u64::MAX, &control)?;
+                let bytes = serialized_size(occurrence, u64::MAX, &control)?;
                 if !tracker.can_add(QueryResource::MemoryBytes, bytes) {
                     record_limit(&mut limiting_resources, QueryResource::MemoryBytes)?;
                     break;
                 }
                 tracker.add_results(1)?;
                 tracker.add_memory(bytes)?;
-                try_push(&mut relations, relation.clone())?;
-            }
-        }
-
-        let mut occurrences = Vec::new();
-        if !limits_optional_results(&limiting_resources) {
-            for occurrence in &document.occurrences {
-                control.check()?;
-                if !tracker.can_add(QueryResource::Rows, 1) {
-                    record_limit(&mut limiting_resources, QueryResource::Rows)?;
-                    break;
-                }
-                tracker.add_rows(1)?;
-                if occurrence_targets_symbol(occurrence, plan.symbol) {
-                    if !tracker.can_add(QueryResource::Results, 1) {
-                        record_limit(&mut limiting_resources, QueryResource::Results)?;
-                        break;
-                    }
-                    let bytes = serialized_size(occurrence, u64::MAX, &control)?;
-                    if !tracker.can_add(QueryResource::MemoryBytes, bytes) {
-                        record_limit(&mut limiting_resources, QueryResource::MemoryBytes)?;
-                        break;
-                    }
-                    tracker.add_results(1)?;
-                    tracker.add_memory(bytes)?;
-                    try_push(&mut occurrences, occurrence.clone())?;
-                }
+                try_push(&mut occurrences, occurrence.clone())?;
             }
         }
 
@@ -665,7 +711,7 @@ where
         } else {
             collect_symbol_signature(
                 document,
-                entity,
+                self.generation.lexical_ordinals_for_symbol(plan.symbol),
                 &mut tracker,
                 &control,
                 &mut limiting_resources,
@@ -2532,8 +2578,97 @@ where
         &self,
         references: Vec<SourceRef>,
         options: SourceReadOptions,
+        source_budget: SourceBudget,
+        budget: QueryBudget,
+    ) -> Result<SourceReadPlan, QueryError> {
+        self.plan_source_read_with_chunk_memory(
+            references,
+            options,
+            source_budget,
+            budget,
+            mem::size_of::<SourceChunkResult>(),
+        )
+    }
+
+    /// Builds a bounded Unicode presentation plan over original-byte selectors.
+    ///
+    /// # Errors
+    /// Returns [`QueryError`] for invalid controls, foreign selectors or budgets
+    /// that cannot admit source presentation and mandatory conditional sidecars.
+    pub fn plan_source_read_lossless_text(
+        &self,
+        references: Vec<SourceRef>,
+        options: LosslessTextReadOptions,
+        source_budget: SourceBudget,
+        budget: QueryBudget,
+    ) -> Result<SourceTextReadPlan, QueryError> {
+        let chunk_memory = mem::size_of::<QuerySourceTextChunk>()
+            .checked_add(mem::size_of::<SourceTextChunk>())
+            .ok_or(QueryError::MemoryUnavailable)?;
+        let base = self.plan_source_read_with_chunk_memory(
+            references,
+            SourceReadOptions::new()
+                .with_context_lines_before(options.context_lines_before)
+                .with_context_lines_after(options.context_lines_after),
+            source_budget,
+            budget,
+            chunk_memory,
+        )?;
+        Ok(SourceTextReadPlan { base, options })
+    }
+
+    /// Plans scalar-safe presentation prefixes without narrowing editing refs.
+    ///
+    /// # Errors
+    /// Returns [`QueryError`] for invalid prefix controls, foreign selectors or
+    /// budgets that cannot admit source payloads and mandatory sidecars.
+    pub fn plan_source_read_lossless_text_prefix(
+        &self,
+        references: Vec<SourceRef>,
+        options: LosslessTextReadOptions,
+        maximum_text_bytes_per_chunk: usize,
         mut source_budget: SourceBudget,
         budget: QueryBudget,
+    ) -> Result<SourceTextPrefixReadPlan, QueryError> {
+        budget.validate()?;
+        source_budget.max_duration = source_budget.max_duration.min(budget.max_duration);
+        source_budget.validate()?;
+        if maximum_text_bytes_per_chunk == 0
+            || maximum_text_bytes_per_chunk > rootlight_source::HARD_MAX_SOURCE_BYTES
+        {
+            return Err(QueryError::Source(SourceError::InvalidBudget));
+        }
+        if references.is_empty() || references.len() > source_budget.max_selectors {
+            return Err(QueryError::Source(SourceError::SelectorLimit));
+        }
+        // Every supported scalar uses at most twice its presented UTF-8 width
+        // in physical bytes. Tighten admission only; no caller cap is raised.
+        let physical_prefix_bound = references
+            .len()
+            .checked_mul(maximum_text_bytes_per_chunk)
+            .and_then(|bytes| bytes.checked_mul(2))
+            .ok_or(QueryError::MemoryUnavailable)?;
+        source_budget.max_source_bytes = usize::try_from(
+            checked_usize_to_u64(source_budget.max_source_bytes)?
+                .min(budget.max_source_bytes)
+                .min(checked_usize_to_u64(physical_prefix_bound)?),
+        )
+        .map_err(|_| QueryError::MemoryUnavailable)?;
+        let base =
+            self.plan_source_read_lossless_text(references, options, source_budget, budget)?;
+        Ok(SourceTextPrefixReadPlan {
+            base,
+            maximum_text_bytes_per_chunk,
+        })
+    }
+
+    fn plan_source_read_with_chunk_memory(
+        &self,
+        references: Vec<SourceRef>,
+        options: SourceReadOptions,
+        mut source_budget: SourceBudget,
+        budget: QueryBudget,
+        chunk_memory_bytes: usize,
     ) -> Result<SourceReadPlan, QueryError> {
         budget.validate()?;
         source_budget.max_duration = source_budget.max_duration.min(budget.max_duration);
@@ -2556,7 +2691,7 @@ where
         let chunk_memory = checked_usize_to_u64(
             references
                 .len()
-                .checked_mul(mem::size_of::<SourceChunkResult>())
+                .checked_mul(chunk_memory_bytes)
                 .ok_or(QueryError::MemoryUnavailable)?,
         )?;
         let activity_memory =
@@ -2714,6 +2849,124 @@ where
         finish_response(plan.explanation.clone(), data, tracker, started, &control)
     }
 
+    /// Executes lossless text without replacing original-byte editing authority.
+    ///
+    /// # Errors
+    /// Returns [`QueryError`] for cancellation, generation or source drift,
+    /// malformed text, non-scalar selections or exhausted resource budgets.
+    pub fn execute_source_read_lossless_text(
+        &self,
+        plan: &SourceTextReadPlan,
+        source: &SourceService<'_>,
+        cancellation: &Cancellation,
+    ) -> Result<QueryResponse<SourceTextReadQueryResult>, QueryError> {
+        let base = &plan.base;
+        self.require_generation(base.explanation.generation)?;
+        let started = Instant::now();
+        let control = QueryControl::new(cancellation, base.budget.max_duration);
+        control.check()?;
+        let result = source.read_lossless_text(
+            &base.references,
+            plan.options,
+            base.source_budget,
+            cancellation,
+        )?;
+        let (data, tracker) = self.project_source_text_result(base, result, &control)?;
+        finish_response(base.explanation.clone(), data, tracker, started, &control)
+    }
+
+    /// Executes bounded prefixes while retaining full original editing authority.
+    ///
+    /// # Errors
+    /// Returns [`QueryError`] for cancellation, source or generation drift,
+    /// malformed text, invalid scalar endpoints or exhausted resource budgets.
+    pub fn execute_source_read_lossless_text_prefix(
+        &self,
+        plan: &SourceTextPrefixReadPlan,
+        source: &SourceService<'_>,
+        cancellation: &Cancellation,
+    ) -> Result<QueryResponse<SourceTextPrefixReadQueryResult>, QueryError> {
+        let base = &plan.base.base;
+        self.require_generation(base.explanation.generation)?;
+        let started = Instant::now();
+        let control = QueryControl::new(cancellation, base.budget.max_duration);
+        control.check()?;
+        let (result, prefix_truncated) = source
+            .read_lossless_text_prefix_with_options(
+                &base.references,
+                plan.base.options,
+                plan.maximum_text_bytes_per_chunk,
+                base.source_budget,
+                cancellation,
+            )?
+            .into_parts();
+        let (result, tracker) = self.project_source_text_result(base, result, &control)?;
+        let data = SourceTextPrefixReadQueryResult {
+            result,
+            prefix_truncated,
+        };
+        finish_response(base.explanation.clone(), data, tracker, started, &control)
+    }
+
+    fn project_source_text_result(
+        &self,
+        base: &SourceReadPlan,
+        result: SourceTextReadResult,
+        control: &QueryControl<'_>,
+    ) -> Result<(SourceTextReadQueryResult, UsageTracker), QueryError> {
+        control.check()?;
+        if result.generation() != self.generation.metadata().generation() {
+            return Err(QueryError::GenerationMismatch);
+        }
+        let generation = result.generation();
+        let total_source_bytes = result.total_source_bytes();
+        let total_text_bytes = result.total_text_bytes();
+        let mut tracker = UsageTracker::new(base.budget);
+        tracker.add_rows(checked_usize_to_u64(base.references.len())?)?;
+        tracker.add_source_bytes(checked_usize_to_u64(total_source_bytes)?)?;
+        tracker.add_memory(checked_usize_to_u64(result.total_response_memory_bytes())?)?;
+        let source_chunks = result.into_chunks();
+        let mut chunks = Vec::new();
+        chunks
+            .try_reserve_exact(source_chunks.len())
+            .map_err(|_| QueryError::MemoryUnavailable)?;
+        // Both fixed-size vectors coexist while validated owners are moved.
+        // Their buffers are distinct from the source service's payload charge.
+        let container_memory = source_chunks
+            .capacity()
+            .checked_mul(mem::size_of::<SourceTextChunk>())
+            .and_then(|bytes| {
+                chunks
+                    .capacity()
+                    .checked_mul(mem::size_of::<QuerySourceTextChunk>())
+                    .and_then(|returned| bytes.checked_add(returned))
+            })
+            .ok_or(QueryError::MemoryUnavailable)?;
+        tracker.add_memory(checked_usize_to_u64(container_memory)?)?;
+        for chunk in source_chunks {
+            control.check()?;
+            tracker.add_results(1)?;
+            chunks.push(QuerySourceTextChunk::new(chunk));
+        }
+        let mut limiting_resources = Vec::new();
+        let activity = conditional_activity::project_source_text(
+            self.generation,
+            &chunks,
+            &mut tracker,
+            control,
+            &mut limiting_resources,
+        )?;
+        let data = SourceTextReadQueryResult {
+            generation,
+            chunks,
+            total_source_bytes,
+            total_text_bytes,
+            conditional_activity: activity.assessments,
+            execution: authoritative_execution(&limiting_resources),
+        };
+        Ok((data, tracker))
+    }
+
     fn require_generation(&self, generation: GenerationId) -> Result<(), QueryError> {
         if generation != self.generation.metadata().generation()
             || generation != self.search.generation()
@@ -2737,33 +2990,134 @@ where
     }
 }
 
+fn hydrate_locate_signatures(
+    document: &NormalizedIrDocument,
+    hits: &mut [LocateHit],
+    tracker: &mut UsageTracker,
+    control: &QueryControl<'_>,
+    limiting_resources: &mut Vec<QueryResource>,
+) -> Result<bool, QueryError> {
+    let symbol_count = hits.iter().filter(|hit| hit.symbol.is_some()).count();
+    if symbol_count == 0 {
+        return Ok(false);
+    }
+    let lookup_bytes = symbol_count
+        .checked_mul(crate::projection::RetainedSignatureIndex::entry_bytes())
+        .ok_or(QueryError::MemoryUnavailable)?;
+    let lookup_bytes = checked_usize_to_u64(lookup_bytes)?;
+    if !tracker.can_add(QueryResource::MemoryBytes, lookup_bytes) {
+        record_limit(limiting_resources, QueryResource::MemoryBytes)?;
+        return Ok(true);
+    }
+    tracker.add_memory(lookup_bytes)?;
+    let mut signatures = crate::projection::RetainedSignatureIndex::new(
+        hits.iter().filter_map(|hit| hit.symbol),
+        symbol_count,
+    )?;
+    for envelope in &document.extensions {
+        control.check()?;
+        if !tracker.can_add(QueryResource::Rows, 1) {
+            record_limit(limiting_resources, QueryResource::Rows)?;
+            return Ok(true);
+        }
+        tracker.add_rows(1)?;
+        if !signatures.candidate(envelope) {
+            continue;
+        }
+        let scratch = signature_decode_bytes(envelope)?;
+        if !tracker.can_add(QueryResource::MemoryBytes, scratch) {
+            record_limit(limiting_resources, QueryResource::MemoryBytes)?;
+            return Ok(true);
+        }
+        tracker.add_memory(scratch)?;
+        signatures.observe(envelope)?;
+    }
+    // No hit receives evidence until the whole candidate scan has completed,
+    // so later conflicting declarations cannot invalidate a published prefix.
+    let mut incomplete = false;
+    for hit in hits {
+        control.check()?;
+        let Some(symbol) = hit.symbol else {
+            continue;
+        };
+        let Some(envelope) = signatures.envelope(symbol) else {
+            continue;
+        };
+        let scratch = signature_decode_bytes(envelope)?;
+        if !tracker.can_add(QueryResource::MemoryBytes, scratch) {
+            record_limit(limiting_resources, QueryResource::MemoryBytes)?;
+            incomplete = true;
+            continue;
+        }
+        tracker.add_memory(scratch)?;
+        let evidence = signatures.evidence(symbol)?.ok_or(QueryError::IndexDrift)?;
+        let source_bytes = signature_source_bytes(&evidence, control)?;
+        if !tracker.can_add(QueryResource::SourceBytes, source_bytes) {
+            record_limit(limiting_resources, QueryResource::SourceBytes)?;
+            incomplete = true;
+            continue;
+        }
+        if !tracker.can_add(QueryResource::Results, 1) {
+            record_limit(limiting_resources, QueryResource::Results)?;
+            incomplete = true;
+            continue;
+        }
+        tracker.add_source_bytes(source_bytes)?;
+        tracker.add_results(1)?;
+        hit.signature = Some(evidence);
+    }
+    Ok(incomplete)
+}
+
+fn signature_decode_bytes(envelope: &rootlight_ir::ExtensionEnvelope) -> Result<u64, QueryError> {
+    checked_usize_to_u64(envelope.payload.len())?
+        .checked_mul(4)
+        .and_then(|bytes| bytes.checked_add(512))
+        .ok_or(QueryError::MemoryUnavailable)
+}
+
+fn signature_source_bytes(
+    evidence: &rootlight_ir::LexicalEvidenceV1,
+    control: &QueryControl<'_>,
+) -> Result<u64, QueryError> {
+    // Source parts describe retained physical fragments, not the joined UTF-8
+    // presentation, omitted gaps, or differently encoded bytes.
+    match evidence.source_parts() {
+        Some(parts) => parts.iter().try_fold(0_u64, |total, part| {
+            control.check()?;
+            let range = part.source_range();
+            let width = range
+                .end
+                .checked_sub(range.start)
+                .ok_or(QueryError::IndexDrift)?;
+            total.checked_add(width).ok_or(QueryError::IndexDrift)
+        }),
+        None => checked_usize_to_u64(evidence.text().len()),
+    }
+}
+
 fn collect_symbol_signature(
     document: &NormalizedIrDocument,
-    entity: &rootlight_ir::EntityRecord,
+    ordinals: &[usize],
     tracker: &mut UsageTracker,
     control: &QueryControl<'_>,
     limiting_resources: &mut Vec<QueryResource>,
 ) -> Result<Option<rootlight_ir::LexicalEvidenceV1>, QueryError> {
     let mut signature = None;
-    for envelope in &document.extensions {
+    for &ordinal in ordinals {
         control.check()?;
+        let envelope = document
+            .extensions
+            .get(ordinal)
+            .ok_or(QueryError::IndexDrift)?;
         if !tracker.can_add(QueryResource::Rows, 1) {
             record_limit(limiting_resources, QueryResource::Rows)?;
             return Ok(None);
         }
         tracker.add_rows(1)?;
-        if envelope.namespace != rootlight_ir::LEXICAL_EXTENSION_NAMESPACE
-            || envelope.version == rootlight_ir::LEXICAL_SUMMARY_BATCH_VERSION
-            || envelope.evidence.derivation.as_slice() != [rootlight_ir::FactRef::Entity(entity.id)]
-        {
-            continue;
-        }
         // Reserve decode and canonical-validation scratch before allocating.
         // The generation has already admitted each bounded envelope payload.
-        let bytes = checked_usize_to_u64(envelope.payload.len())?
-            .checked_mul(4)
-            .and_then(|bytes| bytes.checked_add(512))
-            .ok_or(QueryError::MemoryUnavailable)?;
+        let bytes = signature_decode_bytes(envelope)?;
         if !tracker.can_add(QueryResource::MemoryBytes, bytes) {
             record_limit(limiting_resources, QueryResource::MemoryBytes)?;
             return Ok(None);
@@ -2784,8 +3138,7 @@ fn collect_symbol_signature(
         signature = Some(evidence);
     }
     if let Some(evidence) = &signature {
-        // Retained signature text is raw source too, even without a VFS read.
-        let source_bytes = checked_usize_to_u64(evidence.text().len())?;
+        let source_bytes = signature_source_bytes(evidence, control)?;
         if !tracker.can_add(QueryResource::SourceBytes, source_bytes) {
             record_limit(limiting_resources, QueryResource::SourceBytes)?;
             return Ok(None);
@@ -4213,10 +4566,6 @@ fn serialized_label(value: &impl Serialize) -> Result<String, QueryError> {
         .and_then(|value| value.strip_suffix('"'))
         .map(str::to_owned)
         .ok_or(QueryError::IndexDrift)
-}
-
-fn endpoint_matches(endpoint: RelationEndpoint, symbol: SymbolId) -> bool {
-    endpoint == RelationEndpoint::Entity(symbol)
 }
 
 /// Expands one relation into its matching `(seed, direction, target)` candidate
@@ -10625,17 +10974,6 @@ fn emit_dead_candidate(
     Ok(())
 }
 
-fn occurrence_targets_symbol(
-    occurrence: &rootlight_ir::OccurrenceRecord,
-    symbol: SymbolId,
-) -> bool {
-    match &occurrence.target {
-        OccurrenceTarget::Resolved { symbol: target } => *target == symbol,
-        OccurrenceTarget::Candidates { symbols, .. } => symbols.binary_search(&symbol).is_ok(),
-        OccurrenceTarget::Unresolved { .. } => false,
-    }
-}
-
 struct CoverageView<'a> {
     document: &'a NormalizedIrDocument,
     scope_ordinals: &'a [usize],
@@ -10862,7 +11200,7 @@ fn duration_micros(duration: Duration) -> u64 {
     checked_u128_to_u64(duration.as_nanos().saturating_add(999) / 1_000)
 }
 
-fn serialized_size(
+pub(super) fn serialized_size(
     value: &impl Serialize,
     limit: u64,
     control: &QueryControl<'_>,
@@ -10884,7 +11222,7 @@ fn serialized_size(
     Ok(writer.count)
 }
 
-fn finish_response<T>(
+pub(super) fn finish_response<T>(
     plan: PlanExplanation,
     data: T,
     tracker: UsageTracker,
@@ -10992,7 +11330,7 @@ impl UsageTracker {
         Ok(())
     }
 
-    fn add_results(&mut self, amount: u64) -> Result<(), QueryError> {
+    pub(super) fn add_results(&mut self, amount: u64) -> Result<(), QueryError> {
         self.results = checked_add(
             self.results,
             amount,

@@ -32,14 +32,76 @@ pub(super) enum CompileMembers {
     Bounded,
 }
 
+/// Source-declared F# compilation order from one complete literal project document.
+///
+/// This preserves duplicates and signature entries so consumers cannot mistake
+/// a filtered inventory for a unique, unrestricted compilation context.
+#[derive(Debug, PartialEq, Eq)]
+pub enum OrderedFSharpCompileMembers {
+    /// Literal `.fs` and `.fsi` paths in authored declaration order.
+    Valid(Vec<String>),
+    /// Malformed XML or composition outside the supported literal subset.
+    Rejected,
+    /// An existing document, token, depth, count, or byte ceiling won.
+    Bounded,
+}
+
+/// Reads ordered, unconditional direct F# `Compile Include` declarations.
+///
+/// Paths are normalized against the supplied canonical repository-relative
+/// project path. Imports, conditions, dynamic properties, transformations, scripts and
+/// arbitrary item metadata establish no composition proof. A literal
+/// `Microsoft.NET.Sdk` marker is accepted as authored metadata, not evaluated
+/// build closure. Literal framework/output/documentation properties do not
+/// alter the retained declaration order. No filesystem or MSBuild operations occur.
+///
+/// # Errors
+/// Returns cancellation or a typed VFS allocation failure. Unsupported syntax
+/// and existing resource ceilings produce non-witness outcomes instead.
+pub fn ordered_fsharp_compile_members(
+    bytes: &[u8],
+    project_path: &str,
+    cancellation: &Cancellation,
+) -> Result<OrderedFSharpCompileMembers, DiscoveryError> {
+    cancellation.check()?;
+    if project_path.len() > MAX_PROJECT_STRING_BYTES {
+        return Ok(OrderedFSharpCompileMembers::Bounded);
+    }
+    if project_path.is_empty()
+        || project_path.contains('\\')
+        || !project_path
+            .rsplit_once('.')
+            .is_some_and(|(_, suffix)| suffix.eq_ignore_ascii_case("fsproj"))
+        || project_path.split('/').any(|component| {
+            component.is_empty() || matches!(component, "." | "..") || !literal_component(component)
+        })
+    {
+        return Ok(OrderedFSharpCompileMembers::Rejected);
+    }
+    match read_members(
+        bytes,
+        project_path,
+        cancellation,
+        ReaderMode::OrderedComposition,
+    ) {
+        Ok(members) => Ok(OrderedFSharpCompileMembers::Valid(members)),
+        Err(ReadFailure::Rejected) => Ok(OrderedFSharpCompileMembers::Rejected),
+        Err(ReadFailure::Bounded) => Ok(OrderedFSharpCompileMembers::Bounded),
+        Err(ReadFailure::Discovery(error)) => Err(error),
+    }
+}
+
 /// Reads literal direct `Project/ItemGroup/Compile Include` declarations.
 ///
 /// The caller supplies the admitted project's canonical repository-relative
 /// path. UTF-8 and BOM-backed UTF-16 are borrowed without a decoded source copy.
 /// A result never proves evaluated membership, resolves imports, or opens files.
+/// Conditions are XML-validated but never evaluated: even an inactive literal
+/// declaration provides language evidence, not a claim that a build includes it.
 /// No members escape until one complete, supported XML document has ended.
-/// Literal `.fsi` and `.fsx` entries are validated and charged, but only `.fs`
-/// declarations are returned because signatures and scripts have distinct routes.
+/// Literal `.fsi`, `.fsx`, and `.fsscript` entries are validated and charged, but
+/// only `.fs` declarations are returned because signatures and scripts have
+/// distinct routes.
 ///
 /// # Errors
 /// Returns cancellation or a typed VFS allocation failure. Unsupported syntax
@@ -49,12 +111,42 @@ pub(super) fn compile_members(
     project_path: &str,
     cancellation: &Cancellation,
 ) -> Result<CompileMembers, DiscoveryError> {
-    cancellation.check()?;
-    if bytes.len() > MAX_PROJECT_DOCUMENT_BYTES {
-        return Ok(CompileMembers::Bounded);
+    match read_members(
+        bytes,
+        project_path,
+        cancellation,
+        ReaderMode::LanguageEvidence,
+    ) {
+        Ok(mut members) => {
+            cancellation.check()?;
+            members.sort_unstable();
+            members.dedup();
+            Ok(CompileMembers::Valid(members))
+        }
+        Err(ReadFailure::Rejected) => Ok(CompileMembers::Rejected),
+        Err(ReadFailure::Bounded) => Ok(CompileMembers::Bounded),
+        Err(ReadFailure::Discovery(error)) => Err(error),
     }
-    let Some(text) = SourceText::parse(bytes, cancellation)? else {
-        return Ok(CompileMembers::Rejected);
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ReaderMode {
+    LanguageEvidence,
+    OrderedComposition,
+}
+
+fn read_members(
+    bytes: &[u8],
+    project_path: &str,
+    cancellation: &Cancellation,
+    mode: ReaderMode,
+) -> ReadResult<Vec<String>> {
+    cancellation.check().map_err(DiscoveryError::from)?;
+    if bytes.len() > MAX_PROJECT_DOCUMENT_BYTES {
+        return Err(ReadFailure::Bounded);
+    }
+    let Some(text) = SourceText::parse(bytes, cancellation).map_err(DiscoveryError::from)? else {
+        return Err(ReadFailure::Rejected);
     };
     let mut reader = Reader {
         chars: text.chars().peekable(),
@@ -67,18 +159,11 @@ pub(super) fn compile_members(
         member_bytes: 0,
         seen_root: false,
         project_path,
+        mode,
     };
-    match reader.document() {
-        Ok(()) => {
-            cancellation.check()?;
-            reader.members.sort_unstable();
-            reader.members.dedup();
-            Ok(CompileMembers::Valid(reader.members))
-        }
-        Err(ReadFailure::Rejected) => Ok(CompileMembers::Rejected),
-        Err(ReadFailure::Bounded) => Ok(CompileMembers::Bounded),
-        Err(ReadFailure::Discovery(error)) => Err(error),
-    }
+    reader.document()?;
+    cancellation.check().map_err(DiscoveryError::from)?;
+    Ok(reader.members)
 }
 
 enum ReadFailure {
@@ -100,6 +185,8 @@ enum Role {
     Project,
     ItemGroup,
     Compile,
+    PropertyGroup,
+    LiteralProperty,
     Inert,
 }
 
@@ -124,6 +211,7 @@ struct Reader<'a, I: Iterator<Item = char>> {
     member_bytes: usize,
     seen_root: bool,
     project_path: &'a str,
+    mode: ReaderMode,
 }
 
 impl<I: Iterator<Item = char>> Reader<'_, I> {
@@ -151,7 +239,10 @@ impl<I: Iterator<Item = char>> Reader<'_, I> {
                             self.literal("--")?;
                             self.comment()?;
                         }
-                        Some('[') if !self.stack.is_empty() => {
+                        Some('[')
+                            if !self.stack.is_empty()
+                                && self.mode == ReaderMode::LanguageEvidence =>
+                        {
                             self.literal("[CDATA[")?;
                             self.cdata()?;
                         }
@@ -333,12 +424,38 @@ impl<I: Iterator<Item = char>> Reader<'_, I> {
             match name.as_str() {
                 "ItemGroup" if parent == Role::Project => Role::ItemGroup,
                 "Compile" if parent == Role::ItemGroup => Role::Compile,
+                "PropertyGroup"
+                    if parent == Role::Project && self.mode == ReaderMode::OrderedComposition =>
+                {
+                    Role::PropertyGroup
+                }
+                "TargetFramework" | "OutputType" | "GenerateDocumentationFile"
+                    if parent == Role::PropertyGroup
+                        && self.mode == ReaderMode::OrderedComposition =>
+                {
+                    Role::LiteralProperty
+                }
                 "Compile" => return Err(ReadFailure::Rejected),
                 _ => Role::Inert,
             }
         };
-        if role != Role::Inert && attribute(&attributes, "Condition").is_some() {
-            return Err(ReadFailure::Rejected);
+        if self.mode == ReaderMode::OrderedComposition {
+            let supported = match role {
+                Role::Project => attributes.iter().all(|attribute| {
+                    attribute.name == "xmlns"
+                        || (attribute.name == "Sdk" && attribute.value == "Microsoft.NET.Sdk")
+                }),
+                Role::ItemGroup | Role::PropertyGroup | Role::LiteralProperty => {
+                    attributes.is_empty()
+                }
+                Role::Compile => {
+                    matches!(attributes.as_slice(), [attribute] if attribute.name == "Include")
+                }
+                Role::Inert => false,
+            };
+            if !supported {
+                return Err(ReadFailure::Rejected);
+            }
         }
         if role == Role::Compile {
             if ["Remove", "Update", "Exclude"]
@@ -358,10 +475,16 @@ impl<I: Iterator<Item = char>> Reader<'_, I> {
                 .filter(|bytes| *bytes <= MAX_PROJECT_MEMBER_BYTES)
                 .ok_or(ReadFailure::Bounded)?;
             self.declared_members += 1;
-            if member
+            let shared_source = member
                 .rsplit_once('.')
-                .is_some_and(|(_, suffix)| suffix.eq_ignore_ascii_case("fs"))
-            {
+                .is_some_and(|(_, suffix)| suffix.eq_ignore_ascii_case("fs"));
+            let signature = member
+                .rsplit_once('.')
+                .is_some_and(|(_, suffix)| suffix.eq_ignore_ascii_case("fsi"));
+            if self.mode == ReaderMode::OrderedComposition && !shared_source && !signature {
+                return Err(ReadFailure::Rejected);
+            }
+            if shared_source || self.mode == ReaderMode::OrderedComposition {
                 reserve_one(&mut self.members)?;
                 self.members.push(member);
             }
@@ -387,7 +510,22 @@ impl<I: Iterator<Item = char>> Reader<'_, I> {
         let mut closing_brackets = 0_u8;
         while self.peek().is_some_and(|character| character != '<') {
             let character = self.required()?;
-            if self.stack.is_empty() && !xml_space(character) {
+            let literal_property = self.mode == ReaderMode::OrderedComposition
+                && self
+                    .stack
+                    .last()
+                    .is_some_and(|frame| frame.role == Role::LiteralProperty);
+            if (self.stack.is_empty()
+                || (self.mode == ReaderMode::OrderedComposition && !literal_property))
+                && !xml_space(character)
+            {
+                return Err(ReadFailure::Rejected);
+            }
+            if literal_property
+                && !(character.is_ascii_alphanumeric()
+                    || xml_space(character)
+                    || matches!(character, '.' | '-'))
+            {
                 return Err(ReadFailure::Rejected);
             }
             match character {
@@ -585,7 +723,7 @@ fn normalize_member(project_path: &str, include: &str) -> ReadResult<String> {
         }
     }
     if !path.rsplit_once('.').is_some_and(|(_, suffix)| {
-        ["fs", "fsi", "fsx"]
+        ["fs", "fsi", "fsscript", "fsx"]
             .iter()
             .any(|allowed| suffix.eq_ignore_ascii_case(allowed))
     }) {
@@ -636,6 +774,84 @@ fn reserve_one<T>(values: &mut Vec<T>) -> ReadResult<()> {
 mod tests {
     use super::*;
 
+    #[test]
+    fn ordered_composition_retains_order_signatures_and_duplicates() {
+        let source = "<Project Sdk='Microsoft.NET.Sdk'><PropertyGroup><TargetFramework>net8.0</TargetFramework></PropertyGroup><ItemGroup><Compile Include='Z.fsi'/><Compile Include='Z.fs'/><Compile Include='A.fs'/><Compile Include='./Z.fs'/></ItemGroup></Project>";
+        let expected = ["src/Z.fsi", "src/Z.fs", "src/A.fs", "src/Z.fs"];
+        for encoding in [
+            TextEncoding::Utf8,
+            TextEncoding::Utf16Le,
+            TextEncoding::Utf16Be,
+        ] {
+            let bytes = match encoding {
+                TextEncoding::Utf8 => source.as_bytes().to_vec(),
+                TextEncoding::Utf16Le => [
+                    vec![0xff, 0xfe],
+                    source.encode_utf16().flat_map(u16::to_le_bytes).collect(),
+                ]
+                .concat(),
+                TextEncoding::Utf16Be => [
+                    vec![0xfe, 0xff],
+                    source.encode_utf16().flat_map(u16::to_be_bytes).collect(),
+                ]
+                .concat(),
+            };
+            assert_eq!(
+                ordered_fsharp_compile_members(&bytes, "src/App.fsproj", &Cancellation::new())
+                    .unwrap(),
+                OrderedFSharpCompileMembers::Valid(
+                    expected.iter().map(|path| (*path).to_owned()).collect()
+                )
+            );
+            assert_eq!(
+                compile_members(&bytes, "src/App.fsproj", &Cancellation::new()).unwrap(),
+                CompileMembers::Valid(vec!["src/A.fs".to_owned(), "src/Z.fs".to_owned()])
+            );
+        }
+    }
+
+    #[test]
+    fn ordered_composition_refuses_unevaluated_and_partial_membership() {
+        for source in [
+            "<Project Condition='false'><ItemGroup><Compile Include='A.fs'/></ItemGroup></Project>",
+            "<Project><ItemGroup Condition='true'><Compile Include='A.fs'/></ItemGroup></Project>",
+            "<Project><ItemGroup><Compile Include='A.fs' Condition='true'/></ItemGroup></Project>",
+            "<Project><Import Project='Other.props'/><ItemGroup><Compile Include='A.fs'/></ItemGroup></Project>",
+            "<Project><PropertyGroup><TargetFramework>$(Framework)</TargetFramework></PropertyGroup><ItemGroup><Compile Include='A.fs'/></ItemGroup></Project>",
+            "<Project><PropertyGroup><EnableDefaultCompileItems>false</EnableDefaultCompileItems></PropertyGroup><ItemGroup><Compile Include='A.fs'/></ItemGroup></Project>",
+            "<Project><ItemGroup><Compile Include='A.fs'/><Compile Include='*.fs'/></ItemGroup></Project>",
+            "<Project><ItemGroup><Compile Include='A.fs'/><Compile Remove='A.fs'/></ItemGroup></Project>",
+            "<Project><ItemGroup><Compile Include='A.fs'><Link>Renamed.fs</Link></Compile></ItemGroup></Project>",
+            "<Project><ItemGroup><Compile Include='A.fs'/><Compile Include='Script.fsx'/></ItemGroup></Project>",
+            "<Project><ItemGroup><Compile Include='A.fs'/></ItemGroup></Project><tail/>",
+        ] {
+            assert_eq!(
+                ordered_fsharp_compile_members(
+                    source.as_bytes(),
+                    "App.fsproj",
+                    &Cancellation::new()
+                )
+                .unwrap(),
+                OrderedFSharpCompileMembers::Rejected,
+                "{source}"
+            );
+        }
+        let mut bounded = String::from("<Project><ItemGroup>");
+        bounded.push_str(&"<Compile Include='A.fs'/>".repeat(MAX_PROJECT_MEMBERS + 1));
+        bounded.push_str("</ItemGroup></Project>");
+        assert_eq!(
+            ordered_fsharp_compile_members(bounded.as_bytes(), "App.fsproj", &Cancellation::new())
+                .unwrap(),
+            OrderedFSharpCompileMembers::Bounded
+        );
+        let cancellation = Cancellation::new();
+        cancellation.cancel(rootlight_cancel::CancellationReason::ClientRequest);
+        assert!(matches!(
+            ordered_fsharp_compile_members(b"<Project/>", "App.fsproj", &cancellation),
+            Err(DiscoveryError::Cancelled(_))
+        ));
+    }
+
     fn read(source: &str) -> CompileMembers {
         compile_members(
             source.as_bytes(),
@@ -683,6 +899,25 @@ mod tests {
     }
 
     #[test]
+    fn fsscript_declarations_validate_and_charge_without_project_witnesses() {
+        assert_eq!(
+            read(
+                "<Project><ItemGroup><Compile Include='One.fs'/><Compile Include='Script.fsscript'/><Compile Include='Other.FSSCRIPT'/><Compile Include='Script.fsx'/><Compile Include='One.fsi'/></ItemGroup></Project>"
+            ),
+            CompileMembers::Valid(vec!["src/One.fs".to_owned()])
+        );
+        let mut source = String::from("<Project><ItemGroup>");
+        source.push_str(&"<Compile Include='Script.fsscript'/>".repeat(MAX_PROJECT_MEMBERS));
+        source.push_str("</ItemGroup></Project>");
+        assert_eq!(read(&source), CompileMembers::Valid(Vec::new()));
+        source = source.replace("</ItemGroup>", "<Compile Include='One.fs'/></ItemGroup>");
+        assert_eq!(read(&source), CompileMembers::Bounded);
+        for member in ["Script.fsscript.bak", "$(Script).fsscript", "*.fsscript"] {
+            assert_eq!(read(&project(member)), CompileMembers::Rejected);
+        }
+    }
+
+    #[test]
     fn full_document_validation_never_releases_a_valid_prefix() {
         let valid = project("One.fs");
         for source in [
@@ -727,7 +962,7 @@ mod tests {
             read(&project("&#x2e;&#46;/shared/A&amp;B&apos;λ.fs")),
             CompileMembers::Valid(vec!["shared/A&B'λ.fs".to_owned()])
         );
-        for include in [
+        for member in [
             "&custom;.fs",
             "&#0;.fs",
             "&#xD800;.fs",
@@ -741,11 +976,7 @@ mod tests {
             "&quot;One.fs",
             "Line&#10;Break.fs",
         ] {
-            assert_eq!(
-                read(&project(include)),
-                CompileMembers::Rejected,
-                "{include}"
-            );
+            assert_eq!(read(&project(member)), CompileMembers::Rejected, "{member}");
         }
     }
 
@@ -783,14 +1014,81 @@ mod tests {
     }
 
     #[test]
-    fn conditional_or_transforming_compile_syntax_has_no_witness() {
+    fn conditional_literal_declarations_identify_language_without_evaluated_membership() {
         for source in [
-            "<Project Condition='true'><ItemGroup><Compile Include='One.fs'/></ItemGroup></Project>",
-            "<Project><ItemGroup Condition='true'><Compile Include='One.fs'/></ItemGroup></Project>",
-            "<Project><ItemGroup><Compile Include='One.fs' Condition='true'/></ItemGroup></Project>",
+            "<Project Condition='false'><ItemGroup><Compile Include='One.fs'/></ItemGroup></Project>",
+            "<Project><ItemGroup Condition='false'><Compile Include='One.fs'/></ItemGroup></Project>",
+            "<Project><ItemGroup><Compile Include='One.fs' Condition='false'/></ItemGroup></Project>",
+        ] {
+            assert_eq!(
+                read(source),
+                CompileMembers::Valid(vec!["src/One.fs".to_owned()]),
+                "{source}"
+            );
+        }
+    }
+
+    #[test]
+    fn conditioned_sdk_and_import_context_does_not_expand_literal_declarations() {
+        let source = "<Project Sdk='Microsoft.NET.Sdk' Condition='false'>\
+              <Import Project='$(Other)' Condition='false'/>\
+              <PropertyGroup><EnableDefaultCompileItems>true</EnableDefaultCompileItems></PropertyGroup>\
+              <ItemGroup Condition='false'>\
+                <Compile Include='.\\One.fs' Condition='false'/>\
+                <Compile Include='../shared/Two.fs' Condition='false'/>\
+                <Compile Include='One.fs' Condition='false'/>\
+                <Compile Include='One.fsi' Condition='false'/>\
+                <Compile Include='Script.fsx' Condition='false'/>\
+              </ItemGroup>\
+            </Project>";
+        assert_eq!(
+            read(source),
+            CompileMembers::Valid(vec!["shared/Two.fs".to_owned(), "src/One.fs".to_owned()])
+        );
+        assert_eq!(
+            read(
+                "<Project Sdk='Microsoft.NET.Sdk' Condition='false'><Import Project='$(Other)' Condition='false'/></Project>"
+            ),
+            CompileMembers::Valid(Vec::new())
+        );
+    }
+
+    #[test]
+    fn conditioned_declarations_do_not_bypass_document_path_or_token_validation() {
+        let valid = "<Project Condition='false'><ItemGroup Condition='false'><Compile Include='One.fs' Condition='false'/></ItemGroup></Project>";
+        for source in [
+            format!("{valid}<Project/>"),
+            format!("{valid}<!-- unfinished"),
+            "<Project Condition='false'><ItemGroup><Compile Include='One.fs'/></Project>".to_owned(),
+            "<Project Condition='false' Condition='true'><ItemGroup><Compile Include='One.fs'/></ItemGroup></Project>".to_owned(),
+            "<Project Condition='&unknown;'><ItemGroup><Compile Include='One.fs'/></ItemGroup></Project>".to_owned(),
+        ] {
+            assert_eq!(read(&source), CompileMembers::Rejected, "{source}");
+        }
+        for member in ["../../Escape.fs", "*.fs", "$(Files).fs", "One.fs;Two.fs"] {
+            let source = format!(
+                "<Project Condition='false'><ItemGroup Condition='false'><Compile Include='{member}' Condition='false'/></ItemGroup></Project>"
+            );
+            assert_eq!(read(&source), CompileMembers::Rejected, "{member}");
+        }
+        assert_eq!(
+            read(&format!(
+                "<Project Condition='{}'><ItemGroup><Compile Include='One.fs'/></ItemGroup></Project>",
+                "a".repeat(MAX_PROJECT_STRING_BYTES + 1)
+            )),
+            CompileMembers::Bounded
+        );
+    }
+
+    #[test]
+    fn transforming_or_unsupported_compile_syntax_has_no_witness() {
+        for source in [
             "<Project><ItemGroup><Compile Include='One.fs' Exclude='Other.fs'/></ItemGroup></Project>",
             "<Project><ItemGroup><Compile Include='One.fs'/><Compile Remove='One.fs'/></ItemGroup></Project>",
             "<Project><ItemGroup><Compile Include='One.fs'/><Compile Update='One.fs'/></ItemGroup></Project>",
+            "<Project><ItemGroup><Compile Include='One.fs' Condition='false' Exclude='Other.fs'/></ItemGroup></Project>",
+            "<Project><ItemGroup><Compile Include='One.fs'/><Compile Remove='One.fs' Condition='false'/></ItemGroup></Project>",
+            "<Project><ItemGroup><Compile Include='One.fs'/><Compile Update='One.fs' Condition='false'/></ItemGroup></Project>",
             "<Project><Target Name='Build'><ItemGroup><Compile Include='One.fs'/></ItemGroup></Target></Project>",
             "<Project><Choose><When Condition='true'/></Choose></Project>",
             "<Project><Wrapper><ItemGroup><Compile Include='One.fs'/></ItemGroup></Wrapper></Project>",
@@ -802,7 +1100,7 @@ mod tests {
 
     #[test]
     fn relative_resolution_rejects_escape_and_dynamic_membership() {
-        for include in [
+        for member in [
             "../../Escape.fs",
             "/Absolute.fs",
             "\\\\host\\Share.fs",
@@ -825,11 +1123,7 @@ mod tests {
             "dir./One.fs",
             "dir /One.fs",
         ] {
-            assert_eq!(
-                read(&project(include)),
-                CompileMembers::Rejected,
-                "{include}"
-            );
+            assert_eq!(read(&project(member)), CompileMembers::Rejected, "{member}");
         }
         assert_eq!(
             read(&project("./nested/../One.fs")),

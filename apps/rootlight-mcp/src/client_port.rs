@@ -25,7 +25,8 @@ use rootlight_client::{
     RepositoryIndexMode as ClientRepositoryIndexMode, RepositoryOperationAction,
     RepositoryOperationStatus, RepositoryStatus, RepositoryStatusRequest, RequestOptions,
     RequestTimeout, SourceEncoding as ClientSourceEncoding, SourceRead,
-    SourceReadOptions as ClientSourceReadOptions, SourceReference, SymbolExplain,
+    SourceReadOptions as ClientSourceReadOptions, SourceReference,
+    SourceTextReadOptions as ClientSourceTextReadOptions, SourceTextReadResult, SymbolExplain,
     SymbolExplainProjection, SymbolRelationships, TestsSelect, TestsSelectFilters,
 };
 use rootlight_ids::{FileId, OperationId, RepositoryId, SymbolId};
@@ -48,10 +49,10 @@ use crate::{
     OperationStatusPortRequest, PlanChangePortRequest, PlanChangePortResponse,
     QueryAdvancedPortRequest, QueryAdvancedPortResponse, ReadResponseMetadata,
     RepositoryCatalogPagePortRequest, RepositoryIndexPortRequest, RepositoryIndexPortResponse,
-    RepositoryStatusPortRequest, RequestCancellation, SourceReadPortRequest,
-    SourceReadPortResponse, SymbolExplainPortRequest, SymbolExplainPortResponse,
-    SymbolRelationshipsPortRequest, SymbolRelationshipsPortResponse, TestsSelectPortRequest,
-    TestsSelectPortResponse,
+    RepositoryStatusPortRequest, RequestCancellation, SourceReadLosslessPortResponse,
+    SourceReadPortRequest, SourceReadPortResponse, SymbolExplainPortRequest,
+    SymbolExplainPortResponse, SymbolRelationshipsPortRequest, SymbolRelationshipsPortResponse,
+    TestsSelectPortRequest, TestsSelectPortResponse,
 };
 
 const CLIENT_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
@@ -183,11 +184,39 @@ trait AsyncFirstSliceClient: Send + Sync + 'static {
         options: RequestOptions,
     ) -> AsyncClientFuture<SourceRead>;
 
+    fn source_read_lossless_text(
+        &self,
+        _repository: RepositoryId,
+        _generation: GenerationSelector,
+        _references: Vec<SourceReference>,
+        _projection: ClientSourceTextReadOptions,
+        _options: RequestOptions,
+    ) -> AsyncClientFuture<SourceTextReadResult> {
+        Box::pin(async { Err(ClientError::ProtocolFeatureUnavailable) })
+    }
+
     fn repository_catalog_page(
         &self,
         request: RepositoryCatalogPageRequest,
         timeout: RequestTimeout,
     ) -> AsyncClientFuture<RepositoryCatalogPage>;
+
+    fn source_text_prefix_metadata_quote(
+        &self,
+        _request: SourceReadPortRequest,
+        _options: RequestOptions,
+    ) -> AsyncClientFuture<rootlight_client::SourceTextPrefixMetadataQuoteResult> {
+        Box::pin(async { Err(ClientError::ProtocolFeatureUnavailable) })
+    }
+
+    fn source_read_lossless_text_prefix(
+        &self,
+        _request: SourceReadPortRequest,
+        _maximum_text_bytes_per_chunk: u32,
+        _options: RequestOptions,
+    ) -> AsyncClientFuture<rootlight_client::SourceTextPrefixReadResult> {
+        Box::pin(async { Err(ClientError::ProtocolFeatureUnavailable) })
+    }
 
     fn repository_status(
         &self,
@@ -554,6 +583,85 @@ impl AsyncFirstSliceClient for LiveAsyncFirstSliceClient {
                     generation,
                     &references,
                     projection,
+                    options,
+                )
+                .await
+        })
+    }
+
+    fn source_read_lossless_text(
+        &self,
+        repository: RepositoryId,
+        generation: GenerationSelector,
+        references: Vec<SourceReference>,
+        projection: ClientSourceTextReadOptions,
+        options: RequestOptions,
+    ) -> AsyncClientFuture<SourceTextReadResult> {
+        let client = Arc::clone(&self.client);
+        Box::pin(async move {
+            let client = client.resolve().await?;
+            client
+                .source_read_lossless_text_async_with_options(
+                    repository,
+                    generation,
+                    &references,
+                    projection,
+                    options,
+                )
+                .await
+        })
+    }
+
+    fn source_read_lossless_text_prefix(
+        &self,
+        request: SourceReadPortRequest,
+        maximum_text_bytes_per_chunk: u32,
+        options: RequestOptions,
+    ) -> AsyncClientFuture<rootlight_client::SourceTextPrefixReadResult> {
+        let client = Arc::clone(&self.client);
+        Box::pin(async move {
+            let client = client.resolve().await?;
+            client
+                .source_read_lossless_text_prefix_async_with_options(
+                    request.repository(),
+                    request.generation(),
+                    request.references(),
+                    ClientSourceTextReadOptions {
+                        context_lines_before: request.context_lines_before(),
+                        context_lines_after: request.context_lines_after(),
+                        merge_overlaps: request.merge_overlaps(),
+                        include_line_numbers: request.include_line_numbers(),
+                    },
+                    maximum_text_bytes_per_chunk,
+                    options,
+                )
+                .await
+        })
+    }
+
+    fn source_text_prefix_metadata_quote(
+        &self,
+        request: SourceReadPortRequest,
+        options: RequestOptions,
+    ) -> AsyncClientFuture<rootlight_client::SourceTextPrefixMetadataQuoteResult> {
+        let client = Arc::clone(&self.client);
+        Box::pin(async move {
+            let generation = match request.generation() {
+                GenerationSelector::Generation(generation) => generation,
+                GenerationSelector::Active => return Err(ClientError::InvalidFirstSliceRequest),
+            };
+            let client = client.resolve().await?;
+            client
+                .source_text_prefix_metadata_quote_async_with_options(
+                    request.repository(),
+                    generation,
+                    request.references(),
+                    ClientSourceTextReadOptions {
+                        context_lines_before: request.context_lines_before(),
+                        context_lines_after: request.context_lines_after(),
+                        merge_overlaps: request.merge_overlaps(),
+                        include_line_numbers: request.include_line_numbers(),
+                    },
                     options,
                 )
                 .await
@@ -1198,6 +1306,71 @@ impl FirstSliceClientPort for NativeFirstSliceClientPort {
                 Vec::new(),
                 Vec::new(),
             ))
+        })
+    }
+
+    fn source_read_lossless_text(
+        &self,
+        request: SourceReadPortRequest,
+        options: RequestOptions,
+        _cancellation: RequestCancellation,
+    ) -> ClientPortFuture<SourceReadLosslessPortResponse> {
+        let client = Arc::clone(&self.client);
+        Box::pin(async move {
+            let result = client
+                .source_read_lossless_text(
+                    request.repository(),
+                    request.generation(),
+                    request.references().to_vec(),
+                    ClientSourceTextReadOptions {
+                        context_lines_before: request.context_lines_before(),
+                        context_lines_after: request.context_lines_after(),
+                        merge_overlaps: request.merge_overlaps(),
+                        include_line_numbers: request.include_line_numbers(),
+                    },
+                    options,
+                )
+                .await
+                .map_err(map_client_error)?;
+            let languages = source_text_languages(&result)?;
+            let metadata = read_metadata(&result.context, languages)?;
+            Ok(SourceReadLosslessPortResponse::new(
+                result,
+                metadata,
+                Vec::new(),
+                Vec::new(),
+            ))
+        })
+    }
+
+    fn source_read_lossless_text_prefix(
+        &self,
+        request: SourceReadPortRequest,
+        maximum_text_bytes_per_chunk: u32,
+        options: RequestOptions,
+        _cancellation: RequestCancellation,
+    ) -> ClientPortFuture<rootlight_client::SourceTextPrefixReadResult> {
+        let client = Arc::clone(&self.client);
+        Box::pin(async move {
+            client
+                .source_read_lossless_text_prefix(request, maximum_text_bytes_per_chunk, options)
+                .await
+                .map_err(map_client_error)
+        })
+    }
+
+    fn source_text_prefix_metadata_quote(
+        &self,
+        request: SourceReadPortRequest,
+        options: RequestOptions,
+        _cancellation: RequestCancellation,
+    ) -> ClientPortFuture<rootlight_client::SourceTextPrefixMetadataQuoteResult> {
+        let client = Arc::clone(&self.client);
+        Box::pin(async move {
+            client
+                .source_text_prefix_metadata_quote(request, options)
+                .await
+                .map_err(map_source_metadata_quote_client_error)
         })
     }
 
@@ -1901,6 +2074,22 @@ fn source_languages(result: &SourceRead) -> Result<Vec<LanguageCoverage>, Client
     Ok(language_coverage(languages, result.context.coverage_status))
 }
 
+fn source_text_languages(
+    result: &SourceTextReadResult,
+) -> Result<Vec<LanguageCoverage>, ClientPortError> {
+    let mut languages = BTreeMap::new();
+    for chunk in &result.chunks {
+        if SafeLabel::parse(&chunk.language).is_err() {
+            return Err(ClientPortError::InvalidResponse);
+        }
+        languages
+            .entry(chunk.language.clone())
+            .and_modify(|current| *current = weaker_tier(*current, chunk.tier))
+            .or_insert(chunk.tier);
+    }
+    Ok(language_coverage(languages, result.context.coverage_status))
+}
+
 fn symbol_languages(result: &SymbolExplain) -> Result<Vec<LanguageCoverage>, ClientPortError> {
     let mut languages = BTreeMap::new();
     for symbol in &result.symbols {
@@ -2018,6 +2207,17 @@ fn map_operation_client_error(error: ClientError, operation: OperationId) -> Cli
         ));
     }
     map_client_error(error)
+}
+
+fn map_source_metadata_quote_client_error(error: ClientError) -> ClientPortError {
+    match error {
+        ClientError::ProtocolFeatureUnavailable => mapped_public_error(
+            MappedDomainFailure::unsupported_capability("source_metadata"),
+        )
+        .map(|error| ClientPortError::Public(Box::new(error)))
+        .unwrap_or(ClientPortError::Executor),
+        error => map_client_error(error),
+    }
 }
 
 fn map_client_error(error: ClientError) -> ClientPortError {

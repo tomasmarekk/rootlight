@@ -122,6 +122,7 @@ impl ResolutionEngine {
             remap_existing_relations(&mut document.relations, &occurrence_remap, cancellation)?;
         ensure_relation_remap_is_safe(&document, &relation_remap)?;
         reconcile_perl_target_gaps(&mut document, cancellation)?;
+        reconcile_fsharp_target_gaps(&mut document, cancellation)?;
         reconcile_groovy_import_gaps(&mut document, cancellation)?;
         reconcile_elm_import_relations(&mut document, cancellation)?;
         reconcile_elm_import_gaps(&mut document, cancellation)?;
@@ -251,6 +252,25 @@ impl ResolutionEngine {
             cancellation,
         )?;
         let mut work = ResolutionWorkBudget::new(self.limits.work_limit());
+        if let Err(error) = work.consume_many(lookup.fsharp.preparation_work()) {
+            if !bounded {
+                return Err(error);
+            }
+            drop(lookup);
+            let document = canonicalize_ir_document(document, &ir_limits, &Default::default())
+                .map_err(ResolutionError::InvalidDocument)?;
+            return Ok((
+                document,
+                crate::ResolutionWorkEstimate {
+                    required: self
+                        .limits
+                        .work_limit()
+                        .checked_add(1)
+                        .ok_or(ResolutionError::CountOverflow)?,
+                    limit: self.limits.work_limit(),
+                },
+            ));
+        }
         lookup.classic = match crate::classic::ClassicIndex::build(
             &lookup,
             &document.coverage_records,
@@ -506,6 +526,7 @@ impl ResolutionEngine {
             remap_existing_relations(&mut document.relations, &occurrence_remap, cancellation)?;
         ensure_relation_remap_is_safe(&document, &relation_remap)?;
         reconcile_perl_target_gaps(&mut document, cancellation)?;
+        reconcile_fsharp_target_gaps(&mut document, cancellation)?;
         reconcile_groovy_import_gaps(&mut document, cancellation)?;
         reconcile_elm_import_relations(&mut document, cancellation)?;
         reconcile_elm_import_gaps(&mut document, cancellation)?;
@@ -1288,6 +1309,96 @@ fn reconcile_perl_target_gaps(
     Ok(())
 }
 
+fn reconcile_fsharp_target_gaps(
+    document: &mut NormalizedIrDocument,
+    cancellation: &Cancellation,
+) -> Result<(), ResolutionError> {
+    let mut producers = BTreeSet::new();
+    let mut opened_producers = BTreeSet::new();
+    for provenance in &document.provenance {
+        cancellation.check()?;
+        if provenance.rule.as_deref()
+            == Some("fsharp-opened-value-v6.owned_open_source_declared_project")
+        {
+            opened_producers.insert(provenance.id);
+        }
+        if matches!(
+            provenance.rule.as_deref(),
+            Some(
+                "fsharp-qualified-module-v1.source_declared_project"
+                    | "fsharp-qualified-module-v2.owned_open_source_declared_project"
+                    | "fsharp-qualified-module-v3.signature_mask_source_declared_project"
+                    | "fsharp-qualified-module-v4.record_signature_mask_source_declared_project"
+                    | "fsharp-qualified-module-v5.alias_signature_mask_source_declared_project"
+            )
+        ) {
+            producers.insert(provenance.id);
+        }
+    }
+    let mut sources = BTreeMap::new();
+    let mut opened_sources = BTreeMap::new();
+    for occurrence in &document.occurrences {
+        cancellation.check()?;
+        if producers.contains(&occurrence.provenance)
+            && matches!(occurrence.target, OccurrenceTarget::Resolved { .. })
+        {
+            sources.insert(occurrence.source.clone(), occurrence.provenance);
+        }
+        if opened_producers.contains(&occurrence.provenance)
+            && matches!(occurrence.target, OccurrenceTarget::Resolved { .. })
+            && matches!(
+                (occurrence.role, occurrence.syntax_kind.as_str()),
+                (
+                    OccurrenceRole::Reference,
+                    "fsharp.simple_function_body_read.reference"
+                ) | (OccurrenceRole::CallSite, "fsharp.application.call")
+            )
+        {
+            opened_sources.insert(
+                (occurrence.source.clone(), occurrence.role),
+                occurrence.provenance,
+            );
+        }
+    }
+    let mut remap = BTreeMap::new();
+    for gap in &mut document.skipped_regions {
+        cancellation.check()?;
+        let qualified = matches!(
+            gap.detail.as_str(),
+            "fsharp-qualified-target-unavailable" | "fsharp-direct-call-target-unavailable"
+        )
+        .then(|| sources.get(&gap.source))
+        .flatten()
+        .copied();
+        let opened_role = if gap.domain == rootlight_ir::FactDomain::Relations {
+            match gap.detail.as_str() {
+                "fsharp-formal-binding-target-unavailable" => Some(OccurrenceRole::Reference),
+                "fsharp-direct-call-target-unavailable" => Some(OccurrenceRole::CallSite),
+                _ => None,
+            }
+        } else {
+            None
+        };
+        let opened = opened_role
+            .and_then(|role| opened_sources.get(&(gap.source.clone(), role)))
+            .copied();
+        if let Some(provenance) = qualified.or(opened) {
+            let old = gap.id;
+            // The authored static target is exact; evaluated project closure is
+            // a separate uncertainty, not an unsupported relationship.
+            gap.detail = "fsharp-project-build-closure-unverified".to_owned();
+            gap.reason = rootlight_ir::SkippedRegionReason::MissingBuildContext;
+            gap.provenance = provenance;
+            gap.id = rootlight_ir::derive_skipped_region_id(gap)
+                .map_err(ResolutionError::FactIdentity)?;
+            remap.insert(old, gap.id);
+        }
+    }
+    ensure_nonrelation_remap_is_safe(document, &remap)?;
+    ensure_relation_remap_is_safe(document, &remap)?;
+    Ok(())
+}
+
 fn reconcile_groovy_import_gaps(
     document: &mut NormalizedIrDocument,
     cancellation: &Cancellation,
@@ -1946,6 +2057,37 @@ fn build_provenance(
             }
         }
     }
+    if decision.explanation.rule == ResolutionRule::FSharpQualifiedModule {
+        for envelope in lookup
+            .fsharp
+            .evidence(occurrence)
+            .ok_or(ResolutionError::UnsupportedIdentityRemap)?
+        {
+            derivation_parents.push(FactRef::Fact(envelope.id));
+            if let Some(source) = &envelope.evidence.source {
+                sources.push(source.clone());
+            }
+        }
+        for entity in lookup
+            .fsharp
+            .entity_evidence(occurrence)
+            .ok_or(ResolutionError::UnsupportedIdentityRemap)?
+        {
+            derivation_parents
+                .extend([FactRef::Entity(entity.id), FactRef::Fact(entity.provenance)]);
+            tier = lower_tier(tier, entity.tier);
+            let entity_provenance = lookup
+                .provenance
+                .get(&entity.provenance)
+                .copied()
+                .ok_or(ResolutionError::UnsupportedIdentityRemap)?;
+            tier = lower_tier(tier, entity_provenance.tier);
+            context_digests.push(entity_provenance.build_context.digest());
+            if let Some(source) = &entity.evidence.source {
+                sources.push(source.clone());
+            }
+        }
+    }
     if matches!(
         decision.explanation.rule,
         ResolutionRule::GroovyInheritedType | ResolutionRule::GroovyStaticImport
@@ -2061,6 +2203,10 @@ fn build_provenance(
         ResolutionRule::GroovyQualifiedHeader => "groovy-qualified-header-v1.indexed_snapshot",
         ResolutionRule::GroovyTypeImport => "groovy-type-import-v1.indexed_snapshot",
         ResolutionRule::PerlPackageStorage => "perl-package-storage-v1.indexed_snapshot",
+        ResolutionRule::FSharpQualifiedModule => lookup
+            .fsharp
+            .rule(occurrence)
+            .ok_or(ResolutionError::UnsupportedIdentityRemap)?,
         ResolutionRule::LexicalScope => "scope-v1.lexical_scope",
         ResolutionRule::Import => "scope-v1.import",
     };
@@ -2306,10 +2452,12 @@ fn relation_subject(
     predicate: RelationPredicate,
     rule: ResolutionRule,
 ) -> RelationEndpoint {
-    // Static-import selection proves the native enclosing scope as well as the
-    // target. Other call rules retain their occurrence-based endpoint contract.
-    let proven_call_owner =
-        rule == ResolutionRule::GroovyStaticImport && predicate == RelationPredicate::Calls;
+    // These native selections retain the enclosing owner used by their
+    // same-file adapters. Other calls keep occurrence-based endpoints.
+    let proven_call_owner = matches!(
+        rule,
+        ResolutionRule::GroovyStaticImport | ResolutionRule::FSharpQualifiedModule
+    ) && predicate == RelationPredicate::Calls;
     if (proven_call_owner
         || matches!(
             predicate,

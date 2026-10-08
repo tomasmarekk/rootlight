@@ -12,8 +12,8 @@ use rootlight_ir::{
 };
 use rootlight_storage::{
     CoverageReadRequest, GenerationContext, GenerationMetadata, GenerationReader,
-    GenerationResource, GenerationStats, IdentityVerificationError, IdentityVerifiedGeneration,
-    OccurrenceReadRequest, ReadPage, RelationReadDirection, RelationReadRequest,
+    GenerationResource, GenerationStats, IdentityVerifiedGeneration, OccurrenceReadRequest,
+    ReadPage, RelationReadDirection, RelationReadRequest,
 };
 
 use crate::{
@@ -262,12 +262,8 @@ impl GenerationReader for SegmentReader {
         &self,
         context: &GenerationContext<'_>,
     ) -> Result<IdentityVerifiedGeneration, Self::Error> {
-        IdentityVerifiedGeneration::verify_snapshot(self.snapshot.clone(), context).map_err(
-            |error| match error {
-                IdentityVerificationError::Control(error) => SegmentError::Control(error),
-                _ => SegmentError::Corrupt,
-            },
-        )
+        IdentityVerifiedGeneration::verify_snapshot(self.snapshot.clone(), context)
+            .map_err(format::map_identity_error)
     }
 }
 

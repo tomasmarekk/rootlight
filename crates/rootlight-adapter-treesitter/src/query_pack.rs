@@ -316,6 +316,7 @@ struct QueryInput<'a> {
 struct QueryScanLimits {
     matches: usize,
     captures: usize,
+    body_nodes: usize,
 }
 
 pub(crate) struct QueryPack {
@@ -357,6 +358,13 @@ impl QueryPack {
                     "call" | "comment" | "documentation" | "reference" | "string"
                 )
             });
+            if family == GrammarFamily::FSharp {
+                expected.extend(["call", "expression", "reference"]);
+                expected.sort_unstable();
+            } else {
+                expected.push("expression");
+                expected.sort_unstable();
+            }
         }
         if family == GrammarFamily::Matlab || family.is_classic_basic() {
             expected.retain(|name| !matches!(*name, "call" | "import" | "documentation"));
@@ -516,6 +524,7 @@ impl QueryPack {
             QueryScanLimits {
                 matches: optional_max_matches,
                 captures: optional_max_captures,
+                body_nodes: max_nodes,
             },
             |candidate| {
                 let candidate = RetainedCandidate(candidate);
@@ -581,7 +590,10 @@ impl QueryPack {
                     candidate.required = candidate.role != StructuralRole::Scope
                         || matches!(
                             family,
-                            GrammarFamily::Json | GrammarFamily::Toml | GrammarFamily::Yaml
+                            GrammarFamily::Json
+                                | GrammarFamily::Toml
+                                | GrammarFamily::Yaml
+                                | GrammarFamily::FSharp
                         );
                     push_candidate_fallible(&mut candidates, candidate, limits.captures)?;
                 }
@@ -645,6 +657,19 @@ impl QueryPack {
         let mut groovy_members = groovy::MemberKinds::default();
         let mut groovy_callables = groovy::CallableKinds::default();
         let mut groovy_calls = groovy::Calls::default();
+        // Identity and optional queries have separate scans; RHS read indexing
+        // belongs only to the optional scan that also normalizes call evidence.
+        let mut fsharp_captures =
+            fsharp::CaptureCache::new(limits.captures, input.normalize_calls, limits.body_nodes);
+        // A full-extent root can still omit bytes between included ranges, while
+        // standalone roots may exclude leading or trailing trivia from their span.
+        let fsharp_complete_source = !input.normalize_calls
+            || !matches!(
+                input.family,
+                GrammarFamily::FSharp | GrammarFamily::FSharpSignature
+            )
+            || matches!(input.tree.included_ranges().as_slice(), [range]
+                if range.start_byte == 0 && range.end_byte >= input.source.len());
 
         'query: while let Some(query_match) = matches.next() {
             if match_count >= limits.matches {
@@ -703,9 +728,27 @@ impl QueryPack {
                 if matches!(
                     input.family,
                     GrammarFamily::FSharp | GrammarFamily::FSharpSignature
-                ) && !fsharp::retain_capture(capture.node, role, input.cancellation)?
-                {
-                    continue;
+                ) {
+                    if role == StructuralRole::Expression
+                        && capture.node.kind() == "file"
+                        && !fsharp_complete_source
+                    {
+                        continue;
+                    }
+                    let admitted = fsharp::retain_capture(
+                        capture.node,
+                        role,
+                        input.source,
+                        input.cancellation,
+                        &mut fsharp_captures,
+                    );
+                    if fsharp_captures.exhausted() {
+                        limit = Some(QueryLimit::Capture);
+                        break 'query;
+                    }
+                    if !admitted? {
+                        continue;
+                    }
                 }
                 if matches!(
                     input.family,
@@ -866,13 +909,19 @@ impl QueryPack {
                 {
                     continue;
                 }
-                let mut candidate = candidate_for_capture(
+                let candidate = candidate_for_capture(
                     input.family,
                     capture,
                     role,
                     input.source,
                     input.cancellation,
-                )?;
+                    &mut fsharp_captures,
+                );
+                if fsharp_captures.exhausted() {
+                    limit = Some(QueryLimit::Capture);
+                    break 'query;
+                }
+                let mut candidate = candidate?;
                 if input.family == GrammarFamily::Groovy && candidate.syntax == "groovy.field" {
                     candidate.syntax = groovy_members.kind(capture.node, input.cancellation)?;
                 }
@@ -986,6 +1035,7 @@ fn identity_scan_limits(max_nodes: usize) -> Result<QueryScanLimits, AdapterErro
             .checked_mul(8)
             .ok_or_else(|| query_failure("query-capture-accounting"))?
             .min(HARD_MAX_QUERY_CAPTURES),
+        body_nodes: max_nodes,
     })
 }
 
@@ -1046,6 +1096,7 @@ fn candidate_for_capture(
     role: StructuralRole,
     source: &[u8],
     cancellation: &Cancellation,
+    fsharp_captures: &mut fsharp::CaptureCache,
 ) -> Result<QueryCandidate, AdapterError> {
     if family.is_classic_basic()
         && role == StructuralRole::Reference
@@ -1258,7 +1309,7 @@ fn candidate_for_capture(
             GrammarFamily::FSharp | GrammarFamily::FSharpSignature
         ) =>
         {
-            fsharp::syntax(capture.node, role, source, cancellation)?
+            fsharp::syntax(capture.node, role, source, cancellation, fsharp_captures)?
                 .ok_or_else(|| query_failure("query-fsharp-kind"))?
         }
         _ if matches!(family, GrammarFamily::CobolFixed | GrammarFamily::CobolFree) => {
@@ -1472,8 +1523,9 @@ fn candidate_for_capture(
         family,
         GrammarFamily::FSharp | GrammarFamily::FSharpSignature
     ) {
-        let range = fsharp::capture_range(capture.node, role, cancellation)?
-            .ok_or_else(|| query_failure("query-fsharp-range"))?;
+        let range =
+            fsharp::capture_range(capture.node, role, source, cancellation, fsharp_captures)?
+                .ok_or_else(|| query_failure("query-fsharp-range"))?;
         start = range.start;
         end = range.end;
     }
@@ -2546,6 +2598,12 @@ mod tests {
                     )
                 });
             }
+            if family == GrammarFamily::FSharp {
+                expected.extend(["call", "expression", "reference"]);
+            }
+            if family == GrammarFamily::FSharpSignature {
+                expected.push("expression");
+            }
             if family == GrammarFamily::Matlab || family.is_classic_basic() {
                 expected.retain(|name| !matches!(*name, "call" | "import" | "documentation"));
             }
@@ -2612,7 +2670,7 @@ mod tests {
                 }
                 expected.sort_unstable();
             }
-            assert_eq!(names, expected);
+            assert_eq!(names, expected, "capture contract differs for {family:?}");
             assert_eq!(pack.roles_by_capture.len(), expected.len());
         }
     }

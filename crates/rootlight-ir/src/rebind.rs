@@ -28,12 +28,16 @@ use crate::{
     new_symbol_identity_claim_envelope,
 };
 use crate::{
+    FSHARP_BINDING_NAMESPACE, decode_fsharp_binding_envelope, new_fsharp_binding_envelope,
+};
+use crate::{
     GROOVY_BINDING_NAMESPACE, decode_groovy_binding_envelope, new_groovy_binding_envelope,
 };
 use crate::{
     GROOVY_CALL_LOOKUP_NAMESPACE, GROOVY_STATIC_IMPORT_NAMESPACE,
-    decode_groovy_call_lookup_envelope, decode_groovy_static_import_envelope,
-    new_groovy_call_lookup_envelope, new_groovy_static_import_envelope,
+    decode_groovy_call_lookup_envelope_with_encoding,
+    decode_groovy_static_import_envelope_with_encoding,
+    new_groovy_call_lookup_envelope_with_encoding, new_groovy_static_import_envelope_with_encoding,
 };
 use crate::{
     GROOVY_CALLABLE_NAMESPACE, decode_groovy_callable_envelope, new_groovy_callable_envelope,
@@ -44,12 +48,18 @@ use crate::{
     new_groovy_type_lookup_envelope,
 };
 use crate::{
-    GROOVY_VALUE_LOOKUP_NAMESPACE, decode_groovy_value_lookup_envelope,
-    new_groovy_value_lookup_envelope,
+    GROOVY_VALUE_LOOKUP_NAMESPACE, decode_groovy_value_lookup_envelope_with_encoding,
+    new_groovy_value_lookup_envelope_with_encoding,
 };
 use crate::{PERL_BINDING_NAMESPACE, decode_perl_binding_envelope, new_perl_binding_envelope};
 use crate::{
     VBA_COMPILATION_NAMESPACE, decode_vba_compilation_envelope, new_vba_compilation_envelope,
+};
+#[cfg(test)]
+use crate::{
+    decode_groovy_call_lookup_envelope, decode_groovy_static_import_envelope,
+    decode_groovy_value_lookup_envelope, new_groovy_call_lookup_envelope,
+    new_groovy_static_import_envelope, new_groovy_value_lookup_envelope,
 };
 
 const GENERATION_NEUTRAL_ID: GenerationId = GenerationId::from_bytes([0; 20]);
@@ -827,6 +837,7 @@ fn require_supported_extensions_with_checkpoint(
                 | SYMBOL_IDENTITY_CLAIM_NAMESPACE
                 | LEXICAL_EXTENSION_NAMESPACE
                 | PERL_BINDING_NAMESPACE
+                | FSHARP_BINDING_NAMESPACE
                 | GROOVY_BINDING_NAMESPACE
                 | GROOVY_TYPE_LOOKUP_NAMESPACE
                 | GROOVY_CALLABLE_NAMESPACE
@@ -1434,22 +1445,30 @@ fn rebind_extension(
                 .map_err(|_| NormalizedRebindError::IdentityRecipe)
         }
         GROOVY_VALUE_LOOKUP_NAMESPACE => {
-            let evidence = decode_groovy_value_lookup_envelope(&extension)
-                .map_err(|_| NormalizedRebindError::IdentityRecipe)?;
-            new_groovy_value_lookup_envelope(repository, generation, provenance, source, evidence)
-                .map_err(|_| NormalizedRebindError::IdentityRecipe)
+            let (evidence, encoding) =
+                decode_groovy_value_lookup_envelope_with_encoding(&extension)
+                    .map_err(|_| NormalizedRebindError::IdentityRecipe)?;
+            new_groovy_value_lookup_envelope_with_encoding(
+                repository, generation, provenance, source, evidence, encoding,
+            )
+            .map_err(|_| NormalizedRebindError::IdentityRecipe)
         }
         GROOVY_CALL_LOOKUP_NAMESPACE => {
-            let evidence = decode_groovy_call_lookup_envelope(&extension)
+            let (evidence, encoding) = decode_groovy_call_lookup_envelope_with_encoding(&extension)
                 .map_err(|_| NormalizedRebindError::IdentityRecipe)?;
-            new_groovy_call_lookup_envelope(repository, generation, provenance, source, evidence)
-                .map_err(|_| NormalizedRebindError::IdentityRecipe)
+            new_groovy_call_lookup_envelope_with_encoding(
+                repository, generation, provenance, source, evidence, encoding,
+            )
+            .map_err(|_| NormalizedRebindError::IdentityRecipe)
         }
         GROOVY_STATIC_IMPORT_NAMESPACE => {
-            let evidence = decode_groovy_static_import_envelope(&extension)
-                .map_err(|_| NormalizedRebindError::IdentityRecipe)?;
-            new_groovy_static_import_envelope(repository, generation, provenance, source, evidence)
-                .map_err(|_| NormalizedRebindError::IdentityRecipe)
+            let (evidence, encoding) =
+                decode_groovy_static_import_envelope_with_encoding(&extension)
+                    .map_err(|_| NormalizedRebindError::IdentityRecipe)?;
+            new_groovy_static_import_envelope_with_encoding(
+                repository, generation, provenance, source, evidence, encoding,
+            )
+            .map_err(|_| NormalizedRebindError::IdentityRecipe)
         }
         GROOVY_CALLABLE_NAMESPACE => {
             let evidence = decode_groovy_callable_envelope(&extension)
@@ -1473,6 +1492,12 @@ fn rebind_extension(
             let evidence = decode_groovy_binding_envelope(&extension)
                 .map_err(|_| NormalizedRebindError::IdentityRecipe)?;
             new_groovy_binding_envelope(repository, generation, provenance, source, evidence)
+                .map_err(|_| NormalizedRebindError::IdentityRecipe)
+        }
+        FSHARP_BINDING_NAMESPACE => {
+            let evidence = decode_fsharp_binding_envelope(&extension)
+                .map_err(|_| NormalizedRebindError::IdentityRecipe)?;
+            new_fsharp_binding_envelope(repository, generation, provenance, source, evidence)
                 .map_err(|_| NormalizedRebindError::IdentityRecipe)
         }
         PERL_BINDING_NAMESPACE => {
@@ -2207,6 +2232,180 @@ mod tests {
     }
 
     #[test]
+    fn fsharp_binding_evidence_rebinds_without_hidden_occurrence_identities() {
+        use crate::{FSharpBinding, FSharpBindingEvidence};
+        let mut document = fixture_with_lexical_extension();
+        document.extensions.clear();
+        let file = &document.files[0];
+        let source = file.evidence.source.clone().unwrap();
+        let path = vec![
+            rootlight_ids::content_hash(b"Library"),
+            rootlight_ids::content_hash(b"carry"),
+        ];
+        let bindings = [
+            FSharpBinding::Context,
+            FSharpBinding::Export {
+                path: path.clone(),
+                symbol: document.entities[0].id,
+                slots: Some(1),
+            },
+            FSharpBinding::SignatureValue {
+                path: path.clone(),
+                symbol: document.entities[0].id,
+            },
+            FSharpBinding::SignatureType {
+                path: vec![path[0], rootlight_ids::content_hash(b"Data")],
+                symbol: document.entities[0].id,
+            },
+            FSharpBinding::SignatureAlias {
+                path: vec![path[0], rootlight_ids::content_hash(b"Alias")],
+                symbol: document.entities[0].id,
+            },
+            FSharpBinding::Reference { path: path.clone() },
+            FSharpBinding::Call {
+                path: path.clone(),
+                slots: 1,
+            },
+            FSharpBinding::ImportContext {
+                containers: vec![source.span()],
+                opens: vec![source.span()],
+            },
+            FSharpBinding::Container {
+                path: vec![path[0]],
+                roots: vec![path[1]],
+            },
+            FSharpBinding::Open {
+                path: vec![path[0]],
+                owner: source.span(),
+            },
+            FSharpBinding::ImportedReference { path: path.clone() },
+            FSharpBinding::OpenedReference { name: path[1] },
+            FSharpBinding::OpenedCall {
+                name: path[1],
+                slots: 1,
+            },
+            FSharpBinding::ImportedCall { path, slots: 1 },
+        ];
+        for binding in &bindings {
+            document.extensions.push(
+                new_fsharp_binding_envelope(
+                    document.repository,
+                    document.generation,
+                    file.provenance,
+                    source.clone(),
+                    FSharpBindingEvidence::new(source.span(), binding.clone()),
+                )
+                .unwrap(),
+            );
+        }
+        let limits = IrLimits::default();
+        let support = ExtensionSupport::default();
+        let canonical =
+            canonical_preserving_extensions(document.clone(), &limits, &support).unwrap();
+        for original in &document.extensions {
+            assert!(canonical.extensions.contains(original));
+        }
+        let chunk = CanonicalNormalizedFileChunk::new(&document, &limits, &support).unwrap();
+        let next = GenerationId::from_bytes([88; 20]);
+        let rebound = chunk.rebind(next, &limits, &support).unwrap();
+        assert_eq!(rebound.extensions.len(), bindings.len());
+        for envelope in &rebound.extensions {
+            let evidence = decode_fsharp_binding_envelope(envelope).unwrap();
+            assert_eq!(evidence.scope(), source.span());
+            assert!(bindings.contains(evidence.binding()));
+            let original = document
+                .extensions
+                .iter()
+                .find(|original| {
+                    decode_fsharp_binding_envelope(original).unwrap().binding()
+                        == evidence.binding()
+                })
+                .unwrap();
+            assert_eq!(envelope.version, original.version);
+            assert_eq!(envelope.payload, original.payload);
+            assert_eq!(envelope.evidence.derivation, original.evidence.derivation);
+            assert_eq!(envelope.generation, next);
+            assert_eq!(
+                envelope.evidence.source.as_ref().unwrap().generation(),
+                next
+            );
+            assert!(
+                !document
+                    .extensions
+                    .iter()
+                    .any(|original| original.id == envelope.id)
+            );
+        }
+        assert_eq!(
+            chunk.digest(),
+            CanonicalNormalizedFileChunk::new(&rebound, &limits, &support)
+                .unwrap()
+                .digest()
+        );
+        validate_ir_document(&rebound, &limits, &support).unwrap();
+    }
+
+    #[test]
+    fn fsharp_project_order_survives_canonicalization_and_generation_rebinding() {
+        use crate::{FSharpBinding, FSharpBindingEvidence};
+        let mut document = fixture_with_lexical_extension();
+        document.extensions.clear();
+        let project = document.files[0].clone();
+        let first = FileId::from_bytes([9; 20]);
+        let second = FileId::from_bytes([8; 20]);
+        for (id, path) in [(first, "First.fs"), (second, "Second.fs")] {
+            let mut file = project.clone();
+            file.id = id;
+            file.path = path.to_owned();
+            file.evidence.source = Some(SourceRef::new(
+                document.repository,
+                document.generation,
+                crate::SourceSpan::new(id, 0, file.byte_length).unwrap(),
+                file.content_hash,
+                None,
+            ));
+            document.files.push(file);
+        }
+        let source = project.evidence.source.clone().unwrap();
+        let binding = FSharpBinding::Project {
+            members: vec![first, second],
+        };
+        let original = new_fsharp_binding_envelope(
+            document.repository,
+            document.generation,
+            project.provenance,
+            source.clone(),
+            FSharpBindingEvidence::new(source.span(), binding.clone()),
+        )
+        .unwrap();
+        document.extensions.push(original.clone());
+        let limits = IrLimits::default();
+        let support = ExtensionSupport::default();
+        let canonical = canonical_preserving_extensions(document, &limits, &support).unwrap();
+        assert_eq!(canonical.extensions, vec![original.clone()]);
+        assert_eq!(
+            decode_fsharp_binding_envelope(&canonical.extensions[0])
+                .unwrap()
+                .binding(),
+            &binding
+        );
+        let next = GenerationId::from_bytes([88; 20]);
+        let rebound = rebind_document(canonical, next, &limits, &support).unwrap();
+        let envelope = &rebound.extensions[0];
+        let evidence = decode_fsharp_binding_envelope(envelope).unwrap();
+        assert_eq!(evidence.binding(), &binding);
+        assert_eq!(evidence.scope(), source.span());
+        assert_eq!(envelope.evidence.derivation, original.evidence.derivation);
+        assert_eq!(envelope.generation, next);
+        assert_eq!(
+            envelope.evidence.source.as_ref().unwrap().generation(),
+            next
+        );
+        assert_ne!(envelope.id, original.id);
+        validate_ir_document(&rebound, &limits, &support).unwrap();
+    }
+
+    #[test]
     fn chunk_digest_is_generation_independent() {
         let first = fixture_with_lexical_extension();
         let first_chunk = CanonicalNormalizedFileChunk::new(
@@ -2397,6 +2596,158 @@ mod tests {
             validate_ir_document(&rebound, &limits, &support).unwrap();
             document.extensions[0].payload.push(' ');
             assert!(CanonicalNormalizedFileChunk::new(&document, &limits, &support).is_err());
+        }
+    }
+
+    #[test]
+    fn encoded_groovy_context_rebinding_preserves_encoding() {
+        for encoding in [
+            crate::SourceTextEncoding::Utf16Le,
+            crate::SourceTextEncoding::Utf16Be,
+        ] {
+            let mut document = fixture_with_lexical_extension();
+            document.extensions.clear();
+            let file = &document.files[0];
+            let name = crate::SourceSpan::new(file.id, 0, 2).unwrap();
+            let source = SourceRef::new(
+                document.repository,
+                document.generation,
+                name,
+                file.content_hash,
+                None,
+            );
+            let value = crate::GroovyValueLookup {
+                spelling: "f".into(),
+                name_hash: rootlight_ids::content_hash(b"f"),
+                enclosing_type: None,
+                enclosing_callable: None,
+                lexical_binding: false,
+                static_context: false,
+                read_only: true,
+                write_kind: None,
+            };
+            let value_envelope = new_groovy_value_lookup_envelope_with_encoding(
+                document.repository,
+                document.generation,
+                file.provenance,
+                source,
+                value.clone(),
+                Some(encoding),
+            )
+            .unwrap();
+            let owner = crate::SourceSpan::new(file.id, 0, 4).unwrap();
+            let full_source = SourceRef::new(
+                document.repository,
+                document.generation,
+                owner,
+                file.content_hash,
+                None,
+            );
+            let call = crate::GroovyCallLookup {
+                name,
+                name_hash: value.name_hash,
+                spelling: value.spelling.clone(),
+                arguments: crate::GroovyCallArguments::default(),
+                enclosing_type: Some(owner),
+                enclosing_callable: Some(owner),
+                lexical_binding: false,
+                static_context: true,
+            };
+            let import = crate::GroovyStaticImport {
+                name,
+                alias: Some(crate::SourceSpan::new(file.id, 2, 4).unwrap()),
+                owner: rootlight_ids::content_hash(b"sample.Tools"),
+                member: Some(value.name_hash),
+                binding: Some(rootlight_ids::content_hash(b"g")),
+                member_spelling: Some("f".into()),
+                binding_spelling: Some("g".into()),
+            };
+            let call_envelope = new_groovy_call_lookup_envelope_with_encoding(
+                document.repository,
+                document.generation,
+                file.provenance,
+                full_source.clone(),
+                call.clone(),
+                Some(encoding),
+            )
+            .unwrap();
+            let import_envelope = new_groovy_static_import_envelope_with_encoding(
+                document.repository,
+                document.generation,
+                file.provenance,
+                full_source,
+                import.clone(),
+                Some(encoding),
+            )
+            .unwrap();
+            for original in [call_envelope, value_envelope, import_envelope] {
+                document.extensions = vec![original.clone()];
+                let limits = IrLimits::default();
+                let support = ExtensionSupport::default();
+                let chunk =
+                    CanonicalNormalizedFileChunk::new(&document, &limits, &support).unwrap();
+                let generation = GenerationId::from_bytes([87; 20]);
+                let rebound = chunk.rebind(generation, &limits, &support).unwrap();
+                let envelope = &rebound.extensions[0];
+                let assert_context =
+                    |envelope: &ExtensionEnvelope| match envelope.namespace.as_str() {
+                        GROOVY_CALL_LOOKUP_NAMESPACE => assert_eq!(
+                            decode_groovy_call_lookup_envelope_with_encoding(envelope).unwrap(),
+                            (call.clone(), Some(encoding)),
+                        ),
+                        GROOVY_VALUE_LOOKUP_NAMESPACE => assert_eq!(
+                            decode_groovy_value_lookup_envelope_with_encoding(envelope).unwrap(),
+                            (value.clone(), Some(encoding)),
+                        ),
+                        GROOVY_STATIC_IMPORT_NAMESPACE => assert_eq!(
+                            decode_groovy_static_import_envelope_with_encoding(envelope).unwrap(),
+                            (import.clone(), Some(encoding)),
+                        ),
+                        _ => panic!("fixture contains only groovy context namespaces"),
+                    };
+                assert_context(envelope);
+                assert_eq!(envelope.namespace, original.namespace);
+                assert_eq!(envelope.generation, generation);
+                assert_eq!(envelope.version, "2");
+                assert_eq!(envelope.payload, original.payload);
+                assert_ne!(envelope.id, original.id);
+                assert_eq!(
+                    envelope.evidence.source.as_ref().unwrap().span(),
+                    original.evidence.source.as_ref().unwrap().span(),
+                );
+                assert_eq!(
+                    envelope.evidence.source.as_ref().unwrap().content_hash(),
+                    file.content_hash
+                );
+                assert_eq!(
+                    envelope.evidence.source.as_ref().unwrap().generation(),
+                    generation
+                );
+                assert_eq!(
+                    chunk.digest(),
+                    CanonicalNormalizedFileChunk::new(&rebound, &limits, &support)
+                        .unwrap()
+                        .digest()
+                );
+                let restored = chunk
+                    .rebind(document.generation, &limits, &support)
+                    .unwrap();
+                let restored_envelope = &restored.extensions[0];
+                assert_context(restored_envelope);
+                assert_eq!(restored_envelope.version, original.version);
+                assert_eq!(restored_envelope.namespace, original.namespace);
+                assert_eq!(restored_envelope.payload, original.payload);
+                assert_eq!(restored_envelope.generation, document.generation);
+                assert_eq!(restored_envelope.evidence.source, original.evidence.source);
+                assert_eq!(
+                    chunk.digest(),
+                    CanonicalNormalizedFileChunk::new(&restored, &limits, &support,)
+                        .unwrap()
+                        .digest()
+                );
+                validate_ir_document(&rebound, &limits, &support).unwrap();
+                validate_ir_document(&restored, &limits, &support).unwrap();
+            }
         }
     }
 

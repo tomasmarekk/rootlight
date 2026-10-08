@@ -13,6 +13,9 @@ use std::{
 };
 
 use rootlight_ids::RepositoryId;
+
+mod source_metadata;
+
 use rootlight_mcp_contract::{
     ErrorCode, PublicError, RepositorySelector, SafeLabel, SchemaVersion, SourceFreeMessage,
     ToolResponse, TrustClassification,
@@ -41,8 +44,9 @@ use crate::{
     context_evidence::{
         ContextEvidenceCollectionError, ContextEvidenceCollector, ContextEvidenceCorpus,
         ContextEvidencePort, ContextEvidencePortErrorKind, ContextEvidenceProviderRegistry,
-        ContextSourceMaterial, ContextSourceOutput, ContextSourceRequest, ContextSourceTarget,
-        EvidenceProviderOmission, EvidenceProviderOmissionReason, EvidenceProviderPlanError,
+        ContextSourceMaterial, ContextSourceMetadataQuoteRequest, ContextSourceOutput,
+        ContextSourceRequest, ContextSourceTarget, EvidenceProviderOmission,
+        EvidenceProviderOmissionReason, EvidenceProviderPlanError,
     },
     context_pack_request::{
         CanonicalContextPackRequest, CanonicalContextPackRequestError, normalize_task,
@@ -67,9 +71,8 @@ const FOCUSED_SNIPPET_BYTES: u32 = 2_048;
 const STANDARD_EVIDENCE_HEAVY_BYTES: u32 = 4_096;
 const EVIDENCE_SNIPPET_BYTES: u32 = 8_192;
 const SIGNATURE_BYTES: u32 = 1_024;
-const SOURCE_METADATA_BYTES: u64 = 256;
 const SOURCE_LANGUAGE_BYTES: u64 = 64;
-const SOURCE_PROVIDER_ENVELOPE_BYTES: u64 = 2_048;
+const JSON_ESCAPE_EXPANSION: u64 = 6;
 const MIN_SOURCE_MATERIAL_BYTES: u32 = 64;
 
 /// Maximum omission summary entries.
@@ -580,8 +583,7 @@ impl DefaultContextPackPlanner {
 
         let (include_snippets, configured_max_bytes_per_snippet) =
             source_materialization_limits(request.source_policy(), request.response_profile());
-        let mut selected =
-            selected_source_targets(&planned, &corpus, configured_max_bytes_per_snippet);
+        let mut selected = selected_source_targets(&planned, &corpus);
         if selected.is_empty() {
             return Ok(planned);
         }
@@ -590,9 +592,34 @@ impl DefaultContextPackPlanner {
         budget
             .charge(planned.usage)
             .map_err(ContextPackPlanningError::from)?;
-        let materialization = affordable_source_materialization(
+        let quote_request = ContextSourceMetadataQuoteRequest {
+            repository: request.repository(),
+            generation: request.generation(),
+            source_policy: request.source_policy(),
+            include_snippets,
+            targets: selected
+                .iter()
+                .map(|selected| selected.target.clone())
+                .collect(),
+        };
+        let quoted_bounds = match source_metadata::quote_bounds(
+            port,
+            quote_request,
+            &mut budget,
+            cancellation.clone(),
+            deadline,
+        )
+        .await?
+        {
+            source_metadata::QuoteBoundsOutcome::Complete(bounds) => bounds,
+            source_metadata::QuoteBoundsOutcome::Omitted(label, completeness) => {
+                mark_source_omission(&mut planned, label, selected.len(), completeness)?;
+                planned.usage = budget.consumed();
+                return Ok(planned);
+            }
+        };
+        let materialization = quoted_bounds.affordable(
             budget.remaining(),
-            selected.len(),
             configured_max_bytes_per_snippet,
             include_snippets,
         );
@@ -609,23 +636,16 @@ impl DefaultContextPackPlanner {
             planned.usage = budget.consumed();
             return Ok(planned);
         }
-        for target in &mut selected {
-            target.target.source_ref = bounded_source_ref(
-                &target.target.source_ref,
-                materialization.max_bytes_per_snippet,
-            );
-        }
-
-        let provider_reservation =
-            source_provider_reservation(selected.len(), materialization.max_bytes_per_snippet);
-        let combined_reservation = add_budget_charge(
-            provider_reservation,
-            source_shaping_reservation(
+        let provider_reservation = quoted_bounds
+            .provider(selected.len(), materialization.max_bytes_per_snippet)
+            .ok_or(ContextEvidenceCollectionError::InvalidProviderResponse)?;
+        let combined_reservation = quoted_bounds
+            .combined(
                 selected.len(),
                 materialization.max_bytes_per_snippet,
                 include_snippets,
-            ),
-        );
+            )
+            .ok_or(ContextEvidenceCollectionError::InvalidProviderResponse)?;
         let reservation = budget
             .reserve(combined_reservation)
             .map_err(ContextPackPlanningError::from)?;
@@ -650,6 +670,14 @@ impl DefaultContextPackPlanner {
                 ),
             )
             .await;
+        // Receipt admission does not authorize using unvalidated source material.
+        let usage = match &output {
+            Ok(output) => output.usage,
+            Err(error) => error.usage,
+        };
+        reservation
+            .commit(usage)
+            .map_err(ContextPackPlanningError::from)?;
         if cancellation.is_cancelled() {
             return Err(ContextEvidenceCollectionError::Cancelled.into());
         }
@@ -660,10 +688,7 @@ impl DefaultContextPackPlanner {
         match output {
             Ok(output) => {
                 validate_source_output(&source_request, &output)?;
-                reservation
-                    .commit(output.usage)
-                    .map_err(ContextPackPlanningError::from)?;
-                let shaping = apply_source_materials(&mut planned, &selected, &output.materials);
+                let shaping = apply_source_materials(&mut planned, &selected, &output.materials)?;
                 budget
                     .charge(shaping)
                     .map_err(ContextPackPlanningError::from)?;
@@ -682,36 +707,31 @@ impl DefaultContextPackPlanner {
                     )?;
                 }
             }
-            Err(error) => {
-                reservation
-                    .commit(error.usage)
-                    .map_err(ContextPackPlanningError::from)?;
-                match error.kind {
-                    ContextEvidencePortErrorKind::Cancelled => {
-                        return Err(ContextEvidenceCollectionError::Cancelled.into());
-                    }
-                    ContextEvidencePortErrorKind::DeadlineExceeded => {
-                        return Err(ContextEvidenceCollectionError::DeadlineExceeded.into());
-                    }
-                    ContextEvidencePortErrorKind::InvalidResponse => {
-                        return Err(ContextEvidenceCollectionError::InvalidProviderResponse.into());
-                    }
-                    ContextEvidencePortErrorKind::Unsupported
-                    | ContextEvidencePortErrorKind::Unavailable => {
-                        let label = if error.kind == ContextEvidencePortErrorKind::Unsupported {
-                            "source_unsupported"
-                        } else {
-                            "source_unavailable"
-                        };
-                        mark_source_omission(
-                            &mut planned,
-                            label,
-                            selected.len(),
-                            source_completeness(error.kind, false)?,
-                        )?;
-                    }
+            Err(error) => match error.kind {
+                ContextEvidencePortErrorKind::Cancelled => {
+                    return Err(ContextEvidenceCollectionError::Cancelled.into());
                 }
-            }
+                ContextEvidencePortErrorKind::DeadlineExceeded => {
+                    return Err(ContextEvidenceCollectionError::DeadlineExceeded.into());
+                }
+                ContextEvidencePortErrorKind::InvalidResponse => {
+                    return Err(ContextEvidenceCollectionError::InvalidProviderResponse.into());
+                }
+                ContextEvidencePortErrorKind::Unsupported
+                | ContextEvidencePortErrorKind::Unavailable => {
+                    let label = if error.kind == ContextEvidencePortErrorKind::Unsupported {
+                        "source_unsupported"
+                    } else {
+                        "source_unavailable"
+                    };
+                    mark_source_omission(
+                        &mut planned,
+                        label,
+                        selected.len(),
+                        source_completeness(error.kind, false)?,
+                    )?;
+                }
+            },
         }
         planned.usage = budget.consumed();
         Ok(planned)
@@ -894,7 +914,6 @@ const fn source_materialization_limits(
 fn selected_source_targets(
     planned: &PlannedContextPack,
     corpus: &ContextEvidenceCorpus,
-    max_bytes: u32,
 ) -> Vec<SelectedSourceTarget> {
     planned
         .data
@@ -911,7 +930,7 @@ fn selected_source_targets(
                 item_index,
                 target: ContextSourceTarget {
                     candidate_id: candidate.id().clone(),
-                    source_ref: bounded_source_ref(source_ref, max_bytes),
+                    source_ref: source_ref.clone(),
                 },
             })
         })
@@ -966,73 +985,6 @@ const fn explicit_anchor_role_rank(role: EvidenceRole) -> u8 {
     }
 }
 
-fn bounded_source_ref(source: &rootlight_ir::SourceRef, max_bytes: u32) -> rootlight_ir::SourceRef {
-    let span = source.span();
-    let end_byte = span
-        .start_byte()
-        .saturating_add(u64::from(max_bytes))
-        .min(span.end_byte());
-    let bounded_span = rootlight_ir::SourceSpan::new(span.file(), span.start_byte(), end_byte)
-        .expect("a narrowed valid source span remains valid");
-    rootlight_ir::SourceRef::new(
-        source.repository(),
-        source.generation(),
-        bounded_span,
-        source.content_hash(),
-        None,
-    )
-}
-
-fn source_provider_reservation(targets: usize, max_bytes: u32) -> BudgetCharge {
-    let targets = u64::try_from(targets).unwrap_or(u64::MAX);
-    let source_bytes_per_target = u64::from(max_bytes);
-    let source_bytes = targets.saturating_mul(source_bytes_per_target);
-    // One batched source request has one transport envelope. Charging it once
-    // preserves a conservative payload bound without multiplying fixed
-    // protocol overhead by the number of explicit targets.
-    let json_bytes = source_bytes.saturating_add(SOURCE_PROVIDER_ENVELOPE_BYTES);
-    BudgetCharge {
-        rows: targets,
-        results: targets,
-        // Query responses use the UTF-8 byte upper bound for authoritative
-        // token accounting. Reserving fewer tokens than response bytes lets a
-        // valid child response consume the budget retained for local shaping.
-        tokens: json_bytes,
-        source_bytes,
-        traversal_facts: targets.saturating_mul(8),
-        // Transport budgets require a nonzero depth even for a direct source read.
-        depth: 1,
-        paths: targets,
-        json_bytes,
-        memory_bytes: json_bytes.saturating_add(source_bytes),
-        time_ms: u64::from(CONTEXT_PACK_TIMEOUT_MS),
-        ..BudgetCharge::default()
-    }
-}
-
-fn source_shaping_reservation(
-    targets: usize,
-    max_bytes: u32,
-    include_snippets: bool,
-) -> BudgetCharge {
-    let targets = u64::try_from(targets).unwrap_or(u64::MAX);
-    let signature_bytes = u64::from(SIGNATURE_BYTES.min(max_bytes));
-    let represented_bytes = if include_snippets {
-        u64::from(max_bytes)
-            .saturating_add(signature_bytes)
-            .saturating_add(SOURCE_LANGUAGE_BYTES)
-    } else {
-        signature_bytes
-    };
-    let bytes = targets.saturating_mul(represented_bytes.saturating_add(SOURCE_METADATA_BYTES));
-    BudgetCharge {
-        tokens: bytes,
-        json_bytes: bytes,
-        memory_bytes: bytes,
-        ..BudgetCharge::default()
-    }
-}
-
 fn add_budget_charge(left: BudgetCharge, right: BudgetCharge) -> BudgetCharge {
     BudgetCharge {
         rows: left.rows.saturating_add(right.rows),
@@ -1053,55 +1005,6 @@ fn add_budget_charge(left: BudgetCharge, right: BudgetCharge) -> BudgetCharge {
 struct SourceMaterializationPlan {
     target_count: usize,
     max_bytes_per_snippet: u32,
-}
-
-fn affordable_source_materialization(
-    remaining: BudgetCharge,
-    requested: usize,
-    configured_max_bytes: u32,
-    include_snippets: bool,
-) -> SourceMaterializationPlan {
-    let minimum_bytes = MIN_SOURCE_MATERIAL_BYTES.min(configured_max_bytes);
-    for target_count in (1..=requested).rev() {
-        let minimum_charge =
-            source_materialization_reservation(target_count, minimum_bytes, include_snippets);
-        if !budget_charge_fits(minimum_charge, remaining) {
-            continue;
-        }
-
-        let mut lower = minimum_bytes;
-        let mut upper = configured_max_bytes;
-        while lower < upper {
-            let candidate = lower.saturating_add(upper.saturating_sub(lower).div_ceil(2));
-            let charge =
-                source_materialization_reservation(target_count, candidate, include_snippets);
-            if budget_charge_fits(charge, remaining) {
-                lower = candidate;
-            } else {
-                upper = candidate.saturating_sub(1);
-            }
-        }
-        return SourceMaterializationPlan {
-            target_count,
-            max_bytes_per_snippet: lower,
-        };
-    }
-
-    SourceMaterializationPlan {
-        target_count: 0,
-        max_bytes_per_snippet: 0,
-    }
-}
-
-fn source_materialization_reservation(
-    targets: usize,
-    max_bytes: u32,
-    include_snippets: bool,
-) -> BudgetCharge {
-    add_budget_charge(
-        source_provider_reservation(targets, max_bytes),
-        source_shaping_reservation(targets, max_bytes, include_snippets),
-    )
 }
 
 fn budget_charge_fits(charge: BudgetCharge, remaining: BudgetCharge) -> bool {
@@ -1143,7 +1046,7 @@ fn validate_source_output(
     }
 
     let mut observed = std::collections::BTreeSet::new();
-    let mut observed_sources = Vec::new();
+    let mut observed_sources: Vec<&ContextSourceMaterial> = Vec::new();
     let mut returned_source_bytes = 0u64;
     for material in &output.materials {
         if !observed.insert(material.candidate_id.clone()) {
@@ -1185,10 +1088,23 @@ fn validate_source_output(
         let signature_bytes = material.signature.as_ref().map_or(0, |signature| {
             u64::try_from(signature.len()).unwrap_or(u64::MAX)
         });
-        if !observed_sources.contains(&material.source_ref) {
-            observed_sources.push(material.source_ref.clone());
-            returned_source_bytes =
-                returned_source_bytes.saturating_add(signature_bytes.max(snippet_bytes));
+        let physical_bytes =
+            validate_source_projection(request, material, snippet_bytes, signature_bytes)?;
+        if let Some(previous) = observed_sources
+            .iter()
+            .find(|previous| previous.source_ref == material.source_ref)
+        {
+            if previous.projection != material.projection
+                || previous.signature != material.signature
+                || previous.snippet != material.snippet
+            {
+                return Err(ContextEvidenceCollectionError::InvalidProviderResponse);
+            }
+        } else {
+            observed_sources.push(material);
+            returned_source_bytes = returned_source_bytes
+                .checked_add(physical_bytes)
+                .ok_or(ContextEvidenceCollectionError::InvalidProviderResponse)?;
         }
         if request.source_policy == SourcePolicy::Signatures && material.signature.is_none() {
             return Err(ContextEvidenceCollectionError::InvalidProviderResponse);
@@ -1203,11 +1119,173 @@ fn validate_source_output(
     Ok(())
 }
 
+fn validate_source_projection(
+    request: &ContextSourceRequest,
+    material: &ContextSourceMaterial,
+    snippet_bytes: u64,
+    signature_bytes: u64,
+) -> Result<u64, ContextEvidenceCollectionError> {
+    let projection = &material.projection;
+    let approved = material.source_ref.span();
+    let physical_bytes = projection
+        .end_byte
+        .checked_sub(projection.start_byte)
+        .ok_or(ContextEvidenceCollectionError::InvalidProviderResponse)?;
+    let invalid = || ContextEvidenceCollectionError::InvalidProviderResponse;
+    if projection.start_byte > approved.start_byte()
+        || projection.end_byte <= approved.start_byte()
+        || projection.text_bytes == 0
+        || projection.text_bytes > u64::from(request.max_bytes_per_snippet)
+        || signature_bytes > projection.text_bytes
+        || material.snippet.is_some() && snippet_bytes != projection.text_bytes
+    {
+        return Err(invalid());
+    }
+    let utf16 = projection.encoding.is_some();
+    if !utf16 && physical_bytes != projection.text_bytes
+        || utf16
+            && ([
+                projection.start_byte,
+                projection.end_byte,
+                approved.start_byte(),
+                approved.end_byte(),
+            ]
+            .into_iter()
+            .any(|byte| byte % 2 != 0)
+                || physical_bytes > projection.text_bytes.saturating_mul(2)
+                || physical_bytes < projection.text_bytes.saturating_mul(2).div_ceil(3))
+    {
+        return Err(invalid());
+    }
+    if let Some(signature) = &material.signature {
+        let signature_width = source_text_width(signature, utf16)?;
+        if signature_width > physical_bytes || utf16 && signature.contains('\0') {
+            return Err(invalid());
+        }
+        if signature.contains(['\r', '\n']) || signature.trim_start() != signature.as_str() {
+            return Err(invalid());
+        }
+        if let Some(snippet) = &material.snippet {
+            let visible = visible_approved_source(&snippet.content, material, utf16)?;
+            let declaration = visible
+                .lines()
+                .find(|line| !line.trim().is_empty())
+                .map(str::trim)
+                .ok_or_else(invalid)?;
+            let end = declaration
+                .find(['{', ';'])
+                .map_or(declaration.len(), |index| index.saturating_add(1));
+            if !declaration
+                .get(..end)
+                .is_some_and(|authored| authored.starts_with(signature))
+            {
+                return Err(invalid());
+            }
+        }
+    }
+    if let Some(snippet) = &material.snippet {
+        validate_visible_source_endpoints(&snippet.content, material, utf16)?;
+        if projection.end_byte < approved.end_byte() && !snippet.truncated {
+            return Err(invalid());
+        }
+    }
+    Ok(physical_bytes)
+}
+
+fn source_text_width(text: &str, utf16: bool) -> Result<u64, ContextEvidenceCollectionError> {
+    text.chars().try_fold(0_u64, |width, character| {
+        let size = if utf16 {
+            character.len_utf16() * 2
+        } else {
+            character.len_utf8()
+        };
+        width
+            .checked_add(
+                u64::try_from(size)
+                    .map_err(|_| ContextEvidenceCollectionError::InvalidProviderResponse)?,
+            )
+            .ok_or(ContextEvidenceCollectionError::InvalidProviderResponse)
+    })
+}
+
+fn validate_visible_source_endpoints(
+    text: &str,
+    material: &ContextSourceMaterial,
+    utf16: bool,
+) -> Result<(), ContextEvidenceCollectionError> {
+    let projection = &material.projection;
+    let approved = material.source_ref.span();
+    let invalid = || ContextEvidenceCollectionError::InvalidProviderResponse;
+    if utf16 && (text.contains('\0') || projection.start_byte == 0 && !text.starts_with('\u{feff}'))
+    {
+        return Err(invalid());
+    }
+    let mut cursor = projection.start_byte;
+    // A prefix may be exhausted in preceding context before either approved endpoint.
+    let mut start_visible =
+        approved.start_byte() > projection.end_byte || approved.start_byte() == cursor;
+    let mut end_visible =
+        approved.end_byte() > projection.end_byte || approved.end_byte() == cursor;
+    for character in text.chars() {
+        let size = if utf16 {
+            character.len_utf16() * 2
+        } else {
+            character.len_utf8()
+        };
+        cursor = cursor
+            .checked_add(u64::try_from(size).map_err(|_| invalid())?)
+            .ok_or_else(invalid)?;
+        if cursor > projection.end_byte {
+            return Err(invalid());
+        }
+        start_visible |= approved.start_byte() == cursor;
+        end_visible |= approved.end_byte() == cursor;
+    }
+    if cursor != projection.end_byte || !start_visible || !end_visible {
+        return Err(invalid());
+    }
+    Ok(())
+}
+
+fn visible_approved_source<'a>(
+    text: &'a str,
+    material: &ContextSourceMaterial,
+    utf16: bool,
+) -> Result<&'a str, ContextEvidenceCollectionError> {
+    let approved = material.source_ref.span();
+    let mut physical = material.projection.start_byte;
+    let visible_end = approved.end_byte().min(material.projection.end_byte);
+    let mut start = (physical == approved.start_byte()).then_some(0);
+    let mut end = (physical == visible_end).then_some(0);
+    for (offset, scalar) in text.char_indices() {
+        let width = if utf16 {
+            scalar.len_utf16() * 2
+        } else {
+            scalar.len_utf8()
+        };
+        physical = physical
+            .checked_add(u64::try_from(width).unwrap_or(u64::MAX))
+            .ok_or(ContextEvidenceCollectionError::InvalidProviderResponse)?;
+        let offset = offset + scalar.len_utf8();
+        if physical == approved.start_byte() {
+            start = Some(offset);
+        }
+        if physical == visible_end {
+            end = Some(offset);
+        }
+    }
+    start
+        .zip(end)
+        .and_then(|(start, end)| text.get(start..end))
+        .filter(|visible| !visible.is_empty())
+        .ok_or(ContextEvidenceCollectionError::InvalidProviderResponse)
+}
+
 fn apply_source_materials(
     planned: &mut PlannedContextPack,
     selected: &[SelectedSourceTarget],
     materials: &[ContextSourceMaterial],
-) -> BudgetCharge {
+) -> Result<BudgetCharge, ContextEvidenceCollectionError> {
     let mut shaping = BudgetCharge::default();
     for material in materials {
         let Some(selected) = selected.iter().find(|selected| {
@@ -1217,7 +1295,7 @@ fn apply_source_materials(
             continue;
         };
         let item = &mut planned.data.items[selected.item_index];
-        item.signature.clone_from(&material.signature);
+        item.signature = material.signature.clone();
         item.snippet = material.snippet.as_ref().map(|snippet| RepositorySnippet {
             source_ref: material.source_ref.clone(),
             content: snippet.content.clone(),
@@ -1229,16 +1307,31 @@ fn apply_source_materials(
         let represented_bytes = material
             .signature
             .as_ref()
-            .map_or(0, String::len)
+            .map_or(0, |text| json_string_content_bytes(text))
             .saturating_add(material.snippet.as_ref().map_or(0, |snippet| {
-                snippet.content.len().saturating_add(snippet.language.len())
+                json_string_content_bytes(&snippet.content)
+                    .saturating_add(json_string_content_bytes(&snippet.language))
             }));
-        let represented_bytes = u64::try_from(represented_bytes)
-            .unwrap_or(u64::MAX)
-            .saturating_add(SOURCE_METADATA_BYTES);
+        let metadata =
+            source_metadata::shaping_fixed(&material.source_ref, material.snippet.is_some())?;
+        let represented_bytes = represented_bytes.saturating_add(metadata.json_bytes);
         shaping.tokens = shaping.tokens.saturating_add(represented_bytes);
         shaping.json_bytes = shaping.json_bytes.saturating_add(represented_bytes);
-        shaping.memory_bytes = shaping.memory_bytes.saturating_add(represented_bytes);
+        let owned_bytes = item
+            .signature
+            .as_ref()
+            .map_or(0, String::capacity)
+            .saturating_add(item.snippet.as_ref().map_or(0, |snippet| {
+                snippet
+                    .content
+                    .capacity()
+                    .saturating_add(snippet.language.capacity())
+            }));
+        shaping.memory_bytes = shaping.memory_bytes.saturating_add(
+            u64::try_from(owned_bytes)
+                .unwrap_or(u64::MAX)
+                .saturating_add(metadata.memory_bytes),
+        );
         let item_tokens = u32::try_from(represented_bytes).unwrap_or(u32::MAX);
         item.tokens = item.tokens.saturating_add(item_tokens);
         planned.data.token_accounting.estimated_total = planned
@@ -1247,7 +1340,17 @@ fn apply_source_materials(
             .estimated_total
             .saturating_add(item_tokens);
     }
-    shaping
+    Ok(shaping)
+}
+
+fn json_string_content_bytes(text: &str) -> u64 {
+    text.bytes().fold(0_u64, |bytes, byte| {
+        bytes.saturating_add(match byte {
+            b'"' | b'\\' | b'\n' | b'\r' | b'\t' | 8 | 12 => 2,
+            0..=31 => 6,
+            _ => 1,
+        })
+    })
 }
 
 fn source_completeness(
@@ -3112,33 +3215,40 @@ where
 mod tests {
     use std::{
         collections::BTreeSet,
+        sync::{
+            Arc,
+            atomic::{AtomicBool, AtomicUsize, Ordering},
+        },
         time::{Duration, Instant},
     };
 
     use super::{
-        ContextPackPlanRequest, ContextPackPlanner, ContextPackPlanningError,
-        DefaultContextPackPlanner, EvidenceCandidate, EvidenceRole, MAX_PACK_ITEMS,
-        MAX_PACK_TOKENS, MIN_PACK_TOKENS, PackError, PackObjective, SourceMaterializationPlan,
-        affordable_source_materialization, append_role_followups, bounded_source_ref,
-        context_pack_completeness, context_pack_id, contract_role, evaluate_role_coverage,
-        objective_for_task, optimize_admitted_pack, optimize_context_page, optimize_pack,
-        optimize_pack_with_diversity, reconcile_final_envelope,
-        reconcile_final_envelope_with_budget, resumable_completeness, role_coverage_completeness,
-        source_materialization_limits, source_materialization_reservation,
-        source_shaping_reservation, usage_summary, validate_source_output,
+        ContextEvidencePlanningError, ContextPackPlanRequest, ContextPackPlanner,
+        ContextPackPlanningError, DefaultContextPackPlanner, EvidenceCandidate, EvidenceRole,
+        MAX_PACK_ITEMS, MAX_PACK_TOKENS, MIN_PACK_TOKENS, PackError, PackObjective,
+        SourceMaterializationPlan, append_role_followups, context_pack_completeness,
+        context_pack_id, contract_role, evaluate_role_coverage, objective_for_task,
+        optimize_admitted_pack, optimize_context_page, optimize_pack, optimize_pack_with_diversity,
+        reconcile_final_envelope, reconcile_final_envelope_with_budget, resumable_completeness,
+        role_coverage_completeness, selected_source_targets, source_materialization_limits,
+        usage_summary, validate_source_output,
     };
     use crate::{
         context_evidence::{
-            ContextEvidenceCallContext, ContextEvidenceCollectionError, ContextEvidencePort,
-            ContextEvidencePortError, ContextEvidencePortErrorKind,
-            ContextEvidenceProviderRegistry, ContextSourceMaterial, ContextSourceOutput,
-            ContextSourceRequest, ContextSourceSnippet, ContextSourceTarget,
-            EvidenceCandidateDraft, EvidenceProvenance, EvidenceProvider,
-            EvidenceProviderInvocation, EvidenceProviderObservation, EvidenceProviderOmission,
-            EvidenceProviderOmissionReason, EvidenceProviderOutput, TypedEvidenceCandidate,
+            ContextEvidenceCallContext, ContextEvidenceCollectionError, ContextEvidenceCollector,
+            ContextEvidencePort, ContextEvidencePortError, ContextEvidencePortErrorKind,
+            ContextEvidenceProviderRegistry, ContextSourceMaterial,
+            ContextSourceMetadataQuoteOutput, ContextSourceMetadataQuoteRequest,
+            ContextSourceOutput, ContextSourceProjection, ContextSourceRequest,
+            ContextSourceSnippet, ContextSourceTarget, EvidenceCandidateDraft, EvidenceProvenance,
+            EvidenceProvider, EvidenceProviderInvocation, EvidenceProviderObservation,
+            EvidenceProviderOmission, EvidenceProviderOmissionReason, EvidenceProviderOutput,
+            TypedEvidenceCandidate,
         },
         context_pack_request::CanonicalContextPackRequest,
-        policy::{BudgetCharge, CancellationSignal, NeverCancelled},
+        policy::{
+            BudgetCharge, BudgetResource, CancellationSignal, ExecutionPolicyError, NeverCancelled,
+        },
         port::AgentPortFuture,
     };
     use proptest::prelude::*;
@@ -3190,7 +3300,7 @@ mod tests {
                 SourceSpan::new(FileId::from_bytes([file_byte; 20]), 0, 8_192)
                     .expect("fixture source span"),
                 ContentHash::from_bytes([file_byte; 32]),
-                None,
+                Some(LineRange::new(1, 256).expect("fixture line hint")),
             );
             // A single materializable item isolates response-profile shaping
             // from the independent target-count tradeoff in the shared budget.
@@ -3223,6 +3333,16 @@ mod tests {
             Box::pin(async move { Ok(output) })
         }
 
+        fn quote_source_metadata(
+            &self,
+            request: ContextSourceMetadataQuoteRequest,
+            _context: ContextEvidenceCallContext<C>,
+        ) -> AgentPortFuture<Result<ContextSourceMetadataQuoteOutput, ContextEvidencePortError>>
+        {
+            let output = super::source_metadata::tests::fixture_quote(&request);
+            Box::pin(async move { Ok(output) })
+        }
+
         fn materialize_source(
             &self,
             request: ContextSourceRequest,
@@ -3236,16 +3356,35 @@ mod tests {
                 .map(|target| ContextSourceMaterial {
                     candidate_id: target.candidate_id.clone(),
                     source_ref: target.source_ref.clone(),
+                    projection: ContextSourceProjection {
+                        start_byte: target.source_ref.span().start_byte(),
+                        end_byte: target.source_ref.span().start_byte()
+                            + if request.include_snippets {
+                                u64::from(request.max_bytes_per_snippet)
+                            } else {
+                                20
+                            },
+                        encoding: None,
+                        text_bytes: if request.include_snippets {
+                            u64::from(request.max_bytes_per_snippet)
+                        } else {
+                            20
+                        },
+                    },
                     signature: Some("fn profile_fixture()".to_owned()),
                     snippet: request.include_snippets.then(|| ContextSourceSnippet {
-                        content: "x".repeat(bytes),
+                        content: format!("fn profile_fixture()\n{}", "x".repeat(bytes - 21)),
                         language: "rust".to_owned(),
-                        truncated: false,
+                        truncated: true,
                     }),
                 })
                 .collect::<Vec<_>>();
-            let total_bytes = u64::from(request.max_bytes_per_snippet)
-                .saturating_mul(u64::try_from(materials.len()).unwrap_or(u64::MAX));
+            let total_bytes = if request.include_snippets {
+                u64::from(request.max_bytes_per_snippet)
+            } else {
+                20
+            }
+            .saturating_mul(u64::try_from(materials.len()).unwrap_or(u64::MAX));
             let output = ContextSourceOutput {
                 repository: request.repository,
                 generation: request.generation,
@@ -3263,8 +3402,250 @@ mod tests {
         }
     }
 
+    #[derive(Debug, Clone, Default)]
+    struct SourceReceiptCancellation(Arc<AtomicBool>);
+
+    impl CancellationSignal for SourceReceiptCancellation {
+        fn is_cancelled(&self) -> bool {
+            self.0.load(Ordering::SeqCst)
+        }
+    }
+
+    #[derive(Debug)]
+    struct InterruptedSourcePort {
+        cancellation: SourceReceiptCancellation,
+        source_calls: Arc<AtomicUsize>,
+        failed_response: bool,
+        overage: bool,
+    }
+
+    impl ContextEvidencePort<SourceReceiptCancellation> for InterruptedSourcePort {
+        fn quote_source_metadata(
+            &self,
+            request: ContextSourceMetadataQuoteRequest,
+            context: ContextEvidenceCallContext<SourceReceiptCancellation>,
+        ) -> AgentPortFuture<Result<ContextSourceMetadataQuoteOutput, ContextEvidencePortError>>
+        {
+            ProfileSourcePort.quote_source_metadata(request, context)
+        }
+
+        fn retrieve(
+            &self,
+            invocation: EvidenceProviderInvocation,
+            context: ContextEvidenceCallContext<SourceReceiptCancellation>,
+        ) -> AgentPortFuture<Result<EvidenceProviderOutput, ContextEvidencePortError>> {
+            ProfileSourcePort.retrieve(invocation, context)
+        }
+
+        fn materialize_source(
+            &self,
+            request: ContextSourceRequest,
+            context: ContextEvidenceCallContext<SourceReceiptCancellation>,
+        ) -> AgentPortFuture<Result<ContextSourceOutput, ContextEvidencePortError>> {
+            self.source_calls.fetch_add(1, Ordering::SeqCst);
+            let reserved_rows = context.reservation().rows;
+            let response = ProfileSourcePort.materialize_source(request, context);
+            let cancellation = self.cancellation.clone();
+            let failed_response = self.failed_response;
+            let overage = self.overage;
+            Box::pin(async move {
+                let mut output = response.await?;
+                if overage {
+                    output.usage.rows = reserved_rows + 1;
+                }
+                cancellation.0.store(true, Ordering::SeqCst);
+                if failed_response {
+                    Err(ContextEvidencePortError {
+                        kind: ContextEvidencePortErrorKind::Unavailable,
+                        usage: output.usage,
+                    })
+                } else {
+                    Ok(output)
+                }
+            })
+        }
+    }
+
     #[derive(Debug, Clone, Copy)]
     struct UnsupportedEvidencePort;
+
+    #[derive(Debug)]
+    struct DefaultQuoteSourcePort(Arc<AtomicUsize>);
+
+    #[tokio::test]
+    async fn source_metadata_short_signature_does_not_retain_previous_capacity() {
+        let mut input = context_input(SymbolId::from_bytes([3; 20]));
+        input.token_budget = 20_000;
+        input.source_policy = Some(SourcePolicy::Signatures);
+        let request = CanonicalContextPackRequest::new(
+            &input,
+            RepositoryId::from_bytes([1; 16]),
+            GenerationId::from_bytes([2; 20]),
+        )
+        .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(1);
+        let registry = ContextEvidenceProviderRegistry.plan(&request).unwrap();
+        let corpus = ContextEvidenceCollector
+            .collect(
+                &ProfileSourcePort,
+                &request,
+                &registry,
+                NeverCancelled,
+                deadline,
+            )
+            .await
+            .unwrap();
+        let mut planned = DefaultContextPackPlanner
+            .plan_corpus(&request, &corpus, &NeverCancelled)
+            .unwrap();
+        let selected = selected_source_targets(&planned, &corpus);
+        assert_eq!(selected.len(), 1);
+        let target = selected[0].target.clone();
+        let mut old = String::with_capacity(2048);
+        old.push_str(&"s".repeat(1024));
+        planned.data.items[selected[0].item_index].signature = Some(old);
+        let source_request = ContextSourceRequest {
+            repository: request.repository(),
+            generation: request.generation(),
+            source_policy: SourcePolicy::Signatures,
+            include_snippets: false,
+            max_bytes_per_snippet: 64,
+            targets: vec![target.clone()],
+        };
+        let output = ProfileSourcePort
+            .materialize_source(
+                source_request.clone(),
+                ContextEvidenceCallContext::new(NeverCancelled, deadline, BudgetCharge::default()),
+            )
+            .await
+            .unwrap();
+        validate_source_output(&source_request, &output).unwrap();
+        let fixed = super::source_metadata::shaping_fixed(&target.source_ref, false).unwrap();
+        let shaping =
+            super::apply_source_materials(&mut planned, &selected, &output.materials).unwrap();
+        let signature = planned.data.items[selected[0].item_index]
+            .signature
+            .as_ref()
+            .unwrap();
+        assert_eq!(signature, "fn profile_fixture()");
+        assert_eq!(
+            shaping.memory_bytes,
+            fixed.memory_bytes + u64::try_from(signature.capacity()).unwrap()
+        );
+        assert!(shaping.memory_bytes <= fixed.memory_bytes + 2 * 64);
+        assert_eq!(
+            planned.data.items[selected[0].item_index]
+                .source_ref
+                .as_ref(),
+            Some(&target.source_ref)
+        );
+    }
+
+    #[tokio::test]
+    async fn source_metadata_default_unsupported_preserves_selected_full_refs_without_read() {
+        let mut input = context_input(SymbolId::from_bytes([3; 20]));
+        input.token_budget = 20_000;
+        input.source_policy = Some(SourcePolicy::FocusedSnippets);
+        let request = CanonicalContextPackRequest::new(
+            &input,
+            RepositoryId::from_bytes([1; 16]),
+            GenerationId::from_bytes([2; 20]),
+        )
+        .unwrap();
+        let provider_plan = ContextEvidenceProviderRegistry.plan(&request).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(1);
+        let corpus = ContextEvidenceCollector
+            .collect(
+                &ProfileSourcePort,
+                &request,
+                &provider_plan,
+                NeverCancelled,
+                deadline,
+            )
+            .await
+            .unwrap();
+        let before = DefaultContextPackPlanner
+            .plan_corpus(&request, &corpus, &NeverCancelled)
+            .unwrap();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let planned = DefaultContextPackPlanner
+            .collect_and_plan(
+                &DefaultQuoteSourcePort(Arc::clone(&calls)),
+                &request,
+                NeverCancelled,
+                deadline,
+            )
+            .await
+            .unwrap();
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+        assert_eq!(planned.data.items, before.data.items);
+        assert_eq!(planned.usage, before.usage);
+        assert!(
+            planned
+                .data
+                .items
+                .iter()
+                .any(|item| item.source_ref.is_some())
+        );
+        assert!(
+            before
+                .data
+                .items
+                .iter()
+                .any(|item| { item.source_ref.is_none() && item.signature.is_some() }),
+            "the fixture retains first-stage identity presentation"
+        );
+        assert!(planned.data.items.iter().all(|item| item.snippet.is_none()));
+        let before_targets = selected_source_targets(&before, &corpus)
+            .into_iter()
+            .map(|selected| selected.target)
+            .collect::<Vec<_>>();
+        let after_targets = selected_source_targets(&planned, &corpus)
+            .into_iter()
+            .map(|selected| selected.target)
+            .collect::<Vec<_>>();
+        assert!(!before_targets.is_empty());
+        assert_eq!(
+            after_targets, before_targets,
+            "unsupported quotes preserve candidate identity and full approved references"
+        );
+        assert_eq!(
+            planned.data.structure.reading_order,
+            before.data.structure.reading_order
+        );
+        assert!(
+            planned
+                .data
+                .omitted
+                .iter()
+                .any(|omission| omission.reason.as_str() == "source_metadata_unsupported")
+        );
+        assert_ne!(planned.completeness.state, CompletenessState::Complete);
+    }
+
+    impl ContextEvidencePort<NeverCancelled> for DefaultQuoteSourcePort {
+        fn retrieve(
+            &self,
+            invocation: EvidenceProviderInvocation,
+            context: ContextEvidenceCallContext<NeverCancelled>,
+        ) -> AgentPortFuture<Result<EvidenceProviderOutput, ContextEvidencePortError>> {
+            ProfileSourcePort.retrieve(invocation, context)
+        }
+
+        fn materialize_source(
+            &self,
+            _request: ContextSourceRequest,
+            _context: ContextEvidenceCallContext<NeverCancelled>,
+        ) -> AgentPortFuture<Result<ContextSourceOutput, ContextEvidencePortError>> {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            Box::pin(async {
+                Err(ContextEvidencePortError {
+                    kind: ContextEvidencePortErrorKind::Unavailable,
+                    usage: BudgetCharge::default(),
+                })
+            })
+        }
+    }
 
     impl<C> ContextEvidencePort<C> for UnsupportedEvidencePort
     where
@@ -3366,16 +3747,122 @@ mod tests {
         }
     }
 
-    #[test]
-    fn source_materialization_refs_use_byte_identity_without_line_metadata() {
+    #[tokio::test]
+    async fn source_materialization_interruption_admits_received_work_before_cancellation() {
+        for failed_response in [false, true] {
+            let mut input = context_input(SymbolId::from_bytes([3; 20]));
+            input.token_budget = 20_000;
+            input.source_policy = Some(SourcePolicy::Signatures);
+            let request = CanonicalContextPackRequest::new(
+                &input,
+                RepositoryId::from_bytes([1; 16]),
+                GenerationId::from_bytes([2; 20]),
+            )
+            .unwrap();
+            let cancellation = SourceReceiptCancellation::default();
+            let source_calls = Arc::new(AtomicUsize::new(0));
+            let port = InterruptedSourcePort {
+                cancellation: cancellation.clone(),
+                source_calls: Arc::clone(&source_calls),
+                failed_response,
+                overage: true,
+            };
+
+            let result = DefaultContextPackPlanner
+                .collect_and_plan(
+                    &port,
+                    &request,
+                    cancellation,
+                    Instant::now() + Duration::from_secs(1),
+                )
+                .await;
+
+            assert_eq!(
+                result,
+                Err(ContextEvidencePlanningError::Planning(
+                    ContextPackPlanningError::Policy(ExecutionPolicyError::BudgetExceeded {
+                        resource: BudgetResource::Rows,
+                    }),
+                )),
+            );
+            assert_eq!(source_calls.load(Ordering::SeqCst), 1);
+        }
+    }
+
+    #[tokio::test]
+    async fn source_materialization_interruption_preserves_typed_stop_after_receipt() {
+        for failed_response in [false, true] {
+            let mut input = context_input(SymbolId::from_bytes([3; 20]));
+            input.token_budget = 20_000;
+            input.source_policy = Some(SourcePolicy::Signatures);
+            let request = CanonicalContextPackRequest::new(
+                &input,
+                RepositoryId::from_bytes([1; 16]),
+                GenerationId::from_bytes([2; 20]),
+            )
+            .unwrap();
+            let cancellation = SourceReceiptCancellation::default();
+            let source_calls = Arc::new(AtomicUsize::new(0));
+            let port = InterruptedSourcePort {
+                cancellation: cancellation.clone(),
+                source_calls: Arc::clone(&source_calls),
+                failed_response,
+                overage: false,
+            };
+
+            let result = DefaultContextPackPlanner
+                .collect_and_plan(
+                    &port,
+                    &request,
+                    cancellation,
+                    Instant::now() + Duration::from_secs(1),
+                )
+                .await;
+
+            assert_eq!(
+                result,
+                Err(ContextEvidencePlanningError::Collection(
+                    ContextEvidenceCollectionError::Cancelled,
+                )),
+            );
+            assert_eq!(source_calls.load(Ordering::SeqCst), 1);
+        }
+    }
+
+    #[tokio::test]
+    async fn source_materialization_refs_preserve_full_approved_span_and_line_hint() {
         let generation = GenerationId::from_bytes([2; 20]);
-        let source = explanation(SymbolId::from_bytes([3; 20]), generation).definition;
-
-        let bounded = bounded_source_ref(&source, 20);
-
-        assert_eq!(bounded.span().start_byte(), source.span().start_byte());
-        assert_eq!(bounded.span().end_byte(), 30);
-        assert_eq!(bounded.line_hint(), None);
+        let input = context_input(SymbolId::from_bytes([3; 20]));
+        let request =
+            CanonicalContextPackRequest::new(&input, RepositoryId::from_bytes([1; 16]), generation)
+                .unwrap();
+        let provider_plan = ContextEvidenceProviderRegistry.plan(&request).unwrap();
+        let corpus = ContextEvidenceCollector
+            .collect(
+                &ProfileSourcePort,
+                &request,
+                &provider_plan,
+                NeverCancelled,
+                Instant::now() + Duration::from_secs(1),
+            )
+            .await
+            .unwrap();
+        let planned = DefaultContextPackPlanner
+            .plan_corpus(&request, &corpus, &NeverCancelled)
+            .unwrap();
+        let selected = selected_source_targets(&planned, &corpus);
+        assert_eq!(selected.len(), 1);
+        let approved = corpus
+            .candidates
+            .iter()
+            .flat_map(|candidate| candidate.source_refs())
+            .find(|source| source.span().end_byte() == 8192)
+            .unwrap();
+        assert_eq!(&selected[0].target.source_ref, approved);
+        assert_eq!(
+            selected[0].target.source_ref.line_hint(),
+            Some(LineRange::new(1, 256).unwrap())
+        );
     }
 
     #[test]
@@ -4296,6 +4783,12 @@ mod tests {
         let signature_material = ContextSourceMaterial {
             candidate_id: candidate.id().clone(),
             source_ref: source_ref.clone(),
+            projection: ContextSourceProjection {
+                start_byte: source_ref.span().start_byte(),
+                end_byte: source_ref.span().start_byte() + u64::try_from(signature.len()).unwrap(),
+                encoding: None,
+                text_bytes: u64::try_from(signature.len()).unwrap(),
+            },
             signature: Some(signature.clone()),
             snippet: None,
         };
@@ -4341,58 +4834,72 @@ mod tests {
             repository: canonical.repository(),
             generation: canonical.generation(),
             materials: vec![ContextSourceMaterial {
+                signature: Some("fn parse_request() {".to_owned()),
+                projection: ContextSourceProjection {
+                    start_byte: source_ref.span().start_byte(),
+                    end_byte: source_ref.span().start_byte()
+                        + u64::try_from(snippet.len()).unwrap(),
+                    encoding: None,
+                    text_bytes: u64::try_from(snippet.len()).unwrap(),
+                },
                 snippet: Some(ContextSourceSnippet {
                     content: snippet.clone(),
                     language: "rust".to_owned(),
-                    truncated: false,
+                    truncated: true,
                 }),
                 ..signature_material
             }],
             completeness: ResultCompleteness::complete(),
             usage: BudgetCharge {
                 results: 1,
-                source_bytes: u64::try_from(snippet.len().max(signature.len()))
-                    .expect("fixture length fits"),
+                source_bytes: u64::try_from(snippet.len()).expect("fixture length fits"),
                 ..BudgetCharge::default()
             },
         };
         assert!(validate_source_output(&focused_request, &focused_output).is_ok());
 
-        let shaping = source_shaping_reservation(1, 2_048, true);
+        let bounds = super::source_metadata::tests::fixture_bounds(2, true);
+        let shaping = bounds.shaping(1, 2_048, true).unwrap();
+        let metadata = super::source_metadata::shaping_fixed(
+            &super::source_metadata::tests::fixture_request(1, true).targets[0].source_ref,
+            true,
+        )
+        .unwrap();
         assert_eq!(
             shaping.json_bytes,
-            2_048
-                + u64::from(super::SIGNATURE_BYTES)
-                + super::SOURCE_LANGUAGE_BYTES
-                + super::SOURCE_METADATA_BYTES,
+            (2_048 + u64::from(super::SIGNATURE_BYTES) + super::SOURCE_LANGUAGE_BYTES)
+                * super::JSON_ESCAPE_EXPANSION
+                + metadata.json_bytes,
             "the serialized snippet, signature, language, and metadata are all reserved"
         );
-        let provider = super::source_provider_reservation(1, 2_048);
+        let provider = bounds.provider(1, 2_048).unwrap();
         assert_eq!(
             provider.tokens, provider.json_bytes,
             "provider tokens retain the authoritative UTF-8 byte upper bound"
         );
-        let exact_capacity = source_materialization_reservation(1, 2_048, true);
+        let exact_capacity = bounds.combined(1, 2_048, true).unwrap();
         assert_eq!(
-            affordable_source_materialization(exact_capacity, 2, 2_048, true),
+            bounds.affordable(exact_capacity, 2_048, true),
             SourceMaterializationPlan {
                 target_count: 1,
                 max_bytes_per_snippet: 2_048,
             }
         );
-        let minimum_capacity =
-            source_materialization_reservation(1, super::MIN_SOURCE_MATERIAL_BYTES, true);
+        let minimum_capacity = bounds
+            .combined(1, super::MIN_SOURCE_MATERIAL_BYTES, true)
+            .unwrap();
         assert_eq!(
-            affordable_source_materialization(minimum_capacity, 2, 2_048, true),
+            bounds.affordable(minimum_capacity, 2_048, true),
             SourceMaterializationPlan {
                 target_count: 1,
                 max_bytes_per_snippet: super::MIN_SOURCE_MATERIAL_BYTES,
             }
         );
-        let two_target_capacity =
-            source_materialization_reservation(2, super::MIN_SOURCE_MATERIAL_BYTES, true);
+        let two_target_capacity = bounds
+            .combined(2, super::MIN_SOURCE_MATERIAL_BYTES, true)
+            .unwrap();
         assert_eq!(
-            affordable_source_materialization(two_target_capacity, 2, 2_048, true),
+            bounds.affordable(two_target_capacity, 2_048, true),
             SourceMaterializationPlan {
                 target_count: 2,
                 max_bytes_per_snippet: super::MIN_SOURCE_MATERIAL_BYTES,
@@ -4404,7 +4911,7 @@ mod tests {
             ..minimum_capacity
         };
         assert_eq!(
-            affordable_source_materialization(insufficient, 1, 2_048, true),
+            bounds.affordable(insufficient, 2_048, true),
             SourceMaterializationPlan {
                 target_count: 0,
                 max_bytes_per_snippet: 0,
@@ -4419,8 +4926,316 @@ mod tests {
         );
     }
 
+    fn projection_fixture(
+        text: &str,
+        encoding: Option<rootlight_ir::SourceTextEncoding>,
+        label: &str,
+    ) -> (ContextSourceRequest, ContextSourceOutput) {
+        let repository = RepositoryId::from_bytes([1; 16]);
+        let generation = GenerationId::from_bytes([5; 20]);
+        let symbol = SymbolId::from_bytes([2; 20]);
+        let canonical =
+            CanonicalContextPackRequest::new(&context_input(symbol), repository, generation)
+                .unwrap();
+        let invocation = ContextEvidenceProviderRegistry
+            .plan(&canonical)
+            .unwrap()
+            .invocations()[0]
+            .clone();
+        let source = SourceRef::new(
+            repository,
+            generation,
+            SourceSpan::new(FileId::from_bytes([3; 20]), 2, 100).unwrap(),
+            ContentHash::from_bytes([4; 32]),
+            Some(LineRange::new(1, 4).unwrap()),
+        );
+        let candidate = TypedEvidenceCandidate::from_draft(
+            repository,
+            generation,
+            EvidenceCandidateDraft {
+                repository,
+                generation,
+                invocation: invocation.id().clone(),
+                provider: invocation.provider(),
+                role: invocation.role(),
+                provenance: EvidenceProvenance::Graph,
+                symbol_id: Some(symbol),
+                identity: label.to_owned(),
+                relevance: 900,
+                confidence: 900,
+                cost: BudgetCharge {
+                    results: 1,
+                    tokens: 1,
+                    ..BudgetCharge::default()
+                },
+                source_refs: vec![source.clone()],
+                dependencies: Vec::new(),
+            },
+        )
+        .unwrap();
+        let text_bytes = u64::try_from(text.len()).unwrap();
+        let physical_bytes = if encoding.is_some() {
+            u64::try_from(text.encode_utf16().count() * 2).unwrap()
+        } else {
+            text_bytes
+        };
+        let request = ContextSourceRequest {
+            repository,
+            generation,
+            source_policy: SourcePolicy::FocusedSnippets,
+            include_snippets: true,
+            max_bytes_per_snippet: u32::try_from(text.len().max(1)).unwrap(),
+            targets: vec![ContextSourceTarget {
+                candidate_id: candidate.id().clone(),
+                source_ref: source.clone(),
+            }],
+        };
+        let output = ContextSourceOutput {
+            repository,
+            generation,
+            materials: vec![ContextSourceMaterial {
+                candidate_id: candidate.id().clone(),
+                source_ref: source,
+                projection: ContextSourceProjection {
+                    start_byte: 2,
+                    end_byte: 2 + physical_bytes,
+                    encoding,
+                    text_bytes,
+                },
+                signature: None,
+                snippet: Some(ContextSourceSnippet {
+                    content: text.to_owned(),
+                    language: "rust".to_owned(),
+                    truncated: true,
+                }),
+            }],
+            completeness: ResultCompleteness::complete(),
+            usage: BudgetCharge {
+                results: 1,
+                source_bytes: physical_bytes,
+                ..BudgetCharge::default()
+            },
+        };
+        (request, output)
+    }
+
+    #[test]
+    fn source_projection_charges_exact_physical_width_and_rejects_one_under() {
+        for encoding in [
+            None,
+            Some(rootlight_ir::SourceTextEncoding::Utf16Le),
+            Some(rootlight_ir::SourceTextEncoding::Utf16Be),
+        ] {
+            for text in ["☃", "a", "🧭"] {
+                let (request, mut output) = projection_fixture(text, encoding, "projection-fit");
+                let expected = if encoding.is_some() {
+                    text.encode_utf16().count() * 2
+                } else {
+                    text.len()
+                };
+                assert_eq!(output.usage.source_bytes, u64::try_from(expected).unwrap());
+                assert!(validate_source_output(&request, &output).is_ok());
+                output.usage.source_bytes -= 1;
+                assert_eq!(
+                    validate_source_output(&request, &output),
+                    Err(ContextEvidenceCollectionError::InvalidProviderResponse)
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn source_projection_deduplicates_work_only_for_identical_material() {
+        let (mut request, mut output) = projection_fixture(
+            "☃",
+            Some(rootlight_ir::SourceTextEncoding::Utf16Le),
+            "first-site",
+        );
+        let (second_request, second_output) = projection_fixture(
+            "☃",
+            Some(rootlight_ir::SourceTextEncoding::Utf16Le),
+            "second-site",
+        );
+        assert_ne!(
+            request.targets[0].candidate_id,
+            second_request.targets[0].candidate_id
+        );
+        request.targets.extend(second_request.targets);
+        output.materials.extend(second_output.materials);
+        assert_eq!(output.usage.source_bytes, 2);
+        assert_eq!(output.usage.results, 1);
+        assert!(validate_source_output(&request, &output).is_ok());
+        output.materials[1].snippet.as_mut().unwrap().content = "éx".to_owned();
+        assert!(validate_source_output(&request, &output).is_err());
+        output.materials[1] = output.materials[0].clone();
+        output.materials[1].candidate_id = request.targets[1].candidate_id.clone();
+        output.usage.source_bytes = 1;
+        assert!(validate_source_output(&request, &output).is_err());
+    }
+
+    #[test]
+    fn source_projection_rejects_blank_material_but_accepts_truthful_omission() {
+        let (request, mut empty) = projection_fixture(
+            "",
+            Some(rootlight_ir::SourceTextEncoding::Utf16Le),
+            "empty-site",
+        );
+        assert!(validate_source_output(&request, &empty).is_err());
+        empty.materials.clear();
+        empty.usage = BudgetCharge::default();
+        assert!(validate_source_output(&request, &empty).is_err());
+        empty.completeness = super::snippet_truncation_completeness().unwrap();
+        assert!(validate_source_output(&request, &empty).is_ok());
+    }
+
+    #[test]
+    fn source_projection_rejects_visible_split_surrogate_endpoints() {
+        for encoding in [
+            rootlight_ir::SourceTextEncoding::Utf16Le,
+            rootlight_ir::SourceTextEncoding::Utf16Be,
+        ] {
+            let (mut request, mut output) = projection_fixture("🧭", Some(encoding), "split-site");
+            let source = &request.targets[0].source_ref;
+            let split = SourceRef::new(
+                source.repository(),
+                source.generation(),
+                SourceSpan::new(source.span().file(), 2, 4).unwrap(),
+                source.content_hash(),
+                source.line_hint(),
+            );
+            request.targets[0].source_ref = split.clone();
+            output.materials[0].source_ref = split;
+            assert!(validate_source_output(&request, &output).is_err());
+        }
+    }
+
+    #[test]
+    fn source_projection_signature_only_preserves_codec_and_text_bounds() {
+        for encoding in [
+            None,
+            Some(rootlight_ir::SourceTextEncoding::Utf16Le),
+            Some(rootlight_ir::SourceTextEncoding::Utf16Be),
+        ] {
+            let (mut request, mut output) = projection_fixture("☃", encoding, "signature-site");
+            request.source_policy = SourcePolicy::Signatures;
+            request.include_snippets = false;
+            output.materials[0].snippet = None;
+            output.materials[0].signature = Some("☃".to_owned());
+            assert!(validate_source_output(&request, &output).is_ok());
+            output.materials[0].signature = Some("longer".to_owned());
+            assert!(validate_source_output(&request, &output).is_err());
+        }
+    }
+
+    #[test]
+    fn source_projection_rejects_codec_width_and_text_count_lies() {
+        for encoding in [
+            rootlight_ir::SourceTextEncoding::Utf16Le,
+            rootlight_ir::SourceTextEncoding::Utf16Be,
+        ] {
+            let (request, output) = projection_fixture("☃", Some(encoding), "codec-geometry");
+            let mut tampered = output.clone();
+            tampered.materials[0].projection.text_bytes += 1;
+            assert!(validate_source_output(&request, &tampered).is_err());
+            tampered = output.clone();
+            tampered.materials[0].projection.end_byte += 2;
+            tampered.usage.source_bytes += 2;
+            assert!(
+                validate_source_output(&request, &tampered).is_err(),
+                "even alignment alone does not authenticate physical scalar width"
+            );
+            let (request, output) = projection_fixture("\0", Some(encoding), "utf16-nul");
+            assert!(validate_source_output(&request, &output).is_err());
+        }
+        let (request, output) = projection_fixture("\0", None, "utf8-nul");
+        assert!(validate_source_output(&request, &output).is_ok());
+    }
+
+    #[test]
+    fn source_reservations_cover_physical_text_escape_and_transport_batches() {
+        for targets in [1_u64, 32, 33, 64] {
+            let bounds = super::source_metadata::tests::fixture_bounds(
+                usize::try_from(targets).unwrap(),
+                true,
+            );
+            let reservation = bounds
+                .provider(usize::try_from(targets).unwrap(), 64)
+                .unwrap();
+            let text = targets * 64;
+            let physical = 2 * text;
+            let fixed = targets * 2048;
+            let serialized = 6 * text + fixed;
+            assert_eq!(reservation.source_bytes, physical);
+            assert_eq!(reservation.json_bytes, serialized);
+            assert_eq!(reservation.tokens, serialized);
+            assert_eq!(
+                reservation.memory_bytes,
+                serialized + physical + text + fixed
+            );
+            assert_eq!(reservation.traversal_facts, targets * 10);
+        }
+        let controls = "\0\u{1}\u{1f}\"\\\n\r\t\u{8}\u{c}☃🧭";
+        let serialized = serde_json::to_string(controls).unwrap();
+        assert_eq!(
+            super::json_string_content_bytes(controls),
+            u64::try_from(serialized.len() - 2).unwrap()
+        );
+        assert!(
+            super::json_string_content_bytes(controls)
+                <= 6 * u64::try_from(controls.len()).unwrap()
+        );
+    }
+
+    #[test]
+    fn source_projection_signature_uses_visible_approved_selection_not_context() {
+        let context = "prior();\r\n";
+        let text = format!("{context}fn selected() {{\r\n🧭body\r\n}}");
+        for encoding in [
+            None,
+            Some(rootlight_ir::SourceTextEncoding::Utf16Le),
+            Some(rootlight_ir::SourceTextEncoding::Utf16Be),
+        ] {
+            let (mut request, mut output) =
+                projection_fixture(&text, encoding, "context-signature");
+            let previous = &request.targets[0].source_ref;
+            let context_width = if encoding.is_some() {
+                context.encode_utf16().count() * 2
+            } else {
+                context.len()
+            };
+            let approved = SourceRef::new(
+                previous.repository(),
+                previous.generation(),
+                SourceSpan::new(
+                    previous.span().file(),
+                    2 + u64::try_from(context_width).unwrap(),
+                    output.materials[0].projection.end_byte,
+                )
+                .unwrap(),
+                previous.content_hash(),
+                previous.line_hint(),
+            );
+            request.targets[0].source_ref = approved.clone();
+            output.materials[0].source_ref = approved;
+            output.materials[0].signature = Some("fn selected() {".to_owned());
+            assert!(validate_source_output(&request, &output).is_ok());
+            output.materials[0].signature = Some("prior();".to_owned());
+            assert!(validate_source_output(&request, &output).is_err());
+            output.materials[0].signature = None;
+            let prefix = output.materials[0].snippet.as_mut().unwrap();
+            prefix.content = context.to_owned();
+            output.materials[0].projection.text_bytes = u64::try_from(context.len()).unwrap();
+            output.materials[0].projection.end_byte =
+                request.targets[0].source_ref.span().start_byte();
+            assert!(
+                validate_source_output(&request, &output).is_err(),
+                "preceding-context-only material must be omitted rather than published"
+            );
+        }
+    }
+
     #[tokio::test]
-    async fn standard_and_evidence_profiles_change_live_snippet_output_only() {
+    async fn standard_and_evidence_profiles_preserve_identity_under_live_source_budget() {
         let repository = RepositoryId::from_bytes([1; 16]);
         let generation = GenerationId::from_bytes([5; 20]);
         let plan_for_profile = |profile| {
@@ -4457,6 +5272,39 @@ mod tests {
         };
         let standard_request = plan_for_profile(ResponseProfile::Standard);
         let evidence_request = plan_for_profile(ResponseProfile::Evidence);
+        let registry = ContextEvidenceProviderRegistry
+            .plan(&standard_request)
+            .unwrap();
+        let corpus = ContextEvidenceCollector
+            .collect(
+                &ProfileSourcePort,
+                &standard_request,
+                &registry,
+                NeverCancelled,
+                Instant::now() + Duration::from_secs(1),
+            )
+            .await
+            .expect("pre-source corpus is collected");
+        let before_source = DefaultContextPackPlanner
+            .plan_corpus(&standard_request, &corpus, &NeverCancelled)
+            .expect("pre-source pack is planned");
+        // The port declares its fixed transport bound; shaping counts the full
+        // selected reference rather than guessing a path or metadata width.
+        let target = before_source.data.items[0].source_ref.as_ref().unwrap();
+        let metadata = super::source_metadata::shaping_fixed(target, true).unwrap();
+        let fixed_tokens = 2048 + 6 * super::SOURCE_LANGUAGE_BYTES + metadata.json_bytes;
+        let remaining_tokens = 20_000 - before_source.usage.tokens - 1;
+        let expected_bytes = (remaining_tokens - fixed_tokens) / 18;
+        assert!((64..1_024).contains(&expected_bytes));
+        assert!(18 * (expected_bytes + 1) + fixed_tokens > remaining_tokens);
+        assert_eq!(
+            source_materialization_limits(SourcePolicy::EvidenceHeavy, ResponseProfile::Standard),
+            (true, 4_096)
+        );
+        assert_eq!(
+            source_materialization_limits(SourcePolicy::EvidenceHeavy, ResponseProfile::Evidence),
+            (true, 8_192)
+        );
         let standard = DefaultContextPackPlanner
             .collect_and_plan(
                 &ProfileSourcePort,
@@ -4508,15 +5356,27 @@ mod tests {
             .expect("evidence snippet")
             .content
             .len();
-        assert_eq!(standard_snippet_bytes, 4_096);
-        assert!(
-            evidence_snippet_bytes > standard_snippet_bytes && evidence_snippet_bytes <= 8_192,
-            "evidence uses the larger profile allowance within the shared live budget"
+        assert_eq!(
+            u64::try_from(standard_snippet_bytes).unwrap(),
+            expected_bytes
         );
-        assert!(
-            evidence.data.items[0].tokens > standard.data.items[0].tokens,
-            "the larger evidence body is charged to its item"
+        assert_eq!(
+            evidence_snippet_bytes, standard_snippet_bytes,
+            "both larger profile ceilings respect the same affordable source reservation"
         );
+        assert_eq!(evidence.data.items[0].tokens, standard.data.items[0].tokens);
+        for planned in [&standard, &evidence] {
+            assert!(planned.data.items[0].snippet.as_ref().unwrap().truncated);
+            assert_eq!(
+                planned.data.items[0]
+                    .source_ref
+                    .as_ref()
+                    .unwrap()
+                    .span()
+                    .end_byte(),
+                8_192
+            );
+        }
     }
 
     proptest! {

@@ -1413,7 +1413,10 @@ const SOURCE_READ_RULES: &[CapabilityRule] = &[
         "include_line_numbers",
         "selects optional one-based line metadata",
     ),
-    implemented("encoding", "selects exact UTF-8 or explicit base64 bytes"),
+    implemented(
+        "encoding",
+        "selects lossless physical-encoding-aware text, exact UTF-8 or explicit base64 bytes",
+    ),
     implemented(
         "response_profile",
         "selects compact, standard, or evidence representation without changing source bytes",
@@ -1829,7 +1832,7 @@ const fn input_shape_hash(tool: McpTool) -> &'static str {
         }
         McpTool::PlanChange => "e5f71b656fee51909c5e890683ec943cd445ba1261e4c76ba827ae51a3ae35e7",
         McpTool::ContextPack => "b83aa16bc6f116cc4354fb3058f61d637090562f70f7966a9220b63db3e564fc",
-        McpTool::SourceRead => "0bf1574c6ce6a0a4e99261bc6ec5f0e22dd872da1071dc2f26a9eb00663a4659",
+        McpTool::SourceRead => "fab66fd3a4d3acd752d1f04ffa889a4b2bb6eb465a0abc6fa358b809f911840a",
         McpTool::QueryAdvanced => {
             "195c080e355b7922adcb1741a36a934f4e31900d26020d56cfbd345990be63f0"
         }
@@ -1884,7 +1887,7 @@ const fn tool_fallback_summary(tool: McpTool) -> &'static str {
             "bounded profiled multi-seed evidence assembly with authenticated continuation under a token budget"
         }
         McpTool::SourceRead => {
-            "bounded source ranges from pinned references with source-bound conditional membership as untrusted data"
+            "bounded source ranges from pinned references as untrusted lossless text with original-byte identity and physical encoding"
         }
         McpTool::QueryAdvanced => {
             "bounded safe-ast query with typed value parameters, authenticated continuation, and enforced cost, row, and depth limits"

@@ -1,6 +1,38 @@
 [
   {
-    "type": "_expression",
+    "type": "_application_operand",
+    "named": true,
+    "subtypes": [
+      {
+        "type": "_atomic_expression",
+        "named": true
+      },
+      {
+        "type": "application_expression",
+        "named": true
+      },
+      {
+        "type": "ce_expression",
+        "named": true
+      }
+    ]
+  },
+  {
+    "type": "_arg_expression",
+    "named": true,
+    "subtypes": [
+      {
+        "type": "_atomic_expression",
+        "named": true
+      },
+      {
+        "type": "prefixed_expression",
+        "named": true
+      }
+    ]
+  },
+  {
+    "type": "_atomic_expression",
     "named": true,
     "subtypes": [
       {
@@ -24,11 +56,61 @@
         "named": true
       },
       {
-        "type": "ce_expression",
+        "type": "const",
         "named": true
       },
       {
-        "type": "const",
+        "type": "dot_expression",
+        "named": true
+      },
+      {
+        "type": "index_expression",
+        "named": true
+      },
+      {
+        "type": "list_expression",
+        "named": true
+      },
+      {
+        "type": "literal_expression",
+        "named": true
+      },
+      {
+        "type": "long_identifier_or_op",
+        "named": true
+      },
+      {
+        "type": "null",
+        "named": false
+      },
+      {
+        "type": "paren_expression",
+        "named": true
+      },
+      {
+        "type": "srtp_call_expression",
+        "named": true
+      },
+      {
+        "type": "typed_expression",
+        "named": true
+      }
+    ]
+  },
+  {
+    "type": "_expression",
+    "named": true,
+    "subtypes": [
+      {
+        "type": "_atomic_expression",
+        "named": true
+      },
+      {
+        "type": "application_expression",
+        "named": true
+      },
+      {
+        "type": "ce_expression",
         "named": true
       },
       {
@@ -37,10 +119,6 @@
       },
       {
         "type": "do_expression",
-        "named": true
-      },
-      {
-        "type": "dot_expression",
         "named": true
       },
       {
@@ -64,23 +142,7 @@
         "named": true
       },
       {
-        "type": "index_expression",
-        "named": true
-      },
-      {
         "type": "infix_expression",
-        "named": true
-      },
-      {
-        "type": "list_expression",
-        "named": true
-      },
-      {
-        "type": "literal_expression",
-        "named": true
-      },
-      {
-        "type": "long_identifier_or_op",
         "named": true
       },
       {
@@ -92,14 +154,6 @@
         "named": true
       },
       {
-        "type": "null",
-        "named": false
-      },
-      {
-        "type": "paren_expression",
-        "named": true
-      },
-      {
         "type": "prefixed_expression",
         "named": true
       },
@@ -108,15 +162,7 @@
         "named": true
       },
       {
-        "type": "sequential_expression",
-        "named": true
-      },
-      {
         "type": "short_comp_expression",
-        "named": true
-      },
-      {
-        "type": "srtp_call_expression",
         "named": true
       },
       {
@@ -132,10 +178,6 @@
         "named": true
       },
       {
-        "type": "typed_expression",
-        "named": true
-      },
-      {
         "type": "while_expression",
         "named": true
       }
@@ -146,7 +188,7 @@
     "named": true,
     "subtypes": [
       {
-        "type": "_expression",
+        "type": "_module_expression",
         "named": true
       },
       {
@@ -183,6 +225,76 @@
       },
       {
         "type": "type_definition",
+        "named": true
+      }
+    ]
+  },
+  {
+    "type": "_module_expression",
+    "named": true,
+    "subtypes": [
+      {
+        "type": "_atomic_expression",
+        "named": true
+      },
+      {
+        "type": "application_expression",
+        "named": true
+      },
+      {
+        "type": "ce_expression",
+        "named": true
+      },
+      {
+        "type": "do_expression",
+        "named": true
+      },
+      {
+        "type": "for_expression",
+        "named": true
+      },
+      {
+        "type": "fun_expression",
+        "named": true
+      },
+      {
+        "type": "function_expression",
+        "named": true
+      },
+      {
+        "type": "if_expression",
+        "named": true
+      },
+      {
+        "type": "infix_expression",
+        "named": true
+      },
+      {
+        "type": "match_expression",
+        "named": true
+      },
+      {
+        "type": "mutate_expression",
+        "named": true
+      },
+      {
+        "type": "prefixed_expression",
+        "named": true
+      },
+      {
+        "type": "try_expression",
+        "named": true
+      },
+      {
+        "type": "tuple_expression",
+        "named": true
+      },
+      {
+        "type": "typecast_expression",
+        "named": true
+      },
+      {
+        "type": "while_expression",
         "named": true
       }
     ]
@@ -446,6 +558,10 @@
         {
           "type": "class_as_reference",
           "named": true
+        },
+        {
+          "type": "sequential_expression",
+          "named": true
         }
       ]
     }
@@ -464,6 +580,10 @@
         },
         {
           "type": "_pattern",
+          "named": true
+        },
+        {
+          "type": "sequential_expression",
           "named": true
         }
       ]
@@ -564,7 +684,19 @@
       "required": true,
       "types": [
         {
+          "type": "_application_operand",
+          "named": true
+        },
+        {
+          "type": "_arg_expression",
+          "named": true
+        },
+        {
           "type": "_expression",
+          "named": true
+        },
+        {
+          "type": "sequential_expression",
           "named": true
         },
         {
@@ -855,6 +987,10 @@
           {
             "type": "_expression",
             "named": true
+          },
+          {
+            "type": "sequential_expression",
+            "named": true
           }
         ]
       }
@@ -1046,7 +1182,7 @@
       "required": true,
       "types": [
         {
-          "type": "_expression",
+          "type": "_application_operand",
           "named": true
         }
       ]
@@ -1086,6 +1222,10 @@
           },
           {
             "type": "_type",
+            "named": true
+          },
+          {
+            "type": "sequential_expression",
             "named": true
           }
         ]
@@ -1411,6 +1551,10 @@
           {
             "type": "range_expression",
             "named": true
+          },
+          {
+            "type": "sequential_expression",
+            "named": true
           }
         ]
       }
@@ -1421,6 +1565,10 @@
       "types": [
         {
           "type": "_expression",
+          "named": true
+        },
+        {
+          "type": "_module_expression",
           "named": true
         },
         {
@@ -1449,6 +1597,10 @@
         },
         {
           "type": "paren_pattern",
+          "named": true
+        },
+        {
+          "type": "sequential_expression",
           "named": true
         }
       ]
@@ -1520,10 +1672,14 @@
     "fields": {},
     "children": {
       "multiple": false,
-      "required": true,
+      "required": false,
       "types": [
         {
           "type": "_expression",
+          "named": true
+        },
+        {
+          "type": "sequential_expression",
           "named": true
         }
       ]
@@ -1535,10 +1691,14 @@
     "fields": {},
     "children": {
       "multiple": false,
-      "required": true,
+      "required": false,
       "types": [
         {
           "type": "_expression",
+          "named": true
+        },
+        {
+          "type": "sequential_expression",
           "named": true
         }
       ]
@@ -1553,7 +1713,7 @@
         "required": true,
         "types": [
           {
-            "type": "_expression",
+            "type": "_atomic_expression",
             "named": true
           }
         ]
@@ -1581,6 +1741,10 @@
           {
             "type": "_expression",
             "named": true
+          },
+          {
+            "type": "sequential_expression",
+            "named": true
           }
         ]
       },
@@ -1590,6 +1754,10 @@
         "types": [
           {
             "type": "_expression",
+            "named": true
+          },
+          {
+            "type": "sequential_expression",
             "named": true
           }
         ]
@@ -1917,6 +2085,11 @@
   },
   {
     "type": "float",
+    "named": false,
+    "fields": {}
+  },
+  {
+    "type": "float",
     "named": true,
     "fields": {}
   },
@@ -1942,6 +2115,10 @@
         },
         {
           "type": "range_expression",
+          "named": true
+        },
+        {
+          "type": "sequential_expression",
           "named": true
         }
       ]
@@ -1972,6 +2149,10 @@
       "types": [
         {
           "type": "_expression",
+          "named": true
+        },
+        {
+          "type": "sequential_expression",
           "named": true
         }
       ]
@@ -2025,6 +2206,10 @@
         },
         {
           "type": "argument_patterns",
+          "named": true
+        },
+        {
+          "type": "sequential_expression",
           "named": true
         }
       ]
@@ -2097,10 +2282,14 @@
     "fields": {
       "body": {
         "multiple": true,
-        "required": true,
+        "required": false,
         "types": [
           {
             "type": "_expression",
+            "named": true
+          },
+          {
+            "type": "sequential_expression",
             "named": true
           }
         ]
@@ -2158,6 +2347,10 @@
       "types": [
         {
           "type": "_expression",
+          "named": true
+        },
+        {
+          "type": "sequential_expression",
           "named": true
         },
         {
@@ -2254,6 +2447,10 @@
           {
             "type": "_expression",
             "named": true
+          },
+          {
+            "type": "sequential_expression",
+            "named": true
           }
         ]
       },
@@ -2264,6 +2461,10 @@
           {
             "type": "_expression",
             "named": true
+          },
+          {
+            "type": "sequential_expression",
+            "named": true
           }
         ]
       },
@@ -2273,6 +2474,10 @@
         "types": [
           {
             "type": "_expression",
+            "named": true
+          },
+          {
+            "type": "sequential_expression",
             "named": true
           }
         ]
@@ -2315,6 +2520,10 @@
           {
             "type": "_expression",
             "named": true
+          },
+          {
+            "type": "sequential_expression",
+            "named": true
           }
         ]
       }
@@ -2324,7 +2533,7 @@
       "required": true,
       "types": [
         {
-          "type": "_expression",
+          "type": "_atomic_expression",
           "named": true
         },
         {
@@ -2599,10 +2808,14 @@
     "fields": {},
     "children": {
       "multiple": false,
-      "required": true,
+      "required": false,
       "types": [
         {
           "type": "_expression",
+          "named": true
+        },
+        {
+          "type": "sequential_expression",
           "named": true
         }
       ]
@@ -2675,6 +2888,10 @@
         },
         {
           "type": "rules",
+          "named": true
+        },
+        {
+          "type": "sequential_expression",
           "named": true
         }
       ]
@@ -2852,6 +3069,10 @@
           "named": true
         },
         {
+          "type": "sequential_expression",
+          "named": true
+        },
+        {
           "type": "value_declaration",
           "named": true
         }
@@ -2932,6 +3153,10 @@
             "named": true
           },
           {
+            "type": "sequential_expression",
+            "named": true
+          },
+          {
             "type": "type_argument_constraints",
             "named": true
           },
@@ -2947,6 +3172,10 @@
         "types": [
           {
             "type": "_expression",
+            "named": true
+          },
+          {
+            "type": "sequential_expression",
             "named": true
           }
         ]
@@ -2972,6 +3201,10 @@
         },
         {
           "type": "_type",
+          "named": true
+        },
+        {
+          "type": "sequential_expression",
           "named": true
         },
         {
@@ -3024,43 +3257,11 @@
             "named": false
           },
           {
-            "type": "anon_record_expression",
-            "named": true
-          },
-          {
-            "type": "application_expression",
-            "named": true
-          },
-          {
-            "type": "array_expression",
-            "named": true
-          },
-          {
-            "type": "begin_end_expression",
-            "named": true
-          },
-          {
-            "type": "brace_expression",
-            "named": true
-          },
-          {
-            "type": "ce_expression",
-            "named": true
-          },
-          {
-            "type": "const",
+            "type": "_module_expression",
             "named": true
           },
           {
             "type": "declaration_expression",
-            "named": true
-          },
-          {
-            "type": "do_expression",
-            "named": true
-          },
-          {
-            "type": "dot_expression",
             "named": true
           },
           {
@@ -3072,51 +3273,11 @@
             "named": true
           },
           {
-            "type": "for_expression",
-            "named": true
-          },
-          {
             "type": "fsi_directive_decl",
             "named": true
           },
           {
-            "type": "fun_expression",
-            "named": true
-          },
-          {
-            "type": "function_expression",
-            "named": true
-          },
-          {
-            "type": "if_expression",
-            "named": true
-          },
-          {
             "type": "import_decl",
-            "named": true
-          },
-          {
-            "type": "index_expression",
-            "named": true
-          },
-          {
-            "type": "infix_expression",
-            "named": true
-          },
-          {
-            "type": "list_expression",
-            "named": true
-          },
-          {
-            "type": "literal_expression",
-            "named": true
-          },
-          {
-            "type": "long_identifier_or_op",
-            "named": true
-          },
-          {
-            "type": "match_expression",
             "named": true
           },
           {
@@ -3128,51 +3289,11 @@
             "named": true
           },
           {
-            "type": "mutate_expression",
-            "named": true
-          },
-          {
-            "type": "null",
-            "named": false
-          },
-          {
-            "type": "paren_expression",
-            "named": true
-          },
-          {
-            "type": "prefixed_expression",
-            "named": true
-          },
-          {
             "type": "preproc_if",
             "named": true
           },
           {
-            "type": "srtp_call_expression",
-            "named": true
-          },
-          {
-            "type": "try_expression",
-            "named": true
-          },
-          {
-            "type": "tuple_expression",
-            "named": true
-          },
-          {
             "type": "type_definition",
-            "named": true
-          },
-          {
-            "type": "typecast_expression",
-            "named": true
-          },
-          {
-            "type": "typed_expression",
-            "named": true
-          },
-          {
-            "type": "while_expression",
             "named": true
           }
         ]
@@ -3225,6 +3346,10 @@
         "types": [
           {
             "type": "_expression",
+            "named": true
+          },
+          {
+            "type": "sequential_expression",
             "named": true
           }
         ]
@@ -3458,7 +3583,7 @@
       "required": true,
       "types": [
         {
-          "type": "_expression",
+          "type": "_application_operand",
           "named": true
         },
         {
@@ -3489,10 +3614,14 @@
     "fields": {},
     "children": {
       "multiple": false,
-      "required": true,
+      "required": false,
       "types": [
         {
           "type": "_expression",
+          "named": true
+        },
+        {
+          "type": "sequential_expression",
           "named": true
         }
       ]
@@ -3640,6 +3769,10 @@
       "required": false,
       "types": [
         {
+          "type": "_expression",
+          "named": true
+        },
+        {
           "type": "_module_elem",
           "named": true
         },
@@ -3653,6 +3786,14 @@
         },
         {
           "type": "named_module",
+          "named": true
+        },
+        {
+          "type": "namespace",
+          "named": true
+        },
+        {
+          "type": "sequential_expression",
           "named": true
         },
         {
@@ -3716,6 +3857,10 @@
       "required": false,
       "types": [
         {
+          "type": "_expression",
+          "named": true
+        },
+        {
           "type": "_module_elem",
           "named": true
         },
@@ -3729,6 +3874,14 @@
         },
         {
           "type": "named_module",
+          "named": true
+        },
+        {
+          "type": "namespace",
+          "named": true
+        },
+        {
+          "type": "sequential_expression",
           "named": true
         },
         {
@@ -3904,6 +4057,10 @@
         },
         {
           "type": "attributes",
+          "named": true
+        },
+        {
+          "type": "sequential_expression",
           "named": true
         }
       ]
@@ -4137,6 +4294,10 @@
           {
             "type": "_expression",
             "named": true
+          },
+          {
+            "type": "sequential_expression",
+            "named": true
           }
         ]
       },
@@ -4229,6 +4390,10 @@
         },
         {
           "type": "range_expression",
+          "named": true
+        },
+        {
+          "type": "sequential_expression",
           "named": true
         }
       ]
@@ -4327,6 +4492,10 @@
           "named": true
         },
         {
+          "type": "sequential_expression",
+          "named": true
+        },
+        {
           "type": "trait_member_constraint",
           "named": true
         },
@@ -4370,6 +4539,10 @@
       "types": [
         {
           "type": "_expression",
+          "named": true
+        },
+        {
+          "type": "const",
           "named": true
         }
       ]
@@ -4540,6 +4713,10 @@
         },
         {
           "type": "rules",
+          "named": true
+        },
+        {
+          "type": "sequential_expression",
           "named": true
         }
       ]
@@ -4801,6 +4978,10 @@
             "named": true
           },
           {
+            "type": "sequential_expression",
+            "named": true
+          },
+          {
             "type": "static",
             "named": false
           }
@@ -4829,6 +5010,10 @@
         },
         {
           "type": "member_defn",
+          "named": true
+        },
+        {
+          "type": "sequential_expression",
           "named": true
         }
       ]
@@ -4889,7 +5074,15 @@
           "named": true
         },
         {
+          "type": "_module_expression",
+          "named": true
+        },
+        {
           "type": "_type",
+          "named": true
+        },
+        {
+          "type": "sequential_expression",
           "named": true
         }
       ]
@@ -4927,7 +5120,7 @@
       "required": true,
       "types": [
         {
-          "type": "_expression",
+          "type": "_atomic_expression",
           "named": true
         },
         {
@@ -5298,6 +5491,10 @@
       "types": [
         {
           "type": "_expression",
+          "named": true
+        },
+        {
+          "type": "sequential_expression",
           "named": true
         }
       ]
@@ -5735,10 +5932,6 @@
   },
   {
     "type": "fixed",
-    "named": false
-  },
-  {
-    "type": "float",
     "named": false
   },
   {

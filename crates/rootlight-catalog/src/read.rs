@@ -22,7 +22,9 @@ use rootlight_storage::{
 };
 use rusqlite::{Connection, OptionalExtension, Row, types::FromSql};
 
-use crate::{CatalogError, CatalogErrorKind, codec, write};
+use crate::{
+    CatalogError, CatalogErrorKind, OracleReadAdmissionError, OracleReadMemoryPlan, codec, write,
+};
 
 type EvidenceMap = BTreeMap<(String, Vec<u8>), Vec<FactRef>>;
 
@@ -301,14 +303,40 @@ pub(crate) fn read_generation(
     expected_stats: GenerationStats,
     context: &GenerationContext<'_>,
 ) -> Result<GenerationSnapshot, CatalogError> {
+    match read_generation_with_admission(
+        connection,
+        expected_metadata,
+        expected_stats,
+        context,
+        |_| Ok::<(), std::convert::Infallible>(()),
+    ) {
+        Ok(snapshot) => Ok(snapshot),
+        Err(OracleReadAdmissionError::Catalog(error)) => Err(error),
+        Err(OracleReadAdmissionError::Admission(never)) => match never {},
+    }
+}
+
+pub(crate) fn read_generation_with_admission<E>(
+    connection: &Connection,
+    expected_metadata: GenerationMetadata,
+    expected_stats: GenerationStats,
+    context: &GenerationContext<'_>,
+    admit: impl FnOnce(OracleReadMemoryPlan) -> Result<(), E>,
+) -> Result<GenerationSnapshot, OracleReadAdmissionError<E>> {
     let transaction = connection
         .unchecked_transaction()
         .map_err(CatalogError::sqlite)?;
     let (metadata, stats, ir_version) = read_header(&transaction, context)?;
     if metadata != expected_metadata || stats != expected_stats {
-        return Err(CatalogError::new(CatalogErrorKind::Corrupt));
+        return Err(CatalogError::new(CatalogErrorKind::Corrupt).into());
     }
     validate_payload_cardinality(&transaction, metadata.contract_version(), stats, context)?;
+    let maximum_payload_bytes = maximum_payload_bytes(&transaction, stats, context)?;
+    let memory_plan =
+        oracle_read_memory_plan(metadata.contract_version(), stats, maximum_payload_bytes)?;
+    validate_identity_registry_layout(&transaction, memory_plan.identity_registry_rows(), context)?;
+    admit(memory_plan).map_err(OracleReadAdmissionError::Admission)?;
+    context.check().map_err(CatalogError::control)?;
     let sources = read_sources(&transaction, stats.source_refs(), context)?;
     let mut evidence = read_evidence(&transaction, context)?;
     let mut flags = read_flags(&transaction, context)?;
@@ -352,7 +380,7 @@ pub(crate) fn read_generation(
         || !provenance_sources.is_empty()
         || !provenance_derivations.is_empty()
     {
-        return Err(CatalogError::new(CatalogErrorKind::Corrupt));
+        return Err(CatalogError::new(CatalogErrorKind::Corrupt).into());
     }
     for (observed, expected) in [
         (usize_to_u64(document.files.len())?, stats.files()),
@@ -382,7 +410,7 @@ pub(crate) fn read_generation(
         (usize_to_u64(document.extensions.len())?, stats.extensions()),
     ] {
         if observed != expected {
-            return Err(CatalogError::new(CatalogErrorKind::Corrupt));
+            return Err(CatalogError::new(CatalogErrorKind::Corrupt).into());
         }
     }
 
@@ -422,12 +450,193 @@ pub(crate) fn read_generation(
         stats.stored_rows() == plan.stats.stored_rows()
     };
     if comparable_stats != plan.stats || !stored_rows_match {
-        return Err(CatalogError::new(CatalogErrorKind::Corrupt));
+        return Err(CatalogError::new(CatalogErrorKind::Corrupt).into());
     }
     validate_identity_registry(&transaction, &plan.identities, context)?;
     validate_source_registry(&sources, &plan.source_ordinals, context)?;
     transaction.commit().map_err(CatalogError::sqlite)?;
     Ok(snapshot)
+}
+
+fn oracle_read_memory_plan(
+    contract_version: GenerationContractVersion,
+    stats: GenerationStats,
+    maximum_payload_bytes: u64,
+) -> Result<OracleReadMemoryPlan, CatalogError> {
+    let logical_rows = [
+        stats.files(),
+        stats.entities(),
+        stats.occurrences(),
+        stats.relations(),
+        stats.provenance(),
+        stats.source_mappings(),
+        stats.coverage(),
+        stats.skipped_regions(),
+        stats.diagnostics(),
+        stats.extensions(),
+    ]
+    .into_iter()
+    .try_fold(0_u64, u64::checked_add)
+    .ok_or_else(|| CatalogError::new(CatalogErrorKind::Corrupt))?;
+    let identity_registry_rows = logical_rows
+        .checked_add(1)
+        .ok_or_else(|| CatalogError::new(CatalogErrorKind::Corrupt))?;
+    let physical_rows = if contract_version == GenerationContractVersion::new(1, 1) {
+        stats.stored_rows().checked_add(1)
+    } else {
+        Some(stats.stored_rows())
+    }
+    .ok_or_else(|| CatalogError::new(CatalogErrorKind::Corrupt))?;
+    let other_rows = physical_rows
+        .checked_sub(identity_registry_rows)
+        .ok_or_else(|| CatalogError::new(CatalogErrorKind::Corrupt))?;
+
+    // RegistryIdentity owns only a closed tag and fixed ID. Reserve one complete
+    // 11-slot internal-node envelope per entry plus a root, without assuming
+    // occupancy. All other physical rows retain their full record envelope.
+    const _: () =
+        assert!(std::mem::align_of::<write::RegistryIdentity>() <= std::mem::align_of::<usize>());
+    let identity_node_bytes = std::mem::size_of::<write::RegistryIdentity>()
+        .checked_mul(11)
+        .and_then(|bytes| bytes.checked_add(std::mem::size_of::<usize>().checked_mul(16)?))
+        .and_then(|bytes| u64::try_from(bytes).ok())
+        .ok_or_else(memory_plan_overflow)?;
+    let identity_bytes = identity_registry_rows
+        .checked_add(1)
+        .and_then(|rows| rows.checked_mul(identity_node_bytes))
+        .ok_or_else(memory_plan_overflow)?;
+    let record_workspace_bytes = other_rows
+        .checked_mul(4 * 1024)
+        .and_then(|bytes| bytes.checked_add(identity_bytes))
+        .ok_or_else(memory_plan_overflow)?;
+
+    // Malformed adjacent-tag JSON can buffer owned content before typed decode
+    // rejects it. Four-slot vector growth and owned value/tag storage are charged
+    // for the largest single payload, including locator String slots. Payloads
+    // are decoded sequentially; retained valid data needs a separate text charge.
+    let transient_factor = std::mem::size_of::<String>()
+        .checked_add(std::mem::size_of::<usize>())
+        .and_then(|bytes| bytes.checked_mul(4))
+        .and_then(|bytes| u64::try_from(bytes).ok())
+        .ok_or_else(memory_plan_overflow)?;
+    let transient_decode_bytes = maximum_payload_bytes
+        .checked_mul(transient_factor)
+        .ok_or_else(memory_plan_overflow)?;
+    let materialization_bytes = record_workspace_bytes
+        .checked_add(transient_decode_bytes)
+        .ok_or_else(memory_plan_overflow)?;
+    Ok(OracleReadMemoryPlan {
+        stats,
+        physical_rows,
+        identity_registry_rows,
+        record_workspace_bytes,
+        maximum_payload_bytes,
+        transient_decode_bytes,
+        materialization_bytes,
+    })
+}
+
+fn memory_plan_overflow() -> CatalogError {
+    CatalogError::new(CatalogErrorKind::Storage)
+}
+
+fn validate_identity_registry_layout(
+    connection: &Connection,
+    expected_rows: u64,
+    context: &GenerationContext<'_>,
+) -> Result<(), CatalogError> {
+    context.check().map_err(CatalogError::control)?;
+    let limit = expected_rows
+        .checked_add(1)
+        .ok_or_else(|| CatalogError::new(CatalogErrorKind::Corrupt))?;
+    // The discounted keys must be authenticated in this transaction before
+    // late registry validation can materialize SQL strings or byte vectors.
+    let (rows, invalid): (i64, i64) = connection
+        .query_row(
+            "SELECT count(*), coalesce(sum(CASE WHEN
+                 typeof(kind) != 'text'
+                 OR kind NOT IN ('repository', 'file', 'entity', 'fact')
+                 OR typeof(identity) != 'blob'
+                 OR length(identity) != CASE WHEN kind = 'repository' THEN 16 ELSE 20 END
+                 THEN 1 ELSE 0 END), 0)
+             FROM (SELECT kind, identity FROM identity_registry LIMIT ?1)",
+            [codec::sqlite_i64(limit)?],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .map_err(CatalogError::sqlite)?;
+    context.check().map_err(CatalogError::control)?;
+    let rows = codec::nonnegative_u64(rows)?;
+    context
+        .require(GenerationResource::Rows, rows)
+        .map_err(CatalogError::control)?;
+    if rows != expected_rows || codec::nonnegative_u64(invalid)? != 0 {
+        return Err(CatalogError::new(CatalogErrorKind::Corrupt));
+    }
+    Ok(())
+}
+
+fn maximum_payload_bytes(
+    connection: &Connection,
+    stats: GenerationStats,
+    context: &GenerationContext<'_>,
+) -> Result<u64, CatalogError> {
+    let queries = [
+        (
+            "SELECT count(*), coalesce(max(length(CAST(path_locator_components AS BLOB))), 0)
+             FROM (SELECT path_locator_components FROM files LIMIT ?1)",
+            stats.files(),
+        ),
+        (
+            "SELECT count(*), coalesce(max(length(CAST(payload AS BLOB))), 0)
+             FROM (SELECT payload FROM source_mappings LIMIT ?1)",
+            stats.source_mappings(),
+        ),
+        (
+            "SELECT count(*), coalesce(max(length(CAST(payload AS BLOB))), 0)
+             FROM (SELECT payload FROM skipped_regions LIMIT ?1)",
+            stats.skipped_regions(),
+        ),
+        (
+            "SELECT count(*), coalesce(max(length(CAST(payload AS BLOB))), 0)
+             FROM (SELECT payload FROM diagnostics LIMIT ?1)",
+            stats.diagnostics(),
+        ),
+        (
+            "SELECT count(*), coalesce(max(length(CAST(payload AS BLOB))), 0)
+             FROM (SELECT payload FROM extensions LIMIT ?1)",
+            stats.extensions(),
+        ),
+    ];
+    let mut maximum = 0_u64;
+    let mut observed_rows = 0_u64;
+    for (sql, expected_rows) in queries {
+        context.check().map_err(CatalogError::control)?;
+        let limit = expected_rows
+            .checked_add(1)
+            .ok_or_else(|| CatalogError::new(CatalogErrorKind::Corrupt))?;
+        let (rows, bytes): (i64, i64) = connection
+            .query_row(sql, [codec::sqlite_i64(limit)?], |row| {
+                Ok((row.get(0)?, row.get(1)?))
+            })
+            .map_err(CatalogError::sqlite)?;
+        context.check().map_err(CatalogError::control)?;
+        let rows = codec::nonnegative_u64(rows)?;
+        let bytes = codec::nonnegative_u64(bytes)?;
+        if rows != expected_rows || bytes > stats.text_bytes() {
+            return Err(CatalogError::new(CatalogErrorKind::Corrupt));
+        }
+        observed_rows = observed_rows
+            .checked_add(rows)
+            .ok_or_else(|| CatalogError::new(CatalogErrorKind::Corrupt))?;
+        context
+            .require(GenerationResource::Rows, observed_rows)
+            .map_err(CatalogError::control)?;
+        maximum = maximum.max(bytes);
+        context
+            .require(GenerationResource::EncodedTextBytes, maximum)
+            .map_err(CatalogError::control)?;
+    }
+    Ok(maximum)
 }
 
 fn validate_document_hash(
@@ -1406,4 +1615,367 @@ fn usize_to_u64(value: usize) -> Result<u64, CatalogError> {
 
 fn usize_to_i64(value: usize) -> Result<i64, CatalogError> {
     i64::try_from(value).map_err(|_| CatalogError::new(CatalogErrorKind::Corrupt))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::cell::Cell;
+
+    use rootlight_cancel::{Cancellation, CancellationReason};
+    use rootlight_storage::{GenerationBudget, GenerationReader};
+
+    use super::*;
+    use crate::{ORACLE_FILENAME, OracleReader, OracleWriter};
+
+    fn legacy_reader(context: &GenerationContext<'_>) -> (tempfile::TempDir, OracleReader) {
+        #[cfg(target_os = "macos")]
+        let directory = tempfile::tempdir_in("/private/tmp").unwrap();
+        #[cfg(not(target_os = "macos"))]
+        let directory = tempfile::tempdir().unwrap();
+        drop(OracleWriter::create_in(directory.path()).unwrap());
+        let connection = Connection::open(directory.path().join(ORACLE_FILENAME)).unwrap();
+        connection
+            .execute_batch(include_str!(
+                "../../../tests/fixtures/compatibility/storage/1.1/sealed-oracle.sql"
+            ))
+            .unwrap();
+        drop(connection);
+        let reader = OracleReader::open_in(directory.path(), context).unwrap();
+        (directory, reader)
+    }
+
+    fn stats(rows: u64, text: u64) -> GenerationStats {
+        GenerationStats::new(2, 0, 0, 0, 0, 1, 0, 1, 1, 2, 0, rows, text).unwrap()
+    }
+
+    fn payload_connection() -> Connection {
+        let connection = Connection::open_in_memory().unwrap();
+        connection
+            .execute_batch(
+                "CREATE TABLE files(path_locator_components TEXT);
+                 CREATE TABLE source_mappings(payload TEXT);
+                 CREATE TABLE skipped_regions(payload TEXT);
+                 CREATE TABLE diagnostics(payload TEXT);
+                 CREATE TABLE extensions(payload TEXT);
+                 INSERT INTO files VALUES (NULL), ('[\"ff\"]');
+                 INSERT INTO source_mappings VALUES ('mapping');
+                 INSERT INTO skipped_regions VALUES ('region');
+                 INSERT INTO diagnostics VALUES ('diagnostic');
+                 INSERT INTO extensions VALUES ('short'), ('opaque');",
+            )
+            .unwrap();
+        connection
+    }
+
+    #[test]
+    fn admission_preserves_typed_rejection_and_transaction_retry() {
+        let cancellation = Cancellation::new();
+        let context = GenerationContext::new(&cancellation, GenerationBudget::default());
+        let (_directory, reader) = legacy_reader(&context);
+        let calls = Cell::new(0);
+        let error = reader
+            .read_with_admission(&context, |plan| {
+                calls.set(calls.get() + 1);
+                assert_eq!(plan.stats(), reader.stats());
+                assert_eq!(plan.physical_rows(), 3);
+                assert_eq!(plan.identity_registry_rows(), 1);
+                assert_eq!(plan.maximum_payload_bytes(), 0);
+                assert_eq!(plan.transient_decode_bytes(), 0);
+                assert_eq!(plan.materialization_bytes(), plan.record_workspace_bytes());
+                Err("private-admission-detail")
+            })
+            .unwrap_err();
+        assert_eq!(calls.get(), 1);
+        assert!(!format!("{error:?}").contains("private-admission-detail"));
+        assert!(!error.to_string().contains("private-admission-detail"));
+        assert!(matches!(
+            error,
+            OracleReadAdmissionError::Admission("private-admission-detail")
+        ));
+        let ordinary = reader.read(&context).unwrap();
+        assert_eq!(
+            reader
+                .read_with_admission(&context, |_| Ok::<(), ()>(()))
+                .unwrap(),
+            ordinary
+        );
+    }
+
+    #[test]
+    fn admission_cancellation_is_checked_before_and_after_callback() {
+        let cancellation = Cancellation::new();
+        let context = GenerationContext::new(&cancellation, GenerationBudget::default());
+        let (_directory, reader) = legacy_reader(&context);
+        let called = Cell::new(false);
+        let error = reader
+            .read_with_admission(&context, |_| {
+                called.set(true);
+                assert!(cancellation.cancel(CancellationReason::ClientRequest));
+                Ok::<(), ()>(())
+            })
+            .unwrap_err();
+        assert!(called.get());
+        assert!(matches!(
+            error,
+            OracleReadAdmissionError::Catalog(ref error)
+                if error.kind() == CatalogErrorKind::Cancelled
+        ));
+        called.set(false);
+        let error = reader
+            .read_with_admission(&context, |_| {
+                called.set(true);
+                Ok::<(), ()>(())
+            })
+            .unwrap_err();
+        assert!(!called.get());
+        assert!(matches!(
+            error,
+            OracleReadAdmissionError::Catalog(ref error)
+                if error.kind() == CatalogErrorKind::Cancelled
+        ));
+    }
+
+    #[test]
+    fn forged_physical_counts_fail_before_admission() {
+        let cancellation = Cancellation::new();
+        let context = GenerationContext::new(&cancellation, GenerationBudget::default());
+        let (directory, reader) = legacy_reader(&context);
+        drop(reader);
+        let connection = Connection::open(directory.path().join(ORACLE_FILENAME)).unwrap();
+        connection
+            .execute("UPDATE generation_meta SET stored_row_count = 3", [])
+            .unwrap();
+        drop(connection);
+        let reader = OracleReader::open_in(directory.path(), &context).unwrap();
+        let called = Cell::new(false);
+        let error = reader
+            .read_with_admission(&context, |_| {
+                called.set(true);
+                Ok::<(), ()>(())
+            })
+            .unwrap_err();
+        assert!(!called.get());
+        assert!(matches!(
+            error,
+            OracleReadAdmissionError::Catalog(ref error)
+                if error.kind() == CatalogErrorKind::Corrupt
+        ));
+    }
+
+    #[test]
+    fn unchecked_registry_shapes_fail_before_admission_and_allow_repair_retry() {
+        let cancellation = Cancellation::new();
+        let context = GenerationContext::new(&cancellation, GenerationBudget::default());
+        let (directory, reader) = legacy_reader(&context);
+        let connection = Connection::open(directory.path().join(ORACLE_FILENAME)).unwrap();
+        let (original_kind, original_id): (String, Vec<u8>) = connection
+            .query_row("SELECT kind, identity FROM identity_registry", [], |row| {
+                Ok((row.get(0)?, row.get(1)?))
+            })
+            .unwrap();
+        connection
+            .execute_batch("PRAGMA ignore_check_constraints = ON")
+            .unwrap();
+        for (kind, identity) in [
+            ("unknown", vec![0_u8; 16]),
+            ("repository", vec![0_u8; 64]),
+            ("fact", vec![0_u8; 16]),
+        ] {
+            connection
+                .execute(
+                    "UPDATE identity_registry SET kind = ?1, identity = ?2",
+                    rusqlite::params![kind, identity],
+                )
+                .unwrap();
+            let called = Cell::new(false);
+            let direct = read_generation_with_admission(
+                &connection,
+                reader.metadata,
+                reader.stats,
+                &context,
+                |_| {
+                    called.set(true);
+                    Ok::<(), ()>(())
+                },
+            )
+            .unwrap_err();
+            assert!(!called.get());
+            assert!(matches!(
+                direct,
+                OracleReadAdmissionError::Catalog(ref error)
+                    if error.kind() == CatalogErrorKind::Corrupt
+            ));
+            let public = reader
+                .read_with_admission(&context, |_| {
+                    called.set(true);
+                    Ok::<(), ()>(())
+                })
+                .unwrap_err();
+            assert!(!called.get());
+            assert!(matches!(
+                public,
+                OracleReadAdmissionError::Catalog(ref error)
+                    if error.kind() == CatalogErrorKind::Corrupt
+            ));
+            connection
+                .execute(
+                    "UPDATE identity_registry SET kind = ?1, identity = ?2",
+                    rusqlite::params![original_kind, original_id],
+                )
+                .unwrap();
+            assert!(
+                reader
+                    .read_with_admission(&context, |_| {
+                        called.set(true);
+                        Ok::<(), ()>(())
+                    })
+                    .is_ok()
+            );
+            assert!(called.get());
+        }
+    }
+
+    #[test]
+    fn memory_plan_only_reduces_closed_identity_rows_and_checks_overflow() {
+        let stats = stats(17, 1024);
+        let plan = oracle_read_memory_plan(GENERATION_CONTRACT_VERSION, stats, 97).unwrap();
+        let node_bytes = u64::try_from(
+            11 * std::mem::size_of::<write::RegistryIdentity>() + 16 * std::mem::size_of::<usize>(),
+        )
+        .unwrap();
+        assert_eq!(plan.physical_rows(), 17);
+        assert_eq!(plan.identity_registry_rows(), 8);
+        assert_eq!(plan.record_workspace_bytes(), 9 * 4096 + 9 * node_bytes);
+        assert!(plan.record_workspace_bytes() < 17 * 4096);
+        let factor =
+            u64::try_from(4 * (std::mem::size_of::<String>() + std::mem::size_of::<usize>()))
+                .unwrap();
+        assert_eq!(plan.transient_decode_bytes(), 97 * factor);
+        assert_eq!(
+            plan.materialization_bytes(),
+            plan.record_workspace_bytes() + plan.transient_decode_bytes()
+        );
+        let legacy = oracle_read_memory_plan(
+            GenerationContractVersion::new(1, 1),
+            self::stats(16, 1024),
+            97,
+        )
+        .unwrap();
+        assert_eq!(legacy.physical_rows(), plan.physical_rows());
+        assert_eq!(legacy.materialization_bytes(), plan.materialization_bytes());
+        for (rows, payload) in [(u64::MAX, 0), (17, u64::MAX)] {
+            let error = oracle_read_memory_plan(
+                GENERATION_CONTRACT_VERSION,
+                self::stats(rows, 1024),
+                payload,
+            )
+            .unwrap_err();
+            assert_eq!(error.kind(), CatalogErrorKind::Storage);
+        }
+        let error = oracle_read_memory_plan(
+            GenerationContractVersion::new(1, 1),
+            self::stats(u64::MAX, 1024),
+            0,
+        )
+        .unwrap_err();
+        assert_eq!(error.kind(), CatalogErrorKind::Corrupt);
+    }
+
+    #[test]
+    fn payload_scan_bounds_each_family_and_measures_bytes_not_characters() {
+        let cancellation = Cancellation::new();
+        let context = GenerationContext::new(&cancellation, GenerationBudget::default());
+        let connection = payload_connection();
+        let stats = stats(17, 1024);
+        for sql in [
+            "UPDATE files SET path_locator_components = ?1 WHERE path_locator_components IS NOT NULL",
+            "UPDATE source_mappings SET payload = ?1",
+            "UPDATE skipped_regions SET payload = ?1",
+            "UPDATE diagnostics SET payload = ?1",
+            "UPDATE extensions SET payload = ?1",
+        ] {
+            let payload = "\u{03bb}".repeat(60);
+            connection.execute(sql, [&payload]).unwrap();
+            assert_eq!(
+                maximum_payload_bytes(&connection, stats, &context).unwrap(),
+                120
+            );
+        }
+        connection
+            .execute("INSERT INTO files VALUES ('extra')", [])
+            .unwrap();
+        assert_eq!(
+            maximum_payload_bytes(&connection, stats, &context)
+                .unwrap_err()
+                .kind(),
+            CatalogErrorKind::Corrupt
+        );
+    }
+
+    #[test]
+    fn malformed_nested_payloads_keep_transient_charge_and_decode_limits() {
+        let cancellation = Cancellation::new();
+        let context = GenerationContext::new(&cancellation, GenerationBudget::default());
+        let connection = payload_connection();
+        let envelope = ExtensionEnvelope {
+            id: FactId::from_bytes([1; 20]),
+            repository: RepositoryId::from_bytes([2; 16]),
+            generation: GenerationId::from_bytes([3; 20]),
+            namespace: "rootlight.test".to_owned(),
+            version: "1".to_owned(),
+            criticality: rootlight_ir::ExtensionCriticality::Noncritical,
+            payload: "{}".to_owned(),
+            provenance: FactId::from_bytes([4; 20]),
+            evidence: FactEvidence {
+                source: None,
+                derivation: Vec::new(),
+            },
+        };
+        let zeros = vec!["0"; 1024].join(",");
+        let invalid_evidence = format!("\"derivation\":[{{\"id\":[{zeros}],\"kind\":\"file\"}}]");
+        let encoded = serde_json::to_string(&envelope).unwrap();
+        assert_eq!(
+            decode_extension_envelope_with_checkpoint(
+                encoded.as_bytes(),
+                &IrLimits::default(),
+                || context.check().is_ok()
+            )
+            .unwrap(),
+            envelope
+        );
+        let malformed = encoded.replacen("\"derivation\":[]", &invalid_evidence, 1);
+        connection
+            .execute("UPDATE extensions SET payload = ?1", [&malformed])
+            .unwrap();
+        let mut expected_max = u64::try_from(malformed.len()).unwrap();
+        let empty_components = format!("[{}]", vec!["\"\""; 2048].join(","));
+        connection.execute(
+            "UPDATE files SET path_locator_components = ?1 WHERE path_locator_components IS NOT NULL",
+            [&empty_components],
+        ).unwrap();
+        expected_max = expected_max.max(u64::try_from(empty_components.len()).unwrap());
+        let stats = stats(17, 32_768);
+        let maximum = maximum_payload_bytes(&connection, stats, &context).unwrap();
+        assert_eq!(maximum, expected_max);
+        let plan = oracle_read_memory_plan(GENERATION_CONTRACT_VERSION, stats, maximum).unwrap();
+        let factor =
+            u64::try_from(4 * (std::mem::size_of::<String>() + std::mem::size_of::<usize>()))
+                .unwrap();
+        assert_eq!(plan.transient_decode_bytes(), maximum * factor);
+        assert_eq!(
+            decode_extension_envelope_with_checkpoint(
+                malformed.as_bytes(),
+                &IrLimits::default(),
+                || context.check().is_ok()
+            )
+            .unwrap_err(),
+            rootlight_ir::ExtensionEnvelopeDecodeError::InvalidEnvelopeShape
+        );
+        assert_eq!(
+            decode_path_locator(Some("unix_bytes_v1".to_owned()), Some(empty_components))
+                .unwrap_err()
+                .kind(),
+            CatalogErrorKind::Corrupt
+        );
+    }
 }

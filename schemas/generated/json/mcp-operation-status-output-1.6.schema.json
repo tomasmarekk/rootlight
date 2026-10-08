@@ -594,8 +594,8 @@
       "type": "string",
       "pattern": "^op1_[a-z2-7]{32}$"
     },
-    "OperationIncrementalEvidence": {
-      "description": "Durable source-free invalidation and grouped fact-work evidence.",
+    "OperationIncrementalEvidenceV1_6": {
+      "description": "Invalidation and grouped fact-work evidence for operation-status schema 1.6.",
       "type": "object",
       "properties": {
         "build_strategy": {
@@ -642,7 +642,7 @@
           "description": "Bounded source-free explanation of invalidation and reuse decisions.",
           "anyOf": [
             {
-              "$ref": "#/$defs/OperationInvalidationTraceV1_1"
+              "$ref": "#/$defs/OperationInvalidationTraceV1_6"
             },
             {
               "type": "null"
@@ -859,8 +859,8 @@
         "domain"
       ]
     },
-    "OperationInvalidationInput": {
-      "description": "Typed generation input named by an invalidation decision.",
+    "OperationInvalidationInputV1_6": {
+      "description": "Typed generation input exposed by operation-status schema 1.6.",
       "oneOf": [
         {
           "description": "Actual bytes of one file.",
@@ -887,6 +887,24 @@
             "kind": {
               "type": "string",
               "const": "file_path"
+            },
+            "subject": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "subject"
+          ]
+        },
+        {
+          "description": "Selected parser route for one source with an ambiguous suffix.",
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "file_parser_route"
             },
             "subject": {
               "type": "string"
@@ -1104,8 +1122,8 @@
         }
       ]
     },
-    "OperationInvalidationReason": {
-      "description": "Stable source-free explanation for one invalidation decision.",
+    "OperationInvalidationReasonV1_6": {
+      "description": "Source-free invalidation reason exposed by operation-status schema 1.6.",
       "oneOf": [
         {
           "description": "A complete input transitioned under this conservative class.",
@@ -1194,7 +1212,7 @@
               "const": "artifact_dependency_changed"
             },
             "value": {
-              "$ref": "#/$defs/OperationInvalidationInput"
+              "$ref": "#/$defs/OperationInvalidationInputV1_6"
             }
           },
           "additionalProperties": false,
@@ -1237,8 +1255,8 @@
         }
       ]
     },
-    "OperationInvalidationTarget": {
-      "description": "Source-free target named by one invalidation decision.",
+    "OperationInvalidationTargetV1_6": {
+      "description": "Source-free invalidation target exposed by operation-status schema 1.6.",
       "oneOf": [
         {
           "description": "A changed generation input.",
@@ -1249,7 +1267,7 @@
               "const": "input"
             },
             "value": {
-              "$ref": "#/$defs/OperationInvalidationInput"
+              "$ref": "#/$defs/OperationInvalidationInputV1_6"
             }
           },
           "additionalProperties": false,
@@ -1310,8 +1328,8 @@
         }
       ]
     },
-    "OperationInvalidationTraceEntry": {
-      "description": "One deterministic source-free invalidation decision.",
+    "OperationInvalidationTraceEntryV1_6": {
+      "description": "One deterministic invalidation decision in operation-status schema 1.6.",
       "type": "object",
       "properties": {
         "action": {
@@ -1320,17 +1338,17 @@
         },
         "reason": {
           "description": "Stable reason for the decision.",
-          "$ref": "#/$defs/OperationInvalidationReason"
+          "$ref": "#/$defs/OperationInvalidationReasonV1_6"
         },
         "target": {
           "description": "Input, fact node, artifact, or whole-plan target.",
-          "$ref": "#/$defs/OperationInvalidationTarget"
+          "$ref": "#/$defs/OperationInvalidationTargetV1_6"
         },
         "via": {
           "description": "Direct predecessor that propagated invalidation, when present.",
           "anyOf": [
             {
-              "$ref": "#/$defs/OperationInvalidationTarget"
+              "$ref": "#/$defs/OperationInvalidationTargetV1_6"
             },
             {
               "type": "null"
@@ -1345,8 +1363,8 @@
         "reason"
       ]
     },
-    "OperationInvalidationTraceV1_1": {
-      "description": "Bounded prefix of the complete source-free invalidation trace.",
+    "OperationInvalidationTraceV1_6": {
+      "description": "Bounded invalidation trace exposed by operation-status schema 1.6.",
       "type": "object",
       "properties": {
         "complete": {
@@ -1357,7 +1375,7 @@
           "description": "Canonically ordered trace decisions retained in this response.",
           "type": "array",
           "items": {
-            "$ref": "#/$defs/OperationInvalidationTraceEntry"
+            "$ref": "#/$defs/OperationInvalidationTraceEntryV1_6"
           },
           "maxItems": 8
         },
@@ -2140,7 +2158,7 @@
           "description": "Final invalidation, reuse, and rebuild evidence, when published.",
           "anyOf": [
             {
-              "$ref": "#/$defs/OperationIncrementalEvidence"
+              "$ref": "#/$defs/OperationIncrementalEvidenceV1_6"
             },
             {
               "type": "null"

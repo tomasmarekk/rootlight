@@ -118,7 +118,7 @@ impl VerticalTool {
     pub const fn contract_version(self) -> &'static str {
         match self {
             Self::CodeLocate => crate::source_entity::LOCATE_VERSION,
-            Self::SourceRead => crate::source_entity::SOURCE_READ_VERSION,
+            Self::SourceRead => crate::source_text::SOURCE_READ_TEXT_VERSION,
             Self::QueryAdvanced => crate::source_entity::QUERY_VERSION,
             Self::SymbolExplain => crate::source_entity::EXPLAIN_VERSION,
             Self::ChangeImpact | Self::HistoryCompare => crate::source_entity::CHANGE_VERSION,
@@ -214,7 +214,7 @@ impl VerticalTool {
                 "../../../schemas/generated/json/mcp-context-pack-input-1.1.schema.json"
             ),
             Self::SourceRead => include_str!(
-                "../../../schemas/generated/json/mcp-source-read-input-1.2.schema.json"
+                "../../../schemas/generated/json/mcp-source-read-input-1.3.schema.json"
             ),
             Self::QueryAdvanced => include_str!(
                 "../../../schemas/generated/json/mcp-query-advanced-input-1.7.schema.json"
@@ -278,7 +278,7 @@ impl VerticalTool {
                 "../../../schemas/generated/json/mcp-context-pack-output-1.1.schema.json"
             ),
             Self::SourceRead => include_str!(
-                "../../../schemas/generated/json/mcp-source-read-output-1.2.schema.json"
+                "../../../schemas/generated/json/mcp-source-read-output-1.3.schema.json"
             ),
             Self::QueryAdvanced => include_str!(
                 "../../../schemas/generated/json/mcp-query-advanced-output-1.7.schema.json"
@@ -293,6 +293,7 @@ impl VerticalTool {
     #[must_use]
     pub const fn pre_label_contract_version(self) -> Option<&'static str> {
         match self {
+            Self::SourceRead => Some("1.2"),
             Self::CodeLocate => Some("1.8"),
             Self::SymbolExplain => Some("1.8"),
             Self::QueryAdvanced => Some("1.6"),
@@ -306,6 +307,9 @@ impl VerticalTool {
     #[must_use]
     pub const fn pre_label_input_schema_json(self) -> Option<&'static str> {
         match self {
+            Self::SourceRead => Some(include_str!(
+                "../../../schemas/generated/json/mcp-source-read-input-1.2.schema.json"
+            )),
             Self::CodeLocate => Some(include_str!(
                 "../../../schemas/generated/json/mcp-code-locate-input-1.8.schema.json"
             )),
@@ -329,6 +333,9 @@ impl VerticalTool {
     #[must_use]
     pub const fn pre_label_output_schema_json(self) -> Option<&'static str> {
         match self {
+            Self::SourceRead => Some(include_str!(
+                "../../../schemas/generated/json/mcp-source-read-output-1.2.schema.json"
+            )),
             Self::CodeLocate => Some(include_str!(
                 "../../../schemas/generated/json/mcp-code-locate-output-1.8.schema.json"
             )),
@@ -2327,6 +2334,138 @@ pub struct OperationIncrementalEvidence {
     pub fact_work: Option<OperationIncrementalFactWorkEvidence>,
 }
 
+/// Typed generation input exposed by operation-status schema 1.6.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(tag = "kind", content = "subject", rename_all = "snake_case")]
+pub enum OperationInvalidationInputV1_6 {
+    /// Actual bytes of one file.
+    FileContent(String),
+    /// Canonical path semantics of one file.
+    FilePath(String),
+    /// Selected parser route for one source with an ambiguous suffix.
+    FileParserRoute(String),
+    /// Exported surface of one analysis unit.
+    PublicSurface(String),
+    /// Body summary of one analysis unit.
+    BodySummary(String),
+    /// Import set of one analysis unit.
+    ImportSet(String),
+    /// Build-target identity and membership.
+    BuildTarget(String),
+    /// Compiler and macro option context.
+    CompilerOptions(String),
+    /// Dependency or lockfile resolution.
+    DependencyVersion(String),
+    /// Parser grammar identity.
+    GrammarVersion(String),
+    /// Adapter producer identity.
+    AdapterVersion(String),
+    /// Global resolver revision.
+    ResolverVersion,
+    /// Global analysis-configuration revision.
+    ConfigurationRevision,
+    /// Global search revision.
+    SearchRevision,
+    /// Derived plan or projection identity.
+    DerivedPlan(String),
+}
+
+/// Source-free invalidation target exposed by operation-status schema 1.6.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(tag = "kind", content = "value", rename_all = "snake_case")]
+pub enum OperationInvalidationTargetV1_6 {
+    /// A changed generation input.
+    Input(OperationInvalidationInputV1_6),
+    /// A scoped fact-domain node.
+    Fact(OperationInvalidationFactTarget),
+    /// A reusable immutable artifact identity.
+    Artifact(String),
+    /// The complete invalidation plan.
+    Plan,
+}
+
+/// Source-free invalidation reason exposed by operation-status schema 1.6.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(tag = "kind", content = "value", rename_all = "snake_case")]
+pub enum OperationInvalidationReasonV1_6 {
+    /// A complete input transitioned under this conservative class.
+    InputTransition(OperationInvalidationChangeClass),
+    /// A declared pass dependency propagated invalidation.
+    DependencyPass(String),
+    /// A changed input had no declared dependent edge.
+    MissingDependencyDeclaration,
+    /// The configured fixed-point edge-visit budget was exhausted.
+    ClosureWorkExceeded,
+    /// One artifact output node is invalidated.
+    ArtifactOutputInvalidated,
+    /// One artifact's complete dependency fingerprint changed.
+    ArtifactDependencyChanged(OperationInvalidationInputV1_6),
+    /// Every artifact dependency and output remains reusable.
+    CompleteDependencyMatch,
+    /// A conservative repository fallback rebuilds this target.
+    ConservativeRepositoryRebuild(OperationFallbackReason),
+}
+
+/// One deterministic invalidation decision in operation-status schema 1.6.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct OperationInvalidationTraceEntryV1_6 {
+    /// Input, fact node, artifact, or whole-plan target.
+    pub target: OperationInvalidationTargetV1_6,
+    /// Decision applied to the target.
+    pub action: OperationInvalidationAction,
+    /// Stable reason for the decision.
+    pub reason: OperationInvalidationReasonV1_6,
+    /// Direct predecessor that propagated invalidation, when present.
+    pub via: Option<OperationInvalidationTargetV1_6>,
+}
+
+/// Bounded invalidation trace exposed by operation-status schema 1.6.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct OperationInvalidationTraceV1_6 {
+    /// Incremental trace schema version.
+    #[schemars(length(min = 1, max = 32))]
+    pub version: String,
+    /// Canonically ordered trace decisions retained in this response.
+    #[schemars(length(max = 8))]
+    pub entries: Vec<OperationInvalidationTraceEntryV1_6>,
+    /// Complete number of decisions in the durable trace.
+    pub total_entries: u64,
+    /// Whether every durable decision fits in this response.
+    pub complete: bool,
+}
+
+/// Invalidation and grouped fact-work evidence for operation-status schema 1.6.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct OperationIncrementalEvidenceV1_6 {
+    /// Construction strategy used by this operation.
+    pub build_strategy: OperationBuildStrategy,
+    /// Explicit reason dependency-directed reuse was abandoned, when applicable.
+    pub fallback_reason: RequiredNullable<OperationFallbackReason>,
+    /// Analysis units selected by the invalidation closure.
+    pub invalidated_units: u64,
+    /// Typed generation inputs changed from the parent snapshot.
+    pub changed_inputs: u64,
+    /// Authoritative file transitions observed by reconciliation.
+    pub changed_files: u64,
+    /// Source files whose immutable artifacts were reused.
+    pub reused_files: u64,
+    /// Source files lowered into fresh generation-bound facts.
+    pub rebuilt_files: u64,
+    /// Generation-bound normalized facts reused without rewriting.
+    pub reused_facts: u64,
+    /// Normalized facts rebuilt for the published generation.
+    pub rebuilt_facts: u64,
+    /// Bounded source-free explanation of invalidation and reuse decisions.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub invalidation_trace: Option<OperationInvalidationTraceV1_6>,
+    /// Bounded grouped planned and completed normalized fact work.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fact_work: Option<OperationIncrementalFactWorkEvidence>,
+}
+
 /// `operation.status` result data for schema 1.4.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -2570,7 +2709,7 @@ pub struct OperationStatusData {
     pub planning: Option<OperationPlanning>,
     /// Final invalidation, reuse, and rebuild evidence, when published.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub incremental: Option<OperationIncrementalEvidence>,
+    pub incremental: Option<OperationIncrementalEvidenceV1_6>,
     /// Terminal public error, if any.
     pub error: RequiredNullable<McpPublicError>,
     /// Recommended delay before polling again.
@@ -3129,7 +3268,7 @@ impl<'de> Deserialize<'de> for LocatedItem {
     }
 }
 
-fn extracted_origin_matches_source(origin: &SourceRef, source: &SourceRef) -> bool {
+pub(crate) fn extracted_origin_matches_source(origin: &SourceRef, source: &SourceRef) -> bool {
     origin.repository() == source.repository()
         && origin.generation() == source.generation()
         && origin.span().file() != source.span().file()
@@ -3907,12 +4046,15 @@ mod tests {
     use serde_json::{Value, json};
 
     use super::{
-        CodeLocateInput, CodeLocateOutput, OperationStatusInput, OperationStatusOutput,
-        OperationStatusOutputV1_0, OperationStatusOutputV1_1, OperationStatusOutputV1_2,
-        OperationStatusOutputV1_3, OperationStatusOutputV1_4, OperationStatusOutputV1_5,
-        RepoIndexInput, RepoIndexOutput, RepoIndexOutputV1_0, RepoIndexOutputV1_1,
-        RepoIndexOutputV1_2, SourceReadInput, SourceReadOutput, SymbolExplainInput,
-        SymbolExplainOutputV1_0, SymbolExplainOutputV1_1, VerticalTool,
+        CodeLocateInput, CodeLocateOutput, OperationInvalidationAction,
+        OperationInvalidationChangeClass, OperationInvalidationInputV1_6,
+        OperationInvalidationReasonV1_6, OperationInvalidationTargetV1_6,
+        OperationInvalidationTraceEntry, OperationInvalidationTraceEntryV1_6, OperationStatusInput,
+        OperationStatusOutput, OperationStatusOutputV1_0, OperationStatusOutputV1_1,
+        OperationStatusOutputV1_2, OperationStatusOutputV1_3, OperationStatusOutputV1_4,
+        OperationStatusOutputV1_5, RepoIndexInput, RepoIndexOutput, RepoIndexOutputV1_0,
+        RepoIndexOutputV1_1, RepoIndexOutputV1_2, SourceReadInput, SourceReadOutput,
+        SymbolExplainInput, SymbolExplainOutputV1_0, SymbolExplainOutputV1_1, VerticalTool,
     };
     use crate::change::{
         ChangeImpactInput, ChangeImpactOutputV1_0, ChangeImpactOutputV1_1, HistoryCompareInputV1_0,
@@ -4165,6 +4307,111 @@ mod tests {
             .expect("retained operation without deadline decodes");
         retained["data"]["operation"]["deadline_unix_ms"] = json!(1800000000000u64);
         assert!(serde_json::from_value::<OperationStatusOutputV1_5>(retained).is_err());
+    }
+
+    #[test]
+    fn current_invalidation_trace_round_trips_file_parser_routes() {
+        let input = OperationInvalidationInputV1_6::FileParserRoute("file-fixture".to_owned());
+        let expected = [
+            OperationInvalidationTraceEntryV1_6 {
+                target: OperationInvalidationTargetV1_6::Input(input.clone()),
+                action: OperationInvalidationAction::Changed,
+                reason: OperationInvalidationReasonV1_6::InputTransition(
+                    OperationInvalidationChangeClass::Configuration,
+                ),
+                via: None,
+            },
+            OperationInvalidationTraceEntryV1_6 {
+                target: OperationInvalidationTargetV1_6::Artifact("artifact-fixture".to_owned()),
+                action: OperationInvalidationAction::Rebuilt,
+                reason: OperationInvalidationReasonV1_6::ArtifactDependencyChanged(input.clone()),
+                via: Some(OperationInvalidationTargetV1_6::Input(input)),
+            },
+        ];
+        let schema =
+            serde_json::to_value(schemars::schema_for!(OperationInvalidationTraceEntryV1_6))
+                .expect("current trace-entry schema serializes");
+        let validator =
+            jsonschema::draft202012::new(&schema).expect("current trace-entry schema compiles");
+
+        for (fixture, expected) in parser_route_invalidation_entries()
+            .into_iter()
+            .zip(expected)
+        {
+            let decoded: OperationInvalidationTraceEntryV1_6 =
+                serde_json::from_value(fixture.clone())
+                    .expect("current parser-route entry decodes");
+            assert_eq!(decoded, expected);
+            let encoded = serde_json::to_value(&decoded).expect("current trace entry serializes");
+            assert_eq!(encoded, fixture);
+            assert!(validator.is_valid(&encoded));
+            let round_tripped: OperationInvalidationTraceEntryV1_6 =
+                serde_json::from_value(encoded).expect("serialized parser-route entry decodes");
+            assert_eq!(round_tripped, decoded);
+        }
+    }
+
+    #[test]
+    fn file_parser_route_invalidation_is_rejected_by_retained_contracts() {
+        let schema = serde_json::to_value(schemars::schema_for!(OperationInvalidationTraceEntry))
+            .expect("retained trace-entry schema serializes");
+        let validator =
+            jsonschema::draft202012::new(&schema).expect("retained trace-entry schema compiles");
+
+        for fixture in parser_route_invalidation_entries() {
+            assert!(
+                serde_json::from_value::<OperationInvalidationTraceEntry>(fixture.clone()).is_err()
+            );
+            assert!(!validator.is_valid(&fixture));
+        }
+    }
+
+    #[test]
+    fn current_invalidation_trace_rejects_unknown_input_kinds() {
+        let [mut target, mut reason] = parser_route_invalidation_entries();
+        let mut via = reason.clone();
+        target["target"]["value"]["kind"] = json!("file_parser_routes");
+        reason["reason"]["value"]["kind"] = json!("file_parser_routes");
+        via["via"]["value"]["kind"] = json!("file_parser_routes");
+        let schema =
+            serde_json::to_value(schemars::schema_for!(OperationInvalidationTraceEntryV1_6))
+                .expect("current trace-entry schema serializes");
+        let validator =
+            jsonschema::draft202012::new(&schema).expect("current trace-entry schema compiles");
+
+        for fixture in [target, reason, via] {
+            assert!(
+                serde_json::from_value::<OperationInvalidationTraceEntryV1_6>(fixture.clone())
+                    .is_err()
+            );
+            assert!(!validator.is_valid(&fixture));
+        }
+    }
+
+    fn parser_route_invalidation_entries() -> [Value; 2] {
+        [
+            json!({
+                "target": {
+                    "kind": "input",
+                    "value": {"kind": "file_parser_route", "subject": "file-fixture"}
+                },
+                "action": "changed",
+                "reason": {"kind": "input_transition", "value": "configuration"},
+                "via": null
+            }),
+            json!({
+                "target": {"kind": "artifact", "value": "artifact-fixture"},
+                "action": "rebuilt",
+                "reason": {
+                    "kind": "artifact_dependency_changed",
+                    "value": {"kind": "file_parser_route", "subject": "file-fixture"}
+                },
+                "via": {
+                    "kind": "input",
+                    "value": {"kind": "file_parser_route", "subject": "file-fixture"}
+                }
+            }),
+        ]
     }
 
     fn schema_enum_contains(schema: &Value, definition: &str, expected: &str) -> bool {
@@ -4671,7 +4918,8 @@ mod tests {
         assert_eq!(tool.fifth_legacy_contract_version(), Some("1.1"));
         assert_eq!(tool.initial_contract_version(), Some("1.0"));
         let tool = VerticalTool::SourceRead;
-        assert_eq!(tool.contract_version(), "1.2");
+        assert_eq!(tool.contract_version(), "1.3");
+        assert_eq!(tool.pre_label_contract_version(), Some("1.2"));
         assert_eq!(tool.pre_activity_contract_version(), Some("1.1"));
         assert_eq!(tool.previous_contract_version(), Some("1.0"));
         assert_eq!(tool.legacy_contract_version(), None);

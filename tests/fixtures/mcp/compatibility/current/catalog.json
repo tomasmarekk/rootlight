@@ -4775,9 +4775,9 @@
               "pattern": "^op1_[a-z2-7]{32}$",
               "type": "string"
             },
-            "OperationIncrementalEvidence": {
+            "OperationIncrementalEvidenceV1_6": {
               "additionalProperties": false,
-              "description": "Durable source-free invalidation and grouped fact-work evidence.",
+              "description": "Invalidation and grouped fact-work evidence for operation-status schema 1.6.",
               "properties": {
                 "build_strategy": {
                   "$ref": "#/$defs/OperationBuildStrategy",
@@ -4822,7 +4822,7 @@
                 "invalidation_trace": {
                   "anyOf": [
                     {
-                      "$ref": "#/$defs/OperationInvalidationTraceV1_1"
+                      "$ref": "#/$defs/OperationInvalidationTraceV1_6"
                     },
                     {
                       "type": "null"
@@ -5040,8 +5040,8 @@
               ],
               "type": "object"
             },
-            "OperationInvalidationInput": {
-              "description": "Typed generation input named by an invalidation decision.",
+            "OperationInvalidationInputV1_6": {
+              "description": "Typed generation input exposed by operation-status schema 1.6.",
               "oneOf": [
                 {
                   "additionalProperties": false,
@@ -5067,6 +5067,24 @@
                   "properties": {
                     "kind": {
                       "const": "file_path",
+                      "type": "string"
+                    },
+                    "subject": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "kind",
+                    "subject"
+                  ],
+                  "type": "object"
+                },
+                {
+                  "additionalProperties": false,
+                  "description": "Selected parser route for one source with an ambiguous suffix.",
+                  "properties": {
+                    "kind": {
+                      "const": "file_parser_route",
                       "type": "string"
                     },
                     "subject": {
@@ -5285,8 +5303,8 @@
                 }
               ]
             },
-            "OperationInvalidationReason": {
-              "description": "Stable source-free explanation for one invalidation decision.",
+            "OperationInvalidationReasonV1_6": {
+              "description": "Source-free invalidation reason exposed by operation-status schema 1.6.",
               "oneOf": [
                 {
                   "additionalProperties": false,
@@ -5375,7 +5393,7 @@
                       "type": "string"
                     },
                     "value": {
-                      "$ref": "#/$defs/OperationInvalidationInput"
+                      "$ref": "#/$defs/OperationInvalidationInputV1_6"
                     }
                   },
                   "required": [
@@ -5418,8 +5436,8 @@
                 }
               ]
             },
-            "OperationInvalidationTarget": {
-              "description": "Source-free target named by one invalidation decision.",
+            "OperationInvalidationTargetV1_6": {
+              "description": "Source-free invalidation target exposed by operation-status schema 1.6.",
               "oneOf": [
                 {
                   "additionalProperties": false,
@@ -5430,7 +5448,7 @@
                       "type": "string"
                     },
                     "value": {
-                      "$ref": "#/$defs/OperationInvalidationInput"
+                      "$ref": "#/$defs/OperationInvalidationInputV1_6"
                     }
                   },
                   "required": [
@@ -5491,26 +5509,26 @@
                 }
               ]
             },
-            "OperationInvalidationTraceEntry": {
+            "OperationInvalidationTraceEntryV1_6": {
               "additionalProperties": false,
-              "description": "One deterministic source-free invalidation decision.",
+              "description": "One deterministic invalidation decision in operation-status schema 1.6.",
               "properties": {
                 "action": {
                   "$ref": "#/$defs/OperationInvalidationAction",
                   "description": "Decision applied to the target."
                 },
                 "reason": {
-                  "$ref": "#/$defs/OperationInvalidationReason",
+                  "$ref": "#/$defs/OperationInvalidationReasonV1_6",
                   "description": "Stable reason for the decision."
                 },
                 "target": {
-                  "$ref": "#/$defs/OperationInvalidationTarget",
+                  "$ref": "#/$defs/OperationInvalidationTargetV1_6",
                   "description": "Input, fact node, artifact, or whole-plan target."
                 },
                 "via": {
                   "anyOf": [
                     {
-                      "$ref": "#/$defs/OperationInvalidationTarget"
+                      "$ref": "#/$defs/OperationInvalidationTargetV1_6"
                     },
                     {
                       "type": "null"
@@ -5526,9 +5544,9 @@
               ],
               "type": "object"
             },
-            "OperationInvalidationTraceV1_1": {
+            "OperationInvalidationTraceV1_6": {
               "additionalProperties": false,
-              "description": "Bounded prefix of the complete source-free invalidation trace.",
+              "description": "Bounded invalidation trace exposed by operation-status schema 1.6.",
               "properties": {
                 "complete": {
                   "description": "Whether every durable decision fits in this response.",
@@ -5537,7 +5555,7 @@
                 "entries": {
                   "description": "Canonically ordered trace decisions retained in this response.",
                   "items": {
-                    "$ref": "#/$defs/OperationInvalidationTraceEntry"
+                    "$ref": "#/$defs/OperationInvalidationTraceEntryV1_6"
                   },
                   "maxItems": 8,
                   "type": "array"
@@ -6320,7 +6338,7 @@
                 "incremental": {
                   "anyOf": [
                     {
-                      "$ref": "#/$defs/OperationIncrementalEvidence"
+                      "$ref": "#/$defs/OperationIncrementalEvidenceV1_6"
                     },
                     {
                       "type": "null"
@@ -33275,11 +33293,11 @@
             "batchEligible": true,
             "batchSharedBudget": false,
             "budget": "per_request",
-            "contractVersion": "1.2",
+            "contractVersion": "1.3",
             "explainSupported": true,
-            "fallbackSummary": "bounded source ranges from pinned references with source-bound conditional membership as untrusted data",
+            "fallbackSummary": "bounded source ranges from pinned references as untrusted lossless text with original-byte identity and physical encoding",
             "generation": "selects_generation",
-            "inputShapeHash": "0bf1574c6ce6a0a4e99261bc6ec5f0e22dd872da1071dc2f26a9eb00663a4659",
+            "inputShapeHash": "fab66fd3a4d3acd752d1f04ffa889a4b2bb6eb465a0abc6fa358b809f911840a",
             "limitations": [
               {
                 "errorCode": "UNSUPPORTED_CAPABILITY",
@@ -33313,7 +33331,7 @@
           "openWorldHint": false,
           "readOnlyHint": true
         },
-        "description": "Read bounded source ranges from pinned references with source-bound conditional membership as untrusted data using exact UTF-8 or explicit base64 bytes with optional context, canonical overlap merging, line projection, and caller-reduced ceilings; conditional activity applies only to classic Visual Basic/VBA returned chunks, and direct file selectors are unsupported.",
+        "description": "Read bounded source ranges from pinned references as untrusted lossless text with original-byte identity and physical encoding, or explicitly request historical UTF-8/base64 modes; optional context, overlap merging, line projection and caller-reduced ceilings apply. Conditional activity is source-bound for classic Visual Basic/VBA; direct file selectors are unsupported.",
         "execution": {
           "taskSupport": "forbidden"
         },
@@ -33508,21 +33526,6 @@
                 }
               ]
             },
-            "SourceEncodingRequest": {
-              "description": "Requested source encoding.",
-              "oneOf": [
-                {
-                  "const": "utf8_lossless_when_valid",
-                  "description": "Return exact UTF-8 when the complete verified file is valid UTF-8.",
-                  "type": "string"
-                },
-                {
-                  "const": "bytes_base64",
-                  "description": "Return explicit base64 for a small non-UTF-8 read.",
-                  "type": "string"
-                }
-              ]
-            },
             "SourceReadSelector": {
               "anyOf": [
                 {
@@ -33609,6 +33612,26 @@
               ],
               "type": "object"
             },
+            "SourceTextEncodingRequest": {
+              "description": "Requested representation in source read 1.3.",
+              "oneOf": [
+                {
+                  "const": "lossless_text",
+                  "description": "Strict text preserving original scalar spelling and physical byte identity.",
+                  "type": "string"
+                },
+                {
+                  "const": "utf8_lossless_when_valid",
+                  "description": "Historical exact UTF-8 mode.",
+                  "type": "string"
+                },
+                {
+                  "const": "bytes_base64",
+                  "description": "Historical exact-byte base64 mode.",
+                  "type": "string"
+                }
+              ]
+            },
             "SymbolDefinitionSelector": {
               "additionalProperties": false,
               "description": "Symbol-definition selector.",
@@ -33628,10 +33651,10 @@
               "type": "string"
             }
           },
-          "$id": "https://rootlight.local/schema/mcp/source.read/input/1.2",
+          "$id": "https://rootlight.local/schema/mcp/source.read/input/1.3",
           "$schema": "https://json-schema.org/draft/2020-12/schema",
           "additionalProperties": false,
-          "description": "Strict input for `source.read`.",
+          "description": "Strict source read 1.3 input; omitted encoding selects lossless text.",
           "properties": {
             "budget": {
               "anyOf": [
@@ -33658,13 +33681,13 @@
             "encoding": {
               "anyOf": [
                 {
-                  "$ref": "#/$defs/SourceEncodingRequest"
+                  "$ref": "#/$defs/SourceTextEncodingRequest"
                 }
               ],
-              "description": "Requested encoding."
+              "description": "Representation; omission means lossless text in this revision only."
             },
             "explain": {
-              "description": "Return the bounded plan without executing retrieval.",
+              "description": "Return the bounded source-free plan without retrieval.",
               "type": "boolean"
             },
             "generation": {
@@ -33680,7 +33703,7 @@
               "type": "boolean"
             },
             "max_source_bytes": {
-              "description": "Aggregate raw source-byte ceiling.",
+              "description": "Aggregate physical source-byte ceiling.",
               "format": "uint32",
               "maximum": 524288,
               "minimum": 1,
@@ -33709,14 +33732,14 @@
                   "$ref": "#/$defs/ResponseProfile"
                 }
               ],
-              "description": "Requested representation."
+              "description": "Requested representation profile."
             }
           },
           "required": [
             "repository",
             "references"
           ],
-          "title": "SourceReadInput",
+          "title": "SourceReadInputV1_3",
           "type": "object"
         },
         "name": "source.read",
@@ -33972,16 +33995,6 @@
                 }
               ]
             },
-            "ConditionalSourceReadVersion": {
-              "description": "Exact version of conditional-activity-aware source responses.",
-              "oneOf": [
-                {
-                  "const": "1.2",
-                  "description": "Source read contract 1.2.",
-                  "type": "string"
-                }
-              ]
-            },
             "ContentHash": {
               "pattern": "^b3_[a-z2-7]{58}$",
               "type": "string"
@@ -34134,7 +34147,7 @@
                   "description": "Source-free error and remediation."
                 },
                 "schema_version": {
-                  "$ref": "#/$defs/ConditionalSourceReadVersion",
+                  "$ref": "#/$defs/SourceReadTextVersion",
                   "description": "Exact error contract version."
                 }
               },
@@ -34157,7 +34170,7 @@
                   "description": "Relevant coverage."
                 },
                 "data": {
-                  "$ref": "#/$defs/SourceReadDataV1_2",
+                  "$ref": "#/$defs/SourceReadDataV1_3",
                   "description": "Tool-specific result."
                 },
                 "generation": {
@@ -34173,7 +34186,7 @@
                   "description": "Resolved repository."
                 },
                 "schema_version": {
-                  "$ref": "#/$defs/ConditionalSourceReadVersion",
+                  "$ref": "#/$defs/SourceReadTextVersion",
                   "description": "Exact response contract version."
                 },
                 "truncated": {
@@ -34545,6 +34558,16 @@
                 "end_line"
               ],
               "type": "object"
+            },
+            "LosslessContentEncoding": {
+              "description": "Disjoint discriminator for the single-content lossless branch.",
+              "oneOf": [
+                {
+                  "const": "lossless_text",
+                  "description": "Unicode presentation reconstructible using the physical encoding.",
+                  "type": "string"
+                }
+              ]
             },
             "NextAction": {
               "description": "Stable remediation hints generated from a closed set of templates.",
@@ -35165,6 +35188,19 @@
               ],
               "type": "object"
             },
+            "SourceChunkV1_3": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/SourceTextChunk",
+                  "description": "A single Unicode presentation with original physical encoding."
+                },
+                {
+                  "$ref": "#/$defs/SourceChunk",
+                  "description": "An unchanged legacy UTF-8 or base64 representation."
+                }
+              ],
+              "description": "Disjoint legacy or lossless chunk shapes; encoding selects exactly one branch."
+            },
             "SourceElision": {
               "additionalProperties": false,
               "description": "One source-read elision.",
@@ -35217,20 +35253,20 @@
               "pattern": "^[a-z0-9 -]+$",
               "type": "string"
             },
-            "SourceReadDataV1_2": {
+            "SourceReadDataV1_3": {
               "additionalProperties": false,
-              "description": "Current `source.read` data with required conditional source metadata.",
+              "description": "Source read 1.3 data with independent physical and presentation totals.",
               "properties": {
                 "chunks": {
                   "description": "Verified chunks in request order.",
                   "items": {
-                    "$ref": "#/$defs/SourceChunk"
+                    "$ref": "#/$defs/SourceChunkV1_3"
                   },
                   "maxItems": 32,
                   "type": "array"
                 },
                 "conditional_activity": {
-                  "description": "One ordered assessment for each applicable expanded chunk.",
+                  "description": "Ordered source-bound conditional activity assessments.",
                   "items": {
                     "$ref": "#/$defs/ConditionalActivityAssessment"
                   },
@@ -35265,9 +35301,16 @@
                   "type": "array"
                 },
                 "total_source_bytes": {
-                  "description": "Exact raw source bytes returned before JSON escaping.",
+                  "description": "Exact physical source bytes before JSON escaping.",
                   "format": "uint32",
                   "maximum": 524288,
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "total_text_bytes": {
+                  "description": "UTF-8 bytes of Unicode source text; base64 contributes zero.",
+                  "format": "uint32",
+                  "maximum": 786432,
                   "minimum": 0,
                   "type": "integer"
                 }
@@ -35277,9 +35320,20 @@
                 "stale_references",
                 "elisions",
                 "total_source_bytes",
+                "total_text_bytes",
                 "conditional_activity"
               ],
               "type": "object"
+            },
+            "SourceReadTextVersion": {
+              "description": "Exact source-text response revision.",
+              "oneOf": [
+                {
+                  "const": "1.3",
+                  "description": "Source read contract 1.3.",
+                  "type": "string"
+                }
+              ]
             },
             "SourceRef": {
               "additionalProperties": false,
@@ -35342,6 +35396,132 @@
                 "end_byte"
               ],
               "type": "object"
+            },
+            "SourceTextChunk": {
+              "additionalProperties": false,
+              "description": "One exact scalar-preserving text chunk with physical source coordinates.",
+              "properties": {
+                "content": {
+                  "description": "Exact Unicode presentation, including a selected original BOM.\nUTF-16 can expand at most three UTF-8 bytes per two physical bytes.",
+                  "maxLength": 786432,
+                  "type": "string"
+                },
+                "content_hash": {
+                  "$ref": "#/$defs/ContentHash",
+                  "description": "Complete original-file hash, not a hash of the text presentation."
+                },
+                "encoding": {
+                  "$ref": "#/$defs/LosslessContentEncoding",
+                  "description": "Closed representation discriminator."
+                },
+                "end_byte": {
+                  "description": "Exclusive original byte end.",
+                  "format": "uint64",
+                  "maximum": 18446744073709551615,
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "end_line": {
+                  "description": "Last included one-based line.",
+                  "format": "uint64",
+                  "maximum": 18446744073709551615,
+                  "minimum": 0,
+                  "type": [
+                    "integer",
+                    "null"
+                  ]
+                },
+                "extracted_from": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/$defs/SourceRef"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ],
+                  "description": "Immediate physical container of an extracted source."
+                },
+                "generated": {
+                  "description": "Whether the indexed file is generated.",
+                  "type": "boolean"
+                },
+                "language": {
+                  "description": "Indexed language identity.",
+                  "maxLength": 256,
+                  "minLength": 1,
+                  "type": "string"
+                },
+                "path": {
+                  "description": "Repository-relative display path.",
+                  "maxLength": 8192,
+                  "minLength": 1,
+                  "type": "string"
+                },
+                "physical_encoding": {
+                  "$ref": "#/$defs/SourceTextEncoding",
+                  "description": "Encoding needed to reconstruct the selected original bytes."
+                },
+                "source_ref": {
+                  "$ref": "#/$defs/SourceRef",
+                  "description": "Generation-bound original-byte reference."
+                },
+                "start_byte": {
+                  "description": "Inclusive original byte start.",
+                  "format": "uint64",
+                  "maximum": 18446744073709551615,
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "start_line": {
+                  "description": "First included one-based line.",
+                  "format": "uint64",
+                  "maximum": 18446744073709551615,
+                  "minimum": 0,
+                  "type": [
+                    "integer",
+                    "null"
+                  ]
+                },
+                "trust": {
+                  "$ref": "#/$defs/TrustClassification",
+                  "description": "Repository-data trust marker."
+                }
+              },
+              "required": [
+                "source_ref",
+                "path",
+                "start_byte",
+                "end_byte",
+                "content",
+                "encoding",
+                "physical_encoding",
+                "content_hash",
+                "language",
+                "generated",
+                "trust"
+              ],
+              "type": "object"
+            },
+            "SourceTextEncoding": {
+              "description": "Physical encoding of original source bytes.",
+              "oneOf": [
+                {
+                  "const": "utf-8",
+                  "description": "Original UTF-8 bytes.",
+                  "type": "string"
+                },
+                {
+                  "const": "utf-16le",
+                  "description": "BOM-marked UTF-16 little endian.",
+                  "type": "string"
+                },
+                {
+                  "const": "utf-16be",
+                  "description": "BOM-marked UTF-16 big endian.",
+                  "type": "string"
+                }
+              ]
             },
             "StaleSourceReference": {
               "additionalProperties": false,
@@ -35445,7 +35625,7 @@
               "type": "object"
             }
           },
-          "$id": "https://rootlight.local/schema/mcp/source.read/output/1.2",
+          "$id": "https://rootlight.local/schema/mcp/source.read/output/1.3",
           "$schema": "https://json-schema.org/draft/2020-12/schema",
           "anyOf": [
             {

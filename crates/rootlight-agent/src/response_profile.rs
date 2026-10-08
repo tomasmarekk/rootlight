@@ -18,6 +18,7 @@ use rootlight_mcp_contract::{
         ArchitectureCyclesData, ArchitectureOverviewData, CodeDeadData, FlowTraceData,
         SymbolRelationshipsData,
     },
+    source_text::{SourceChunkV1_3, SourceReadDataV1_3},
     vertical::{
         CodeLocateData, ReadEnvelope, ResponseProfile, ResponseWarning, SourceReadData,
         SymbolExplainData,
@@ -878,6 +879,37 @@ impl ProfileShape for SourceReadDataV1_2 {
     }
 }
 
+impl ProfileShape for SourceReadDataV1_3 {
+    fn shape_with_limits(&mut self, profile: ResponseProfile, _limits: ProfileLimits) {
+        for (index, chunk) in self.chunks.iter_mut().enumerate() {
+            let mandatory_source = self
+                .conditional_activity
+                .iter()
+                .any(|assessment| usize::try_from(assessment.result_index).ok() == Some(index));
+            if mandatory_source {
+                continue;
+            }
+            let (source, start_line, end_line) = match chunk {
+                SourceChunkV1_3::Lossless(chunk) => (
+                    &mut chunk.source_ref,
+                    &mut chunk.start_line,
+                    &mut chunk.end_line,
+                ),
+                SourceChunkV1_3::Legacy(chunk) => (
+                    &mut chunk.source_ref,
+                    &mut chunk.start_line,
+                    &mut chunk.end_line,
+                ),
+            };
+            shape_source_ref(source, profile);
+            if matches!(profile, ResponseProfile::Compact) {
+                *start_line = None;
+                *end_line = None;
+            }
+        }
+    }
+}
+
 impl ProfileShape for SymbolRelationshipsData {
     fn shape_with_limits(&mut self, profile: ResponseProfile, limits: ProfileLimits) {
         let evidence_limit = usize::from(limits.evidence_references_per_result);
@@ -1202,6 +1234,7 @@ mod tests {
         assert_profile_shape::<ContextPackData>();
         assert_profile_shape::<SourceReadData>();
         assert_profile_shape::<SourceReadDataV1_2>();
+        assert_profile_shape::<SourceReadDataV1_3>();
     }
 
     #[test]
@@ -1378,6 +1411,115 @@ mod tests {
         }
         assert_eq!(serde_json::to_value(read).unwrap(), read_json);
         assert_eq!(serde_json::to_value(locate).unwrap(), locate_json);
+    }
+
+    #[test]
+    fn lossless_source_profiles_preserve_text_physical_identity_and_activity() {
+        use rootlight_mcp_contract::conditional_activity::{
+            ConditionalActivityAssessment, ConditionalActivityBasis, ConditionalActivityReason,
+            ConditionalActivityState,
+        };
+        use rootlight_mcp_contract::source_text::{
+            LosslessContentEncoding, SourceTextChunk, SourceTextEncoding,
+        };
+        use rootlight_mcp_contract::vertical::RequiredNullable;
+        let content = "a\r\n\u{0100}\u{1f642}";
+        for encoding in [
+            SourceTextEncoding::Utf8,
+            SourceTextEncoding::Utf16Le,
+            SourceTextEncoding::Utf16Be,
+        ] {
+            let bytes = if encoding == SourceTextEncoding::Utf8 {
+                9
+            } else {
+                12
+            };
+            let base = source_ref(1);
+            let source = SourceRef::new(
+                base.repository(),
+                base.generation(),
+                SourceSpan::new(base.span().file(), 2, 2 + u64::from(bytes)).unwrap(),
+                base.content_hash(),
+                Some(LineRange::new(2, 3).unwrap()),
+            );
+            for language in ["rust", "vba"] {
+                let conditional_activity = if language == "vba" {
+                    vec![ConditionalActivityAssessment {
+                        result_index: 0,
+                        basis: ConditionalActivityBasis::ReturnedRange,
+                        activity: ConditionalActivityState::Unproven,
+                        assessed_source_ref: RequiredNullable(Some(source.clone())),
+                        inventory: RequiredNullable(None),
+                        reason: RequiredNullable(Some(ConditionalActivityReason::NoInventory)),
+                    }]
+                } else {
+                    Vec::new()
+                };
+                let raw = SourceReadDataV1_3 {
+                    chunks: vec![SourceChunkV1_3::Lossless(SourceTextChunk {
+                        extracted_from: None,
+                        source_ref: source.clone(),
+                        path: "module.rs".into(),
+                        start_byte: 2,
+                        end_byte: 2 + u64::from(bytes),
+                        start_line: Some(2),
+                        end_line: Some(3),
+                        content: content.into(),
+                        encoding: LosslessContentEncoding::LosslessText,
+                        physical_encoding: encoding,
+                        content_hash: base.content_hash(),
+                        language: language.into(),
+                        generated: false,
+                        trust: TrustClassification::UntrustedRepositoryData,
+                    })],
+                    stale_references: Vec::new(),
+                    elisions: Vec::new(),
+                    total_source_bytes: bytes,
+                    total_text_bytes: 9,
+                    explanation: None,
+                    conditional_activity,
+                };
+                raw.validate_conditional_activity().unwrap();
+                for profile in [
+                    ResponseProfile::Compact,
+                    ResponseProfile::Standard,
+                    ResponseProfile::Evidence,
+                ] {
+                    let mut shaped = raw.clone();
+                    shape_data(&mut shaped, profile);
+                    shaped.validate_conditional_activity().unwrap();
+                    assert_eq!(shaped.total_source_bytes, bytes);
+                    assert_eq!(shaped.total_text_bytes, 9);
+                    assert_eq!(shaped.conditional_activity, raw.conditional_activity);
+                    let SourceChunkV1_3::Lossless(chunk) = &shaped.chunks[0] else {
+                        panic!("lossless representation remains selected");
+                    };
+                    assert_source_semantics(&chunk.source_ref, &source);
+                    assert_eq!(chunk.content, content);
+                    assert_eq!(chunk.physical_encoding, encoding);
+                    assert_eq!(chunk.start_byte, 2);
+                    assert_eq!(chunk.end_byte, 2 + u64::from(bytes));
+                    if profile != ResponseProfile::Evidence && language == "rust" {
+                        assert_eq!(
+                            (chunk.start_line, chunk.end_line),
+                            if profile == ResponseProfile::Compact {
+                                (None, None)
+                            } else {
+                                (Some(2), Some(3))
+                            }
+                        );
+                        assert!(chunk.source_ref.line_hint().is_none());
+                    } else {
+                        assert_eq!(chunk.source_ref, source);
+                        assert_eq!((chunk.start_line, chunk.end_line), (Some(2), Some(3)));
+                    }
+                    serde_json::from_value::<SourceReadDataV1_3>(
+                        serde_json::to_value(shaped).unwrap(),
+                    )
+                    .unwrap();
+                }
+            }
+        }
     }
 
     #[test]

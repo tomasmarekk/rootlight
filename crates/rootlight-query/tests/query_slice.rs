@@ -26,7 +26,7 @@ use rootlight_search::{
     BuildBudget, LexicalSearch, QueryViolation, SearchBudget, SearchError, SearchHit,
     SearchOutcome, SearchRequest,
 };
-use rootlight_source::{SourceBudget, SourceReadOptions, SourceService};
+use rootlight_source::{LosslessTextReadOptions, SourceBudget, SourceReadOptions, SourceService};
 use rootlight_storage::{
     GENERATION_CONTRACT_VERSION, GenerationBudget, GenerationContext, GenerationManifestRecipe,
     GenerationMetadata, GenerationSnapshot, IdentityVerifiedGeneration,
@@ -1514,6 +1514,204 @@ fn conditional_activity_resource_stop_preserves_records_without_membership_or_co
 }
 
 #[test]
+fn lossless_text_preserves_conditional_assessed_physical_ranges() {
+    let (snapshot, retained, search) = conditional_fixture();
+    let sources = [retained];
+    let source = SourceService::from_snapshots(&sources, &snapshot).unwrap();
+    let query = QueryService::new(&snapshot, &search).unwrap();
+    let located = conditional_locate(&snapshot, &search, QueryBudget::new());
+    let reference = located
+        .hits
+        .iter()
+        .find(|hit| hit.identifier == "Excluded")
+        .unwrap()
+        .source
+        .clone()
+        .unwrap();
+    let plan = query
+        .plan_source_read_lossless_text(
+            vec![reference.clone(), reference.clone()],
+            LosslessTextReadOptions::new()
+                .with_context_lines_before(0)
+                .with_context_lines_after(0),
+            SourceBudget::new(),
+            QueryBudget::new(),
+        )
+        .unwrap();
+    let response = query
+        .execute_source_read_lossless_text(&plan, &source, &Cancellation::new())
+        .unwrap();
+    assert_eq!(response.data.chunks.len(), 2);
+    assert_eq!(response.data.conditional_activity.len(), 2);
+    for (index, chunk) in response.data.chunks.iter().enumerate() {
+        assert_eq!(chunk.raw().reference, reference);
+        assert_eq!(chunk.text().as_bytes(), chunk.raw().bytes);
+        assert_eq!(chunk.physical_encoding(), rootlight_vfs::TextEncoding::Utf8);
+        let assessment = &response.data.conditional_activity[index];
+        assert_eq!(assessment.result_index, u32::try_from(index).unwrap());
+        assert_eq!(assessment.activity, ConditionalActivityState::Inactive);
+        let assessed = assessment.assessed_source_ref.as_ref().unwrap();
+        assert_eq!(assessed.span().start_byte(), chunk.raw().start_byte);
+        assert_eq!(assessed.span().end_byte(), chunk.raw().end_byte);
+    }
+    assert_eq!(
+        response.data.total_source_bytes,
+        response.data.total_text_bytes
+    );
+    assert_eq!(
+        response.usage.source_bytes,
+        u64::try_from(response.data.total_source_bytes).unwrap()
+    );
+    assert_exact_response_accounting(&response);
+    let cancellation = Cancellation::new();
+    cancellation.cancel(CancellationReason::ClientRequest);
+    assert!(matches!(
+        query.execute_source_read_lossless_text(&plan, &source, &cancellation),
+        Err(QueryError::Cancelled(CancellationReason::ClientRequest))
+    ));
+}
+
+#[test]
+fn lossless_text_separates_utf16_physical_and_presentation_costs() {
+    let (template, _, _) = conditional_fixture();
+    let text = "\u{feff}a\u{010a}\u{0a00}😀\r\nnext\r\n";
+    for encoding in [
+        rootlight_vfs::TextEncoding::Utf16Le,
+        rootlight_vfs::TextEncoding::Utf16Be,
+    ] {
+        let bytes: Vec<u8> = text
+            .encode_utf16()
+            .flat_map(|unit| match encoding {
+                rootlight_vfs::TextEncoding::Utf16Le => unit.to_le_bytes(),
+                rootlight_vfs::TextEncoding::Utf16Be => unit.to_be_bytes(),
+                rootlight_vfs::TextEncoding::Utf8 => unreachable!("fixture covers UTF-16 only"),
+            })
+            .collect();
+        let mut file = template.document().files[0].clone();
+        file.language = "unknown".to_owned();
+        file.encoding = encoding.as_str().to_owned();
+        file.content_hash = content_hash(&bytes);
+        file.byte_length = u64::try_from(bytes.len()).unwrap();
+        let reference = SourceRef::new(
+            file.repository,
+            file.generation,
+            SourceSpan::new(file.id, 0, file.byte_length).unwrap(),
+            file.content_hash,
+            None,
+        );
+        file.evidence.source = Some(reference.clone());
+        let path = RelativePath::parse(Path::new(&file.path)).unwrap();
+        let retained = Arc::new(
+            SourceSnapshot::from_persisted(
+                file.repository,
+                path,
+                file.id,
+                file.content_hash,
+                bytes.clone(),
+            )
+            .unwrap(),
+        );
+        let mut provenance = template.document().provenance[0].clone();
+        provenance.language = file.language.clone();
+        provenance.input_sources = vec![reference.clone()];
+        provenance.evidence_sources = vec![reference.clone()];
+        let mut document = NormalizedIrDocument::empty(file.repository, file.generation);
+        document.provenance.push(provenance);
+        document.files.push(file);
+        let snapshot = GenerationSnapshot::new(
+            template.metadata(),
+            document,
+            &IrLimits::default(),
+            &ExtensionSupport::default(),
+        )
+        .unwrap();
+        let search = FakeSearch {
+            generation: snapshot.metadata().generation(),
+            hits: Vec::new(),
+        };
+        let query = QueryService::new(&snapshot, &search).unwrap();
+        let sources = [retained];
+        let source = SourceService::from_snapshots(&sources, &snapshot).unwrap();
+        let options = LosslessTextReadOptions::new()
+            .with_context_lines_before(0)
+            .with_context_lines_after(0);
+        let source_budget = SourceBudget::new().with_max_source_bytes(128);
+        let query_budget = QueryBudget::new().with_max_source_bytes(128);
+        let plan = query
+            .plan_source_read_lossless_text(
+                vec![reference.clone(), reference.clone()],
+                options,
+                source_budget,
+                query_budget,
+            )
+            .unwrap();
+        let response = query
+            .execute_source_read_lossless_text(&plan, &source, &Cancellation::new())
+            .unwrap();
+        for chunk in &response.data.chunks {
+            assert_eq!(chunk.raw().reference, reference);
+            assert_eq!(chunk.raw().bytes, bytes);
+            assert_eq!(chunk.text(), text);
+            assert_eq!(chunk.physical_encoding(), encoding);
+            assert_eq!(chunk.trust(), RepositoryDataTrust::UntrustedRepositoryData);
+        }
+        assert_eq!(response.data.total_source_bytes, bytes.len() * 2);
+        assert_eq!(response.data.total_text_bytes, text.len() * 2);
+        assert_ne!(
+            response.data.total_source_bytes,
+            response.data.total_text_bytes
+        );
+        assert_eq!(
+            response.usage.source_bytes,
+            u64::try_from(bytes.len() * 2).unwrap()
+        );
+        assert_exact_response_accounting(&response);
+        let value = serde_json::to_value(&response).unwrap();
+        assert_eq!(value["data"]["chunks"][0]["content"], text);
+        assert_eq!(
+            value["data"]["chunks"][0]["physical_encoding"],
+            encoding.as_str()
+        );
+        assert!(value["data"]["chunks"][0].get("bytes").is_none());
+        assert!(value["data"]["chunks"][0].get("presentation").is_none());
+        let limited = query
+            .plan_source_read_lossless_text(
+                vec![reference.clone()],
+                options,
+                SourceBudget::new().with_max_source_bytes(bytes.len() - 1),
+                query_budget,
+            )
+            .unwrap();
+        assert!(matches!(
+            query.execute_source_read_lossless_text(&limited, &source, &Cancellation::new()),
+            Err(QueryError::Source(
+                rootlight_source::SourceError::SourceBudgetExceeded
+            ))
+        ));
+        let malformed = SourceRef::new(
+            reference.repository(),
+            reference.generation(),
+            SourceSpan::new(reference.span().file(), 3, 4).unwrap(),
+            reference.content_hash(),
+            None,
+        );
+        let invalid = query
+            .plan_source_read_lossless_text(vec![malformed], options, source_budget, query_budget)
+            .unwrap();
+        assert!(
+            query
+                .execute_source_read_lossless_text(&invalid, &source, &Cancellation::new())
+                .is_err()
+        );
+    }
+}
+
+#[path = "support/source_metadata_quote.rs"]
+mod source_metadata_quote;
+#[path = "support/source_text_prefix.rs"]
+mod source_text_prefix;
+
+#[test]
 fn conditional_activity_branchless_batch_reuses_decoder_scratch_under_default_budget() {
     let (template, _, _) = conditional_fixture();
     let mut document = NormalizedIrDocument::empty(
@@ -2224,6 +2422,366 @@ fn signature_snapshot(signatures: &[&str]) -> (GenerationSnapshot, SymbolId) {
     )
 }
 
+fn explain_posting_snapshot(unrelated_count: u8) -> (GenerationSnapshot, SymbolId) {
+    let (base, symbol) = signature_snapshot(&["fn fixture()"]);
+    let mut document = base.document().clone();
+    let mut unrelated_entity = document.entities[0].clone();
+    unrelated_entity.id = SymbolId::from_bytes([200; 20]);
+    unrelated_entity.canonical_name = "unrelated".to_owned();
+    unrelated_entity.display_name = "unrelated".to_owned();
+    unrelated_entity.qualified_name = "crate::unrelated".to_owned();
+    let unrelated_symbol = unrelated_entity.id;
+    document.entities.push(unrelated_entity);
+
+    let mut other_file = document.files[0].clone();
+    let path = RelativePath::parse(Path::new("src/consumer.rs")).unwrap();
+    other_file.id = derive_file(FileIdentity {
+        repository: document.repository,
+        path_identity: path.identity_bytes(),
+    })
+    .id();
+    other_file.path = path.as_str().to_owned();
+    other_file.path_locator = Some(path.to_locator());
+    let source = SourceRef::new(
+        document.repository,
+        document.generation,
+        SourceSpan::new(other_file.id, 0, 7).unwrap(),
+        other_file.content_hash,
+        None,
+    );
+    other_file.evidence.source = Some(SourceRef::new(
+        document.repository,
+        document.generation,
+        SourceSpan::new(other_file.id, 0, other_file.byte_length).unwrap(),
+        other_file.content_hash,
+        None,
+    ));
+    let mut candidate = document.occurrences[0].clone();
+    candidate.id = derive_fact("rootlight.query-test.candidate/v1", b"consumer").id();
+    candidate.file = other_file.id;
+    candidate.source = source.clone();
+    candidate.role = OccurrenceRole::Reference;
+    candidate.enclosing = Some(unrelated_symbol);
+    candidate.target = OccurrenceTarget::Candidates {
+        symbols: vec![symbol, unrelated_symbol],
+        total_count: 2,
+        completeness: CoverageStatus::Complete,
+    };
+    candidate.evidence.source = Some(source);
+    document.files.push(other_file);
+    document.occurrences.push(candidate);
+
+    for index in 0..unrelated_count {
+        let mut relation = document.relations[0].clone();
+        relation.id = derive_fact("rootlight.query-test.explain-noise-relation/v1", &[index]).id();
+        relation.subject = RelationEndpoint::Entity(unrelated_symbol);
+        relation.object = RelationEndpoint::Entity(unrelated_symbol);
+        relation.predicate = RelationPredicate::Calls;
+        document.relations.push(relation);
+        let mut occurrence = document.occurrences[0].clone();
+        occurrence.id =
+            derive_fact("rootlight.query-test.explain-noise-occurrence/v1", &[index]).id();
+        occurrence.target = OccurrenceTarget::Resolved {
+            symbol: unrelated_symbol,
+        };
+        occurrence.enclosing = Some(unrelated_symbol);
+        document.occurrences.push(occurrence);
+        let evidence = rootlight_ir::LexicalEvidenceV1::from_complete_text(
+            rootlight_ir::LexicalEvidenceKind::Signature,
+            rootlight_ir::FactRef::Entity(unrelated_symbol),
+            rootlight_ir::LexicalEvidenceFormat::SourceText,
+            &format!("fn unrelated_{index}()"),
+        )
+        .unwrap();
+        document.extensions.push(
+            rootlight_ir::new_lexical_evidence_envelope(
+                document.repository,
+                document.generation,
+                document.entities[0].provenance,
+                document.entities[0].evidence.source.clone().unwrap(),
+                &evidence,
+            )
+            .unwrap(),
+        );
+    }
+    (
+        GenerationSnapshot::new(
+            base.metadata(),
+            document,
+            &IrLimits::default(),
+            &ExtensionSupport::default(),
+        )
+        .unwrap(),
+        symbol,
+    )
+}
+
+#[test]
+fn symbol_explain_rows_are_independent_of_unrelated_facts() {
+    let (baseline, symbol) = explain_posting_snapshot(0);
+    let search = fixture_search(&baseline);
+    let service = QueryService::new(&baseline, &search).unwrap();
+    let expected = service
+        .plan_symbol_explain(symbol, QueryBudget::new())
+        .and_then(|plan| service.execute_symbol_explain(&plan, &Cancellation::new()))
+        .unwrap();
+    assert!(!expected.data.truncated);
+    assert_eq!(expected.data.occurrences.len(), 2);
+    assert!(expected.data.occurrences.iter().any(|occurrence| {
+        matches!(occurrence.target, OccurrenceTarget::Candidates { .. })
+            && occurrence.file
+                != expected
+                    .data
+                    .entity
+                    .evidence
+                    .source
+                    .as_ref()
+                    .unwrap()
+                    .span()
+                    .file()
+    }));
+    let (noisy, _) = explain_posting_snapshot(16);
+    let search = fixture_search(&noisy);
+    let service = QueryService::new(&noisy, &search).unwrap();
+    for max_rows in [expected.usage.rows, expected.usage.rows + 1] {
+        let actual = service
+            .plan_symbol_explain(symbol, QueryBudget::new().with_max_rows(max_rows))
+            .and_then(|plan| service.execute_symbol_explain(&plan, &Cancellation::new()))
+            .unwrap();
+        assert_eq!(actual.data, expected.data);
+        assert_eq!(actual.usage.rows, expected.usage.rows);
+        assert_eq!(actual.usage.edges, expected.usage.edges);
+        assert_eq!(actual.usage.source_bytes, expected.usage.source_bytes);
+        assert_exact_response_accounting(&actual);
+    }
+    let bounded = service
+        .plan_symbol_explain(
+            symbol,
+            QueryBudget::new().with_max_rows(expected.usage.rows - 1),
+        )
+        .and_then(|plan| service.execute_symbol_explain(&plan, &Cancellation::new()))
+        .unwrap();
+    assert!(bounded.data.truncated);
+    assert_eq!(bounded.data.limiting_resources, vec![QueryResource::Rows]);
+    assert_eq!(bounded.usage.rows, expected.usage.rows - 1);
+    assert_exact_response_accounting(&bounded);
+}
+
+fn projected_signature_snapshot(
+    source_bytes: &[u8],
+    encoding: Option<rootlight_ir::SourceTextEncoding>,
+    ranges: &[std::ops::Range<usize>],
+) -> (
+    GenerationSnapshot,
+    SymbolId,
+    rootlight_ir::LexicalEvidenceV1,
+) {
+    let (base, source) = fallback_fixture_with_bytes(
+        "signature.sourceblob",
+        source_bytes.to_vec(),
+        encoding.map_or("utf-8", rootlight_ir::SourceTextEncoding::as_str),
+    );
+    let mut document = base.document().clone();
+    let reference = document
+        .files
+        .iter()
+        .find(|file| file.id == source.file())
+        .unwrap()
+        .evidence
+        .source
+        .clone()
+        .unwrap();
+    let entity = &mut document.entities[0];
+    let symbol = entity.id;
+    let provenance = entity.provenance;
+    entity.container = Some(rootlight_ir::ContainerRef::File(source.file()));
+    entity.evidence.source = Some(reference.clone());
+    let subject = rootlight_ir::FactRef::Entity(symbol);
+    let evidence = match encoding {
+        Some(encoding) => rootlight_ir::LexicalEvidenceV1::from_encoded_source_projection(
+            subject,
+            rootlight_ir::EncodedSourceTextProjection::from_source(source_bytes, encoding, ranges)
+                .unwrap(),
+        ),
+        None => rootlight_ir::LexicalEvidenceV1::from_source_projection(
+            subject,
+            rootlight_ir::SourceTextProjection::from_source(
+                std::str::from_utf8(source_bytes).unwrap(),
+                ranges,
+            )
+            .unwrap(),
+        ),
+    };
+    assert_eq!(evidence.verify_source_bytes(source_bytes), Ok(()));
+    document.extensions.push(
+        rootlight_ir::new_lexical_evidence_envelope(
+            document.repository,
+            document.generation,
+            provenance,
+            reference,
+            &evidence,
+        )
+        .unwrap(),
+    );
+    (
+        GenerationSnapshot::new(
+            base.metadata(),
+            document,
+            &IrLimits::default(),
+            &ExtensionSupport::default(),
+        )
+        .unwrap(),
+        symbol,
+        evidence,
+    )
+}
+
+fn assert_signature_physical_budget(
+    snapshot: &GenerationSnapshot,
+    symbol: SymbolId,
+    evidence: &rootlight_ir::LexicalEvidenceV1,
+    physical_bytes: u64,
+) {
+    let search = fixture_search(snapshot);
+    let service = QueryService::new(snapshot, &search).unwrap();
+    for maximum in [physical_bytes - 1, physical_bytes, physical_bytes + 1] {
+        let plan = service
+            .plan_symbol_explain(symbol, QueryBudget::new().with_max_source_bytes(maximum))
+            .unwrap();
+        let result = service
+            .execute_symbol_explain(&plan, &Cancellation::new())
+            .unwrap();
+        if maximum < physical_bytes {
+            assert!(result.data.signature.is_none());
+            assert_eq!(result.usage.source_bytes, 0);
+            assert!(result.data.truncated);
+            assert!(
+                result
+                    .data
+                    .limiting_resources
+                    .contains(&QueryResource::SourceBytes)
+            );
+        } else {
+            assert_eq!(result.data.signature.as_ref(), Some(evidence));
+            assert_eq!(result.usage.source_bytes, physical_bytes);
+            assert!(!result.data.truncated);
+            assert_eq!(
+                result.usage.results,
+                u64::try_from(
+                    3 + result.data.relations.len()
+                        + result.data.occurrences.len()
+                        + result.data.coverage.len(),
+                )
+                .unwrap()
+            );
+        }
+        assert!(result.usage.source_bytes <= plan.explanation().estimate.source_bytes);
+        assert_exact_response_accounting(&result);
+    }
+}
+
+#[test]
+fn projected_signatures_charge_only_physical_fragments() {
+    for (source, ranges) in [
+        ("fn /* gap */ item", [0..2, 13..17]),
+        ("fnitem", [0..2, 2..6]),
+    ] {
+        let (snapshot, symbol, evidence) =
+            projected_signature_snapshot(source.as_bytes(), None, &ranges);
+        assert_eq!(evidence.text(), "fn item");
+        assert_eq!(evidence.text().len(), 7);
+        assert_eq!(evidence.source_parts().unwrap().len(), 2);
+        assert_signature_physical_budget(&snapshot, symbol, &evidence, 6);
+    }
+}
+
+#[test]
+fn encoded_signatures_charge_physical_source_in_both_endians() {
+    for encoding in [
+        rootlight_ir::SourceTextEncoding::Utf16Le,
+        rootlight_ir::SourceTextEncoding::Utf16Be,
+    ] {
+        for (source, ranges, retained, physical_bytes, text_bytes) in [
+            (
+                "\u{feff}\u{2603}",
+                std::iter::once(2..4).collect::<Vec<_>>(),
+                "\u{2603}",
+                2,
+                3,
+            ),
+            (
+                "\u{feff}x",
+                std::iter::once(2..4).collect::<Vec<_>>(),
+                "x",
+                2,
+                1,
+            ),
+            (
+                "\u{feff}\u{1f642}",
+                std::iter::once(2..6).collect::<Vec<_>>(),
+                "\u{1f642}",
+                4,
+                4,
+            ),
+            (
+                "\u{feff}\u{2603} /* skipped */ x",
+                vec![2..4, 34..36],
+                "\u{2603} x",
+                4,
+                5,
+            ),
+        ] {
+            let raw = source
+                .encode_utf16()
+                .flat_map(|unit| match encoding {
+                    rootlight_ir::SourceTextEncoding::Utf16Le => unit.to_le_bytes(),
+                    rootlight_ir::SourceTextEncoding::Utf16Be => unit.to_be_bytes(),
+                })
+                .collect::<Vec<_>>();
+            let (snapshot, symbol, evidence) =
+                projected_signature_snapshot(&raw, Some(encoding), &ranges);
+            assert_eq!(evidence.text(), retained);
+            assert_eq!(evidence.text().len(), text_bytes);
+            assert_eq!(evidence.source_encoding(), Some(encoding));
+            assert_signature_physical_budget(&snapshot, symbol, &evidence, physical_bytes);
+        }
+    }
+}
+
+#[test]
+fn encoded_signature_plan_bounds_physical_bytes_above_text_limit() {
+    let retained = "x".repeat(3_000);
+    let source = format!("\u{feff}{retained}");
+    for encoding in [
+        rootlight_ir::SourceTextEncoding::Utf16Le,
+        rootlight_ir::SourceTextEncoding::Utf16Be,
+    ] {
+        let raw = source
+            .encode_utf16()
+            .flat_map(|unit| match encoding {
+                rootlight_ir::SourceTextEncoding::Utf16Le => unit.to_le_bytes(),
+                rootlight_ir::SourceTextEncoding::Utf16Be => unit.to_be_bytes(),
+            })
+            .collect::<Vec<_>>();
+        let range = 2..raw.len();
+        let (snapshot, symbol, evidence) =
+            projected_signature_snapshot(&raw, Some(encoding), std::slice::from_ref(&range));
+        assert_eq!(evidence.text(), retained);
+        let physical_bytes = u64::try_from(range.len()).unwrap();
+        assert!(physical_bytes > u64::try_from(rootlight_ir::MAX_LEXICAL_SIGNATURE_BYTES).unwrap());
+        let search = fixture_search(&snapshot);
+        let service = QueryService::new(&snapshot, &search).unwrap();
+        let plan = service
+            .plan_symbol_explain(
+                symbol,
+                QueryBudget::new().with_max_source_bytes(physical_bytes),
+            )
+            .unwrap();
+        assert_eq!(plan.explanation().estimate.source_bytes, physical_bytes);
+        assert_signature_physical_budget(&snapshot, symbol, &evidence, physical_bytes);
+    }
+}
+
 #[test]
 fn explanations_preserve_retained_multiline_signatures_and_truncation() {
     let long = format!("fn large({})", "value: é, ".repeat(600));
@@ -2327,6 +2885,277 @@ fn retained_signatures_obey_source_byte_budgets() {
         }
         assert!(result.usage.source_bytes <= plan.explanation().estimate.source_bytes);
         assert_exact_response_accounting(&result);
+    }
+}
+
+#[test]
+fn retained_signatures_reach_symbol_projection_and_text_locate() {
+    let text = "fn item(value: HeaderWitness)";
+    let (snapshot, symbol) = signature_snapshot(&[text]);
+    let cancellation = Cancellation::new();
+    let projected =
+        project_lexical_documents(&snapshot, BuildBudget::default(), &cancellation).unwrap();
+    let document = projected
+        .iter()
+        .find(|document| document.symbol_id == Some(symbol))
+        .unwrap();
+    assert_eq!(document.signature.as_deref(), Some(text));
+    let search = rootlight_search::LexicalIndex::build_ephemeral(
+        snapshot.metadata().generation(),
+        projected,
+        BuildBudget::default(),
+        &cancellation,
+    )
+    .unwrap();
+    let service = QueryService::new(&snapshot, &search).unwrap();
+    let plan = service
+        .plan_code_locate(
+            "HeaderWitness".to_owned(),
+            LocateMode::Text,
+            10,
+            0,
+            SearchBudget::default(),
+            QueryBudget::new(),
+        )
+        .unwrap();
+    let result = service.execute_code_locate(&plan, &cancellation).unwrap();
+    assert_eq!(result.data.hits.len(), 1);
+    let hit = &result.data.hits[0];
+    assert_eq!(hit.symbol, Some(symbol));
+    assert_eq!(
+        hit.source.as_ref(),
+        snapshot.document().entities[0].evidence.source.as_ref()
+    );
+    let signature = hit.signature.as_ref().unwrap();
+    assert_eq!(signature.text(), text);
+    assert_eq!(signature.subject(), rootlight_ir::FactRef::Entity(symbol));
+    assert_eq!(
+        signature.complete_text_hash(),
+        content_hash(text.as_bytes())
+    );
+    assert!(!signature.is_truncated());
+    let explained = service
+        .execute_symbol_explain(
+            &service
+                .plan_symbol_explain(symbol, QueryBudget::new())
+                .unwrap(),
+            &cancellation,
+        )
+        .unwrap();
+    assert_eq!(hit.signature, explained.data.signature);
+    assert!(!result.data.truncated);
+    assert_exact_response_accounting(&result);
+}
+
+#[test]
+fn signature_projection_and_locate_reject_ambiguous_retained_evidence() {
+    let text = "fn item(value: HeaderWitness)";
+    for (signatures, expected) in [
+        (Vec::new(), None),
+        (vec![text, "fn item(value: OtherHeaderWitness)"], None),
+        (vec![text, text], Some(text)),
+    ] {
+        let (snapshot, symbol) = signature_snapshot(&signatures);
+        let cancellation = Cancellation::new();
+        let projected =
+            project_lexical_documents(&snapshot, BuildBudget::default(), &cancellation).unwrap();
+        assert_eq!(
+            projected
+                .iter()
+                .find(|document| document.symbol_id == Some(symbol))
+                .unwrap()
+                .signature
+                .as_deref(),
+            expected
+        );
+        let index = rootlight_search::LexicalIndex::build_ephemeral(
+            snapshot.metadata().generation(),
+            projected,
+            BuildBudget::default(),
+            &cancellation,
+        )
+        .unwrap();
+        let service = QueryService::new(&snapshot, &index).unwrap();
+        let plan = service
+            .plan_code_locate(
+                "HeaderWitness".to_owned(),
+                LocateMode::Text,
+                10,
+                0,
+                SearchBudget::default(),
+                QueryBudget::new(),
+            )
+            .unwrap();
+        let lexical = service.execute_code_locate(&plan, &cancellation).unwrap();
+        assert_eq!(lexical.data.hits.len(), usize::from(expected.is_some()));
+        if let Some(hit) = lexical.data.hits.first() {
+            assert_eq!(hit.symbol, Some(symbol));
+            assert_eq!(
+                hit.signature.as_ref().map(|evidence| evidence.text()),
+                expected
+            );
+        }
+        let exact = fixture_search(&snapshot);
+        let service = QueryService::new(&snapshot, &exact).unwrap();
+        let plan = service
+            .plan_code_locate(
+                exact.hits[0].identifier.clone(),
+                LocateMode::Exact,
+                1,
+                0,
+                SearchBudget::default(),
+                QueryBudget::new(),
+            )
+            .unwrap();
+        let located = service.execute_code_locate(&plan, &cancellation).unwrap();
+        assert_eq!(located.data.hits.len(), 1);
+        assert_eq!(
+            located.data.hits[0]
+                .signature
+                .as_ref()
+                .map(|evidence| evidence.text()),
+            expected
+        );
+        assert!(!located.data.truncated);
+        assert_exact_response_accounting(&located);
+    }
+}
+
+#[test]
+fn retained_signature_projection_charges_exact_build_text_bytes() {
+    let text = "fn item(value: HeaderWitness)";
+    let cancellation = Cancellation::new();
+    let (without_signature, _) = signature_snapshot(&[]);
+    let documents =
+        project_lexical_documents(&without_signature, BuildBudget::default(), &cancellation)
+            .unwrap();
+    let metadata_bytes = documents
+        .iter()
+        .map(|document| {
+            document.identifier.len()
+                + document.canonical_name.as_ref().map_or(0, String::len)
+                + document.qualified_name.len()
+                + document.path.len()
+                + document.kind.len()
+                + document.language.len()
+                + document.tier.len()
+        })
+        .sum::<usize>();
+    let (snapshot, symbol) = signature_snapshot(&[text]);
+    for allowance in [metadata_bytes + text.len() - 1, metadata_bytes + text.len()] {
+        let projected = project_lexical_documents(
+            &snapshot,
+            BuildBudget {
+                max_text_bytes: allowance,
+                ..BuildBudget::default()
+            },
+            &cancellation,
+        );
+        if allowance < metadata_bytes + text.len() {
+            assert!(matches!(
+                projected,
+                Err(QueryError::Search(SearchError::BuildBudgetExceeded {
+                    resource: "text_bytes"
+                }))
+            ));
+        } else {
+            assert_eq!(
+                projected
+                    .unwrap()
+                    .iter()
+                    .find(|document| document.symbol_id == Some(symbol))
+                    .unwrap()
+                    .signature
+                    .as_deref(),
+                Some(text)
+            );
+        }
+    }
+}
+
+#[test]
+fn locate_signatures_obey_source_byte_budgets() {
+    let text = "fn item(value: é) -> Output";
+    let bytes = u64::try_from(text.len()).unwrap();
+    let (snapshot, symbol) = signature_snapshot(&[text]);
+    let search = fixture_search(&snapshot);
+    let service = QueryService::new(&snapshot, &search).unwrap();
+    for maximum in [bytes - 1, bytes, bytes + 1] {
+        let plan = service
+            .plan_code_locate(
+                search.hits[0].identifier.clone(),
+                LocateMode::Exact,
+                1,
+                0,
+                SearchBudget::default(),
+                QueryBudget::new().with_max_source_bytes(maximum),
+            )
+            .unwrap();
+        let result = service
+            .execute_code_locate(&plan, &Cancellation::new())
+            .unwrap();
+        assert_eq!(result.data.hits.len(), 1);
+        assert_eq!(result.data.hits[0].symbol, Some(symbol));
+        if maximum < bytes {
+            assert!(result.data.hits[0].signature.is_none());
+            assert_eq!(result.usage.source_bytes, 0);
+            assert!(result.data.truncated);
+            assert!(
+                result
+                    .data
+                    .limiting_resources
+                    .contains(&QueryResource::SourceBytes)
+            );
+        } else {
+            assert_eq!(result.data.hits[0].signature.as_ref().unwrap().text(), text);
+            assert_eq!(result.usage.source_bytes, bytes);
+            assert!(!result.data.truncated);
+        }
+        assert!(result.usage.source_bytes <= plan.explanation().estimate.source_bytes);
+        assert_exact_response_accounting(&result);
+    }
+}
+
+#[test]
+fn incomplete_locate_signature_scans_never_publish_evidence() {
+    let text = format!("fn item({})", "value: HeaderWitness, ".repeat(50));
+    let (snapshot, _) = signature_snapshot(&[&text]);
+    let search = fixture_search(&snapshot);
+    let service = QueryService::new(&snapshot, &search).unwrap();
+    for (budget, resource) in [
+        (QueryBudget::new().with_max_rows(2), QueryResource::Rows),
+        (
+            QueryBudget::new().with_max_memory_bytes(1_024),
+            QueryResource::MemoryBytes,
+        ),
+    ] {
+        let plan = service
+            .plan_code_locate(
+                search.hits[0].identifier.clone(),
+                LocateMode::Exact,
+                1,
+                0,
+                SearchBudget {
+                    max_candidates: 1,
+                    ..SearchBudget::default()
+                },
+                budget,
+            )
+            .unwrap();
+        match service.execute_code_locate(&plan, &Cancellation::new()) {
+            Ok(result) => {
+                assert!(result.data.hits.iter().all(|hit| hit.signature.is_none()));
+                assert!(result.data.truncated);
+                assert!(result.data.limiting_resources.contains(&resource));
+                assert!(result.usage.rows <= budget.max_rows());
+                assert!(result.usage.memory_bytes <= budget.max_memory_bytes());
+                assert_exact_response_accounting(&result);
+            }
+            Err(QueryError::BudgetExceeded {
+                resource: exceeded, ..
+            }) => assert_eq!(exceeded, resource),
+            Err(error) => panic!("unexpected locate signature failure: {error:?}"),
+        }
     }
 }
 

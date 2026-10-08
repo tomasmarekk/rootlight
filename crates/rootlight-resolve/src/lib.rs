@@ -9,6 +9,7 @@ mod application;
 mod classic;
 mod engine;
 mod foreign;
+mod fsharp;
 mod groovy;
 mod model;
 mod perl;

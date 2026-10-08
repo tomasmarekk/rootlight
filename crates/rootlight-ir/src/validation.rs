@@ -131,6 +131,437 @@ impl Default for IrLimits {
     }
 }
 
+/// Raw document quota usage measured before canonicalization or deduplication.
+///
+/// This fixed-size summary borrows records while measuring and owns no source
+/// text. It does not establish identity validity, encoded size, or heap usage.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct IrDocumentUsage {
+    files: usize,
+    entities: usize,
+    occurrences: usize,
+    relations: usize,
+    provenance_records: usize,
+    source_mappings: usize,
+    coverage_records: usize,
+    skipped_regions: usize,
+    diagnostics: usize,
+    extensions: usize,
+    total_records: usize,
+    total_nested_items: usize,
+    total_string_bytes: usize,
+    total_extension_bytes: usize,
+    total_diagnostic_bytes: usize,
+    maximum_nested: (&'static str, usize),
+    maximum_string: (&'static str, usize),
+    maximum_payload: Option<(FactId, usize)>,
+    maximum_diagnostic_message: Option<(FactId, usize)>,
+}
+
+impl IrDocumentUsage {
+    /// Measures all raw quota dimensions using the document limit traversal.
+    ///
+    /// # Errors
+    /// Returns a resource or entity-kind version failure, or accounting overflow.
+    pub fn measure(
+        document: &NormalizedIrDocument,
+        limits: &IrLimits,
+    ) -> Result<Self, IrDocumentUsageError> {
+        Self::measure_with_checkpoint(document, limits, || true)
+    }
+
+    /// Measures usage with checkpoints before, during, and after traversal.
+    ///
+    /// Returning `false` stops at the next record or component boundary. No
+    /// partial summary is returned, and the borrowed document is never changed.
+    ///
+    /// # Errors
+    /// Returns [`IrDocumentUsageError::Interrupted`] when a checkpoint refuses
+    /// work, or a validation or checked accounting failure.
+    pub fn measure_with_checkpoint(
+        document: &NormalizedIrDocument,
+        limits: &IrLimits,
+        mut checkpoint: impl FnMut() -> bool,
+    ) -> Result<Self, IrDocumentUsageError> {
+        collect_document_usage(
+            document,
+            limits,
+            &mut || {
+                if checkpoint() {
+                    Ok(())
+                } else {
+                    Err(IrDocumentUsageError::Interrupted)
+                }
+            },
+            checked_usage_add,
+        )
+    }
+
+    /// Measures one borrowed extension, including its metadata and evidence.
+    ///
+    /// # Errors
+    /// Returns a quota failure or accounting overflow, without identity checks.
+    pub fn measure_extension(
+        extension: &ExtensionEnvelope,
+        limits: &IrLimits,
+    ) -> Result<Self, IrDocumentUsageError> {
+        let usage = Self {
+            extensions: 1,
+            total_records: 1,
+            ..Self::default()
+        };
+        usage.validate_record_totals(limits)?;
+        let mut checkpoint = || Ok(());
+        let mut budget = NestedBudget::new(usage, &mut checkpoint, checked_usage_add);
+        budget.extension(extension, limits)?;
+        budget.finish(limits)
+    }
+
+    /// Measures one borrowed diagnostic, including strings and evidence.
+    ///
+    /// # Errors
+    /// Returns a quota failure or accounting overflow, without identity checks.
+    pub fn measure_diagnostic(
+        diagnostic: &crate::DiagnosticRecord,
+        limits: &IrLimits,
+    ) -> Result<Self, IrDocumentUsageError> {
+        let usage = Self {
+            diagnostics: 1,
+            total_records: 1,
+            ..Self::default()
+        };
+        usage.validate_record_totals(limits)?;
+        let mut checkpoint = || Ok(());
+        let mut budget = NestedBudget::new(usage, &mut checkpoint, checked_usage_add);
+        budget.diagnostic(diagnostic, limits)?;
+        budget.finish(limits)
+    }
+
+    /// Combines raw summaries and checks every aggregate and per-record quota.
+    ///
+    /// Retained maximum witnesses allow a stricter `limits` value without
+    /// revisiting records. Counts remain pre-deduplication, including duplicates.
+    ///
+    /// # Errors
+    /// Returns accounting overflow or a quota failure. The caller commits the
+    /// returned summary only after this operation succeeds.
+    pub fn checked_add(self, other: Self, limits: &IrLimits) -> Result<Self, IrDocumentUsageError> {
+        let combined = Self {
+            files: checked_usage_add(self.files, other.files)?,
+            entities: checked_usage_add(self.entities, other.entities)?,
+            occurrences: checked_usage_add(self.occurrences, other.occurrences)?,
+            relations: checked_usage_add(self.relations, other.relations)?,
+            provenance_records: checked_usage_add(
+                self.provenance_records,
+                other.provenance_records,
+            )?,
+            source_mappings: checked_usage_add(self.source_mappings, other.source_mappings)?,
+            coverage_records: checked_usage_add(self.coverage_records, other.coverage_records)?,
+            skipped_regions: checked_usage_add(self.skipped_regions, other.skipped_regions)?,
+            diagnostics: checked_usage_add(self.diagnostics, other.diagnostics)?,
+            extensions: checked_usage_add(self.extensions, other.extensions)?,
+            total_records: checked_usage_add(self.total_records, other.total_records)?,
+            total_nested_items: checked_usage_add(
+                self.total_nested_items,
+                other.total_nested_items,
+            )?,
+            total_string_bytes: checked_usage_add(
+                self.total_string_bytes,
+                other.total_string_bytes,
+            )?,
+            total_extension_bytes: checked_usage_add(
+                self.total_extension_bytes,
+                other.total_extension_bytes,
+            )?,
+            total_diagnostic_bytes: checked_usage_add(
+                self.total_diagnostic_bytes,
+                other.total_diagnostic_bytes,
+            )?,
+            maximum_nested: larger_named_count(self.maximum_nested, other.maximum_nested),
+            maximum_string: larger_named_count(self.maximum_string, other.maximum_string),
+            maximum_payload: larger_fact_count(self.maximum_payload, other.maximum_payload),
+            maximum_diagnostic_message: larger_fact_count(
+                self.maximum_diagnostic_message,
+                other.maximum_diagnostic_message,
+            ),
+        };
+        combined.validate_record_totals(limits)?;
+        combined.validate_maxima(limits)?;
+        combined.validate_nested_totals(limits)?;
+        Ok(combined)
+    }
+
+    /// Subtracts removed raw quota counts without rescanning retained records.
+    ///
+    /// The caller establishes that `other` describes records actually removed.
+    /// Per-record maxima remain conservative witnesses from `self`, even when
+    /// the record providing a maximum was removed.
+    ///
+    /// # Errors
+    /// Returns [`IrDocumentUsageError::AccountingOverflow`] for any underflow.
+    pub fn checked_sub(self, other: Self) -> Result<Self, IrDocumentUsageError> {
+        Ok(Self {
+            files: checked_usage_sub(self.files, other.files)?,
+            entities: checked_usage_sub(self.entities, other.entities)?,
+            occurrences: checked_usage_sub(self.occurrences, other.occurrences)?,
+            relations: checked_usage_sub(self.relations, other.relations)?,
+            provenance_records: checked_usage_sub(
+                self.provenance_records,
+                other.provenance_records,
+            )?,
+            source_mappings: checked_usage_sub(self.source_mappings, other.source_mappings)?,
+            coverage_records: checked_usage_sub(self.coverage_records, other.coverage_records)?,
+            skipped_regions: checked_usage_sub(self.skipped_regions, other.skipped_regions)?,
+            diagnostics: checked_usage_sub(self.diagnostics, other.diagnostics)?,
+            extensions: checked_usage_sub(self.extensions, other.extensions)?,
+            total_records: checked_usage_sub(self.total_records, other.total_records)?,
+            total_nested_items: checked_usage_sub(
+                self.total_nested_items,
+                other.total_nested_items,
+            )?,
+            total_string_bytes: checked_usage_sub(
+                self.total_string_bytes,
+                other.total_string_bytes,
+            )?,
+            total_extension_bytes: checked_usage_sub(
+                self.total_extension_bytes,
+                other.total_extension_bytes,
+            )?,
+            total_diagnostic_bytes: checked_usage_sub(
+                self.total_diagnostic_bytes,
+                other.total_diagnostic_bytes,
+            )?,
+            maximum_nested: self.maximum_nested,
+            maximum_string: self.maximum_string,
+            maximum_payload: self.maximum_payload,
+            maximum_diagnostic_message: self.maximum_diagnostic_message,
+        })
+    }
+
+    /// Returns raw file records before deduplication.
+    #[must_use]
+    pub fn files(&self) -> usize {
+        self.files
+    }
+    /// Returns raw entity records before deduplication.
+    #[must_use]
+    pub fn entities(&self) -> usize {
+        self.entities
+    }
+    /// Returns raw occurrence records before deduplication.
+    #[must_use]
+    pub fn occurrences(&self) -> usize {
+        self.occurrences
+    }
+    /// Returns raw relation records before deduplication.
+    #[must_use]
+    pub fn relations(&self) -> usize {
+        self.relations
+    }
+    /// Returns raw provenance records before deduplication.
+    #[must_use]
+    pub fn provenance_records(&self) -> usize {
+        self.provenance_records
+    }
+    /// Returns raw source-mapping records before deduplication.
+    #[must_use]
+    pub fn source_mappings(&self) -> usize {
+        self.source_mappings
+    }
+    /// Returns raw coverage records before deduplication.
+    #[must_use]
+    pub fn coverage_records(&self) -> usize {
+        self.coverage_records
+    }
+    /// Returns raw skipped regions before deduplication.
+    #[must_use]
+    pub fn skipped_regions(&self) -> usize {
+        self.skipped_regions
+    }
+    /// Returns raw diagnostic records before deduplication.
+    #[must_use]
+    pub fn diagnostics(&self) -> usize {
+        self.diagnostics
+    }
+    /// Returns raw extension envelopes before deduplication.
+    #[must_use]
+    pub fn extensions(&self) -> usize {
+        self.extensions
+    }
+    /// Returns the sum of all ten raw record-domain counts.
+    #[must_use]
+    pub fn total_records(&self) -> usize {
+        self.total_records
+    }
+    /// Returns raw nested collection items, including locator components.
+    #[must_use]
+    pub fn total_nested_items(&self) -> usize {
+        self.total_nested_items
+    }
+    /// Returns non-payload UTF-8 string bytes, including diagnostic strings.
+    #[must_use]
+    pub fn total_string_bytes(&self) -> usize {
+        self.total_string_bytes
+    }
+    /// Returns raw extension payload UTF-8 bytes, excluding envelope metadata.
+    #[must_use]
+    pub fn total_extension_bytes(&self) -> usize {
+        self.total_extension_bytes
+    }
+    /// Returns diagnostic code and message UTF-8 bytes.
+    #[must_use]
+    pub fn total_diagnostic_bytes(&self) -> usize {
+        self.total_diagnostic_bytes
+    }
+
+    fn collections(&self, limits: &IrLimits) -> [(&'static str, usize, usize); 10] {
+        [
+            ("files", self.files, limits.max_files),
+            ("entities", self.entities, limits.max_entities),
+            ("occurrences", self.occurrences, limits.max_occurrences),
+            ("relations", self.relations, limits.max_relations),
+            (
+                "provenance",
+                self.provenance_records,
+                limits.max_provenance_records,
+            ),
+            (
+                "source_mappings",
+                self.source_mappings,
+                limits.max_source_mappings,
+            ),
+            (
+                "coverage_records",
+                self.coverage_records,
+                limits.max_coverage_records,
+            ),
+            (
+                "skipped_regions",
+                self.skipped_regions,
+                limits.max_skipped_regions,
+            ),
+            ("diagnostics", self.diagnostics, limits.max_diagnostics),
+            ("extensions", self.extensions, limits.max_extensions),
+        ]
+    }
+
+    fn validate_record_totals(&self, limits: &IrLimits) -> Result<(), IrDocumentValidationError> {
+        for (collection, observed, limit) in self.collections(limits) {
+            check_collection_limit(collection, observed, limit)?;
+        }
+        if self.total_records > limits.max_total_records {
+            return Err(IrDocumentValidationError::TotalRecordLimit {
+                observed: self.total_records,
+                limit: limits.max_total_records,
+            });
+        }
+        Ok(())
+    }
+
+    fn validate_maxima(&self, limits: &IrLimits) -> Result<(), IrDocumentValidationError> {
+        check_collection_limit(
+            self.maximum_nested.0,
+            self.maximum_nested.1,
+            limits.max_nested_items_per_record,
+        )?;
+        if self.maximum_string.1 > limits.max_string_bytes {
+            return Err(IrDocumentValidationError::StringLimit {
+                field: self.maximum_string.0,
+                observed: self.maximum_string.1,
+                limit: limits.max_string_bytes,
+            });
+        }
+        if let Some((id, observed)) = self.maximum_payload
+            && observed > limits.max_extension_payload_bytes
+        {
+            return Err(IrDocumentValidationError::ExtensionPayloadLimit {
+                id,
+                observed,
+                limit: limits.max_extension_payload_bytes,
+            });
+        }
+        if let Some((id, observed)) = self.maximum_diagnostic_message
+            && observed > limits.max_diagnostic_message_bytes
+        {
+            return Err(IrDocumentValidationError::DiagnosticMessageLimit {
+                id,
+                observed,
+                limit: limits.max_diagnostic_message_bytes,
+            });
+        }
+        Ok(())
+    }
+
+    fn validate_nested_totals(&self, limits: &IrLimits) -> Result<(), IrDocumentValidationError> {
+        if self.total_nested_items > limits.max_total_nested_items {
+            return Err(IrDocumentValidationError::TotalNestedItemLimit {
+                observed: self.total_nested_items,
+                limit: limits.max_total_nested_items,
+            });
+        }
+        if self.total_string_bytes > limits.max_total_string_bytes {
+            return Err(IrDocumentValidationError::TotalStringLimit {
+                observed: self.total_string_bytes,
+                limit: limits.max_total_string_bytes,
+            });
+        }
+        if self.total_extension_bytes > limits.max_total_extension_bytes {
+            return Err(IrDocumentValidationError::TotalExtensionBytesLimit {
+                observed: self.total_extension_bytes,
+                limit: limits.max_total_extension_bytes,
+            });
+        }
+        if self.total_diagnostic_bytes > limits.max_total_diagnostic_bytes {
+            return Err(IrDocumentValidationError::TotalDiagnosticBytesLimit {
+                observed: self.total_diagnostic_bytes,
+                limit: limits.max_total_diagnostic_bytes,
+            });
+        }
+        Ok(())
+    }
+}
+
+/// Failures specific to borrowed raw document quota accounting.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum IrDocumentUsageError {
+    /// The existing resource or entity-kind version contract was rejected.
+    #[error(transparent)]
+    Validation(#[from] IrDocumentValidationError),
+    /// Addition overflowed or subtraction underflowed the accounting integer.
+    #[error("normalized IR usage accounting is out of range")]
+    AccountingOverflow,
+    /// A caller checkpoint stopped measurement before a complete summary.
+    #[error("normalized IR usage measurement was interrupted")]
+    Interrupted,
+}
+
+fn checked_usage_add(left: usize, right: usize) -> Result<usize, IrDocumentUsageError> {
+    left.checked_add(right)
+        .ok_or(IrDocumentUsageError::AccountingOverflow)
+}
+
+fn checked_usage_sub(left: usize, right: usize) -> Result<usize, IrDocumentUsageError> {
+    left.checked_sub(right)
+        .ok_or(IrDocumentUsageError::AccountingOverflow)
+}
+
+fn larger_named_count(
+    left: (&'static str, usize),
+    right: (&'static str, usize),
+) -> (&'static str, usize) {
+    if right.1 > left.1 { right } else { left }
+}
+
+fn larger_fact_count(
+    left: Option<(FactId, usize)>,
+    right: Option<(FactId, usize)>,
+) -> Option<(FactId, usize)> {
+    match (left, right) {
+        (Some(left), Some(right)) => Some(if right.1 > left.1 { right } else { left }),
+        (left, right) => left.or(right),
+    }
+}
+
 pub(crate) enum StandaloneExtensionValidationError {
     Limit,
     Identity,
@@ -233,6 +664,22 @@ pub fn validate_ir_document(
     canonicalize_ir_document_ref(document, limits, extensions).map(|_| ())
 }
 
+/// Checks document resource limits without cloning or canonicalizing facts.
+///
+/// This preflight does not validate identities, references, or evidence. It is
+/// intended for atomic admission of optional fact groups before full validation.
+///
+/// # Errors
+///
+/// Returns [`IrDocumentValidationError`] when a resource limit is exceeded or
+/// an entity kind is incompatible with the document version.
+pub fn preflight_ir_document_limits(
+    document: &NormalizedIrDocument,
+    limits: &IrLimits,
+) -> Result<(), IrDocumentValidationError> {
+    validate_limits(document, limits)
+}
+
 pub(crate) fn canonicalize_ir_document_ref(
     document: &NormalizedIrDocument,
     limits: &IrLimits,
@@ -291,60 +738,51 @@ fn validate_limits(
     document: &NormalizedIrDocument,
     limits: &IrLimits,
 ) -> Result<(), IrDocumentValidationError> {
-    let collections = [
-        ("files", document.files.len(), limits.max_files),
-        ("entities", document.entities.len(), limits.max_entities),
-        (
-            "occurrences",
-            document.occurrences.len(),
-            limits.max_occurrences,
-        ),
-        ("relations", document.relations.len(), limits.max_relations),
-        (
-            "provenance",
-            document.provenance.len(),
-            limits.max_provenance_records,
-        ),
-        (
-            "source_mappings",
-            document.source_mappings.len(),
-            limits.max_source_mappings,
-        ),
-        (
-            "coverage_records",
-            document.coverage_records.len(),
-            limits.max_coverage_records,
-        ),
-        (
-            "skipped_regions",
-            document.skipped_regions.len(),
-            limits.max_skipped_regions,
-        ),
-        (
-            "diagnostics",
-            document.diagnostics.len(),
-            limits.max_diagnostics,
-        ),
-        (
-            "extensions",
-            document.extensions.len(),
-            limits.max_extensions,
-        ),
-    ];
+    // Existing validators retain their saturating quota/error contract; usage
+    // admission uses checked arithmetic through the same borrowed traversal.
+    collect_document_usage(document, limits, &mut || Ok(()), |left, right| {
+        Ok(left.saturating_add(right))
+    })
+    .map(|_| ())
+}
+
+fn collect_document_usage<E: From<IrDocumentValidationError>>(
+    document: &NormalizedIrDocument,
+    limits: &IrLimits,
+    checkpoint: &mut impl FnMut() -> Result<(), E>,
+    add: fn(usize, usize) -> Result<usize, E>,
+) -> Result<IrDocumentUsage, E> {
+    checkpoint()?;
+    let mut usage = IrDocumentUsage {
+        files: document.files.len(),
+        entities: document.entities.len(),
+        occurrences: document.occurrences.len(),
+        relations: document.relations.len(),
+        provenance_records: document.provenance.len(),
+        source_mappings: document.source_mappings.len(),
+        coverage_records: document.coverage_records.len(),
+        skipped_regions: document.skipped_regions.len(),
+        diagnostics: document.diagnostics.len(),
+        extensions: document.extensions.len(),
+        ..IrDocumentUsage::default()
+    };
     let mut total_records = 0_usize;
-    for (collection, observed, limit) in collections {
-        check_collection_limit(collection, observed, limit)?;
-        total_records = total_records.saturating_add(observed);
+    for (collection, observed, limit) in usage.collections(limits) {
+        checkpoint()?;
+        check_collection_limit(collection, observed, limit).map_err(E::from)?;
+        total_records = add(total_records, observed)?;
     }
     if total_records > limits.max_total_records {
         return Err(IrDocumentValidationError::TotalRecordLimit {
             observed: total_records,
             limit: limits.max_total_records,
-        });
+        }
+        .into());
     }
-
-    let mut budget = NestedBudget::default();
+    usage.total_records = total_records;
+    let mut budget = NestedBudget::new(usage, checkpoint, add);
     for file in &document.files {
+        budget.checkpoint()?;
         budget.evidence("file.evidence.derivation", &file.evidence, limits)?;
         budget.string("file.path", &file.path, limits)?;
         if let Some(locator) = &file.path_locator {
@@ -361,8 +799,9 @@ fn validate_limits(
         budget.string("file.encoding", &file.encoding, limits)?;
     }
     for entity in &document.entities {
+        budget.checkpoint()?;
         if document.version < entity.kind.minimum_ir_version() {
-            return Err(IrDocumentValidationError::EntityKindVersion { kind: entity.kind });
+            return Err(IrDocumentValidationError::EntityKindVersion { kind: entity.kind }.into());
         }
         budget.nested("entity.flags", entity.flags.len(), limits)?;
         budget.evidence("entity.evidence.derivation", &entity.evidence, limits)?;
@@ -372,6 +811,7 @@ fn validate_limits(
         budget.string("entity.qualified_name", &entity.qualified_name, limits)?;
     }
     for occurrence in &document.occurrences {
+        budget.checkpoint()?;
         if let OccurrenceTarget::Candidates { symbols, .. } = &occurrence.target {
             budget.nested("occurrence.target.symbols", symbols.len(), limits)?;
         }
@@ -383,9 +823,11 @@ fn validate_limits(
         budget.string("occurrence.syntax_kind", &occurrence.syntax_kind, limits)?;
     }
     for relation in &document.relations {
+        budget.checkpoint()?;
         budget.evidence("relation.evidence.derivation", &relation.evidence, limits)?;
     }
     for provenance in &document.provenance {
+        budget.checkpoint()?;
         budget.nested(
             "provenance.input_sources",
             provenance.input_sources.len(),
@@ -420,6 +862,7 @@ fn validate_limits(
         }
     }
     for mapping in &document.source_mappings {
+        budget.checkpoint()?;
         budget.evidence(
             "source_mapping.evidence.derivation",
             &mapping.evidence,
@@ -427,9 +870,11 @@ fn validate_limits(
         )?;
     }
     for coverage in &document.coverage_records {
+        budget.checkpoint()?;
         budget.evidence("coverage.evidence.derivation", &coverage.evidence, limits)?;
     }
     for skipped in &document.skipped_regions {
+        budget.checkpoint()?;
         budget.evidence(
             "skipped_region.evidence.derivation",
             &skipped.evidence,
@@ -438,66 +883,12 @@ fn validate_limits(
         budget.string("skipped_region.detail", &skipped.detail, limits)?;
     }
     for diagnostic in &document.diagnostics {
-        budget.evidence(
-            "diagnostic.evidence.derivation",
-            &diagnostic.evidence,
-            limits,
-        )?;
-        budget.string("diagnostic.code", &diagnostic.code, limits)?;
-        budget.string("diagnostic.message", &diagnostic.message, limits)?;
-        let message_bytes = diagnostic.message.len();
-        if message_bytes > limits.max_diagnostic_message_bytes {
-            return Err(IrDocumentValidationError::DiagnosticMessageLimit {
-                id: diagnostic.id,
-                observed: message_bytes,
-                limit: limits.max_diagnostic_message_bytes,
-            });
-        }
-        budget.total_diagnostic_bytes = budget
-            .total_diagnostic_bytes
-            .saturating_add(diagnostic.code.len())
-            .saturating_add(message_bytes);
+        budget.diagnostic(diagnostic, limits)?;
     }
     for extension in &document.extensions {
-        budget.evidence("extension.evidence.derivation", &extension.evidence, limits)?;
-        budget.string("extension.namespace", &extension.namespace, limits)?;
-        budget.string("extension.version", &extension.version, limits)?;
-        let payload_bytes = extension.payload.len();
-        if payload_bytes > limits.max_extension_payload_bytes {
-            return Err(IrDocumentValidationError::ExtensionPayloadLimit {
-                id: extension.id,
-                observed: payload_bytes,
-                limit: limits.max_extension_payload_bytes,
-            });
-        }
-        budget.total_extension_bytes = budget.total_extension_bytes.saturating_add(payload_bytes);
+        budget.extension(extension, limits)?;
     }
-
-    if budget.total_nested_items > limits.max_total_nested_items {
-        return Err(IrDocumentValidationError::TotalNestedItemLimit {
-            observed: budget.total_nested_items,
-            limit: limits.max_total_nested_items,
-        });
-    }
-    if budget.total_string_bytes > limits.max_total_string_bytes {
-        return Err(IrDocumentValidationError::TotalStringLimit {
-            observed: budget.total_string_bytes,
-            limit: limits.max_total_string_bytes,
-        });
-    }
-    if budget.total_extension_bytes > limits.max_total_extension_bytes {
-        return Err(IrDocumentValidationError::TotalExtensionBytesLimit {
-            observed: budget.total_extension_bytes,
-            limit: limits.max_total_extension_bytes,
-        });
-    }
-    if budget.total_diagnostic_bytes > limits.max_total_diagnostic_bytes {
-        return Err(IrDocumentValidationError::TotalDiagnosticBytesLimit {
-            observed: budget.total_diagnostic_bytes,
-            limit: limits.max_total_diagnostic_bytes,
-        });
-    }
-    Ok(())
+    budget.finish(limits)
 }
 
 fn check_collection_limit(
@@ -516,23 +907,47 @@ fn check_collection_limit(
     }
 }
 
-#[derive(Default)]
-struct NestedBudget {
-    total_nested_items: usize,
-    total_string_bytes: usize,
-    total_extension_bytes: usize,
-    total_diagnostic_bytes: usize,
+struct NestedBudget<'a, E, C> {
+    usage: IrDocumentUsage,
+    checkpoint: &'a mut C,
+    add: fn(usize, usize) -> Result<usize, E>,
 }
 
-impl NestedBudget {
+impl<'a, E: From<IrDocumentValidationError>, C: FnMut() -> Result<(), E>> NestedBudget<'a, E, C> {
+    fn new(
+        usage: IrDocumentUsage,
+        checkpoint: &'a mut C,
+        add: fn(usize, usize) -> Result<usize, E>,
+    ) -> Self {
+        Self {
+            usage,
+            checkpoint,
+            add,
+        }
+    }
+
+    fn checkpoint(&mut self) -> Result<(), E> {
+        (self.checkpoint)()
+    }
+
+    fn finish(mut self, limits: &IrLimits) -> Result<IrDocumentUsage, E> {
+        self.usage.validate_nested_totals(limits).map_err(E::from)?;
+        self.checkpoint()?;
+        Ok(self.usage)
+    }
+
     fn nested(
         &mut self,
         collection: &'static str,
         observed: usize,
         limits: &IrLimits,
-    ) -> Result<(), IrDocumentValidationError> {
-        check_collection_limit(collection, observed, limits.max_nested_items_per_record)?;
-        self.total_nested_items = self.total_nested_items.saturating_add(observed);
+    ) -> Result<(), E> {
+        self.checkpoint()?;
+        check_collection_limit(collection, observed, limits.max_nested_items_per_record)
+            .map_err(E::from)?;
+        self.usage.total_nested_items = (self.add)(self.usage.total_nested_items, observed)?;
+        self.usage.maximum_nested =
+            larger_named_count(self.usage.maximum_nested, (collection, observed));
         Ok(())
     }
 
@@ -541,25 +956,80 @@ impl NestedBudget {
         collection: &'static str,
         evidence: &FactEvidence,
         limits: &IrLimits,
-    ) -> Result<(), IrDocumentValidationError> {
+    ) -> Result<(), E> {
         self.nested(collection, evidence.derivation.len(), limits)
     }
 
-    fn string(
-        &mut self,
-        field: &'static str,
-        value: &str,
-        limits: &IrLimits,
-    ) -> Result<(), IrDocumentValidationError> {
+    fn string(&mut self, field: &'static str, value: &str, limits: &IrLimits) -> Result<(), E> {
+        self.checkpoint()?;
         let observed = value.len();
         if observed > limits.max_string_bytes {
             return Err(IrDocumentValidationError::StringLimit {
                 field,
                 observed,
                 limit: limits.max_string_bytes,
-            });
+            }
+            .into());
         }
-        self.total_string_bytes = self.total_string_bytes.saturating_add(observed);
+        self.usage.total_string_bytes = (self.add)(self.usage.total_string_bytes, observed)?;
+        self.usage.maximum_string =
+            larger_named_count(self.usage.maximum_string, (field, observed));
+        Ok(())
+    }
+
+    fn diagnostic(
+        &mut self,
+        diagnostic: &crate::DiagnosticRecord,
+        limits: &IrLimits,
+    ) -> Result<(), E> {
+        self.checkpoint()?;
+        self.evidence(
+            "diagnostic.evidence.derivation",
+            &diagnostic.evidence,
+            limits,
+        )?;
+        self.string("diagnostic.code", &diagnostic.code, limits)?;
+        self.string("diagnostic.message", &diagnostic.message, limits)?;
+        let message_bytes = diagnostic.message.len();
+        if message_bytes > limits.max_diagnostic_message_bytes {
+            return Err(IrDocumentValidationError::DiagnosticMessageLimit {
+                id: diagnostic.id,
+                observed: message_bytes,
+                limit: limits.max_diagnostic_message_bytes,
+            }
+            .into());
+        }
+        self.usage.total_diagnostic_bytes =
+            (self.add)(self.usage.total_diagnostic_bytes, diagnostic.code.len())?;
+        self.usage.total_diagnostic_bytes =
+            (self.add)(self.usage.total_diagnostic_bytes, message_bytes)?;
+        self.usage.maximum_diagnostic_message = larger_fact_count(
+            self.usage.maximum_diagnostic_message,
+            Some((diagnostic.id, message_bytes)),
+        );
+        Ok(())
+    }
+
+    fn extension(&mut self, extension: &ExtensionEnvelope, limits: &IrLimits) -> Result<(), E> {
+        self.checkpoint()?;
+        self.evidence("extension.evidence.derivation", &extension.evidence, limits)?;
+        self.string("extension.namespace", &extension.namespace, limits)?;
+        self.string("extension.version", &extension.version, limits)?;
+        let payload_bytes = extension.payload.len();
+        if payload_bytes > limits.max_extension_payload_bytes {
+            return Err(IrDocumentValidationError::ExtensionPayloadLimit {
+                id: extension.id,
+                observed: payload_bytes,
+                limit: limits.max_extension_payload_bytes,
+            }
+            .into());
+        }
+        self.usage.total_extension_bytes =
+            (self.add)(self.usage.total_extension_bytes, payload_bytes)?;
+        self.usage.maximum_payload = larger_fact_count(
+            self.usage.maximum_payload,
+            Some((extension.id, payload_bytes)),
+        );
         Ok(())
     }
 }
@@ -1775,6 +2245,372 @@ mod tests {
             hash,
             None,
         )
+    }
+
+    #[test]
+    fn usage_measures_all_raw_domains_strings_and_locator_components() {
+        let mut document = fixture();
+        let limits = IrLimits::default();
+        let usage = IrDocumentUsage::measure(&document, &limits).expect("fixture usage is bounded");
+        assert_eq!(
+            [
+                usage.files(),
+                usage.entities(),
+                usage.occurrences(),
+                usage.relations(),
+                usage.provenance_records(),
+                usage.source_mappings(),
+                usage.coverage_records(),
+                usage.skipped_regions(),
+                usage.diagnostics(),
+                usage.extensions()
+            ],
+            [1; 10]
+        );
+        assert_eq!(usage.total_records(), 10);
+        assert_eq!(usage.total_nested_items(), 3);
+        assert_eq!(usage.total_string_bytes(), 187);
+        assert_eq!(usage.total_extension_bytes(), 2);
+        assert_eq!(usage.total_diagnostic_bytes(), 45);
+
+        document.files[0].path_locator = Some(
+            crate::FilePathLocator::new(
+                crate::FilePathLocatorEncoding::UnixBytesV1,
+                vec!["737263".to_owned(), "6c69622e7273".to_owned()],
+            )
+            .expect("canonical locator components"),
+        );
+        let locator_usage =
+            IrDocumentUsage::measure(&document, &limits).expect("locator is bounded");
+        assert_eq!(locator_usage.total_nested_items(), 5);
+        assert_eq!(locator_usage.total_string_bytes(), 205);
+
+        let reference = FactRef::File(document.files[0].id);
+        document.files[0].evidence.derivation.push(reference);
+        document.entities[0].evidence.derivation.push(reference);
+        document.occurrences[0].evidence.derivation.push(reference);
+        document.relations[0].evidence.derivation.push(reference);
+        document.source_mappings[0]
+            .evidence
+            .derivation
+            .push(reference);
+        document.coverage_records[0]
+            .evidence
+            .derivation
+            .push(reference);
+        document.skipped_regions[0]
+            .evidence
+            .derivation
+            .push(reference);
+        document.diagnostics[0].evidence.derivation.push(reference);
+        document.extensions[0].evidence.derivation.push(reference);
+        document.occurrences[0].target = OccurrenceTarget::Candidates {
+            symbols: vec![document.entities[0].id; 2],
+            total_count: 2,
+            completeness: CoverageStatus::Complete,
+        };
+        document.entities[0].flags.push(crate::EntityFlag::Exported);
+        let input = document.provenance[0].input_sources[0].clone();
+        let evidence = document.provenance[0].evidence_sources[0].clone();
+        document.provenance[0].input_sources.push(input);
+        document.provenance[0].evidence_sources.push(evidence);
+        document.provenance[0]
+            .derivation_parents
+            .extend([reference; 2]);
+        document.provenance[0].rule = Some("rule".to_owned());
+        document.entities[0].display_name = "\u{03b4}".to_owned();
+        document.diagnostics[0].message = "\u{03b4}".to_owned();
+        let expanded =
+            IrDocumentUsage::measure(&document, &limits).expect("raw nested usage is bounded");
+        assert_eq!(expanded.total_nested_items(), 21);
+        assert_eq!(expanded.total_string_bytes(), 176);
+        assert_eq!(expanded.total_diagnostic_bytes(), 17);
+        assert_eq!(expanded.total_extension_bytes(), 2);
+        assert!(validate_ir_document(&document, &limits, &ExtensionSupport::default()).is_err());
+    }
+
+    #[test]
+    fn usage_counts_equal_duplicates_before_canonicalization() {
+        let document = fixture();
+        let limits = IrLimits::default();
+        let usage = IrDocumentUsage::measure(&document, &limits).expect("fixture usage is bounded");
+        let mut duplicate = document.clone();
+        duplicate.files.extend(document.files.clone());
+        duplicate.entities.extend(document.entities.clone());
+        duplicate.occurrences.extend(document.occurrences.clone());
+        duplicate.relations.extend(document.relations.clone());
+        duplicate.provenance.extend(document.provenance.clone());
+        duplicate
+            .source_mappings
+            .extend(document.source_mappings.clone());
+        duplicate
+            .coverage_records
+            .extend(document.coverage_records.clone());
+        duplicate
+            .skipped_regions
+            .extend(document.skipped_regions.clone());
+        duplicate.diagnostics.extend(document.diagnostics.clone());
+        duplicate.extensions.extend(document.extensions.clone());
+        let expected = usage
+            .clone()
+            .checked_add(usage, &limits)
+            .expect("doubled raw usage is bounded");
+        assert_eq!(IrDocumentUsage::measure(&duplicate, &limits), Ok(expected));
+        assert_eq!(canonical(duplicate.clone()), canonical(document));
+        let tight = IrLimits {
+            max_files: 1,
+            ..limits
+        };
+        let expected_error = IrDocumentValidationError::CollectionLimit {
+            collection: "files",
+            observed: 2,
+            limit: 1,
+        };
+        assert_eq!(
+            preflight_ir_document_limits(&duplicate, &tight),
+            Err(expected_error.clone())
+        );
+        assert_eq!(
+            IrDocumentUsage::measure(&duplicate, &tight),
+            Err(IrDocumentUsageError::Validation(expected_error))
+        );
+    }
+
+    fn exact_pair_limits(usage: &IrDocumentUsage) -> IrLimits {
+        IrLimits {
+            max_files: usage.files * 2,
+            max_entities: usage.entities * 2,
+            max_occurrences: usage.occurrences * 2,
+            max_relations: usage.relations * 2,
+            max_provenance_records: usage.provenance_records * 2,
+            max_source_mappings: usage.source_mappings * 2,
+            max_coverage_records: usage.coverage_records * 2,
+            max_skipped_regions: usage.skipped_regions * 2,
+            max_diagnostics: usage.diagnostics * 2,
+            max_extensions: usage.extensions * 2,
+            max_total_records: usage.total_records * 2,
+            max_total_nested_items: usage.total_nested_items * 2,
+            max_total_string_bytes: usage.total_string_bytes * 2,
+            max_total_extension_bytes: usage.total_extension_bytes * 2,
+            max_total_diagnostic_bytes: usage.total_diagnostic_bytes * 2,
+            ..IrLimits::default()
+        }
+    }
+
+    #[test]
+    fn usage_merges_accept_exact_and_reject_one_above_each_aggregate_quota() {
+        let usage =
+            IrDocumentUsage::measure(&fixture(), &IrLimits::default()).expect("fixture is bounded");
+        let exact = exact_pair_limits(&usage);
+        assert!(usage.clone().checked_add(usage.clone(), &exact).is_ok());
+        let tighten: [fn(&mut IrLimits); 15] = [
+            |limits| limits.max_files -= 1,
+            |limits| limits.max_entities -= 1,
+            |limits| limits.max_occurrences -= 1,
+            |limits| limits.max_relations -= 1,
+            |limits| limits.max_provenance_records -= 1,
+            |limits| limits.max_source_mappings -= 1,
+            |limits| limits.max_coverage_records -= 1,
+            |limits| limits.max_skipped_regions -= 1,
+            |limits| limits.max_diagnostics -= 1,
+            |limits| limits.max_extensions -= 1,
+            |limits| limits.max_total_records -= 1,
+            |limits| limits.max_total_nested_items -= 1,
+            |limits| limits.max_total_string_bytes -= 1,
+            |limits| limits.max_total_extension_bytes -= 1,
+            |limits| limits.max_total_diagnostic_bytes -= 1,
+        ];
+        for (dimension, tighten) in tighten.into_iter().enumerate() {
+            let mut limits = exact.clone();
+            tighten(&mut limits);
+            assert!(
+                matches!(
+                    usage.clone().checked_add(usage.clone(), &limits),
+                    Err(IrDocumentUsageError::Validation(_))
+                ),
+                "dimension {dimension} must reject its exact +1 demand"
+            );
+        }
+    }
+
+    #[test]
+    fn usage_merges_recheck_per_record_maxima_under_stricter_limits() {
+        let document = fixture();
+        let usage =
+            IrDocumentUsage::measure(&document, &IrLimits::default()).expect("fixture is bounded");
+        let cases = [
+            (
+                IrLimits {
+                    max_nested_items_per_record: 0,
+                    ..IrLimits::default()
+                },
+                IrDocumentValidationError::CollectionLimit {
+                    collection: "entity.flags",
+                    observed: 1,
+                    limit: 0,
+                },
+            ),
+            (
+                IrLimits {
+                    max_string_bytes: 29,
+                    ..IrLimits::default()
+                },
+                IrDocumentValidationError::StringLimit {
+                    field: "diagnostic.message",
+                    observed: 30,
+                    limit: 29,
+                },
+            ),
+            (
+                IrLimits {
+                    max_extension_payload_bytes: 1,
+                    ..IrLimits::default()
+                },
+                IrDocumentValidationError::ExtensionPayloadLimit {
+                    id: document.extensions[0].id,
+                    observed: 2,
+                    limit: 1,
+                },
+            ),
+            (
+                IrLimits {
+                    max_diagnostic_message_bytes: 29,
+                    ..IrLimits::default()
+                },
+                IrDocumentValidationError::DiagnosticMessageLimit {
+                    id: document.diagnostics[0].id,
+                    observed: 30,
+                    limit: 29,
+                },
+            ),
+        ];
+        for (limits, expected) in cases {
+            assert_eq!(
+                usage
+                    .clone()
+                    .checked_add(IrDocumentUsage::default(), &limits),
+                Err(IrDocumentUsageError::Validation(expected))
+            );
+        }
+    }
+
+    #[test]
+    fn usage_record_measurement_and_subtraction_share_document_accounting() {
+        let document = fixture();
+        let limits = IrLimits::default();
+        let whole = IrDocumentUsage::measure(&document, &limits).expect("fixture is bounded");
+        let extension = IrDocumentUsage::measure_extension(&document.extensions[0], &limits)
+            .expect("extension is bounded");
+        let diagnostic = IrDocumentUsage::measure_diagnostic(&document.diagnostics[0], &limits)
+            .expect("diagnostic is bounded");
+        assert_eq!(extension.extensions(), 1);
+        assert_eq!(extension.total_records(), 1);
+        assert_eq!(extension.total_string_bytes(), 24);
+        assert_eq!(extension.total_extension_bytes(), 2);
+        assert_eq!(diagnostic.diagnostics(), 1);
+        assert_eq!(diagnostic.total_records(), 1);
+        assert_eq!(diagnostic.total_string_bytes(), 45);
+        assert_eq!(diagnostic.total_diagnostic_bytes(), 45);
+        let removed = extension
+            .checked_add(diagnostic, &limits)
+            .expect("removed records combine");
+        let remainder = whole
+            .clone()
+            .checked_sub(removed.clone())
+            .expect("owned records subtract");
+        assert_eq!(remainder.total_records(), 8);
+        assert_eq!(remainder.total_string_bytes(), 118);
+        assert_eq!(remainder.total_extension_bytes(), 0);
+        assert_eq!(remainder.total_diagnostic_bytes(), 0);
+        assert_eq!(remainder.clone().checked_add(removed, &limits), Ok(whole));
+        assert!(matches!(
+            remainder.checked_add(
+                IrDocumentUsage::default(),
+                &IrLimits {
+                    max_diagnostic_message_bytes: 29,
+                    ..limits
+                }
+            ),
+            Err(IrDocumentUsageError::Validation(
+                IrDocumentValidationError::DiagnosticMessageLimit { observed: 30, .. }
+            ))
+        ));
+    }
+
+    #[test]
+    fn usage_checked_arithmetic_rejects_every_counter_overflow_and_underflow() {
+        let fields: [fn(&mut IrDocumentUsage, usize); 15] = [
+            |usage, value| usage.files = value,
+            |usage, value| usage.entities = value,
+            |usage, value| usage.occurrences = value,
+            |usage, value| usage.relations = value,
+            |usage, value| usage.provenance_records = value,
+            |usage, value| usage.source_mappings = value,
+            |usage, value| usage.coverage_records = value,
+            |usage, value| usage.skipped_regions = value,
+            |usage, value| usage.diagnostics = value,
+            |usage, value| usage.extensions = value,
+            |usage, value| usage.total_records = value,
+            |usage, value| usage.total_nested_items = value,
+            |usage, value| usage.total_string_bytes = value,
+            |usage, value| usage.total_extension_bytes = value,
+            |usage, value| usage.total_diagnostic_bytes = value,
+        ];
+        for field in fields {
+            let mut maximum = IrDocumentUsage::default();
+            let mut one = IrDocumentUsage::default();
+            field(&mut maximum, usize::MAX);
+            field(&mut one, 1);
+            let preserved = maximum.clone();
+            assert_eq!(
+                maximum
+                    .clone()
+                    .checked_add(one.clone(), &IrLimits::default()),
+                Err(IrDocumentUsageError::AccountingOverflow)
+            );
+            assert_eq!(maximum, preserved);
+            assert_eq!(
+                IrDocumentUsage::default().checked_sub(one),
+                Err(IrDocumentUsageError::AccountingOverflow)
+            );
+        }
+    }
+
+    #[test]
+    fn usage_checkpoints_interrupt_at_every_boundary_without_partial_commit() {
+        let mut document = fixture();
+        document.files[0].path_locator = Some(
+            crate::FilePathLocator::new(
+                crate::FilePathLocatorEncoding::UnixBytesV1,
+                vec!["737263".to_owned(), "6c69622e7273".to_owned()],
+            )
+            .expect("canonical locator components"),
+        );
+        let original = document.clone();
+        let limits = IrLimits::default();
+        let mut count = 0;
+        let complete = IrDocumentUsage::measure_with_checkpoint(&document, &limits, || {
+            count += 1;
+            true
+        })
+        .expect("complete traversal succeeds");
+        assert!(count > complete.total_records());
+        for allowed in 0..count {
+            let mut observed = 0;
+            let mut committed = IrDocumentUsage::default();
+            let result = IrDocumentUsage::measure_with_checkpoint(&document, &limits, || {
+                observed += 1;
+                observed <= allowed
+            });
+            if let Ok(summary) = &result {
+                committed = summary.clone();
+            }
+            assert_eq!(result, Err(IrDocumentUsageError::Interrupted));
+            assert_eq!(observed, allowed + 1);
+            assert_eq!(committed, IrDocumentUsage::default());
+            assert_eq!(document, original);
+        }
+        assert_eq!(IrDocumentUsage::measure(&document, &limits), Ok(complete));
     }
 
     #[test]

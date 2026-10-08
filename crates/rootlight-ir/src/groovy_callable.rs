@@ -60,7 +60,8 @@ impl GroovyCallableReturnType {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct GroovyCallableName {
-    /// Hash of exact name bytes, including authored quotes and escapes.
+    /// Hash of authored spelling expressed as UTF-8, including quotes and escapes.
+    /// Physical byte ownership remains in the envelope source and name span.
     pub spelling_hash: ContentHash,
     /// Hash of the independently decoded, parser-attested canonical name.
     pub canonical_hash: ContentHash,

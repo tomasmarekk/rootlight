@@ -1,3 +1,6 @@
+// Private declaration-terminator prototype over the retained F# scanner.
+// Only a grammar-committed root body and its DO owners may close at written ;;.
+// Empty closure tokens retain the original endpoint; historical frames never invent ROOT.
 #ifndef TREE_SITTER_FSHARP_SCANNER_H_
 #define TREE_SITTER_FSHARP_SCANNER_H_
 
@@ -48,7 +51,17 @@ enum TokenType {
   ERROR_SENTINEL,
   ENUM_CASE_BAR,
   DO_BODY_INDENT,
-  DONE_KEYWORD
+  DONE_KEYWORD,
+  APPLICATION_ARG_START,
+  DECL_TERM,
+  ROOT_BODY_INDENT,
+  SINGLE_SEMICOLON_EXTRA,
+  QUALIFIED_CALLEE_DOT,
+  INTEGER_LITERAL_SUFFIX,
+  BASED_LITERAL_SUFFIX,
+  FLOAT_LITERAL_SUFFIX,
+  NUMERIC_EXPONENT_CONTINUATION,
+  NUMERIC_DIGIT_CONTINUATION
 };
 
 typedef enum {
@@ -66,6 +79,8 @@ typedef enum {
   INDENT_BRACE = 4,
   // A committed do-body lets "done" close only scopes owned by that body.
   INDENT_DO = 5,
+  // Only module-level value-body grammar commits this owner at the native base.
+  INDENT_ROOT = 6,
 } IndentKind;
 
 // OR-ed into the indent_kinds byte when the scope's INDENT fired mid-line
@@ -94,7 +109,7 @@ typedef enum {
   PREPROC_STRAY = 1,
 } PreprocKind;
 
-enum { STATE_HEADER_SIZE = 12, STATE_VERSION = 1 };
+enum { STATE_HEADER_SIZE = 12, STATE_VERSION = 2, HISTORICAL_STATE_VERSION = 1 };
 
 static bool reserve_storage(void **contents, uint32_t *capacity,
                             uint32_t needed, size_t element_size) {
@@ -647,6 +662,50 @@ static inline bool is_bracket_end(TSLexer *lexer) {
     return false;
   }
 
+// ROOT is a committed grammar owner, never a column-derived interpretation.
+static bool root_position_valid(const Scanner *scanner) {
+  for (uint32_t i = 0; i < scanner->indent_kinds.size; i++) {
+    uint8_t raw = *array_get(&scanner->indent_kinds, i);
+    if ((raw & ~INDENT_KIND_FLAGS_MASK) != INDENT_ROOT) continue;
+    if (i != 1 || *array_get(&scanner->indents, 0) != 0 ||
+        *array_get(&scanner->indent_kinds, 0) != INDENT_NORMAL) return false;
+  }
+  return true;
+}
+
+static bool at_native_base(const Scanner *scanner) {
+  return scanner->indents.size == 1 && scanner->indent_kinds.size == 1 &&
+         *array_get(&scanner->indents, 0) == 0 &&
+         *array_get(&scanner->indent_kinds, 0) == INDENT_NORMAL;
+}
+
+// A completed module-list position must retain its written separator instead of
+// hiding it as trivia. NEWLINE still owns every ordinary expression-body separator.
+static bool single_semicolon_is_element_separator(
+    const Scanner *scanner, const bool *valid_symbols, bool advanced_in_ws_walk) {
+  return valid_symbols[ELEM_SEP] && !valid_symbols[NEWLINE] &&
+      !valid_symbols[ERROR_SENTINEL] && !valid_symbols[INSIDE_STRING] &&
+      !valid_symbols[QUOTED_CLOSE] && !valid_symbols[UNTYPED_QUOTED_CLOSE] &&
+      !advanced_in_ws_walk && at_native_base(scanner) &&
+      scanner->preprocessor_indents.size == 0 && scanner->preproc_kinds.size == 0 &&
+      scanner->multi_dollar_count == 0;
+}
+
+// Preflight the whole closure before one pop; ordinary/protected owners are barriers.
+static bool declaration_body_can_close(const Scanner *scanner) {
+  if (scanner->indents.size != scanner->indent_kinds.size ||
+      scanner->indents.size < 2 || scanner->preprocessor_indents.size != 0 ||
+      scanner->preproc_kinds.size != 0 || scanner->multi_dollar_count != 0 ||
+      !root_position_valid(scanner)) return false;
+  if ((*array_get(&scanner->indent_kinds, 1) & ~INDENT_KIND_FLAGS_MASK) != INDENT_ROOT)
+    return false;
+  for (uint32_t i = 2; i < scanner->indent_kinds.size; i++) {
+    if ((*array_get(&scanner->indent_kinds, i) & ~INDENT_KIND_FLAGS_MASK) != INDENT_DO)
+      return false;
+  }
+  return true;
+}
+
 static bool state_fits(const Scanner *scanner) {
   if (scanner->state_unrepresentable ||
       scanner->indents.size != scanner->indent_kinds.size ||
@@ -669,8 +728,379 @@ static bool add_column(Scanner *scanner, uint32_t *column, uint32_t width) {
   return true;
 }
 
+static bool application_dual_operator_start(int32_t c) {
+  return c == '+' || c == '-' || c == '%' || c == '&';
+}
+
+static bool application_operator_char(int32_t c) {
+  switch (c) {
+  case '!': case '%': case '&': case '*': case '+': case '.': case '/':
+  case '<': case '=': case '>': case '@': case '^': case '|': case '~':
+  case '$': case '?': case '-': case ':':
+    return true;
+  default:
+    return false;
+  }
+}
+
+// Each initial checked here is already a complete immediate token in that family.
+// UL is checked from the existing word probe only at final marker emission.
+// Context bits, not a global word blacklist, leave adjacent nonnumeric atoms alone.
+static bool application_literal_continuation(
+    const bool *valid_symbols, int32_t c) {
+  if (valid_symbols[INTEGER_LITERAL_SUFFIX] &&
+      (c == 'y' || c == 's' || c == 'l' || c == 'u' || c == 'n' ||
+       c == 'L' || c == 'Q' || c == 'R' || c == 'Z' || c == 'I' ||
+       c == 'N' || c == 'G' || c == 'M' || c == 'm')) return true;
+  if (valid_symbols[BASED_LITERAL_SUFFIX] &&
+      (c == 'y' || c == 's' || c == 'l' || c == 'u' || c == 'n' ||
+       c == 'L')) return true;
+  if (valid_symbols[FLOAT_LITERAL_SUFFIX] &&
+      (c == 'f' || c == 'F' || c == 'M' || c == 'm')) return true;
+  if (valid_symbols[NUMERIC_EXPONENT_CONTINUATION] &&
+      (c == 'e' || c == 'E')) return true;
+  return valid_symbols[NUMERIC_DIGIT_CONTINUATION] && c >= '0' && c <= '9';
+}
+
+static bool application_plain_atom_start(int32_t c, bool separated) {
+  bool unicode_extra = c == 0xA0 || c == 0x1680 ||
+    (c >= 0x2000 && c <= 0x200B) || c == 0x2028 || c == 0x2029 ||
+    c == 0x202F || c == 0x205F || c == 0x2060 || c == 0x3000 || c == 0xFEFF;
+  return is_word_char(c) || (c >= 0x80 && !unicode_extra) || c == '"' || c == '\'' ||
+         c == '`' || c == '[' || c == '{' || c == '!' || c == '~' ||
+         (separated && c == '(');
+}
+
+
+// The generated operator token uses ASCII \s, not locale-dependent whitespace.
+static bool application_operator_space(int32_t c) {
+  return (c >= '\t' && c <= '\r') || c == ' ';
+}
+
+static bool application_operator_first(int32_t c) {
+  return application_operator_char(c) && c != ':';
+}
+
+static bool application_operator_tail(int32_t c) {
+  return application_operator_first(c) && c != '$';
+}
+
+// Called only after old layout returns: a failed peek cannot leak its ')' back
+// into owner-closing logic. The original mark and native state remain untouched.
+static bool application_peek_operator_reference_body(TSLexer *lexer) {
+  while (application_operator_space(lexer->lookahead)) advance(lexer);
+  if (!application_operator_first(lexer->lookahead)) return false;
+  uint8_t prefix_length = 0;
+  bool only_dots = true;
+  do {
+    only_dots = only_dots && lexer->lookahead == '.';
+    if (prefix_length < 3) prefix_length++;
+    advance(lexer);
+  } while (application_operator_tail(lexer->lookahead));
+  if (only_dots && prefix_length == 2 && lexer->lookahead == ' ') {
+    advance(lexer);
+    if (lexer->lookahead == '.') {
+      advance(lexer);
+      if (lexer->lookahead != '.') return false;
+      advance(lexer);
+    }
+  }
+  while (application_operator_space(lexer->lookahead)) advance(lexer);
+  return lexer->lookahead == ')';
+}
+
+typedef enum {
+  APPLICATION_SPECIAL_INFIX,
+  APPLICATION_SPECIAL_LITERAL,
+  APPLICATION_SPECIAL_QUOTATION,
+  APPLICATION_SPECIAL_QUOTED_CLOSE,
+  APPLICATION_SPECIAL_UNTYPED_QUOTED_CLOSE
+} ApplicationSpecialHead;
+
+// This peek never marks or installs string state; the owning token is rescanned.
+static ApplicationSpecialHead application_peek_specialized_head(TSLexer *lexer) {
+  if (lexer->lookahead == '@') {
+    advance(lexer);
+    if (lexer->lookahead == '"') return APPLICATION_SPECIAL_LITERAL;
+    if (lexer->lookahead == '$') {
+      advance(lexer);
+      return lexer->lookahead == '"' ? APPLICATION_SPECIAL_LITERAL
+                                     : APPLICATION_SPECIAL_INFIX;
+    }
+    if (lexer->lookahead == '>') {
+      advance(lexer);
+      return APPLICATION_SPECIAL_QUOTED_CLOSE;
+    }
+    if (lexer->lookahead == '@') {
+      advance(lexer);
+      if (lexer->lookahead == '>') {
+        advance(lexer);
+        return APPLICATION_SPECIAL_UNTYPED_QUOTED_CLOSE;
+      }
+    }
+    return APPLICATION_SPECIAL_INFIX;
+  }
+  if (lexer->lookahead == '$') {
+    uint8_t dollar_count = 0;
+    while (lexer->lookahead == '$' && dollar_count < UINT8_MAX) {
+      advance(lexer);
+      dollar_count++;
+    }
+    if (dollar_count == 1) {
+      if (lexer->lookahead == '@') advance(lexer);
+      return lexer->lookahead == '"' ? APPLICATION_SPECIAL_LITERAL
+                                     : APPLICATION_SPECIAL_INFIX;
+    }
+    if (lexer->lookahead != '"') return APPLICATION_SPECIAL_INFIX;
+    advance(lexer);
+    if (lexer->lookahead != '"') return APPLICATION_SPECIAL_INFIX;
+    advance(lexer);
+    return lexer->lookahead == '"' ? APPLICATION_SPECIAL_LITERAL
+                                   : APPLICATION_SPECIAL_INFIX;
+  }
+  if (lexer->lookahead == '<') {
+    advance(lexer);
+    return lexer->lookahead == '@' ? APPLICATION_SPECIAL_QUOTATION
+                                   : APPLICATION_SPECIAL_INFIX;
+  }
+  return APPLICATION_SPECIAL_INFIX;
+}
+
+static bool application_owner_word(const char *word) {
+  const char *owners[] = {
+    "and", "do", "done", "elif", "else", "end", "in", "then", "with",
+    "let", "use", "match", "try", "while", "for", "type", "module",
+    "namespace", "open", "member", "interface", "inherit", "val", "to", "downto"
+  };
+  for (size_t i = 0; i < sizeof(owners) / sizeof(owners[0]); i++) {
+    if (keyword_equals(word, owners[i])) return true;
+  }
+  return false;
+}
+
+typedef struct {
+  char text[10];
+  size_t length;
+  bool active;
+  bool too_long;
+} ApplicationWordProbe;
+
+// Owner probes keep their original advances; only marker admission uses this copy.
+static void application_keyword_step(
+    TSLexer *lexer, ApplicationWordProbe *word, bool padding) {
+  if (word->active) {
+    if (!is_word_char(lexer->lookahead)) {
+      word->active = false;
+    } else if (word->length + 1 < sizeof(word->text)) {
+      word->text[word->length++] = (char)lexer->lookahead;
+    } else {
+      word->too_long = true;
+      word->active = false;
+    }
+  }
+  lexer->advance(lexer, padding);
+}
+
+static void application_keyword_advance(TSLexer *lexer, ApplicationWordProbe *word) {
+  application_keyword_step(lexer, word, false);
+}
+
+static bool application_infix_start(TSLexer *lexer, ApplicationWordProbe *word) {
+  if (!word->active || lexer->lookahead != 'o') return is_infix_op_start(lexer);
+  application_keyword_step(lexer, word, true);
+  if (lexer->lookahead != 'r') return false;
+  application_keyword_step(lexer, word, true);
+  return !is_word_char(lexer->lookahead);
+}
+
+static bool application_finish_owner_word(TSLexer *lexer, ApplicationWordProbe *word) {
+  while (word->active && is_word_char(lexer->lookahead)) {
+    application_keyword_advance(lexer, word);
+  }
+  if (word->active && is_hash_word_char(lexer->lookahead)) return false;
+  return !word->too_long && application_owner_word(word->text);
+}
+
+// Peeking never marks past the operator: its original syntax token is retained.
+static bool application_adjacent_dual_operator(TSLexer *lexer, bool separated) {
+  char operator_text[3] = {0};
+  size_t length = 0;
+  while (application_operator_char(lexer->lookahead)) {
+    if (length == 2) return false;
+    operator_text[length++] = (char)lexer->lookahead;
+    advance(lexer);
+  }
+  bool exact = length == 1 ||
+    (length == 2 && ((operator_text[0] == '+' && operator_text[1] == '.') ||
+                    (operator_text[0] == '-' && operator_text[1] == '.') ||
+                    (operator_text[0] == '%' && operator_text[1] == '%') ||
+                    (operator_text[0] == '&' && operator_text[1] == '&')));
+  if (!separated || !exact || lexer->eof(lexer) ||
+      !application_plain_atom_start(lexer->lookahead, true)) return false;
+  if (lexer->lookahead == '(') {
+    advance(lexer);
+    if (lexer->lookahead == '*') {
+      advance(lexer);
+      // (*) is a parenthesized operator, not a skipped comment token.
+      return lexer->lookahead == ')';
+    }
+  }
+  return true;
+}
+
+static void application_peek_advance(TSLexer *lexer, bool *crossed_line) {
+  if (lexer->lookahead == '\n') *crossed_line = true;
+  advance(lexer);
+}
+
+static bool application_peek_block_comment(TSLexer *lexer, bool *crossed_line) {
+  uint32_t depth = 1;
+  while (!lexer->eof(lexer)) {
+    if (lexer->lookahead == '(') {
+      application_peek_advance(lexer, crossed_line);
+      if (lexer->lookahead == '*') {
+        if (depth == UINT32_MAX) return false;
+        depth++;
+        application_peek_advance(lexer, crossed_line);
+      }
+    } else if (lexer->lookahead == '*') {
+      application_peek_advance(lexer, crossed_line);
+      if (lexer->lookahead == ')') {
+        application_peek_advance(lexer, crossed_line);
+        if (--depth == 0) return true;
+      }
+    } else {
+      application_peek_advance(lexer, crossed_line);
+    }
+  }
+  return false;
+}
+
+// The owning tail and its extras are rescanned after the one-byte DOT mark.
+// A complete operator reference outranks the overlapping block-comment spelling.
+static bool qualified_callee_tail(TSLexer *lexer) {
+  for (;;) {
+    while (application_operator_space(lexer->lookahead) ||
+           lexer->lookahead == 0x200B || lexer->lookahead == 0x2060 ||
+           lexer->lookahead == 0xFEFF) {
+      advance(lexer);
+    }
+    if (lexer->lookahead == '/') {
+      advance(lexer);
+      if (lexer->lookahead != '/') return false;
+      while (!lexer->eof(lexer) && lexer->lookahead != '\n' && lexer->lookahead != '\r') advance(lexer);
+      continue;
+    }
+    if (lexer->lookahead != '(') return false;
+    advance(lexer);
+    if (lexer->lookahead == '|') return true;
+    bool block_comment = lexer->lookahead == '*';
+    if (application_peek_operator_reference_body(lexer)) return true;
+    if (!block_comment) return false;
+    bool crossed_line = false;
+    if (!application_peek_block_comment(lexer, &crossed_line)) return false;
+  }
+}
+
+// Comments remain extras after the zero-width marker; no comment bytes are eaten.
+static bool application_peek_comment_argument(
+    Scanner *scanner, TSLexer *lexer, bool block_comment,
+    bool *crossed_line, uint32_t *indent_length, bool *infix_head,
+    int32_t *argument_head, bool *argument_eof, bool *specialized_head) {
+  if (block_comment) {
+    if (!application_peek_block_comment(lexer, crossed_line)) return false;
+  } else {
+    while (!lexer->eof(lexer) && lexer->lookahead != '\n') advance(lexer);
+  }
+  for (;;) {
+    *indent_length = lexer->get_column(lexer);
+    while (lexer->lookahead == ' ' || lexer->lookahead == '\t' ||
+           lexer->lookahead == '\n' || lexer->lookahead == '\r' ||
+           lexer->lookahead == '\f') {
+      if (lexer->lookahead == '\n') {
+        *crossed_line = true;
+        *indent_length = 0;
+      } else if (lexer->lookahead == '\r' || lexer->lookahead == '\f') {
+        *indent_length = 0;
+      } else if (!add_column(scanner, indent_length,
+                             lexer->lookahead == '\t' ? 8 : 1)) {
+        return false;
+      }
+      advance(lexer);
+    }
+    *argument_head = lexer->lookahead;
+    *argument_eof = lexer->eof(lexer);
+    if (lexer->lookahead == '/') {
+      advance(lexer);
+      if (lexer->lookahead != '/') { *infix_head = true; return false; }
+      while (!lexer->eof(lexer) && lexer->lookahead != '\n') advance(lexer);
+      continue;
+    }
+    if (lexer->lookahead == '(') {
+      advance(lexer);
+      if (lexer->lookahead != '*') return true;
+      advance(lexer);
+      if (lexer->lookahead == ')') return true;
+      if (!application_peek_block_comment(lexer, crossed_line)) return false;
+      continue;
+    }
+    if (lexer->lookahead == '@' || lexer->lookahead == '$' ||
+        lexer->lookahead == '<') {
+      ApplicationSpecialHead head = application_peek_specialized_head(lexer);
+      *specialized_head = head == APPLICATION_SPECIAL_LITERAL ||
+                          head == APPLICATION_SPECIAL_QUOTATION;
+      *infix_head = !*specialized_head;
+      return *specialized_head;
+    }
+    if (application_dual_operator_start(lexer->lookahead)) {
+      bool adjacent = application_adjacent_dual_operator(lexer, true);
+      *infix_head = !adjacent;
+      return adjacent;
+    }
+    if (is_word_char(lexer->lookahead)) {
+      char word[10] = {0};
+      size_t length = 0;
+      while (is_word_char(lexer->lookahead) && length + 1 < sizeof(word)) {
+        word[length++] = (char)lexer->lookahead;
+        advance(lexer);
+      }
+      if (!is_word_char(lexer->lookahead) && keyword_equals(word, "or")) {
+        *infix_head = true;
+        return false;
+      }
+      return is_hash_word_char(lexer->lookahead) || !application_owner_word(word);
+    }
+    if (lexer->lookahead == '!') {
+      advance(lexer);
+      if (lexer->lookahead == '=') { *infix_head = true; return false; }
+      return true;
+    }
+    if (!application_plain_atom_start(lexer->lookahead, true)) {
+      *infix_head = is_infix_op_start(lexer);
+      return false;
+    }
+    return !lexer->eof(lexer) &&
+      application_plain_atom_start(lexer->lookahead, true);
+  }
+}
+
 static bool scan(Scanner *scanner, TSLexer *lexer, const bool *valid_symbols) {
   if (!scanner) return false;
+  // Inert guards alone cannot publish tokens or clear persistent layout state.
+  bool literal_guard_valid = valid_symbols[INTEGER_LITERAL_SUFFIX] ||
+    valid_symbols[BASED_LITERAL_SUFFIX] || valid_symbols[FLOAT_LITERAL_SUFFIX] ||
+    valid_symbols[NUMERIC_EXPONENT_CONTINUATION] ||
+    valid_symbols[NUMERIC_DIGIT_CONTINUATION];
+  if (literal_guard_valid) {
+    bool older_token_valid = false;
+    for (int i = 0; i <= QUALIFIED_CALLEE_DOT; i++) {
+      if (i != PREPROC_INACTIVE && valid_symbols[i]) {
+        older_token_valid = true;
+        break;
+      }
+    }
+    if (!older_token_valid) return false;
+  }
   if (!state_fits(scanner)) {
     scanner->state_unrepresentable = true;
     return false;
@@ -679,6 +1109,7 @@ static bool scan(Scanner *scanner, TSLexer *lexer, const bool *valid_symbols) {
   // the persistent copy up front so it is consumed by the immediately
   // following scan (the NEWLINE emit below) and never leaks further.
   bool prev_stranded_dedent = scanner->stranded_dedent;
+  uint8_t previous_line_stranded = scanner->line_stranded;
   scanner->stranded_dedent = false;
 
   if (valid_symbols[ERROR_SENTINEL]) {
@@ -728,14 +1159,76 @@ static bool scan(Scanner *scanner, TSLexer *lexer, const bool *valid_symbols) {
     // record/CE '{') bails out and the token is never emitted.
     // Appended owner/delimiter tokens must also bypass the extra-only fast path.
     if (valid_symbols[BRACE_INDENT] || valid_symbols[ENUM_CASE_BAR] ||
-        valid_symbols[DO_BODY_INDENT] || valid_symbols[DONE_KEYWORD]) {
+        valid_symbols[DO_BODY_INDENT] || valid_symbols[DONE_KEYWORD] ||
+        valid_symbols[APPLICATION_ARG_START] || valid_symbols[DECL_TERM] ||
+        valid_symbols[ROOT_BODY_INDENT]) {
       any_structural_valid = true;
     }
     if (!any_structural_valid) {
+      bool offside_owner = scanner->indents.size > 1 &&
+          peek_indent_kind(scanner) == INDENT_NORMAL;
+      uint32_t offside_column = lexer->get_column(lexer);
+      bool offside_newline = false;
+      if (offside_owner) lexer->mark_end(lexer);
       while (lexer->lookahead == ' ' || lexer->lookahead == '\t' ||
              lexer->lookahead == '\n' || lexer->lookahead == '\r' ||
              lexer->lookahead == '\f') {
+        if (offside_owner) {
+          if (lexer->lookahead == '\n' || lexer->lookahead == '\r' ||
+              lexer->lookahead == '\f') {
+            offside_column = 0;
+            if (lexer->lookahead == '\n') offside_newline = true;
+          } else if (!add_column(scanner, &offside_column,
+                                 lexer->lookahead == '\t' ? 8 : 1)) {
+            return false;
+          }
+        }
         skip(lexer);
+      }
+      // A required operand can have only extras enabled. At a real offside
+      // value declaration, close its owned ordinary RHS before internal lexing
+      // skips the keyword during recovery. The unrequested DEDENT deliberately
+      // triggers real parser recovery; no empty operand becomes valid syntax.
+      if (offside_owner && offside_newline &&
+          offside_column < peek_indent_length(scanner) &&
+          offside_column <= *array_get(&scanner->indents, scanner->indents.size - 2) &&
+          (scanner->preprocessor_indents.size == 0 ||
+           offside_column >= *array_back(&scanner->preprocessor_indents))) {
+        uint8_t below_raw = *array_get(&scanner->indent_kinds, scanner->indent_kinds.size - 2);
+        IndentKind below = (IndentKind)(below_raw & ~INDENT_KIND_FLAGS_MASK);
+        if ((below == INDENT_NORMAL || below == INDENT_TRY ||
+             below == INDENT_DO || below == INDENT_ROOT) &&
+            (lexer->lookahead == 'l' || lexer->lookahead == 'v')) {
+          char first = (char)lexer->lookahead;
+          advance(lexer);
+          bool declaration = match_keyword_rest(lexer, first == 'l' ? "et" : "al") &&
+              !is_hash_word_char(lexer->lookahead) && lexer->lookahead != '!';
+          if (!declaration) return false;
+          scanner->line_stranded = false;
+          pop_indent(scanner);
+          lexer->result_symbol = DEDENT;
+          return true;
+        }
+      }
+      if (valid_symbols[SINGLE_SEMICOLON_EXTRA] && lexer->lookahead == ';') {
+        advance(lexer);
+        scanner->stranded_dedent = prev_stranded_dedent;
+        scanner->line_stranded = previous_line_stranded;
+        if (lexer->lookahead == ';' || valid_symbols[INSIDE_STRING]) return false;
+        lexer->mark_end(lexer);
+        lexer->result_symbol = single_semicolon_is_element_separator(
+            scanner, valid_symbols, false) ? ELEM_SEP : SINGLE_SEMICOLON_EXTRA;
+        return true;
+      }
+      if (valid_symbols[QUALIFIED_CALLEE_DOT] && lexer->lookahead == '.') {
+        advance(lexer);
+        lexer->mark_end(lexer);
+        bool found = qualified_callee_tail(lexer);
+        scanner->stranded_dedent = prev_stranded_dedent;
+        scanner->line_stranded = previous_line_stranded;
+        if (!found) return false;
+        lexer->result_symbol = QUALIFIED_CALLEE_DOT;
+        return true;
       }
       if (lexer->lookahead != '#') {
         return false;
@@ -1041,20 +1534,41 @@ static bool scan(Scanner *scanner, TSLexer *lexer, const bool *valid_symbols) {
   bool found_comment_start = false;
   bool advanced_in_ws_walk = false;
   bool skipped_open_paren = false;
+  bool application_marker_valid = valid_symbols[APPLICATION_ARG_START] &&
+    !valid_symbols[ERROR_SENTINEL] && !valid_symbols[INSIDE_STRING];
+  bool application_separated = false;
+  bool application_marker_armed = false;
+  ApplicationWordProbe application_word = {0};
+  bool application_adjacent_operator_body = false;
+  bool application_adjacent_multiply = false;
+  bool application_comment_peeked = false;
+  int32_t application_comment_head = 0;
+  bool application_comment_eof = false;
+  bool application_specialized_probe = false;
+  int32_t application_specialized_head = 0;
+  bool application_specialized_eof = false;
+  bool failed_at_sign_match = false;
+  bool failed_block_opener = false;
+  bool elem_sep_armed = false;
+  bool qualified_callee_dot_pending = false;
   uint32_t indent_length = lexer->get_column(lexer);
 
   for (;;) {
     if (lexer->lookahead == '\n') {
+      application_separated = true;
       found_end_of_line = true;
       indent_length = 0;
       skip(lexer);
     } else if (lexer->lookahead == ' ') {
+      application_separated = true;
       if (!add_column(scanner, &indent_length, 1)) return false;
       skip(lexer);
     } else if (lexer->lookahead == '\r' || lexer->lookahead == '\f') {
+      application_separated = true;
       indent_length = 0;
       skip(lexer);
     } else if (lexer->lookahead == '\t') {
+      application_separated = true;
       if (!add_column(scanner, &indent_length, 8)) return false;
       skip(lexer);
     } else if (lexer->eof(lexer)) {
@@ -1062,7 +1576,19 @@ static bool scan(Scanner *scanner, TSLexer *lexer, const bool *valid_symbols) {
       indent_length = 0;
       break;
     } else if (lexer->lookahead == '/') {
-      skip(lexer);
+      bool slash_indent = valid_symbols[INDENT] &&
+          !valid_symbols[ERROR_SENTINEL] && !valid_symbols[INSIDE_STRING] &&
+          !valid_symbols[TRY_INDENT] && !valid_symbols[DO_BODY_INDENT] &&
+          !valid_symbols[ROOT_BODY_INDENT] && !found_preproc_if &&
+          !found_preproc_else && !found_preprocessor_end &&
+          !found_hash_type_prefix && !found_other_hash_directive;
+      // A reciprocal starts a type RHS; retain the existing zero-width frontier
+      // and leave its slash beyond mark_end for the internal measure lexer.
+      if (application_marker_valid || slash_indent) {
+        advance(lexer);
+      } else {
+        skip(lexer);
+      }
       if (!valid_symbols[INSIDE_STRING] && lexer->lookahead == '/') {
         // Once the loop has scanned past a directive (`#endif`/`#else` that
         // couldn't be emitted yet, or a `#if` line), declining on a trailing
@@ -1072,12 +1598,33 @@ static bool scan(Scanner *scanner, TSLexer *lexer, const bool *valid_symbols) {
         // were blank, so the pending NEWLINE/DEDENT decision proceeds.
         if (!found_preproc_if && !found_preprocessor_end &&
             !found_preproc_else) {
+          if (application_marker_valid) {
+            application_marker_armed = application_peek_comment_argument(
+              scanner, lexer, false, &found_end_of_line, &indent_length,
+              &found_start_of_infix_op, &application_comment_head,
+              &application_comment_eof, &application_specialized_probe);
+            application_comment_peeked = true;
+            goto application_trivia_layout;
+          }
           return false;
         }
         while (lexer->lookahead != '\n' && !lexer->eof(lexer)) {
           skip(lexer);
         }
       } else {
+        if (slash_indent) {
+          uint8_t flags = 0;
+          if (found_end_of_line) {
+            scanner->line_stranded = false;
+          } else {
+            flags |= INDENT_KIND_MIDLINE_FLAG;
+            if (scanner->line_stranded) flags |= INDENT_KIND_STRANDED_LINE_FLAG;
+          }
+          if (!push_indent(scanner, indent_length,
+                           (IndentKind)(INDENT_NORMAL | flags))) return false;
+          lexer->result_symbol = INDENT;
+          return true;
+        }
         return false;
       }
     } else if (lexer->lookahead == '#') {
@@ -1439,6 +1986,38 @@ static bool scan(Scanner *scanner, TSLexer *lexer, const bool *valid_symbols) {
     scanner->line_stranded = false;
   }
 
+  if (application_marker_valid && !lexer->eof(lexer)) {
+    application_marker_armed =
+      application_plain_atom_start(lexer->lookahead, application_separated) &&
+      (application_separated || application_comment_peeked ||
+       !application_literal_continuation(valid_symbols, lexer->lookahead));
+    // Keep the scan-frontier mark: speculative marker peeks must not widen older tokens.
+    // A closer-valid scan must retain its post-padding mark; peeks cannot rewind it.
+    if ((lexer->lookahead == '@' && !valid_symbols[QUOTED_CLOSE] &&
+         !valid_symbols[UNTYPED_QUOTED_CLOSE]) || lexer->lookahead == '$' ||
+        lexer->lookahead == '<') {
+      application_specialized_probe = true;
+      application_specialized_head = lexer->lookahead;
+      application_specialized_eof = lexer->eof(lexer);
+      ApplicationSpecialHead head = application_peek_specialized_head(lexer);
+      if (head == APPLICATION_SPECIAL_QUOTED_CLOSE ||
+          head == APPLICATION_SPECIAL_UNTYPED_QUOTED_CLOSE) {
+        if (valid_symbols[DEDENT] && scanner->indents.size > 1) {
+          pop_indent(scanner);
+          lexer->result_symbol = DEDENT;
+          return true;
+        }
+        lexer->mark_end(lexer);
+        lexer->result_symbol = head == APPLICATION_SPECIAL_QUOTED_CLOSE
+          ? QUOTED_CLOSE : UNTYPED_QUOTED_CLOSE;
+        return true;
+      }
+      application_marker_armed = head == APPLICATION_SPECIAL_LITERAL ||
+                                 head == APPLICATION_SPECIAL_QUOTATION;
+      found_start_of_infix_op = !application_marker_armed;
+    }
+  }
+
   // Top-level module-element separator, phase 1 of 2 (arm): a next line at
   // column 0 while only the base indent level is open separates module
   // elements, so an application expression cannot absorb the next element
@@ -1466,23 +2045,29 @@ static bool scan(Scanner *scanner, TSLexer *lexer, const bool *valid_symbols) {
   // side effect of arming: a zero-width token emitted below in an armed
   // scan (e.g. INDENT) carries this mark_end too and consumes the newline
   // as padding — same parse, slightly shifted extents.
-  bool elem_sep_armed = false;
-  if (valid_symbols[ELEM_SEP] && !valid_symbols[ERROR_SENTINEL] &&
-      found_end_of_line && indent_length == 0 && !lexer->eof(lexer) &&
+  int32_t module_head = application_specialized_probe
+    ? application_specialized_head : lexer->lookahead;
+  bool module_head_eof = application_specialized_probe
+    ? application_specialized_eof : lexer->eof(lexer);
+  bool module_element_boundary = !valid_symbols[ERROR_SENTINEL] &&
+      found_end_of_line && indent_length == 0 && !module_head_eof &&
       scanner->indents.size == 1 && !advanced_in_ws_walk &&
       !found_preprocessor_end && !found_preproc_if && !found_preproc_else &&
-      (is_word_char(lexer->lookahead) || lexer->lookahead == '[' ||
-       lexer->lookahead == '"')) {
+      (is_word_char(module_head) || module_head == '[' ||
+       module_head == '"');
+  if (module_element_boundary) application_marker_armed = false;
+  if (valid_symbols[ELEM_SEP] && module_element_boundary) {
     elem_sep_armed = true;
     lexer->mark_end(lexer);
   }
+
+  // Completed peeks may only use saved layout input, never the advanced body.
+  if (application_specialized_probe) goto application_specialized_layout;
 
   // Handle @> and @@> as external tokens to prevent them from being
   // tokenized as infix operators inside quotation expressions.
   // If a dedent is pending for a same-line expression block (e.g. fun x -> x),
   // emit the dedent first and leave the quote closer for the next scan.
-  bool failed_at_sign_match = false;
-  bool failed_block_opener = false;
   // A hash peek may now sit inside its type name. Only layout decisions may
   // inspect this scan; keyword/quote probes must never consume that remainder.
   if (!found_hash_type_prefix && !found_other_hash_directive) {
@@ -1606,6 +2191,7 @@ static bool scan(Scanner *scanner, TSLexer *lexer, const bool *valid_symbols) {
   }
   }
 
+application_specialized_layout:
   // Not gated on found_preprocessor_end: when '#endif' follows, this point is
   // only reached if PREPROC_END was not a valid symbol (a valid one returns
   // above), and the pending NEWLINE_NO_ALIGNED (e.g. an fsi directive's
@@ -1625,16 +2211,43 @@ static bool scan(Scanner *scanner, TSLexer *lexer, const bool *valid_symbols) {
   }
 
   if (!found_hash_type_prefix && !found_other_hash_directive &&
-      !failed_block_opener && !failed_at_sign_match) {
+      !failed_block_opener && !failed_at_sign_match &&
+      !application_specialized_probe) {
 
-  if (valid_symbols[NEWLINE] && lexer->lookahead == ';') {
+  if (lexer->lookahead == ';') {
     advance(lexer);
-    // `;;` is the fsi-style spelling of the same thing; consume both
-    // semicolons as one token so the second one doesn't error.
     if (lexer->lookahead == ';') {
+      // A declined written double must not become an ordinary NEWLINE token.
+      scanner->stranded_dedent = prev_stranded_dedent;
+      scanner->line_stranded = previous_line_stranded;
+      if (valid_symbols[ERROR_SENTINEL] || valid_symbols[INSIDE_STRING] ||
+          valid_symbols[QUOTED_CLOSE] || valid_symbols[UNTYPED_QUOTED_CLOSE] ||
+          advanced_in_ws_walk || scanner->preprocessor_indents.size != 0 ||
+          scanner->preproc_kinds.size != 0 || scanner->multi_dollar_count != 0)
+        return false;
+      if (valid_symbols[DEDENT] && declaration_body_can_close(scanner)) {
+        pop_indent(scanner);
+        lexer->result_symbol = DEDENT;
+        return true;
+      }
+      if (!valid_symbols[DECL_TERM] || !at_native_base(scanner)) return false;
       advance(lexer);
+      lexer->mark_end(lexer);
+      lexer->result_symbol = DECL_TERM;
+      return true;
     }
-    lexer->mark_end(lexer);  // Token = just ';'/';;'; chars after are returned to input
+    if (!valid_symbols[NEWLINE]) {
+      if (!valid_symbols[SINGLE_SEMICOLON_EXTRA] || valid_symbols[INSIDE_STRING])
+        return false;
+      scanner->stranded_dedent = prev_stranded_dedent;
+      scanner->line_stranded = previous_line_stranded;
+      lexer->mark_end(lexer);
+      lexer->result_symbol = single_semicolon_is_element_separator(
+          scanner, valid_symbols, advanced_in_ws_walk)
+          ? ELEM_SEP : SINGLE_SEMICOLON_EXTRA;
+      return true;
+    }
+    lexer->mark_end(lexer);  // Only written single ; reaches ordinary separator logic.
     bool saw_newline = false;
     for (;;) {
       while (lexer->lookahead == ' ' || lexer->lookahead == '\n' ||
@@ -1669,9 +2282,9 @@ static bool scan(Scanner *scanner, TSLexer *lexer, const bool *valid_symbols) {
     if (saw_newline) {
       found_end_of_line = true;
     }
-    // A trailing ';' / ';;' TERMINATES a top-level element; it does not
-    // separate two expressions. (';;' is just ';' here — the second semicolon
-    // adds nothing but an fsi convention.) Emitting NEWLINE makes it a
+    // A trailing single ';' TERMINATES a top-level element; it does not
+    // separate two expressions. Written doubles use their separate owner protocol.
+    // Emitting NEWLINE makes it a
     // sequential-expression separator that demands another expression on the
     // right, so `exit 0;` at end of file errors, and `exit 0;` followed by a
     // column-0 `let` absorbs that let as a let-in argument (MISSING `in`).
@@ -1683,19 +2296,33 @@ static bool scan(Scanner *scanner, TSLexer *lexer, const bool *valid_symbols) {
     // extra takes the characters. Anything else (a ';' inside an indented
     // block or a bracket, mid-line, before a continuation line, before a
     // comment) keeps the separator behaviour.
+    // A committed ROOT may still be open at physical EOF. Preserve the written
+    // single as trivia; the next EOF scan owns ordinary DEDENT, never this peek.
+    bool root_eof_extra =
+        lexer->eof(lexer) && valid_symbols[SINGLE_SEMICOLON_EXTRA] &&
+        !valid_symbols[ERROR_SENTINEL] && !valid_symbols[INSIDE_STRING] &&
+        !valid_symbols[QUOTED_CLOSE] && !valid_symbols[UNTYPED_QUOTED_CLOSE] &&
+        !advanced_in_ws_walk && declaration_body_can_close(scanner);
     bool semi_terminator =
-        !found_comment_start && scanner->indents.size == 1 &&
+        !found_comment_start &&
+        (scanner->indents.size == 1 || root_eof_extra) &&
         (lexer->eof(lexer) || (saw_newline && indent_length == 0));
     if (semi_terminator) {
       if (!lexer->eof(lexer) && valid_symbols[ELEM_SEP] &&
           !valid_symbols[ERROR_SENTINEL] &&
           (is_word_char(lexer->lookahead) || lexer->lookahead == '[' ||
            lexer->lookahead == '"')) {
-        // Consume the `;;` and the newline: the separator makes progress, so
+        // Consume the single ';' and the newline: the separator makes progress, so
         // it cannot be re-shifted at this position (see the arming comment).
         lexer->mark_end(lexer);
         elem_sep_armed = true;
       } else if (lexer->eof(lexer)) {
+        if (valid_symbols[SINGLE_SEMICOLON_EXTRA]) {
+          scanner->stranded_dedent = prev_stranded_dedent;
+          scanner->line_stranded = previous_line_stranded;
+          lexer->result_symbol = SINGLE_SEMICOLON_EXTRA;
+          return true;
+        }
         return false;
       } else {
         semi_terminator = false;
@@ -1706,15 +2333,17 @@ static bool scan(Scanner *scanner, TSLexer *lexer, const bool *valid_symbols) {
     }
   }
 
+  application_word.active = application_marker_valid &&
+    application_marker_armed && is_word_char(lexer->lookahead);
   if (lexer->lookahead == 't' &&
       (valid_symbols[THEN] || valid_symbols[DEDENT])) {
-    advance(lexer);
+    application_keyword_advance(lexer, &application_word);
     if (lexer->lookahead == 'h') {
-      advance(lexer);
+      application_keyword_advance(lexer, &application_word);
       if (lexer->lookahead == 'e') {
-        advance(lexer);
+        application_keyword_advance(lexer, &application_word);
         if (lexer->lookahead == 'n') {
-          advance(lexer);
+          application_keyword_advance(lexer, &application_word);
           if (!is_word_char(lexer->lookahead)) {
             // the 'THEN' token is only valid if we have popped the appropriate
             // amount of dedent tokens.
@@ -1734,11 +2363,11 @@ static bool scan(Scanner *scanner, TSLexer *lexer, const bool *valid_symbols) {
     }
   } else if (lexer->lookahead == 'a' &&
              (valid_symbols[AND] || valid_symbols[DEDENT])) {
-    advance(lexer);
+    application_keyword_advance(lexer, &application_word);
     if (lexer->lookahead == 'n') {
-      advance(lexer);
+      application_keyword_advance(lexer, &application_word);
       if (lexer->lookahead == 'd') {
-        advance(lexer);
+        application_keyword_advance(lexer, &application_word);
         if (lexer->lookahead == ' ') {
           // the 'AND' token is only valid if we have popped the appropriate
           // amount of dedent tokens.
@@ -1757,13 +2386,13 @@ static bool scan(Scanner *scanner, TSLexer *lexer, const bool *valid_symbols) {
                 scanner->indents.size > 0 &&
                 indent_length < (uint32_t)peek_indent_length(scanner)) {
               while (lexer->lookahead == ' ') {
-                advance(lexer);
+                application_keyword_advance(lexer, &application_word);
               }
               char word[9];
               int word_len = 0;
               while (is_word_char(lexer->lookahead) && word_len < 8) {
                 word[word_len++] = (char)lexer->lookahead;
-                advance(lexer);
+                application_keyword_advance(lexer, &application_word);
               }
               word[word_len] = '\0';
               bool accessor_next =
@@ -1810,13 +2439,13 @@ static bool scan(Scanner *scanner, TSLexer *lexer, const bool *valid_symbols) {
     }
   } else if (lexer->lookahead == 'w' &&
              (valid_symbols[WITH] || valid_symbols[DEDENT])) {
-    advance(lexer);
+    application_keyword_advance(lexer, &application_word);
     if (lexer->lookahead == 'i') {
-      advance(lexer);
+      application_keyword_advance(lexer, &application_word);
       if (lexer->lookahead == 't') {
-        advance(lexer);
+        application_keyword_advance(lexer, &application_word);
         if (lexer->lookahead == 'h') {
-          advance(lexer);
+          application_keyword_advance(lexer, &application_word);
           if (!is_word_char(lexer->lookahead)) {
             // Force-close a try-body scope whose terminating 'with' begins a
             // new line at the same column as the body, so an ordinary dedent
@@ -1868,13 +2497,13 @@ static bool scan(Scanner *scanner, TSLexer *lexer, const bool *valid_symbols) {
              (valid_symbols[DO_KEYWORD] ||
               (!valid_symbols[ERROR_SENTINEL] &&
                (valid_symbols[DONE_KEYWORD] || valid_symbols[DEDENT])))) {
-    advance(lexer);
+    application_keyword_advance(lexer, &application_word);
     if (lexer->lookahead == 'o') {
-      advance(lexer);
+      application_keyword_advance(lexer, &application_word);
       if (lexer->lookahead == 'n') {
-        advance(lexer);
+        application_keyword_advance(lexer, &application_word);
         if (lexer->lookahead == 'e') {
-          advance(lexer);
+          application_keyword_advance(lexer, &application_word);
           // A Unicode identifier suffix must never be split into a delimiter.
           if (!valid_symbols[ERROR_SENTINEL] &&
               !is_hash_word_char(lexer->lookahead)) {
@@ -1905,9 +2534,9 @@ static bool scan(Scanner *scanner, TSLexer *lexer, const bool *valid_symbols) {
     }
   } else if (lexer->lookahead == 'i' &&
              (valid_symbols[IN] || valid_symbols[DEDENT])) {
-    advance(lexer);
+    application_keyword_advance(lexer, &application_word);
     if (lexer->lookahead == 'n') {
-      advance(lexer);
+      application_keyword_advance(lexer, &application_word);
       if (!is_word_char(lexer->lookahead)) {
         if (valid_symbols[IN]) {
           // Produce the IN token to close an _expression_block_for_let.
@@ -1940,15 +2569,15 @@ static bool scan(Scanner *scanner, TSLexer *lexer, const bool *valid_symbols) {
   } else if (lexer->lookahead == 'e' &&
              (valid_symbols[ELSE] || valid_symbols[ELIF] ||
               valid_symbols[END] || valid_symbols[DEDENT])) {
-    advance(lexer);
+    application_keyword_advance(lexer, &application_word);
     uint32_t token_indent_level = lexer->get_column(lexer);
     if (lexer->lookahead == 'l') {
-      advance(lexer);
+      application_keyword_advance(lexer, &application_word);
       if (lexer->lookahead == 's' &&
           (valid_symbols[ELSE] || valid_symbols[DEDENT])) {
-        advance(lexer);
+        application_keyword_advance(lexer, &application_word);
         if (lexer->lookahead == 'e') {
-          advance(lexer);
+          application_keyword_advance(lexer, &application_word);
           if (!is_word_char(lexer->lookahead)) {
             if (valid_symbols[ELSE]) {
               // Don't pop paren-kind scopes: an if/else inside a call's
@@ -1967,15 +2596,15 @@ static bool scan(Scanner *scanner, TSLexer *lexer, const bool *valid_symbols) {
                 // so skip only same-line spacing here, never newlines.
                 for (;;) {
                   if (lexer->lookahead == ' ' || lexer->lookahead == '\t') {
-                    advance(lexer);
+                    application_keyword_advance(lexer, &application_word);
                   } else {
                     break;
                   }
                 }
                 if (lexer->lookahead == 'i') {
-                  advance(lexer);
+                  application_keyword_advance(lexer, &application_word);
                   if (lexer->lookahead == 'f') {
-                    advance(lexer);
+                    application_keyword_advance(lexer, &application_word);
                     if (!is_word_char(lexer->lookahead)) {
                       lexer->mark_end(lexer);
                       lexer->result_symbol = ELIF;
@@ -1995,9 +2624,9 @@ static bool scan(Scanner *scanner, TSLexer *lexer, const bool *valid_symbols) {
         }
       } else if (lexer->lookahead == 'i' &&
                  (valid_symbols[ELIF] || valid_symbols[DEDENT])) {
-        advance(lexer);
+        application_keyword_advance(lexer, &application_word);
         if (lexer->lookahead == 'f') {
-          advance(lexer);
+          application_keyword_advance(lexer, &application_word);
           if (!is_word_char(lexer->lookahead)) {
             if (valid_symbols[ELIF]) {
               if (scanner->indents.size > 0 &&
@@ -2021,9 +2650,9 @@ static bool scan(Scanner *scanner, TSLexer *lexer, const bool *valid_symbols) {
       }
     } else if (lexer->lookahead == 'n' &&
                (valid_symbols[END] || valid_symbols[DEDENT])) {
-      advance(lexer);
+      application_keyword_advance(lexer, &application_word);
       if (lexer->lookahead == 'd') {
-        advance(lexer);
+        application_keyword_advance(lexer, &application_word);
         if (!is_word_char(lexer->lookahead)) {
           if (valid_symbols[END]) {
             lexer->mark_end(lexer);
@@ -2039,7 +2668,24 @@ static bool scan(Scanner *scanner, TSLexer *lexer, const bool *valid_symbols) {
     }
   } else if (is_bracket_end(lexer)) {
     found_bracket_end = true;
-  } else if (is_infix_op_start(lexer)) {
+  } else if (application_marker_valid &&
+             application_dual_operator_start(lexer->lookahead)) {
+    application_marker_armed =
+      application_adjacent_dual_operator(lexer, application_separated);
+    found_start_of_infix_op = !application_marker_armed;
+  } else if (valid_symbols[QUALIFIED_CALLEE_DOT] &&
+             !valid_symbols[TYPE_APP_INDENT] &&
+             !valid_symbols[ERROR_SENTINEL] && !valid_symbols[INSIDE_STRING] &&
+             !advanced_in_ws_walk && lexer->lookahead == '.') {
+    // Keep the old frontier mark until every older layout emission has declined.
+    advance(lexer);
+    qualified_callee_dot_pending = true;
+    if (lexer->lookahead != '.') {
+      application_marker_armed = false;
+      found_start_of_infix_op = true;
+    }
+  } else if (application_infix_start(lexer, &application_word)) {
+    application_marker_armed = false;
     found_start_of_infix_op = true;
   } else if (lexer->lookahead == '|') {
     // A type-case separator may sit two columns left of the body's first
@@ -2052,7 +2698,8 @@ static bool scan(Scanner *scanner, TSLexer *lexer, const bool *valid_symbols) {
       (!found_end_of_line || indent_length >= enum_floor ||
        (scanner->indents.size > 1 &&
         (peek_indent_kind(scanner) == INDENT_NORMAL ||
-         peek_indent_kind(scanner) == INDENT_DO) &&
+         peek_indent_kind(scanner) == INDENT_DO ||
+         peek_indent_kind(scanner) == INDENT_ROOT) &&
         enum_floor - indent_length <= 2));
     if (enum_bar_candidate) {
       advance(lexer);
@@ -2103,7 +2750,9 @@ static bool scan(Scanner *scanner, TSLexer *lexer, const bool *valid_symbols) {
       found_start_of_infix_op = true;
     }
   } else if (lexer->lookahead == '(') {
-    skip(lexer);
+    application_adjacent_operator_body = application_marker_valid &&
+      !application_separated;
+    if (application_marker_valid) advance(lexer); else skip(lexer);
     // Recorded for the SRTP typar-group veto below: this scan began *on* a
     // '(', so any group seen from here is inside that paren, i.e. the request
     // belongs to the enclosing expression's paren rather than to the group's.
@@ -2112,9 +2761,21 @@ static bool scan(Scanner *scanner, TSLexer *lexer, const bool *valid_symbols) {
       // `(*)` is the multiplication operator reference (F# spec 3.10), not a
       // comment opener — peek one further so it doesn't suppress INDENT and
       // force the comment interpretation (`let f = (*) 2 3`).
-      skip(lexer);
+      if (application_marker_valid) advance(lexer); else skip(lexer);
+      application_adjacent_multiply = application_adjacent_operator_body &&
+        lexer->lookahead == ')';
+      application_adjacent_operator_body = false;
       if (lexer->lookahead != ')') {
         found_comment_start = true;
+        if (application_marker_valid) {
+          application_marker_armed = application_peek_comment_argument(
+            scanner, lexer, true, &found_end_of_line, &indent_length,
+            &found_start_of_infix_op, &application_comment_head,
+            &application_comment_eof, &application_specialized_probe);
+          application_comment_peeked = true;
+          found_comment_start = false;
+          goto application_trivia_layout;
+        }
       }
     }
   }
@@ -2164,7 +2825,8 @@ static bool scan(Scanner *scanner, TSLexer *lexer, const bool *valid_symbols) {
     return true;
   }
 
-  if ((valid_symbols[INDENT] || valid_symbols[DO_BODY_INDENT]) &&
+  if ((valid_symbols[INDENT] || valid_symbols[DO_BODY_INDENT] ||
+       valid_symbols[ROOT_BODY_INDENT]) &&
       !valid_symbols[ERROR_SENTINEL] &&
       !found_bracket_end && !found_preprocessor_end &&
       !found_same_line_pipe_infix &&
@@ -2181,11 +2843,12 @@ static bool scan(Scanner *scanner, TSLexer *lexer, const bool *valid_symbols) {
         indent_flags |= INDENT_KIND_STRANDED_LINE_FLAG;
       }
     }
-    IndentKind kind =
+    if (valid_symbols[ROOT_BODY_INDENT] && !at_native_base(scanner)) return false;
+    IndentKind kind = valid_symbols[ROOT_BODY_INDENT] ? INDENT_ROOT :
         valid_symbols[DO_BODY_INDENT] ? INDENT_DO : INDENT_NORMAL;
     if (!push_indent(scanner, indent_length,
                      (IndentKind)(kind | indent_flags))) return false;
-    lexer->result_symbol =
+    lexer->result_symbol = valid_symbols[ROOT_BODY_INDENT] ? ROOT_BODY_INDENT :
         valid_symbols[DO_BODY_INDENT] ? DO_BODY_INDENT : INDENT;
     return true;
   }
@@ -2235,12 +2898,38 @@ static bool scan(Scanner *scanner, TSLexer *lexer, const bool *valid_symbols) {
       !found_bracket_end &&
       !found_preprocessor_end && !found_same_line_pipe_infix) {
     bool is_multiline = found_end_of_line ||
-        (!found_hash_type_prefix && is_multiline_type_app_ahead(lexer));
+        (!found_hash_type_prefix && !application_specialized_probe &&
+         is_multiline_type_app_ahead(lexer));
     if (is_multiline) {
       if (!push_indent(scanner, indent_length, INDENT_TYPE_APP)) return false;
       lexer->result_symbol = TYPE_APP_INDENT;
       return true;
     }
+  }
+
+application_trivia_layout:
+  if (application_comment_peeked) {
+    if (found_end_of_line) scanner->line_stranded = false;
+    // Specialized directive, string and quotation probes retain their own priority.
+    if (application_comment_head == '#' ||
+        (!application_specialized_probe &&
+         (application_comment_head == '@' || application_comment_head == '$' ||
+          application_comment_head == '<')))
+      return false;
+    // The module repeat separator must consume its newline, not a comment peek.
+    if (found_end_of_line && scanner->indents.size == 1 && indent_length == 0)
+      return false;
+  }
+
+  int32_t layout_head = application_comment_peeked
+    ? application_comment_head : application_specialized_probe
+    ? application_specialized_head : lexer->lookahead;
+  bool layout_eof = application_comment_peeked
+    ? application_comment_eof : application_specialized_probe
+    ? application_specialized_eof : lexer->eof(lexer);
+  if (application_comment_peeked || application_specialized_probe) {
+    found_bracket_end = layout_head == ')' || layout_head == ']' || layout_head == '}';
+    if (layout_eof) { found_end_of_line = true; indent_length = 0; }
   }
 
   if (scanner->indents.size > 0) {
@@ -2252,7 +2941,7 @@ static bool scan(Scanner *scanner, TSLexer *lexer, const bool *valid_symbols) {
     // gated on the type-app bit so we don't pop ordinary paren scopes here.
     bool found_type_app_close = !found_hash_type_prefix &&
                                 peek_is_type_app_indent(scanner) &&
-                                lexer->lookahead == '>' &&
+                                layout_head == '>' &&
                                 valid_symbols[DEDENT];
 
     if ((found_bracket_end || found_type_app_close) && valid_symbols[DEDENT]) {
@@ -2267,11 +2956,14 @@ static bool scan(Scanner *scanner, TSLexer *lexer, const bool *valid_symbols) {
       // dedenting out — the '}' is what closes the block.
       bool brace_separator =
           is_brace_indent && indent_length < current_indent_length;
-      if ((indent_length == current_indent_length || brace_separator) &&
+      bool line_separator =
+          (indent_length == current_indent_length || brace_separator) &&
           indent_length > 0 &&
-          !found_start_of_infix_op && !found_bracket_end) {
-        if (valid_symbols[NEWLINE] && !found_preprocessor_end &&
-            !found_comment_start) {
+          !found_start_of_infix_op && !found_bracket_end &&
+          !found_preprocessor_end && !found_comment_start;
+      if (line_separator) {
+        application_marker_armed = false;
+        if (valid_symbols[NEWLINE]) {
           lexer->result_symbol = NEWLINE;
           return true;
         }
@@ -2283,10 +2975,13 @@ static bool scan(Scanner *scanner, TSLexer *lexer, const bool *valid_symbols) {
       // starts a new element instead of being stranded. Guarded on a real
       // preceding stranded DEDENT so ordinary more-indented continuation lines
       // (e.g. a multi-line application argument) are untouched.
-      if (prev_stranded_dedent && indent_length > current_indent_length &&
-          valid_symbols[NEWLINE] && !found_start_of_infix_op &&
+      bool stranded_separator =
+          prev_stranded_dedent && indent_length > current_indent_length &&
+          !found_start_of_infix_op &&
           !found_bracket_end && !found_preprocessor_end &&
-          !found_comment_start) {
+          !found_comment_start;
+      if (stranded_separator) application_marker_armed = false;
+      if (stranded_separator && valid_symbols[NEWLINE]) {
         // This line hangs between two open levels; scopes anchored mid-line
         // on it must not claim following same-column lines as continuations.
         scanner->line_stranded = true;
@@ -2335,7 +3030,7 @@ static bool scan(Scanner *scanner, TSLexer *lexer, const bool *valid_symbols) {
       // paren indent can't get stranded forever if its closing bracket was
       // consumed by the grammar rather than seen here at the start of a line.
       bool can_dedent_paren_indent = !(is_paren_indent || is_brace_indent) ||
-          indent_length == 0 || (!found_hash_type_prefix && lexer->eof(lexer));
+          indent_length == 0 || (!found_hash_type_prefix && layout_eof);
 
       // A line that sits strictly DEEPER than the line which opened a
       // mid-line-anchored scope continues the anchored expression, even when
@@ -2362,7 +3057,7 @@ static bool scan(Scanner *scanner, TSLexer *lexer, const bool *valid_symbols) {
         IndentKind below_kind =
             (IndentKind)(below_kind_raw & ~INDENT_KIND_FLAGS_MASK);
         if ((below_kind == INDENT_NORMAL || below_kind == INDENT_TRY ||
-             below_kind == INDENT_DO) &&
+             below_kind == INDENT_DO || below_kind == INDENT_ROOT) &&
             indent_length >
                 *array_get(&scanner->indents, scanner->indents.size - 2)) {
           can_dedent_midline_anchor = false;
@@ -2373,6 +3068,8 @@ static bool scan(Scanner *scanner, TSLexer *lexer, const bool *valid_symbols) {
           can_dedent_preproc && can_dedent_infix_op &&
           can_dedent_midline_anchor &&
           (!valid_symbols[TUPLE_MARKER] || valid_symbols[ERROR_SENTINEL]) && can_dedent_paren_indent) {
+        // A comment peek may owe closure, but cannot publish an unrequested token.
+        if (application_comment_peeked && !valid_symbols[DEDENT]) return false;
         pop_indent(scanner);
         // If this line closed a nested block but still sits above the enclosing
         // block's own indent (e.g. dedenting from a nested module body back to
@@ -2397,6 +3094,48 @@ static bool scan(Scanner *scanner, TSLexer *lexer, const bool *valid_symbols) {
     }
   }
 
+  if (application_word.active &&
+      application_finish_owner_word(lexer, &application_word)) {
+    application_marker_armed = false;
+  }
+
+  if (application_marker_valid && application_marker_armed &&
+      !found_start_of_infix_op && !found_bracket_end &&
+      !found_preprocessor_end && !found_preproc_if && !found_preproc_else &&
+      !found_hash_type_prefix && !found_other_hash_directive) {
+    // UL needs both characters; U alone remains an ordinary adjacent argument.
+    // The owner probe already inspected this prefix after all older layout returns.
+    if (!application_separated && !application_comment_peeked &&
+        (valid_symbols[INTEGER_LITERAL_SUFFIX] ||
+         valid_symbols[BASED_LITERAL_SUFFIX]) &&
+        application_word.length >= 2 && application_word.text[0] == 'U' &&
+        application_word.text[1] == 'L') {
+      return false;
+    }
+    lexer->result_symbol = APPLICATION_ARG_START;
+    return true;
+  }
+  // Adjacent ordinary parentheses stay on the immediate application route.
+  // Only complete operator references use the existing low-application marker.
+  if (application_marker_valid && !application_comment_peeked &&
+      !found_start_of_infix_op && !found_bracket_end &&
+      !found_preprocessor_end && !found_preproc_if && !found_preproc_else &&
+      !found_hash_type_prefix && !found_other_hash_directive &&
+      (application_adjacent_multiply ||
+       (application_adjacent_operator_body &&
+        application_peek_operator_reference_body(lexer)))) {
+    lexer->result_symbol = APPLICATION_ARG_START;
+    return true;
+  }
+  if (qualified_callee_dot_pending) {
+    lexer->mark_end(lexer);
+    bool found = qualified_callee_tail(lexer);
+    scanner->stranded_dedent = prev_stranded_dedent;
+    scanner->line_stranded = previous_line_stranded;
+    if (!found) return false;
+    lexer->result_symbol = QUALIFIED_CALLEE_DOT;
+    return true;
+  }
   return false;
 }
 
@@ -2425,7 +3164,7 @@ static unsigned serialize(Scanner *scanner, char *buffer) {
   for (unsigned i = 0; i < STATE_HEADER_SIZE; i++) buffer[i] = 0;
   buffer[0] = 'F';
   buffer[1] = STATE_VERSION;
-  if (!scanner || !state_fits(scanner)) {
+  if (!scanner || !state_fits(scanner) || !root_position_valid(scanner)) {
     buffer[2] = 1;
     return STATE_HEADER_SIZE;
   }
@@ -2472,7 +3211,9 @@ static void deserialize(Scanner *scanner, const char *buffer, unsigned length) {
   reset(scanner);
   if (!buffer || length < STATE_HEADER_SIZE ||
       length > TREE_SITTER_SERIALIZATION_BUFFER_SIZE ||
-      buffer[0] != 'F' || (uint8_t)buffer[1] != STATE_VERSION) return;
+      buffer[0] != 'F' || ((uint8_t)buffer[1] != STATE_VERSION &&
+                          (uint8_t)buffer[1] != HISTORICAL_STATE_VERSION)) return;
+  bool historical = (uint8_t)buffer[1] == HISTORICAL_STATE_VERSION;
   if ((uint8_t)buffer[2] == 1) {
     if (length != STATE_HEADER_SIZE) return;
     for (unsigned i = 3; i < STATE_HEADER_SIZE; i++) {
@@ -2492,10 +3233,17 @@ static void deserialize(Scanner *scanner, const char *buffer, unsigned length) {
   size_t size = STATE_HEADER_SIZE;
   for (uint32_t i = 0; i < indents; i++, size += 5) {
     uint8_t kind = (uint8_t)buffer[size + 4];
-    if (kind > INDENT_DO && kind != INDENT_KIND_MIDLINE_FLAG &&
-        kind != INDENT_KIND_FLAGS_MASK &&
-        kind != (INDENT_DO | INDENT_KIND_MIDLINE_FLAG) &&
-        kind != (INDENT_DO | INDENT_KIND_FLAGS_MASK)) return;
+    bool old_domain = kind <= INDENT_DO || kind == INDENT_KIND_MIDLINE_FLAG ||
+        kind == INDENT_KIND_FLAGS_MASK ||
+        kind == (INDENT_DO | INDENT_KIND_MIDLINE_FLAG) ||
+        kind == (INDENT_DO | INDENT_KIND_FLAGS_MASK);
+    bool root_domain = kind == INDENT_ROOT ||
+        kind == (INDENT_ROOT | INDENT_KIND_MIDLINE_FLAG) ||
+        kind == (INDENT_ROOT | INDENT_KIND_FLAGS_MASK);
+    if (!old_domain && (historical || !root_domain)) return;
+    if (root_domain &&
+        (i != 1 || read_u32(buffer + STATE_HEADER_SIZE) != 0 ||
+         (uint8_t)buffer[STATE_HEADER_SIZE + 4] != INDENT_NORMAL)) return;
   }
   size += 4 * (size_t)preprocessor;
   for (uint32_t i = 0; i < kinds; i++) {

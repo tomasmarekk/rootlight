@@ -1,7 +1,7 @@
 use std::collections::{BTreeSet, HashSet};
 
 use rootlight_cancel::Cancellation;
-use rootlight_ids::FileId;
+use rootlight_ids::{FileId, SymbolId};
 use rootlight_ir::{ContainerRef, EntityFlag, EntityKind, EntityRecord, NormalizedIrDocument};
 use rootlight_search::{
     BuildBudget, LexicalDocument, SearchBudget, SearchError, SymbolNameProjection,
@@ -110,6 +110,16 @@ impl<'generation> LexicalProjectionBuilder<'generation> {
             .try_reserve(document.entities.len())
             .map_err(|_| QueryError::MemoryUnavailable)?;
         let mut text_bytes = 0usize;
+        let mut signatures = RetainedSignatureIndex::new(
+            document.entities.iter().map(|entity| entity.id),
+            document.entities.len(),
+        )?;
+        for envelope in &document.extensions {
+            cancellation
+                .check()
+                .map_err(|cancelled| QueryError::Cancelled(cancelled.reason()))?;
+            signatures.observe(envelope)?;
+        }
         for entity in &document.entities {
             cancellation
                 .check()
@@ -123,8 +133,15 @@ impl<'generation> LexicalProjectionBuilder<'generation> {
             {
                 continue;
             }
-            let (entity, next_text_bytes) =
-                project_entity_document(document, entity, text_bytes, budget)?;
+            let signature = signatures.evidence(entity.id)?;
+            let (entity, next_text_bytes) = project_entity_document(
+                document,
+                entity,
+                signature.as_ref(),
+                text_bytes,
+                budget,
+                cancellation,
+            )?;
             projected.push(entity);
             text_bytes = next_text_bytes;
         }
@@ -675,6 +692,26 @@ fn project_scoped_source_documents(
         .try_reserve_exact(document_count)
         .map_err(|_| QueryError::MemoryUnavailable)?;
     let mut text_bytes = 0;
+    let mut signatures = RetainedSignatureIndex::new(
+        document
+            .entities
+            .iter()
+            .filter(|entity| {
+                entity
+                    .evidence
+                    .source
+                    .as_ref()
+                    .is_some_and(|evidence| evidence.span().file() == file.id)
+            })
+            .map(|entity| entity.id),
+        entity_count,
+    )?;
+    for envelope in &document.extensions {
+        cancellation
+            .check()
+            .map_err(|cancelled| QueryError::Cancelled(cancelled.reason()))?;
+        signatures.observe(envelope)?;
+    }
     for entity in document.entities.iter().filter(|entity| {
         entity
             .evidence
@@ -685,8 +722,15 @@ fn project_scoped_source_documents(
         cancellation
             .check()
             .map_err(|cancelled| QueryError::Cancelled(cancelled.reason()))?;
-        let (entity, next_text_bytes) =
-            project_entity_document(document, entity, text_bytes, budget)?;
+        let signature = signatures.evidence(entity.id)?;
+        let (entity, next_text_bytes) = project_entity_document(
+            document,
+            entity,
+            signature.as_ref(),
+            text_bytes,
+            budget,
+            cancellation,
+        )?;
         projected.push(entity);
         text_bytes = next_text_bytes;
     }
@@ -706,8 +750,10 @@ fn project_scoped_source_documents(
 fn project_entity_document(
     document: &NormalizedIrDocument,
     entity: &EntityRecord,
+    signature: Option<&rootlight_ir::LexicalEvidenceV1>,
     current_text_bytes: usize,
     budget: BuildBudget,
+    cancellation: &Cancellation,
 ) -> Result<(LexicalDocument, usize), QueryError> {
     let source = entity
         .evidence
@@ -740,6 +786,7 @@ fn project_entity_document(
         kind.len(),
         entity.language.len(),
         tier.len(),
+        signature.map_or(0, |evidence| evidence.text().len()),
     ]
     .into_iter()
     .try_fold(current_text_bytes, |total, length| {
@@ -771,7 +818,11 @@ fn project_entity_document(
             tier,
             package: None,
             build_target: None,
-            signature: None,
+            signature: signature
+                .map(|evidence| {
+                    rootlight_search::project_signature_search_text(evidence.text(), cancellation)
+                })
+                .transpose()?,
             type_names: Vec::new(),
             documentation: None,
             source_identifiers: Vec::new(),
@@ -785,6 +836,113 @@ fn project_entity_document(
         },
         next_text_bytes,
     ))
+}
+
+/// One bounded extension pass selects unique canonical payloads without retaining
+/// a decoded header for every entity. Conflicts remain absent for the whole scan.
+pub(super) struct RetainedSignatureIndex<'document> {
+    candidates: Vec<(
+        SymbolId,
+        Option<&'document rootlight_ir::ExtensionEnvelope>,
+        bool,
+    )>,
+}
+
+impl<'document> RetainedSignatureIndex<'document> {
+    pub(super) fn new(
+        symbols: impl Iterator<Item = SymbolId>,
+        maximum_symbols: usize,
+    ) -> Result<Self, QueryError> {
+        let mut candidates = Vec::new();
+        candidates
+            .try_reserve_exact(maximum_symbols)
+            .map_err(|_| QueryError::MemoryUnavailable)?;
+        for symbol in symbols {
+            if candidates.len() == maximum_symbols {
+                return Err(QueryError::MemoryUnavailable);
+            }
+            candidates.push((symbol, None, false));
+        }
+        candidates.sort_unstable_by_key(|candidate| candidate.0);
+        candidates.dedup_by_key(|candidate| candidate.0);
+        Ok(Self { candidates })
+    }
+
+    pub(super) fn candidate(&self, envelope: &rootlight_ir::ExtensionEnvelope) -> bool {
+        Self::subject(envelope).is_some_and(|symbol| {
+            self.candidates
+                .binary_search_by_key(&symbol, |candidate| candidate.0)
+                .is_ok()
+        })
+    }
+
+    fn subject(envelope: &rootlight_ir::ExtensionEnvelope) -> Option<SymbolId> {
+        if envelope.namespace != rootlight_ir::LEXICAL_EXTENSION_NAMESPACE
+            || envelope.version == rootlight_ir::LEXICAL_SUMMARY_BATCH_VERSION
+        {
+            return None;
+        }
+        match envelope.evidence.derivation.as_slice() {
+            [rootlight_ir::FactRef::Entity(symbol)] => Some(*symbol),
+            _ => None,
+        }
+    }
+
+    pub(super) fn observe(
+        &mut self,
+        envelope: &'document rootlight_ir::ExtensionEnvelope,
+    ) -> Result<(), QueryError> {
+        let Some(symbol) = Self::subject(envelope) else {
+            return Ok(());
+        };
+        let Ok(index) = self
+            .candidates
+            .binary_search_by_key(&symbol, |candidate| candidate.0)
+        else {
+            return Ok(());
+        };
+        let evidence = rootlight_ir::decode_lexical_evidence_envelope(envelope)
+            .map_err(|_| QueryError::IndexDrift)?;
+        if evidence.kind() != rootlight_ir::LexicalEvidenceKind::Signature {
+            return Ok(());
+        }
+        let (_, previous, conflicting) = &mut self.candidates[index];
+        if previous.is_some_and(|previous| previous.payload != envelope.payload) {
+            // Canonical encoding makes payload equality equivalent to the
+            // retained evidence equality used by symbol.explain.
+            *conflicting = true;
+        }
+        *previous = Some(envelope);
+        Ok(())
+    }
+
+    pub(super) fn envelope(
+        &self,
+        symbol: SymbolId,
+    ) -> Option<&'document rootlight_ir::ExtensionEnvelope> {
+        let index = self
+            .candidates
+            .binary_search_by_key(&symbol, |candidate| candidate.0)
+            .ok()?;
+        let (_, envelope, conflicting) = self.candidates[index];
+        (!conflicting).then_some(envelope).flatten()
+    }
+
+    pub(super) fn evidence(
+        &self,
+        symbol: SymbolId,
+    ) -> Result<Option<rootlight_ir::LexicalEvidenceV1>, QueryError> {
+        self.envelope(symbol)
+            .map(|envelope| {
+                rootlight_ir::decode_lexical_evidence_envelope(envelope)
+                    .map_err(|_| QueryError::IndexDrift)
+            })
+            .transpose()
+    }
+
+    pub(super) const fn entry_bytes() -> usize {
+        std::mem::size_of::<(SymbolId, Option<&rootlight_ir::ExtensionEnvelope>, bool)>()
+    }
 }
 
 fn analysis_tier_for_file(

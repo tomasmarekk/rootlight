@@ -71,6 +71,7 @@ pub(super) fn entity_kind(
         "fsharp.namespace.declaration" => EntityKind::Namespace,
         "fsharp.module.declaration" | "fsharp.nested_module.declaration" => EntityKind::Module,
         "fsharp.function.declaration" => EntityKind::Function,
+        "fsharp.parameter.declaration" => EntityKind::Parameter,
         "fsharp.variable.declaration" => EntityKind::Variable,
         "fsharp.record.declaration" | "fsharp.struct.declaration" => EntityKind::Struct,
         "fsharp.union.declaration" => EntityKind::Union,
@@ -209,6 +210,10 @@ pub(super) fn captured_name<'a>(
         "fsharp.name.definition" => written_path(text),
         "fsharp.operator_name.definition" => written_operator(text),
         "fsharp.new_name.definition" => text == "new",
+        "fsharp.simple_function_body_read.reference" if language == "fsharp" => {
+            written_path(text)
+                && (!text.contains('.') || text.starts_with("``") && text.ends_with("``"))
+        }
         _ => false,
     };
     accepted.then_some(Cow::Borrowed(text))
@@ -265,6 +270,7 @@ mod tests {
             ("fsharp.module.declaration", EntityKind::Module),
             ("fsharp.nested_module.declaration", EntityKind::Module),
             ("fsharp.function.declaration", EntityKind::Function),
+            ("fsharp.parameter.declaration", EntityKind::Parameter),
             ("fsharp.variable.declaration", EntityKind::Variable),
             ("fsharp.record.declaration", EntityKind::Struct),
             ("fsharp.struct.declaration", EntityKind::Struct),
@@ -455,6 +461,41 @@ mod tests {
             assert!(
                 structural_captured_name_for_fact("fsharp", &definition, source, 128).is_none(),
                 "{source:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn formal_read_names_require_exact_single_written_name_evidence() {
+        let read = fact(
+            SyntaxFactKind::Occurrence,
+            "fsharp.simple_function_body_read.reference",
+            declaration("unused").span(),
+        );
+        for name in ["value", "δ", "``value.with spaces``"] {
+            assert_eq!(
+                structural_captured_name_for_fact("fsharp", &read, name, name.len()).as_deref(),
+                Some(name)
+            );
+            assert!(
+                structural_captured_name_for_fact("fsharp", &read, name, name.len() - 1).is_none()
+            );
+            assert!(
+                structural_captured_name_for_fact("fsharp-signature", &read, name, name.len())
+                    .is_none()
+            );
+        }
+        for name in [
+            "module.value",
+            "( + )",
+            " value",
+            "``broken",
+            "value()",
+            "x\ny",
+        ] {
+            assert!(
+                structural_captured_name_for_fact("fsharp", &read, name, 128).is_none(),
+                "{name:?}"
             );
         }
     }

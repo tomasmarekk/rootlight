@@ -10,6 +10,8 @@ mod conditional_activity;
 mod model;
 mod projection;
 mod service;
+mod source_metadata_quote;
+mod source_text;
 mod store;
 
 pub use conditional_activity::{
@@ -42,9 +44,10 @@ pub use model::{
     QueryOperator, QueryResource, QueryResponse, QueryUsage, RankedTestSelection,
     RelationDirection, RelationFamily, RelationshipEdgeTarget, RelationshipGroup,
     RepositoryDataTrust, ResolvedChangeRecord, SemanticChangeRecord, SourceChunkEncoding,
-    SourceChunkResult, SourceReadPlan, SourceReadQueryResult, SymbolExplainPlan,
-    SymbolExplainResult, SymbolRelationshipsPlan, SymbolRelationshipsResult, TestsSelectCoverage,
-    TestsSelectGap, TestsSelectKind, TestsSelectPlan, TestsSelectResult, TokenAccountingProfile,
+    SourceChunkResult, SourceReadPlan, SourceReadQueryResult, SourceTextPrefixReadPlan,
+    SourceTextReadPlan, SymbolExplainPlan, SymbolExplainResult, SymbolRelationshipsPlan,
+    SymbolRelationshipsResult, TestsSelectCoverage, TestsSelectGap, TestsSelectKind,
+    TestsSelectPlan, TestsSelectResult, TokenAccountingProfile,
 };
 pub use projection::{
     LexicalProjectionBuilder, SOURCE_FALLBACK_TEXT_BYTES, project_lexical_documents,
@@ -54,4 +57,11 @@ pub use projection::{
     project_source_fallback_document, project_source_fallback_document_with_text_limit,
 };
 pub use service::QueryService;
+pub use source_metadata_quote::{
+    SourceTextPrefixFixedUpper, SourceTextPrefixMetadataQuoteEntry,
+    SourceTextPrefixMetadataQuoteQueryResult,
+};
+pub use source_text::{
+    QuerySourceTextChunk, SourceTextPrefixReadQueryResult, SourceTextReadQueryResult,
+};
 pub use store::{GenerationLease, GenerationSet};

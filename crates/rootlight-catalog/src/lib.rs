@@ -293,6 +293,114 @@ pub struct OracleReader {
     stats: GenerationStats,
 }
 
+/// Conservative materialization workspace for one validated oracle read.
+///
+/// The plan is derived and admitted within the same read transaction. It keeps
+/// full record envelopes except for the closed, heap-free identity-registry keys,
+/// and separately reserves transient decoding of one opaque or locator payload.
+/// It is a logical reservation, not an allocator, heap, or RSS measurement.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct OracleReadMemoryPlan {
+    stats: GenerationStats,
+    physical_rows: u64,
+    identity_registry_rows: u64,
+    record_workspace_bytes: u64,
+    maximum_payload_bytes: u64,
+    transient_decode_bytes: u64,
+    materialization_bytes: u64,
+}
+
+impl OracleReadMemoryPlan {
+    /// Returns the validated persisted logical and physical statistics.
+    #[must_use]
+    pub const fn stats(self) -> GenerationStats {
+        self.stats
+    }
+
+    /// Returns the actual physical census, including the legacy seal adjustment.
+    #[must_use]
+    pub const fn physical_rows(self) -> u64 {
+        self.physical_rows
+    }
+
+    /// Returns the exact count of closed identity-registry entries.
+    #[must_use]
+    pub const fn identity_registry_rows(self) -> u64 {
+        self.identity_registry_rows
+    }
+
+    /// Returns fixed record and registry workspace, excluding dynamic text.
+    #[must_use]
+    pub const fn record_workspace_bytes(self) -> u64 {
+        self.record_workspace_bytes
+    }
+
+    /// Returns the largest encoded opaque or locator payload in this transaction.
+    #[must_use]
+    pub const fn maximum_payload_bytes(self) -> u64 {
+        self.maximum_payload_bytes
+    }
+
+    /// Returns the additional workspace for transient single-payload decoding.
+    #[must_use]
+    pub const fn transient_decode_bytes(self) -> u64 {
+        self.transient_decode_bytes
+    }
+
+    /// Returns checked record workspace plus transient decoding workspace.
+    ///
+    /// Callers must separately reserve retained text, derived indexes, source
+    /// sidecars, and any other state they keep alive during materialization.
+    #[must_use]
+    pub const fn materialization_bytes(self) -> u64 {
+        self.materialization_bytes
+    }
+}
+
+/// Separates catalog failures from a caller's typed admission rejection.
+pub enum OracleReadAdmissionError<E> {
+    /// Validation, decoding, cancellation, or storage failed in the catalog.
+    Catalog(CatalogError),
+    /// The caller rejected materialization before record maps were allocated.
+    Admission(E),
+}
+
+impl<E> From<CatalogError> for OracleReadAdmissionError<E> {
+    fn from(error: CatalogError) -> Self {
+        Self::Catalog(error)
+    }
+}
+
+impl<E> fmt::Debug for OracleReadAdmissionError<E> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Catalog(error) => formatter
+                .debug_tuple("OracleReadAdmissionError::Catalog")
+                .field(error)
+                .finish(),
+            Self::Admission(_) => formatter.write_str("OracleReadAdmissionError::Admission(..)"),
+        }
+    }
+}
+
+impl<E> fmt::Display for OracleReadAdmissionError<E> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Catalog(error) => fmt::Display::fmt(error, formatter),
+            Self::Admission(_) => formatter.write_str("oracle materialization admission failed"),
+        }
+    }
+}
+
+impl<E: Error + 'static> Error for OracleReadAdmissionError<E> {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match self {
+            Self::Catalog(error) => Some(error),
+            Self::Admission(error) => Some(error),
+        }
+    }
+}
+
 impl OracleReader {
     /// Opens and verifies the oracle inside a generation directory.
     ///
@@ -352,11 +460,40 @@ impl OracleReader {
         Ok(snapshot)
     }
 
+    /// Admits materialization within the transaction that validates its plan.
+    ///
+    /// The callback runs once after bounded header, text, physical-census, and
+    /// payload-length validation, before source or record maps are built. Its
+    /// rejection is preserved separately from catalog corruption. Successful
+    /// admission does not bypass any existing decode or canonical checks.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`OracleReadAdmissionError::Catalog`] for the same failures as
+    /// [`Self::read`], or [`OracleReadAdmissionError::Admission`] for the exact
+    /// caller rejection. Cancellation is checked after the callback as well.
+    pub fn read_with_admission<E>(
+        &self,
+        context: &GenerationContext<'_>,
+        admit: impl FnOnce(OracleReadMemoryPlan) -> Result<(), E>,
+    ) -> Result<GenerationSnapshot, OracleReadAdmissionError<E>> {
+        let connection = schema::open_oracle_reader(&self.path, context)?;
+        let snapshot = read::read_generation_with_admission(
+            &connection,
+            self.metadata,
+            self.stats,
+            context,
+            admit,
+        )?;
+        schema::validate_oracle(&connection, context)?;
+        Ok(snapshot)
+    }
+
     /// Materializes only generations carrying a validated identity proof.
     ///
     /// Legacy generation contracts in a supported schema remain readable through
     /// [`Self::read`], but cannot enter the backend-neutral query contract without
-    /// the current identity proof. Sealed schema versions 3 and 4 are readable.
+    /// the current identity proof. Supported sealed schemas remain readable.
     ///
     /// # Errors
     ///
@@ -370,6 +507,9 @@ impl OracleReader {
         IdentityVerifiedGeneration::verify_snapshot(snapshot, context).map_err(
             |error| match error {
                 IdentityVerificationError::Control(error) => CatalogError::control(error),
+                IdentityVerificationError::ResourceUnavailable => {
+                    CatalogError::identity_resource_unavailable()
+                }
                 IdentityVerificationError::LegacyContract
                 | IdentityVerificationError::MissingClaim => {
                     CatalogError::new(CatalogErrorKind::IdentityProofRequired)
@@ -661,6 +801,9 @@ impl EphemeralOracleReader {
         IdentityVerifiedGeneration::verify_snapshot(snapshot, context).map_err(
             |error| match error {
                 IdentityVerificationError::Control(error) => CatalogError::control(error),
+                IdentityVerificationError::ResourceUnavailable => {
+                    CatalogError::identity_resource_unavailable()
+                }
                 IdentityVerificationError::LegacyContract
                 | IdentityVerificationError::MissingClaim => {
                     CatalogError::new(CatalogErrorKind::IdentityProofRequired)
@@ -853,7 +996,7 @@ pub enum CatalogErrorKind {
     InsecureFile,
     /// Generation metadata or normalized IR was invalid.
     InvalidGeneration,
-    /// An IO, SQLite, or scalar-codec operation failed.
+    /// An IO, SQLite, scalar-codec, or allocation operation failed.
     Storage,
 }
 
@@ -891,16 +1034,27 @@ impl CatalogError {
     }
 
     pub(crate) fn invalid_generation(error: GenerationValidationError) -> Self {
-        Self::with_source(
-            CatalogErrorKind::InvalidGeneration,
-            CatalogErrorSource::Generation(error),
-        )
+        let kind = if matches!(error, GenerationValidationError::IndexResourceUnavailable) {
+            CatalogErrorKind::Storage
+        } else {
+            CatalogErrorKind::InvalidGeneration
+        };
+        Self::with_source(kind, CatalogErrorSource::Generation(error))
     }
 
     pub(crate) fn corrupt_generation(error: GenerationValidationError) -> Self {
+        let kind = if matches!(error, GenerationValidationError::IndexResourceUnavailable) {
+            CatalogErrorKind::Storage
+        } else {
+            CatalogErrorKind::Corrupt
+        };
+        Self::with_source(kind, CatalogErrorSource::Generation(error))
+    }
+
+    fn identity_resource_unavailable() -> Self {
         Self::with_source(
-            CatalogErrorKind::Corrupt,
-            CatalogErrorSource::Generation(error),
+            CatalogErrorKind::Storage,
+            CatalogErrorSource::Identity(IdentityVerificationError::ResourceUnavailable),
         )
     }
 
@@ -1004,6 +1158,7 @@ pub(crate) enum CatalogErrorSource {
     Sqlite(rusqlite::Error),
     Json(serde_json::Error),
     Generation(GenerationValidationError),
+    Identity(IdentityVerificationError),
 }
 
 impl CatalogErrorSource {
@@ -1024,6 +1179,10 @@ impl CatalogErrorSource {
             Self::Generation(source) => {
                 let _ = std::mem::discriminant(source);
                 "generation"
+            }
+            Self::Identity(source) => {
+                let _ = std::mem::discriminant(source);
+                "identity"
             }
         }
     }
@@ -1049,6 +1208,61 @@ impl Error for CatalogErrorSource {}
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn generation_workspace_failures_are_storage_not_invalid_or_corrupt() {
+        type GenerationErrorMapper = fn(GenerationValidationError) -> CatalogError;
+        let mappings: [(GenerationErrorMapper, CatalogErrorKind); 2] = [
+            (
+                CatalogError::invalid_generation,
+                CatalogErrorKind::InvalidGeneration,
+            ),
+            (CatalogError::corrupt_generation, CatalogErrorKind::Corrupt),
+        ];
+        for (map_error, validation_kind) in mappings {
+            let allocation = map_error(GenerationValidationError::IndexResourceUnavailable);
+            assert_eq!(allocation.kind(), CatalogErrorKind::Storage);
+            assert!(matches!(
+                allocation.source.as_ref(),
+                Some(CatalogErrorSource::Generation(
+                    GenerationValidationError::IndexResourceUnavailable,
+                ))
+            ));
+            assert!(allocation.source().is_some());
+
+            let invalid = map_error(GenerationValidationError::OwnershipMismatch);
+            assert_eq!(invalid.kind(), validation_kind);
+            assert!(matches!(
+                invalid.source.as_ref(),
+                Some(CatalogErrorSource::Generation(
+                    GenerationValidationError::OwnershipMismatch,
+                ))
+            ));
+        }
+    }
+
+    #[test]
+    fn identity_workspace_failure_retains_redacted_typed_source() {
+        let error = CatalogError::identity_resource_unavailable();
+        assert_eq!(error.kind(), CatalogErrorKind::Storage);
+        assert!(matches!(
+            error.source.as_ref(),
+            Some(CatalogErrorSource::Identity(
+                IdentityVerificationError::ResourceUnavailable,
+            ))
+        ));
+        let source = error.source().expect("redacted typed source is retained");
+        assert_eq!(source.to_string(), "redacted catalog error source");
+        assert!(source.source().is_none());
+    }
+
+    #[test]
+    fn generation_workspace_cancellation_keeps_cancelled_classification() {
+        let error = CatalogError::control(GenerationControlError::Cancelled {
+            reason: rootlight_cancel::CancellationReason::ClientRequest,
+        });
+        assert_eq!(error.kind(), CatalogErrorKind::Cancelled);
+    }
 
     #[test]
     fn error_rendering_redacts_underlying_paths() {

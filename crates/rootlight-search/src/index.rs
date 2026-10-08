@@ -19,7 +19,7 @@ use tantivy::{
         BytesOptions, Field, IndexRecordOption, NumericOptions, Schema, TextFieldIndexing,
         TextOptions, Value,
     },
-    tokenizer::{MAX_TOKEN_LEN, RemoveLongFilter, TextAnalyzer},
+    tokenizer::{MAX_TOKEN_LEN, RemoveLongFilter, TextAnalyzer, TokenStream, Tokenizer},
 };
 use tantivy_fst::{Automaton as _, Regex};
 
@@ -80,6 +80,59 @@ const MAX_LANGUAGE_FILTER_BYTES: usize = 64;
 const SORT_CHECKPOINT_STRIDE: usize = 1_024;
 
 type QueryClause = (Occur, Box<dyn Query>);
+
+/// Prepares bounded signature postings without changing admissible source text.
+///
+/// Only code-token spans whose normalized terms exceed the existing term bound
+/// are replaced with one space. All other bytes, including authored punctuation
+/// and line breaks, remain exact. This projection is not signature evidence;
+/// callers retain the complete authored evidence separately.
+///
+/// # Errors
+/// Returns a source-redacted signature-field error for empty, NUL-containing,
+/// or over-4-KiB input, a bounded allocation error, or cooperative cancellation.
+pub fn project_signature_search_text(
+    text: &str,
+    cancellation: &Cancellation,
+) -> Result<String, SearchError> {
+    cancellation.check()?;
+    if text.is_empty() || text.len() > MAX_SIGNATURE_BYTES || text.contains('\0') {
+        return Err(SearchError::InvalidDocument {
+            field: DocumentField::Signature,
+        });
+    }
+    let mut projected = String::new();
+    projected
+        .try_reserve_exact(text.len())
+        .map_err(|_| SearchError::BuildBudgetExceeded {
+            resource: "signature_memory",
+        })?;
+    let mut tokenizer = CodeTokenizer::default();
+    let mut stream = tokenizer.token_stream(text);
+    let mut retained_from = 0;
+    while stream.advance() {
+        cancellation.check()?;
+        let token = stream.token();
+        if token.text.len() > MAX_TERM_BYTES {
+            let before =
+                text.get(retained_from..token.offset_from)
+                    .ok_or(SearchError::InvalidDocument {
+                        field: DocumentField::Signature,
+                    })?;
+            projected.push_str(before);
+            projected.push(' ');
+            retained_from = token.offset_to;
+        }
+    }
+    cancellation.check()?;
+    projected.push_str(
+        text.get(retained_from..)
+            .ok_or(SearchError::InvalidDocument {
+                field: DocumentField::Signature,
+            })?,
+    );
+    Ok(projected)
+}
 
 /// Selects explicit symbol-name storage without changing any source spelling.
 /// File-only projections must not use this selector to enable segmented names.
@@ -1383,12 +1436,13 @@ impl Fields {
         budget: SearchBudget,
         control: &SearchControl<'_>,
     ) -> Result<Box<dyn Query>, SearchError> {
-        let normalized = normalize_exact(request.query.trim());
+        let raw_query = request.query.trim();
+        let normalized = normalize_exact(raw_query);
         let mut work = QueryWork::new(searcher, budget, control);
         let lexical_query = match request.mode {
             SearchMode::Exact => self.exact_query(&normalized, &mut work)?,
             SearchMode::Prefix => self.prefix_query(&normalized, &mut work)?,
-            SearchMode::Text => self.text_query(&normalized, &mut work)?,
+            SearchMode::Text => self.text_query(raw_query, &normalized, &mut work)?,
             SearchMode::SafeRegex => {
                 self.pattern_query(&compile_safe_regex(&normalized)?, &mut work)?
             }
@@ -1505,10 +1559,11 @@ impl Fields {
 
     fn text_query(
         &self,
+        raw_query: &str,
         normalized: &str,
         work: &mut QueryWork<'_>,
     ) -> Result<Box<dyn Query>, SearchError> {
-        let tokens = token_texts(normalized);
+        let tokens = token_texts(raw_query);
         if tokens.is_empty() {
             return Err(SearchError::InvalidQuery(QueryViolation::Empty));
         }
@@ -2440,7 +2495,7 @@ fn select_query_source_view(
         budget,
     )?;
     let normalized = normalize_text(query);
-    let tokens = token_texts(&normalized);
+    let tokens = token_texts(query.trim());
     let mut selection = SourceQuerySelection {
         terminal: qualified_symbol_terminal(&normalized),
         normalized,
@@ -3316,8 +3371,19 @@ mod tests {
             ("unrelated tailOnlyMarker", "absentMarker", false),
             ("first_value ignored second_value", "first second", true),
             ("first_value ignored", "first second", false),
+            (
+                "firstValue ignored secondValue",
+                "firstValue secondValue",
+                true,
+            ),
+            ("firstValue ignored", "firstValue secondValue", false),
             ("HTTPServer", "http server", true),
             ("HTTPServer", "http", true),
+            (
+                "HTTPServer ignored Cafe\u{301}Value",
+                "HTTPServer CaféValue",
+                true,
+            ),
             ("crate handler_suffix handler", "crate::handler", true),
             ("crate handler_suffix", "crate::handler", false),
             ("Cafe\u{301} Straße", "CAFÉ", true),
@@ -3871,6 +3937,102 @@ mod tests {
             test: false,
             declaration_only: false,
         }
+    }
+
+    #[test]
+    fn signature_search_projection_preserves_admissible_authored_bytes() {
+        for text in [
+            "fn item(value: int) -> Output",
+            "fn item(\r\n    Cafe\u{301}Value: &str,\r\n) -> Straße\r\n",
+            "(value: int)",
+        ] {
+            let projected = project_signature_search_text(text, &Cancellation::new()).unwrap();
+            assert_eq!(projected.as_bytes(), text.as_bytes());
+            assert!(!has_oversized_term(&projected));
+        }
+        let boundary = format!("fn item(value: {})", "x".repeat(MAX_TERM_BYTES));
+        assert_eq!(
+            project_signature_search_text(&boundary, &Cancellation::new()).unwrap(),
+            boundary
+        );
+    }
+
+    #[test]
+    fn signature_search_projection_omits_only_oversized_native_token_spans() {
+        let raw = format!(
+            "fn item(keepBefore: {}) -> keepAfter",
+            "x".repeat(MAX_TERM_BYTES + 1)
+        );
+        let projected = project_signature_search_text(&raw, &Cancellation::new()).unwrap();
+        assert_eq!(projected, "fn item(keepBefore:  ) -> keepAfter");
+        assert!(projected.len() <= raw.len());
+        assert!(!has_oversized_term(&projected));
+        let mut source = document(1, "carrier", "src/carrier.rs");
+        source.signature = Some(projected);
+        source.type_names.clear();
+        source.documentation = None;
+        let index = LexicalIndex::build_ephemeral(
+            generation(1),
+            vec![source],
+            BuildBudget::default(),
+            &Cancellation::new(),
+        )
+        .unwrap();
+        let hits = search(&index, "keepBefore keepAfter", SearchMode::Text);
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].symbol_id, Some(SymbolId::from_bytes([1; 20])));
+    }
+
+    #[test]
+    fn signature_search_projection_applies_normalized_unicode_term_bounds() {
+        let supported = "İ".repeat(80);
+        assert_eq!(normalize_text(&supported).len(), MAX_TERM_BYTES);
+        assert_eq!(
+            project_signature_search_text(&supported, &Cancellation::new()).unwrap(),
+            supported
+        );
+        let omitted = "İ".repeat(81);
+        assert!(omitted.len() < MAX_TERM_BYTES);
+        assert!(normalize_text(&omitted).len() > MAX_TERM_BYTES);
+        let raw = format!("before_{omitted}_after");
+        assert_eq!(
+            project_signature_search_text(&raw, &Cancellation::new()).unwrap(),
+            "before_ _after"
+        );
+        let shrinking = "ſ".repeat(MAX_TERM_BYTES);
+        assert!(shrinking.len() > MAX_TERM_BYTES);
+        assert_eq!(normalize_text(&shrinking).len(), MAX_TERM_BYTES);
+        assert_eq!(
+            project_signature_search_text(&shrinking, &Cancellation::new()).unwrap(),
+            shrinking
+        );
+    }
+
+    #[test]
+    fn signature_search_projection_enforces_raw_admission_and_cancellation() {
+        let cancellation = Cancellation::new();
+        let boundary = " ".repeat(MAX_SIGNATURE_BYTES);
+        assert_eq!(
+            project_signature_search_text(&boundary, &cancellation).unwrap(),
+            boundary
+        );
+        for invalid in [
+            String::new(),
+            "fn item\0()".to_owned(),
+            " ".repeat(MAX_SIGNATURE_BYTES + 1),
+        ] {
+            assert_eq!(
+                project_signature_search_text(&invalid, &cancellation),
+                Err(SearchError::InvalidDocument {
+                    field: DocumentField::Signature
+                })
+            );
+        }
+        cancellation.cancel(CancellationReason::ClientRequest);
+        assert_eq!(
+            project_signature_search_text("fn item()", &cancellation),
+            Err(SearchError::Cancelled(CancellationReason::ClientRequest))
+        );
     }
 
     fn open_index(
@@ -4428,6 +4590,76 @@ mod tests {
                 &Cancellation::new(),
             )
             .expect("query succeeds")
+    }
+
+    #[test]
+    fn text_queries_preserve_case_boundaries_in_signature_only_postings() {
+        let mut carrier = document(1, "carrier", "src/carrier.rs");
+        carrier.signature = Some(
+            "fn item(value: HeaderWitness, client: HTTPServer, info: Cafe\u{301}Value)".to_owned(),
+        );
+        carrier.type_names.clear();
+        carrier.documentation = None;
+        let (_directory, _manifest, index) = build(vec![carrier]);
+
+        for query in [
+            "HeaderWitness",
+            "  HeaderWitness  ",
+            "header witness",
+            "HTTPServer",
+            "http server",
+            "CaféValue",
+            "Cafe\u{301}Value",
+            "CAFÉ value",
+        ] {
+            let hits = search(&index, query, SearchMode::Text);
+            assert_eq!(hits.len(), 1, "query: {query}");
+            assert_eq!(hits[0].symbol_id, Some(SymbolId::from_bytes([1; 20])));
+        }
+    }
+
+    #[test]
+    fn text_queries_keep_normalized_names_and_scoped_filters() {
+        let mut first = document(1, "HTTPServer", "src/server.rs");
+        let mut second = document(2, "HTTPServer", "vendor/server.rs");
+        let mut unicode = document(3, "Cafe\u{301}Value", "src/unicode.rs");
+        for document in [&mut first, &mut second, &mut unicode] {
+            document.signature = None;
+            document.type_names.clear();
+            document.documentation = None;
+        }
+        let (_directory, _manifest, index) = build(vec![first, second, unicode]);
+        assert_eq!(search(&index, "httpserver", SearchMode::Exact).len(), 2);
+        assert_eq!(search(&index, "https", SearchMode::Prefix).len(), 2);
+        assert_eq!(
+            search(&index, "CaféValue", SearchMode::Exact)[0].symbol_id,
+            Some(SymbolId::from_bytes([3; 20]))
+        );
+        for query in ["HTTPServer", "http server"] {
+            assert_eq!(search(&index, query, SearchMode::Text).len(), 2);
+            let outcome = index
+                .search_with_entity_filters_and_stats(
+                    &SearchRequest {
+                        query: query.to_owned(),
+                        mode: SearchMode::Text,
+                        max_results: 10,
+                        page_offset: 0,
+                    },
+                    SearchFilters {
+                        languages: &["rust".to_owned()],
+                        path_prefixes: &["src".to_owned()],
+                        kinds: Some(&["function".to_owned()]),
+                    },
+                    SearchBudget::default(),
+                    &Cancellation::new(),
+                )
+                .unwrap();
+            assert_eq!(outcome.matched_candidates, 1);
+            assert_eq!(
+                outcome.hits[0].symbol_id,
+                Some(SymbolId::from_bytes([1; 20]))
+            );
+        }
     }
 
     #[test]

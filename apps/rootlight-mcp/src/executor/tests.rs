@@ -98,6 +98,18 @@ use tokio::sync::{Notify, watch};
 
 use super::*;
 
+#[path = "source_material_tests.rs"]
+mod source_material_tests;
+
+#[path = "source_budget_tests.rs"]
+mod source_budget_tests;
+
+#[path = "context_interruption_tests.rs"]
+mod context_interruption_tests;
+
+#[path = "source_metadata_quote_tests.rs"]
+mod source_metadata_quote_tests;
+
 type CodeLocateOutput = ToolResponse<ReadEnvelope<CodeLocateData>>;
 type SourceReadOutput = ToolResponse<ReadEnvelope<SourceReadData>>;
 
@@ -139,9 +151,37 @@ enum FakeOutcome {
     SymbolExplain(Result<SymbolExplainPortResponse, ClientPortError>),
     SymbolExplainPerRequest(Result<SymbolExplainPortResponse, ClientPortError>),
     SourceRead(Result<SourceReadPortResponse, ClientPortError>),
+    SourceMetadataQuotes {
+        responses: Arc<
+            Mutex<VecDeque<Result<client::SourceTextPrefixMetadataQuoteResult, ClientPortError>>>,
+        >,
+        pending: Option<(Arc<Notify>, Arc<AtomicBool>)>,
+        cancel_on_last: Option<watch::Sender<bool>>,
+    },
+    SourceReadPrefixSequence {
+        responses:
+            Arc<Mutex<VecDeque<Result<client::SourceTextPrefixReadResult, ClientPortError>>>>,
+        cancel_on_last_response: Option<watch::Sender<bool>>,
+    },
     SourceReadSymbolResolution {
         explain: Result<SymbolExplainPortResponse, ClientPortError>,
         source: Box<Result<SourceReadPortResponse, ClientPortError>>,
+    },
+    ContextSourceTrajectory {
+        locate: CodeLocatePortResponse,
+        explanations: Arc<Mutex<VecDeque<Result<SymbolExplainPortResponse, ClientPortError>>>>,
+        source: Box<Result<SourceReadLosslessPortResponse, ClientPortError>>,
+        cancel_on_source: Option<watch::Sender<bool>>,
+    },
+    ContextPendingExplanation {
+        locate: CodeLocatePortResponse,
+        started: Arc<Notify>,
+        dropped: Arc<AtomicBool>,
+    },
+    SourcePrefixThenPending {
+        responses: Arc<Mutex<VecDeque<client::SourceTextPrefixReadResult>>>,
+        started: Arc<Notify>,
+        dropped: Arc<AtomicBool>,
     },
     RepositoryList(Result<RepositoryList, ClientPortError>),
     RepositoryCatalogPageSequence(
@@ -221,6 +261,12 @@ enum ObservedCall {
     CodeLocate(ObservedAnalyticCall<CodeLocatePortRequest>),
     SymbolExplain(ObservedAnalyticCall<SymbolExplainPortRequest>),
     SourceRead(ObservedAnalyticCall<SourceReadPortRequest>),
+    SourceReadLossless(ObservedAnalyticCall<SourceReadPortRequest>),
+    SourceMetadataQuote(ObservedAnalyticCall<SourceReadPortRequest>),
+    SourceReadLosslessPrefix {
+        call: ObservedAnalyticCall<SourceReadPortRequest>,
+        maximum_text_bytes: u32,
+    },
     RepositoryList(RepositoryCatalogPagePortRequest),
     RepositoryStatus(RepositoryStatusPortRequest),
     SymbolRelationships(ObservedAnalyticCall<SymbolRelationshipsPortRequest>),
@@ -513,6 +559,8 @@ impl FirstSliceClientPort for FakePort {
         )));
         let outcome = match &self.outcome {
             FakeOutcome::CodeLocate(outcome) => outcome.clone(),
+            FakeOutcome::ContextSourceTrajectory { locate, .. } => Ok(locate.clone()),
+            FakeOutcome::ContextPendingExplanation { locate, .. } => Ok(locate.clone()),
             FakeOutcome::CodeLocateSequence(outcomes) => outcomes
                 .lock()
                 .expect("fake locate sequence is not poisoned")
@@ -559,6 +607,22 @@ impl FirstSliceClientPort for FakePort {
         )));
         let outcome = match &self.outcome {
             FakeOutcome::SymbolExplain(outcome) => outcome.clone(),
+            FakeOutcome::ContextPendingExplanation {
+                started, dropped, ..
+            } => {
+                let started = Arc::clone(started);
+                let drop_marker = DropMarker(Arc::clone(dropped));
+                return Box::pin(async move {
+                    let _drop_marker = drop_marker;
+                    started.notify_one();
+                    std::future::pending().await
+                });
+            }
+            FakeOutcome::ContextSourceTrajectory { explanations, .. } => explanations
+                .lock()
+                .expect("fake explanation sequence is not poisoned")
+                .pop_front()
+                .expect("fake explanation sequence is not exhausted"),
             FakeOutcome::SymbolExplainPerRequest(outcome) => outcome.clone().map(|mut response| {
                 response
                     .result
@@ -593,6 +657,200 @@ impl FirstSliceClientPort for FakePort {
             _ => Err(ClientPortError::Executor),
         };
         Box::pin(async move { outcome })
+    }
+
+    fn source_read_lossless_text(
+        &self,
+        request: SourceReadPortRequest,
+        options: client::RequestOptions,
+        cancellation: RequestCancellation,
+    ) -> ClientPortFuture<SourceReadLosslessPortResponse> {
+        if let FakeOutcome::ContextSourceTrajectory {
+            source,
+            cancel_on_source,
+            ..
+        } = &self.outcome
+        {
+            self.record(ObservedCall::SourceReadLossless(ObservedAnalyticCall::new(
+                request, options,
+            )));
+            let outcome = source.as_ref().clone();
+            let cancel_on_source = cancel_on_source.clone();
+            return Box::pin(async move {
+                if let Some(sender) = cancel_on_source {
+                    sender
+                        .send(true)
+                        .expect("test request owner remains subscribed");
+                }
+                outcome
+            });
+        }
+        let future = self.source_read(request, options, cancellation);
+        Box::pin(async move {
+            let legacy = future.await?;
+            let mut chunks = Vec::new();
+            for chunk in legacy.result.chunks {
+                if chunk.encoding != client::SourceEncoding::Utf8 {
+                    return Err(ClientPortError::InvalidResponse);
+                }
+                chunks.push(client::SourceTextChunk {
+                    extracted_from: chunk.extracted_from,
+                    source: chunk.source,
+                    path: chunk.path,
+                    start_byte: chunk.start_byte,
+                    end_byte: chunk.end_byte,
+                    start_line: chunk.start_line,
+                    end_line: chunk.end_line,
+                    content: String::from_utf8(chunk.content)
+                        .map_err(|_| ClientPortError::InvalidResponse)?,
+                    physical_encoding: client::SourceTextEncoding::Utf8,
+                    content_hash: chunk.content_hash,
+                    language: chunk.language,
+                    tier: chunk.tier,
+                    generated: chunk.generated,
+                });
+            }
+            Ok(SourceReadLosslessPortResponse::new(
+                client::SourceTextReadResult {
+                    context: legacy.result.context,
+                    chunks,
+                    total_source_bytes: legacy.result.total_source_bytes,
+                    total_text_bytes: legacy.result.total_source_bytes,
+                    truncated: legacy.result.truncated,
+                    execution_completeness: legacy.result.execution_completeness,
+                    conditional_activity: legacy.result.conditional_activity,
+                },
+                legacy.metadata,
+                legacy.stale_references,
+                legacy.elisions,
+            ))
+        })
+    }
+
+    fn source_text_prefix_metadata_quote(
+        &self,
+        request: SourceReadPortRequest,
+        options: client::RequestOptions,
+        _cancellation: RequestCancellation,
+    ) -> ClientPortFuture<client::SourceTextPrefixMetadataQuoteResult> {
+        self.record(ObservedCall::SourceMetadataQuote(
+            ObservedAnalyticCall::new(request, options),
+        ));
+        if let FakeOutcome::SourceMetadataQuotes {
+            responses,
+            pending,
+            cancel_on_last,
+        } = &self.outcome
+        {
+            let mut responses = responses.lock().expect("quote fixture lock");
+            if let Some(response) = responses.pop_front() {
+                let cancel = if responses.is_empty() {
+                    cancel_on_last.clone()
+                } else {
+                    None
+                };
+                return Box::pin(async move {
+                    if let Some(sender) = cancel {
+                        sender.send(true).expect("quote owner subscribed");
+                    }
+                    response
+                });
+            }
+            if let Some((started, dropped)) = pending {
+                let started = Arc::clone(started);
+                let drop_marker = DropMarker(Arc::clone(dropped));
+                return Box::pin(async move {
+                    let _drop_marker = drop_marker;
+                    started.notify_one();
+                    std::future::pending().await
+                });
+            }
+        }
+        Box::pin(async { Err(ClientPortError::Executor) })
+    }
+
+    fn source_read_lossless_text_prefix(
+        &self,
+        request: SourceReadPortRequest,
+        maximum_text_bytes_per_chunk: u32,
+        options: client::RequestOptions,
+        _cancellation: RequestCancellation,
+    ) -> ClientPortFuture<client::SourceTextPrefixReadResult> {
+        self.record(ObservedCall::SourceReadLosslessPrefix {
+            call: ObservedAnalyticCall::new(request.clone(), options),
+            maximum_text_bytes: maximum_text_bytes_per_chunk,
+        });
+        if let FakeOutcome::SourcePrefixThenPending {
+            responses,
+            started,
+            dropped,
+        } = &self.outcome
+        {
+            if let Some(response) = responses
+                .lock()
+                .expect("fake prefix receipt lock")
+                .pop_front()
+            {
+                return Box::pin(async move { Ok(response) });
+            }
+            let started = Arc::clone(started);
+            let drop_marker = DropMarker(Arc::clone(dropped));
+            return Box::pin(async move {
+                let _drop_marker = drop_marker;
+                started.notify_one();
+                std::future::pending().await
+            });
+        }
+        if let FakeOutcome::SourceReadPrefixSequence {
+            responses,
+            cancel_on_last_response,
+        } = &self.outcome
+        {
+            let mut responses = responses
+                .lock()
+                .expect("fake prefix sequence is not poisoned");
+            let outcome = responses
+                .pop_front()
+                .expect("fake prefix sequence is not exhausted");
+            let cancel = if responses.is_empty() {
+                cancel_on_last_response.clone()
+            } else {
+                None
+            };
+            return Box::pin(async move {
+                if let Some(sender) = cancel {
+                    sender
+                        .send(true)
+                        .expect("test cancellation owner remains subscribed");
+                }
+                outcome
+            });
+        }
+        if let FakeOutcome::ContextSourceTrajectory { source, .. } = &self.outcome {
+            let outcome = source.as_ref().clone();
+            return Box::pin(async move {
+                source_material_tests::prefix_text_fixture(
+                    outcome?.result,
+                    &request,
+                    maximum_text_bytes_per_chunk,
+                )
+            });
+        }
+        let outcome = match &self.outcome {
+            FakeOutcome::SourceRead(outcome)
+            | FakeOutcome::BatchSourceRead {
+                source: outcome, ..
+            } => outcome.clone(),
+            FakeOutcome::SourceReadSymbolResolution { source, .. } => source.as_ref().clone(),
+            _ => Err(ClientPortError::Executor),
+        };
+        Box::pin(async move {
+            source_material_tests::prefix_legacy_fixture(
+                outcome?,
+                &request,
+                maximum_text_bytes_per_chunk,
+            )
+        })
     }
 
     fn repository_catalog_page(
@@ -1858,6 +2116,8 @@ fn locate_response() -> CodeLocatePortResponse {
                 file: file(),
                 identifier: "Publisher".to_owned(),
                 qualified_name: "crate::Publisher".to_owned(),
+                signature: None,
+                signature_truncated: false,
                 path: "src/lib.rs".to_owned(),
                 kind: "struct".to_owned(),
                 language: "rust".to_owned(),
@@ -1885,6 +2145,133 @@ fn conditional_locate_request() -> CodeLocatePortRequest {
         &normalization_error(),
     )
     .unwrap()
+}
+
+#[test]
+fn locate_mapper_preserves_supplied_signature_without_expanding_leaf_source() {
+    for signature in [
+        "pub struct Publisher<T>".to_owned(),
+        format!("{}λ", "a".repeat(4_094)),
+    ] {
+        let mut response = locate_response();
+        response.result.hits[0].signature = Some(signature.clone());
+        let expected_source =
+            client_source_ref(response.result.hits[0].source.as_ref().unwrap()).unwrap();
+        let output = map_code_locate(response, &conditional_locate_request(), None).unwrap();
+        assert_eq!(
+            output.data.matches[0].signature.as_deref(),
+            Some(signature.as_str())
+        );
+        assert_eq!(
+            output.data.matches[0].source_ref.as_ref(),
+            Some(&expected_source)
+        );
+        assert!(
+            output
+                .warnings
+                .iter()
+                .all(|warning| warning.code.as_str() != "signature_truncated")
+        );
+    }
+}
+
+#[test]
+fn locate_mapper_keeps_absent_signature_null() {
+    let output = map_code_locate(locate_response(), &conditional_locate_request(), None).unwrap();
+    assert!(output.data.matches[0].signature.is_none());
+    assert_eq!(
+        serde_json::to_value(&output.data).unwrap()["matches"][0]["signature"],
+        Value::Null
+    );
+    assert!(
+        output
+            .warnings
+            .iter()
+            .all(|warning| warning.code.as_str() != "signature_truncated")
+    );
+}
+
+#[test]
+fn locate_mapper_rejects_malformed_or_unowned_signature_evidence() {
+    for (signature, truncated, symbol_present, source_present) in [
+        (Some(String::new()), false, true, true),
+        (Some("pub\0struct Publisher".to_owned()), false, true, true),
+        (Some("a".repeat(4_097)), false, true, true),
+        (Some("pub struct Publisher".to_owned()), false, false, true),
+        (Some("pub struct Publisher".to_owned()), false, true, false),
+        (None, true, true, true),
+    ] {
+        let mut response = locate_response();
+        let hit = &mut response.result.hits[0];
+        hit.signature = signature;
+        hit.signature_truncated = truncated;
+        if !symbol_present {
+            hit.symbol = None;
+            hit.kind = "file".to_owned();
+        }
+        if !source_present {
+            hit.source = None;
+        }
+        let error = map_code_locate(response, &conditional_locate_request(), None)
+            .expect_err("malformed or unowned signature evidence must fail closed");
+        assert_eq!(error.failure(), Some(ToolExecutionFailure::InvalidResponse));
+    }
+}
+
+#[test]
+fn locate_mapper_reports_truncated_signature_without_repository_text_in_warning() {
+    let mut response = locate_response();
+    let signature = "pub struct Publisher<";
+    response.result.hits[0].signature = Some(signature.to_owned());
+    response.result.hits[0].signature_truncated = true;
+    let mut second_hit = response.result.hits[0].clone();
+    second_hit.symbol = Some(SymbolId::from_bytes([41; 20]));
+    second_hit.identifier = "Subscriber".to_owned();
+    second_hit.qualified_name = "crate::Subscriber".to_owned();
+    second_hit.signature = Some("pub struct Subscriber<".to_owned());
+    second_hit.source = Some(source_reference(16, 24, 3, 3));
+    response.result.hits.push(second_hit);
+    response.result.matched_candidates = 2;
+    response.result.context = context(2, 0);
+    let output = map_code_locate(response, &conditional_locate_request(), None).unwrap();
+    assert_eq!(output.data.matches[0].signature.as_deref(), Some(signature));
+    let warnings = output
+        .warnings
+        .iter()
+        .filter(|warning| warning.code.as_str() == "signature_truncated")
+        .collect::<Vec<_>>();
+    assert_eq!(warnings.len(), 1);
+    assert!(!warnings[0].message.as_str().contains(signature));
+    assert!(!warnings[0].message.as_str().contains("Subscriber"));
+    assert!(!warnings[0].message.as_str().contains("src/lib.rs"));
+    assert!(!output.truncated);
+    assert_eq!(output.completeness.state, CompletenessState::Complete);
+}
+
+#[tokio::test]
+async fn locate_mapper_signature_respects_existing_response_profiles() {
+    let signature = "pub struct Publisher<T>";
+    for (profile, expected) in [
+        ("compact", Value::Null),
+        ("standard", json!(signature)),
+        ("evidence", json!(signature)),
+    ] {
+        let mut response = locate_response();
+        response.result.hits[0].signature = Some(signature.to_owned());
+        let harness = Harness::new(FakeOutcome::CodeLocate(Ok(response)));
+        let output = execute(
+            &harness.executor,
+            VerticalTool::CodeLocate,
+            json!({
+                "repository": {"repository_id": repository()},
+                "query": "publish",
+                "response_profile": profile,
+            }),
+        )
+        .await
+        .expect("valid locate signature maps under each response profile");
+        assert_eq!(output["data"]["matches"][0]["signature"], expected);
+    }
 }
 
 fn conditional_source_request() -> SourceReadPortRequest {
@@ -3352,6 +3739,86 @@ fn explain_response(definition: client::SourceReference) -> SymbolExplainPortRes
     )
 }
 
+#[test]
+fn lossless_source_mapping_keeps_physical_refs_and_independent_unicode_totals() {
+    let requested = source_reference_without_lines(2, 14);
+    let request = normalize_source_read(
+        decode_arguments(json!({
+            "repository": {"repository_id": repository()},
+            "references": [{"source_ref": client_source_ref(&requested).unwrap()}],
+            "include_line_numbers": false,
+        })),
+        &normalization_error(),
+        &normalization_error(),
+    )
+    .unwrap();
+    for encoding in [
+        client::SourceTextEncoding::Utf16Le,
+        client::SourceTextEncoding::Utf16Be,
+    ] {
+        let response = SourceReadLosslessPortResponse::new(
+            client::SourceTextReadResult {
+                context: context(1, 12),
+                chunks: vec![client::SourceTextChunk {
+                    extracted_from: None,
+                    source: requested.clone(),
+                    path: "src/lib.rs".into(),
+                    start_byte: 2,
+                    end_byte: 14,
+                    start_line: None,
+                    end_line: None,
+                    content: "a\r\n\u{0100}\u{1f642}".into(),
+                    physical_encoding: encoding,
+                    content_hash: content_hash(),
+                    language: "rust".into(),
+                    tier: ClientTier::TierB,
+                    generated: false,
+                }],
+                total_source_bytes: 12,
+                total_text_bytes: 9,
+                truncated: false,
+                execution_completeness: complete_execution(),
+                conditional_activity: Vec::new(),
+            },
+            metadata("trace-lossless-source"),
+            Vec::new(),
+            Vec::new(),
+        );
+        let output = map_lossless_source_read(response.clone(), &request).unwrap();
+        assert_eq!(output.usage.source_bytes, 12);
+        assert_eq!(output.data.total_source_bytes, 12);
+        assert_eq!(output.data.total_text_bytes, 9);
+        let SourceChunkV1_3::Lossless(chunk) = &output.data.chunks[0] else {
+            panic!("lossless branch expected");
+        };
+        assert_eq!(chunk.source_ref.span().start_byte(), 2);
+        assert_eq!(chunk.source_ref.span().end_byte(), 14);
+        assert_eq!(chunk.source_ref.content_hash(), content_hash());
+        assert_eq!(chunk.content, "a\r\n\u{0100}\u{1f642}");
+        let wire = serde_json::to_value(&output.data).unwrap();
+        assert!(wire["chunks"][0].get("exact_content").is_none());
+        assert!(wire["chunks"][0].get("raw_bytes").is_none());
+        serde_json::from_value::<SourceReadDataV1_3>(wire).unwrap();
+        for mutate in 0..5 {
+            let mut invalid = response.clone();
+            match mutate {
+                0 => invalid.result.total_source_bytes -= 1,
+                1 => invalid.result.total_text_bytes -= 1,
+                2 => invalid.result.chunks[0].physical_encoding = client::SourceTextEncoding::Utf8,
+                3 => invalid.result.chunks[0].content.push('\0'),
+                _ => {
+                    invalid.result.chunks[0].content_hash = ContentHash::from_bytes([9; 32]);
+                    assert_ne!(invalid.result.chunks[0].content_hash, content_hash());
+                }
+            }
+            assert!(
+                map_lossless_source_read(invalid, &request).is_err(),
+                "mutation {mutate}"
+            );
+        }
+    }
+}
+
 fn source_read_response(source: client::SourceReference) -> SourceReadPortResponse {
     assert_eq!(source.byte_range(), 4..12);
     SourceReadPortResponse::new(
@@ -3854,6 +4321,27 @@ async fn maps_operation_status_action_time_progress_and_resources() {
 
 #[tokio::test]
 async fn maps_durable_incremental_and_generation_resource_evidence() {
+    let trace = json!({
+        "version": "1.0",
+        "entries": [{
+            "target": {"kind": "input", "value": {"kind": "file_parser_route", "subject": file()}},
+            "action": "changed",
+            "reason": {"kind": "input_transition", "value": "added"},
+            "via": null
+        }, {
+            "target": {"kind": "artifact", "value": "syntax"},
+            "action": "rebuilt",
+            "reason": {"kind": "artifact_dependency_changed", "value": {"kind": "file_parser_route", "subject": file()}},
+            "via": null
+        }, {
+            "target": {"kind": "artifact", "value": "syntax"},
+            "action": "rebuilt",
+            "reason": {"kind": "artifact_output_invalidated"},
+            "via": {"kind": "input", "value": {"kind": "file_parser_route", "subject": file()}}
+        }],
+        "total_entries": 3,
+        "complete": true
+    });
     let response = RepositoryOperationStatus {
         operation: operation_status(ClientOperationState::Succeeded),
         published_generation: Some(generation()),
@@ -3894,9 +4382,7 @@ async fn maps_durable_incremental_and_generation_resource_evidence() {
             reserved_memory_bytes: 4_096,
             owned_memory_bytes: 3_072,
             retained_durable_bytes: 1_536,
-            invalidation_trace_json: Some(
-                br#"{"version":"1.0","entries":[],"total_entries":0,"complete":true}"#.to_vec(),
-            ),
+            invalidation_trace_json: Some(serde_json::to_vec(&trace).unwrap()),
             fact_work: Some(grouped_fact_work()),
         }),
     };
@@ -3950,11 +4436,14 @@ async fn maps_durable_incremental_and_generation_resource_evidence() {
             .samples,
         [analysis_unit()]
     );
-    assert!(
-        incremental
-            .invalidation_trace
-            .expect("invalidation trace is projected")
-            .complete
+    assert_eq!(
+        serde_json::to_value(
+            incremental
+                .invalidation_trace
+                .expect("invalidation trace is projected")
+        )
+        .unwrap(),
+        trace
     );
     assert_eq!(output.data.operation.resources.referenced_bytes, 1_024);
     assert_eq!(output.data.operation.resources.newly_written_bytes, 2_048);
@@ -4027,6 +4516,45 @@ async fn maps_clean_rebuild_strategy_with_planned_user_cause_and_normalized_tech
         encoded["data"]["incremental"]["fact_work"]["normalized"]["groups"][0]["cause"],
         "generation_bound_lowering"
     );
+}
+
+#[test]
+fn rejects_unknown_invalidation_input_kinds() {
+    let evidence = RepositoryOperationEvidence {
+        build_strategy: ClientBuildStrategy::DependencyDirected,
+        fallback_reason: None,
+        invalidated_units: 1,
+        changed_inputs: 1,
+        changed_files: 1,
+        reused_files: 0,
+        rebuilt_files: 1,
+        reused_facts: 0,
+        rebuilt_facts: 0,
+        referenced_bytes: 0,
+        newly_written_bytes: 0,
+        reserved_memory_bytes: 0,
+        owned_memory_bytes: 0,
+        retained_durable_bytes: 0,
+        invalidation_trace_json: Some(
+            serde_json::to_vec(&json!({
+                "version": "1.0",
+                "entries": [{
+                    "target": {"kind": "input", "value": {"kind": "unknown_input"}},
+                    "action": "changed",
+                    "reason": {"kind": "input_transition", "value": "added"},
+                    "via": null
+                }],
+                "total_entries": 1,
+                "complete": true
+            }))
+            .unwrap(),
+        ),
+        fact_work: None,
+    };
+
+    let error = map_operation_incremental_evidence(evidence)
+        .expect_err("unknown trace inputs must remain invalid");
+    assert_eq!(error.failure(), Some(ToolExecutionFailure::InvalidResponse));
 }
 
 #[test]
@@ -6376,6 +6904,49 @@ async fn query_batch_forwards_source_context_fields() {
     };
     assert_eq!(request.context_lines_before(), 2);
     assert_eq!(request.context_lines_after(), 3);
+    assert_eq!(
+        request.encoding(),
+        SourceEncodingRequest::Utf8LosslessWhenValid
+    );
+    assert_eq!(
+        batch_descriptor(BatchTool::SourceRead).contract_version,
+        "1.2"
+    );
+    assert_eq!(
+        output.data.operation_results[0].data.as_ref().unwrap()["chunks"][0]["encoding"],
+        "utf8"
+    );
+    assert!(
+        output.data.operation_results[0]
+            .data
+            .as_ref()
+            .unwrap()
+            .get("total_text_bytes")
+            .is_none()
+    );
+}
+
+#[tokio::test]
+async fn legacy_query_batch_rejects_lossless_text_before_any_client_work() {
+    let harness = batch_harness();
+    let error = execute(
+        &harness.executor,
+        VerticalTool::QueryBatch,
+        json!({
+            "repository": {"repository_id": repository()},
+            "operations": [{"id": "read", "tool": "source.read", "arguments": {
+                "references": [{"source_ref": wire_source_reference(4, 12, 2, 2)}],
+                "encoding": "lossless_text",
+            }}],
+        }),
+    )
+    .await
+    .expect_err("published batch contract retains source.read 1.2");
+    assert_eq!(
+        error.public_error().map(PublicError::code),
+        Some(ErrorCode::InvalidArgument)
+    );
+    assert_eq!(harness.call_count.load(Ordering::Relaxed), 0);
 }
 
 #[tokio::test]
@@ -6865,6 +7436,630 @@ async fn maps_truncated_symbol_explain_without_reclassifying_omitted_ids() {
     assert_eq!(output.data.symbols.len(), 1);
     assert!(output.data.unresolved_ids.is_empty());
     assert_eq!(output.completeness.state, CompletenessState::Truncated);
+}
+
+fn first_stage_source_invocation() -> EvidenceProviderInvocation {
+    let input: ContextPackInput = serde_json::from_value(json!({
+        "repository": {"repository_id": repository()},
+        "task": "explain the selected source symbol",
+        "seeds": {"paths": ["src/lib.rs"]},
+        "sections": ["source"], "source_policy": "references_only", "token_budget": 4000,
+    }))
+    .unwrap();
+    let request = CanonicalContextPackRequest::new(&input, repository(), generation()).unwrap();
+    rootlight_agent::context_evidence::ContextEvidenceProviderRegistry
+        .plan(&request)
+        .unwrap()
+        .invocations()
+        .iter()
+        .find(|invocation| invocation.provider() == EvidenceProvider::Implementation)
+        .expect("source section schedules the implementation provider")
+        .clone()
+}
+
+async fn first_stage_source_retrieve(
+    harness: &Harness,
+    cancellation: RequestCancellation,
+) -> Result<EvidenceProviderOutput, ContextEvidencePortError> {
+    let invocation = first_stage_source_invocation();
+    let reservation = invocation.reservation();
+    let options = context_evidence::source_evidence_options(reservation, 1).unwrap();
+    context_evidence::retrieve_source_evidence(
+        Arc::clone(&harness.executor.port),
+        invocation,
+        reservation,
+        options,
+        cancellation,
+    )
+    .await
+}
+
+async fn first_stage_source_adapter_retrieve(
+    harness: &Harness,
+) -> Result<EvidenceProviderOutput, ContextEvidencePortError> {
+    let adapter = McpAgentToolPort {
+        port: Arc::clone(&harness.executor.port),
+        validator: Arc::clone(&harness.executor.batch_validator),
+        unsupported: harness.executor.unsupported.clone(),
+        invalid_arguments: harness.executor.invalid_arguments.clone(),
+        invalid_cursor: harness.executor.invalid_cursor.clone(),
+        exposure_profile: ExposureProfile::Developer,
+        cursor_key: harness.executor.cursor_key,
+    };
+    let invocation = first_stage_source_invocation();
+    let context = ContextEvidenceCallContext::new(
+        cancellation(),
+        Instant::now() + Duration::from_secs(10),
+        invocation.reservation(),
+    );
+    adapter.retrieve(invocation, context).await
+}
+
+fn first_stage_source_harness(
+    locate: CodeLocatePortResponse,
+    explanations: Vec<Result<SymbolExplainPortResponse, ClientPortError>>,
+    source: Result<SourceReadLosslessPortResponse, ClientPortError>,
+    cancel_on_source: Option<watch::Sender<bool>>,
+) -> Harness {
+    Harness::new(FakeOutcome::ContextSourceTrajectory {
+        locate,
+        explanations: Arc::new(Mutex::new(explanations.into())),
+        source: Box::new(source),
+        cancel_on_source,
+    })
+}
+
+fn first_stage_source_fixture(
+    encoding: client::SourceTextEncoding,
+) -> (
+    CodeLocatePortResponse,
+    SymbolExplainPortResponse,
+    SourceReadLosslessPortResponse,
+) {
+    let content = "\u{2603}\u{1f642}\r\n";
+    let raw: Vec<u8> = std::iter::once(0xfeff)
+        .chain(content.encode_utf16())
+        .flat_map(|unit| match encoding {
+            client::SourceTextEncoding::Utf16Le => unit.to_le_bytes(),
+            client::SourceTextEncoding::Utf16Be => unit.to_be_bytes(),
+            client::SourceTextEncoding::Utf8 => panic!("encoded fixture requires UTF-16"),
+        })
+        .collect();
+    let hash = rootlight_ids::content_hash(&raw);
+    let reference = client::SourceReference::new(
+        repository(),
+        generation(),
+        file(),
+        2..u64::try_from(raw.len()).unwrap(),
+        hash,
+        None,
+    )
+    .unwrap();
+    let mut locate = locate_response();
+    locate.result.hits[0].source = Some(reference.clone());
+    let mut explanation = explain_response(reference.clone());
+    explanation.result.unresolved_symbols.clear();
+    explanation.result.context.usage.results = 1;
+    let source = SourceReadLosslessPortResponse::new(
+        client::SourceTextReadResult {
+            context: context(1, 10),
+            chunks: vec![client::SourceTextChunk {
+                extracted_from: None,
+                source: reference,
+                path: "src/lib.rs".into(),
+                start_byte: 2,
+                end_byte: 12,
+                start_line: Some(1),
+                end_line: Some(2),
+                content: content.into(),
+                physical_encoding: encoding,
+                content_hash: hash,
+                language: "rust".into(),
+                tier: ClientTier::TierB,
+                generated: false,
+            }],
+            total_source_bytes: 10,
+            total_text_bytes: 9,
+            truncated: false,
+            execution_completeness: complete_execution(),
+            conditional_activity: Vec::new(),
+        },
+        metadata("trace-first-stage-source"),
+        Vec::new(),
+        Vec::new(),
+    );
+    (locate, explanation, source)
+}
+
+fn first_stage_known_work(contexts: &[&QueryContext]) -> BudgetCharge {
+    let mut work = BudgetCharge::default();
+    for context in contexts {
+        let usage = &context.usage;
+        work.rows += usage.rows;
+        work.results += usage.results;
+        work.tokens += usage.estimated_tokens;
+        work.source_bytes += usage.source_bytes;
+        work.traversal_facts += usage.edges;
+        work.json_bytes += usage.json_bytes;
+        work.memory_bytes += usage.memory_bytes.unwrap_or(0);
+        work.time_ms = work.time_ms.max(usage.elapsed_micros.div_ceil(1_000));
+    }
+    work
+}
+
+#[tokio::test]
+async fn first_stage_source_retrieves_lossless_utf16_with_exact_physical_accounting() {
+    for encoding in [
+        client::SourceTextEncoding::Utf16Le,
+        client::SourceTextEncoding::Utf16Be,
+    ] {
+        let (locate, explanation, source) = first_stage_source_fixture(encoding);
+        let expected_source = client_source_ref(&source.result.chunks[0].source).unwrap();
+        let mut expected_usage = first_stage_known_work(&[
+            &locate.result.context,
+            &explanation.result.context,
+            &source.result.context,
+        ]);
+        expected_usage.results = 1;
+        expected_usage.tokens = rootlight_mcp_contract::accounting::estimate_tokens(9);
+        let harness = first_stage_source_harness(locate, vec![Ok(explanation)], Ok(source), None);
+        let adapter = McpAgentToolPort {
+            port: Arc::clone(&harness.executor.port),
+            validator: Arc::clone(&harness.executor.batch_validator),
+            unsupported: harness.executor.unsupported.clone(),
+            invalid_arguments: harness.executor.invalid_arguments.clone(),
+            invalid_cursor: harness.executor.invalid_cursor.clone(),
+            exposure_profile: ExposureProfile::Developer,
+            cursor_key: harness.executor.cursor_key,
+        };
+        let invocation = first_stage_source_invocation();
+        let context = ContextEvidenceCallContext::new(
+            cancellation(),
+            Instant::now() + Duration::from_secs(10),
+            invocation.reservation(),
+        );
+        let output = adapter.retrieve(invocation, context).await.unwrap();
+        assert_eq!(output.repository, repository());
+        assert_eq!(output.generation, generation());
+        assert_eq!(output.completeness.state, CompletenessState::Complete);
+        assert_eq!(output.usage, expected_usage);
+        assert_eq!(output.observations.len(), 1);
+        let observation = &output.observations[0];
+        assert_eq!(observation.symbol_id, Some(symbol()));
+        assert_eq!(observation.source_refs, [expected_source]);
+        assert_eq!(observation.source_bytes, 10);
+        assert_eq!(
+            observation.estimated_tokens,
+            rootlight_mcp_contract::accounting::estimate_tokens(9)
+        );
+        let calls = harness.calls.lock().unwrap();
+        let [
+            ObservedCall::CodeLocate(_),
+            ObservedCall::SymbolExplain(_),
+            ObservedCall::SourceReadLossless(read),
+        ] = calls.as_slice()
+        else {
+            panic!(
+                "first-stage source retrieval uses the lossless call after anchor and definition lookup"
+            );
+        };
+        assert_eq!(read.references().len(), 1);
+        assert_eq!(read.references()[0].byte_range(), 2..12);
+        assert_eq!(read.context_lines_before(), 0);
+        assert_eq!(read.context_lines_after(), 0);
+        assert!(!read.merge_overlaps());
+        assert!(read.include_line_numbers());
+    }
+}
+
+#[tokio::test]
+async fn first_stage_source_rejects_correlation_completeness_and_total_contradictions() {
+    for encoding in [
+        client::SourceTextEncoding::Utf16Le,
+        client::SourceTextEncoding::Utf16Be,
+    ] {
+        for mutation in 0..13 {
+            let (locate, explanation, mut source) = first_stage_source_fixture(encoding);
+            match mutation {
+                0 => source.result.chunks[0].source = source_reference_without_lines(4, 12),
+                1 => source.result.chunks[0].start_byte = 3,
+                2 => source.result.chunks[0].content_hash = content_hash(),
+                3 => source.result.total_source_bytes -= 1,
+                4 => source.result.total_text_bytes -= 1,
+                5 => source.result.context.usage.source_bytes -= 1,
+                6 => source.result.context.usage.results = 0,
+                7 => {
+                    source.result.chunks.clear();
+                    source.result.total_source_bytes = 0;
+                    source.result.total_text_bytes = 0;
+                    source.result.context.usage.results = 0;
+                    source.result.context.usage.source_bytes = 0;
+                }
+                8 => source.result.chunks[0].physical_encoding = client::SourceTextEncoding::Utf8,
+                9 => source.result.truncated = true,
+                10 => {
+                    source.result.execution_completeness = truncated_execution(
+                        client::LimitingResourceKind::Results,
+                        client::ContinuationGuidance::SplitRequest,
+                    )
+                }
+                11 => source.result.context.generation = alternate_generation(),
+                _ => source.result.chunks[0].content.push('\0'),
+            }
+            let expected_usage = first_stage_known_work(&[
+                &locate.result.context,
+                &explanation.result.context,
+                &source.result.context,
+            ]);
+            let harness =
+                first_stage_source_harness(locate, vec![Ok(explanation)], Ok(source), None);
+            let error = first_stage_source_retrieve(&harness, cancellation())
+                .await
+                .expect_err("contradictory first-stage source response fails closed");
+            assert_eq!(
+                error.kind,
+                ContextEvidencePortErrorKind::InvalidResponse,
+                "mutation {mutation}"
+            );
+            assert_eq!(error.usage, expected_usage, "mutation {mutation}");
+            assert_eq!(harness.call_count.load(Ordering::Relaxed), 3);
+        }
+    }
+}
+
+#[tokio::test]
+async fn first_stage_source_adapter_failure_keeps_work_without_candidate_charge() {
+    use rootlight_agent::policy::{BudgetLedger, BudgetResource, ExecutionPolicyError};
+
+    for encoding in [
+        client::SourceTextEncoding::Utf16Le,
+        client::SourceTextEncoding::Utf16Be,
+    ] {
+        let (mut locate, mut explanation, _) = first_stage_source_fixture(encoding);
+        locate.result.context.usage.source_bytes = 2;
+        explanation.result.context.usage.source_bytes = 10;
+        explanation.result.context.usage.estimated_tokens = 2_914;
+        explanation.result.context.usage.json_bytes = 2_914;
+        explanation.result.context.usage.memory_bytes = Some(2_050);
+        explanation.result.context.usage.elapsed_micros = 5_001;
+        let known = first_stage_known_work(&[&locate.result.context, &explanation.result.context]);
+        let expected = BudgetCharge {
+            results: 0,
+            tokens: 0,
+            ..known
+        };
+        for client_error in [ClientPortError::Transport, ClientPortError::InvalidResponse] {
+            let make_harness = || {
+                first_stage_source_harness(
+                    locate.clone(),
+                    vec![Ok(explanation.clone())],
+                    Err(client_error.clone()),
+                    None,
+                )
+            };
+            let direct_harness = make_harness();
+            let direct = first_stage_source_retrieve(&direct_harness, cancellation())
+                .await
+                .unwrap_err();
+            assert_eq!(direct.usage, known);
+            let reservation = first_stage_source_invocation().reservation();
+            let mut raw_ledger = BudgetLedger::with_token_limit(4_000);
+            assert_eq!(
+                raw_ledger
+                    .reserve(reservation)
+                    .unwrap()
+                    .commit(direct.usage),
+                Err(ExecutionPolicyError::BudgetExceeded {
+                    resource: BudgetResource::Tokens
+                })
+            );
+            let harness = make_harness();
+            let error = first_stage_source_adapter_retrieve(&harness)
+                .await
+                .unwrap_err();
+            assert_eq!(error.kind, direct.kind);
+            assert_eq!(error.usage, expected);
+            let mut projected_ledger = BudgetLedger::with_token_limit(4_000);
+            projected_ledger
+                .reserve(reservation)
+                .unwrap()
+                .commit(error.usage)
+                .unwrap();
+            assert_eq!(projected_ledger.consumed(), expected);
+            assert_eq!(harness.call_count.load(Ordering::Relaxed), 3);
+            assert!(matches!(
+                harness.calls.lock().unwrap().last(),
+                Some(ObservedCall::SourceReadLossless(_))
+            ));
+        }
+    }
+}
+
+#[tokio::test]
+async fn first_stage_source_adapter_later_explanation_failure_keeps_known_work() {
+    let (mut locate, mut explanation, _) =
+        first_stage_source_fixture(client::SourceTextEncoding::Utf16Be);
+    let mut second_hit = locate.result.hits[0].clone();
+    second_hit.symbol = Some(missing_symbol());
+    locate.result.hits.push(second_hit);
+    locate.result.context.usage.results = 2;
+    locate.result.context.usage.source_bytes = 2;
+    explanation.result.context.usage.source_bytes = 10;
+    explanation.result.context.usage.estimated_tokens = 2_914;
+    explanation.result.context.usage.json_bytes = 2_914;
+    explanation.result.context.usage.memory_bytes = Some(2_050);
+    explanation.result.context.usage.elapsed_micros = 5_001;
+    let known = first_stage_known_work(&[&locate.result.context, &explanation.result.context]);
+    let expected = BudgetCharge {
+        results: 0,
+        tokens: 0,
+        ..known
+    };
+    for client_error in [ClientPortError::Transport, ClientPortError::InvalidResponse] {
+        let make_harness = || {
+            first_stage_source_harness(
+                locate.clone(),
+                vec![Ok(explanation.clone()), Err(client_error.clone())],
+                Err(ClientPortError::Executor),
+                None,
+            )
+        };
+        let direct_harness = make_harness();
+        let direct = first_stage_source_retrieve(&direct_harness, cancellation())
+            .await
+            .unwrap_err();
+        assert_eq!(direct.usage, known);
+        let harness = make_harness();
+        let error = first_stage_source_adapter_retrieve(&harness)
+            .await
+            .unwrap_err();
+        assert_eq!(error.kind, direct.kind);
+        assert_eq!(error.usage, expected);
+        assert_eq!(harness.call_count.load(Ordering::Relaxed), 3);
+        let calls = harness.calls.lock().unwrap();
+        let [
+            ObservedCall::CodeLocate(_),
+            ObservedCall::SymbolExplain(first),
+            ObservedCall::SymbolExplain(second),
+        ] = calls.as_slice()
+        else {
+            panic!("a failed second explanation starts no source read");
+        };
+        assert_eq!(first.symbols(), [symbol()]);
+        assert_eq!(second.symbols(), [missing_symbol()]);
+    }
+}
+
+#[tokio::test]
+async fn first_stage_source_failure_preserves_resolved_and_explained_work() {
+    let (locate, explanation, _) = first_stage_source_fixture(client::SourceTextEncoding::Utf16Le);
+    let expected_usage =
+        first_stage_known_work(&[&locate.result.context, &explanation.result.context]);
+    for error in [ClientPortError::Transport, ClientPortError::InvalidResponse] {
+        let harness = first_stage_source_harness(
+            locate.clone(),
+            vec![Ok(explanation.clone())],
+            Err(error.clone()),
+            None,
+        );
+        let mapped = first_stage_source_retrieve(&harness, cancellation())
+            .await
+            .unwrap_err();
+        let expected_kind = if error == ClientPortError::InvalidResponse {
+            ContextEvidencePortErrorKind::InvalidResponse
+        } else {
+            ContextEvidencePortErrorKind::Unavailable
+        };
+        assert_eq!(mapped.kind, expected_kind);
+        assert_eq!(mapped.usage, expected_usage);
+        assert_eq!(harness.call_count.load(Ordering::Relaxed), 3);
+    }
+}
+
+#[tokio::test]
+async fn first_stage_source_second_explanation_failure_preserves_earlier_work() {
+    let (mut locate, explanation, _) =
+        first_stage_source_fixture(client::SourceTextEncoding::Utf16Le);
+    let mut second_hit = locate.result.hits[0].clone();
+    second_hit.symbol = Some(missing_symbol());
+    locate.result.hits.push(second_hit);
+    locate.result.context.usage.results = 2;
+    let expected_usage =
+        first_stage_known_work(&[&locate.result.context, &explanation.result.context]);
+    let harness = first_stage_source_harness(
+        locate,
+        vec![Ok(explanation), Err(ClientPortError::Transport)],
+        Err(ClientPortError::Executor),
+        None,
+    );
+    let error = first_stage_source_retrieve(&harness, cancellation())
+        .await
+        .unwrap_err();
+    assert_eq!(error.kind, ContextEvidencePortErrorKind::Unavailable);
+    assert_eq!(error.usage, expected_usage);
+    let calls = harness.calls.lock().unwrap();
+    let [
+        ObservedCall::CodeLocate(_),
+        ObservedCall::SymbolExplain(first),
+        ObservedCall::SymbolExplain(second),
+    ] = calls.as_slice()
+    else {
+        panic!("failed second explanation starts no source read");
+    };
+    assert_eq!(first.symbols(), [symbol()]);
+    assert_eq!(second.symbols(), [missing_symbol()]);
+}
+
+#[tokio::test]
+async fn first_stage_source_invalid_explanation_preserves_received_work() {
+    for invalid_identity in [true, false] {
+        let (locate, mut explanation, _) =
+            first_stage_source_fixture(client::SourceTextEncoding::Utf16Be);
+        if invalid_identity {
+            explanation.result.context.generation = alternate_generation();
+        } else {
+            explanation.result.execution_completeness.state =
+                ClientResultCompletenessState::Truncated;
+        }
+        let expected_usage =
+            first_stage_known_work(&[&locate.result.context, &explanation.result.context]);
+        let harness = first_stage_source_harness(
+            locate,
+            vec![Ok(explanation)],
+            Err(ClientPortError::Executor),
+            None,
+        );
+        let error = first_stage_source_retrieve(&harness, cancellation())
+            .await
+            .unwrap_err();
+        assert_eq!(error.kind, ContextEvidencePortErrorKind::InvalidResponse);
+        assert_eq!(error.usage, expected_usage);
+        assert_eq!(harness.call_count.load(Ordering::Relaxed), 2);
+    }
+}
+
+#[tokio::test]
+async fn first_stage_source_empty_truncation_preserves_work_and_cancellation() {
+    for cancel_on_return in [false, true] {
+        let (locate, explanation, mut source) =
+            first_stage_source_fixture(client::SourceTextEncoding::Utf16Le);
+        source.result.chunks.clear();
+        source.result.total_source_bytes = 0;
+        source.result.total_text_bytes = 0;
+        source.result.context.usage.results = 0;
+        source.result.context.usage.source_bytes = 0;
+        source.result.truncated = true;
+        source.result.execution_completeness = truncated_execution(
+            client::LimitingResourceKind::Results,
+            client::ContinuationGuidance::SplitRequest,
+        );
+        let mut expected_usage = first_stage_known_work(&[
+            &locate.result.context,
+            &explanation.result.context,
+            &source.result.context,
+        ]);
+        let (sender, receiver) = watch::channel(false);
+        let harness = first_stage_source_harness(
+            locate,
+            vec![Ok(explanation)],
+            Ok(source),
+            cancel_on_return.then(|| sender.clone()),
+        );
+        let result = first_stage_source_retrieve(&harness, RequestCancellation { receiver }).await;
+        if cancel_on_return {
+            let error = result.expect_err(
+                "cancellation after source response retains measured work even without chunks",
+            );
+            assert_eq!(error.kind, ContextEvidencePortErrorKind::Cancelled);
+            assert_eq!(error.usage, expected_usage);
+        } else {
+            let output = result.expect("declared empty truncation is not false completeness");
+            expected_usage.results = 0;
+            expected_usage.tokens = 0;
+            assert_eq!(output.usage, expected_usage);
+            assert!(output.observations.is_empty());
+            assert_eq!(output.completeness.state, CompletenessState::Truncated);
+        }
+        assert_eq!(harness.call_count.load(Ordering::Relaxed), 3);
+    }
+}
+
+#[tokio::test]
+async fn first_stage_source_preserves_order_and_admits_only_declared_prefix_subsets() {
+    for mode in 0..3 {
+        let (mut locate, first, mut source) =
+            first_stage_source_fixture(client::SourceTextEncoding::Utf16Be);
+        let first_chunk = source.result.chunks[0].clone();
+        let second_reference = client::SourceReference::new(
+            repository(),
+            generation(),
+            file(),
+            4..8,
+            first_chunk.content_hash,
+            None,
+        )
+        .unwrap();
+        let mut second = first.clone();
+        second.result.symbols[0].symbol = missing_symbol();
+        second.result.symbols[0].definition = second_reference.clone();
+        let mut second_hit = locate.result.hits[0].clone();
+        second_hit.symbol = Some(missing_symbol());
+        second_hit.source = Some(second_reference.clone());
+        locate.result.hits.push(second_hit);
+        locate.result.context.usage.results = 2;
+        let mut second_chunk = first_chunk.clone();
+        second_chunk.source = second_reference.clone();
+        second_chunk.start_byte = 4;
+        second_chunk.end_byte = 8;
+        second_chunk.end_line = Some(1);
+        second_chunk.content = "\u{1f642}".into();
+        source.result.chunks.push(second_chunk);
+        source.result.context.usage.results = 2;
+        source.result.context.usage.source_bytes = 14;
+        source.result.total_source_bytes = 14;
+        source.result.total_text_bytes = 13;
+        if mode == 1 {
+            source.result.chunks.reverse();
+        }
+        if mode == 2 {
+            source.result.chunks.truncate(1);
+            source.result.context.usage.results = 1;
+            source.result.context.usage.source_bytes = 10;
+            source.result.total_source_bytes = 10;
+            source.result.total_text_bytes = 9;
+            source.result.truncated = true;
+            source.result.execution_completeness = truncated_execution(
+                client::LimitingResourceKind::Results,
+                client::ContinuationGuidance::SplitRequest,
+            );
+        }
+        let mut expected_usage = first_stage_known_work(&[
+            &locate.result.context,
+            &first.result.context,
+            &second.result.context,
+            &source.result.context,
+        ]);
+        let harness =
+            first_stage_source_harness(locate, vec![Ok(first), Ok(second)], Ok(source), None);
+        let result = first_stage_source_retrieve(&harness, cancellation()).await;
+        if mode == 1 {
+            let error =
+                result.expect_err("reordered chunks cannot be relabeled as requested definitions");
+            assert_eq!(error.kind, ContextEvidencePortErrorKind::InvalidResponse);
+            assert_eq!(error.usage, expected_usage);
+        } else {
+            let output = result.unwrap();
+            let count = if mode == 2 { 1 } else { 2 };
+            expected_usage.results = count;
+            expected_usage.tokens = rootlight_mcp_contract::accounting::estimate_tokens(9)
+                + if mode == 2 {
+                    0
+                } else {
+                    rootlight_mcp_contract::accounting::estimate_tokens(4)
+                };
+            assert_eq!(output.usage, expected_usage);
+            assert_eq!(
+                output.observations[0].source_refs,
+                [client_source_ref(&first_chunk.source).unwrap()]
+            );
+            if mode == 0 {
+                assert_eq!(
+                    output.observations[1].source_refs,
+                    [client_source_ref(&second_reference).unwrap()]
+                );
+                assert_eq!(output.observations[1].symbol_id, Some(missing_symbol()));
+            }
+            assert_eq!(
+                output.completeness.state,
+                if mode == 2 {
+                    CompletenessState::Truncated
+                } else {
+                    CompletenessState::Complete
+                }
+            );
+        }
+        assert_eq!(harness.call_count.load(Ordering::Relaxed), 4);
+    }
 }
 
 fn context_source_harness(content: Vec<u8>) -> Harness {

@@ -7,6 +7,8 @@
 #![forbid(unsafe_code)]
 
 mod graph_projection;
+mod source_metadata_quote;
+mod source_text;
 mod update;
 
 pub use graph_projection::{
@@ -17,6 +19,14 @@ pub use graph_projection::{
 };
 pub use rootlight_ids::{
     ContentHash, FactId, FileId, GenerationId, OperationId, RepositoryId, SymbolId,
+};
+pub use source_metadata_quote::{
+    SourceTextPrefixFixedUpper, SourceTextPrefixMetadataQuoteEntry,
+    SourceTextPrefixMetadataQuoteResult,
+};
+pub use source_text::{
+    SourceTextChunk, SourceTextEncoding, SourceTextPrefixReadResult, SourceTextReadOptions,
+    SourceTextReadResult,
 };
 pub use update::{
     ACTIVE_VERSION_FILE, ArtifactMetadata, CandidateHealthCheck, CandidateHealthError,
@@ -1252,6 +1262,11 @@ pub struct LocateHit {
     pub identifier: String,
     /// Untrusted repository-qualified name.
     pub qualified_name: String,
+    /// Bounded untrusted declaration text, absent when unavailable.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub signature: Option<String>,
+    /// Whether the retained signature omits a suffix of its complete text.
+    pub signature_truncated: bool,
     /// Untrusted repository-relative path.
     pub path: String,
     /// Stable normalized entity kind.
@@ -8166,7 +8181,20 @@ fn ensure_request_supported(
     request: &daemon::request_envelope::Request,
     selected_protocol_minor: u32,
 ) -> Result<(), ClientError> {
+    if let daemon::request_envelope::Request::SourceRead(request) = request
+        && request.maximum_text_bytes_per_chunk.is_some()
+    {
+        source_text::validate_source_text_prefix_request(request)?;
+    }
     let required_minor = match request {
+        daemon::request_envelope::Request::SourceTextPrefixMetadataQuote(_) => {
+            rootlight_protocol::SOURCE_TEXT_PREFIX_METADATA_QUOTE_PROTOCOL_MINOR
+        }
+        daemon::request_envelope::Request::SourceRead(request)
+            if request.maximum_text_bytes_per_chunk.is_some() =>
+        {
+            rootlight_protocol::LOSSLESS_SOURCE_TEXT_PREFIX_PROTOCOL_MINOR
+        }
         daemon::request_envelope::Request::GraphProjectionOpen(_)
         | daemon::request_envelope::Request::GraphProjectionPage(_)
         | daemon::request_envelope::Request::GraphProjectionRelease(_) => 10,
@@ -8186,6 +8214,11 @@ fn ensure_request_supported(
             if request.mode == daemon::RepositoryIndexMode::RepositoryIndexRebuild as i32 =>
         {
             16
+        }
+        daemon::request_envelope::Request::SourceRead(request)
+            if request.encoding == daemon::SourceReadEncoding::LosslessText as i32 =>
+        {
+            rootlight_protocol::LOSSLESS_SOURCE_TEXT_PROTOCOL_MINOR
         }
         daemon::request_envelope::Request::RepositoryIndex(_)
         | daemon::request_envelope::Request::RepositoryOperationStatus(_)
@@ -9194,6 +9227,7 @@ fn build_source_read_request(
             context_lines_after: u32::from(projection.context_lines_after),
             merge_overlaps: projection.merge_overlaps,
             include_line_numbers: Some(projection.include_line_numbers),
+            maximum_text_bytes_per_chunk: None,
             encoding: match projection.encoding {
                 SourceEncoding::Utf8 => daemon::SourceReadEncoding::Utf8 as i32,
                 SourceEncoding::Bytes => daemon::SourceReadEncoding::Bytes as i32,
@@ -13184,7 +13218,21 @@ fn parse_code_locate_for_minor(
             .source
             .map(|source| parse_source_reference(source, &context))
             .transpose()?;
-        if hit.score > 1_000 || source.as_ref().is_some_and(|source| source.file != file) {
+        let symbol = hit
+            .symbol
+            .map(|symbol| parse_symbol(Some(symbol)))
+            .transpose()?;
+        if hit.score > 1_000
+            || source.as_ref().is_some_and(|source| source.file != file)
+            || hit.signature_truncated && hit.signature.is_none()
+            || hit.signature.as_ref().is_some_and(|signature| {
+                signature.is_empty()
+                    || signature.len() > 4_096
+                    || signature.as_bytes().contains(&0)
+                    || symbol.is_none()
+                    || source.is_none()
+            })
+        {
             return Err(ClientError::InvalidResponseCorrelation);
         }
         let extracted_from = parse_extracted_from(hit.extracted_from, file, &context)?;
@@ -13193,10 +13241,9 @@ fn parse_code_locate_for_minor(
         }
         hits.push(LocateHit {
             extracted_from,
-            symbol: hit
-                .symbol
-                .map(|symbol| parse_symbol(Some(symbol)))
-                .transpose()?,
+            signature: hit.signature,
+            signature_truncated: hit.signature_truncated,
+            symbol,
             file,
             identifier: hit.identifier,
             qualified_name: hit.qualified_name,
@@ -13420,6 +13467,9 @@ fn parse_source_read_for_minor(
     projection: SourceReadOptions,
     selected_protocol_minor: u32,
 ) -> Result<SourceRead, ClientError> {
+    if response.total_text_bytes != 0 || response.prefix_truncated.is_some() {
+        return Err(ClientError::InvalidResponseCorrelation);
+    }
     require_first_slice_response_schema(response.schema_version)?;
     let execution_completeness =
         parse_result_completeness(response.completeness, Some(response.truncated), false)?;
@@ -13460,6 +13510,7 @@ fn parse_source_read_for_minor(
             .checked_sub(chunk.start_byte)
             .ok_or(ClientError::InvalidResponseCorrelation)?;
         if &source != expected
+            || chunk.physical_encoding.is_some()
             || chunk.start_byte > source.start_byte
             || chunk.end_byte < source.end_byte
             || projection.context_lines_before == 0 && chunk.start_byte != source.start_byte
@@ -15481,7 +15532,7 @@ mod tests {
         Endpoint::new(path).expect("test endpoint validates")
     }
 
-    fn async_test_endpoint(label: &str) -> (tempfile::TempDir, Endpoint) {
+    pub(super) fn async_test_endpoint(label: &str) -> (tempfile::TempDir, Endpoint) {
         let temporary = tempfile::tempdir().expect("temporary directory is available");
         #[cfg(unix)]
         let path = {
@@ -15508,7 +15559,7 @@ mod tests {
         )
     }
 
-    fn async_server_hello(instance_nonce: [u8; 16]) -> daemon::ServerHello {
+    pub(super) fn async_server_hello(instance_nonce: [u8; 16]) -> daemon::ServerHello {
         daemon::ServerHello {
             selected_protocol: Some(common::ContractVersion {
                 major: 1,
@@ -15548,7 +15599,7 @@ mod tests {
         (stream, request)
     }
 
-    async fn serve_async_responses(
+    pub(super) async fn serve_async_responses(
         listener: AsyncLocalListener,
         instance_nonce: [u8; 16],
         responses: Vec<daemon::response_envelope::Response>,
@@ -15571,11 +15622,11 @@ mod tests {
         requests
     }
 
-    fn test_repository() -> RepositoryId {
+    pub(super) fn test_repository() -> RepositoryId {
         RepositoryId::from_bytes([1; 16])
     }
 
-    fn test_generation() -> GenerationId {
+    pub(super) fn test_generation() -> GenerationId {
         GenerationId::from_bytes([2; 20])
     }
 
@@ -15738,7 +15789,7 @@ mod tests {
         ));
     }
 
-    fn test_source(file_byte: u8, start: u64, end: u64) -> SourceReference {
+    pub(super) fn test_source(file_byte: u8, start: u64, end: u64) -> SourceReference {
         SourceReference::new(
             test_repository(),
             test_generation(),
@@ -15766,7 +15817,10 @@ mod tests {
         assert!(first[0].line_range().is_none());
     }
 
-    fn wire_query_context(results: u64, source_bytes: u64) -> daemon::FirstSliceQueryContext {
+    pub(super) fn wire_query_context(
+        results: u64,
+        source_bytes: u64,
+    ) -> daemon::FirstSliceQueryContext {
         daemon::FirstSliceQueryContext {
             repository: Some(repository_to_wire(test_repository())),
             generation: Some(generation_to_wire(test_generation())),
@@ -16443,6 +16497,8 @@ mod tests {
             context: Some(wire_query_context(1, 0)),
             hits: vec![daemon::FirstSliceLocateHit {
                 extracted_from: None,
+                signature: None,
+                signature_truncated: false,
                 symbol: Some(symbol_to_wire(symbol)),
                 file: Some(file_to_wire(source.file)),
                 identifier: "answer".to_owned(),
@@ -16459,6 +16515,77 @@ mod tests {
             truncated: false,
             next_page_offset: None,
             completeness: None,
+        }
+    }
+
+    #[test]
+    fn locate_signatures_preserve_bounded_text_and_legacy_absence() {
+        let source = test_source(4, 0, 3);
+        let symbol = SymbolId::from_bytes([5; 20]);
+        let legacy = parse_code_locate(
+            wire_code_locate(symbol, &source),
+            test_repository(),
+            GenerationSelector::Active,
+            1,
+            0,
+        )
+        .unwrap();
+        assert_eq!(legacy.hits[0].signature, None);
+        assert!(!legacy.hits[0].signature_truncated);
+        assert_eq!(legacy.hits[0].source.as_ref(), Some(&source));
+        for signature in ["fn answer() -> u32".to_owned(), "λ".repeat(2_048)] {
+            for truncated in [false, true] {
+                let mut wire = wire_code_locate(symbol, &source);
+                wire.hits[0].signature = Some(signature.clone());
+                wire.hits[0].signature_truncated = truncated;
+                let parsed =
+                    parse_code_locate(wire, test_repository(), GenerationSelector::Active, 1, 0)
+                        .unwrap();
+                assert_eq!(
+                    parsed.hits[0].signature.as_deref(),
+                    Some(signature.as_str())
+                );
+                assert_eq!(parsed.hits[0].signature_truncated, truncated);
+                assert_eq!(parsed.hits[0].symbol, Some(symbol));
+                assert_eq!(parsed.hits[0].source.as_ref(), Some(&source));
+                assert!(!format!("{:?}", parsed.hits[0]).contains(&signature));
+            }
+        }
+    }
+
+    #[test]
+    fn locate_signatures_reject_invalid_text_and_unbound_evidence() {
+        let source = test_source(4, 0, 3);
+        let symbol = SymbolId::from_bytes([5; 20]);
+        for signature in [
+            String::new(),
+            "x".repeat(4_097),
+            "λ".repeat(2_049),
+            "fn answer\0()".to_owned(),
+        ] {
+            let mut wire = wire_code_locate(symbol, &source);
+            wire.hits[0].signature = Some(signature);
+            assert!(matches!(
+                parse_code_locate(wire, test_repository(), GenerationSelector::Active, 1, 0),
+                Err(ClientError::InvalidResponseCorrelation),
+            ));
+        }
+        for missing in ["symbol", "source", "signature"] {
+            let mut wire = wire_code_locate(symbol, &source);
+            wire.hits[0].signature = Some("fn answer() -> u32".to_owned());
+            match missing {
+                "symbol" => wire.hits[0].symbol = None,
+                "source" => wire.hits[0].source = None,
+                "signature" => {
+                    wire.hits[0].signature = None;
+                    wire.hits[0].signature_truncated = true;
+                }
+                _ => unreachable!(),
+            }
+            assert!(matches!(
+                parse_code_locate(wire, test_repository(), GenerationSelector::Active, 1, 0),
+                Err(ClientError::InvalidResponseCorrelation),
+            ));
         }
     }
 
@@ -16499,8 +16626,9 @@ mod tests {
         }
     }
 
-    fn wire_source_read(source: &SourceReference) -> daemon::SourceReadResponse {
+    pub(super) fn wire_source_read(source: &SourceReference) -> daemon::SourceReadResponse {
         daemon::SourceReadResponse {
+            prefix_truncated: None,
             conditional_activity: Vec::new(),
             schema_version: Some(first_slice_schema()),
             context: Some(wire_query_context(1, 3)),
@@ -16521,8 +16649,10 @@ mod tests {
                 included_end_line: Some(1),
                 exact_content: b"abc".to_vec(),
                 tier: daemon::FirstSliceAnalysisTier::FirstSliceTierB as i32,
+                physical_encoding: None,
             }],
             total_source_bytes: 3,
+            total_text_bytes: 0,
             truncated: false,
             completeness: None,
         }
@@ -16606,7 +16736,7 @@ mod tests {
         ));
     }
 
-    fn wire_activity(
+    pub(super) fn wire_activity(
         source: &SourceReference,
         basis: daemon::ConditionalActivityBasis,
     ) -> daemon::ConditionalActivityAssessment {
@@ -19917,6 +20047,8 @@ mod tests {
             context: Some(wire_query_context(2, 0)),
             hits: vec![daemon::FirstSliceLocateHit {
                 extracted_from: None,
+                signature: None,
+                signature_truncated: false,
                 symbol: Some(symbol_to_wire(symbol)),
                 file: Some(file_to_wire(source.file)),
                 identifier: "answer".to_owned(),
@@ -20102,14 +20234,17 @@ mod tests {
                 included_end_line: Some(1),
                 exact_content: content.as_bytes().to_vec(),
                 tier: daemon::FirstSliceAnalysisTier::FirstSliceTierB as i32,
+                physical_encoding: None,
             }
         };
         let source_read = daemon::SourceReadResponse {
+            prefix_truncated: None,
             conditional_activity: Vec::new(),
             schema_version: Some(first_slice_schema()),
             context: Some(wire_query_context(2, 6)),
             chunks: vec![chunk(&first, 0, 3, "aaa"), chunk(&second, 3, 6, "bbb")],
             total_source_bytes: 6,
+            total_text_bytes: 0,
             truncated: false,
             completeness: None,
         };

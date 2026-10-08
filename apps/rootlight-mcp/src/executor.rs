@@ -67,6 +67,10 @@ use rootlight_mcp_contract::intent::{
     StronglyConnectedComponent, SymbolRelationshipsData, SymbolRelationshipsInput, TraceEdge,
     TracePath,
 };
+use rootlight_mcp_contract::source_text::{
+    LosslessContentEncoding, SourceChunkV1_3, SourceReadDataV1_3, SourceReadInputV1_3,
+    SourceTextChunk, SourceTextEncoding,
+};
 use rootlight_mcp_contract::{
     DetailKey, ErrorCode, ExposureProfile, GenerationSelector, McpPublicError, McpTool, NextAction,
     PublicError, PublicErrorBuildError, PublicValue, RepoIndexInput, RepositorySelector, SafeLabel,
@@ -105,8 +109,9 @@ use rootlight_mcp_contract::{
         OperationAction, OperationAffectedAnalysisUnitIds, OperationAffectedFileIds,
         OperationBuildStrategy, OperationDetailV1_6 as CurrentOperationDetail,
         OperationFactWorkCause, OperationFactWorkDisposition, OperationFallbackReason,
-        OperationIncrementalEvidence, OperationIncrementalFactWorkEvidence,
-        OperationInvalidationTraceV1_1 as OperationInvalidationTrace,
+        OperationIncrementalEvidenceV1_6 as OperationIncrementalEvidence,
+        OperationIncrementalFactWorkEvidence,
+        OperationInvalidationTraceV1_6 as OperationInvalidationTrace,
         OperationNormalizedFactDomain, OperationNormalizedFactWorkCollection,
         OperationNormalizedFactWorkGroup, OperationPlannedFactDomain,
         OperationPlannedFactWorkCollection, OperationPlannedFactWorkGroup, OperationPlanning,
@@ -282,6 +287,52 @@ pub trait FirstSliceClientPort: Send + Sync + 'static {
         options: client::RequestOptions,
         cancellation: RequestCancellation,
     ) -> ClientPortFuture<SourceReadPortResponse>;
+
+    /// Reads lossless text using shared selectors and context controls.
+    /// The legacy encoding field in the control request is not consulted.
+    fn source_read_lossless_text(
+        &self,
+        _request: SourceReadPortRequest,
+        _options: client::RequestOptions,
+        _cancellation: RequestCancellation,
+    ) -> ClientPortFuture<SourceReadLosslessPortResponse> {
+        Box::pin(async {
+            Err(ClientPortError::Public(Box::new(authoritative_error(
+                MappedDomainFailure::unsupported_capability("encoding"),
+            ))))
+        })
+    }
+
+    /// Reads scalar-bounded text prefixes while retaining full editing references.
+    /// This internal route is not exposed as an exact MCP source read.
+    fn source_read_lossless_text_prefix(
+        &self,
+        _request: SourceReadPortRequest,
+        _maximum_text_bytes_per_chunk: u32,
+        _options: client::RequestOptions,
+        _cancellation: RequestCancellation,
+    ) -> ClientPortFuture<client::SourceTextPrefixReadResult> {
+        Box::pin(async {
+            Err(ClientPortError::Public(Box::new(authoritative_error(
+                MappedDomainFailure::unsupported_capability("encoding"),
+            ))))
+        })
+    }
+
+    /// Quotes source-prefix metadata without reading source bodies.
+    /// This internal reservation route is not a public MCP tool.
+    fn source_text_prefix_metadata_quote(
+        &self,
+        _request: SourceReadPortRequest,
+        _options: client::RequestOptions,
+        _cancellation: RequestCancellation,
+    ) -> ClientPortFuture<client::SourceTextPrefixMetadataQuoteResult> {
+        Box::pin(async {
+            Err(ClientPortError::Public(Box::new(authoritative_error(
+                MappedDomainFailure::unsupported_capability("source_metadata"),
+            ))))
+        })
+    }
 
     /// Lists the repositories known to the daemon process.
     fn repository_catalog_page(
@@ -1645,6 +1696,33 @@ impl SourceReadPortResponse {
     #[must_use]
     pub const fn new(
         result: SourceRead,
+        metadata: ReadResponseMetadata,
+        stale_references: Vec<StaleSourceReference>,
+        elisions: Vec<SourceElision>,
+    ) -> Self {
+        Self {
+            result,
+            metadata,
+            stale_references,
+            elisions,
+        }
+    }
+}
+
+/// Lossless daemon text plus server-owned metadata and range dispositions.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SourceReadLosslessPortResponse {
+    result: client::SourceTextReadResult,
+    metadata: ReadResponseMetadata,
+    stale_references: Vec<StaleSourceReference>,
+    elisions: Vec<SourceElision>,
+}
+
+impl SourceReadLosslessPortResponse {
+    /// Creates complete lossless source data and server-owned metadata.
+    #[must_use]
+    pub const fn new(
+        result: client::SourceTextReadResult,
         metadata: ReadResponseMetadata,
         stale_references: Vec<StaleSourceReference>,
         elisions: Vec<SourceElision>,
@@ -6769,6 +6847,16 @@ async fn execute_source_read<P>(
 where
     P: FirstSliceClientPort,
 {
+    if arguments.get("encoding").and_then(Value::as_str) == Some("lossless_text") {
+        return execute_lossless_source_read(
+            port,
+            arguments,
+            cancellation,
+            unsupported,
+            invalid_arguments,
+        )
+        .await;
+    }
     let input: SourceReadInput = decode_input(arguments)?;
     let response_profile = input.response_profile.unwrap_or(ResponseProfile::Compact);
     let budget =
@@ -6793,6 +6881,71 @@ where
     let response = await_port(future, cancellation).await?;
     let output = map_source_read(response, &expected)?;
     serialize_source_read_success(output, response_profile, started_at, budget.limits)
+}
+
+async fn execute_lossless_source_read<P>(
+    port: Arc<P>,
+    arguments: Map<String, Value>,
+    cancellation: RequestCancellation,
+    unsupported: &PublicError,
+    invalid_arguments: &PublicError,
+) -> Result<Map<String, Value>, ToolExecutionError>
+where
+    P: FirstSliceClientPort,
+{
+    let input: SourceReadInputV1_3 = decode_input(arguments)?;
+    let response_profile = input.response_profile.unwrap_or(ResponseProfile::Compact);
+    let budget =
+        AnalyticalBudget::with_source_limit(input.budget.as_ref(), input.max_source_bytes)?;
+    let explain_only = input.explain == Some(true);
+    let request =
+        normalize_source_read(input.into_legacy_controls(), unsupported, invalid_arguments)?;
+    let started_at = prepare_port(&port, &cancellation).await?;
+    if explain_only {
+        let status = await_port(
+            port.repository_status(
+                RepositoryStatusPortRequest::new(request.repository, request.generation),
+                cancellation.clone(),
+            ),
+            cancellation,
+        )
+        .await?;
+        let explanation = rootlight_agent::explain::finalize_plan(
+            rootlight_agent::explain::source_read_plan(request.selector_count),
+            &status.resolved_generation.to_string(),
+        );
+        let mut output = explain_envelope_from_status(
+            status,
+            SourceReadDataV1_3 {
+                chunks: Vec::new(),
+                stale_references: Vec::new(),
+                elisions: Vec::new(),
+                total_source_bytes: 0,
+                total_text_bytes: 0,
+                explanation: Some(explanation),
+                conditional_activity: Vec::new(),
+            },
+        )?;
+        rootlight_agent::response_profile::shape_read_envelope(&mut output, response_profile);
+        return serialize_measured_read_success(output, started_at, budget.limits);
+    }
+    let request = resolve_source_read_symbols(
+        &port,
+        request,
+        budget.options,
+        cancellation.clone(),
+        invalid_arguments,
+    )
+    .await?;
+    let expected = request.clone();
+    let response = await_port(
+        port.source_read_lossless_text(request, budget.options, cancellation.clone()),
+        cancellation,
+    )
+    .await?;
+    let mut output = map_lossless_source_read(response, &expected)?;
+    rootlight_agent::response_profile::shape_read_envelope(&mut output, response_profile);
+    serialize_measured_read_success(output, started_at, budget.limits)
 }
 
 async fn await_port<T>(
@@ -8145,6 +8298,7 @@ fn map_code_locate(
         return Err(internal(ToolExecutionFailure::InvalidResponse));
     }
     let mut seen_targets = BTreeSet::new();
+    let mut has_truncated_signature = false;
     for hit in response.result.hits {
         if hit.identifier.is_empty()
             || request
@@ -8156,6 +8310,14 @@ fn map_code_locate(
             || !safe_label(&hit.language, 64)
             || !seen_targets.insert((hit.symbol, hit.file))
             || (hit.symbol.is_none() && hit.kind != "file")
+            || hit.signature.as_ref().is_some_and(|signature| {
+                signature.is_empty()
+                    || signature.len() > 4_096
+                    || signature.contains('\0')
+                    || hit.symbol.is_none()
+                    || hit.source.is_none()
+            })
+            || (hit.signature_truncated && hit.signature.is_none())
             || hit.source.as_ref().is_some_and(|source| {
                 source.repository() != request.repository
                     || source.generation() != resolved_generation
@@ -8164,6 +8326,7 @@ fn map_code_locate(
         {
             return Err(internal(ToolExecutionFailure::InvalidResponse));
         }
+        has_truncated_signature |= hit.signature_truncated;
         let source_ref = hit.source.as_ref().map(client_source_ref).transpose()?;
         let extracted_from = hit
             .extracted_from
@@ -8176,7 +8339,7 @@ fn map_code_locate(
             file_id: Some(hit.file),
             kind: entity_kind(&hit.kind)?,
             display_name: hit.identifier,
-            signature: None,
+            signature: hit.signature,
             path: hit.path,
             score: u16::try_from(hit.score)
                 .map_err(|_| internal(ToolExecutionFailure::InvalidResponse))?,
@@ -8232,6 +8395,13 @@ fn map_code_locate(
         &mut response.metadata.warnings,
         &data.conditional_activity,
     )?;
+    if has_truncated_signature {
+        push_completeness_warning(
+            &mut response.metadata.warnings,
+            "signature_truncated",
+            "one or more returned signatures are truncated",
+        )?;
+    }
     map_read_envelope(
         response.result.context,
         response.metadata,
@@ -8576,6 +8746,205 @@ fn map_source_read(
         stale_references: response.stale_references,
         elisions: response.elisions,
         total_source_bytes,
+        explanation: None,
+    };
+    data.validate_conditional_activity()
+        .map_err(|_| internal(ToolExecutionFailure::InvalidResponse))?;
+    if data
+        .conditional_activity
+        .iter()
+        .any(|assessment| assessment.reason.0 == Some(ConditionalActivityReason::ScanIncomplete))
+        && !metadata_partial
+    {
+        return Err(internal(ToolExecutionFailure::InvalidResponse));
+    }
+    append_conditional_activity_warning(
+        &mut response.metadata.warnings,
+        &data.conditional_activity,
+    )?;
+    map_read_envelope(
+        response.result.context,
+        response.metadata,
+        data,
+        response.result.execution_completeness,
+        None,
+    )
+}
+
+fn map_lossless_source_read(
+    mut response: SourceReadLosslessPortResponse,
+    request: &SourceReadPortRequest,
+) -> Result<ReadEnvelope<SourceReadDataV1_3>, ToolExecutionError> {
+    validate_query_context(
+        &response.result.context,
+        request.repository,
+        request.generation,
+    )?;
+    let conditional_activity = map_conditional_activity(response.result.conditional_activity)?;
+    let metadata_partial = response.result.execution_completeness.state
+        == client::ResultCompletenessState::Truncated
+        && response
+            .result
+            .execution_completeness
+            .limiting_resources
+            .iter()
+            .any(|resource| {
+                matches!(
+                    resource.kind,
+                    client::LimitingResourceKind::Rows | client::LimitingResourceKind::MemoryBytes
+                )
+            })
+        && conditional_activity.iter().any(|assessment| {
+            assessment.reason.0 == Some(ConditionalActivityReason::ScanIncomplete)
+        });
+    if response.result.truncated
+        != (response.result.execution_completeness.state
+            == client::ResultCompletenessState::Truncated)
+        || (metadata_partial
+            && response.stale_references.is_empty()
+            && response.elisions.is_empty()
+            && !request.merge_overlaps
+            && response.result.chunks.len() != request.references.len())
+        || response.result.chunks.len() > request.references.len()
+        || (!response.result.truncated
+            && (!request.merge_overlaps
+                && response.result.chunks.len() != request.references.len()
+                || !response.stale_references.is_empty()
+                || !response.elisions.is_empty()))
+        || (response.result.truncated
+            && response.stale_references.is_empty()
+            && response.elisions.is_empty()
+            && !metadata_partial)
+        || response
+            .stale_references
+            .iter()
+            .any(|item| usize::from(item.selector_index) >= request.references.len())
+        || response
+            .elisions
+            .iter()
+            .any(|item| usize::from(item.selector_index) >= request.references.len())
+    {
+        return Err(internal(ToolExecutionFailure::InvalidResponse));
+    }
+
+    let mut chunks = Vec::new();
+    chunks
+        .try_reserve_exact(response.result.chunks.len())
+        .map_err(|_| internal(ToolExecutionFailure::Executor))?;
+    let resolved_generation = response.result.context.generation;
+    let mut measured_source_bytes = 0_u64;
+    let mut measured_text_bytes = 0_u64;
+    for (index, chunk) in response.result.chunks.into_iter().enumerate() {
+        let requested = &chunk.source;
+        let requested_bytes = requested.byte_range();
+        let selector_correlates = if request.merge_overlaps {
+            request.references.iter().any(|selector| {
+                selector.repository() == requested.repository()
+                    && selector.generation() == requested.generation()
+                    && selector.file() == requested.file()
+                    && selector.content_hash() == requested.content_hash()
+                    && selector.byte_range().start < requested_bytes.end
+                    && selector.byte_range().end > requested_bytes.start
+            })
+        } else {
+            request.references.get(index) == Some(requested)
+        };
+        let returned_bytes = chunk
+            .end_byte
+            .checked_sub(chunk.start_byte)
+            .ok_or_else(|| internal(ToolExecutionFailure::InvalidResponse))?;
+        if !selector_correlates
+            || chunk.source.repository() != request.repository
+            || chunk.source.generation() != resolved_generation
+            || chunk.start_byte > requested_bytes.start
+            || chunk.end_byte < requested_bytes.end
+            || request.context_lines_before == 0 && chunk.start_byte != requested_bytes.start
+            || request.context_lines_after == 0 && chunk.end_byte != requested_bytes.end
+            || request.include_line_numbers
+                && (chunk.start_line.is_none()
+                    || chunk.end_line.is_none()
+                    || chunk.start_line == Some(0)
+                    || chunk.start_line > chunk.end_line)
+            || !request.include_line_numbers
+                && (chunk.start_line.is_some() || chunk.end_line.is_some())
+            || chunk.content_hash != requested.content_hash()
+            || !safe_label(&chunk.language, 256)
+            || !safe_repository_relative_path(&chunk.path)
+        {
+            return Err(internal(ToolExecutionFailure::InvalidResponse));
+        }
+        measured_source_bytes = measured_source_bytes
+            .checked_add(returned_bytes)
+            .ok_or_else(|| internal(ToolExecutionFailure::InvalidResponse))?;
+        let span = SourceSpan::new(requested.file(), chunk.start_byte, chunk.end_byte)
+            .map_err(|_| internal(ToolExecutionFailure::InvalidResponse))?;
+        let lines = match (chunk.start_line, chunk.end_line) {
+            (Some(start), Some(end)) => Some(
+                LineRange::new(start, end)
+                    .map_err(|_| internal(ToolExecutionFailure::InvalidResponse))?,
+            ),
+            (None, None) => None,
+            _ => return Err(internal(ToolExecutionFailure::InvalidResponse)),
+        };
+        let source_ref = SourceRef::new(
+            requested.repository(),
+            requested.generation(),
+            span,
+            requested.content_hash(),
+            lines,
+        );
+        let physical_encoding = match chunk.physical_encoding {
+            client::SourceTextEncoding::Utf8 => SourceTextEncoding::Utf8,
+            client::SourceTextEncoding::Utf16Le => SourceTextEncoding::Utf16Le,
+            client::SourceTextEncoding::Utf16Be => SourceTextEncoding::Utf16Be,
+        };
+        measured_text_bytes = measured_text_bytes
+            .checked_add(
+                u64::try_from(chunk.content.len())
+                    .map_err(|_| internal(ToolExecutionFailure::InvalidResponse))?,
+            )
+            .ok_or_else(|| internal(ToolExecutionFailure::InvalidResponse))?;
+        let extracted_from = chunk
+            .extracted_from
+            .as_ref()
+            .map(|origin| client_extracted_from(origin, Some(&source_ref)))
+            .transpose()?;
+        let mapped = SourceTextChunk {
+            extracted_from,
+            source_ref,
+            path: chunk.path,
+            start_byte: chunk.start_byte,
+            end_byte: chunk.end_byte,
+            start_line: chunk.start_line,
+            end_line: chunk.end_line,
+            content: chunk.content,
+            encoding: LosslessContentEncoding::LosslessText,
+            physical_encoding,
+            content_hash: chunk.content_hash,
+            language: chunk.language,
+            generated: chunk.generated,
+            trust: TrustClassification::UntrustedRepositoryData,
+        };
+        mapped
+            .validate()
+            .map_err(|_| internal(ToolExecutionFailure::InvalidResponse))?;
+        chunks.push(SourceChunkV1_3::Lossless(mapped));
+    }
+    if response.result.total_source_bytes != measured_source_bytes
+        || response.result.total_text_bytes != measured_text_bytes
+    {
+        return Err(internal(ToolExecutionFailure::InvalidResponse));
+    }
+    let total_source_bytes = u32::try_from(response.result.total_source_bytes)
+        .map_err(|_| internal(ToolExecutionFailure::InvalidResponse))?;
+    let data = SourceReadDataV1_3 {
+        chunks,
+        conditional_activity,
+        stale_references: response.stale_references,
+        elisions: response.elisions,
+        total_source_bytes,
+        total_text_bytes: u32::try_from(measured_text_bytes)
+            .map_err(|_| internal(ToolExecutionFailure::InvalidResponse))?,
         explanation: None,
     };
     data.validate_conditional_activity()

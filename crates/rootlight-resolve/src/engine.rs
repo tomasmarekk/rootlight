@@ -85,6 +85,7 @@ impl ResolutionEngine {
             cancellation,
         )?;
         let mut work = ResolutionWorkBudget::new(self.limits.work_limit());
+        work.consume_many(index.fsharp.preparation_work())?;
         let mut memo = ResolutionMemo::new(&document.occurrences, &index, cancellation)?;
         let mut decisions = Vec::new();
         for occurrence in &document.occurrences {
@@ -131,7 +132,7 @@ impl ResolutionEngine {
             cancellation,
         )?;
         let mut memo = ResolutionMemo::new(&document.occurrences, &index, cancellation)?;
-        let mut required = 0_usize;
+        let mut required = index.fsharp.preparation_work();
         for occurrence in &document.occurrences {
             cancellation.check()?;
             let site_work = index.occurrence_work(occurrence)?.unwrap_or(0);
@@ -156,6 +157,9 @@ impl ResolutionEngine {
             return Ok(decision);
         }
         if let Some(decision) = index.perl.resolve(occurrence) {
+            return Ok(decision);
+        }
+        if let Some(decision) = index.fsharp.resolve(occurrence) {
             return Ok(decision);
         }
         if let Some(entry) = index
@@ -684,27 +688,15 @@ pub(crate) struct ResolutionContextKey {
     spelling: ContentHash,
     provenance: FactId,
     role: OccurrenceRole,
-    syntax_kind: &'static str,
+    syntax_kind: usize,
 }
 
 impl ResolutionContextKey {
     fn for_occurrence(occurrence: &OccurrenceRecord, index: &CandidateIndex<'_>) -> Option<Self> {
-        let syntax_kind = match occurrence.syntax_kind.as_str() {
-            "typescript.identifier.reference" => "typescript.identifier.reference",
-            "typescript.property_identifier.reference" => {
-                "typescript.property_identifier.reference"
-            }
-            "typescript.call.call" => "typescript.call.call",
-            _ => return None,
-        };
-        if matches!(occurrence.target, OccurrenceTarget::Resolved { .. })
-            || index
-                .files
-                .get(&occurrence.file)
-                .is_none_or(|file| file.language != "typescript")
-        {
+        if !Self::reusable(occurrence, index) {
             return None;
         }
+        let syntax_kind = *index.syntax_kinds.get(occurrence.syntax_kind.as_str())?;
         Some(Self {
             file: occurrence.file,
             enclosing: occurrence.enclosing,
@@ -713,6 +705,43 @@ impl ResolutionContextKey {
             role: occurrence.role,
             syntax_kind,
         })
+    }
+
+    fn reusable(occurrence: &OccurrenceRecord, index: &CandidateIndex<'_>) -> bool {
+        if matches!(occurrence.target, OccurrenceTarget::Resolved { .. })
+            || !resolvable_occurrence(occurrence)
+            || !index
+                .by_name_hash
+                .contains_key(&occurrence.syntactic_text_hash)
+            || is_javascript_lexical_reference(occurrence, index)
+            || index.classic.proof(occurrence).is_some()
+            || index.perl.eligible(occurrence)
+            || index.fsharp.eligible(occurrence)
+            || index.groovy.proof(occurrence).is_some()
+            || index.groovy.inherited_entry(occurrence).is_some()
+            || index.groovy.static_import_entry(occurrence).is_some()
+        {
+            return false;
+        }
+        let Some(file) = index.files.get(&occurrence.file) else {
+            return false;
+        };
+        let language = if matches!(file.language.as_str(), "markdown" | "html") {
+            occurrence
+                .syntax_kind
+                .split_once('.')
+                .map_or("", |(language, _)| language)
+        } else {
+            file.language.as_str()
+        };
+        // Native routes may inspect source length or occurrence-owned evidence.
+        // Only ordinary scoring is independent of the omitted source span and ID.
+        !(language == "elm"
+            && ((occurrence.syntax_kind == "elm.import"
+                && occurrence.role == OccurrenceRole::ImportUse)
+                || (occurrence.syntax_kind == "elm.type.reference"
+                    && occurrence.role == OccurrenceRole::TypeUse)))
+            && !(language == "matlab" && matlab_candidate_reference(occurrence))
     }
 }
 
@@ -842,11 +871,13 @@ pub(crate) struct CandidateIndex<'a> {
     pub(crate) classic: crate::classic::ClassicIndex<'a>,
     pub(crate) groovy: crate::groovy::GroovyIndex<'a>,
     pub(crate) perl: crate::perl::PerlIndex<'a>,
+    pub(crate) fsharp: crate::fsharp::FSharpIndex<'a>,
     by_name_hash: BTreeMap<ContentHash, Vec<IndexedCandidate<'a>>>,
     javascript_by_scope: BTreeMap<(ContentHash, FileId, ContainerRef), Vec<IndexedCandidate<'a>>>,
     pub(crate) entities: BTreeMap<SymbolId, &'a EntityRecord>,
     pub(crate) files: BTreeMap<FileId, &'a FileRecord>,
     pub(crate) provenance: BTreeMap<FactId, &'a ProvenanceRecord>,
+    syntax_kinds: BTreeMap<String, usize>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -937,7 +968,7 @@ impl<'a> CandidateIndex<'a> {
             entries.sort_unstable_by_key(|entry| (entry.entity.id, entry.name_match));
             entries.dedup_by_key(|entry| entry.entity.id);
         }
-        Ok(Self {
+        let mut index = Self {
             classic: crate::classic::ClassicIndex::default(),
             groovy: crate::groovy::GroovyIndex::build(
                 &files,
@@ -955,12 +986,37 @@ impl<'a> CandidateIndex<'a> {
                 extension_records,
                 cancellation,
             )?,
+            fsharp: crate::fsharp::FSharpIndex::build(
+                &files,
+                &entities,
+                &provenance,
+                extension_records,
+                cancellation,
+            )?,
             by_name_hash,
             javascript_by_scope,
             entities,
             files,
             provenance,
-        })
+            syntax_kinds: BTreeMap::new(),
+        };
+        for occurrence in occurrence_records {
+            cancellation.check()?;
+            if ResolutionContextKey::reusable(occurrence, &index)
+                && !index
+                    .syntax_kinds
+                    .contains_key(occurrence.syntax_kind.as_str())
+            {
+                // Own each distinct label so application can mutate occurrences;
+                // full-string lookup preserves identity without hash collisions.
+                index.syntax_kinds.insert(occurrence.syntax_kind.clone(), 0);
+            }
+        }
+        for (token, value) in index.syntax_kinds.values_mut().enumerate() {
+            cancellation.check()?;
+            *value = token;
+        }
+        Ok(index)
     }
 
     pub(crate) fn occurrence_work(
@@ -982,6 +1038,7 @@ impl<'a> CandidateIndex<'a> {
         }
         if !matches!(occurrence.target, OccurrenceTarget::Resolved { .. })
             && (self.perl.eligible(occurrence)
+                || self.fsharp.eligible(occurrence)
                 || self.groovy.proof(occurrence).is_some()
                 || self.classic.proof(occurrence).is_some())
         {

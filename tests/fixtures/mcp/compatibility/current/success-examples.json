@@ -336,6 +336,7 @@
     },
     {
       "input": {
+        "encoding": "utf8_lossless_when_valid",
         "references": [
           {
             "source_ref": {
@@ -409,7 +410,8 @@
           "conditional_activity": [],
           "elisions": [],
           "stale_references": [],
-          "total_source_bytes": 10
+          "total_source_bytes": 10,
+          "total_text_bytes": 10
         },
         "generation": {
           "generation_id": "gen1_is6sduoy6mt3wwxnzuibgq6rb6zs2jtal4aj2by",
@@ -422,7 +424,7 @@
           "display_name": "fixture",
           "repository_id": "repo1_3hhm6hhk3shhmievg6ra3yjlhp2wuv5v"
         },
-        "schema_version": "1.2",
+        "schema_version": "1.3",
         "truncated": false,
         "trust": "untrusted_repository_data",
         "usage": {

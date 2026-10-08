@@ -3,20 +3,21 @@
 //! Batch sequences are transport-only. Successful reports validate explicit
 //! end markers before staged output is deterministically committed.
 
-use std::{cmp::Ordering, convert::Infallible, fmt, mem};
+use std::{cmp::Ordering, collections::HashMap, convert::Infallible, fmt, mem};
 
 use rootlight_cancel::{Cancellation, Cancelled};
 use rootlight_ir::{
     AnalysisTier, CoverageRecord, CoverageStatus, DiagnosticRecord, DiagnosticSeverity,
     EntityRecord, ExtensionEnvelope, ExtensionSupport, FactEvidence, FileRecord, IrLimits,
-    NormalizedIrDocument, OccurrenceRecord, ProvenanceRecord, RelationRecord, SkippedRegion,
-    SourceMappingRecord, SourceRef, SourceSpan, canonicalize_ir_document,
+    LEXICAL_ENCODED_PROJECTION_VERSION, LEXICAL_EXTENSION_NAMESPACE, NormalizedIrDocument,
+    OccurrenceRecord, ProvenanceRecord, RelationRecord, SkippedRegion, SourceMappingRecord,
+    SourceRef, SourceSpan, canonicalize_ir_document, decode_lexical_evidence_envelope,
 };
 
 use crate::{
     descriptor::{
-        MemoryAdmissionPolicy, MemoryAdmissionStatus, MemoryEnforcement, ParseCapabilities,
-        ProducerDescriptor, validated_label,
+        EncodingId, MemoryAdmissionPolicy, MemoryAdmissionStatus, MemoryEnforcement,
+        ParseCapabilities, ProducerDescriptor, validated_label,
     },
     error::{
         AdapterError, LabelError, LabelField, ReportError, RequestError, ResourceKind, SinkError,
@@ -24,7 +25,7 @@ use crate::{
     ir_accounting::{IrRawBudget, ir_batch_metrics},
     limits::{RemainingBudget, StreamLimits, StreamUsage},
     report::{AnalysisReport, ParseReport, ProjectAnalysisReport},
-    request::{AnalysisRequest, ParseRequest, ProjectAnalysisRequest},
+    request::{AnalysisRequest, GenerationBoundSnapshot, ParseRequest, ProjectAnalysisRequest},
 };
 
 const MAX_SYNTAX_KIND_BYTES: usize = 128;
@@ -1172,6 +1173,8 @@ pub fn execute_parse_transaction<T>(
 /// `cancellation` must carry a process-local monotonic deadline. The explicit
 /// `memory_policy` either admits hard/reported enforcement or intentionally
 /// selects the visible unavailable-enforcement fallback.
+/// Encoded lexical projections must match the immutable original source bytes;
+/// their full-file encoding is validated once before staged output is committed.
 ///
 /// # Errors
 ///
@@ -1233,6 +1236,17 @@ pub fn execute_analysis<A: LanguageAnalyzer + ?Sized>(
         sink.discard();
         return Err(error.into());
     }
+    if let Err(error) = verify_encoded_lexical_sources(
+        &sink.document,
+        std::iter::once(BoundEncodedLexicalSource::new(
+            request.source(),
+            request.encoding(),
+        )),
+        cancellation,
+    ) {
+        sink.discard();
+        return Err(error);
+    }
     let document = sink.commit()?;
     Ok(AnalysisOutput {
         document,
@@ -1247,6 +1261,8 @@ pub fn execute_analysis<A: LanguageAnalyzer + ?Sized>(
 /// output remains invisible unless the provider returns a report matching the
 /// exact analysis unit, build target, build context, requested tier, resource
 /// usage, and stream end marker.
+/// Encoded lexical projections are independently checked against their bound
+/// original input, with one complete encoding validation per referenced file.
 ///
 /// # Errors
 ///
@@ -1312,12 +1328,149 @@ pub fn execute_project_analysis<A: ProjectLanguageAnalyzer + ?Sized>(
         sink.discard();
         return Err(error.into());
     }
+    if let Err(error) = verify_encoded_lexical_sources(
+        &sink.document,
+        request
+            .inputs()
+            .iter()
+            .map(|input| BoundEncodedLexicalSource::new(input.source(), input.encoding())),
+        cancellation,
+    ) {
+        sink.discard();
+        return Err(error);
+    }
     let document = sink.commit()?;
     Ok(ProjectAnalysisOutput {
         document,
         report,
         memory_admission,
     })
+}
+
+struct BoundEncodedLexicalSource<'a> {
+    bytes: &'a [u8],
+    source: &'a SourceRef,
+    encoding: &'a EncodingId,
+    validated: bool,
+}
+
+impl<'a> BoundEncodedLexicalSource<'a> {
+    fn new(source: &'a GenerationBoundSnapshot<'_>, encoding: &'a EncodingId) -> Self {
+        Self {
+            bytes: source.bytes(),
+            source: source.source_ref(),
+            encoding,
+            validated: false,
+        }
+    }
+}
+
+fn verify_encoded_lexical_sources<'a>(
+    document: &NormalizedIrDocument,
+    bound_sources: impl ExactSizeIterator<Item = BoundEncodedLexicalSource<'a>>,
+    cancellation: &Cancellation,
+) -> Result<(), AdapterError> {
+    let mut first_encoded = None;
+    for (index, envelope) in document.extensions.iter().enumerate() {
+        if index.is_multiple_of(CANCELLATION_CHECK_INTERVAL) {
+            cancellation.check()?;
+        }
+        if is_encoded_lexical_projection(envelope) {
+            first_encoded = Some(index);
+            break;
+        }
+    }
+    let Some(first_encoded) = first_encoded else {
+        return Ok(());
+    };
+
+    // Project inputs are ordered by path, not file ID. One request-bounded
+    // borrowed index avoids repeated project scans and whole-file decoding.
+    cancellation.check()?;
+    let mut sources = HashMap::new();
+    sources
+        .try_reserve(bound_sources.len())
+        .map_err(|_| SinkError::AllocationFailed)?;
+    for (index, source) in bound_sources.enumerate() {
+        if index.is_multiple_of(CANCELLATION_CHECK_INTERVAL) {
+            cancellation.check()?;
+        }
+        if sources
+            .insert(source.source.span().file(), source)
+            .is_some()
+        {
+            return Err(SinkError::SourceMismatch.into());
+        }
+    }
+
+    for (index, envelope) in document.extensions.iter().skip(first_encoded).enumerate() {
+        if index.is_multiple_of(CANCELLATION_CHECK_INTERVAL) {
+            cancellation.check()?;
+        }
+        if !is_encoded_lexical_projection(envelope) {
+            continue;
+        }
+        cancellation.check()?;
+        let evidence =
+            decode_lexical_evidence_envelope(envelope).map_err(|_| SinkError::InvalidIr)?;
+        let source = envelope
+            .evidence
+            .source
+            .as_ref()
+            .ok_or(SinkError::SourceMismatch)?;
+        let encoding = evidence.source_encoding().ok_or(SinkError::InvalidIr)?;
+        let bound = sources
+            .get_mut(&source.span().file())
+            .ok_or(SinkError::SourceMismatch)?;
+        if !source_within_source(source, bound.source)
+            || bound.encoding.as_str() != encoding.as_str()
+            || !source.span().start_byte().is_multiple_of(2)
+            || !source.span().end_byte().is_multiple_of(2)
+        {
+            return Err(SinkError::SourceMismatch.into());
+        }
+        if !bound.validated {
+            // Fragment proofs cannot attest an omitted malformed tail or guess
+            // a physical encoding. The immutable full input must carry its BOM.
+            let text = rootlight_vfs::SourceText::parse(bound.bytes, cancellation)?
+                .ok_or(SinkError::SourceMismatch)?;
+            if text.encoding().as_str() != bound.encoding.as_str() {
+                return Err(SinkError::SourceMismatch.into());
+            }
+            bound.validated = true;
+        }
+        let start =
+            usize::try_from(source.span().start_byte()).map_err(|_| SinkError::SourceMismatch)?;
+        let end =
+            usize::try_from(source.span().end_byte()).map_err(|_| SinkError::SourceMismatch)?;
+        let bytes = bound
+            .bytes
+            .get(start..end)
+            .ok_or(SinkError::SourceMismatch)?;
+        evidence
+            .verify_source_bytes(bytes)
+            .map_err(|_| SinkError::SourceMismatch)?;
+        cancellation.check()?;
+    }
+
+    for (index, file) in document.files.iter().enumerate() {
+        if index.is_multiple_of(CANCELLATION_CHECK_INTERVAL) {
+            cancellation.check()?;
+        }
+        if sources
+            .get(&file.id)
+            .is_some_and(|source| source.validated && file.encoding != source.encoding.as_str())
+        {
+            return Err(SinkError::SourceMismatch.into());
+        }
+    }
+    cancellation.check()?;
+    Ok(())
+}
+
+fn is_encoded_lexical_projection(envelope: &ExtensionEnvelope) -> bool {
+    envelope.namespace == LEXICAL_EXTENSION_NAMESPACE
+        && envelope.version == LEXICAL_ENCODED_PROJECTION_VERSION
 }
 
 fn validate_parse_capabilities(

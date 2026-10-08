@@ -93,11 +93,14 @@ impl Fixture {
         context: &mut NativeParseContext,
         cancellation: &Cancellation,
     ) -> Result<Tree, AdapterError> {
+        let request = self.request(&[]);
+        let source = self.provider.native_source_view(&request, cancellation)?;
         self.provider.parse_native_tree(
-            &self.request(&[]),
+            &request,
             &tree_sitter_md::INLINE_LANGUAGE.into(),
             None,
             self.provider.config.default_settings(),
+            &source,
             Some(context),
             cancellation,
         )
@@ -191,10 +194,16 @@ fn native_origin_matches_full_scan_across_unicode_and_crlf_ranges() {
         ),
     ]);
     let cancellation = Cancellation::new();
-    let baseline = tree_sitter_ranges(&request, text.as_bytes(), None, &cancellation).unwrap();
+    let source = fixture
+        .provider
+        .native_source_view(&request, &cancellation)
+        .unwrap();
+    let baseline =
+        tree_sitter_ranges(&request, text.as_bytes(), &source, None, &cancellation).unwrap();
     let anchored = tree_sitter_ranges(
         &request,
         text.as_bytes(),
+        &source,
         Some((first, Point { row: 1, column: 2 })),
         &cancellation,
     )
@@ -205,6 +214,7 @@ fn native_origin_matches_full_scan_across_unicode_and_crlf_ranges() {
         tree_sitter_ranges(
             &request,
             text.as_bytes(),
+            &source,
             Some((first + 1, Point { row: 1, column: 3 })),
             &cancellation
         )
@@ -212,7 +222,7 @@ fn native_origin_matches_full_scan_across_unicode_and_crlf_ranges() {
     );
     assert!(cancellation.cancel(CancellationReason::ClientRequest));
     assert!(matches!(
-        tree_sitter_ranges(&request, text.as_bytes(), None, &cancellation),
+        tree_sitter_ranges(&request, text.as_bytes(), &source, None, &cancellation),
         Err(AdapterError::Cancelled { .. })
     ));
 }

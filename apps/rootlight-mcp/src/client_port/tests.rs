@@ -27,7 +27,8 @@ use rootlight_client::{
     RepositoryIndexDiagnostic, RepositoryIndexMode, RepositoryOperationAction,
     RepositoryOperationStatus, RepositoryStatus, RepositoryStatusRequest, RequestOptions,
     RequestTimeout, ResultCompleteness, ResultCompletenessState, SourceChunk, SourceRead,
-    SourceReference, SymbolExplain, SymbolExplanation, SymbolRelationships, TestsSelect,
+    SourceReference, SourceTextReadOptions as ClientSourceTextReadOptions, SourceTextReadResult,
+    SymbolExplain, SymbolExplanation, SymbolRelationships, TestsSelect,
     TestsSelectCoverageStrategy,
 };
 use rootlight_ids::{ContentHash, FileId, GenerationId, OperationId, RepositoryId, SymbolId};
@@ -525,6 +526,63 @@ impl AsyncFirstSliceClient for FakeAsyncClient {
                 total_source_bytes: 0,
                 truncated: false,
                 execution_completeness: complete_execution(),
+            })
+        })
+    }
+
+    fn source_read_lossless_text(
+        &self,
+        repository: RepositoryId,
+        generation: GenerationSelector,
+        references: Vec<SourceReference>,
+        projection: ClientSourceTextReadOptions,
+        options: RequestOptions,
+    ) -> AsyncClientFuture<SourceTextReadResult> {
+        let future = self.source_read(
+            repository,
+            generation,
+            references,
+            rootlight_client::SourceReadOptions {
+                context_lines_before: projection.context_lines_before,
+                context_lines_after: projection.context_lines_after,
+                merge_overlaps: projection.merge_overlaps,
+                include_line_numbers: projection.include_line_numbers,
+                encoding: rootlight_client::SourceEncoding::Utf8,
+            },
+            options,
+        );
+        Box::pin(async move {
+            let legacy = future.await?;
+            let chunks = legacy
+                .chunks
+                .into_iter()
+                .map(|chunk| {
+                    Ok(rootlight_client::SourceTextChunk {
+                        extracted_from: chunk.extracted_from,
+                        source: chunk.source,
+                        path: chunk.path,
+                        start_byte: chunk.start_byte,
+                        end_byte: chunk.end_byte,
+                        start_line: chunk.start_line,
+                        end_line: chunk.end_line,
+                        content: String::from_utf8(chunk.content)
+                            .map_err(|_| ClientError::InvalidResponseCorrelation)?,
+                        physical_encoding: rootlight_client::SourceTextEncoding::Utf8,
+                        content_hash: chunk.content_hash,
+                        language: chunk.language,
+                        tier: chunk.tier,
+                        generated: chunk.generated,
+                    })
+                })
+                .collect::<Result<Vec<_>, ClientError>>()?;
+            Ok(SourceTextReadResult {
+                context: legacy.context,
+                chunks,
+                total_source_bytes: legacy.total_source_bytes,
+                total_text_bytes: legacy.total_source_bytes,
+                truncated: legacy.truncated,
+                execution_completeness: legacy.execution_completeness,
+                conditional_activity: legacy.conditional_activity,
             })
         })
     }
@@ -1695,6 +1753,8 @@ fn read_metadata_preserves_safe_non_rust_languages() {
         context: context.clone(),
         hits: vec![LocateHit {
             extracted_from: None,
+            signature: None,
+            signature_truncated: false,
             symbol: Some(symbol()),
             file: file(),
             identifier: "DenoWorkspace".to_owned(),
@@ -2112,6 +2172,20 @@ fn client_errors_map_to_source_free_port_classes() {
     assert_eq!(
         map_client_error(ClientError::InvalidRepositoryCatalogRequest),
         crate::ClientPortError::Executor
+    );
+}
+
+#[test]
+fn source_metadata_quote_old_client_is_typed_unsupported_only_for_quote() {
+    let error =
+        super::map_source_metadata_quote_client_error(ClientError::ProtocolFeatureUnavailable);
+    let ClientPortError::Public(error) = error else {
+        panic!("an older quote client is a typed capability omission");
+    };
+    assert_eq!(error.code(), ErrorCode::UnsupportedCapability);
+    assert_eq!(
+        map_client_error(ClientError::ProtocolFeatureUnavailable),
+        ClientPortError::Transport
     );
 }
 

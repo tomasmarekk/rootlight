@@ -17,11 +17,13 @@ use rootlight_agent::{
         ContextContinuationState,
     },
     context_evidence::{
-        ContextEvidenceCallContext, ContextEvidencePort, ContextEvidencePortError,
-        ContextEvidencePortErrorKind, ContextSourceMaterial, ContextSourceOutput,
-        ContextSourceRequest, EvidenceAnchor, EvidenceProvider, EvidenceProviderInvocation,
-        EvidenceProviderObservation, EvidenceProviderObservationKind, EvidenceProviderOutput,
-        EvidenceSeedKind,
+        CONTEXT_SOURCE_METADATA_QUOTE_POLICY_VERSION, ContextEvidenceCallContext,
+        ContextEvidencePort, ContextEvidencePortError, ContextEvidencePortErrorKind,
+        ContextSourceMaterial, ContextSourceMetadataFixedUpper, ContextSourceMetadataQuoteEntry,
+        ContextSourceMetadataQuoteOutput, ContextSourceMetadataQuoteRequest, ContextSourceOutput,
+        ContextSourceProjection, ContextSourceRequest, ContextSourceSnippet, EvidenceAnchor,
+        EvidenceProvider, EvidenceProviderInvocation, EvidenceProviderObservation,
+        EvidenceProviderObservationKind, EvidenceProviderOutput, EvidenceSeedKind,
     },
     context_pack::{CONTEXT_PACK_TIMEOUT_MS, ContextPackService, ContextPackServiceError},
     policy::{BudgetCharge, CancellationSignal},
@@ -31,7 +33,7 @@ use rootlight_agent::{
     },
 };
 use rootlight_ids::{ContentHash, FileId, GenerationId, RepositoryId, SymbolId};
-use rootlight_ir::{CoverageStatus, LineRange, SourceRef, SourceSpan};
+use rootlight_ir::{CoverageStatus, LineRange, SourceRef, SourceSpan, SourceTextEncoding};
 use rootlight_mcp_contract::{
     ErrorCode, PublicError, RepositorySelector, SchemaVersion, TrustClassification,
     completeness::{CompletenessState, LimitingResourceKind},
@@ -83,6 +85,8 @@ struct FakePort {
     definition_candidates: usize,
     candidate_tokens: u64,
     signature_bytes: Vec<usize>,
+    encoded_source: Option<(String, SourceTextEncoding)>,
+    source_requests: Mutex<Vec<ContextSourceRequest>>,
     support_all_providers: bool,
 }
 
@@ -100,6 +104,8 @@ impl FakePort {
             definition_candidates: 1,
             candidate_tokens: 32,
             signature_bytes: vec![1],
+            encoded_source: None,
+            source_requests: Mutex::new(Vec::new()),
             support_all_providers: false,
         }
     }
@@ -195,12 +201,36 @@ impl ContextEvidencePort<TestCancellation> for FakePort {
                 let candidate_symbol = SymbolId::from_bytes(symbol_bytes);
                 let mut file_bytes = [0; 20];
                 file_bytes.copy_from_slice(&digest[12..]);
+                let raw_source = self
+                    .encoded_source
+                    .as_ref()
+                    .map(|(text, encoding)| encoded_fixture_bytes(text, *encoding));
+                let source_length = raw_source.as_ref().map_or_else(
+                    || {
+                        self.signature_bytes
+                            .iter()
+                            .copied()
+                            .max()
+                            .unwrap_or(1)
+                            .max(32)
+                    },
+                    Vec::len,
+                );
+                let source_hash = raw_source
+                    .as_ref()
+                    .map_or(ContentHash::from_bytes(digest), |bytes| {
+                        ContentHash::from_bytes(*blake3::hash(bytes).as_bytes())
+                    });
                 let definition = SourceRef::new(
                     invocation.repository(),
                     invocation.generation(),
-                    SourceSpan::new(FileId::from_bytes(file_bytes), 0, 32)
-                        .expect("fixture source span is valid"),
-                    ContentHash::from_bytes(digest),
+                    SourceSpan::new(
+                        FileId::from_bytes(file_bytes),
+                        0,
+                        u64::try_from(source_length).unwrap(),
+                    )
+                    .expect("fixture source span is valid"),
+                    source_hash,
                     Some(LineRange::new(1, 2).expect("fixture line range is valid")),
                 );
                 EvidenceProviderObservation {
@@ -238,12 +268,28 @@ impl ContextEvidencePort<TestCancellation> for FakePort {
         Box::pin(async move { Ok(output) })
     }
 
+    fn quote_source_metadata(
+        &self,
+        request: ContextSourceMetadataQuoteRequest,
+        _context: ContextEvidenceCallContext<TestCancellation>,
+    ) -> AgentPortFuture<Result<ContextSourceMetadataQuoteOutput, ContextEvidencePortError>> {
+        let output = fixture_metadata_quote(&request);
+        Box::pin(async move { Ok(output) })
+    }
+
     fn materialize_source(
         &self,
         request: ContextSourceRequest,
         _context: ContextEvidenceCallContext<TestCancellation>,
     ) -> AgentPortFuture<Result<ContextSourceOutput, ContextEvidencePortError>> {
+        self.source_requests
+            .lock()
+            .expect("source request lock is available")
+            .push(request.clone());
         let signature_bytes = self.signature_bytes.clone();
+        let encoded_source = self.encoded_source.clone();
+        let maximum = usize::try_from(request.max_bytes_per_snippet).unwrap();
+        let include_snippets = request.include_snippets;
         let materials = request
             .targets
             .into_iter()
@@ -254,18 +300,45 @@ impl ContextEvidencePort<TestCancellation> for FakePort {
                     .copied()
                     .or_else(|| signature_bytes.last().copied())
                     .unwrap_or(1);
+                let (content, encoding) = encoded_source.as_ref().map_or_else(
+                    || ("s".repeat(bytes.min(maximum)), None),
+                    |(text, encoding)| {
+                        (
+                            fixture_text_prefix(text, maximum).to_owned(),
+                            Some(*encoding),
+                        )
+                    },
+                );
+                let text_bytes = u64::try_from(content.len()).unwrap();
+                let physical_bytes = u64::try_from(
+                    encoding.map_or(content.len(), |_| content.encode_utf16().count() * 2),
+                )
+                .unwrap();
+                let start_byte = target.source_ref.span().start_byte();
+                let end_byte = start_byte + physical_bytes;
+                let signature = fixture_signature(&content, maximum.min(1_024));
+                let snippet = include_snippets.then(|| ContextSourceSnippet {
+                    content,
+                    language: "rust".to_owned(),
+                    truncated: end_byte < target.source_ref.span().end_byte(),
+                });
                 ContextSourceMaterial {
                     candidate_id: target.candidate_id,
                     source_ref: target.source_ref,
-                    signature: Some("s".repeat(bytes)),
-                    snippet: None,
+                    projection: ContextSourceProjection {
+                        start_byte,
+                        end_byte,
+                        encoding,
+                        text_bytes,
+                    },
+                    signature,
+                    snippet,
                 }
             })
             .collect::<Vec<_>>();
         let source_bytes = materials
             .iter()
-            .filter_map(|material| material.signature.as_ref())
-            .map(|signature| u64::try_from(signature.len()).unwrap_or(u64::MAX))
+            .map(|material| material.projection.end_byte - material.projection.start_byte)
             .sum();
         let result_count = u64::try_from(materials.len()).unwrap_or(u64::MAX);
         let output = ContextSourceOutput {
@@ -281,6 +354,71 @@ impl ContextEvidencePort<TestCancellation> for FakePort {
         };
         Box::pin(async move { Ok(output) })
     }
+}
+
+fn fixture_metadata_quote(
+    request: &ContextSourceMetadataQuoteRequest,
+) -> ContextSourceMetadataQuoteOutput {
+    let mut entries = Vec::new();
+    for target in &request.targets {
+        if entries
+            .iter()
+            .any(|entry: &ContextSourceMetadataQuoteEntry| entry.source_ref == target.source_ref)
+        {
+            continue;
+        }
+        let count = u64::try_from(entries.len() + 1).unwrap();
+        entries.push(ContextSourceMetadataQuoteEntry {
+            source_ref: target.source_ref.clone(),
+            prefix_fixed_upper: ContextSourceMetadataFixedUpper {
+                json_bytes: count * 2048,
+                memory_bytes: count * 2048,
+                rows: count,
+                traversal_facts: count * 10,
+                paths: count,
+            },
+        });
+    }
+    let results = u64::try_from(entries.len()).unwrap();
+    ContextSourceMetadataQuoteOutput {
+        repository: request.repository,
+        generation: request.generation,
+        quote_policy_version: CONTEXT_SOURCE_METADATA_QUOTE_POLICY_VERSION,
+        entries,
+        completeness: rootlight_mcp_contract::completeness::ResultCompleteness::complete(),
+        usage: BudgetCharge {
+            results,
+            tokens: 1,
+            ..BudgetCharge::default()
+        },
+    }
+}
+
+fn encoded_fixture_bytes(text: &str, encoding: SourceTextEncoding) -> Vec<u8> {
+    text.encode_utf16()
+        .flat_map(|unit| match encoding {
+            SourceTextEncoding::Utf16Le => unit.to_le_bytes(),
+            SourceTextEncoding::Utf16Be => unit.to_be_bytes(),
+        })
+        .collect()
+}
+
+fn fixture_text_prefix(text: &str, maximum: usize) -> &str {
+    let mut end = text.len().min(maximum);
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    &text[..end]
+}
+
+fn fixture_signature(text: &str, maximum: usize) -> Option<String> {
+    let line = text.lines().find(|line| !line.trim().is_empty())?.trim();
+    let end = line
+        .char_indices()
+        .find(|(_, scalar)| matches!(scalar, '{' | ';'))
+        .map_or(line.len(), |(start, scalar)| start + scalar.len_utf8());
+    let declaration = fixture_text_prefix(&line[..end], maximum);
+    (!declaration.is_empty()).then(|| declaration.to_owned())
 }
 
 impl ContextContinuationCodec for FakePort {
@@ -1329,6 +1467,79 @@ async fn pinned_identity_path_skips_resolution_and_preserves_child_behavior() {
         output.usage.estimated_tokens,
         u64::from(output.data.token_accounting.estimated_total)
     );
+}
+
+#[tokio::test]
+async fn encoded_source_prefix_keeps_full_approved_reference_and_physical_cost() {
+    let authored = format!(
+        "\u{feff}fn encoded_fixture() {{\r\n    let _ = \"☃ {}\"; }}",
+        "🧭".repeat(4_096)
+    );
+    for encoding in [SourceTextEncoding::Utf16Le, SourceTextEncoding::Utf16Be] {
+        let raw = encoded_fixture_bytes(&authored, encoding);
+        let hash = ContentHash::from_bytes(*blake3::hash(&raw).as_bytes());
+        let mut fixture = FakePort::new(Ok(identity(generation(2))), None);
+        fixture.encoded_source = Some((authored.clone(), encoding));
+        let port = Arc::new(fixture);
+        let mut request = input(generation(2));
+        request.source_policy = Some(SourcePolicy::FocusedSnippets);
+        request.response_profile = Some(ResponseProfile::Standard);
+        request.token_budget = 20_000;
+        let output = ContextPackService
+            .execute(
+                Arc::clone(&port),
+                request,
+                repository(),
+                TestCancellation(false),
+            )
+            .await
+            .expect("encoded prefix pack is published");
+        let calls = port.source_requests.lock().unwrap();
+        assert_eq!(calls.len(), 1);
+        let call = &calls[0];
+        assert_eq!(call.targets.len(), 1);
+        let approved = &call.targets[0].source_ref;
+        assert_eq!(approved.generation(), generation(2));
+        assert_eq!(approved.content_hash(), hash);
+        assert_eq!(approved.span().start_byte(), 0);
+        assert_eq!(
+            approved.span().end_byte(),
+            u64::try_from(raw.len()).unwrap()
+        );
+        assert_eq!(approved.line_hint(), Some(LineRange::new(1, 2).unwrap()));
+        assert!((64..=2_048).contains(&call.max_bytes_per_snippet));
+        let item = output
+            .data
+            .items
+            .iter()
+            .find(|item| item.source_ref.as_ref() == Some(approved))
+            .expect("approved source is retained on the selected item");
+        let snippet = item
+            .snippet
+            .as_ref()
+            .expect("bounded encoded body is materialized");
+        assert_eq!(&snippet.source_ref, approved);
+        let mut text_bytes = 0_u32;
+        let expected = authored
+            .chars()
+            .take_while(|scalar| {
+                let next = text_bytes + u32::try_from(scalar.len_utf8()).unwrap();
+                if next > call.max_bytes_per_snippet {
+                    return false;
+                }
+                text_bytes = next;
+                true
+            })
+            .collect::<String>();
+        assert_eq!(snippet.content, expected);
+        assert!(snippet.content.contains('🧭'));
+        assert!(snippet.content.contains("\r\n"));
+        assert!(snippet.truncated);
+        assert_eq!(snippet.trust, TrustClassification::UntrustedRepositoryData);
+        let physical = u64::try_from(snippet.content.encode_utf16().count() * 2).unwrap();
+        assert_eq!(output.usage.source_bytes, physical);
+        assert_ne!(physical, u64::try_from(snippet.content.len()).unwrap());
+    }
 }
 
 #[tokio::test]

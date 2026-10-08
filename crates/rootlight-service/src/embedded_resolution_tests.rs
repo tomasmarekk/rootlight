@@ -85,6 +85,7 @@ fn embedded_native_resolution_and_replay_preserve_source_scopes() {
             &snapshot,
             false,
             host,
+            "utf-8",
             &service.analysis_limits,
         )
         .unwrap();
@@ -196,6 +197,7 @@ fn embedded_native_resolution_and_replay_preserve_source_scopes() {
             &snapshot,
             false,
             host,
+            "utf-8",
             &limits,
         )
         .unwrap();
@@ -208,6 +210,7 @@ fn embedded_native_resolution_and_replay_preserve_source_scopes() {
             &snapshot,
             false,
             host,
+            "utf-8",
             &limits,
         )
         .unwrap();

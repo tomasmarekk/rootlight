@@ -18,7 +18,7 @@ use cap_std::{ambient_authority, fs::Dir};
 #[cfg(test)]
 use flate2::{Compression, write::GzEncoder};
 use rootlight_cancel::{Cancellation, CancellationReason};
-use rootlight_catalog::OracleReader;
+use rootlight_catalog::{OracleReadAdmissionError, OracleReader};
 use rootlight_config::DEFAULT_MAX_SOURCE_FILE_BYTES;
 use rootlight_discovery::IncrementalDiscoveryBaseline;
 use rootlight_ids::{
@@ -36,8 +36,8 @@ use rootlight_query::project_source_fallback_document_with_text_limit;
 use rootlight_search::{BuildBudget, EphemeralLexicalIndexBuilder, LexicalIndex};
 use rootlight_storage::{
     GENERATION_CONTRACT_VERSION, GenerationBudget, GenerationContext, GenerationContractVersion,
-    GenerationMetadata, GenerationReader, GenerationSnapshot, IdentityVerificationError,
-    IdentityVerifiedGeneration, SourceFileCatalog, SourceFileCatalogEntry,
+    GenerationMetadata, GenerationSnapshot, IdentityVerificationError, IdentityVerifiedGeneration,
+    SourceFileCatalog, SourceFileCatalogEntry,
 };
 use rootlight_vfs::{
     MAX_PATH_BYTES, MAX_PATH_COMPONENTS, MAX_SNAPSHOT_BYTES, RelativePath, SourceSnapshot,
@@ -5931,8 +5931,11 @@ fn recovery_snapshot_memory_bytes(
 ) -> Result<u64, FirstSliceError> {
     // JSON-gzip recovery retains both encoded and decoded buffers. MessagePack
     // streams decoding, but reserves the same envelope for verification work.
+    // Each derived explain posting consumes one serialized symbol ID. Two
+    // additional document charges conservatively admit posting sort/build
+    // workspace before snapshot construction; retained charges use capacities.
     // File-only snapshots also retain normalized paths outside the sidecar.
-    let document_copies = if file_only { 9 } else { 1 };
+    let document_copies = if file_only { 11 } else { 3 };
     plan.serialized_document_bytes
         .checked_mul(document_copies)
         .and_then(|bytes| bytes.checked_add(plan.encoded_bytes))
@@ -6726,24 +6729,41 @@ fn restore_oracle_generation(
     let allocated_bytes = oracle
         .allocated_bytes(context)
         .map_err(|error| map_catalog_error(&error, cancellation))?;
-    if let Some((reservation, staging_bytes)) = admission {
-        let stats = oracle.stats();
-        // Oracle header validation checks text lengths without materializing the
-        // document; read() checks the same header and row cardinalities again.
-        // Charge fixed record/association work and worst-case JSON text escaping,
-        // not SQLite file size. This logical envelope is not an exact RSS bound.
-        let text_copies = if source_files.is_empty() { 6 } else { 14 };
-        let bytes = stats
-            .stored_rows()
-            .checked_mul(4 * 1024)
-            .and_then(|bytes| bytes.checked_add(stats.text_bytes().checked_mul(text_copies)?))
-            .and_then(|bytes| bytes.checked_add(staging_bytes))
-            .ok_or(FirstSliceError::Limits)?;
-        reservation.resize(bytes, true)?;
-    }
     let persisted = oracle
-        .read(context)
-        .map_err(|error| map_catalog_error(&error, cancellation))?;
+        .read_with_admission(context, |plan| {
+            check_cancellation(cancellation)?;
+            if let Some((reservation, staging_bytes)) = admission {
+                // The plan authenticates row cardinalities and the largest
+                // opaque payload inside the same transaction, before any
+                // payload maps. Its closed-key registry allowance does not
+                // replace text, posting work, or sidecar charges, and the
+                // resulting logical reservation is not an exact RSS bound.
+                let text_copies = if source_files.is_empty() { 6 } else { 14 };
+                let index_build_bytes_per_row = u64::try_from(
+                    4 * std::mem::size_of::<(rootlight_ids::SymbolId, usize)>()
+                        + 2 * std::mem::size_of::<usize>(),
+                )
+                .map_err(|_| FirstSliceError::Limits)?;
+                let bytes = plan
+                    .materialization_bytes()
+                    .checked_add(
+                        plan.physical_rows()
+                            .checked_mul(index_build_bytes_per_row)
+                            .ok_or(FirstSliceError::Limits)?,
+                    )
+                    .and_then(|bytes| {
+                        bytes.checked_add(plan.stats().text_bytes().checked_mul(text_copies)?)
+                    })
+                    .and_then(|bytes| bytes.checked_add(staging_bytes))
+                    .ok_or(FirstSliceError::Limits)?;
+                reservation.resize(bytes, true)?;
+            }
+            check_cancellation(cancellation)
+        })
+        .map_err(|error| match error {
+            OracleReadAdmissionError::Catalog(error) => map_catalog_error(&error, cancellation),
+            OracleReadAdmissionError::Admission(error) => error,
+        })?;
     let metadata = persisted.metadata();
     if metadata.repository() != expectation.repository
         || metadata.generation() != expectation.generation
@@ -6770,7 +6790,10 @@ fn map_persisted_identity_error(
         return cancelled;
     }
     match error {
-        error @ IdentityVerificationError::Control(_) => map_identity_error(error, cancellation),
+        error @ (IdentityVerificationError::Control(_)
+        | IdentityVerificationError::ResourceUnavailable) => {
+            map_identity_error(error, cancellation)
+        }
         _ => FirstSliceError::CatalogCorrupt,
     }
 }
@@ -8502,6 +8525,35 @@ mod tests {
                 MAX_FIRST_SLICE_GENERATION_MEMORY_BYTES + 1,
             ),
             Err(FirstSliceError::CatalogCorrupt)
+        );
+    }
+
+    #[test]
+    fn persisted_identity_allocation_failure_does_not_quarantine() {
+        let cancellation = Cancellation::new();
+        assert_eq!(
+            map_persisted_identity_error(
+                IdentityVerificationError::ResourceUnavailable,
+                &cancellation
+            ),
+            FirstSliceError::ResourceUnavailable {
+                resource: super::super::FirstSliceResource::MemoryBytes,
+            }
+        );
+        assert_eq!(
+            map_persisted_identity_error(
+                IdentityVerificationError::InvalidGeneration,
+                &cancellation
+            ),
+            FirstSliceError::CatalogCorrupt
+        );
+        cancellation.cancel(CancellationReason::ClientRequest);
+        assert_eq!(
+            map_persisted_identity_error(
+                IdentityVerificationError::ResourceUnavailable,
+                &cancellation
+            ),
+            FirstSliceError::Cancelled(CancellationReason::ClientRequest)
         );
     }
 

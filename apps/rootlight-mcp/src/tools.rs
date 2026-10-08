@@ -7,6 +7,9 @@ use std::{fmt, future::Future, io, pin::Pin, sync::Arc};
 
 use rootlight_agent::policy::BudgetLimits;
 use rootlight_json_schema::{self as jsonschema, Validator};
+use rootlight_mcp_contract::source_text::{
+    SourceChunkV1_3, SourceReadInputV1_3, SourceReadOutputV1_3, SourceTextEncodingRequest,
+};
 use rootlight_mcp_contract::{
     CodeLocateInput, CodeLocateOutput, ContinuationCursor, DetailKey, ErrorCode, ExposureProfile,
     GenerationSelector, McpTool, NextAction, OperationStatusInput, OperationStatusOutput,
@@ -362,7 +365,7 @@ where
                 .unwrap_or_else(|_| internal_tool_error("tool error validation failed"));
             return cancel_or(&cancellation, response);
         };
-        let arguments_value = Value::Object(arguments);
+        let mut arguments_value = Value::Object(arguments);
         let typed_input =
             match validate_contract_input(contract, selected_version, &arguments_value, profile) {
                 Ok(input) => input,
@@ -386,6 +389,16 @@ where
             Ok(limits) => limits,
             Err(()) => return internal_tool_error("tool input budget invariant failed"),
         };
+        if contract.tool == VerticalTool::SourceRead
+            && selected_version == ContractSelection::Current
+        {
+            let arguments = arguments_value
+                .as_object_mut()
+                .expect("arguments are an object");
+            if arguments.get("encoding").is_none_or(Value::is_null) {
+                arguments.insert("encoding".into(), Value::String("lossless_text".into()));
+            }
+        }
         let Value::Object(arguments) = arguments_value else {
             return cancel_or(
                 &cancellation,
@@ -416,7 +429,35 @@ where
                 return cancel_or(&cancellation, internal_tool_error(failure.message()));
             }
         };
-        let output = Value::Object(output);
+        let mut output = Value::Object(output);
+        if selected_version != ContractSelection::Current
+            && contract.tool == VerticalTool::OperationStatus
+            && output
+                .pointer("/data/incremental/invalidation_trace")
+                .is_some()
+        {
+            let Ok(current) =
+                select_output_version(contract.tool, ContractSelection::Current, output)
+            else {
+                return cancel_or(
+                    &cancellation,
+                    internal_tool_error("tool output version conversion failed"),
+                );
+            };
+            // Projection must not conceal malformed or over-budget decisions
+            // in a suffix that the retained trace vocabulary cannot express.
+            if !contract
+                .output_validator(ContractSelection::Current)
+                .is_valid(&current)
+                || !typed_output_is_valid(contract.tool, &typed_input, &current)
+            {
+                return cancel_or(
+                    &cancellation,
+                    internal_tool_error("tool output failed validation"),
+                );
+            }
+            output = current;
+        }
         if selected_version != ContractSelection::Current
             && requires_entity_contract(contract.tool, selected_version, &output)
         {
@@ -1075,7 +1116,7 @@ impl MaterializedToolValidator {
         })
     }
 
-    /// Validates one materialized child request through the direct-call path.
+    /// Validates a materialized child, retaining batch 1.0 source-read semantics.
     pub(crate) fn validate(
         &self,
         tool: VerticalTool,
@@ -1091,7 +1132,11 @@ impl MaterializedToolValidator {
             })?;
         validate_contract_input(
             contract,
-            ContractSelection::Current,
+            if tool == VerticalTool::SourceRead {
+                ContractSelection::PreLabel
+            } else {
+                ContractSelection::Current
+            },
             &Value::Object(arguments.clone()),
             profile,
         )
@@ -1134,7 +1179,15 @@ fn validate_contract_input(
             |error| MaterializedInputError::Public(Box::new(error)),
         ));
     }
-    let typed_input = decode_typed_input(contract.tool, arguments).map_err(|()| {
+    let decoded =
+        if contract.tool == VerticalTool::SourceRead && selection == ContractSelection::Current {
+            SourceReadInputV1_3::deserialize(arguments)
+                .map(TypedInput::SourceReadCurrent)
+                .map_err(|_| ())
+        } else {
+            decode_typed_input(contract.tool, arguments)
+        };
+    let typed_input = decoded.map_err(|()| {
         classify_typed_decode_error(contract.tool, arguments).map_or(
             MaterializedInputError::Invalid {
                 instance_path: None,
@@ -1805,6 +1858,7 @@ enum TypedInput {
     Other,
     RepoList(RepoListInput),
     SourceRead(SourceReadInput),
+    SourceReadCurrent(SourceReadInputV1_3),
     ContextPack(ContextPackInput),
     QueryAdvanced(QueryAdvancedInput),
     QueryBatch(QueryBatchInput),
@@ -2428,30 +2482,7 @@ fn typed_output_is_valid(tool: VerticalTool, input: &TypedInput, output: &Value)
         VerticalTool::HistoryCompare => HistoryCompareOutputV1_6::deserialize(output).is_ok(),
         VerticalTool::PlanChange => PlanChangeOutputV1_1::deserialize(output).is_ok(),
         VerticalTool::ContextPack => ContextPackOutputV1_1::deserialize(output).is_ok(),
-        VerticalTool::SourceRead => {
-            let Ok(output) = SourceReadOutputV1_2::deserialize(output) else {
-                return false;
-            };
-            let TypedInput::SourceRead(input) = input else {
-                return false;
-            };
-            let EntityToolResponse::Success(output) = output else {
-                return true;
-            };
-            let metadata_only = output.truncated
-                && output.data.stale_references.is_empty()
-                && output.data.elisions.is_empty();
-            (!metadata_only || output.data.conditional_activity.iter().any(|assessment| assessment.reason.0 == Some(rootlight_mcp_contract::conditional_activity::ConditionalActivityReason::ScanIncomplete)))
-                && conditional_output_is_valid(&output.data.conditional_activity, output.repository.repository_id, output.generation.generation_id, &output.warnings, output.truncated, &output.completeness, output.next_cursor.0.is_some()) && source_read_fields_are_valid(
-                input,
-                output.repository.repository_id,
-                output.generation.generation_id,
-                output.trust,
-                output.usage.source_bytes,
-                output.data.total_source_bytes,
-                &output.data.chunks,
-            )
-        }
+        VerticalTool::SourceRead => source_read_current_output_is_valid(input, output),
     }
 }
 
@@ -2488,6 +2519,30 @@ fn typed_selected_output_is_valid(
             _ => false,
         },
         ContractSelection::PreLabel => match tool {
+            VerticalTool::SourceRead => {
+                let Ok(output) = SourceReadOutputV1_2::deserialize(output) else {
+                    return false;
+                };
+                let TypedInput::SourceRead(input) = input else {
+                    return false;
+                };
+                let EntityToolResponse::Success(output) = output else {
+                    return true;
+                };
+                let metadata_only = output.truncated
+                    && output.data.stale_references.is_empty()
+                    && output.data.elisions.is_empty();
+                (!metadata_only || output.data.conditional_activity.iter().any(|assessment| assessment.reason.0 == Some(rootlight_mcp_contract::conditional_activity::ConditionalActivityReason::ScanIncomplete)))
+                && conditional_output_is_valid(&output.data.conditional_activity, output.repository.repository_id, output.generation.generation_id, &output.warnings, output.truncated, &output.completeness, output.next_cursor.0.is_some()) && source_read_fields_are_valid(
+                input,
+                output.repository.repository_id,
+                output.generation.generation_id,
+                output.trust,
+                output.usage.source_bytes,
+                output.data.total_source_bytes,
+                &output.data.chunks,
+            )
+            }
             VerticalTool::QueryAdvanced => QueryAdvancedOutputV1_6::deserialize(output).is_ok(),
             VerticalTool::CodeLocate => CodeLocateOutputV1_8::deserialize(output).is_ok(),
             VerticalTool::SymbolExplain => SymbolExplainOutputV1_8::deserialize(output).is_ok(),
@@ -2606,6 +2661,64 @@ fn source_read_output_invariants_are_valid(
         output.data.total_source_bytes,
         &output.data.chunks,
     )
+}
+
+fn source_read_current_output_is_valid(input: &TypedInput, output: &Value) -> bool {
+    let Ok(output) = SourceReadOutputV1_3::deserialize(output) else {
+        return false;
+    };
+    let EntityToolResponse::Success(output) = output else {
+        return true;
+    };
+    let (controls, mode) = match input {
+        TypedInput::SourceReadCurrent(input) => (
+            input.clone().into_legacy_controls(),
+            input.effective_encoding(),
+        ),
+        TypedInput::SourceRead(input) => (
+            input.clone(),
+            match input.encoding.unwrap_or(
+                rootlight_mcp_contract::vertical::SourceEncodingRequest::Utf8LosslessWhenValid,
+            ) {
+                rootlight_mcp_contract::vertical::SourceEncodingRequest::Utf8LosslessWhenValid => {
+                    SourceTextEncodingRequest::Utf8LosslessWhenValid
+                }
+                rootlight_mcp_contract::vertical::SourceEncodingRequest::BytesBase64 => {
+                    SourceTextEncodingRequest::BytesBase64
+                }
+            },
+        ),
+        _ => return false,
+    };
+    let repository = output.repository.repository_id;
+    let generation = output.generation.generation_id;
+    let maximum = controls
+        .max_source_bytes
+        .into_iter()
+        .chain(
+            controls
+                .budget
+                .as_ref()
+                .and_then(|budget| budget.max_source_bytes),
+        )
+        .min();
+    let metadata_only = output.truncated
+        && output.data.stale_references.is_empty()
+        && output.data.elisions.is_empty();
+    output.trust == TrustClassification::UntrustedRepositoryData
+        && output.usage.source_bytes == u64::from(output.data.total_source_bytes)
+        && maximum.is_none_or(|maximum| output.data.total_source_bytes <= maximum)
+        && match controls.repository { RepositorySelector::ById(selector) => selector.repository_id == repository, _ => true }
+        && controls.generation.as_ref().is_none_or(|selector| match selector { GenerationSelector::Explicit(requested) => *requested == generation, _ => true })
+        && output.data.chunks.iter().all(|chunk| {
+            chunk.source_ref().repository() == repository && chunk.source_ref().generation() == generation && chunk.trust() == output.trust
+                && matches!((mode, chunk),
+                    (SourceTextEncodingRequest::LosslessText, SourceChunkV1_3::Lossless(_))
+                    | (SourceTextEncodingRequest::Utf8LosslessWhenValid, SourceChunkV1_3::Legacy(rootlight_mcp_contract::vertical::SourceChunk { encoding: rootlight_mcp_contract::vertical::SourceEncoding::Utf8, .. }))
+                    | (SourceTextEncodingRequest::BytesBase64, SourceChunkV1_3::Legacy(rootlight_mcp_contract::vertical::SourceChunk { encoding: rootlight_mcp_contract::vertical::SourceEncoding::Base64, .. })))
+        })
+        && (!metadata_only || output.data.conditional_activity.iter().any(|assessment| assessment.reason.0 == Some(rootlight_mcp_contract::conditional_activity::ConditionalActivityReason::ScanIncomplete)))
+        && conditional_output_is_valid(&output.data.conditional_activity, repository, generation, &output.warnings, output.truncated, &output.completeness, output.next_cursor.0.is_some())
 }
 
 fn source_read_fields_are_valid(
@@ -2862,8 +2975,9 @@ fn requires_entity_contract(
     selection: ContractSelection,
     output: &Value,
 ) -> bool {
-    if selection != ContractSelection::Current
-        && matches!(tool, VerticalTool::CodeLocate | VerticalTool::SourceRead)
+    if (tool == VerticalTool::CodeLocate && selection != ContractSelection::Current
+        || tool == VerticalTool::SourceRead
+            && matches!(selection.schema_version(tool), "1.0" | "1.1"))
         && output
             .pointer("/data/conditional_activity")
             .and_then(Value::as_array)
@@ -3044,7 +3158,7 @@ fn typed_error_output_is_valid(tool: VerticalTool, output: &Value) -> bool {
         VerticalTool::HistoryCompare => HistoryCompareOutputV1_6::deserialize(output).is_ok(),
         VerticalTool::PlanChange => PlanChangeOutputV1_1::deserialize(output).is_ok(),
         VerticalTool::ContextPack => ContextPackOutputV1_1::deserialize(output).is_ok(),
-        VerticalTool::SourceRead => SourceReadOutputV1_2::deserialize(output).is_ok(),
+        VerticalTool::SourceRead => SourceReadOutputV1_3::deserialize(output).is_ok(),
     }
 }
 
@@ -3061,6 +3175,7 @@ fn typed_selected_error_output_is_valid(
             _ => false,
         },
         ContractSelection::PreLabel => match tool {
+            VerticalTool::SourceRead => SourceReadOutputV1_2::deserialize(output).is_ok(),
             VerticalTool::QueryAdvanced => QueryAdvancedOutputV1_6::deserialize(output).is_ok(),
             VerticalTool::CodeLocate => CodeLocateOutputV1_8::deserialize(output).is_ok(),
             VerticalTool::SymbolExplain => SymbolExplainOutputV1_8::deserialize(output).is_ok(),
@@ -3161,6 +3276,35 @@ fn select_output_version(
     mut output: Value,
 ) -> Result<Value, ()> {
     if selection == ContractSelection::Current {
+        if tool == VerticalTool::SourceRead {
+            let data = output
+                .get_mut("data")
+                .and_then(Value::as_object_mut)
+                .ok_or(())?;
+            if !data.contains_key("total_text_bytes") {
+                let total = data
+                    .get("chunks")
+                    .and_then(Value::as_array)
+                    .ok_or(())?
+                    .iter()
+                    .try_fold(0_u64, |total, chunk| {
+                        let bytes = match chunk.get("encoding").and_then(Value::as_str).ok_or(())? {
+                            "utf8" => u64::try_from(
+                                chunk
+                                    .get("content")
+                                    .and_then(Value::as_str)
+                                    .ok_or(())?
+                                    .len(),
+                            )
+                            .map_err(|_| ())?,
+                            "base64" => 0,
+                            _ => return Err(()),
+                        };
+                        total.checked_add(bytes).ok_or(())
+                    })?;
+                data.insert("total_text_bytes".into(), Value::from(total));
+            }
+        }
         output.as_object_mut().ok_or(())?.insert(
             "schema_version".to_owned(),
             Value::String(selection.schema_version(tool).to_owned()),
@@ -3176,7 +3320,22 @@ fn select_output_version(
         .get_mut("data")
         .and_then(Value::as_object_mut)
         .ok_or(())?;
-    if matches!(tool, VerticalTool::CodeLocate | VerticalTool::SourceRead) {
+    if tool == VerticalTool::SourceRead {
+        data.remove("total_text_bytes");
+        if data
+            .get("chunks")
+            .and_then(Value::as_array)
+            .ok_or(())?
+            .iter()
+            .any(|chunk| chunk.get("encoding").and_then(Value::as_str) == Some("lossless_text"))
+        {
+            return Err(());
+        }
+    }
+    if tool == VerticalTool::CodeLocate
+        || tool == VerticalTool::SourceRead
+            && matches!(selection.schema_version(tool), "1.0" | "1.1")
+    {
         if data
             .get("conditional_activity")
             .and_then(Value::as_array)
@@ -3195,6 +3354,7 @@ fn select_output_version(
     }
     if tool == VerticalTool::OperationStatus {
         select_public_error_version(tool, selection, data.get_mut("error").ok_or(())?)?;
+        retain_operation_invalidation_trace_prefix(data)?;
     }
     match tool {
         VerticalTool::RepoIndex => match selection {
@@ -3457,6 +3617,38 @@ fn remove_operation_fact_work(data: &mut Map<String, Value>) -> Result<(), ()> {
         return Ok(());
     }
     incremental.as_object_mut().ok_or(())?.remove("fact_work");
+    Ok(())
+}
+
+fn retain_operation_invalidation_trace_prefix(data: &mut Map<String, Value>) -> Result<(), ()> {
+    let Some(incremental) = data.get_mut("incremental") else {
+        return Ok(());
+    };
+    if incremental.is_null() {
+        return Ok(());
+    }
+    let Some(trace) = incremental
+        .as_object_mut()
+        .ok_or(())?
+        .get_mut("invalidation_trace")
+    else {
+        return Ok(());
+    };
+    let trace = trace.as_object_mut().ok_or(())?;
+    let entries = trace
+        .get_mut("entries")
+        .and_then(Value::as_array_mut)
+        .ok_or(())?;
+    let first_unrepresentable = entries.iter().position(|entry| {
+        rootlight_mcp_contract::vertical::OperationInvalidationTraceEntry::deserialize(entry)
+            .is_err()
+    });
+    if let Some(first_unrepresentable) = first_unrepresentable {
+        // The trace is a deterministic prefix, not a filterable sample: later
+        // decisions cannot leapfrog an input the retained vocabulary omits.
+        entries.truncate(first_unrepresentable);
+        trace.insert("complete".into(), Value::Bool(false));
+    }
     Ok(())
 }
 
@@ -3769,7 +3961,7 @@ mod tests {
             "../../../tests/fixtures/mcp/1.0/tool-contracts.json"
         ))
         .expect("retained tool contracts are valid JSON");
-        fixture["tools"]
+        let mut input = fixture["tools"]
             .as_array()
             .expect("tool contracts contain an array")
             .iter()
@@ -3777,7 +3969,207 @@ mod tests {
             .unwrap_or_else(|| panic!("retained tool contract {name} exists"))["input"]
             .as_object()
             .expect("retained input is an object")
-            .clone()
+            .clone();
+        if name == "source.read" {
+            input.insert("encoding".into(), json!("utf8_lossless_when_valid"));
+        }
+        input
+    }
+
+    #[derive(Debug, Default)]
+    struct SourceEncodingRecordingExecutor {
+        modes: std::sync::Mutex<Vec<Option<String>>>,
+    }
+
+    impl ToolExecutor for SourceEncodingRecordingExecutor {
+        fn execute(
+            &self,
+            tool: VerticalTool,
+            arguments: Map<String, Value>,
+            _profile: ExposureProfile,
+            _cancellation: RequestCancellation,
+        ) -> ToolExecutionFuture {
+            assert_eq!(tool, VerticalTool::SourceRead);
+            let mode = arguments
+                .get("encoding")
+                .and_then(Value::as_str)
+                .map(str::to_owned);
+            self.modes.lock().unwrap().push(mode.clone());
+            Box::pin(async move {
+                let mut output = retained_output("source.read");
+                if mode.as_deref() == Some("lossless_text") {
+                    let data = output
+                        .get_mut("data")
+                        .and_then(Value::as_object_mut)
+                        .unwrap();
+                    let chunk = data["chunks"][0].as_object_mut().unwrap();
+                    let text_bytes = chunk["content"].as_str().unwrap().len();
+                    chunk.insert("encoding".into(), json!("lossless_text"));
+                    chunk.insert("physical_encoding".into(), json!("utf-8"));
+                    data.insert("total_text_bytes".into(), json!(text_bytes));
+                }
+                Ok(output)
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn source_read_defaults_are_selected_by_exact_contract_revision() {
+        let router = ToolRouter::new(
+            SourceEncodingRecordingExecutor::default(),
+            ExposureProfile::Developer,
+        )
+        .unwrap();
+        for version in ["1.3", "1.2", "1.1", "1.0"] {
+            let mut input = retained_input("source.read");
+            input.remove("encoding");
+            let response = success(
+                router
+                    .handle(
+                        request(
+                            "tools/call",
+                            json!({
+                                "name": "source.read", "arguments": input,
+                                "_meta": {(TOOL_CONTRACT_VERSION_META_KEY): version},
+                            }),
+                        ),
+                        cancellation(),
+                    )
+                    .await,
+            );
+            assert_eq!(response["isError"], false, "{version}");
+            let output = &response["structuredContent"];
+            assert_eq!(output["schema_version"], version);
+            assert_eq!(
+                output["data"]["chunks"][0]["encoding"],
+                if version == "1.3" {
+                    "lossless_text"
+                } else {
+                    "utf8"
+                }
+            );
+            assert_eq!(
+                output["data"].get("total_text_bytes").is_some(),
+                version == "1.3"
+            );
+            assert_eq!(
+                output["data"].get("conditional_activity").is_some(),
+                matches!(version, "1.2" | "1.3")
+            );
+        }
+        assert_eq!(
+            *router.executor.modes.lock().unwrap(),
+            [Some("lossless_text".into()), None, None, None]
+        );
+    }
+
+    #[tokio::test]
+    async fn every_retained_source_read_rejects_lossless_before_backend_work() {
+        let router =
+            ToolRouter::new(FixtureExecutor::default(), ExposureProfile::Developer).unwrap();
+        for version in ["1.2", "1.1", "1.0"] {
+            let mut input = retained_input("source.read");
+            input.insert("encoding".into(), json!("lossless_text"));
+            let output = success(
+                router
+                    .handle(
+                        request(
+                            "tools/call",
+                            json!({
+                                "name": "source.read", "arguments": input,
+                                "_meta": {(TOOL_CONTRACT_VERSION_META_KEY): version},
+                            }),
+                        ),
+                        cancellation(),
+                    )
+                    .await,
+            );
+            assert_eq!(output["isError"], true);
+            assert_eq!(router.executor.calls.load(Ordering::Relaxed), 0);
+        }
+    }
+
+    #[tokio::test]
+    async fn lossless_source_result_preserves_physical_identity_and_exact_mirror_accounting() {
+        for encoding in ["utf-16le", "utf-16be"] {
+            let mut canonical = retained_output("source.read");
+            canonical["data"]["chunks"][0]["content"] = json!("\u{feff}a\r\n\u{0100}\u{1f642}");
+            canonical["data"]["chunks"][0]["encoding"] = json!("lossless_text");
+            canonical["data"]["chunks"][0]["physical_encoding"] = json!(encoding);
+            canonical["data"]["chunks"][0]["end_byte"] = json!(14);
+            canonical["data"]["chunks"][0]["end_line"] = json!(2);
+            canonical["data"]["chunks"][0]["source_ref"]["span"]["end_byte"] = json!(14);
+            canonical["data"]["chunks"][0]["source_ref"]["line_hint"]["end_line"] = json!(2);
+            canonical["data"]["total_source_bytes"] = json!(14);
+            canonical["data"]["total_text_bytes"] = json!(12);
+            canonical["usage"]["source_bytes"] = json!(14);
+            let mut input = retained_input("source.read");
+            input.remove("encoding");
+            input["references"][0]["source_ref"] =
+                canonical["data"]["chunks"][0]["source_ref"].clone();
+            let router = ToolRouter::new(
+                StaticExecutor {
+                    result: Ok(canonical.clone()),
+                },
+                ExposureProfile::Developer,
+            )
+            .unwrap();
+            let result = success(
+                router
+                    .handle(
+                        request(
+                            "tools/call",
+                            json!({"name": "source.read", "arguments": input.clone()}),
+                        ),
+                        cancellation(),
+                    )
+                    .await,
+            );
+            assert_eq!(result["isError"], false);
+            let output = &result["structuredContent"];
+            assert_eq!(output["schema_version"], "1.3");
+            assert_eq!(output["data"]["total_source_bytes"], 14);
+            assert_eq!(output["data"]["total_text_bytes"], 12);
+            assert_eq!(
+                output["data"]["chunks"][0]["source_ref"],
+                input["references"][0]["source_ref"]
+            );
+            assert_eq!(output["data"]["chunks"][0]["physical_encoding"], encoding);
+            assert!(output["data"]["chunks"][0].get("exact_content").is_none());
+            assert_eq!(
+                output["usage"]["json_bytes"],
+                json!(serde_json::to_vec(output).unwrap().len())
+            );
+            let mirror: Value =
+                serde_json::from_str(result["content"][0]["text"].as_str().unwrap()).unwrap();
+            assert_eq!(&mirror, output);
+            for field in ["total_source_bytes", "total_text_bytes"] {
+                let mut invalid = canonical.clone();
+                invalid["data"][field] = json!(11);
+                let router = ToolRouter::new(
+                    StaticExecutor {
+                        result: Ok(invalid),
+                    },
+                    ExposureProfile::Developer,
+                )
+                .unwrap();
+                assert!(matches!(
+                    router
+                        .handle(
+                            request(
+                                "tools/call",
+                                json!({"name": "source.read", "arguments": input.clone()})
+                            ),
+                            cancellation()
+                        )
+                        .await,
+                    HandlerResponse::Error {
+                        code: INTERNAL_ERROR,
+                        ..
+                    }
+                ));
+            }
+        }
     }
 
     fn independently_recount_usage(output: &mut Value) {
@@ -5004,16 +5396,16 @@ mod tests {
             observed,
             [
                 (
-                    245_955,
-                    "05e1d7805e3b280a80029f6a34d752cf14c9e36ba820d2a27c7fd5a6dd72a2a8".to_owned(),
+                    249_311,
+                    "7acc9f3508e253b474945fa332f065944254b56218fc25f00873dd76ffc46562".to_owned(),
                 ),
                 (
-                    515_714,
-                    "8a6ca8cc5b030fe396169b86eae03673763290d04a6fb1e3de4b7b000473fe26".to_owned(),
+                    519_070,
+                    "cea895cd366ea99ae5d30e73c22d0f6c49fe3d0c9b2ad4c94b89480e1ee1589e".to_owned(),
                 ),
                 (
-                    719_727,
-                    "08d299f3f34dc017021e85848e1e50d9a0e74fe5104adf99e4e547033509c3de".to_owned(),
+                    723_450,
+                    "dd9fcf97e06ad0d0fc2291d24ee2b1e2ae7c5786d225325c69e4b602b3eb70f0".to_owned(),
                 ),
             ],
             "update the reviewed Scout, Analysis, and Developer tools/list goldens"
@@ -5836,7 +6228,7 @@ mod tests {
                         "1.10",
                     ]
                 } else {
-                    &["1.0", "1.1", "1.2"]
+                    &["1.0", "1.1", "1.2", "1.3"]
                 };
                 for version in versions {
                     let result = success(router.handle(
@@ -5861,11 +6253,22 @@ mod tests {
                     } else {
                         let mut expected = output.clone();
                         expected.insert("schema_version".to_owned(), json!(version));
-                        if *version != tool.contract_version() {
+                        if *version != tool.contract_version()
+                            && !(tool == VerticalTool::SourceRead && *version == "1.2")
+                        {
                             expected["data"]
                                 .as_object_mut()
                                 .unwrap()
                                 .remove("conditional_activity");
+                        }
+                        if tool == VerticalTool::SourceRead && *version == "1.3" {
+                            let total_text_bytes: usize = expected["data"]["chunks"]
+                                .as_array()
+                                .unwrap()
+                                .iter()
+                                .map(|chunk| chunk["content"].as_str().unwrap().len())
+                                .sum();
+                            expected["data"]["total_text_bytes"] = json!(total_text_bytes);
                         }
                         let mut expected = Value::Object(expected);
                         independently_recount_usage(&mut expected);
@@ -6890,6 +7293,47 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn retained_source_read_one_two_preserves_activity_and_extracted_origin() {
+        let mut output = conditional_fixture(VerticalTool::SourceRead, "no_inventory");
+        let source = output["data"]["chunks"][0]["source_ref"].clone();
+        let mut origin = source.clone();
+        origin.as_object_mut().unwrap().remove("line_hint");
+        origin["span"]["file"] =
+            serde_json::to_value(rootlight_ids::FileId::from_bytes([87; 20])).unwrap();
+        origin["span"]["start_byte"] = json!(0);
+        origin["span"]["end_byte"] = json!(4096);
+        output["data"]["chunks"][0]["extracted_from"] = origin.clone();
+        let expected_activity = output["data"]["conditional_activity"].clone();
+        let router = ToolRouter::new(
+            StaticExecutor { result: Ok(output) },
+            ExposureProfile::Developer,
+        )
+        .unwrap();
+        let result = success(
+            router
+                .handle(
+                    request(
+                        "tools/call",
+                        json!({
+                            "name": "source.read", "arguments": retained_input("source.read"),
+                            "_meta": {(TOOL_CONTRACT_VERSION_META_KEY): "1.2"},
+                        }),
+                    ),
+                    cancellation(),
+                )
+                .await,
+        );
+        assert_eq!(result["isError"], false);
+        let output = &result["structuredContent"];
+        assert_eq!(output["schema_version"], "1.2");
+        assert_eq!(output["data"]["conditional_activity"], expected_activity);
+        assert_eq!(output["data"]["chunks"][0]["extracted_from"], origin);
+        assert_eq!(output["data"]["chunks"][0]["source_ref"], source);
+        assert!(output["data"].get("total_text_bytes").is_none());
+        SourceReadOutputV1_2::deserialize(output).unwrap();
+    }
+
+    #[tokio::test]
     async fn new_retained_slots_serve_exact_representable_empty_sidecars() {
         for (tool, version) in [
             (VerticalTool::CodeLocate, "1.9"),
@@ -6917,28 +7361,52 @@ mod tests {
     #[test]
     fn metadata_only_source_partiality_requires_exact_scan_warning_and_resource_truth() {
         let tool = VerticalTool::SourceRead;
-        let input = decode_typed_input(tool, &Value::Object(retained_input(tool.name()))).unwrap();
-        let mut output = Value::Object(conditional_fixture(tool, "scan_incomplete"));
-        output["schema_version"] = json!("1.2");
-        output["truncated"] = json!(true);
-        output["completeness"] = json!({"state": "truncated", "limiting_resources": [{"kind": "rows", "limit": null, "observed": null}], "continuation": "unavailable", "guidance": ["narrow_scope"]});
-        assert!(
-            output["data"]["stale_references"]
-                .as_array()
-                .unwrap()
-                .is_empty()
-        );
-        assert!(output["data"]["elisions"].as_array().unwrap().is_empty());
-        assert!(typed_output_is_valid(tool, &input, &output));
-        let exact_chunks = output["data"]["chunks"].clone();
-        output["warnings"][0]["message"] =
-            json!("conditional activity unproven for 2 returned items");
-        assert!(!typed_output_is_valid(tool, &input, &output));
-        output["warnings"][0]["message"] =
-            json!("conditional activity unproven for 1 returned items");
-        output["completeness"]["limiting_resources"][0]["kind"] = json!("source_bytes");
-        assert!(!typed_output_is_valid(tool, &input, &output));
-        assert_eq!(output["data"]["chunks"], exact_chunks);
+        let input_value = Value::Object(retained_input(tool.name()));
+        for selection in [ContractSelection::PreLabel, ContractSelection::Current] {
+            let input = if selection == ContractSelection::Current {
+                TypedInput::SourceReadCurrent(
+                    SourceReadInputV1_3::deserialize(&input_value).unwrap(),
+                )
+            } else {
+                decode_typed_input(tool, &input_value).unwrap()
+            };
+            let mut output = Value::Object(conditional_fixture(tool, "scan_incomplete"));
+            output["schema_version"] = json!(selection.schema_version(tool));
+            if selection == ContractSelection::Current {
+                let total_text_bytes: usize = output["data"]["chunks"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|chunk| chunk["content"].as_str().unwrap().len())
+                    .sum();
+                output["data"]["total_text_bytes"] = json!(total_text_bytes);
+            }
+            output["truncated"] = json!(true);
+            output["completeness"] = json!({"state": "truncated", "limiting_resources": [{"kind": "rows", "limit": null, "observed": null}], "continuation": "unavailable", "guidance": ["narrow_scope"]});
+            assert!(
+                output["data"]["stale_references"]
+                    .as_array()
+                    .unwrap()
+                    .is_empty()
+            );
+            assert!(output["data"]["elisions"].as_array().unwrap().is_empty());
+            assert!(typed_selected_output_is_valid(
+                tool, selection, &input, &output
+            ));
+            let exact_chunks = output["data"]["chunks"].clone();
+            output["warnings"][0]["message"] =
+                json!("conditional activity unproven for 2 returned items");
+            assert!(!typed_selected_output_is_valid(
+                tool, selection, &input, &output
+            ));
+            output["warnings"][0]["message"] =
+                json!("conditional activity unproven for 1 returned items");
+            output["completeness"]["limiting_resources"][0]["kind"] = json!("source_bytes");
+            assert!(!typed_selected_output_is_valid(
+                tool, selection, &input, &output
+            ));
+            assert_eq!(output["data"]["chunks"], exact_chunks);
+        }
     }
 
     #[tokio::test]
@@ -6990,8 +7458,7 @@ mod tests {
         }
     }
 
-    #[tokio::test]
-    async fn operation_status_serves_current_and_six_retained_minor_contracts() {
+    fn operation_status_current_output() -> Map<String, Value> {
         let Value::Object(output) = json!({
             "schema_version": "1.6",
             "data": {
@@ -7135,8 +7602,15 @@ mod tests {
         }) else {
             panic!("operation fixture is an object");
         };
+        output
+    }
+
+    #[tokio::test]
+    async fn operation_status_serves_current_and_six_retained_minor_contracts() {
         let router = ToolRouter::new(
-            StaticExecutor { result: Ok(output) },
+            StaticExecutor {
+                result: Ok(operation_status_current_output()),
+            },
             ExposureProfile::Developer,
         )
         .expect("registry compiles");
@@ -7202,6 +7676,213 @@ mod tests {
                 data["error"]["next_actions"].as_array().map_or(0, Vec::len),
                 actions
             );
+        }
+    }
+
+    fn operation_status_trace_entry() -> Value {
+        json!({
+            "target": {
+                "kind": "input",
+                "value": {
+                    "kind": "file_content",
+                    "subject": rootlight_ids::FileId::from_bytes([3; 20])
+                }
+            },
+            "action": "changed",
+            "reason": {"kind": "input_transition", "value": "added"},
+            "via": null
+        })
+    }
+
+    fn operation_status_output_with_trace(trace: Value) -> Map<String, Value> {
+        let mut output = operation_status_current_output();
+        output
+            .get_mut("data")
+            .and_then(|data| data.get_mut("incremental"))
+            .and_then(Value::as_object_mut)
+            .unwrap()
+            .insert("invalidation_trace".into(), trace);
+        output
+    }
+
+    async fn call_operation_status(
+        router: &ToolRouter<StaticExecutor>,
+        version: &str,
+    ) -> HandlerResponse {
+        router
+            .handle(
+                request(
+                    "tools/call",
+                    json!({
+                        "name": "operation.status",
+                        "arguments": {
+                            "operation_id": "op1_aaaaaaaaaaaaaaaaaaaaaaaaadujjxgv"
+                        },
+                        "_meta": {(TOOL_CONTRACT_VERSION_META_KEY): version}
+                    }),
+                ),
+                cancellation(),
+            )
+            .await
+    }
+
+    #[tokio::test]
+    async fn operation_status_retains_current_parser_routes_and_projects_legacy_trace_prefix() {
+        let parser_route = json!({
+            "kind": "file_parser_route",
+            "subject": rootlight_ids::FileId::from_bytes([3; 20])
+        });
+        let mut target_route = operation_status_trace_entry();
+        target_route["target"]["value"] = parser_route.clone();
+        let mut reason_route = operation_status_trace_entry();
+        reason_route["reason"] =
+            json!({"kind": "artifact_dependency_changed", "value": parser_route});
+        let mut via_route = operation_status_trace_entry();
+        via_route["via"] = json!({"kind": "input", "value": parser_route});
+        let contract = ToolContract::compile(VerticalTool::OperationStatus).unwrap();
+        let input = decode_typed_input(
+            VerticalTool::OperationStatus,
+            &json!({
+                "operation_id": "op1_aaaaaaaaaaaaaaaaaaaaaaaaadujjxgv"
+            }),
+        )
+        .unwrap();
+
+        for unsupported in [target_route, reason_route, via_route] {
+            for prefix_len in [0, 1] {
+                for complete in [false, true] {
+                    let mut entries = vec![operation_status_trace_entry(); prefix_len];
+                    entries.push(unsupported.clone());
+                    entries.push(operation_status_trace_entry());
+                    let total_entries = entries.len() + usize::from(!complete);
+                    let trace = json!({
+                        "version": "1.0",
+                        "entries": entries,
+                        "total_entries": total_entries,
+                        "complete": complete
+                    });
+                    let router = ToolRouter::new(
+                        StaticExecutor {
+                            result: Ok(operation_status_output_with_trace(trace.clone())),
+                        },
+                        ExposureProfile::Developer,
+                    )
+                    .unwrap();
+
+                    for version in ["1.6", "1.5", "1.4", "1.3", "1.2", "1.1", "1.0"] {
+                        let result = success(call_operation_status(&router, version).await);
+                        assert_eq!(result["isError"], false, "{version}");
+                        let output = &result["structuredContent"];
+                        assert_eq!(output["schema_version"], version);
+                        let selection =
+                            ContractSelection::select(&contract, Some(version)).unwrap();
+                        assert!(contract.output_validator(selection).is_valid(output));
+                        assert!(typed_selected_output_is_valid(
+                            VerticalTool::OperationStatus,
+                            selection,
+                            &input,
+                            output
+                        ));
+                        if version == "1.0" {
+                            assert!(output["data"].get("incremental").is_none());
+                        } else if version == "1.6" {
+                            assert_eq!(output["data"]["incremental"]["invalidation_trace"], trace);
+                        } else {
+                            assert_eq!(
+                                output["data"]["incremental"]["invalidation_trace"],
+                                json!({
+                                    "version": "1.0",
+                                    "entries": vec![operation_status_trace_entry(); prefix_len],
+                                    "total_entries": total_entries,
+                                    "complete": false
+                                }),
+                                "{version}"
+                            );
+                        }
+                        let text = result["content"][0]["text"].as_str().unwrap();
+                        assert_eq!(serde_json::from_str::<Value>(text).unwrap(), *output);
+                    }
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn operation_status_preserves_representable_trace_completeness_for_retained_callers() {
+        for complete in [false, true] {
+            let trace = json!({
+                "version": "1.0",
+                "entries": [operation_status_trace_entry()],
+                "total_entries": if complete { 1 } else { 3 },
+                "complete": complete
+            });
+            let router = ToolRouter::new(
+                StaticExecutor {
+                    result: Ok(operation_status_output_with_trace(trace.clone())),
+                },
+                ExposureProfile::Developer,
+            )
+            .unwrap();
+            for version in ["1.6", "1.5", "1.4", "1.3", "1.2", "1.1"] {
+                let result = success(call_operation_status(&router, version).await);
+                assert_eq!(result["isError"], false, "{version}");
+                assert_eq!(
+                    result["structuredContent"]["data"]["incremental"]["invalidation_trace"],
+                    trace
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn operation_status_rejects_invalid_trace_suffix_before_retained_projection() {
+        let mut parser_route = operation_status_trace_entry();
+        parser_route["target"]["value"]["kind"] = json!("file_parser_route");
+        let valid_trace = json!({
+            "version": "1.0",
+            "entries": [operation_status_trace_entry(), parser_route, operation_status_trace_entry()],
+            "total_entries": 3,
+            "complete": true
+        });
+        let mut unknown_input = valid_trace.clone();
+        unknown_input["entries"][2]["target"]["value"]["kind"] = json!("undeclared_input");
+        let mut unknown_action = valid_trace.clone();
+        unknown_action["entries"][2]["action"] = json!("undeclared_action");
+        let mut extra_field = valid_trace.clone();
+        extra_field["entries"][2]["undeclared_field"] = json!(true);
+        let mut empty_version = valid_trace.clone();
+        empty_version["version"] = json!("");
+        let mut oversized = valid_trace;
+        let entries = oversized["entries"].as_array_mut().unwrap();
+        entries.extend(vec![operation_status_trace_entry(); 6]);
+        oversized["total_entries"] = json!(9);
+
+        for trace in [
+            unknown_input,
+            unknown_action,
+            extra_field,
+            empty_version,
+            oversized,
+        ] {
+            let router = ToolRouter::new(
+                StaticExecutor {
+                    result: Ok(operation_status_output_with_trace(trace)),
+                },
+                ExposureProfile::Developer,
+            )
+            .unwrap();
+            for version in ["1.6", "1.5", "1.4", "1.3", "1.2", "1.1", "1.0"] {
+                assert!(
+                    matches!(
+                        call_operation_status(&router, version).await,
+                        HandlerResponse::Error {
+                            code: INTERNAL_ERROR,
+                            ..
+                        }
+                    ),
+                    "{version}"
+                );
+            }
         }
     }
 
@@ -7712,7 +8393,7 @@ mod tests {
             result["structuredContent"]["error"]["code"],
             "RESOURCE_EXHAUSTED"
         );
-        serde_json::from_value::<SourceReadOutputV1_2>(result["structuredContent"].clone())
+        serde_json::from_value::<SourceReadOutputV1_3>(result["structuredContent"].clone())
             .expect("resource error uses the source.read output contract");
         assert!(serialized_json_fits(&result, MAX_TOOL_RESULT_BYTES));
         let mirror: Value = serde_json::from_str(

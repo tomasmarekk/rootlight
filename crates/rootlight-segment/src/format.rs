@@ -300,10 +300,18 @@ pub(crate) fn decode(
     })
 }
 
-fn map_identity_error(error: IdentityVerificationError) -> SegmentError {
+pub(crate) fn map_identity_error(error: IdentityVerificationError) -> SegmentError {
     match error {
         IdentityVerificationError::Control(error) => SegmentError::Control(error),
-        _ => SegmentError::Corrupt,
+        IdentityVerificationError::ResourceUnavailable => SegmentError::Allocation,
+        IdentityVerificationError::InvalidGeneration
+        | IdentityVerificationError::LegacyContract
+        | IdentityVerificationError::MissingClaim
+        | IdentityVerificationError::DuplicateClaim
+        | IdentityVerificationError::IdentityMismatch(_)
+        | IdentityVerificationError::ManifestMismatch
+        | IdentityVerificationError::UnsupportedExtension
+        | IdentityVerificationError::RecipeEncoding => SegmentError::Corrupt,
     }
 }
 
@@ -1041,4 +1049,53 @@ impl<'a> Decoder<'a> {
 
 fn usize_to_u64(value: usize) -> Result<u64, SegmentError> {
     u64::try_from(value).map_err(|_| SegmentError::Encoding)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rootlight_cancel::CancellationReason;
+    use rootlight_storage::GenerationControlError;
+
+    #[test]
+    fn identity_workspace_failure_maps_to_allocation_not_corruption() {
+        assert!(matches!(
+            map_identity_error(IdentityVerificationError::ResourceUnavailable),
+            SegmentError::Allocation
+        ));
+    }
+
+    #[test]
+    fn identity_validation_failures_remain_corrupt() {
+        for error in [
+            IdentityVerificationError::InvalidGeneration,
+            IdentityVerificationError::LegacyContract,
+            IdentityVerificationError::MissingClaim,
+            IdentityVerificationError::DuplicateClaim,
+            IdentityVerificationError::ManifestMismatch,
+            IdentityVerificationError::UnsupportedExtension,
+            IdentityVerificationError::RecipeEncoding,
+        ] {
+            assert!(matches!(map_identity_error(error), SegmentError::Corrupt));
+        }
+    }
+
+    #[test]
+    fn identity_control_failures_preserve_cancellation_and_budget_details() {
+        for control in [
+            GenerationControlError::Cancelled {
+                reason: CancellationReason::ClientRequest,
+            },
+            GenerationControlError::BudgetExceeded {
+                resource: GenerationResource::Rows,
+                observed: 2,
+                limit: 1,
+            },
+        ] {
+            assert!(matches!(
+                map_identity_error(IdentityVerificationError::Control(control)),
+                SegmentError::Control(actual) if actual == control
+            ));
+        }
+    }
 }

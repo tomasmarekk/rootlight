@@ -110,7 +110,7 @@ const COMPATIBILITY_BASELINES: [&str; 13] = [
     STORAGE_COMPATIBILITY_BASELINES[5],
     STORAGE_COMPATIBILITY_BASELINES[6],
 ];
-const DAEMON_PROTOCOL_DESCRIPTOR_BASELINES: [(&str, &str); 20] = [
+const DAEMON_PROTOCOL_DESCRIPTOR_BASELINES: [(&str, &str); 22] = [
     ("1.1", "protobuf/1.1/rootlight.desc"),
     ("1.2", "protobuf/1.2/rootlight.desc"),
     ("1.3", "protobuf/1.3/rootlight.desc"),
@@ -131,8 +131,10 @@ const DAEMON_PROTOCOL_DESCRIPTOR_BASELINES: [(&str, &str); 20] = [
     ("1.20", "protobuf/1.20/rootlight.desc"),
     ("1.21", "protobuf/1.21/rootlight.desc"),
     ("1.22", "protobuf/1.22/rootlight.desc"),
+    ("1.23", "protobuf/1.23/rootlight.desc"),
+    ("1.25", "protobuf/1.25/rootlight.desc"),
 ];
-const SCHEMA_PROVENANCE_INPUTS: [&str; 26] = [
+const SCHEMA_PROVENANCE_INPUTS: [&str; 27] = [
     "Cargo.lock",
     "crates/rootlight-config/src/lib.rs",
     "crates/rootlight-error/src/lib.rs",
@@ -149,6 +151,7 @@ const SCHEMA_PROVENANCE_INPUTS: [&str; 26] = [
     "crates/rootlight-mcp-contract/src/intent.rs",
     "crates/rootlight-mcp-contract/src/repository.rs",
     "crates/rootlight-mcp-contract/src/source_entity.rs",
+    "crates/rootlight-mcp-contract/src/source_text.rs",
     "crates/rootlight-mcp-contract/src/vertical.rs",
     "tests/fixtures/mcp/1.0/schemas/mcp-repo-list-input-1.0.schema.json",
     "tests/fixtures/mcp/1.0/schemas/mcp-repo-list-output-1.0.schema.json",
@@ -1005,6 +1008,9 @@ fn generate_json_schemas(workspace_root: &Path, staged_root: &Path) -> Result<()
     write_schema::<rootlight_ir::LexicalProjectionSchema>(
         &schema_root.join("ir-extension-rootlight-lexical-2.schema.json"),
     )?;
+    write_schema::<rootlight_ir::EncodedLexicalProjectionSchema>(
+        &schema_root.join("ir-extension-rootlight-lexical-4.schema.json"),
+    )?;
     write_schema::<ResponseMetadata>(&schema_root.join("mcp-response-metadata-1.0.schema.json"))?;
     write_schema::<ErrorResponse>(&schema_root.join("mcp-error-response-1.0.schema.json"))?;
     write_mcp_tool_schema_version::<RepoIndexInput>(&schema_root, "repo.index", "input", "1.3")?;
@@ -1302,6 +1308,18 @@ fn generate_json_schemas(workspace_root: &Path, staged_root: &Path) -> Result<()
     write_mcp_tool_schema::<SourceReadOutput>(&schema_root, "source.read", "output")?;
     write_mcp_tool_schema_version::<SourceReadInput>(&schema_root, "source.read", "input", "1.1")?;
     write_mcp_tool_schema_version::<SourceReadInput>(&schema_root, "source.read", "input", "1.2")?;
+    write_mcp_tool_schema_version::<rootlight_mcp_contract::source_text::SourceReadInputV1_3>(
+        &schema_root,
+        "source.read",
+        "input",
+        "1.3",
+    )?;
+    write_mcp_tool_schema_version::<rootlight_mcp_contract::source_text::SourceReadOutputV1_3>(
+        &schema_root,
+        "source.read",
+        "output",
+        "1.3",
+    )?;
     write_mcp_tool_schema_version::<rootlight_mcp_contract::source_entity::SourceReadOutputV1_2>(
         &schema_root,
         "source.read",
@@ -2691,6 +2709,7 @@ fn validate_generated_json_schemas(
             extracted.clone(),
         ));
     }
+    cases.extend(encoded_lexical_schema_cases(projection_subject)?);
     for case in cases {
         let path = schema_root.join(case.schema);
         let schema: serde_json::Value = serde_json::from_slice(&read_bytes(&path)?)
@@ -3023,6 +3042,88 @@ struct SchemaSemanticCase {
     runtime_payload: Option<String>,
 }
 
+fn encoded_lexical_schema_cases(
+    subject: rootlight_ir::FactRef,
+) -> Result<Vec<SchemaSemanticCase>, SchemaError> {
+    let source = "fn λ𝄞 /* comment */ call()";
+    let prefix_end = "fn λ𝄞".encode_utf16().count() * 2;
+    let tail_start = "fn λ𝄞 /* comment */ ".encode_utf16().count() * 2;
+    let mut cases = Vec::new();
+    for encoding in [
+        rootlight_ir::SourceTextEncoding::Utf16Le,
+        rootlight_ir::SourceTextEncoding::Utf16Be,
+    ] {
+        let bytes: Vec<u8> = source
+            .encode_utf16()
+            .flat_map(|unit| match encoding {
+                rootlight_ir::SourceTextEncoding::Utf16Le => unit.to_le_bytes(),
+                rootlight_ir::SourceTextEncoding::Utf16Be => unit.to_be_bytes(),
+            })
+            .collect();
+        let projection = rootlight_ir::EncodedSourceTextProjection::from_source(
+            &bytes,
+            encoding,
+            &[0..prefix_end, tail_start..bytes.len()],
+        )
+        .map_err(|error| SchemaError::GeneratedSchemaSemantics(error.to_string()))?;
+        let evidence =
+            rootlight_ir::LexicalEvidenceV1::from_encoded_source_projection(subject, projection);
+        evidence
+            .verify_source_bytes(&bytes)
+            .map_err(|error| SchemaError::GeneratedSchemaSemantics(error.to_string()))?;
+        let payload = serde_json::to_value(&evidence).map_err(SchemaError::SerializeJson)?;
+        cases.push(SchemaSemanticCase::valid_with_runtime(
+            "ir-extension-rootlight-lexical-4.schema.json",
+            "exact UTF-16 fragments retain decoded signature text",
+            payload.clone(),
+            rootlight_ir::encode_lexical_evidence(&evidence)
+                .map_err(|error| SchemaError::GeneratedSchemaSemantics(error.to_string()))?,
+        ));
+        for schema in [
+            "ir-extension-rootlight-lexical-1.schema.json",
+            "ir-extension-rootlight-lexical-2.schema.json",
+        ] {
+            cases.push(SchemaSemanticCase::invalid(
+                schema,
+                "encoded projection cannot enter a frozen UTF-8 schema",
+                payload.clone(),
+            ));
+        }
+        let mut missing_encoding = payload.clone();
+        missing_encoding
+            .as_object_mut()
+            .expect("lexical evidence serializes as an object")
+            .remove("source_encoding");
+        let mut unknown_encoding = payload.clone();
+        unknown_encoding["source_encoding"] = serde_json::json!("utf-8");
+        let mut truncated = payload.clone();
+        truncated["truncated"] = serde_json::json!(true);
+        let mut excess_parts = payload.clone();
+        excess_parts["source_parts"] = serde_json::json!(vec![
+            payload["source_parts"][0].clone();
+            rootlight_ir::MAX_SIGNATURE_SOURCE_PARTS
+                + 1
+        ]);
+        for (description, invalid) in [
+            ("encoded projection requires byte order", missing_encoding),
+            (
+                "encoded projection rejects unknown byte order",
+                unknown_encoding,
+            ),
+            ("encoded projection cannot be truncated", truncated),
+            ("encoded projection bounds source part count", excess_parts),
+        ] {
+            cases.push(SchemaSemanticCase::invalid_with_runtime(
+                "ir-extension-rootlight-lexical-4.schema.json",
+                description,
+                invalid.clone(),
+                serde_json::to_string(&invalid).map_err(SchemaError::SerializeJson)?,
+            ));
+        }
+    }
+    Ok(cases)
+}
+
 impl SchemaSemanticCase {
     fn valid(schema: &'static str, description: &'static str, instance: serde_json::Value) -> Self {
         Self {
@@ -3215,6 +3316,8 @@ fn expected_artifact_paths() -> Vec<String> {
         format!("{SCHEMA_ROOT}/json/mcp-code-locate-output-1.10.schema.json"),
         format!("{SCHEMA_ROOT}/json/mcp-source-read-input-1.2.schema.json"),
         format!("{SCHEMA_ROOT}/json/mcp-source-read-output-1.2.schema.json"),
+        format!("{SCHEMA_ROOT}/json/mcp-source-read-input-1.3.schema.json"),
+        format!("{SCHEMA_ROOT}/json/mcp-source-read-output-1.3.schema.json"),
         format!("{SCHEMA_ROOT}/json/mcp-code-locate-output-1.9.schema.json"),
         format!("{SCHEMA_ROOT}/json/mcp-symbol-explain-input-1.9.schema.json"),
         format!("{SCHEMA_ROOT}/json/mcp-symbol-explain-output-1.9.schema.json"),
@@ -3226,6 +3329,7 @@ fn expected_artifact_paths() -> Vec<String> {
         format!("{SCHEMA_ROOT}/json/mcp-history-compare-output-1.6.schema.json"),
         format!("{SCHEMA_ROOT}/json/ir-extension-rootlight-lexical-1.schema.json"),
         format!("{SCHEMA_ROOT}/json/ir-extension-rootlight-lexical-2.schema.json"),
+        format!("{SCHEMA_ROOT}/json/ir-extension-rootlight-lexical-4.schema.json"),
         format!("{SCHEMA_ROOT}/json/mcp-response-metadata-1.0.schema.json"),
         format!("{SCHEMA_ROOT}/json/mcp-error-response-1.0.schema.json"),
         format!("{SCHEMA_ROOT}/json/mcp-repo-index-input-1.0.schema.json"),

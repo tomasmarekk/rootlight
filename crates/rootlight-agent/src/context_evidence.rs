@@ -403,6 +403,11 @@ impl ContextEvidenceProviderRegistry {
 pub struct EvidenceCandidateId(String);
 
 impl EvidenceCandidateId {
+    #[cfg(test)]
+    pub(crate) fn fixture(label: impl Into<String>) -> Self {
+        Self(label.into())
+    }
+
     /// Borrows the candidate identity.
     #[must_use]
     pub fn as_str(&self) -> &str {
@@ -705,6 +710,65 @@ pub struct ContextSourceTarget {
     pub source_ref: SourceRef,
 }
 
+/// Supported policy for metadata-only source-prefix reservation statements.
+pub const CONTEXT_SOURCE_METADATA_QUOTE_POLICY_VERSION: u32 = 1;
+
+/// Metadata-only quote request for optimizer-selected source previews.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ContextSourceMetadataQuoteRequest {
+    /// Pinned repository identity.
+    pub repository: RepositoryId,
+    /// Explicit immutable generation identity.
+    pub generation: GenerationId,
+    /// Selected source presentation policy.
+    pub source_policy: SourcePolicy,
+    /// Whether previews include source bodies and their line context.
+    pub include_snippets: bool,
+    /// Ordered selected items; transport deduplicates complete references only.
+    pub targets: Vec<ContextSourceTarget>,
+}
+
+/// Content-independent upper bounds for a cumulative unique-reference prefix.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ContextSourceMetadataFixedUpper {
+    /// Future prefix-response JSON bytes, excluding escaped source content.
+    pub json_bytes: u64,
+    /// Future fixed response/workspace ownership, excluding source content.
+    pub memory_bytes: u64,
+    /// Future prefix-read rows inspected.
+    pub rows: u64,
+    /// Future prefix-read traversal and conditional-activity work.
+    pub traversal_facts: u64,
+    /// Future independently inspected source paths.
+    pub paths: u64,
+}
+
+/// Cumulative quote through one first-seen complete source reference.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ContextSourceMetadataQuoteEntry {
+    /// Original approved reference, including its full range and line hint.
+    pub source_ref: SourceRef,
+    /// Upper bound through this entry across every prior transport batch.
+    pub prefix_fixed_upper: ContextSourceMetadataFixedUpper,
+}
+
+/// Received metadata quote; its execution usage is not a future reservation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ContextSourceMetadataQuoteOutput {
+    /// Pinned repository identity observed by the quote producer.
+    pub repository: RepositoryId,
+    /// Immutable generation observed by the quote producer.
+    pub generation: GenerationId,
+    /// Explicit reservation-statement policy version.
+    pub quote_policy_version: u32,
+    /// First-seen unique references with cumulative fixed bounds.
+    pub entries: Vec<ContextSourceMetadataQuoteEntry>,
+    /// Whether the entire requested metadata quote completed.
+    pub completeness: ResultCompleteness,
+    /// Received quote work; source bytes are zero because no bodies are read.
+    pub usage: BudgetCharge,
+}
+
 /// Bounded second-stage source request for already selected evidence.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ContextSourceRequest {
@@ -725,7 +789,7 @@ pub struct ContextSourceRequest {
 /// Repository-derived source body returned strictly as untrusted data.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ContextSourceSnippet {
-    /// Exact UTF-8 source bytes.
+    /// Lossless UTF-8 presentation; string positions are not physical source offsets.
     pub content: String,
     /// Bounded language identifier supplied by the source adapter.
     pub language: String,
@@ -733,13 +797,29 @@ pub struct ContextSourceSnippet {
     pub truncated: bool,
 }
 
+/// Actual source projection underlying a materialized preview or signature.
+/// The full editing reference is retained separately on the material.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ContextSourceProjection {
+    /// Inclusive start in original source bytes, including admitted context.
+    pub start_byte: u64,
+    /// Exclusive end in original source bytes, possibly before the approved end.
+    pub end_byte: u64,
+    /// Physical codec: `None` is UTF-8; `Some` is BOM-marked UTF-16 LE or BE.
+    pub encoding: Option<rootlight_ir::SourceTextEncoding>,
+    /// UTF-8 bytes returned before local signature extraction.
+    pub text_bytes: u64,
+}
+
 /// Materialized representation for one selected context candidate.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ContextSourceMaterial {
     /// Selected candidate identity echoed by the adapter.
     pub candidate_id: EvidenceCandidateId,
-    /// Exact generation-pinned source range that produced this material.
+    /// Complete approved generation-pinned selection, unchanged by prefix clipping.
     pub source_ref: SourceRef,
+    /// Actual physical range and presentation cost verified by the source adapter.
+    pub projection: ContextSourceProjection,
     /// Bounded declaration or type signature when requested.
     pub signature: Option<String>,
     /// Bounded source body when requested.
@@ -837,6 +917,22 @@ where
         invocation: EvidenceProviderInvocation,
         context: ContextEvidenceCallContext<C>,
     ) -> AgentPortFuture<Result<EvidenceProviderOutput, ContextEvidencePortError>>;
+
+    /// Quotes selected source metadata without reading or hydrating source bodies.
+    ///
+    /// Unsupported implementations must not guess a materialization reservation.
+    fn quote_source_metadata(
+        &self,
+        _request: ContextSourceMetadataQuoteRequest,
+        _context: ContextEvidenceCallContext<C>,
+    ) -> AgentPortFuture<Result<ContextSourceMetadataQuoteOutput, ContextEvidencePortError>> {
+        Box::pin(async {
+            Err(ContextEvidencePortError {
+                kind: ContextEvidencePortErrorKind::Unsupported,
+                usage: BudgetCharge::default(),
+            })
+        })
+    }
 
     /// Materializes generation-pinned source only for optimizer-selected items.
     ///
@@ -961,11 +1057,28 @@ impl ContextEvidenceCollector {
         P: ContextEvidencePort<C>,
         C: CancellationSignal + Clone + Send + Sync + 'static,
     {
+        let mut ledger = BudgetLedger::with_token_limit(u64::from(request.token_budget()));
+        self.collect_with_ledger(port, request, plan, cancellation, deadline, &mut ledger)
+            .await
+    }
+
+    async fn collect_with_ledger<P, C>(
+        &self,
+        port: &P,
+        request: &CanonicalContextPackRequest,
+        plan: &EvidenceProviderPlan,
+        cancellation: C,
+        deadline: Instant,
+        ledger: &mut BudgetLedger,
+    ) -> Result<ContextEvidenceCorpus, ContextEvidenceCollectionError>
+    where
+        P: ContextEvidencePort<C>,
+        C: CancellationSignal + Clone + Send + Sync + 'static,
+    {
         if plan.request_digest() != request.digest_bytes() {
             return Err(ContextEvidenceCollectionError::IdentityMismatch);
         }
 
-        let mut ledger = BudgetLedger::with_token_limit(u64::from(request.token_budget()));
         let mut candidates = Vec::<TypedEvidenceCandidate>::new();
         let mut omissions = Vec::new();
 
@@ -997,15 +1110,17 @@ impl ContextEvidenceCollector {
                     ),
                 )
                 .await;
+            // A received work receipt survives interruption without admitting its evidence.
+            let usage = match &response {
+                Ok(output) => output.usage,
+                Err(error) => error.usage,
+            };
+            reservation.commit(usage)?;
             collection_checkpoint(&cancellation, deadline)?;
 
             let output = match response {
-                Ok(output) => {
-                    reservation.commit(output.usage)?;
-                    output
-                }
+                Ok(output) => output,
                 Err(error) => {
-                    reservation.commit(error.usage)?;
                     match error.kind {
                         ContextEvidencePortErrorKind::Cancelled => {
                             return Err(ContextEvidenceCollectionError::Cancelled);
@@ -1110,7 +1225,7 @@ impl ContextEvidenceCollector {
             candidates,
             omissions,
             usage: ledger.consumed(),
-            budget: ledger,
+            budget: ledger.clone(),
         })
     }
 }
@@ -1728,8 +1843,8 @@ mod tests {
     use std::{
         collections::{BTreeSet, VecDeque},
         sync::{
-            Mutex,
-            atomic::{AtomicUsize, Ordering},
+            Arc, Mutex,
+            atomic::{AtomicBool, AtomicUsize, Ordering},
         },
         time::Duration,
     };
@@ -1844,6 +1959,7 @@ mod tests {
     struct FakeEvidencePort {
         responses: Mutex<VecDeque<Result<EvidenceProviderOutput, ContextEvidencePortError>>>,
         calls: AtomicUsize,
+        cancellation_at_response: Option<Arc<AtomicBool>>,
     }
 
     impl FakeEvidencePort {
@@ -1855,6 +1971,7 @@ mod tests {
             Self {
                 responses: Mutex::new(responses.into_iter().collect()),
                 calls: AtomicUsize::new(0),
+                cancellation_at_response: None,
             }
         }
     }
@@ -1875,7 +1992,13 @@ mod tests {
                 .expect("fake response lock")
                 .pop_front()
                 .expect("fake response exists");
-            Box::pin(async move { response })
+            let cancellation = self.cancellation_at_response.clone();
+            Box::pin(async move {
+                if let Some(cancellation) = cancellation {
+                    cancellation.store(true, Ordering::SeqCst);
+                }
+                response
+            })
         }
     }
 
@@ -1885,6 +2008,31 @@ mod tests {
     impl CancellationSignal for AlwaysCancelled {
         fn is_cancelled(&self) -> bool {
             true
+        }
+    }
+
+    #[derive(Debug, Clone, Default)]
+    struct ReceiptCancellation(Arc<AtomicBool>);
+
+    impl CancellationSignal for ReceiptCancellation {
+        fn is_cancelled(&self) -> bool {
+            self.0.load(Ordering::SeqCst)
+        }
+    }
+
+    fn receipt_usage() -> BudgetCharge {
+        BudgetCharge {
+            rows: 7,
+            results: 1,
+            tokens: 64,
+            actual_tokens: 5,
+            source_bytes: 11,
+            traversal_facts: 3,
+            depth: 2,
+            paths: 1,
+            json_bytes: 17,
+            memory_bytes: 19,
+            time_ms: 5,
         }
     }
 
@@ -2838,6 +2986,149 @@ mod tests {
             Err(ContextEvidenceCollectionError::Cancelled)
         );
         assert_eq!(port.calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn collector_interruption_commits_received_success_before_cancellation() {
+        let request = request("fix crash");
+        let mut plan = one_invocation_plan(&request);
+        plan.invocations[0].reservation.actual_tokens = 8;
+        let usage = receipt_usage();
+        let mut output = complete_output(&plan.invocations[0], "received");
+        output.usage = usage;
+        let cancellation = ReceiptCancellation::default();
+        let mut port = FakeEvidencePort::with_responses([Ok(output)]);
+        port.cancellation_at_response = Some(Arc::clone(&cancellation.0));
+        let mut ledger = BudgetLedger::with_token_limit(u64::from(request.token_budget()));
+
+        let result = ContextEvidenceCollector
+            .collect_with_ledger(
+                &port,
+                &request,
+                &plan,
+                cancellation,
+                Instant::now() + Duration::from_secs(1),
+                &mut ledger,
+            )
+            .await;
+
+        assert_eq!(result, Err(ContextEvidenceCollectionError::Cancelled));
+        assert_eq!(ledger.consumed(), usage);
+        assert_eq!(ledger.snapshot().reserved(), BudgetCharge::default());
+        assert_eq!(port.calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn collector_interruption_commits_received_error_before_cancellation() {
+        let request = request("fix crash");
+        let mut plan = one_invocation_plan(&request);
+        plan.invocations[0].reservation.actual_tokens = 8;
+        let usage = receipt_usage();
+        let cancellation = ReceiptCancellation::default();
+        let mut port = FakeEvidencePort::with_responses([Err(ContextEvidencePortError {
+            kind: ContextEvidencePortErrorKind::Unavailable,
+            usage,
+        })]);
+        port.cancellation_at_response = Some(Arc::clone(&cancellation.0));
+        let mut ledger = BudgetLedger::with_token_limit(u64::from(request.token_budget()));
+
+        let result = ContextEvidenceCollector
+            .collect_with_ledger(
+                &port,
+                &request,
+                &plan,
+                cancellation,
+                Instant::now() + Duration::from_secs(1),
+                &mut ledger,
+            )
+            .await;
+
+        assert_eq!(result, Err(ContextEvidenceCollectionError::Cancelled));
+        assert_eq!(ledger.consumed(), usage);
+        assert_eq!(ledger.snapshot().reserved(), BudgetCharge::default());
+        assert_eq!(port.calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn collector_interruption_admits_received_overage_before_cancellation() {
+        for failed_response in [false, true] {
+            let request = request("fix crash");
+            let plan = one_invocation_plan(&request);
+            let usage = BudgetCharge {
+                source_bytes: plan.invocations[0].reservation.source_bytes + 1,
+                ..BudgetCharge::default()
+            };
+            let response = if failed_response {
+                Err(ContextEvidencePortError {
+                    kind: ContextEvidencePortErrorKind::Unavailable,
+                    usage,
+                })
+            } else {
+                let mut output = complete_output(&plan.invocations[0], "overage");
+                output.usage = usage;
+                Ok(output)
+            };
+            let cancellation = ReceiptCancellation::default();
+            let mut port = FakeEvidencePort::with_responses([response]);
+            port.cancellation_at_response = Some(Arc::clone(&cancellation.0));
+            let mut ledger = BudgetLedger::with_token_limit(u64::from(request.token_budget()));
+
+            let result = ContextEvidenceCollector
+                .collect_with_ledger(
+                    &port,
+                    &request,
+                    &plan,
+                    cancellation,
+                    Instant::now() + Duration::from_secs(1),
+                    &mut ledger,
+                )
+                .await;
+
+            assert_eq!(
+                result,
+                Err(ContextEvidenceCollectionError::Policy(
+                    ExecutionPolicyError::BudgetExceeded {
+                        resource: BudgetResource::SourceBytes,
+                    },
+                )),
+            );
+            assert_eq!(ledger.consumed(), BudgetCharge::default());
+            assert_eq!(ledger.snapshot().reserved(), BudgetCharge::default());
+            assert_eq!(
+                ledger.snapshot().limiting_resource(),
+                Some(BudgetResource::SourceBytes)
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn collector_interruption_does_not_double_charge_completed_success() {
+        let request = request("fix crash");
+        let mut plan = one_invocation_plan(&request);
+        plan.invocations[0].reservation.actual_tokens = 8;
+        let usage = receipt_usage();
+        let mut output = complete_output(&plan.invocations[0], "received");
+        output.usage = usage;
+        let port = FakeEvidencePort::with_responses([Ok(output)]);
+        let mut ledger = BudgetLedger::with_token_limit(u64::from(request.token_budget()));
+
+        let corpus = ContextEvidenceCollector
+            .collect_with_ledger(
+                &port,
+                &request,
+                &plan,
+                NeverCancelled,
+                Instant::now() + Duration::from_secs(1),
+                &mut ledger,
+            )
+            .await
+            .expect("complete response fits the existing reservation");
+
+        assert_eq!(corpus.usage, usage);
+        assert_eq!(corpus.budget.consumed(), usage);
+        assert_eq!(ledger.consumed(), usage);
+        assert_eq!(ledger.snapshot().reserved(), BudgetCharge::default());
+        assert_eq!(port.calls.load(Ordering::SeqCst), 1);
     }
 
     #[tokio::test]

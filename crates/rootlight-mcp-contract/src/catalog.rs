@@ -103,7 +103,7 @@ impl McpTool {
         match self {
             Self::ChangeImpact | Self::HistoryCompare => crate::source_entity::CHANGE_VERSION,
             Self::CodeLocate => crate::source_entity::LOCATE_VERSION,
-            Self::SourceRead => crate::source_entity::SOURCE_READ_VERSION,
+            Self::SourceRead => crate::source_text::SOURCE_READ_TEXT_VERSION,
             Self::QueryAdvanced => crate::source_entity::QUERY_VERSION,
             Self::SymbolExplain => crate::source_entity::EXPLAIN_VERSION,
             Self::RepoList => crate::REPO_LIST_SCHEMA_VERSION,
@@ -200,7 +200,7 @@ impl McpTool {
                 "Assemble deterministic generation-pinned definitions, implementations, callers, tests, risks, architecture, change, and source evidence from symbol, path, route, test, change, located-result, or plan seeds under an authenticated token-bounded continuation."
             }
             Self::SourceRead => {
-                "Read bounded source ranges from pinned references with source-bound conditional membership as untrusted data using exact UTF-8 or explicit base64 bytes with optional context, canonical overlap merging, line projection, and caller-reduced ceilings; conditional activity applies only to classic Visual Basic/VBA returned chunks, and direct file selectors are unsupported."
+                "Read bounded source ranges from pinned references as untrusted lossless text with original-byte identity and physical encoding, or explicitly request historical UTF-8/base64 modes; optional context, overlap merging, line projection and caller-reduced ceilings apply. Conditional activity is source-bound for classic Visual Basic/VBA; direct file selectors are unsupported."
             }
             Self::QueryAdvanced => {
                 "Use a bounded safe-AST query with typed value parameters, authenticated continuation, and enforced cost, row, and depth limits."
@@ -464,7 +464,7 @@ mod tests {
         );
         assert_eq!(
             McpTool::SourceRead.contract_version(),
-            crate::source_entity::SOURCE_READ_VERSION
+            crate::source_text::SOURCE_READ_TEXT_VERSION
         );
         assert_eq!(
             McpTool::QueryAdvanced.contract_version(),

@@ -425,7 +425,7 @@ pub fn is_conditional_activity_language(language: &str) -> bool {
     matches!(language, "vba" | "visual-basic-classic")
 }
 
-fn validate_ordinals(
+pub(crate) fn validate_ordinals(
     assessments: &[ConditionalActivityAssessment],
     returned: usize,
     maximum: usize,

@@ -213,13 +213,23 @@ impl BatchToolDescriptor {
     /// Checked standalone input schema consumed by the batch adapter.
     #[must_use]
     pub const fn input_schema_json(self) -> &'static str {
-        self.adapter.input_schema_json()
+        match self.batch_tool {
+            BatchTool::SourceRead => include_str!(
+                "../../../schemas/generated/json/mcp-source-read-input-1.2.schema.json"
+            ),
+            _ => self.adapter.input_schema_json(),
+        }
     }
 
     /// Checked standalone output schema produced by the batch adapter.
     #[must_use]
     pub const fn output_schema_json(self) -> &'static str {
-        self.adapter.output_schema_json()
+        match self.batch_tool {
+            BatchTool::SourceRead => include_str!(
+                "../../../schemas/generated/json/mcp-source-read-output-1.2.schema.json"
+            ),
+            _ => self.adapter.output_schema_json(),
+        }
     }
 }
 
@@ -631,7 +641,12 @@ const fn descriptor(
         batch_tool,
         tool,
         adapter,
-        contract_version: tool.contract_version(),
+        // Published batch 1.0 keeps its UTF-8 source default independently of
+        // the additive standalone text contract.
+        contract_version: match batch_tool {
+            BatchTool::SourceRead => crate::source_entity::SOURCE_READ_VERSION,
+            _ => tool.contract_version(),
+        },
         required_profile,
         read_only: tool.read_only(),
         eligible: true,
@@ -801,14 +816,27 @@ mod tests {
             assert!(catalog_tools.insert(descriptor.tool));
             assert_eq!(descriptor.tool.name(), descriptor.batch_tool.name());
             assert_eq!(descriptor.adapter.name(), descriptor.batch_tool.name());
-            assert_eq!(
-                descriptor.contract_version,
-                descriptor.tool.contract_version()
-            );
-            assert_eq!(
-                descriptor.contract_version,
-                descriptor.adapter.contract_version()
-            );
+            if descriptor.batch_tool == BatchTool::SourceRead {
+                assert_eq!(descriptor.contract_version, "1.2");
+                assert_eq!(descriptor.tool.contract_version(), "1.3");
+                assert_eq!(
+                    descriptor.input_schema_json(),
+                    descriptor.adapter.pre_label_input_schema_json().unwrap()
+                );
+                assert_eq!(
+                    descriptor.output_schema_json(),
+                    descriptor.adapter.pre_label_output_schema_json().unwrap()
+                );
+            } else {
+                assert_eq!(
+                    descriptor.contract_version,
+                    descriptor.tool.contract_version()
+                );
+                assert_eq!(
+                    descriptor.contract_version,
+                    descriptor.adapter.contract_version()
+                );
+            }
             assert!(descriptor.read_only);
             assert!(descriptor.eligible);
             assert!(!descriptor.input_schema_json().is_empty());

@@ -57,6 +57,7 @@ message RequestEnvelope {
     GraphProjectionPageRequest graph_projection_page = 49;
     GraphProjectionReleaseRequest graph_projection_release = 50;
     RepositoryCatalogMutationRequest repository_catalog_mutation = 51;
+    SourceTextPrefixMetadataQuoteRequest source_text_prefix_metadata_quote = 52;
   }
 }
 
@@ -107,6 +108,7 @@ message ResponseEnvelope {
     GraphProjectionResponse graph_projection = 48;
     GraphProjectionReleaseResponse graph_projection_release = 50;
     RepositoryCatalogMutationResponse repository_catalog_mutation = 51;
+    SourceTextPrefixMetadataQuoteResponse source_text_prefix_metadata_quote = 52;
     rootlight.common.v1.PublicError error = 20;
   }
 }
@@ -892,6 +894,9 @@ message FirstSliceLocateHit {
   // Whole immediate container dependency; the hit path is a derived display path,
   // not an editable filesystem path or a byte-offset mapping into the container.
   optional FirstSliceSourceRef extracted_from = 12;
+  // Bounded declaration presentation; source remains the existing definition selection.
+  optional string signature = 13;
+  bool signature_truncated = 14;
 }
 
 // Returns bounded typed lexical results and generation correlation.
@@ -1017,6 +1022,13 @@ message SymbolExplainResponse {
 enum SourceReadEncoding {
   SOURCE_READ_ENCODING_UTF8 = 0;
   SOURCE_READ_ENCODING_BYTES = 1;
+  SOURCE_READ_ENCODING_LOSSLESS_TEXT = 2;
+}
+
+enum SourcePhysicalEncoding {
+  SOURCE_PHYSICAL_ENCODING_UTF8 = 0;
+  SOURCE_PHYSICAL_ENCODING_UTF16_LE = 1;
+  SOURCE_PHYSICAL_ENCODING_UTF16_BE = 2;
 }
 
 // Requests exact generation-bound source references and bounded presentation.
@@ -1030,9 +1042,11 @@ message SourceReadRequest {
   bool merge_overlaps = 7;
   optional bool include_line_numbers = 8;
   SourceReadEncoding encoding = 9;
+  // Present only for negotiated lossless prefixes; bounds UTF-8 presentation per chunk.
+  optional uint32 maximum_text_bytes_per_chunk = 10;
 }
 
-// One verified exact-byte source chunk.
+// One verified source chunk with a negotiated byte or lossless text representation.
 message FirstSliceSourceChunk {
   FirstSliceSourceRef source = 1;
   string path = 2;
@@ -1049,11 +1063,13 @@ message FirstSliceSourceChunk {
   // Exact optional line projection for new clients.
   optional uint64 included_start_line = 12;
   optional uint64 included_end_line = 13;
-  // Exact bytes for both UTF-8 and binary source reads.
+  // Exact bytes for UTF-8 and binary reads; empty in lossless text mode.
   bytes exact_content = 14;
   FirstSliceAnalysisTier tier = 15;
   // Whole immediate container dependency, not byte-offset equivalence.
   optional FirstSliceSourceRef extracted_from = 16;
+  // Required only for lossless text mode, whose content is one UTF-8 string.
+  optional SourcePhysicalEncoding physical_encoding = 17;
 }
 
 // Returns exact verified source chunks.
@@ -1065,6 +1081,44 @@ message SourceReadResponse {
   bool truncated = 5;
   FirstSliceCompleteness completeness = 6;
   repeated ConditionalActivityAssessment conditional_activity = 7;
+  // UTF-8 presentation bytes in lossless text mode; zero for legacy reads.
+  uint64 total_text_bytes = 8;
+  // Prefix intent is distinct from execution truncation; absent for exact reads.
+  optional bool prefix_truncated = 9;
+}
+
+// Quotes resident metadata only; source bodies and freshness are not inspected.
+message SourceTextPrefixMetadataQuoteRequest {
+  rootlight.common.v1.ContractVersion schema_version = 1;
+  rootlight.common.v1.RepositoryId repository = 2;
+  rootlight.common.v1.GenerationId generation = 3;
+  repeated FirstSliceSourceRef references = 4;
+  uint32 context_lines_before = 5;
+  uint32 context_lines_after = 6;
+}
+
+// Cumulative fixed future prefix costs, excluding content-dependent terms.
+message SourceTextPrefixFixedUpper {
+  uint64 json_bytes = 1;
+  uint64 memory_bytes = 2;
+  uint64 rows = 3;
+  uint64 traversal_facts = 4;
+  uint64 paths = 5;
+}
+
+// Echoes unchanged editing authority and the bound for this ordered prefix.
+message SourceTextPrefixMetadataQuoteEntry {
+  FirstSliceSourceRef source = 1;
+  SourceTextPrefixFixedUpper prefix_fixed_upper = 2;
+}
+
+// Versioned bounds plus measured metadata-only work, not a source-read result.
+message SourceTextPrefixMetadataQuoteResponse {
+  rootlight.common.v1.ContractVersion schema_version = 1;
+  FirstSliceQueryContext context = 2;
+  uint32 quote_policy_version = 3;
+  repeated SourceTextPrefixMetadataQuoteEntry entries = 4;
+  FirstSliceCompleteness completeness = 5;
 }
 
 // Requests the bounded list of repositories known to this daemon process.

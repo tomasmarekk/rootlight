@@ -2468,6 +2468,188 @@ fn markdown_fsharp_profiles_keep_separate_written_identities_and_coverage() {
 }
 
 #[test]
+fn markdown_fsharp_fragments_keep_host_spans_without_whole_file_context() {
+    use rootlight_adapter_sdk::execute_parse;
+
+    for ending in ["\n", "\r\n"] {
+        let mut text = format!("# λ Examples{ending}{ending}");
+        let mut bodies = Vec::new();
+        for (language, body) in [
+            ("fsharp", "module First\nlet pick value = value + 1\n \t\n"),
+            (
+                "fsharp-signature",
+                "module Contracts\nval pick: int -> int\n \t\n",
+            ),
+            ("fsharp", " \t\n"),
+            ("fsharp-signature", ""),
+        ] {
+            text.push_str(&format!("~~~{language}{ending}"));
+            let start = text.len();
+            text.push_str(&body.replace('\n', ending));
+            bodies.push(start..text.len());
+            text.push_str(&format!("~~~{ending}{ending}"));
+        }
+        for encoding in ["utf-8", "utf-16le", "utf-16be"] {
+            let mut bytes = match encoding {
+                "utf-8" => Vec::new(),
+                "utf-16le" => vec![0xff, 0xfe],
+                "utf-16be" => vec![0xfe, 0xff],
+                _ => unreachable!(),
+            };
+            if encoding == "utf-8" {
+                bytes.extend_from_slice(text.as_bytes());
+            } else {
+                for unit in text.encode_utf16() {
+                    bytes.extend_from_slice(&if encoding == "utf-16le" {
+                        unit.to_le_bytes()
+                    } else {
+                        unit.to_be_bytes()
+                    });
+                }
+            }
+            let physical_offset = |offset| {
+                if encoding == "utf-8" {
+                    offset
+                } else {
+                    2 + 2 * text.get(..offset).unwrap().encode_utf16().count()
+                }
+            };
+            let body_spans = bodies
+                .iter()
+                .map(|body| physical_offset(body.start)..physical_offset(body.end))
+                .collect::<Vec<_>>();
+            let provider = Arc::new(provider());
+            let analyzer = analyzer(&provider, MARKDOWN);
+            let fixture = Fixture::new(MARKDOWN, &bytes);
+            let budget = limits();
+            let initial = AnalysisRequest::new_with_parse_context(
+                GenerationBoundSnapshot::new(&fixture.snapshot, &fixture.source).unwrap(),
+                language(MARKDOWN),
+                EncodingId::new(encoding).unwrap(),
+                Vec::new(),
+                AnalysisTier::TierD,
+                build_context(),
+                &budget,
+            )
+            .unwrap()
+            .with_generated_status(false);
+            let parsed = execute_parse(
+                provider.as_ref(),
+                &initial.to_parse_request(),
+                MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
+                &deadline(),
+            )
+            .unwrap();
+            assert!(!parsed.facts().iter().any(|fact| matches!(
+                fact.syntax_kind().as_str(),
+                "fsharp.qualified_context.expression" | "fsharp.signature_context.expression"
+            )));
+            for fact in parsed
+                .facts()
+                .iter()
+                .filter(|fact| fact.syntax_kind().as_str().starts_with("fsharp."))
+            {
+                let start = usize::try_from(fact.span().start_byte()).unwrap();
+                let end = usize::try_from(fact.span().end_byte()).unwrap();
+                assert!(
+                    body_spans
+                        .iter()
+                        .any(|body| body.start <= start && end <= body.end),
+                    "{encoding}: {:?}",
+                    fact
+                );
+            }
+            let required = provider
+                .required_syntax_fact_count(&initial.to_parse_request(), &deadline())
+                .unwrap();
+            let artifact = analyzer.prepare_artifact(&initial, &deadline()).unwrap();
+            assert_eq!(
+                artifact.required_syntax_fact_count(&deadline()).unwrap(),
+                required
+            );
+            assert_eq!(artifact.syntax_fact_count(), parsed.facts().len());
+            let prepared = analyzer
+                .analyze_prepared_artifact(
+                    &initial,
+                    &artifact,
+                    ExtensionSupport::default(),
+                    MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
+                    &deadline(),
+                )
+                .unwrap();
+            let fresh = analyze(&analyzer, &initial, &ExtensionSupport::default());
+            assert_eq!(prepared.document(), fresh.document());
+            assert_eq!(prepared.report(), fresh.report());
+            validate_ir_document(
+                prepared.document(),
+                budget.ir(),
+                &ExtensionSupport::default(),
+            )
+            .unwrap();
+            let values = prepared
+                .document()
+                .entities
+                .iter()
+                .filter(|entity| entity.canonical_name == "pick")
+                .collect::<Vec<_>>();
+            assert_eq!(values.len(), 2, "{encoding}");
+            for (profile, kind) in [
+                ("fsharp", EntityKind::Function),
+                ("fsharp-signature", EntityKind::Variable),
+            ] {
+                let value = values
+                    .iter()
+                    .find(|entity| entity.language == profile)
+                    .unwrap();
+                assert_eq!(value.kind, kind);
+                let definition = prepared
+                    .document()
+                    .occurrences
+                    .iter()
+                    .find(|occurrence| {
+                        occurrence.role == OccurrenceRole::Definition
+                            && occurrence.target
+                                == (OccurrenceTarget::Resolved { symbol: value.id })
+                    })
+                    .unwrap();
+                assert_eq!(
+                    definition.source.content_hash(),
+                    fixture.snapshot.content_hash()
+                );
+                assert_eq!(definition.source.generation(), fixture.source.generation());
+                let span = definition.source.span();
+                let start = usize::try_from(span.start_byte()).unwrap();
+                let end = usize::try_from(span.end_byte()).unwrap();
+                assert!(
+                    body_spans
+                        .iter()
+                        .any(|body| body.start <= start && end <= body.end)
+                );
+                let expected = if encoding == "utf-8" {
+                    b"pick".to_vec()
+                } else {
+                    "pick"
+                        .encode_utf16()
+                        .flat_map(|unit| {
+                            if encoding == "utf-16le" {
+                                unit.to_le_bytes()
+                            } else {
+                                unit.to_be_bytes()
+                            }
+                        })
+                        .collect()
+                };
+                assert_eq!(bytes.get(start..end), Some(expected.as_slice()));
+            }
+            assert!(prepared.document().skipped_regions.iter().any(|gap| {
+                gap.domain == FactDomain::Relations
+                    && gap.detail == "markdown-code-semantics-unavailable"
+            }));
+        }
+    }
+}
+
+#[test]
 fn markdown_objective_c_preserves_unary_dispatch_signatures() {
     let source = "~~~objective-c\n@interface Sample\n- (int)value;\n+ (int)value;\n@end\n~~~\n";
     let fixture = Fixture::new(MARKDOWN, source.as_bytes());

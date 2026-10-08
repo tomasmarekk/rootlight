@@ -14,6 +14,7 @@
 
 #![forbid(unsafe_code)]
 
+mod fsharp_binding;
 mod groovy_binding;
 mod groovy_call_lookup;
 mod groovy_callable;
@@ -28,6 +29,14 @@ mod source_projection;
 mod validation;
 mod vba_compilation;
 
+pub use fsharp_binding::{
+    FSHARP_BINDING_NAMESPACE, FSHARP_BINDING_VERSION, FSHARP_IMPORT_BINDING_VERSION,
+    FSHARP_OPENED_BINDING_VERSION, FSHARP_SIGNATURE_ALIAS_BINDING_VERSION,
+    FSHARP_SIGNATURE_BINDING_VERSION, FSHARP_SIGNATURE_TYPE_BINDING_VERSION, FSharpBinding,
+    FSharpBindingError, FSharpBindingEvidence, MAX_FSHARP_BINDING_COMPONENTS,
+    MAX_FSHARP_BINDING_PAYLOAD_BYTES, MAX_FSHARP_PROJECT_MEMBERS, decode_fsharp_binding_envelope,
+    new_fsharp_binding_envelope,
+};
 pub use groovy_binding::{
     GROOVY_BINDING_NAMESPACE, GroovyBindingError, GroovyImportedType,
     decode_groovy_binding_envelope, new_groovy_binding_envelope,
@@ -36,9 +45,12 @@ pub use groovy_call_lookup::{
     GROOVY_CALL_LOOKUP_NAMESPACE, GROOVY_STATIC_IMPORT_NAMESPACE, GROOVY_VALUE_LOOKUP_NAMESPACE,
     GroovyCallArguments, GroovyCallLookup, GroovyCallLookupError, GroovyStaticImport,
     GroovyValueLookup, GroovyValueWrite, decode_groovy_call_lookup_envelope,
-    decode_groovy_static_import_envelope, decode_groovy_value_lookup_envelope,
-    new_groovy_call_lookup_envelope, new_groovy_static_import_envelope,
-    new_groovy_value_lookup_envelope,
+    decode_groovy_call_lookup_envelope_with_encoding, decode_groovy_static_import_envelope,
+    decode_groovy_static_import_envelope_with_encoding, decode_groovy_value_lookup_envelope,
+    decode_groovy_value_lookup_envelope_with_encoding, new_groovy_call_lookup_envelope,
+    new_groovy_call_lookup_envelope_with_encoding, new_groovy_static_import_envelope,
+    new_groovy_static_import_envelope_with_encoding, new_groovy_value_lookup_envelope,
+    new_groovy_value_lookup_envelope_with_encoding,
 };
 pub use groovy_callable::{
     GROOVY_CALLABLE_NAMESPACE, GroovyCallable, GroovyCallableDispatch, GroovyCallableError,
@@ -71,13 +83,13 @@ pub use identity::{
     new_symbol_identity_claim_envelope,
 };
 #[cfg(feature = "schema")]
-pub use lexical::LexicalProjectionSchema;
+pub use lexical::{EncodedLexicalProjectionSchema, LexicalProjectionSchema};
 pub use lexical::{
-    LEXICAL_EXTENSION_NAMESPACE, LEXICAL_EXTENSION_VERSION, LEXICAL_PROJECTION_VERSION,
-    LEXICAL_SUMMARY_BATCH_VERSION, LexicalEvidence, LexicalEvidenceFormat, LexicalEvidenceKind,
-    LexicalEvidenceV1, LexicalExtensionError, MAX_LEXICAL_PAYLOAD_BYTES,
-    MAX_LEXICAL_SIGNATURE_BYTES, MAX_LEXICAL_SUMMARY_BATCH_ENTRIES, MAX_LEXICAL_SUMMARY_BYTES,
-    decode_lexical_evidence, decode_lexical_evidence_envelope,
+    LEXICAL_ENCODED_PROJECTION_VERSION, LEXICAL_EXTENSION_NAMESPACE, LEXICAL_EXTENSION_VERSION,
+    LEXICAL_PROJECTION_VERSION, LEXICAL_SUMMARY_BATCH_VERSION, LexicalEvidence,
+    LexicalEvidenceFormat, LexicalEvidenceKind, LexicalEvidenceV1, LexicalExtensionError,
+    MAX_LEXICAL_PAYLOAD_BYTES, MAX_LEXICAL_SIGNATURE_BYTES, MAX_LEXICAL_SUMMARY_BATCH_ENTRIES,
+    MAX_LEXICAL_SUMMARY_BYTES, decode_lexical_evidence, decode_lexical_evidence_envelope,
     decode_lexical_summary_batch_envelope, encode_lexical_evidence, new_lexical_evidence_envelope,
     new_lexical_summary_batch_envelope, validate_lexical_evidence_envelope,
 };
@@ -111,11 +123,13 @@ pub use rebind::{
     generation_neutral_workspace_bytes,
 };
 pub use source_projection::{
-    MAX_SIGNATURE_SOURCE_PARTS, SignatureSourcePart, SourceTextProjection,
+    EncodedSourceTextProjection, MAX_SIGNATURE_SOURCE_PARTS, SignatureSourcePart,
+    SourceTextEncoding, SourceTextProjection,
 };
 pub use validation::{
-    ExtensionIdentifier, ExtensionSupport, IrDocumentValidationError, IrLimits,
-    UnknownNoncriticalExtensionPolicy, canonicalize_ir_document, validate_ir_document,
+    ExtensionIdentifier, ExtensionSupport, IrDocumentUsage, IrDocumentUsageError,
+    IrDocumentValidationError, IrLimits, UnknownNoncriticalExtensionPolicy,
+    canonicalize_ir_document, preflight_ir_document_limits, validate_ir_document,
 };
 pub use vba_compilation::{
     MAX_VBA_COMPILATION_BRANCHES, MAX_VBA_COMPILATION_PAYLOAD_BYTES, VBA_COMPILATION_NAMESPACE,

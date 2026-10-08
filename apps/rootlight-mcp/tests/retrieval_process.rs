@@ -5,6 +5,9 @@
 
 mod process_support;
 
+#[path = "retrieval_process/context_prefix.rs"]
+mod context_prefix;
+
 use std::{
     ffi::OsStr,
     fs,
@@ -76,6 +79,551 @@ pub fn scope_page_candidate() -> usize {
     1
 }
 ";
+
+#[test]
+fn encoded_symbol_explain_previews_cross_real_process_boundaries() {
+    let body = "pub fn encoded_beacon() -> &'static str {\r\n    \"\u{2603}\u{1f642}\"\r\n}";
+    let text = format!("\u{feff}// \u{2603}\u{1f642}\r\n{body}\r\npub fn after() {{}}\r\n");
+    let start = u64::try_from(
+        text.get(..text.find(body).unwrap())
+            .unwrap()
+            .encode_utf16()
+            .count(),
+    )
+    .unwrap()
+        * 2;
+    let sources: Vec<_> = [("encoded-le.rs", true), ("encoded-be.rs", false)]
+        .into_iter()
+        .map(|(path, little_endian)| {
+            let raw: Vec<_> = text
+                .encode_utf16()
+                .flat_map(|unit| {
+                    if little_endian {
+                        unit.to_le_bytes()
+                    } else {
+                        unit.to_be_bytes()
+                    }
+                })
+                .collect();
+            (path, raw)
+        })
+        .collect();
+    let mut fixture = RetrievalFixture::spawn_with_sources(&sources, FixtureLayout::Data);
+    for (ordinal, (path, raw)) in sources.iter().enumerate() {
+        assert_encoded_symbol_explain_case(&mut fixture, path, raw, ordinal == 0, start, body);
+    }
+    fixture.finish();
+}
+
+fn assert_encoded_symbol_explain_case(
+    fixture: &mut RetrievalFixture,
+    path: &str,
+    raw: &[u8],
+    little_endian: bool,
+    start: u64,
+    body: &str,
+) {
+    let located = fixture.standalone(
+        &format!("encoded-symbol-locate-{path}"),
+        "code.locate",
+        json!({"query": "encoded_beacon", "search_modes": ["exact"],
+            "kinds": ["function"], "scope": {"paths": [path]}, "response_profile": "evidence"}),
+    );
+    assert_success(&located, "code.locate");
+    let output = &located["result"]["structuredContent"];
+    let matches = output["data"]["matches"].as_array().unwrap();
+    assert_eq!(matches.len(), 1);
+    let found = &matches[0];
+    assert_eq!(found["path"], path);
+    assert_eq!(found["kind"], "function");
+    let symbol = found["symbol_id"].clone();
+    serde_json::from_value::<SymbolId>(symbol.clone()).unwrap();
+    let definition: rootlight_ir::SourceRef =
+        serde_json::from_value(found["source_ref"].clone()).unwrap();
+    let end = start + u64::try_from(body.encode_utf16().count()).unwrap() * 2;
+    assert_eq!(definition.span().start_byte(), start);
+    assert_eq!(definition.span().end_byte(), end);
+    assert_eq!(definition.content_hash(), rootlight_ids::content_hash(raw));
+    assert_eq!(
+        output["generation"]["generation_id"],
+        definition.generation().to_string()
+    );
+    assert_eq!(
+        output["repository"]["repository_id"],
+        definition.repository().to_string()
+    );
+    let selected = raw
+        .get(usize::try_from(start).unwrap()..usize::try_from(end).unwrap())
+        .unwrap();
+    let selected_text = decode_process_utf16(selected, little_endian);
+    assert_eq!(selected_text, body);
+    let expected_signature = body.split_once(" {").unwrap().0;
+    let signature_end =
+        start + u64::try_from(expected_signature.encode_utf16().count()).unwrap() * 2;
+    let signature_raw = raw
+        .get(usize::try_from(start).unwrap()..usize::try_from(signature_end).unwrap())
+        .unwrap();
+    assert_eq!(
+        decode_process_utf16(signature_raw, little_endian),
+        expected_signature
+    );
+    let signature_bytes = u64::try_from(signature_raw.len()).unwrap();
+    let expected_preview = selected_text
+        .split_terminator("\r\n")
+        .take(2)
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(expected_preview.contains('\u{2603}'));
+    assert!(expected_preview.contains('\u{1f642}'));
+    let arguments = json!({"repository": {"repository_id": fixture.repository_id},
+        "generation": definition.generation(), "symbol_ids": [symbol],
+        "sections": ["signature", "source_preview"], "source_preview_lines": 2,
+        "include_provenance": "compact", "response_profile": "evidence"});
+    let physical_encoding = if little_endian {
+        "utf-16le"
+    } else {
+        "utf-16be"
+    };
+    for retained in [false, true] {
+        if retained {
+            let replacement: Vec<_> = "\u{feff}pub fn replacement_beacon() {}\r\n"
+                .encode_utf16()
+                .flat_map(|unit| {
+                    if little_endian {
+                        unit.to_le_bytes()
+                    } else {
+                        unit.to_be_bytes()
+                    }
+                })
+                .collect();
+            fs::write(
+                fixture._root.path().join("repository").join(path),
+                &replacement,
+            )
+            .unwrap();
+            let reindex_arguments = json!({"root": fixture._root.path().join("repository"),
+                "mode": "auto", "detached": false});
+            let indexed = process_support::retry_transient_busy("encoded-symbol-reindex", |id| {
+                fixture
+                    .mcp
+                    .call(id, "repo.index", reindex_arguments.clone())
+            });
+            assert_success(&indexed, "repo.index");
+            let operation_id = indexed["result"]["structuredContent"]["data"]["operation_id"]
+                .as_str()
+                .unwrap();
+            wait_for_publication(&mut fixture.mcp, &indexed, operation_id);
+            let active = fixture.standalone(
+                &format!("replacement-symbol-{path}"),
+                "code.locate",
+                json!({"query": "replacement_beacon", "search_modes": ["exact"],
+                    "kinds": ["function"], "scope": {"paths": [path]}, "response_profile": "evidence"}),
+            );
+            assert_success(&active, "code.locate");
+            let active = &active["result"]["structuredContent"];
+            assert_eq!(active["data"]["matches"].as_array().unwrap().len(), 1);
+            let found = &active["data"]["matches"][0];
+            assert_eq!(found["path"], path);
+            assert_eq!(found["kind"], "function");
+            let replacement_definition: rootlight_ir::SourceRef =
+                serde_json::from_value(found["source_ref"].clone()).unwrap();
+            assert_eq!(
+                replacement_definition.content_hash(),
+                rootlight_ids::content_hash(&replacement)
+            );
+            assert_eq!(
+                active["generation"]["generation_id"],
+                replacement_definition.generation().to_string()
+            );
+            assert_ne!(
+                active["generation"]["generation_id"],
+                definition.generation().to_string()
+            );
+        }
+        let preview = fixture.mcp.call(
+            &format!("encoded-preview-{path}-{retained}"),
+            "symbol.explain",
+            arguments.clone(),
+        );
+        assert_success(&preview, "symbol.explain");
+        let preview_output = &preview["result"]["structuredContent"];
+        assert_common_read_contract(preview_output, &fixture.repository_id);
+        assert_eq!(
+            preview_output["data"]["symbols"].as_array().unwrap().len(),
+            1
+        );
+        let explained = &preview_output["data"]["symbols"][0];
+        assert_eq!(explained["symbol_id"], symbol);
+        assert_eq!(
+            explained["definition"],
+            serde_json::to_value(&definition).unwrap()
+        );
+        assert_eq!(explained["signature"], expected_signature);
+        assert_eq!(explained["source_preview"], expected_preview);
+        assert_eq!(
+            preview_output["generation"]["generation_id"],
+            definition.generation().to_string()
+        );
+        for explicit_zero in [false, true] {
+            let mut metadata_arguments = arguments.clone();
+            if explicit_zero {
+                metadata_arguments["source_preview_lines"] = json!(0);
+            } else {
+                metadata_arguments
+                    .as_object_mut()
+                    .unwrap()
+                    .remove("source_preview_lines");
+            }
+            let metadata = fixture.mcp.call(
+                &format!("encoded-metadata-{path}-{retained}-{explicit_zero}"),
+                "symbol.explain",
+                metadata_arguments,
+            );
+            assert_success(&metadata, "symbol.explain");
+            let metadata = &metadata["result"]["structuredContent"];
+            assert_common_read_contract(metadata, &fixture.repository_id);
+            assert!(metadata["data"]["symbols"][0]["source_preview"].is_null());
+            assert_eq!(
+                metadata["data"]["symbols"][0]["definition"],
+                explained["definition"]
+            );
+            assert_eq!(
+                metadata["data"]["symbols"][0]["signature"],
+                expected_signature
+            );
+            assert_eq!(metadata["usage"]["source_bytes"], signature_bytes);
+            // Signature fragments are charged in original physical bytes,
+            // independently of their UTF-8 display text and optional preview reads.
+            assert_eq!(
+                preview_output["usage"]["source_bytes"]
+                    .as_u64()
+                    .unwrap()
+                    .checked_sub(signature_bytes)
+                    .unwrap(),
+                u64::try_from(raw.len()).unwrap() - start,
+            );
+        }
+        let mut limited_arguments = arguments.clone();
+        limited_arguments["source_preview_lines"] = json!(0);
+        limited_arguments["budget"] = json!({"max_source_bytes": 1});
+        let limited = fixture.mcp.call(
+            &format!("encoded-source-free-{path}-{retained}"),
+            "symbol.explain",
+            limited_arguments,
+        );
+        assert_success(&limited, "symbol.explain");
+        let limited = &limited["result"]["structuredContent"];
+        assert_eq!(limited["usage"]["source_bytes"], 0);
+        assert!(limited["data"]["symbols"][0]["source_preview"].is_null());
+        assert!(limited["data"]["symbols"][0]["signature"].is_null());
+        assert_eq!(limited["completeness"]["state"], "truncated");
+        assert!(
+            limited["completeness"]["limiting_resources"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|resource| resource["kind"] == "source_bytes")
+        );
+        let read = fixture.mcp.call_version(
+            &format!("encoded-definition-read-{path}-{retained}"),
+            "source.read",
+            json!({"repository": {"repository_id": fixture.repository_id},
+                "generation": definition.generation(), "references": [{"source_ref": definition}],
+                "context_lines_before": 0, "context_lines_after": 0,
+                "include_line_numbers": false, "response_profile": "evidence"}),
+            "1.3",
+        );
+        assert_lossless_process_read(&read, &definition, path, physical_encoding, &selected_text);
+        assert!(
+            read["result"]["structuredContent"]["data"]["chunks"][0]["content"]
+                .as_str()
+                .unwrap()
+                .contains("\r\n")
+        );
+        assert!(!expected_preview.contains('\r'));
+        let legacy = fixture.mcp.call_version(
+            &format!("encoded-explain-retained-schema-{path}-{retained}"),
+            "symbol.explain",
+            arguments.clone(),
+            "1.0",
+        );
+        assert_success(&legacy, "symbol.explain");
+        let legacy = &legacy["result"]["structuredContent"];
+        assert_common_read_contract(legacy, &fixture.repository_id);
+        assert_eq!(legacy["schema_version"], "1.0");
+        assert_eq!(
+            legacy["generation"]["generation_id"],
+            definition.generation().to_string()
+        );
+        let legacy_symbol = &legacy["data"]["symbols"][0];
+        assert_eq!(legacy_symbol["symbol_id"], symbol);
+        assert_eq!(
+            legacy_symbol["definition"],
+            serde_json::to_value(&definition).unwrap()
+        );
+        for field in [
+            "qualified_name",
+            "container",
+            "relation_samples",
+            "source_preview",
+            "section_gaps",
+        ] {
+            assert!(legacy_symbol.get(field).is_none());
+        }
+    }
+}
+
+fn decode_process_utf16(raw: &[u8], little_endian: bool) -> String {
+    let (pairs, tail) = raw.as_chunks::<2>();
+    assert!(tail.is_empty());
+    let units: Vec<_> = pairs
+        .iter()
+        .map(|pair| {
+            if little_endian {
+                u16::from_le_bytes(*pair)
+            } else {
+                u16::from_be_bytes(*pair)
+            }
+        })
+        .collect();
+    String::from_utf16(&units).unwrap()
+}
+
+#[test]
+fn lossless_utf16_source_text_crosses_real_process_boundaries() {
+    let text = "head\r\n\u{010a}\u{0100}\u{1f642}\r\ntail\r\n";
+    let scalar_text = "\u{010a}\u{0100}\u{1f642}";
+    let complete_text = format!("\u{feff}{text}");
+    let sources: Vec<_> = [("encoded-le.note", true), ("encoded-be.note", false)]
+        .into_iter()
+        .map(|(path, little_endian)| {
+            let mut raw = if little_endian {
+                vec![0xff, 0xfe]
+            } else {
+                vec![0xfe, 0xff]
+            };
+            for unit in text.encode_utf16() {
+                let bytes = if little_endian {
+                    unit.to_le_bytes()
+                } else {
+                    unit.to_be_bytes()
+                };
+                raw.extend_from_slice(&bytes);
+            }
+            (path, raw)
+        })
+        .collect();
+    let mut fixture = RetrievalFixture::spawn_with_sources(&sources, FixtureLayout::Data);
+    for (ordinal, (path, raw)) in sources.iter().enumerate() {
+        let physical_encoding = if ordinal == 0 { "utf-16le" } else { "utf-16be" };
+        let located = fixture.standalone(
+            &format!("encoded-file-{ordinal}"),
+            "code.locate",
+            json!({"query": path, "search_modes": ["path"], "kinds": ["file"],
+                "scope": {"paths": [path]}, "response_profile": "evidence"}),
+        );
+        assert_success(&located, "code.locate");
+        let found = located["result"]["structuredContent"]["data"]["matches"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|item| item["path"] == *path && item["kind"] == "file")
+            .unwrap();
+        assert!(found["symbol_id"].is_null());
+        let file_reference: rootlight_ir::SourceRef =
+            serde_json::from_value(found["source_ref"].clone()).unwrap();
+        assert_eq!(
+            file_reference.content_hash(),
+            rootlight_ids::content_hash(raw)
+        );
+        assert_eq!(
+            serde_json::to_value(file_reference.span().file()).unwrap(),
+            found["file_id"]
+        );
+        let scalar_start = 2 + u64::try_from("head\r\n".encode_utf16().count()).unwrap() * 2;
+        let scalar_end =
+            scalar_start + u64::try_from(scalar_text.encode_utf16().count()).unwrap() * 2;
+        for (case, start, end, expected) in [
+            (
+                "full",
+                0,
+                u64::try_from(raw.len()).unwrap(),
+                complete_text.as_str(),
+            ),
+            ("scalars", scalar_start, scalar_end, scalar_text),
+            ("crlf", 10, 14, "\r\n"),
+        ] {
+            let reference = rootlight_ir::SourceRef::new(
+                file_reference.repository(),
+                file_reference.generation(),
+                rootlight_ir::SourceSpan::new(file_reference.span().file(), start, end).unwrap(),
+                file_reference.content_hash(),
+                None,
+            );
+            let arguments = json!({"references": [{"source_ref": reference}],
+                "context_lines_before": 0, "context_lines_after": 0,
+                "include_line_numbers": false, "response_profile": "evidence"});
+            for explicit in [false, true] {
+                let mut selected = arguments.clone();
+                let id = format!("encoded-text-{ordinal}-{case}-{explicit}");
+                let response = if explicit {
+                    selected["encoding"] = json!("lossless_text");
+                    fixture.standalone_version(&id, "source.read", selected, "1.3")
+                } else {
+                    fixture.standalone(&id, "source.read", selected)
+                };
+                assert_lossless_process_read(
+                    &response,
+                    &reference,
+                    path,
+                    physical_encoding,
+                    expected,
+                );
+            }
+            assert_legacy_encoded_process_read(
+                &mut fixture,
+                &arguments,
+                &reference,
+                raw,
+                path,
+                ordinal,
+                case,
+            );
+        }
+    }
+    fixture.finish();
+}
+
+fn assert_lossless_process_read(
+    response: &Value,
+    reference: &rootlight_ir::SourceRef,
+    path: &str,
+    physical_encoding: &str,
+    expected: &str,
+) {
+    assert_success(response, "source.read");
+    assert_eq!(response["result"]["isError"], false);
+    let output = &response["result"]["structuredContent"];
+    assert_eq!(output["schema_version"], "1.3");
+    assert_common_usage(output);
+    let physical_bytes = reference.span().end_byte() - reference.span().start_byte();
+    assert_eq!(
+        physical_bytes,
+        match physical_encoding {
+            "utf-8" => u64::try_from(expected.len()).unwrap(),
+            "utf-16le" | "utf-16be" => u64::try_from(expected.encode_utf16().count()).unwrap() * 2,
+            other => panic!("unsupported fixture encoding: {other}"),
+        }
+    );
+    assert_eq!(output["usage"]["source_bytes"], physical_bytes);
+    assert_eq!(output["data"]["total_source_bytes"], physical_bytes);
+    assert_eq!(output["data"]["total_text_bytes"], expected.len());
+    assert_eq!(output["data"]["chunks"].as_array().unwrap().len(), 1);
+    let chunk = &output["data"]["chunks"][0];
+    assert_eq!(chunk["encoding"], "lossless_text");
+    assert_eq!(chunk["physical_encoding"], physical_encoding);
+    assert_eq!(chunk["content"], expected);
+    assert_eq!(chunk["path"], path);
+    assert_eq!(
+        chunk["source_ref"],
+        serde_json::to_value(reference).unwrap()
+    );
+    assert_eq!(chunk["start_byte"], reference.span().start_byte());
+    assert_eq!(chunk["end_byte"], reference.span().end_byte());
+    assert_eq!(chunk["content_hash"], reference.content_hash().to_string());
+    assert_eq!(
+        output["repository"]["repository_id"],
+        reference.repository().to_string()
+    );
+    assert_eq!(
+        output["generation"]["generation_id"],
+        reference.generation().to_string()
+    );
+    assert!(chunk["start_line"].is_null());
+    assert!(chunk["end_line"].is_null());
+    for duplicate in ["exact_content", "raw_bytes", "content_bytes"] {
+        assert!(chunk.get(duplicate).is_none());
+    }
+    assert_eq!(output["data"]["stale_references"], json!([]));
+    assert_eq!(output["data"]["elisions"], json!([]));
+    assert_eq!(output["truncated"], false);
+    serde_json::from_value::<rootlight_mcp_contract::source_text::SourceReadOutputV1_3>(
+        output.clone(),
+    )
+    .unwrap();
+    let content = response["result"]["content"].as_array().unwrap();
+    assert_eq!(content.len(), 1);
+    assert_eq!(content[0]["type"], "text");
+    let mirrored = content[0]["text"].as_str().unwrap();
+    assert_eq!(serde_json::from_str::<Value>(mirrored).unwrap(), *output);
+    assert_eq!(mirrored.as_bytes(), serde_json::to_vec(output).unwrap());
+}
+
+fn assert_legacy_encoded_process_read(
+    fixture: &mut RetrievalFixture,
+    arguments: &Value,
+    reference: &rootlight_ir::SourceRef,
+    raw: &[u8],
+    path: &str,
+    ordinal: usize,
+    case: &str,
+) {
+    let mut bytes = arguments.clone();
+    bytes["encoding"] = json!("bytes_base64");
+    let response = fixture.standalone_version(
+        &format!("encoded-bytes-{ordinal}-{case}"),
+        "source.read",
+        bytes,
+        "1.2",
+    );
+    assert_success(&response, "source.read");
+    let output = &response["result"]["structuredContent"];
+    assert_eq!(output["schema_version"], "1.2");
+    assert_common_usage(output);
+    assert!(output["data"].get("total_text_bytes").is_none());
+    let chunk = &output["data"]["chunks"][0];
+    assert_eq!(output["data"]["chunks"].as_array().unwrap().len(), 1);
+    assert_eq!(chunk["encoding"], "base64");
+    assert!(chunk.get("physical_encoding").is_none());
+    assert_eq!(chunk["path"], path);
+    assert_eq!(
+        chunk["source_ref"],
+        serde_json::to_value(reference).unwrap()
+    );
+    assert_eq!(
+        chunk["content_hash"],
+        rootlight_ids::content_hash(raw).to_string()
+    );
+    let start = usize::try_from(reference.span().start_byte()).unwrap();
+    let end = usize::try_from(reference.span().end_byte()).unwrap();
+    assert_eq!(chunk["start_byte"], start);
+    assert_eq!(chunk["end_byte"], end);
+    assert_eq!(output["data"]["total_source_bytes"], end - start);
+    assert_eq!(output["usage"]["source_bytes"], end - start);
+    assert_exact_base64(&raw[start..end], chunk["content"].as_str().unwrap());
+    serde_json::from_value::<rootlight_mcp_contract::source_entity::SourceReadOutputV1_2>(
+        output.clone(),
+    )
+    .unwrap();
+    if case == "full" {
+        // Legacy UTF-8 refusal remains its established domain error, not a transport failure.
+        let mut utf8 = arguments.clone();
+        utf8["encoding"] = json!("utf8_lossless_when_valid");
+        let refused = fixture.standalone_version(
+            &format!("encoded-legacy-utf8-{ordinal}"),
+            "source.read",
+            utf8,
+            "1.2",
+        );
+        assert_public_error(&refused, "INTERNAL");
+        let output = &refused["result"]["structuredContent"];
+        assert_eq!(output["schema_version"], "1.2");
+        assert_eq!(output["error"]["retryable"], false);
+        let message = output["error"]["message"].as_str().unwrap();
+        assert!(!message.contains(path));
+        assert!(!message.contains("\u{010a}\u{0100}\u{1f642}"));
+    }
+}
 
 #[test]
 fn vba_conditional_activity_crosses_processes_without_losing_source_or_downgrading() {
@@ -183,7 +731,8 @@ fn vba_conditional_activity_crosses_processes_without_losing_source_or_downgradi
                 read_arguments,
                 "1.2",
             );
-            let chunk = assert_conditional_process_read(&read, source, expected, &mut inventory);
+            let chunk =
+                assert_conditional_process_read(&read, source, expected, &mut inventory, "1.2");
             assert_eq!(chunk["content"], name);
             assert_eq!(chunk["start_byte"], token["span"]["start_byte"]);
             assert_eq!(chunk["end_byte"], token["span"]["end_byte"]);
@@ -199,8 +748,13 @@ fn vba_conditional_activity_crosses_processes_without_losing_source_or_downgradi
                 } else {
                     "unproven"
                 };
-                let chunk =
-                    assert_conditional_process_read(&whole, source, body_expected, &mut inventory);
+                let chunk = assert_conditional_process_read(
+                    &whole,
+                    source,
+                    body_expected,
+                    &mut inventory,
+                    "1.3",
+                );
                 assert!(
                     chunk["content"]
                         .as_str()
@@ -227,7 +781,8 @@ fn vba_conditional_activity_crosses_processes_without_losing_source_or_downgradi
             json!({"references": [{"source_ref": included_token}], "context_lines_before": 2,
                 "context_lines_after": 3, "include_line_numbers": false, "response_profile": profile}),
         );
-        let chunk = assert_conditional_process_read(&expanded, source, "unproven", &mut inventory);
+        let chunk =
+            assert_conditional_process_read(&expanded, source, "unproven", &mut inventory, "1.3");
         assert!(
             chunk["start_byte"].as_u64().unwrap()
                 < included_token["span"]["start_byte"].as_u64().unwrap()
@@ -349,15 +904,28 @@ fn assert_conditional_process_read<'response>(
     source: &str,
     expected: &str,
     inventory: &mut Value,
+    version: &str,
 ) -> &'response Value {
     assert_success(response, "source.read");
     let output = &response["result"]["structuredContent"];
-    assert_eq!(output["schema_version"], "1.2");
+    assert_eq!(output["schema_version"], version);
     assert_common_usage(output);
     assert_eq!(output["data"]["chunks"].as_array().unwrap().len(), 1);
     let chunk = &output["data"]["chunks"][0];
     assert_eq!(chunk["path"], "Activity.bas");
-    assert_eq!(chunk["encoding"], "utf8");
+    if version == "1.3" {
+        assert_eq!(chunk["encoding"], "lossless_text");
+        assert_eq!(chunk["physical_encoding"], "utf-8");
+        assert_eq!(
+            output["data"]["total_text_bytes"],
+            chunk["content"].as_str().unwrap().len()
+        );
+    } else {
+        assert_eq!(version, "1.2");
+        assert_eq!(chunk["encoding"], "utf8");
+        assert!(chunk.get("physical_encoding").is_none());
+        assert!(output["data"].get("total_text_bytes").is_none());
+    }
     assert_conditional_process_source(&chunk["source_ref"], output, source);
     assert_eq!(
         chunk["content_hash"],
@@ -3643,6 +4211,7 @@ fn supported_symbol_explain_projection_crosses_process_boundaries(fixture: &mut 
 fn source_symbol_selector_resolves_the_complete_definition(fixture: &mut RetrievalFixture) {
     let arguments = json!({
         "references": [{"symbol_id": fixture.symbols[0].clone()}],
+        "encoding": "utf8_lossless_when_valid",
         "response_profile": "evidence"
     });
     let standalone = fixture.standalone("source-symbol-selector", "source.read", arguments.clone());
@@ -4368,7 +4937,30 @@ fn assert_standalone_batch_parity(standalone: &Value, batch: &Value, tool: &str)
         "batch child did not preserve {tool}: {batch:#}"
     );
     assert!(operation.get("error").is_none());
-    assert_eq!(operation["data"], standalone["data"]);
+    if tool == "source.read" {
+        assert_eq!(standalone["schema_version"], "1.3");
+        assert!(operation["data"].get("total_text_bytes").is_none());
+        let chunks = standalone["data"]["chunks"].as_array().unwrap();
+        let total_text_bytes: usize = chunks
+            .iter()
+            .map(|chunk| match chunk["encoding"].as_str().unwrap() {
+                "utf8" => chunk["content"].as_str().unwrap().len(),
+                "base64" => 0,
+                other => {
+                    panic!("retained batch parity requires an explicit legacy mode, got {other}")
+                }
+            })
+            .sum();
+        assert_eq!(standalone["data"]["total_text_bytes"], total_text_bytes);
+        let mut historical_data = standalone["data"].clone();
+        historical_data
+            .as_object_mut()
+            .unwrap()
+            .remove("total_text_bytes");
+        assert_eq!(operation["data"], historical_data);
+    } else {
+        assert_eq!(operation["data"], standalone["data"]);
+    }
     assert_eq!(
         operation["truncated"], standalone["truncated"],
         "standalone: {standalone:#}\nbatch: {batch:#}"

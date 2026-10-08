@@ -13,10 +13,10 @@ mod tokenizer;
 pub use artifact::{ArtifactBudget, LexicalArtifactManifest, VerifiedLexicalArtifact};
 pub use index::{
     EPHEMERAL_MAX_TEXT_BYTES, EphemeralLexicalIndexBuilder, LexicalIndex, LexicalIndexBuilder,
-    LexicalSearch, project_source_term_chunks, project_source_terms_with_coverage,
-    project_symbol_name_projection, select_query_source_bytes, select_query_source_text,
-    symbol_name_omission_memory_bytes, symbol_name_term_omissions, validate_build_admission,
-    validate_search_request, validate_search_request_with_entity_filters,
+    LexicalSearch, project_signature_search_text, project_source_term_chunks,
+    project_source_terms_with_coverage, project_symbol_name_projection, select_query_source_bytes,
+    select_query_source_text, symbol_name_omission_memory_bytes, symbol_name_term_omissions,
+    validate_build_admission, validate_search_request, validate_search_request_with_entity_filters,
     validate_search_request_with_filters, validate_search_request_with_languages,
 };
 pub use model::{

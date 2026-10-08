@@ -330,6 +330,8 @@ pub enum ResolutionRule {
     GroovyTypeImport,
     /// Native Perl package CODE storage in the indexed dependency snapshot.
     PerlPackageStorage,
+    /// Native public F# module export in one source-declared project order.
+    FSharpQualifiedModule,
     /// Lexical scope and file containment resolution.
     LexicalScope,
     /// Import or module-name resolution over available normalized facts.
@@ -426,6 +428,8 @@ pub struct RejectedCandidate {
 pub enum CompletenessAssumption {
     /// Links identify indexed package declarations, not evaluated loader paths or runtime values.
     IndexedPackageSnapshot,
+    /// Literal ordered project members constrain links, without evaluated build closure.
+    SourceDeclaredProjectOrder,
     /// The normalized document passed common ownership, reference, and quota validation.
     ValidatedNormalizedDocument,
     /// All considered facts belong to one repository generation.

@@ -585,6 +585,10 @@
         {
           "type": "type_argument",
           "named": true
+        },
+        {
+          "type": "typed_expression",
+          "named": true
         }
       ]
     }
@@ -2018,6 +2022,11 @@
   },
   {
     "type": "float",
+    "named": false,
+    "fields": {}
+  },
+  {
+    "type": "float",
     "named": true,
     "fields": {}
   },
@@ -2054,6 +2063,18 @@
         },
         {
           "type": "paren_expression",
+          "named": true
+        },
+        {
+          "type": "sequential_expression",
+          "named": true
+        },
+        {
+          "type": "typecast_expression",
+          "named": true
+        },
+        {
+          "type": "typed_expression",
           "named": true
         }
       ]
@@ -3430,6 +3451,10 @@
         {
           "type": "tuple_expression",
           "named": true
+        },
+        {
+          "type": "typed_expression",
+          "named": true
         }
       ]
     }
@@ -3700,6 +3725,10 @@
           "named": true
         },
         {
+          "type": "namespace",
+          "named": true
+        },
+        {
           "type": "type_extension_elements",
           "named": true
         }
@@ -3773,6 +3802,10 @@
         },
         {
           "type": "named_module",
+          "named": true
+        },
+        {
+          "type": "namespace",
           "named": true
         },
         {
@@ -4205,6 +4238,33 @@
     }
   },
   {
+    "type": "sequential_expression",
+    "named": true,
+    "fields": {},
+    "children": {
+      "multiple": true,
+      "required": false,
+      "types": [
+        {
+          "type": "const",
+          "named": true
+        },
+        {
+          "type": "long_identifier_or_op",
+          "named": true
+        },
+        {
+          "type": "paren_expression",
+          "named": true
+        },
+        {
+          "type": "typed_expression",
+          "named": true
+        }
+      ]
+    }
+  },
+  {
     "type": "simple_type",
     "named": true,
     "fields": {},
@@ -4264,6 +4324,10 @@
         },
         {
           "type": "paren_expression",
+          "named": true
+        },
+        {
+          "type": "typed_expression",
           "named": true
         }
       ]
@@ -4502,6 +4566,10 @@
         },
         {
           "type": "paren_expression",
+          "named": true
+        },
+        {
+          "type": "typed_expression",
           "named": true
         }
       ]
@@ -4964,6 +5032,105 @@
     }
   },
   {
+    "type": "typecast_expression",
+    "named": true,
+    "fields": {},
+    "children": {
+      "multiple": true,
+      "required": true,
+      "types": [
+        {
+          "type": "anon_record_type",
+          "named": true
+        },
+        {
+          "type": "byref_type",
+          "named": true
+        },
+        {
+          "type": "compound_type",
+          "named": true
+        },
+        {
+          "type": "const",
+          "named": true
+        },
+        {
+          "type": "constrained_type",
+          "named": true
+        },
+        {
+          "type": "flexible_type",
+          "named": true
+        },
+        {
+          "type": "function_type",
+          "named": true
+        },
+        {
+          "type": "generic_type",
+          "named": true
+        },
+        {
+          "type": "list_type",
+          "named": true
+        },
+        {
+          "type": "long_identifier_or_op",
+          "named": true
+        },
+        {
+          "type": "nullable_type",
+          "named": true
+        },
+        {
+          "type": "paren_expression",
+          "named": true
+        },
+        {
+          "type": "paren_type",
+          "named": true
+        },
+        {
+          "type": "postfix_type",
+          "named": true
+        },
+        {
+          "type": "qualified_type",
+          "named": true
+        },
+        {
+          "type": "sequential_expression",
+          "named": true
+        },
+        {
+          "type": "simple_type",
+          "named": true
+        },
+        {
+          "type": "static_constant_type",
+          "named": true
+        },
+        {
+          "type": "static_type",
+          "named": true
+        },
+        {
+          "type": "struct_type",
+          "named": true
+        },
+        {
+          "type": "type_argument",
+          "named": true
+        },
+        {
+          "type": "typed_expression",
+          "named": true
+        }
+      ]
+    }
+  },
+  {
     "type": "typed_const_pattern",
     "named": true,
     "fields": {},
@@ -4981,6 +5148,25 @@
         },
         {
           "type": "types",
+          "named": true
+        }
+      ]
+    }
+  },
+  {
+    "type": "typed_expression",
+    "named": true,
+    "fields": {},
+    "children": {
+      "multiple": true,
+      "required": true,
+      "types": [
+        {
+          "type": "const",
+          "named": true
+        },
+        {
+          "type": "measure",
           "named": true
         }
       ]
@@ -5651,6 +5837,10 @@
           {
             "type": "paren_expression",
             "named": true
+          },
+          {
+            "type": "typed_expression",
+            "named": true
           }
         ]
       }
@@ -5821,6 +6011,10 @@
     "named": false
   },
   {
+    "type": ";",
+    "named": false
+  },
+  {
     "type": "<",
     "named": false
   },
@@ -5946,10 +6140,6 @@
   },
   {
     "type": "exception",
-    "named": false
-  },
-  {
-    "type": "float",
     "named": false
   },
   {

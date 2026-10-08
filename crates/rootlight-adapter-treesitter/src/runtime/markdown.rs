@@ -1,4 +1,4 @@
-//! Native inline Markdown parsing in original document coordinates.
+//! Native inline Markdown parsing in one whole-document text coordinate space.
 //! Each block is interpreted independently so unmatched delimiters cannot join
 //! unrelated paragraphs; block continuation markers are excluded, not rewritten.
 
@@ -12,6 +12,7 @@ impl TreeSitterProvider {
         &self,
         tree: &Tree,
         request: &ParseRequest<'_>,
+        source: &NativeSourceView<'_>,
         traversal: &mut TraversalReport,
         candidates: &mut Vec<QueryCandidate>,
         max_facts: Option<usize>,
@@ -32,6 +33,7 @@ impl TreeSitterProvider {
         let inline_limited = self.extract_markdown_inline(
             tree,
             request,
+            source,
             traversal,
             candidates,
             &mut context,
@@ -40,6 +42,7 @@ impl TreeSitterProvider {
         self.extract_markdown_code(
             tree,
             request,
+            source,
             traversal,
             candidates,
             max_facts,
@@ -57,6 +60,7 @@ impl TreeSitterProvider {
         &self,
         tree: &Tree,
         request: &ParseRequest<'_>,
+        source: &NativeSourceView<'_>,
         traversal: &mut TraversalReport,
         candidates: &mut Vec<QueryCandidate>,
         context: &mut NativeParseContext,
@@ -81,7 +85,7 @@ impl TreeSitterProvider {
             if candidate.syntax != "markdown.inline"
                 || candidate.role != StructuralRole::Signature
                 || (!request.included_ranges().is_empty()
-                    && !candidate_within_included_range(&candidate, request)?)
+                    && !candidate_within_included_range(&candidate, request, source)?)
             {
                 continue;
             }
@@ -96,7 +100,8 @@ impl TreeSitterProvider {
                     node.kind() == "inline" && node.byte_range() == (candidate.start..candidate.end)
                 })
                 .ok_or_else(|| provider_failure("markdown-inline-host-span"))?;
-            let Some(ranges) = inline_ranges(body, request, maximum_ranges, cancellation)? else {
+            let Some(ranges) = inline_ranges(body, request, source, maximum_ranges, cancellation)?
+            else {
                 candidates[index].syntax = "markdown.inline_limit";
                 limited = true;
                 continue;
@@ -114,7 +119,7 @@ impl TreeSitterProvider {
                 ranges,
                 &limits,
             )?;
-            // The native host node already has an exact original-source point;
+            // The native host node already has an exact projected-source point;
             // rescanning the prefix for every paragraph would be quadratic.
             context.range_origin = (body.start_byte(), body.start_position());
             let child = match self.parse_native_tree(
@@ -122,6 +127,7 @@ impl TreeSitterProvider {
                 &tree_sitter_md::INLINE_LANGUAGE.into(),
                 None,
                 self.config.default_settings(),
+                source,
                 Some(&mut *context),
                 cancellation,
             ) {
@@ -143,6 +149,7 @@ impl TreeSitterProvider {
             let report = inspect_tree(
                 &child,
                 &child_request,
+                source,
                 remaining_nodes,
                 limits.max_syntax_depth(),
                 cancellation,
@@ -172,7 +179,7 @@ impl TreeSitterProvider {
                 continue;
             }
             candidates[index].syntax = "markdown.inline_parsed";
-            capture_inline(&child, request.source().bytes(), candidates, cancellation)?;
+            capture_inline(&child, source.as_bytes(), candidates, cancellation)?;
         }
         Ok(limited)
     }
@@ -181,6 +188,7 @@ impl TreeSitterProvider {
 fn inline_ranges(
     body: Node<'_>,
     request: &ParseRequest<'_>,
+    source: &NativeSourceView<'_>,
     maximum: usize,
     cancellation: &Cancellation,
 ) -> Result<Option<Vec<IncludedRange>>, AdapterError> {
@@ -202,6 +210,7 @@ fn inline_ranges(
             start,
             child.start_byte(),
             request,
+            source,
             maximum,
             cancellation,
         )? {
@@ -214,6 +223,7 @@ fn inline_ranges(
         start,
         body.end_byte(),
         request,
+        source,
         maximum,
         cancellation,
     )? || ranges.is_empty()
@@ -228,6 +238,7 @@ fn append_range(
     start: usize,
     end: usize,
     request: &ParseRequest<'_>,
+    view: &NativeSourceView<'_>,
     maximum: usize,
     cancellation: &Cancellation,
 ) -> Result<bool, AdapterError> {
@@ -237,8 +248,7 @@ fn append_range(
     if ranges.len() >= maximum {
         return Ok(false);
     }
-    let source = source_ref_for_span(request.source().source_ref(), start, end)
-        .ok_or_else(|| provider_failure("markdown-inline-source-span"))?;
+    let source = source_ref_for_projected_span(request.source().source_ref(), view, start, end)?;
     try_reserve_cancellable(ranges, 1, cancellation, "markdown-ranges-allocation")?;
     ranges.push(IncludedRange::new(
         source.span(),

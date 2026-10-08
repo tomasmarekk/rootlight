@@ -6,7 +6,7 @@ use std::{
     ptr::NonNull,
 };
 
-const TOKEN_COUNT: usize = 43;
+const TOKEN_COUNT: usize = 53;
 const ENUM_CASE_BAR: usize = 40;
 const INDENT: usize = 1;
 const ERROR_SENTINEL: usize = 39;
@@ -188,7 +188,7 @@ impl Scanner {
             advanced_past_end: false,
             watchdog: false,
         };
-        // SAFETY: The opaque owner, complete 43-flag array, Input and non-panicking
+        // SAFETY: The opaque owner, complete 53-flag array, Input and non-panicking
         // callbacks are live for this call. The scanner does not retain lexer pointers.
         let found = unsafe {
             match self.profile {
@@ -1178,12 +1178,18 @@ fn native_stranded_do_state_round_trips_and_every_unknown_raw_kind_resets() {
             let mut restored = Scanner::new(profile);
             restored.restore(&owned);
             assert_eq!(restored.snapshot_at(1), owned);
+            assert_eq!(owned[1], 2, "{profile:?}: current native donor version");
+            // The old raw-kind domain belongs to codec1, not current ROOT-capable codec2.
+            let mut historical = owned.clone();
+            historical[1] = 1;
+            restored.restore(&historical);
+            assert_eq!(restored.snapshot_at(1), owned);
             for unknown in u8::MIN..=u8::MAX {
                 if domain.contains(&unknown) {
                     continue;
                 }
-                // Only rejection inputs alter an observed native kind; accepted states are genuine.
-                let mut invalid = owned.clone();
+                // Rejection mutates the explicit historical payload; valid payloads canonicalize to codec2.
+                let mut invalid = historical.clone();
                 invalid[kind_index] = unknown;
                 restored.restore(&owned);
                 restored.restore(&invalid);
@@ -1230,3 +1236,930 @@ fn type_application_barrier_blocks_done_until_its_own_written_closer() {
         }
     }
 }
+
+const APPLICATION_ARGUMENT_START: usize = 43;
+
+fn marker_scanner(profile: Profile) -> Scanner {
+    let mut scanner = Scanner::new(profile);
+    open_enum_body(&mut scanner, 4);
+    scanner
+}
+
+fn assert_argument_marker(
+    scanner: &mut Scanner,
+    source: &str,
+    column: u32,
+    tokens: &[usize],
+    endpoint: usize,
+) {
+    let before = scanner.snapshot();
+    let (found, input) = scanner.scan(source, column, flags(tokens));
+    assert!(
+        found,
+        "{:?}: argument marker declined {source:?}",
+        scanner.profile
+    );
+    assert_eq!(
+        input.lexer.result_symbol,
+        u16::try_from(APPLICATION_ARGUMENT_START).unwrap(),
+        "{:?}: wrong token for {source:?}",
+        scanner.profile
+    );
+    assert_eq!(
+        input.marked,
+        Some(endpoint),
+        "{:?}: marker consumed beyond its head/trivia frontier in {source:?}",
+        scanner.profile
+    );
+    assert_eq!(
+        scanner.snapshot(),
+        before,
+        "{:?}: argument marker mutated native state for {source:?}",
+        scanner.profile
+    );
+}
+
+fn assert_no_argument_marker(scanner: &mut Scanner, source: &str, column: u32, tokens: &[usize]) {
+    let before = scanner.snapshot();
+    let (found, input) = scanner.scan(source, column, flags(tokens));
+    assert!(
+        !found,
+        "{:?}: argument marker accepted {source:?}",
+        scanner.profile
+    );
+    assert_eq!(
+        input.lexer.result_symbol,
+        u16::MAX,
+        "{:?}: declining marker invented a token for {source:?}",
+        scanner.profile
+    );
+    assert_eq!(
+        scanner.snapshot(),
+        before,
+        "{:?}: declining marker mutated native state for {source:?}",
+        scanner.profile
+    );
+}
+
+#[test]
+fn argument_marker_requires_left_trivia_and_right_adjacency_for_dual_signs() {
+    for profile in PROFILES {
+        let mut scanner = marker_scanner(profile);
+        for source in [" -value", " +value", " -1", " +1"] {
+            assert_argument_marker(&mut scanner, source, 12, &[APPLICATION_ARGUMENT_START], 0);
+        }
+        for source in [
+            "-value",
+            "+value",
+            "-1",
+            "+1",
+            " - value",
+            " + value",
+            " - 1",
+            " + 1",
+            " -\nvalue",
+            " +\r\nvalue",
+        ] {
+            assert_no_argument_marker(&mut scanner, source, 12, &[APPLICATION_ARGUMENT_START]);
+        }
+    }
+}
+
+#[test]
+fn ordinary_adjacent_argument_heads_do_not_steal_immediate_parentheses() {
+    for profile in PROFILES {
+        let mut scanner = marker_scanner(profile);
+        for source in ["\"%s\"value", "[|1|]", "{ Value = 1 }"] {
+            assert_argument_marker(&mut scanner, source, 12, &[APPLICATION_ARGUMENT_START], 0);
+        }
+        for source in ["(value)", "()"] {
+            assert_no_argument_marker(&mut scanner, source, 12, &[APPLICATION_ARGUMENT_START]);
+        }
+        for source in [" (value)", " ()"] {
+            assert_argument_marker(&mut scanner, source, 12, &[APPLICATION_ARGUMENT_START], 0);
+        }
+    }
+}
+
+#[test]
+fn comment_peeks_keep_marker_extent_before_original_trivia_and_preserve_state() {
+    for profile in PROFILES {
+        let mut scanner = marker_scanner(profile);
+        for (source, endpoint) in [
+            ("(*c*)-value", 0),
+            (" (*c*)-value", 0),
+            (" (*outer(*inner*)*)-value", 0),
+            ("(*outer(*inner*)*)-1", 0),
+            (" (*c*)value", 0),
+            ("(*c*)[|1|]", 0),
+            (" (*c*){ Value = 1 }", 0),
+            (" // comment\n        value", 0),
+            (" // comment\r\n        value", 0),
+        ] {
+            assert_argument_marker(
+                &mut scanner,
+                source,
+                12,
+                &[APPLICATION_ARGUMENT_START],
+                endpoint,
+            );
+        }
+        for source in [
+            "(*c*)- value",
+            " (*outer(*inner*)*)+ value",
+            " // comment\n    ignore 103",
+            " // comment\r\n    ignore 103",
+            "(* unfinished",
+            "(*outer(*inner*)",
+        ] {
+            assert_no_argument_marker(&mut scanner, source, 12, &[APPLICATION_ARGUMENT_START]);
+        }
+    }
+}
+
+#[test]
+fn offside_layout_wins_over_equal_indent_prefix_argument_markers() {
+    for profile in PROFILES {
+        for ending in ["\n", "\r\n"] {
+            let mut scanner = marker_scanner(profile);
+            let deeper = format!("{ending}        -value");
+            assert_argument_marker(
+                &mut scanner,
+                &deeper,
+                0,
+                &[APPLICATION_ARGUMENT_START, NEWLINE, DEDENT],
+                0,
+            );
+            let equal = format!("{ending}    -value");
+            assert_no_argument_marker(&mut scanner, &equal, 0, &[APPLICATION_ARGUMENT_START]);
+            for tokens in [
+                vec![APPLICATION_ARGUMENT_START, NEWLINE],
+                vec![APPLICATION_ARGUMENT_START, NEWLINE, DEDENT],
+            ] {
+                let before = scanner.snapshot();
+                let (found, input) = scanner.scan(&equal, 0, flags(&tokens));
+                assert!(
+                    found,
+                    "{profile:?}: equal prefix did not separate its sibling"
+                );
+                assert_eq!(input.lexer.result_symbol, u16::try_from(NEWLINE).unwrap());
+                assert_eq!(input.marked, Some(0));
+                assert_eq!(scanner.snapshot(), before);
+            }
+            for spaces in ["    ", "        "] {
+                let infix = format!("{ending}{spaces}- value");
+                assert_no_argument_marker(
+                    &mut scanner,
+                    &infix,
+                    0,
+                    &[APPLICATION_ARGUMENT_START, NEWLINE, DEDENT],
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn guarded_eof_and_keyword_frontiers_never_invent_argument_markers() {
+    for profile in PROFILES {
+        for tokens in [
+            vec![APPLICATION_ARGUMENT_START, INSIDE_STRING],
+            vec![APPLICATION_ARGUMENT_START, ERROR_SENTINEL],
+        ] {
+            for source in [" -value", "\"%s\"", "(*c*)value"] {
+                let mut scanner = marker_scanner(profile);
+                assert_no_argument_marker(&mut scanner, source, 12, &tokens);
+            }
+        }
+        for source in ["", " ", "\t", "(*c*)", " // comment"] {
+            let mut base = Scanner::new(profile);
+            assert_no_argument_marker(&mut base, source, 12, &[APPLICATION_ARGUMENT_START]);
+        }
+        let mut scanner = marker_scanner(profile);
+        for source in ["let", "in", "then", "else", "with", "done", ";", ";;"] {
+            assert_no_argument_marker(&mut scanner, source, 12, &[APPLICATION_ARGUMENT_START]);
+        }
+        let mut recovery = marker_scanner(profile);
+        let (_found, input) = recovery.scan(" -value", 12, [true; TOKEN_COUNT]);
+        assert_ne!(
+            input.lexer.result_symbol,
+            u16::try_from(APPLICATION_ARGUMENT_START).unwrap(),
+            "{profile:?}: all-valid recovery invented an argument marker"
+        );
+        let before = scanner.snapshot();
+        let (found, input) =
+            scanner.scan("", 0, flags(&[APPLICATION_ARGUMENT_START, ERROR_SENTINEL]));
+        assert!(
+            found,
+            "{profile:?}: recovery EOF did not retain old closure"
+        );
+        assert_eq!(input.lexer.result_symbol, u16::try_from(DEDENT).unwrap());
+        assert_ne!(
+            input.lexer.result_symbol,
+            u16::try_from(APPLICATION_ARGUMENT_START).unwrap()
+        );
+        assert_ne!(scanner.snapshot(), before);
+    }
+}
+
+#[test]
+fn marker_decisions_match_after_native_snapshot_restore_with_input_derived_bounds() {
+    for profile in PROFILES {
+        let mut original = marker_scanner(profile);
+        let state = original.snapshot();
+        let mut restored = Scanner::new(profile);
+        restored.restore(&state);
+        assert_eq!(restored.snapshot_at(1), state);
+        let many_comments = format!(" {}value", "(*outer(*inner*)*)".repeat(128));
+        for (source, column, tokens) in [
+            (" -value", 12, flags(&[APPLICATION_ARGUMENT_START])),
+            ("-value", 12, flags(&[APPLICATION_ARGUMENT_START])),
+            ("\"%s\"value", 12, flags(&[APPLICATION_ARGUMENT_START])),
+            ("(value)", 12, flags(&[APPLICATION_ARGUMENT_START])),
+            ("(*c*)-value", 12, flags(&[APPLICATION_ARGUMENT_START])),
+            (
+                many_comments.as_str(),
+                12,
+                flags(&[APPLICATION_ARGUMENT_START]),
+            ),
+            (
+                "\n        -value",
+                0,
+                flags(&[APPLICATION_ARGUMENT_START, NEWLINE, DEDENT]),
+            ),
+            (
+                "\r\n    -value",
+                0,
+                flags(&[APPLICATION_ARGUMENT_START, NEWLINE, DEDENT]),
+            ),
+        ] {
+            // Every replay starts from the same native-created state; no wire frame is authored.
+            original.restore(&state);
+            restored.restore(&state);
+            let (original_found, original_input) = original.scan(source, column, tokens);
+            let (restored_found, restored_input) = restored.scan(source, column, tokens);
+            assert_eq!(original_found, restored_found, "{profile:?}: {source:?}");
+            assert_eq!(
+                original_input.lexer.result_symbol,
+                restored_input.lexer.result_symbol
+            );
+            assert_eq!(original_input.marked, restored_input.marked);
+            assert_eq!(original_input.offset, restored_input.offset);
+            assert_eq!(original_input.advances, restored_input.advances);
+            assert_eq!(original.snapshot(), restored.snapshot());
+            assert_eq!(original.snapshot(), state);
+        }
+        assert_argument_marker(
+            &mut original,
+            &many_comments,
+            12,
+            &[APPLICATION_ARGUMENT_START],
+            0,
+        );
+    }
+}
+
+#[test]
+fn marker_validity_preserves_existing_layout_token_priority_and_original_extent() {
+    for profile in PROFILES {
+        for ending in ["\n", "\r\n"] {
+            for (owner, column, source, expected_token) in [
+                ("normal", 4, format!("{ending}    item"), NEWLINE),
+                ("normal", 8, format!("{ending}    item"), DEDENT),
+                ("paren", 8, format!("{ending}        item"), NEWLINE),
+                ("paren", 8, format!("{ending}    )"), DEDENT),
+            ] {
+                let mut seed = Scanner::new(profile);
+                open_enum_body(&mut seed, 4);
+                let outer = seed.snapshot();
+                if column > 4 {
+                    if owner == "paren" {
+                        open_paren(&mut seed, column);
+                    } else {
+                        open_enum_body(&mut seed, column);
+                    }
+                }
+                let before = seed.snapshot();
+                let expected_state = if expected_token == NEWLINE {
+                    &before
+                } else {
+                    &outer
+                };
+                let padding_end = source.chars().take_while(char::is_ascii_whitespace).count();
+                assert!(padding_end > 0);
+
+                for ordinary_tokens in [vec![expected_token], vec![NEWLINE, DEDENT]] {
+                    let mut marker_tokens = ordinary_tokens.clone();
+                    marker_tokens.push(APPLICATION_ARGUMENT_START);
+                    // Native-created owners isolate admission changes from snapshot fabrication.
+                    for tokens in [&ordinary_tokens, &marker_tokens] {
+                        let mut scanner = Scanner::new(profile);
+                        scanner.restore(&before);
+                        assert_eq!(scanner.snapshot(), before);
+                        let (found, input) = scanner.scan(&source, 0, flags(tokens));
+                        assert!(
+                            found,
+                            "{profile:?}: {owner} layout declined {source:?}, {tokens:?}"
+                        );
+                        assert_eq!(
+                            input.lexer.result_symbol,
+                            u16::try_from(expected_token).unwrap(),
+                            "{profile:?}: marker displaced {owner} layout for {source:?}"
+                        );
+                        // A hidden zero-width token must not acquire consumed padding.
+                        assert_eq!(
+                            input.marked,
+                            Some(0),
+                            "{profile:?}: marker validity moved old {owner} layout extent"
+                        );
+                        assert!(
+                            input.offset >= padding_end,
+                            "{profile:?}: layout did not inspect original padding"
+                        );
+                        assert_eq!(
+                            scanner.snapshot(),
+                            *expected_state,
+                            "{profile:?}: marker validity changed old {owner} layout state"
+                        );
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn complete_adjacent_operator_references_keep_the_original_marker_frontier() {
+    for profile in PROFILES {
+        let mut scanner = marker_scanner(profile);
+        for source in [
+            "(+)",
+            "(-)",
+            "(*)",
+            "(?)",
+            "($)",
+            "($+)",
+            "(!)",
+            "(%&&)",
+            "(~+)",
+            "(<=>)",
+            "(.+)",
+            "(.. ..)",
+            "(.. )",
+            "( .. .. )",
+            "( * )",
+            "( **)",
+            "(\t+\t)",
+            "(\n+\n)",
+            "(\r\n+\r\n)",
+            "(\u{b}+\u{c})",
+            "(+))",
+        ] {
+            assert_argument_marker(&mut scanner, source, 12, &[APPLICATION_ARGUMENT_START], 0);
+        }
+    }
+}
+
+#[test]
+fn incomplete_operator_probes_preserve_parentheses_comments_and_native_state() {
+    for profile in PROFILES {
+        let mut scanner = marker_scanner(profile);
+        for source in [
+            "()",
+            "(value)",
+            "(",
+            "(+",
+            "(+value)",
+            "( + value )",
+            "(~value)",
+            "(+$)",
+            "(+ $)",
+            "(:)",
+            "(,)",
+            "(..  ..)",
+            "(.. ..+)",
+            "(* )",
+            "(**)",
+            "(*c*)",
+            "(* unfinished",
+            "(*outer(*inner*)",
+            "(\u{85}+)",
+            "(\u{a0}+)",
+            "(\u{feff}+)",
+            "(+\u{2000})",
+        ] {
+            assert_no_argument_marker(&mut scanner, source, 12, &[APPLICATION_ARGUMENT_START]);
+        }
+        for source in ["(+)", "(*)", "( .. .. )"] {
+            for tokens in [
+                vec![APPLICATION_ARGUMENT_START, ERROR_SENTINEL],
+                vec![APPLICATION_ARGUMENT_START, INSIDE_STRING],
+            ] {
+                assert_no_argument_marker(&mut scanner, source, 12, &tokens);
+            }
+        }
+    }
+}
+
+#[test]
+fn complete_operator_peeks_do_not_close_the_retained_enclosing_parenthesis() {
+    for profile in PROFILES {
+        let mut seed = marker_scanner(profile);
+        let outer = seed.snapshot();
+        open_paren(&mut seed, 16);
+        let before = seed.snapshot();
+        for source in ["(+)", "(*)", "( .. .. )", "(\n+\n)"] {
+            let mut scanner = Scanner::new(profile);
+            scanner.restore(&before);
+            assert_argument_marker(
+                &mut scanner,
+                source,
+                16,
+                &[APPLICATION_ARGUMENT_START, DEDENT],
+                0,
+            );
+            assert_eq!(scanner.snapshot(), before);
+            let (found, input) =
+                scanner.scan(")", 16, flags(&[APPLICATION_ARGUMENT_START, DEDENT]));
+            assert!(found);
+            assert_eq!(input.lexer.result_symbol, u16::try_from(DEDENT).unwrap());
+            assert_eq!(input.marked, Some(0));
+            assert_eq!(scanner.snapshot(), outer);
+        }
+        for source in ["(+value)", "(+ value)", "(+$)", "(.. ..+)"] {
+            let mut scanner = Scanner::new(profile);
+            scanner.restore(&before);
+            assert_no_argument_marker(
+                &mut scanner,
+                source,
+                16,
+                &[APPLICATION_ARGUMENT_START, DEDENT],
+            );
+            assert_eq!(scanner.snapshot(), before);
+        }
+    }
+}
+
+#[test]
+fn operator_heads_cannot_displace_existing_newline_or_dedent_priority() {
+    for profile in PROFILES {
+        for ending in ["\n", "\r\n"] {
+            for head in ["(+)", "(*)", "(+value)", "( .. .. )"] {
+                for (owner, column, next_column, expected) in [
+                    ("normal", 4, 4, NEWLINE),
+                    ("normal", 8, 4, DEDENT),
+                    ("paren", 8, 8, NEWLINE),
+                ] {
+                    let mut seed = Scanner::new(profile);
+                    open_enum_body(&mut seed, 4);
+                    let outer = seed.snapshot();
+                    if column > 4 {
+                        if owner == "paren" {
+                            open_paren(&mut seed, column);
+                        } else {
+                            open_enum_body(&mut seed, column);
+                        }
+                    }
+                    let before = seed.snapshot();
+                    let expected_state = if expected == DEDENT { &outer } else { &before };
+                    let source = format!("{ending}{}{head}", " ".repeat(next_column));
+                    for tokens in [
+                        vec![NEWLINE, DEDENT],
+                        vec![NEWLINE, DEDENT, APPLICATION_ARGUMENT_START],
+                    ] {
+                        let mut scanner = Scanner::new(profile);
+                        scanner.restore(&before);
+                        let (found, input) = scanner.scan(&source, 0, flags(&tokens));
+                        assert!(found, "{profile:?}: {owner} {source:?}");
+                        assert_eq!(input.lexer.result_symbol, u16::try_from(expected).unwrap());
+                        assert_eq!(input.marked, Some(0));
+                        assert_eq!(scanner.snapshot(), *expected_state);
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn genuine_operator_shaped_comments_keep_the_existing_trivia_argument_route() {
+    for profile in PROFILES {
+        let mut scanner = marker_scanner(profile);
+        for source in ["(**)value", "(*+word*)value", "(*c*)(+)", "(*c*)(*)"] {
+            let before = scanner.snapshot();
+            let (found, input) = scanner.scan(source, 12, flags(&[APPLICATION_ARGUMENT_START]));
+            assert!(found, "{profile:?}: {source:?}");
+            assert_eq!(
+                input.lexer.result_symbol,
+                u16::try_from(APPLICATION_ARGUMENT_START).unwrap(),
+            );
+            assert_eq!(input.marked, Some(0));
+            assert!(
+                input.offset >= 4,
+                "{profile:?}: comment route was not inspected"
+            );
+            assert_eq!(scanner.snapshot(), before);
+        }
+    }
+}
+
+#[test]
+fn operator_reference_decisions_replay_from_native_snapshots_with_input_derived_bounds() {
+    for profile in PROFILES {
+        let mut original = marker_scanner(profile);
+        let before = original.snapshot();
+        let long_operator = format!("({})", "+".repeat(4_096));
+        let long_padding = format!("({}+{})", " ".repeat(1_024), "\t".repeat(1_024));
+        for (source, expected) in [
+            (long_operator.as_str(), true),
+            (long_padding.as_str(), true),
+            ("(.. ..)", true),
+            ("(+$)", false),
+            ("(**)", false),
+            ("(+ value)", false),
+            ("(*c*)(+)", true),
+        ] {
+            let mut restored = Scanner::new(profile);
+            restored.restore(&before);
+            let (first, a) = original.scan(source, 12, flags(&[APPLICATION_ARGUMENT_START]));
+            let (second, b) = restored.scan(source, 12, flags(&[APPLICATION_ARGUMENT_START]));
+            assert_eq!(first, expected, "{profile:?}: {source:?}");
+            assert_eq!(second, expected);
+            assert_eq!(a.lexer.result_symbol, b.lexer.result_symbol);
+            assert_eq!(a.marked, Some(0));
+            assert_eq!(b.marked, Some(0));
+            assert_eq!(a.offset, b.offset);
+            assert_eq!(a.advances, b.advances);
+            assert_eq!(original.snapshot(), before);
+            assert_eq!(restored.snapshot(), before);
+        }
+    }
+}
+
+// Direct specialized-opener admission controls for the retained scanner helpers.
+// Additional declared heads test scanner protocol, not compiler syntax acceptance.
+
+const SPECIALIZED_QUOTED_CLOSE: usize = 22;
+const SPECIALIZED_UNTYPED_QUOTED_CLOSE: usize = 23;
+const SPECIALIZED_MULTI_DOLLAR_START: usize = 24;
+const SPECIALIZED_TYPE_OPEN: usize = 29;
+
+const SPECIALIZED_DECLARED_HEADS: [&str; 8] = [
+    "@\"neutral\"",
+    "$\"neutral {value}\"",
+    "@$\"neutral {value}\"",
+    "$@\"neutral {value}\"",
+    "$\"\"\"neutral\"\"\"",
+    "$$\"\"\"neutral\"\"\"",
+    "<@ value @>",
+    "<@@ value @@>",
+];
+
+#[test]
+fn specialized_full_openers_keep_the_original_argument_frontier_and_state() {
+    for profile in PROFILES {
+        let mut scanner = marker_scanner(profile);
+        for head in SPECIALIZED_DECLARED_HEADS {
+            for padding in ["", " ", "\t"] {
+                let source = format!("{padding}{head}");
+                assert_argument_marker(&mut scanner, &source, 12, &[APPLICATION_ARGUMENT_START], 0);
+            }
+        }
+        for head in ["<@ value @>", "<@@ value @@>"] {
+            let source = format!(" {head}");
+            assert_argument_marker(
+                &mut scanner,
+                &source,
+                12,
+                &[APPLICATION_ARGUMENT_START, SPECIALIZED_TYPE_OPEN],
+                0,
+            );
+        }
+        for head in ["$$\"\"\"neutral\"\"\"", "$$$\"\"\"neutral\"\"\""] {
+            assert_argument_marker(
+                &mut scanner,
+                head,
+                12,
+                &[APPLICATION_ARGUMENT_START, SPECIALIZED_MULTI_DOLLAR_START],
+                0,
+            );
+        }
+    }
+}
+
+#[test]
+fn incomplete_specialized_openers_and_real_infix_heads_cannot_claim_arguments() {
+    for profile in PROFILES {
+        let mut scanner = marker_scanner(profile);
+        for source in [
+            "@",
+            "@$",
+            "@value",
+            "@@value",
+            "$",
+            "$@",
+            "$value",
+            "$$\"value",
+            "$$\"\"value",
+            "<",
+            "<<",
+            "<|",
+            "<=",
+            "<>value",
+            "<$value",
+            "@ value",
+            "$ value",
+            "< value",
+            "(* incomplete @\"neutral\"",
+        ] {
+            assert_no_argument_marker(&mut scanner, source, 12, &[APPLICATION_ARGUMENT_START]);
+        }
+    }
+}
+
+#[test]
+fn specialized_openers_do_not_displace_owed_normal_or_parenthesis_layout() {
+    for profile in PROFILES {
+        for ending in ["\n", "\r\n"] {
+            for head in SPECIALIZED_DECLARED_HEADS {
+                for (owner, column, next_column, expected) in [
+                    ("normal", 4, 4, NEWLINE),
+                    ("normal", 8, 4, DEDENT),
+                    ("paren", 8, 8, NEWLINE),
+                ] {
+                    let mut seed = marker_scanner(profile);
+                    let outer = seed.snapshot();
+                    if column > 4 {
+                        if owner == "paren" {
+                            open_paren(&mut seed, column);
+                        } else {
+                            open_enum_body(&mut seed, column);
+                        }
+                    }
+                    let before = seed.snapshot();
+                    let expected_state = if expected == DEDENT { &outer } else { &before };
+                    let source = format!("{ending}{}{head}", " ".repeat(next_column));
+                    let mut scanner = Scanner::new(profile);
+                    scanner.restore(&before);
+                    let (found, input) = scanner.scan(
+                        &source,
+                        0,
+                        flags(&[NEWLINE, DEDENT, APPLICATION_ARGUMENT_START]),
+                    );
+                    assert!(found, "{profile:?}: {owner} {source:?}");
+                    assert_eq!(input.lexer.result_symbol, u16::try_from(expected).unwrap());
+                    assert_eq!(input.marked, Some(0));
+                    assert_eq!(scanner.snapshot(), *expected_state);
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn specialized_argument_validity_preserves_exact_quotation_closer_ownership() {
+    for profile in PROFILES {
+        for (source, closer) in [
+            ("@>", SPECIALIZED_QUOTED_CLOSE),
+            ("@@>", SPECIALIZED_UNTYPED_QUOTED_CLOSE),
+        ] {
+            let mut seed = marker_scanner(profile);
+            let outer = seed.snapshot();
+            open_paren(&mut seed, 16);
+            let before = seed.snapshot();
+            for extra_marker in [false, true] {
+                let mut scanner = Scanner::new(profile);
+                scanner.restore(&before);
+                let mut tokens = vec![closer, DEDENT];
+                if extra_marker {
+                    tokens.push(APPLICATION_ARGUMENT_START);
+                }
+                let (found, input) = scanner.scan(source, 16, flags(&tokens));
+                assert!(found);
+                assert_eq!(input.lexer.result_symbol, u16::try_from(DEDENT).unwrap());
+                assert_eq!(input.marked, Some(0));
+                assert_eq!(scanner.snapshot(), outer);
+                tokens.retain(|token| *token != DEDENT);
+                let (found, input) = scanner.scan(source, 16, flags(&tokens));
+                assert!(found);
+                assert_eq!(input.lexer.result_symbol, u16::try_from(closer).unwrap());
+                assert_eq!(input.marked, Some(source.len()));
+                assert_eq!(scanner.snapshot(), outer);
+            }
+        }
+    }
+}
+
+#[test]
+fn specialized_argument_admission_is_disabled_in_recovery_and_string_content() {
+    for profile in PROFILES {
+        let mut scanner = marker_scanner(profile);
+        for head in SPECIALIZED_DECLARED_HEADS {
+            for tokens in [
+                vec![APPLICATION_ARGUMENT_START, ERROR_SENTINEL],
+                vec![APPLICATION_ARGUMENT_START, INSIDE_STRING],
+            ] {
+                assert_no_argument_marker(&mut scanner, head, 12, &tokens);
+            }
+        }
+    }
+}
+
+#[test]
+fn specialized_heads_after_comments_replay_without_consuming_comment_or_opener_bytes() {
+    for profile in PROFILES {
+        let mut original = marker_scanner(profile);
+        let before = original.snapshot();
+        for head in SPECIALIZED_DECLARED_HEADS {
+            for trivia in [
+                "(* c *)",
+                "(* outer (* inner *) *)",
+                "// c\n        ",
+                "// c\r\n        ",
+            ] {
+                let source = format!("{trivia}{head}");
+                let mut restored = Scanner::new(profile);
+                restored.restore(&before);
+                for scanner in [&mut original, &mut restored] {
+                    let (found, input) =
+                        scanner.scan(&source, 12, flags(&[APPLICATION_ARGUMENT_START]));
+                    assert!(found, "{profile:?}: {source:?}");
+                    assert_eq!(
+                        input.lexer.result_symbol,
+                        u16::try_from(APPLICATION_ARGUMENT_START).unwrap(),
+                    );
+                    assert_eq!(input.marked, Some(0));
+                    assert!(input.offset >= trivia.chars().count());
+                    assert_eq!(scanner.snapshot(), before);
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn multi_dollar_specialized_peeks_preserve_the_existing_count_domain_and_snapshot() {
+    for profile in PROFILES {
+        let mut scanner = marker_scanner(profile);
+        let before = scanner.snapshot();
+        for dollars in [2_usize, 3, usize::from(u8::MAX)] {
+            let source = format!("{}\"\"\"neutral\"\"\"", "$".repeat(dollars));
+            assert_argument_marker(
+                &mut scanner,
+                &source,
+                12,
+                &[APPLICATION_ARGUMENT_START, SPECIALIZED_MULTI_DOLLAR_START],
+                0,
+            );
+            let mut restored = Scanner::new(profile);
+            restored.restore(&before);
+            assert_argument_marker(
+                &mut restored,
+                &source,
+                12,
+                &[APPLICATION_ARGUMENT_START, SPECIALIZED_MULTI_DOLLAR_START],
+                0,
+            );
+        }
+        let too_many = format!(
+            "{}\"\"\"neutral\"\"\"",
+            "$".repeat(usize::from(u8::MAX) + 1)
+        );
+        assert_no_argument_marker(&mut scanner, &too_many, 12, &[APPLICATION_ARGUMENT_START]);
+        assert_eq!(scanner.snapshot(), before);
+    }
+}
+
+#[test]
+fn padded_quote_closers_keep_legacy_endpoints_with_or_without_argument_validity() {
+    for profile in PROFILES {
+        for (closer_text, closer) in [
+            ("@>", SPECIALIZED_QUOTED_CLOSE),
+            ("@@>", SPECIALIZED_UNTYPED_QUOTED_CLOSE),
+        ] {
+            for padding in ["", " ", "\t", "\n    ", "\r\n    "] {
+                let mut seed = marker_scanner(profile);
+                let outer = seed.snapshot();
+                open_paren(&mut seed, 16);
+                let before = seed.snapshot();
+                let source = format!("{padding}{closer_text}");
+                let mut ordinary = Scanner::new(profile);
+                ordinary.restore(&before);
+                let mut marked = Scanner::new(profile);
+                marked.restore(&before);
+                let (ordinary_found, ordinary_input) =
+                    ordinary.scan(&source, 16, flags(&[closer, DEDENT]));
+                let (marked_found, marked_input) = marked.scan(
+                    &source,
+                    16,
+                    flags(&[closer, DEDENT, APPLICATION_ARGUMENT_START]),
+                );
+                assert!(ordinary_found && marked_found, "{profile:?}: {source:?}");
+                assert_eq!(
+                    ordinary_input.lexer.result_symbol,
+                    u16::try_from(DEDENT).unwrap(),
+                );
+                assert_eq!(
+                    marked_input.lexer.result_symbol,
+                    ordinary_input.lexer.result_symbol
+                );
+                assert_eq!(ordinary_input.marked, Some(padding.len()));
+                assert_eq!(marked_input.marked, ordinary_input.marked);
+                assert_eq!(ordinary.snapshot(), outer);
+                assert_eq!(marked.snapshot(), ordinary.snapshot());
+
+                let (ordinary_found, ordinary_input) = ordinary.scan(&source, 16, flags(&[closer]));
+                let (marked_found, marked_input) =
+                    marked.scan(&source, 16, flags(&[closer, APPLICATION_ARGUMENT_START]));
+                assert!(ordinary_found && marked_found);
+                assert_eq!(
+                    ordinary_input.lexer.result_symbol,
+                    u16::try_from(closer).unwrap(),
+                );
+                assert_eq!(
+                    marked_input.lexer.result_symbol,
+                    ordinary_input.lexer.result_symbol
+                );
+                assert_eq!(ordinary_input.marked, Some(source.len()));
+                assert_eq!(marked_input.marked, ordinary_input.marked);
+                assert_eq!(ordinary.snapshot(), outer);
+                assert_eq!(marked.snapshot(), ordinary.snapshot());
+            }
+        }
+    }
+}
+
+#[test]
+fn synthetic_closer_masks_keep_priority_over_at_prefixed_argument_peeks() {
+    for profile in PROFILES {
+        let mut scanner = marker_scanner(profile);
+        for source in ["@\"neutral\"", "@$\"neutral {value}\""] {
+            for closer in [SPECIALIZED_QUOTED_CLOSE, SPECIALIZED_UNTYPED_QUOTED_CLOSE] {
+                assert_no_argument_marker(
+                    &mut scanner,
+                    source,
+                    12,
+                    &[APPLICATION_ARGUMENT_START, closer],
+                );
+            }
+        }
+    }
+}
+
+// Prospective direct control: found=true alone does not identify an argument marker.
+#[test]
+fn comment_only_eof_closes_the_retained_owner_only_when_dedent_is_valid() {
+    for profile in PROFILES {
+        let mut seed = Scanner::new(profile);
+        let outer = seed.snapshot();
+        open_enum_body(&mut seed, 4);
+        let retained = seed.snapshot();
+        for source in ["(**)", "(*c*)", "(*outer(*inner*)*)"] {
+            for dedent_valid in [false, true] {
+                let mut scanner = Scanner::new(profile);
+                scanner.restore(&retained);
+                let valid = if dedent_valid {
+                    flags(&[APPLICATION_ARGUMENT_START, DEDENT])
+                } else {
+                    flags(&[APPLICATION_ARGUMENT_START])
+                };
+                let (found, input) = scanner.scan(source, 12, valid);
+                assert_eq!(
+                    found, dedent_valid,
+                    "{profile:?}: {source:?}, DEDENT valid={dedent_valid}, returned symbol={}",
+                    input.lexer.result_symbol,
+                );
+                assert_eq!(input.marked, Some(0));
+                if dedent_valid {
+                    assert_eq!(input.lexer.result_symbol, u16::try_from(DEDENT).unwrap());
+                    assert_eq!(scanner.snapshot(), outer);
+                } else {
+                    assert_eq!(input.lexer.result_symbol, u16::MAX);
+                    assert_eq!(scanner.snapshot(), retained);
+                }
+            }
+        }
+    }
+}
+
+#[path = "common/fsharp_scanner/declaration_controls.rs"]
+mod declaration_controls;
+
+#[path = "common/fsharp_scanner/separator_controls.rs"]
+mod separator_controls;
+
+mod header_controls {
+    use super::*;
+    include!("common/fsharp_scanner/header_controls.rs");
+}
+
+mod eof_controls {
+    use super::*;
+    include!("common/fsharp_scanner/eof_controls.rs");
+}
+
+include!("common/fsharp_scanner/numeric_continuation_controls.rs");
+
+include!("common/fsharp_scanner/reciprocal_controls.rs");
+
+include!("common/fsharp_scanner/offside_declaration_controls.rs");

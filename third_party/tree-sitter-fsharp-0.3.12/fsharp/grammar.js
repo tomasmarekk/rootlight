@@ -58,7 +58,7 @@ module.exports = grammar({
     $.preproc_line,
     $.compiler_directive_decl,
     $.preproc_inactive,
-    ";",
+    $._single_semicolon_extra,
   ],
 
   // The external scanner (scanner.c) allows us to inject "dummy" tokens into the grammar.
@@ -108,17 +108,37 @@ module.exports = grammar({
     $._enum_case_bar,
     $._do_body_indent,
     $._done_keyword,
+    $._application_arg_start,
+    $._decl_term,
+    $._root_body_indent,
+    $._single_semicolon_extra,
+    $._qualified_callee_dot,
+    $._integer_literal_suffix,
+    $._based_literal_suffix,
+    $._float_literal_suffix,
+    $._numeric_exponent_continuation,
+    $._numeric_digit_continuation,
   ],
 
   conflicts: ($) => [
+    // Module declarations and expression declarations retain distinct body owners.
+    // Keep both interpretations at shared module/preprocessor frontiers.
+    [$.value_declaration, $._root_value_declaration],
     [$.long_identifier, $._identifier_or_op],
+    [$.long_identifier_or_op, $._identifier_or_op],
+    [$.long_identifier_or_op, $.long_identifier],
+    [$._dotted_expression_identifier, $.long_identifier, $._identifier_or_op],
+    [$._dotted_expression_identifier, $.long_identifier],
     [$.simple_type, $.type_argument],
     // `new ^T ...` is ambiguous between an SRTP type arg (^T or ^U ...) and a
     // plain generic type var; only reachable via generic_new_expression,
     // resolved dynamically.
     [$._srtp_type_argument, $._static_type_identifier],
     [$._module_expression, $._expression],
+    // A constructor atom can remain an object operand or a record-copy expression.
+    [$._application_operand, $._expression],
     [$.declaration_expression, $._comp_or_range_expression],
+    [$.declaration_expression, $.comp_declaration_expression],
     [$.rules],
     // Singleton: union_type_cases conflicts with itself (shift the optional
     // _newline before the next '|' case vs. reduce), like [$.rules] above.
@@ -153,22 +173,22 @@ module.exports = grammar({
   // = 2` binds a value named "type" and `open System` inside a function body
   // parses as the application `open System`. Listing the keywords here stops
   // that fallback, so those positions become ERROR as FSC reports them.
-  // Two keywords are deliberately absent:
-  //
-  //  * `member`, because the grammar relies on it lexing as an identifier to
-  //    recover from over-indented member declarations (`inherit Base()` followed
-  //    by a more-indented `static member ...`), which FSC accepts.
-  //  * `val`, because the `basic long namespace` test in source_file.txt asserts
-  //    a tree for `namespace test.val`, which FSC rejects ("Unexpected start of
-  //    structured construct"). Reserving it would change that expected tree.
+  // `member` remains an identifier fallback for over-indented declarations
+  // (`inherit Base()` followed by a more-indented `static member ...`), which
+  // FSC accepts.
+  // Declaration keywords cannot become type operands after an incomplete RHS;
+  // this also rejects unquoted namespace segments that FSC treats as keywords.
   // `null` cannot fall back to a union-case identifier: doing so would invent
   // a second constructor for a nullable type alias such as `Reference | null`.
   reserved: {
-    global: (_) => ["as", "namespace", "open", "type", "null", "done"],
+    global: (_) => ["as", "namespace", "open", "type", "null", "done", "let", "val"],
   },
 
   inline: ($) => [
     $._expression_or_range,
+    $._untyped_full_expression,
+    $._full_expression,
+    $._full_comp_or_range_expression,
     $._object_expression_inner,
     $._record_type_defn_inner,
     $._union_type_defn_inner,
@@ -180,8 +200,12 @@ module.exports = grammar({
 
   supertypes: ($) => [
     $._module_elem,
+    $._module_expression,
     $._pattern,
     $._expression,
+    $._atomic_expression,
+    $._arg_expression,
+    $._application_operand,
     $._type,
     $._type_defn_body,
     $._static_parameter,
@@ -209,7 +233,7 @@ module.exports = grammar({
     file: ($) =>
       choice(
         repeat1($.namespace),
-        prec(-1, repeat(choice($._module_elem, $._elem_separator))),
+        prec(-1, repeat(choice($._module_elem, $._elem_separator, $._decl_term))),
         prec(1, $.named_module),
       ),
 
@@ -227,7 +251,7 @@ module.exports = grammar({
           "global",
           field("name", seq(optional("rec"), $.long_identifier)),
         ),
-        repeat(choice($._module_elem, $._elem_separator)),
+        repeat(choice($._module_elem, $._elem_separator, $._decl_term)),
       ),
 
     named_module: ($) =>
@@ -238,7 +262,7 @@ module.exports = grammar({
         optional($.access_modifier),
         optional("rec"),
         field("name", $.long_identifier),
-        repeat(choice($._module_elem, $._elem_separator)),
+        repeat(choice($._module_elem, $._elem_separator, $._decl_term)),
       ),
 
     _preproc_toplevel_module: ($) =>
@@ -248,7 +272,19 @@ module.exports = grammar({
         optional($.access_modifier),
         optional("rec"),
         field("name", $.long_identifier),
-        repeat($._module_elem),
+        repeat(choice($._module_elem, $._decl_term)),
+      ),
+
+    // Conditional headers stop at their branch boundary, not a root separator.
+    // They retain authored namespaces without choosing a compilation-symbol arm.
+    _preproc_toplevel_namespace: ($) =>
+      seq(
+        "namespace",
+        choice(
+          "global",
+          field("name", seq(optional("rec"), $.long_identifier)),
+        ),
+        repeat(choice($._module_elem, $._decl_term)),
       ),
 
     _module_body_elem: ($) =>
@@ -268,22 +304,12 @@ module.exports = grammar({
 
     _module_expression: ($) =>
       choice(
-        "null",
-        $.const,
-        $.paren_expression,
-        $.begin_end_expression,
-        $.long_identifier_or_op,
-        $.typed_expression,
+        $._atomic_expression,
         $.infix_expression,
-        $.index_expression,
         $.mutate_expression,
-        $.list_expression,
-        $.array_expression,
-        $.ce_expression,
         $.prefixed_expression,
-        $.brace_expression,
-        $.anon_record_expression,
         $.typecast_expression,
+        alias($._module_annotated_expression, $.typecast_expression),
         $.do_expression,
         $.fun_expression,
         $.function_expression,
@@ -292,17 +318,18 @@ module.exports = grammar({
         $.for_expression,
         $.match_expression,
         $.try_expression,
-        $.literal_expression,
         $.tuple_expression,
         $.application_expression,
-        $.dot_expression,
-        $.srtp_call_expression,
+        $.ce_expression,
         // (static-typars : (member-sig) expr)
       ),
 
+    _module_annotated_expression: ($) =>
+      prec.right(PREC.SPECIAL_INFIX, seq($._module_expression, ":", $._type)),
+
     _module_elem: ($) =>
       choice(
-        alias($.value_declaration, $.declaration_expression),
+        alias($._root_value_declaration, $.declaration_expression),
         $.module_defn,
         $.module_abbrev,
         $.import_decl,
@@ -310,14 +337,14 @@ module.exports = grammar({
         $.type_definition,
         $.exception_definition,
         $.extern_binding,
-        $._expression,
+        $._module_expression,
         $.preproc_if,
         alias($._attribute_expression, $.declaration_expression),
         // $.exception_defn
       ),
 
     _attribute_expression: ($) =>
-      prec(PREC.DO_DECL - 1, seq($.attributes, $._expression)),
+      prec(PREC.DO_DECL - 1, seq($.attributes, $._module_expression)),
 
     module_abbrev: ($) =>
       seq(
@@ -398,7 +425,55 @@ module.exports = grammar({
         ),
       ),
 
-    // Both do ownership routes must survive the same external body admission.
+    // The module wrapper commits ROOT without changing public declaration kinds.
+    _root_value_declaration: ($) =>
+      seq(
+        optional($.attributes),
+        choice(
+          prec(
+            PREC.LET_DECL,
+            alias($._root_function_or_value_defn, $.function_or_value_defn),
+          ),
+          prec(PREC.DO_DECL, alias($._root_do, $.do)),
+        ),
+      ),
+
+    _root_function_or_value_defn: ($) =>
+      seq(
+        choice("let", "let!"),
+        choice(
+          $._root_function_or_value_defn_body,
+          seq("rec", $._root_function_or_value_defns),
+        ),
+      ),
+
+    _root_function_or_value_defns: ($) =>
+      prec.right(
+        seq(
+          $._root_function_or_value_defn_body,
+          repeat(seq("and", $._root_function_or_value_defn_body)),
+        ),
+      ),
+
+    _root_function_or_value_defn_body: ($) =>
+      seq(
+        choice($.function_declaration_left, $.value_declaration_left),
+        optional(seq(":", optional($.attributes), $._type)),
+        optional($.type_argument_constraints),
+        "=",
+        field("body", $._root_expression_block_for_let),
+      ),
+
+    _root_expression_block_for_let: ($) =>
+      seq($._root_body_indent, $._full_expression, choice($._dedent, $._in)),
+
+    _root_do: ($) =>
+      prec(PREC.DO_EXPR + 1, seq("do", $._root_do_expression_block)),
+
+    _root_do_expression_block: ($) =>
+      seq($._root_body_indent, $._full_expression, $._dedent),
+
+    // Module-only ROOT admission must not change expression DO body ownership.
     do: ($) => prec(PREC.DO_EXPR + 1, seq("do", $._do_expression_block)),
 
     _function_or_value_defns: ($) =>
@@ -638,22 +713,35 @@ module.exports = grammar({
     // Expressions (BEGIN)
     //
 
-    _expression_block: ($) => seq($._indent, $._expression, $._dedent),
+    _expression_block: ($) => seq($._indent, $._full_expression, $._dedent),
 
     // The dedicated indent commits the owner before an explicit "done" closes it.
-    _do_expression_block: ($) => seq($._do_body_indent, $._expression, $._dedent),
+    _do_expression_block: ($) => seq($._do_body_indent, $._full_expression, $._dedent),
 
     // Like _expression_block, but also allows the block to be terminated by
     // the 'in' keyword instead of a dedent.  Used for let/use bindings so that
     // single-line  let x = 1 in x  works (where no newline → no DEDENT).
     _expression_block_for_let: ($) =>
-      seq($._indent, $._expression, choice($._dedent, $._in)),
+      seq($._indent, $._full_expression, choice($._dedent, $._in)),
 
-    _paren_expression_block: ($) => seq($._paren_indent, $._expression, $._dedent),
+    _paren_expression_block: ($) => seq($._paren_indent, $._full_expression, $._dedent),
 
     _mutable_expression: ($) => choice($.long_identifier_or_op, $.index_expression, $.dot_expression),
 
-    _expression: ($) =>
+    // Only scope owners admit sequences; operator and argument links cannot.
+    _full_expression: ($) =>
+      choice(
+        $._expression,
+        $.sequential_expression,
+        alias($._annotated_expression, $.typecast_expression),
+      ),
+
+    _untyped_full_expression: ($) => choice($._expression, $.sequential_expression),
+
+    _annotated_expression: ($) =>
+      prec.right(PREC.SPECIAL_INFIX, seq($._untyped_full_expression, ":", $._type)),
+
+    _atomic_expression: ($) =>
       choice(
         "null",
         $.const,
@@ -661,22 +749,41 @@ module.exports = grammar({
         $.begin_end_expression,
         $.long_identifier_or_op,
         $.typed_expression,
-        $.infix_expression,
         $.index_expression,
-        $.mutate_expression,
         $.list_expression,
         $.array_expression,
-        $.ce_expression,
-        $.prefixed_expression,
-        $.generic_new_expression,
         $.brace_expression,
         $.anon_record_expression,
+        $.literal_expression,
+        $.dot_expression,
+        $.srtp_call_expression,
+        alias($._high_prec_app, $.application_expression),
+      ),
+
+    _arg_expression: ($) =>
+      choice(
+        $._atomic_expression,
+        alias($._prefix_argument_expression, $.prefixed_expression),
+      ),
+
+    _prefix_argument_expression: ($) =>
+      seq($.prefix_op, prec.right(PREC.PREFIX_EXPR, $._atomic_expression)),
+
+    _application_operand: ($) =>
+      choice($._atomic_expression, $.application_expression, $.ce_expression),
+
+    _expression: ($) =>
+      choice(
+        $._atomic_expression,
+        $.infix_expression,
+        $.mutate_expression,
+        $.prefixed_expression,
+        $.generic_new_expression,
         $.typecast_expression,
         $.declaration_expression,
         $.do_expression,
         $.fun_expression,
         $.function_expression,
-        $.sequential_expression,
         $.if_expression,
         $.while_expression,
         $.for_expression,
@@ -686,12 +793,10 @@ module.exports = grammar({
         $.short_comp_expression,
         $.match_expression,
         $.try_expression,
-        $.literal_expression,
         $.tuple_expression,
         $.application_expression,
-        $.dot_expression,
+        $.ce_expression,
         alias($.preproc_if_in_expression, $.preproc_if),
-        $.srtp_call_expression,
       ),
 
     literal_expression: ($) =>
@@ -725,7 +830,7 @@ module.exports = grammar({
           "(",
           $.trait_member_constraint,
           ")",
-          $._expression,
+          $._full_expression,
         ),
       ),
 
@@ -744,11 +849,17 @@ module.exports = grammar({
     long_identifier_or_op: ($) =>
       prec.right(
         choice(
-          $.long_identifier,
-          seq($.long_identifier, ".", $._identifier_or_op),
-          $._identifier_or_op,
+          $.identifier,
+          $.op_identifier,
+          $.active_pattern,
+          alias($._dotted_expression_identifier, $.long_identifier),
+          seq($.long_identifier, alias($._qualified_callee_dot, "."), choice($.op_identifier, $.active_pattern)),
         ),
       ),
+
+    // A plain identifier has one public route; dotted names retain their wrapper.
+    _dotted_expression_identifier: ($) =>
+      prec.right(seq($.identifier, repeat1(seq(".", $.identifier)))),
 
     tuple_expression: ($) =>
       prec.right(
@@ -805,7 +916,7 @@ module.exports = grammar({
         PREC.NEW_OBJ + 1,
         seq(
           "new",
-          $._expression,
+          $._application_operand,
           // No `as` binding: `{ new Base() as b with ... }` is rejected by FSC
           // ("'inherit' declarations cannot have 'as' bindings"); `base` is a
           // keyword instead.
@@ -853,7 +964,8 @@ module.exports = grammar({
           $.type_argument,
           choice(
             $.unit,
-            seq(token.immediate(prec(10000, "(")), $._paren_expression_block, ")"),
+            // A longer adjacent block-comment opener must remain an extra.
+            seq(token.immediate("("), $._paren_expression_block, ")"),
           ),
         ),
       ),
@@ -861,7 +973,7 @@ module.exports = grammar({
     typecast_expression: ($) =>
       prec.right(
         PREC.SPECIAL_INFIX,
-        seq($._expression, choice(":", ":>", ":?", ":?>"), $._type),
+        seq($._expression, choice(":>", ":?", ":?>"), $._type),
       ),
 
     for_expression: ($) =>
@@ -925,7 +1037,7 @@ module.exports = grammar({
         PREC.MATCH_EXPR,
         seq(
           "try",
-          seq($._try_indent, $._expression, $._dedent),
+          seq($._try_indent, $._full_expression, $._dedent),
           optional($._newline),
           choice(seq("with", $.rules), seq("finally", $._expression_block)),
         ),
@@ -934,7 +1046,7 @@ module.exports = grammar({
     match_expression: ($) =>
       seq(
         choice("match", "match!"),
-        $._expression,
+        $._full_expression,
         optional($._newline),
         "with",
         choice(
@@ -974,9 +1086,9 @@ module.exports = grammar({
       prec(
         PREC.INDEX_EXPR,
         seq(
-          $._expression,
+          $._atomic_expression,
           ".[",
-          choice(field("index", $._expression), $.slice_ranges),
+          choice(field("index", $._full_expression), $.slice_ranges),
           "]",
         ),
       ),
@@ -985,7 +1097,7 @@ module.exports = grammar({
       prec(
         PREC.PAREN_EXPR,
         seq(
-          $._expression,
+          $._atomic_expression,
           $._tyapp_open,
           optional(choice($.types, $.measure)),
           prec(PREC.PAREN_EXPR, ">"),
@@ -1001,7 +1113,7 @@ module.exports = grammar({
             repeat($.and_bang),
           ),
         ),
-        field("in", $._expression),
+        field("in", $._full_expression),
       ),
 
     and_bang: ($) =>
@@ -1087,7 +1199,7 @@ module.exports = grammar({
     begin_end_expression: ($) =>
       prec(
         PREC.PAREN_EXPR,
-        seq("begin", scoped($._expression, $._indent, $._dedent), "end"),
+        seq("begin", scoped($._full_expression, $._indent, $._dedent), "end"),
       ),
 
     paren_expression: ($) =>
@@ -1097,24 +1209,29 @@ module.exports = grammar({
       prec.left(
         PREC.DOT + 1,
         seq(
-          $._expression,
+          $._atomic_expression,
           choice(
             $.unit,
-            seq(token.immediate(prec(10000, "(")), $._paren_expression_block, ")"),
+            // Preserve maximal munch for a longer adjacent block-comment opener.
+            seq(token.immediate("("), $._paren_expression_block, ")"),
           ),
         ),
       ),
 
     _low_prec_app: ($) =>
-      prec.left(PREC.APP_EXPR, seq($._expression, $._expression)),
+      // The scanner admits a lexical argument boundary before an ambiguous sign.
+      prec.left(
+        PREC.APP_EXPR,
+        seq($._application_operand, $._application_arg_start, $._arg_expression),
+      ),
 
-    application_expression: ($) => choice($._high_prec_app, $._low_prec_app),
+    application_expression: ($) => $._low_prec_app,
 
     dot_expression: ($) =>
       prec.right(
         PREC.DOT,
         seq(
-          field("base", $._expression),
+          field("base", $._atomic_expression),
           ".",
           field("field", $.long_identifier_or_op),
         ),
@@ -1140,7 +1257,8 @@ module.exports = grammar({
       prec.left(
         PREC.CE_EXPR,
         seq(
-          prec(-1, $._expression),
+          prec(-1, $._application_operand),
+          $._application_arg_start,
           "{",
           scoped($._comp_expression_block, $._brace_indent, $._dedent),
           "}",
@@ -1183,6 +1301,13 @@ module.exports = grammar({
         $._expression,
       ),
 
+    _full_comp_or_range_expression: ($) =>
+      choice(
+        alias($.comp_declaration_expression, $.declaration_expression),
+        $.range_expression,
+        $._full_expression,
+      ),
+
     comp_declaration_expression: ($) =>
       seq(
         choice(
@@ -1192,7 +1317,7 @@ module.exports = grammar({
             repeat($.and_bang),
           ),
         ),
-        field("in", $._comp_or_range_expression),
+        field("in", $._full_comp_or_range_expression),
       ),
 
     // _comp_expressions: $ =>
@@ -1334,7 +1459,7 @@ module.exports = grammar({
     //   ),
 
     short_comp_expression: ($) =>
-      seq("for", $._pattern, "in", $._expression_or_range, arrow(), $._expression),
+      seq("for", $._pattern, "in", $._expression_or_range, arrow(), $._full_expression),
 
     // comp_rule: $ =>
     //   seq(
@@ -1508,6 +1633,7 @@ module.exports = grammar({
       prec.left(6, seq($._measure_operand, repeat1($._measure_operand))),
 
     // Left-associative, so `m / s / s` is `(m / s) / s` rather than an error.
+    // A leading slash has no written numerator; retain only its denominator.
     // A chain of divisions is one node with the operands in order, matching how
     // FSC parses it: `m / s / s` is a flat `SynType.Tuple [Type; Slash; Type;
     // Slash; Type]`, folded left only later during checking. A single '/' gives
@@ -1516,7 +1642,7 @@ module.exports = grammar({
       prec.left(
         5,
         seq(
-          choice(
+          optional(choice(
             $._measure_operand,
             $.measure_product,
             // `kg m` is indistinguishable from a postfix type until a
@@ -1526,7 +1652,7 @@ module.exports = grammar({
             // general operand it would also make a plain `type T = A.B`
             // abbreviation ambiguous with a measure.
             $.postfix_type,
-          ),
+          )),
           // `m / s s`: the same postfix-type reading of `s s` applies on the right.
           repeat1(seq("/", choice($._measure_operand, $.measure_product, $.postfix_type))),
         ),
@@ -2309,7 +2435,7 @@ module.exports = grammar({
         seq(
           optional(seq(":", $._type)),
           "=",
-          $._expression,
+          $._full_expression,
           optional(
             seq(
               "with",
@@ -2409,7 +2535,7 @@ module.exports = grammar({
                 $._type,
                 alias($._inline_multiline_generic_type, $.generic_type),
               ),
-              optional($._expression),
+              optional($._full_expression),
             ),
             $._indent,
             $._dedent,
@@ -2510,8 +2636,8 @@ module.exports = grammar({
 
     format_string_eval: ($) =>
       choice(
-        seq(token.immediate(prec(1000, "{")), $._expression, "}"),
-        seq($._multi_dollar_interp_start, $._expression, $._multi_dollar_interp_end),
+        seq(token.immediate(prec(1000, "{")), $._full_expression, "}"),
+        seq($._multi_dollar_interp_start, $._full_expression, $._multi_dollar_interp_end),
       ),
 
     format_string: ($) =>
@@ -2642,8 +2768,8 @@ module.exports = grammar({
     op_identifier: (_) =>
       token(
         prec(
-          // Above the 10000 of _high_prec_app's immediate '(' so a section
-          // like f(+) lexes as an operator reference, not application-paren.
+          // Combined operator references outrank shorter punctuation, including
+          // constructor parentheses, so f(+) remains an operator reference.
           100001,
           seq(
             "(",
@@ -2697,28 +2823,46 @@ module.exports = grammar({
         choice(/0[xX]([0-9a-fA-F]_?)+/, /0[oO]([0-7]_?)+/, /0[bB]([0-1]_?)+/),
       ),
 
-    sbyte: ($) => seq(choice($.int, $.xint), token.immediate("y")),
-    byte: ($) => seq(choice($.int, $.xint), token.immediate("uy")),
-    int16: ($) => seq(choice($.int, $.xint), token.immediate("s")),
-    uint16: ($) => seq(choice($.int, $.xint), token.immediate("us")),
-    int32: ($) => seq(choice($.int, $.xint), token.immediate("l")),
-    uint32: ($) =>
-      seq(choice($.int, $.xint), token.immediate(choice("ul", "u"))),
-    nativeint: ($) => seq(choice($.int, $.xint), token.immediate("n")),
-    unativeint: ($) => seq(choice($.int, $.xint), token.immediate("un")),
-    int64: ($) => seq(choice($.int, $.xint), token.immediate("L")),
-    uint64: ($) =>
-      seq(choice($.int, $.xint), token.immediate(choice("UL", "uL"))),
+    // Hidden bases share nullable context guards without adding public owners.
+    _integer_suffix_base: ($) =>
+      seq($.int, optional($._integer_literal_suffix)),
+    _based_suffix_base: ($) =>
+      seq($.xint, optional($._based_literal_suffix)),
+    _integer_literal_base: ($) =>
+      choice($._integer_suffix_base, $._based_suffix_base),
+    _float_suffix_base: ($) =>
+      seq($.float, optional($._float_literal_suffix)),
+    _numeric_literal_digits: ($) =>
+      seq(optional($._numeric_digit_continuation), token.immediate(/([0-9]_?)+/)),
+    _numeric_literal_exponent: ($) =>
+      seq(optional($._numeric_exponent_continuation), token.immediate(/[eE][+-]?/)),
+
+    sbyte: ($) => integerSuffix($, token.immediate("y")),
+    byte: ($) => integerSuffix($, token.immediate("uy")),
+    int16: ($) => integerSuffix($, token.immediate("s")),
+    uint16: ($) => integerSuffix($, token.immediate("us")),
+    int32: ($) => integerSuffix($, token.immediate("l")),
+    uint32: ($) => integerSuffix($, token.immediate(choice("ul", "u"))),
+    nativeint: ($) => integerSuffix($, token.immediate("n")),
+    unativeint: ($) => integerSuffix($, token.immediate("un")),
+    int64: ($) => integerSuffix($, token.immediate("L")),
+    uint64: ($) => integerSuffix($, token.immediate(choice("UL", "uL"))),
 
     ieee32: ($) =>
       choice(
-        seq($.float, token.immediate(/[fF]/)),
-        seq($.xint, token.immediate("lf")),
+        seq($._float_suffix_base, token.immediate(/[fF]/)),
+        seq($._based_suffix_base, token.immediate("lf")),
       ),
-    ieee64: ($) => seq($.xint, token.immediate("LF")),
+    ieee64: ($) =>
+      seq($._based_suffix_base, token.immediate("LF")),
 
-    bignum: ($) => seq($.int, token.immediate(/[QRZING]/)),
-    decimal: ($) => seq(choice($.float, $.int), token.immediate(/[Mm]/)),
+    bignum: ($) =>
+      seq($._integer_suffix_base, token.immediate(/[QRZING]/)),
+    decimal: ($) =>
+      choice(
+        seq($._float_suffix_base, token.immediate(/[Mm]/)),
+        seq($._integer_suffix_base, token.immediate(/[Mm]/)),
+      ),
 
     float: ($) =>
       prec.right(
@@ -2727,18 +2871,18 @@ module.exports = grammar({
             seq(
               $.int,
               token.immediate("."),
-              optional(token.immediate(/([0-9]_?)+/)),
+              optional($._numeric_literal_digits),
             ),
             seq(
               $.int,
               optional(
                 seq(
                   token.immediate("."),
-                  token.immediate(/([0-9]_?)+/),
+                  optional($._numeric_literal_digits),
                 ),
               ),
-              token.immediate(/[eE][+-]?/),
-              token.immediate(/([0-9]_?)+/),
+              $._numeric_literal_exponent,
+              $._numeric_literal_digits,
             ),
           ),
           "float",
@@ -2853,11 +2997,12 @@ module.exports = grammar({
             //   #endif
             //   type CompanyHub() = ...
             seq(
-              repeat1(seq($._module_elem, optional($._newline))),
+              repeat1(seq(choice($._module_elem, $._decl_term), optional($._newline))),
               optional($.attributes),
             ),
             $.attributes,
             alias($._preproc_toplevel_module, $.named_module),
+            alias($._preproc_toplevel_namespace, $.namespace),
           ),
         ),
     ),
@@ -2878,7 +3023,7 @@ module.exports = grammar({
             seq(
               optional($._newline),
               choice(
-                $._expression,
+                $._full_expression,
                 alias($.value_declaration, $.declaration_expression),
               ),
             ),
@@ -2902,6 +3047,12 @@ module.exports = grammar({
     ...preprocIf("_in_member_definition", ($) => repeat($.member_defn), -2),
   },
 });
+
+// Optional guards expose continuation context without completing a numeric owner.
+// The scanner never emits them; every original immediate suffix stays required.
+function integerSuffix($, suffix) {
+  return seq($._integer_literal_base, suffix);
+}
 
 /**
  *

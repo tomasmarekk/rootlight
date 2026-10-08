@@ -7,6 +7,7 @@ mod embedded;
 mod matlab;
 mod nix_paths;
 mod perl;
+mod source_coordinates;
 mod toml;
 mod yaml;
 
@@ -16,6 +17,7 @@ use std::{
     sync::Arc,
 };
 
+use crate::source_view::{NATIVE_SOURCE_PROJECTION_POLICY, NativeSourceView};
 use rootlight_adapter_sdk::{
     AdapterDiagnostic, AdapterError, AnalysisLimits, AnalysisOutput, AnalysisReport,
     AnalysisRequest, CoverageReport, DiagnosticCode, DomainCoverage, IrBatch, IrBatchSink,
@@ -46,6 +48,7 @@ use rootlight_ir::{
     derive_skipped_region_id, entity_kind_identity_label, new_file_identity_claim_envelope,
     new_lexical_evidence_envelope, new_symbol_identity_claim_envelope,
 };
+use source_coordinates::SourceCoordinates;
 
 const SYNTAX_FALLBACK_TIER: AnalysisTier = AnalysisTier::TierD;
 const RUST_STRUCTURAL_TIER: AnalysisTier = AnalysisTier::TierB;
@@ -62,6 +65,62 @@ const VBA_CONDITIONAL_EVALUATION_UNAVAILABLE: &str =
 const HASKELL_BINDING_UNAVAILABLE: &str = "haskell-binding-target-unavailable";
 const HASKELL_ANNOTATION_UNAVAILABLE: &str = "haskell-annotation-owner-unavailable";
 type ApplicationProofKey = (u64, u64, SymbolId, u64, u64);
+
+fn fsharp_recovery_partition_available(
+    request: &AnalysisRequest<'_>,
+    parse_output: &ParseOutput,
+    cancellation: &Cancellation,
+) -> Result<bool, AdapterError> {
+    cancellation.check()?;
+    let coverage = parse_output.report().coverage();
+    let full_source = request.source().source_ref();
+    let source_bytes = request.source().bytes().len();
+    if request.language().as_str() != "fsharp"
+        || !request.included_ranges().is_empty()
+        || coverage.status() != CoverageStatus::Unknown
+        || coverage.total_source_bytes() != source_bytes
+        || coverage.covered_source_bytes() != source_bytes
+        || full_source.span().start_byte() != 0
+        || u64::try_from(source_bytes).ok() != Some(full_source.span().end_byte())
+        || parse_output.diagnostics().is_empty()
+        || coverage.skipped_regions() != parse_output.diagnostics().len()
+    {
+        return Ok(false);
+    }
+    for diagnostic in parse_output.diagnostics() {
+        cancellation.check()?;
+        if diagnostic.code().as_str() != "syntax-error-recovery"
+            || diagnostic.severity() != DiagnosticSeverity::Warning
+            || diagnostic.coverage_effect() != CoverageStatus::Unknown
+        {
+            return Ok(false);
+        }
+        let Some(source) = diagnostic.source() else {
+            return Ok(false);
+        };
+        // Sealed structural artifacts can be lowered into a fresh generation.
+        // Diagnostic ownership uses their immutable source tuple, not the old generation.
+        if source.repository() != full_source.repository()
+            || source.content_hash() != full_source.content_hash()
+            || source.span().file() != full_source.span().file()
+            || source.span().start_byte() < full_source.span().start_byte()
+            || source.span().end_byte() > full_source.span().end_byte()
+        {
+            return Ok(false);
+        }
+    }
+    // Recovery does not establish which conditional namespace or binding arm owns a name.
+    for fact in parse_output.facts() {
+        cancellation.check()?;
+        if matches!(
+            fact.syntax_kind().as_str(),
+            "fsharp.preprocessor.scope" | "fsharp.preprocessor_branch.scope"
+        ) {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
 
 /// Tree-sitter syntax analyzer backed by an injected parser-independent provider.
 #[derive(Clone)]
@@ -85,9 +144,16 @@ pub struct TreeSitterStructuralArtifact {
     file: FileId,
     content_hash: ContentHash,
     parse_context_hash: ContentHash,
+    required_scope_profile: RequiredScopeProfile,
     limits: AnalysisLimits,
     parse_output: ParseOutput,
     accounted_bytes: usize,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum RequiredScopeProfile {
+    DeclarationClosure,
+    FSharpImplementation,
 }
 
 impl TreeSitterStructuralArtifact {
@@ -115,11 +181,27 @@ impl TreeSitterStructuralArtifact {
         self.parse_output.facts().len()
     }
 
-    /// Returns the exact retained declaration-identity syntax-fact demand.
+    /// Returns whether the retained syntax partition was extracted without clipping.
     ///
-    /// Complete identity facts are retained even when optional extraction is
-    /// bounded, so an exact-match incremental successor can reuse this count
-    /// without reparsing unchanged source.
+    /// This only reports the absence of `syntax-extraction-limit`. Native parse
+    /// recovery, unsupported constructs, and context-limited embedded analysis
+    /// can still leave explicit coverage gaps; it is not full language coverage.
+    #[must_use]
+    pub fn syntax_partition_complete(&self) -> bool {
+        self.parse_output
+            .diagnostics()
+            .iter()
+            .all(|diagnostic| diagnostic.code().as_str() != "syntax-extraction-limit")
+    }
+
+    /// Returns the exact declaration-identity count in the retained syntax facts.
+    ///
+    /// Native stream admission preserves every captured required identity or
+    /// returns a typed limit error. This retained count does not establish full
+    /// source demand: parser, query and embedded-context restrictions remain
+    /// independently scoped, even when the syntax partition was not clipped.
+    /// Callers reserving source-level identity capacity must use the provider's
+    /// independent identity preflight.
     ///
     /// # Errors
     ///
@@ -129,7 +211,11 @@ impl TreeSitterStructuralArtifact {
         &self,
         cancellation: &Cancellation,
     ) -> Result<usize, AdapterError> {
-        required_syntax_fact_count_from_output(&self.parse_output, cancellation)
+        required_syntax_fact_count_from_output(
+            &self.parse_output,
+            self.required_scope_profile,
+            cancellation,
+        )
     }
 
     /// Returns whether this artifact can be replayed under the supplied limits.
@@ -143,11 +229,23 @@ impl TreeSitterStructuralArtifact {
     pub fn is_compatible_with_limits(&self, limits: &AnalysisLimits) -> bool {
         self.limits == *limits
             || (self.parse_output.facts().len() < limits.syntax_stream().max_records()
-                && self
-                    .parse_output
-                    .diagnostics()
-                    .iter()
-                    .all(|diagnostic| diagnostic.code().as_str() != "syntax-extraction-limit")
+                && self.syntax_partition_complete()
+                && analysis_limit_shape_matches(&self.limits, limits))
+    }
+
+    /// Returns whether prepared evidence fits the supplied lowering partition.
+    ///
+    /// Exact original limits preserve bounded evidence and its warnings. A
+    /// changed syntax-record quota requires an unclipped partition, enough room
+    /// for every retained normalized fact, and unchanged non-record limits.
+    /// This permits exact-fit lowering of already admitted evidence, not a claim
+    /// that freshly querying at the smaller quota would produce the same facts:
+    /// optional query work and raw overlapping captures are bounded before deduplication.
+    #[must_use]
+    pub fn is_compatible_with_prepared_limits(&self, limits: &AnalysisLimits) -> bool {
+        self.limits == *limits
+            || (self.syntax_partition_complete()
+                && self.syntax_fact_count() <= limits.syntax_stream().max_records()
                 && analysis_limit_shape_matches(&self.limits, limits))
     }
 }
@@ -180,6 +278,15 @@ pub enum TreeSitterAnalyzerConfigError {
 }
 
 impl TreeSitterAnalyzer {
+    /// Reports the injected parser and lowering path's encoding admission.
+    ///
+    /// This does not claim semantic completeness for that encoding or language;
+    /// scoped parser and lowering coverage warnings remain independent.
+    #[must_use]
+    pub fn supports_encoding(&self, encoding: &rootlight_adapter_sdk::EncodingId) -> bool {
+        self.parser.capabilities().encodings().contains(encoding)
+    }
+
     /// Creates a Tier D analyzer over an injected parser provider.
     ///
     /// Lowering currently has bounded admission but no complete transient
@@ -271,6 +378,28 @@ impl TreeSitterAnalyzer {
         })
     }
 
+    /// Parses one file into SDK-admitted structural evidence without lowering IR.
+    ///
+    /// Parsing retains the ordinary SDK capability, deadline, memory-policy,
+    /// bounded-sink, report, and transactional commit checks. The returned
+    /// source-free artifact must be retained under a bounded caller-owned policy;
+    /// preparing it does not perform IR admission or claim complete coverage.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AdapterError`] for request identity, parser admission, resource,
+    /// report, cancellation, sink, or retained-artifact accounting failures.
+    pub fn prepare_artifact(
+        &self,
+        request: &AnalysisRequest<'_>,
+        cancellation: &Cancellation,
+    ) -> Result<TreeSitterStructuralArtifact, AdapterError> {
+        cancellation.check()?;
+        self.validate_request_identity(request)?;
+        let parse_output = self.parse_request(request, cancellation)?;
+        TreeSitterStructuralArtifact::capture(self, request, parse_output, cancellation)
+    }
+
     /// Parses and lowers one file while returning reusable structural work.
     ///
     /// The returned artifact is safe to retain only under a bounded caller-
@@ -333,6 +462,43 @@ impl TreeSitterAnalyzer {
         execute_analysis(&prepared, request, extensions, memory_policy, cancellation)
     }
 
+    /// Lowers prepared structural evidence without repeating parser extraction.
+    ///
+    /// Identity and parse context must match as for [`Self::analyze_from_artifact`].
+    /// Limits must satisfy
+    /// [`TreeSitterStructuralArtifact::is_compatible_with_prepared_limits`].
+    /// An unclipped partition may fill the new normalized fact quota exactly;
+    /// this lowers the complete previously admitted evidence rather than
+    /// repeating a query under a smaller raw-capture work budget. Existing
+    /// scoped coverage gaps and diagnostics remain visible. Fresh generation-bound
+    /// lowering, validation, and transactional IR admission still run.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AdapterError`] for stale or incompatible artifacts and for the
+    /// same bounded lowering failures as [`Self::analyze_and_capture`].
+    pub fn analyze_prepared_artifact(
+        &self,
+        request: &AnalysisRequest<'_>,
+        artifact: &TreeSitterStructuralArtifact,
+        extensions: ExtensionSupport,
+        memory_policy: MemoryAdmissionPolicy,
+        cancellation: &Cancellation,
+    ) -> Result<AnalysisOutput, AdapterError> {
+        cancellation.check()?;
+        self.validate_request_identity(request)?;
+        if !artifact.matches_identity(self, request, cancellation)?
+            || !artifact.is_compatible_with_prepared_limits(request.limits())
+        {
+            return Err(provider_failure("treesitter-structural-artifact-mismatch"));
+        }
+        let prepared = PreparsedTreeSitterAnalyzer {
+            analyzer: self,
+            parse_output: &artifact.parse_output,
+        };
+        execute_analysis(&prepared, request, extensions, memory_policy, cancellation)
+    }
+
     /// Emits bounded file identity and coverage facts for invalid UTF-8 input.
     ///
     /// The ordinary parser contract continues to reject malformed UTF-8. A
@@ -374,7 +540,7 @@ impl TreeSitterAnalyzer {
         if self.descriptor.tier() != request.tier() {
             return Err(RequestError::UnsupportedTier.into());
         }
-        if request.encoding().as_str() != "utf-8" {
+        if !self.supports_encoding(request.encoding()) {
             return Err(RequestError::UnsupportedEncoding.into());
         }
         if request.generated_status().is_none() {
@@ -405,7 +571,15 @@ impl TreeSitterAnalyzer {
         sink: &mut dyn IrBatchSink,
         cancellation: &Cancellation,
     ) -> Result<AnalysisReport, AdapterError> {
-        let lowered = Lowering::new(self, request, parse_output)?.lower(cancellation)?;
+        let source_view = NativeSourceView::new(
+            request.source().bytes(),
+            request.encoding().as_str(),
+            request.limits().max_source_bytes(),
+            request.limits().max_reported_memory_bytes(),
+            cancellation,
+        )?;
+        let lowered = Lowering::new(self, request, parse_output, &source_view, cancellation)?
+            .lower(cancellation)?;
         emit_records(lowered.records, request, sink, cancellation)?;
         cancellation.check()?;
 
@@ -452,6 +626,13 @@ impl TreeSitterStructuralArtifact {
             file: request.source().source_ref().span().file(),
             content_hash: request.source().source_ref().content_hash(),
             parse_context_hash,
+            // Both F# profiles share fact labels; only implementation scopes
+            // are intrinsically mandatory in the native query contract.
+            required_scope_profile: if analyzer.descriptor.language().as_str() == "fsharp" {
+                RequiredScopeProfile::FSharpImplementation
+            } else {
+                RequiredScopeProfile::DeclarationClosure
+            },
             limits: request.limits().clone(),
             parse_output,
             accounted_bytes,
@@ -464,6 +645,16 @@ impl TreeSitterStructuralArtifact {
         request: &AnalysisRequest<'_>,
         cancellation: &Cancellation,
     ) -> Result<bool, AdapterError> {
+        Ok(self.matches_identity(analyzer, request, cancellation)?
+            && self.is_compatible_with_limits(request.limits()))
+    }
+
+    fn matches_identity(
+        &self,
+        analyzer: &TreeSitterAnalyzer,
+        request: &AnalysisRequest<'_>,
+        cancellation: &Cancellation,
+    ) -> Result<bool, AdapterError> {
         let source = request.source().source_ref();
         let context_matches =
             structural_parse_context_hash(request, cancellation)? == self.parse_context_hash;
@@ -471,18 +662,19 @@ impl TreeSitterStructuralArtifact {
             && self.repository == source.repository()
             && self.file == source.span().file()
             && self.content_hash == source.content_hash()
-            && context_matches
-            && self.is_compatible_with_limits(request.limits()))
+            && context_matches)
     }
 }
 
 fn required_syntax_fact_count_from_output(
     output: &ParseOutput,
+    required_scope_profile: RequiredScopeProfile,
     cancellation: &Cancellation,
 ) -> Result<usize, AdapterError> {
     cancellation.check()?;
     let facts = output.facts();
     let mut declarations = Vec::new();
+    let mut fsharp_implementation_ranges = Vec::new();
     declarations
         .try_reserve_exact(facts.len())
         .map_err(|_| SinkError::AllocationFailed)?;
@@ -490,6 +682,17 @@ fn required_syntax_fact_count_from_output(
         check_periodically(index, cancellation)?;
         if fact.kind() == SyntaxFactKind::Declaration {
             declarations.push((fact.span().start_byte(), fact.span().end_byte()));
+        }
+        if fact.kind() == SyntaxFactKind::Signature
+            && matches!(
+                fact.syntax_kind().as_str(),
+                "markdown.fsharp_code_parsed.signature" | "markdown.fsharp_code_error.signature"
+            )
+        {
+            fsharp_implementation_ranges
+                .try_reserve(1)
+                .map_err(|_| SinkError::AllocationFailed)?;
+            fsharp_implementation_ranges.push((fact.span().start_byte(), fact.span().end_byte()));
         }
     }
     crate::runtime::sort_cancellable_by(&mut declarations, cancellation, Ord::cmp)?;
@@ -502,6 +705,15 @@ fn required_syntax_fact_count_from_output(
         minimum_end = minimum_end.min(*end);
         *end = minimum_end;
     }
+    crate::runtime::sort_cancellable_by(&mut fsharp_implementation_ranges, cancellation, Ord::cmp)?;
+    // The parsed fence marker encloses every admitted child capture. Its exact
+    // profile distinguishes shared F# scope labels even in mixed documents.
+    let mut maximum_end = 0;
+    for (visit, (_, end)) in fsharp_implementation_ranges.iter_mut().enumerate() {
+        check_periodically(visit, cancellation)?;
+        maximum_end = maximum_end.max(*end);
+        *end = maximum_end;
+    }
 
     let mut required = 0usize;
     for (index, fact) in facts.iter().enumerate() {
@@ -510,6 +722,12 @@ fn required_syntax_fact_count_from_output(
         let contains_declaration = declarations
             .get(first)
             .is_some_and(|(_, end)| *end <= fact.span().end_byte());
+        let after_implementation = fsharp_implementation_ranges
+            .partition_point(|(start, _)| *start <= fact.span().start_byte());
+        let within_fsharp_implementation = after_implementation
+            .checked_sub(1)
+            .and_then(|index| fsharp_implementation_ranges.get(index))
+            .is_some_and(|(_, end)| *end >= fact.span().end_byte());
         let identity_fact = matches!(
             fact.kind(),
             SyntaxFactKind::Root | SyntaxFactKind::Module | SyntaxFactKind::Declaration
@@ -521,7 +739,10 @@ fn required_syntax_fact_count_from_output(
                 && (contains_declaration
                     || fact.syntax_kind().as_str().starts_with("json.")
                     || fact.syntax_kind().as_str().starts_with("toml.")
-                    || fact.syntax_kind().as_str().starts_with("yaml.")))
+                    || fact.syntax_kind().as_str().starts_with("yaml.")
+                    || ((required_scope_profile == RequiredScopeProfile::FSharpImplementation
+                        || within_fsharp_implementation)
+                        && fact.syntax_kind().as_str().starts_with("fsharp."))))
             || (fact.kind() == SyntaxFactKind::Occurrence
                 && (fact.syntax_kind().as_str().ends_with(".definition")
                     || fact.syntax_kind().as_str().ends_with(".definition_part")));
@@ -756,6 +977,7 @@ fn structural_parse_context_hash(
     cancellation.check()?;
     let mut hasher = blake3::Hasher::new();
     hasher.update(b"rootlight.treesitter.structural-artifact-context/1\0");
+    hash_sized_bytes(&mut hasher, NATIVE_SOURCE_PROJECTION_POLICY.as_bytes())?;
     hash_sized_bytes(&mut hasher, request.source().path().identity_bytes())?;
     hash_sized_bytes(&mut hasher, request.language().as_str().as_bytes())?;
     hash_sized_bytes(&mut hasher, request.encoding().as_str().as_bytes())?;
@@ -892,7 +1114,7 @@ fn preflight_lowering_limits(
                 limits,
             )?;
         }
-        if let Some((_, detail)) = source_coverage_gap(fact) {
+        for (_, detail) in source_coverage_gaps(fact) {
             skipped_candidates = checked_add(skipped_candidates, 1)?;
             account_string(&mut string_bytes, detail.len(), limits)?;
         }
@@ -955,7 +1177,16 @@ fn preflight_lowering_limits(
                 skipped_candidates = checked_add(skipped_candidates, 1)?;
                 account_string(
                     &mut string_bytes,
-                    "signature-capture-unavailable".len(),
+                    if kind == EntityKind::Parameter
+                        && language_for_fact_with_profile_fences(request, fact, profile_fences)
+                            == "fsharp"
+                    {
+                        // One optional header replaces its gap; reserve the wider
+                        // resource detail rather than counting both records.
+                        "lexical-evidence-resource-limit".len()
+                    } else {
+                        "signature-capture-unavailable".len()
+                    },
                     limits,
                 )?;
             }
@@ -1086,6 +1317,35 @@ fn preflight_lowering_limits(
                 "perl-project-evidence-resource-limit".len(),
                 limits,
             )?;
+        }
+        if matches!(
+            fact.syntax_kind().as_str(),
+            "fsharp.qualified_context.expression"
+                | "fsharp.function.declaration"
+                | "fsharp.variable.declaration"
+                | "fsharp.qualified_body_read.reference"
+                | "fsharp.application.call"
+                | "fsharp.module.declaration"
+                | "fsharp.namespace.declaration"
+                | "fsharp.nested_module.declaration"
+                | "fsharp.open.import"
+        ) {
+            extension_candidates = checked_add(extension_candidates, 1)?;
+            skipped_candidates = checked_add(skipped_candidates, 1)?;
+            account_string(
+                &mut string_bytes,
+                "fsharp-project-evidence-resource-limit".len(),
+                limits,
+            )?;
+            if fact.syntax_kind().as_str() == "fsharp.qualified_context.expression" {
+                extension_candidates = checked_add(extension_candidates, 1)?;
+                skipped_candidates = checked_add(skipped_candidates, 1)?;
+                account_string(
+                    &mut string_bytes,
+                    "fsharp-project-evidence-resource-limit".len(),
+                    limits,
+                )?;
+            }
         }
         if is_signature_capture(fact) {
             extension_candidates = checked_add(extension_candidates, 1)?;
@@ -1245,6 +1505,8 @@ struct Lowering<'context, 'source> {
     analyzer: &'context TreeSitterAnalyzer,
     request: &'context AnalysisRequest<'source>,
     parse_output: &'context ParseOutput,
+    coordinates: SourceCoordinates<'context, 'source>,
+    source_view: &'context NativeSourceView<'source>,
     source_text: &'context str,
     full_source: &'context SourceRef,
     classic_fences: Vec<SourceSpan>,
@@ -1256,14 +1518,31 @@ impl<'context, 'source> Lowering<'context, 'source> {
         analyzer: &'context TreeSitterAnalyzer,
         request: &'context AnalysisRequest<'source>,
         parse_output: &'context ParseOutput,
+        source_view: &'context NativeSourceView<'source>,
+        cancellation: &Cancellation,
     ) -> Result<Self, AdapterError> {
-        let source_text = std::str::from_utf8(request.source().bytes())
-            .map_err(|_| provider_failure("treesitter-lowering-invalid-utf8"))?;
+        // Validate committed physical topology before constructing the private
+        // inverse view; never relabel projected bytes with the raw source hash.
+        validate_fact_graph(
+            parse_output.facts(),
+            request.included_ranges(),
+            request.source().source_ref(),
+            cancellation,
+        )?;
+        let coordinates = SourceCoordinates::new(
+            source_view,
+            parse_output.facts(),
+            request.included_ranges(),
+            request.limits().max_reported_memory_bytes(),
+            cancellation,
+        )?;
         Ok(Self {
             analyzer,
             request,
             parse_output,
-            source_text,
+            coordinates,
+            source_view,
+            source_text: source_view.as_str(),
             full_source: request.source().source_ref(),
             classic_fences: Vec::new(),
             profile_fences: Vec::new(),
@@ -1284,30 +1563,41 @@ impl<'context, 'source> Lowering<'context, 'source> {
                 return "visual-basic-classic";
             }
         }
-        language_for_fact_with_profile_fences(self.request, fact, &self.profile_fences)
+        language_for_fact_with_ranges_and_profile_fences(
+            self.request,
+            fact,
+            self.coordinates.ranges(),
+            &self.profile_fences,
+        )
     }
 
     fn lower(mut self, cancellation: &Cancellation) -> Result<LoweredOutput, AdapterError> {
         if self.request.language().as_str() == "markdown" {
-            self.profile_fences = profile_fence_spans(self.parse_output.facts(), cancellation)?;
+            self.profile_fences = profile_fence_spans(self.coordinates.facts(), cancellation)?;
         }
+        let physical_profile_fences = if self.source_view.encoding().is_some()
+            && self.request.language().as_str() == "markdown"
+        {
+            Some(profile_fence_spans(
+                self.parse_output.facts(),
+                cancellation,
+            )?)
+        } else {
+            None
+        };
         let mut budget = preflight_lowering_limits(
             self.request,
             self.parse_output,
             self.analyzer.descriptor.identity(),
             &self.analyzer.frontend_version,
-            &self.profile_fences,
+            physical_profile_fences
+                .as_deref()
+                .unwrap_or(&self.profile_fences),
             cancellation,
         )?;
         let mut total_string_bytes = budget.string_bytes;
-        validate_fact_graph(
-            self.parse_output.facts(),
-            self.request.included_ranges(),
-            self.full_source,
-            cancellation,
-        )?;
         if self.request.language().as_str() == "markdown" {
-            self.classic_fences = classic_fence_spans(self.parse_output.facts(), cancellation)?;
+            self.classic_fences = classic_fence_spans(self.coordinates.facts(), cancellation)?;
         }
         let provenance = self.provenance()?;
         let provenance_id = provenance.id;
@@ -1321,6 +1611,7 @@ impl<'context, 'source> Lowering<'context, 'source> {
             let entity = materialize_entity(
                 draft,
                 self.full_source,
+                &self.coordinates,
                 self.request.build_context(),
                 provenance_id,
                 self.analyzer.descriptor.tier(),
@@ -1367,7 +1658,7 @@ impl<'context, 'source> Lowering<'context, 'source> {
             // Entity identity can coalesce same-named declarations, so count
             // authored definition captures before accepting a call target.
             for fact in self
-                .parse_output
+                .coordinates
                 .facts()
                 .iter()
                 .filter(|fact| fact.syntax_kind().as_str() == "awk.function.definition")
@@ -1393,7 +1684,7 @@ impl<'context, 'source> Lowering<'context, 'source> {
         if self.request.language().as_str() == "erlang" {
             let mut definition_counts = HashMap::<String, usize>::new();
             for fact in self
-                .parse_output
+                .coordinates
                 .facts()
                 .iter()
                 .filter(|fact| fact.syntax_kind().as_str() == "erlang.function.definition")
@@ -1443,7 +1734,7 @@ impl<'context, 'source> Lowering<'context, 'source> {
         let mut extension_bytes = 0_usize;
         let mut skipped = BTreeMap::<FactId, SkippedRegion>::new();
         let mut diagnostics = BTreeMap::<FactId, DiagnosticRecord>::new();
-        for span in classic_dialect_spans(self.request).chain(self.classic_fences.iter().copied()) {
+        for span in classic_dialect_spans(self.request) {
             cancellation.check()?;
             let region = skipped_region(
                 self.full_source,
@@ -1455,10 +1746,20 @@ impl<'context, 'source> Lowering<'context, 'source> {
             )?;
             skipped.insert(region.id, region);
         }
+        for span in self.classic_fences.iter().copied() {
+            cancellation.check()?;
+            let region = self.skipped_region(
+                span,
+                FactDomain::Relations,
+                SkippedRegionReason::UnsupportedConstruct,
+                "visual-basic-dialect-unproven",
+                provenance_id,
+            )?;
+            skipped.insert(region.id, region);
+        }
         for &(span, detail) in &entity_plan.yaml_warnings {
             cancellation.check()?;
-            let region = skipped_region(
-                self.full_source,
+            let region = self.skipped_region(
                 span,
                 FactDomain::Entities,
                 SkippedRegionReason::UnsupportedConstruct,
@@ -1468,12 +1769,12 @@ impl<'context, 'source> Lowering<'context, 'source> {
             skipped.insert(region.id, region);
         }
         let facts_by_id: HashMap<_, _> = self
-            .parse_output
+            .coordinates
             .facts()
             .iter()
             .map(|fact| (fact.local_id(), fact))
             .collect();
-        let terminal_call_names = terminal_call_names(self.parse_output.facts(), cancellation)?;
+        let terminal_call_names = terminal_call_names(self.coordinates.facts(), cancellation)?;
         // A truncated capture plan may omit a shadowing declaration. Exact lexical
         // targets require a complete plan even when remaining text is readable.
         let lua_bindings = if self.parse_output.report().coverage().status()
@@ -1481,7 +1782,7 @@ impl<'context, 'source> Lowering<'context, 'source> {
             && (self.request.language().as_str() == "lua"
                 || (self.request.language().as_str() == "markdown"
                     && self
-                        .parse_output
+                        .coordinates
                         .facts()
                         .iter()
                         .any(|fact| fact.syntax_kind().as_str() == "lua.identifier.reference")))
@@ -1495,12 +1796,83 @@ impl<'context, 'source> Lowering<'context, 'source> {
                 })
                 .collect();
             Some(crate::lua_bindings::LuaBindings::new(
-                self.parse_output.facts(),
-                self.request.source().bytes(),
+                self.coordinates.facts(),
+                self.source_view.as_bytes(),
                 &symbols,
                 self.request.limits().ir().max_string_bytes,
                 cancellation,
             )?)
+        } else {
+            None
+        };
+
+        let fsharp_recovery_partition = self.request.language().as_str() == "fsharp"
+            && fsharp_recovery_partition_available(self.request, self.parse_output, cancellation)?;
+        let fsharp_bindings = if self.request.language().as_str() == "fsharp"
+            && (self.parse_output.report().coverage().status() == CoverageStatus::Complete
+                || fsharp_recovery_partition)
+        {
+            let mut symbols = HashMap::new();
+            symbols
+                .try_reserve(materialized.len())
+                .map_err(|_| AdapterError::Sink(SinkError::AllocationFailed))?;
+            for entity in materialized.values() {
+                cancellation.check()?;
+                if matches!(
+                    entity.record.kind,
+                    EntityKind::Parameter | EntityKind::Function | EntityKind::Variable
+                ) && let Some(definition) = entity.definition_local_id
+                    && symbols.insert(definition, entity.record.id).is_some()
+                {
+                    return Err(provider_failure("fsharp-lexical-identity-conflict"));
+                }
+            }
+            Some(if fsharp_recovery_partition {
+                crate::fsharp_bindings::FSharpBindings::new_recovered_owners(
+                    self.coordinates.facts(),
+                    self.source_view.as_bytes(),
+                    &symbols,
+                    self.request.limits().ir().max_string_bytes,
+                    cancellation,
+                )?
+            } else {
+                crate::fsharp_bindings::FSharpBindings::new(
+                    self.coordinates.facts(),
+                    self.source_view.as_bytes(),
+                    &symbols,
+                    self.request.limits().ir().max_string_bytes,
+                    cancellation,
+                )?
+            })
+        } else {
+            None
+        };
+
+        let fsharp_signature_claims = if self.request.language().as_str() == "fsharp-signature"
+            && self.parse_output.report().coverage().status() == CoverageStatus::Complete
+        {
+            let mut symbols = HashMap::new();
+            symbols
+                .try_reserve(materialized.len())
+                .map_err(|_| AdapterError::Sink(SinkError::AllocationFailed))?;
+            for entity in materialized.values() {
+                cancellation.check()?;
+                if matches!(
+                    entity.record.kind,
+                    EntityKind::Variable | EntityKind::Struct | EntityKind::TypeAlias
+                ) && let Some(definition) = entity.definition_local_id
+                    && symbols.insert(definition, entity.record.id).is_some()
+                {
+                    return Err(provider_failure("fsharp-signature-identity-conflict"));
+                }
+            }
+            crate::fsharp_bindings::signature_claims(
+                self.coordinates.facts(),
+                self.source_view.as_bytes(),
+                &symbols,
+                self.request.limits().ir().max_string_bytes,
+                cancellation,
+            )?
         } else {
             None
         };
@@ -1522,8 +1894,8 @@ impl<'context, 'source> Lowering<'context, 'source> {
                 }
             }
             Some(crate::haskell_bindings::HaskellBindings::new(
-                self.parse_output.facts(),
-                self.request.source().bytes(),
+                self.coordinates.facts(),
+                self.source_view.as_bytes(),
                 &symbols,
                 self.request.limits().ir().max_string_bytes,
                 cancellation,
@@ -1535,7 +1907,7 @@ impl<'context, 'source> Lowering<'context, 'source> {
         let vba_bindings = if self.parse_output.report().coverage().status()
             == CoverageStatus::Complete
             && self
-                .parse_output
+                .coordinates
                 .facts()
                 .iter()
                 .any(|fact| fact.syntax_kind().as_str() == "vba.file.scope")
@@ -1553,8 +1925,8 @@ impl<'context, 'source> Lowering<'context, 'source> {
                 }))
                 .collect();
             Some(crate::vba_bindings::VbaBindings::new(
-                self.parse_output.facts(),
-                self.request.source().bytes(),
+                self.coordinates.facts(),
+                self.source_view.as_bytes(),
                 &symbols,
                 self.request.limits().ir().max_string_bytes,
                 cancellation,
@@ -1597,7 +1969,7 @@ impl<'context, 'source> Lowering<'context, 'source> {
         let groovy_bindings = if self.parse_output.report().coverage().status()
             == CoverageStatus::Complete
             && self
-                .parse_output
+                .coordinates
                 .facts()
                 .iter()
                 .any(|fact| fact.syntax_kind().as_str() == "groovy.file.module")
@@ -1611,8 +1983,8 @@ impl<'context, 'source> Lowering<'context, 'source> {
                 })
                 .collect();
             Some(crate::groovy_bindings::GroovyBindings::new(
-                self.parse_output.facts(),
-                self.request.source().bytes(),
+                self.coordinates.facts(),
+                self.source_view.as_bytes(),
                 &symbols,
                 self.request.limits().ir().max_string_bytes,
                 cancellation,
@@ -1622,13 +1994,13 @@ impl<'context, 'source> Lowering<'context, 'source> {
         };
 
         let groovy_callables = if groovy_bindings.is_some() {
-            crate::groovy_callables::collect(self.parse_output.facts(), &facts_by_id, cancellation)?
+            crate::groovy_callables::collect(self.coordinates.facts(), &facts_by_id, cancellation)?
         } else {
             BTreeMap::new()
         };
         let groovy_members = if let Some(bindings) = &groovy_bindings {
             crate::groovy_members::collect(
-                self.parse_output.facts(),
+                self.coordinates.facts(),
                 &facts_by_id,
                 bindings,
                 cancellation,
@@ -1638,10 +2010,10 @@ impl<'context, 'source> Lowering<'context, 'source> {
         };
         let groovy_calls = if let Some(bindings) = &groovy_bindings {
             crate::groovy_calls::collect(
-                self.parse_output.facts(),
+                self.coordinates.facts(),
                 &facts_by_id,
                 bindings,
-                self.request.source().bytes(),
+                self.source_view.as_bytes(),
                 self.request.limits().ir().max_string_bytes,
                 cancellation,
             )?
@@ -1683,7 +2055,7 @@ impl<'context, 'source> Lowering<'context, 'source> {
         let nix_bindings = if self.parse_output.report().coverage().status()
             == CoverageStatus::Complete
             && self
-                .parse_output
+                .coordinates
                 .facts()
                 .iter()
                 .any(|fact| fact.syntax_kind().as_str() == "nix.file.module")
@@ -1697,8 +2069,8 @@ impl<'context, 'source> Lowering<'context, 'source> {
                 })
                 .collect();
             Some(crate::nix_bindings::NixBindings::new(
-                self.parse_output.facts(),
-                self.request.source().bytes(),
+                self.coordinates.facts(),
+                self.source_view.as_bytes(),
                 &symbols,
                 self.request.limits().ir().max_string_bytes,
                 cancellation,
@@ -1710,7 +2082,7 @@ impl<'context, 'source> Lowering<'context, 'source> {
         let perl_bindings = if self.parse_output.report().coverage().status()
             == CoverageStatus::Complete
             && self
-                .parse_output
+                .coordinates
                 .facts()
                 .iter()
                 .any(|fact| fact.syntax_kind().as_str() == "perl.file.module")
@@ -1724,8 +2096,8 @@ impl<'context, 'source> Lowering<'context, 'source> {
                 })
                 .collect();
             Some(crate::perl_bindings::PerlBindings::new(
-                self.parse_output.facts(),
-                self.request.source().bytes(),
+                self.coordinates.facts(),
+                self.source_view.as_bytes(),
                 &symbols,
                 &entity_plan
                     .perl
@@ -1746,8 +2118,8 @@ impl<'context, 'source> Lowering<'context, 'source> {
 
         let perl_code_values = if let Some(bindings) = &perl_bindings {
             crate::perl_code_values::resolve(
-                self.parse_output.facts(),
-                self.request.source().bytes(),
+                self.coordinates.facts(),
+                self.source_view.as_bytes(),
                 bindings,
                 &materialized
                     .values()
@@ -1783,8 +2155,8 @@ impl<'context, 'source> Lowering<'context, 'source> {
                 })
                 .collect();
             Some(crate::markdown_bindings::MarkdownBindings::new(
-                self.parse_output.facts(),
-                self.request.source().bytes(),
+                self.coordinates.facts(),
+                self.source_view.as_bytes(),
                 &symbols,
                 self.request.limits().ir().max_string_bytes,
                 cancellation,
@@ -1849,8 +2221,9 @@ impl<'context, 'source> Lowering<'context, 'source> {
                     self.full_source.repository(),
                     self.full_source.generation(),
                     provenance_id,
-                    source_for_span(self.full_source, compilation.scope),
-                    compilation.clone(),
+                    self.source_for_span(compilation.scope)?,
+                    self.coordinates
+                        .vba_compilation(compilation.clone(), cancellation)?,
                 )
                 .map_err(|_| provider_failure("vba-compilation-evidence"))?;
                 ensure_extension_budget(
@@ -1863,15 +2236,14 @@ impl<'context, 'source> Lowering<'context, 'source> {
             }
         }
 
-        for (index, fact) in self.parse_output.facts().iter().enumerate() {
+        for (index, fact) in self.coordinates.facts().iter().enumerate() {
             check_periodically(index, cancellation)?;
-            let source = source_for_span(self.full_source, fact.span());
+            let source = self.source_for_span(fact.span())?;
             if entity_plan
                 .haskell_orphan_signatures
                 .contains(&fact.local_id())
             {
-                let gap = skipped_region(
-                    self.full_source,
+                let gap = self.skipped_region(
                     fact.span(),
                     FactDomain::Entities,
                     SkippedRegionReason::UnsupportedConstruct,
@@ -1883,8 +2255,7 @@ impl<'context, 'source> Lowering<'context, 'source> {
             if let Some(annotation) = entity_plan.haskell_annotations.get(&fact.local_id()) {
                 let Some(definition) = annotation.definition.and_then(|id| facts_by_id.get(&id))
                 else {
-                    let gap = skipped_region(
-                        self.full_source,
+                    let gap = self.skipped_region(
                         fact.span(),
                         FactDomain::Entities,
                         SkippedRegionReason::UnsupportedConstruct,
@@ -1905,7 +2276,7 @@ impl<'context, 'source> Lowering<'context, 'source> {
                     enclosing,
                     provenance_id,
                     syntax_confidence,
-                    source_for_span(self.full_source, definition.span()),
+                    self.source_for_span(definition.span())?,
                     self.text_for_span(definition.span())?,
                 )?;
                 if let Some(target) = target {
@@ -1913,8 +2284,7 @@ impl<'context, 'source> Lowering<'context, 'source> {
                         symbol: target.record.id,
                     };
                 } else {
-                    let gap = skipped_region(
-                        self.full_source,
+                    let gap = self.skipped_region(
                         fact.span(),
                         FactDomain::Entities,
                         SkippedRegionReason::UnsupportedConstruct,
@@ -1925,21 +2295,33 @@ impl<'context, 'source> Lowering<'context, 'source> {
                 }
                 let signature_source = annotation
                     .signature
-                    .map(|span| source_for_span(self.full_source, span));
+                    .map(|span| self.source_for_span(span))
+                    .transpose()?;
                 if let Some(signature_source) = &signature_source {
                     occurrence.evidence = direct_evidence(signature_source.clone());
                 }
                 occurrence.id = derive_occurrence_record_id(&occurrence)
                     .map_err(|_| provider_failure("treesitter-occurrence-identity"))?;
                 if let Some(signature_source) = signature_source {
-                    let span = signature_source.span();
-                    let lexical = LexicalEvidenceV1::from_complete_text(
-                        LexicalEvidenceKind::Signature,
-                        FactRef::Fact(occurrence.id),
-                        LexicalEvidenceFormat::SourceText,
-                        self.text_for_span(span)?,
-                    )
-                    .ok();
+                    let span = annotation
+                        .signature
+                        .ok_or_else(|| provider_failure("treesitter-lowering-signature"))?;
+                    let lexical = if self.source_view.encoding().is_some() {
+                        let signature_range = 0..self.text_for_span(span)?.len();
+                        self.encoded_signature_lexical(
+                            span,
+                            FactRef::Fact(occurrence.id),
+                            std::slice::from_ref(&signature_range),
+                        )?
+                    } else {
+                        LexicalEvidenceV1::from_complete_text(
+                            LexicalEvidenceKind::Signature,
+                            FactRef::Fact(occurrence.id),
+                            LexicalEvidenceFormat::SourceText,
+                            self.text_for_span(span)?,
+                        )
+                        .ok()
+                    };
                     let envelope = lexical.and_then(|lexical| {
                         new_lexical_evidence_envelope(
                             self.full_source.repository(),
@@ -1960,8 +2342,7 @@ impl<'context, 'source> Lowering<'context, 'source> {
                         None => false,
                     };
                     if !retained {
-                        let gap = skipped_region(
-                            self.full_source,
+                        let gap = self.skipped_region(
                             span,
                             FactDomain::Extensions,
                             SkippedRegionReason::ResourceLimit,
@@ -1971,8 +2352,7 @@ impl<'context, 'source> Lowering<'context, 'source> {
                         skipped.insert(gap.id, gap);
                     }
                 } else {
-                    let gap = skipped_region(
-                        self.full_source,
+                    let gap = self.skipped_region(
                         fact.span(),
                         FactDomain::Extensions,
                         SkippedRegionReason::UnsupportedConstruct,
@@ -1985,8 +2365,7 @@ impl<'context, 'source> Lowering<'context, 'source> {
                 continue;
             }
             if entity_plan.groovy_name_gaps.contains(&fact.local_id()) {
-                let region = skipped_region(
-                    self.full_source,
+                let region = self.skipped_region(
                     fact.span(),
                     FactDomain::Entities,
                     SkippedRegionReason::UnsupportedConstruct,
@@ -2005,8 +2384,7 @@ impl<'context, 'source> Lowering<'context, 'source> {
                         .unsupported_scope_entities
                         .contains(&fact.local_id()))
             {
-                let region = skipped_region(
-                    self.full_source,
+                let region = self.skipped_region(
                     fact.span(),
                     FactDomain::Entities,
                     SkippedRegionReason::UnsupportedConstruct,
@@ -2015,17 +2393,19 @@ impl<'context, 'source> Lowering<'context, 'source> {
                 )?;
                 skipped.insert(region.id, region);
             }
-            if let Some((domain, detail)) = source_coverage_gap(fact)
-                && !(entity_plan.perl.owned_functions.contains(&fact.local_id())
+            for (domain, detail) in source_coverage_gaps(fact) {
+                if (entity_plan.perl.owned_functions.contains(&fact.local_id())
                     && materialized.contains_key(&fact.local_id()))
-                && !(detail == VBA_CONDITIONAL_EVALUATION_UNAVAILABLE
-                    && match &vba_bindings {
-                        Some(bindings) => {
-                            bindings.compilation_evaluation_proven(fact, cancellation)?
-                        }
-                        None => false,
-                    })
-            {
+                    || (detail == VBA_CONDITIONAL_EVALUATION_UNAVAILABLE
+                        && match &vba_bindings {
+                            Some(bindings) => {
+                                bindings.compilation_evaluation_proven(fact, cancellation)?
+                            }
+                            None => false,
+                        })
+                {
+                    continue;
+                }
                 let reason = match fact.syntax_kind().as_str() {
                     "html.embedded_limit.signature"
                     | "astro.embedded_limit.signature"
@@ -2040,21 +2420,14 @@ impl<'context, 'source> Lowering<'context, 'source> {
                     | "markdown.inline_error.signature" => SkippedRegionReason::ParseError,
                     _ => SkippedRegionReason::UnsupportedConstruct,
                 };
-                let region = skipped_region(
-                    self.full_source,
-                    fact.span(),
-                    domain,
-                    reason,
-                    detail,
-                    provenance_id,
-                )?;
+                let region =
+                    self.skipped_region(fact.span(), domain, reason, detail, provenance_id)?;
                 skipped.insert(region.id, region);
             }
             if entity_plan.duplicate_data_keys.contains(&fact.local_id()) {
                 // Both written occurrences remain searchable, but their data
                 // meaning is not a valid unique YAML mapping entry.
-                let region = skipped_region(
-                    self.full_source,
+                let region = self.skipped_region(
                     fact.span(),
                     FactDomain::Entities,
                     SkippedRegionReason::UnsupportedConstruct,
@@ -2091,7 +2464,7 @@ impl<'context, 'source> Lowering<'context, 'source> {
                         entity,
                         provenance_id,
                         syntax_confidence,
-                        &source_for_span(self.full_source, definition_span),
+                        &self.source_for_span(definition_span)?,
                         content_hash(self.text_for_span(definition_span)?.as_bytes()),
                     )?;
                     if let Some(owner) = entity_plan.matlab.writes.get(&fact.local_id()) {
@@ -2116,8 +2489,8 @@ impl<'context, 'source> Lowering<'context, 'source> {
                         self.full_source.repository(),
                         self.full_source.generation(),
                         provenance_id,
-                        source_for_span(self.full_source, *statement),
-                        *member,
+                        self.source_for_span(*statement)?,
+                        self.coordinates.groovy_member(*member)?,
                     )
                     .map_err(|_| provider_failure("groovy-member-evidence"))?;
                     if !insert_optional_extension(
@@ -2126,8 +2499,7 @@ impl<'context, 'source> Lowering<'context, 'source> {
                         &mut extension_bytes,
                         self.request.limits().ir(),
                     )? {
-                        let gap = skipped_region(
-                            self.full_source,
+                        let gap = self.skipped_region(
                             fact.span(),
                             FactDomain::Extensions,
                             SkippedRegionReason::ResourceLimit,
@@ -2142,8 +2514,7 @@ impl<'context, 'source> Lowering<'context, 'source> {
                         "groovy.field.declaration" | "groovy.property.declaration"
                     )
                 {
-                    let gap = skipped_region(
-                        self.full_source,
+                    let gap = self.skipped_region(
                         fact.span(),
                         FactDomain::Extensions,
                         SkippedRegionReason::UnsupportedConstruct,
@@ -2163,7 +2534,7 @@ impl<'context, 'source> Lowering<'context, 'source> {
                         self.full_source.generation(),
                         provenance_id,
                         entity_source.clone(),
-                        callable,
+                        self.coordinates.groovy_callable(callable)?,
                     )
                     .map_err(|_| provider_failure("groovy-callable-evidence"))?;
                     if !insert_optional_extension(
@@ -2172,8 +2543,7 @@ impl<'context, 'source> Lowering<'context, 'source> {
                         &mut extension_bytes,
                         self.request.limits().ir(),
                     )? {
-                        let gap = skipped_region(
-                            self.full_source,
+                        let gap = self.skipped_region(
                             fact.span(),
                             FactDomain::Extensions,
                             SkippedRegionReason::ResourceLimit,
@@ -2187,8 +2557,7 @@ impl<'context, 'source> Lowering<'context, 'source> {
                     && fact.syntax_kind().as_str() == "groovy.function.declaration"
                     && !groovy_callables.contains_key(&fact.local_id())
                 {
-                    let gap = skipped_region(
-                        self.full_source,
+                    let gap = self.skipped_region(
                         fact.span(),
                         FactDomain::Extensions,
                         SkippedRegionReason::UnsupportedConstruct,
@@ -2201,8 +2570,12 @@ impl<'context, 'source> Lowering<'context, 'source> {
                     let signature_span = entity
                         .signature_span
                         .ok_or_else(|| provider_failure("treesitter-lowering-signature"))?;
-                    let signature_source = source_for_span(self.full_source, signature_span);
-                    let lexical = signature.lexical(FactRef::Entity(entity.record.id));
+                    let signature_source = self.source_for_span(signature_span)?;
+                    let lexical = self.signature_lexical(
+                        signature,
+                        signature_span,
+                        FactRef::Entity(entity.record.id),
+                    )?;
                     if let Some(envelope) = lexical.and_then(|lexical| {
                         new_lexical_evidence_envelope(
                             self.full_source.repository(),
@@ -2219,8 +2592,7 @@ impl<'context, 'source> Lowering<'context, 'source> {
                             &mut extension_bytes,
                             self.request.limits().ir(),
                         )? {
-                            let region = skipped_region(
-                                self.full_source,
+                            let region = self.skipped_region(
                                 signature_span,
                                 FactDomain::Extensions,
                                 SkippedRegionReason::ResourceLimit,
@@ -2230,8 +2602,7 @@ impl<'context, 'source> Lowering<'context, 'source> {
                             skipped.insert(region.id, region);
                         }
                     } else {
-                        let region = skipped_region(
-                            self.full_source,
+                        let region = self.skipped_region(
                             signature_span,
                             FactDomain::Extensions,
                             SkippedRegionReason::UnsupportedConstruct,
@@ -2247,7 +2618,9 @@ impl<'context, 'source> Lowering<'context, 'source> {
                     entity
                         .definition_local_id
                         .and_then(|id| facts_by_id.get(&id).copied()),
-                ) {
+                ) && !(entity.record.kind == EntityKind::Parameter
+                    && entity.signature_span.is_some())
+                {
                     let region = skipped_region(
                         self.full_source,
                         entity
@@ -2269,27 +2642,37 @@ impl<'context, 'source> Lowering<'context, 'source> {
 
             if let Some(role) = occurrence_role(fact) {
                 let call_context = if fact.syntax_kind().as_str() == "groovy.implicit_call.call" {
-                    groovy_calls.calls.get(&fact.span()).cloned().map(|lookup| {
-                        rootlight_ir::new_groovy_call_lookup_envelope(
-                            self.full_source.repository(),
-                            self.full_source.generation(),
-                            provenance_id,
-                            source.clone(),
-                            lookup,
-                        )
-                    })
-                } else if fact.syntax_kind().as_str() == "groovy.identifier.reference" {
                     groovy_calls
-                        .values
+                        .calls
                         .get(&fact.span())
                         .cloned()
+                        .map(|lookup| self.coordinates.groovy_call(lookup))
+                        .transpose()?
                         .map(|lookup| {
-                            rootlight_ir::new_groovy_value_lookup_envelope(
+                            rootlight_ir::new_groovy_call_lookup_envelope_with_encoding(
                                 self.full_source.repository(),
                                 self.full_source.generation(),
                                 provenance_id,
                                 source.clone(),
                                 lookup,
+                                self.source_view.encoding(),
+                            )
+                        })
+                } else if fact.syntax_kind().as_str() == "groovy.identifier.reference" {
+                    groovy_calls
+                        .values
+                        .get(&fact.span())
+                        .cloned()
+                        .map(|lookup| self.coordinates.groovy_value(lookup))
+                        .transpose()?
+                        .map(|lookup| {
+                            rootlight_ir::new_groovy_value_lookup_envelope_with_encoding(
+                                self.full_source.repository(),
+                                self.full_source.generation(),
+                                provenance_id,
+                                source.clone(),
+                                lookup,
+                                self.source_view.encoding(),
                             )
                         })
                 } else if fact.kind() == SyntaxFactKind::Import {
@@ -2298,13 +2681,16 @@ impl<'context, 'source> Lowering<'context, 'source> {
                         .get(&fact.span())
                         .cloned()
                         .flatten()
+                        .map(|import| self.coordinates.groovy_static_import(import))
+                        .transpose()?
                         .map(|import| {
-                            rootlight_ir::new_groovy_static_import_envelope(
+                            rootlight_ir::new_groovy_static_import_envelope_with_encoding(
                                 self.full_source.repository(),
                                 self.full_source.generation(),
                                 provenance_id,
                                 source.clone(),
                                 import,
+                                self.source_view.encoding(),
                             )
                         })
                 } else {
@@ -2321,8 +2707,7 @@ impl<'context, 'source> Lowering<'context, 'source> {
                         Err(_) => false,
                     };
                     if !retained {
-                        let gap = skipped_region(
-                            self.full_source,
+                        let gap = self.skipped_region(
                             fact.span(),
                             FactDomain::Extensions,
                             SkippedRegionReason::ResourceLimit,
@@ -2342,8 +2727,7 @@ impl<'context, 'source> Lowering<'context, 'source> {
                     ) || (fact.kind() == SyntaxFactKind::Import
                         && groovy_calls.imports.contains_key(&fact.span())))
                 {
-                    let gap = skipped_region(
-                        self.full_source,
+                    let gap = self.skipped_region(
                         fact.span(),
                         FactDomain::Extensions,
                         SkippedRegionReason::UnsupportedConstruct,
@@ -2367,13 +2751,30 @@ impl<'context, 'source> Lowering<'context, 'source> {
                     .and_then(|local_id| facts_by_id.get(local_id))
                     .map(|terminal| self.text_for_span(terminal.span()))
                     .transpose()?;
-                let resolution_text = structural_resolution_text(
-                    self.language_for_fact(fact),
-                    fact,
-                    text,
-                    terminal_call_name,
-                    self.request.limits().ir().max_string_bytes,
-                );
+                let resolution_text =
+                    if fact.syntax_kind().as_str() == "fsharp.qualified_body_read.reference" {
+                        fsharp_bindings
+                            .as_ref()
+                            .map(|bindings| bindings.qualified_read_name(fact))
+                            .transpose()?
+                            .flatten()
+                            .map(std::borrow::Cow::Borrowed)
+                    } else if fact.syntax_kind().as_str() == "fsharp.application.call" {
+                        fsharp_bindings
+                            .as_ref()
+                            .map(|bindings| bindings.call_name(fact, cancellation))
+                            .transpose()?
+                            .flatten()
+                            .map(std::borrow::Cow::Borrowed)
+                    } else {
+                        structural_resolution_text(
+                            self.language_for_fact(fact),
+                            fact,
+                            text,
+                            terminal_call_name,
+                            self.request.limits().ir().max_string_bytes,
+                        )
+                    };
                 let enclosing = entity_plan
                     .nearest_entity_ancestor
                     .get(&fact.local_id())
@@ -2404,8 +2805,7 @@ impl<'context, 'source> Lowering<'context, 'source> {
                     );
                     occurrence.id = derive_occurrence_record_id(&occurrence)
                         .map_err(|_| provider_failure("treesitter-occurrence-identity"))?;
-                    let region = skipped_region(
-                        self.full_source,
+                    let region = self.skipped_region(
                         fact.span(),
                         FactDomain::Occurrences,
                         SkippedRegionReason::UnsupportedConstruct,
@@ -2460,8 +2860,7 @@ impl<'context, 'source> Lowering<'context, 'source> {
                     if fact.syntax_kind().as_str() == "vba.event_identifier.reference" {
                         // A declared event is a static reference target. Its
                         // connected runtime handlers are not implied by that edge.
-                        let gap = skipped_region(
-                            self.full_source,
+                        let gap = self.skipped_region(
                             fact.span(),
                             FactDomain::Relations,
                             SkippedRegionReason::UnsupportedConstruct,
@@ -2516,6 +2915,31 @@ impl<'context, 'source> Lowering<'context, 'source> {
                         relation.id = derive_relation_record_id(&relation)
                             .map_err(|_| provider_failure("treesitter-relation-identity"))?;
                     }
+                    relations.insert(relation.id, relation);
+                }
+                if let Some(bindings) = &fsharp_bindings
+                    && let Some(symbol) = bindings.resolve(fact, text, cancellation)?
+                {
+                    occurrence.target = OccurrenceTarget::Resolved { symbol };
+                    occurrence.id = derive_occurrence_record_id(&occurrence)
+                        .map_err(|_| provider_failure("treesitter-occurrence-identity"))?;
+                    let relation = lexical_reference_relation(&occurrence, symbol)?;
+                    relations.insert(relation.id, relation);
+                }
+                if let Some(bindings) = &fsharp_bindings
+                    && let Some(symbol) = bindings.resolve_call(fact, cancellation)?
+                {
+                    occurrence.role = OccurrenceRole::CallSite;
+                    occurrence.target = OccurrenceTarget::Resolved { symbol };
+                    occurrence.id = derive_occurrence_record_id(&occurrence)
+                        .map_err(|_| provider_failure("treesitter-occurrence-identity"))?;
+                    let mut relation = lexical_reference_relation(&occurrence, symbol)?;
+                    relation.predicate = RelationPredicate::Calls;
+                    if let Some(caller) = occurrence.enclosing {
+                        relation.subject = RelationEndpoint::Entity(caller);
+                    }
+                    relation.id = derive_relation_record_id(&relation)
+                        .map_err(|_| provider_failure("treesitter-relation-identity"))?;
                     relations.insert(relation.id, relation);
                 }
                 if let Some(bindings) = &haskell_bindings
@@ -2575,7 +2999,7 @@ impl<'context, 'source> Lowering<'context, 'source> {
                         self.full_source.generation(),
                         provenance_id,
                         occurrence.source.clone(),
-                        binding,
+                        self.coordinates.groovy_binding(binding)?,
                     )
                     .map_err(|_| provider_failure("groovy-import-use-evidence"))?;
                     if !matches!(
@@ -2592,8 +3016,7 @@ impl<'context, 'source> Lowering<'context, 'source> {
                         &mut extension_bytes,
                         self.request.limits().ir(),
                     )? {
-                        let gap = skipped_region(
-                            self.full_source,
+                        let gap = self.skipped_region(
                             fact.span(),
                             FactDomain::Extensions,
                             SkippedRegionReason::ResourceLimit,
@@ -2619,7 +3042,7 @@ impl<'context, 'source> Lowering<'context, 'source> {
                         self.full_source.generation(),
                         provenance_id,
                         occurrence.source.clone(),
-                        lookup,
+                        self.coordinates.groovy_type(lookup)?,
                     )
                     .map_err(|_| provider_failure("groovy-type-lookup-evidence"))?;
                     if !matches!(
@@ -2636,8 +3059,7 @@ impl<'context, 'source> Lowering<'context, 'source> {
                         &mut extension_bytes,
                         self.request.limits().ir(),
                     )? {
-                        let gap = skipped_region(
-                            self.full_source,
+                        let gap = self.skipped_region(
                             fact.span(),
                             FactDomain::Extensions,
                             SkippedRegionReason::ResourceLimit,
@@ -2738,8 +3160,7 @@ impl<'context, 'source> Lowering<'context, 'source> {
                         ) && occurrence.role != OccurrenceRole::CallSite
                             && !vba_array_invocation_proven))
                 {
-                    let region = skipped_region(
-                        self.full_source,
+                    let region = self.skipped_region(
                         fact.span(),
                         FactDomain::Relations,
                         SkippedRegionReason::UnsupportedConstruct,
@@ -2749,8 +3170,7 @@ impl<'context, 'source> Lowering<'context, 'source> {
                     skipped.insert(region.id, region);
                 }
                 if let Some(detail) = automatic_instantiation_gap(fact) {
-                    let region = skipped_region(
-                        self.full_source,
+                    let region = self.skipped_region(
                         fact.span(),
                         FactDomain::Relations,
                         SkippedRegionReason::UnsupportedConstruct,
@@ -2775,8 +3195,7 @@ impl<'context, 'source> Lowering<'context, 'source> {
                         let relation = lexical_reference_relation(&occurrence, target.record.id)?;
                         relations.insert(relation.id, relation);
                     } else {
-                        let region = skipped_region(
-                            self.full_source,
+                        let region = self.skipped_region(
                             fact.span(),
                             FactDomain::Relations,
                             SkippedRegionReason::UnsupportedConstruct,
@@ -2792,7 +3211,7 @@ impl<'context, 'source> Lowering<'context, 'source> {
                     let target = markdown_bindings
                         .as_ref()
                         .map(|bindings| {
-                            bindings.resolve(fact, self.request.source().bytes(), cancellation)
+                            bindings.resolve(fact, self.source_view.as_bytes(), cancellation)
                         })
                         .transpose()?
                         .flatten();
@@ -2803,8 +3222,7 @@ impl<'context, 'source> Lowering<'context, 'source> {
                         let relation = lexical_reference_relation(&occurrence, symbol)?;
                         relations.insert(relation.id, relation);
                     } else {
-                        let region = skipped_region(
-                            self.full_source,
+                        let region = self.skipped_region(
                             fact.span(),
                             FactDomain::Relations,
                             SkippedRegionReason::UnsupportedConstruct,
@@ -2839,8 +3257,7 @@ impl<'context, 'source> Lowering<'context, 'source> {
                             &mut extension_bytes,
                             self.request.limits().ir(),
                         )? {
-                            let region = skipped_region(
-                                self.full_source,
+                            let region = self.skipped_region(
                                 fact.span(),
                                 FactDomain::Extensions,
                                 SkippedRegionReason::ResourceLimit,
@@ -2850,8 +3267,7 @@ impl<'context, 'source> Lowering<'context, 'source> {
                             skipped.insert(region.id, region);
                         }
                     } else {
-                        let region = skipped_region(
-                            self.full_source,
+                        let region = self.skipped_region(
                             fact.span(),
                             FactDomain::Extensions,
                             SkippedRegionReason::UnsupportedConstruct,
@@ -2864,8 +3280,7 @@ impl<'context, 'source> Lowering<'context, 'source> {
             }
 
             if fact.kind() == SyntaxFactKind::Import {
-                let region = skipped_region(
-                    self.full_source,
+                let region = self.skipped_region(
                     fact.span(),
                     FactDomain::Relations,
                     SkippedRegionReason::UnsupportedConstruct,
@@ -2878,8 +3293,7 @@ impl<'context, 'source> Lowering<'context, 'source> {
                 SyntaxFactKind::Declaration | SyntaxFactKind::Module
             ) {
                 if let Some(gap) = structural_entity_classification_gap(fact) {
-                    let region = skipped_region(
-                        self.full_source,
+                    let region = self.skipped_region(
                         gap.span(),
                         gap.domain(),
                         gap.reason(),
@@ -2897,8 +3311,7 @@ impl<'context, 'source> Lowering<'context, 'source> {
                 } else {
                     "declaration-name-unavailable"
                 };
-                let region = skipped_region(
-                    self.full_source,
+                let region = self.skipped_region(
                     fact.span(),
                     FactDomain::Entities,
                     SkippedRegionReason::UnsupportedConstruct,
@@ -2907,6 +3320,122 @@ impl<'context, 'source> Lowering<'context, 'source> {
                 )?;
                 skipped.insert(region.id, region);
             }
+        }
+
+        if let Some(claims) = fsharp_bindings
+            .as_ref()
+            .and_then(|bindings| bindings.repository_claims())
+            .or(fsharp_signature_claims.as_ref())
+        {
+            let mut complete = true;
+            for item in &claims.claims {
+                cancellation.check()?;
+                let width = match &item.binding {
+                    rootlight_ir::FSharpBinding::Container { path, roots } => {
+                        path.len().saturating_add(roots.len())
+                    }
+                    rootlight_ir::FSharpBinding::ImportContext { containers, opens } => {
+                        containers.len().saturating_add(opens.len())
+                    }
+                    _ => 0,
+                };
+                // Fixed-size hashes and source spans encode below 256 bytes per
+                // entry. The header allowance also covers the scope and tag;
+                // wide optional manifests must close evidence, not fail parsing.
+                if width.saturating_mul(256).saturating_add(4096)
+                    > rootlight_ir::MAX_FSHARP_BINDING_PAYLOAD_BYTES
+                {
+                    complete = false;
+                    let gap = self.skipped_region(
+                        item.source,
+                        FactDomain::Extensions,
+                        SkippedRegionReason::ResourceLimit,
+                        "fsharp-project-evidence-resource-limit",
+                        provenance_id,
+                    )?;
+                    skipped.insert(gap.id, gap);
+                    continue;
+                }
+                let mut binding = item.binding.clone();
+                match &mut binding {
+                    rootlight_ir::FSharpBinding::Open { owner, .. } => {
+                        *owner = self.coordinates.physical(*owner)?;
+                    }
+                    rootlight_ir::FSharpBinding::ImportContext { containers, opens } => {
+                        for span in containers.iter_mut().chain(opens.iter_mut()) {
+                            cancellation.check()?;
+                            *span = self.coordinates.physical(*span)?;
+                        }
+                    }
+                    _ => {}
+                }
+                let envelope = rootlight_ir::new_fsharp_binding_envelope(
+                    self.full_source.repository(),
+                    self.full_source.generation(),
+                    provenance_id,
+                    self.source_for_span(item.source)?,
+                    rootlight_ir::FSharpBindingEvidence::new(self.full_source.span(), binding),
+                )
+                .map_err(|_| provider_failure("fsharp-project-evidence"))?;
+                if !insert_optional_extension(
+                    envelope,
+                    &mut extensions,
+                    &mut extension_bytes,
+                    self.request.limits().ir(),
+                )? {
+                    complete = false;
+                    let gap = self.skipped_region(
+                        item.source,
+                        FactDomain::Extensions,
+                        SkippedRegionReason::ResourceLimit,
+                        "fsharp-project-evidence-resource-limit",
+                        provenance_id,
+                    )?;
+                    skipped.insert(gap.id, gap);
+                }
+            }
+            // A surviving subset must never license an export or qualified target.
+            if complete {
+                let envelope = rootlight_ir::new_fsharp_binding_envelope(
+                    self.full_source.repository(),
+                    self.full_source.generation(),
+                    provenance_id,
+                    self.full_source.clone(),
+                    rootlight_ir::FSharpBindingEvidence::new(
+                        self.full_source.span(),
+                        rootlight_ir::FSharpBinding::Context,
+                    ),
+                )
+                .map_err(|_| provider_failure("fsharp-project-context"))?;
+                if !insert_optional_extension(
+                    envelope,
+                    &mut extensions,
+                    &mut extension_bytes,
+                    self.request.limits().ir(),
+                )? {
+                    let gap = self.skipped_region(
+                        claims.scope,
+                        FactDomain::Extensions,
+                        SkippedRegionReason::ResourceLimit,
+                        "fsharp-project-evidence-resource-limit",
+                        provenance_id,
+                    )?;
+                    skipped.insert(gap.id, gap);
+                }
+            }
+        }
+
+        if self.request.language().as_str() == "fsharp-signature"
+            && fsharp_signature_claims.is_none()
+        {
+            let gap = self.skipped_region(
+                self.full_source.span(),
+                FactDomain::Extensions,
+                SkippedRegionReason::UnsupportedConstruct,
+                "fsharp-signature-mask-unavailable",
+                provenance_id,
+            )?;
+            skipped.insert(gap.id, gap);
         }
 
         // Publish a native-context marker only after every binding claim for that
@@ -2933,8 +3462,11 @@ impl<'context, 'source> Lowering<'context, 'source> {
                 self.full_source.repository(),
                 self.full_source.generation(),
                 provenance_id,
-                source_for_span(self.full_source, item.source),
-                rootlight_ir::PerlBindingEvidence::new(item.module, binding),
+                self.source_for_span(item.source)?,
+                rootlight_ir::PerlBindingEvidence::new(
+                    self.coordinates.physical(item.module)?,
+                    binding,
+                ),
             )
             .map_err(|_| provider_failure("perl-project-evidence"))?;
             if !insert_optional_extension(
@@ -2944,8 +3476,7 @@ impl<'context, 'source> Lowering<'context, 'source> {
                 self.request.limits().ir(),
             )? {
                 project_complete.insert(item.module, false);
-                let gap = skipped_region(
-                    self.full_source,
+                let gap = self.skipped_region(
                     item.source,
                     FactDomain::Extensions,
                     SkippedRegionReason::ResourceLimit,
@@ -2964,9 +3495,9 @@ impl<'context, 'source> Lowering<'context, 'source> {
                 self.full_source.repository(),
                 self.full_source.generation(),
                 provenance_id,
-                source_for_span(self.full_source, module),
+                self.source_for_span(module)?,
                 rootlight_ir::PerlBindingEvidence::new(
-                    module,
+                    self.coordinates.physical(module)?,
                     rootlight_ir::PerlBinding::ModuleContext,
                 ),
             )
@@ -2977,8 +3508,7 @@ impl<'context, 'source> Lowering<'context, 'source> {
                 &mut extension_bytes,
                 self.request.limits().ir(),
             )? {
-                let gap = skipped_region(
-                    self.full_source,
+                let gap = self.skipped_region(
                     module,
                     FactDomain::Extensions,
                     SkippedRegionReason::ResourceLimit,
@@ -3049,6 +3579,136 @@ impl<'context, 'source> Lowering<'context, 'source> {
             }
         }
         application_proofs.dedup_by(|left, right| left.id == right.id);
+        // Core names, references and provenance have consumed their string credit.
+        // Admit authored parameter text last so optional evidence cannot starve them.
+        let mut has_parameter_headers = false;
+        if matches!(self.request.language().as_str(), "fsharp" | "markdown") {
+            for (index, draft) in drafts.iter().enumerate() {
+                check_periodically(index, cancellation)?;
+                if draft.kind == EntityKind::Parameter
+                    && draft.signature_span.is_some()
+                    && draft.signature_evidence.is_none()
+                {
+                    has_parameter_headers = true;
+                    break;
+                }
+            }
+        }
+        if has_parameter_headers {
+            let mut parameter_id_counts = HashMap::new();
+            for (index, entity) in materialized.values().enumerate() {
+                check_periodically(index, cancellation)?;
+                if entity.record.kind == EntityKind::Parameter && entity.record.language == "fsharp"
+                {
+                    parameter_id_counts
+                        .try_reserve(1)
+                        .map_err(|_| SinkError::AllocationFailed)?;
+                    let count = parameter_id_counts
+                        .entry(entity.record.id)
+                        .or_insert(0usize);
+                    *count = checked_add(*count, 1)?;
+                }
+            }
+            for (index, draft) in drafts.iter().enumerate() {
+                check_periodically(index, cancellation)?;
+                if draft.kind != EntityKind::Parameter {
+                    continue;
+                }
+                let Some(span) = draft
+                    .signature_span
+                    .filter(|_| draft.signature_evidence.is_none())
+                else {
+                    continue;
+                };
+                let Some(entity) = materialized.get(&draft.local_id) else {
+                    // Ambiguous identity subtrees already have scoped entity gaps.
+                    continue;
+                };
+                if parameter_id_counts.get(&entity.record.id) != Some(&1) {
+                    let gap = self.skipped_region(
+                        draft.span,
+                        FactDomain::Extensions,
+                        SkippedRegionReason::UnsupportedConstruct,
+                        "signature-capture-unavailable",
+                        provenance_id,
+                    )?;
+                    skipped.insert(gap.id, gap);
+                    continue;
+                }
+                let text = self.text_for_span(span)?;
+                let limits = self.request.limits().ir();
+                let fits = text.len() <= rootlight_ir::MAX_LEXICAL_SIGNATURE_BYTES
+                    && text.len() <= limits.max_string_bytes
+                    && total_string_bytes
+                        .checked_add(text.len())
+                        .is_some_and(|bytes| bytes <= limits.max_total_string_bytes);
+                let envelope = if fits {
+                    let subject = FactRef::Entity(entity.record.id);
+                    let lexical = if self.source_view.encoding().is_some() {
+                        let fragment = 0..text.len();
+                        self.encoded_signature_lexical(
+                            span,
+                            subject,
+                            std::slice::from_ref(&fragment),
+                        )?
+                    } else {
+                        LexicalEvidenceV1::from_complete_text(
+                            LexicalEvidenceKind::Signature,
+                            subject,
+                            LexicalEvidenceFormat::SourceText,
+                            text,
+                        )
+                        .ok()
+                    };
+                    let source = self.source_for_span(span)?;
+                    lexical.and_then(|lexical| {
+                        new_lexical_evidence_envelope(
+                            self.full_source.repository(),
+                            self.full_source.generation(),
+                            provenance_id,
+                            source,
+                            &lexical,
+                        )
+                        .ok()
+                    })
+                } else {
+                    None
+                };
+                let (reason, detail) = match envelope {
+                    Some(envelope) => {
+                        if insert_optional_extension(
+                            envelope,
+                            &mut extensions,
+                            &mut extension_bytes,
+                            limits,
+                        )? {
+                            account_string(&mut total_string_bytes, text.len(), limits)?;
+                            continue;
+                        }
+                        (
+                            SkippedRegionReason::ResourceLimit,
+                            "lexical-evidence-resource-limit",
+                        )
+                    }
+                    None if !fits => (
+                        SkippedRegionReason::ResourceLimit,
+                        "lexical-evidence-resource-limit",
+                    ),
+                    None => (
+                        SkippedRegionReason::UnsupportedConstruct,
+                        "lexical-evidence-unavailable",
+                    ),
+                };
+                let gap = self.skipped_region(
+                    span,
+                    FactDomain::Extensions,
+                    reason,
+                    detail,
+                    provenance_id,
+                )?;
+                skipped.insert(gap.id, gap);
+            }
+        }
         let stats = DomainStats::new(
             entities.len(),
             occurrences.len(),
@@ -3135,12 +3795,18 @@ impl<'context, 'source> Lowering<'context, 'source> {
     ) -> Result<FactId, AdapterError> {
         const RULE: &str = "vba-procedure-application-v1.source";
         cancellation.check()?;
+        let application_span = self.coordinates.physical(application.span())?;
+        let scope_span = self.coordinates.physical(evidence.scope.span())?;
+        let statement_span = evidence
+            .implicit_statement
+            .map(|statement| self.coordinates.physical(statement.span()))
+            .transpose()?;
         let key = (
-            application.span().start_byte(),
-            application.span().end_byte(),
+            application_span.start_byte(),
+            application_span.end_byte(),
             target,
-            evidence.scope.span().start_byte(),
-            evidence.scope.span().end_byte(),
+            scope_span.start_byte(),
+            scope_span.end_byte(),
         );
         if let Some(id) = proof_ids.get(&key) {
             return Ok(*id);
@@ -3160,11 +3826,11 @@ impl<'context, 'source> Lowering<'context, 'source> {
             .as_ref()
             .filter(|source| same_source(source))
             .ok_or_else(|| provider_failure("vba-application-proof-target"))?;
-        if !span_contains(self.full_source.span(), application.span())
-            || !span_contains(self.full_source.span(), evidence.scope.span())
-            || evidence.implicit_statement.is_some_and(|statement| {
-                !span_contains(self.full_source.span(), statement.span())
-                    || !span_contains(statement.span(), application.span())
+        if !span_contains(self.full_source.span(), application_span)
+            || !span_contains(self.full_source.span(), scope_span)
+            || statement_span.is_some_and(|statement| {
+                !span_contains(self.full_source.span(), statement)
+                    || !span_contains(statement, application_span)
             })
             || parser.id != target_entity.provenance
         {
@@ -3172,6 +3838,8 @@ impl<'context, 'source> Lowering<'context, 'source> {
         }
         for (declaration, definition, symbol) in evidence.parameters {
             cancellation.check()?;
+            let declaration_span = self.coordinates.physical(declaration.span())?;
+            let definition_span = self.coordinates.physical(definition.span())?;
             let parameter = entities
                 .get(symbol)
                 .ok_or_else(|| provider_failure("vba-application-proof-parameter"))?;
@@ -3184,16 +3852,16 @@ impl<'context, 'source> Lowering<'context, 'source> {
                 || parameter.container != Some(ContainerRef::Entity(target))
                 || parameter.provenance != parser.id
                 || !same_source(source)
-                || !span_contains(evidence.scope.span(), declaration.span())
-                || !span_contains(declaration.span(), definition.span())
-                || !span_contains(declaration.span(), source.span())
+                || !span_contains(scope_span, declaration_span)
+                || !span_contains(declaration_span, definition_span)
+                || !span_contains(declaration_span, source.span())
             {
                 return Err(provider_failure("vba-application-proof-parameter"));
             }
         }
 
         let limits = self.request.limits().ir();
-        let scope_source = source_for_span(self.full_source, evidence.scope.span());
+        let scope_source = self.source_for_span(evidence.scope.span())?;
         let distinct_target_source = *target_source != scope_source;
         let evidence_count = checked_add(
             checked_add(
@@ -3248,9 +3916,9 @@ impl<'context, 'source> Lowering<'context, 'source> {
         evidence_sources
             .try_reserve_exact(evidence_count)
             .map_err(|_| SinkError::AllocationFailed)?;
-        evidence_sources.push(source_for_span(self.full_source, application.span()));
+        evidence_sources.push(self.source_for_span(application.span())?);
         if let Some(statement) = evidence.implicit_statement {
-            evidence_sources.push(source_for_span(self.full_source, statement.span()));
+            evidence_sources.push(self.source_for_span(statement.span())?);
         }
         evidence_sources.push(scope_source);
         if distinct_target_source {
@@ -3268,9 +3936,9 @@ impl<'context, 'source> Lowering<'context, 'source> {
         input_sources.push(self.full_source.clone());
         for (declaration, definition, symbol) in evidence.parameters {
             cancellation.check()?;
-            input_sources.push(source_for_span(self.full_source, declaration.span()));
-            evidence_sources.push(source_for_span(self.full_source, declaration.span()));
-            evidence_sources.push(source_for_span(self.full_source, definition.span()));
+            input_sources.push(self.source_for_span(declaration.span())?);
+            evidence_sources.push(self.source_for_span(declaration.span())?);
+            evidence_sources.push(self.source_for_span(definition.span())?);
             derivation_parents.push(FactRef::Entity(*symbol));
         }
         sort_owned_cancellable_by(&mut input_sources, cancellation, Ord::cmp)?;
@@ -3321,11 +3989,22 @@ impl<'context, 'source> Lowering<'context, 'source> {
         cancellation: &Cancellation,
         total_string_bytes: &mut usize,
     ) -> Result<EntityPlan, AdapterError> {
-        let mut ordered_facts: Vec<_> = self.parse_output.facts().iter().collect();
+        let mut ordered_facts: Vec<_> = self.coordinates.facts().iter().collect();
         ordered_facts.sort_by(|left, right| structural_syntax_fact_order(left, right));
+        let fsharp_parameter_signatures =
+            if matches!(self.request.language().as_str(), "fsharp" | "markdown") {
+                Some(crate::fsharp_bindings::FSharpParameterSignatures::new(
+                    self.coordinates.facts(),
+                    self.source_text.as_bytes(),
+                    self.request.limits().ir().max_string_bytes,
+                    cancellation,
+                )?)
+            } else {
+                None
+            };
         let mut yaml_names = if self.request.language().as_str() == "yaml" {
             yaml::names::Names::new(
-                self.parse_output.facts(),
+                self.coordinates.facts(),
                 self.source_text,
                 self.request.limits().ir().max_string_bytes,
                 self.parse_output.report().coverage().status() == CoverageStatus::Complete,
@@ -3337,11 +4016,11 @@ impl<'context, 'source> Lowering<'context, 'source> {
         let mut embedded_yaml = Vec::new();
         if self.request.language().as_str() == "markdown" {
             let completeness = embedded::YamlCompleteness::new(
-                self.parse_output.facts(),
+                self.coordinates.facts(),
                 self.parse_output.diagnostics(),
                 cancellation,
             )?;
-            for facts in embedded::partitions(self.parse_output.facts(), "yaml", cancellation)? {
+            for facts in embedded::partitions(self.coordinates.facts(), "yaml", cancellation)? {
                 let complete = completeness.certifies(&facts, cancellation)?;
                 let names = yaml::names::Names::new(
                     &facts,
@@ -3358,7 +4037,7 @@ impl<'context, 'source> Lowering<'context, 'source> {
         }
         let rust_test_declarations = rust_test_declarations(&ordered_facts);
         let infer_bindings = rootlight_adapter_sdk::typescript_infer_bindings(
-            self.parse_output.facts(),
+            self.coordinates.facts(),
             cancellation,
         )?;
         let file_is_test = test_source_path(self.request.source().path().as_str());
@@ -3489,7 +4168,7 @@ impl<'context, 'source> Lowering<'context, 'source> {
         let mut written_scopes = HashMap::<Option<u64>, u64>::new();
         let mut haskell_clause_positions = HashMap::<HaskellClauseKey, u64>::new();
         let matlab_scope_names = matlab::named_scopes(
-            self.parse_output.facts(),
+            self.coordinates.facts(),
             &captures,
             self.source_text,
             self.request.limits().ir().max_string_bytes,
@@ -3701,7 +4380,15 @@ impl<'context, 'source> Lowering<'context, 'source> {
                         | "typescript.mapped_type.scope"
                         | "typescript.conditional.scope"
                         | "scss.block.scope"
+                        | "fsharp.local_binding.scope"
+                        | "fsharp.lambda.scope"
+                        | "fsharp.match_branch.scope"
+                        | "fsharp.preprocessor.scope"
+                        | "fsharp.preprocessor_branch.scope"
                 ) {
+                    anonymous_scopes
+                        .try_reserve(1)
+                        .map_err(|_| SinkError::AllocationFailed)?;
                     let next = anonymous_scopes.entry(fact.parent()).or_default();
                     let position = *next;
                     *next = next.checked_add(1).ok_or(SinkError::AccountingOverflow)?;
@@ -3717,6 +4404,17 @@ impl<'context, 'source> Lowering<'context, 'source> {
                             "rootlight.ecmascript-lexical-scope/1"
                         } else if self.language_for_fact(fact) == "scss" {
                             "rootlight.scss-lexical-scope/1"
+                        } else if fact.syntax_kind().as_str() == "fsharp.local_binding.scope" {
+                            "rootlight.fsharp-local-scope/1"
+                        } else if fact.syntax_kind().as_str() == "fsharp.lambda.scope" {
+                            "rootlight.fsharp-lambda-scope/1"
+                        } else if fact.syntax_kind().as_str() == "fsharp.match_branch.scope" {
+                            "rootlight.fsharp-match-branch-scope/1"
+                        } else if matches!(
+                            fact.syntax_kind().as_str(),
+                            "fsharp.preprocessor.scope" | "fsharp.preprocessor_branch.scope"
+                        ) {
+                            "rootlight.fsharp-conditional-scope/1"
                         } else {
                             "rootlight.solidity-lexical-scope/1"
                         },
@@ -3773,7 +4471,7 @@ impl<'context, 'source> Lowering<'context, 'source> {
                             .as_ref()
                             .and_then(|scope| scope.collision_guard),
                         fact.syntax_kind().as_str(),
-                        fact.span(),
+                        self.coordinates.physical(fact.span())?,
                     )?)
                 };
                 let context = ScopeContext {
@@ -4139,70 +4837,78 @@ impl<'context, 'source> Lowering<'context, 'source> {
                     .as_ref()
                     .and_then(|scope| scope.stable_identity)
             };
-            let (signature, signature_evidence, signature_span) = if supports_declaration_signature(
-                kind,
-                self.language_for_fact(fact),
-                fact,
-                definition,
-            ) && let Some(signature) =
-                signature_capture
-            {
-                let text = self.text_for_span(signature.span())?;
-                let maximum = self.request.limits().ir().max_string_bytes;
-                let first_comment = signature_comments.partition_point(|comment| {
-                    comment.start_byte() < signature.span().start_byte()
-                });
-                let comments = &signature_comments[first_comment..];
-                let needs_projection = comments
-                    .first()
-                    .is_some_and(|comment| comment.start_byte() < signature.span().end_byte());
-                let projection = if needs_projection {
-                    project_commented_signature(text, signature.span(), comments, cancellation)?
-                } else {
-                    None
-                };
-                let signature_text = projection
-                    .as_ref()
-                    .map_or(text, rootlight_ir::SourceTextProjection::text);
-                let canonical = if needs_projection && projection.is_none() {
-                    None
-                } else if kind == EntityKind::Constructor
-                    && self.language_for_fact(fact) == "dart"
-                    && let Some(definition) = definition
+            let parameter_header = fsharp_parameter_signatures
+                .as_ref()
+                .and_then(|plan| plan.signature_for_declaration(fact.local_id()))
+                .filter(|_| kind == EntityKind::Parameter);
+            let (signature, signature_evidence, signature_span) =
+                if let Some(header) = parameter_header {
+                    // Defer optional text until every core field has been admitted.
+                    // An authored header never contributes to the parameter's identity.
+                    (String::new(), None, Some(header.span()))
+                } else if supports_declaration_signature(
+                    kind,
+                    self.language_for_fact(fact),
+                    fact,
+                    definition,
+                ) && let Some(signature) = signature_capture
                 {
-                    rootlight_adapter_sdk::canonical_dart_constructor_signature(
-                        text,
-                        signature.span(),
-                        definition.span(),
-                        &name,
-                        maximum,
-                    )
-                } else {
-                    canonical_symbol_signature(signature_text, maximum)
-                };
-                match canonical {
-                    Some(canonical) => {
-                        if fact.syntax_kind().as_str() == "haskell.field.declaration" {
-                            account_string(
-                                total_string_bytes,
-                                text.len(),
-                                self.request.limits().ir(),
-                            )?;
-                        }
-                        (
-                            canonical,
-                            Some(match projection {
-                                Some(projection) => SignatureEvidence::Projected(projection),
-                                None => SignatureEvidence::Contiguous(text.to_owned()),
-                            }),
-                            Some(signature.span()),
+                    let text = self.text_for_span(signature.span())?;
+                    let maximum = self.request.limits().ir().max_string_bytes;
+                    let first_comment = signature_comments.partition_point(|comment| {
+                        comment.start_byte() < signature.span().start_byte()
+                    });
+                    let comments = &signature_comments[first_comment..];
+                    let needs_projection = comments
+                        .first()
+                        .is_some_and(|comment| comment.start_byte() < signature.span().end_byte());
+                    let projection = if needs_projection {
+                        project_commented_signature(text, signature.span(), comments, cancellation)?
+                    } else {
+                        None
+                    };
+                    let signature_text = projection
+                        .as_ref()
+                        .map_or(text, rootlight_ir::SourceTextProjection::text);
+                    let canonical = if needs_projection && projection.is_none() {
+                        None
+                    } else if kind == EntityKind::Constructor
+                        && self.language_for_fact(fact) == "dart"
+                        && let Some(definition) = definition
+                    {
+                        rootlight_adapter_sdk::canonical_dart_constructor_signature(
+                            text,
+                            signature.span(),
+                            definition.span(),
+                            &name,
+                            maximum,
                         )
+                    } else {
+                        canonical_symbol_signature(signature_text, maximum)
+                    };
+                    match canonical {
+                        Some(canonical) => {
+                            if fact.syntax_kind().as_str() == "haskell.field.declaration" {
+                                account_string(
+                                    total_string_bytes,
+                                    text.len(),
+                                    self.request.limits().ir(),
+                                )?;
+                            }
+                            (
+                                canonical,
+                                Some(match projection {
+                                    Some(projection) => SignatureEvidence::Projected(projection),
+                                    None => SignatureEvidence::Contiguous(text.to_owned()),
+                                }),
+                                Some(signature.span()),
+                            )
+                        }
+                        None => (String::new(), None, None),
                     }
-                    None => (String::new(), None, None),
-                }
-            } else {
-                (String::new(), None, None)
-            };
+                } else {
+                    (String::new(), None, None)
+                };
             let language = self.language_for_fact(fact).to_owned();
             let qualified_prefix = parent_scope
                 .as_ref()
@@ -4282,7 +4988,7 @@ impl<'context, 'source> Lowering<'context, 'source> {
         }
         if self.request.language().as_str() == "toml" {
             toml::resolve(
-                self.parse_output.facts(),
+                self.coordinates.facts(),
                 &mut drafts,
                 &mut unsupported_scope_entities,
                 total_string_bytes,
@@ -4291,7 +4997,7 @@ impl<'context, 'source> Lowering<'context, 'source> {
             )?;
         }
         if self.request.language().as_str() == "markdown" {
-            for facts in embedded::partitions(self.parse_output.facts(), "toml", cancellation)? {
+            for facts in embedded::partitions(self.coordinates.facts(), "toml", cancellation)? {
                 let base = facts
                     .iter()
                     .find(|fact| fact.parent().is_none())
@@ -4311,7 +5017,7 @@ impl<'context, 'source> Lowering<'context, 'source> {
         let (mut duplicate_data_keys, mut yaml_aliases) =
             if self.request.language().as_str() == "yaml" {
                 let plan = yaml::resolve(
-                    self.parse_output.facts(),
+                    self.coordinates.facts(),
                     yaml_names.bindings,
                     &mut drafts,
                     &mut unsupported_scope_entities,
@@ -4352,7 +5058,7 @@ impl<'context, 'source> Lowering<'context, 'source> {
             embedded::restore_host_depths(&facts, &mut drafts, base, cancellation)?;
         }
         let nix_path_gaps = nix_paths::resolve(
-            self.parse_output.facts(),
+            self.coordinates.facts(),
             self.source_text,
             &nix_contexts,
             &mut drafts,
@@ -4361,7 +5067,7 @@ impl<'context, 'source> Lowering<'context, 'source> {
             cancellation,
         )?;
         let matlab = matlab::resolve(
-            self.parse_output.facts(),
+            self.coordinates.facts(),
             self.source_text,
             &mut drafts,
             self.parse_output.report().coverage().status() == CoverageStatus::Complete,
@@ -4370,7 +5076,7 @@ impl<'context, 'source> Lowering<'context, 'source> {
             cancellation,
         )?;
         let perl = perl::resolve(
-            self.parse_output.facts(),
+            self.coordinates.facts(),
             self.source_text,
             &mut drafts,
             self.parse_output.report().coverage().status() == CoverageStatus::Complete,
@@ -4447,6 +5153,118 @@ impl<'context, 'source> Lowering<'context, 'source> {
         self.source_text
             .get(start..end)
             .ok_or_else(|| provider_failure("treesitter-lowering-span"))
+    }
+
+    fn source_for_span(&self, span: SourceSpan) -> Result<SourceRef, AdapterError> {
+        self.coordinates.source(self.full_source, span)
+    }
+
+    fn signature_lexical(
+        &self,
+        signature: &SignatureEvidence,
+        span: SourceSpan,
+        subject: FactRef,
+    ) -> Result<Option<LexicalEvidenceV1>, AdapterError> {
+        if self.source_view.encoding().is_none() {
+            return Ok(signature.lexical(subject));
+        }
+        let mut ranges: [std::ops::Range<usize>; rootlight_ir::MAX_SIGNATURE_SOURCE_PARTS] =
+            std::array::from_fn(|_| 0..0);
+        let count = match signature {
+            SignatureEvidence::Contiguous(text) => {
+                ranges[0] = 0..text.len();
+                1
+            }
+            SignatureEvidence::Projected(projection) => {
+                for (index, part) in projection.parts().iter().enumerate() {
+                    let source = part.source_range();
+                    let range = ranges
+                        .get_mut(index)
+                        .ok_or_else(|| provider_failure("treesitter-lowering-signature"))?;
+                    *range = usize::try_from(source.start)
+                        .map_err(|_| provider_failure("treesitter-lowering-signature"))?
+                        ..usize::try_from(source.end)
+                            .map_err(|_| provider_failure("treesitter-lowering-signature"))?;
+                }
+                projection.parts().len()
+            }
+        };
+        self.encoded_signature_lexical(span, subject, &ranges[..count])
+    }
+
+    fn raw_bytes_for_span(&self, span: SourceSpan) -> Result<&[u8], AdapterError> {
+        let physical = self.coordinates.physical(span)?;
+        let start = usize::try_from(physical.start_byte())
+            .map_err(|_| provider_failure("treesitter-lowering-span"))?;
+        let end = usize::try_from(physical.end_byte())
+            .map_err(|_| provider_failure("treesitter-lowering-span"))?;
+        self.request
+            .source()
+            .bytes()
+            .get(start..end)
+            .ok_or_else(|| provider_failure("treesitter-lowering-span"))
+    }
+
+    fn encoded_signature_lexical(
+        &self,
+        span: SourceSpan,
+        subject: FactRef,
+        projected_ranges: &[std::ops::Range<usize>],
+    ) -> Result<Option<LexicalEvidenceV1>, AdapterError> {
+        let encoding = self
+            .source_view
+            .encoding()
+            .ok_or_else(|| provider_failure("treesitter-lowering-signature"))?;
+        let physical = self.coordinates.physical(span)?;
+        let mut ranges: [std::ops::Range<usize>; rootlight_ir::MAX_SIGNATURE_SOURCE_PARTS] =
+            std::array::from_fn(|_| 0..0);
+        for (index, range) in projected_ranges.iter().enumerate() {
+            let start = span
+                .start_byte()
+                .checked_add(u64::try_from(range.start).map_err(|_| SinkError::AccountingOverflow)?)
+                .ok_or(SinkError::AccountingOverflow)?;
+            let end = span
+                .start_byte()
+                .checked_add(u64::try_from(range.end).map_err(|_| SinkError::AccountingOverflow)?)
+                .ok_or(SinkError::AccountingOverflow)?;
+            let fragment = SourceSpan::new(span.file(), start, end)
+                .map_err(|_| provider_failure("treesitter-lowering-signature"))?;
+            let fragment = self.coordinates.physical(fragment)?;
+            let mapped = ranges
+                .get_mut(index)
+                .ok_or_else(|| provider_failure("treesitter-lowering-signature"))?;
+            *mapped = usize::try_from(fragment.start_byte() - physical.start_byte())
+                .map_err(|_| SinkError::AccountingOverflow)?
+                ..usize::try_from(fragment.end_byte() - physical.start_byte())
+                    .map_err(|_| SinkError::AccountingOverflow)?;
+        }
+        // Encoded evidence is complete for its selected fragments. An oversized
+        // signature becomes an explicit gap, never an unmarked truncated proof.
+        Ok(rootlight_ir::EncodedSourceTextProjection::from_source(
+            self.raw_bytes_for_span(span)?,
+            encoding,
+            &ranges[..projected_ranges.len()],
+        )
+        .ok()
+        .map(|projection| LexicalEvidenceV1::from_encoded_source_projection(subject, projection)))
+    }
+
+    fn skipped_region(
+        &self,
+        span: SourceSpan,
+        domain: FactDomain,
+        reason: SkippedRegionReason,
+        detail: &str,
+        provenance: FactId,
+    ) -> Result<SkippedRegion, AdapterError> {
+        skipped_region(
+            self.full_source,
+            self.coordinates.physical(span)?,
+            domain,
+            reason,
+            detail,
+            provenance,
+        )
     }
 
     fn associate_haskell_field_signatures<'fact>(
@@ -4533,7 +5351,7 @@ impl<'context, 'source> Lowering<'context, 'source> {
             return Ok(HaskellAnnotationPlan::default());
         }
         let mut signatures = Vec::new();
-        for fact in self.parse_output.facts() {
+        for fact in self.coordinates.facts() {
             cancellation.check()?;
             if is_haskell_type_annotation(fact) {
                 signatures
@@ -4568,9 +5386,9 @@ impl<'context, 'source> Lowering<'context, 'source> {
         }
         let mut facts = HashMap::new();
         facts
-            .try_reserve(self.parse_output.facts().len())
+            .try_reserve(self.coordinates.facts().len())
             .map_err(|_| SinkError::AllocationFailed)?;
-        for fact in self.parse_output.facts() {
+        for fact in self.coordinates.facts() {
             cancellation.check()?;
             facts.insert(fact.local_id(), fact);
         }
@@ -5181,9 +5999,14 @@ enum StableScopeKind {
     CssContext,
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "physical coordinate mapping and independent symbol identity inputs remain explicit at record construction"
+)]
 fn materialize_entity(
     draft: &EntityDraft,
     full_source: &SourceRef,
+    coordinates: &SourceCoordinates<'_, '_>,
     build_context: rootlight_ir::BuildContextIdentity,
     provenance: FactId,
     tier: AnalysisTier,
@@ -5317,7 +6140,7 @@ fn materialize_entity(
         build_context_discriminator: build_context.digest().as_bytes(),
     })
     .id();
-    let source = source_for_span(full_source, draft.span);
+    let source = coordinates.source(full_source, draft.span)?;
     let mut flags = BTreeSet::new();
     if draft.synthetic {
         flags.insert(EntityFlag::Synthetic);
@@ -5483,8 +6306,43 @@ fn equivalent_entity_projection(left: &EntityRecord, right: &EntityRecord) -> bo
         && left.provenance == right.provenance
 }
 
+fn source_coverage_gaps(fact: &SyntaxFact) -> impl Iterator<Item = (FactDomain, &'static str)> {
+    // An unanalysed attribute omits both the authored decorator occurrence and
+    // its binding relation. Lexical header evidence proves neither domain.
+    source_coverage_gap(fact)
+        .into_iter()
+        .chain(
+            (fact.syntax_kind().as_str() == "fsharp.unsupported_attribute.expression").then_some((
+                FactDomain::Occurrences,
+                "fsharp-attribute-binding-analysis-unavailable",
+            )),
+        )
+        .chain(
+            matches!(
+                fact.syntax_kind().as_str(),
+                "fsharp.preprocessor.scope" | "fsharp.preprocessor_branch.scope"
+            )
+            .then_some((
+                FactDomain::Entities,
+                "fsharp-conditional-namespace-owner-unavailable",
+            )),
+        )
+}
+
 fn source_coverage_gap(fact: &SyntaxFact) -> Option<(FactDomain, &'static str)> {
     match fact.syntax_kind().as_str() {
+        "fsharp.unsupported_attribute.expression" => Some((
+            FactDomain::Relations,
+            "fsharp-attribute-binding-analysis-unavailable",
+        )),
+        "fsharp.unsupported_body.expression" => Some((
+            FactDomain::Relations,
+            "fsharp-body-binding-and-call-analysis-unavailable",
+        )),
+        "fsharp.preprocessor.scope" | "fsharp.preprocessor_branch.scope" => Some((
+            FactDomain::Relations,
+            "fsharp-conditional-compilation-evaluation-unavailable",
+        )),
         "vba.compilation_constant.declaration"
         | "vba.preprocessor.scope"
         | "vba.conditional_sub_function.declaration"
@@ -5883,6 +6741,16 @@ fn structural_resolution_text<'a>(
     terminal_call_name: Option<&'a str>,
     maximum_name_bytes: usize,
 ) -> Option<std::borrow::Cow<'a, str>> {
+    if language == "fsharp"
+        && fact.syntax_kind().as_str() == "fsharp.simple_function_body_read.reference"
+    {
+        return rootlight_adapter_sdk::structural_captured_name_for_fact(
+            language,
+            fact,
+            text,
+            maximum_name_bytes,
+        );
+    }
     if language == "erlang" && fact.syntax_kind().as_str() == "erlang.function.call" {
         return rootlight_adapter_sdk::canonical_erlang_function_head(text, maximum_name_bytes)
             .map(std::borrow::Cow::Owned);
@@ -6462,6 +7330,20 @@ fn language_for_fact_with_profile_fences<'a>(
     fact: &'a SyntaxFact,
     fences: &[ProfileFence],
 ) -> &'a str {
+    language_for_fact_with_ranges_and_profile_fences(
+        request,
+        fact,
+        request.included_ranges(),
+        fences,
+    )
+}
+
+fn language_for_fact_with_ranges_and_profile_fences<'a>(
+    request: &'a AnalysisRequest<'_>,
+    fact: &'a SyntaxFact,
+    ranges: &'a [rootlight_adapter_sdk::IncludedRange],
+    fences: &[ProfileFence],
+) -> &'a str {
     if request.language().as_str() == "markdown"
         && matches!(
             fact.syntax_kind()
@@ -6492,7 +7374,7 @@ fn language_for_fact_with_profile_fences<'a>(
             return fence.language;
         }
     }
-    language_for_fact(request, fact)
+    language_for_fact_with_ranges(request, fact, ranges)
 }
 
 fn classic_fence_spans(
@@ -6547,7 +7429,11 @@ fn classic_dialect_spans<'a>(
         )
 }
 
-fn language_for_fact<'a>(request: &'a AnalysisRequest<'_>, fact: &'a SyntaxFact) -> &'a str {
+fn language_for_fact_with_ranges<'a>(
+    request: &'a AnalysisRequest<'_>,
+    fact: &'a SyntaxFact,
+    ranges: &'a [rootlight_adapter_sdk::IncludedRange],
+) -> &'a str {
     if request.language().as_str() == "markdown"
         && fact.syntax_kind().as_str().starts_with("objective_c.")
     {
@@ -6605,7 +7491,7 @@ fn language_for_fact<'a>(request: &'a AnalysisRequest<'_>, fact: &'a SyntaxFact)
             return "css";
         }
     }
-    containing_range(request.included_ranges(), fact.span())
+    containing_range(ranges, fact.span())
         .map_or(
             request.language(),
             rootlight_adapter_sdk::IncludedRange::language,
@@ -6799,6 +7685,8 @@ fn is_signature_capture(fact: &SyntaxFact) -> bool {
                 | "typescript.conditional_consequence.signature"
         )
         && fact.syntax_kind().as_str() != "sql.body.signature"
+        // Parameter-list markers prove binder ownership, not callable headers.
+        && fact.syntax_kind().as_str() != "fsharp.simple_parameters.signature"
         && !fact.syntax_kind().as_str().starts_with("html.embedded_")
         && !fact.syntax_kind().as_str().starts_with("astro.")
         && !fact.syntax_kind().as_str().starts_with("markdown.")
@@ -6925,6 +7813,11 @@ fn source_reference_gap(fact: &SyntaxFact) -> Option<&'static str> {
         return Some(HASKELL_BINDING_UNAVAILABLE);
     }
     match fact.syntax_kind().as_str() {
+        "fsharp.simple_function_body_read.reference" => {
+            Some("fsharp-formal-binding-target-unavailable")
+        }
+        "fsharp.qualified_body_read.reference" => Some("fsharp-qualified-target-unavailable"),
+        "fsharp.application.call" => Some("fsharp-direct-call-target-unavailable"),
         "vba.procedure_pointer.reference"
         | "vba.qualified_procedure_pointer.reference"
         | "vba.unsupported_procedure_pointer.reference" => {
@@ -7856,6 +8749,29 @@ mod tests {
     }
 
     #[test]
+    fn fsharp_callable_signatures_exclude_binder_proofs_and_reject_conflicting_headers() {
+        let file = FileId::from_bytes([3; 20]);
+        let fact = |id, start, end, label| {
+            SyntaxFact::new(
+                id,
+                Some(1),
+                SyntaxFactKind::Signature,
+                SourceSpan::new(file, start, end).expect("test span is ordered"),
+                1,
+                SyntaxKindLabel::new(label).expect("test label is valid"),
+            )
+        };
+        let header = fact(2, 4, 20, "fsharp.function.signature");
+        let marker = fact(3, 9, 19, "fsharp.simple_parameters.signature");
+        let conflicting = fact(4, 4, 21, "fsharp.function.signature");
+
+        assert!(is_signature_capture(&header));
+        assert!(!is_signature_capture(&marker));
+        assert_eq!(select_unique_capture(&[&header, &header]), Some(&header));
+        assert!(select_unique_capture(&[&header, &conflicting]).is_none());
+    }
+
+    #[test]
     fn signature_capture_requires_both_role_and_signature_kind() {
         let file = FileId::from_bytes([3; 20]);
         let fact = |kind, label| {
@@ -7881,6 +8797,110 @@ mod tests {
             SyntaxFactKind::Signature,
             "rust.function.declaration"
         )));
+    }
+
+    #[test]
+    fn fsharp_parameter_headers_do_not_enter_callable_signature_selection() {
+        let file = FileId::from_bytes([3; 20]);
+        let fact = |id, start, end, label| {
+            SyntaxFact::new(
+                id,
+                Some(1),
+                SyntaxFactKind::Signature,
+                SourceSpan::new(file, start, end).unwrap(),
+                1,
+                SyntaxKindLabel::new(label).unwrap(),
+            )
+        };
+        let function = fact(2, 0, 20, "fsharp.function.signature");
+        let marker = fact(3, 5, 19, "fsharp.simple_parameters.signature");
+        let parameter = fact(4, 5, 17, "fsharp.parameter_header.expression");
+        assert!(!is_signature_capture(&parameter));
+        let callable = [&function, &marker, &parameter]
+            .into_iter()
+            .filter(|fact| is_signature_capture(fact))
+            .collect::<Vec<_>>();
+        assert_eq!(select_unique_capture(&callable), Some(&function));
+    }
+
+    #[test]
+    fn fsharp_body_gaps_do_not_enter_signature_selection() {
+        let file = FileId::from_bytes([3; 20]);
+        let fact = SyntaxFact::new(
+            2,
+            Some(1),
+            SyntaxFactKind::Signature,
+            SourceSpan::new(file, 20, 40).unwrap(),
+            1,
+            SyntaxKindLabel::new("fsharp.unsupported_body.expression").unwrap(),
+        );
+        assert!(!is_signature_capture(&fact));
+        assert_eq!(
+            source_coverage_gap(&fact),
+            Some((
+                FactDomain::Relations,
+                "fsharp-body-binding-and-call-analysis-unavailable",
+            )),
+        );
+    }
+
+    #[test]
+    fn fsharp_attribute_gaps_preserve_both_semantic_domains() {
+        let file = FileId::from_bytes([3; 20]);
+        let fact = SyntaxFact::new(
+            2,
+            Some(1),
+            SyntaxFactKind::Signature,
+            SourceSpan::new(file, 2, 10).unwrap(),
+            1,
+            SyntaxKindLabel::new("fsharp.unsupported_attribute.expression").unwrap(),
+        );
+        assert!(!is_signature_capture(&fact));
+        assert_eq!(
+            source_coverage_gaps(&fact).collect::<Vec<_>>(),
+            vec![
+                (
+                    FactDomain::Relations,
+                    "fsharp-attribute-binding-analysis-unavailable",
+                ),
+                (
+                    FactDomain::Occurrences,
+                    "fsharp-attribute-binding-analysis-unavailable",
+                ),
+            ],
+        );
+    }
+
+    #[test]
+    fn fsharp_conditional_scopes_preserve_both_semantic_gaps() {
+        let file = FileId::from_bytes([3; 20]);
+        for label in [
+            "fsharp.preprocessor.scope",
+            "fsharp.preprocessor_branch.scope",
+        ] {
+            let fact = SyntaxFact::new(
+                2,
+                Some(1),
+                SyntaxFactKind::Scope,
+                SourceSpan::new(file, 2, 10).unwrap(),
+                1,
+                SyntaxKindLabel::new(label).unwrap(),
+            );
+            assert!(!is_signature_capture(&fact));
+            assert_eq!(
+                source_coverage_gaps(&fact).collect::<Vec<_>>(),
+                vec![
+                    (
+                        FactDomain::Relations,
+                        "fsharp-conditional-compilation-evaluation-unavailable",
+                    ),
+                    (
+                        FactDomain::Entities,
+                        "fsharp-conditional-namespace-owner-unavailable",
+                    ),
+                ],
+            );
+        }
     }
 
     #[test]

@@ -14,10 +14,12 @@
 module.exports = grammar(require("../fsharp/grammar"), {
   name: "fsharp_signature",
 
-  // Signature bodies omit loop tails, but done must remain a lexical keyword
-  // without adding an implementation form solely to keep its token reachable.
+  // Signature bodies omit loop tails and let bodies; their keywords must stay
+  // reserved without introducing implementation forms solely for token reachability.
+  // An adjacent abstract member must not become a postfix type argument of its predecessor.
   reserved: {
-    global: ($) => ["as", "namespace", "open", "type", "null", $._reserved_done],
+    global: ($) => ["as", "namespace", "open", "type", "null", "val", "abstract",
+      $._reserved_done, $._reserved_let],
   },
 
   conflicts: ($) => [
@@ -38,13 +40,14 @@ module.exports = grammar(require("../fsharp/grammar"), {
       choice(
         $.named_module,
         repeat1($.namespace),
-        repeat($._module_signature_elements),
+        repeat(choice($._module_signature_elements, $._decl_term)),
       ),
 
     // A regex is absorbed into a hidden lexical terminal; a hidden string rule
     // remains a syntax variable and cannot provide this reserved terminal.
     // Keyword extraction requires this fixed regex to outrank identifiers.
     _reserved_done: (_) => token(prec(1, /done/)),
+    _reserved_let: (_) => token(prec(1, /let/)),
 
     named_module: ($, _original) =>
       seq(
@@ -53,7 +56,7 @@ module.exports = grammar(require("../fsharp/grammar"), {
         optional($.access_modifier),
         optional("rec"),
         field("name", $.long_identifier),
-        repeat($._module_signature_elements),
+        repeat(choice($._module_signature_elements, $._decl_term)),
       ),
 
     namespace: ($, _original) =>
@@ -63,7 +66,7 @@ module.exports = grammar(require("../fsharp/grammar"), {
           "global",
           field("name", seq(optional("rec"), $.long_identifier)),
         ),
-        repeat($._module_signature_elements),
+        repeat(choice($._module_signature_elements, $._decl_term)),
       ),
 
     module_defn: ($, _original) =>
@@ -207,7 +210,19 @@ module.exports = grammar(require("../fsharp/grammar"), {
       choice(seq($._indent, $._expression, $._dedent), $._expression),
 
     _expression: ($, _original) =>
-      choice("null", $.const, $.long_identifier_or_op, $.paren_expression),
+      choice("null", $.const, $.long_identifier_or_op, $.paren_expression,
+        alias($._measured_constant_expression, $.typed_expression)),
+
+    // Signature attributes may contain measured numeric constants, not general
+    // implementation expressions or arbitrary expression type applications.
+    _measured_constant_expression: ($) =>
+      prec(21, seq(alias($._measure_numeric_constant, $.const),
+        $._tyapp_open, $.measure, prec(21, ">"))),
+
+    _measure_numeric_constant: ($) =>
+      choice($.sbyte, $.int16, $.int32, $.int64, $.byte, $.uint16,
+        $.uint32, $.int, $.xint, $.nativeint, $.unativeint, $.decimal,
+        $.float, $.uint64, $.ieee32, $.ieee64),
 
     paren_expression: ($, _original) =>
       prec(1, seq("(", choice($.tuple_expression, $._expression), ")")),

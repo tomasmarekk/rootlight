@@ -36,6 +36,8 @@ mod prolog;
 mod shebang;
 mod vba;
 
+pub use fsproj::{OrderedFSharpCompileMembers, ordered_fsharp_compile_members};
+
 pub use incremental::{
     IncrementalDiscovery, IncrementalDiscoveryBaseline, IncrementalDiscoveryContext,
     IncrementalDiscoveryOptions, IncrementalDiscoveryProgress, ManifestReconcileInputs,
@@ -43,7 +45,7 @@ pub use incremental::{
 };
 
 /// Current deterministic manifest and source-classification revision.
-pub const DISCOVERY_MANIFEST_VERSION: &str = "1.23";
+pub const DISCOVERY_MANIFEST_VERSION: &str = "1.36";
 /// Stable source-free diagnostic emitted when the entry budget truncates discovery.
 pub const DISCOVERY_ENTRY_LIMIT_DIAGNOSTIC_CODE: &str = "DISCOVERY_ENTRY_LIMIT";
 /// Stable source-free diagnostic emitted when retained source bytes truncate discovery.
@@ -58,6 +60,49 @@ pub const MAX_DISCOVERY_DIAGNOSTICS: usize = 10_000;
 pub const MAX_CLASSIFICATION_BYTES: usize = 8 * 1024;
 /// Hard aggregate ceiling for source snapshots retained by one discovery.
 pub const MAX_RETAINED_SOURCE_BYTES: u64 = 512 * 1024 * 1024;
+
+/// Whether a source snapshot may undergo native F# admission without a content hint.
+///
+/// This checks sampled lexical contexts and conflicting Forth evidence only;
+/// `true` is not a language signal or a successful parse. The native caller must
+/// establish complete sampled syntax and an owned declaration witness before
+/// admitting F#. The shared encoding classifier validates UTF-16 and supplies
+/// the same prefix bounded by both original and projected
+/// [`MAX_CLASSIFICATION_BYTES`]. Incomplete sampled
+/// lexical contexts and ambiguous unowned colons return `false`.
+///
+/// # Errors
+///
+/// Returns cancellation or source-decoding/resource errors from the shared
+/// classifier. Unsupported encodings, invalid sampled UTF-8, incomplete masked
+/// contexts, and Forth conflicts return `Ok(false)`; syntax validity is left to
+/// the native caller.
+pub fn fsharp_native_probe_allowed(
+    content: &[u8],
+    cancellation: &Cancellation,
+) -> Result<bool, DiscoveryError> {
+    let allowed = match encoding::classify(content, cancellation)? {
+        Some(classification) => {
+            let projected = classification
+                .decoded_prefix
+                .as_ref()
+                .map_or(content, |prefix| prefix.as_bytes());
+            let sample = projected
+                .get(..MAX_CLASSIFICATION_BYTES)
+                .unwrap_or(projected);
+            fsharp::native_probe_allowed(
+                sample,
+                classification.prefix_truncated,
+                classification.prefix_truncated
+                    && (classification.decoded_prefix.is_some()
+                        || projected.len() >= MAX_CLASSIFICATION_BYTES),
+            )
+        }
+        None => false,
+    };
+    cancellation.check()?;
+    Ok(allowed)
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct RetainedSnapshotBudget {
@@ -221,6 +266,8 @@ pub struct DiscoveryPolicy {
 #[derive(Debug)]
 struct PolicyMatchers {
     default: Gitignore,
+    metadata_default: Gitignore,
+    host_default: Gitignore,
     vcs_ignore: Gitignore,
     repository: Gitignore,
     operation: Gitignore,
@@ -228,6 +275,7 @@ struct PolicyMatchers {
 
 impl DiscoveryPolicy {
     /// Builds a layered matcher in deterministic precedence order.
+    /// Git metadata remains excluded regardless of later pattern negations.
     ///
     /// # Errors
     ///
@@ -235,7 +283,9 @@ impl DiscoveryPolicy {
     /// source labels, and [`DiscoveryError::InvalidPattern`] for malformed
     /// configured patterns.
     pub fn build(mut rules: Vec<PolicyRule>, audit: bool) -> Result<Self, DiscoveryError> {
-        rules.splice(0..0, default_rules());
+        let built_in_rules = default_rules();
+        let built_in_rule_count = built_in_rules.len();
+        rules.splice(0..0, built_in_rules);
         if rules.windows(2).any(|pair| pair[0].layer > pair[1].layer) {
             return Err(DiscoveryError::InvalidPolicy);
         }
@@ -244,8 +294,13 @@ impl DiscoveryPolicy {
                 return Err(DiscoveryError::InvalidPolicy);
             }
         }
+        let host_rules = rules
+            .get(built_in_rule_count..)
+            .ok_or(DiscoveryError::InvalidPolicy)?;
         let matchers = PolicyMatchers {
             default: build_policy_matcher(&rules, PolicyLayer::Default)?,
+            metadata_default: build_metadata_matcher()?,
+            host_default: build_policy_matcher(host_rules, PolicyLayer::Default)?,
             vcs_ignore: build_policy_matcher(&rules, PolicyLayer::VcsIgnore)?,
             repository: build_policy_matcher(&rules, PolicyLayer::Repository)?,
             operation: build_policy_matcher(&rules, PolicyLayer::Operation)?,
@@ -258,8 +313,9 @@ impl DiscoveryPolicy {
         })
     }
 
-    /// Retains tracked regular files through VCS ignores, without overriding
-    /// default, repository, operation, or VFS safety policy.
+    /// Retains tracked regular files through VCS ignores and built-in artifact
+    /// directory exclusions, without overriding Git metadata, caller-supplied
+    /// default rules, repository, operation, or VFS safety policy.
     ///
     /// Ancestors are traversal routes only; their untracked children do not
     /// inherit the tracked-file admission.
@@ -292,8 +348,8 @@ impl DiscoveryPolicy {
     /// Windows resolves each regular tracked path through `root` without reading
     /// source content. Missing or unresolvable entries retain only their original
     /// exact policy key; they never confer case-folded or inode-wide admission.
-    /// Non-Windows admission remains exact. All other policy layers and VFS
-    /// exclusions remain authoritative.
+    /// Non-Windows admission remains exact. Git metadata, caller-supplied default
+    /// rules, repository and operation rules, and VFS exclusions remain authoritative.
     ///
     /// # Errors
     ///
@@ -375,16 +431,25 @@ impl DiscoveryPolicy {
         scoped_ignores: Option<&ScopedIgnores>,
     ) -> PolicyDecision {
         let candidate = Path::new(path.as_str());
-        let default_decision = decision_from_match(
-            self.matchers.default.matched(candidate, is_directory),
+        // A later artifact pattern or caller negation cannot reopen Git metadata.
+        if let Some(decision) = default_policy_decision(
+            &self.matchers.metadata_default,
+            path,
+            is_directory,
             self.audit,
-        );
+        )
+        .filter(|decision| decision.excluded)
+        {
+            return decision;
+        }
+        let default_decision =
+            default_policy_decision(&self.matchers.default, path, is_directory, self.audit);
         let default_excluded = default_decision
             .as_ref()
             .is_some_and(|decision| decision.excluded);
         let mut decision = default_decision.unwrap_or_default();
 
-        // Repository-controlled ignore files must not reopen host-owned default exclusions.
+        // Repository-controlled ignores cannot reopen an excluded artifact directory.
         if !default_excluded {
             if let Some(layer_decision) = decision_from_match(
                 self.matchers.vcs_ignore.matched(candidate, is_directory),
@@ -424,6 +489,16 @@ impl DiscoveryPolicy {
                     };
                 }
             }
+        } else if !default_policy_decision(&self.matchers.host_default, path, is_directory, false)
+            .is_some_and(|decision| decision.excluded)
+            && self.admits_tracked_path(path, is_directory)
+        {
+            // A directory name is not evidence that its tracked leaves are build outputs.
+            // Only built-in artifact defaults are soft; caller rules retain their authority.
+            decision = PolicyDecision {
+                included: true,
+                ..PolicyDecision::default()
+            };
         }
         for matcher in [&self.matchers.repository, &self.matchers.operation] {
             if let Some(layer_decision) =
@@ -434,6 +509,22 @@ impl DiscoveryPolicy {
         }
         decision
     }
+}
+
+fn build_metadata_matcher() -> Result<Gitignore, DiscoveryError> {
+    let rule = metadata_default_rule();
+    let mut builder = GitignoreBuilder::new("");
+    // Windows Git metadata lookups accept case aliases; ordinary policy remains exact.
+    #[cfg(windows)]
+    builder
+        .case_insensitive(true)
+        .map_err(|source| DiscoveryError::InvalidPattern { source })?;
+    builder
+        .add_line(Some(PathBuf::from(rule.source)), &rule.pattern)
+        .map_err(|source| DiscoveryError::InvalidPattern { source })?;
+    builder
+        .build()
+        .map_err(|source| DiscoveryError::InvalidPattern { source })
 }
 
 fn build_policy_matcher(
@@ -486,6 +577,28 @@ fn decision_from_match(
         }),
         Match::None => None,
     }
+}
+
+fn default_policy_decision(
+    matcher: &Gitignore,
+    path: &RelativePath,
+    is_directory: bool,
+    audit: bool,
+) -> Option<PolicyDecision> {
+    let mut candidate = path.as_str();
+    let mut is_directory = is_directory;
+    // Required routes may reopen a default-excluded directory, not its untracked
+    // descendants. Each parent is a shorter slice of an already bounded relative path.
+    while !candidate.is_empty() {
+        if let Some(decision) =
+            decision_from_match(matcher.matched(Path::new(candidate), is_directory), audit)
+        {
+            return Some(decision);
+        }
+        candidate = parent_scope(candidate);
+        is_directory = true;
+    }
+    None
 }
 
 #[derive(Debug, Default)]
@@ -1356,6 +1469,7 @@ impl<'a> DiscoveryState<'a> {
                 classification_content
             },
             classification.prefix_truncated,
+            classification.decoded_prefix.is_some(),
         );
         if let Some(format) = container_format {
             language_signals.clear();
@@ -1692,13 +1806,19 @@ fn read_directory_with_entry_budget(
 
 #[cfg(test)]
 fn classify(path: &RelativePath, content: &[u8]) -> (InputClass, Vec<LanguageSignal>) {
-    classify_prefix(path, content, content.len() > MAX_CLASSIFICATION_BYTES)
+    classify_prefix(
+        path,
+        content,
+        content.len() > MAX_CLASSIFICATION_BYTES,
+        false,
+    )
 }
 
 fn classify_prefix(
     path: &RelativePath,
     content: &[u8],
     prefix_truncated: bool,
+    decoded_prefix: bool,
 ) -> (InputClass, Vec<LanguageSignal>) {
     let normalized = path.as_str().to_ascii_lowercase();
     let class = if generated_path(&normalized) || generated_content(content) {
@@ -1743,6 +1863,7 @@ fn classify_prefix(
         fsharp::has_content_hint(
             &content[..content.len().min(MAX_CLASSIFICATION_BYTES)],
             prefix_truncated,
+            prefix_truncated && (decoded_prefix || content.len() >= MAX_CLASSIFICATION_BYTES),
         )
         .then_some("fsharp")
     } else if is_ambiguous_perl_prolog_source(&normalized)
@@ -1830,7 +1951,7 @@ fn infer_shared_m_suffix_context(inputs: &mut [ManifestInput]) {
 }
 
 fn is_shared_m_source(input: &ManifestInput) -> bool {
-    input.encoding == "utf-8"
+    matches!(input.encoding.as_str(), "utf-8" | "utf-16le" | "utf-16be")
         && input
             .path
             .rsplit_once('.')
@@ -2020,7 +2141,7 @@ const LANGUAGE_CAPABILITIES: &[LanguageCapability] = &[
     LanguageCapability {
         language: "fsharp",
         // `.fs` also denotes Forth; a bounded content hint or assignment is required.
-        suffixes: &[".fsx"],
+        suffixes: &[".fsscript", ".fsx"],
         aliases: &[],
         detectors: &["content", "extension", "configuration"],
         maximum_tier: "tier_d",
@@ -2577,22 +2698,26 @@ fn cpp_features(code: &str) -> u8 {
     features
 }
 
-fn default_rules() -> Vec<PolicyRule> {
-    [
-        ".git/",
-        "target/",
-        "node_modules/",
-        ".venv/",
-        "dist/",
-        "build/",
-    ]
-    .into_iter()
-    .map(|pattern| PolicyRule {
+fn metadata_default_rule() -> PolicyRule {
+    PolicyRule {
         layer: PolicyLayer::Default,
-        pattern: pattern.to_owned(),
+        pattern: ".git".to_owned(),
         source: "rootlight-default".to_owned(),
-    })
-    .collect()
+    }
+}
+
+fn default_rules() -> Vec<PolicyRule> {
+    std::iter::once(metadata_default_rule())
+        .chain(
+            ["target/", "node_modules/", ".venv/", "dist/", "build/"]
+                .into_iter()
+                .map(|pattern| PolicyRule {
+                    layer: PolicyLayer::Default,
+                    pattern: pattern.to_owned(),
+                    source: "rootlight-default".to_owned(),
+                }),
+        )
+        .collect()
 }
 
 fn valid_source_label(source: &str) -> bool {
@@ -2796,6 +2921,74 @@ mod tests {
     }
 
     #[test]
+    fn conditioned_project_declarations_only_hint_admitted_literal_members() {
+        let temporary = local_tempdir();
+        write_fixture(&temporary, "Unit.fs", b"let answer = 1\n");
+        write_fixture(&temporary, "Other.fs", b"let other = 2\n");
+        write_fixture(&temporary, "cache/Hidden.fs", b"let hidden = 3\n");
+        write_fixture(&temporary, ".gitignore", b"cache/\n");
+        let root = fixture_root(&temporary, b"conditioned-project-language-evidence");
+        let policy = DiscoveryPolicy::build(Vec::new(), true).unwrap();
+        let config = config();
+        for document in [
+            "<Project Condition='false'><ItemGroup><Compile Include='Unit.fs'/><Compile Include='cache/Hidden.fs'/><Compile Include='Missing.fs'/></ItemGroup></Project>",
+            "<Project><ItemGroup Condition='false'><Compile Include='Unit.fs'/><Compile Include='cache/Hidden.fs'/><Compile Include='Missing.fs'/></ItemGroup></Project>",
+            "<Project><ItemGroup><Compile Condition='false' Include='Unit.fs'/><Compile Include='cache/Hidden.fs'/><Compile Include='Missing.fs'/></ItemGroup></Project>",
+        ] {
+            write_fixture(&temporary, "App.fsproj", document.as_bytes());
+            let manifest =
+                discover(&root, &config, &policy, limits(), &Cancellation::new()).unwrap();
+            let member = manifest
+                .inputs
+                .iter()
+                .find(|input| input.path == "Unit.fs")
+                .unwrap();
+            assert_eq!(
+                member.language_signals,
+                [LanguageSignal {
+                    language: "fsharp".to_owned(),
+                    evidence: LanguageEvidence::Project,
+                }]
+            );
+            let project = manifest
+                .inputs
+                .iter()
+                .find(|input| input.path == "App.fsproj")
+                .unwrap();
+            assert_eq!(
+                member.project_language_witnesses,
+                [ProjectLanguageWitness {
+                    language: "fsharp".to_owned(),
+                    project_file: project.file,
+                    project_path: project.path.clone(),
+                    project_content_hash: content_hash(document.as_bytes()),
+                }]
+            );
+            assert!(
+                manifest
+                    .inputs
+                    .iter()
+                    .find(|input| input.path == "Other.fs")
+                    .unwrap()
+                    .project_language_witnesses
+                    .is_empty()
+            );
+            assert!(
+                !manifest
+                    .inputs
+                    .iter()
+                    .any(|input| matches!(input.path.as_str(), "cache/Hidden.fs" | "Missing.fs"))
+            );
+            assert!(
+                !manifest
+                    .diagnostics
+                    .iter()
+                    .any(|diagnostic| diagnostic.code == "DISCOVERY_PROJECT_WITNESS_UNPROVEN")
+            );
+        }
+    }
+
+    #[test]
     fn project_witnesses_never_expand_admission_or_use_invalid_documents() {
         let temporary = local_tempdir();
         write_fixture(&temporary, "Unit.fs", b"let answer = 1\n");
@@ -2807,7 +3000,6 @@ mod tests {
         let cancellation = Cancellation::new();
         for document in [
             "<Project><ItemGroup><Compile Include='Unit.fs'/></ItemGroup></Project><extra/>",
-            "<Project><ItemGroup Condition='enabled'><Compile Include='Unit.fs'/></ItemGroup></Project>",
             "<Project><ItemGroup><Compile Include='*.fs'/></ItemGroup></Project>",
             "<Project><ItemGroup><Compile Include='Unit.fs'/><Compile Remove='Unit.fs'/></ItemGroup></Project>",
         ] {
@@ -3946,6 +4138,106 @@ max_source_file_bytes = 2097152
         }));
     }
 
+    fn assert_encoded_shared_m_context(little_endian: bool) {
+        let temporary = local_tempdir();
+        let encoding = if little_endian {
+            "utf-16le"
+        } else {
+            "utf-16be"
+        };
+        let encode = |source: &str| {
+            std::iter::once(0xfeff_u16)
+                .chain(source.encode_utf16())
+                .flat_map(|unit| {
+                    if little_endian {
+                        unit.to_le_bytes()
+                    } else {
+                        unit.to_be_bytes()
+                    }
+                })
+                .collect::<Vec<_>>()
+        };
+        let startup = encode("addpath(genpath(pwd));\r\n");
+        let measure = encode("function result = measure(value)\r\nresult = value;\r\nend\r\n");
+        let estimate = encode("function result = estimate(value)\r\nresult = value;\r\nend\r\n");
+        let objc_measure = encode("@interface Measure\r\n@end\r\n");
+        let objc_estimate = encode("@interface Estimate\r\n@end\r\n");
+        write_fixture(&temporary, "startup.m", &startup);
+        write_fixture(&temporary, "measure.m", &measure);
+        let root = fixture_root(&temporary, b"encoded-shared-m-context");
+        let config = config();
+        let policy = DiscoveryPolicy::build(Vec::new(), true).unwrap();
+        let inspect = |measure: &[u8], estimate: Option<&[u8]>, context: Option<&str>| {
+            let result = discover_with_snapshots(
+                &root,
+                &config,
+                &policy,
+                limits(),
+                BTreeMap::new(),
+                &Cancellation::new(),
+            )
+            .unwrap();
+            assert!(result.manifest.exclusions.is_empty());
+            assert_eq!(
+                result.manifest.inputs.len(),
+                2 + usize::from(estimate.is_some())
+            );
+            for (path, bytes) in [("startup.m", startup.as_slice()), ("measure.m", measure)]
+                .into_iter()
+                .chain(estimate.map(|bytes| ("estimate.m", bytes)))
+            {
+                let input = result
+                    .manifest
+                    .inputs
+                    .iter()
+                    .find(|input| input.path == path)
+                    .unwrap();
+                assert_eq!(input.encoding, encoding);
+                assert_eq!(input.content_hash, content_hash(bytes));
+                assert_eq!(input.bytes, u64::try_from(bytes.len()).unwrap());
+                assert_eq!(result.snapshots.get(&input.file).unwrap().content(), bytes);
+            }
+            let input = result
+                .manifest
+                .inputs
+                .iter()
+                .find(|input| input.path == "startup.m")
+                .unwrap();
+            let actual: Vec<_> = input
+                .language_signals
+                .iter()
+                .filter(|signal| signal.evidence == LanguageEvidence::Context)
+                .map(|signal| signal.language.as_str())
+                .collect();
+            assert_eq!(
+                actual,
+                context.into_iter().collect::<Vec<_>>(),
+                "{encoding}"
+            );
+            input.file
+        };
+        let file = inspect(&measure, None, None);
+        write_fixture(&temporary, "estimate.m", &estimate);
+        assert_eq!(inspect(&measure, Some(&estimate), Some("matlab")), file);
+        write_fixture(&temporary, "estimate.m", &objc_estimate);
+        assert_eq!(inspect(&measure, Some(&objc_estimate), None), file);
+        write_fixture(&temporary, "measure.m", &objc_measure);
+        assert_eq!(
+            inspect(&objc_measure, Some(&objc_estimate), Some("objective-c")),
+            file
+        );
+    }
+
+    #[test]
+    fn utf16le_shared_m_context_tracks_peer_language_changes() {
+        assert_encoded_shared_m_context(true);
+    }
+
+    #[test]
+    fn utf16be_shared_m_context_tracks_peer_language_changes() {
+        assert_encoded_shared_m_context(false);
+    }
+
     #[test]
     fn matlab_script_hints_do_not_override_objc_or_known_suffixes() {
         for source in [
@@ -4257,6 +4549,128 @@ max_source_file_bytes = 2097152
     }
 
     #[test]
+    fn fsharp_native_probe_is_eligibility_not_positive_routing() {
+        let path = RelativePath::parse(Path::new("Source.fs")).unwrap();
+        for source in [
+            b"let identity value = value\n".as_slice(),
+            b"let map = fun value -> value\n",
+            b"type Alias = System.String\n",
+            b"type Choice = First | Second\n",
+        ] {
+            assert!(fsharp_native_probe_allowed(source, &Cancellation::new()).unwrap());
+            assert!(classify(&path, source).1.is_empty());
+        }
+        for source in [
+            b": square dup * ;\n".as_slice(),
+            b"let identity value = value\n: square dup * ;\n",
+            b"let identity value = value\n(* unfinished",
+            b"let identity value = \"unfinished",
+        ] {
+            assert!(!fsharp_native_probe_allowed(source, &Cancellation::new()).unwrap());
+        }
+    }
+
+    #[test]
+    fn fsharp_native_probe_reuses_utf16_validation_and_both_sample_budgets() {
+        let encoded = |source: &str, little_endian: bool| -> Vec<u8> {
+            std::iter::once(0xfeff_u16)
+                .chain(source.encode_utf16())
+                .flat_map(|unit| {
+                    if little_endian {
+                        unit.to_le_bytes()
+                    } else {
+                        unit.to_be_bytes()
+                    }
+                })
+                .collect()
+        };
+        for little_endian in [true, false] {
+            for source in [
+                "let identity value = value\n",
+                "let map = fun value -> value\n",
+                "type Choice = First | Second\n",
+            ] {
+                assert!(
+                    fsharp_native_probe_allowed(
+                        &encoded(source, little_endian),
+                        &Cancellation::new()
+                    )
+                    .unwrap()
+                );
+            }
+            assert!(
+                !fsharp_native_probe_allowed(
+                    &encoded(
+                        "let map = fun value -> value\n: square dup * ;\n",
+                        little_endian
+                    ),
+                    &Cancellation::new(),
+                )
+                .unwrap()
+            );
+            let original_bound = (MAX_CLASSIFICATION_BYTES - 2) / 2;
+            let mut source = "let identity value = value\n".to_owned();
+            source.push_str(&" ".repeat(original_bound - source.len() - 1));
+            let safe_prefix = source.clone();
+            source.push_str("\"closed outside the sample\"");
+            assert!(
+                !fsharp_native_probe_allowed(
+                    &encoded(&source, little_endian),
+                    &Cancellation::new()
+                )
+                .unwrap()
+            );
+            source = format!("{safe_prefix} \nlet later = 1\n");
+            let mut bytes = encoded(&source, little_endian);
+            assert!(fsharp_native_probe_allowed(&bytes, &Cancellation::new()).unwrap());
+            bytes.extend_from_slice(&if little_endian {
+                0xd800_u16.to_le_bytes()
+            } else {
+                0xd800_u16.to_be_bytes()
+            });
+            assert!(!fsharp_native_probe_allowed(&bytes, &Cancellation::new()).unwrap());
+
+            let header = "let value = ";
+            let wide = "界".repeat((MAX_CLASSIFICATION_BYTES - header.len() - 1) / 3);
+            let source = format!("{header}{wide}\"closed outside the sample\"");
+            assert!(encoded(&source, little_endian).len() < MAX_CLASSIFICATION_BYTES);
+            assert!(
+                !fsharp_native_probe_allowed(
+                    &encoded(&source, little_endian),
+                    &Cancellation::new()
+                )
+                .unwrap()
+            );
+        }
+        for source in [
+            vec![0xff],
+            vec![0xff, 0xfe, 0x61],
+            vec![0xff, 0xfe, 0, 0xd8],
+            vec![0xfe, 0xff, 0xdc, 0],
+            b"let value = 1\0".to_vec(),
+        ] {
+            assert!(!fsharp_native_probe_allowed(&source, &Cancellation::new()).unwrap());
+        }
+    }
+
+    #[test]
+    fn fsharp_native_probe_checks_cancellation_before_admission() {
+        let cancellation = Cancellation::new();
+        assert!(cancellation.cancel(CancellationReason::ClientRequest));
+        for source in [
+            b"let identity value = value\n".as_slice(),
+            b"",
+            &[0xff, 0xfe, 0, 0xd8],
+        ] {
+            assert!(matches!(
+                fsharp_native_probe_allowed(source, &cancellation),
+                Err(DiscoveryError::Cancelled(cancelled))
+                    if cancelled.reason() == CancellationReason::ClientRequest
+            ));
+        }
+    }
+
+    #[test]
     fn fsharp_shared_suffix_uses_bounded_content_without_suffix_or_peer_promotion() {
         let source = b"module Example.Core\nlet value = 1\n";
         for name in ["Library.fs", "src/LIBRARY.FS"] {
@@ -4302,6 +4716,100 @@ max_source_file_bytes = 2097152
         let mut outside = vec![b' '; MAX_CLASSIFICATION_BYTES];
         outside.extend_from_slice(source);
         assert!(classify(&path, &outside).1.is_empty());
+    }
+
+    #[test]
+    fn fsharp_implicit_modules_supply_only_content_evidence_on_the_shared_suffix() {
+        for source in [
+            "open Example.Support\nlet answer = 1\n",
+            "[<EntryPoint>]\nlet main _ = 0\n",
+            "let identity (value: int) : int = value\n",
+            "type Box<'T> = Box of 'T\n",
+            "let answer = 1\nlet identity (value: int) = value\n",
+        ] {
+            for name in ["Source.fs", "src/SOURCE.FS"] {
+                let path = RelativePath::parse(Path::new(name)).unwrap();
+                assert_eq!(extension_language(name), None);
+                assert_eq!(
+                    classify(&path, source.as_bytes()).1,
+                    vec![LanguageSignal {
+                        language: "fsharp".to_owned(),
+                        evidence: LanguageEvidence::Content,
+                    }],
+                    "{name}: {source:?}"
+                );
+                let mixed = format!("{source}: square dup * ;\n");
+                assert!(classify(&path, mixed.as_bytes()).1.is_empty());
+            }
+            let path = RelativePath::parse(Path::new("Source.txt")).unwrap();
+            assert!(classify(&path, source.as_bytes()).1.is_empty());
+        }
+        let path = RelativePath::parse(Path::new("Source.fs")).unwrap();
+        assert!(classify(&path, b"let answer = 1\n").1.is_empty());
+    }
+
+    #[test]
+    fn fsharp_shared_suffix_accepts_only_module_accessibility_source_evidence() {
+        for accessibility in ["private", "internal", "public"] {
+            for recursive in ["", "rec "] {
+                let source =
+                    format!("module {accessibility} {recursive}Example.Core\nlet value = 1\n");
+                for name in ["Library.fs", "src/LIBRARY.FS"] {
+                    let path = RelativePath::parse(Path::new(name)).unwrap();
+                    assert_eq!(extension_language(name), None);
+                    assert_eq!(
+                        classify(&path, source.as_bytes()).1,
+                        vec![LanguageSignal {
+                            language: "fsharp".to_owned(),
+                            evidence: LanguageEvidence::Content,
+                        }],
+                        "{name}: {source:?}"
+                    );
+                }
+                let path = RelativePath::parse(Path::new("Library.txt")).unwrap();
+                assert!(classify(&path, source.as_bytes()).1.is_empty());
+            }
+        }
+        let path = RelativePath::parse(Path::new("Library.fs")).unwrap();
+        for source in [
+            "namespace internal Example\nlet value = 1\n",
+            "module public private Example\nlet value = 1\n",
+            "module internal Example\nlet value =\n",
+            "module internal Example\nlet value = 1\n: square dup * ;\n",
+            "// module internal Example\n// let value = 1\n",
+        ] {
+            assert!(
+                classify(&path, source.as_bytes()).1.is_empty(),
+                "{source:?}"
+            );
+        }
+        let mut outside = vec![b' '; MAX_CLASSIFICATION_BYTES];
+        outside.extend_from_slice(b"module internal Example\nlet value = 1\n");
+        assert!(classify(&path, &outside).1.is_empty());
+    }
+
+    #[test]
+    fn fsharp_shared_suffix_retains_quote_character_source_evidence() {
+        for literal in ["'\"'", "'\\\"'"] {
+            for newline in ["\n", "\r\n"] {
+                let source = format!("module Example{newline}let quote = {literal}{newline}");
+                let path = RelativePath::parse(Path::new("Library.fs")).unwrap();
+                let expected = vec![LanguageSignal {
+                    language: "fsharp".to_owned(),
+                    evidence: LanguageEvidence::Content,
+                }];
+                assert_eq!(extension_language("Library.fs"), None);
+                assert_eq!(classify(&path, source.as_bytes()).1, expected);
+                let mut sampled = source.as_bytes().to_vec();
+                sampled.resize(MAX_CLASSIFICATION_BYTES, b' ');
+                sampled.extend_from_slice(b"let following = 1\n");
+                assert_eq!(classify(&path, &sampled).1, expected);
+                let text = RelativePath::parse(Path::new("Library.txt")).unwrap();
+                assert!(classify(&text, source.as_bytes()).1.is_empty());
+                let mixed = format!("{source}: square dup * ;{newline}");
+                assert!(classify(&path, mixed.as_bytes()).1.is_empty());
+            }
+        }
     }
 
     #[test]
@@ -4464,6 +4972,507 @@ max_source_file_bytes = 2097152
     }
 
     #[test]
+    fn fsharp_return_annotations_survive_decoded_sampling() {
+        let temporary = local_tempdir();
+        let mut cases = Vec::new();
+        for (newline_name, newline) in [("Lf", "\n"), ("CrLf", "\r\n")] {
+            let prefix = "module Example\nlet prior = 1\nlet build<'Item when 'Item : comparison>\n    (value: 'Item[])\n    (items: Example.Item option)\n    (pairs: (int * string) list)\n    : Example.Result<'Item> list =\n        []\n"
+                .replace('\n', newline);
+            let complete = prefix.clone();
+            let sampled = format!("{prefix}//{}", " ".repeat(MAX_CLASSIFICATION_BYTES));
+            let mut partial_body =
+                "module Example\nlet prior = 1\nlet build\n    (value: int)\n    : int =\n"
+                    .replace('\n', newline);
+            partial_body.push_str(&" ".repeat(MAX_CLASSIFICATION_BYTES - partial_body.len() - 1));
+            partial_body.push_str("value\n");
+            for (case_name, source, recognized) in [
+                ("Complete", complete, true),
+                ("Sampled", sampled, true),
+                ("PartialBody", partial_body, false),
+            ] {
+                for encoding in ["utf-8", "utf-16le", "utf-16be"] {
+                    let bytes = if encoding == "utf-8" {
+                        source.as_bytes().to_vec()
+                    } else {
+                        std::iter::once(0xfeff_u16)
+                            .chain(source.encode_utf16())
+                            .flat_map(|unit| {
+                                if encoding == "utf-16le" {
+                                    unit.to_le_bytes()
+                                } else {
+                                    unit.to_be_bytes()
+                                }
+                            })
+                            .collect()
+                    };
+                    let path = format!("{newline_name}{case_name}{encoding}.fs");
+                    write_fixture(&temporary, &path, &bytes);
+                    let recognized = if case_name == "PartialBody" {
+                        encoding == "utf-8"
+                    } else {
+                        recognized
+                    };
+                    cases.push((path, bytes, encoding, recognized));
+                }
+            }
+        }
+        let config = ConfigSnapshot::resolve(&[]).unwrap();
+        let root = fixture_root(&temporary, b"fsharp-return-annotation");
+        let policy = DiscoveryPolicy::build(Vec::new(), true).unwrap();
+        let result = discover_with_snapshots(
+            &root,
+            &config,
+            &policy,
+            DiscoveryLimits::from_config(&config),
+            BTreeMap::new(),
+            &Cancellation::new(),
+        )
+        .unwrap();
+        assert_eq!(result.manifest.inputs.len(), cases.len());
+        assert!(result.manifest.exclusions.is_empty());
+        for (path, bytes, encoding, recognized) in cases {
+            let input = result
+                .manifest
+                .inputs
+                .iter()
+                .find(|input| input.path == path)
+                .unwrap();
+            assert_eq!(input.encoding, encoding, "{path}");
+            assert_eq!(input.content_hash, content_hash(&bytes), "{path}");
+            assert_eq!(input.bytes, u64::try_from(bytes.len()).unwrap(), "{path}");
+            assert_eq!(result.snapshots.get(&input.file).unwrap().content(), bytes);
+            let expected = if recognized {
+                vec![LanguageSignal {
+                    language: "fsharp".to_owned(),
+                    evidence: LanguageEvidence::Content,
+                }]
+            } else {
+                Vec::new()
+            };
+            assert_eq!(input.language_signals, expected, "{path}");
+        }
+    }
+
+    #[test]
+    fn fsharp_multiline_named_fields_preserve_decoded_shared_suffix_routes() {
+        let temporary = local_tempdir();
+        let mut cases = Vec::new();
+        for (case, pattern, tail, sampled, recognized) in [
+            (
+                "Multiline",
+                "(Packet(item=value\n        metadata=state))",
+                "",
+                true,
+                true,
+            ),
+            (
+                "MixedComplete",
+                "(Packet(item=value\n        metadata=state ; code=other))",
+                "",
+                false,
+                true,
+            ),
+            (
+                "MixedSampled",
+                "(Packet(item=value\n        metadata=state ; code=other))",
+                "",
+                true,
+                true,
+            ),
+            (
+                "ForthColon",
+                "(Packet(item=value\n        metadata=state ; code=other))",
+                ": word\n",
+                false,
+                false,
+            ),
+            (
+                "ForthDefinition",
+                "(Packet(item=value\n        metadata=state ; code=other))",
+                ": word dup * ;\n",
+                true,
+                false,
+            ),
+            (
+                "MissingValue",
+                "(Packet(item=value\n        metadata=))",
+                "",
+                true,
+                false,
+            ),
+            (
+                "TupleOwnership",
+                "(Packet(item=value)\n        metadata=state)",
+                "",
+                true,
+                false,
+            ),
+        ] {
+            for (newline_name, newline) in [("Lf", "\n"), ("CrLf", "\r\n")] {
+                let mut source = format!("module Example\nlet prior = 1\nlet combine\n    {pattern}\n    : int =\n    1\n{tail}").replace('\n', newline);
+                if sampled {
+                    source.push_str("//");
+                    source.push_str(&" ".repeat(MAX_CLASSIFICATION_BYTES));
+                }
+                for encoding in ["utf-8", "utf-16le", "utf-16be"] {
+                    let bytes = if encoding == "utf-8" {
+                        source.as_bytes().to_vec()
+                    } else {
+                        std::iter::once(0xfeff_u16)
+                            .chain(source.encode_utf16())
+                            .flat_map(|unit| {
+                                if encoding == "utf-16le" {
+                                    unit.to_le_bytes()
+                                } else {
+                                    unit.to_be_bytes()
+                                }
+                            })
+                            .collect()
+                    };
+                    let path = format!("{case}{newline_name}{encoding}.fs");
+                    write_fixture(&temporary, &path, &bytes);
+                    cases.push((path, bytes, encoding, recognized));
+                }
+            }
+        }
+        let config = ConfigSnapshot::resolve(&[]).unwrap();
+        let root = fixture_root(&temporary, b"fsharp-multiline-named-fields");
+        let policy = DiscoveryPolicy::build(Vec::new(), true).unwrap();
+        let result = discover_with_snapshots(
+            &root,
+            &config,
+            &policy,
+            DiscoveryLimits::from_config(&config),
+            BTreeMap::new(),
+            &Cancellation::new(),
+        )
+        .unwrap();
+        assert_eq!(result.manifest.inputs.len(), cases.len());
+        assert!(result.manifest.exclusions.is_empty());
+        for (path, bytes, encoding, recognized) in cases {
+            let input = result
+                .manifest
+                .inputs
+                .iter()
+                .find(|input| input.path == path)
+                .unwrap();
+            assert_eq!(input.encoding, encoding, "{path}");
+            assert_eq!(input.content_hash, content_hash(&bytes), "{path}");
+            assert_eq!(input.bytes, u64::try_from(bytes.len()).unwrap(), "{path}");
+            assert_eq!(input.class, InputClass::Source, "{path}");
+            assert!(input.project_language_witnesses.is_empty(), "{path}");
+            assert_eq!(result.snapshots.get(&input.file).unwrap().content(), bytes);
+            let expected = if recognized {
+                vec![LanguageSignal {
+                    language: "fsharp".to_owned(),
+                    evidence: LanguageEvidence::Content,
+                }]
+            } else {
+                Vec::new()
+            };
+            assert_eq!(input.language_signals, expected, "{path}");
+        }
+    }
+
+    #[test]
+    fn fsharp_decoded_sample_boundaries_preserve_only_prior_owned_declarations() {
+        let temporary = local_tempdir();
+        let mut cases = Vec::new();
+        for (newline_name, newline) in [("Lf", "\n"), ("CrLf", "\r\n")] {
+            for encoding in ["utf-8", "utf-16le", "utf-16be"] {
+                let cutoff = if encoding == "utf-8" {
+                    MAX_CLASSIFICATION_BYTES
+                } else {
+                    (MAX_CLASSIFICATION_BYTES - 2) / 2
+                };
+                for (case_name, prefix, head, body, recognized) in [
+                    (
+                        "Owned",
+                        "module Example\nlet prior = 1\n",
+                        "let build (value: int)",
+                        "        value",
+                        true,
+                    ),
+                    (
+                        "NoAnchor",
+                        "module Example\n",
+                        "let build (value: int)",
+                        "        value",
+                        false,
+                    ),
+                    (
+                        "InvalidOwner",
+                        "module Example\nlet prior = 1\n",
+                        "let build (: int)",
+                        "        value",
+                        false,
+                    ),
+                    (
+                        "Conflict",
+                        "module Example\nlet prior = 1\n: square dup * ;\n",
+                        "let build (value: int)",
+                        "        value",
+                        false,
+                    ),
+                    (
+                        "Offside",
+                        "module Example\nlet prior = 1\n",
+                        "let build (value: int)",
+                        "value",
+                        false,
+                    ),
+                ] {
+                    let prefix = prefix.replace('\n', newline);
+                    let head = format!("{head}{newline}    : int ={newline}");
+                    let before_value = body.len() - "value".len();
+                    let padding =
+                        cutoff - prefix.len() - 2 - newline.len() - head.len() - before_value - 1;
+                    let source = format!(
+                        "{prefix}//{}{newline}{head}{body}{newline}",
+                        " ".repeat(padding)
+                    );
+                    assert_eq!(source.as_bytes()[cutoff - 1], b'v');
+                    let bytes = if encoding == "utf-8" {
+                        source.as_bytes().to_vec()
+                    } else {
+                        std::iter::once(0xfeff_u16)
+                            .chain(source.encode_utf16())
+                            .flat_map(|unit| {
+                                if encoding == "utf-16le" {
+                                    unit.to_le_bytes()
+                                } else {
+                                    unit.to_be_bytes()
+                                }
+                            })
+                            .collect()
+                    };
+                    assert!(bytes.len() > MAX_CLASSIFICATION_BYTES);
+                    let path = format!("{newline_name}{case_name}{encoding}.fs");
+                    write_fixture(&temporary, &path, &bytes);
+                    cases.push((path, bytes, encoding, recognized));
+                }
+            }
+        }
+        let root = fixture_root(&temporary, b"fsharp-decoded-owned-body-boundary");
+        let config = ConfigSnapshot::resolve(&[]).unwrap();
+        let policy = DiscoveryPolicy::build(Vec::new(), true).unwrap();
+        let result = discover_with_snapshots(
+            &root,
+            &config,
+            &policy,
+            DiscoveryLimits::from_config(&config),
+            BTreeMap::new(),
+            &Cancellation::new(),
+        )
+        .unwrap();
+        assert!(result.manifest.coverage.complete);
+        assert!(result.manifest.exclusions.is_empty());
+        assert_eq!(result.manifest.inputs.len(), cases.len());
+        for (path, bytes, encoding, recognized) in cases {
+            let input = result
+                .manifest
+                .inputs
+                .iter()
+                .find(|input| input.path == path)
+                .unwrap();
+            assert_eq!(input.encoding, encoding, "{path}");
+            assert_eq!(input.content_hash, content_hash(&bytes), "{path}");
+            assert_eq!(input.bytes, u64::try_from(bytes.len()).unwrap(), "{path}");
+            assert_eq!(result.snapshots.get(&input.file).unwrap().content(), bytes);
+            let expected = if recognized {
+                vec![LanguageSignal {
+                    language: "fsharp".to_owned(),
+                    evidence: LanguageEvidence::Content,
+                }]
+            } else {
+                Vec::new()
+            };
+            assert_eq!(input.language_signals, expected, "{path}");
+        }
+    }
+
+    #[test]
+    fn fsharp_finite_prologues_require_decoded_complete_anchors() {
+        let temporary = local_tempdir();
+        let mut cases = Vec::new();
+        for (case_name, prologue, recognized) in [
+            ("Open", "open Example.Support\n", true),
+            ("Attribute", "[<AutoOpen>]\n", true),
+            ("Warning", "#nowarn \"9\"\n", true),
+            (
+                "WarningComment",
+                "#nowarn \"9\" // scoped warning policy\n",
+                true,
+            ),
+            (
+                "Combined",
+                "#nowarn \"9\"\nopen Example.Support\n[<AutoOpen>]\n",
+                true,
+            ),
+            ("Conditional", "#if FEATURE\n", false),
+            ("OpenType", "open type Example.Support\n", false),
+            ("MalformedPath", "open Example..Support\n", false),
+            ("AttributeArgument", "[<Example.Attribute(1)>]\n", false),
+            ("NonNumericWarning", "#nowarn \"other\"\n", false),
+        ] {
+            for (newline_name, newline) in [("Lf", "\n"), ("CrLf", "\r\n")] {
+                let source = format!(
+                    "{prologue}module Example =\n    let value = 1\n//{}",
+                    " ".repeat(MAX_CLASSIFICATION_BYTES),
+                )
+                .replace('\n', newline);
+                for encoding in ["utf-8", "utf-16le", "utf-16be"] {
+                    let bytes = if encoding == "utf-8" {
+                        source.as_bytes().to_vec()
+                    } else {
+                        std::iter::once(0xfeff_u16)
+                            .chain(source.encode_utf16())
+                            .flat_map(|unit| {
+                                if encoding == "utf-16le" {
+                                    unit.to_le_bytes()
+                                } else {
+                                    unit.to_be_bytes()
+                                }
+                            })
+                            .collect()
+                    };
+                    let path = format!("{case_name}{newline_name}{encoding}.fs");
+                    write_fixture(&temporary, &path, &bytes);
+                    cases.push((path, bytes, encoding, recognized));
+                }
+            }
+        }
+        let config = ConfigSnapshot::resolve(&[]).unwrap();
+        let root = fixture_root(&temporary, b"fsharp-finite-prologue");
+        let policy = DiscoveryPolicy::build(Vec::new(), true).unwrap();
+        let result = discover_with_snapshots(
+            &root,
+            &config,
+            &policy,
+            DiscoveryLimits::from_config(&config),
+            BTreeMap::new(),
+            &Cancellation::new(),
+        )
+        .unwrap();
+        assert_eq!(result.manifest.inputs.len(), cases.len());
+        assert!(result.manifest.exclusions.is_empty());
+        for (path, bytes, encoding, recognized) in cases {
+            let input = result
+                .manifest
+                .inputs
+                .iter()
+                .find(|input| input.path == path)
+                .unwrap();
+            assert_eq!(input.encoding, encoding, "{path}");
+            assert_eq!(input.content_hash, content_hash(&bytes), "{path}");
+            assert_eq!(input.bytes, u64::try_from(bytes.len()).unwrap(), "{path}");
+            assert_eq!(result.snapshots.get(&input.file).unwrap().content(), bytes);
+            let expected = if recognized {
+                vec![LanguageSignal {
+                    language: "fsharp".to_owned(),
+                    evidence: LanguageEvidence::Content,
+                }]
+            } else {
+                Vec::new()
+            };
+            assert_eq!(input.language_signals, expected, "{path}");
+        }
+    }
+
+    #[test]
+    fn fsharp_conditional_scopes_require_complete_decoded_alternatives() {
+        let temporary = local_tempdir();
+        let mut cases = Vec::new();
+        for (case, source, recognized) in [
+            (
+                "Namespaces",
+                "#if FEATURE\nnamespace Example.Enabled\n#else\nnamespace Example.Disabled\n#endif\nlet value = 1\n",
+                true,
+            ),
+            (
+                "Modules",
+                "#if FEATURE\nmodule internal Example.Enabled\n#else\nmodule Example.Disabled\n#endif\nlet value = 1\n",
+                true,
+            ),
+            (
+                "MalformedArm",
+                "#if FEATURE\nnamespace Example.Enabled\n#else\nnamespace Example.\n#endif\nlet value = 1\n",
+                false,
+            ),
+            (
+                "Unclosed",
+                "#if FEATURE\nnamespace Example.Enabled\n#else\nnamespace Example.Disabled\nlet value = 1\n",
+                false,
+            ),
+            (
+                "Mixed",
+                "#if FEATURE\nnamespace Example.Enabled\n#else\nnamespace Example.Disabled\n#endif\nlet value = 1\n: square dup * ;\n",
+                false,
+            ),
+        ] {
+            for (newline_name, newline) in [("Lf", "\n"), ("CrLf", "\r\n")] {
+                let source = format!("{source}//{}", " ".repeat(MAX_CLASSIFICATION_BYTES))
+                    .replace('\n', newline);
+                for encoding in ["utf-8", "utf-16le", "utf-16be"] {
+                    let bytes = if encoding == "utf-8" {
+                        source.as_bytes().to_vec()
+                    } else {
+                        std::iter::once(0xfeff_u16)
+                            .chain(source.encode_utf16())
+                            .flat_map(|unit| {
+                                if encoding == "utf-16le" {
+                                    unit.to_le_bytes()
+                                } else {
+                                    unit.to_be_bytes()
+                                }
+                            })
+                            .collect()
+                    };
+                    let path = format!("{case}{newline_name}{encoding}.fs");
+                    write_fixture(&temporary, &path, &bytes);
+                    cases.push((path, bytes, encoding, recognized));
+                }
+            }
+        }
+        let config = ConfigSnapshot::resolve(&[]).unwrap();
+        let root = fixture_root(&temporary, b"fsharp-conditional-scopes");
+        let policy = DiscoveryPolicy::build(Vec::new(), true).unwrap();
+        let result = discover_with_snapshots(
+            &root,
+            &config,
+            &policy,
+            DiscoveryLimits::from_config(&config),
+            BTreeMap::new(),
+            &Cancellation::new(),
+        )
+        .unwrap();
+        assert_eq!(result.manifest.inputs.len(), cases.len());
+        assert!(result.manifest.exclusions.is_empty());
+        for (path, bytes, encoding, recognized) in cases {
+            let input = result
+                .manifest
+                .inputs
+                .iter()
+                .find(|input| input.path == path)
+                .unwrap();
+            assert_eq!(input.encoding, encoding, "{path}");
+            assert_eq!(input.content_hash, content_hash(&bytes), "{path}");
+            assert_eq!(input.bytes, u64::try_from(bytes.len()).unwrap(), "{path}");
+            assert!(input.project_language_witnesses.is_empty(), "{path}");
+            assert_eq!(result.snapshots.get(&input.file).unwrap().content(), bytes);
+            let expected = if recognized {
+                vec![LanguageSignal {
+                    language: "fsharp".to_owned(),
+                    evidence: LanguageEvidence::Content,
+                }]
+            } else {
+                Vec::new()
+            };
+            assert_eq!(input.language_signals, expected, "{path}");
+        }
+    }
+
+    #[test]
     fn fsharp_shared_suffix_keeps_complete_evidence_before_sample_truncation() {
         let path = RelativePath::parse(Path::new("Library.fs")).unwrap();
         for (tail, remainder) in [
@@ -4491,12 +5500,15 @@ max_source_file_bytes = 2097152
 
     #[test]
     fn fsharp_routes_keep_implementation_and_signature_profiles_distinct() {
-        for (language, suffix) in [("fsharp", ".fsx"), ("fsharp-signature", ".fsi")] {
+        for (language, suffixes) in [
+            ("fsharp", &[".fsscript", ".fsx"][..]),
+            ("fsharp-signature", &[".fsi"][..]),
+        ] {
             let capability = language_capabilities()
                 .iter()
                 .find(|entry| entry.language == language)
                 .unwrap();
-            assert_eq!(capability.suffixes, [suffix]);
+            assert_eq!(capability.suffixes, suffixes);
             let detectors: &[&str] = if language == "fsharp" {
                 &["content", "extension", "configuration"]
             } else {
@@ -4506,15 +5518,166 @@ max_source_file_bytes = 2097152
             assert_eq!(capability.analyzers, ["treesitter"]);
             assert_eq!(capability.maximum_tier, "tier_d");
             assert_eq!(canonical_language(language), Some(language));
-            for path in [
-                format!("Sample{suffix}"),
-                format!("src/SAMPLE{suffix}").to_uppercase(),
-            ] {
-                assert_eq!(extension_language(&path), Some(language));
+            for suffix in suffixes {
+                for path in [
+                    format!("Sample{suffix}"),
+                    format!("src/SAMPLE{suffix}").to_uppercase(),
+                ] {
+                    assert_eq!(extension_language(&path), Some(language));
+                }
             }
         }
-        for path in ["sample.fs", "sample.FS", "sample.fsx.bak", "sample.fsi.txt"] {
+        for path in [
+            "sample.fs",
+            "sample.FS",
+            "sample.fsx.bak",
+            "sample.fsscript.bak",
+            "sample.fsi.txt",
+        ] {
             assert_eq!(extension_language(path), None, "{path}");
+        }
+    }
+
+    #[test]
+    fn fsscript_routes_do_not_depend_on_declaration_shape() {
+        let source = b"printfn \"ready\"\r\n";
+        for path in ["Script.fsscript", "src/SCRIPT.FSSCRIPT", "Script.fsx"] {
+            let path = RelativePath::parse(Path::new(path)).unwrap();
+            assert_eq!(
+                classify(&path, source),
+                (
+                    InputClass::Source,
+                    vec![LanguageSignal {
+                        language: "fsharp".to_owned(),
+                        evidence: LanguageEvidence::Extension,
+                    }],
+                )
+            );
+        }
+        let ambiguous = RelativePath::parse(Path::new("Script.fs")).unwrap();
+        assert!(classify(&ambiguous, source).1.is_empty());
+        let signature = RelativePath::parse(Path::new("Contract.fsi")).unwrap();
+        assert_eq!(
+            classify(&signature, b"val value: int\n").1,
+            vec![LanguageSignal {
+                language: "fsharp-signature".to_owned(),
+                evidence: LanguageEvidence::Extension,
+            }]
+        );
+    }
+
+    #[test]
+    fn configured_fsscript_preserves_original_sources_and_policy_barriers() {
+        let temporary = local_tempdir();
+        let script = "\u{feff}// Unicode source preservation: λ\r\nprintfn \"ready\"\r\n";
+        let signature = b"module Contract\r\nval value: int\r\n";
+        for path in [
+            "Script.fsscript",
+            "Script.fsx",
+            "Ambiguous.fs",
+            "denied.fsscript",
+        ] {
+            write_fixture(&temporary, path, script.as_bytes());
+        }
+        write_fixture(&temporary, "Configured.fsscript", signature);
+        write_fixture(&temporary, "Contract.fsi", signature);
+        write_fixture(&temporary, "binary.fsscript", b"\0binary");
+        let config = ConfigSnapshot::resolve(&[rootlight_config::ConfigLayer {
+            source: rootlight_config::ConfigSource::User,
+            contents: "version='1.3'\n[extensions.source-languages]\nversion='1.0'\ncritical=true\n[extensions.source-languages.data.extensions]\nfsscript='fsharp'\n[extensions.source-languages.data.paths]\n'Configured.fsscript'='fsharp-signature'\n'denied.fsscript'='fsharp'\n'binary.fsscript'='fsharp'\n",
+        }])
+        .unwrap();
+        assert_eq!(
+            config.source_language_for_path("Configured.fsscript"),
+            Some("fsharp-signature")
+        );
+        let root = fixture_root(&temporary, b"configured-fsscript");
+        let policy = DiscoveryPolicy::build(
+            vec![PolicyRule {
+                layer: PolicyLayer::Operation,
+                pattern: "denied.fsscript".to_owned(),
+                source: "fixture".to_owned(),
+            }],
+            true,
+        )
+        .unwrap();
+        let (manifest, snapshots) = discover_with_snapshots(
+            &root,
+            &config,
+            &policy,
+            limits(),
+            BTreeMap::new(),
+            &Cancellation::new(),
+        )
+        .unwrap()
+        .into_parts();
+        assert_eq!(manifest.configuration_hash, config.hash());
+        assert_eq!(manifest.inputs.len(), 5);
+        assert_eq!(snapshots.len(), 5);
+        for (path, content) in [
+            ("Script.fsscript", script.as_bytes()),
+            ("Script.fsx", script.as_bytes()),
+            ("Ambiguous.fs", script.as_bytes()),
+            ("Configured.fsscript", signature.as_slice()),
+            ("Contract.fsi", signature.as_slice()),
+        ] {
+            let input = manifest
+                .inputs
+                .iter()
+                .find(|input| input.path == path)
+                .unwrap();
+            let path = RelativePath::parse(Path::new(path)).unwrap();
+            assert_eq!(input.file, root.file_id(&path));
+            assert_eq!(input.class, InputClass::Source);
+            assert_eq!(input.encoding, "utf-8");
+            assert_eq!(input.bytes, u64::try_from(content.len()).unwrap());
+            assert_eq!(input.content_hash, content_hash(content));
+            assert_eq!(snapshots[&input.file].content(), content);
+            assert!(input.project_language_witnesses.is_empty());
+            let expected = match input.path.as_str() {
+                "Script.fsscript" => vec![
+                    LanguageSignal {
+                        language: "fsharp".to_owned(),
+                        evidence: LanguageEvidence::Extension,
+                    },
+                    LanguageSignal {
+                        language: "fsharp".to_owned(),
+                        evidence: LanguageEvidence::Configuration,
+                    },
+                ],
+                "Configured.fsscript" => vec![
+                    LanguageSignal {
+                        language: "fsharp".to_owned(),
+                        evidence: LanguageEvidence::Extension,
+                    },
+                    LanguageSignal {
+                        language: "fsharp-signature".to_owned(),
+                        evidence: LanguageEvidence::Configuration,
+                    },
+                ],
+                "Script.fsx" => vec![LanguageSignal {
+                    language: "fsharp".to_owned(),
+                    evidence: LanguageEvidence::Extension,
+                }],
+                "Contract.fsi" => vec![LanguageSignal {
+                    language: "fsharp-signature".to_owned(),
+                    evidence: LanguageEvidence::Extension,
+                }],
+                _ => Vec::new(),
+            };
+            assert_eq!(input.language_signals, expected, "{}", input.path);
+        }
+        for (path, reason) in [
+            ("denied.fsscript", ExclusionReason::Policy),
+            ("binary.fsscript", ExclusionReason::Binary),
+        ] {
+            assert!(
+                manifest
+                    .exclusions
+                    .iter()
+                    .any(|item| item.path == path && item.reason == reason)
+            );
+            assert!(!manifest.inputs.iter().any(|input| input.path == path));
         }
     }
 
@@ -5328,7 +6491,8 @@ max_source_file_bytes = 2097152
                 ".gitignore",
                 "cache-other.rs",
                 "cache/deep/kept.rs",
-                "cache/kept.rs"
+                "cache/kept.rs",
+                "target/kept.rs"
             ]
         );
         assert!(
@@ -5361,6 +6525,429 @@ max_source_file_bytes = 2097152
         ));
     }
 
+    #[test]
+    fn tracked_admission_reopens_only_required_artifact_routes() {
+        let temporary = local_tempdir();
+        write_fixture(&temporary, ".gitignore", b"!**/*.rs\n");
+        let mut tracked = BTreeSet::new();
+        let mut denied = Vec::new();
+        for artifact in ["target", "node_modules", ".venv", "dist", "build"] {
+            for prefix in [artifact.to_owned(), format!("fixtures/{artifact}")] {
+                write_fixture(&temporary, &format!("{prefix}/.gitignore"), b"!**/*.rs\n");
+                for suffix in ["kept.rs", "deep/kept.rs"] {
+                    let path = format!("{prefix}/{suffix}");
+                    write_fixture(&temporary, &path, b"fn value() {}\n");
+                    tracked.insert(path);
+                }
+                for suffix in ["untracked.rs", "deep/untracked.rs"] {
+                    let path = format!("{prefix}/{suffix}");
+                    write_fixture(&temporary, &path, b"fn value() {}\n");
+                    denied.push(path);
+                }
+                write_fixture(
+                    &temporary,
+                    &format!("{prefix}/untracked-dir/ignored.rs"),
+                    b"fn value() {}\n",
+                );
+                denied.push(format!("{prefix}/untracked-dir"));
+            }
+        }
+        let root = fixture_root(&temporary, b"tracked-artifact-routes");
+        let policy = DiscoveryPolicy::build(Vec::new(), true)
+            .expect("policy builds")
+            .with_tracked_files(tracked.clone(), &Cancellation::new())
+            .expect("tracked paths validate");
+        let manifest = discover(&root, &config(), &policy, limits(), &Cancellation::new())
+            .expect("tracked artifact discovery succeeds");
+        tracked.insert(".gitignore".to_owned());
+        assert_eq!(
+            manifest
+                .inputs
+                .iter()
+                .map(|input| input.path.clone())
+                .collect::<BTreeSet<_>>(),
+            tracked
+        );
+        for path in denied {
+            assert!(
+                manifest.exclusions.iter().any(|exclusion| {
+                    exclusion.path == path && exclusion.reason == ExclusionReason::Policy
+                }),
+                "{path}"
+            );
+        }
+    }
+
+    #[test]
+    fn tracked_artifact_admission_preserves_host_and_explicit_exclusions() {
+        let temporary = local_tempdir();
+        let paths = [
+            "fixtures/target/kept.rs",
+            "fixtures/target/host-denied.rs",
+            "fixtures/target/repository-denied.rs",
+            "fixtures/target/operation-denied.rs",
+        ];
+        for path in paths {
+            write_fixture(&temporary, path, b"fn value() {}\n");
+        }
+        let root = fixture_root(&temporary, b"tracked-artifact-denials");
+        let policy = DiscoveryPolicy::build(
+            vec![
+                PolicyRule {
+                    layer: PolicyLayer::Default,
+                    pattern: "**/host-denied.rs".to_owned(),
+                    source: "host".to_owned(),
+                },
+                PolicyRule {
+                    layer: PolicyLayer::Repository,
+                    pattern: "**/repository-denied.rs".to_owned(),
+                    source: "repository".to_owned(),
+                },
+                PolicyRule {
+                    layer: PolicyLayer::Operation,
+                    pattern: "**/operation-denied.rs".to_owned(),
+                    source: "operation".to_owned(),
+                },
+            ],
+            true,
+        )
+        .expect("policy builds")
+        .with_tracked_files(paths.map(str::to_owned).into(), &Cancellation::new())
+        .expect("tracked paths validate");
+        let manifest = discover(&root, &config(), &policy, limits(), &Cancellation::new())
+            .expect("tracked artifact discovery succeeds");
+        assert_eq!(
+            manifest
+                .inputs
+                .iter()
+                .map(|input| input.path.as_str())
+                .collect::<Vec<_>>(),
+            ["fixtures/target/kept.rs"]
+        );
+        for path in paths.into_iter().skip(1) {
+            assert!(manifest.exclusions.iter().any(|exclusion| {
+                exclusion.path == path && exclusion.reason == ExclusionReason::Policy
+            }));
+        }
+    }
+
+    #[test]
+    fn caller_default_exclusion_cannot_spoof_builtin_artifact_authority() {
+        for source in ["host", "rootlight-default"] {
+            let policy = DiscoveryPolicy::build(
+                vec![PolicyRule {
+                    layer: PolicyLayer::Default,
+                    pattern: "target/".to_owned(),
+                    source: source.to_owned(),
+                }],
+                true,
+            )
+            .expect("policy builds")
+            .with_tracked_files(
+                ["fixtures/target/kept.rs".to_owned()].into(),
+                &Cancellation::new(),
+            )
+            .expect("tracked paths validate");
+            for (path, is_directory) in [
+                ("fixtures/target", true),
+                ("fixtures/target/kept.rs", false),
+            ] {
+                let path = RelativePath::parse(Path::new(path)).expect("fixture path");
+                let decision = policy.decision(&path, is_directory);
+                assert!(
+                    decision.excluded && !decision.included,
+                    "{source}: {path:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn tracked_admission_keeps_git_metadata_hard_under_pattern_negation() {
+        let temporary = local_tempdir();
+        let paths = [
+            ".git",
+            "nested/.git/target/kept.rs",
+            "target/.git/build/kept.rs",
+        ];
+        for path in paths {
+            write_fixture(&temporary, path, b"metadata\n");
+        }
+        let root = fixture_root(&temporary, b"tracked-metadata-boundary");
+        let policy = DiscoveryPolicy::build(
+            vec![
+                PolicyRule {
+                    layer: PolicyLayer::Default,
+                    pattern: "!**/.git".to_owned(),
+                    source: "host".to_owned(),
+                },
+                PolicyRule {
+                    layer: PolicyLayer::Default,
+                    pattern: "!**/target/".to_owned(),
+                    source: "host".to_owned(),
+                },
+                PolicyRule {
+                    layer: PolicyLayer::VcsIgnore,
+                    pattern: "!**/.git/**".to_owned(),
+                    source: "repository-ignore".to_owned(),
+                },
+                PolicyRule {
+                    layer: PolicyLayer::Repository,
+                    pattern: "!**".to_owned(),
+                    source: "repository".to_owned(),
+                },
+                PolicyRule {
+                    layer: PolicyLayer::Operation,
+                    pattern: "!**".to_owned(),
+                    source: "operation".to_owned(),
+                },
+            ],
+            true,
+        )
+        .expect("policy builds")
+        .with_tracked_files(paths.map(str::to_owned).into(), &Cancellation::new())
+        .expect("tracked paths validate");
+        for path in paths {
+            let path = RelativePath::parse(Path::new(path)).expect("fixture path");
+            let decision = policy.decision(&path, false);
+            assert!(decision.excluded && !decision.included, "{path:?}");
+            assert_eq!(
+                decision.decisive_rule,
+                Some(DecisiveRule {
+                    source: "rootlight-default".to_owned(),
+                    pattern: ".git".to_owned(),
+                })
+            );
+        }
+        let manifest = discover(&root, &config(), &policy, limits(), &Cancellation::new())
+            .expect("metadata-safe discovery succeeds");
+        assert!(manifest.inputs.is_empty());
+        for path in [".git", "nested/.git", "target/.git"] {
+            assert!(manifest.exclusions.iter().any(|exclusion| {
+                exclusion.path == path && exclusion.reason == ExclusionReason::Policy
+            }));
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_git_metadata_casing_is_hard_without_folding_source_policy() {
+        for metadata_name in [".GIT", ".Git"] {
+            let temporary = local_tempdir();
+            let tracked_metadata = [
+                format!("{metadata_name}/target/tracked.rs"),
+                format!("worktree/{metadata_name}"),
+                format!("target/nested/{metadata_name}/build/tracked.rs"),
+            ];
+            for path in &tracked_metadata {
+                write_fixture(&temporary, path, b"gitdir: ../metadata\n");
+            }
+            for path in [
+                format!("{metadata_name}/untracked.rs"),
+                format!("target/nested/{metadata_name}/untracked.rs"),
+            ] {
+                write_fixture(&temporary, &path, b"metadata\n");
+            }
+            let source_cases = [
+                (PolicyLayer::Default, "host", "Host"),
+                (PolicyLayer::VcsIgnore, "vcs", "Vcs"),
+                (PolicyLayer::Repository, "repository", "Repository"),
+                (PolicyLayer::Operation, "operation", "Operation"),
+            ];
+            let mut rules = Vec::new();
+            for (layer, excluded_name, retained_name) in source_cases {
+                write_fixture(
+                    &temporary,
+                    &format!("src/{retained_name}.rs"),
+                    b"fn value() {}\n",
+                );
+                for pattern in [
+                    format!("!**/{metadata_name}"),
+                    format!("!**/{metadata_name}/**"),
+                    format!("src/{excluded_name}.rs"),
+                ] {
+                    rules.push(PolicyRule {
+                        layer,
+                        pattern,
+                        source: excluded_name.to_owned(),
+                    });
+                }
+            }
+            for path in [
+                "src/metadata-lookalike.git.rs",
+                "artifact-case/Target/ordinary.rs",
+                "target/kept.rs",
+            ] {
+                write_fixture(&temporary, path, b"fn value() {}\n");
+            }
+            let root = fixture_root(&temporary, b"windows-metadata-casing-boundary");
+            let cancellation = Cancellation::new();
+            for (directory, kind) in [
+                (None, EntryKind::Directory),
+                (Some("worktree"), EntryKind::File),
+            ] {
+                let directory = directory.map(|path| {
+                    RelativePath::parse(Path::new(path)).expect("fixture directory path")
+                });
+                let entries = root
+                    .read_directory(directory.as_ref(), 16, &cancellation)
+                    .expect("fixture directory enumerates");
+                assert!(entries.iter().any(|entry| {
+                    entry.name == OsStr::new(metadata_name) && entry.kind == kind
+                }));
+            }
+            let mut tracked = BTreeSet::from(tracked_metadata);
+            tracked.insert("target/kept.rs".to_owned());
+            let policy = DiscoveryPolicy::build(rules, true)
+                .expect("policy builds")
+                .with_tracked_files_in_root(&root, tracked, &cancellation)
+                .expect("tracked paths validate");
+            let manifest = discover(&root, &config(), &policy, limits(), &cancellation)
+                .expect("metadata-safe discovery succeeds");
+            assert_eq!(
+                manifest
+                    .inputs
+                    .iter()
+                    .map(|input| input.path.as_str())
+                    .collect::<Vec<_>>(),
+                [
+                    "artifact-case/Target/ordinary.rs",
+                    "src/Host.rs",
+                    "src/Operation.rs",
+                    "src/Repository.rs",
+                    "src/Vcs.rs",
+                    "src/metadata-lookalike.git.rs",
+                    "target/kept.rs",
+                ],
+                "{metadata_name} metadata must not be indexed"
+            );
+            for path in [
+                metadata_name.to_owned(),
+                format!("worktree/{metadata_name}"),
+                format!("target/nested/{metadata_name}"),
+            ] {
+                assert!(manifest.exclusions.iter().any(|exclusion| {
+                    exclusion.path == path
+                        && exclusion.reason == ExclusionReason::Policy
+                        && exclusion.decisive_rule
+                            == Some(DecisiveRule {
+                                source: "rootlight-default".to_owned(),
+                                pattern: ".git".to_owned(),
+                            })
+                }));
+            }
+            for path in [
+                format!("{metadata_name}/target/tracked.rs"),
+                format!("{metadata_name}/untracked.rs"),
+                format!("target/nested/{metadata_name}/build/tracked.rs"),
+                format!("target/nested/{metadata_name}/untracked.rs"),
+                format!("worktree/{metadata_name}"),
+            ] {
+                let path = RelativePath::parse(Path::new(&path)).expect("fixture metadata path");
+                let decision = policy.decision(&path, false);
+                assert!(decision.excluded && !decision.included, "{path:?}");
+            }
+            for (_, excluded_name, retained_name) in source_cases {
+                let excluded = RelativePath::parse(Path::new(&format!("src/{excluded_name}.rs")))
+                    .expect("excluded source path");
+                let retained = RelativePath::parse(Path::new(&format!("src/{retained_name}.rs")))
+                    .expect("retained source path");
+                assert!(policy.decision(&excluded, false).excluded);
+                assert!(!policy.decision(&retained, false).excluded);
+            }
+            let artifact = RelativePath::parse(Path::new("artifact-case/target/ordinary.rs"))
+                .expect("case-sensitive artifact policy path");
+            assert!(policy.decision(&artifact, false).excluded);
+        }
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn git_metadata_policy_preserves_distinct_non_windows_names() {
+        let policy = DiscoveryPolicy::build(Vec::new(), true).expect("policy builds");
+        for name in [".GIT", ".Git", "src/.GIT", "src/.Git"] {
+            let path = RelativePath::parse(Path::new(name)).expect("distinct metadata-like path");
+            for is_directory in [false, true] {
+                assert!(!policy.decision(&path, is_directory).excluded);
+            }
+        }
+        for name in [".git", "src/.git", "src/.git/tracked.rs"] {
+            let path = RelativePath::parse(Path::new(name)).expect("metadata path");
+            for is_directory in [false, true] {
+                assert!(policy.decision(&path, is_directory).excluded);
+            }
+        }
+    }
+
+    #[test]
+    fn tracked_artifact_admission_preserves_binary_size_and_depth_safety() {
+        let temporary = local_tempdir();
+        write_fixture(&temporary, "target/kept.rs", b"fn value() {}\n");
+        write_fixture(&temporary, "target/binary.rs", b"\0binary\0");
+        write_fixture(&temporary, "target/large.rs", &[b'x'; 32]);
+        write_fixture(&temporary, "target/deep/kept.rs", b"fn value() {}\n");
+        let root = fixture_root(&temporary, b"tracked-artifact-safety");
+        let policy = DiscoveryPolicy::build(Vec::new(), true)
+            .expect("policy builds")
+            .with_tracked_files(
+                [
+                    "target/kept.rs",
+                    "target/binary.rs",
+                    "target/large.rs",
+                    "target/deep/kept.rs",
+                ]
+                .map(str::to_owned)
+                .into(),
+                &Cancellation::new(),
+            )
+            .expect("tracked paths validate");
+        let bounds = DiscoveryLimits::new(100, 1, 16, 16).expect("fixture bounds");
+        let manifest = discover(&root, &config(), &policy, bounds, &Cancellation::new())
+            .expect("bounded tracked discovery succeeds");
+        assert_eq!(
+            manifest
+                .inputs
+                .iter()
+                .map(|input| input.path.as_str())
+                .collect::<Vec<_>>(),
+            ["target/kept.rs"]
+        );
+        for (path, reason) in [
+            ("target/binary.rs", ExclusionReason::Binary),
+            ("target/large.rs", ExclusionReason::Oversized),
+            ("target/deep", ExclusionReason::DepthLimit),
+        ] {
+            assert!(
+                manifest
+                    .exclusions
+                    .iter()
+                    .any(|exclusion| { exclusion.path == path && exclusion.reason == reason })
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn tracked_artifact_admission_does_not_follow_symbolic_links() {
+        use std::os::unix::fs::symlink;
+
+        let temporary = local_tempdir();
+        write_fixture(&temporary, "target/source.rs", b"fn value() {}\n");
+        symlink("source.rs", temporary.path().join("target/linked.rs"))
+            .expect("tracked fixture link is created");
+        let root = fixture_root(&temporary, b"tracked-artifact-links");
+        let policy = DiscoveryPolicy::build(Vec::new(), true)
+            .expect("policy builds")
+            .with_tracked_files(["target/linked.rs".to_owned()].into(), &Cancellation::new())
+            .expect("tracked paths validate");
+        let manifest = discover(&root, &config(), &policy, limits(), &Cancellation::new())
+            .expect("link-safe tracked discovery succeeds");
+        assert!(manifest.inputs.is_empty());
+        assert!(manifest.exclusions.iter().any(|exclusion| {
+            exclusion.path == "target/linked.rs" && exclusion.reason == ExclusionReason::Link
+        }));
+    }
+
     #[cfg(windows)]
     #[test]
     fn tracked_admission_resolves_existing_casing_without_admitting_siblings() {
@@ -5372,6 +6959,10 @@ max_source_file_bytes = 2097152
             "Cache/Deep/Denied.fs",
             "Cache/Deep/RepositoryDenied.fs",
             "target/Kept.fs",
+            "fixtures/target/Deep/Unit.fs",
+            "fixtures/target/Deep/Untracked.fs",
+            "fixtures/target/Deep/Denied.fs",
+            "fixtures/target/Deep/RepositoryDenied.fs",
         ] {
             write_fixture(&temporary, path, b"module Unit\nlet value = 1\n");
         }
@@ -5380,6 +6971,13 @@ max_source_file_bytes = 2097152
             temporary.path().join("Cache/Deep/UntrackedLink.fs"),
         )
         .expect("untracked hardlink is created");
+        std::fs::hard_link(
+            temporary.path().join("fixtures/target/Deep/Unit.fs"),
+            temporary
+                .path()
+                .join("fixtures/target/Deep/UntrackedLink.fs"),
+        )
+        .expect("untracked artifact hardlink is created");
         let root = fixture_root(&temporary, b"tracked-path-casing");
         let policy = DiscoveryPolicy::build(
             vec![
@@ -5405,6 +7003,9 @@ max_source_file_bytes = 2097152
                 "cache/deep/repositorydenied.fs",
                 "target/kept.fs",
                 "cache/deep/missing.fs",
+                "fixtures/target/deep/unit.fs",
+                "fixtures/target/deep/denied.fs",
+                "fixtures/target/deep/repositorydenied.fs",
             ]
             .map(str::to_owned)
             .into(),
@@ -5423,7 +7024,12 @@ max_source_file_bytes = 2097152
                 .iter()
                 .map(|input| input.path.as_str())
                 .collect::<Vec<_>>(),
-            [".gitignore", "Cache/Deep/Unit.fs"]
+            [
+                ".gitignore",
+                "Cache/Deep/Unit.fs",
+                "fixtures/target/Deep/Unit.fs",
+                "target/Kept.fs"
+            ]
         );
         let retained = manifest
             .inputs
@@ -5457,6 +7063,21 @@ max_source_file_bytes = 2097152
             &RelativePath::parse(Path::new("Cache/Deep/UntrackedLink.fs")).expect("hardlink path"),
             false,
         ));
+        assert!(
+            !policy.admits_tracked_path(
+                &RelativePath::parse(Path::new("fixtures/target/Deep/UntrackedLink.fs"))
+                    .expect("artifact hardlink path"),
+                false,
+            )
+        );
+        let artifact = manifest
+            .inputs
+            .iter()
+            .find(|input| input.path == "fixtures/target/Deep/Unit.fs")
+            .expect("artifact source existing spelling is retained");
+        let artifact_path = RelativePath::parse(Path::new("fixtures/target/Deep/Unit.fs"))
+            .expect("artifact source path");
+        assert_eq!(artifact.file, root.file_id(&artifact_path));
     }
 
     #[test]

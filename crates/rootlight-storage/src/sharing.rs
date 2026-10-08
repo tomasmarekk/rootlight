@@ -14,8 +14,9 @@ use rootlight_ir::{
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    GenerationContext, GenerationContractVersion, GenerationMetadata, GenerationSnapshot,
-    GenerationValidationError, IdentityVerificationError, IdentityVerifiedGeneration,
+    GenerationContext, GenerationContractVersion, GenerationControlError, GenerationMetadata,
+    GenerationSnapshot, GenerationValidationError, IdentityVerificationError,
+    IdentityVerifiedGeneration,
 };
 
 /// Wire identity for portable immutable-generation bundles.
@@ -409,8 +410,24 @@ fn map_metadata_error(_error: GenerationValidationError) -> SharedGenerationErro
     SharedGenerationError::Identity
 }
 
-fn map_identity_error(_error: IdentityVerificationError) -> SharedGenerationError {
-    SharedGenerationError::Identity
+fn map_identity_error(error: IdentityVerificationError) -> SharedGenerationError {
+    match error {
+        IdentityVerificationError::ResourceUnavailable
+        | IdentityVerificationError::Control(GenerationControlError::BudgetExceeded { .. }) => {
+            SharedGenerationError::ResourceLimit
+        }
+        IdentityVerificationError::Control(GenerationControlError::Cancelled { .. }) => {
+            SharedGenerationError::Cancelled
+        }
+        IdentityVerificationError::InvalidGeneration
+        | IdentityVerificationError::LegacyContract
+        | IdentityVerificationError::MissingClaim
+        | IdentityVerificationError::DuplicateClaim
+        | IdentityVerificationError::IdentityMismatch(_)
+        | IdentityVerificationError::ManifestMismatch
+        | IdentityVerificationError::UnsupportedExtension
+        | IdentityVerificationError::RecipeEncoding => SharedGenerationError::Identity,
+    }
 }
 
 /// Invalid, mismatched, or resource-exhausting shared generation transfer.
@@ -420,7 +437,7 @@ pub enum SharedGenerationError {
     /// A configured transfer limit is zero, inconsistent, or above hard limits.
     #[error("shared generation transfer limit is invalid")]
     InvalidLimit,
-    /// The transfer exceeded a byte, collection, or representation limit.
+    /// The transfer exceeded a limit or bounded workspace was unavailable.
     #[error("shared generation transfer exceeded a resource limit")]
     ResourceLimit,
     /// Cooperative cancellation or a monotonic deadline stopped the transfer.
@@ -458,7 +475,48 @@ mod tests {
     use rootlight_ir::{ExtensionSupport, IrLimits, NormalizedIrDocument};
 
     use super::*;
-    use crate::{GENERATION_CONTRACT_VERSION, GenerationBudget, GenerationManifestRecipe};
+    use crate::{
+        GENERATION_CONTRACT_VERSION, GenerationBudget, GenerationManifestRecipe,
+        GenerationResource, IdentityMismatchComponent,
+    };
+
+    #[test]
+    fn identity_mapping_preserves_resource_and_cancellation_failures() {
+        assert_eq!(
+            map_identity_error(IdentityVerificationError::ResourceUnavailable),
+            SharedGenerationError::ResourceLimit,
+        );
+        assert_eq!(
+            map_identity_error(IdentityVerificationError::Control(
+                GenerationControlError::BudgetExceeded {
+                    resource: GenerationResource::Rows,
+                    observed: 2,
+                    limit: 1,
+                },
+            )),
+            SharedGenerationError::ResourceLimit,
+        );
+        assert_eq!(
+            map_identity_error(IdentityVerificationError::Control(
+                GenerationControlError::Cancelled {
+                    reason: CancellationReason::ClientRequest,
+                },
+            )),
+            SharedGenerationError::Cancelled,
+        );
+        for error in [
+            IdentityVerificationError::InvalidGeneration,
+            IdentityVerificationError::LegacyContract,
+            IdentityVerificationError::MissingClaim,
+            IdentityVerificationError::DuplicateClaim,
+            IdentityVerificationError::IdentityMismatch(IdentityMismatchComponent::FileClaim),
+            IdentityVerificationError::ManifestMismatch,
+            IdentityVerificationError::UnsupportedExtension,
+            IdentityVerificationError::RecipeEncoding,
+        ] {
+            assert_eq!(map_identity_error(error), SharedGenerationError::Identity);
+        }
+    }
 
     fn fixture() -> (GenerationSnapshot, Cancellation, IrLimits, ExtensionSupport) {
         fixture_for_version(rootlight_ir::NormalizedIrVersion::V1_1)

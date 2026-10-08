@@ -28,6 +28,9 @@ const SOURCE_BYTES: u64 = 64;
 #[path = "scope_resolution/perl_binding.rs"]
 mod perl_binding;
 
+#[path = "scope_resolution/fsharp_binding.rs"]
+mod fsharp_binding;
+
 #[path = "scope_resolution/groovy_import.rs"]
 mod groovy_import;
 
@@ -1308,6 +1311,348 @@ fn resolver_work_limit_bounds_same_name_candidate_scans() {
     assert_eq!(total_count, 3);
     assert_eq!(completeness, CoverageStatus::Bounded);
     assert_eq!(exact.decisions[0].explanation.candidates.len(), 1);
+}
+
+#[test]
+fn ordinary_repeated_contexts_preserve_bounded_decisions_and_applied_identity() {
+    for language in ["csharp", "bash", "powershell", "rust", "python"] {
+        for candidate_limit in [1, 8] {
+            let mut fixture = ordinary_repeated_fixture(language);
+            let original_occurrences = fixture.document.occurrences.clone();
+            for (index, occurrence) in original_occurrences.iter().enumerate() {
+                fixture.document.relations.push(RelationRecord {
+                    id: FactId::from_bytes([80 + u8::try_from(index).unwrap(); 20]),
+                    repository: fixture.document.repository,
+                    generation: fixture.document.generation,
+                    subject: RelationEndpoint::Entity(fixture.document.entities[0].id),
+                    predicate: RelationPredicate::DefinesAt,
+                    object: RelationEndpoint::Occurrence(occurrence.id),
+                    confidence: Confidence::new(1_000).unwrap(),
+                    evidence_kind: EvidenceKind::Syntax,
+                    provenance: fixture.provenance,
+                    evidence: FactEvidence {
+                        source: Some(occurrence.source.clone()),
+                        derivation: vec![FactRef::Fact(occurrence.id)],
+                    },
+                });
+            }
+            fixture.validate();
+            let cancellation = Cancellation::new();
+            let engine = ResolutionEngine::new(
+                ResolutionLimits::with_work_limit(candidate_limit, 8).unwrap(),
+            );
+            // All five indexed names are inspected, including rejected languages and kinds.
+            assert_eq!(
+                engine
+                    .estimate_work(&fixture.document, &cancellation)
+                    .unwrap()
+                    .required,
+                8,
+                "{language}: three sites plus one five-candidate inspection"
+            );
+            let batch = engine.resolve(&fixture.document, &cancellation).unwrap();
+            assert_eq!(batch.decisions.len(), 3);
+            for decision in &batch.decisions {
+                let mut independent = fixture.document.clone();
+                independent
+                    .occurrences
+                    .retain(|occurrence| occurrence.id == decision.occurrence);
+                independent.relations.retain(|relation| {
+                    relation.object == RelationEndpoint::Occurrence(decision.occurrence)
+                });
+                assert_eq!(
+                    engine
+                        .resolve(&independent, &cancellation)
+                        .unwrap()
+                        .decisions,
+                    vec![decision.clone()],
+                    "{language}: isolated scoring retains the exact occurrence and explanation"
+                );
+                let ResolutionOutcome::Candidates {
+                    symbols,
+                    total_count,
+                    completeness,
+                    ..
+                } = &decision.outcome
+                else {
+                    panic!("two native modules remain ambiguous");
+                };
+                assert_eq!(symbols.len(), candidate_limit.min(2));
+                assert_eq!(*total_count, 2);
+                assert_eq!(
+                    *completeness,
+                    if candidate_limit == 1 {
+                        CoverageStatus::Bounded
+                    } else {
+                        CoverageStatus::Complete
+                    }
+                );
+                assert_eq!(decision.explanation.rejected_total, 3);
+                if candidate_limit > 1 {
+                    assert!(
+                        decision
+                            .explanation
+                            .rejected_candidates
+                            .iter()
+                            .any(|candidate| {
+                                candidate.reason == RejectionReason::LanguageMismatch
+                            })
+                    );
+                    assert!(
+                        decision
+                            .explanation
+                            .rejected_candidates
+                            .iter()
+                            .any(|candidate| {
+                                candidate.reason == RejectionReason::TargetKindMismatch
+                            })
+                    );
+                }
+            }
+            let context = ResolverFactContext::new(fixture.content_hash);
+            let applied = engine
+                .apply(fixture.document.clone(), context, &cancellation)
+                .unwrap();
+            let streamed = engine
+                .apply_document(fixture.document.clone(), context, &cancellation)
+                .unwrap();
+            let (bounded, estimate) = engine
+                .apply_document_bounded(fixture.document.clone(), context, &cancellation)
+                .unwrap();
+            assert_eq!(applied.batch, batch);
+            assert_eq!(streamed, applied.document);
+            assert_eq!(bounded, applied.document);
+            assert_eq!(estimate.required, 8);
+            for original in &original_occurrences {
+                let occurrence = applied
+                    .document
+                    .occurrences
+                    .iter()
+                    .find(|occurrence| occurrence.source == original.source)
+                    .unwrap();
+                assert_ne!(occurrence.id, original.id);
+                assert_eq!(occurrence.evidence.source, original.evidence.source);
+                assert_eq!(occurrence.syntax_kind, original.syntax_kind);
+                assert_eq!(
+                    occurrence.id,
+                    rootlight_ir::derive_occurrence_record_id(occurrence).unwrap()
+                );
+                let provenance = applied
+                    .document
+                    .provenance
+                    .iter()
+                    .find(|record| record.id == occurrence.provenance)
+                    .unwrap();
+                assert_eq!(provenance.producer_kind, ProducerKind::Rule);
+                assert!(provenance.input_sources.contains(&original.source));
+                assert_eq!(
+                    provenance.id,
+                    rootlight_ir::derive_provenance_record_id(provenance).unwrap()
+                );
+                let relation = applied
+                    .document
+                    .relations
+                    .iter()
+                    .find(|relation| {
+                        relation.predicate == RelationPredicate::DefinesAt
+                            && relation.object == RelationEndpoint::Occurrence(occurrence.id)
+                    })
+                    .unwrap();
+                assert!(
+                    relation
+                        .evidence
+                        .derivation
+                        .contains(&FactRef::Fact(occurrence.id))
+                );
+                assert!(
+                    !relation
+                        .evidence
+                        .derivation
+                        .contains(&FactRef::Fact(original.id))
+                );
+                assert_eq!(
+                    relation.id,
+                    rootlight_ir::derive_relation_record_id(relation).unwrap()
+                );
+            }
+            let limited = ResolutionEngine::new(
+                ResolutionLimits::with_work_limit(candidate_limit, 7).unwrap(),
+            );
+            assert!(matches!(
+                limited.resolve(&fixture.document, &cancellation),
+                Err(ResolutionError::WorkLimit { maximum: 7 })
+            ));
+            let (partial, partial_estimate) = limited
+                .apply_document_bounded(fixture.document.clone(), context, &cancellation)
+                .unwrap();
+            assert_eq!(partial_estimate.required, 8);
+            assert!(partial.occurrences.iter().all(|occurrence| {
+                matches!(occurrence.target, OccurrenceTarget::Unresolved { .. })
+            }));
+            fixture.document.entities.reverse();
+            fixture.document.occurrences.reverse();
+            fixture.document.relations.reverse();
+            fixture.document.provenance.reverse();
+            assert_eq!(
+                engine.resolve(&fixture.document, &cancellation).unwrap(),
+                batch
+            );
+            let (reordered, reordered_estimate) = limited
+                .apply_document_bounded(fixture.document, context, &cancellation)
+                .unwrap();
+            assert_eq!(reordered_estimate, partial_estimate);
+            assert_eq!(reordered, partial);
+        }
+    }
+}
+
+#[test]
+fn ordinary_repeated_contexts_keep_all_scoring_inputs_distinct() {
+    let mut fixture = ordinary_repeated_fixture("rust");
+    let second_file = fixture.add_file(2, "src/other.rs");
+    let scope = fixture.add_entity(
+        50,
+        "scope",
+        fixture.primary_file,
+        EntityKind::Function,
+        None,
+    );
+    let mut provenance = fixture.document.provenance[0].clone();
+    provenance.id = FactId::from_bytes([60; 20]);
+    provenance.tier = AnalysisTier::TierD;
+    provenance.build_context = BuildContextIdentity::new(content_hash(b"other-context"));
+    fixture.document.provenance.push(provenance);
+    for identity in 30..36 {
+        let mut occurrence = fixture.document.occurrences[0].clone();
+        occurrence.id = FactId::from_bytes([identity; 20]);
+        match identity {
+            30 => occurrence.file = second_file,
+            31 => occurrence.enclosing = Some(scope),
+            32 => occurrence.syntax_kind = "rust.other.import".to_owned(),
+            33 => occurrence.provenance = FactId::from_bytes([60; 20]),
+            34 => {
+                occurrence.role = OccurrenceRole::CallSite;
+            }
+            35 => {
+                let hash = content_hash(b"absent");
+                occurrence.syntactic_text_hash = hash;
+                occurrence.target = OccurrenceTarget::Unresolved { text_hash: hash };
+            }
+            _ => unreachable!("fixture identity is within its bounded range"),
+        }
+        let start = u64::from(identity);
+        occurrence.source = source_ref(
+            fixture.document.repository,
+            fixture.document.generation,
+            occurrence.file,
+            fixture.content_hash,
+            start,
+            start + 1,
+        );
+        occurrence.evidence.source = Some(occurrence.source.clone());
+        fixture.document.occurrences.push(occurrence);
+    }
+    fixture.validate();
+    let cancellation = Cancellation::new();
+    let engine = ResolutionEngine::new(ResolutionLimits::with_work_limit(8, 39).unwrap());
+    assert_eq!(
+        engine
+            .estimate_work(&fixture.document, &cancellation)
+            .unwrap()
+            .required,
+        39
+    );
+    let batch = engine.resolve(&fixture.document, &cancellation).unwrap();
+    assert_eq!(batch.decisions.len(), 9);
+    for decision in &batch.decisions {
+        let mut independent = fixture.document.clone();
+        independent
+            .occurrences
+            .retain(|occurrence| occurrence.id == decision.occurrence);
+        assert_eq!(
+            engine
+                .resolve(&independent, &cancellation)
+                .unwrap()
+                .decisions,
+            vec![decision.clone()]
+        );
+    }
+    assert_ne!(batch.decisions[0].outcome, batch.decisions[6].outcome);
+    let context = ResolverFactContext::new(fixture.content_hash);
+    let expected = engine
+        .apply(fixture.document.clone(), context, &cancellation)
+        .unwrap();
+    assert_eq!(
+        engine
+            .apply_document(fixture.document.clone(), context, &cancellation)
+            .unwrap(),
+        expected.document
+    );
+    let (bounded, estimate) = engine
+        .apply_document_bounded(fixture.document, context, &cancellation)
+        .unwrap();
+    assert_eq!(estimate.required, 39);
+    assert_eq!(bounded, expected.document);
+}
+
+#[test]
+fn ordinary_context_reuse_excludes_span_sensitive_elm_routes() {
+    for (syntax_kind, role, kind) in [
+        ("elm.import", OccurrenceRole::ImportUse, EntityKind::Module),
+        (
+            "elm.type.reference",
+            OccurrenceRole::TypeUse,
+            EntityKind::TypeAlias,
+        ),
+    ] {
+        let mut fixture = Fixture::new();
+        let target_file = if role == OccurrenceRole::ImportUse {
+            fixture.add_file(2, "src/Shared.elm")
+        } else {
+            fixture.primary_file
+        };
+        let target = fixture.add_entity(10, "Shared", target_file, kind, None);
+        for identity in [20, 21] {
+            fixture.add_occurrence(identity, "Shared", fixture.primary_file, role, None);
+        }
+        for file in &mut fixture.document.files {
+            file.language = "elm".to_owned();
+        }
+        fixture.document.entities[0].language = "elm".to_owned();
+        fixture.document.provenance[0].language = "elm".to_owned();
+        for (index, occurrence) in fixture.document.occurrences.iter_mut().enumerate() {
+            let start = 16 + u64::try_from(index).unwrap() * 8;
+            occurrence.source = source_ref(
+                fixture.document.repository,
+                fixture.document.generation,
+                fixture.primary_file,
+                fixture.content_hash,
+                start,
+                start + 6 + u64::try_from(index).unwrap(),
+            );
+            occurrence.evidence.source = Some(occurrence.source.clone());
+            occurrence.syntax_kind = syntax_kind.to_owned();
+        }
+        fixture.validate();
+        let engine = ResolutionEngine::new(ResolutionLimits::with_work_limit(8, 4).unwrap());
+        assert_eq!(
+            engine
+                .estimate_work(&fixture.document, &Cancellation::new())
+                .unwrap()
+                .required,
+            4
+        );
+        let batch = engine
+            .resolve(&fixture.document, &Cancellation::new())
+            .unwrap();
+        assert!(
+            matches!(batch.decisions[0].outcome, ResolutionOutcome::Resolved { symbol, .. } if symbol == target)
+        );
+        assert!(matches!(
+            batch.decisions[1].outcome,
+            ResolutionOutcome::Unresolved { .. }
+        ));
+    }
 }
 
 #[test]
@@ -2659,6 +3004,56 @@ struct Fixture {
     primary_file: FileId,
     provenance: FactId,
     content_hash: ContentHash,
+}
+
+fn ordinary_repeated_fixture(language: &str) -> Fixture {
+    let mut fixture = Fixture::new();
+    for identity in 10..15 {
+        fixture.add_entity(
+            identity,
+            "shared",
+            fixture.primary_file,
+            if identity == 14 {
+                EntityKind::Function
+            } else {
+                EntityKind::Module
+            },
+            None,
+        );
+    }
+    for identity in 20..23 {
+        fixture.add_occurrence(
+            identity,
+            "shared",
+            fixture.primary_file,
+            OccurrenceRole::ImportUse,
+            None,
+        );
+    }
+    fixture.document.files[0].language = language.to_owned();
+    fixture.document.provenance[0].language = language.to_owned();
+    for (index, entity) in fixture.document.entities.iter_mut().enumerate() {
+        entity.language = if matches!(index, 2 | 3) {
+            "fixture-foreign"
+        } else {
+            language
+        }
+        .to_owned();
+    }
+    for (index, occurrence) in fixture.document.occurrences.iter_mut().enumerate() {
+        let start = 16 + u64::try_from(index).unwrap() * 8;
+        occurrence.source = source_ref(
+            fixture.document.repository,
+            fixture.document.generation,
+            fixture.primary_file,
+            fixture.content_hash,
+            start,
+            start + 8,
+        );
+        occurrence.evidence.source = Some(occurrence.source.clone());
+        occurrence.syntax_kind = format!("{language}.import");
+    }
+    fixture
 }
 
 impl Fixture {

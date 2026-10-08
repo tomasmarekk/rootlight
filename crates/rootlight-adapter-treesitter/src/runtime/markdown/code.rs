@@ -10,6 +10,7 @@ impl TreeSitterProvider {
         &self,
         tree: &Tree,
         request: &ParseRequest<'_>,
+        source: &NativeSourceView<'_>,
         traversal: &mut TraversalReport,
         candidates: &mut Vec<QueryCandidate>,
         max_facts: Option<usize>,
@@ -27,7 +28,7 @@ impl TreeSitterProvider {
             if candidate.syntax != "markdown.code_block"
                 || candidate.role != StructuralRole::Signature
                 || (!request.included_ranges().is_empty()
-                    && !candidate_within_included_range(&candidate, request)?)
+                    && !candidate_within_included_range(&candidate, request, source)?)
             {
                 continue;
             }
@@ -39,12 +40,8 @@ impl TreeSitterProvider {
                         && node.byte_range() == (candidate.start..candidate.end)
                 })
                 .ok_or_else(|| provider_failure("markdown-code-host-span"))?;
-            let Some(language) = fence_language(
-                block,
-                request.source().bytes(),
-                &self.registry,
-                cancellation,
-            )?
+            let Some(language) =
+                fence_language(block, source.as_bytes(), &self.registry, cancellation)?
             else {
                 continue;
             };
@@ -69,7 +66,7 @@ impl TreeSitterProvider {
                 continue;
             };
             if family.is_cobol()
-                && !cobol_physical_body(block, body, request.source().bytes(), cancellation)?
+                && !cobol_physical_body(block, body, source.as_bytes(), cancellation)?
             {
                 continue;
             }
@@ -77,7 +74,8 @@ impl TreeSitterProvider {
                 .limits()
                 .max_syntax_nodes()
                 .saturating_sub(traversal.processed_nodes);
-            let Some(ranges) = inline_ranges(body, request, maximum_ranges, cancellation)? else {
+            let Some(ranges) = inline_ranges(body, request, source, maximum_ranges, cancellation)?
+            else {
                 candidates[index].syntax = "markdown.code_limit";
                 limited.context = true;
                 continue;
@@ -85,9 +83,14 @@ impl TreeSitterProvider {
             if family.is_cobol()
                 && !(ranges.len() == 1
                     && ranges.first().is_some_and(|range| {
-                        usize::try_from(range.span().start_byte()).ok() == Some(body.start_byte())
-                            && usize::try_from(range.span().end_byte()).ok()
-                                == Some(body.end_byte())
+                        source
+                            .projected_span(range.span())
+                            .ok()
+                            .is_some_and(|span| {
+                                usize::try_from(span.start_byte()).ok() == Some(body.start_byte())
+                                    && usize::try_from(span.end_byte()).ok()
+                                        == Some(body.end_byte())
+                            })
                     }))
             {
                 continue;
@@ -115,7 +118,7 @@ impl TreeSitterProvider {
                 ranges,
                 &limits,
             )?;
-            // The host already admitted UTF-8 and supplies the exact source
+            // The host already admitted its text view and supplies the exact native
             // point; revalidating or rescanning its prefix per fence is redundant.
             context.range_origin = (body.start_byte(), body.start_position());
             let child_tree = match self.parse_native_tree(
@@ -123,6 +126,7 @@ impl TreeSitterProvider {
                 &language_for(native_family),
                 None,
                 self.config.default_settings(),
+                source,
                 Some(&mut *context),
                 cancellation,
             ) {
@@ -144,6 +148,7 @@ impl TreeSitterProvider {
             let child = inspect_tree(
                 &child_tree,
                 &child_request,
+                source,
                 remaining_nodes,
                 limits.max_syntax_depth(),
                 cancellation,
@@ -184,7 +189,7 @@ impl TreeSitterProvider {
                 let extraction = pack.extract(
                     family,
                     &child_tree,
-                    request.source().bytes(),
+                    source.as_bytes(),
                     remaining_nodes,
                     maximum.saturating_sub(candidates.len()),
                     cancellation,
@@ -195,7 +200,7 @@ impl TreeSitterProvider {
                 pack.extract_identity(
                     family,
                     &child_tree,
-                    request.source().bytes(),
+                    source.as_bytes(),
                     remaining_nodes,
                     cancellation,
                 )?
@@ -204,6 +209,7 @@ impl TreeSitterProvider {
                 limited.merge(self.extract_perl_replacements(
                     &child_tree,
                     &child_request,
+                    source,
                     request.limits(),
                     traversal,
                     &mut captures,
@@ -608,14 +614,18 @@ mod tests {
         )
         .unwrap();
         let cancellation = Cancellation::with_deadline(Instant::now() + Duration::from_secs(30));
+        let view = provider
+            .native_source_view(&request, &cancellation)
+            .unwrap();
         let host = provider
-            .prepare_tree(&request, None, &[], settings, &cancellation)
+            .prepare_tree(&request, None, &[], settings, &view, &cancellation)
             .unwrap();
         assert!(host.traversal.fully_traversed);
         for credit in [0, 1] {
             let mut traversal = inspect_tree(
                 &host.tree,
                 &request,
+                &view,
                 limits.max_syntax_nodes(),
                 limits.max_syntax_depth(),
                 &cancellation,
@@ -645,6 +655,7 @@ mod tests {
                 .extract_markdown_code(
                     &host.tree,
                     &request,
+                    &view,
                     &mut traversal,
                     &mut candidates,
                     Some(4096),

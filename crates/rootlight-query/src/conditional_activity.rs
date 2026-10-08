@@ -3,6 +3,8 @@
 //! remains fail-closed until bounded inventory and definition scans finish.
 
 use std::{collections::BTreeMap, mem};
+mod metadata_quote;
+pub(super) use metadata_quote::{PrefixActivityUpper, prefix_metadata_upper};
 
 use rootlight_ids::{ContentHash, FactId, FileId, SymbolId};
 use rootlight_ir::{
@@ -15,6 +17,7 @@ use rootlight_storage::GenerationSnapshot;
 use serde::Serialize;
 
 use crate::{
+    QuerySourceTextChunk,
     model::{LocateHit, QueryError, QueryResource, SourceChunkResult, checked_usize_to_u64},
     service::{QueryControl, UsageTracker, record_limit},
 };
@@ -250,18 +253,74 @@ pub(super) fn project_source(
     control: &QueryControl<'_>,
     limiting_resources: &mut Vec<QueryResource>,
 ) -> Result<ActivityProjection, QueryError> {
+    project_source_ranges(
+        generation,
+        chunks.iter().map(|chunk| SourceActivityRange {
+            reference: &chunk.reference,
+            language: &chunk.language,
+            start_byte: chunk.start_byte,
+            end_byte: chunk.end_byte,
+            content_hash: chunk.content_hash,
+        }),
+        tracker,
+        control,
+        limiting_resources,
+    )
+}
+
+pub(super) fn project_source_text(
+    generation: &GenerationSnapshot,
+    chunks: &[QuerySourceTextChunk],
+    tracker: &mut UsageTracker,
+    control: &QueryControl<'_>,
+    limiting_resources: &mut Vec<QueryResource>,
+) -> Result<ActivityProjection, QueryError> {
+    project_source_ranges(
+        generation,
+        chunks.iter().map(|chunk| {
+            let raw = chunk.raw();
+            SourceActivityRange {
+                reference: &raw.reference,
+                language: &raw.language,
+                start_byte: raw.start_byte,
+                end_byte: raw.end_byte,
+                content_hash: raw.content_hash,
+            }
+        }),
+        tracker,
+        control,
+        limiting_resources,
+    )
+}
+
+#[derive(Clone, Copy)]
+struct SourceActivityRange<'a> {
+    reference: &'a SourceRef,
+    language: &'a str,
+    start_byte: u64,
+    end_byte: u64,
+    content_hash: ContentHash,
+}
+
+fn project_source_ranges<'a>(
+    generation: &GenerationSnapshot,
+    chunks: impl Iterator<Item = SourceActivityRange<'a>> + Clone,
+    tracker: &mut UsageTracker,
+    control: &QueryControl<'_>,
+    limiting_resources: &mut Vec<QueryResource>,
+) -> Result<ActivityProjection, QueryError> {
     let count = chunks
-        .iter()
-        .filter(|chunk| applicable(&chunk.language))
+        .clone()
+        .filter(|chunk| applicable(chunk.language))
         .count();
     tracker.add_memory(mandatory_memory(count)?)?;
     let mut requests = Vec::new();
     requests
         .try_reserve_exact(count)
         .map_err(|_| QueryError::MemoryUnavailable)?;
-    for (index, chunk) in chunks.iter().enumerate() {
+    for (index, chunk) in chunks.enumerate() {
         control.check()?;
-        if applicable(&chunk.language) {
+        if applicable(chunk.language) {
             let source = SourceRef::new(
                 chunk.reference.repository(),
                 chunk.reference.generation(),
@@ -416,19 +475,8 @@ fn project_document(
         let scope = model.scope;
         let key = (scope.file(), scope.start_byte(), scope.end_byte());
         validate_scope(&inventories, key)?;
-        let retained_memory = mem::size_of::<((FileId, u64, u64), Inventory)>()
-            .checked_add(2 * mem::size_of::<usize>())
-            .and_then(|bytes| bytes.checked_mul(16))
-            .and_then(|bytes| {
-                bytes.checked_add(
-                    model
-                        .branches
-                        .capacity()
-                        .checked_mul(mem::size_of::<rootlight_ir::VbaCompilationBranch>())?,
-                )
-            })
-            .ok_or(QueryError::MemoryUnavailable)?;
-        if !budget.memory(checked_usize_to_u64(retained_memory)?)? {
+        let retained_memory = inventory_memory(&model)?;
+        if !budget.memory(retained_memory)? {
             return Ok(incomplete(requests, assessments));
         }
         inventories.insert(
@@ -807,6 +855,22 @@ fn validate_scope(
     Ok(())
 }
 
+fn inventory_memory(model: &VbaCompilation) -> Result<u64, QueryError> {
+    let bytes = mem::size_of::<((FileId, u64, u64), Inventory)>()
+        .checked_add(2 * mem::size_of::<usize>())
+        .and_then(|bytes| bytes.checked_mul(16))
+        .and_then(|bytes| {
+            bytes.checked_add(
+                model
+                    .branches
+                    .capacity()
+                    .checked_mul(mem::size_of::<rootlight_ir::VbaCompilationBranch>())?,
+            )
+        })
+        .ok_or(QueryError::MemoryUnavailable)?;
+    checked_usize_to_u64(bytes)
+}
+
 fn decoder_memory(payload_bytes: usize) -> Result<u64, QueryError> {
     // The decoder simultaneously retains parsed and cloned branch vectors,
     // two validation trees, group vectors and ordered/ancestor vectors. Charge
@@ -1034,6 +1098,7 @@ mod tests {
             file: full.span().file(),
             identifier: "Item".to_owned(),
             qualified_name: "Module.Item".to_owned(),
+            signature: None,
             path: "Module.bas".to_owned(),
             kind: "variable".to_owned(),
             language: "vba".to_owned(),

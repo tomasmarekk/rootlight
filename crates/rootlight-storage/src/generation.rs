@@ -5,21 +5,22 @@
 
 use std::{
     collections::{BTreeMap, BTreeSet},
+    convert::Infallible,
     error::Error,
     io::{self, BufReader, Read, Write},
 };
 
 use rootlight_cancel::{Cancellation, CancellationReason};
 use rootlight_ids::{
-    ContentHash, GenerationId, GenerationIdentity, RepositoryId, derive_generation,
+    ContentHash, GenerationId, GenerationIdentity, RepositoryId, SymbolId, derive_generation,
 };
 use rootlight_ir::{
     CanonicalGenerationNeutralDigests, CanonicalNormalizedIrDocument, ExtensionSupport,
-    FILE_IDENTITY_CLAIM_NAMESPACE, FactEvidence, FileIdentityClaim, FileRecord, IdentityClaimError,
-    IrDocumentDecodeError, IrDocumentValidationError, IrLimits, IrVersion,
+    FILE_IDENTITY_CLAIM_NAMESPACE, FactEvidence, FactRef, FileIdentityClaim, FileRecord,
+    IdentityClaimError, IrDocumentDecodeError, IrDocumentValidationError, IrLimits, IrVersion,
     LEXICAL_EXTENSION_NAMESPACE, LEXICAL_SUMMARY_BATCH_VERSION, NORMALIZED_IR_VERSION,
     NormalizedIrDocument, NormalizedRebindError, OccurrenceTarget, PERL_BINDING_NAMESPACE,
-    SYMBOL_IDENTITY_CLAIM_NAMESPACE, SourceRef,
+    RelationEndpoint, SYMBOL_IDENTITY_CLAIM_NAMESPACE, SourceRef,
     decode_file_identity_claim_envelope_with_checkpoint, decode_lexical_summary_batch_envelope,
     decode_normalized_ir_document_messagepack_reader_with_checkpoint,
     decode_normalized_ir_document_with_checkpoint, decode_perl_binding_envelope,
@@ -237,6 +238,7 @@ pub struct GenerationSnapshot {
     document: CanonicalNormalizedIrDocument,
     source_files: SourceFileCatalog,
     coverage_ordinals_by_scope: Vec<usize>,
+    symbol_explain_indexes: SymbolExplainIndexes,
 }
 
 impl GenerationSnapshot {
@@ -274,24 +276,65 @@ impl GenerationSnapshot {
         limits: &IrLimits,
         extensions: &ExtensionSupport,
     ) -> Result<Self, GenerationValidationError> {
-        let document = CanonicalNormalizedIrDocument::new(document, limits, extensions)
-            .map_err(GenerationValidationError::InvalidIr)?;
+        match Self::new_with_source_files_and_checkpoint(
+            metadata,
+            document,
+            source_files,
+            limits,
+            extensions,
+            &mut || Ok::<(), Infallible>(()),
+        ) {
+            Ok(snapshot) => Ok(snapshot),
+            Err(IndexConstructionError::Validation(error)) => Err(error),
+            Err(IndexConstructionError::Checkpoint(never)) => match never {},
+        }
+    }
+
+    fn new_with_source_files_and_checkpoint<E>(
+        metadata: GenerationMetadata,
+        document: NormalizedIrDocument,
+        source_files: SourceFileCatalog,
+        limits: &IrLimits,
+        extensions: &ExtensionSupport,
+        checkpoint: &mut impl FnMut() -> Result<(), E>,
+    ) -> Result<Self, IndexConstructionError<E>> {
+        checkpoint().map_err(IndexConstructionError::Checkpoint)?;
+        let document =
+            CanonicalNormalizedIrDocument::new(document, limits, extensions).map_err(|error| {
+                IndexConstructionError::Validation(GenerationValidationError::InvalidIr(error))
+            })?;
         if document.document().repository != metadata.repository()
             || document.document().generation != metadata.generation()
         {
-            return Err(GenerationValidationError::OwnershipMismatch);
+            return Err(IndexConstructionError::Validation(
+                GenerationValidationError::OwnershipMismatch,
+            ));
         }
-        validate_source_file_catalog(metadata, document.document(), &source_files)
-            .map_err(GenerationValidationError::InvalidSourceCatalog)?;
+        validate_source_file_catalog(metadata, document.document(), &source_files).map_err(
+            |error| {
+                IndexConstructionError::Validation(GenerationValidationError::InvalidSourceCatalog(
+                    error,
+                ))
+            },
+        )?;
         let coverage_records = &document.document().coverage_records;
-        let mut coverage_ordinals_by_scope: Vec<_> = (0..coverage_records.len()).collect();
-        coverage_ordinals_by_scope
-            .sort_unstable_by_key(|&ordinal| (coverage_records[ordinal].scope, ordinal));
+        let mut coverage_ordinals_by_scope = reserved_index_vec(coverage_records.len())?;
+        for ordinal in 0..coverage_records.len() {
+            checkpoint().map_err(IndexConstructionError::Checkpoint)?;
+            coverage_ordinals_by_scope.push(ordinal);
+        }
+        sort_index_with_checkpoint(
+            &mut coverage_ordinals_by_scope,
+            |&ordinal| (coverage_records[ordinal].scope, ordinal),
+            checkpoint,
+        )?;
+        let symbol_explain_indexes = SymbolExplainIndexes::build(document.document(), checkpoint)?;
         Ok(Self {
             metadata,
             document,
             source_files,
             coverage_ordinals_by_scope,
+            symbol_explain_indexes,
         })
     }
 
@@ -343,9 +386,18 @@ impl GenerationSnapshot {
         )
         .map_err(GenerationSnapshotError::Control)?;
         context.check().map_err(GenerationSnapshotError::Control)?;
-        let snapshot =
-            Self::new_with_source_files(metadata, document, source_files, limits, extensions)
-                .map_err(GenerationSnapshotError::Validation)?;
+        let snapshot = Self::new_with_source_files_and_checkpoint(
+            metadata,
+            document,
+            source_files,
+            limits,
+            extensions,
+            &mut || context.check(),
+        )
+        .map_err(|error| match error {
+            IndexConstructionError::Checkpoint(error) => GenerationSnapshotError::Control(error),
+            IndexConstructionError::Validation(error) => GenerationSnapshotError::Validation(error),
+        })?;
         context.check().map_err(GenerationSnapshotError::Control)?;
         require_generation_budget(
             snapshot.metadata().contract_version(),
@@ -377,6 +429,94 @@ impl GenerationSnapshot {
     #[must_use]
     pub fn coverage_ordinals_by_scope(&self) -> &[usize] {
         &self.coverage_ordinals_by_scope
+    }
+
+    /// Returns canonical relation ordinals with a direct entity endpoint.
+    ///
+    /// A self-relation appears once. Occurrence endpoints are not projected to
+    /// their enclosing entities, matching the direct-endpoint explain contract.
+    #[must_use]
+    pub fn relation_ordinals_for_symbol(&self, symbol: SymbolId) -> &[usize] {
+        self.symbol_explain_indexes.relations.ordinals(symbol)
+    }
+
+    /// Returns canonical occurrence ordinals targeting the symbol.
+    ///
+    /// Both resolved targets and every ambiguous candidate are retained across
+    /// all files; an ambiguous occurrence remains ambiguous in the document.
+    #[must_use]
+    pub fn occurrence_ordinals_for_symbol(&self, symbol: SymbolId) -> &[usize] {
+        self.symbol_explain_indexes.occurrences.ordinals(symbol)
+    }
+
+    /// Returns canonical lexical ordinals derived solely from the entity.
+    ///
+    /// Summary batches are excluded. Payload decoding and signature-conflict
+    /// checks remain query responsibilities; this index does not infer a kind.
+    #[must_use]
+    pub fn lexical_ordinals_for_symbol(&self, symbol: SymbolId) -> &[usize] {
+        self.symbol_explain_indexes.lexical.ordinals(symbol)
+    }
+
+    /// Returns actual heap-capacity bytes retained by the three explain indexes.
+    ///
+    /// This excludes fixed snapshot fields and the existing coverage index.
+    /// Resident-memory admission must account for these generation-owned bytes.
+    #[must_use]
+    pub const fn retained_symbol_explain_index_bytes(&self) -> u64 {
+        self.symbol_explain_indexes.retained_bytes
+    }
+
+    /// Estimates a conservative peak heap reservation for explain-index builds.
+    ///
+    /// Callers must separately admit the document and coverage index. Candidate
+    /// fanout is counted with checkpoints; duplicates in noncanonical input can
+    /// only increase this estimate. No source or payload is decoded.
+    ///
+    /// # Errors
+    ///
+    /// Returns control errors for cancellation or the existing row budget, and
+    /// validation errors when checked workspace size cannot be represented.
+    pub fn estimate_symbol_explain_index_memory_bytes(
+        document: &NormalizedIrDocument,
+        context: &GenerationContext<'_>,
+    ) -> Result<u64, GenerationSnapshotError> {
+        let counts =
+            SymbolPostingCounts::count(document, &mut || context.check()).map_err(|error| {
+                match error {
+                    IndexConstructionError::Checkpoint(error) => {
+                        GenerationSnapshotError::Control(error)
+                    }
+                    IndexConstructionError::Validation(error) => {
+                        GenerationSnapshotError::Validation(error)
+                    }
+                }
+            })?;
+        let total = counts
+            .total()
+            .map_err(GenerationSnapshotError::Validation)?;
+        context
+            .require(
+                GenerationResource::Rows,
+                u64::try_from(total).map_err(|_| {
+                    GenerationSnapshotError::Validation(
+                        GenerationValidationError::IndexResourceUnavailable,
+                    )
+                })?,
+            )
+            .map_err(GenerationSnapshotError::Control)?;
+        // Each posting can own one sort tuple, one range tuple and one ordinal.
+        // Charging all three builders together also covers sequential conversion.
+        let tuples = index_capacity_bytes::<(SymbolId, usize)>(total)
+            .map_err(GenerationSnapshotError::Validation)?;
+        let ordinals =
+            index_capacity_bytes::<usize>(total).map_err(GenerationSnapshotError::Validation)?;
+        tuples
+            .checked_mul(2)
+            .and_then(|bytes| bytes.checked_add(ordinals))
+            .ok_or(GenerationSnapshotError::Validation(
+                GenerationValidationError::IndexResourceUnavailable,
+            ))
     }
 
     /// Returns the canonical file-only source catalog.
@@ -461,6 +601,290 @@ impl GenerationSnapshot {
                 _ => GenerationNeutralDigestError::InvalidGeneration,
             })
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+struct SymbolPostingIndex {
+    starts: Vec<(SymbolId, usize)>,
+    ordinals: Vec<usize>,
+}
+
+impl SymbolPostingIndex {
+    fn from_entries<E>(
+        mut entries: Vec<(SymbolId, usize)>,
+        checkpoint: &mut impl FnMut() -> Result<(), E>,
+    ) -> Result<Self, IndexConstructionError<E>> {
+        sort_index_with_checkpoint(&mut entries, |entry| *entry, checkpoint)?;
+        let mut symbols = 0_usize;
+        let mut previous = None;
+        for &(symbol, _) in &entries {
+            checkpoint().map_err(IndexConstructionError::Checkpoint)?;
+            if previous != Some(symbol) {
+                symbols = symbols
+                    .checked_add(1)
+                    .ok_or_else(index_workspace_unavailable)?;
+                previous = Some(symbol);
+            }
+        }
+        let mut starts = reserved_index_vec(symbols)?;
+        let mut ordinals = reserved_index_vec(entries.len())?;
+        previous = None;
+        for (symbol, ordinal) in entries {
+            checkpoint().map_err(IndexConstructionError::Checkpoint)?;
+            if previous != Some(symbol) {
+                starts.push((symbol, ordinals.len()));
+                previous = Some(symbol);
+            }
+            ordinals.push(ordinal);
+        }
+        Ok(Self { starts, ordinals })
+    }
+
+    fn ordinals(&self, symbol: SymbolId) -> &[usize] {
+        let Ok(index) = self.starts.binary_search_by_key(&symbol, |entry| entry.0) else {
+            return &[];
+        };
+        let start = self.starts[index].1;
+        let end = self
+            .starts
+            .get(index + 1)
+            .map_or(self.ordinals.len(), |entry| entry.1);
+        &self.ordinals[start..end]
+    }
+
+    fn retained_bytes(&self) -> Result<u64, GenerationValidationError> {
+        index_capacity_bytes::<(SymbolId, usize)>(self.starts.capacity())?
+            .checked_add(index_capacity_bytes::<usize>(self.ordinals.capacity())?)
+            .ok_or(GenerationValidationError::IndexResourceUnavailable)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SymbolExplainIndexes {
+    relations: SymbolPostingIndex,
+    occurrences: SymbolPostingIndex,
+    lexical: SymbolPostingIndex,
+    retained_bytes: u64,
+}
+
+impl SymbolExplainIndexes {
+    fn build<E>(
+        document: &NormalizedIrDocument,
+        checkpoint: &mut impl FnMut() -> Result<(), E>,
+    ) -> Result<Self, IndexConstructionError<E>> {
+        let counts = SymbolPostingCounts::count(document, checkpoint)?;
+        let mut entries = reserved_index_vec(counts.relations)?;
+        for (ordinal, relation) in document.relations.iter().enumerate() {
+            checkpoint().map_err(IndexConstructionError::Checkpoint)?;
+            for symbol in direct_relation_entities(relation).into_iter().flatten() {
+                entries.push((symbol, ordinal));
+            }
+        }
+        let relations = SymbolPostingIndex::from_entries(entries, checkpoint)?;
+        let mut entries = reserved_index_vec(counts.occurrences)?;
+        for (ordinal, occurrence) in document.occurrences.iter().enumerate() {
+            checkpoint().map_err(IndexConstructionError::Checkpoint)?;
+            match &occurrence.target {
+                OccurrenceTarget::Resolved { symbol } => entries.push((*symbol, ordinal)),
+                OccurrenceTarget::Candidates { symbols, .. } => {
+                    for &symbol in symbols {
+                        checkpoint().map_err(IndexConstructionError::Checkpoint)?;
+                        entries.push((symbol, ordinal));
+                    }
+                }
+                OccurrenceTarget::Unresolved { .. } => {}
+            }
+        }
+        let occurrences = SymbolPostingIndex::from_entries(entries, checkpoint)?;
+        let mut entries = reserved_index_vec(counts.lexical)?;
+        for (ordinal, envelope) in document.extensions.iter().enumerate() {
+            checkpoint().map_err(IndexConstructionError::Checkpoint)?;
+            if let Some(symbol) = lexical_entity_owner(envelope) {
+                entries.push((symbol, ordinal));
+            }
+        }
+        let lexical = SymbolPostingIndex::from_entries(entries, checkpoint)?;
+        let relation_bytes = relations
+            .retained_bytes()
+            .map_err(IndexConstructionError::Validation)?;
+        let occurrence_bytes = occurrences
+            .retained_bytes()
+            .map_err(IndexConstructionError::Validation)?;
+        let lexical_bytes = lexical
+            .retained_bytes()
+            .map_err(IndexConstructionError::Validation)?;
+        let retained_bytes = relation_bytes
+            .checked_add(occurrence_bytes)
+            .and_then(|bytes| bytes.checked_add(lexical_bytes))
+            .ok_or_else(index_workspace_unavailable)?;
+        Ok(Self {
+            relations,
+            occurrences,
+            lexical,
+            retained_bytes,
+        })
+    }
+}
+
+struct SymbolPostingCounts {
+    relations: usize,
+    occurrences: usize,
+    lexical: usize,
+}
+
+impl SymbolPostingCounts {
+    fn count<E>(
+        document: &NormalizedIrDocument,
+        checkpoint: &mut impl FnMut() -> Result<(), E>,
+    ) -> Result<Self, IndexConstructionError<E>> {
+        let mut result = Self {
+            relations: 0,
+            occurrences: 0,
+            lexical: 0,
+        };
+        for relation in &document.relations {
+            checkpoint().map_err(IndexConstructionError::Checkpoint)?;
+            for _ in direct_relation_entities(relation).into_iter().flatten() {
+                result.relations = result
+                    .relations
+                    .checked_add(1)
+                    .ok_or_else(index_workspace_unavailable)?;
+            }
+        }
+        for occurrence in &document.occurrences {
+            checkpoint().map_err(IndexConstructionError::Checkpoint)?;
+            match &occurrence.target {
+                OccurrenceTarget::Resolved { .. } => {
+                    result.occurrences = result
+                        .occurrences
+                        .checked_add(1)
+                        .ok_or_else(index_workspace_unavailable)?;
+                }
+                OccurrenceTarget::Candidates { symbols, .. } => {
+                    for _ in symbols {
+                        checkpoint().map_err(IndexConstructionError::Checkpoint)?;
+                        result.occurrences = result
+                            .occurrences
+                            .checked_add(1)
+                            .ok_or_else(index_workspace_unavailable)?;
+                    }
+                }
+                OccurrenceTarget::Unresolved { .. } => {}
+            }
+        }
+        for envelope in &document.extensions {
+            checkpoint().map_err(IndexConstructionError::Checkpoint)?;
+            if lexical_entity_owner(envelope).is_some() {
+                result.lexical = result
+                    .lexical
+                    .checked_add(1)
+                    .ok_or_else(index_workspace_unavailable)?;
+            }
+        }
+        Ok(result)
+    }
+
+    fn total(&self) -> Result<usize, GenerationValidationError> {
+        self.relations
+            .checked_add(self.occurrences)
+            .and_then(|total| total.checked_add(self.lexical))
+            .ok_or(GenerationValidationError::IndexResourceUnavailable)
+    }
+}
+
+#[derive(Debug)]
+enum IndexConstructionError<E> {
+    Checkpoint(E),
+    Validation(GenerationValidationError),
+}
+
+fn index_workspace_unavailable<E>() -> IndexConstructionError<E> {
+    IndexConstructionError::Validation(GenerationValidationError::IndexResourceUnavailable)
+}
+
+fn reserved_index_vec<T, E>(capacity: usize) -> Result<Vec<T>, IndexConstructionError<E>> {
+    let mut result = Vec::new();
+    result
+        .try_reserve_exact(capacity)
+        .map_err(|_| index_workspace_unavailable())?;
+    Ok(result)
+}
+
+fn index_capacity_bytes<T>(capacity: usize) -> Result<u64, GenerationValidationError> {
+    let bytes = capacity
+        .checked_mul(std::mem::size_of::<T>())
+        .ok_or(GenerationValidationError::IndexResourceUnavailable)?;
+    u64::try_from(bytes).map_err(|_| GenerationValidationError::IndexResourceUnavailable)
+}
+
+fn direct_relation_entities(relation: &rootlight_ir::RelationRecord) -> [Option<SymbolId>; 2] {
+    let subject = match relation.subject {
+        RelationEndpoint::Entity(symbol) => Some(symbol),
+        RelationEndpoint::Repository(_)
+        | RelationEndpoint::File(_)
+        | RelationEndpoint::Occurrence(_) => None,
+    };
+    let object = match relation.object {
+        RelationEndpoint::Entity(symbol) => (Some(symbol) != subject).then_some(symbol),
+        RelationEndpoint::Repository(_)
+        | RelationEndpoint::File(_)
+        | RelationEndpoint::Occurrence(_) => None,
+    };
+    [subject, object]
+}
+
+fn lexical_entity_owner(envelope: &rootlight_ir::ExtensionEnvelope) -> Option<SymbolId> {
+    if envelope.namespace != LEXICAL_EXTENSION_NAMESPACE
+        || envelope.version == LEXICAL_SUMMARY_BATCH_VERSION
+    {
+        return None;
+    }
+    match envelope.evidence.derivation.as_slice() {
+        [FactRef::Entity(symbol)] => Some(*symbol),
+        _ => None,
+    }
+}
+
+// Heap sorting checks cancellation during comparisons without allocating a
+// second posting buffer. Canonical ordinals break ties independently of names.
+fn sort_index_with_checkpoint<T, K: Ord, E>(
+    values: &mut [T],
+    key: impl Fn(&T) -> K,
+    checkpoint: &mut impl FnMut() -> Result<(), E>,
+) -> Result<(), IndexConstructionError<E>> {
+    checkpoint().map_err(IndexConstructionError::Checkpoint)?;
+    let length = values.len();
+    for root in (0..length / 2).rev() {
+        sift_index_heap(values, root, length, &key, checkpoint)?;
+    }
+    for end in (1..values.len()).rev() {
+        checkpoint().map_err(IndexConstructionError::Checkpoint)?;
+        values.swap(0, end);
+        sift_index_heap(values, 0, end, &key, checkpoint)?;
+    }
+    checkpoint().map_err(IndexConstructionError::Checkpoint)
+}
+
+fn sift_index_heap<T, K: Ord, E>(
+    values: &mut [T],
+    mut root: usize,
+    end: usize,
+    key: &impl Fn(&T) -> K,
+    checkpoint: &mut impl FnMut() -> Result<(), E>,
+) -> Result<(), IndexConstructionError<E>> {
+    while root < end / 2 {
+        checkpoint().map_err(IndexConstructionError::Checkpoint)?;
+        let mut child = root * 2 + 1;
+        if child + 1 < end && key(&values[child]) < key(&values[child + 1]) {
+            child += 1;
+        }
+        if key(&values[root]) >= key(&values[child]) {
+            break;
+        }
+        values.swap(root, child);
+        root = child;
+    }
+    Ok(())
 }
 
 fn validate_source_file_catalog(
@@ -1241,14 +1665,15 @@ impl IdentityVerifiedGeneration {
         {
             return Err(IdentityVerificationError::InvalidGeneration);
         }
-        let snapshot = GenerationSnapshot::new_with_source_files(
+        let snapshot = GenerationSnapshot::new_with_source_files_and_context(
             metadata,
             document,
             source_files,
             limits,
             extensions,
+            context,
         )
-        .map_err(|_| IdentityVerificationError::InvalidGeneration)?;
+        .map_err(IdentityVerificationError::from_snapshot)?;
         Self::verify_snapshot(snapshot, context)
     }
 
@@ -1550,6 +1975,16 @@ fn verify_snapshot_identities(
                             IdentityMismatchComponent::LexicalEvidence,
                         )
                     })?;
+                context
+                    .check()
+                    .map_err(IdentityVerificationError::Control)?;
+            }
+            rootlight_ir::FSHARP_BINDING_NAMESPACE => {
+                rootlight_ir::decode_fsharp_binding_envelope(envelope).map_err(|_| {
+                    IdentityVerificationError::IdentityMismatch(
+                        IdentityMismatchComponent::ClaimEnvelope,
+                    )
+                })?;
                 context
                     .check()
                     .map_err(IdentityVerificationError::Control)?;
@@ -2254,6 +2689,9 @@ pub enum IdentityVerificationError {
     /// Cooperative cancellation or a resource policy stopped verification.
     #[error("generation identity verification was interrupted")]
     Control(#[source] GenerationControlError),
+    /// Snapshot workspace could not be represented or reserved.
+    #[error("generation snapshot workspace is unavailable")]
+    ResourceUnavailable,
     /// Snapshot construction failed before identity verification.
     #[error("generation is not a valid canonical snapshot")]
     InvalidGeneration,
@@ -2345,6 +2783,9 @@ impl IdentityVerificationError {
     fn from_snapshot(error: GenerationSnapshotError) -> Self {
         match error {
             GenerationSnapshotError::Control(error) => Self::Control(error),
+            GenerationSnapshotError::Validation(
+                GenerationValidationError::IndexResourceUnavailable,
+            ) => Self::ResourceUnavailable,
             GenerationSnapshotError::Validation(_) => Self::InvalidGeneration,
         }
     }
@@ -2382,6 +2823,9 @@ pub enum GenerationValidationError {
     /// File-only retrieval records failed their exact source contract.
     #[error("generation source file catalog is invalid")]
     InvalidSourceCatalog(#[source] SourceFileCatalogError),
+    /// Checked derived-index workspace could not be represented or reserved.
+    #[error("generation derived index workspace is unavailable")]
+    IndexResourceUnavailable,
     /// Cardinality addition overflowed.
     #[error("generation statistics overflowed")]
     StatisticsOverflow,
@@ -2648,6 +3092,466 @@ mod tests {
         assert_eq!(snapshot.document().repository, repository);
     }
 
+    fn symbol_posting_fixture() -> (GenerationMetadata, NormalizedIrDocument, SymbolId, SymbolId) {
+        let (metadata, mut document, catalog) = file_only_generation(true);
+        document.files.push(catalog.entries()[0].file().clone());
+        let first = SymbolId::from_bytes([7; 20]);
+        let second = SymbolId::from_bytes([8; 20]);
+        let source = document.files[0].evidence.source.clone().unwrap();
+        let other_source = document.files[1].evidence.source.clone().unwrap();
+        let provenance = document.provenance[0].id;
+        for (id, name) in [(second, "second"), (first, "first")] {
+            document.entities.push(rootlight_ir::EntityRecord {
+                id,
+                repository: document.repository,
+                generation: document.generation,
+                kind: rootlight_ir::EntityKind::Function,
+                language: "text".to_owned(),
+                tier: AnalysisTier::TierD,
+                canonical_name: name.to_owned(),
+                display_name: name.to_owned(),
+                qualified_name: name.to_owned(),
+                container: Some(rootlight_ir::ContainerRef::File(source.span().file())),
+                visibility: rootlight_ir::EntityVisibility::Public,
+                flags: Vec::new(),
+                provenance,
+                evidence: FactEvidence {
+                    source: Some(source.clone()),
+                    derivation: Vec::new(),
+                },
+            });
+        }
+        for (target, source) in [
+            (OccurrenceTarget::Resolved { symbol: first }, source.clone()),
+            (
+                OccurrenceTarget::Candidates {
+                    symbols: vec![second, first],
+                    total_count: 2,
+                    completeness: rootlight_ir::CoverageStatus::Complete,
+                },
+                other_source.clone(),
+            ),
+            (
+                OccurrenceTarget::Unresolved {
+                    text_hash: content_hash(b"unknown"),
+                },
+                source.clone(),
+            ),
+        ] {
+            let mut occurrence = rootlight_ir::OccurrenceRecord {
+                id: FactId::from_bytes([0; 20]),
+                repository: document.repository,
+                generation: document.generation,
+                file: source.span().file(),
+                source: source.clone(),
+                role: rootlight_ir::OccurrenceRole::Read,
+                enclosing: Some(first),
+                target,
+                syntactic_text_hash: content_hash(b"anchor"),
+                syntax_kind: "fixture.read".to_owned(),
+                provenance,
+                confidence: rootlight_ir::Confidence::new(1000).unwrap(),
+                evidence: FactEvidence {
+                    source: Some(source),
+                    derivation: Vec::new(),
+                },
+            };
+            occurrence.id = rootlight_ir::derive_occurrence_record_id(&occurrence).unwrap();
+            document.occurrences.push(occurrence);
+        }
+        let read = document.occurrences[0].id;
+        for (subject, object) in [
+            (
+                RelationEndpoint::Entity(first),
+                RelationEndpoint::Entity(second),
+            ),
+            (
+                RelationEndpoint::Entity(first),
+                RelationEndpoint::Entity(first),
+            ),
+            (
+                RelationEndpoint::Occurrence(read),
+                RelationEndpoint::Entity(second),
+            ),
+        ] {
+            let mut relation = rootlight_ir::RelationRecord {
+                id: FactId::from_bytes([0; 20]),
+                repository: document.repository,
+                generation: document.generation,
+                subject,
+                predicate: rootlight_ir::RelationPredicate::RefersTo,
+                object,
+                confidence: rootlight_ir::Confidence::new(1000).unwrap(),
+                evidence_kind: rootlight_ir::EvidenceKind::Syntax,
+                provenance,
+                evidence: FactEvidence {
+                    source: Some(source.clone()),
+                    derivation: Vec::new(),
+                },
+            };
+            relation.id = rootlight_ir::derive_relation_record_id(&relation).unwrap();
+            document.relations.push(relation);
+        }
+        for (kind, subject, text, source) in [
+            (
+                rootlight_ir::LexicalEvidenceKind::Signature,
+                FactRef::Entity(first),
+                "anchor",
+                source.clone(),
+            ),
+            (
+                rootlight_ir::LexicalEvidenceKind::Signature,
+                FactRef::Entity(first),
+                "source",
+                other_source,
+            ),
+            (
+                rootlight_ir::LexicalEvidenceKind::CommentSummary,
+                FactRef::Entity(second),
+                "anchor",
+                source.clone(),
+            ),
+            (
+                rootlight_ir::LexicalEvidenceKind::CommentSummary,
+                FactRef::File(source.span().file()),
+                "anchor",
+                source,
+            ),
+        ] {
+            let format = if kind == rootlight_ir::LexicalEvidenceKind::Signature {
+                rootlight_ir::LexicalEvidenceFormat::SourceText
+            } else {
+                rootlight_ir::LexicalEvidenceFormat::PlainText
+            };
+            let evidence =
+                rootlight_ir::LexicalEvidenceV1::from_complete_text(kind, subject, format, text)
+                    .unwrap();
+            document.extensions.push(
+                rootlight_ir::new_lexical_evidence_envelope(
+                    document.repository,
+                    document.generation,
+                    provenance,
+                    source,
+                    &evidence,
+                )
+                .unwrap(),
+            );
+        }
+        (metadata, document, first, second)
+    }
+
+    #[test]
+    fn symbol_postings_preserve_canonical_direct_endpoint_and_target_ranges() {
+        let (metadata, document, first, second) = symbol_posting_fixture();
+        let canonical = CanonicalNormalizedIrDocument::new(
+            document.clone(),
+            &IrLimits::default(),
+            &ExtensionSupport::default(),
+        )
+        .unwrap();
+        let snapshot = GenerationSnapshot::new(
+            metadata,
+            document,
+            &IrLimits::default(),
+            &ExtensionSupport::default(),
+        )
+        .unwrap();
+        assert_eq!(
+            serde_json::to_vec(snapshot.document()).unwrap(),
+            serde_json::to_vec(canonical.document()).unwrap(),
+        );
+        for symbol in [first, second] {
+            let expected_relations = snapshot
+                .document()
+                .relations
+                .iter()
+                .enumerate()
+                .filter_map(|(ordinal, relation)| {
+                    (relation.subject == RelationEndpoint::Entity(symbol)
+                        || relation.object == RelationEndpoint::Entity(symbol))
+                    .then_some(ordinal)
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(
+                snapshot.relation_ordinals_for_symbol(symbol),
+                expected_relations
+            );
+            let expected_occurrences = snapshot
+                .document()
+                .occurrences
+                .iter()
+                .enumerate()
+                .filter_map(|(ordinal, occurrence)| {
+                    let matches = match &occurrence.target {
+                        OccurrenceTarget::Resolved { symbol: target } => *target == symbol,
+                        OccurrenceTarget::Candidates { symbols, .. } => symbols.contains(&symbol),
+                        OccurrenceTarget::Unresolved { .. } => false,
+                    };
+                    matches.then_some(ordinal)
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(
+                snapshot.occurrence_ordinals_for_symbol(symbol),
+                expected_occurrences
+            );
+        }
+        assert_eq!(snapshot.relation_ordinals_for_symbol(first).len(), 2);
+        assert_eq!(snapshot.relation_ordinals_for_symbol(second).len(), 2);
+        assert_eq!(snapshot.occurrence_ordinals_for_symbol(first).len(), 2);
+        assert_eq!(snapshot.occurrence_ordinals_for_symbol(second).len(), 1);
+        let candidate =
+            &snapshot.document().occurrences[snapshot.occurrence_ordinals_for_symbol(second)[0]];
+        assert!(matches!(
+            &candidate.target,
+            OccurrenceTarget::Candidates { .. }
+        ));
+        assert_ne!(
+            candidate.file,
+            snapshot.document().entities[0]
+                .evidence
+                .source
+                .as_ref()
+                .unwrap()
+                .span()
+                .file()
+        );
+        let missing = SymbolId::from_bytes([9; 20]);
+        assert!(snapshot.relation_ordinals_for_symbol(missing).is_empty());
+        assert!(snapshot.occurrence_ordinals_for_symbol(missing).is_empty());
+        assert!(snapshot.lexical_ordinals_for_symbol(missing).is_empty());
+    }
+
+    #[test]
+    fn lexical_postings_preserve_all_exact_entity_envelopes_without_kind_inference() {
+        let (metadata, document, first, second) = symbol_posting_fixture();
+        let snapshot = GenerationSnapshot::new(
+            metadata,
+            document,
+            &IrLimits::default(),
+            &ExtensionSupport::default(),
+        )
+        .unwrap();
+        assert_eq!(snapshot.lexical_ordinals_for_symbol(first).len(), 2);
+        assert_eq!(snapshot.lexical_ordinals_for_symbol(second).len(), 1);
+        let ordinal = snapshot.lexical_ordinals_for_symbol(second)[0];
+        let original = &snapshot.document().extensions[ordinal];
+        assert_eq!(
+            rootlight_ir::decode_lexical_evidence_envelope(original)
+                .unwrap()
+                .kind(),
+            rootlight_ir::LexicalEvidenceKind::CommentSummary,
+        );
+        for mutate in 0..4 {
+            let mut envelope = original.clone();
+            match mutate {
+                0 => envelope.namespace = "fixture.other".to_owned(),
+                1 => envelope.version = LEXICAL_SUMMARY_BATCH_VERSION.to_owned(),
+                2 => envelope.evidence.derivation.clear(),
+                3 => envelope.evidence.derivation.push(FactRef::Entity(first)),
+                _ => unreachable!(),
+            }
+            assert_eq!(lexical_entity_owner(&envelope), None);
+        }
+        for symbol in [first, second] {
+            assert!(
+                snapshot
+                    .lexical_ordinals_for_symbol(symbol)
+                    .windows(2)
+                    .all(|pair| pair[0] < pair[1])
+            );
+        }
+    }
+
+    #[test]
+    fn posting_heap_sort_matches_canonical_order_and_checks_mid_sort_cancellation() {
+        for length in 0..65 {
+            let mut values = (0..length)
+                .map(|index| (index * 17 + 3) % 11)
+                .collect::<Vec<_>>();
+            let mut expected = values.clone();
+            expected.sort_unstable();
+            sort_index_with_checkpoint(&mut values, |value| *value, &mut || {
+                Ok::<(), Infallible>(())
+            })
+            .unwrap();
+            assert_eq!(values, expected);
+        }
+        let mut checkpoints = 0;
+        let mut values = (0..128).rev().collect::<Vec<_>>();
+        let result = sort_index_with_checkpoint(&mut values, |value| *value, &mut || {
+            checkpoints += 1;
+            if checkpoints == 7 {
+                Err("cancelled")
+            } else {
+                Ok(())
+            }
+        });
+        assert!(matches!(
+            result,
+            Err(IndexConstructionError::Checkpoint("cancelled"))
+        ));
+        assert_eq!(checkpoints, 7);
+    }
+
+    #[test]
+    fn posting_memory_estimate_covers_retained_capacities_and_existing_row_limits() {
+        let (metadata, document, _, _) = symbol_posting_fixture();
+        let cancellation = Cancellation::new();
+        let context = GenerationContext::new(&cancellation, GenerationBudget::default());
+        let estimate =
+            GenerationSnapshot::estimate_symbol_explain_index_memory_bytes(&document, &context)
+                .unwrap();
+        let snapshot = GenerationSnapshot::new_with_context(
+            metadata,
+            document.clone(),
+            &IrLimits::default(),
+            &ExtensionSupport::default(),
+            &context,
+        )
+        .unwrap();
+        assert!(snapshot.retained_symbol_explain_index_bytes() > 0);
+        assert!(snapshot.retained_symbol_explain_index_bytes() <= estimate);
+        assert_eq!(
+            snapshot.retained_symbol_explain_index_bytes(),
+            snapshot
+                .symbol_explain_indexes
+                .relations
+                .retained_bytes()
+                .unwrap()
+                + snapshot
+                    .symbol_explain_indexes
+                    .occurrences
+                    .retained_bytes()
+                    .unwrap()
+                + snapshot
+                    .symbol_explain_indexes
+                    .lexical
+                    .retained_bytes()
+                    .unwrap(),
+        );
+        let reduced = GenerationContext::new(
+            &cancellation,
+            GenerationBudget::new(
+                1,
+                HARD_MAX_GENERATION_SOURCE_REFS,
+                HARD_MAX_GENERATION_TEXT_BYTES,
+            )
+            .unwrap(),
+        );
+        assert!(matches!(
+            GenerationSnapshot::estimate_symbol_explain_index_memory_bytes(&document, &reduced),
+            Err(GenerationSnapshotError::Control(
+                GenerationControlError::BudgetExceeded {
+                    resource: GenerationResource::Rows,
+                    ..
+                }
+            )),
+        ));
+        assert_eq!(
+            index_capacity_bytes::<(SymbolId, usize)>(usize::MAX),
+            Err(GenerationValidationError::IndexResourceUnavailable),
+        );
+        let empty = NormalizedIrDocument::empty(document.repository, document.generation);
+        assert_eq!(
+            GenerationSnapshot::estimate_symbol_explain_index_memory_bytes(&empty, &context)
+                .unwrap(),
+            0
+        );
+    }
+
+    #[test]
+    fn posting_build_and_estimate_honor_context_and_nested_candidate_checkpoints() {
+        let (metadata, document, _, _) = symbol_posting_fixture();
+        let cancellation = Cancellation::new();
+        cancellation.cancel(CancellationReason::ClientRequest);
+        let context = GenerationContext::new(&cancellation, GenerationBudget::default());
+        for result in [
+            GenerationSnapshot::estimate_symbol_explain_index_memory_bytes(&document, &context)
+                .map(|_| ()),
+            GenerationSnapshot::new_with_context(
+                metadata,
+                document.clone(),
+                &IrLimits::default(),
+                &ExtensionSupport::default(),
+                &context,
+            )
+            .map(|_| ()),
+        ] {
+            assert!(matches!(
+                result,
+                Err(GenerationSnapshotError::Control(
+                    GenerationControlError::Cancelled {
+                        reason: CancellationReason::ClientRequest
+                    },
+                ))
+            ));
+        }
+        let mut count_checkpoints = 0;
+        SymbolPostingCounts::count(&document, &mut || {
+            count_checkpoints += 1;
+            Ok::<(), Infallible>(())
+        })
+        .unwrap();
+        let stop = count_checkpoints + document.relations.len() + 2;
+        let mut build_checkpoints = 0;
+        let result = SymbolExplainIndexes::build(&document, &mut || {
+            build_checkpoints += 1;
+            if build_checkpoints == stop {
+                Err("build cancelled")
+            } else {
+                Ok(())
+            }
+        });
+        assert!(matches!(
+            result,
+            Err(IndexConstructionError::Checkpoint("build cancelled"))
+        ));
+        assert_eq!(build_checkpoints, stop);
+        let mut candidate_document = document;
+        candidate_document.relations.clear();
+        candidate_document.extensions.clear();
+        candidate_document
+            .occurrences
+            .retain(|record| matches!(&record.target, OccurrenceTarget::Candidates { .. }));
+        let mut calls = 0;
+        let result = SymbolPostingCounts::count(&candidate_document, &mut || {
+            calls += 1;
+            if calls == 3 {
+                Err("candidate cancelled")
+            } else {
+                Ok(())
+            }
+        });
+        assert!(matches!(
+            result,
+            Err(IndexConstructionError::Checkpoint("candidate cancelled"))
+        ));
+        assert_eq!(calls, 3);
+    }
+
+    #[test]
+    fn snapshot_workspace_failure_is_not_identity_corruption() {
+        assert_eq!(
+            IdentityVerificationError::from_snapshot(GenerationSnapshotError::Validation(
+                GenerationValidationError::IndexResourceUnavailable,
+            )),
+            IdentityVerificationError::ResourceUnavailable,
+        );
+        let cancelled = GenerationControlError::Cancelled {
+            reason: CancellationReason::ClientRequest,
+        };
+        assert_eq!(
+            IdentityVerificationError::from_snapshot(GenerationSnapshotError::Control(cancelled)),
+            IdentityVerificationError::Control(cancelled),
+        );
+        assert_eq!(
+            IdentityVerificationError::from_snapshot(GenerationSnapshotError::Validation(
+                GenerationValidationError::OwnershipMismatch,
+            )),
+            IdentityVerificationError::InvalidGeneration,
+        );
+    }
+
     #[test]
     fn lexical_batch_verification_checks_each_hidden_source() {
         let (metadata, document, catalog) = file_only_generation(true);
@@ -2865,6 +3769,425 @@ mod tests {
                     Err(IdentityVerificationError::InvalidGeneration)
                 );
             }
+        }
+    }
+
+    #[test]
+    fn fsharp_binding_identity_is_verified_before_snapshot_admission() {
+        let (metadata, mut document, catalog) = file_only_generation(true);
+        let file = &document.files[0];
+        let source = file.evidence.source.clone().unwrap();
+        let envelope = rootlight_ir::new_fsharp_binding_envelope(
+            document.repository,
+            document.generation,
+            file.provenance,
+            source.clone(),
+            rootlight_ir::FSharpBindingEvidence::new(
+                source.span(),
+                rootlight_ir::FSharpBinding::Context,
+            ),
+        )
+        .unwrap();
+        document.extensions.push(envelope.clone());
+        let cancellation = Cancellation::new();
+        let context = GenerationContext::new(&cancellation, GenerationBudget::default());
+        IdentityVerifiedGeneration::verify_with_source_files(
+            metadata,
+            document.clone(),
+            catalog.clone(),
+            &IrLimits::default(),
+            &ExtensionSupport::default(),
+            &context,
+        )
+        .unwrap();
+        for mutate in [
+            |value: &mut rootlight_ir::ExtensionEnvelope| value.payload.push(' '),
+            |value: &mut rootlight_ir::ExtensionEnvelope| value.version = "2".into(),
+            |value: &mut rootlight_ir::ExtensionEnvelope| value.id = FactId::from_bytes([99; 20]),
+        ] {
+            let mut changed = document.clone();
+            mutate(
+                changed
+                    .extensions
+                    .iter_mut()
+                    .find(|item| item.id == envelope.id)
+                    .unwrap(),
+            );
+            assert_eq!(
+                IdentityVerifiedGeneration::verify_with_source_files(
+                    metadata,
+                    changed,
+                    catalog.clone(),
+                    &IrLimits::default(),
+                    &ExtensionSupport::default(),
+                    &context
+                ),
+                Err(IdentityVerificationError::IdentityMismatch(
+                    IdentityMismatchComponent::ClaimEnvelope
+                ))
+            );
+        }
+    }
+
+    #[test]
+    fn fsharp_stored_legacy_claim_restores_beside_versioned_import_evidence() {
+        let (metadata, mut document, catalog) = file_only_generation(true);
+        let file = &document.files[0];
+        let source = file.evidence.source.clone().unwrap();
+        let payload = format!(
+            "{{\"scope\":{},\"binding\":{{\"kind\":\"context\"}}}}",
+            serde_json::to_string(&source.span()).unwrap()
+        );
+        let derivation = vec![rootlight_ir::FactRef::File(file.id)];
+        let identity = serde_json::to_vec(&(
+            "rootlight.fsharp_binding",
+            "1",
+            document.repository,
+            document.generation,
+            file.provenance,
+            &source,
+            &payload,
+            &derivation,
+        ))
+        .unwrap();
+        let legacy = rootlight_ir::ExtensionEnvelope {
+            id: rootlight_ids::derive_fact("rootlight.fsharp_binding/v1", &identity).id(),
+            repository: document.repository,
+            generation: document.generation,
+            namespace: "rootlight.fsharp_binding".to_owned(),
+            version: "1".to_owned(),
+            criticality: rootlight_ir::ExtensionCriticality::Noncritical,
+            payload,
+            provenance: file.provenance,
+            evidence: FactEvidence {
+                source: Some(source.clone()),
+                derivation,
+            },
+        };
+        document.extensions.push(legacy.clone());
+        for binding in [
+            rootlight_ir::FSharpBinding::ImportContext {
+                containers: vec![source.span()],
+                opens: vec![],
+            },
+            rootlight_ir::FSharpBinding::Container {
+                path: vec![content_hash(b"Library")],
+                roots: vec![],
+            },
+            rootlight_ir::FSharpBinding::OpenedReference {
+                name: content_hash(b"offset"),
+            },
+            rootlight_ir::FSharpBinding::OpenedCall {
+                name: content_hash(b"carry"),
+                slots: 1,
+            },
+        ] {
+            document.extensions.push(
+                rootlight_ir::new_fsharp_binding_envelope(
+                    document.repository,
+                    document.generation,
+                    file.provenance,
+                    source.clone(),
+                    rootlight_ir::FSharpBindingEvidence::new(source.span(), binding),
+                )
+                .unwrap(),
+            );
+        }
+        let cancellation = Cancellation::new();
+        let context = GenerationContext::new(&cancellation, GenerationBudget::default());
+        let limits = IrLimits::default();
+        let extensions = ExtensionSupport::default();
+        let verified = IdentityVerifiedGeneration::verify_with_source_files(
+            metadata,
+            document,
+            catalog.clone(),
+            &limits,
+            &extensions,
+            &context,
+        )
+        .unwrap();
+        let encoded = serde_json::to_vec(verified.snapshot().document()).unwrap();
+        let restored = IdentityVerifiedGeneration::restore_published_json_with_source_files(
+            metadata,
+            &encoded,
+            content_hash(&encoded),
+            catalog,
+            &limits,
+            &extensions,
+            &context,
+        )
+        .unwrap();
+        assert_eq!(
+            restored.snapshot().document(),
+            verified.snapshot().document()
+        );
+        let retained = restored
+            .snapshot()
+            .document()
+            .extensions
+            .iter()
+            .find(|item| item.id == legacy.id)
+            .unwrap();
+        assert_eq!(retained, &legacy);
+        assert_eq!(
+            rootlight_ir::decode_fsharp_binding_envelope(retained)
+                .unwrap()
+                .binding(),
+            &rootlight_ir::FSharpBinding::Context
+        );
+        assert_eq!(
+            restored
+                .snapshot()
+                .document()
+                .extensions
+                .iter()
+                .filter(|item| {
+                    item.namespace == rootlight_ir::FSHARP_BINDING_NAMESPACE
+                        && item.version == rootlight_ir::FSHARP_IMPORT_BINDING_VERSION
+                })
+                .count(),
+            2
+        );
+        assert_eq!(
+            restored
+                .snapshot()
+                .document()
+                .extensions
+                .iter()
+                .filter(|item| {
+                    item.namespace == rootlight_ir::FSHARP_BINDING_NAMESPACE
+                        && item.version == rootlight_ir::FSHARP_OPENED_BINDING_VERSION
+                })
+                .count(),
+            2
+        );
+    }
+
+    #[test]
+    fn fsharp_signature_value_restores_with_exact_declaration_identity() {
+        assert_fsharp_signature_declaration_roundtrip(
+            rootlight_ir::EntityKind::Variable,
+            "carry",
+            b"val carry: int -> int",
+            |path, symbol| rootlight_ir::FSharpBinding::SignatureValue { path, symbol },
+            rootlight_ir::FSHARP_SIGNATURE_BINDING_VERSION,
+        );
+    }
+
+    #[test]
+    fn fsharp_signature_record_name_restores_with_exact_declaration_identity() {
+        assert_fsharp_signature_declaration_roundtrip(
+            rootlight_ir::EntityKind::Struct,
+            "Data",
+            b"type Data = { Value: int }",
+            |path, symbol| rootlight_ir::FSharpBinding::SignatureType { path, symbol },
+            rootlight_ir::FSHARP_SIGNATURE_TYPE_BINDING_VERSION,
+        );
+    }
+
+    #[test]
+    fn fsharp_signature_alias_name_restores_with_exact_declaration_identity() {
+        assert_fsharp_signature_declaration_roundtrip(
+            rootlight_ir::EntityKind::TypeAlias,
+            "Data",
+            b"type Data = System.Int32",
+            |path, symbol| rootlight_ir::FSharpBinding::SignatureAlias { path, symbol },
+            rootlight_ir::FSHARP_SIGNATURE_ALIAS_BINDING_VERSION,
+        );
+    }
+
+    fn assert_fsharp_signature_declaration_roundtrip(
+        kind: rootlight_ir::EntityKind,
+        name: &str,
+        signature: &[u8],
+        binding: fn(Vec<ContentHash>, rootlight_ids::SymbolId) -> rootlight_ir::FSharpBinding,
+        version: &str,
+    ) {
+        use rootlight_ir::{
+            ContainerRef, EntityRecord, EntityVisibility, FSharpBindingEvidence, FactRef,
+            SymbolIdentityClaim, new_fsharp_binding_envelope, new_symbol_identity_claim_envelope,
+        };
+        let (metadata, mut document, catalog) = file_only_generation(true);
+        let file = &document.files[0];
+        let scope = file.evidence.source.as_ref().unwrap().span();
+        let declaration = SourceRef::new(
+            document.repository,
+            document.generation,
+            SourceSpan::new(file.id, 1, 5).unwrap(),
+            file.content_hash,
+            None,
+        );
+        let binding_source = if matches!(
+            kind,
+            rootlight_ir::EntityKind::Struct | rootlight_ir::EntityKind::TypeAlias
+        ) {
+            SourceRef::new(
+                document.repository,
+                document.generation,
+                scope,
+                file.content_hash,
+                None,
+            )
+        } else {
+            declaration.clone()
+        };
+        let provenance = &document.provenance[0];
+        let mut container_identity = vec![0];
+        container_identity.extend_from_slice(file.id.as_bytes());
+        let mut claim = SymbolIdentityClaim {
+            symbol: rootlight_ids::SymbolId::from_bytes([0; 20]),
+            repository: document.repository,
+            language: provenance.language.clone(),
+            kind,
+            container: Some(ContainerRef::File(file.id)),
+            container_identity,
+            declared_identity: name.to_owned(),
+            signature_discriminator: signature.to_vec(),
+            build_context_discriminator: provenance.build_context.digest().as_bytes().to_vec(),
+        };
+        claim.symbol = claim.derived_symbol();
+        document.entities.push(EntityRecord {
+            id: claim.symbol,
+            repository: document.repository,
+            generation: document.generation,
+            kind: claim.kind,
+            language: claim.language.clone(),
+            tier: provenance.tier,
+            canonical_name: claim.declared_identity.clone(),
+            display_name: claim.declared_identity.clone(),
+            qualified_name: format!("Library.{name}"),
+            container: claim.container,
+            visibility: EntityVisibility::Public,
+            flags: Vec::new(),
+            provenance: provenance.id,
+            evidence: FactEvidence {
+                source: Some(declaration.clone()),
+                derivation: Vec::new(),
+            },
+        });
+        document.extensions.push(
+            new_symbol_identity_claim_envelope(
+                &claim,
+                document.generation,
+                provenance.id,
+                declaration.clone(),
+            )
+            .unwrap(),
+        );
+        let binding = binding(
+            vec![content_hash(b"Library"), content_hash(name.as_bytes())],
+            claim.symbol,
+        );
+        let envelope = new_fsharp_binding_envelope(
+            document.repository,
+            document.generation,
+            provenance.id,
+            binding_source.clone(),
+            FSharpBindingEvidence::new(scope, binding.clone()),
+        )
+        .unwrap();
+        document.extensions.push(envelope.clone());
+        let cancellation = Cancellation::new();
+        let context = GenerationContext::new(&cancellation, GenerationBudget::default());
+        let limits = IrLimits::default();
+        let extensions = ExtensionSupport::default();
+        let verified = IdentityVerifiedGeneration::verify_with_source_files(
+            metadata,
+            document.clone(),
+            catalog.clone(),
+            &limits,
+            &extensions,
+            &context,
+        )
+        .unwrap();
+        let encoded = serde_json::to_vec(verified.snapshot().document()).unwrap();
+        let restored = IdentityVerifiedGeneration::restore_published_json_with_source_files(
+            metadata,
+            &encoded,
+            content_hash(&encoded),
+            catalog.clone(),
+            &limits,
+            &extensions,
+            &context,
+        )
+        .unwrap();
+        assert_eq!(
+            restored.snapshot().document(),
+            verified.snapshot().document()
+        );
+        let retained = restored
+            .snapshot()
+            .document()
+            .extensions
+            .iter()
+            .find(|item| item.id == envelope.id)
+            .unwrap();
+        assert_eq!(retained, &envelope);
+        assert_eq!(retained.version, version);
+        assert_eq!(retained.evidence.source, Some(binding_source));
+        assert_eq!(
+            retained.evidence.derivation,
+            vec![FactRef::Entity(claim.symbol)]
+        );
+        assert_eq!(
+            rootlight_ir::decode_fsharp_binding_envelope(retained)
+                .unwrap()
+                .binding(),
+            &binding
+        );
+        for mutate in [
+            |value: &mut rootlight_ir::ExtensionEnvelope| value.version = "1".into(),
+            |value: &mut rootlight_ir::ExtensionEnvelope| value.version = "2".into(),
+            |value: &mut rootlight_ir::ExtensionEnvelope| value.payload.push(' '),
+            |value: &mut rootlight_ir::ExtensionEnvelope| value.id = FactId::from_bytes([99; 20]),
+            |value: &mut rootlight_ir::ExtensionEnvelope| value.evidence.derivation.clear(),
+        ] {
+            let mut changed = document.clone();
+            mutate(
+                changed
+                    .extensions
+                    .iter_mut()
+                    .find(|item| item.id == envelope.id)
+                    .unwrap(),
+            );
+            assert_eq!(
+                IdentityVerifiedGeneration::verify_with_source_files(
+                    metadata,
+                    changed,
+                    catalog.clone(),
+                    &limits,
+                    &extensions,
+                    &context
+                ),
+                Err(IdentityVerificationError::IdentityMismatch(
+                    IdentityMismatchComponent::ClaimEnvelope
+                ))
+            );
+        }
+        for wrong_version in ["3", "4", "5"] {
+            if wrong_version == version {
+                continue;
+            }
+            let mut changed = document.clone();
+            changed
+                .extensions
+                .iter_mut()
+                .find(|item| item.id == envelope.id)
+                .unwrap()
+                .version = wrong_version.to_owned();
+            assert_eq!(
+                IdentityVerifiedGeneration::verify_with_source_files(
+                    metadata,
+                    changed,
+                    catalog.clone(),
+                    &limits,
+                    &extensions,
+                    &context
+                ),
+                Err(IdentityVerificationError::IdentityMismatch(
+                    IdentityMismatchComponent::ClaimEnvelope
+                ))
+            );
         }
     }
 

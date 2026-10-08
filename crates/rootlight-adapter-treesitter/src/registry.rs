@@ -378,16 +378,16 @@ const fn identity_for(family: GrammarFamily) -> GrammarIdentity {
     match family {
         GrammarFamily::FSharpSignature => GrammarIdentity {
             language_id: "fsharp-signature",
-            parser_sha256: "5d3f9d1beaf4015bafba03a7f948027fa6b4c5ab3c9c834299e4c8b550f9fc10",
+            parser_sha256: "3dbb6066529f453c360f261ac9557f5d0ff60e945f5658b6cdd10baae8882f10",
             ..identity_for(GrammarFamily::FSharp)
         },
         GrammarFamily::FSharp => GrammarIdentity {
             language_id: "fsharp",
             grammar_version: "0.3.12",
-            source_package_sha256: "14995645e8e7460eff2f60f2ab33b063890f3164e99b4396b7e7738b368dedbb",
-            parser_sha256: "6c076cd9d36a1a2a9387fef19ae90f76d3426e09792f99d1d49b60fcd69e1b16",
+            source_package_sha256: "813a911d6caba550be7af1b369c15df347f80a07eab8f3720ea9da476693b37a",
+            parser_sha256: "237e6520ab73b91bb32a582d3bc96cdc1645e7d9dc813caa26c1947f2bb265a9",
             scanner_sha256: Some(
-                "90bb85f17014e0735f8ca40410344c94c078975ea8a70f805a4b570a3bc512fa",
+                "5c67f7662807e744aa1e2e978d3b9edc22d839240d0e63f3dc9334d9e594c18c",
             ),
         },
         GrammarFamily::CobolFree => GrammarIdentity {

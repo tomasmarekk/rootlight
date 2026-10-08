@@ -8,7 +8,7 @@ use rootlight_ir::{
     ProvenanceRecord, RelationPredicate, RelationRecord, SourceRef,
 };
 use rootlight_search::{SearchBudget, SearchError, SearchMode};
-use rootlight_source::{SourceBudget, SourceError, SourceReadOptions};
+use rootlight_source::{LosslessTextReadOptions, SourceBudget, SourceError, SourceReadOptions};
 use serde::{Deserialize, Serialize};
 
 const HARD_MAX_QUERY_ROWS: u64 = 1_000_000;
@@ -934,6 +934,54 @@ impl SourceReadPlan {
     }
 }
 
+/// Prevalidated lossless text read with unchanged physical source selectors.
+#[derive(Debug, Clone)]
+pub struct SourceTextReadPlan {
+    pub(crate) base: SourceReadPlan,
+    pub(crate) options: LosslessTextReadOptions,
+}
+
+impl SourceTextReadPlan {
+    /// Returns deterministic admission and original-byte work estimates.
+    #[must_use]
+    pub const fn explanation(&self) -> &PlanExplanation {
+        self.base.explanation()
+    }
+
+    /// Borrows the prevalidated original-byte selectors in caller order.
+    #[must_use]
+    pub fn references(&self) -> &[SourceRef] {
+        &self.base.references
+    }
+}
+
+/// Prevalidated per-chunk Unicode prefixes of expanded original-byte ranges.
+#[derive(Debug, Clone)]
+pub struct SourceTextPrefixReadPlan {
+    pub(crate) base: SourceTextReadPlan,
+    pub(crate) maximum_text_bytes_per_chunk: usize,
+}
+
+impl SourceTextPrefixReadPlan {
+    /// Returns admission estimates within the existing caller resource ceilings.
+    #[must_use]
+    pub const fn explanation(&self) -> &PlanExplanation {
+        self.base.explanation()
+    }
+
+    /// Borrows complete approved selectors, not the clipped presentation ranges.
+    #[must_use]
+    pub fn references(&self) -> &[SourceRef] {
+        self.base.references()
+    }
+
+    /// Returns the UTF-8 presentation ceiling applied independently per chunk.
+    #[must_use]
+    pub const fn maximum_text_bytes_per_chunk(&self) -> usize {
+        self.maximum_text_bytes_per_chunk
+    }
+}
+
 /// Mandatory trust label for repository-controlled query values.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -958,6 +1006,8 @@ pub struct LocateHit {
     pub identifier: String,
     /// Qualified presentation name.
     pub qualified_name: String,
+    /// Retained authored header evidence, never inferred from the definition body.
+    pub signature: Option<rootlight_ir::LexicalEvidenceV1>,
     /// Repository-relative display path.
     pub path: String,
     /// Closed semantic kind label.

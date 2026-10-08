@@ -6,6 +6,7 @@
 #![forbid(unsafe_code)]
 
 mod config;
+mod fsharp_bindings;
 mod groovy_bindings;
 mod groovy_callables;
 mod groovy_calls;
@@ -23,6 +24,7 @@ mod pool;
 mod query_pack;
 mod registry;
 mod runtime;
+mod source_view;
 mod vba_bindings;
 mod vba_pointer;
 
@@ -39,7 +41,9 @@ pub use rootlight_adapter_sdk::{
     StructuralClassificationGap, structural_captured_name, structural_entity_classification_gap,
     structural_entity_kind, structural_entity_kind_from_source, structural_syntax_fact_order,
 };
-pub use runtime::{CacheStats, RuntimeStats, TreeSitterProvider};
+pub use runtime::{
+    CacheStats, FSharpAdmissionKind, FSharpAdmissionWitness, RuntimeStats, TreeSitterProvider,
+};
 
 /// Exact adapter crate version compiled into this runtime.
 pub const ADAPTER_VERSION: &str = env!("CARGO_PKG_VERSION");

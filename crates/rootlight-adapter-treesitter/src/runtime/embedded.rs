@@ -1,5 +1,5 @@
 //! Host-bound parsing of HTML/Astro script, style and server bodies.
-//! Child grammars read original bytes through included ranges. Their candidates
+//! Child grammars share the host's private UTF-8 view through physical requests. Their candidates
 //! join the host plan before identity closure, budgeting and parent assignment.
 
 use rootlight_adapter_sdk::AnalysisLimits;
@@ -12,6 +12,7 @@ impl TreeSitterProvider {
         &self,
         tree: &Tree,
         request: &ParseRequest<'_>,
+        source: &NativeSourceView<'_>,
         traversal: &mut TraversalReport,
         candidates: &mut Vec<QueryCandidate>,
         max_facts: Option<usize>,
@@ -22,6 +23,7 @@ impl TreeSitterProvider {
             return self.extract_perl_replacements(
                 tree,
                 request,
+                source,
                 request.limits(),
                 traversal,
                 candidates,
@@ -35,6 +37,7 @@ impl TreeSitterProvider {
             return self.extract_markdown(
                 tree,
                 request,
+                source,
                 traversal,
                 candidates,
                 max_facts,
@@ -76,7 +79,7 @@ impl TreeSitterProvider {
                     | "astro.frontmatter"
                     | "astro.expression"
             ) || (!request.included_ranges().is_empty()
-                && !candidate_within_included_range(&candidate, request)?)
+                && !candidate_within_included_range(&candidate, request, source)?)
             {
                 continue;
             }
@@ -109,9 +112,9 @@ impl TreeSitterProvider {
             let language = if expression {
                 Some("typescript")
             } else if astro {
-                astro_body_language(body, request.source().bytes(), cancellation)?
+                astro_body_language(body, source.as_bytes(), cancellation)?
             } else {
-                body_language(body, request.source().bytes(), cancellation)?
+                body_language(body, source.as_bytes(), cancellation)?
             };
             let Some(language) = language else {
                 continue;
@@ -139,17 +142,17 @@ impl TreeSitterProvider {
             let limits = embedded_limits(request.limits(), remaining_nodes)?;
             let language_id =
                 LanguageId::new(language).map_err(|_| provider_failure("embedded-language"))?;
-            let source = source_ref_for_span(
+            let body_source = source_ref_for_projected_span(
                 request.source().source_ref(),
+                source,
                 candidate.start,
                 candidate.end,
-            )
-            .ok_or_else(|| provider_failure("embedded-source-span"))?;
+            )?;
             let child_request = ParseRequest::new(
                 request.source().clone(),
                 language_id.clone(),
                 request.encoding().clone(),
-                vec![IncludedRange::new(source.span(), language_id)],
+                vec![IncludedRange::new(body_source.span(), language_id)],
                 &limits,
             )?;
             let (family, native_family, child_tree, child_traversal) = if expression {
@@ -157,7 +160,7 @@ impl TreeSitterProvider {
                     None
                 } else {
                     let envelope = super::expression::ExpressionEnvelope::new(
-                        request.source().bytes(),
+                        source.as_bytes(),
                         candidate.start,
                         candidate.end,
                     )
@@ -167,13 +170,9 @@ impl TreeSitterProvider {
                             parent.kind() == "attribute" && parent.named_child(0) == Some(body)
                         })
                     {
-                        Some(
-                            envelope
-                                .with_attribute_spread(request.source().bytes(), cancellation)?,
-                        )
+                        Some(envelope.with_attribute_spread(source.as_bytes(), cancellation)?)
                     } else if body.kind() == "html_interpolation"
-                        && envelope
-                            .contains_only_comments(request.source().bytes(), cancellation)?
+                        && envelope.contains_only_comments(source.as_bytes(), cancellation)?
                     {
                         None
                     } else {
@@ -194,12 +193,14 @@ impl TreeSitterProvider {
                     &language_for(GrammarFamily::JavaScript),
                     None,
                     self.config.default_settings(),
+                    source,
                     Some(&mut context),
                     cancellation,
                 )?;
                 let report = inspect_tree(
                     &tree,
                     &child_request,
+                    source,
                     remaining_nodes,
                     limits.max_syntax_depth(),
                     cancellation,
@@ -217,6 +218,7 @@ impl TreeSitterProvider {
                     None,
                     &[],
                     self.config.default_settings(),
+                    source,
                     cancellation,
                 )?;
                 (
@@ -275,7 +277,7 @@ impl TreeSitterProvider {
                 let extraction = pack.extract(
                     family,
                     &child_tree,
-                    request.source().bytes(),
+                    source.as_bytes(),
                     remaining_nodes,
                     maximum.saturating_sub(candidates.len()),
                     cancellation,
@@ -286,7 +288,7 @@ impl TreeSitterProvider {
                 pack.extract_identity(
                     family,
                     &child_tree,
-                    request.source().bytes(),
+                    source.as_bytes(),
                     remaining_nodes,
                     cancellation,
                 )?

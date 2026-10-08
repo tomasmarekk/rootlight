@@ -52,7 +52,7 @@ pub struct RequestEnvelope {
     pub effective_budget: ::core::option::Option<FirstSliceEffectiveBudget>,
     #[prost(
         oneof = "request_envelope::Request",
-        tags = "10, 11, 12, 13, 14, 15, 16, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51"
+        tags = "10, 11, 12, 13, 14, 15, 16, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52"
     )]
     #[allow(missing_docs)]
     pub request: ::core::option::Option<request_envelope::Request>,
@@ -149,6 +149,9 @@ pub mod request_envelope {
         #[prost(message, tag = "51")]
         #[allow(missing_docs)]
         RepositoryCatalogMutation(super::RepositoryCatalogMutationRequest),
+        #[prost(message, tag = "52")]
+        #[allow(missing_docs)]
+        SourceTextPrefixMetadataQuote(super::SourceTextPrefixMetadataQuoteRequest),
     }
 }
 /// Complete validated resource ceilings for one first-slice request.
@@ -196,7 +199,7 @@ pub struct ResponseEnvelope {
     pub request_id: u64,
     #[prost(
         oneof = "response_envelope::Response",
-        tags = "10, 11, 12, 13, 14, 15, 16, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 50, 51, 20"
+        tags = "10, 11, 12, 13, 14, 15, 16, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 50, 51, 52, 20"
     )]
     #[allow(missing_docs)]
     pub response: ::core::option::Option<response_envelope::Response>,
@@ -290,6 +293,9 @@ pub mod response_envelope {
         #[prost(message, tag = "51")]
         #[allow(missing_docs)]
         RepositoryCatalogMutation(super::RepositoryCatalogMutationResponse),
+        #[prost(message, tag = "52")]
+        #[allow(missing_docs)]
+        SourceTextPrefixMetadataQuote(super::SourceTextPrefixMetadataQuoteResponse),
         #[prost(message, tag = "20")]
         #[allow(missing_docs)]
         Error(super::super::super::common::v1::PublicError),
@@ -1421,6 +1427,13 @@ pub struct FirstSliceLocateHit {
     #[prost(message, optional, tag = "12")]
     #[allow(missing_docs)]
     pub extracted_from: ::core::option::Option<FirstSliceSourceRef>,
+    /// Bounded declaration presentation; source remains the existing definition selection.
+    #[prost(string, optional, tag = "13")]
+    #[allow(missing_docs)]
+    pub signature: ::core::option::Option<::prost::alloc::string::String>,
+    #[prost(bool, tag = "14")]
+    #[allow(missing_docs)]
+    pub signature_truncated: bool,
 }
 /// Returns bounded typed lexical results and generation correlation.
 #[derive(Clone, PartialEq, ::prost::Message)]
@@ -1679,8 +1692,12 @@ pub struct SourceReadRequest {
     #[prost(enumeration = "SourceReadEncoding", tag = "9")]
     #[allow(missing_docs)]
     pub encoding: i32,
+    /// Present only for negotiated lossless prefixes; bounds UTF-8 presentation per chunk.
+    #[prost(uint32, optional, tag = "10")]
+    #[allow(missing_docs)]
+    pub maximum_text_bytes_per_chunk: ::core::option::Option<u32>,
 }
-/// One verified exact-byte source chunk.
+/// One verified source chunk with a negotiated byte or lossless text representation.
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct FirstSliceSourceChunk {
     #[prost(message, optional, tag = "1")]
@@ -1724,7 +1741,7 @@ pub struct FirstSliceSourceChunk {
     #[prost(uint64, optional, tag = "13")]
     #[allow(missing_docs)]
     pub included_end_line: ::core::option::Option<u64>,
-    /// Exact bytes for both UTF-8 and binary source reads.
+    /// Exact bytes for UTF-8 and binary reads; empty in lossless text mode.
     #[prost(bytes = "vec", tag = "14")]
     #[allow(missing_docs)]
     pub exact_content: ::prost::alloc::vec::Vec<u8>,
@@ -1735,6 +1752,10 @@ pub struct FirstSliceSourceChunk {
     #[prost(message, optional, tag = "16")]
     #[allow(missing_docs)]
     pub extracted_from: ::core::option::Option<FirstSliceSourceRef>,
+    /// Required only for lossless text mode, whose content is one UTF-8 string.
+    #[prost(enumeration = "SourcePhysicalEncoding", optional, tag = "17")]
+    #[allow(missing_docs)]
+    pub physical_encoding: ::core::option::Option<i32>,
 }
 /// Returns exact verified source chunks.
 #[derive(Clone, PartialEq, ::prost::Message)]
@@ -1762,6 +1783,88 @@ pub struct SourceReadResponse {
     #[prost(message, repeated, tag = "7")]
     #[allow(missing_docs)]
     pub conditional_activity: ::prost::alloc::vec::Vec<ConditionalActivityAssessment>,
+    /// UTF-8 presentation bytes in lossless text mode; zero for legacy reads.
+    #[prost(uint64, tag = "8")]
+    #[allow(missing_docs)]
+    pub total_text_bytes: u64,
+    /// Prefix intent is distinct from execution truncation; absent for exact reads.
+    #[prost(bool, optional, tag = "9")]
+    #[allow(missing_docs)]
+    pub prefix_truncated: ::core::option::Option<bool>,
+}
+/// Quotes resident metadata only; source bodies and freshness are not inspected.
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct SourceTextPrefixMetadataQuoteRequest {
+    #[prost(message, optional, tag = "1")]
+    #[allow(missing_docs)]
+    pub schema_version: ::core::option::Option<
+        super::super::common::v1::ContractVersion,
+    >,
+    #[prost(message, optional, tag = "2")]
+    #[allow(missing_docs)]
+    pub repository: ::core::option::Option<super::super::common::v1::RepositoryId>,
+    #[prost(message, optional, tag = "3")]
+    #[allow(missing_docs)]
+    pub generation: ::core::option::Option<super::super::common::v1::GenerationId>,
+    #[prost(message, repeated, tag = "4")]
+    #[allow(missing_docs)]
+    pub references: ::prost::alloc::vec::Vec<FirstSliceSourceRef>,
+    #[prost(uint32, tag = "5")]
+    #[allow(missing_docs)]
+    pub context_lines_before: u32,
+    #[prost(uint32, tag = "6")]
+    #[allow(missing_docs)]
+    pub context_lines_after: u32,
+}
+/// Cumulative fixed future prefix costs, excluding content-dependent terms.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct SourceTextPrefixFixedUpper {
+    #[prost(uint64, tag = "1")]
+    #[allow(missing_docs)]
+    pub json_bytes: u64,
+    #[prost(uint64, tag = "2")]
+    #[allow(missing_docs)]
+    pub memory_bytes: u64,
+    #[prost(uint64, tag = "3")]
+    #[allow(missing_docs)]
+    pub rows: u64,
+    #[prost(uint64, tag = "4")]
+    #[allow(missing_docs)]
+    pub traversal_facts: u64,
+    #[prost(uint64, tag = "5")]
+    #[allow(missing_docs)]
+    pub paths: u64,
+}
+/// Echoes unchanged editing authority and the bound for this ordered prefix.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct SourceTextPrefixMetadataQuoteEntry {
+    #[prost(message, optional, tag = "1")]
+    #[allow(missing_docs)]
+    pub source: ::core::option::Option<FirstSliceSourceRef>,
+    #[prost(message, optional, tag = "2")]
+    #[allow(missing_docs)]
+    pub prefix_fixed_upper: ::core::option::Option<SourceTextPrefixFixedUpper>,
+}
+/// Versioned bounds plus measured metadata-only work, not a source-read result.
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct SourceTextPrefixMetadataQuoteResponse {
+    #[prost(message, optional, tag = "1")]
+    #[allow(missing_docs)]
+    pub schema_version: ::core::option::Option<
+        super::super::common::v1::ContractVersion,
+    >,
+    #[prost(message, optional, tag = "2")]
+    #[allow(missing_docs)]
+    pub context: ::core::option::Option<FirstSliceQueryContext>,
+    #[prost(uint32, tag = "3")]
+    #[allow(missing_docs)]
+    pub quote_policy_version: u32,
+    #[prost(message, repeated, tag = "4")]
+    #[allow(missing_docs)]
+    pub entries: ::prost::alloc::vec::Vec<SourceTextPrefixMetadataQuoteEntry>,
+    #[prost(message, optional, tag = "5")]
+    #[allow(missing_docs)]
+    pub completeness: ::core::option::Option<FirstSliceCompleteness>,
 }
 /// Requests the bounded list of repositories known to this daemon process.
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
@@ -5157,6 +5260,8 @@ pub enum SourceReadEncoding {
     Utf8 = 0,
     #[allow(missing_docs)]
     Bytes = 1,
+    #[allow(missing_docs)]
+    LosslessText = 2,
 }
 impl SourceReadEncoding {
     /// String value of the enum field names used in the ProtoBuf definition.
@@ -5167,6 +5272,7 @@ impl SourceReadEncoding {
         match self {
             Self::Utf8 => "SOURCE_READ_ENCODING_UTF8",
             Self::Bytes => "SOURCE_READ_ENCODING_BYTES",
+            Self::LosslessText => "SOURCE_READ_ENCODING_LOSSLESS_TEXT",
         }
     }
     /// Creates an enum from field names used in the ProtoBuf definition.
@@ -5174,6 +5280,40 @@ impl SourceReadEncoding {
         match value {
             "SOURCE_READ_ENCODING_UTF8" => Some(Self::Utf8),
             "SOURCE_READ_ENCODING_BYTES" => Some(Self::Bytes),
+            "SOURCE_READ_ENCODING_LOSSLESS_TEXT" => Some(Self::LosslessText),
+            _ => None,
+        }
+    }
+}
+#[allow(missing_docs)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
+#[repr(i32)]
+pub enum SourcePhysicalEncoding {
+    #[allow(missing_docs)]
+    Utf8 = 0,
+    #[allow(missing_docs)]
+    Utf16Le = 1,
+    #[allow(missing_docs)]
+    Utf16Be = 2,
+}
+impl SourcePhysicalEncoding {
+    /// String value of the enum field names used in the ProtoBuf definition.
+    ///
+    /// The values are not transformed in any way and thus are considered stable
+    /// (if the ProtoBuf definition does not change) and safe for programmatic use.
+    pub fn as_str_name(&self) -> &'static str {
+        match self {
+            Self::Utf8 => "SOURCE_PHYSICAL_ENCODING_UTF8",
+            Self::Utf16Le => "SOURCE_PHYSICAL_ENCODING_UTF16_LE",
+            Self::Utf16Be => "SOURCE_PHYSICAL_ENCODING_UTF16_BE",
+        }
+    }
+    /// Creates an enum from field names used in the ProtoBuf definition.
+    pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+        match value {
+            "SOURCE_PHYSICAL_ENCODING_UTF8" => Some(Self::Utf8),
+            "SOURCE_PHYSICAL_ENCODING_UTF16_LE" => Some(Self::Utf16Le),
+            "SOURCE_PHYSICAL_ENCODING_UTF16_BE" => Some(Self::Utf16Be),
             _ => None,
         }
     }

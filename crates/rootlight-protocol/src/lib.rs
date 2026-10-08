@@ -28,9 +28,17 @@ pub const FILE_DESCRIPTOR_SET: &[u8] =
 /// authenticated operation submission and cannot satisfy the current contract.
 pub const MINIMUM_PROTOCOL_MINOR: u32 = 1;
 /// Latest daemon protocol implemented by the current client and server.
-pub const CURRENT_PROTOCOL_MINOR: u32 = 23;
+pub const CURRENT_PROTOCOL_MINOR: u32 = 26;
 /// Current production protocol contract version.
-pub const PROTOCOL_VERSION: &str = "1.23";
+pub const PROTOCOL_VERSION: &str = "1.26";
+/// First daemon protocol carrying resident source-prefix metadata quotes.
+pub const SOURCE_TEXT_PREFIX_METADATA_QUOTE_PROTOCOL_MINOR: u32 = 26;
+/// Supported cumulative source-prefix metadata bound policy.
+pub const SOURCE_TEXT_PREFIX_METADATA_QUOTE_POLICY_VERSION: u32 = 1;
+/// First daemon protocol carrying separately bounded lossless text prefixes.
+pub const LOSSLESS_SOURCE_TEXT_PREFIX_PROTOCOL_MINOR: u32 = 25;
+/// First daemon protocol carrying lossless text with physical source encoding.
+pub const LOSSLESS_SOURCE_TEXT_PROTOCOL_MINOR: u32 = 24;
 /// First daemon protocol carrying optional generation-bound language coverage.
 pub const LANGUAGE_COVERAGE_PROJECTION_PROTOCOL_MINOR: u32 = 23;
 /// First daemon protocol carrying source-bound conditional-activity assessments.
@@ -264,6 +272,206 @@ mod tests {
         .encode_to_vec();
         assert_eq!(only_locate[0], 0x42);
         assert_eq!(only_source[0], 0x3a);
+    }
+
+    #[test]
+    fn lossless_source_text_fields_are_additive_and_legacy_bytes_are_conserved() {
+        use generated::daemon::v1 as daemon;
+        #[derive(Clone, PartialEq, Message)]
+        struct LegacyChunk {
+            #[prost(string, tag = "7")]
+            content: String,
+            #[prost(enumeration = "daemon::SourceReadEncoding", tag = "11")]
+            encoding: i32,
+            #[prost(bytes = "vec", tag = "14")]
+            exact_content: Vec<u8>,
+        }
+        #[derive(Clone, PartialEq, Message)]
+        struct LegacyResponse {
+            #[prost(message, repeated, tag = "3")]
+            chunks: Vec<LegacyChunk>,
+            #[prost(uint64, tag = "4")]
+            total_source_bytes: u64,
+        }
+        let legacy = LegacyResponse {
+            chunks: vec![LegacyChunk {
+                content: String::new(),
+                encoding: daemon::SourceReadEncoding::Bytes as i32,
+                exact_content: b"abc".to_vec(),
+            }],
+            total_source_bytes: 3,
+        };
+        let response = daemon::SourceReadResponse {
+            chunks: vec![daemon::FirstSliceSourceChunk {
+                encoding: daemon::SourceReadEncoding::Bytes as i32,
+                exact_content: b"abc".to_vec(),
+                ..Default::default()
+            }],
+            total_source_bytes: 3,
+            ..Default::default()
+        };
+        assert_eq!(response.encode_to_vec(), legacy.encode_to_vec());
+        let text = daemon::SourceReadResponse {
+            chunks: vec![daemon::FirstSliceSourceChunk {
+                content: "abc".to_owned(),
+                encoding: daemon::SourceReadEncoding::LosslessText as i32,
+                physical_encoding: Some(daemon::SourcePhysicalEncoding::Utf16Le as i32),
+                ..Default::default()
+            }],
+            total_source_bytes: 6,
+            total_text_bytes: 3,
+            ..Default::default()
+        };
+        let encoded = text.encode_to_vec();
+        assert_eq!(
+            daemon::SourceReadResponse::decode(encoded.as_slice()).unwrap(),
+            text
+        );
+        let older = LegacyResponse::decode(encoded.as_slice()).unwrap();
+        assert_eq!(older.total_source_bytes, 6);
+        assert_eq!(older.chunks[0].content, "abc");
+        assert_eq!(older.chunks[0].encoding, 2);
+        assert!(older.chunks[0].exact_content.is_empty());
+        assert_eq!(
+            daemon::FirstSliceSourceChunk {
+                physical_encoding: Some(daemon::SourcePhysicalEncoding::Utf8 as i32),
+                ..Default::default()
+            }
+            .encode_to_vec(),
+            [0x88, 0x01, 0x00]
+        );
+        assert_eq!(
+            daemon::SourceReadResponse {
+                total_text_bytes: 3,
+                ..Default::default()
+            }
+            .encode_to_vec(),
+            [0x40, 0x03]
+        );
+        assert_eq!(
+            daemon::SourceReadRequest {
+                encoding: daemon::SourceReadEncoding::LosslessText as i32,
+                ..Default::default()
+            }
+            .encode_to_vec(),
+            [0x48, 0x02]
+        );
+    }
+
+    #[test]
+    fn lossless_prefix_controls_are_presence_sensitive_and_exact_bytes_are_unchanged() {
+        use generated::daemon::v1 as daemon;
+        #[derive(Clone, PartialEq, Message)]
+        struct ExactRequest {
+            #[prost(enumeration = "daemon::SourceReadEncoding", tag = "9")]
+            encoding: i32,
+        }
+        #[derive(Clone, PartialEq, Message)]
+        struct ExactResponse {
+            #[prost(uint64, tag = "8")]
+            total_text_bytes: u64,
+        }
+        let exact = daemon::SourceReadRequest {
+            encoding: daemon::SourceReadEncoding::LosslessText as i32,
+            ..Default::default()
+        };
+        assert_eq!(
+            exact.encode_to_vec(),
+            ExactRequest {
+                encoding: exact.encoding
+            }
+            .encode_to_vec()
+        );
+        let response = daemon::SourceReadResponse {
+            total_text_bytes: 3,
+            ..Default::default()
+        };
+        assert_eq!(
+            response.encode_to_vec(),
+            ExactResponse {
+                total_text_bytes: 3
+            }
+            .encode_to_vec()
+        );
+        for cap in [0, 1, 512 * 1024] {
+            let request = daemon::SourceReadRequest {
+                maximum_text_bytes_per_chunk: Some(cap),
+                ..exact.clone()
+            };
+            assert_ne!(request.encode_to_vec(), exact.encode_to_vec());
+            assert_eq!(
+                daemon::SourceReadRequest::decode(request.encode_to_vec().as_slice()).unwrap(),
+                request
+            );
+            assert_eq!(
+                ExactRequest::decode(request.encode_to_vec().as_slice())
+                    .unwrap()
+                    .encoding,
+                exact.encoding
+            );
+        }
+        assert_eq!(
+            daemon::SourceReadRequest {
+                maximum_text_bytes_per_chunk: Some(0),
+                ..Default::default()
+            }
+            .encode_to_vec(),
+            [0x50, 0x00]
+        );
+        for (clipped, byte) in [(false, 0), (true, 1)] {
+            let prefix = daemon::SourceReadResponse {
+                prefix_truncated: Some(clipped),
+                ..Default::default()
+            };
+            assert_eq!(prefix.encode_to_vec(), [0x48, byte]);
+            assert_eq!(
+                daemon::SourceReadResponse::decode(prefix.encode_to_vec().as_slice()).unwrap(),
+                prefix
+            );
+        }
+        assert_eq!(LOSSLESS_SOURCE_TEXT_PROTOCOL_MINOR, 24);
+        assert_eq!(LOSSLESS_SOURCE_TEXT_PREFIX_PROTOCOL_MINOR, 25);
+    }
+
+    #[test]
+    fn source_metadata_quote_is_separate_and_uses_free_tag_fifty_two() {
+        use generated::daemon::v1 as daemon;
+        let request = daemon::RequestEnvelope {
+            request: Some(
+                daemon::request_envelope::Request::SourceTextPrefixMetadataQuote(
+                    daemon::SourceTextPrefixMetadataQuoteRequest::default(),
+                ),
+            ),
+            ..Default::default()
+        };
+        assert_eq!(request.encode_to_vec(), [0xa2, 0x03, 0x00]);
+        assert_eq!(
+            daemon::RequestEnvelope::decode(request.encode_to_vec().as_slice()).unwrap(),
+            request
+        );
+        let response = daemon::ResponseEnvelope {
+            response: Some(
+                daemon::response_envelope::Response::SourceTextPrefixMetadataQuote(
+                    daemon::SourceTextPrefixMetadataQuoteResponse::default(),
+                ),
+            ),
+            ..Default::default()
+        };
+        assert_eq!(response.encode_to_vec(), [0xa2, 0x03, 0x00]);
+        assert_eq!(
+            daemon::ResponseEnvelope::decode(response.encode_to_vec().as_slice()).unwrap(),
+            response
+        );
+        let upper = daemon::SourceTextPrefixFixedUpper {
+            json_bytes: 1,
+            memory_bytes: 2,
+            rows: 3,
+            traversal_facts: 4,
+            paths: 5,
+        };
+        assert_eq!(upper.encode_to_vec(), [8, 1, 16, 2, 24, 3, 32, 4, 40, 5]);
+        assert_eq!(SOURCE_TEXT_PREFIX_METADATA_QUOTE_PROTOCOL_MINOR, 26);
+        assert_eq!(SOURCE_TEXT_PREFIX_METADATA_QUOTE_POLICY_VERSION, 1);
     }
 
     #[test]

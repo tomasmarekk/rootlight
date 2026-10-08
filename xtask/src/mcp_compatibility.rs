@@ -346,9 +346,52 @@ fn success_examples(root: &Path) -> Result<Value, CompatibilityError> {
         VerticalTool::SourceRead.contract_version(),
         |data| {
             data.insert("conditional_activity".into(), json!([]));
+            let total = data
+                .get("chunks")
+                .and_then(Value::as_array)
+                .ok_or_else(|| {
+                    CompatibilityError::FixtureContract(
+                        "source.read chunks must be an array".into(),
+                    )
+                })?
+                .iter()
+                .try_fold(0_u64, |total, chunk| {
+                    let bytes = if chunk.get("encoding").and_then(Value::as_str) == Some("utf8") {
+                        u64::try_from(
+                            chunk
+                                .get("content")
+                                .and_then(Value::as_str)
+                                .ok_or_else(|| {
+                                    CompatibilityError::FixtureContract(
+                                        "source.read content must be text".into(),
+                                    )
+                                })?
+                                .len(),
+                        )
+                        .map_err(|_| {
+                            CompatibilityError::FixtureContract(
+                                "source.read text total is invalid".into(),
+                            )
+                        })?
+                    } else {
+                        0
+                    };
+                    total.checked_add(bytes).ok_or_else(|| {
+                        CompatibilityError::FixtureContract(
+                            "source.read text total is invalid".into(),
+                        )
+                    })
+                })?;
+            data.insert("total_text_bytes".into(), json!(total));
             Ok(())
         },
     )?;
+    tools
+        .iter_mut()
+        .find(|entry| entry["tool"] == "source.read")
+        .ok_or_else(|| {
+            CompatibilityError::FixtureContract("source.read example is missing".into())
+        })?["input"]["encoding"] = json!("utf8_lossless_when_valid");
     upgrade_additive_success_example(
         &mut tools,
         "query.advanced",
@@ -1559,7 +1602,7 @@ mod tests {
                 },
                 {
                     "tool": "source.read",
-                    "current_version": "1.2",
+                    "current_version": "1.3",
                     "projected_version": "1.0",
                 },
                 {

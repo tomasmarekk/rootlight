@@ -1,4 +1,4 @@
-//! Native Perl replacement expressions in unchanged host source coordinates.
+//! Native Perl replacement expressions in the host's shared text coordinates.
 //! Child trees share range, node, depth and native-work budgets; unknown evaluation
 //! retains its storage barrier even when the first-stage expression is parsed.
 
@@ -17,6 +17,7 @@ impl TreeSitterProvider {
         &self,
         tree: &Tree,
         request: &ParseRequest<'_>,
+        source: &NativeSourceView<'_>,
         budget: &AnalysisLimits,
         traversal: &mut TraversalReport,
         candidates: &mut Vec<QueryCandidate>,
@@ -58,7 +59,7 @@ impl TreeSitterProvider {
             for scope in job.scopes {
                 cancellation.check()?;
                 if !request.included_ranges().is_empty()
-                    && !candidate_within_included_range(&scope, request)?
+                    && !candidate_within_included_range(&scope, request, source)?
                 {
                     continue;
                 }
@@ -76,7 +77,7 @@ impl TreeSitterProvider {
                 }
                 let Some(flags) = node
                     .child_by_field_name("modifiers")
-                    .and_then(|flags| request.source().bytes().get(flags.byte_range()))
+                    .and_then(|flags| source.as_bytes().get(flags.byte_range()))
                 else {
                     continue;
                 };
@@ -114,18 +115,18 @@ impl TreeSitterProvider {
                 }
                 *used_ranges += 1;
                 let limits = embedded::embedded_limits(budget, nodes)?;
-                let source = source_ref_for_span(
+                let body_source = source_ref_for_projected_span(
                     request.source().source_ref(),
+                    source,
                     body.start_byte(),
                     body.end_byte(),
-                )
-                .ok_or_else(|| provider_failure("perl-replacement-source-span"))?;
+                )?;
                 let child_request = ParseRequest::new(
                     request.source().clone(),
                     request.language().clone(),
                     request.encoding().clone(),
                     vec![IncludedRange::new(
-                        source.span(),
+                        body_source.span(),
                         request.language().clone(),
                     )],
                     &limits,
@@ -136,6 +137,7 @@ impl TreeSitterProvider {
                     &language_for(GrammarFamily::Perl),
                     None,
                     self.config.default_settings(),
+                    source,
                     Some(&mut *context),
                     cancellation,
                 ) {
@@ -156,6 +158,7 @@ impl TreeSitterProvider {
                 let child = inspect_tree(
                     &child_tree,
                     &child_request,
+                    source,
                     nodes,
                     depth_budget,
                     cancellation,
@@ -187,7 +190,7 @@ impl TreeSitterProvider {
                     let extraction = pack.extract(
                         GrammarFamily::Perl,
                         &child_tree,
-                        request.source().bytes(),
+                        source.as_bytes(),
                         nodes,
                         maximum.saturating_sub(candidates.len()),
                         cancellation,
@@ -201,7 +204,7 @@ impl TreeSitterProvider {
                     pack.extract_identity(
                         GrammarFamily::Perl,
                         &child_tree,
-                        request.source().bytes(),
+                        source.as_bytes(),
                         nodes,
                         cancellation,
                     )?

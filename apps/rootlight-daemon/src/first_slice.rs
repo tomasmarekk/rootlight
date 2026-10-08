@@ -100,9 +100,9 @@ use rootlight_service::{
     FirstSliceProjectAnalysisRequest, FirstSliceProjectAnalyzer, FirstSliceRecoveryTarget,
     FirstSliceService, FirstSliceStorageAccountingState, FirstSliceStoragePolicy,
     FirstSliceSupplementalPrefix, FirstSliceSupportInventory, FirstSliceWorkingTreeSelection,
-    HistoryChangeKind, PROJECT_SYNTAX_FACT_LIMIT_DIAGNOSTIC, PlanChangeObjective,
-    ProjectModuleResolution, SemanticProjectLanguage, SourceEncoding as ServiceSourceEncoding,
-    SourceReadOptions,
+    HistoryChangeKind, LosslessTextReadOptions, PROJECT_SYNTAX_FACT_LIMIT_DIAGNOSTIC,
+    PlanChangeObjective, ProjectModuleResolution, SemanticProjectLanguage,
+    SourceEncoding as ServiceSourceEncoding, SourceReadOptions, SourceTextEncoding,
     catalog::{
         CATALOG_SORT_VERSION, CatalogError, CatalogInstant, CatalogListFilter, CatalogPageRequest,
         CatalogPageSize, CatalogRepositoryRecord, CatalogRepositoryState, CatalogSnapshotId,
@@ -7930,6 +7930,15 @@ fn execute_service_request(
         .cancellation
         .check()
         .map_err(|cancelled| cancellation_error(cancelled.reason()))?;
+    if let FirstSliceIpcRequest::SourceRead(request) = &request {
+        require_source_read_protocol(request, context.selected_protocol_minor)?;
+    }
+    if matches!(
+        &request,
+        FirstSliceIpcRequest::SourceTextPrefixMetadataQuote(_)
+    ) {
+        require_source_metadata_quote_protocol(context.selected_protocol_minor)?;
+    }
     let requested_repository = request_repository(&request)?;
     let requested_recovery = if let Some(repository) = requested_repository {
         lanes
@@ -8015,6 +8024,10 @@ fn execute_service_request(
         }
         FirstSliceIpcRequest::SourceRead(request) => {
             source_read(&service, request, &context).map(FirstSliceIpcResponse::SourceRead)
+        }
+        FirstSliceIpcRequest::SourceTextPrefixMetadataQuote(request) => {
+            source_text_prefix_metadata_quote(&service, request, &context)
+                .map(FirstSliceIpcResponse::SourceTextPrefixMetadataQuote)
         }
         FirstSliceIpcRequest::RepositoryList(request) => {
             repository_list(&service, request).map(FirstSliceIpcResponse::RepositoryList)
@@ -8199,6 +8212,7 @@ fn request_repository(request: &FirstSliceIpcRequest) -> Result<Option<Repositor
         FirstSliceIpcRequest::CodeLocate(request) => request.repository.as_ref(),
         FirstSliceIpcRequest::SymbolExplain(request) => request.repository.as_ref(),
         FirstSliceIpcRequest::SourceRead(request) => request.repository.as_ref(),
+        FirstSliceIpcRequest::SourceTextPrefixMetadataQuote(request) => request.repository.as_ref(),
         FirstSliceIpcRequest::RepositoryStatus(request) => request.repository.as_ref(),
         FirstSliceIpcRequest::SymbolRelationships(request) => request.repository.as_ref(),
         FirstSliceIpcRequest::FlowTrace(request) => request.repository.as_ref(),
@@ -11413,8 +11427,12 @@ fn code_locate(
     hits.try_reserve_exact(response.data.hits.len())
         .map_err(|_| resource_exhausted())?;
     for hit in response.data.hits {
+        let (signature, signature_truncated) =
+            retained_locate_signature_to_wire(&hit, repository, generation.generation)?;
         hits.push(daemon::FirstSliceLocateHit {
             extracted_from: hit.extracted_from.as_ref().map(source_ref_to_wire),
+            signature,
+            signature_truncated,
             symbol: hit.symbol.map(symbol_to_wire),
             file: Some(file_to_wire(hit.file)),
             identifier: hit.identifier,
@@ -11447,6 +11465,34 @@ fn code_locate(
         completeness: Some(completeness),
         conditional_activity,
     })
+}
+
+fn retained_locate_signature_to_wire(
+    hit: &rootlight_query::LocateHit,
+    repository: RepositoryId,
+    generation: GenerationId,
+) -> Result<(Option<String>, bool), PublicError> {
+    let Some(signature) = hit.signature.as_ref() else {
+        return Ok((None, false));
+    };
+    if signature.kind() != rootlight_ir::LexicalEvidenceKind::Signature
+        || hit.symbol.map(rootlight_ir::FactRef::Entity) != Some(signature.subject())
+        || signature.text().is_empty()
+        || signature.text().len() > rootlight_ir::MAX_LEXICAL_SIGNATURE_BYTES
+        || signature.text().as_bytes().contains(&0)
+        || hit.source.as_ref().is_none_or(|source| {
+            source.repository() != repository
+                || source.generation() != generation
+                || source.span().file() != hit.file
+        })
+    {
+        return Err(internal_error());
+    }
+    let mut text = String::new();
+    text.try_reserve_exact(signature.text().len())
+        .map_err(|_| resource_exhausted())?;
+    text.push_str(signature.text());
+    Ok((Some(text), signature.is_truncated()))
 }
 
 fn conditional_activity_to_wire(
@@ -12046,11 +12092,11 @@ fn explain_source_projection(
     let source_budget = budget
         .with_source_max_context_lines(u16::from(lines))
         .map_err(service_error)?;
-    let options = SourceReadOptions::new()
+    let options = LosslessTextReadOptions::new()
         .with_context_lines_before(0)
         .with_context_lines_after(u16::from(lines.saturating_sub(1)));
     let response = service
-        .source_read_with_options_and_budget(
+        .source_read_lossless_text_with_options_and_budget(
             generation,
             vec![definition.clone()],
             options,
@@ -12063,10 +12109,11 @@ fn explain_source_projection(
         return Err(incomplete_coverage());
     }
     let chunk = chunks.pop().ok_or_else(incomplete_coverage)?;
-    let source = String::from_utf8(chunk.bytes).map_err(|_| incomplete_coverage())?;
-    Ok((first_source_lines(&source, lines), response.usage))
+    Ok((first_source_lines(chunk.text(), lines), response.usage))
 }
 
+// Explain previews normalize line terminators for display. Editing authority
+// remains the original definition SourceRef, not positions in this string.
 fn first_source_lines(source: &str, maximum: u8) -> String {
     source
         .lines()
@@ -13772,29 +13819,171 @@ fn parse_history_revision(
     }
 }
 
+fn require_source_metadata_quote_protocol(selected_protocol_minor: u32) -> Result<(), PublicError> {
+    if selected_protocol_minor
+        < rootlight_protocol::SOURCE_TEXT_PREFIX_METADATA_QUOTE_PROTOCOL_MINOR
+    {
+        return Err(unsupported_capability());
+    }
+    Ok(())
+}
+
+fn source_text_prefix_metadata_quote(
+    service: &FirstSliceService,
+    request: daemon::SourceTextPrefixMetadataQuoteRequest,
+    context: &FirstSliceIpcContext,
+) -> Result<daemon::SourceTextPrefixMetadataQuoteResponse, PublicError> {
+    // Keep direct handler calls fail-closed as well as the core dispatch gate.
+    require_source_metadata_quote_protocol(context.selected_protocol_minor)?;
+    context
+        .cancellation
+        .check()
+        .map_err(|cancelled| cancellation_error(cancelled.reason()))?;
+    if request.references.is_empty()
+        || request.references.len() > 32
+        || !matches!(
+            (request.context_lines_before, request.context_lines_after),
+            (0, 0) | (1, 1)
+        )
+    {
+        return Err(invalid_argument());
+    }
+    let repository = parse_repository(request.repository.as_ref())?;
+    let generation = parse_generation(request.generation.as_ref())?;
+    let mut references = Vec::new();
+    references
+        .try_reserve_exact(request.references.len())
+        .map_err(|_| resource_exhausted())?;
+    for reference in &request.references {
+        context
+            .cancellation
+            .check()
+            .map_err(|cancelled| cancellation_error(cancelled.reason()))?;
+        let reference = source_ref_from_wire(reference)?;
+        if reference.repository() != repository
+            || reference.generation() != generation
+            || references.contains(&reference)
+        {
+            return Err(invalid_argument());
+        }
+        references.push(reference);
+    }
+    let options = LosslessTextReadOptions::new()
+        .with_context_lines_before(
+            u16::try_from(request.context_lines_before).map_err(|_| invalid_argument())?,
+        )
+        .with_context_lines_after(
+            u16::try_from(request.context_lines_after).map_err(|_| invalid_argument())?,
+        );
+    // Capture indexed freshness before the resident-only operation. This is
+    // the last authoritative scan, never a live filesystem/body observation.
+    let generation_context = service
+        .resolve_generation(repository, Some(generation))
+        .map_err(service_error)?;
+    let freshness = service
+        .generation_freshness(repository, generation)
+        .map_err(service_error)?;
+    let response = service
+        .source_text_prefix_metadata_quote_with_options(
+            repository,
+            generation,
+            references,
+            options,
+            service_budget(context),
+            &context.cancellation,
+        )
+        .map_err(service_error)?;
+    if response.usage.source_bytes != 0 || response.data.generation != generation {
+        return Err(internal_error());
+    }
+    let data = response.data;
+    let execution = data.execution;
+    let mut entries = Vec::new();
+    entries
+        .try_reserve_exact(data.entries.len())
+        .map_err(|_| resource_exhausted())?;
+    for entry in data.entries {
+        context
+            .cancellation
+            .check()
+            .map_err(|cancelled| cancellation_error(cancelled.reason()))?;
+        let upper = entry.prefix_fixed_upper;
+        entries.push(daemon::SourceTextPrefixMetadataQuoteEntry {
+            source: Some(source_ref_to_wire(&entry.reference)),
+            prefix_fixed_upper: Some(daemon::SourceTextPrefixFixedUpper {
+                json_bytes: upper.json_bytes,
+                memory_bytes: upper.memory_bytes,
+                rows: upper.rows,
+                traversal_facts: upper.traversal_facts,
+                paths: upper.paths,
+            }),
+        });
+    }
+    Ok(daemon::SourceTextPrefixMetadataQuoteResponse {
+        schema_version: Some(schema_version()),
+        context: Some(source_metadata_quote_context(
+            generation_context,
+            &response.usage,
+            freshness.structural,
+            freshness.semantic,
+        )),
+        quote_policy_version: data.quote_policy_version,
+        entries,
+        completeness: Some(execution_completeness(
+            execution.state(),
+            execution.limiting_resources(),
+            false,
+            daemon::FirstSliceContinuationGuidance::FirstSliceGuidanceSplitRequest,
+        )),
+    })
+}
+
+fn source_metadata_quote_context(
+    generation: FirstSliceGenerationContext,
+    usage: &QueryUsage,
+    structural: FirstSliceObservedFreshness,
+    semantic: FirstSliceObservedFreshness,
+) -> daemon::FirstSliceQueryContext {
+    // This mapper deliberately has no service/cache/VFS argument: forming the
+    // wire envelope cannot reload a generation or scan source-domain coverage.
+    daemon::FirstSliceQueryContext {
+        repository: Some(repository_to_wire(generation.repository)),
+        generation: Some(generation_to_wire(generation.generation)),
+        parent_generation: generation.parent.map(generation_to_wire),
+        active_generation: generation.active,
+        tier: daemon::FirstSliceAnalysisTier::FirstSliceTierD as i32,
+        coverage_status: daemon::FirstSliceCoverageStatus::FirstSliceCoverageUnknown as i32,
+        skipped_inputs: 0,
+        usage: Some(daemon::FirstSliceQueryUsage {
+            rows: usage.rows, edges: usage.edges, results: usage.results,
+            source_bytes: usage.source_bytes, json_bytes: usage.json_bytes,
+            estimated_tokens: usage.estimated_tokens, elapsed_micros: usage.elapsed_micros,
+            token_accounting: Some(daemon::FirstSliceTokenAccountingProfile::FirstSliceTokenAccountingUtf8ByteUpperBoundV1 as i32),
+            memory_bytes: Some(usage.memory_bytes),
+        }),
+        structural_freshness: query_freshness_label(structural).to_owned(),
+        semantic_freshness: query_freshness_label(semantic).to_owned(),
+        coverage_gaps: Vec::new(), omitted_coverage_gap_groups: 0, language_coverage: None,
+    }
+}
+
 fn source_read(
     service: &FirstSliceService,
     request: daemon::SourceReadRequest,
     context: &FirstSliceIpcContext,
 ) -> Result<daemon::SourceReadResponse, PublicError> {
+    require_source_read_protocol(&request, context.selected_protocol_minor)?;
     let repository = parse_repository(request.repository.as_ref())?;
     let selected = parse_generation_selector(request.generation.as_ref())?;
     let generation = service
         .resolve_generation(repository, selected)
         .map_err(service_error)?;
-    let encoding = match daemon::SourceReadEncoding::try_from(request.encoding) {
-        Ok(daemon::SourceReadEncoding::Utf8) => ServiceSourceEncoding::Utf8,
-        Ok(daemon::SourceReadEncoding::Bytes) => ServiceSourceEncoding::Bytes,
-        Err(_) => return Err(invalid_argument()),
-    };
+    let encoding =
+        daemon::SourceReadEncoding::try_from(request.encoding).map_err(|_| invalid_argument())?;
     let context_lines_before =
         u16::try_from(request.context_lines_before).map_err(|_| invalid_argument())?;
     let context_lines_after =
         u16::try_from(request.context_lines_after).map_err(|_| invalid_argument())?;
-    let options = SourceReadOptions::new()
-        .with_context_lines_before(context_lines_before)
-        .with_context_lines_after(context_lines_after)
-        .with_encoding(encoding);
     let source_budget = service_budget(context)
         .with_source_max_context_lines(context_lines_before.max(context_lines_after))
         .map_err(service_error)?;
@@ -13813,6 +14002,27 @@ fn source_read(
     if request.merge_overlaps {
         references = merge_source_references(references)?;
     }
+    let encoding = match encoding {
+        daemon::SourceReadEncoding::Utf8 => ServiceSourceEncoding::Utf8,
+        daemon::SourceReadEncoding::Bytes => ServiceSourceEncoding::Bytes,
+        daemon::SourceReadEncoding::LosslessText => {
+            return source_read_lossless_text_response(
+                service,
+                generation,
+                references,
+                LosslessTextReadOptions::new()
+                    .with_context_lines_before(context_lines_before)
+                    .with_context_lines_after(context_lines_after),
+                source_budget,
+                &request,
+                context,
+            );
+        }
+    };
+    let options = SourceReadOptions::new()
+        .with_context_lines_before(context_lines_before)
+        .with_context_lines_after(context_lines_after)
+        .with_encoding(encoding);
     let requested_reference_count = references.len();
     let response = service
         .source_read_with_options_and_budget(
@@ -13875,6 +14085,7 @@ fn source_read(
             included_end_line,
             exact_content: chunk.bytes,
             tier: analysis_tier_to_wire(tier) as i32,
+            physical_encoding: None,
         });
     }
     if execution.is_truncated() || chunks.len() != requested_reference_count {
@@ -13904,6 +14115,180 @@ fn source_read(
             daemon::FirstSliceContinuationGuidance::FirstSliceGuidanceSplitRequest,
         )),
         conditional_activity,
+        total_text_bytes: 0,
+        prefix_truncated: None,
+    })
+}
+
+fn require_source_read_protocol(
+    request: &daemon::SourceReadRequest,
+    selected_protocol_minor: u32,
+) -> Result<(), PublicError> {
+    // Negotiation precedes repository recovery or source access, even if a
+    // request bypasses the transport decoder and reaches this adapter directly.
+    if let Some(maximum_text_bytes) = request.maximum_text_bytes_per_chunk {
+        if selected_protocol_minor < rootlight_protocol::LOSSLESS_SOURCE_TEXT_PREFIX_PROTOCOL_MINOR
+        {
+            return Err(unsupported_capability());
+        }
+        if request.encoding != daemon::SourceReadEncoding::LosslessText as i32
+            || maximum_text_bytes == 0
+            || u64::from(maximum_text_bytes)
+                > rootlight_protocol::MAX_FIRST_SLICE_BUDGET_SOURCE_BYTES
+            || request.merge_overlaps
+            || request.include_line_numbers.unwrap_or(true)
+        {
+            return Err(invalid_argument());
+        }
+    }
+    if request.encoding == daemon::SourceReadEncoding::LosslessText as i32
+        && selected_protocol_minor < rootlight_protocol::LOSSLESS_SOURCE_TEXT_PROTOCOL_MINOR
+    {
+        return Err(unsupported_capability());
+    }
+    Ok(())
+}
+
+fn source_read_lossless_text_response(
+    service: &FirstSliceService,
+    generation: FirstSliceGenerationContext,
+    references: Vec<SourceRef>,
+    options: LosslessTextReadOptions,
+    budget: FirstSliceBudget,
+    request: &daemon::SourceReadRequest,
+    context: &FirstSliceIpcContext,
+) -> Result<daemon::SourceReadResponse, PublicError> {
+    let requested_reference_count = references.len();
+    let include_line_numbers = request.include_line_numbers.unwrap_or(true);
+    let (response, prefix_truncated) = match request.maximum_text_bytes_per_chunk {
+        Some(maximum_text_bytes) => {
+            let prefix = service
+                .source_read_lossless_text_prefix_with_options_and_budget(
+                    generation.generation,
+                    references,
+                    options,
+                    usize::try_from(maximum_text_bytes).map_err(|_| invalid_argument())?,
+                    budget,
+                    &context.cancellation,
+                )
+                .map_err(service_error)?;
+            let truncated = prefix.data.prefix_truncated;
+            (
+                rootlight_query::QueryResponse {
+                    plan: prefix.plan,
+                    data: prefix.data.result,
+                    usage: prefix.usage,
+                },
+                Some(truncated),
+            )
+        }
+        None => (
+            service
+                .source_read_lossless_text_with_options_and_budget(
+                    generation.generation,
+                    references,
+                    options,
+                    budget,
+                    &context.cancellation,
+                )
+                .map_err(service_error)?,
+            None,
+        ),
+    };
+    let data = response.data;
+    let total_source_bytes =
+        u64::try_from(data.total_source_bytes).map_err(|_| internal_error())?;
+    let total_text_bytes = u64::try_from(data.total_text_bytes).map_err(|_| internal_error())?;
+    if total_source_bytes != response.usage.source_bytes {
+        return Err(internal_error());
+    }
+    let execution = data.execution;
+    let conditional_activity =
+        conditional_activity_to_wire(data.conditional_activity, context.selected_protocol_minor)?;
+    let mut chunks = Vec::new();
+    chunks
+        .try_reserve_exact(data.chunks.len())
+        .map_err(|_| resource_exhausted())?;
+    let mut path_prefixes = Vec::new();
+    path_prefixes
+        .try_reserve_exact(data.chunks.len())
+        .map_err(|_| resource_exhausted())?;
+    for chunk in data.chunks {
+        let (chunk, extracted_from) = chunk.into_parts();
+        let (chunk, physical_encoding, presentation) = chunk.into_parts();
+        let (language, tier) = service
+            .source_language_coverage_until(
+                generation.generation,
+                chunk.reference.span().file(),
+                &context.cancellation,
+            )
+            .map_err(service_error)?;
+        if language != chunk.language {
+            return Err(internal_error());
+        }
+        let physical_encoding = match physical_encoding {
+            SourceTextEncoding::Utf8 => daemon::SourcePhysicalEncoding::Utf8,
+            SourceTextEncoding::Utf16Le => daemon::SourcePhysicalEncoding::Utf16Le,
+            SourceTextEncoding::Utf16Be => daemon::SourcePhysicalEncoding::Utf16Be,
+        };
+        let included_start_line = include_line_numbers.then_some(chunk.start_line).flatten();
+        let included_end_line = include_line_numbers.then_some(chunk.end_line).flatten();
+        path_prefixes.push(chunk.path.clone());
+        // A UTF-8 chunk moves its original buffer; a UTF-16 chunk moves its
+        // admitted presentation. The new mode never duplicates either on wire.
+        let content = match presentation {
+            Some(presentation) => presentation,
+            None => String::from_utf8(chunk.bytes).map_err(|_| internal_error())?,
+        };
+        chunks.push(daemon::FirstSliceSourceChunk {
+            extracted_from: extracted_from.as_ref().map(source_ref_to_wire),
+            source: Some(source_ref_to_wire(&chunk.reference)),
+            path: chunk.path,
+            start_byte: chunk.start_byte,
+            end_byte: chunk.end_byte,
+            start_line: included_start_line.unwrap_or(0),
+            end_line: included_end_line.unwrap_or(0),
+            content,
+            content_hash: Some(content_hash_to_wire(chunk.content_hash)),
+            language,
+            generated: chunk.generated,
+            encoding: daemon::SourceReadEncoding::LosslessText as i32,
+            included_start_line,
+            included_end_line,
+            exact_content: Vec::new(),
+            tier: analysis_tier_to_wire(tier) as i32,
+            physical_encoding: Some(physical_encoding as i32),
+        });
+    }
+    if execution.is_truncated() || chunks.len() != requested_reference_count {
+        path_prefixes.clear();
+    } else {
+        path_prefixes.sort_unstable();
+        path_prefixes.dedup();
+    }
+    Ok(daemon::SourceReadResponse {
+        schema_version: Some(schema_version()),
+        context: Some(query_context_with_languages(
+            service,
+            generation,
+            &response.usage,
+            &[],
+            &[],
+            &path_prefixes,
+            &context.cancellation,
+        )?),
+        chunks,
+        total_source_bytes,
+        total_text_bytes,
+        truncated: execution.is_truncated(),
+        completeness: Some(execution_completeness(
+            execution.state(),
+            execution.limiting_resources(),
+            false,
+            daemon::FirstSliceContinuationGuidance::FirstSliceGuidanceSplitRequest,
+        )),
+        conditional_activity,
+        prefix_truncated,
     })
 }
 
@@ -16844,6 +17229,206 @@ mod tests {
                 assert!(hit.source.is_some());
             }
         }
+    }
+
+    #[test]
+    fn locate_wire_signatures_preserve_retained_and_unavailable_evidence() {
+        for signature in [
+            "pub fn selected_answer(value: u32) -> u32".to_owned(),
+            format!(
+                "pub fn selected_answer({}value: u32) -> u32",
+                " ".repeat(4_096)
+            ),
+        ] {
+            let fixture = TempDir::new().unwrap();
+            fs::write(
+                fixture.path().join("lib.rs"),
+                format!("{signature} {{ value }}\n"),
+            )
+            .unwrap();
+            let deadline = Instant::now() + Duration::from_secs(30);
+            let cancellation = Cancellation::with_deadline(deadline);
+            let mut service = FirstSliceService::new(2).unwrap();
+            let receipt = service
+                .index_repository_with_mode(
+                    fixture.path(),
+                    FirstSliceIndexMode::Structural,
+                    &cancellation,
+                )
+                .unwrap();
+            let retained = service
+                .code_locate(
+                    receipt.generation,
+                    "selected_answer".to_owned(),
+                    LocateMode::Exact,
+                    10,
+                    0,
+                    &cancellation,
+                )
+                .unwrap();
+            let retained_symbol = retained
+                .data
+                .hits
+                .iter()
+                .find(|hit| hit.symbol.is_some())
+                .unwrap();
+            let expected_definition = source_ref_to_wire(retained_symbol.source.as_ref().unwrap());
+            if signature.len() > rootlight_ir::MAX_LEXICAL_SIGNATURE_BYTES {
+                assert_eq!(retained_symbol.signature, None);
+                service
+                    .inspect_generation(
+                        receipt.repository,
+                        Some(receipt.generation),
+                        &cancellation,
+                        |snapshot| {
+                            assert_eq!(
+                                snapshot
+                                    .document()
+                                    .skipped_regions
+                                    .iter()
+                                    .filter(|gap| {
+                                        gap.domain == rootlight_ir::FactDomain::Extensions
+                                            && gap.reason
+                                                == rootlight_ir::SkippedRegionReason::UnsupportedConstruct
+                                            && gap.detail == "signature-capture-unavailable"
+                                            && Some(&gap.source) == retained_symbol.source.as_ref()
+                                    })
+                                    .count(),
+                                1
+                            );
+                        },
+                    )
+                    .unwrap();
+            } else {
+                let evidence = retained_symbol.signature.as_ref().unwrap();
+                assert_eq!(evidence.text(), signature);
+                assert!(!evidence.is_truncated());
+            }
+            let context = FirstSliceIpcContext {
+                client_instance_id: ClientInstanceId::SYSTEM,
+                selected_protocol_minor: rootlight_daemon_core::PROTOCOL_MINOR,
+                cancellation,
+                deadline,
+                effective_budget: None,
+                index_admission: None,
+            };
+            let response = code_locate(
+                &service,
+                daemon::CodeLocateRequest {
+                    schema_version: Some(schema_version()),
+                    repository: Some(repository_to_wire(receipt.repository)),
+                    generation: Some(daemon::GenerationSelector {
+                        selector: Some(daemon::generation_selector::Selector::Active(true)),
+                    }),
+                    query: "selected_answer".to_owned(),
+                    mode: daemon::FirstSliceLocateMode::FirstSliceLocateExact as i32,
+                    maximum_results: 10,
+                    ..Default::default()
+                },
+                &context,
+            )
+            .unwrap();
+            let hit = response
+                .hits
+                .iter()
+                .find(|hit| hit.symbol.is_some())
+                .unwrap();
+            let expected_signature = retained_symbol
+                .signature
+                .as_ref()
+                .map(rootlight_ir::LexicalEvidenceV1::text);
+            assert_eq!(hit.signature.as_deref(), expected_signature);
+            assert!(!hit.signature_truncated);
+            assert_eq!(hit.source.as_ref(), Some(&expected_definition));
+            assert_eq!(hit.symbol, retained_symbol.symbol.map(symbol_to_wire));
+            if signature.len() > rootlight_ir::MAX_LEXICAL_SIGNATURE_BYTES {
+                let metadata = response.context.as_ref().unwrap();
+                assert!(metadata.coverage_gaps.iter().any(|gap| {
+                    gap.reason == "unsupported"
+                        && gap.language.as_deref() == Some("rust")
+                        && gap.files == 1
+                }));
+                assert_ne!(
+                    metadata.coverage_status,
+                    daemon::FirstSliceCoverageStatus::FirstSliceCoverageComplete as i32
+                );
+            }
+            for file_hit in response.hits.iter().filter(|hit| hit.symbol.is_none()) {
+                assert_eq!(file_hit.signature, None);
+                assert!(!file_hit.signature_truncated);
+            }
+        }
+    }
+
+    #[test]
+    fn locate_wire_signatures_preserve_validated_truncation_and_definition_identity() {
+        let fixture = TempDir::new().unwrap();
+        let source = "pub fn selected_answer(value: u32) -> u32 { value }\n";
+        fs::write(fixture.path().join("lib.rs"), source).unwrap();
+        let cancellation = Cancellation::with_deadline(Instant::now() + Duration::from_secs(30));
+        let mut service = FirstSliceService::new(2).unwrap();
+        let receipt = service
+            .index_repository_with_mode(
+                fixture.path(),
+                FirstSliceIndexMode::Structural,
+                &cancellation,
+            )
+            .unwrap();
+        let retained = service
+            .code_locate(
+                receipt.generation,
+                "selected_answer".to_owned(),
+                LocateMode::Exact,
+                10,
+                0,
+                &cancellation,
+            )
+            .unwrap();
+        let mut hit = retained
+            .data
+            .hits
+            .into_iter()
+            .find(|hit| hit.symbol.is_some())
+            .unwrap();
+        let definition = hit.source.clone().unwrap();
+        // Rust deliberately omits oversized native headers; this exercises the
+        // wire boundary with validated retained IR, not a new native capture claim.
+        let complete_text = format!(
+            "pub fn selected_answer({}value: u32) -> u32",
+            " ".repeat(rootlight_ir::MAX_LEXICAL_SIGNATURE_BYTES)
+        );
+        let evidence = rootlight_ir::LexicalEvidenceV1::from_complete_text(
+            rootlight_ir::LexicalEvidenceKind::Signature,
+            rootlight_ir::FactRef::Entity(hit.symbol.unwrap()),
+            rootlight_ir::LexicalEvidenceFormat::SourceText,
+            &complete_text,
+        )
+        .unwrap();
+        assert!(evidence.is_truncated());
+        assert_eq!(
+            evidence.complete_text_hash(),
+            content_hash(complete_text.as_bytes())
+        );
+        hit.signature = Some(evidence);
+        let (signature, truncated) =
+            retained_locate_signature_to_wire(&hit, receipt.repository, receipt.generation)
+                .unwrap();
+        assert_eq!(
+            signature.as_deref(),
+            Some(&complete_text[..rootlight_ir::MAX_LEXICAL_SIGNATURE_BYTES])
+        );
+        assert!(truncated);
+        assert_eq!(hit.source.as_ref(), Some(&definition));
+        assert_eq!(definition.repository(), receipt.repository);
+        assert_eq!(definition.generation(), receipt.generation);
+        assert_eq!(definition.span().file(), hit.file);
+        assert_eq!(definition.content_hash(), content_hash(source.as_bytes()));
+        // The native Rust producer owns the declaration span, not a name leaf.
+        assert_eq!(definition.span().start_byte(), 0);
+        assert_eq!(
+            definition.span().end_byte(),
+            u64::try_from(source.trim_end().len()).unwrap()
+        );
     }
 
     fn assert_located_symbol_and_file(hits: &[daemon::FirstSliceLocateHit]) {
@@ -23200,6 +23785,436 @@ mod tests {
     }
 
     #[test]
+    fn lossless_source_read_rejects_old_minors_before_generation_lookup() {
+        let service = FirstSliceService::new(2).unwrap();
+        for selected_protocol_minor in [0, 5, 23] {
+            let deadline = Instant::now() + Duration::from_secs(30);
+            let context = FirstSliceIpcContext {
+                client_instance_id: ClientInstanceId::SYSTEM,
+                selected_protocol_minor,
+                cancellation: Cancellation::with_deadline(deadline),
+                deadline,
+                effective_budget: None,
+                index_admission: None,
+            };
+            let error = source_read(
+                &service,
+                daemon::SourceReadRequest {
+                    encoding: daemon::SourceReadEncoding::LosslessText as i32,
+                    ..Default::default()
+                },
+                &context,
+            )
+            .expect_err("unnegotiated mode precedes invalid repository lookup");
+            assert_eq!(error.code(), ErrorCode::UnsupportedCapability);
+            assert!(error.message().contains("unsupported"));
+        }
+    }
+
+    #[test]
+    fn source_metadata_quote_rejects_old_minor_before_repository_access() {
+        let service = FirstSliceService::new(2).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(30);
+        let context = FirstSliceIpcContext {
+            client_instance_id: ClientInstanceId::SYSTEM,
+            selected_protocol_minor: 25,
+            cancellation: Cancellation::with_deadline(deadline),
+            deadline,
+            effective_budget: None,
+            index_admission: None,
+        };
+        let error = source_text_prefix_metadata_quote(
+            &service,
+            daemon::SourceTextPrefixMetadataQuoteRequest::default(),
+            &context,
+        )
+        .unwrap_err();
+        assert_eq!(error.code(), ErrorCode::UnsupportedCapability);
+    }
+
+    #[test]
+    fn source_metadata_quote_uses_resident_metadata_without_reading_source() {
+        let raw = b"pub fn lantern() -> u32 { 7 }\n";
+        let (service, fixture, reference, mut context) = indexed_lossless_source(raw);
+        context.selected_protocol_minor = 26;
+        // A quote is a bound from resident metadata, not a freshness/source read.
+        fs::remove_file(fixture.path().join("sample.rs")).unwrap();
+        for (before, after) in [(0, 0), (1, 1)] {
+            let response = source_text_prefix_metadata_quote(
+                &service,
+                daemon::SourceTextPrefixMetadataQuoteRequest {
+                    schema_version: Some(schema_version()),
+                    repository: Some(repository_to_wire(reference.repository())),
+                    generation: Some(generation_to_wire(reference.generation())),
+                    references: vec![source_ref_to_wire(&reference)],
+                    context_lines_before: before,
+                    context_lines_after: after,
+                },
+                &context,
+            )
+            .unwrap();
+            assert_eq!(response.quote_policy_version, 1);
+            assert_eq!(response.entries.len(), 1);
+            assert_eq!(
+                response.entries[0].source,
+                Some(source_ref_to_wire(&reference))
+            );
+            let usage = response.context.as_ref().unwrap().usage.as_ref().unwrap();
+            assert_eq!(usage.source_bytes, 0);
+            assert_eq!(usage.results, 1);
+            let upper = response.entries[0].prefix_fixed_upper.as_ref().unwrap();
+            assert!(upper.json_bytes > 0 && upper.memory_bytes > 0);
+            assert!(upper.rows >= 1 && upper.paths >= 1);
+            assert_eq!(
+                response.context.as_ref().unwrap().coverage_status,
+                daemon::FirstSliceCoverageStatus::FirstSliceCoverageUnknown as i32
+            );
+        }
+    }
+
+    #[test]
+    fn source_metadata_quote_context_survives_service_drop_without_cache_access() {
+        let raw = b"pub fn lantern() -> u32 { 7 }\n";
+        let (service, fixture, reference, context) = indexed_lossless_source(raw);
+        let generation = service
+            .resolve_generation(reference.repository(), Some(reference.generation()))
+            .unwrap();
+        let freshness = service
+            .generation_freshness(reference.repository(), reference.generation())
+            .unwrap();
+        let response = service
+            .source_text_prefix_metadata_quote_with_options(
+                reference.repository(),
+                reference.generation(),
+                vec![reference.clone()],
+                LosslessTextReadOptions::new()
+                    .with_context_lines_before(0)
+                    .with_context_lines_after(0),
+                FirstSliceBudget::new(),
+                &context.cancellation,
+            )
+            .unwrap();
+        // The response mapper cannot consult even resident metadata after this.
+        drop(service);
+        fs::remove_file(fixture.path().join("sample.rs")).unwrap();
+        let wire = source_metadata_quote_context(
+            generation,
+            &response.usage,
+            freshness.structural,
+            freshness.semantic,
+        );
+        assert_eq!(
+            wire.repository,
+            Some(repository_to_wire(reference.repository()))
+        );
+        assert_eq!(
+            wire.generation,
+            Some(generation_to_wire(reference.generation()))
+        );
+        assert_eq!(
+            wire.coverage_status,
+            daemon::FirstSliceCoverageStatus::FirstSliceCoverageUnknown as i32
+        );
+        assert!(wire.coverage_gaps.is_empty());
+        assert!(wire.language_coverage.is_none());
+        assert_eq!(wire.usage.unwrap().source_bytes, 0);
+    }
+
+    fn indexed_lossless_source(
+        raw: &[u8],
+    ) -> (FirstSliceService, TempDir, SourceRef, FirstSliceIpcContext) {
+        let fixture = TempDir::new().unwrap();
+        fs::write(fixture.path().join("sample.rs"), raw).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(30);
+        let cancellation = Cancellation::with_deadline(deadline);
+        let mut service = FirstSliceService::new(2).unwrap();
+        let receipt = service
+            .index_repository_with_mode(
+                fixture.path(),
+                FirstSliceIndexMode::Structural,
+                &cancellation,
+            )
+            .unwrap();
+        let located = service
+            .code_locate_with_entity_filters_and_budget(
+                receipt.generation,
+                "sample.rs".to_owned(),
+                LocateMode::Prefix,
+                Vec::new(),
+                vec!["sample.rs".to_owned()],
+                Some(vec!["file".to_owned()]),
+                1,
+                0,
+                FirstSliceBudget::default(),
+                &cancellation,
+            )
+            .unwrap();
+        assert_eq!(located.data.hits.len(), 1);
+        let reference = located.data.hits[0].source.clone().unwrap();
+        assert_eq!(reference.span().start_byte(), 0);
+        assert_eq!(
+            reference.span().end_byte(),
+            u64::try_from(raw.len()).unwrap()
+        );
+        let context = FirstSliceIpcContext {
+            client_instance_id: ClientInstanceId::SYSTEM,
+            selected_protocol_minor: rootlight_protocol::LOSSLESS_SOURCE_TEXT_PROTOCOL_MINOR,
+            cancellation,
+            deadline,
+            effective_budget: None,
+            index_admission: None,
+        };
+        (service, fixture, reference, context)
+    }
+
+    fn source_read_fixture_request(
+        reference: &SourceRef,
+        encoding: daemon::SourceReadEncoding,
+    ) -> daemon::SourceReadRequest {
+        daemon::SourceReadRequest {
+            repository: Some(repository_to_wire(reference.repository())),
+            generation: Some(daemon::GenerationSelector {
+                selector: Some(daemon::generation_selector::Selector::Generation(
+                    generation_to_wire(reference.generation()),
+                )),
+            }),
+            references: vec![source_ref_to_wire(reference)],
+            include_line_numbers: Some(true),
+            encoding: encoding as i32,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn lossless_source_read_preserves_bom_crlf_unicode_and_physical_identity() {
+        let text = "\u{feff}// \u{03bb}\r\npub fn lantern() -> &'static str { \"\u{1f642}\" }\r\n";
+        let cases = [
+            (
+                text.as_bytes().to_vec(),
+                daemon::SourcePhysicalEncoding::Utf8,
+            ),
+            (
+                text.encode_utf16().flat_map(u16::to_le_bytes).collect(),
+                daemon::SourcePhysicalEncoding::Utf16Le,
+            ),
+            (
+                text.encode_utf16().flat_map(u16::to_be_bytes).collect(),
+                daemon::SourcePhysicalEncoding::Utf16Be,
+            ),
+        ];
+        for (raw, physical_encoding) in cases {
+            let (service, _fixture, reference, context) = indexed_lossless_source(&raw);
+            let response = source_read(
+                &service,
+                source_read_fixture_request(&reference, daemon::SourceReadEncoding::LosslessText),
+                &context,
+            )
+            .unwrap();
+            assert_eq!(response.chunks.len(), 1);
+            assert!(!response.truncated);
+            assert_eq!(
+                response.total_source_bytes,
+                u64::try_from(raw.len()).unwrap()
+            );
+            assert_eq!(
+                response.total_text_bytes,
+                u64::try_from(text.len()).unwrap()
+            );
+            let chunk = &response.chunks[0];
+            assert_eq!(chunk.content, text);
+            assert!(chunk.exact_content.is_empty());
+            assert_eq!(
+                chunk.encoding,
+                daemon::SourceReadEncoding::LosslessText as i32
+            );
+            assert_eq!(chunk.physical_encoding, Some(physical_encoding as i32));
+            assert_eq!(chunk.source, Some(source_ref_to_wire(&reference)));
+            assert_eq!(
+                chunk.content_hash,
+                Some(content_hash_to_wire(content_hash(&raw)))
+            );
+            assert_eq!(chunk.start_byte, 0);
+            assert_eq!(chunk.end_byte, u64::try_from(raw.len()).unwrap());
+            assert_eq!(chunk.included_start_line, Some(1));
+            assert_eq!(chunk.included_end_line, Some(2));
+            assert!(chunk.extracted_from.is_none());
+
+            let mut legacy_context = context.clone();
+            legacy_context.selected_protocol_minor = 23;
+            let bytes = source_read(
+                &service,
+                source_read_fixture_request(&reference, daemon::SourceReadEncoding::Bytes),
+                &legacy_context,
+            )
+            .unwrap();
+            assert_eq!(bytes.chunks[0].exact_content, raw);
+            assert!(bytes.chunks[0].content.is_empty());
+            assert_eq!(bytes.chunks[0].source, Some(source_ref_to_wire(&reference)));
+            assert!(bytes.chunks[0].physical_encoding.is_none());
+            assert_eq!(bytes.total_text_bytes, 0);
+            assert_eq!(bytes.total_source_bytes, response.total_source_bytes);
+        }
+    }
+
+    #[test]
+    fn lossless_source_prefix_retains_full_authority_and_context() {
+        let text =
+            "\u{feff}// before\r\npub fn lantern() { \"\u{1f642}\u{2603}\"; }\r\n// after\r\n";
+        let selected_start = text.find("pub fn").unwrap();
+        let selected_end = text.find("\r\n// after").unwrap();
+        for physical_encoding in [
+            daemon::SourcePhysicalEncoding::Utf8,
+            daemon::SourcePhysicalEncoding::Utf16Le,
+            daemon::SourcePhysicalEncoding::Utf16Be,
+        ] {
+            let encode = |value: &str| match physical_encoding {
+                daemon::SourcePhysicalEncoding::Utf8 => value.as_bytes().to_vec(),
+                daemon::SourcePhysicalEncoding::Utf16Le => {
+                    value.encode_utf16().flat_map(u16::to_le_bytes).collect()
+                }
+                daemon::SourcePhysicalEncoding::Utf16Be => {
+                    value.encode_utf16().flat_map(u16::to_be_bytes).collect()
+                }
+            };
+            let raw = encode(text);
+            let (service, _fixture, file_reference, mut context) = indexed_lossless_source(&raw);
+            context.selected_protocol_minor =
+                rootlight_protocol::LOSSLESS_SOURCE_TEXT_PREFIX_PROTOCOL_MINOR;
+            let reference = SourceRef::new(
+                file_reference.repository(),
+                file_reference.generation(),
+                SourceSpan::new(
+                    file_reference.span().file(),
+                    u64::try_from(encode(&text[..selected_start]).len()).unwrap(),
+                    u64::try_from(encode(&text[..selected_end]).len()).unwrap(),
+                )
+                .unwrap(),
+                file_reference.content_hash(),
+                Some(rootlight_ir::LineRange::new(2, 2).unwrap()),
+            );
+            for cap in [1_u32, 3, 9, 24, 128] {
+                let mut request = source_read_fixture_request(
+                    &reference,
+                    daemon::SourceReadEncoding::LosslessText,
+                );
+                request.include_line_numbers = Some(false);
+                request.context_lines_before = 1;
+                request.context_lines_after = 1;
+                request.maximum_text_bytes_per_chunk = Some(cap);
+                let response = source_read(&service, request.clone(), &context).unwrap();
+                let mut boundary = usize::try_from(cap).unwrap().min(text.len());
+                while !text.is_char_boundary(boundary) {
+                    boundary -= 1;
+                }
+                let expected = &text[..boundary];
+                assert_eq!(response.chunks.len(), 1);
+                assert!(!response.truncated);
+                assert_eq!(response.prefix_truncated, Some(boundary < text.len()));
+                assert_eq!(
+                    response.total_text_bytes,
+                    u64::try_from(expected.len()).unwrap()
+                );
+                assert_eq!(
+                    response.total_source_bytes,
+                    u64::try_from(encode(expected).len()).unwrap()
+                );
+                let chunk = &response.chunks[0];
+                assert_eq!(chunk.source, Some(source_ref_to_wire(&reference)));
+                assert_eq!(
+                    chunk.content_hash,
+                    Some(content_hash_to_wire(reference.content_hash()))
+                );
+                assert_eq!(chunk.content, expected);
+                assert_eq!(chunk.start_byte, 0);
+                assert_eq!(chunk.end_byte, response.total_source_bytes);
+                assert_eq!(chunk.physical_encoding, Some(physical_encoding as i32));
+                assert!(chunk.included_start_line.is_none() && chunk.included_end_line.is_none());
+                request.maximum_text_bytes_per_chunk = None;
+                let exact = source_read(&service, request, &context).unwrap();
+                assert_eq!(exact.prefix_truncated, None);
+                assert_eq!(exact.chunks[0].content, text);
+                assert_eq!(exact.chunks[0].source, chunk.source);
+            }
+        }
+    }
+
+    #[test]
+    fn lossless_source_prefix_checks_controls_before_repository_io() {
+        let deadline = Instant::now() + Duration::from_secs(30);
+        let service = FirstSliceService::new(2).unwrap();
+        let mut context = FirstSliceIpcContext {
+            client_instance_id: ClientInstanceId::SYSTEM,
+            selected_protocol_minor: 24,
+            cancellation: Cancellation::with_deadline(deadline),
+            deadline,
+            effective_budget: None,
+            index_admission: None,
+        };
+        let valid = daemon::SourceReadRequest {
+            encoding: daemon::SourceReadEncoding::LosslessText as i32,
+            include_line_numbers: Some(false),
+            maximum_text_bytes_per_chunk: Some(8),
+            ..Default::default()
+        };
+        let error = source_read(&service, valid.clone(), &context).unwrap_err();
+        assert_eq!(error.code(), ErrorCode::UnsupportedCapability);
+        context.selected_protocol_minor =
+            rootlight_protocol::LOSSLESS_SOURCE_TEXT_PREFIX_PROTOCOL_MINOR;
+        let mut invalid = Vec::new();
+        let mut request = valid.clone();
+        request.maximum_text_bytes_per_chunk = Some(0);
+        invalid.push(request);
+        let mut request = valid.clone();
+        request.maximum_text_bytes_per_chunk = Some(u32::MAX);
+        invalid.push(request);
+        let mut request = valid.clone();
+        request.merge_overlaps = true;
+        invalid.push(request);
+        let mut request = valid.clone();
+        request.include_line_numbers = Some(true);
+        invalid.push(request);
+        let mut request = valid.clone();
+        request.encoding = daemon::SourceReadEncoding::Bytes as i32;
+        invalid.push(request);
+        for request in invalid {
+            let error = source_read(&service, request, &context).unwrap_err();
+            assert_eq!(error.code(), ErrorCode::InvalidArgument);
+        }
+    }
+
+    #[test]
+    fn lossless_source_read_leaves_legacy_utf8_content_and_bytes_unchanged() {
+        let text = "\u{feff}pub fn lantern() -> &'static str { \"\u{1f642}\" }\r\n";
+        let (service, _fixture, reference, context) = indexed_lossless_source(text.as_bytes());
+        for minor in [
+            0,
+            23,
+            rootlight_protocol::LOSSLESS_SOURCE_TEXT_PROTOCOL_MINOR,
+        ] {
+            let mut legacy_context = context.clone();
+            legacy_context.selected_protocol_minor = minor;
+            let response = source_read(
+                &service,
+                source_read_fixture_request(&reference, daemon::SourceReadEncoding::Utf8),
+                &legacy_context,
+            )
+            .unwrap();
+            assert_eq!(response.chunks[0].content, text);
+            assert_eq!(response.chunks[0].exact_content, text.as_bytes());
+            assert_eq!(
+                response.chunks[0].encoding,
+                daemon::SourceReadEncoding::Utf8 as i32
+            );
+            assert!(response.chunks[0].physical_encoding.is_none());
+            assert_eq!(response.total_text_bytes, 0);
+            assert_eq!(
+                response.total_source_bytes,
+                u64::try_from(text.len()).unwrap()
+            );
+        }
+    }
+
+    #[test]
     fn source_reference_merging_is_transitive_and_permutation_invariant() {
         let repository = RepositoryId::from_bytes([1; 16]);
         let generation = GenerationId::from_bytes([2; 20]);
@@ -23347,6 +24362,179 @@ mod tests {
         assert_eq!(reduced.plan.estimate.results, 1);
         assert_eq!(reduced.data.hits.len(), 1);
         assert!(reduced.data.truncated);
+    }
+
+    #[test]
+    fn explain_preview_preserves_existing_line_display_semantics() {
+        for (source, maximum, expected) in [
+            ("alpha\r\nbeta\r\ngamma\r\n", 2, "alpha\nbeta"),
+            ("alpha\nbeta\n", 2, "alpha\nbeta"),
+            ("alpha\rbeta\r", 2, "alpha\rbeta\r"),
+            ("alpha\r\n\r\nbeta", 2, "alpha\n"),
+            ("\r\n", 2, ""),
+            ("", 2, ""),
+            ("alpha\n", 0, ""),
+            (
+                "\u{feff}\u{03bb}\u{1f642}\r\nbeta",
+                1,
+                "\u{feff}\u{03bb}\u{1f642}",
+            ),
+        ] {
+            assert_eq!(first_source_lines(source, maximum), expected);
+        }
+    }
+
+    fn encode_explain_source(text: &str, encoding: daemon::SourcePhysicalEncoding) -> Vec<u8> {
+        match encoding {
+            daemon::SourcePhysicalEncoding::Utf8 => text.as_bytes().to_vec(),
+            daemon::SourcePhysicalEncoding::Utf16Le => {
+                text.encode_utf16().flat_map(u16::to_le_bytes).collect()
+            }
+            daemon::SourcePhysicalEncoding::Utf16Be => {
+                text.encode_utf16().flat_map(u16::to_be_bytes).collect()
+            }
+        }
+    }
+
+    #[test]
+    fn symbol_explain_lossless_previews_preserve_retained_physical_identity() {
+        let text = "\u{feff}// \u{03bb}\u{1f642}\r\npub fn beacon() -> &'static str {\r\n    \"\u{03bb}\u{1f642}\"\r\n}\r\npub fn after() {}\r\n";
+        for encoding in [
+            daemon::SourcePhysicalEncoding::Utf8,
+            daemon::SourcePhysicalEncoding::Utf16Le,
+            daemon::SourcePhysicalEncoding::Utf16Be,
+        ] {
+            let raw = encode_explain_source(text, encoding);
+            let (mut service, fixture, reference, mut context) = indexed_lossless_source(&raw);
+            let located = service
+                .code_locate(
+                    reference.generation(),
+                    "beacon".to_owned(),
+                    LocateMode::Exact,
+                    1,
+                    0,
+                    &context.cancellation,
+                )
+                .unwrap();
+            let symbol = located.data.hits[0].symbol.unwrap();
+            let explained = service
+                .symbol_explain(reference.generation(), symbol, &context.cancellation)
+                .unwrap();
+            let definition = explained.data.entity.evidence.source.unwrap();
+            assert_eq!(definition.content_hash(), content_hash(&raw));
+            assert_eq!(definition.generation(), reference.generation());
+            assert_eq!(definition.span().file(), reference.span().file());
+            let start = usize::try_from(definition.span().start_byte()).unwrap();
+            let prefix = raw.get(..start).unwrap();
+            let projected_start = match encoding {
+                daemon::SourcePhysicalEncoding::Utf8 => std::str::from_utf8(prefix).unwrap().len(),
+                daemon::SourcePhysicalEncoding::Utf16Le
+                | daemon::SourcePhysicalEncoding::Utf16Be => {
+                    let (pairs, tail) = prefix.as_chunks::<2>();
+                    assert!(tail.is_empty());
+                    let units: Vec<_> = pairs
+                        .iter()
+                        .map(|pair| match encoding {
+                            daemon::SourcePhysicalEncoding::Utf16Le => u16::from_le_bytes(*pair),
+                            daemon::SourcePhysicalEncoding::Utf16Be => u16::from_be_bytes(*pair),
+                            daemon::SourcePhysicalEncoding::Utf8 => unreachable!(),
+                        })
+                        .collect();
+                    String::from_utf16(&units).unwrap().len()
+                }
+            };
+            let expected_preview = text
+                .get(projected_start..)
+                .unwrap()
+                .split_terminator("\r\n")
+                .take(2)
+                .collect::<Vec<_>>()
+                .join("\n");
+            assert!(expected_preview.contains('\u{03bb}'));
+            assert!(expected_preview.contains('\u{1f642}'));
+            let replacement =
+                encode_explain_source("\u{feff}pub fn replacement() {}\r\n", encoding);
+            fs::write(fixture.path().join("sample.rs"), replacement).unwrap();
+            let newer = service
+                .index_repository_with_mode(
+                    fixture.path(),
+                    FirstSliceIndexMode::Structural,
+                    &context.cancellation,
+                )
+                .unwrap();
+            assert_ne!(newer.generation, reference.generation());
+            let (full_preview, full_usage) = explain_source_projection(
+                &service,
+                reference.generation(),
+                &reference,
+                2,
+                FirstSliceBudget::new(),
+                &context.cancellation,
+            )
+            .unwrap();
+            assert_eq!(
+                full_preview,
+                "\u{feff}// \u{03bb}\u{1f642}\npub fn beacon() -> &'static str {"
+            );
+            assert_eq!(full_usage.source_bytes, u64::try_from(raw.len()).unwrap());
+            let (_, definition_usage) = explain_source_projection(
+                &service,
+                reference.generation(),
+                &definition,
+                2,
+                FirstSliceBudget::new(),
+                &context.cancellation,
+            )
+            .unwrap();
+            let request = |source_preview_lines| daemon::SymbolExplainRequest {
+                schema_version: Some(schema_version()),
+                repository: Some(repository_to_wire(reference.repository())),
+                generation: Some(daemon::GenerationSelector {
+                    selector: Some(daemon::generation_selector::Selector::Generation(
+                        generation_to_wire(reference.generation()),
+                    )),
+                }),
+                symbols: vec![symbol_to_wire(symbol)],
+                sections: vec!["signature".to_owned(), "source_preview".to_owned()],
+                relation_sample_limit: Some(0),
+                source_preview_lines,
+                include_provenance: "compact".to_owned(),
+            };
+            for minor in [5, rootlight_protocol::LOSSLESS_SOURCE_TEXT_PROTOCOL_MINOR] {
+                context.selected_protocol_minor = minor;
+                let response = symbol_explain(&service, request(Some(2)), &context).unwrap();
+                let returned = &response.symbols[0];
+                assert_eq!(
+                    returned.definition.as_ref(),
+                    Some(&source_ref_to_wire(&definition))
+                );
+                assert_eq!(
+                    returned.source_preview.as_deref(),
+                    Some(expected_preview.as_str())
+                );
+                let returned_context = response.context.unwrap();
+                assert_eq!(
+                    returned_context.generation,
+                    Some(generation_to_wire(reference.generation()))
+                );
+                assert!(!returned_context.active_generation);
+                let source_bytes = returned_context.usage.unwrap().source_bytes;
+                assert!(
+                    source_bytes >= definition.span().end_byte() - definition.span().start_byte()
+                );
+                let mut metadata_source_bytes = None;
+                for omitted in [None, Some(0)] {
+                    let metadata = symbol_explain(&service, request(omitted), &context).unwrap();
+                    assert!(metadata.symbols[0].source_preview.is_none());
+                    let measured = metadata.context.unwrap().usage.unwrap().source_bytes;
+                    assert_eq!(source_bytes, measured + definition_usage.source_bytes);
+                    if let Some(previous) = metadata_source_bytes {
+                        assert_eq!(measured, previous);
+                    }
+                    metadata_source_bytes = Some(measured);
+                }
+            }
+        }
     }
 
     #[test]

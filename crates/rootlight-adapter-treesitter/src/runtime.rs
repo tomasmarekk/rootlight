@@ -7,8 +7,11 @@
 
 mod embedded;
 mod expression;
+mod fsharp_admission;
 mod markdown;
 mod perl;
+
+pub use fsharp_admission::{FSharpAdmissionKind, FSharpAdmissionWitness};
 
 #[cfg(test)]
 mod native_context_tests;
@@ -43,6 +46,7 @@ use crate::{
     pool::{ParserPool, PoolError},
     query_pack::{QueryCandidate, QueryPackRegistry, StructuralRole},
     registry::{language_for, native_family_for_source},
+    source_view::{NATIVE_SOURCE_PROJECTION_POLICY, NativeSourceView},
 };
 
 const LOGICAL_TREE_NODE_BYTES: usize = 64;
@@ -163,7 +167,11 @@ impl TreeSitterProvider {
             .collect();
         let capabilities = ParseCapabilities::new(
             languages,
-            vec![EncodingId::new("utf-8")?],
+            vec![
+                EncodingId::new("utf-8")?,
+                EncodingId::new("utf-16le")?,
+                EncodingId::new("utf-16be")?,
+            ],
             config.max_source_bytes(),
             config.max_syntax_nodes(),
             config.max_syntax_depth(),
@@ -200,11 +208,13 @@ impl TreeSitterProvider {
         request: &ParseRequest<'_>,
         cancellation: &Cancellation,
     ) -> Result<usize, AdapterError> {
+        let source = self.native_source_view(request, cancellation)?;
         let mut prepared = self.prepare_tree(
             request,
             None,
             &[],
             self.config.default_settings(),
+            &source,
             cancellation,
         )?;
         if !prepared.traversal.fully_traversed {
@@ -218,7 +228,7 @@ impl TreeSitterProvider {
         let mut candidates = pack.extract_identity(
             prepared.family,
             &prepared.tree,
-            request.source().bytes(),
+            source.as_bytes(),
             request.limits().max_syntax_nodes(),
             cancellation,
         )?;
@@ -226,12 +236,13 @@ impl TreeSitterProvider {
         self.extract_embedded(
             &prepared.tree,
             request,
+            &source,
             &mut prepared.traversal,
             &mut candidates,
             None,
             cancellation,
         )?;
-        normalize_query_candidates(candidates, request, usize::MAX, cancellation)
+        normalize_query_candidates(candidates, request, &source, usize::MAX, cancellation)
             .map(|normalized| normalized.required)
     }
 
@@ -295,6 +306,7 @@ impl TreeSitterProvider {
         sink: &mut dyn SyntaxFactSink,
         cancellation: &Cancellation,
     ) -> Result<RawParseWithPrevious, AdapterError> {
+        let source = self.native_source_view(request, cancellation)?;
         let PreparedParse {
             family,
             identity,
@@ -302,10 +314,18 @@ impl TreeSitterProvider {
             mut traversal,
             reuse_status,
             reuse_key,
-        } = self.prepare_tree(request, previous, edits, settings, cancellation)?;
+        } = self.prepare_tree(request, previous, edits, settings, &source, cancellation)?;
         let source_bytes = request.source().bytes();
         let extraction = if traversal.fully_traversed {
-            self.extract_syntax_facts(family, &tree, request, &mut traversal, sink, cancellation)?
+            self.extract_syntax_facts(
+                family,
+                &tree,
+                request,
+                &source,
+                &mut traversal,
+                sink,
+                cancellation,
+            )?
         } else {
             emit_primary_diagnostic(&traversal, request, sink, cancellation)?;
             ExtractionReport { limited: false }
@@ -367,6 +387,7 @@ impl TreeSitterProvider {
         previous: Option<&PreviousParse>,
         edits: &[SourceEdit],
         settings: ParserSettings,
+        source: &NativeSourceView<'_>,
         cancellation: &Cancellation,
     ) -> Result<PreparedParse, AdapterError> {
         let (family, native_family) =
@@ -386,7 +407,7 @@ impl TreeSitterProvider {
             encoding: request.encoding().as_str().to_owned(),
             included_ranges: Arc::clone(&included_ranges),
             settings,
-            virtual_line_ending: needs_virtual_matlab_line_ending(request),
+            virtual_line_ending: needs_virtual_matlab_line_ending(request, source.as_bytes()),
         };
         let cached = self.resolve_previous(previous, cancellation)?;
         let previous_hash = cached
@@ -418,6 +439,7 @@ impl TreeSitterProvider {
             &language_for(native_family),
             old_tree.as_ref(),
             settings,
+            source,
             None,
             cancellation,
         )?;
@@ -431,6 +453,7 @@ impl TreeSitterProvider {
         let traversal = inspect_tree(
             &tree,
             request,
+            source,
             request.limits().max_syntax_nodes(),
             request.limits().max_syntax_depth(),
             cancellation,
@@ -444,6 +467,34 @@ impl TreeSitterProvider {
             reuse_status,
             reuse_key,
         })
+    }
+
+    fn native_source_view<'a>(
+        &self,
+        request: &'a ParseRequest<'_>,
+        cancellation: &Cancellation,
+    ) -> Result<NativeSourceView<'a>, AdapterError> {
+        let maximum = self
+            .config
+            .max_source_bytes()
+            .min(request.limits().max_source_bytes());
+        require_provider_limit(
+            ResourceKind::SourceBytes,
+            request.source().bytes().len(),
+            maximum,
+        )?;
+        if request.encoding().as_str() == "utf-8" {
+            // Preserve chunked cancellation while the borrowed view independently
+            // obtains its checked UTF-8 string without copying the snapshot.
+            validate_utf8_cancellable(request.source().bytes(), cancellation)?;
+        }
+        NativeSourceView::new(
+            request.source().bytes(),
+            request.encoding().as_str(),
+            maximum,
+            request.limits().max_reported_memory_bytes(),
+            cancellation,
+        )
     }
 
     fn admit_parse_input(
@@ -469,7 +520,10 @@ impl TreeSitterProvider {
         if native_family.is_cobol() && !request.included_ranges().is_empty() {
             return Err(RequestError::EmbeddedRangesUnsupported.into());
         }
-        if request.encoding().as_str() != "utf-8" {
+        if !matches!(
+            request.encoding().as_str(),
+            "utf-8" | "utf-16le" | "utf-16be"
+        ) {
             return Err(RequestError::UnsupportedEncoding.into());
         }
         let source_bytes = request.source().bytes();
@@ -493,7 +547,6 @@ impl TreeSitterProvider {
             request.included_ranges().len(),
             self.config.max_included_ranges(),
         )?;
-        validate_utf8_cancellable(source_bytes, cancellation)?;
         validate_included_range_languages(
             request.included_ranges(),
             request.language(),
@@ -505,12 +558,14 @@ impl TreeSitterProvider {
 
     // The caller admits the full source and included ranges. Host and embedded
     // grammars share the same pool, native work budget and cancellation path.
+    #[allow(clippy::too_many_arguments)]
     fn parse_native_tree(
         &self,
         request: &ParseRequest<'_>,
         language: &tree_sitter::Language,
         old_tree: Option<&Tree>,
         settings: ParserSettings,
+        source: &NativeSourceView<'_>,
         mut context: Option<&mut NativeParseContext>,
         cancellation: &Cancellation,
     ) -> Result<Tree, AdapterError> {
@@ -526,7 +581,7 @@ impl TreeSitterProvider {
         {
             return Err(provider_failure(parse_work_limit.failure_code));
         }
-        let source_bytes = request.source().bytes();
+        let source_bytes = source.as_bytes();
         let mut lease = self.pool.acquire(cancellation).map_err(map_pool_error)?;
         let parser = lease.parser_mut().map_err(map_pool_error)?;
         parser
@@ -535,6 +590,7 @@ impl TreeSitterProvider {
         let included_ranges = tree_sitter_ranges(
             request,
             source_bytes,
+            source,
             context.as_ref().map(|context| context.range_origin),
             cancellation,
         )?;
@@ -542,7 +598,8 @@ impl TreeSitterProvider {
             .set_included_ranges(&included_ranges)
             .map_err(|_| provider_failure("included-ranges"))?;
 
-        let virtual_line_ending = context.is_none() && needs_virtual_matlab_line_ending(request);
+        let virtual_line_ending =
+            context.is_none() && needs_virtual_matlab_line_ending(request, source_bytes);
         let mut callback_cancelled = false;
         let envelope = context
             .as_ref()
@@ -609,6 +666,7 @@ impl TreeSitterProvider {
         family: GrammarFamily,
         tree: &Tree,
         request: &ParseRequest<'_>,
+        source: &NativeSourceView<'_>,
         traversal: &mut TraversalReport,
         sink: &mut dyn SyntaxFactSink,
         cancellation: &Cancellation,
@@ -623,7 +681,7 @@ impl TreeSitterProvider {
         let mut extraction = pack.extract(
             family,
             tree,
-            request.source().bytes(),
+            source.as_bytes(),
             request.limits().max_syntax_nodes(),
             max_facts,
             cancellation,
@@ -632,6 +690,7 @@ impl TreeSitterProvider {
         let embedded_limits = self.extract_embedded(
             tree,
             request,
+            source,
             traversal,
             &mut extraction.candidates,
             Some(max_facts),
@@ -647,33 +706,40 @@ impl TreeSitterProvider {
         let normalization_fact_limit = extraction
             .fact_limit
             .min(pre_extraction_fact_limit(sink.remaining_budget())?);
-        let normalized = normalize_query_candidates(
+        let mut normalized = prepare_query_candidates(
             extraction.candidates,
             request,
+            source,
             normalization_fact_limit,
             cancellation,
         )?;
+        let retention = admit_exact_query_candidates(
+            &mut normalized.candidates,
+            sink.remaining_budget(),
+            cancellation,
+        )?;
+        normalized.limited |= retention.limited;
         if normalized.limited && !partition_limited {
             emit_extraction_limit_diagnostic(request, sink, cancellation)?;
             partition_limited = true;
+            // The diagnostic consumes shared byte and string credits. Re-admit
+            // candidates before assigning parents or local IDs to the survivors.
+            let retention = admit_exact_query_candidates(
+                &mut normalized.candidates,
+                sink.remaining_budget(),
+                cancellation,
+            )?;
+            normalized.limited |= retention.limited;
         }
-        let initial_plan =
-            plan_fact_batches(&normalized.facts, sink.remaining_budget(), cancellation)?;
-        let sink_limited = initial_plan.emitted < normalized.facts.len();
-        let plan = if sink_limited && !partition_limited {
-            emit_extraction_limit_diagnostic(request, sink, cancellation)?;
-            plan_fact_batches(&normalized.facts, sink.remaining_budget(), cancellation)?
-        } else {
-            initial_plan
-        };
-        let emitted = plan.emitted;
+        let normalized = materialize_query_candidates(normalized, request, source, cancellation)?;
+        let plan = plan_fact_batches(&normalized.facts, sink.remaining_budget(), cancellation)?;
         let fact_count = normalized.facts.len();
+        if plan.emitted != fact_count {
+            return Err(provider_failure("query-batch-invariant"));
+        }
         emit_fact_plan(normalized.facts, plan, sink, cancellation)?;
         Ok(ExtractionReport {
-            limited: partition_limited
-                || embedded_limits.context
-                || sink_limited
-                || emitted < fact_count,
+            limited: partition_limited || embedded_limits.context || normalized.limited,
         })
     }
 
@@ -904,6 +970,7 @@ impl ParseCache {
         self.next_entry_id = self.next_entry_id.checked_add(1).ok_or(())?;
         self.entries.push_back(CachedParse {
             entry_id,
+            projection_policy: NATIVE_SOURCE_PROJECTION_POLICY,
             identity,
             source,
             tree: Some(tree.clone()),
@@ -932,6 +999,7 @@ impl ParseCache {
 #[derive(Debug)]
 struct CachedParse {
     entry_id: u64,
+    projection_policy: &'static str,
     identity: ParseIdentity,
     source: Arc<Vec<u8>>,
     tree: Option<Tree>,
@@ -943,6 +1011,7 @@ impl CachedParse {
     fn invalidation(invalidation: ReuseInvalidation) -> Self {
         Self {
             entry_id: 0,
+            projection_policy: NATIVE_SOURCE_PROJECTION_POLICY,
             identity: invalid_identity(),
             source: Arc::new(Vec::new()),
             tree: None,
@@ -954,6 +1023,7 @@ impl CachedParse {
     fn clone_for_reuse(&self) -> Self {
         Self {
             entry_id: self.entry_id,
+            projection_policy: self.projection_policy,
             identity: self.identity.clone(),
             source: self.source.clone(),
             tree: self.tree.clone(),
@@ -975,12 +1045,10 @@ fn invalid_identity() -> ParseIdentity {
     }
 }
 
-fn needs_virtual_matlab_line_ending(request: &ParseRequest<'_>) -> bool {
+fn needs_virtual_matlab_line_ending(request: &ParseRequest<'_>, source: &[u8]) -> bool {
     request.language().as_str() == "matlab"
         && request.included_ranges().is_empty()
-        && request
-            .source()
-            .bytes()
+        && source
             .last()
             .is_some_and(|last| !matches!(last, b'\n' | b'\r' | b';' | b','))
 }
@@ -1055,6 +1123,12 @@ fn prepare_reuse(
     if let Some(reason) = cached.invalidation {
         return Ok((None, ReuseStatus::Invalidated(reason)));
     }
+    if cached.projection_policy != NATIVE_SOURCE_PROJECTION_POLICY {
+        return Ok((
+            None,
+            ReuseStatus::Invalidated(ReuseInvalidation::FrontendRoute),
+        ));
+    }
     if cached.identity.family != current.family {
         return Ok((None, ReuseStatus::Invalidated(ReuseInvalidation::Language)));
     }
@@ -1085,6 +1159,11 @@ fn prepare_reuse(
             ReuseStatus::Invalidated(ReuseInvalidation::VirtualLineEnding),
         ));
     }
+    if matches!(current.encoding.as_str(), "utf-16le" | "utf-16be") && !edits.is_empty() {
+        // SourceEdit is explicitly sequential UTF-8. Applying it to physical
+        // UTF-16 or to a projected tree would fabricate an edit contract.
+        return Ok((None, ReuseStatus::Invalidated(ReuseInvalidation::Encoding)));
+    }
     if cached.identity.content_hash != current.content_hash && edits.is_empty() {
         return Ok((
             None,
@@ -1094,6 +1173,29 @@ fn prepare_reuse(
     let Some(tree) = cached.tree.clone() else {
         return Ok((None, ReuseStatus::Invalidated(ReuseInvalidation::Evicted)));
     };
+    if matches!(current.encoding.as_str(), "utf-16le" | "utf-16be") {
+        if cached.source.len() != current_source.len() {
+            return Ok((
+                None,
+                ReuseStatus::Invalidated(ReuseInvalidation::MissingEdits),
+            ));
+        }
+        for (old, new) in cached
+            .source
+            .chunks(CANCELLATION_BYTE_INTERVAL)
+            .zip(current_source.chunks(CANCELLATION_BYTE_INTERVAL))
+        {
+            cancellation.check()?;
+            if old != new {
+                return Ok((
+                    None,
+                    ReuseStatus::Invalidated(ReuseInvalidation::MissingEdits),
+                ));
+            }
+        }
+        cancellation.check()?;
+        return Ok((Some(tree), ReuseStatus::Reused { changed_ranges: 0 }));
+    }
     match apply_edits(
         tree,
         &cached.source,
@@ -1398,6 +1500,7 @@ fn copy_source_for_cache(
 fn tree_sitter_ranges(
     request: &ParseRequest<'_>,
     source: &[u8],
+    view: &NativeSourceView<'_>,
     origin: Option<(usize, Point)>,
     cancellation: &Cancellation,
 ) -> Result<Vec<Range>, AdapterError> {
@@ -1412,7 +1515,7 @@ fn tree_sitter_ranges(
     let (mut cursor, mut point) = origin.unwrap_or((0, Point { row: 0, column: 0 }));
     for included in request.included_ranges() {
         cancellation.check()?;
-        let span = included.span();
+        let span = view.projected_span(included.span())?;
         let start =
             usize::try_from(span.start_byte()).map_err(|_| provider_failure("range-offset"))?;
         let end = usize::try_from(span.end_byte()).map_err(|_| provider_failure("range-offset"))?;
@@ -1566,6 +1669,12 @@ struct NormalizedFacts {
     limited: bool,
 }
 
+struct NormalizedCandidates {
+    candidates: Vec<QueryCandidate>,
+    required: usize,
+    limited: bool,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct CandidateRetention {
     required: usize,
@@ -1590,11 +1699,24 @@ struct FactPlan {
 }
 
 fn normalize_query_candidates(
-    mut candidates: Vec<QueryCandidate>,
+    candidates: Vec<QueryCandidate>,
     request: &ParseRequest<'_>,
+    source: &NativeSourceView<'_>,
     max_facts: usize,
     cancellation: &Cancellation,
 ) -> Result<NormalizedFacts, AdapterError> {
+    let normalized =
+        prepare_query_candidates(candidates, request, source, max_facts, cancellation)?;
+    materialize_query_candidates(normalized, request, source, cancellation)
+}
+
+fn prepare_query_candidates(
+    mut candidates: Vec<QueryCandidate>,
+    request: &ParseRequest<'_>,
+    source: &NativeSourceView<'_>,
+    max_facts: usize,
+    cancellation: &Cancellation,
+) -> Result<NormalizedCandidates, AdapterError> {
     if request.language().as_str() == "perl" && request.included_ranges().is_empty() {
         for candidate in &mut candidates {
             cancellation.check()?;
@@ -1602,7 +1724,7 @@ fn normalize_query_candidates(
                 // The native root excludes leading trivia, but a whole-file binding
                 // context covers the snapshot. Included/embedded modules stay scoped.
                 candidate.start = 0;
-                candidate.end = request.source().bytes().len();
+                candidate.end = source.as_bytes().len();
             }
         }
     }
@@ -1686,7 +1808,7 @@ fn normalize_query_candidates(
                 if restricted.len().is_multiple_of(CANCELLATION_CHECK_INTERVAL) {
                     cancellation.check()?;
                 }
-                let span = included.span();
+                let span = source.projected_span(included.span())?;
                 let expanded = QueryCandidate {
                     start: usize::try_from(span.start_byte())
                         .map_err(|_| provider_failure("query-span"))?,
@@ -1696,7 +1818,7 @@ fn normalize_query_candidates(
                 };
                 restricted.push(expanded);
             }
-        } else if candidate_within_included_range(&candidate, request)? {
+        } else if candidate_within_included_range(&candidate, request, source)? {
             restricted.push(candidate);
         }
     }
@@ -1738,23 +1860,40 @@ fn normalize_query_candidates(
             ))
     })?;
 
+    Ok(NormalizedCandidates {
+        candidates: restricted,
+        required: retention.required,
+        limited,
+    })
+}
+
+fn candidate_syntax_base(candidate: QueryCandidate) -> &'static str {
+    match (candidate.syntax, candidate.role) {
+        ("python.module", StructuralRole::Module) => "python.file",
+        ("javascript.program", StructuralRole::Module) => "javascript.file",
+        ("typescript.program", StructuralRole::Module) => "typescript.file",
+        _ => candidate.syntax,
+    }
+}
+
+fn materialize_query_candidates(
+    normalized: NormalizedCandidates,
+    request: &ParseRequest<'_>,
+    source: &NativeSourceView<'_>,
+    cancellation: &Cancellation,
+) -> Result<NormalizedFacts, AdapterError> {
     let mut drafts = Vec::new();
     try_reserve_exact_cancellable(
         &mut drafts,
-        restricted.len(),
+        normalized.candidates.len(),
         cancellation,
         "query-fact-allocation",
     )?;
-    for (index, candidate) in restricted.into_iter().enumerate() {
+    for (index, candidate) in normalized.candidates.into_iter().enumerate() {
         if index.is_multiple_of(CANCELLATION_CHECK_INTERVAL) {
             cancellation.check()?;
         }
-        let base = match (candidate.syntax, candidate.role) {
-            ("python.module", StructuralRole::Module) => "python.file",
-            ("javascript.program", StructuralRole::Module) => "javascript.file",
-            ("typescript.program", StructuralRole::Module) => "typescript.file",
-            _ => candidate.syntax,
-        };
+        let base = candidate_syntax_base(candidate);
         let label = format!("{base}.{}", candidate.role.label());
         drafts.push(FactDraft {
             start: candidate.start,
@@ -1794,8 +1933,9 @@ fn normalize_query_candidates(
             .transpose()?;
         let start = u64::try_from(draft.start).map_err(|_| provider_failure("query-span"))?;
         let end = u64::try_from(draft.end).map_err(|_| provider_failure("query-span"))?;
-        let span = SourceSpan::new(request.source().source_ref().span().file(), start, end)
+        let projected = SourceSpan::new(request.source().source_ref().span().file(), start, end)
             .map_err(|_| provider_failure("query-span"))?;
+        let span = source.physical_span(projected)?;
         facts.push(SyntaxFact::new(
             local_id,
             parent,
@@ -1808,8 +1948,8 @@ fn normalize_query_candidates(
     cancellation.check()?;
     Ok(NormalizedFacts {
         facts,
-        required: retention.required,
-        limited,
+        required: normalized.required,
+        limited: normalized.limited,
     })
 }
 
@@ -2185,9 +2325,12 @@ fn prune_optional_candidates_within_limit(
 fn candidate_within_included_range(
     candidate: &QueryCandidate,
     request: &ParseRequest<'_>,
+    source: &NativeSourceView<'_>,
 ) -> Result<bool, AdapterError> {
-    let start = u64::try_from(candidate.start).map_err(|_| provider_failure("query-span"))?;
-    let end = u64::try_from(candidate.end).map_err(|_| provider_failure("query-span"))?;
+    let start = u64::try_from(source.to_physical_offset(candidate.start)?)
+        .map_err(|_| provider_failure("query-span"))?;
+    let end = u64::try_from(source.to_physical_offset(candidate.end)?)
+        .map_err(|_| provider_failure("query-span"))?;
     let ranges = request.included_ranges();
     let index = ranges.partition_point(|included| included.span().end_byte() <= start);
     Ok(ranges.get(index).is_some_and(|included| {
@@ -2314,6 +2457,297 @@ const fn span_contains(
     inner_end: usize,
 ) -> bool {
     outer_start <= inner_start && outer_end >= inner_end
+}
+
+#[derive(Default, Clone, Copy)]
+struct CandidatePacking {
+    records: usize,
+    output_bytes: usize,
+    string_bytes: usize,
+    batches: usize,
+    batch_records: usize,
+    batch_output_bytes: usize,
+}
+
+impl CandidatePacking {
+    fn push(&mut self, usage: FactUsage, budget: RemainingBudget) -> Result<(), AdapterError> {
+        let batch = budget.batch();
+        let next_records = checked_query_add(self.batch_records, 1)?;
+        let next_output = checked_query_add(self.batch_output_bytes, usage.output_bytes)?;
+        if self.batch_records == 0
+            || next_records > batch.max_records()
+            || next_output > batch.max_output_bytes()
+        {
+            self.batches = checked_query_add(self.batches, 1)?;
+            self.batch_records = 0;
+            self.batch_output_bytes = 0;
+        }
+        self.batch_records = checked_query_add(self.batch_records, 1)?;
+        self.batch_output_bytes = checked_query_add(self.batch_output_bytes, usage.output_bytes)?;
+        self.records = checked_query_add(self.records, 1)?;
+        self.output_bytes = checked_query_add(self.output_bytes, usage.output_bytes)?;
+        self.string_bytes = checked_query_add(self.string_bytes, usage.string_bytes)?;
+        Ok(())
+    }
+
+    fn fits(self, budget: RemainingBudget) -> bool {
+        let remaining = budget.remaining();
+        let batch = budget.batch();
+        self.records <= remaining.records()
+            && self.output_bytes <= remaining.output_bytes()
+            && self.string_bytes <= remaining.string_bytes()
+            && self.batches <= remaining.batches()
+            && self.batch_records <= batch.max_records()
+            && self.batch_output_bytes <= batch.max_output_bytes()
+    }
+
+    fn validate_required(self, budget: RemainingBudget) -> Result<(), AdapterError> {
+        let remaining = budget.remaining();
+        let batch = budget.batch();
+        for (resource, observed, limit) in [
+            (
+                ResourceKind::RequiredSyntaxFacts,
+                self.records,
+                remaining.records(),
+            ),
+            (
+                ResourceKind::OutputBytes,
+                self.batch_output_bytes,
+                batch.max_output_bytes(),
+            ),
+            (
+                ResourceKind::OutputBytes,
+                self.output_bytes,
+                remaining.output_bytes(),
+            ),
+            (
+                ResourceKind::StringBytes,
+                self.string_bytes,
+                remaining.string_bytes(),
+            ),
+            (ResourceKind::Batches, self.batches, remaining.batches()),
+        ] {
+            if observed > limit {
+                return Err(AdapterError::Sink(SinkError::StreamLimit {
+                    resource,
+                    observed,
+                    limit,
+                }));
+            }
+        }
+        Ok(())
+    }
+}
+
+#[derive(Default)]
+struct CandidateBatch {
+    records: usize,
+    output_bytes: usize,
+}
+
+#[derive(Clone, Copy)]
+struct CandidateAdmission {
+    candidate: QueryCandidate,
+    usage: FactUsage,
+    batch: usize,
+    selected: bool,
+}
+
+fn checked_query_add(left: usize, right: usize) -> Result<usize, AdapterError> {
+    left.checked_add(right)
+        .ok_or_else(|| provider_failure("query-fact-accounting"))
+}
+
+fn candidate_usage(candidate: QueryCandidate) -> Result<FactUsage, AdapterError> {
+    let string_bytes = checked_query_add(
+        checked_query_add(candidate_syntax_base(candidate).len(), 1)?,
+        candidate.role.label().len(),
+    )?;
+    Ok(FactUsage {
+        output_bytes: checked_query_add(LOGICAL_SYNTAX_FACT_BYTES, string_bytes)?,
+        string_bytes,
+    })
+}
+
+fn candidate_source_key(
+    candidate: QueryCandidate,
+) -> (usize, usize, StructuralRole, &'static str, usize) {
+    (
+        candidate.start,
+        candidate.end,
+        candidate.role,
+        candidate.syntax,
+        candidate.native_depth,
+    )
+}
+
+fn candidates_in_source_order(
+    candidates: &[QueryCandidate],
+    cancellation: &Cancellation,
+) -> Result<bool, AdapterError> {
+    cancellation.check()?;
+    for (index, pair) in candidates.windows(2).enumerate() {
+        if index.is_multiple_of(CANCELLATION_CHECK_INTERVAL) {
+            cancellation.check()?;
+        }
+        if candidate_source_key(pair[0]) > candidate_source_key(pair[1]) {
+            return Ok(false);
+        }
+    }
+    cancellation.check()?;
+    Ok(true)
+}
+
+fn admit_exact_query_candidates(
+    candidates: &mut Vec<QueryCandidate>,
+    budget: RemainingBudget,
+    cancellation: &Cancellation,
+) -> Result<CandidateRetention, AdapterError> {
+    // Prepared candidates are ordered; avoid allocating a merge buffer for the full-fit path.
+    if !candidates_in_source_order(candidates, cancellation)? {
+        sort_cancellable_by(candidates, cancellation, |left, right| {
+            candidate_source_key(*left).cmp(&candidate_source_key(*right))
+        })?;
+    }
+    let mut required = 0usize;
+    let mut all = CandidatePacking::default();
+    let mut all_fit = true;
+    for (index, candidate) in candidates.iter().copied().enumerate() {
+        if index.is_multiple_of(CANCELLATION_CHECK_INTERVAL) {
+            cancellation.check()?;
+        }
+        if candidate.required {
+            required = checked_query_add(required, 1)?;
+        }
+        if all_fit {
+            all.push(candidate_usage(candidate)?, budget)?;
+            all_fit = all.fits(budget);
+        }
+    }
+    if all_fit {
+        cancellation.check()?;
+        return Ok(CandidateRetention {
+            required,
+            limited: false,
+        });
+    }
+
+    let mut entries = Vec::new();
+    try_reserve_exact_cancellable(
+        &mut entries,
+        candidates.len(),
+        cancellation,
+        "query-admission-allocation",
+    )?;
+    let mut batches = Vec::<CandidateBatch>::new();
+    try_reserve_exact_cancellable(
+        &mut batches,
+        required.min(budget.remaining().batches()),
+        cancellation,
+        "query-admission-allocation",
+    )?;
+    let mut admitted = CandidatePacking::default();
+    for (index, candidate) in candidates.iter().copied().enumerate() {
+        if index.is_multiple_of(CANCELLATION_CHECK_INTERVAL) {
+            cancellation.check()?;
+        }
+        let usage = candidate_usage(candidate)?;
+        let mut slot = 0;
+        if candidate.required {
+            admitted.push(usage, budget)?;
+            admitted.validate_required(budget)?;
+            slot = admitted
+                .batches
+                .checked_sub(1)
+                .ok_or_else(|| provider_failure("query-batch-invariant"))?;
+            if batches.len() < admitted.batches {
+                batches.push(CandidateBatch::default());
+            }
+            let batch = batches
+                .get_mut(slot)
+                .ok_or_else(|| provider_failure("query-batch-invariant"))?;
+            batch.records = checked_query_add(batch.records, 1)?;
+            batch.output_bytes = checked_query_add(batch.output_bytes, usage.output_bytes)?;
+        }
+        entries.push(CandidateAdmission {
+            candidate,
+            usage,
+            batch: slot,
+            selected: candidate.required,
+        });
+    }
+    if batches.is_empty() && budget.remaining().batches() > 0 {
+        try_reserve_cancellable(&mut batches, 1, cancellation, "query-admission-allocation")?;
+        batches.push(CandidateBatch::default());
+    }
+    let mut following_batch = batches.len().saturating_sub(1);
+    for (index, entry) in entries.iter_mut().rev().enumerate() {
+        if index.is_multiple_of(CANCELLATION_CHECK_INTERVAL) {
+            cancellation.check()?;
+        }
+        if entry.candidate.required {
+            following_batch = entry.batch;
+        } else {
+            entry.batch = following_batch;
+        }
+    }
+    sort_cancellable_by(&mut entries, cancellation, |left, right| {
+        left.candidate
+            .selection_rank()
+            .cmp(&right.candidate.selection_rank())
+    })?;
+    let remaining = budget.remaining();
+    let batch_limits = budget.batch();
+    let mut limited = false;
+    for (index, entry) in entries.iter_mut().enumerate() {
+        if index.is_multiple_of(CANCELLATION_CHECK_INTERVAL) {
+            cancellation.check()?;
+        }
+        if entry.selected {
+            continue;
+        }
+        let Some(batch) = batches.get_mut(entry.batch) else {
+            limited = true;
+            continue;
+        };
+        let records = checked_query_add(admitted.records, 1)?;
+        let output = checked_query_add(admitted.output_bytes, entry.usage.output_bytes)?;
+        let strings = checked_query_add(admitted.string_bytes, entry.usage.string_bytes)?;
+        let batch_records = checked_query_add(batch.records, 1)?;
+        let batch_output = checked_query_add(batch.output_bytes, entry.usage.output_bytes)?;
+        if records > remaining.records()
+            || output > remaining.output_bytes()
+            || strings > remaining.string_bytes()
+            || batch_records > batch_limits.max_records()
+            || batch_output > batch_limits.max_output_bytes()
+        {
+            limited = true;
+            continue;
+        }
+        entry.selected = true;
+        admitted.records = records;
+        admitted.output_bytes = output;
+        admitted.string_bytes = strings;
+        batch.records = batch_records;
+        batch.output_bytes = batch_output;
+    }
+    // Required-only source-order boundaries stay fixed. Optional facts spend
+    // their containing batch's slack, so acceptance never splits that closure
+    // or repeatedly replans the whole file to search for an alternative packing.
+    candidates.clear();
+    for (index, entry) in entries.into_iter().enumerate() {
+        if index.is_multiple_of(CANCELLATION_CHECK_INTERVAL) {
+            cancellation.check()?;
+        }
+        if entry.selected {
+            candidates.push(entry.candidate);
+        }
+    }
+    sort_cancellable_by(candidates, cancellation, |left, right| {
+        candidate_source_key(*left).cmp(&candidate_source_key(*right))
+    })?;
+    cancellation.check()?;
+    Ok(CandidateRetention { required, limited })
 }
 
 fn plan_fact_batches(
@@ -2595,12 +3029,13 @@ struct SyntaxTraversal {
 fn inspect_tree(
     tree: &Tree,
     request: &ParseRequest<'_>,
+    source: &NativeSourceView<'_>,
     max_nodes: usize,
     max_depth: usize,
     cancellation: &Cancellation,
 ) -> Result<TraversalReport, AdapterError> {
     let pointer_source = matches!(request.language().as_str(), "vba" | "visual-basic-classic")
-        .then(|| request.source().bytes());
+        .then(|| source.as_bytes());
     let traversal = traverse_syntax(tree, max_nodes, max_depth, pointer_source, cancellation)?;
     cancellation.check()?;
     let SyntaxTraversal {
@@ -2629,6 +3064,18 @@ fn inspect_tree(
             Some(PrimaryDiagnostic::DepthLimit),
         )
     } else if let Some((start, end)) = error_span {
+        // MATLAB's parser-only final delimiter has no physical evidence bytes.
+        // Its EOF recovery endpoints collapse to the real source end only.
+        let (start, end) = if needs_virtual_matlab_line_ending(request, source.as_bytes()) {
+            (
+                start.min(source.as_bytes().len()),
+                end.min(source.as_bytes().len()),
+            )
+        } else {
+            (start, end)
+        };
+        let start = source.to_physical_offset(start)?;
+        let end = source.to_physical_offset(end)?;
         (
             CoverageStatus::Unknown,
             1,
@@ -2837,6 +3284,20 @@ fn source_ref_for_span(source: &SourceRef, start: usize, end: usize) -> Option<S
         source.content_hash(),
         None,
     ))
+}
+
+fn source_ref_for_projected_span(
+    source: &SourceRef,
+    view: &NativeSourceView<'_>,
+    start: usize,
+    end: usize,
+) -> Result<SourceRef, AdapterError> {
+    source_ref_for_span(
+        source,
+        view.to_physical_offset(start)?,
+        view.to_physical_offset(end)?,
+    )
+    .ok_or_else(|| provider_failure("projected-source-span"))
 }
 
 fn map_pool_error(error: PoolError) -> AdapterError {
@@ -3161,12 +3622,20 @@ mod tests {
         let tree = language_tree(GrammarFamily::Rust, b"fn one() {}");
         let cached = CachedParse {
             entry_id: 1,
+            projection_policy: NATIVE_SOURCE_PROJECTION_POLICY,
             identity: base.clone(),
             source: Arc::new(b"fn one() {}".to_vec()),
             tree: Some(tree),
             accounted_bytes: 1,
             invalidation: None,
         };
+        let mut old_projection = cached.clone_for_reuse();
+        old_projection.projection_policy = "rootlight.treesitter.source-projection/0";
+        assert_invalidated(
+            &old_projection,
+            base.clone(),
+            ReuseInvalidation::FrontendRoute,
+        );
         let mut changed = base.clone();
         changed.family = GrammarFamily::Python;
         assert_invalidated(&cached, changed, ReuseInvalidation::Language);
@@ -3417,6 +3886,470 @@ mod tests {
             pre_extraction_fact_limit(sink.remaining_budget())
                 .expect("fact capacity is representable"),
             1
+        );
+    }
+
+    fn exact_admission_facts() -> [SyntaxFact; 2] {
+        let file = rootlight_ids::FileId::from_bytes([3; 20]);
+        [
+            SyntaxFact::new(
+                1,
+                None,
+                rootlight_adapter_sdk::SyntaxFactKind::Signature,
+                SourceSpan::new(file, 0, 8).expect("optional span is ordered"),
+                0,
+                SyntaxKindLabel::new("fsharp.parameter_header.expression")
+                    .expect("optional syntax label is valid"),
+            ),
+            SyntaxFact::new(
+                2,
+                None,
+                rootlight_adapter_sdk::SyntaxFactKind::Occurrence,
+                SourceSpan::new(file, 16, 20).expect("definition span is ordered"),
+                0,
+                SyntaxKindLabel::new("fsharp.name.definition")
+                    .expect("definition syntax label is valid"),
+            ),
+        ]
+    }
+
+    fn exact_admission_candidates() -> Vec<QueryCandidate> {
+        vec![
+            QueryCandidate {
+                start: 0,
+                end: 8,
+                role: StructuralRole::Expression,
+                syntax: "fsharp.parameter_header",
+                required: false,
+                native_depth: 0,
+            },
+            QueryCandidate {
+                start: 16,
+                end: 20,
+                role: StructuralRole::Definition,
+                syntax: "fsharp.name",
+                required: true,
+                native_depth: 0,
+            },
+        ]
+    }
+
+    fn exact_admission_fact(candidate: QueryCandidate, local_id: u64) -> SyntaxFact {
+        SyntaxFact::new(
+            local_id,
+            None,
+            candidate.role.fact_kind(),
+            SourceSpan::new(
+                rootlight_ids::FileId::from_bytes([3; 20]),
+                u64::try_from(candidate.start).unwrap(),
+                u64::try_from(candidate.end).unwrap(),
+            )
+            .unwrap(),
+            0,
+            SyntaxKindLabel::new(&format!(
+                "{}.{}",
+                candidate_syntax_base(candidate),
+                candidate.role.label(),
+            ))
+            .unwrap(),
+        )
+    }
+
+    fn exact_admission_sink(
+        maximum_batches: usize,
+        output_bytes: usize,
+        string_bytes: usize,
+        batch_output_bytes: usize,
+    ) -> rootlight_adapter_sdk::BoundedSyntaxSink {
+        exact_admission_sink_with_records(
+            2,
+            maximum_batches,
+            output_bytes,
+            string_bytes,
+            batch_output_bytes,
+        )
+    }
+
+    fn exact_admission_sink_with_records(
+        maximum_records: usize,
+        maximum_batches: usize,
+        output_bytes: usize,
+        string_bytes: usize,
+        batch_output_bytes: usize,
+    ) -> rootlight_adapter_sdk::BoundedSyntaxSink {
+        let batch = rootlight_adapter_sdk::BatchThresholds::new(
+            maximum_records,
+            batch_output_bytes,
+            1,
+            1024,
+        )
+        .expect("test batch limits are valid");
+        let stream = rootlight_adapter_sdk::StreamLimits::new(
+            maximum_batches,
+            maximum_records,
+            output_bytes,
+            1,
+            1024,
+            string_bytes,
+            batch,
+        )
+        .expect("test stream limits are valid");
+        let source = SourceRef::new(
+            rootlight_ids::RepositoryId::from_bytes([1; 16]),
+            rootlight_ids::GenerationId::from_bytes([2; 20]),
+            SourceSpan::new(rootlight_ids::FileId::from_bytes([3; 20]), 0, 32)
+                .expect("test source span is ordered"),
+            ContentHash::from_bytes([4; 32]),
+            None,
+        );
+        rootlight_adapter_sdk::BoundedSyntaxSink::new(source, stream, 64)
+    }
+
+    fn assert_exact_admission_preserves_late_definition(
+        maximum_batches: usize,
+        output_bytes: usize,
+        string_bytes: usize,
+        batch_output_bytes: usize,
+    ) {
+        let facts = exact_admission_facts();
+        let optional_usage = fact_usage(&facts[0]).expect("optional usage is representable");
+        let definition_usage = fact_usage(&facts[1]).expect("definition usage is representable");
+        assert_eq!(optional_usage.output_bytes, 98);
+        assert_eq!(optional_usage.string_bytes, 34);
+        assert_eq!(definition_usage.output_bytes, 86);
+        assert_eq!(definition_usage.string_bytes, 22);
+        let sink = exact_admission_sink(
+            maximum_batches,
+            output_bytes,
+            string_bytes,
+            batch_output_bytes,
+        );
+        let cancellation = Cancellation::new();
+        assert_eq!(
+            pre_extraction_fact_limit(sink.remaining_budget()).unwrap(),
+            2,
+            "both candidates reach exact planning before any coarse pruning"
+        );
+        let required_only =
+            plan_fact_batches(&facts[1..], sink.remaining_budget(), &cancellation).unwrap();
+        assert_eq!(required_only.emitted, 1, "the definition fits by itself");
+        let mut candidates = exact_admission_candidates();
+        let retention =
+            admit_exact_query_candidates(&mut candidates, sink.remaining_budget(), &cancellation)
+                .unwrap();
+        assert!(retention.limited, "optional clipping remains explicit");
+        assert_eq!(retention.required, 1);
+        assert!(
+            candidates
+                .iter()
+                .any(|candidate| candidate.role == StructuralRole::Definition
+                    && candidate.start == 16
+                    && candidate.end == 20),
+            "optional evidence must not displace the fitting late definition: {candidates:?}"
+        );
+        let admitted_facts = candidates
+            .iter()
+            .copied()
+            .enumerate()
+            .map(|(index, candidate)| {
+                exact_admission_fact(candidate, u64::try_from(index + 1).unwrap())
+            })
+            .collect::<Vec<_>>();
+        let plan =
+            plan_fact_batches(&admitted_facts, sink.remaining_budget(), &cancellation).unwrap();
+        assert_eq!(
+            plan.emitted,
+            admitted_facts.len(),
+            "every admitted survivor fits exact emission"
+        );
+    }
+
+    #[test]
+    fn exact_output_admission_preserves_late_required_definition() {
+        assert_exact_admission_preserves_late_definition(4, 150, 512, 150);
+    }
+
+    #[test]
+    fn exact_string_admission_preserves_late_required_definition() {
+        assert_exact_admission_preserves_late_definition(4, 512, 40, 512);
+    }
+
+    #[test]
+    fn exact_batch_admission_preserves_late_required_definition() {
+        assert_exact_admission_preserves_late_definition(1, 512, 512, 150);
+    }
+
+    #[test]
+    fn exact_fact_admission_retains_all_fitting_facts() {
+        let facts = exact_admission_facts();
+        let sink = exact_admission_sink(4, 512, 512, 512);
+        let plan =
+            plan_fact_batches(&facts, sink.remaining_budget(), &Cancellation::new()).unwrap();
+        assert_eq!(plan.emitted, facts.len());
+        assert_eq!(plan.batches, vec![0..facts.len()]);
+        let mut candidates = exact_admission_candidates();
+        let expected = candidates.clone();
+        let retention = admit_exact_query_candidates(
+            &mut candidates,
+            sink.remaining_budget(),
+            &Cancellation::new(),
+        )
+        .unwrap();
+        assert!(!retention.limited);
+        assert_eq!(retention.required, 1);
+        assert_eq!(candidates, expected);
+    }
+
+    #[test]
+    fn exact_fact_admission_orders_unordered_candidates() {
+        let sink = exact_admission_sink(4, 512, 512, 512);
+        let expected = exact_admission_candidates();
+        let mut candidates = expected.iter().copied().rev().collect::<Vec<_>>();
+        let retention = admit_exact_query_candidates(
+            &mut candidates,
+            sink.remaining_budget(),
+            &Cancellation::new(),
+        )
+        .unwrap();
+        assert!(!retention.limited);
+        assert_eq!(retention.required, 1);
+        assert_eq!(candidates, expected);
+    }
+
+    #[test]
+    fn exact_candidate_source_order_check_handles_long_and_empty_inputs() {
+        let cancellation = Cancellation::new();
+        assert!(candidates_in_source_order(&[], &cancellation).unwrap());
+        let template = exact_admission_candidates()[0];
+        let mut candidates = (0..CANCELLATION_CHECK_INTERVAL + 2)
+            .map(|index| QueryCandidate {
+                start: index * 2,
+                end: index * 2 + 1,
+                ..template
+            })
+            .collect::<Vec<_>>();
+        assert!(candidates_in_source_order(&candidates, &cancellation).unwrap());
+        let last = candidates.len() - 1;
+        candidates.swap(last - 1, last);
+        assert!(!candidates_in_source_order(&candidates, &cancellation).unwrap());
+
+        let sink = exact_admission_sink(4, 512, 512, 512);
+        let retention =
+            admit_exact_query_candidates(&mut Vec::new(), sink.remaining_budget(), &cancellation)
+                .unwrap();
+        assert!(!retention.limited);
+        assert_eq!(retention.required, 0);
+    }
+
+    #[test]
+    fn exact_fact_admission_preserves_precancellation() {
+        let facts = exact_admission_facts();
+        let sink = exact_admission_sink(1, 512, 512, 150);
+        let cancellation = Cancellation::new();
+        assert!(cancellation.cancel(rootlight_cancel::CancellationReason::ClientRequest));
+        assert!(matches!(
+            plan_fact_batches(&facts, sink.remaining_budget(), &cancellation),
+            Err(AdapterError::Cancelled {
+                reason: rootlight_cancel::CancellationReason::ClientRequest
+            })
+        ));
+        let mut candidates = exact_admission_candidates();
+        assert!(matches!(
+            admit_exact_query_candidates(&mut candidates, sink.remaining_budget(), &cancellation),
+            Err(AdapterError::Cancelled {
+                reason: rootlight_cancel::CancellationReason::ClientRequest
+            })
+        ));
+        assert!(matches!(
+            admit_exact_query_candidates(&mut Vec::new(), sink.remaining_budget(), &cancellation),
+            Err(AdapterError::Cancelled {
+                reason: rootlight_cancel::CancellationReason::ClientRequest
+            })
+        ));
+    }
+
+    #[test]
+    fn exact_fact_admission_does_not_downgrade_mandatory_overflow() {
+        let mut candidates = vec![
+            QueryCandidate {
+                start: 0,
+                end: 4,
+                role: StructuralRole::Definition,
+                syntax: "fsharp.name",
+                required: true,
+                native_depth: 1,
+            },
+            QueryCandidate {
+                start: 16,
+                end: 20,
+                role: StructuralRole::Definition,
+                syntax: "fsharp.name",
+                required: true,
+                native_depth: 1,
+            },
+        ];
+        assert!(matches!(
+            retain_required_candidates_within_limit(&mut candidates, 1, &Cancellation::new()),
+            Err(AdapterError::Sink(SinkError::StreamLimit {
+                resource: ResourceKind::RequiredSyntaxFacts,
+                observed: 2,
+                limit: 1,
+            }))
+        ));
+        let sink = exact_admission_sink_with_records(1, 4, 512, 512, 512);
+        assert!(matches!(
+            admit_exact_query_candidates(
+                &mut candidates,
+                sink.remaining_budget(),
+                &Cancellation::new()
+            ),
+            Err(AdapterError::Sink(SinkError::StreamLimit {
+                resource: ResourceKind::RequiredSyntaxFacts,
+                observed: 2,
+                limit: 1,
+            }))
+        ));
+    }
+
+    #[test]
+    fn exact_fact_admission_reports_mandatory_output_string_and_batch_deficits() {
+        for (
+            maximum_batches,
+            output_bytes,
+            string_bytes,
+            batch_output_bytes,
+            resource,
+            observed,
+            limit,
+        ) in [
+            (4, 150, 512, 150, ResourceKind::OutputBytes, 172, 150),
+            (4, 512, 40, 512, ResourceKind::StringBytes, 44, 40),
+            (1, 512, 512, 150, ResourceKind::Batches, 2, 1),
+        ] {
+            let mut candidates = exact_admission_candidates();
+            candidates[0] = QueryCandidate {
+                start: 0,
+                end: 4,
+                ..candidates[1]
+            };
+            let sink = exact_admission_sink(
+                maximum_batches,
+                output_bytes,
+                string_bytes,
+                batch_output_bytes,
+            );
+            let error = admit_exact_query_candidates(
+                &mut candidates,
+                sink.remaining_budget(),
+                &Cancellation::new(),
+            )
+            .unwrap_err();
+            assert!(
+                matches!(&error,
+                    AdapterError::Sink(SinkError::StreamLimit {
+                        resource: actual_resource, observed: actual_observed, limit: actual_limit,
+                    }) if *actual_resource == resource && *actual_observed == observed && *actual_limit == limit
+                ),
+                "wrong mandatory deficit: {error:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn exact_candidate_accounting_matches_materialized_labels() {
+        let mut candidates = exact_admission_candidates();
+        for syntax in ["python.module", "javascript.program", "typescript.program"] {
+            candidates.push(QueryCandidate {
+                start: 0,
+                end: 32,
+                role: StructuralRole::Module,
+                syntax,
+                required: true,
+                native_depth: 0,
+            });
+        }
+        for candidate in candidates {
+            let observed = candidate_usage(candidate).unwrap();
+            let fact = exact_admission_fact(candidate, 1);
+            let expected = SyntaxFactBatch::new(0, vec![fact], Vec::new())
+                .usage()
+                .unwrap();
+            assert_eq!(observed.output_bytes, expected.output_bytes());
+            assert_eq!(observed.string_bytes, expected.string_bytes());
+        }
+    }
+
+    #[test]
+    fn exact_fact_admission_clips_before_parent_identity_assignment() {
+        let candidate = |start, end, role, syntax, native_depth, required| QueryCandidate {
+            start,
+            end,
+            role,
+            syntax,
+            native_depth,
+            required,
+        };
+        let mut candidates = vec![
+            candidate(0, 32, StructuralRole::Root, "test", 0, true),
+            candidate(0, 32, StructuralRole::Scope, "test", 1, true),
+            candidate(
+                0,
+                8,
+                StructuralRole::Expression,
+                "fsharp.parameter_header",
+                2,
+                false,
+            ),
+            candidate(16, 20, StructuralRole::Declaration, "test", 2, true),
+            candidate(16, 20, StructuralRole::Definition, "fsharp.name", 3, true),
+        ];
+        let sink = exact_admission_sink_with_records(5, 2, 350, 512, 350);
+        let cancellation = Cancellation::new();
+        let retention =
+            admit_exact_query_candidates(&mut candidates, sink.remaining_budget(), &cancellation)
+                .unwrap();
+        assert!(retention.limited);
+        assert_eq!(retention.required, 4);
+        assert_eq!(candidates.len(), 4);
+        assert!(
+            candidates
+                .windows(2)
+                .all(|pair| candidate_source_key(pair[0]) <= candidate_source_key(pair[1]))
+        );
+        let mut drafts = candidates
+            .iter()
+            .map(|candidate| FactDraft {
+                start: candidate.start,
+                end: candidate.end,
+                role: candidate.role,
+                syntax_kind: SyntaxKindLabel::new(&format!(
+                    "{}.{}",
+                    candidate_syntax_base(*candidate),
+                    candidate.role.label(),
+                ))
+                .unwrap(),
+                parent: None,
+                depth: 0,
+                native_depth: candidate.native_depth,
+            })
+            .collect::<Vec<_>>();
+        assign_fact_parents(&mut drafts, &cancellation).unwrap();
+        assert_eq!(
+            drafts.iter().map(|draft| draft.role).collect::<Vec<_>>(),
+            vec![
+                StructuralRole::Root,
+                StructuralRole::Scope,
+                StructuralRole::Declaration,
+                StructuralRole::Definition,
+            ]
+        );
+        assert_eq!(
+            drafts.iter().map(|draft| draft.parent).collect::<Vec<_>>(),
+            vec![None, Some(0), Some(1), Some(2)]
+        );
+        assert_eq!(
+            drafts.iter().map(|draft| draft.depth).collect::<Vec<_>>(),
+            vec![0, 1, 2, 3]
         );
     }
 
