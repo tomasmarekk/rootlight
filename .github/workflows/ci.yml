@@ -67,6 +67,7 @@ jobs:
           python scripts/test_download_osv_database.py
           python scripts/test_orchestrate_release.py
           python scripts/test_release_signing_workflow.py
+          python -B scripts/test_workflow_checkout_paths.py
           python scripts/test_prepare_npm_packages.py
           python scripts/test_publish_npm_packages.py
           python scripts/test_verify_installed_web.py
@@ -415,6 +416,10 @@ jobs:
       matrix:
         os: [ubuntu-24.04, windows-2025, macos-15, macos-15-intel]
     steps:
+      - name: Enable long Git paths on Windows
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: git config --global core.longpaths true
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
         with:
           persist-credentials: false
@@ -474,6 +479,10 @@ jobs:
       matrix:
         os: [ubuntu-24.04, windows-2025, macos-15, macos-15-intel]
     steps:
+      - name: Enable long Git paths on Windows
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: git config --global core.longpaths true
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
         with:
           persist-credentials: false
@@ -504,6 +513,10 @@ jobs:
       matrix:
         os: [ubuntu-24.04, windows-2025, macos-15, macos-15-intel]
     steps:
+      - name: Enable long Git paths on Windows
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: git config --global core.longpaths true
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
         with:
           persist-credentials: false
@@ -555,6 +568,10 @@ jobs:
           - os: macos-15-intel
             platform: macos-x86_64
     steps:
+      - name: Enable long Git paths on Windows
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: git config --global core.longpaths true
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
         with:
           persist-credentials: false
@@ -840,6 +857,10 @@ jobs:
     runs-on: windows-2025
     timeout-minutes: 45
     steps:
+      - name: Enable long Git paths on Windows
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: git config --global core.longpaths true
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
         with:
           persist-credentials: false
@@ -1650,6 +1671,10 @@ jobs:
             target: macos-x86_64
             platform: mac_os
     steps:
+      - name: Enable long Git paths on Windows
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: git config --global core.longpaths true
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
         with:
           persist-credentials: false
@@ -2158,6 +2183,10 @@ jobs:
           - os: windows-2025
             target: x86_64-pc-windows-msvc
     steps:
+      - name: Enable long Git paths on Windows
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: git config --global core.longpaths true
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
         with:
           persist-credentials: false
