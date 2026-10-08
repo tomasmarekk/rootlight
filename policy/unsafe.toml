@@ -14,6 +14,19 @@ expected_geiger_count = 32
 geiger_host_os = "all"
 
 [[boundaries]]
+package = "rootlight-vfs"
+package_version = "0.1.0"
+manifest = "crates/rootlight-vfs/Cargo.toml"
+module = "rootlight_vfs::windows_handle"
+source = "crates/rootlight-vfs/src/windows_handle.rs"
+status = "enabled"
+owner = "@tomasmarekk"
+reason = "bounded retained-handle names and full-width Windows object identities attest capability-relative reopen operations"
+expected_source_tokens = 2
+expected_geiger_count = 13
+geiger_host_os = "windows"
+
+[[boundaries]]
 package = "rootlight-catalog"
 package_version = "0.1.0"
 manifest = "crates/rootlight-catalog/Cargo.toml"

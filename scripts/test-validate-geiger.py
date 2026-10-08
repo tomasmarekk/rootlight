@@ -348,7 +348,7 @@ class GeigerValidationTests(unittest.TestCase):
             {self.cargo_id: 5},
         )
 
-    def test_uncovered_native_boundary_is_rejected(self) -> None:
+    def test_windows_vfs_boundary_has_native_coverage_and_zero_off_host_allowance(self) -> None:
         self.policy_path.write_text(
             self.policy_path.read_text(encoding="utf-8")
             .replace('status = "disabled"', 'status = "enabled"')
@@ -357,10 +357,76 @@ class GeigerValidationTests(unittest.TestCase):
             .replace('geiger_host_os = "all"', 'geiger_host_os = "windows"'),
             encoding="utf-8",
         )
-        with self.assertRaisesRegex(ValueError, "lacks native CI coverage"):
-            VALIDATOR.load_approved_counts(
-                self.policy_path, self.inventory, "linux"
+        for host, expected in (("windows", 1), ("macos", 0), ("linux", 0)):
+            with self.subTest(host=host):
+                self.assertEqual(
+                    VALIDATOR.load_approved_counts(
+                        self.policy_path, self.inventory, host
+                    ),
+                    {self.cargo_id: expected},
+                )
+
+    def test_native_boundary_coverage_requires_the_exact_package_and_host(self) -> None:
+        enabled = (
+            self.policy_path.read_text(encoding="utf-8")
+            .replace('status = "disabled"', 'status = "enabled"')
+            .replace("expected_source_tokens = 0", "expected_source_tokens = 1")
+            .replace("expected_geiger_count = 0", "expected_geiger_count = 1")
+        )
+        for package in ("rootlight-sandbox", "rootlight-other", "rootlight-vfs-extra"):
+            package_root = self.root / "crates" / package
+            source_root = package_root / "src"
+            source_root.mkdir(parents=True)
+            manifest = package_root / "Cargo.toml"
+            manifest.write_text(
+                f'[package]\nname = "{package}"\nversion = "0.1.0"\n',
+                encoding="utf-8",
             )
+            (source_root / "lib.rs").write_text(
+                self.source_path.read_text(encoding="utf-8"), encoding="utf-8"
+            )
+            cargo_id = f"path+{package_root.as_uri()}#{package}@0.1.0"
+            inventory = {
+                cargo_id: VALIDATOR.WorkspacePackage(
+                    cargo_id, package, "0.1.0", manifest.resolve()
+                )
+            }
+            for host in ("macos", "windows"):
+                with self.subTest(package=package, host=host):
+                    self.policy_path.write_text(
+                        enabled.replace("rootlight-vfs", package)
+                        .replace("rootlight_vfs", package.replace("-", "_"))
+                        .replace('geiger_host_os = "all"', f'geiger_host_os = "{host}"'),
+                        encoding="utf-8",
+                    )
+                    if package == "rootlight-sandbox":
+                        self.assertEqual(
+                            VALIDATOR.load_approved_counts(
+                                self.policy_path, inventory, host
+                            ),
+                            {cargo_id: 1},
+                        )
+                    else:
+                        with self.assertRaisesRegex(ValueError, "lacks native CI coverage"):
+                            VALIDATOR.load_approved_counts(
+                                self.policy_path, inventory, host
+                            )
+
+    def test_uncovered_native_boundary_is_rejected(self) -> None:
+        self.policy_path.write_text(
+            self.policy_path.read_text(encoding="utf-8")
+            .replace('status = "disabled"', 'status = "enabled"')
+            .replace("expected_source_tokens = 0", "expected_source_tokens = 1")
+            .replace("expected_geiger_count = 0", "expected_geiger_count = 1")
+            .replace('geiger_host_os = "all"', 'geiger_host_os = "macos"'),
+            encoding="utf-8",
+        )
+        for host in ("linux", "macos", "windows"):
+            with self.subTest(host=host):
+                with self.assertRaisesRegex(ValueError, "lacks native CI coverage"):
+                    VALIDATOR.load_approved_counts(
+                        self.policy_path, self.inventory, host
+                    )
 
     def test_safe_package_still_requires_an_unconditional_forbid_lint(self) -> None:
         report = self.report()

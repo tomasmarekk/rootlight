@@ -950,8 +950,9 @@ fn validate_unsafe_boundaries<'a>(
 fn unsafe_boundary_has_ci_coverage(package: &str, host: UnsafeBoundaryGeigerHost) -> bool {
     match host {
         UnsafeBoundaryGeigerHost::All | UnsafeBoundaryGeigerHost::Linux => true,
-        UnsafeBoundaryGeigerHost::Macos | UnsafeBoundaryGeigerHost::Windows => {
-            package == NATIVE_UNSAFE_INVENTORY_PACKAGE
+        UnsafeBoundaryGeigerHost::Macos => package == NATIVE_UNSAFE_INVENTORY_PACKAGE,
+        UnsafeBoundaryGeigerHost::Windows => {
+            package == NATIVE_UNSAFE_INVENTORY_PACKAGE || package == "rootlight-vfs"
         }
     }
 }
@@ -2239,8 +2240,18 @@ mod tests {
                 NATIVE_UNSAFE_INVENTORY_PACKAGE,
                 host
             ));
-            assert!(!unsafe_boundary_has_ci_coverage("rootlight-vfs", host));
+            for package in ["rootlight-other", "rootlight-vfs-extra", ""] {
+                assert!(!unsafe_boundary_has_ci_coverage(package, host));
+            }
         }
+        assert!(unsafe_boundary_has_ci_coverage(
+            "rootlight-vfs",
+            UnsafeBoundaryGeigerHost::Windows
+        ));
+        assert!(!unsafe_boundary_has_ci_coverage(
+            "rootlight-vfs",
+            UnsafeBoundaryGeigerHost::Macos
+        ));
         assert!(unsafe_boundary_has_ci_coverage(
             "rootlight-vfs",
             UnsafeBoundaryGeigerHost::All
@@ -2249,6 +2260,12 @@ mod tests {
             "rootlight-vfs",
             UnsafeBoundaryGeigerHost::Linux
         ));
+        for host in [
+            UnsafeBoundaryGeigerHost::All,
+            UnsafeBoundaryGeigerHost::Linux,
+        ] {
+            assert!(unsafe_boundary_has_ci_coverage("rootlight-other", host));
+        }
     }
 
     fn lint_inventory(target: &str, reachable_non_target: &[&str]) -> Option<UnsafeLintInventory> {
@@ -2418,6 +2435,43 @@ mod tests {
             unsafe_lint_declarations("#![forbid(unsafe_code, reason = \"one\", reason = \"two\")]")
                 .is_none()
         );
+    }
+
+    #[test]
+    fn enabled_boundaries_require_exact_reachable_allow_count() {
+        let manifest: toml::Value =
+            toml::from_str("[lints.rust]\nunsafe_code = \"deny\"\n").expect("fixture parses");
+        let target = "#![deny(unsafe_code, reason = \"workspace safety baseline\")]";
+        let first = "#![allow(unsafe_code, reason = \"reviewed first boundary\")]";
+        let second = "#![allow(unsafe_code, reason = \"reviewed second boundary\")]";
+        let extra = "#![allow(unsafe_code, reason = \"unreviewed sibling override\")]";
+        let exact = lint_inventory(target, &[first, second]).expect("lint state parses");
+
+        for declared_count in [1, 2, 3] {
+            assert_eq!(
+                boundary_lint_state_is_valid(
+                    UnsafeBoundaryStatus::Enabled,
+                    manifest.get("lints"),
+                    Some(&exact),
+                    2,
+                    1,
+                    declared_count,
+                ),
+                declared_count == 2,
+            );
+        }
+        let missing_or_extra: [&[&str]; 2] = [&[first], &[first, second, extra]];
+        for sources in missing_or_extra {
+            let inventory = lint_inventory(target, sources).expect("lint state parses");
+            assert!(!boundary_lint_state_is_valid(
+                UnsafeBoundaryStatus::Enabled,
+                manifest.get("lints"),
+                Some(&inventory),
+                2,
+                1,
+                2,
+            ));
+        }
     }
 
     #[test]

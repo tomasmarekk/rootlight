@@ -29,7 +29,10 @@ SUPPORTED_CARGO_GEIGER_VERSION = "cargo-geiger 0.13.0"
 SUPPORTED_CARGO_GEIGER_POLICY_VERSION = "0.13.0"
 SOURCE_INPUT_MODE = "workspace-rust-source-digest-v1"
 REPORT_FORMAT = "cargo-geiger SafetyReport"
-NATIVE_UNSAFE_INVENTORY_PACKAGE = "rootlight-sandbox"
+NATIVE_UNSAFE_INVENTORY_PACKAGES = {
+    "macos": {"rootlight-sandbox"},
+    "windows": {"rootlight-sandbox", "rootlight-vfs"},
+}
 CARGO_GEIGER_REPORT_ARGUMENTS = (
     "--all-features",
     "--all-targets",
@@ -450,8 +453,8 @@ def load_approved_counts(
             )
         if (
             status == "enabled"
-            and geiger_host_os in {"macos", "windows"}
-            and package_name != NATIVE_UNSAFE_INVENTORY_PACKAGE
+            and geiger_host_os in NATIVE_UNSAFE_INVENTORY_PACKAGES
+            and package_name not in NATIVE_UNSAFE_INVENTORY_PACKAGES[geiger_host_os]
         ):
             raise fail(
                 "host-specific unsafe boundary lacks native CI coverage: "

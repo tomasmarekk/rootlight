@@ -79,9 +79,15 @@ jobs:
           python -B scripts/test_patch_npm_source_fixture.py
           python -B scripts/test_verify_local_npm_sources.py
           python -B -m unittest discover -s scripts -p 'test_*lightning_producer_sources.py' -v
+          python -B -m unittest discover -s scripts -p 'test_*lightning_yarn_sources.py' -v
+          python -B scripts/test_restore_lightning_source_inputs.py
+          python -B scripts/test_install_lightning_from_archives.py
+          python -B scripts/test_verify_lightning_installed_placements.py
+          python -B scripts/restore_lightning_source_inputs.py --project . --restore-file-modes
           python -B scripts/verify_lightning_producer_sources.py \
             --project . \
             --bundle source-inputs/producers/lightningcss-1d680fa14e9a089c92dc0929f869d6757ae91c30
+          python -B scripts/verify_lightning_yarn_sources.py --project .
           python -B scripts/test_install_frontend_from_archives.py
           python -B scripts/verify_local_npm_sources.py \
             --project-root . \
@@ -91,6 +97,7 @@ jobs:
           node --check packaging/npm/run-native.mjs
           node --check packaging/npm/remove-cli-bridge.mjs
           node scripts/test_npm_wrappers.mjs
+          node --test scripts/test_compact_generated_c.mjs
           cargo run --locked --quiet --package xtask -- id-vectors > target/id-vectors.actual.json
           cmp tests/fixtures/id-vectors.json target/id-vectors.actual.json
       - name: Capability parity and evidence
@@ -841,13 +848,20 @@ jobs:
       - name: Install checksum-verified cargo-geiger
         shell: bash
         run: bash scripts/install-geiger.sh "$HOME/.local/bin"
-      - name: Inventory Windows unsafe boundary
+      - name: Inventory Windows sandbox unsafe boundary
         shell: bash
         run: |
           bash scripts/run-geiger.sh \
             "$HOME/.local/bin/cargo-geiger.exe" \
-            artifacts/geiger \
+            artifacts/geiger/sandbox \
             rootlight-sandbox
+      - name: Inventory Windows VFS unsafe boundary
+        shell: bash
+        run: |
+          bash scripts/run-geiger.sh \
+            "$HOME/.local/bin/cargo-geiger.exe" \
+            artifacts/geiger/vfs \
+            rootlight-vfs
       - name: Upload Windows unsafe inventory
         if: failure()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -898,6 +912,8 @@ jobs:
           persist-credentials: false
       - name: Install pinned Rust
         run: rustup show active-toolchain
+      - name: Restore authenticated producer source metadata
+        run: python3 -B scripts/restore_lightning_source_inputs.py --project . --restore-file-modes
       - name: Export complete versioned Rust sources without acquisition
         run: bash scripts/prepare-offline.sh
       - name: Restore portable sources and create empty build caches
