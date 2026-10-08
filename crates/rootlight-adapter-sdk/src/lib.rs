@@ -40,6 +40,7 @@ pub use descriptor::{
 pub use ecmascript_names::canonical_ecmascript_identifier;
 pub use erlang_names::{
     atom_end as erlang_atom_end, canonical_function_head as canonical_erlang_function_head,
+    canonical_qualified_function_call as canonical_erlang_qualified_function_call,
     function_head as erlang_function_head,
 };
 pub use error::{

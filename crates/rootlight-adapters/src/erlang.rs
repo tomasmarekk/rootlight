@@ -1,12 +1,12 @@
 //! First-party Erlang source parser for module and function indicators.
-//! Macro expansion, remote dispatch and expression semantics remain bounded.
+//! Macro expansion, dynamic dispatch and expression semantics remain bounded.
 
 use rootlight_adapter_sdk::{
     AdapterDiagnostic, AdapterError, CoverageReport, DescriptorError, DiagnosticCode,
     DomainCoverage, EncodingId, LanguageId, MemoryEnforcement, ParseCapabilities, ParseProvider,
     ParseReport, ParseRequest, ResourceUsage, SinkError, StreamEnd, StreamUsage, SyntaxFact,
     SyntaxFactBatch, SyntaxFactKind, SyntaxFactSink, SyntaxKindLabel,
-    canonical_erlang_function_head, erlang_atom_end,
+    canonical_erlang_function_head, canonical_erlang_qualified_function_call, erlang_atom_end,
 };
 use rootlight_cancel::Cancellation;
 use rootlight_ids::{ContentHash, FileId, content_hash};
@@ -188,7 +188,11 @@ impl ParseProvider for ErlangParseProvider {
                 SyntaxFactKind::Occurrence,
                 source_span(file, call.start, call.end)?,
                 if module_id.is_some() { 3 } else { 2 },
-                label("erlang.function.call"),
+                label(if call.qualified {
+                    "erlang.function.scoped_call"
+                } else {
+                    "erlang.function.call"
+                }),
             ));
         }
         for batch in facts.chunks(32) {
@@ -307,6 +311,7 @@ struct Call {
     start: usize,
     end: usize,
     function_index: usize,
+    qualified: bool,
 }
 
 struct ParsedSource {
@@ -414,12 +419,31 @@ fn scan_source(
                 cursor += 1;
                 continue;
             };
-            let open = skip_space(&masked, name_end);
+            let next = skip_space(&masked, name_end);
+            let qualified = masked.get(next) == Some(&b':');
+            let callee_end = if qualified {
+                let callee_start = skip_space(&masked, next + 1);
+                text.get(callee_start..)
+                    .and_then(erlang_atom_end)
+                    .and_then(|length| callee_start.checked_add(length))
+            } else {
+                Some(name_end)
+            };
+            let Some(callee_end) = callee_end else {
+                cursor = name_end;
+                continue;
+            };
+            let open = skip_space(&masked, callee_end);
             if masked.get(open) == Some(&b'(')
                 && let Some(end) = balanced_end(&masked, open, b'(', b')')
                 && end <= function.end
                 && !is_qualified_or_macro(&masked, cursor)
-                && canonical_erlang_function_head(&text[cursor..end], max_name_bytes).is_some()
+                && if qualified {
+                    canonical_erlang_qualified_function_call(&text[cursor..end], max_name_bytes)
+                        .is_some()
+                } else {
+                    canonical_erlang_function_head(&text[cursor..end], max_name_bytes).is_some()
+                }
                 && !is_clause_head(&masked, cursor, end, function.end)
             {
                 calls
@@ -429,6 +453,7 @@ fn scan_source(
                     start: cursor,
                     end,
                     function_index,
+                    qualified,
                 });
                 if fact_count(module, functions.len(), calls.len())
                     .is_none_or(|n| n > max_syntax_nodes)
@@ -527,7 +552,7 @@ fn is_qualified_or_macro(masked: &[u8], start: usize) -> bool {
     (0..start)
         .rev()
         .find(|&index| !masked[index].is_ascii_whitespace())
-        .is_some_and(|index| matches!(masked[index], b':' | b'?' | b'#'))
+        .is_some_and(|index| matches!(masked[index], b':' | b'?' | b'#' | b'.'))
 }
 
 fn is_atom_start(masked: &[u8], index: usize) -> bool {
@@ -707,11 +732,44 @@ mod tests {
             .collect::<Vec<_>>();
         assert!(calls.contains(&b"local(#{k => <<1,2>>})".as_slice()));
         assert!(calls.contains(&b"'quoted-call'(X)".as_slice()));
+        assert!(calls.contains(&b"io:format(\"ghost(X).\")".as_slice()));
         assert!(
             !calls
                 .iter()
                 .any(|call| call.starts_with(b"format(") || call.starts_with(b"MISSING("))
         );
+    }
+
+    #[test]
+    fn static_remote_calls_keep_full_spans_without_dynamic_targets() {
+        let source = b"-module(entry).\nrun(X, Module, Function) ->\n  remote:work(X), 'remote' : 'work'(X, []), remote % owner\n  : work % name\n  (X), Module:work(X), remote:Function(X), ?MODULE:work(X), remote:?FUNCTION(X), Record#state.target:work(X).\n";
+        let parsed = scan_source(source, 32, 128, &Cancellation::new()).expect("bounded source");
+        let remote = parsed
+            .calls
+            .iter()
+            .filter(|call| call.qualified)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            remote.len(),
+            3,
+            "captured calls: {:?}",
+            remote
+                .iter()
+                .map(|call| &source[call.start..call.end])
+                .collect::<Vec<_>>()
+        );
+        for call in remote {
+            assert_eq!(call.function_index, 0);
+            assert!(
+                canonical_erlang_qualified_function_call(
+                    std::str::from_utf8(&source[call.start..call.end]).expect("UTF-8"),
+                    128
+                )
+                .is_some()
+            );
+        }
+        assert_eq!(parsed.fact_count, 1 + 2 + 3 + parsed.calls.len());
+        assert!(scan_source(source, parsed.fact_count - 1, 128, &Cancellation::new()).is_err());
     }
 
     #[test]

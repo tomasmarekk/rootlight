@@ -28,6 +28,9 @@ const SOURCE_BYTES: u64 = 64;
 #[path = "scope_resolution/perl_binding.rs"]
 mod perl_binding;
 
+#[path = "scope_resolution/erlang_binding.rs"]
+mod erlang_binding;
+
 #[path = "scope_resolution/fsharp_binding.rs"]
 mod fsharp_binding;
 

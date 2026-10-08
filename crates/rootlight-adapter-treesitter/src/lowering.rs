@@ -6751,9 +6751,18 @@ fn structural_resolution_text<'a>(
             maximum_name_bytes,
         );
     }
-    if language == "erlang" && fact.syntax_kind().as_str() == "erlang.function.call" {
-        return rootlight_adapter_sdk::canonical_erlang_function_head(text, maximum_name_bytes)
-            .map(std::borrow::Cow::Owned);
+    if language == "erlang"
+        && matches!(
+            fact.syntax_kind().as_str(),
+            "erlang.function.call" | "erlang.function.scoped_call"
+        )
+    {
+        return rootlight_adapter_sdk::structural_captured_name_for_fact(
+            language,
+            fact,
+            text,
+            maximum_name_bytes,
+        );
     }
     if language == "groovy"
         && matches!(

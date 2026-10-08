@@ -619,6 +619,11 @@ pub fn structural_captured_name_for_fact<'a>(
         (!text.is_empty() && text.len() <= maximum_bytes && !text.contains('\0'))
             .then_some(Cow::Borrowed(text))
     } else if language == "erlang"
+        && fact.kind() == SyntaxFactKind::Occurrence
+        && fact.syntax_kind().as_str() == "erlang.function.scoped_call"
+    {
+        crate::erlang_names::canonical_qualified_function_call(text, maximum_bytes).map(Cow::Owned)
+    } else if language == "erlang"
         && matches!(
             fact.syntax_kind().as_str(),
             "erlang.function.definition" | "erlang.function.call"

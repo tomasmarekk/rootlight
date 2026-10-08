@@ -361,13 +361,23 @@ impl ResolutionEngine {
                 .ok_or(ResolutionError::InvalidScore)?;
             let tier_ceiling =
                 confidence_ceiling(occurrence_tier).min(confidence_ceiling(entity.tier));
-            candidate.score = confidence(
-                candidate
-                    .score
-                    .get()
-                    .saturating_add(UNIQUE_SCOPED_CALL_BONUS)
-                    .min(tier_ceiling),
-            )?;
+            candidate.score = if candidate
+                .positive_signals
+                .contains(&ResolutionSignal::QualifiedNameHash)
+                && is_static_erlang_call_binding(occurrence, entity, index)
+            {
+                // Exact atom/module/arity and source ownership prove this binding;
+                // the native frontend's broader Tier D completeness is unchanged.
+                confidence(EXACT_BINDING_THRESHOLD)?
+            } else {
+                confidence(
+                    candidate
+                        .score
+                        .get()
+                        .saturating_add(UNIQUE_SCOPED_CALL_BONUS)
+                        .min(tier_ceiling),
+                )?
+            };
             candidate
                 .positive_signals
                 .push(ResolutionSignal::UniqueScopedCallCandidate);
@@ -736,12 +746,13 @@ impl ResolutionContextKey {
         };
         // Native routes may inspect source length or occurrence-owned evidence.
         // Only ordinary scoring is independent of the omitted source span and ID.
-        !(language == "elm"
+        !((language == "elm"
             && ((occurrence.syntax_kind == "elm.import"
                 && occurrence.role == OccurrenceRole::ImportUse)
                 || (occurrence.syntax_kind == "elm.type.reference"
                     && occurrence.role == OccurrenceRole::TypeUse)))
-            && !(language == "matlab" && matlab_candidate_reference(occurrence))
+            || (language == "matlab" && matlab_candidate_reference(occurrence))
+            || (language == "erlang" && occurrence.syntax_kind == "erlang.function.scoped_call"))
     }
 }
 
@@ -1197,6 +1208,60 @@ fn score_candidate(
 
 fn is_scoped_call_syntax(syntax_kind: &str) -> bool {
     syntax_kind.ends_with(".scoped_call")
+}
+
+fn is_static_erlang_call_binding(
+    occurrence: &OccurrenceRecord,
+    target: &EntityRecord,
+    index: &CandidateIndex<'_>,
+) -> bool {
+    if occurrence.role != OccurrenceRole::CallSite
+        || occurrence.syntax_kind != "erlang.function.scoped_call"
+        || index
+            .files
+            .get(&occurrence.file)
+            .is_none_or(|file| file.language != "erlang")
+        || target.language != "erlang"
+        || target.kind != EntityKind::Function
+    {
+        return false;
+    }
+    let Some(caller) = occurrence.enclosing.and_then(|id| index.entities.get(&id)) else {
+        return false;
+    };
+    let Some(caller_source) = caller.evidence.source.as_ref() else {
+        return false;
+    };
+    if caller.language != "erlang"
+        || caller.kind != EntityKind::Function
+        || caller_source.span().file() != occurrence.file
+        || caller_source.content_hash() != occurrence.source.content_hash()
+        || caller_source.span().start_byte() > occurrence.source.span().start_byte()
+        || caller_source.span().end_byte() < occurrence.source.span().end_byte()
+    {
+        return false;
+    }
+    let Some(ContainerRef::Entity(module_id)) = target.container else {
+        return false;
+    };
+    let Some(module) = index.entities.get(&module_id) else {
+        return false;
+    };
+    let (Some(module_source), Some(target_source)) = (
+        module.evidence.source.as_ref(),
+        target.evidence.source.as_ref(),
+    ) else {
+        return false;
+    };
+    module.language == "erlang"
+        && module.kind == EntityKind::Module
+        && module_source.span().file() == target_source.span().file()
+        && module_source.content_hash() == target_source.content_hash()
+        && target
+            .qualified_name
+            .strip_prefix(&module.canonical_name)
+            .and_then(|name| name.strip_prefix("::"))
+            == Some(target.canonical_name.as_str())
 }
 
 impl NameMatch {
