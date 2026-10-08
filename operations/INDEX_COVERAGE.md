@@ -63,6 +63,28 @@ declarations or relationships need source-grounded language-specific checks;
 neither zero recorded gaps nor high occurrence counts prove semantic completeness.
 This diagnostic does not qualify an installed package or the MCP transport.
 
+For an independent, discovery-only path ledger, use the `source_inventory`
+example. It uses the same default configuration and tracked-path capability
+admission, with discovery audit enabled, but does not parse sources, create
+service state, run repository code, or mutate the repository.
+
+```sh
+cargo build --locked --offline -p rootlight-service --example source_inventory
+target/debug/examples/source_inventory /path/to/repository > inventory.json
+```
+
+Its optional second argument is a configuration file. The output retains the
+canonical manifest and hash, included path/content/encoding identities, actual
+exclusions with their decisive rules, diagnostics, and bounded traversal counts.
+Its file IDs belong to a shared diagnostic namespace, not a registered service
+repository or generation; compare exact paths and original byte identities,
+not those IDs, against an indexing report. Excluded directories have an observed
+directory record, not fabricated records for unvisited descendants. Independently
+join a complete tracked inventory to this ledger to account for those descendants
+and missing paths. A complete discovery traversal does not prove structural or
+semantic language coverage. Inventory hashing also warms filesystem caches and
+must not be described as an OS-cold indexing measurement.
+
 BOM-backed, strictly valid UTF-16LE/BE text is retained with its original encoding,
 hash and byte ranges. A bounded decoded prefix supplies discovery signals.
 File-level lexical vocabulary scans the complete UTF-8 or UTF-16 text with the

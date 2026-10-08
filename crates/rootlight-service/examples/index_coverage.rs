@@ -34,6 +34,9 @@ mod gap_text;
 #[path = "index_coverage/binding_proofs.rs"]
 mod binding_proofs;
 
+#[path = "index_coverage/gap_census.rs"]
+mod gap_census;
+
 #[cfg(test)]
 #[path = "../src/container_sources/fixture.rs"]
 mod fixture;
@@ -233,25 +236,32 @@ impl DiagnosticSession {
             return Err("unchanged repository produced a different receipt".into());
         }
         let status = service.repository_status(cold.repository, Some(cold.generation))?;
-        let (rows, configuration_hash, (exported_provenance, exported_fact_identities)) = service
-            .inspect_generation(
+        let (rows, configuration_hash, (exported_provenance, exported_fact_identities), gap_census) =
+            service.inspect_generation(
                 cold.repository,
                 Some(cold.generation),
                 &deadline()?,
                 |snapshot| -> Result<_, Box<dyn Error>> {
                     let mut evidence = binding_proofs::select_report_evidence(snapshot.document())?;
+                    let mut census = gap_census::GapCensus::new();
                     let rows = inspect_files(
                         snapshot,
                         service,
                         repository,
                         cold.generation,
                         &mut evidence,
+                        &mut census,
                     )?;
                     evidence.finish(snapshot.document())?;
+                    let census = census.finish(
+                        &snapshot.document().diagnostics,
+                        snapshot.document().skipped_regions.len(),
+                    )?;
                     Ok((
                         rows,
                         snapshot.metadata().configuration_hash(),
                         (evidence.provenance, evidence.fact_identities),
+                        census,
                     ))
                 },
             )??;
@@ -267,6 +277,7 @@ impl DiagnosticSession {
             "coverage":status.coverage.iter().map(|entry| json!({"language":entry.language,"indexed_files":entry.indexed_files,
                 "discovered_files":entry.discovered_files,"tier":entry.tier,"status":entry.status})).collect::<Vec<_>>(),
             "files":rows,"full_semantic_completeness_proven":false,
+            "gap_census":gap_census,
             "exported_provenance":exported_provenance,
             "exported_fact_identities":exported_fact_identities,
             "exported_fact_identity_scope":"terminal_source_witnesses_not_semantic_records",
@@ -378,12 +389,13 @@ fn occurrence_matches_gap(site: &OccurrenceRecord, gap: &SkippedRegion) -> bool 
         && site.source.content_hash() == gap.source.content_hash()
 }
 
-fn inspect_files(
-    snapshot: &rootlight_storage::GenerationSnapshot,
+fn inspect_files<'snapshot>(
+    snapshot: &'snapshot rootlight_storage::GenerationSnapshot,
     service: &FirstSliceService,
     repository: &Path,
     generation: rootlight_ids::GenerationId,
     evidence: &mut binding_proofs::BindingEvidence,
+    census: &mut gap_census::GapCensus<'snapshot>,
 ) -> Result<Vec<serde_json::Value>, Box<dyn Error>> {
     let document = snapshot.document();
     let mut origins = BTreeMap::new();
@@ -552,6 +564,11 @@ fn inspect_files(
             .iter()
             .filter(|gap| gap.source.span().file() == file.id)
             .map(|gap| {
+                let candidates = sites_by_span
+                    .get(&gap.source.span())
+                    .map(Vec::as_slice)
+                    .unwrap_or_default();
+                census.record(&file.language, gap, candidates)?;
                 let mut value = serde_json::to_value(gap)?;
                 evidence.admit_gap(gap);
                 // A callee and its application can share a span but disagree on
@@ -971,6 +988,15 @@ mod tests {
             .unwrap();
         assert_eq!(retained["normalized_proof_status"], "exported");
         let document = inspected_document(&repository, &state);
+        assert_eq!(
+            report["gap_census"]["gaps"]["total_records"],
+            document.skipped_regions.len(),
+        );
+        assert_eq!(
+            report["gap_census"]["full_semantic_completeness_proven"],
+            false
+        );
+        assert_eq!(report["gap_census"]["installed_mcp_qualified"], false);
         let notes = document
             .files
             .iter()
@@ -989,6 +1015,7 @@ mod tests {
             "exported_provenance",
             "exported_fact_identities",
             "exported_fact_root_scope",
+            "gap_census",
         ] {
             assert_eq!(report[field], restored[field], "reopened {field}");
         }
