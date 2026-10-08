@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Exercise Cargo/local npm/producer exports using authored fixtures and mocked Git.
+"""Exercise Cargo/npm/producer/Yarn exports using authored fixtures and mocked Git.
 
 No Cargo, npm, registry or product process runs; the portable export retains
 strict source/mode boundaries without claiming installation or OS isolation.
@@ -13,6 +13,8 @@ import io
 import json
 import os
 from pathlib import Path
+import subprocess
+import sys
 import tarfile
 import tempfile
 import tomllib
@@ -23,11 +25,79 @@ import prepare_rust_source_bundle as bundle
 import import_lightning_producer_sources as producer_import
 import patch_npm_source_fixture as fixture
 import verify_lightning_producer_sources as producer
+import verify_lightning_yarn_sources as yarn
 import verify_local_npm_sources as npm
 import verify_npm_source_bundle as original_npm
 import vendor_rust_sources as vendor
 from test_verify_local_npm_sources import _archive as npm_archive
 from test_verify_lightning_producer_sources import AuthoredFixture, archive as producer_archive
+from test_verify_lightning_yarn_sources import archive as yarn_archive, pin_fields as yarn_pin_fields
+
+
+_OBSERVER_SCRIPT_PATH = "scripts/verify_lightning_installed_placements.py"
+_LIGHTNING_PLACEMENT_SCRIPT_PATHS = (
+    "scripts/install_lightning_from_archives.py",
+    _OBSERVER_SCRIPT_PATH,
+)
+
+
+_EXPORTED_VERIFIER_BOOTSTRAP = """
+import importlib
+import json
+from pathlib import Path
+import runpy
+import sys
+
+root = Path(sys.argv[1]).resolve()
+paths = json.loads(sys.argv[2])
+archive_pin = sys.argv[3]
+sys.path.insert(0, str(root / "scripts"))
+origins = {}
+for relative in paths:
+    name = Path(relative).stem
+    module = importlib.import_module(name)
+    origin = Path(module.__file__).resolve()
+    if origin != root / relative:
+        raise SystemExit("verifier module resolved outside exported sources")
+    origins[name] = str(origin)
+if archive_pin:
+    sys.modules["verify_lightning_producer_sources"].ARCHIVE_SHA256 = archive_pin
+sys.argv = [str(root / "scripts/prepare_rust_source_bundle.py"),
+            "--destination", str(root), "--verify-only"]
+runpy.run_path(sys.argv[0], run_name="__main__")
+print(json.dumps({"module_origins": origins}, sort_keys=True))
+"""
+
+
+def _add_verification_scripts(source: Path) -> None:
+    scripts = Path(__file__).resolve().parent
+    for relative in bundle.VERIFICATION_SCRIPT_PATHS:
+        target = source / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes((scripts / Path(relative).name).read_bytes())
+        target.chmod(0o644)
+
+
+def _verify_with_exported_scripts(case, exported: Path, *, archive_pin: str = "") -> None:
+    unrelated = case.root / "unrelated-python-cwd"
+    unrelated.mkdir()
+    # Isolated startup ignores poisoned PYTHONPATH; only exported scripts are added.
+    result = subprocess.run(
+        [sys.executable, "-I", "-S", "-B", "-c", _EXPORTED_VERIFIER_BOOTSTRAP,
+         str(exported), json.dumps(bundle.VERIFICATION_SCRIPT_PATHS), archive_pin],
+        cwd=unrelated, env={**os.environ, "PYTHONPATH": str(Path(__file__).resolve().parent)},
+        check=False, capture_output=True, text=True, timeout=60,
+    )
+    case.assertEqual(result.returncode, 0, result.stderr)
+    case.assertEqual(result.stderr, "")
+    rows = result.stdout.splitlines()
+    case.assertEqual(len(rows), 2)
+    case.assertEqual(json.loads(rows[0])["status"], "verified")
+    origins = json.loads(rows[1])["module_origins"]
+    case.assertEqual(origins, {Path(relative).stem: str((exported / relative).resolve())
+                              for relative in bundle.VERIFICATION_SCRIPT_PATHS})
+    case.assertEqual(origins[Path(_OBSERVER_SCRIPT_PATH).stem],
+                     str((exported / _OBSERVER_SCRIPT_PATH).resolve()))
 
 
 class RustSourceBundleTests(unittest.TestCase):
@@ -203,6 +273,7 @@ class RustSourceBundleTests(unittest.TestCase):
         (acquired / self.archive.name).write_bytes(self.archive.read_bytes())
         vendor.vendor_sources(source, acquired)
         self.add_npm_inputs(source)
+        _add_verification_scripts(source)
         # A Windows Git index may mark all vendor files non-executable; the
         # original archives, not those host/index bits, remain authoritative.
         inventory = sorted((path.relative_to(source).as_posix(), path.name == "run.sh")
@@ -311,6 +382,8 @@ class RustSourceBundleTests(unittest.TestCase):
         self.assertIs(manifest["npm_distribution_inputs_verified"], True)
         self.assertIsNone(manifest["lightning_producer_inputs"])
         self.assertIs(manifest["lightning_producer_inputs_verified"], False)
+        self.assertIsNone(manifest["lightning_yarn_inputs"])
+        self.assertIs(manifest["lightning_yarn_inputs_verified"], False)
         self.assertEqual(manifest["source_input_empty_directories"], {})
         npm_inputs = manifest["npm_distribution_inputs"]
         self.assertEqual((npm_inputs["archive_count"], npm_inputs["lock_record_count"],
@@ -713,6 +786,106 @@ class RustSourceBundleTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "producer source inputs"):
             bundle.verify_project_bundle(project)
 
+    def test_absent_yarn_requires_explicit_null_evidence_and_false_verified_flag(self) -> None:
+        project, pristine = self.create_project()
+        self.assertEqual(bundle._yarn_source_inputs(project), (None, {}, {}, set()))
+        for field, value in (("lightning_yarn_inputs", {}), ("lightning_yarn_inputs_verified", True),
+                             ("lightning_yarn_inputs_verified", 0)):
+            manifest = copy.deepcopy(pristine)
+            manifest[field] = value
+            (project / bundle.MANIFEST_PATH).write_bytes(producer.json_bytes(manifest))
+            with self.subTest(field=field, value=value), self.assertRaisesRegex(ValueError, "Yarn source inputs"):
+                bundle.verify_project_bundle(project)
+        for field in ("lightning_yarn_inputs", "lightning_yarn_inputs_verified"):
+            manifest = copy.deepcopy(pristine)
+            del manifest[field]
+            (project / bundle.MANIFEST_PATH).write_bytes(producer.json_bytes(manifest))
+            with self.subTest(field=field), self.assertRaisesRegex(ValueError, "Yarn source inputs"):
+                bundle.verify_project_bundle(project)
+
+    def test_all_verification_modules_must_be_tracked_before_export(self) -> None:
+        source, inventory = self.create_checkout()
+        for index, name in enumerate(bundle.VERIFICATION_SCRIPT_PATHS):
+            destination = self.root / f"untracked-verification-script-{index}"
+            with self.subTest(name=name), self.assertRaisesRegex(ValueError, "untracked required project source"):
+                self.export_project(source, [row for row in inventory if row[0] != name], destination)
+            self.assertFalse(destination.exists())
+
+    def test_all_verification_modules_must_be_regular_present_inputs_before_export(self) -> None:
+        source, inventory = self.create_checkout()
+        for index, name in enumerate(bundle.VERIFICATION_SCRIPT_PATHS):
+            path = source / name
+            content = path.read_bytes()
+            path.unlink()
+            destination = self.root / f"missing-verification-script-{index}"
+            with self.subTest(name=name), self.assertRaisesRegex(ValueError, "missing regular source input"):
+                self.export_project(source, inventory, destination)
+            self.assertFalse(destination.exists())
+            path.write_bytes(content)
+            path.chmod(0o644)
+
+    def test_restored_manifest_must_retain_every_verification_module(self) -> None:
+        exported, pristine = self.create_project()
+        for name in bundle.VERIFICATION_SCRIPT_PATHS:
+            manifest = copy.deepcopy(pristine)
+            manifest["project_sources"] = [row for row in manifest["project_sources"] if row["path"] != name]
+            (exported / bundle.MANIFEST_PATH).write_bytes(producer.json_bytes(manifest))
+            with self.subTest(name=name), self.assertRaisesRegex(ValueError, "omits required versioned project inputs"):
+                bundle.verify_project_bundle(exported)
+        (exported / bundle.MANIFEST_PATH).write_bytes(producer.json_bytes(pristine))
+        for name in bundle.VERIFICATION_SCRIPT_PATHS:
+            path = exported / name
+            content = path.read_bytes()
+            path.unlink()
+            with self.subTest(missing=name), self.assertRaisesRegex(ValueError, "missing regular source input"):
+                bundle.verify_project_bundle(exported)
+            path.write_bytes(content)
+            path.chmod(0o644)
+
+    def test_lightning_placement_scripts_require_tracked_regular_export_sources(self) -> None:
+        for relative in _LIGHTNING_PLACEMENT_SCRIPT_PATHS:
+            self.assertIn(relative, bundle.VERIFICATION_SCRIPT_PATHS)
+            stem = Path(relative).stem
+            for state in ("untracked", "missing"):
+                source, inventory = self.create_checkout(f"{stem}-{state}")
+                if state == "untracked":
+                    inventory = [row for row in inventory if row[0] != relative]
+                    reason = "untracked required project source"
+                else:
+                    (source / relative).unlink()
+                    reason = "missing regular source input"
+                destination = self.root / f"rejected-{stem}-{state}"
+                diagnostic = f"^{reason}: {relative.replace('.', '[.]')}$"
+                with self.subTest(relative=relative, state=state):
+                    with self.assertRaisesRegex(ValueError, diagnostic):
+                        self.export_project(source, inventory, destination)
+                self.assertFalse(destination.exists())
+
+    def test_exported_lightning_placement_script_bytes_are_manifest_bound(self) -> None:
+        exported, manifest = self.create_project()
+        scripts = Path(__file__).resolve().parent
+        for relative in _LIGHTNING_PLACEMENT_SCRIPT_PATHS:
+            self.assertIn(relative, bundle.VERIFICATION_SCRIPT_PATHS)
+            path = exported / relative
+            original = path.read_bytes()
+            self.assertEqual(original, (scripts / Path(relative).name).read_bytes())
+            record = next(row for row in manifest["project_sources"]
+                          if row["path"] == relative)
+            self.assertEqual(record["sha256"], bundle.digest(path))
+            self.assertEqual(manifest["file_modes"][relative], 0o644)
+            path.write_bytes(original + b"\n# Authored exported verification module mutation.\n")
+            diagnostic = f"^changed project source: {relative.replace('.', '[.]')}$"
+            with self.subTest(relative=relative):
+                with self.assertRaisesRegex(ValueError, diagnostic):
+                    bundle.verify_project_bundle(exported)
+            path.write_bytes(original)
+
+    def test_exported_scripts_verify_without_original_workspace_import_resolution(self) -> None:
+        exported, manifest = self.create_project()
+        paths = {record["path"] for record in manifest["project_sources"]}
+        self.assertTrue(set(_LIGHTNING_PLACEMENT_SCRIPT_PATHS).issubset(paths))
+        _verify_with_exported_scripts(self, exported)
+
 
 class ProducerSourceExportTests(AuthoredFixture, unittest.TestCase):
     """Exercise real producer verification on complete authored inert inputs."""
@@ -773,6 +946,7 @@ class ProducerSourceExportTests(AuthoredFixture, unittest.TestCase):
         package = json.loads((self.project / npm.CANONICAL_LOCK).read_bytes())["packages"][""]
         (frontend / "package.json").write_bytes(producer.json_bytes(package))
         (frontend / ".npmrc").write_bytes(b"fund=false\npackage-lock=true\n")
+        _add_verification_scripts(self.project)
         self.inventory = sorted((path.relative_to(self.project).as_posix(), False)
                                 for path in self.project.rglob("*") if path.is_file()
                                 and self.prepared not in path.parents and path != self.capture)
@@ -1020,6 +1194,281 @@ class ProducerSourceExportTests(AuthoredFixture, unittest.TestCase):
         with patch.object(bundle, "linked_path", side_effect=lambda path: path == parent or original(path)):
             with self.assertRaisesRegex(ValueError, "linked producer"):
                 bundle._producer_source_inputs(self.project)
+
+
+class YarnSourceExportTests(AuthoredFixture, unittest.TestCase):
+    """Transport actual synthetic producer/Yarn inputs without verifier substitutes."""
+
+    def setUp(self) -> None:
+        ProducerSourceExportTests.setUp(self)
+        self.yarn_root = self.project / yarn.BUNDLE_PATH
+        (self.yarn_root / "archives").mkdir(parents=True)
+        (self.yarn_root / "packages").mkdir()
+        self.yarn_rows, sections = [], ["# yarn lockfile v1\n"]
+        for name in ("leaf", "second"):
+            payload, members = yarn_archive(name, extras={
+                "authored root/.gitignore": (b"bin/task.js\n.DS_Store\n", 0o644),
+                "authored root/vendor/.DS_Store": (b"authored inert ignored input\n", 0o644),
+            })
+            resolved, integrity = yarn_pin_fields(name, payload)
+            sections.append(f'{name}@^1.0.0:\n  version "1.0.0"\n  resolved "{resolved}"\n'
+                            f'  integrity {integrity}\n\n')
+            filename = hashlib.sha256(resolved.encode("ascii")).hexdigest() + ".tgz"
+            archive_path = self.yarn_root / "archives" / filename
+            archive_path.write_bytes(payload)
+            archive_path.chmod(0o644)
+            expanded = self.yarn_root / "packages" / Path(filename).stem
+            (expanded / "authored root/nested/empty").mkdir(parents=True)
+            for path, (content, mode) in members.items():
+                target = expanded / path
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_bytes(content)
+                target.chmod(mode)
+            self.yarn_rows.append({"archive": archive_path, "expanded": expanded, "payload": payload})
+        sections.append(f'"{producer.PACKAGE}@link:.":\n  version "0.0.0"\n  uid ""\n')
+        self.files[producer.ROOT + "/package.json"] = producer.json_bytes({
+            "name": producer.PACKAGE, "version": producer.VERSION,
+            "dependencies": {"leaf": "^1.0.0"}, "optionalDependencies": {"second": "^1.0.0"},
+            "resolutions": {producer.PACKAGE: "link:."},
+        })
+        self.files[producer.ROOT + "/yarn.lock"] = "".join(sections).encode("ascii")
+        empty = tarfile.TarInfo(producer.ROOT + "/documentation/empty")
+        empty.type, empty.mode = tarfile.DIRTYPE, 0o775
+        self.payload = producer_archive(self.files, [empty])
+        pin = patch.object(producer, "ARCHIVE_SHA256", producer.digest(self.payload))
+        pin.start()
+        self.addCleanup(pin.stop)
+        self.write_prepared()
+        self.destination.rename(self.root / "prior-authored-producer")
+        producer_import.import_bundle(self.project, self.prepared, self.capture, self.destination)
+        self.yarn_report = yarn.derive_bundle(self.project, self.yarn_root)
+        (self.yarn_root / yarn.REPORT_NAME).write_bytes(producer.json_bytes(self.yarn_report))
+        (self.yarn_root / yarn.REPORT_NAME).chmod(0o644)
+        self.inventory = sorted((path.relative_to(self.project).as_posix(), False)
+                                for path in self.project.rglob("*") if path.is_file()
+                                and self.prepared not in path.parents and path != self.capture)
+
+    def export(self, *, inventory=None, destination=None):
+        """Use the common export harness, replacing only read-only Git provenance."""
+        return ProducerSourceExportTests.export(self, inventory=inventory, destination=destination)
+
+    def test_exact_yarn_bytes_modes_ignore_members_and_separate_claims_survive_export(self) -> None:
+        before = {name: (self.project / name).read_bytes() for name, _mode in self.inventory}
+        exported, manifest = self.export()
+        self.assertIs(manifest["lightning_yarn_inputs_verified"], True)
+        self.assertEqual(manifest["lightning_yarn_inputs"], yarn.verify_bundle(exported))
+        self.assertEqual(manifest["lightning_yarn_inputs"], self.yarn_report)
+        self.assertEqual(self.yarn_report["archive_count"], 2)
+        self.assertEqual(self.yarn_report["pin_graph"]["stanza_count"], 3)
+        self.assertEqual(self.yarn_report["pin_graph"]["local_associations"][0]["resolution"], "link:.")
+        self.assertIn("optionalDependencies", {row["section"] for row in self.yarn_report["pin_graph"]["roots"]})
+        self.assertEqual(manifest["npm_distribution_inputs"]["archive_count"], 1)
+        for key in yarn.FALSE_CLAIMS:
+            self.assertIs(manifest["lightning_yarn_inputs"][key], False)
+        self.assertIs(manifest["frontend_external_source_closure_verified"], False)
+        _proof, modes, hashes, _directories = bundle._yarn_source_inputs(self.project)
+        self.assertEqual(set(hashes), {yarn.BUNDLE_PATH + "/" + name for name in self.yarn_report["files"]}
+                         | {yarn.BUNDLE_PATH + "/" + yarn.REPORT_NAME})
+        for name, mode in modes.items():
+            self.assertEqual(manifest["file_modes"][name], mode)
+            self.assertIs(next(row["executable"] for row in manifest["project_sources"] if row["path"] == name),
+                          bool(mode & 0o111))
+        self.assertEqual(sum(name.endswith("/.DS_Store") for name in hashes), 2)
+        self.assertEqual(sum(name.endswith("/.gitignore") for name in hashes), 2)
+        for name, content in before.items():
+            self.assertEqual((exported / name).read_bytes(), content)
+            self.assertEqual((self.project / name).read_bytes(), content)
+        self.assertEqual(bundle.verify_project_bundle(exported), manifest)
+
+    def test_exported_scripts_independently_verify_actual_authored_producer_and_yarn_inputs(self) -> None:
+        exported, _manifest = self.export()
+        _verify_with_exported_scripts(self, exported, archive_pin=producer.digest(self.payload))
+
+    def test_yarn_archive_transport_is_byte_reproducible_and_restores_empty_directories(self) -> None:
+        exported, manifest = self.export()
+        yarn_empties = {yarn.BUNDLE_PATH + "/" + row["expanded_path"] + "/authored root/nested/empty"
+                        for row in self.yarn_report["packages"]}
+        self.assertTrue(yarn_empties.issubset(manifest["source_input_empty_directories"]))
+        for name in yarn_empties:
+            self.assertEqual(manifest["source_input_empty_directories"][name], 0o755)
+            self.assertEqual(list((exported / name).iterdir()), [])
+        first, second = self.root / "yarn-first.tar.gz", self.root / "yarn-second.tar.gz"
+        bundle.archive_bundle(exported, first)
+        bundle.archive_bundle(exported, second)
+        self.assertEqual(first.read_bytes(), second.read_bytes())
+        restored = self.root / "yarn-restored"
+        restored.mkdir()
+        with tarfile.open(first) as tar:
+            self.assertEqual(tar.getnames(), sorted(set(tar.getnames())))
+            for name in yarn_empties:
+                member = tar.getmember("rootlight/" + name)
+                self.assertTrue(member.isdir())
+                self.assertEqual((member.mode, member.uid, member.gid, member.mtime), (0o755, 0, 0, 0))
+            for name, mode in manifest["file_modes"].items():
+                if name.startswith(yarn.BUNDLE_PATH + "/"):
+                    self.assertEqual(tar.getmember("rootlight/" + name).mode, mode)
+            tar.extractall(restored, filter="data")
+        self.assertEqual(bundle.verify_project_bundle(restored / "rootlight"), manifest)
+
+    def test_yarn_namespace_partial_empty_foreign_and_extra_children_are_not_absence(self) -> None:
+        parent = self.project / bundle.PRODUCER_DEPENDENCIES_PATH
+        child = self.yarn_root.parent
+        child.rename(self.root / "saved-yarn-producer")
+        with self.assertRaisesRegex(ValueError, "Yarn namespace inventory"):
+            bundle._yarn_source_inputs(self.project)
+        foreign = parent / "unreviewed-producer"
+        foreign.mkdir()
+        with self.assertRaisesRegex(ValueError, "Yarn namespace inventory"):
+            bundle._yarn_source_inputs(self.project)
+        foreign.rmdir()
+        child.mkdir()
+        with self.assertRaisesRegex(ValueError, "Yarn namespace inventory"):
+            bundle._yarn_source_inputs(self.project)
+        child.rmdir()
+        (self.root / "saved-yarn-producer").rename(child)
+        extra = child / "extra-namespace"
+        extra.mkdir()
+        with self.assertRaisesRegex(ValueError, "Yarn namespace inventory"):
+            bundle._yarn_source_inputs(self.project)
+        extra.rmdir()
+        parent.rename(self.root / "saved-yarn-parent")
+        parent.write_bytes(b"not a namespace directory")
+        with self.assertRaisesRegex(ValueError, "Yarn namespace inventory"):
+            bundle._yarn_source_inputs(self.project)
+
+    def test_every_yarn_archive_member_and_report_must_be_tracked_before_copy(self) -> None:
+        _proof, _modes, hashes, _directories = bundle._yarn_source_inputs(self.project)
+        for index, name in enumerate(hashes):
+            destination = self.root / f"untracked-yarn-{index}"
+            inventory = [row for row in self.inventory if row[0] != name]
+            with self.subTest(name=name), self.assertRaisesRegex(ValueError, "untracked Yarn"):
+                self.export(inventory=inventory, destination=destination)
+            self.assertFalse(destination.exists())
+
+    def test_missing_yarn_original_member_and_report_reject_before_destination_creation(self) -> None:
+        controls = (self.yarn_rows[0]["archive"], self.yarn_rows[1]["expanded"] / "authored root/LICENSE",
+                    self.yarn_root / yarn.REPORT_NAME)
+        for index, path in enumerate(controls):
+            content = path.read_bytes()
+            path.unlink()
+            destination = self.root / f"missing-yarn-{index}"
+            with self.subTest(path=path), self.assertRaises(ValueError):
+                self.export(destination=destination)
+            self.assertFalse(destination.exists())
+            path.write_bytes(content)
+            path.chmod(0o644)
+
+    def test_yarn_report_byte_mode_inventory_and_claim_rebinding_reject(self) -> None:
+        path = self.yarn_root / yarn.REPORT_NAME
+        before = path.read_bytes()
+        member = next(name for name in self.yarn_report["files"] if name.endswith("/bin/task.js"))
+        changes = (
+            lambda report: report.update(preferred_source_closure_complete=True),
+            lambda report: report.update(extra=False),
+            lambda report: report["files"][member].update(mode=0o644),
+            lambda report: report["files"][member].update(sha256="0" * 64),
+            lambda report: report["files"].pop(member),
+        )
+        for index, change in enumerate(changes):
+            report = copy.deepcopy(self.yarn_report)
+            change(report)
+            path.write_bytes(producer.json_bytes(report))
+            destination = self.root / f"rebound-yarn-report-{index}"
+            with self.subTest(index=index), self.assertRaisesRegex(ValueError, "canonical_report_differs"):
+                self.export(destination=destination)
+            self.assertFalse(destination.exists())
+        path.write_bytes(json.dumps(self.yarn_report).encode())
+        with self.assertRaisesRegex(ValueError, "canonical_report_differs"):
+            self.export(destination=self.root / "noncanonical-yarn-report")
+        path.write_bytes(before)
+
+    def test_restored_yarn_witness_flags_and_modes_cannot_be_rebound(self) -> None:
+        exported, pristine = self.export()
+        manifest_path = exported / bundle.MANIFEST_PATH
+        for field, value in (("lightning_yarn_inputs", None), ("lightning_yarn_inputs_verified", False),
+                             ("lightning_yarn_inputs_verified", 1)):
+            manifest = copy.deepcopy(pristine)
+            manifest[field] = value
+            manifest_path.write_bytes(producer.json_bytes(manifest))
+            with self.subTest(field=field, value=value), self.assertRaisesRegex(ValueError, "Yarn source inputs"):
+                bundle.verify_project_bundle(exported)
+        for field in ("archive_count", "preferred_source_closure_complete"):
+            manifest = copy.deepcopy(pristine)
+            manifest["lightning_yarn_inputs"][field] = 9 if field == "archive_count" else True
+            manifest_path.write_bytes(producer.json_bytes(manifest))
+            with self.subTest(field=field), self.assertRaisesRegex(ValueError, "Yarn source inputs"):
+                bundle.verify_project_bundle(exported)
+        for name, expected_mode in bundle._yarn_source_inputs(self.project)[1].items():
+            manifest = copy.deepcopy(pristine)
+            manifest["file_modes"][name] = 0o644 if expected_mode == 0o755 else 0o755
+            next(row for row in manifest["project_sources"] if row["path"] == name)["executable"] = expected_mode != 0o755
+            manifest_path.write_bytes(producer.json_bytes(manifest))
+            with self.subTest(name=name), self.assertRaisesRegex(ValueError, "authenticated Yarn inputs"):
+                bundle.verify_project_bundle(exported)
+
+    def test_yarn_archive_modes_override_all_nonexecutable_and_data_executable_git_bits(self) -> None:
+        modes = bundle._yarn_source_inputs(self.project)[1]
+        inventory = [(name, modes[name] == 0o644 if name in modes else executable)
+                     for name, executable in self.inventory]
+        exported, manifest = self.export(inventory=inventory)
+        for name, mode in modes.items():
+            self.assertEqual(manifest["file_modes"][name], mode)
+        self.assertEqual(bundle.verify_project_bundle(exported), manifest)
+
+    def test_restored_yarn_bytes_cannot_be_rebound_through_project_checksums(self) -> None:
+        exported, pristine = self.export()
+        prefix = yarn.BUNDLE_PATH + "/"
+        controls = (prefix + yarn.REPORT_NAME,
+                    next(prefix + name for name in self.yarn_report["files"] if name.startswith("archives/")),
+                    next(prefix + name for name in self.yarn_report["files"] if name.endswith("/LICENSE")))
+        for name in controls:
+            path = exported / name
+            content = path.read_bytes()
+            path.write_bytes(content + b"mutation")
+            manifest = copy.deepcopy(pristine)
+            next(row for row in manifest["project_sources"] if row["path"] == name)["sha256"] = bundle.digest(path)
+            (exported / bundle.MANIFEST_PATH).write_bytes(producer.json_bytes(manifest))
+            with self.subTest(name=name), self.assertRaises(ValueError):
+                bundle.verify_project_bundle(exported)
+            path.write_bytes(content)
+
+    def test_missing_yarn_empty_directories_are_never_silently_reconstructed(self) -> None:
+        empty = self.yarn_rows[0]["expanded"] / "authored root/nested/empty"
+        empty.rmdir()
+        destination = self.root / "missing-yarn-empty"
+        with self.assertRaisesRegex(ValueError, "stored_namespace_inventory_differs"):
+            self.export(destination=destination)
+        self.assertFalse(destination.exists())
+        empty.mkdir()
+        exported, pristine = self.export()
+        relative = empty.relative_to(self.project).as_posix()
+        manifest = copy.deepcopy(pristine)
+        del manifest["source_input_empty_directories"][relative]
+        (exported / bundle.MANIFEST_PATH).write_bytes(producer.json_bytes(manifest))
+        with self.assertRaisesRegex(ValueError, "empty directories"):
+            bundle.verify_project_bundle(exported)
+        (exported / bundle.MANIFEST_PATH).write_bytes(producer.json_bytes(pristine))
+        (exported / relative).rmdir()
+        with self.assertRaisesRegex(ValueError, "stored_namespace_inventory_differs"):
+            bundle.verify_project_bundle(exported)
+
+    def test_source_mutation_after_verification_is_detected_without_manifest_publication(self) -> None:
+        destination = self.root / "late-yarn-mutation"
+        source = self.yarn_rows[0]["expanded"] / "authored root/LICENSE"
+
+        def provenance_with_mutation(command, **_options):
+            self.assertEqual(command, ["git", "diff", "--quiet", "HEAD", "--"])
+            source.write_bytes(source.read_bytes() + b"changed after verification")
+            result = unittest.mock.Mock()
+            result.returncode = 1
+            return result
+
+        with patch.object(bundle, "tracked_files", return_value=self.inventory), \
+                patch.object(bundle.subprocess, "check_output", return_value="a" * 40 + "\n"), \
+                patch.object(bundle.subprocess, "run", side_effect=provenance_with_mutation):
+            with self.assertRaisesRegex(ValueError, "project source changed during export"):
+                bundle.create_bundle(self.project, destination, allow_network=False)
+        self.assertFalse((destination / bundle.MANIFEST_PATH).exists())
 
 
 if __name__ == "__main__":
