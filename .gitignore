@@ -20,3 +20,7 @@ AGENTS.md
 # Operating-system files
 .DS_Store
 Thumbs.db
+
+# Preserve only these authenticated published dependency members.
+!/source-inputs/producer-dependencies/lightningcss-1d680fa14e9a089c92dc0929f869d6757ae91c30/yarn-originals/packages/0bc079e9ba93f743da340004ade69e3888f4780280e24f7c61b41e1f02a56582/package/vendor/.DS_Store
+!/source-inputs/producer-dependencies/lightningcss-1d680fa14e9a089c92dc0929f869d6757ae91c30/yarn-originals/packages/0bc079e9ba93f743da340004ade69e3888f4780280e24f7c61b41e1f02a56582/package/vendor/macos/.DS_Store

@@ -16,6 +16,9 @@ source-inputs/npm/local-distributions/*.tgz binary
 # Producer inventories retain the complete authenticated upstream tree.
 source-inputs/producers/**/tree/** -text whitespace=-blank-at-eol,-blank-at-eof,-space-before-tab,cr-at-eol
 source-inputs/producers/**/*.tar.gz binary
+# Producer dependency inventories retain authenticated published member bytes.
+source-inputs/producer-dependencies/** -text whitespace=-blank-at-eol,-blank-at-eof,-space-before-tab,cr-at-eol
+source-inputs/producer-dependencies/**/archives/*.tgz binary
 # The complete Haskell upstream tree retains its authenticated source bytes.
 third_party/tree-sitter-haskell-0.23.1/** -text
 # Retained COBOL preferred sources and originals preserve exact source bytes.
@@ -34,6 +37,8 @@ source-inputs/cargo/globset-0.4.19/README.md conflict-marker-size=32
 source-inputs/cargo/ref-cast-1.0.25/README.md conflict-marker-size=32
 source-inputs/cargo/ref-cast-1.0.26/README.md conflict-marker-size=32
 source-inputs/cargo/walkdir-2.5.0/README.md conflict-marker-size=32
+source-inputs/producer-dependencies/lightningcss-1d680fa14e9a089c92dc0929f869d6757ae91c30/yarn-originals/packages/7b79496c2e35e0f55eb9531996f8c984917c482c05ef025f09f12a2c3ae01d54/package/README.markdown conflict-marker-size=32
+source-inputs/producer-dependencies/lightningcss-1d680fa14e9a089c92dc0929f869d6757ae91c30/yarn-originals/packages/ac5ba3dc1b25d5e9fdecbdeb000b0971e076bae4403fc8d5cdb6beb8ac20bc49/package/README.md conflict-marker-size=32
 # Preserve the audited upstream license bytes, including its final blank line.
 adapters/licenses/tree-sitter-ruby-0.23.1-LICENSE whitespace=-blank-at-eof
 # Vendored query bytes are pinned to the published upstream archive.
