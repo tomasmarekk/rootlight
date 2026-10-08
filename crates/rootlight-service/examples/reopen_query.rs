@@ -1,6 +1,7 @@
 //! Queries an existing durable index through public service APIs.
 //! This diagnostic avoids whole-generation transfer so large repositories can
 //! prove individual source-bound query trajectories without changing limits.
+//! Returned inbound call evidence is read completely or fails its aggregate bound.
 
 use std::{
     collections::BTreeSet,
@@ -16,6 +17,8 @@ use rootlight_service::{
     SourceEncoding, SourceReadOptions,
 };
 use serde_json::json;
+
+const MAX_CALL_EVIDENCE_READS: usize = 128;
 
 fn main() -> Result<(), Box<dyn Error>> {
     let args: Vec<_> = std::env::args_os().skip(1).collect();
@@ -73,6 +76,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         return Err("query returned no symbols".into());
     }
     let mut details = Vec::new();
+    let mut call_evidence_reads_total = 0_usize;
     for symbol in symbols {
         let explained = service.symbol_explain(generation, symbol, &cancellation)?;
         let related = service.symbol_relationships(
@@ -125,27 +129,26 @@ fn main() -> Result<(), Box<dyn Error>> {
             })
             .flat_map(|group| &group.items)
             .flat_map(|item| &item.source_refs);
-        let call_evidence_total = call_sources.clone().count();
-        let mut call_evidence_reads = Vec::new();
-        for reference in call_sources.take(16) {
-            let evidence = service.source_read_with_options_and_budget(
-                generation,
-                vec![reference.clone()],
-                SourceReadOptions::new()
-                    .with_context_lines_before(0)
-                    .with_context_lines_after(0)
-                    .with_encoding(SourceEncoding::Bytes),
-                FirstSliceBudget::default(),
-                &cancellation,
-            )?;
-            let [chunk] = evidence.data.chunks.as_slice() else {
-                return Err("call evidence read returned an unexpected chunk count".into());
-            };
-            if evidence.data.generation != generation || chunk.reference != *reference {
-                return Err("call evidence read returned another generation or source".into());
-            }
-            call_evidence_reads.push(evidence);
-        }
+        let (call_evidence_total, call_evidence_reads) =
+            read_all_call_evidence(call_sources, &mut call_evidence_reads_total, |reference| {
+                let evidence = service.source_read_with_options_and_budget(
+                    generation,
+                    vec![reference.clone()],
+                    SourceReadOptions::new()
+                        .with_context_lines_before(0)
+                        .with_context_lines_after(0)
+                        .with_encoding(SourceEncoding::Bytes),
+                    FirstSliceBudget::default(),
+                    &cancellation,
+                )?;
+                let [chunk] = evidence.data.chunks.as_slice() else {
+                    return Err("call evidence read returned an unexpected chunk count".into());
+                };
+                if evidence.data.generation != generation || chunk.reference != *reference {
+                    return Err("call evidence read returned another generation or source".into());
+                }
+                Ok(evidence)
+            })?;
         details.push(json!({
             "symbol":symbol,
             "explain":explained,
@@ -178,4 +181,109 @@ fn main() -> Result<(), Box<dyn Error>> {
         }))?
     );
     Ok(())
+}
+
+fn checked_call_evidence_total(completed: usize, additional: usize) -> Result<usize, &'static str> {
+    let total = completed
+        .checked_add(additional)
+        .ok_or("call evidence read count overflow")?;
+    if total > MAX_CALL_EVIDENCE_READS {
+        return Err("call evidence reads exceed aggregate diagnostic bound");
+    }
+    Ok(total)
+}
+
+fn read_all_call_evidence<I, T>(
+    references: I,
+    completed: &mut usize,
+    mut read: impl FnMut(I::Item) -> Result<T, Box<dyn Error>>,
+) -> Result<(usize, Vec<T>), Box<dyn Error>>
+where
+    I: Iterator + Clone,
+{
+    let count = references.clone().try_fold(0_usize, |count, _| {
+        count
+            .checked_add(1)
+            .ok_or("call evidence read count overflow")
+    })?;
+    let total = checked_call_evidence_total(*completed, count)?;
+    let reads = references.map(&mut read).collect::<Result<Vec<_>, _>>()?;
+    *completed = total;
+    Ok((count, reads))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{checked_call_evidence_total, read_all_call_evidence};
+
+    #[test]
+    fn captures_every_returned_reference_beyond_sixteen_per_symbol() {
+        let mut completed = 0;
+        for count in [22, 62] {
+            let mut observed = Vec::new();
+            let (total, reads) = read_all_call_evidence(0..count, &mut completed, |reference| {
+                observed.push(reference);
+                Ok(reference)
+            })
+            .expect("both complete symbol batches fit the aggregate bound");
+            let expected: Vec<_> = (0..count).collect();
+            assert_eq!(total, count);
+            assert_eq!(reads.len(), total);
+            assert_eq!(reads, expected);
+            assert_eq!(observed, expected);
+        }
+        assert_eq!(completed, 84);
+    }
+
+    #[test]
+    fn admits_128_reads_across_multiple_symbols() {
+        let mut completed = 0;
+        for count in [22, 62, 44] {
+            let (total, reads) = read_all_call_evidence(0..count, &mut completed, Ok)
+                .expect("the complete batches fit the aggregate bound");
+            assert_eq!(total, count);
+            assert_eq!(reads.len(), total);
+        }
+        assert_eq!(completed, 128);
+    }
+
+    #[test]
+    fn rejects_129_before_any_source_read_for_the_batch() {
+        let mut completed = 127;
+        let mut attempted = 0;
+        let error = read_all_call_evidence(0..2, &mut completed, |reference| {
+            attempted += 1;
+            Ok(reference)
+        })
+        .expect_err("the batch would exceed the aggregate bound");
+        assert_eq!(
+            error.to_string(),
+            "call evidence reads exceed aggregate diagnostic bound"
+        );
+        assert_eq!(attempted, 0);
+        assert_eq!(completed, 127);
+
+        let (total, reads) = read_all_call_evidence(0..1, &mut completed, Ok)
+            .expect("one remaining read fits the aggregate bound");
+        assert_eq!(total, 1);
+        assert_eq!(reads, [0]);
+        assert_eq!(completed, 128);
+        assert!(
+            read_all_call_evidence(0..1, &mut completed, |_| {
+                attempted += 1;
+                Ok(())
+            })
+            .is_err()
+        );
+        assert_eq!(attempted, 0);
+        assert_eq!(completed, 128);
+    }
+
+    #[test]
+    fn rejects_aggregate_read_count_overflow() {
+        assert_eq!(
+            checked_call_evidence_total(usize::MAX, 1),
+            Err("call evidence read count overflow")
+        );
+    }
 }
