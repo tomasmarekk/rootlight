@@ -201,23 +201,7 @@ pub(crate) fn check(options: &Options) -> Result<(), BudgetConformanceError> {
     }
     if options.refresh {
         let source_revision = current_source_revision()?;
-        let report = build_report(&source_revision, None)?;
-        fs::create_dir_all(&options.fixture_root).map_err(|source| BudgetConformanceError::Io {
-            path: options.fixture_root.clone(),
-            source,
-        })?;
-        let mut encoded = serde_json::to_vec_pretty(&report)?;
-        encoded.push(b'\n');
-        fs::write(&report_path, encoded).map_err(|source| BudgetConformanceError::Io {
-            path: report_path.clone(),
-            source,
-        })?;
-        println!(
-            "budget conformance refreshed for {} tools at {}",
-            report.tools.len(),
-            report_path.display()
-        );
-        return Ok(());
+        return refresh_report(&options.fixture_root, &source_revision);
     }
 
     let encoded = read_bounded(&report_path)?;
@@ -234,6 +218,30 @@ pub(crate) fn check(options: &Options) -> Result<(), BudgetConformanceError> {
         "budget conformance verified for {} tools at {}",
         retained.tools.len(),
         retained.source_revision
+    );
+    Ok(())
+}
+
+fn refresh_report(
+    fixture_root: &Path,
+    source_revision: &str,
+) -> Result<(), BudgetConformanceError> {
+    let report_path = fixture_root.join(REPORT_FILE);
+    let report = build_report(source_revision, None)?;
+    fs::create_dir_all(fixture_root).map_err(|source| BudgetConformanceError::Io {
+        path: fixture_root.to_path_buf(),
+        source,
+    })?;
+    let mut encoded = serde_json::to_vec_pretty(&report)?;
+    encoded.push(b'\n');
+    fs::write(&report_path, encoded).map_err(|source| BudgetConformanceError::Io {
+        path: report_path.clone(),
+        source,
+    })?;
+    println!(
+        "budget conformance refreshed for {} tools at {}",
+        report.tools.len(),
+        report_path.display()
     );
     Ok(())
 }
@@ -1299,7 +1307,7 @@ pub(crate) enum BudgetConformanceError {
 
 #[cfg(test)]
 mod tests {
-    use super::{BudgetConformanceError, Options, REPORT_FILE, check};
+    use super::{BudgetConformanceError, Options, REPORT_FILE, check, refresh_report};
 
     #[test]
     fn options_default_to_check_and_require_explicit_refresh() {
@@ -1354,14 +1362,8 @@ mod tests {
     #[test]
     fn refreshed_report_passes_the_offline_default_gate() {
         let directory = tempfile::tempdir().expect("temporary directory creates");
-        let refresh = Options {
-            fixture_root: directory.path().to_path_buf(),
-            refresh: true,
-            runtime_report: None,
-            cancellation_report: None,
-            output: None,
-        };
-        check(&refresh).expect("budget-conformance report refreshes");
+        refresh_report(directory.path(), &"a".repeat(40))
+            .expect("budget-conformance report refreshes from an explicit fixture revision");
         assert!(directory.path().join(REPORT_FILE).is_file());
 
         let verify = Options {
@@ -1377,14 +1379,8 @@ mod tests {
     #[test]
     fn modified_report_is_rejected() {
         let directory = tempfile::tempdir().expect("temporary directory creates");
-        let refresh = Options {
-            fixture_root: directory.path().to_path_buf(),
-            refresh: true,
-            runtime_report: None,
-            cancellation_report: None,
-            output: None,
-        };
-        check(&refresh).expect("budget-conformance report refreshes");
+        refresh_report(directory.path(), &"a".repeat(40))
+            .expect("budget-conformance report refreshes from an explicit fixture revision");
         let path = directory.path().join(REPORT_FILE);
         let mut value: serde_json::Value =
             serde_json::from_slice(&std::fs::read(&path).expect("report reads"))
@@ -1407,5 +1403,15 @@ mod tests {
             check(&verify),
             Err(BudgetConformanceError::ReportDrift { .. })
         ));
+    }
+
+    #[test]
+    fn refresh_rejects_invalid_revision_before_publishing_a_report() {
+        let directory = tempfile::tempdir().expect("temporary directory creates");
+        assert!(matches!(
+            refresh_report(directory.path(), "not-a-source-revision"),
+            Err(BudgetConformanceError::InvalidSourceRevision(_))
+        ));
+        assert!(!directory.path().join(REPORT_FILE).exists());
     }
 }
