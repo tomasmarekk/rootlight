@@ -2113,3 +2113,124 @@ paths = ['''^source-inputs/cargo/ed25519-compact-2\.3\.1/src/pem\.rs$''']
 regexes = [
   '''^\x2d----BEGIN\ PRIVATE\ KEY-----\nMC4CAQAwBQYDK2VwBCIEIMXY1NUbUe/3dW2YUoKW5evsnCJPMfj60/q0RzGne3gg\n-----END\ PRIVATE\ KEY-----$''',
 ]
+
+[[allowlists]]
+description = "Published Yarn published_release_public_gpg_fingerprint 1"
+targetRules = ["generic-api-key"]
+condition = "AND"
+regexTarget = "match"
+paths = ['''^source-inputs/producer-dependencies/lightningcss-1d680fa14e9a089c92dc0929f869d6757ae91c30/yarn-originals/packages/10c1c299ecb586cd07e9d2408950a29d47ca98b5911ba981d0af9d98b2a48767/package/README\.md$''']
+regexes = ['''^key:\ 3ABC01543F22DD2239285CDD818674489FBC127E$''']
+
+[[allowlists]]
+description = "Published Yarn documented_public_spki_sha256_output 2"
+targetRules = ["generic-api-key"]
+condition = "AND"
+regexTarget = "match"
+paths = ['''^source-inputs/producer-dependencies/lightningcss-1d680fa14e9a089c92dc0929f869d6757ae91c30/yarn-originals/packages/3367e46047c5593c14bb50c0cd288f1d1488433219fac181972066a586da52a4/node/https\.d\.ts$''']
+regexes = ['''^key\ ping\-sha256:\ pL1\+qb9HTMRZJmuC/bB/ZI9d302BYrrqiVuRyW\+DGrU=$''']
+
+[[allowlists]]
+description = "Published Yarn documented_public_spki_sha256_output 3"
+targetRules = ["generic-api-key"]
+condition = "AND"
+regexTarget = "match"
+paths = ['''^source-inputs/producer-dependencies/lightningcss-1d680fa14e9a089c92dc0929f869d6757ae91c30/yarn-originals/packages/3367e46047c5593c14bb50c0cd288f1d1488433219fac181972066a586da52a4/node/https\.d\.ts$''']
+regexes = ['''^key\ ping\-sha256:\ RRM1dGqnDFsCJXBTHky16vi1obOlCgFFn/yOhI/y\+ho=$''']
+
+[[allowlists]]
+description = "Published Yarn documented_public_spki_sha256_output 4"
+targetRules = ["generic-api-key"]
+condition = "AND"
+regexTarget = "match"
+paths = ['''^source-inputs/producer-dependencies/lightningcss-1d680fa14e9a089c92dc0929f869d6757ae91c30/yarn-originals/packages/3367e46047c5593c14bb50c0cd288f1d1488433219fac181972066a586da52a4/node/https\.d\.ts$''']
+regexes = ['''^key\ ping\-sha256:\ WoiWRyIOVNa9ihaBciRSC7XHjliYS9VwUGOIud4PB18=$''']
+
+[[allowlists]]
+description = "Published Yarn compiler_export_chain_void_zero 5"
+targetRules = ["generic-api-key"]
+condition = "AND"
+regexTarget = "match"
+paths = ['''^source-inputs/producer-dependencies/lightningcss-1d680fa14e9a089c92dc0929f869d6757ae91c30/yarn-originals/packages/5cf35638a68ea5ecf5a3da3150373fc48d418e46e7038cf503b8da7e1bfb2e28/package/\.yarn/releases/yarn-3\.2\.2\.cjs$''']
+regexes = ['''^Sn\.MismatchedTokenException=Sn\.isRecognitionException=void\ $''']
+
+[[allowlists]]
+description = "Published Yarn compiler_export_chain_void_zero 6"
+targetRules = ["generic-api-key"]
+condition = "AND"
+regexTarget = "match"
+paths = ['''^source-inputs/producer-dependencies/lightningcss-1d680fa14e9a089c92dc0929f869d6757ae91c30/yarn-originals/packages/7636c6ea495fca01d07dbfbd01e94568299b73b14914fedb06f488fcd203d1f5/package/esm/parser-typescript\.mjs$''']
+regexes = ['''^a\.visitorKeys=a\.getKeys=void\ $''']
+
+[[allowlists]]
+description = "Published Yarn compiler_export_chain_void_zero 7"
+targetRules = ["generic-api-key"]
+condition = "AND"
+regexTarget = "match"
+paths = ['''^source-inputs/producer-dependencies/lightningcss-1d680fa14e9a089c92dc0929f869d6757ae91c30/yarn-originals/packages/7636c6ea495fca01d07dbfbd01e94568299b73b14914fedb06f488fcd203d1f5/package/parser-typescript\.js$''']
+regexes = ['''^a\.visitorKeys=a\.getKeys=void\ $''']
+
+[[allowlists]]
+description = "Published Yarn ellipsis_only_non_key_documentation 8"
+targetRules = ["private-key"]
+condition = "AND"
+regexTarget = "match"
+paths = ['''^source-inputs/producer-dependencies/lightningcss-1d680fa14e9a089c92dc0929f869d6757ae91c30/yarn-originals/packages/b1ff0c2a3ae1c98752b511a82deb3a7a0b0e98f42f12dc2d147405dffa124ffc/package/README-es\.md$''']
+regexes = ['''^\-\-\-\-\-BEGIN\ RSA\ PRIVATE\ KEY\-\-\-\-\-\n\.\.\.\nKh9NV\.\.\.\n\.\.\.\n\-\-\-\-\-END\ RSA\ PRIVATE\ KEY\-\-\-\-\-"\n```\n\nAlternativamente,\ puede\ usar\ comillas\ dobles\ y\ usar\ el\ carácter\ `\\n`:\n\n```dosini\nPRIVATE_KEY="\-\-\-\-\-BEGIN\ RSA\ PRIVATE\ KEY\-\-\-\-\-$''']
+
+[[allowlists]]
+description = "Published Yarn ellipsis_only_non_key_documentation 9"
+targetRules = ["private-key"]
+condition = "AND"
+regexTarget = "match"
+paths = ['''^source-inputs/producer-dependencies/lightningcss-1d680fa14e9a089c92dc0929f869d6757ae91c30/yarn-originals/packages/b1ff0c2a3ae1c98752b511a82deb3a7a0b0e98f42f12dc2d147405dffa124ffc/package/README\.md$''']
+regexes = ['''^\-\-\-\-\-BEGIN\ RSA\ PRIVATE\ KEY\-\-\-\-\-\n\.\.\.\nKh9NV\.\.\.\n\.\.\.\n\-\-\-\-\-END\ RSA\ PRIVATE\ KEY\-\-\-\-\-"\n```\n\nAlternatively,\ you\ can\ double\ quote\ strings\ and\ use\ the\ `\\n`\ character:\n\n```dosini\nPRIVATE_KEY="\-\-\-\-\-BEGIN\ RSA\ PRIVATE\ KEY\-\-\-\-\-$''']
+
+[[allowlists]]
+description = "Published Yarn source_map_compiler_identifier_assignment 10"
+targetRules = ["generic-api-key"]
+condition = "AND"
+regexTarget = "match"
+paths = ['''^source-inputs/producer-dependencies/lightningcss-1d680fa14e9a089c92dc0929f869d6757ae91c30/yarn-originals/packages/f08c02f9954eec61473d71be504c6a6ca2831c4aade534545e38e44e755cf488/package/lib/index\.js\.map$''']
+regexes = ['''^np12\.generateKey\ =\ forge\.pbe\.generatePkcs12Key;$''']
+
+[[allowlists]]
+description = "Published Yarn inline_source_map_names_identifier 11"
+targetRules = ["generic-api-key"]
+condition = "AND"
+regexTarget = "match"
+paths = ['''^source-inputs/producer-dependencies/lightningcss-1d680fa14e9a089c92dc0929f869d6757ae91c30/yarn-originals/packages/f6ceaa15ed008ab00c32da77724a164e294b6cc41be560d20156790ca1344749/package/scripts/index\.js$''']
+regexes = ['''^distinctUntilKeyChanged_1","throwIfEmpty_1"$''']
+
+[[allowlists]]
+description = "Published Lightning Yarn integrity tokens"
+targetRules = ["generic-api-key"]
+condition = "AND"
+regexTarget = "match"
+paths = ['''^source-inputs/producer-dependencies/lightningcss-1d680fa14e9a089c92dc0929f869d6757ae91c30/yarn-originals/yarn-source-closure\.json$''']
+regexes = [
+  '''^token":\ "sha512\-0VQY1K35DQET3dVYWpOaPFecqOT9dbuCfzjxoQyif1Wc574t3kOSkKevULddcR9znz1TcklCE7Ht6NIxjvTqLA=="$''',
+  '''^token":\ "sha512\-1nh45deeb5olNY7eX82BkPO7SSxR5SSYJiPTrTdFUVYwAl8CKMA5N9PjTYkHiRjisVcxcQ1HXdLhx2qxxJzLNQ=="$''',
+  '''^token":\ "sha512\-2MueBrlPQCw5dVJJpQdUYgeqIzDQgw3QtiAHUC4RBz9FXPrskyyU3VI1hw7C0BSKB9OduwSJ79FTCqtGMWqJHg=="$''',
+  '''^token":\ "sha512\-4wvrf5BgnR8RpogHhtpCPJMKBmvyZPhhUtEwMJbXh0ni2BucpfF07jlmyM11zRqQ2XIq6PbC2j7W7UCCcm1rRQ=="$''',
+  '''^token":\ "sha512\-6Z7Ma2aVEWisaL6TvBCy7P8rm2LQoPv6dJ7ecIaIixHcwfbJ0x7mWdbcwlIM5IGQxPZSFYeqRCqlOOeKoJYMkw=="$''',
+  '''^token":\ "sha512\-A2a5A5fuyNcjSGOS0hPcdQmOE2kszZnLIXof7UMGNkNkeC62KAG8WcFZH5RNOY3LT5H773hq51zmc2Y2gE5Rnw=="$''',
+  '''^token":\ "sha512\-A8o9IVCv919vhv69SkLmyW2WjJR5WZgcMqV6L1uiGF8i8z18myrMhrp2JuSHx29PRT9uNyzNC4Xrd4StYjIhJg=="$''',
+  '''^token":\ "sha512\-AVbw3UJ2e9bq64vSaS9Am0fje1Pa8pbGqTTsmXfaIiMpnr5DlDhfJOuLj9Sf95ZPVDAUerDfEk88MPmPe7UCQg=="$''',
+  '''^token":\ "sha512\-DqGhF5IKoBl8WNf8C1gu8q0xZSInh9j1kJJMqT3a94w1JzVaBU4EXOSMrz9yDqMT0xt3selp83fuFMQ0uzv6qA=="$''',
+  '''^token":\ "sha512\-Ed61U6XJc3CVRfkERJWDz4dJwKe7iLmmJsbOGu9wSloNSFttHV0I8g6UAgb7qnK5ly5bGLPd4oXZlxCdANBOWQ=="$''',
+  '''^token":\ "sha512\-FlCHFwNnutLgVTflOYHPW2pPcl2AACqVzExlkGQNsi4CJgqOHN7YTgDd4LuhgN1BFO3TS0vLAruV1Td6dwWPJA=="$''',
+  '''^token":\ "sha512\-S1qARKOphxfiBEkwLUbHjCY9BWPdWnW9j7f7Hb2jPplu8UZ3nes7zpPOW9bkLbHRvWM0WDTsjdOTUgW0xLBN1Q=="$''',
+  '''^token":\ "sha512\-SbKbANkN603Vi4jEZv49LeVJMn4yGwsbzZworEoyEiutsN3nJYdbO36zfhGJ6QEDpOZIFkDtnq5JRxmvl3jsoQ=="$''',
+  '''^token":\ "sha512\-URgtR1dJnmGvX864pn1B2YUYNzjmXkuJOIqG2HdU62MVS4EHpU2946OZoTMnRUHklGtJdJZ33QfzdjGACXhn1A=="$''',
+  '''^token":\ "sha512\-UZm14QpamDFoUut9YtCZSpG1HxPs07lUwUCpsAYL0PpxASD3oWJQxIJGfDZPa2272DarXDG9adTKrNXvkHZblw=="$''',
+  '''^token":\ "sha512\-YntRXNngcvEvDbEjTdRWGU606eZvB5prmHG4BF0yLmVpamXbpsRJzevyy6MZVyuecgzI2AWAlvFi8DAeCqwpvA=="$''',
+  '''^token":\ "sha512\-ZNeFp6AOIQFv7mZIv2P5O188dnZHNg0ymeDVcakfZomwhpSva2dFNS3AnvWo4eyWBlUxkmQO8BtaxeWTs7jAuA=="$''',
+  '''^token":\ "sha512\-agE4QfB2Lkp9uICn7BAqoscw4SZP9kTE2hxiFI3jBPmXJfdqiahTbUuKGsMoN2GtqL9AxhYioAcVvgsb1HvRbA=="$''',
+  '''^token":\ "sha512\-e2LSXPqEHVW6aoGbjV9RsSSNDO3A0rZLCBxN24zvxF25WknMPpX8Dm9UxxThyEbaytzggRuZxaGXqaOhxQ514Q=="$''',
+  '''^token":\ "sha512\-fyHac4jIc1ANYGRDxtiqelIbdWkIuQaI84Mv45KvGRRxSAa7o7d1ZKAOBaYbnepLC1WqxfpimdeWfvqqSGwR2Q=="$''',
+  '''^token":\ "sha512\-jHvEjZVEibyW97zEYg19mZCIXO16lHbvRaPDkEuOfMPBmzlI7cYczMZLMfUvwkhdOVQpIxu3gx6mgaw46KsNsQ=="$''',
+  '''^token":\ "sha512\-uIFDxqpRZGZ6ThOk84hEfqWoHx2devRFvpTZcTHur85vImfaxUbTW9Ryh4CpCuDnToOP1CEtXKIgytHBPVff5A=="$''',
+  '''^token":\ "sha512\-w96Cjofp72M5IIhpjgobBimYEfoPjx1Vx0BSX9P30WBdZW2WIKU0T1Bd0kz2eNZ9ikjKgHbEyKx8BB6H1L3h3A=="$''',
+  '''^token":\ "sha512\-zIHwmZPRshsCdpMDyVsqGmgyP0yT8GAgXUnkdAoJisxvf33k7yO6OuoKmcTGuXPWSsm8Oh88nZicRLA9Y0rUeA=="$''',
+]
