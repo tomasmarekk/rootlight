@@ -18,6 +18,7 @@ use crate::{
     registry::{language_for, native_family_for_source},
 };
 
+mod assembly;
 mod cobol;
 mod dart;
 mod ecmascript;
@@ -359,6 +360,11 @@ impl QueryPack {
             expected.retain(|name| !matches!(*name, "call" | "import" | "documentation"));
             expected.push("expression");
         }
+        if family == GrammarFamily::Assembly {
+            expected
+                .retain(|name| !matches!(*name, "call" | "import" | "documentation" | "reference"));
+            expected.push("expression");
+        }
         if matches!(
             family,
             GrammarFamily::FSharp | GrammarFamily::FSharpSignature
@@ -673,6 +679,8 @@ impl QueryPack {
         let mut fsharp_captures =
             fsharp::CaptureCache::new(limits.captures, input.normalize_calls, limits.body_nodes);
         let mut plsql_captures = plsql::CaptureCache::new(limits.captures.min(limits.body_nodes));
+        let mut assembly_captures =
+            assembly::CaptureCache::new(limits.captures.min(limits.body_nodes));
         // A full-extent root can still omit bytes between included ranges, while
         // standalone roots may exclude leading or trailing trivia from their span.
         let fsharp_complete_source = !input.normalize_calls
@@ -716,6 +724,22 @@ impl QueryPack {
                     continue;
                 }
                 let mut capture = *capture;
+                if input.family == GrammarFamily::Assembly {
+                    let admitted = assembly::retain_capture(
+                        capture.node,
+                        role,
+                        input.source,
+                        input.cancellation,
+                        &mut assembly_captures,
+                    )?;
+                    if assembly_captures.exhausted() {
+                        limit = Some(QueryLimit::Capture);
+                        break 'query;
+                    }
+                    if !admitted {
+                        continue;
+                    }
+                }
                 if input.family == GrammarFamily::PlSql {
                     let admitted = plsql::retain_capture(
                         capture.node,
@@ -952,16 +976,26 @@ impl QueryPack {
                 {
                     continue;
                 }
-                let candidate = candidate_for_capture(
-                    input.family,
-                    capture,
-                    role,
-                    input.source,
-                    input.cancellation,
-                    &mut fsharp_captures,
-                    &mut plsql_captures,
-                );
-                if fsharp_captures.exhausted() {
+                let candidate = if input.family == GrammarFamily::Assembly {
+                    assembly::candidate(
+                        capture.node,
+                        role,
+                        input.source,
+                        input.cancellation,
+                        &mut assembly_captures,
+                    )
+                } else {
+                    candidate_for_capture(
+                        input.family,
+                        capture,
+                        role,
+                        input.source,
+                        input.cancellation,
+                        &mut fsharp_captures,
+                        &mut plsql_captures,
+                    )
+                };
+                if fsharp_captures.exhausted() || assembly_captures.exhausted() {
                     limit = Some(QueryLimit::Capture);
                     break 'query;
                 }
@@ -1544,6 +1578,7 @@ fn candidate_for_capture(
             GrammarFamily::PowerShell => "powershell.call",
             GrammarFamily::Fortran => "fortran.explicit_subroutine",
             GrammarFamily::PlSql => return Err(query_failure("query-plsql-unproven-call")),
+            GrammarFamily::Assembly => return Err(query_failure("query-assembly-unproven-call")),
             GrammarFamily::Css => return Err(query_failure("query-css-call-kind")),
             GrammarFamily::Json => return Err(query_failure("query-json-call-kind")),
             GrammarFamily::Toml => return Err(query_failure("query-toml-call-kind")),
@@ -2457,7 +2492,7 @@ impl QueryPackRegistry {
     }
 
     fn compile_audited() -> Result<Self, GrammarFamily> {
-        let mut packs = Vec::with_capacity(42);
+        let mut packs = Vec::with_capacity(43);
         for (family, source) in [
             (GrammarFamily::Rust, include_str!("../queries/rust.scm")),
             (GrammarFamily::Python, include_str!("../queries/python.scm")),
@@ -2510,6 +2545,10 @@ impl QueryPackRegistry {
                 include_str!("../queries/fortran.scm"),
             ),
             (GrammarFamily::PlSql, include_str!("../queries/plsql.scm")),
+            (
+                GrammarFamily::Assembly,
+                include_str!("../queries/assembly.scm"),
+            ),
             (
                 GrammarFamily::FSharpSignature,
                 include_str!("../queries/fsharp_signature.scm"),
@@ -2641,6 +2680,7 @@ mod tests {
             GrammarFamily::CobolFixed,
             GrammarFamily::CobolFree,
             GrammarFamily::Fortran,
+            GrammarFamily::Assembly,
         ] {
             let pack = registry.get(family).expect("family has a query pack");
             let mut names = pack.identity_query.capture_names().to_vec();
@@ -2654,6 +2694,12 @@ mod tests {
             }
             if family == GrammarFamily::Fortran {
                 expected.retain(|name| *name != "documentation");
+                expected.push("expression");
+            }
+            if family == GrammarFamily::Assembly {
+                expected.retain(|name| {
+                    !matches!(*name, "call" | "import" | "documentation" | "reference")
+                });
                 expected.push("expression");
             }
             if matches!(

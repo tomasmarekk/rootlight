@@ -97,6 +97,8 @@ pub enum GrammarFamily {
     Fortran,
     /// Oracle PL/SQL written source without compiler or catalog evaluation.
     PlSql,
+    /// Assembly written owners without expansion, ISA validation or assembled binding.
+    Assembly,
 }
 
 impl GrammarFamily {
@@ -189,7 +191,7 @@ impl GrammarRegistry {
     /// Returns [`RegistryError`] if an SDK label is invalid or a linked grammar
     /// falls outside Tree-sitter's supported ABI interval.
     pub fn audited() -> Result<Self, RegistryError> {
-        let mut descriptors = Vec::with_capacity(42);
+        let mut descriptors = Vec::with_capacity(43);
         for family in [
             GrammarFamily::Rust,
             GrammarFamily::Python,
@@ -233,6 +235,7 @@ impl GrammarRegistry {
             GrammarFamily::CobolFree,
             GrammarFamily::Fortran,
             GrammarFamily::PlSql,
+            GrammarFamily::Assembly,
         ] {
             let language = language_for(family);
             let abi_version = language.abi_version();
@@ -370,6 +373,7 @@ pub(crate) fn language_for(family: GrammarFamily) -> Language {
         GrammarFamily::CobolFree => tree_sitter_cobol::FREE.into(),
         GrammarFamily::Fortran => tree_sitter_fortran::LANGUAGE.into(),
         GrammarFamily::PlSql => tree_sitter_plsql::LANGUAGE.into(),
+        GrammarFamily::Assembly => tree_sitter_asm::LANGUAGE_ASSEMBLY.into(),
     }
 }
 
@@ -384,6 +388,13 @@ struct GrammarIdentity {
 
 const fn identity_for(family: GrammarFamily) -> GrammarIdentity {
     match family {
+        GrammarFamily::Assembly => GrammarIdentity {
+            language_id: "assembly",
+            grammar_version: "0.24.0",
+            source_package_sha256: "05ab716e887d01045e6357cbce255e427546bc540035703105de8a42d2a1a95e",
+            parser_sha256: "eca05ffdbf8d5e8788bf73776812003d8975f8b1648554b241200aa6da37a798",
+            scanner_sha256: None,
+        },
         GrammarFamily::FSharpSignature => GrammarIdentity {
             language_id: "fsharp-signature",
             parser_sha256: "3dbb6066529f453c360f261ac9557f5d0ff60e945f5658b6cdd10baae8882f10",
@@ -780,7 +791,7 @@ mod tests {
     fn registry_contains_each_audited_family_once_with_checked_abi() {
         let registry = GrammarRegistry::audited().expect("audited grammars initialize");
 
-        assert_eq!(registry.descriptors().len(), 42);
+        assert_eq!(registry.descriptors().len(), 43);
         for family in [
             GrammarFamily::Rust,
             GrammarFamily::Python,
@@ -824,6 +835,7 @@ mod tests {
             GrammarFamily::CobolFree,
             GrammarFamily::Fortran,
             GrammarFamily::PlSql,
+            GrammarFamily::Assembly,
         ] {
             let descriptor = registry.get(family).expect("family is registered");
             assert!(
@@ -922,6 +934,40 @@ mod tests {
     }
 
     #[test]
+    fn assembly_descriptor_keeps_exact_static_source_identity() {
+        let registry = GrammarRegistry::audited().unwrap();
+        let descriptor = registry.get(GrammarFamily::Assembly).unwrap();
+        assert_eq!(descriptor.language().as_str(), "assembly");
+        assert_eq!(descriptor.grammar_version(), "0.24.0");
+        assert_eq!(descriptor.abi_version(), 14);
+        assert_eq!(descriptor.scanner_sha256(), None);
+        assert_eq!(
+            registry.family_for_language(&LanguageId::new("assembly").unwrap()),
+            Some(GrammarFamily::Assembly)
+        );
+        let workspace = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let lock = fs::read_to_string(workspace.join("Cargo.lock")).unwrap();
+        let (version, registry_checksum) = locked_package(&lock, "tree-sitter-asm");
+        assert_eq!(version, descriptor.grammar_version());
+        assert_eq!(registry_checksum, None);
+        let lock = fs::read_to_string(workspace.join("adapters/grammars.lock")).unwrap();
+        let grammar = locked_grammar(&lock, "assembly");
+        assert_eq!(
+            descriptor.grammar_source_sha256(),
+            quoted_field(grammar, "vendored_source_sha256")
+        );
+        assert_eq!(
+            descriptor.parser_sha256(),
+            quoted_field(grammar, "parser_sha256")
+        );
+        assert_eq!(quoted_field(grammar, "scanner_sha256"), "none");
+        assert_eq!(
+            quoted_field(grammar, "manifest_path"),
+            "third_party/tree-sitter-asm-0.24.0/Cargo.toml"
+        );
+    }
+
+    #[test]
     fn published_grammar_metadata_matches_enforced_locks() {
         let workspace = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
         let lock = fs::read_to_string(workspace.join("Cargo.lock"))
@@ -1000,6 +1046,7 @@ mod tests {
             (GrammarFamily::CobolFree, "cobol-free", "tree-sitter-cobol"),
             (GrammarFamily::Fortran, "fortran", "tree-sitter-fortran"),
             (GrammarFamily::PlSql, "plsql", "tree-sitter-plsql"),
+            (GrammarFamily::Assembly, "assembly", "tree-sitter-asm"),
             (GrammarFamily::Perl, "perl", "ts-parser-perl"),
             (
                 GrammarFamily::Groovy,
@@ -1032,6 +1079,7 @@ mod tests {
                         GrammarFamily::Vba | GrammarFamily::FSharp | GrammarFamily::FSharpSignature
                     ) || family.is_cobol()
                         || family == GrammarFamily::PlSql
+                        || family == GrammarFamily::Assembly
                     {
                         "vendored_source_sha256"
                     } else {

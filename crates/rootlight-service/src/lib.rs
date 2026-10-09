@@ -6399,6 +6399,8 @@ impl FirstSliceService {
                 )
             } else if descriptor.family() == GrammarFamily::Sql {
                 format!("tree-sitter-sequel-{}", descriptor.grammar_version())
+            } else if descriptor.family() == GrammarFamily::Assembly {
+                format!("tree-sitter-asm-{}", descriptor.grammar_version())
             } else if matches!(
                 descriptor.family(),
                 GrammarFamily::Vba | GrammarFamily::VisualBasicClassic

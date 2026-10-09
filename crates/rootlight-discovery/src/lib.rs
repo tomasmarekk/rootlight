@@ -2053,7 +2053,7 @@ const LANGUAGE_CAPABILITIES: &[LanguageCapability] = &[
         aliases: &["asm"],
         detectors: &["extension"],
         maximum_tier: "tier_d",
-        analyzers: &["source-fallback"],
+        analyzers: &["treesitter"],
     },
     LanguageCapability {
         language: "astro",
@@ -6786,6 +6786,35 @@ max_source_file_bytes = 2097152
             assert_eq!(canonical_language(language), Some(expected));
         }
         assert_eq!(canonical_language("unknown"), None);
+    }
+
+    #[test]
+    fn assembly_capability_reports_the_native_structural_analyzer() {
+        let capability = language_capabilities()
+            .iter()
+            .find(|entry| entry.language == "assembly")
+            .expect("Assembly source capability");
+        assert_eq!(capability.suffixes, [".asm", ".s"]);
+        assert_eq!(capability.aliases, ["asm"]);
+        assert_eq!(capability.detectors, ["extension"]);
+        assert_eq!(capability.maximum_tier, "tier_d");
+        assert_eq!(capability.analyzers, ["treesitter"]);
+        assert_eq!(canonical_language("asm"), Some("assembly"));
+        for path in ["source.asm", "source.s", "source.ASM", "source.S"] {
+            assert_eq!(extension_language(path), Some("assembly"));
+            let (class, signals) = classify(
+                &RelativePath::parse(Path::new(path)).expect("fixture path"),
+                b"Written PROC\nnop\nWritten ENDP\n",
+            );
+            assert_eq!(class, InputClass::Source);
+            assert_eq!(
+                signals,
+                [LanguageSignal {
+                    language: "assembly".to_owned(),
+                    evidence: LanguageEvidence::Extension,
+                }]
+            );
+        }
     }
 
     #[test]

@@ -7952,6 +7952,7 @@ fn supports_declaration_signature(
         && declaration.syntax_kind().as_str() == "fsharp.file.module")
         || (language == "fortran" && declaration.syntax_kind().as_str() == "fortran.file.module")
         || (language == "plsql" && declaration.syntax_kind().as_str() == "plsql.file.module")
+        || (language == "assembly" && declaration.syntax_kind().as_str() == "assembly.file.module")
         || (language == "common-lisp"
             && declaration.syntax_kind().as_str() == "common_lisp.file.module")
     {
@@ -7976,7 +7977,10 @@ fn supports_signature(kind: EntityKind, language: &str) -> bool {
         || (kind == EntityKind::Variable && language == "haskell")
         || (kind == EntityKind::Property && matches!(language, "vba" | "visual-basic-classic"))
         || (kind == EntityKind::Module
-            && matches!(language, "cobol-fixed" | "cobol-free" | "fortran" | "plsql"))
+            && matches!(
+                language,
+                "cobol-fixed" | "cobol-free" | "fortran" | "plsql" | "assembly"
+            ))
         || (language == "plsql" && kind == EntityKind::DatabaseObject)
         || matches!(
             kind,
@@ -9186,6 +9190,19 @@ mod tests {
             )
         };
         let module = fact(SyntaxFactKind::Module, "assembly.file.module");
+        assert!(!supports_declaration_signature(
+            EntityKind::Module,
+            "assembly",
+            &module,
+            None
+        ));
+        assert!(supports_declaration_signature(
+            EntityKind::Module,
+            "assembly",
+            &fact(SyntaxFactKind::Declaration, "assembly.segment.declaration"),
+            None
+        ));
+        assert!(!supports_signature(EntityKind::Module, "rust"));
         assert!(is_explicit_file_module(&module, "assembly"));
         assert!(!is_explicit_file_module(&module, "python"));
         assert!(!is_explicit_file_module(

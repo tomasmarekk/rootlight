@@ -34,7 +34,12 @@ struct LanguageCase {
     source: &'static str,
 }
 
-const CASES: [LanguageCase; 42] = [
+const CASES: [LanguageCase; 43] = [
+    LanguageCase {
+        name: "written.asm",
+        language: "assembly",
+        source: "Written PROC\nnop\nWritten ENDP\n",
+    },
     LanguageCase {
         name: "sample.pks",
         language: "plsql",

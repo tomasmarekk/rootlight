@@ -19,7 +19,7 @@ const GRAMMAR_LOCK_PATH: &str = "adapters/grammars.lock";
 const CARGO_LOCK_PATH: &str = "Cargo.lock";
 const ADAPTER_PACKAGE: &str = "rootlight-adapter-treesitter";
 const GRAMMAR_LOCK_SHA256: &str =
-    "da2534f38d968c0c0475807c17d73812cca407fc2779d8421227a0ef99f1645d";
+    "eb17952519e94bfc5da18b5ab1f4cf817b288ac39f7dd96931691c9cd239d495";
 const JAVA_LICENSE_PATH: &str = "adapters/licenses/tree-sitter-java-0.23.5-LICENSE";
 const JAVA_LICENSE_SHA256: &str =
     "52ed137b039cd9c46409bc22e89938af911c95b157feae2d040b51e6084369a7";
@@ -217,7 +217,13 @@ const EXPECTED_PACKAGES: [(&str, &str, &str); 35] = [
     ),
 ];
 
-const EXPECTED_LOCAL_PACKAGES: [(&str, &str, &str, &str); 4] = [
+const EXPECTED_LOCAL_PACKAGES: [(&str, &str, &str, &str); 5] = [
+    (
+        "tree-sitter-asm",
+        "0.24.0",
+        "third_party/tree-sitter-asm-0.24.0",
+        "05ab716e887d01045e6357cbce255e427546bc540035703105de8a42d2a1a95e",
+    ),
     (
         "tree-sitter-vba",
         "0.14.1",
@@ -270,6 +276,11 @@ pub(crate) fn check(metadata: &Metadata, root: &Path) -> Result<(), GrammarLockE
     validate_local_license(root, KOTLIN_LICENSE_PATH, KOTLIN_LICENSE_SHA256)?;
     validate_local_license(root, LUA_LICENSE_PATH, LUA_LICENSE_SHA256)?;
     validate_local_license(root, RUBY_LICENSE_PATH, RUBY_LICENSE_SHA256)?;
+    validate_local_license(
+        root,
+        "third_party/tree-sitter-asm-0.24.0/notices/LICENSE",
+        "0e9f43573925c2e4b49f328a45c4df22c882191d77d876b0d18ecd60bd21e17c",
+    )?;
     validate_local_license(
         root,
         "adapters/licenses/dekobon-tree-sitter-groovy-0.2.0-LICENSE-MIT",
@@ -395,7 +406,7 @@ fn validate_manifest(manifest: &GrammarLock) -> Result<(), GrammarLockError> {
         ));
     }
     validate_runtime(&manifest.runtime)?;
-    if manifest.grammars.len() != 41 {
+    if manifest.grammars.len() != 42 {
         return Err(GrammarLockError::GrammarCount(manifest.grammars.len()));
     }
     let mut languages = BTreeSet::new();
@@ -420,6 +431,7 @@ fn validate_manifest(manifest: &GrammarLock) -> Result<(), GrammarLockError> {
         }
     }
     let expected_languages = BTreeSet::from([
+        "assembly",
         "astro",
         "bash",
         "c",
@@ -1154,7 +1166,7 @@ pub(crate) enum GrammarLockError {
     InvalidDigest { label: &'static str },
     #[error("grammar lock field {0} must not be empty")]
     EmptyField(&'static str),
-    #[error("grammar lock contains {0} grammars instead of 41")]
+    #[error("grammar lock contains {0} grammars instead of 42")]
     GrammarCount(usize),
     #[error("grammar lock repeats language {0}")]
     DuplicateLanguage(String),
@@ -1212,6 +1224,126 @@ mod tests {
         let manifest: GrammarLock = toml::from_str(include_str!("../../adapters/grammars.lock"))
             .expect("grammar lock parses");
         validate_manifest(&manifest).expect("reviewed runtime and grammar identities agree");
+    }
+
+    #[test]
+    fn assembly_retains_originals_and_authenticates_scoped_native_tables() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
+        let manifest: GrammarLock =
+            toml::from_str(include_str!("../../adapters/grammars.lock")).unwrap();
+        let grammar = manifest
+            .grammars
+            .iter()
+            .find(|grammar| grammar.language == "assembly")
+            .unwrap();
+        let sources = grammar.vendored.as_ref().unwrap();
+        let directory = root.join("third_party/tree-sitter-asm-0.24.0");
+        assert!(grammar.crates_io_checksum.is_none());
+        assert_eq!(grammar.abi, 14);
+        assert_eq!(grammar.scanner_sha256, "none");
+        assert_eq!(sources.files.len(), 89);
+        assert_eq!(sources.parser_path.as_deref(), Some("src/parser.c"));
+        assert_eq!(sources.license_path.as_deref(), Some("notices/LICENSE"));
+        assert_eq!(
+            grammar.license_sha256,
+            "0e9f43573925c2e4b49f328a45c4df22c882191d77d876b0d18ecd60bd21e17c"
+        );
+        let inventory: serde_json::Value = serde_json::from_str(include_str!(
+            "../../third_party/tree-sitter-asm-0.24.0/SOURCE-INVENTORY.json"
+        ))
+        .unwrap();
+        assert_eq!(inventory["schema"], "rootlight.assembly-source-inventory/1");
+        assert_eq!(inventory["original_regular_file_count"], 66);
+        assert_eq!(inventory["original_regular_file_bytes"], 399_975);
+        assert_eq!(inventory["original_directory_record_count"], 20);
+        let mut payload_paths = BTreeSet::new();
+        for payload in inventory["payload_files"].as_array().unwrap() {
+            let path = payload["path"].as_str().unwrap();
+            assert!(is_source_relative_path(path));
+            assert!(payload_paths.insert(path));
+            assert_eq!(
+                sources.files.get(path).map(String::as_str),
+                payload["sha256"].as_str()
+            );
+            assert_eq!(
+                fs::metadata(directory.join(path)).unwrap().len(),
+                payload["bytes"]
+            );
+        }
+        assert_eq!(payload_paths.len(), 87);
+        payload_paths.extend(["SOURCE-INVENTORY.json", "SOURCE-PROVENANCE.json"]);
+        assert_eq!(
+            payload_paths,
+            sources.files.keys().map(String::as_str).collect()
+        );
+        let mut original_paths = BTreeSet::new();
+        let mut original_bytes = 0u64;
+        let mut original_directories = 0usize;
+        for archive in inventory["sources"].as_array().unwrap() {
+            let retained_tree = archive["retained_tree"].as_str().unwrap();
+            let archive_path = archive["archive"].as_str().unwrap();
+            assert_eq!(
+                sources.files.get(archive_path).map(String::as_str),
+                archive["sha256"].as_str()
+            );
+            for member in archive["inventory"]["members"].as_array().unwrap() {
+                let member_path = member["path"].as_str().unwrap();
+                let path = if member_path.is_empty() {
+                    assert_eq!(member["directory"], true);
+                    retained_tree.to_owned()
+                } else {
+                    format!("{retained_tree}/{member_path}")
+                };
+                assert!(is_source_relative_path(&path));
+                if member["directory"].as_bool().unwrap() {
+                    assert!(directory.join(&path).is_dir());
+                    original_directories += 1;
+                } else {
+                    assert!(original_paths.insert(path.clone()));
+                    assert_eq!(
+                        sources.files.get(&path).map(String::as_str),
+                        member["sha256"].as_str()
+                    );
+                    original_bytes += member["bytes"].as_u64().unwrap();
+                }
+            }
+        }
+        assert_eq!(original_paths.len(), 66);
+        assert_eq!(original_bytes, 399_975);
+        assert_eq!(original_directories, 20);
+        let provenance: serde_json::Value = serde_json::from_str(include_str!(
+            "../../third_party/tree-sitter-asm-0.24.0/SOURCE-PROVENANCE.json"
+        ))
+        .unwrap();
+        assert_eq!(provenance["package"], grammar.crate_name);
+        assert_eq!(provenance["version"], grammar.crate_version);
+        assert_eq!(provenance["authored_revision"], grammar.commit);
+        assert_eq!(provenance["license"], "MIT");
+        let generation = &provenance["local_generation"];
+        assert_eq!(generation["abi"], 14);
+        assert_eq!(generation["state_count"], 179);
+        assert_eq!(generation["symbol_count"], 84);
+        assert_eq!(generation["external_token_count"], 0);
+        let outputs = generation["outputs"].as_object().unwrap();
+        assert_eq!(outputs.len(), 6);
+        for (path, output) in outputs {
+            assert_eq!(
+                sources.files.get(path).map(String::as_str),
+                output["sha256"].as_str()
+            );
+        }
+        for claim in [
+            "production_integration_verified",
+            "whole_language_coverage_verified",
+            "installed_mcp_verified",
+            "build_and_packaging_acceptance_verified",
+            "empty_dependency_cache_verified",
+            "os_network_denial_verified",
+        ] {
+            assert_eq!(provenance[claim], false, "{claim}");
+        }
+        validate_vendored_tree(&directory, grammar, sources)
+            .expect("all original Assembly inputs, the primary notice and native tables agree");
     }
 
     #[test]
