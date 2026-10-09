@@ -1,0 +1,28 @@
+# Local unpublished wrapper for reviewed Pascal inputs and generated static tables.
+# Cargo.toml.published.orig retains the normalized upstream manifest unchanged.
+[package]
+name = "tree-sitter-pascal"
+version = "0.10.2"
+edition = "2024"
+rust-version = "1.90"
+license = "MIT"
+repository = "https://github.com/Isopod/tree-sitter-pascal"
+description = "Pinned Pascal grammar with a local static language binding"
+publish = false
+build = "bindings/rust/build.rs"
+
+[lib]
+name = "tree_sitter_pascal"
+path = "bindings/rust/lib.rs"
+
+[dependencies]
+tree-sitter-language = "=0.1.7"
+
+[build-dependencies]
+cc = "=1.2.67"
+
+[lints.rust]
+unsafe_op_in_unsafe_fn = "deny"
+
+[lints.clippy]
+undocumented_unsafe_blocks = "deny"

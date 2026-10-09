@@ -25,6 +25,12 @@ third_party/tree-sitter-haskell-0.23.1/** -text
 third_party/tree-sitter-cobol-0.0.1/** -text
 # Retained PL/SQL upstream inputs and originals preserve exact source bytes.
 third_party/tree-sitter-plsql-0.0.1/** -text whitespace=-blank-at-eol,-blank-at-eof,-space-before-tab,cr-at-eol
+# Retained Apex, SAS and Pascal inputs use authenticated byte identities.
+third_party/tree-sitter-sfapex-3.0.1/** -text
+third_party/tree-sitter-sas-0.4.2/** -text
+third_party/tree-sitter-pascal-0.10.2/** -text
+# Published Pascal indentation is retained in both preferred-source versions.
+third_party/tree-sitter-pascal-0.10.2/grammar.js* whitespace=-space-before-tab
 # Retained Kotlin registry inputs and scanner originals remain byte-exact.
 third_party/tree-sitter-kotlin-ng-1.1.0/** -text
 # F# preferred sources, generated tables and originals retain exact input bytes.
