@@ -38,6 +38,161 @@ mod fsharp_binding;
 mod groovy_import;
 
 #[test]
+fn common_lisp_unproven_reads_retain_exact_written_source() {
+    for (spelling, role, syntax, kind) in [
+        (
+            "value",
+            OccurrenceRole::Read,
+            "common_lisp.symbol.read",
+            EntityKind::Variable,
+        ),
+        (
+            "pkg::value",
+            OccurrenceRole::Reference,
+            "common_lisp.symbol.reference",
+            EntityKind::Variable,
+        ),
+        (
+            "|Case sensitive|",
+            OccurrenceRole::MacroUse,
+            "common_lisp.macro.reference",
+            EntityKind::Function,
+        ),
+        (
+            "pkg:value",
+            OccurrenceRole::TypeUse,
+            "common_lisp.type.reference",
+            EntityKind::Class,
+        ),
+    ] {
+        assert_common_lisp_unproven_target(spelling, role, syntax, kind, false);
+    }
+}
+
+#[test]
+fn common_lisp_unproven_calls_ignore_same_spelling_and_written_packages() {
+    for (spelling, syntax, cross_file) in [
+        ("transform", "common_lisp.function.scoped_call", true),
+        ("transform", "common_lisp.function.call", false),
+        ("pkg:transform", "common_lisp.function.scoped_call", true),
+        ("pkg::transform", "common_lisp.function.scoped_call", false),
+        ("/", "common_lisp.function.call", false),
+    ] {
+        assert_common_lisp_unproven_target(
+            spelling,
+            OccurrenceRole::CallSite,
+            syntax,
+            EntityKind::Function,
+            cross_file,
+        );
+    }
+}
+
+fn assert_common_lisp_unproven_target(
+    spelling: &str,
+    role: OccurrenceRole,
+    syntax: &str,
+    kind: EntityKind,
+    cross_file: bool,
+) {
+    let mut fixture = Fixture::new();
+    let target_file = if cross_file {
+        fixture.add_file(2, "src/other.lisp")
+    } else {
+        fixture.primary_file
+    };
+    fixture.add_entity(10, spelling, target_file, kind, None);
+    fixture.add_occurrence(20, spelling, fixture.primary_file, role, None);
+    for file in &mut fixture.document.files {
+        file.language = "common-lisp".to_owned();
+    }
+    fixture.document.provenance[0].language = "common-lisp".to_owned();
+    fixture.document.entities[0].language = "common-lisp".to_owned();
+    fixture.document.entities[0].qualified_name = spelling.to_owned();
+    fixture.document.occurrences[0].syntax_kind = syntax.to_owned();
+    fixture.validate();
+    let original = fixture.document.occurrences[0].clone();
+    let engine = ResolutionEngine::default();
+    let cancellation = Cancellation::new();
+    let estimate = engine
+        .estimate_work(&fixture.document, &cancellation)
+        .unwrap();
+    let batch = engine.resolve(&fixture.document, &cancellation).unwrap();
+    assert!(
+        batch.decisions.is_empty(),
+        "{spelling}: {syntax}: {batch:?}"
+    );
+    assert_eq!(estimate.required, 0, "{spelling}: {syntax}");
+    let context = ResolverFactContext::new(fixture.content_hash);
+    let applied = engine
+        .apply(fixture.document.clone(), context, &cancellation)
+        .unwrap();
+    let streamed = engine
+        .apply_document(fixture.document.clone(), context, &cancellation)
+        .unwrap();
+    let (bounded, bounded_estimate) = engine
+        .apply_document_bounded(fixture.document, context, &cancellation)
+        .unwrap();
+    assert_eq!(bounded_estimate, estimate);
+    assert_eq!(bounded, streamed);
+    assert_eq!(streamed, applied.document);
+    assert_eq!(bounded.occurrences, [original], "{spelling}: {syntax}");
+    assert!(bounded.relations.is_empty(), "{spelling}: {syntax}");
+}
+
+#[test]
+fn common_lisp_resolved_definition_retains_its_physical_identity() {
+    let mut fixture = Fixture::new();
+    let symbol = fixture.add_entity(
+        10,
+        "transform",
+        fixture.primary_file,
+        EntityKind::Function,
+        None,
+    );
+    fixture.add_occurrence(
+        20,
+        "transform",
+        fixture.primary_file,
+        OccurrenceRole::Definition,
+        None,
+    );
+    fixture.document.files[0].language = "common-lisp".to_owned();
+    fixture.document.provenance[0].language = "common-lisp".to_owned();
+    fixture.document.entities[0].language = "common-lisp".to_owned();
+    let source = fixture.document.entities[0]
+        .evidence
+        .source
+        .clone()
+        .unwrap();
+    let occurrence = &mut fixture.document.occurrences[0];
+    occurrence.target = OccurrenceTarget::Resolved { symbol };
+    occurrence.syntax_kind = "common_lisp.function.definition".to_owned();
+    occurrence.source = source.clone();
+    occurrence.evidence.source = Some(source);
+    let original = occurrence.clone();
+    fixture.validate();
+    let engine = ResolutionEngine::default();
+    let cancellation = Cancellation::new();
+    assert!(
+        engine
+            .resolve(&fixture.document, &cancellation)
+            .unwrap()
+            .decisions
+            .is_empty()
+    );
+    let applied = engine
+        .apply(
+            fixture.document,
+            ResolverFactContext::new(fixture.content_hash),
+            &cancellation,
+        )
+        .unwrap();
+    assert_eq!(applied.document.occurrences, [original]);
+    assert!(applied.document.relations.is_empty());
+}
+
+#[test]
 fn embedded_code_uses_its_language_and_does_not_bind_other_markdown_examples() {
     for language in ["rust", "python", "javascript"] {
         let mut fixture = Fixture::new();

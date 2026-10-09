@@ -1399,6 +1399,34 @@ fn unresolved_reason(role: OccurrenceRole, kind_rejection_total: u64) -> Unresol
 }
 
 pub(crate) fn resolvable_occurrence(occurrence: &OccurrenceRecord) -> bool {
+    // Common Lisp readtable, package and function/macro bindings need
+    // language-owned proof; written qualification does not establish a target.
+    if occurrence.syntax_kind.starts_with("common_lisp.")
+        && matches!(occurrence.target, OccurrenceTarget::Unresolved { .. })
+    {
+        return false;
+    }
+    // Written qualifiers, overloads and accessor names do not prove Pascal
+    // targets. Preserve unresolved source until language-owned binding exists.
+    if occurrence.syntax_kind.starts_with("pascal.")
+        && matches!(occurrence.target, OccurrenceTarget::Unresolved { .. })
+    {
+        return false;
+    }
+    // Apex member/overload/platform targets require language-owned proof;
+    // spelling scores cannot supply a target the adapter left unresolved.
+    if occurrence.syntax_kind.starts_with("apex.")
+        && matches!(occurrence.target, OccurrenceTarget::Unresolved { .. })
+    {
+        return false;
+    }
+    // Macro expansion, FCMP environments and dataset runtime identity require
+    // SAS-owned proof; a matching source spelling cannot establish those targets.
+    if occurrence.syntax_kind.starts_with("sas.")
+        && matches!(occurrence.target, OccurrenceTarget::Unresolved { .. })
+    {
+        return false;
+    }
     // Package/schema lookup, overload selection and call-or-index syntax need
     // PL/SQL-owned evidence; spelling scores cannot establish those targets.
     if occurrence.syntax_kind.starts_with("plsql.")
@@ -1638,5 +1666,84 @@ fn kind_supports_role(kind: EntityKind, role: OccurrenceRole) -> bool {
                 | EntityKind::Change
                 | EntityKind::CommunityView
         ),
+    }
+}
+
+#[cfg(test)]
+mod source_owned_target_tests {
+    use rootlight_ids::{GenerationId, RepositoryId};
+    use rootlight_ir::{FactEvidence, SourceRef, SourceSpan};
+
+    use super::*;
+
+    #[test]
+    fn unproven_language_references_cannot_acquire_spelling_only_targets() {
+        let repository = RepositoryId::from_bytes([1; 16]);
+        let generation = GenerationId::from_bytes([2; 20]);
+        let file = FileId::from_bytes([3; 20]);
+        let hash = content_hash(b"Value");
+        let source = SourceRef::new(
+            repository,
+            generation,
+            SourceSpan::new(file, 0, 5).unwrap(),
+            hash,
+            None,
+        );
+        let mut occurrence = OccurrenceRecord {
+            id: FactId::from_bytes([4; 20]),
+            repository,
+            generation,
+            file,
+            source: source.clone(),
+            role: OccurrenceRole::Reference,
+            enclosing: None,
+            target: OccurrenceTarget::Unresolved { text_hash: hash },
+            syntactic_text_hash: hash,
+            syntax_kind: String::new(),
+            provenance: FactId::from_bytes([5; 20]),
+            confidence: Confidence::new(0).unwrap(),
+            evidence: FactEvidence {
+                source: Some(source),
+                derivation: Vec::new(),
+            },
+        };
+        for syntax in [
+            "common_lisp.symbol.reference",
+            "common_lisp.function.scoped_call",
+            "sas.macro_call.reference",
+            "sas.macro_variable.reference",
+            "sas.dataset.reference",
+            "apex.identifier.reference",
+            "apex.member.reference",
+            "apex.unproven_call.reference",
+            "pascal.identifier.reference",
+            "pascal.unit_reference.reference",
+            "pascal.member_reference.reference",
+        ] {
+            occurrence.syntax_kind = syntax.to_owned();
+            assert!(!resolvable_occurrence(&occurrence), "{syntax}");
+            occurrence.role = OccurrenceRole::CallSite;
+            assert!(!resolvable_occurrence(&occurrence), "{syntax}");
+            occurrence.role = OccurrenceRole::Reference;
+        }
+        occurrence.syntax_kind = "python.identifier.reference".to_owned();
+        assert!(resolvable_occurrence(&occurrence));
+        occurrence.target = OccurrenceTarget::Resolved {
+            symbol: SymbolId::from_bytes([6; 20]),
+        };
+        for syntax in [
+            "common_lisp.function.scoped_call",
+            "sas.macro_call.reference",
+            "apex.unproven_call.reference",
+            "pascal.member_reference.reference",
+        ] {
+            occurrence.syntax_kind = syntax.to_owned();
+            assert!(
+                resolvable_occurrence(&occurrence),
+                "the guard does not erase independent target proof"
+            );
+        }
+        occurrence.role = OccurrenceRole::Definition;
+        assert!(!resolvable_occurrence(&occurrence));
     }
 }
