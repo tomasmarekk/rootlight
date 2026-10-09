@@ -46,7 +46,7 @@ pub use incremental::{
 };
 
 /// Current deterministic manifest and source-classification revision.
-pub const DISCOVERY_MANIFEST_VERSION: &str = "1.40";
+pub const DISCOVERY_MANIFEST_VERSION: &str = "1.41";
 /// Stable source-free diagnostic emitted when the entry budget truncates discovery.
 pub const DISCOVERY_ENTRY_LIMIT_DIAGNOSTIC_CODE: &str = "DISCOVERY_ENTRY_LIMIT";
 /// Stable source-free diagnostic emitted when retained source bytes truncate discovery.
@@ -6819,6 +6819,61 @@ max_source_file_bytes = 2097152
             .expect("Prolog capability");
         assert_eq!(capability.detectors, ["content"]);
         assert_eq!(capability.analyzers, ["native"]);
+    }
+
+    #[test]
+    fn prolog_dcg_content_keeps_independent_perl_extension_and_shebang_evidence() {
+        for path in ["grammar.pl", "src/GRAMMAR.PL"] {
+            let path = RelativePath::parse(Path::new(path)).expect("fixture path");
+            for source in [
+                "sentence(Token) --> [Token].\n",
+                "#!/usr/bin/perl\nsentence(Token) --> [Token].\n",
+            ] {
+                let (_, signals) = classify(&path, source.as_bytes());
+                assert!(signals.contains(&LanguageSignal {
+                    language: "prolog".to_owned(),
+                    evidence: LanguageEvidence::Content,
+                }));
+                assert!(signals.contains(&LanguageSignal {
+                    language: "perl".to_owned(),
+                    evidence: LanguageEvidence::Extension,
+                }));
+                assert_eq!(
+                    signals.contains(&LanguageSignal {
+                        language: "perl".to_owned(),
+                        evidence: LanguageEvidence::Shebang,
+                    }),
+                    source.starts_with("#!"),
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn prolog_dcg_content_cannot_use_an_arrow_or_body_start_outside_the_sample() {
+        let path = RelativePath::parse(Path::new("grammar.pl")).expect("fixture path");
+        for (tail, remainder, has_hint) in [
+            ("sentence(Token) --", "> [Token].\n", false),
+            ("sentence(Token) -->", " [Token].\n", false),
+            ("sentence(Token) --> [", "Token].\n", true),
+        ] {
+            let mut source = vec![b' '; MAX_CLASSIFICATION_BYTES - tail.len()];
+            source.extend_from_slice(tail.as_bytes());
+            source.extend_from_slice(remainder.as_bytes());
+            let (_, signals) = classify(&path, &source);
+            assert_eq!(
+                signals.contains(&LanguageSignal {
+                    language: "prolog".to_owned(),
+                    evidence: LanguageEvidence::Content,
+                }),
+                has_hint,
+                "{tail}",
+            );
+            assert!(signals.contains(&LanguageSignal {
+                language: "perl".to_owned(),
+                evidence: LanguageEvidence::Extension,
+            }));
+        }
     }
 
     #[test]

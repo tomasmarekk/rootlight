@@ -40,7 +40,22 @@ pub(super) fn has_content_hint(source: &[u8]) -> bool {
         rest
     };
     let rest = rest.trim_start_matches([' ', '\t', '\r', '\n']);
-    rest.starts_with(":-") || rest.starts_with(":+") || sentence_dot(rest)
+    rest.starts_with(":-") || rest.starts_with(":+") || dcg_body_hint(rest) || sentence_dot(rest)
+}
+
+fn dcg_body_hint(source: &str) -> bool {
+    let Some(body) = source.strip_prefix("-->") else {
+        return false;
+    };
+    let Some(first) = body.trim_start().chars().next() else {
+        return false;
+    };
+    // A visible body token avoids turning a truncated arrow or Perl's
+    // decrement/comparison punctuation into Prolog evidence. Adjacent graphic
+    // characters form a different operator, so a cut requires separation.
+    first.is_alphabetic()
+        || matches!(first, '_' | '(' | '[' | '{' | '\'' | '"')
+        || first == '!' && body.starts_with(char::is_whitespace)
 }
 
 fn atom_name_end(source: &str) -> Option<usize> {
@@ -157,6 +172,65 @@ mod tests {
         ] {
             assert!(has_content_hint(source.as_bytes()), "{source}");
         }
+    }
+
+    #[test]
+    fn recognizes_source_backed_dcg_heads() {
+        for source in [
+            "sentence --> [token].\n",
+            "sentence(Token) --> [Token].\n",
+            "'quoted sentence'(Token) --> [Token].\n",
+            "sentence('close ) here', [a, b])\n  --> [token].\n",
+            "\u{feff}% opening comment\r\n/* license */\r\nsentence --> [token].\r\n",
+            "λ(Token) --> [Token].\n",
+            "sentence --> other_sentence.\n",
+            "sentence --> (other_sentence, [token]).\n",
+            "sentence --> {accept(token)}.\n",
+            "sentence --> \"text\".\n",
+            "sentence --> !, [token].\n",
+            "sentence(Body) --> Body.\n",
+        ] {
+            assert!(has_content_hint(source.as_bytes()), "{source}");
+        }
+    }
+
+    #[test]
+    fn rejects_incomplete_dcg_heads_and_perl_punctuation() {
+        for source in [
+            "sentence(Token -- > [Token].\n",
+            "sentence(Token) -- > [Token].\n",
+            "sentence(Token) - -> [Token].\n",
+            "sentence(Token) --\n> [Token].\n",
+            "sentence(Token) --/* comment */> [Token].\n",
+            "sentence(Token) -->> [Token].\n",
+            "sentence(Token) -->= [Token].\n",
+            "sentence(Token) -->- [Token].\n",
+            "sentence(Token) -->! [Token].\n",
+            "sentence(Token) -->\n",
+            "sentence(Token) --> $value;\n",
+            "sentence(Token) --> @values;\n",
+            "sentence(Token) --> > $value;\n",
+            "Sentence(Token) --> [Token].\n",
+            "'escaped\\'name'(Token) --> [Token].\n",
+            "sentence('unclosed) --> [token].\n",
+            "% sentence(Token) --> [Token].\n",
+            "/* sentence(Token) --> [Token]. */\n",
+            "print(\"sentence(Token) --> [Token].\") . \"tail\";\n",
+            "sentence(\"-->\") . \"tail\";\n",
+        ] {
+            assert!(!has_content_hint(source.as_bytes()), "{source}");
+        }
+    }
+
+    #[test]
+    fn dcg_hint_rejects_invalid_utf8_but_keeps_a_proven_head_before_a_split_tail() {
+        assert!(!has_content_hint(b"sentence(Token) --> [Token].\n\xff"));
+        let mut source = b"sentence(Token) --> [Token].\n".to_vec();
+        source.resize(super::super::MAX_CLASSIFICATION_BYTES - 1, b' ');
+        source.extend_from_slice("λ".as_bytes());
+        assert!(has_content_hint(
+            &source[..super::super::MAX_CLASSIFICATION_BYTES]
+        ));
     }
 
     #[test]
