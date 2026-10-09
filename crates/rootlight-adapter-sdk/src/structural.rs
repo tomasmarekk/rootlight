@@ -6,6 +6,9 @@ use rootlight_ir::EntityKind;
 
 use crate::{SyntaxFact, SyntaxFactKind};
 
+#[path = "structural_assembly.rs"]
+mod assembly;
+
 #[path = "structural_common_lisp.rs"]
 mod common_lisp;
 
@@ -21,11 +24,14 @@ pub use fsharp::StructuralClassificationGap;
 /// additionally requires the caller's language-specific scope evidence.
 /// Unsupported F# declaration shapes return `None`; callers must retain the
 /// corresponding [`structural_entity_classification_gap`] in entity coverage.
-/// Common Lisp accepts only exact reviewed declaration labels; unknown labels
-/// never fall through to the shared substring classifier.
+/// Assembly and Common Lisp accept only exact reviewed declaration labels;
+/// unknown labels never fall through to the shared substring classifier.
 #[must_use]
 pub fn structural_entity_kind(fact: &SyntaxFact) -> Option<EntityKind> {
     let label = fact.syntax_kind().as_str();
+    if label.starts_with("assembly.") {
+        return assembly::entity_kind(fact);
+    }
     if label.starts_with("fsharp.") {
         return fsharp::entity_kind(fact).ok().flatten();
     }
@@ -557,6 +563,8 @@ pub fn structural_captured_name(text: &str, maximum_bytes: usize) -> Option<&str
 /// escapes and package punctuation; caller-owned native evidence must prove the
 /// capture is a symbol, not an arbitrary form. Reader and package identities
 /// remain unavailable; neither case nor escape spelling is normalized.
+/// Assembly currently accepts only complete MASM identifiers in proved owner
+/// contexts; GAS/local label spelling and assembler resolution are separate.
 /// Other languages retain
 /// the shared borrowed-name contract. Source and canonical output must both fit
 /// `maximum_bytes`. Invalid names, excess bytes or allocation failure return `None`.
@@ -566,7 +574,9 @@ pub fn structural_captured_name_for_language<'a>(
     text: &'a str,
     maximum_bytes: usize,
 ) -> Option<Cow<'a, str>> {
-    if language == "fortran" {
+    if language == "assembly" {
+        assembly::captured_name(text, maximum_bytes).map(Cow::Borrowed)
+    } else if language == "fortran" {
         (text.len() <= maximum_bytes
             && text.as_bytes().first().is_some_and(u8::is_ascii_alphabetic)
             && text
@@ -764,6 +774,14 @@ pub fn structural_captured_name_for_fact<'a>(
     text: &'a str,
     maximum_bytes: usize,
 ) -> Option<Cow<'a, str>> {
+    if language == "assembly" || fact.syntax_kind().as_str().starts_with("assembly.") {
+        return (language == "assembly"
+            && fact.kind() == SyntaxFactKind::Occurrence
+            && fact.syntax_kind().as_str() == "assembly.masm_name.definition")
+            .then(|| assembly::captured_name(text, maximum_bytes))
+            .flatten()
+            .map(Cow::Borrowed);
+    }
     if language == "common-lisp" || fact.syntax_kind().as_str().starts_with("common_lisp.") {
         return (language == "common-lisp"
             && fact.kind() == SyntaxFactKind::Occurrence
