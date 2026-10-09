@@ -121,6 +121,8 @@ fn conditional_kind(node: Node<'_>) -> bool {
         "conditional_compilation_statement"
             | "conditional_compilation_declaration"
             | "conditional_compilation_declaration_section"
+            | "conditional_compilation_function_properties"
+            | "conditional_compilation_cache_dependency"
     )
 }
 

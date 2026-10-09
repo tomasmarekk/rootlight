@@ -16,7 +16,7 @@ const GRAMMAR_LOCK_PATH: &str = "adapters/grammars.lock";
 const CARGO_LOCK_PATH: &str = "Cargo.lock";
 const ADAPTER_PACKAGE: &str = "rootlight-adapter-treesitter";
 const GRAMMAR_LOCK_SHA256: &str =
-    "61c7d08e950d07cb994be922d62a68a073d328a1e24e46247dda88b7acf10e00";
+    "3f249a7cb3de3e5de00bbc1be82bde457e51b485f2c20b5b08e048189eeab1f5";
 const JAVA_LICENSE_PATH: &str = "adapters/licenses/tree-sitter-java-0.23.5-LICENSE";
 const JAVA_LICENSE_SHA256: &str =
     "52ed137b039cd9c46409bc22e89938af911c95b157feae2d040b51e6084369a7";
@@ -231,7 +231,7 @@ const EXPECTED_LOCAL_PACKAGES: [(&str, &str, &str, &str); 4] = [
         "tree-sitter-plsql",
         "0.0.1",
         "third_party/tree-sitter-plsql-0.0.1",
-        "7d4adf5f85fb5c0957b0c54a88ebc8a4a36bafb343535ad696a23aa5454b66fd",
+        "f3ca99f350039320e3d687eab76b8039195123bc9c3a03f7ccabd221a817e031",
     ),
     (
         "tree-sitter-fsharp",
@@ -1356,7 +1356,7 @@ mod tests {
             serde_json::Value::Bool(false)
         );
         assert_eq!(provenance["generated_parser_language_abi"], 14);
-        assert_eq!(provenance["generated_parser_state_count"], 10577);
+        assert_eq!(provenance["generated_parser_state_count"], 10623);
         assert_eq!(provenance["generated_parser_external_token_count"], 0);
         let generation = &provenance["local_generation"];
         assert_eq!(generation["version"], "0.24.4");
@@ -1377,6 +1377,23 @@ mod tests {
         assert_eq!(
             generation["independent_regenerations_byte_identical"],
             serde_json::Value::Bool(true)
+        );
+        assert_eq!(generation["unchanged_existing_grammar_rule_count"], 747);
+        assert_eq!(
+            generation["modified_existing_grammar_rules"]
+                .as_array()
+                .unwrap()
+                .len(),
+            9
+        );
+        assert_eq!(generation["new_grammar_rule_count"], 29);
+        assert_eq!(generation["removed_existing_grammar_rule_count"], 0);
+        assert_eq!(generation["grammar_conflicts_and_extras_unchanged"], false);
+        assert_eq!(generation["original_grammar_conflicts_retained"], true);
+        assert_eq!(generation["grammar_extras_unchanged"], true);
+        assert_eq!(
+            generation["added_grammar_conflicts"],
+            serde_json::json!([["result_cache_clause"]])
         );
         let outputs = generation["generated_output_sha256"].as_object().unwrap();
         assert_eq!(outputs.len(), 6);

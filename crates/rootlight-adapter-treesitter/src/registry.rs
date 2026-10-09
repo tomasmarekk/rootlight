@@ -414,8 +414,8 @@ const fn identity_for(family: GrammarFamily) -> GrammarIdentity {
         GrammarFamily::PlSql => GrammarIdentity {
             language_id: "plsql",
             grammar_version: "0.0.1",
-            source_package_sha256: "7d4adf5f85fb5c0957b0c54a88ebc8a4a36bafb343535ad696a23aa5454b66fd",
-            parser_sha256: "1fa49f5fea82d2f3a28fd2a3eec111e7982ba4b1b4f25118380ea7aaad26d2be",
+            source_package_sha256: "f3ca99f350039320e3d687eab76b8039195123bc9c3a03f7ccabd221a817e031",
+            parser_sha256: "4dfdf07704b94b01163af725f24a28f9ba681e14a0ca89c2397c1346967a45d9",
             scanner_sha256: None,
         },
         GrammarFamily::CobolFixed => GrammarIdentity {

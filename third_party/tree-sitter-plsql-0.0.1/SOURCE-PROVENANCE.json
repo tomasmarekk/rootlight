@@ -269,7 +269,7 @@
       "local_bytes": 575,
       "purpose": "local unpublished edition-2024 binding with exact existing language-handle and C-build dependencies; correct authored repository; no obsolete Tree-sitter runtime dependency",
       "patch_document": "PATCHES.md",
-      "patch_document_sha256": "666da6573d7aa1f2b747bf05df2c0be415d27c44c806178f25d27e87602f0a66"
+      "patch_document_sha256": "cca3fa9ef12da4ebc2cac7e8b93501c5db8fa2fe05976204e932023f9ca06352"
     },
     {
       "path": "bindings/rust/build.rs",
@@ -279,7 +279,7 @@
       "local_bytes": 582,
       "purpose": "compile only the locally generated ABI14 parser C table with the local header; no scanner, code acquisition, grammar generation or package hooks",
       "patch_document": "PATCHES.md",
-      "patch_document_sha256": "666da6573d7aa1f2b747bf05df2c0be415d27c44c806178f25d27e87602f0a66"
+      "patch_document_sha256": "cca3fa9ef12da4ebc2cac7e8b93501c5db8fa2fe05976204e932023f9ca06352"
     },
     {
       "path": "bindings/rust/lib.rs",
@@ -289,47 +289,47 @@
       "local_bytes": 718,
       "purpose": "static LanguageFn handle and exact locally generated NODE_TYPES replace obsolete runtime-by-value FFI; the native factory name remains unchanged",
       "patch_document": "PATCHES.md",
-      "patch_document_sha256": "666da6573d7aa1f2b747bf05df2c0be415d27c44c806178f25d27e87602f0a66"
+      "patch_document_sha256": "cca3fa9ef12da4ebc2cac7e8b93501c5db8fa2fe05976204e932023f9ca06352"
     },
     {
       "path": "grammar.js",
       "original_path": "grammar.js.orig",
       "original_sha256": "59e02a7ec966bfb10494851e0490ca1e537541a91b5413edb19cafa28ea4be34",
-      "local_sha256": "3f3ad3a44085e0efd17c7aa281659c239265aa4d8d2f4791f4274ed2d7593fdd",
-      "local_bytes": 109079,
-      "purpose": "single-END standalone routine bodies, semicolon-terminated external call specifications, separately typed recursive physical conditional-compilation branches and distinct inquiry expressions; no condition evaluation or inferred active branch",
+      "local_sha256": "d25db1516b03122872fbbbeccb57e259b0ecc808e4c1eebd776209e3f7df20bf",
+      "local_bytes": 111662,
+      "purpose": "single-END standalone routine bodies, semicolon-terminated external call specifications, separately typed physical conditional-compilation statements, declarations, function properties and cache dependencies, RESULT_CACHE RELIES_ON syntax and distinct inquiry expressions; one declared cache-clause ambiguity, no condition evaluation or inferred active branch",
       "patch_document": "PATCHES.md",
-      "patch_document_sha256": "666da6573d7aa1f2b747bf05df2c0be415d27c44c806178f25d27e87602f0a66"
+      "patch_document_sha256": "cca3fa9ef12da4ebc2cac7e8b93501c5db8fa2fe05976204e932023f9ca06352"
     },
     {
       "path": "src/grammar.json",
       "original_path": "src/grammar.json.orig",
       "original_sha256": "aa652ba6387d5a7d1189da7d6770750156c9f7fb37fbc8c1d00075071555714d",
-      "local_sha256": "0d26aa69be52a7a073de8bc23d960d1bc5414f4fbd67280929434d7c5946fb4b",
-      "local_bytes": 392020,
+      "local_sha256": "0eb760dc1123d780aad8da15e20302fb96d92f8169521c47ba8379b17da56db2",
+      "local_bytes": 398380,
       "purpose": "authentic preparation-only generator output from the patched preferred grammar; no hand-edited generated rules",
       "patch_document": "PATCHES.md",
-      "patch_document_sha256": "666da6573d7aa1f2b747bf05df2c0be415d27c44c806178f25d27e87602f0a66"
+      "patch_document_sha256": "cca3fa9ef12da4ebc2cac7e8b93501c5db8fa2fe05976204e932023f9ca06352"
     },
     {
       "path": "src/node-types.json",
       "original_path": "src/node-types.json.orig",
       "original_sha256": "d3f7e6547832c7b69b67154e9030db719260436faec8eea4b2244c3a6a7714c4",
-      "local_sha256": "8e210fb59ab65223bffee1b3b5f50eed63c313d23b7867387a68352452029b8b",
-      "local_bytes": 207379,
+      "local_sha256": "e8b5079011a55dd2fa641ff3fa4ea2517e482298d2abcc95414edd7475a76c20",
+      "local_bytes": 215675,
       "purpose": "authentic preparation-only generated named nodes and native fields from the patched preferred grammar",
       "patch_document": "PATCHES.md",
-      "patch_document_sha256": "666da6573d7aa1f2b747bf05df2c0be415d27c44c806178f25d27e87602f0a66"
+      "patch_document_sha256": "cca3fa9ef12da4ebc2cac7e8b93501c5db8fa2fe05976204e932023f9ca06352"
     },
     {
       "path": "src/parser.c",
       "original_path": "src/parser.c.orig",
       "original_sha256": "ff2be405105d527a8425b9a1381eec0783b6101d19a6f7765f400f52d62d41e1",
-      "local_sha256": "1fa49f5fea82d2f3a28fd2a3eec111e7982ba4b1b4f25118380ea7aaad26d2be",
-      "local_bytes": 9539145,
+      "local_sha256": "4dfdf07704b94b01163af725f24a28f9ba681e14a0ca89c2397c1346967a45d9",
+      "local_bytes": 9596010,
       "purpose": "authentic preparation-only generated ABI14 static parser table; no handwritten replacement parser or generated C edits",
       "patch_document": "PATCHES.md",
-      "patch_document_sha256": "666da6573d7aa1f2b747bf05df2c0be415d27c44c806178f25d27e87602f0a66"
+      "patch_document_sha256": "cca3fa9ef12da4ebc2cac7e8b93501c5db8fa2fe05976204e932023f9ca06352"
     },
     {
       "path": "src/tree_sitter/parser.h",
@@ -339,7 +339,7 @@
       "local_bytes": 7039,
       "purpose": "authentic preparation-only generated ABI14-compatible C header accompanying the local static parser table",
       "patch_document": "PATCHES.md",
-      "patch_document_sha256": "666da6573d7aa1f2b747bf05df2c0be415d27c44c806178f25d27e87602f0a66"
+      "patch_document_sha256": "cca3fa9ef12da4ebc2cac7e8b93501c5db8fa2fe05976204e932023f9ca06352"
     }
   ],
   "local_generation": {
@@ -357,8 +357,8 @@
     "javascript_runtime_binary_sha256": "f13ac3ca23248dc389507e8fe38c34489ab7edb3e6d6700eb6da6a0b7e128eaf",
     "javascript_runtime_binary_bytes": 89894400,
     "command": "tree-sitter generate --abi 14 --js-runtime node grammar.js",
-    "preferred_input_sha256": "3f3ad3a44085e0efd17c7aa281659c239265aa4d8d2f4791f4274ed2d7593fdd",
-    "preferred_input_bytes": 109079,
+    "preferred_input_sha256": "d25db1516b03122872fbbbeccb57e259b0ecc808e4c1eebd776209e3f7df20bf",
+    "preferred_input_bytes": 111662,
     "preferred_grammar_executed_during_preparation": true,
     "preparation_only": true,
     "original_generator_version_known": false,
@@ -368,29 +368,32 @@
     "independent_regeneration_stderr_bytes": [0, 0],
     "independent_regenerations_byte_identical": true,
     "generation_receipt_schema": "rootlight.plsql-parser-regeneration/1",
-    "generation_receipt_sha256": "d782e28d29a31fd4798a8122e0bc0e09d96306b12c921bf449e41231d38204bf",
+    "generation_receipt_sha256": "f55bd6613043cd14df34cbb93810f840ceb86ea3c23de9afb512b45781352257",
     "generated_output_sha256": {
-      "src/grammar.json": "0d26aa69be52a7a073de8bc23d960d1bc5414f4fbd67280929434d7c5946fb4b",
-      "src/node-types.json": "8e210fb59ab65223bffee1b3b5f50eed63c313d23b7867387a68352452029b8b",
-      "src/parser.c": "1fa49f5fea82d2f3a28fd2a3eec111e7982ba4b1b4f25118380ea7aaad26d2be",
+      "src/grammar.json": "0eb760dc1123d780aad8da15e20302fb96d92f8169521c47ba8379b17da56db2",
+      "src/node-types.json": "e8b5079011a55dd2fa641ff3fa4ea2517e482298d2abcc95414edd7475a76c20",
+      "src/parser.c": "4dfdf07704b94b01163af725f24a28f9ba681e14a0ca89c2397c1346967a45d9",
       "src/tree_sitter/alloc.h": "b29c1c9fb7cc82f58c84b376df1297d6e2737a1d655fd356db0859e3c29c2fea",
       "src/tree_sitter/array.h": "4ff743903dc46f5db6aa54f31c6b4d160a8a9779e5b2ab1ee59ae7ebcd850ea1",
       "src/tree_sitter/parser.h": "a1f6ef161fbaf48a0e10fca90ef5290a062462b307b3898aa562993853b9f80a"
     },
     "original_generated_copies": ["src/grammar.json.orig", "src/node-types.json.orig", "src/parser.c.orig", "src/tree_sitter/parser.h.orig"],
     "new_generator_headers": ["src/tree_sitter/alloc.h", "src/tree_sitter/array.h"],
-    "unchanged_existing_grammar_rule_count": 749,
-    "modified_existing_grammar_rules": ["create_function", "create_procedure", "_declare_section_element", "_item_list_1", "statement", "_expression_base_elements", "_expression_base_boolean_elements"],
-    "new_grammar_rule_count": 19,
+    "unchanged_existing_grammar_rule_count": 747,
+    "modified_existing_grammar_rules": ["create_function", "create_procedure", "result_cache_clause", "_declare_section_element", "_item_list_1", "_function_properties", "statement", "_expression_base_elements", "_expression_base_boolean_elements"],
+    "new_grammar_rule_count": 29,
     "removed_existing_grammar_rule_count": 0,
-    "grammar_conflicts_and_extras_unchanged": true,
+    "grammar_conflicts_and_extras_unchanged": false,
+    "original_grammar_conflicts_retained": true,
+    "grammar_extras_unchanged": true,
+    "added_grammar_conflicts": [["result_cache_clause"]],
     "all_tree_behavioral_equivalence_proven": false,
     "os_network_denial_verified": false
   },
   "original_generated_parser_unchanged": false,
   "preferred_grammar_unchanged": false,
   "generated_parser_language_abi": 14,
-  "generated_parser_state_count": 10577,
+  "generated_parser_state_count": 10623,
   "generated_parser_external_token_count": 0,
   "native_factory": "tree_sitter_plsql",
   "supplied_license": "MIT",

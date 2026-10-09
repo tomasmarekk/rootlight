@@ -804,6 +804,301 @@ fn conditional_package_declarations_retain_each_written_branch_without_selection
     );
 }
 
+fn assert_conditional_gap(document: &NormalizedIrDocument, fixture: &Fixture, written: &str) {
+    let span = fixture.span(written, 0);
+    for domain in [
+        FactDomain::Entities,
+        FactDomain::Occurrences,
+        FactDomain::Relations,
+    ] {
+        let gaps: Vec<_> = document
+            .skipped_regions
+            .iter()
+            .filter(|gap| {
+                gap.domain == domain
+                    && gap.detail == "plsql-conditional-selection-unavailable"
+                    && gap.source.span() == span
+            })
+            .collect();
+        assert_eq!(gaps.len(), 1, "{domain:?} conditional at {span:?}");
+        assert_eq!(gaps[0].reason, SkippedRegionReason::UnsupportedConstruct);
+        assert_eq!(gaps[0].source.repository(), fixture.source.repository());
+        assert_eq!(gaps[0].source.generation(), fixture.source.generation());
+        assert_eq!(gaps[0].source.content_hash(), fixture.source.content_hash());
+    }
+}
+
+#[test]
+fn function_properties_retain_result_cache_dependencies_and_neighbor_owners() {
+    for body in [false, true] {
+        let qualifier = if body { " body" } else { "" };
+        let before = if body {
+            "procedure BeforeStep(BeforeArg in number) as begin null; end BeforeStep;"
+        } else {
+            "procedure BeforeStep(BeforeArg in number);"
+        };
+        let cache_header = "function ReadValue(ReadArg in number) return number result_cache relies_on (DataA, DataB)";
+        let cache_tail = if body {
+            " as\nbegin return ReadArg; end ReadValue;"
+        } else {
+            ";"
+        };
+        let after = if body {
+            "procedure AfterStep(AfterArg in number) as begin null; end AfterStep;"
+        } else {
+            "procedure AfterStep(AfterArg in number);"
+        };
+        let fixture = Fixture::new(&format!(
+            "create or replace package{qualifier} CacheKit as\n{before}\n{cache_header}{cache_tail}\n{after}\nend CacheKit;\n/\n"
+        ));
+        let output = fixture.analyze(true);
+        let document = output.document();
+        let package = definition(document, fixture.span("CacheKit", 0));
+        assert_eq!(package.kind, EntityKind::Module);
+        for (written, formal) in [
+            ("BeforeStep", "BeforeArg"),
+            ("ReadValue", "ReadArg"),
+            ("AfterStep", "AfterArg"),
+        ] {
+            let routine = definition(document, fixture.span(written, 0));
+            assert_eq!(routine.kind, EntityKind::Function);
+            assert_eq!(routine.container, Some(ContainerRef::Entity(package.id)));
+            let parameter = definition(document, fixture.span(formal, 0));
+            assert_eq!(parameter.kind, EntityKind::Parameter);
+            assert_eq!(parameter.container, Some(ContainerRef::Entity(routine.id)));
+        }
+        let cached = definition(document, fixture.span("ReadValue", 0));
+        let header = format!("{cache_header}{}", if body { " as" } else { ";" });
+        assert_header(document, cached, &fixture, &header);
+        for written in ["DataA", "DataB"] {
+            assert_unresolved(
+                document,
+                fixture.span(written, 0),
+                "plsql.identifier.reference",
+                "plsql-binding-target-unavailable",
+            );
+        }
+        assert!(
+            document
+                .relations
+                .iter()
+                .all(|edge| edge.predicate != RelationPredicate::Calls)
+        );
+    }
+}
+
+#[test]
+fn function_properties_retain_conditional_headers_and_empty_written_branches() {
+    let properties = "$if $$CacheEnabled $then\nresult_cache\n$elsif $$PureEnabled $then\ndeterministic\n$else\n$end";
+    for body in [false, true] {
+        let qualifier = if body { " body" } else { "" };
+        let before = if body {
+            "procedure BeforeStep(BeforeArg in number) as begin null; end BeforeStep;"
+        } else {
+            "procedure BeforeStep(BeforeArg in number);"
+        };
+        let cache_header =
+            format!("function ReadValue(ReadArg in number) return number\n{properties}");
+        let cache_tail = if body {
+            "\nas\nbegin return ReadArg; end ReadValue;"
+        } else {
+            ";"
+        };
+        let after = if body {
+            "procedure AfterStep(AfterArg in number) as begin null; end AfterStep;"
+        } else {
+            "procedure AfterStep(AfterArg in number);"
+        };
+        let fixture = Fixture::new(&format!(
+            "create or replace package{qualifier} CacheKit as\n{before}\n{cache_header}{cache_tail}\n{after}\nend CacheKit;\n/\n"
+        ));
+        let output = fixture.analyze(true);
+        let document = output.document();
+        let package = definition(document, fixture.span("CacheKit", 0));
+        for (written, formal) in [
+            ("BeforeStep", "BeforeArg"),
+            ("ReadValue", "ReadArg"),
+            ("AfterStep", "AfterArg"),
+        ] {
+            let routine = definition(document, fixture.span(written, 0));
+            assert_eq!(routine.kind, EntityKind::Function);
+            assert_eq!(routine.container, Some(ContainerRef::Entity(package.id)));
+            let parameter = definition(document, fixture.span(formal, 0));
+            assert_eq!(parameter.kind, EntityKind::Parameter);
+            assert_eq!(parameter.container, Some(ContainerRef::Entity(routine.id)));
+        }
+        let cached = definition(document, fixture.span("ReadValue", 0));
+        let header = format!("{cache_header}{}", if body { "\nas" } else { ";" });
+        assert_header(document, cached, &fixture, &header);
+        assert_conditional_gap(document, &fixture, properties);
+        assert!(
+            document
+                .occurrences
+                .iter()
+                .all(|site| site.role != OccurrenceRole::CallSite)
+        );
+        assert!(
+            document
+                .relations
+                .iter()
+                .all(|edge| edge.predicate != RelationPredicate::Calls)
+        );
+    }
+}
+
+#[test]
+fn function_properties_retain_nested_split_cache_dependencies_without_selection() {
+    let dependencies = "$if $$TrackDependencies $then\nrelies_on (DataA, DataB)\n$elsif $$AlternateDependencies $then\nrelies_on (DataC)\n$else\n$end";
+    for nested in [false, true] {
+        let properties = if nested {
+            format!("$if $$CacheEnabled $then\nresult_cache\n{dependencies}\n$else\n$end")
+        } else {
+            format!("result_cache\n{dependencies}")
+        };
+        let header =
+            format!("function ReadValue(ReadArg in number) return number\n{properties}\nas");
+        let fixture = Fixture::new(&format!(
+            "create or replace package body CacheKit as\nprocedure BeforeStep(BeforeArg in number) as begin null; end BeforeStep;\n{header}\nbegin return ReadArg; end ReadValue;\nprocedure AfterStep(AfterArg in number) as begin null; end AfterStep;\nend CacheKit;\n/\n"
+        ));
+        let output = fixture.analyze(true);
+        let document = output.document();
+        let package = definition(document, fixture.span("CacheKit", 0));
+        let cached = definition(document, fixture.span("ReadValue", 0));
+        assert_header(document, cached, &fixture, &header);
+        for (written, formal) in [
+            ("BeforeStep", "BeforeArg"),
+            ("ReadValue", "ReadArg"),
+            ("AfterStep", "AfterArg"),
+        ] {
+            let routine = definition(document, fixture.span(written, 0));
+            assert_eq!(routine.kind, EntityKind::Function);
+            assert_eq!(routine.container, Some(ContainerRef::Entity(package.id)));
+            let parameter = definition(document, fixture.span(formal, 0));
+            assert_eq!(parameter.kind, EntityKind::Parameter);
+            assert_eq!(parameter.container, Some(ContainerRef::Entity(routine.id)));
+        }
+        assert_conditional_gap(document, &fixture, dependencies);
+        if nested {
+            assert_conditional_gap(document, &fixture, &properties);
+        }
+        for written in ["DataA", "DataB", "DataC"] {
+            assert_unresolved(
+                document,
+                fixture.span(written, 0),
+                "plsql.identifier.reference",
+                "plsql-binding-target-unavailable",
+            );
+        }
+        assert!(
+            document
+                .relations
+                .iter()
+                .all(|edge| edge.predicate != RelationPredicate::Calls)
+        );
+    }
+}
+
+#[test]
+fn function_properties_after_result_cache_are_not_forced_into_dependency_context() {
+    let properties = "$if $$PureEnabled $then\ndeterministic\n$else\n$end";
+    for body in [false, true] {
+        let qualifier = if body { " body" } else { "" };
+        let header = format!(
+            "function ReadValue(ReadArg in number) return number result_cache\n{properties}{}",
+            if body { "\nas" } else { ";" }
+        );
+        let tail = if body {
+            "\nbegin return ReadArg; end ReadValue;"
+        } else {
+            ""
+        };
+        let after = if body {
+            "procedure AfterStep(AfterArg in number) as begin null; end AfterStep;"
+        } else {
+            "procedure AfterStep(AfterArg in number);"
+        };
+        let fixture = Fixture::new(&format!(
+            "create or replace package{qualifier} CacheKit as\n{header}{tail}\n{after}\nend CacheKit;\n/\n"
+        ));
+        let output = fixture.analyze(true);
+        let document = output.document();
+        let package = definition(document, fixture.span("CacheKit", 0));
+        let cached = definition(document, fixture.span("ReadValue", 0));
+        assert_header(document, cached, &fixture, &header);
+        for (written, formal) in [("ReadValue", "ReadArg"), ("AfterStep", "AfterArg")] {
+            let routine = definition(document, fixture.span(written, 0));
+            assert_eq!(routine.kind, EntityKind::Function);
+            assert_eq!(routine.container, Some(ContainerRef::Entity(package.id)));
+            let parameter = definition(document, fixture.span(formal, 0));
+            assert_eq!(parameter.kind, EntityKind::Parameter);
+            assert_eq!(parameter.container, Some(ContainerRef::Entity(routine.id)));
+        }
+        assert_conditional_gap(document, &fixture, properties);
+        assert!(
+            document
+                .relations
+                .iter()
+                .all(|edge| edge.predicate != RelationPredicate::Calls)
+        );
+    }
+}
+
+#[test]
+fn function_properties_empty_elsif_and_else_branches_stay_physical() {
+    let conditional = "$if $$CacheEnabled $then\n$elsif $$AlternateCache $then\n$else\n$end";
+    for prefix in ["", "result_cache\n"] {
+        let header =
+            format!("function ReadValue(ReadArg in number) return number\n{prefix}{conditional};");
+        let fixture = Fixture::new(&format!(
+            "create or replace package CacheKit as\n{header}\nprocedure AfterStep(AfterArg in number);\nend CacheKit;\n/\n"
+        ));
+        let output = fixture.analyze(true);
+        let document = output.document();
+        let package = definition(document, fixture.span("CacheKit", 0));
+        let cached = definition(document, fixture.span("ReadValue", 0));
+        assert_header(document, cached, &fixture, &header);
+        for (written, formal) in [("ReadValue", "ReadArg"), ("AfterStep", "AfterArg")] {
+            let routine = definition(document, fixture.span(written, 0));
+            assert_eq!(routine.container, Some(ContainerRef::Entity(package.id)));
+            let parameter = definition(document, fixture.span(formal, 0));
+            assert_eq!(parameter.kind, EntityKind::Parameter);
+            assert_eq!(parameter.container, Some(ContainerRef::Entity(routine.id)));
+        }
+        assert_conditional_gap(document, &fixture, conditional);
+        assert!(
+            document
+                .relations
+                .iter()
+                .all(|edge| edge.predicate != RelationPredicate::Calls)
+        );
+    }
+}
+
+#[test]
+fn function_properties_missing_conditional_end_cannot_invent_header_identity() {
+    let fixture = Fixture::new(
+        "create or replace package CacheKit as\nprocedure BeforeStep(BeforeArg in number);\nfunction Broken(Leaked in number) return number\n$if $$CacheEnabled $then\nresult_cache;\nprocedure AfterStep(AfterArg in number);\nend CacheKit;\n/\n",
+    );
+    let output = fixture.analyze(false);
+    let document = output.document();
+    assert!(
+        document
+            .entities
+            .iter()
+            .all(|entity| !matches!(entity.canonical_name.as_str(), "Broken" | "Leaked"))
+    );
+    assert!(document.occurrences.iter().all(|site| {
+        site.role != OccurrenceRole::Definition
+            || ![fixture.span("Broken", 0), fixture.span("Leaked", 0)].contains(&site.source.span())
+    }));
+    assert!(
+        document
+            .skipped_regions
+            .iter()
+            .any(|gap| gap.reason == SkippedRegionReason::ParseError)
+    );
+}
+
 #[test]
 fn recovered_malformed_headers_and_wrong_closing_names_do_not_leak_descendants() {
     for body in [

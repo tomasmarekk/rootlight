@@ -15,7 +15,8 @@
 (ref_call) @reference
 (ref_call) @expression
 [(conditional_compilation_statement) (conditional_compilation_declaration)
- (conditional_compilation_declaration_section)] @expression
+ (conditional_compilation_declaration_section) (conditional_compilation_function_properties)
+ (conditional_compilation_cache_dependency)] @expression
 (identifier) @reference
 [(comment_sl) (comment_ml)] @comment
 (literal_string) @string

@@ -57,6 +57,8 @@ module.exports = grammar({
         [$._outer_join_clause],
         [$._query_table_expression_ref_element],
         [$.referenced_element_point_method_call],
+        // A following directive may contain dependency fragments or another header property.
+        [$.result_cache_clause],
     ],
     extras: $ => [
         $.comment_sl,
@@ -920,14 +922,40 @@ module.exports = grammar({
         ),
         result_cache_clause: $ => seq(
             $.kw_result_cache,
-            optional(
-                seq(
-                    $.kw_relies_on,
-                    BRACKET_LEFT,
-                    $.identifier_list_repeat,
-                    BRACKET_RIGHT,
-                ),
-            ),
+            optional($._result_cache_dependency),
+        ),
+        // Dependency fragments stay attached to RESULT_CACHE across physical directives.
+        _result_cache_dependency: $ => choice(
+            $.result_cache_dependency_clause,
+            $.conditional_compilation_cache_dependency,
+        ),
+        result_cache_dependency_clause: $ => seq(
+            $.kw_relies_on,
+            BRACKET_LEFT,
+            $.identifier_list_repeat,
+            BRACKET_RIGHT,
+        ),
+        conditional_compilation_cache_dependency: $ => seq(
+            field("if_branch", $.conditional_compilation_cache_dependency_if_branch),
+            repeat(field("elsif_branch", $.conditional_compilation_cache_dependency_elsif_branch)),
+            optional(field("else_branch", $.conditional_compilation_cache_dependency_else_branch)),
+            $.cc_end,
+        ),
+        conditional_compilation_cache_dependency_if_branch: $ => seq(
+            $.cc_if,
+            field("condition", $.expression),
+            $.cc_then,
+            repeat(field("body", $._result_cache_dependency)),
+        ),
+        conditional_compilation_cache_dependency_elsif_branch: $ => seq(
+            $.cc_elsif,
+            field("condition", $.expression),
+            $.cc_then,
+            repeat(field("body", $._result_cache_dependency)),
+        ),
+        conditional_compilation_cache_dependency_else_branch: $ => seq(
+            $.cc_else,
+            repeat(field("body", $._result_cache_dependency)),
         ),
         parallel_enable_clause: $ => seq(
             $.kw_parallel_enable,
@@ -1155,7 +1183,31 @@ module.exports = grammar({
             $.kw_deterministic,
             $.kw_pipelined,
             $.kw_parallel_enable,
-            $.kw_result_cache,
+            $.result_cache_clause,
+            $.conditional_compilation_function_properties,
+        ),
+        // Header branches admit properties, not declarations or executable statements.
+        conditional_compilation_function_properties: $ => seq(
+            field("if_branch", $.conditional_compilation_function_properties_if_branch),
+            repeat(field("elsif_branch", $.conditional_compilation_function_properties_elsif_branch)),
+            optional(field("else_branch", $.conditional_compilation_function_properties_else_branch)),
+            $.cc_end,
+        ),
+        conditional_compilation_function_properties_if_branch: $ => seq(
+            $.cc_if,
+            field("condition", $.expression),
+            $.cc_then,
+            repeat(field("body", $._function_properties)),
+        ),
+        conditional_compilation_function_properties_elsif_branch: $ => seq(
+            $.cc_elsif,
+            field("condition", $.expression),
+            $.cc_then,
+            repeat(field("body", $._function_properties)),
+        ),
+        conditional_compilation_function_properties_else_branch: $ => seq(
+            $.cc_else,
+            repeat(field("body", $._function_properties)),
         ),
         exception_declaration: $ => seq(
             $.identifier,

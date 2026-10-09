@@ -4493,30 +4493,175 @@
           "type": "CHOICE",
           "members": [
             {
-              "type": "SEQ",
-              "members": [
-                {
-                  "type": "SYMBOL",
-                  "name": "kw_relies_on"
-                },
-                {
-                  "type": "STRING",
-                  "value": "("
-                },
-                {
-                  "type": "SYMBOL",
-                  "name": "identifier_list_repeat"
-                },
-                {
-                  "type": "STRING",
-                  "value": ")"
-                }
-              ]
+              "type": "SYMBOL",
+              "name": "_result_cache_dependency"
             },
             {
               "type": "BLANK"
             }
           ]
+        }
+      ]
+    },
+    "_result_cache_dependency": {
+      "type": "CHOICE",
+      "members": [
+        {
+          "type": "SYMBOL",
+          "name": "result_cache_dependency_clause"
+        },
+        {
+          "type": "SYMBOL",
+          "name": "conditional_compilation_cache_dependency"
+        }
+      ]
+    },
+    "result_cache_dependency_clause": {
+      "type": "SEQ",
+      "members": [
+        {
+          "type": "SYMBOL",
+          "name": "kw_relies_on"
+        },
+        {
+          "type": "STRING",
+          "value": "("
+        },
+        {
+          "type": "SYMBOL",
+          "name": "identifier_list_repeat"
+        },
+        {
+          "type": "STRING",
+          "value": ")"
+        }
+      ]
+    },
+    "conditional_compilation_cache_dependency": {
+      "type": "SEQ",
+      "members": [
+        {
+          "type": "FIELD",
+          "name": "if_branch",
+          "content": {
+            "type": "SYMBOL",
+            "name": "conditional_compilation_cache_dependency_if_branch"
+          }
+        },
+        {
+          "type": "REPEAT",
+          "content": {
+            "type": "FIELD",
+            "name": "elsif_branch",
+            "content": {
+              "type": "SYMBOL",
+              "name": "conditional_compilation_cache_dependency_elsif_branch"
+            }
+          }
+        },
+        {
+          "type": "CHOICE",
+          "members": [
+            {
+              "type": "FIELD",
+              "name": "else_branch",
+              "content": {
+                "type": "SYMBOL",
+                "name": "conditional_compilation_cache_dependency_else_branch"
+              }
+            },
+            {
+              "type": "BLANK"
+            }
+          ]
+        },
+        {
+          "type": "SYMBOL",
+          "name": "cc_end"
+        }
+      ]
+    },
+    "conditional_compilation_cache_dependency_if_branch": {
+      "type": "SEQ",
+      "members": [
+        {
+          "type": "SYMBOL",
+          "name": "cc_if"
+        },
+        {
+          "type": "FIELD",
+          "name": "condition",
+          "content": {
+            "type": "SYMBOL",
+            "name": "expression"
+          }
+        },
+        {
+          "type": "SYMBOL",
+          "name": "cc_then"
+        },
+        {
+          "type": "REPEAT",
+          "content": {
+            "type": "FIELD",
+            "name": "body",
+            "content": {
+              "type": "SYMBOL",
+              "name": "_result_cache_dependency"
+            }
+          }
+        }
+      ]
+    },
+    "conditional_compilation_cache_dependency_elsif_branch": {
+      "type": "SEQ",
+      "members": [
+        {
+          "type": "SYMBOL",
+          "name": "cc_elsif"
+        },
+        {
+          "type": "FIELD",
+          "name": "condition",
+          "content": {
+            "type": "SYMBOL",
+            "name": "expression"
+          }
+        },
+        {
+          "type": "SYMBOL",
+          "name": "cc_then"
+        },
+        {
+          "type": "REPEAT",
+          "content": {
+            "type": "FIELD",
+            "name": "body",
+            "content": {
+              "type": "SYMBOL",
+              "name": "_result_cache_dependency"
+            }
+          }
+        }
+      ]
+    },
+    "conditional_compilation_cache_dependency_else_branch": {
+      "type": "SEQ",
+      "members": [
+        {
+          "type": "SYMBOL",
+          "name": "cc_else"
+        },
+        {
+          "type": "REPEAT",
+          "content": {
+            "type": "FIELD",
+            "name": "body",
+            "content": {
+              "type": "SYMBOL",
+              "name": "_result_cache_dependency"
+            }
+          }
         }
       ]
     },
@@ -5629,7 +5774,139 @@
         },
         {
           "type": "SYMBOL",
-          "name": "kw_result_cache"
+          "name": "result_cache_clause"
+        },
+        {
+          "type": "SYMBOL",
+          "name": "conditional_compilation_function_properties"
+        }
+      ]
+    },
+    "conditional_compilation_function_properties": {
+      "type": "SEQ",
+      "members": [
+        {
+          "type": "FIELD",
+          "name": "if_branch",
+          "content": {
+            "type": "SYMBOL",
+            "name": "conditional_compilation_function_properties_if_branch"
+          }
+        },
+        {
+          "type": "REPEAT",
+          "content": {
+            "type": "FIELD",
+            "name": "elsif_branch",
+            "content": {
+              "type": "SYMBOL",
+              "name": "conditional_compilation_function_properties_elsif_branch"
+            }
+          }
+        },
+        {
+          "type": "CHOICE",
+          "members": [
+            {
+              "type": "FIELD",
+              "name": "else_branch",
+              "content": {
+                "type": "SYMBOL",
+                "name": "conditional_compilation_function_properties_else_branch"
+              }
+            },
+            {
+              "type": "BLANK"
+            }
+          ]
+        },
+        {
+          "type": "SYMBOL",
+          "name": "cc_end"
+        }
+      ]
+    },
+    "conditional_compilation_function_properties_if_branch": {
+      "type": "SEQ",
+      "members": [
+        {
+          "type": "SYMBOL",
+          "name": "cc_if"
+        },
+        {
+          "type": "FIELD",
+          "name": "condition",
+          "content": {
+            "type": "SYMBOL",
+            "name": "expression"
+          }
+        },
+        {
+          "type": "SYMBOL",
+          "name": "cc_then"
+        },
+        {
+          "type": "REPEAT",
+          "content": {
+            "type": "FIELD",
+            "name": "body",
+            "content": {
+              "type": "SYMBOL",
+              "name": "_function_properties"
+            }
+          }
+        }
+      ]
+    },
+    "conditional_compilation_function_properties_elsif_branch": {
+      "type": "SEQ",
+      "members": [
+        {
+          "type": "SYMBOL",
+          "name": "cc_elsif"
+        },
+        {
+          "type": "FIELD",
+          "name": "condition",
+          "content": {
+            "type": "SYMBOL",
+            "name": "expression"
+          }
+        },
+        {
+          "type": "SYMBOL",
+          "name": "cc_then"
+        },
+        {
+          "type": "REPEAT",
+          "content": {
+            "type": "FIELD",
+            "name": "body",
+            "content": {
+              "type": "SYMBOL",
+              "name": "_function_properties"
+            }
+          }
+        }
+      ]
+    },
+    "conditional_compilation_function_properties_else_branch": {
+      "type": "SEQ",
+      "members": [
+        {
+          "type": "SYMBOL",
+          "name": "cc_else"
+        },
+        {
+          "type": "REPEAT",
+          "content": {
+            "type": "FIELD",
+            "name": "body",
+            "content": {
+              "type": "SYMBOL",
+              "name": "_function_properties"
+            }
+          }
         }
       ]
     },
@@ -18557,6 +18834,9 @@
     ],
     [
       "referenced_element_point_method_call"
+    ],
+    [
+      "result_cache_clause"
     ]
   ],
   "precedences": [],

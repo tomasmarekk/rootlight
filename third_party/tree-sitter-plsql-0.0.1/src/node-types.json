@@ -1216,6 +1216,170 @@
     }
   },
   {
+    "type": "conditional_compilation_cache_dependency",
+    "named": true,
+    "fields": {
+      "else_branch": {
+        "multiple": false,
+        "required": false,
+        "types": [
+          {
+            "type": "conditional_compilation_cache_dependency_else_branch",
+            "named": true
+          }
+        ]
+      },
+      "elsif_branch": {
+        "multiple": true,
+        "required": false,
+        "types": [
+          {
+            "type": "conditional_compilation_cache_dependency_elsif_branch",
+            "named": true
+          }
+        ]
+      },
+      "if_branch": {
+        "multiple": false,
+        "required": true,
+        "types": [
+          {
+            "type": "conditional_compilation_cache_dependency_if_branch",
+            "named": true
+          }
+        ]
+      }
+    },
+    "children": {
+      "multiple": false,
+      "required": true,
+      "types": [
+        {
+          "type": "cc_end",
+          "named": true
+        }
+      ]
+    }
+  },
+  {
+    "type": "conditional_compilation_cache_dependency_else_branch",
+    "named": true,
+    "fields": {
+      "body": {
+        "multiple": true,
+        "required": false,
+        "types": [
+          {
+            "type": "conditional_compilation_cache_dependency",
+            "named": true
+          },
+          {
+            "type": "result_cache_dependency_clause",
+            "named": true
+          }
+        ]
+      }
+    },
+    "children": {
+      "multiple": false,
+      "required": true,
+      "types": [
+        {
+          "type": "cc_else",
+          "named": true
+        }
+      ]
+    }
+  },
+  {
+    "type": "conditional_compilation_cache_dependency_elsif_branch",
+    "named": true,
+    "fields": {
+      "body": {
+        "multiple": true,
+        "required": false,
+        "types": [
+          {
+            "type": "conditional_compilation_cache_dependency",
+            "named": true
+          },
+          {
+            "type": "result_cache_dependency_clause",
+            "named": true
+          }
+        ]
+      },
+      "condition": {
+        "multiple": false,
+        "required": true,
+        "types": [
+          {
+            "type": "expression",
+            "named": true
+          }
+        ]
+      }
+    },
+    "children": {
+      "multiple": true,
+      "required": true,
+      "types": [
+        {
+          "type": "cc_elsif",
+          "named": true
+        },
+        {
+          "type": "cc_then",
+          "named": true
+        }
+      ]
+    }
+  },
+  {
+    "type": "conditional_compilation_cache_dependency_if_branch",
+    "named": true,
+    "fields": {
+      "body": {
+        "multiple": true,
+        "required": false,
+        "types": [
+          {
+            "type": "conditional_compilation_cache_dependency",
+            "named": true
+          },
+          {
+            "type": "result_cache_dependency_clause",
+            "named": true
+          }
+        ]
+      },
+      "condition": {
+        "multiple": false,
+        "required": true,
+        "types": [
+          {
+            "type": "expression",
+            "named": true
+          }
+        ]
+      }
+    },
+    "children": {
+      "multiple": true,
+      "required": true,
+      "types": [
+        {
+          "type": "cc_if",
+          "named": true
+        },
+        {
+          "type": "cc_then",
+          "named": true
+        }
+      ]
+    }
+  },
+  {
     "type": "conditional_compilation_declaration",
     "named": true,
     "fields": {
@@ -1838,6 +2002,206 @@
     }
   },
   {
+    "type": "conditional_compilation_function_properties",
+    "named": true,
+    "fields": {
+      "else_branch": {
+        "multiple": false,
+        "required": false,
+        "types": [
+          {
+            "type": "conditional_compilation_function_properties_else_branch",
+            "named": true
+          }
+        ]
+      },
+      "elsif_branch": {
+        "multiple": true,
+        "required": false,
+        "types": [
+          {
+            "type": "conditional_compilation_function_properties_elsif_branch",
+            "named": true
+          }
+        ]
+      },
+      "if_branch": {
+        "multiple": false,
+        "required": true,
+        "types": [
+          {
+            "type": "conditional_compilation_function_properties_if_branch",
+            "named": true
+          }
+        ]
+      }
+    },
+    "children": {
+      "multiple": false,
+      "required": true,
+      "types": [
+        {
+          "type": "cc_end",
+          "named": true
+        }
+      ]
+    }
+  },
+  {
+    "type": "conditional_compilation_function_properties_else_branch",
+    "named": true,
+    "fields": {
+      "body": {
+        "multiple": true,
+        "required": false,
+        "types": [
+          {
+            "type": "conditional_compilation_function_properties",
+            "named": true
+          },
+          {
+            "type": "kw_deterministic",
+            "named": true
+          },
+          {
+            "type": "kw_parallel_enable",
+            "named": true
+          },
+          {
+            "type": "kw_pipelined",
+            "named": true
+          },
+          {
+            "type": "result_cache_clause",
+            "named": true
+          }
+        ]
+      }
+    },
+    "children": {
+      "multiple": false,
+      "required": true,
+      "types": [
+        {
+          "type": "cc_else",
+          "named": true
+        }
+      ]
+    }
+  },
+  {
+    "type": "conditional_compilation_function_properties_elsif_branch",
+    "named": true,
+    "fields": {
+      "body": {
+        "multiple": true,
+        "required": false,
+        "types": [
+          {
+            "type": "conditional_compilation_function_properties",
+            "named": true
+          },
+          {
+            "type": "kw_deterministic",
+            "named": true
+          },
+          {
+            "type": "kw_parallel_enable",
+            "named": true
+          },
+          {
+            "type": "kw_pipelined",
+            "named": true
+          },
+          {
+            "type": "result_cache_clause",
+            "named": true
+          }
+        ]
+      },
+      "condition": {
+        "multiple": false,
+        "required": true,
+        "types": [
+          {
+            "type": "expression",
+            "named": true
+          }
+        ]
+      }
+    },
+    "children": {
+      "multiple": true,
+      "required": true,
+      "types": [
+        {
+          "type": "cc_elsif",
+          "named": true
+        },
+        {
+          "type": "cc_then",
+          "named": true
+        }
+      ]
+    }
+  },
+  {
+    "type": "conditional_compilation_function_properties_if_branch",
+    "named": true,
+    "fields": {
+      "body": {
+        "multiple": true,
+        "required": false,
+        "types": [
+          {
+            "type": "conditional_compilation_function_properties",
+            "named": true
+          },
+          {
+            "type": "kw_deterministic",
+            "named": true
+          },
+          {
+            "type": "kw_parallel_enable",
+            "named": true
+          },
+          {
+            "type": "kw_pipelined",
+            "named": true
+          },
+          {
+            "type": "result_cache_clause",
+            "named": true
+          }
+        ]
+      },
+      "condition": {
+        "multiple": false,
+        "required": true,
+        "types": [
+          {
+            "type": "expression",
+            "named": true
+          }
+        ]
+      }
+    },
+    "children": {
+      "multiple": true,
+      "required": true,
+      "types": [
+        {
+          "type": "cc_if",
+          "named": true
+        },
+        {
+          "type": "cc_then",
+          "named": true
+        }
+      ]
+    }
+  },
+  {
     "type": "conditional_compilation_if_branch",
     "named": true,
     "fields": {
@@ -1992,6 +2356,10 @@
           "named": true
         },
         {
+          "type": "conditional_compilation_function_properties",
+          "named": true
+        },
+        {
           "type": "create_obj",
           "named": true
         },
@@ -2052,10 +2420,6 @@
           "named": true
         },
         {
-          "type": "kw_result_cache",
-          "named": true
-        },
-        {
           "type": "parameter_declaration",
           "named": true
         },
@@ -2065,6 +2429,10 @@
         },
         {
           "type": "procedure_definition",
+          "named": true
+        },
+        {
+          "type": "result_cache_clause",
           "named": true
         },
         {
@@ -4923,6 +5291,10 @@
       "required": true,
       "types": [
         {
+          "type": "conditional_compilation_function_properties",
+          "named": true
+        },
+        {
           "type": "kw_deterministic",
           "named": true
         },
@@ -4939,11 +5311,11 @@
           "named": true
         },
         {
-          "type": "kw_result_cache",
+          "type": "parameter_declaration",
           "named": true
         },
         {
-          "type": "parameter_declaration",
+          "type": "result_cache_clause",
           "named": true
         },
         {
@@ -4982,6 +5354,10 @@
         },
         {
           "type": "conditional_compilation_declaration_section",
+          "named": true
+        },
+        {
+          "type": "conditional_compilation_function_properties",
           "named": true
         },
         {
@@ -5033,10 +5409,6 @@
           "named": true
         },
         {
-          "type": "kw_result_cache",
-          "named": true
-        },
-        {
           "type": "parameter_declaration",
           "named": true
         },
@@ -5046,6 +5418,10 @@
         },
         {
           "type": "procedure_definition",
+          "named": true
+        },
+        {
+          "type": "result_cache_clause",
           "named": true
         },
         {
@@ -6864,15 +7240,34 @@
       "required": true,
       "types": [
         {
+          "type": "conditional_compilation_cache_dependency",
+          "named": true
+        },
+        {
+          "type": "kw_result_cache",
+          "named": true
+        },
+        {
+          "type": "result_cache_dependency_clause",
+          "named": true
+        }
+      ]
+    }
+  },
+  {
+    "type": "result_cache_dependency_clause",
+    "named": true,
+    "fields": {},
+    "children": {
+      "multiple": true,
+      "required": true,
+      "types": [
+        {
           "type": "identifier_list_repeat",
           "named": true
         },
         {
           "type": "kw_relies_on",
-          "named": true
-        },
-        {
-          "type": "kw_result_cache",
           "named": true
         }
       ]

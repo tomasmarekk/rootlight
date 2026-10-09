@@ -14,7 +14,7 @@ inputs, examples, corpus and image. They remain inert upstream input data, not
 project instructions, source-inventory filters or invoked package hooks. The
 three replaced Rust binding inputs, preferred grammar and four original
 generated files retain exact `.orig` copies. Original fixtures, license and image
-remain unchanged. The locally generated ABI14 table has 10,577 states and no
+remain unchanged. The locally generated ABI14 table has 10,623 states and no
 external scanner tokens. The generated `alloc.h` and `array.h` are new local
 generator outputs, not claimed as original upstream files.
 
@@ -46,6 +46,16 @@ generator outputs, not claimed as original upstream files.
   inferred reference target. Its base-expression precedence follows existing
   identifier-expression precedence. No conditions are evaluated or branches
   selected; `$ERROR` and conditional datatype fragments remain outside this slice.
+- Function properties: `RESULT_CACHE` admits an optional `RELIES_ON (...)`
+  dependency clause. Physical conditional-compilation branches recurse separately
+  through function-header properties or cache-dependency fragments, not through
+  a statement/declaration union. Written dependencies do not establish catalog
+  identity, cache invalidation semantics or an active compilation branch.
+- Grammar ambiguity: the original declared conflicts remain intact, with one
+  additional singleton `result_cache_clause` conflict. An optional cache dependency
+  and a following conditional property can share the same directive prefix;
+  retaining both native alternatives does not infer which condition is active.
+  Original extras remain unchanged.
 
 ## Declared preparation-only generation
 

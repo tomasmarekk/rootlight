@@ -436,6 +436,146 @@ fn package_declarations_public_locate_and_source_preserve_case_quotes_and_header
 }
 
 #[test]
+fn nested_conditional_cache_headers_are_publicly_source_exact_without_selection() {
+    let dependencies = concat!(
+        "$if $$TrackDependencies $then\n",
+        "relies_on (DataA, DataB)\n",
+        "$else\n",
+        "$end",
+    );
+    let properties = format!("$if $$CacheEnabled $then\nresult_cache\n{dependencies}\n$else\n$end");
+    let header = format!("function ReadValue(ReadArg in number) return number\n{properties}\nas");
+    let source = format!(
+        "create or replace package body CacheKit as\n{header}\nbegin return ReadArg; end ReadValue;\nend CacheKit;\n/\n"
+    );
+    let repository = directory();
+    let path = "cache.pkb";
+    fs::write(repository.path().join(path), &source).unwrap();
+    let mut service = FirstSliceService::new(2).unwrap();
+    let receipt = service
+        .index_repository(repository.path(), &deadline())
+        .unwrap();
+    let document = inspect(&service, &receipt);
+    assert_eq!(receipt.indexed_files, 1);
+    assert!(receipt.discovery_complete);
+    assert!(!document.skipped_regions.iter().any(|gap| {
+        matches!(
+            gap.reason,
+            SkippedRegionReason::ParseError | SkippedRegionReason::AdapterFailure
+        )
+    }));
+    assert_file(&service, &receipt, &document, path, "plsql", &source);
+    let package = assert_declaration(
+        &service,
+        &receipt,
+        &document,
+        path,
+        &source,
+        "CacheKit",
+        EntityKind::Module,
+    );
+    let function = assert_declaration(
+        &service,
+        &receipt,
+        &document,
+        path,
+        &source,
+        "ReadValue",
+        EntityKind::Function,
+    );
+    assert_eq!(
+        entity(&document, path, "ReadValue", EntityKind::Function).container,
+        Some(ContainerRef::Entity(package))
+    );
+    assert_declaration(
+        &service,
+        &receipt,
+        &document,
+        path,
+        &source,
+        "ReadArg",
+        EntityKind::Parameter,
+    );
+    assert_eq!(
+        entity(&document, path, "ReadArg", EntityKind::Parameter).container,
+        Some(ContainerRef::Entity(function))
+    );
+    assert_header(
+        &service, &receipt, &document, path, &source, function, &header,
+    );
+    let file = file(&document, path);
+    for written in [properties.as_str(), dependencies] {
+        for domain in [
+            IrFactDomain::Entities,
+            IrFactDomain::Occurrences,
+            IrFactDomain::Relations,
+        ] {
+            let gaps: Vec<_> = document
+                .skipped_regions
+                .iter()
+                .filter(|gap| {
+                    gap.domain == domain
+                        && gap.detail == "plsql-conditional-selection-unavailable"
+                        && selected(&source, &gap.source) == written.as_bytes()
+                })
+                .collect();
+            assert_eq!(gaps.len(), 1, "one physical {domain:?} conditional gap");
+            assert_eq!(gaps[0].reason, SkippedRegionReason::UnsupportedConstruct);
+            assert_source(
+                &service,
+                &receipt,
+                file,
+                &gaps[0].source,
+                &source,
+                written.as_bytes(),
+            );
+        }
+    }
+    assert!(document.occurrences.iter().all(|site| {
+        site.role != OccurrenceRole::CallSite
+            && (site.role != OccurrenceRole::Reference
+                || matches!(site.target, OccurrenceTarget::Unresolved { .. }))
+    }));
+    assert!(!document.relations.iter().any(|relation| {
+        matches!(
+            relation.predicate,
+            RelationPredicate::Calls | RelationPredicate::RefersTo
+        )
+    }));
+    let relationships = service
+        .symbol_relationships(
+            receipt.generation,
+            BTreeSet::from([function]),
+            vec![RelationFamily::Calls, RelationFamily::References],
+            Some(RelationDirection::Outbound),
+            0,
+            16,
+            0,
+            &deadline(),
+        )
+        .unwrap();
+    assert_eq!(relationships.data.returned_edges, 0);
+    assert!(!relationships.data.truncated);
+    let summary = service
+        .coverage_gap_summary_for_paths_until(
+            receipt.repository,
+            receipt.generation,
+            &["plsql".to_owned()],
+            &[path.to_owned()],
+            &deadline(),
+        )
+        .unwrap();
+    assert!(summary.incomplete);
+    assert_eq!(summary.skipped_inputs, 1);
+    assert_eq!(summary.omitted_gap_groups, 0);
+    assert!(summary.gaps.iter().any(|gap| {
+        gap.reason == FirstSliceCoverageGapReason::Unsupported
+            && gap.language.as_deref() == Some("plsql")
+            && gap.files == 1
+    }));
+}
+
+#[test]
 fn dedicated_plsql_suffixes_do_not_reassign_default_sql_sources() {
     let repository = directory();
     for path in [
