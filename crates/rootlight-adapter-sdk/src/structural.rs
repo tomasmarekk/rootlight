@@ -101,6 +101,14 @@ pub fn structural_entity_kind(fact: &SyntaxFact) -> Option<EntityKind> {
         SyntaxFactKind::Declaration if label == "pascal.object.declaration" => {
             Some(EntityKind::Struct)
         }
+        SyntaxFactKind::Declaration
+            if matches!(
+                label,
+                "pascal.class_variable.declaration" | "pascal.class_variable_fragment.declaration"
+            ) =>
+        {
+            Some(EntityKind::Field)
+        }
         SyntaxFactKind::Declaration if label == "pascal.procedure.declaration" => {
             Some(EntityKind::Function)
         }
@@ -1296,6 +1304,11 @@ mod tests {
             ("pascal.destructor.declaration", EntityKind::Method),
             ("pascal.property.declaration", EntityKind::Property),
             ("pascal.field_fragment.declaration", EntityKind::Field),
+            ("pascal.class_variable.declaration", EntityKind::Field),
+            (
+                "pascal.class_variable_fragment.declaration",
+                EntityKind::Field,
+            ),
             ("pascal.variable_fragment.declaration", EntityKind::Variable),
             (
                 "pascal.parameter_fragment.declaration",
