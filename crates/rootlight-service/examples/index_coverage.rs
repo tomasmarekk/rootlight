@@ -5,10 +5,13 @@
 //! wait for external source edits between newline-delimited reports.
 //! Gap matches identify exact-span occurrences, not the semantic owner of a gap.
 //! Bounded gap text comes from verified source reads; omissions carry reasons.
+//! Opt-in source accounting verifies every retained source without exporting
+//! normalized binding witnesses or treating absent details as semantic proof.
 
 use std::{
     collections::{BTreeMap, BTreeSet},
     error::Error,
+    ffi::OsString,
     fs,
     io::{BufRead, Read, Write},
     path::{Path, PathBuf},
@@ -41,10 +44,74 @@ mod gap_census;
 #[path = "../src/container_sources/fixture.rs"]
 mod fixture;
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum StateMode {
     Fresh,
     Resume,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ReportMode {
+    Full,
+    SourceAccounting,
+}
+
+struct Arguments<'a> {
+    state_mode: StateMode,
+    sequence: bool,
+    report_mode: ReportMode,
+    paths: &'a [OsString],
+}
+
+fn parse_arguments(args: &[OsString]) -> Result<Arguments<'_>, Box<dyn Error>> {
+    let mut state_mode = StateMode::Fresh;
+    let mut sequence = false;
+    let mut report_mode = ReportMode::Full;
+    let mut lifetime_selected = false;
+    let mut flags = 0;
+    for argument in args {
+        if !argument.to_string_lossy().starts_with("--") {
+            break;
+        }
+        match argument.to_str() {
+            Some("--resume") | Some("--warm-sequence") => {
+                if lifetime_selected {
+                    return Err("duplicate or conflicting service lifetime flag".into());
+                }
+                lifetime_selected = true;
+                if argument == "--resume" {
+                    state_mode = StateMode::Resume;
+                } else {
+                    sequence = true;
+                }
+            }
+            Some("--source-accounting") => {
+                if report_mode == ReportMode::SourceAccounting {
+                    return Err("duplicate source-accounting flag".into());
+                }
+                report_mode = ReportMode::SourceAccounting;
+            }
+            _ => return Err("unknown diagnostic flag".into()),
+        }
+        flags += 1;
+    }
+    let paths = args.get(flags..).ok_or("invalid diagnostic arguments")?;
+    if !(2..=3).contains(&paths.len())
+        || paths
+            .iter()
+            .any(|argument| argument.to_string_lossy().starts_with("--"))
+    {
+        return Err("usage: index_coverage [--resume | --warm-sequence] [--source-accounting] REPOSITORY STATE_DIRECTORY [CONFIG_FILE]".into());
+    }
+    if sequence && report_mode == ReportMode::SourceAccounting {
+        return Err("source-accounting does not support warm sequences".into());
+    }
+    Ok(Arguments {
+        state_mode,
+        sequence,
+        report_mode,
+        paths,
+    })
 }
 
 #[derive(Clone, Copy)]
@@ -60,6 +127,7 @@ struct DiagnosticSession {
     config: Option<String>,
     open_wall_micros: u128,
     lifetime: ServiceLifetime,
+    report_mode: ReportMode,
 }
 
 fn deadline() -> Result<Cancellation, Box<dyn Error>> {
@@ -97,16 +165,12 @@ fn read_live_file(repository: &Path, file: &FileRecord) -> Result<Vec<u8>, Box<d
 
 fn main() -> Result<(), Box<dyn Error>> {
     let args: Vec<_> = std::env::args_os().skip(1).collect();
-    let (mode, sequence, args) = match args.split_first() {
-        Some((flag, tail)) if flag == "--resume" => (StateMode::Resume, false, tail),
-        Some((flag, tail)) if flag == "--warm-sequence" => (StateMode::Fresh, true, tail),
-        _ => (StateMode::Fresh, false, args.as_slice()),
-    };
-    if !(2..=3).contains(&args.len()) {
-        return Err(
-            "usage: index_coverage [--resume | --warm-sequence] REPOSITORY STATE_DIRECTORY [CONFIG_FILE]".into(),
-        );
-    }
+    let Arguments {
+        state_mode: mode,
+        sequence,
+        report_mode,
+        paths: args,
+    } = parse_arguments(&args)?;
     let repository = PathBuf::from(&args[0]);
     let state = PathBuf::from(&args[1]);
     let config = args
@@ -126,7 +190,12 @@ fn main() -> Result<(), Box<dyn Error>> {
             &mut std::io::stdout().lock(),
         )?;
     } else {
-        let report = inspect(&repository, &state, config.as_deref(), mode)?;
+        let report = match report_mode {
+            ReportMode::Full => inspect(&repository, &state, config.as_deref(), mode)?,
+            ReportMode::SourceAccounting => {
+                inspect_source_accounting(&repository, &state, config.as_deref(), mode)?
+            }
+        };
         write_pretty_report(&report, &mut std::io::stdout().lock())?;
     }
     Ok(())
@@ -174,6 +243,17 @@ fn inspect(
     DiagnosticSession::open(repository, state, config, mode)?.inspect()
 }
 
+fn inspect_source_accounting(
+    repository: &Path,
+    state: &Path,
+    config: Option<&str>,
+    mode: StateMode,
+) -> Result<serde_json::Value, Box<dyn Error>> {
+    let mut session = DiagnosticSession::open(repository, state, config, mode)?;
+    session.report_mode = ReportMode::SourceAccounting;
+    session.inspect()
+}
+
 impl DiagnosticSession {
     fn open(
         repository: &Path,
@@ -206,6 +286,7 @@ impl DiagnosticSession {
                 StateMode::Fresh => ServiceLifetime::Fresh,
                 StateMode::Resume => ServiceLifetime::Reopened,
             },
+            report_mode: ReportMode::Full,
         })
     }
 
@@ -216,7 +297,12 @@ impl DiagnosticSession {
             config,
             open_wall_micros,
             lifetime,
+            report_mode,
         } = self;
+        if *report_mode == ReportMode::SourceAccounting && matches!(lifetime, ServiceLifetime::Warm)
+        {
+            return Err("source-accounting does not support warm sequences".into());
+        }
         let previous_generation = match lifetime {
             ServiceLifetime::Fresh => None,
             ServiceLifetime::Reopened | ServiceLifetime::Warm => {
@@ -236,12 +322,33 @@ impl DiagnosticSession {
             return Err("unchanged repository produced a different receipt".into());
         }
         let status = service.repository_status(cold.repository, Some(cold.generation))?;
-        let (rows, configuration_hash, (exported_provenance, exported_fact_identities), gap_census) =
+        let (rows, configuration_hash, details) =
             service.inspect_generation(
                 cold.repository,
                 Some(cold.generation),
                 &deadline()?,
                 |snapshot| -> Result<_, Box<dyn Error>> {
+                    if *report_mode == ReportMode::SourceAccounting {
+                        let (rows, accounting) = inspect_source_files(
+                            snapshot,
+                            service,
+                            repository,
+                            cold.generation,
+                        )?;
+                        return Ok((rows, snapshot.metadata().configuration_hash(), json!({
+                            "report_scope":"retained_source_accounting",
+                            "source_accounting":accounting,
+                            "normalized_proof_exported":false,
+                            "structural_coverage_qualified":false,
+                            "semantic_resolution_qualified":false,
+                            "gap_census":null,
+                            "gap_census_scope":"not_exported_source_accounting",
+                            "exported_provenance":null,
+                            "exported_fact_identities":null,
+                            "exported_fact_identity_scope":"not_exported_source_accounting",
+                            "exported_fact_root_scope":"not_exported_source_accounting"
+                        })));
+                    }
                     let mut evidence = binding_proofs::select_report_evidence(snapshot.document())?;
                     let mut census = gap_census::GapCensus::new();
                     let rows = inspect_files(
@@ -260,13 +367,19 @@ impl DiagnosticSession {
                     Ok((
                         rows,
                         snapshot.metadata().configuration_hash(),
-                        (evidence.provenance, evidence.fact_identities),
-                        census,
+                        json!({
+                            "gap_census":census,
+                            "exported_provenance":evidence.provenance,
+                            "exported_fact_identities":evidence.fact_identities,
+                            "exported_fact_identity_scope":"terminal_source_witnesses_not_semantic_records",
+                            "exported_fact_root_scope":"emitted_normalized_files_gaps_matching_occurrences_and_bindings"
+                        }),
                     ))
                 },
             )??;
         let mut report = json!({
-            "schema":"rootlight-index-coverage-diagnostic/4", "explicit_configuration":config.is_some(),
+            "schema":if *report_mode == ReportMode::Full { "rootlight-index-coverage-diagnostic/4" }
+                else { "rootlight-index-source-accounting-diagnostic/1" }, "explicit_configuration":config.is_some(),
             "configuration_input_hash":rootlight_ids::content_hash(config.as_deref().unwrap_or("").as_bytes()).to_string(),
             "configuration_hash":configuration_hash,
             "open_wall_micros":open_wall_micros,
@@ -277,13 +390,15 @@ impl DiagnosticSession {
             "coverage":status.coverage.iter().map(|entry| json!({"language":entry.language,"indexed_files":entry.indexed_files,
                 "discovered_files":entry.discovered_files,"tier":entry.tier,"status":entry.status})).collect::<Vec<_>>(),
             "files":rows,"full_semantic_completeness_proven":false,
-            "gap_census":gap_census,
-            "exported_provenance":exported_provenance,
-            "exported_fact_identities":exported_fact_identities,
-            "exported_fact_identity_scope":"terminal_source_witnesses_not_semantic_records",
-            "exported_fact_root_scope":"emitted_normalized_files_gaps_matching_occurrences_and_bindings",
             "installed_mcp_qualified":false
         });
+        let serde_json::Value::Object(details) = details else {
+            return Err("report details are not an object".into());
+        };
+        report
+            .as_object_mut()
+            .ok_or("report is not an object")?
+            .extend(details);
         match lifetime {
             ServiceLifetime::Fresh => {
                 report["service_lifetime"] = json!("fresh");
@@ -292,7 +407,11 @@ impl DiagnosticSession {
                 report["cold_timing"] = cold_timing;
             }
             ServiceLifetime::Reopened | ServiceLifetime::Warm => {
-                report["schema"] = json!("rootlight-index-update-diagnostic/1");
+                report["schema"] = json!(if *report_mode == ReportMode::Full {
+                    "rootlight-index-update-diagnostic/1"
+                } else {
+                    "rootlight-index-source-accounting-update-diagnostic/1"
+                });
                 report["service_lifetime"] = json!("reopened");
                 if matches!(lifetime, ServiceLifetime::Warm) {
                     report["schema"] = json!("rootlight-index-warm-update-diagnostic/1");
@@ -389,15 +508,9 @@ fn occurrence_matches_gap(site: &OccurrenceRecord, gap: &SkippedRegion) -> bool 
         && site.source.content_hash() == gap.source.content_hash()
 }
 
-fn inspect_files<'snapshot>(
-    snapshot: &'snapshot rootlight_storage::GenerationSnapshot,
-    service: &FirstSliceService,
-    repository: &Path,
-    generation: rootlight_ids::GenerationId,
-    evidence: &mut binding_proofs::BindingEvidence,
-    census: &mut gap_census::GapCensus<'snapshot>,
-) -> Result<Vec<serde_json::Value>, Box<dyn Error>> {
-    let document = snapshot.document();
+fn source_origins(
+    document: &rootlight_ir::NormalizedIrDocument,
+) -> Result<BTreeMap<rootlight_ids::FileId, &SourceRef>, Box<dyn Error>> {
     let mut origins = BTreeMap::new();
     for mapping in &document.source_mappings {
         if mapping.kind == SourceMappingKind::ExtractedFromContainer
@@ -408,43 +521,74 @@ fn inspect_files<'snapshot>(
             return Err("extracted source has multiple container origins".into());
         }
     }
-    let mut verified_containers = BTreeSet::new();
-    let mut rows = Vec::new();
-    for (file, normalized) in document.files.iter().map(|file| (file, true)).chain(
-        snapshot
-            .source_files()
-            .entries()
-            .iter()
-            .map(|entry| (entry.file(), false)),
-    ) {
+    Ok(origins)
+}
+
+struct VerifiedSource {
+    source_exact: bool,
+    read_bytes: u64,
+    read_chunks: usize,
+    gap_text: Option<gap_text::GapTexts>,
+}
+
+struct FileSourceVerifier<'a> {
+    snapshot: &'a rootlight_storage::GenerationSnapshot,
+    service: &'a FirstSliceService,
+    repository: &'a Path,
+    generation: rootlight_ids::GenerationId,
+    verified_containers: BTreeSet<rootlight_ids::FileId>,
+}
+
+impl<'a> FileSourceVerifier<'a> {
+    fn new(
+        snapshot: &'a rootlight_storage::GenerationSnapshot,
+        service: &'a FirstSliceService,
+        repository: &'a Path,
+        generation: rootlight_ids::GenerationId,
+    ) -> Self {
+        Self {
+            snapshot,
+            service,
+            repository,
+            generation,
+            verified_containers: BTreeSet::new(),
+        }
+    }
+
+    fn verify(
+        &mut self,
+        file: &FileRecord,
+        origin: Option<&SourceRef>,
+        gap_spans: Option<Vec<(usize, usize)>>,
+    ) -> Result<VerifiedSource, Box<dyn Error>> {
         let source = file
             .evidence
             .source
             .clone()
             .ok_or("file has no generation-bound source")?;
-        if source.generation() != generation {
+        if source.generation() != self.generation {
             return Err("file source belongs to a different generation".into());
         }
-        let origin = origins.get(&file.id).copied();
         if let Some(container_ref) = origin {
-            let container = snapshot
+            let container = self
+                .snapshot
                 .find_file(container_ref.span().file())
                 .ok_or("extracted source has no retained container")?;
             if container_ref.repository() != file.repository
-                || container_ref.generation() != generation
+                || container_ref.generation() != self.generation
                 || container_ref.span().start_byte() != 0
                 || container_ref.span().end_byte() != container.byte_length
                 || container_ref.content_hash() != container.content_hash
             {
                 return Err("extracted source has an invalid container reference".into());
             }
-            if verified_containers.insert(container.id) {
-                read_live_file(repository, container)?;
+            if self.verified_containers.insert(container.id) {
+                read_live_file(self.repository, container)?;
             }
         }
         let live = origin
             .is_none()
-            .then(|| read_live_file(repository, file))
+            .then(|| read_live_file(self.repository, file))
             .transpose()?;
         let text = live
             .as_deref()
@@ -456,26 +600,12 @@ fn inspect_files<'snapshot>(
             SourceEncoding::Bytes
         };
         let file_length = usize::try_from(file.byte_length)?;
-        let gap_spans = document
-            .skipped_regions
-            .iter()
-            .filter(|gap| gap.source.span().file() == file.id)
-            .map(|gap| {
-                if gap.source.repository() != file.repository
-                    || gap.source.generation() != generation
-                    || gap.source.content_hash() != file.content_hash
-                {
-                    return Err("gap source identity differs from indexed file".into());
-                }
-                Ok((
-                    usize::try_from(gap.source.span().start_byte())?,
-                    usize::try_from(gap.source.span().end_byte())?,
-                ))
-            })
-            .collect::<Result<Vec<_>, Box<dyn Error>>>()?;
-        let mut gap_text =
-            gap_text::GapTexts::new(file_length, file.encoding == "utf-8", gap_spans)?;
+        let mut gap_text = gap_spans
+            .map(|spans| gap_text::GapTexts::new(file_length, file.encoding == "utf-8", spans))
+            .transpose()?;
         let mut returned_hasher = blake3::Hasher::new();
+        let mut read_bytes = 0_u64;
+        let mut read_chunks = 0_usize;
         let mut start = 0_usize;
         loop {
             let end = text.map_or_else(
@@ -489,8 +619,8 @@ fn inspect_files<'snapshot>(
                 source.content_hash(),
                 None,
             );
-            let read = service.source_read_with_options_and_budget(
-                generation,
+            let read = self.service.source_read_with_options_and_budget(
+                self.generation,
                 vec![part.clone()],
                 SourceReadOptions::new()
                     .with_context_lines_before(0)
@@ -499,7 +629,7 @@ fn inspect_files<'snapshot>(
                 FirstSliceBudget::default(),
                 &deadline()?,
             )?;
-            if read.data.generation != generation || read.data.chunks.len() != 1 {
+            if read.data.generation != self.generation || read.data.chunks.len() != 1 {
                 return Err(format!(
                     "source retrieval returned an unexpected generation or chunk count: {}",
                     file.path
@@ -522,7 +652,15 @@ fn inspect_files<'snapshot>(
                     file.path, chunk.start_byte, chunk.end_byte, chunk.bytes.len()).into());
             }
             returned_hasher.update(&chunk.bytes);
-            gap_text.capture(start, &chunk.bytes)?;
+            read_bytes = read_bytes
+                .checked_add(u64::try_from(chunk.bytes.len())?)
+                .ok_or("source read byte count overflow")?;
+            read_chunks = read_chunks
+                .checked_add(1)
+                .ok_or("source read chunk count overflow")?;
+            if let Some(text) = &mut gap_text {
+                text.capture(start, &chunk.bytes)?;
+            }
             if end == file_length {
                 break;
             }
@@ -537,6 +675,233 @@ fn inspect_files<'snapshot>(
             )
             .into());
         }
+        if read_bytes != file.byte_length {
+            return Err("retrieved source byte count differs from indexed file".into());
+        }
+        Ok(VerifiedSource {
+            source_exact: live.is_some(),
+            read_bytes,
+            read_chunks,
+            gap_text,
+        })
+    }
+}
+
+#[derive(Default)]
+struct FileRecordCounts {
+    gaps: usize,
+    occurrences: usize,
+    resolved: usize,
+    candidates: usize,
+    unresolved: usize,
+}
+
+fn add_count(count: &mut usize, increment: usize) -> Result<(), Box<dyn Error>> {
+    *count = count
+        .checked_add(increment)
+        .ok_or("retained record count overflow")?;
+    Ok(())
+}
+
+fn verify_counted_source(
+    file: &FileRecord,
+    source: &SourceRef,
+    generation: rootlight_ids::GenerationId,
+) -> Result<(), Box<dyn Error>> {
+    if source.repository() != file.repository
+        || source.generation() != generation
+        || source.content_hash() != file.content_hash
+        || source.span().file() != file.id
+        || source.span().end_byte() > file.byte_length
+    {
+        return Err("counted record source differs from retained file".into());
+    }
+    Ok(())
+}
+
+fn inspect_source_files(
+    snapshot: &rootlight_storage::GenerationSnapshot,
+    service: &FirstSliceService,
+    repository: &Path,
+    generation: rootlight_ids::GenerationId,
+) -> Result<(Vec<serde_json::Value>, serde_json::Value), Box<dyn Error>> {
+    let document = snapshot.document();
+    let origins = source_origins(document)?;
+    let mut files = BTreeMap::new();
+    for (file, normalized) in document.files.iter().map(|file| (file, true)).chain(
+        snapshot
+            .source_files()
+            .entries()
+            .iter()
+            .map(|entry| (entry.file(), false)),
+    ) {
+        if files
+            .insert(file.id, (file, normalized, FileRecordCounts::default()))
+            .is_some()
+        {
+            return Err("retained file identity appears more than once".into());
+        }
+    }
+    if files.len() != snapshot.file_count() {
+        return Err("source accounting omitted a retained file record".into());
+    }
+    // Count retained records once; no target/provenance closure or per-record
+    // witness payload is needed to account for physical source retention.
+    for occurrence in &document.occurrences {
+        let (file, _, counts) = files
+            .get_mut(&occurrence.source.span().file())
+            .ok_or("occurrence has no retained source file")?;
+        verify_counted_source(file, &occurrence.source, generation)?;
+        if occurrence.file != file.id
+            || occurrence.repository != file.repository
+            || occurrence.generation != generation
+        {
+            return Err("occurrence identity differs from counted source file".into());
+        }
+        add_count(&mut counts.occurrences, 1)?;
+        match occurrence.target {
+            OccurrenceTarget::Resolved { .. } => add_count(&mut counts.resolved, 1)?,
+            OccurrenceTarget::Candidates { .. } => add_count(&mut counts.candidates, 1)?,
+            OccurrenceTarget::Unresolved { .. } => add_count(&mut counts.unresolved, 1)?,
+        }
+    }
+    for gap in &document.skipped_regions {
+        let (file, _, counts) = files
+            .get_mut(&gap.source.span().file())
+            .ok_or("gap has no retained source file")?;
+        verify_counted_source(file, &gap.source, generation)?;
+        if gap.repository != file.repository || gap.generation != generation {
+            return Err("gap identity differs from counted source file".into());
+        }
+        add_count(&mut counts.gaps, 1)?;
+    }
+    let mut verifier = FileSourceVerifier::new(snapshot, service, repository, generation);
+    let mut rows = Vec::new();
+    let mut gap_total = 0_usize;
+    let mut occurrence_total = 0_usize;
+    let mut physical_files = 0_usize;
+    let mut normalized_files = 0_usize;
+    let mut read_bytes = 0_u64;
+    let mut read_chunks = 0_usize;
+    for (file, normalized, counts) in files.values() {
+        let origin = origins.get(&file.id).copied();
+        let verified = verifier.verify(file, origin, None)?;
+        if verified.gap_text.is_some() {
+            return Err("source accounting constructed gap text witnesses".into());
+        }
+        add_count(&mut gap_total, counts.gaps)?;
+        add_count(&mut occurrence_total, counts.occurrences)?;
+        add_count(&mut read_chunks, verified.read_chunks)?;
+        if origin.is_none() {
+            add_count(&mut physical_files, 1)?;
+        }
+        if *normalized {
+            add_count(&mut normalized_files, 1)?;
+        }
+        read_bytes = read_bytes
+            .checked_add(verified.read_bytes)
+            .ok_or("source read byte count overflow")?;
+        let mut resolution_total = counts.resolved;
+        add_count(&mut resolution_total, counts.candidates)?;
+        add_count(&mut resolution_total, counts.unresolved)?;
+        if resolution_total != counts.occurrences {
+            return Err("occurrence resolution counts are not conserved".into());
+        }
+        let container_path = origin.and_then(|reference| {
+            snapshot
+                .find_file(reference.span().file())
+                .map(|container| container.path.as_str())
+        });
+        rows.push(json!({
+            "file":file,
+            "normalized_record_present":normalized,
+            "normalized_proof_status":if *normalized { "not_exported_source_accounting" }
+                else { "unavailable_source_only" },
+            "source_exact":verified.source_exact,
+            "source_read_exact":true,
+            "source_read_bytes":verified.read_bytes,
+            "source_read_chunks":verified.read_chunks,
+            "extracted_from":origin,
+            "container_path":container_path,
+            "container_live_exact":origin.map(|_| true),
+            "extraction_independently_verified":origin.map(|_| false),
+            "record_count_scope":"retained_normalized_records_not_source_completeness",
+            "gap_record_count":counts.gaps,
+            "occurrence_record_count":counts.occurrences,
+            "occurrence_resolution_counts":{"resolved":counts.resolved,"candidates":counts.candidates,
+                "unresolved":counts.unresolved},
+            "gaps":null,"occurrences":null,"supplemental_calls":null,"external_bindings":null
+        }));
+    }
+    if gap_total != document.skipped_regions.len() || occurrence_total != document.occurrences.len()
+    {
+        return Err("source accounting did not conserve retained normalized record counts".into());
+    }
+    let extracted_files = rows
+        .len()
+        .checked_sub(physical_files)
+        .ok_or("extracted file count underflow")?;
+    let source_only_files = rows
+        .len()
+        .checked_sub(normalized_files)
+        .ok_or("source-only file count underflow")?;
+    let accounting = json!({
+        "scope":"retained_normalized_record_counts_not_exhaustive_semantic_denominators",
+        "retained_file_records":rows.len(),"physical_file_records":physical_files,
+        "extracted_file_records":extracted_files,"normalized_file_records":normalized_files,
+        "source_only_file_records":source_only_files,
+        "source_read_verified_file_records":rows.len(),"source_read_bytes":read_bytes,
+        "source_read_chunks":read_chunks,"retained_gap_records":gap_total,
+        "retained_occurrence_records":occurrence_total,
+        "retained_entity_records":document.entities.len(),"retained_relation_records":document.relations.len(),
+        "normalized_witness_details_exported":false,"full_semantic_completeness_proven":false,
+        "installed_mcp_qualified":false
+    });
+    Ok((rows, accounting))
+}
+
+fn inspect_files<'snapshot>(
+    snapshot: &'snapshot rootlight_storage::GenerationSnapshot,
+    service: &FirstSliceService,
+    repository: &Path,
+    generation: rootlight_ids::GenerationId,
+    evidence: &mut binding_proofs::BindingEvidence,
+    census: &mut gap_census::GapCensus<'snapshot>,
+) -> Result<Vec<serde_json::Value>, Box<dyn Error>> {
+    let document = snapshot.document();
+    let origins = source_origins(document)?;
+    let mut verifier = FileSourceVerifier::new(snapshot, service, repository, generation);
+    let mut rows = Vec::new();
+    for (file, normalized) in document.files.iter().map(|file| (file, true)).chain(
+        snapshot
+            .source_files()
+            .entries()
+            .iter()
+            .map(|entry| (entry.file(), false)),
+    ) {
+        let origin = origins.get(&file.id).copied();
+        let gap_spans = document
+            .skipped_regions
+            .iter()
+            .filter(|gap| gap.source.span().file() == file.id)
+            .map(|gap| {
+                if gap.source.repository() != file.repository
+                    || gap.source.generation() != generation
+                    || gap.source.content_hash() != file.content_hash
+                {
+                    return Err("gap source identity differs from indexed file".into());
+                }
+                Ok((
+                    usize::try_from(gap.source.span().start_byte())?,
+                    usize::try_from(gap.source.span().end_byte())?,
+                ))
+            })
+            .collect::<Result<Vec<_>, Box<dyn Error>>>()?;
+        let verified = verifier.verify(file, origin, Some(gap_spans))?;
+        let gap_text = verified
+            .gap_text
+            .as_ref()
+            .ok_or("full report has no gap text collector")?;
         let mut occurrences = BTreeMap::<String, usize>::new();
         let mut sites_by_span = BTreeMap::<_, Vec<_>>::new();
         for site in &document.occurrences {
@@ -606,7 +971,7 @@ fn inspect_files<'snapshot>(
         rows.push(json!({
             "file":file,
             "normalized_proof_status":if normalized { "exported" } else { "unavailable_source_only" },
-            "source_exact":live.is_some(),
+            "source_exact":verified.source_exact,
             "source_read_exact":true,
             "extracted_from":origin,
             "container_path":container_path,
@@ -2147,6 +2512,540 @@ mod tests {
         assert_eq!(timing["operation"]["strategy"], "RetainedGeneration");
         assert_eq!(timing["operation"]["rebuilt_files"], 0);
         assert_eq!(timing["operation"]["rebuilt_facts"], 0);
+    }
+
+    #[test]
+    fn source_accounting_flags_are_explicit_and_reject_conflicting_modes() {
+        let parse = |args: &[&str]| {
+            let args: Vec<_> = args
+                .iter()
+                .map(|argument| OsString::from(*argument))
+                .collect();
+            parse_arguments(&args).map(|parsed| {
+                (
+                    parsed.state_mode,
+                    parsed.sequence,
+                    parsed.report_mode,
+                    parsed.paths.to_vec(),
+                )
+            })
+        };
+        for (flags, mode, report_mode, sequence) in [
+            (vec![], StateMode::Fresh, ReportMode::Full, false),
+            (vec!["--resume"], StateMode::Resume, ReportMode::Full, false),
+            (
+                vec!["--warm-sequence"],
+                StateMode::Fresh,
+                ReportMode::Full,
+                true,
+            ),
+            (
+                vec!["--source-accounting"],
+                StateMode::Fresh,
+                ReportMode::SourceAccounting,
+                false,
+            ),
+            (
+                vec!["--resume", "--source-accounting"],
+                StateMode::Resume,
+                ReportMode::SourceAccounting,
+                false,
+            ),
+            (
+                vec!["--source-accounting", "--resume"],
+                StateMode::Resume,
+                ReportMode::SourceAccounting,
+                false,
+            ),
+        ] {
+            let mut args = flags;
+            args.extend(["repository", "state", "configuration"]);
+            let (actual_mode, actual_sequence, actual_report, paths) = parse(&args).unwrap();
+            assert_eq!(actual_mode, mode);
+            assert_eq!(actual_sequence, sequence);
+            assert_eq!(actual_report, report_mode);
+            assert_eq!(
+                paths,
+                ["repository", "state", "configuration"].map(OsString::from)
+            );
+        }
+        for args in [
+            vec![],
+            vec!["repository"],
+            vec!["repository", "state", "configuration", "extra"],
+            vec!["--unknown", "repository", "state"],
+            vec!["--resume", "--resume", "repository", "state"],
+            vec!["--warm-sequence", "--warm-sequence", "repository", "state"],
+            vec!["--resume", "--warm-sequence", "repository", "state"],
+            vec!["--warm-sequence", "--resume", "repository", "state"],
+            vec![
+                "--source-accounting",
+                "--source-accounting",
+                "repository",
+                "state",
+            ],
+            vec![
+                "--source-accounting",
+                "--warm-sequence",
+                "repository",
+                "state",
+            ],
+            vec![
+                "--warm-sequence",
+                "--source-accounting",
+                "repository",
+                "state",
+            ],
+            vec!["repository", "--source-accounting", "state"],
+            vec!["repository", "state", "--unknown"],
+        ] {
+            assert!(
+                parse(&args).is_err(),
+                "accepted invalid arguments: {args:?}"
+            );
+        }
+        let mut count = usize::MAX;
+        assert!(add_count(&mut count, 1).is_err());
+        assert_eq!(count, usize::MAX);
+    }
+
+    fn assert_source_accounting_scope(report: &serde_json::Value) {
+        assert_eq!(report["report_scope"], "retained_source_accounting");
+        for key in [
+            "gap_census",
+            "exported_provenance",
+            "exported_fact_identities",
+        ] {
+            assert!(
+                report.get(key).unwrap().is_null(),
+                "detail is not omitted: {key}"
+            );
+        }
+        for key in [
+            "gap_census_scope",
+            "exported_fact_identity_scope",
+            "exported_fact_root_scope",
+        ] {
+            assert_eq!(report[key], "not_exported_source_accounting");
+        }
+        for key in [
+            "normalized_proof_exported",
+            "structural_coverage_qualified",
+            "semantic_resolution_qualified",
+            "full_semantic_completeness_proven",
+            "installed_mcp_qualified",
+        ] {
+            assert_eq!(report[key], false);
+        }
+        let rows = report["files"].as_array().unwrap();
+        assert_eq!(
+            report["source_accounting"]["retained_file_records"],
+            rows.len()
+        );
+        assert_eq!(
+            report["source_accounting"]["source_read_verified_file_records"],
+            rows.len()
+        );
+        let mut gaps = 0_u64;
+        let mut occurrences = 0_u64;
+        let mut bytes = 0_u64;
+        let mut chunks = 0_u64;
+        for row in rows {
+            for key in [
+                "gaps",
+                "occurrences",
+                "supplemental_calls",
+                "external_bindings",
+            ] {
+                assert!(row.get(key).unwrap().is_null());
+            }
+            assert_eq!(row["source_read_exact"], true);
+            assert_ne!(row["normalized_proof_status"], "exported");
+            assert_eq!(row["source_read_bytes"], row["file"]["byte_length"]);
+            assert!(row["source_read_chunks"].as_u64().unwrap() >= 1);
+            assert_eq!(
+                row["record_count_scope"],
+                "retained_normalized_records_not_source_completeness"
+            );
+            let resolution = &row["occurrence_resolution_counts"];
+            assert_eq!(
+                row["occurrence_record_count"].as_u64().unwrap(),
+                resolution["resolved"].as_u64().unwrap()
+                    + resolution["candidates"].as_u64().unwrap()
+                    + resolution["unresolved"].as_u64().unwrap()
+            );
+            gaps += row["gap_record_count"].as_u64().unwrap();
+            occurrences += row["occurrence_record_count"].as_u64().unwrap();
+            bytes += row["source_read_bytes"].as_u64().unwrap();
+            chunks += row["source_read_chunks"].as_u64().unwrap();
+        }
+        let accounting = &report["source_accounting"];
+        assert_eq!(
+            accounting["scope"],
+            "retained_normalized_record_counts_not_exhaustive_semantic_denominators"
+        );
+        assert_eq!(accounting["retained_gap_records"], gaps);
+        assert_eq!(accounting["retained_occurrence_records"], occurrences);
+        assert_eq!(accounting["source_read_bytes"], bytes);
+        assert_eq!(accounting["source_read_chunks"], chunks);
+        assert_eq!(accounting["normalized_witness_details_exported"], false);
+        assert_eq!(accounting["full_semantic_completeness_proven"], false);
+        assert_eq!(accounting["installed_mcp_qualified"], false);
+    }
+
+    #[test]
+    fn full_report_keeps_its_default_schema_and_field_contract() {
+        let directory = tempfile::tempdir().unwrap();
+        let repository = directory.path().join("repository");
+        fs::create_dir(&repository).unwrap();
+        fs::write(
+            repository.join("module.rs"),
+            b"pub fn compute(value: i32) -> i32 { value + 1 }\n",
+        )
+        .unwrap();
+        let report = inspect(
+            &repository,
+            &directory.path().join("state"),
+            None,
+            StateMode::Fresh,
+        )
+        .unwrap();
+        assert_eq!(report["schema"], "rootlight-index-coverage-diagnostic/4");
+        let expected: BTreeSet<_> = [
+            "schema",
+            "explicit_configuration",
+            "configuration_input_hash",
+            "configuration_hash",
+            "open_wall_micros",
+            "process_id",
+            "no_op_same_generation",
+            "no_op_wall_micros",
+            "no_op_timing",
+            "generation_inspection_method",
+            "shared_bundle_roundtrip",
+            "coverage",
+            "files",
+            "full_semantic_completeness_proven",
+            "gap_census",
+            "exported_provenance",
+            "exported_fact_identities",
+            "exported_fact_identity_scope",
+            "exported_fact_root_scope",
+            "installed_mcp_qualified",
+            "service_lifetime",
+            "cold",
+            "cold_wall_micros",
+            "cold_timing",
+        ]
+        .into_iter()
+        .collect();
+        let actual: BTreeSet<_> = report
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
+        assert_eq!(actual, expected);
+        assert!(report["exported_provenance"].is_array());
+        assert!(report["exported_fact_identities"].is_array());
+        assert!(report["gap_census"].is_object());
+        let expected_file: BTreeSet<_> = [
+            "file",
+            "normalized_proof_status",
+            "source_exact",
+            "source_read_exact",
+            "extracted_from",
+            "container_path",
+            "container_live_exact",
+            "extraction_independently_verified",
+            "occurrences",
+            "gaps",
+            "supplemental_calls",
+            "external_bindings",
+        ]
+        .into_iter()
+        .collect();
+        for row in report["files"].as_array().unwrap() {
+            assert_eq!(
+                row.as_object()
+                    .unwrap()
+                    .keys()
+                    .map(String::as_str)
+                    .collect::<BTreeSet<_>>(),
+                expected_file
+            );
+        }
+    }
+
+    #[test]
+    fn source_accounting_reads_all_physical_bytes_and_conserves_retained_counts_after_reopen() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = fs::canonicalize(directory.path()).unwrap();
+        let repository = root.join("repository");
+        let state = root.join("state");
+        fs::create_dir(&repository).unwrap();
+        fs::write(repository.join("empty.txt"), b"").unwrap();
+        fs::write(
+            repository.join("notes.txt"),
+            format!(
+                "{}🦀\r\n{}",
+                "x".repeat(16 * 1024 - 1),
+                "tail".repeat(3_000)
+            ),
+        )
+        .unwrap();
+        let encoded = std::iter::once(0xfeff_u16)
+            .chain("λ𝄞\r\n".repeat(5_000).encode_utf16())
+            .flat_map(u16::to_le_bytes)
+            .collect::<Vec<_>>();
+        fs::write(repository.join("encoded.txt"), &encoded).unwrap();
+        fs::write(
+            repository.join("module.rs"),
+            b"pub fn compute(value: i32) -> i32 { value + 1 }\n",
+        )
+        .unwrap();
+        let report =
+            inspect_source_accounting(&repository, &state, None, StateMode::Fresh).unwrap();
+        assert_source_accounting_scope(&report);
+        assert_eq!(
+            report["schema"],
+            "rootlight-index-source-accounting-diagnostic/1"
+        );
+        assert_eq!(report["service_lifetime"], "fresh");
+        assert_eq!(report["source_accounting"]["physical_file_records"], 4);
+        assert_eq!(report["source_accounting"]["extracted_file_records"], 0);
+        assert_eq!(report["no_op_same_generation"], true);
+        let document = inspected_document(&repository, &state);
+        assert_eq!(
+            report["source_accounting"]["retained_gap_records"],
+            document.skipped_regions.len()
+        );
+        assert_eq!(
+            report["source_accounting"]["retained_occurrence_records"],
+            document.occurrences.len()
+        );
+        assert_eq!(
+            report["source_accounting"]["retained_entity_records"],
+            document.entities.len()
+        );
+        assert_eq!(
+            report["source_accounting"]["retained_relation_records"],
+            document.relations.len()
+        );
+        let rows = report["files"].as_array().unwrap();
+        assert_eq!(rows.len(), 4);
+        for row in rows {
+            let bytes = fs::read(repository.join(row["file"]["path"].as_str().unwrap())).unwrap();
+            assert_eq!(row["source_exact"], true);
+            assert_eq!(row["file"]["byte_length"], bytes.len());
+            assert_eq!(
+                row["file"]["content_hash"],
+                rootlight_ids::content_hash(&bytes).to_string()
+            );
+            let id = row["file"]["id"].as_str().unwrap();
+            assert_eq!(
+                row["gap_record_count"],
+                document
+                    .skipped_regions
+                    .iter()
+                    .filter(|gap| gap.source.span().file().to_string() == id)
+                    .count()
+            );
+            assert_eq!(
+                row["occurrence_record_count"],
+                document
+                    .occurrences
+                    .iter()
+                    .filter(|site| site.source.span().file().to_string() == id)
+                    .count()
+            );
+        }
+        let empty = rows
+            .iter()
+            .find(|row| row["file"]["path"] == "empty.txt")
+            .unwrap();
+        assert_eq!(empty["source_read_chunks"], 1);
+        assert_eq!(empty["source_read_bytes"], 0);
+        let encoded_row = rows
+            .iter()
+            .find(|row| row["file"]["path"] == "encoded.txt")
+            .unwrap();
+        assert_eq!(encoded_row["file"]["encoding"], "utf-16le");
+        assert!(encoded_row["source_read_chunks"].as_u64().unwrap() > 1);
+        let reopened =
+            inspect_source_accounting(&repository, &state, None, StateMode::Resume).unwrap();
+        assert_source_accounting_scope(&reopened);
+        assert_eq!(
+            reopened["schema"],
+            "rootlight-index-source-accounting-update-diagnostic/1"
+        );
+        assert_eq!(reopened["service_lifetime"], "reopened");
+        assert_eq!(
+            reopened["previous_generation"],
+            report["cold"]["generation"]
+        );
+        assert_eq!(
+            reopened["update"]["generation"],
+            report["cold"]["generation"]
+        );
+        assert_eq!(reopened["files"], report["files"]);
+        assert_eq!(reopened["source_accounting"], report["source_accounting"]);
+        assert_eq!(reopened["coverage"], report["coverage"]);
+        assert_eq!(reopened["configuration_hash"], report["configuration_hash"]);
+        for report in [&report, &reopened] {
+            assert_eq!(report["no_op_timing"]["operation"]["changed_files"], 0);
+        }
+        assert!(inspect_source_accounting(&repository, &state, None, StateMode::Fresh).is_err());
+    }
+
+    #[test]
+    fn source_accounting_preserves_explicit_configuration_and_routes_on_resume() {
+        let directory = tempfile::tempdir().unwrap();
+        let repository = directory.path().join("repository");
+        fs::create_dir(&repository).unwrap();
+        fs::write(
+            repository.join("module.bas"),
+            b"Attribute VB_Name = \"Metrics\"\r\nSub Run()\r\nEnd Sub\r\n",
+        )
+        .unwrap();
+        let configured = "version='1.3'\n[extensions.source-languages]\nversion='1.0'\ncritical=true\n[extensions.source-languages.data.extensions]\nbas='vba'\n";
+        for (mode, config) in [("default", None), ("configured", Some(configured))] {
+            let state = directory.path().join(mode);
+            let report =
+                inspect_source_accounting(&repository, &state, config, StateMode::Fresh).unwrap();
+            assert_source_accounting_scope(&report);
+            assert_eq!(report["explicit_configuration"], config.is_some());
+            assert_eq!(
+                report["configuration_input_hash"],
+                rootlight_ids::content_hash(config.unwrap_or("").as_bytes()).to_string()
+            );
+            assert_eq!(
+                report["files"][0]["file"]["language"],
+                if config.is_some() {
+                    "vba"
+                } else {
+                    "visual-basic-classic"
+                }
+            );
+            let reopened =
+                inspect_source_accounting(&repository, &state, config, StateMode::Resume).unwrap();
+            assert_source_accounting_scope(&reopened);
+            assert_eq!(reopened["configuration_hash"], report["configuration_hash"]);
+            assert_eq!(
+                reopened["configuration_input_hash"],
+                report["configuration_input_hash"]
+            );
+            assert_eq!(reopened["files"], report["files"]);
+            assert_eq!(
+                reopened["update"]["generation"],
+                report["cold"]["generation"]
+            );
+        }
+    }
+
+    #[test]
+    fn source_accounting_preserves_extracted_sources_without_claiming_independent_expansion() {
+        let directory = tempfile::tempdir().unwrap();
+        let repository = directory.path().join("repository");
+        fs::create_dir(&repository).unwrap();
+        let module = b"Attribute VB_Name = \"Client\"\r\nSub Run()\r\nEnd Sub\r\n";
+        let container = fixture::book(&[("Client", module)]);
+        fs::write(repository.join("book.xlsm"), &container).unwrap();
+        let report = inspect_source_accounting(
+            &repository,
+            &directory.path().join("state"),
+            None,
+            StateMode::Fresh,
+        )
+        .unwrap();
+        assert_source_accounting_scope(&report);
+        assert_eq!(report["source_accounting"]["physical_file_records"], 1);
+        let rows = report["files"].as_array().unwrap();
+        let physical = rows
+            .iter()
+            .find(|row| row["extracted_from"].is_null())
+            .unwrap();
+        assert_eq!(physical["file"]["path"], "book.xlsm");
+        assert_eq!(physical["source_exact"], true);
+        assert_eq!(physical["source_read_bytes"], container.len());
+        let extracted: Vec<_> = rows
+            .iter()
+            .filter(|row| !row["extracted_from"].is_null())
+            .collect();
+        assert!(!extracted.is_empty());
+        assert_eq!(
+            report["source_accounting"]["extracted_file_records"],
+            extracted.len()
+        );
+        for row in extracted {
+            assert_eq!(row["source_exact"], false);
+            assert_eq!(row["container_live_exact"], true);
+            assert_eq!(row["container_path"], "book.xlsm");
+            assert_eq!(row["extraction_independently_verified"], false);
+            assert_eq!(
+                row["file"]["content_hash"],
+                rootlight_ids::content_hash(module).to_string()
+            );
+            assert_eq!(row["source_read_bytes"], module.len());
+        }
+    }
+
+    #[test]
+    fn source_accounting_resume_reindexes_changed_bytes_and_rejects_stale_live_source_proof() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = fs::canonicalize(directory.path()).unwrap();
+        let repository = root.join("repository");
+        let state = root.join("state");
+        fs::create_dir(&repository).unwrap();
+        let original = b"pub fn compute(value: i32) -> i32 { value + 1 }\n";
+        let changed = b"pub fn compute(value: i32) -> i32 { value + 2 }\n";
+        fs::write(repository.join("module.rs"), original).unwrap();
+        assert!(inspect_source_accounting(&repository, &state, None, StateMode::Resume).is_err());
+        let cold = inspect_source_accounting(&repository, &state, None, StateMode::Fresh).unwrap();
+        fs::write(repository.join("module.rs"), changed).unwrap();
+        let session =
+            DiagnosticSession::open(&repository, &state, None, StateMode::Resume).unwrap();
+        let registered = session
+            .service
+            .registered_repository_for_root(&repository, &deadline().unwrap())
+            .unwrap()
+            .unwrap();
+        let generation = session
+            .service
+            .repository_status(registered, None)
+            .unwrap()
+            .resolved_generation;
+        let stale = session
+            .service
+            .inspect_generation(
+                registered,
+                Some(generation),
+                &deadline().unwrap(),
+                |snapshot| {
+                    inspect_source_files(snapshot, &session.service, &repository, generation)
+                },
+            )
+            .unwrap();
+        assert!(stale.is_err());
+        drop(session);
+        let updated =
+            inspect_source_accounting(&repository, &state, None, StateMode::Resume).unwrap();
+        assert_source_accounting_scope(&updated);
+        assert_eq!(updated["previous_generation"], cold["cold"]["generation"]);
+        assert_ne!(updated["update"]["generation"], cold["cold"]["generation"]);
+        assert_eq!(
+            updated["files"][0]["file"]["content_hash"],
+            rootlight_ids::content_hash(changed).to_string()
+        );
+        assert_eq!(updated["update_timing"]["operation"]["changed_files"], 1);
+        assert_eq!(updated["no_op_timing"]["operation"]["changed_files"], 0);
+        let reopened =
+            inspect_source_accounting(&repository, &state, None, StateMode::Resume).unwrap();
+        assert_eq!(reopened["files"], updated["files"]);
+        assert_eq!(
+            reopened["update"]["generation"],
+            updated["update"]["generation"]
+        );
     }
 
     #[test]
