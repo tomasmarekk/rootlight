@@ -2201,6 +2201,14 @@ const LANGUAGE_CAPABILITIES: &[LanguageCapability] = &[
         analyzers: &["treesitter"],
     },
     LanguageCapability {
+        language: "glsl",
+        suffixes: &[".vert", ".frag", ".vsh", ".fsh", ".glsl"],
+        aliases: &[],
+        detectors: &["extension"],
+        maximum_tier: "tier_d",
+        analyzers: &["source-fallback"],
+    },
+    LanguageCapability {
         language: "go",
         suffixes: &[".go", ".pb.go"],
         aliases: &["golang"],
@@ -2223,6 +2231,14 @@ const LANGUAGE_CAPABILITIES: &[LanguageCapability] = &[
         detectors: &["extension"],
         maximum_tier: "tier_d",
         analyzers: &["treesitter"],
+    },
+    LanguageCapability {
+        language: "hlsl",
+        suffixes: &[".hlsl"],
+        aliases: &[],
+        detectors: &["extension"],
+        maximum_tier: "tier_d",
+        analyzers: &["source-fallback"],
     },
     LanguageCapability {
         language: "html",
@@ -6770,6 +6786,71 @@ max_source_file_bytes = 2097152
             assert_eq!(canonical_language(language), Some(expected));
         }
         assert_eq!(canonical_language("unknown"), None);
+    }
+
+    #[test]
+    fn shader_suffixes_retain_distinct_source_fallback_capabilities() {
+        for (language, suffixes) in [
+            ("glsl", &[".vert", ".frag", ".vsh", ".fsh", ".glsl"][..]),
+            ("hlsl", &[".hlsl"][..]),
+        ] {
+            let capability = language_capabilities()
+                .iter()
+                .find(|entry| entry.language == language)
+                .expect("shader source capability");
+            assert_eq!(capability.suffixes, suffixes);
+            assert!(capability.aliases.is_empty());
+            assert_eq!(capability.detectors, ["extension"]);
+            assert_eq!(capability.maximum_tier, "tier_d");
+            assert_eq!(capability.analyzers, ["source-fallback"]);
+            assert_eq!(canonical_language(language), Some(language));
+            for suffix in suffixes {
+                for path in [
+                    format!("shaders/program{suffix}"),
+                    format!("shaders/PROGRAM{}", suffix.to_ascii_uppercase()),
+                ] {
+                    assert_eq!(extension_language(&path), Some(language));
+                    let (class, signals) = classify(
+                        &RelativePath::parse(Path::new(&path)).expect("fixture path"),
+                        b"void main() {}\n",
+                    );
+                    assert_eq!(class, InputClass::Source);
+                    assert_eq!(
+                        signals,
+                        [LanguageSignal {
+                            language: language.to_owned(),
+                            evidence: LanguageEvidence::Extension,
+                        }]
+                    );
+                }
+                assert_eq!(extension_language(&format!("program{suffix}.bak")), None);
+            }
+        }
+    }
+
+    #[test]
+    fn shader_routing_does_not_claim_shared_or_unaudited_suffixes() {
+        for path in [
+            "program.fs",
+            "program.fx",
+            "program.fxh",
+            "program.hlsli",
+            "program.geom",
+            "program.tesc",
+            "program.tese",
+            "program.comp",
+            "program.glsl.map",
+            "program.hlsl.txt",
+            "shaders.vert/program",
+        ] {
+            assert!(!matches!(extension_language(path), Some("glsl" | "hlsl")));
+        }
+        assert_eq!(extension_language("source.fsx"), Some("fsharp"));
+        assert_eq!(extension_language("source.c"), Some("c"));
+        assert_eq!(extension_language("source.cpp"), Some("cpp"));
+        for alias in ["shader", "source.glsl", "source.cpp", "c", "cpp"] {
+            assert!(!matches!(canonical_language(alias), Some("glsl" | "hlsl")));
+        }
     }
 
     #[test]
