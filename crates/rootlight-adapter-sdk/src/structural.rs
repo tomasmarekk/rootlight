@@ -70,6 +70,27 @@ pub fn structural_entity_kind(fact: &SyntaxFact) -> Option<EntityKind> {
         SyntaxFactKind::Declaration
             if matches!(
                 label,
+                "sas.fcmp_function.declaration"
+                    | "sas.fcmp_subroutine.declaration"
+                    | "sas.macro.declaration"
+            ) =>
+        {
+            Some(EntityKind::Function)
+        }
+        SyntaxFactKind::Declaration
+            if matches!(
+                label,
+                "sas.fcmp_parameter.declaration" | "sas.macro_parameter.declaration"
+            ) =>
+        {
+            Some(EntityKind::Parameter)
+        }
+        SyntaxFactKind::Declaration if label == "sas.data_target.declaration" => {
+            Some(EntityKind::DatabaseObject)
+        }
+        SyntaxFactKind::Declaration
+            if matches!(
+                label,
                 "fortran.subroutine.declaration"
                     | "fortran.separate_module_procedure.declaration"
                     | "fortran.interface_function.declaration"
@@ -492,6 +513,8 @@ pub fn structural_captured_name(text: &str, maximum_bytes: usize) -> Option<&str
 /// names are unavailable rather than evaluated; source spans retain all quoting.
 /// PL/SQL retains exact ordinary or double-quoted identifier spelling; source
 /// identity does not establish case folding or database name-resolution equivalence.
+/// SAS retains exact ASCII identifiers or static one- or two-part dataset names;
+/// macro expansion, name literals and runtime dataset identity remain unavailable.
 /// Other languages retain
 /// the shared borrowed-name contract. Source and canonical output must both fit
 /// `maximum_bytes`. Invalid names, excess bytes or allocation failure return `None`.
@@ -510,6 +533,8 @@ pub fn structural_captured_name_for_language<'a>(
         .then_some(Cow::Borrowed(text))
     } else if language == "plsql" {
         plsql_captured_name(text, maximum_bytes).map(Cow::Borrowed)
+    } else if language == "sas" {
+        sas_captured_name(text, maximum_bytes).map(Cow::Borrowed)
     } else if matches!(language, "javascript" | "typescript") {
         crate::canonical_ecmascript_identifier(text, maximum_bytes)
             .or_else(|| structural_captured_name(text, maximum_bytes).map(Cow::Borrowed))
@@ -598,6 +623,24 @@ pub fn structural_captured_name_for_language<'a>(
     } else {
         structural_captured_name(text, maximum_bytes).map(Cow::Borrowed)
     }
+}
+
+fn sas_captured_name(text: &str, maximum_bytes: usize) -> Option<&str> {
+    if text.is_empty() || text.len() > maximum_bytes {
+        return None;
+    }
+    let mut components = text.split('.');
+    let valid = |part: &str| {
+        part.as_bytes()
+            .first()
+            .is_some_and(|byte| byte.is_ascii_alphabetic() || *byte == b'_')
+            && part
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+    };
+    let first = components.next()?;
+    (valid(first) && components.next().is_none_or(valid) && components.next().is_none())
+        .then_some(text)
 }
 
 fn plsql_captured_name(text: &str, maximum_bytes: usize) -> Option<&str> {
@@ -1131,6 +1174,63 @@ mod tests {
         assert_ne!(
             structural_captured_name_for_language("plsql", "\"CaseName\"", 64),
             structural_captured_name_for_language("plsql", "CaseName", 64)
+        );
+    }
+
+    #[test]
+    fn sas_written_kinds_and_names_do_not_expand_macros_or_fold_case() {
+        use crate::SyntaxKindLabel;
+        use rootlight_ids::FileId;
+        use rootlight_ir::SourceSpan;
+
+        for (label, kind) in [
+            ("sas.fcmp_function.declaration", EntityKind::Function),
+            ("sas.fcmp_subroutine.declaration", EntityKind::Function),
+            ("sas.macro.declaration", EntityKind::Function),
+            ("sas.fcmp_parameter.declaration", EntityKind::Parameter),
+            ("sas.macro_parameter.declaration", EntityKind::Parameter),
+            ("sas.data_target.declaration", EntityKind::DatabaseObject),
+        ] {
+            let fact = SyntaxFact::new(
+                1,
+                None,
+                SyntaxFactKind::Declaration,
+                SourceSpan::new(FileId::from_bytes([3; 20]), 0, 1).unwrap(),
+                0,
+                SyntaxKindLabel::new(label).unwrap(),
+            );
+            assert_eq!(structural_entity_kind(&fact), Some(kind), "{label}");
+        }
+        for name in ["MixedName", "_Value2", "Work.Output", "Output"] {
+            assert_eq!(
+                structural_captured_name_for_language("sas", name, name.len()).as_deref(),
+                Some(name)
+            );
+            assert!(structural_captured_name_for_language("sas", name, name.len() - 1).is_none());
+        }
+        for name in [
+            "",
+            "1Value",
+            "Work.&Output.",
+            "%Factory",
+            "&Value",
+            "Work.Output.More",
+            "Work..Output",
+            "Work.",
+            ".Output",
+            "Value$",
+            "'Name'n",
+            "Work . Output",
+            "caf\u{e9}",
+        ] {
+            assert!(
+                structural_captured_name_for_language("sas", name, 64).is_none(),
+                "{name:?}"
+            );
+        }
+        assert_ne!(
+            structural_captured_name_for_language("sas", "Work.Output", 64),
+            structural_captured_name_for_language("sas", "work.output", 64)
         );
     }
 
