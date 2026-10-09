@@ -7,6 +7,74 @@ use super::*;
 use rootlight_ir::{EntityKind, EntityVisibility, NormalizedIrDocument, OccurrenceTarget};
 
 #[test]
+fn common_lisp_source_gaps_keep_scoped_generation_bound_evidence() {
+    use rootlight_ir::{CoverageScope, FactDomain, SkippedRegionReason};
+
+    const TEXT: &str = "(defmacro written ((first second)) first)\n";
+    let (_directory, snapshot, source) =
+        source_fixture_for(TEXT, "src/scoped.lisp", b"common-lisp-scoped-coverage");
+    let start = u64::try_from(TEXT.find("((first second))").unwrap()).unwrap();
+    let region_span = SourceSpan::new(source.span().file(), start, start + 16).unwrap();
+    for (syntax, domain) in [
+        ("unsupported_owner", FactDomain::Entities),
+        ("reader_context", FactDomain::Entities),
+        ("local_macro_context", FactDomain::Entities),
+        ("parameter_context", FactDomain::Entities),
+        ("conditional_selection", FactDomain::Relations),
+        ("package_environment", FactDomain::Relations),
+        ("body_semantics", FactDomain::Relations),
+    ] {
+        let facts = vec![
+            SyntaxFact::new(
+                1,
+                None,
+                SyntaxFactKind::Root,
+                source.span(),
+                0,
+                label("common_lisp.file.root"),
+            ),
+            SyntaxFact::new(
+                2,
+                Some(1),
+                SyntaxFactKind::Signature,
+                region_span,
+                1,
+                label(&format!("common_lisp.{syntax}.expression")),
+            ),
+        ];
+        let output = analyze_custom(
+            &snapshot,
+            &source,
+            LanguageId::new("common-lisp").unwrap(),
+            &limits(IrLimits::default()),
+            facts,
+        )
+        .expect("explicit omitted-region evidence lowers without fabricated entities");
+        let document = output.document();
+        assert!(document.entities.is_empty());
+        assert!(document.occurrences.is_empty());
+        assert!(document.relations.is_empty());
+        assert_eq!(document.skipped_regions.len(), 1, "{syntax}");
+        let region = &document.skipped_regions[0];
+        assert_eq!(region.domain, domain);
+        assert_eq!(region.reason, SkippedRegionReason::UnsupportedConstruct);
+        assert_eq!(region.source.span(), region_span);
+        assert_eq!(region.source.repository(), source.repository());
+        assert_eq!(region.source.generation(), source.generation());
+        assert_eq!(region.source.content_hash(), source.content_hash());
+        let coverage = document
+            .coverage_records
+            .iter()
+            .find(|record| record.domain == domain)
+            .unwrap();
+        assert_eq!(coverage.scope, CoverageScope::File(source.span().file()));
+        assert_eq!(coverage.status, CoverageStatus::Bounded);
+        assert_eq!(coverage.skipped, 1);
+        assert_eq!(coverage.discovered, coverage.indexed + coverage.skipped);
+    }
+}
+
+#[test]
 fn common_lisp_file_module_keeps_path_without_package_or_header_identity() {
     const TEXT: &str = "(defpackage :written)\n";
     const PATH: &str = "src/package.lisp";

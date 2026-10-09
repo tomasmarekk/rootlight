@@ -6374,7 +6374,49 @@ fn fortran_source_identity_gap(fact: &SyntaxFact) -> Option<&'static str> {
     }
 }
 
+fn common_lisp_source_gap(fact: &SyntaxFact) -> Option<(FactDomain, &'static str)> {
+    // Expression captures use the SDK's Signature fact role. The exact label
+    // also distinguishes these qualifications from real declaration headers.
+    if fact.kind() != SyntaxFactKind::Signature {
+        return None;
+    }
+    Some(match fact.syntax_kind().as_str() {
+        "common_lisp.unsupported_owner.expression" => (
+            FactDomain::Entities,
+            "common-lisp-written-owner-analysis-unavailable",
+        ),
+        "common_lisp.reader_context.expression" => (
+            FactDomain::Entities,
+            "common-lisp-reader-context-analysis-unavailable",
+        ),
+        "common_lisp.local_macro_context.expression" => (
+            FactDomain::Entities,
+            "common-lisp-local-macro-owner-analysis-unavailable",
+        ),
+        "common_lisp.parameter_context.expression" => (
+            FactDomain::Entities,
+            "common-lisp-parameter-owner-analysis-unavailable",
+        ),
+        "common_lisp.conditional_selection.expression" => (
+            FactDomain::Relations,
+            "common-lisp-reader-conditional-selection-unavailable",
+        ),
+        "common_lisp.package_environment.expression" => (
+            FactDomain::Relations,
+            "common-lisp-package-environment-unavailable",
+        ),
+        "common_lisp.body_semantics.expression" => (
+            FactDomain::Relations,
+            "common-lisp-body-binding-and-call-analysis-unavailable",
+        ),
+        _ => return None,
+    })
+}
+
 fn source_coverage_gap(fact: &SyntaxFact) -> Option<(FactDomain, &'static str)> {
+    if let Some(gap) = common_lisp_source_gap(fact) {
+        return Some(gap);
+    }
     match fact.syntax_kind().as_str() {
         "common_lisp.file.module" if fact.kind() == SyntaxFactKind::Module => Some((
             FactDomain::Relations,
@@ -9113,6 +9155,84 @@ mod tests {
             ))
             .is_none()
         );
+    }
+
+    #[test]
+    fn common_lisp_omitted_source_regions_keep_exact_scoped_domains() {
+        let file = FileId::from_bytes([3; 20]);
+        let fact = |kind, label| {
+            SyntaxFact::new(
+                1,
+                None,
+                kind,
+                SourceSpan::new(file, 4, 30).unwrap(),
+                0,
+                SyntaxKindLabel::new(label).unwrap(),
+            )
+        };
+        for (label, domain, reason) in [
+            (
+                "common_lisp.unsupported_owner.expression",
+                FactDomain::Entities,
+                "common-lisp-written-owner-analysis-unavailable",
+            ),
+            (
+                "common_lisp.reader_context.expression",
+                FactDomain::Entities,
+                "common-lisp-reader-context-analysis-unavailable",
+            ),
+            (
+                "common_lisp.local_macro_context.expression",
+                FactDomain::Entities,
+                "common-lisp-local-macro-owner-analysis-unavailable",
+            ),
+            (
+                "common_lisp.parameter_context.expression",
+                FactDomain::Entities,
+                "common-lisp-parameter-owner-analysis-unavailable",
+            ),
+            (
+                "common_lisp.conditional_selection.expression",
+                FactDomain::Relations,
+                "common-lisp-reader-conditional-selection-unavailable",
+            ),
+            (
+                "common_lisp.package_environment.expression",
+                FactDomain::Relations,
+                "common-lisp-package-environment-unavailable",
+            ),
+            (
+                "common_lisp.body_semantics.expression",
+                FactDomain::Relations,
+                "common-lisp-body-binding-and-call-analysis-unavailable",
+            ),
+        ] {
+            let expression = fact(SyntaxFactKind::Signature, label);
+            assert_eq!(
+                source_coverage_gaps(&expression).collect::<Vec<_>>(),
+                [(domain, reason)],
+                "{label}"
+            );
+            for kind in [
+                SyntaxFactKind::Module,
+                SyntaxFactKind::Declaration,
+                SyntaxFactKind::Occurrence,
+            ] {
+                assert!(source_coverage_gaps(&fact(kind, label)).next().is_none());
+            }
+        }
+        for label in [
+            "common_lisp.unsupported_owner.scope",
+            "common_lisp.unsupported_owner.expression.extra",
+            "common_lisp_extra.unsupported_owner.expression",
+            "common_lisp.unreviewed.expression",
+        ] {
+            assert!(
+                source_coverage_gaps(&fact(SyntaxFactKind::Signature, label))
+                    .next()
+                    .is_none()
+            );
+        }
     }
 
     #[test]
