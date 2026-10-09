@@ -35,6 +35,7 @@ mod powershell;
 mod r;
 mod scala;
 mod sql;
+mod sql_admission;
 pub(super) mod vba;
 mod vba_calls;
 mod yaml;
@@ -930,6 +931,11 @@ impl QueryPack {
                     }
                 }
                 if input.family == GrammarFamily::Sql
+                    && !sql_admission::retain(capture.node, role, input.cancellation)?
+                {
+                    continue;
+                }
+                if input.family == GrammarFamily::Sql
                     && role == StructuralRole::Reference
                     && sql::is_declared_name(capture.node)
                 {
@@ -1672,7 +1678,7 @@ fn candidate_for_capture(
     }
     if family == GrammarFamily::Sql
         && role == StructuralRole::Signature
-        && capture.node.kind() == "create_function"
+        && matches!(capture.node.kind(), "create_function" | "tsql_procedure")
     {
         let range = sql::signature_range(capture.node, source)
             .ok_or_else(|| query_failure("query-sql-signature-header"))?;
@@ -2016,6 +2022,10 @@ fn canonical_syntax(family: GrammarFamily, native: &str) -> Option<&'static str>
         (GrammarFamily::Sql, "create_trigger") => Some("sql.trigger"),
         (GrammarFamily::Sql, "create_type") => Some("sql.type"),
         (GrammarFamily::Sql, "create_function") => Some("sql.function"),
+        (GrammarFamily::Sql, "tsql_procedure" | "tsql_procedure_header") => Some("sql.function"),
+        (GrammarFamily::Sql, "tsql_parameter") => Some("sql.parameter"),
+        (GrammarFamily::Sql, "tsql_variable" | "tsql_table_variable") => Some("sql.variable"),
+        (GrammarFamily::Sql, "tsql_body") => Some("sql.body"),
         (GrammarFamily::Sql, "function_arguments") => Some("sql.arguments"),
         (GrammarFamily::Sql, "function_body") => Some("sql.body"),
         (GrammarFamily::Sql, "function_argument") => Some("sql.parameter"),

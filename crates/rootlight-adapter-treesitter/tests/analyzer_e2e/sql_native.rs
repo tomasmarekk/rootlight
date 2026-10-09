@@ -314,3 +314,251 @@ fn sql_return_type_changes_invalidate_callable_identity_but_not_unrelated_object
     };
     assert_eq!(objects(&first), objects(&next));
 }
+
+#[test]
+fn sql_tsql_routines_keep_raw_names_and_direct_parameter_and_local_owners() {
+    let source = "CREATE OR ALTER PROCEDURE [work].[Step]]Name]\n\
+                  @Input int, @Output nvarchar(max) = 'AS body' OUTPUT,\n\
+                  @Rows work.RowType READONLY\n\
+                  AS BEGIN\n\
+                  DECLARE @Local int = 1, @Other nvarchar(max) = 'item';\n\
+                  DECLARE @Items TABLE ([ItemId] int, [Label] nvarchar(max));\n\
+                  SELECT @Local;\n\
+                  END;";
+    let result = output(source);
+    let document = result.document();
+    assert!(
+        document.diagnostics.is_empty(),
+        "{:?}",
+        document.diagnostics
+    );
+    let routine = document
+        .entities
+        .iter()
+        .find(|entity| entity.canonical_name == "[work].[Step]]Name]")
+        .unwrap();
+    assert_eq!(routine.kind, EntityKind::Function);
+    for (name, kind) in [
+        ("@Input", EntityKind::Parameter),
+        ("@Output", EntityKind::Parameter),
+        ("@Rows", EntityKind::Parameter),
+        ("@Local", EntityKind::Variable),
+        ("@Other", EntityKind::Variable),
+        ("@Items", EntityKind::Variable),
+    ] {
+        let entity = document
+            .entities
+            .iter()
+            .find(|entity| entity.canonical_name == name)
+            .unwrap();
+        assert_eq!(entity.kind, kind, "{name}");
+        assert_eq!(
+            entity.container,
+            Some(rootlight_ir::ContainerRef::Entity(routine.id))
+        );
+        let definition = document
+            .occurrences
+            .iter()
+            .find(|occurrence| {
+                occurrence.role == OccurrenceRole::Definition
+                    && occurrence.target == OccurrenceTarget::Resolved { symbol: entity.id }
+            })
+            .unwrap();
+        let span = definition.source.span();
+        assert_eq!(
+            source.get(
+                usize::try_from(span.start_byte()).unwrap()
+                    ..usize::try_from(span.end_byte()).unwrap()
+            ),
+            Some(name)
+        );
+    }
+    let table_variable = document
+        .entities
+        .iter()
+        .find(|entity| entity.canonical_name == "@Items")
+        .unwrap();
+    for name in ["[ItemId]", "[Label]"] {
+        let column = document
+            .entities
+            .iter()
+            .find(|entity| entity.canonical_name == name)
+            .unwrap();
+        assert_eq!(column.kind, EntityKind::Field);
+        assert_eq!(
+            column.container,
+            Some(rootlight_ir::ContainerRef::Entity(table_variable.id))
+        );
+    }
+    assert!(
+        document
+            .relations
+            .iter()
+            .all(|relation| relation.predicate == RelationPredicate::Contains)
+    );
+    assert_ne!(
+        result.report().coverage().status(),
+        CoverageStatus::Complete
+    );
+}
+
+#[test]
+fn sql_tsql_table_names_and_columns_preserve_bracket_escapes_without_catalog_binding() {
+    let source = "CREATE TABLE [work].[Items] ([Id] [int] IDENTITY(1, 1) PRIMARY KEY,\n\
+                  [Display]]Name] [nvarchar](max) NOT NULL);";
+    let result = output(source);
+    let document = result.document();
+    assert!(
+        document.diagnostics.is_empty(),
+        "{:?}",
+        document.diagnostics
+    );
+    let table = document
+        .entities
+        .iter()
+        .find(|entity| entity.canonical_name == "[work].[Items]")
+        .unwrap();
+    assert_eq!(table.kind, EntityKind::DatabaseObject);
+    for name in ["[Id]", "[Display]]Name]"] {
+        let column = document
+            .entities
+            .iter()
+            .find(|entity| entity.canonical_name == name)
+            .unwrap();
+        assert_eq!(column.kind, EntityKind::Field);
+        assert_eq!(
+            column.container,
+            Some(rootlight_ir::ContainerRef::Entity(table.id))
+        );
+    }
+    assert!(
+        document
+            .relations
+            .iter()
+            .all(|relation| relation.predicate == RelationPredicate::Contains)
+    );
+}
+
+#[test]
+fn sql_tsql_routine_signatures_use_native_as_and_keep_sibling_formals_separate() {
+    let source = "CREATE PROC [work].[First] @Value int = 1 AS BEGIN SELECT @Value; END;\n\
+                  ALTER PROCEDURE [work].[Second] @Value nvarchar(max) = 'BEGIN END AS' OUTPUT\n\
+                  AS BEGIN SELECT @Value; END;";
+    let result = output(source);
+    let document = result.document();
+    assert!(
+        document.diagnostics.is_empty(),
+        "{:?}",
+        document.diagnostics
+    );
+    let routines = document
+        .entities
+        .iter()
+        .filter(|entity| entity.kind == EntityKind::Function)
+        .collect::<Vec<_>>();
+    assert_eq!(routines.len(), 2);
+    let parameters = document
+        .entities
+        .iter()
+        .filter(|entity| entity.kind == EntityKind::Parameter)
+        .collect::<Vec<_>>();
+    assert_eq!(parameters.len(), 2);
+    assert_ne!(parameters[0].id, parameters[1].id);
+    for routine in routines {
+        assert_eq!(
+            parameters
+                .iter()
+                .filter(|parameter| parameter.container
+                    == Some(rootlight_ir::ContainerRef::Entity(routine.id)))
+                .count(),
+            1
+        );
+        let signatures = document
+            .extensions
+            .iter()
+            .filter(|extension| extension.namespace == rootlight_ir::LEXICAL_EXTENSION_NAMESPACE)
+            .filter_map(|extension| {
+                let lexical = rootlight_ir::decode_lexical_evidence_envelope(extension).unwrap();
+                (lexical.kind() == rootlight_ir::LexicalEvidenceKind::Signature
+                    && lexical.subject() == rootlight_ir::FactRef::Entity(routine.id))
+                .then_some(lexical)
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(signatures.len(), 1);
+        let header = signatures[0].text();
+        assert!(header.ends_with("AS"), "{header}");
+        assert!(!header.contains("SELECT"), "{header}");
+        assert!(header.contains(&routine.canonical_name));
+    }
+}
+
+#[test]
+fn sql_tsql_malformed_headers_and_quoted_ddl_never_fabricate_routine_definitions() {
+    for source in [
+        "CREATE PROCEDURE [work].[Incomplete] @Value AS BEGIN SELECT 1; END;",
+        "CREATE PROCEDURE [work].[Incomplete] @Value int BEGIN SELECT 1; END;",
+        "SELECT 'CREATE PROCEDURE [work].[Quoted] @Value int AS BEGIN SELECT 1; END;';",
+    ] {
+        let result = output(source);
+        assert!(
+            !result.document().entities.iter().any(|entity| {
+                matches!(entity.kind, EntityKind::Function | EntityKind::Parameter)
+            }),
+            "{source}: {:?}",
+            result.document().entities
+        );
+        assert_ne!(
+            result.report().coverage().status(),
+            CoverageStatus::Complete
+        );
+    }
+}
+
+#[test]
+fn sql_tsql_rejected_routines_do_not_reparent_locals_or_columns_to_the_file() {
+    let source = "CREATE PROC [work].[Broken] @Input int AS BEGIN\n\
+                  DECLARE @Leaked int;\n\
+                  DECLARE @LeakedTable TABLE ([LeakedColumn] int);\n\
+                  IF @Input > 0 PRINT 'unsupported'; END;\n\
+                  CREATE PROC [work].[Valid] @Kept int AS BEGIN\n\
+                  DECLARE @Owned int; SELECT @Kept; END;";
+    let result = output(source);
+    let document = result.document();
+    for name in [
+        "[work].[Broken]",
+        "@Input",
+        "@Leaked",
+        "@LeakedTable",
+        "[LeakedColumn]",
+    ] {
+        assert!(
+            !document
+                .entities
+                .iter()
+                .any(|entity| entity.canonical_name == name),
+            "recovered owner leaked {name}: {:?}",
+            document.entities
+        );
+    }
+    let routine = document
+        .entities
+        .iter()
+        .find(|entity| entity.canonical_name == "[work].[Valid]")
+        .unwrap();
+    for name in ["@Kept", "@Owned"] {
+        let child = document
+            .entities
+            .iter()
+            .find(|entity| entity.canonical_name == name)
+            .unwrap();
+        assert_eq!(
+            child.container,
+            Some(rootlight_ir::ContainerRef::Entity(routine.id))
+        );
+    }
+    assert!(!document.skipped_regions.is_empty());
+    assert_ne!(
+        result.report().coverage().status(),
+        CoverageStatus::Complete
+    );
+}
