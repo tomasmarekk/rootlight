@@ -4785,11 +4785,11 @@ impl<'context, 'source> Lowering<'context, 'source> {
                     label,
                     position,
                 ))
-            } else if matches!(
+            } else if uses_written_source_identity(
                 self.language_for_fact(fact),
-                "r" | "powershell" | "nix" | "matlab" | "perl" | "groovy" | "tcl" | "common-lisp"
-            ) && kind != EntityKind::Module
-            {
+                kind,
+                fact.syntax_kind().as_str(),
+            ) {
                 // Separate written occurrences and their children without claiming
                 // runtime binding identity or merging disjoint source environments.
                 let label = fact.syntax_kind().as_str();
@@ -6123,9 +6123,9 @@ fn materialize_entity(
     }
     debug_assert_eq!(qualified_name.len(), draft.qualified_length);
     let semantic_kind = entity_kind_identity_label(draft.kind);
-    // Common Lisp headers are exact source evidence, not runtime binding or
+    // Assembly and Common Lisp headers are source evidence, not runtime binding or
     // overload identities. Haskell equations likewise retain one lexical binding.
-    let signature_discriminator = if draft.language == "common-lisp"
+    let signature_discriminator = if matches!(draft.language.as_str(), "assembly" | "common-lisp")
         || (draft.language == "haskell"
             && matches!(
                 draft.kind,
@@ -6418,6 +6418,10 @@ fn source_coverage_gap(fact: &SyntaxFact) -> Option<(FactDomain, &'static str)> 
         return Some(gap);
     }
     match fact.syntax_kind().as_str() {
+        "assembly.file.module" if fact.kind() == SyntaxFactKind::Module => Some((
+            FactDomain::Relations,
+            "assembly-expansion-and-binding-unavailable",
+        )),
         "common_lisp.file.module" if fact.kind() == SyntaxFactKind::Module => Some((
             FactDomain::Relations,
             "common-lisp-reader-and-runtime-binding-unavailable",
@@ -6681,6 +6685,34 @@ fn json_data_identity(parent: Option<[u8; 32]>, kind: &str, position: u64) -> [u
     *hasher.finalize().as_bytes()
 }
 
+fn uses_written_source_identity(language: &str, kind: EntityKind, label: &str) -> bool {
+    if language == "assembly" {
+        // Segments are written containers too, not assembled namespaces. Keep
+        // each complete physical owner distinct without promoting name equality.
+        return matches!(
+            (kind, label),
+            (
+                EntityKind::Function,
+                "assembly.procedure.declaration" | "assembly.macro.declaration"
+            ) | (EntityKind::Module, "assembly.segment.declaration")
+                | (
+                    EntityKind::Constant,
+                    "assembly.constant.declaration" | "assembly.source_constant.declaration"
+                )
+                | (EntityKind::Variable, "assembly.data.declaration")
+                | (
+                    EntityKind::StatementLabel,
+                    "assembly.source_label.declaration"
+                )
+        );
+    }
+    kind != EntityKind::Module
+        && matches!(
+            language,
+            "r" | "powershell" | "nix" | "matlab" | "perl" | "groovy" | "tcl" | "common-lisp"
+        )
+}
+
 fn written_source_identity(
     language: &str,
     parent: Option<[u8; 32]>,
@@ -6703,6 +6735,8 @@ fn written_source_identity(
         "rootlight.haskell-source-scope/1"
     } else if language == "common-lisp" {
         "rootlight.common-lisp-source-occurrence/1"
+    } else if language == "assembly" {
+        "rootlight.assembly-source-occurrence/1"
     } else {
         "rootlight.powershell-source-occurrence/1"
     };
@@ -7704,6 +7738,9 @@ fn test_source_path(path: &str) -> bool {
 }
 
 fn is_explicit_file_module(fact: &SyntaxFact, language: &str) -> bool {
+    if fact.syntax_kind().as_str() == "assembly.file.module" {
+        return fact.kind() == SyntaxFactKind::Module && language == "assembly";
+    }
     if fact.syntax_kind().as_str() == "common_lisp.file.module" {
         return fact.kind() == SyntaxFactKind::Module && language == "common-lisp";
     }

@@ -41,6 +41,9 @@ mod perl_calls;
 #[path = "lowering_contract/common_lisp_identity.rs"]
 mod common_lisp_identity;
 
+#[path = "lowering_contract/assembly_identity.rs"]
+mod assembly_identity;
+
 #[test]
 fn json_key_captures_lower_to_exact_source_bound_properties() {
     assert_data_key_captures(
