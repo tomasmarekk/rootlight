@@ -6,6 +6,8 @@
 ///
 /// Quoted names without escapes retain their source spelling. Operators and
 /// module-qualified heads remain unavailable without syntax and scope evidence.
+/// Argument counting skips nested comments; an unterminated comment cannot
+/// establish a head identity.
 #[must_use]
 pub fn predicate_head(text: &str) -> Option<(&str, usize)> {
     let head = text.trim();
@@ -145,10 +147,7 @@ fn argument_count(args: &str) -> Option<usize> {
                 .map_or(bytes.len(), |offset| index + offset);
             continue;
         } else if bytes[index..].starts_with(b"/*") {
-            let end = bytes[index + 2..]
-                .windows(2)
-                .position(|pair| pair == b"*/")?;
-            index += end + 4;
+            index = block_comment_end(bytes, index)?;
             continue;
         } else if byte == b'\''
             && let Some(length) = character_code_literal_len(bytes, index)
@@ -192,6 +191,27 @@ fn argument_count(args: &str) -> Option<usize> {
     }
     (quote.is_none() && parens == 0 && brackets == 0 && braces == 0 && segment_has_code)
         .then_some(arity)
+}
+
+fn block_comment_end(bytes: &[u8], start: usize) -> Option<usize> {
+    let mut index = start.checked_add(2)?;
+    let mut depth = 1_usize;
+    loop {
+        match bytes.get(index..index.checked_add(2)?)? {
+            b"/*" => {
+                depth = depth.checked_add(1)?;
+                index = index.checked_add(2)?;
+            }
+            b"*/" => {
+                depth = depth.checked_sub(1)?;
+                index = index.checked_add(2)?;
+                if depth == 0 {
+                    return Some(index);
+                }
+            }
+            _ => index = index.checked_add(1)?,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -249,6 +269,60 @@ mod tests {
         for source in ["10'@", "name0'@", "0'"] {
             let quote = source.find('\'').expect("fixture has a quote");
             assert_eq!(character_code_literal_len(source.as_bytes(), quote), None);
+        }
+    }
+
+    #[test]
+    fn nested_block_comments_do_not_change_head_arity() {
+        for source in [
+            "edge(A, /* outer /* inner */ text , text */ B)",
+            "edge(A, /* outer /* middle /* inner */ middle , */ outer , */ B)",
+            "edge(/* outer /* , } ) ' */ */ A, B)",
+            "edge(A/* outer /* one */ /* two */ tail */ , B)",
+            "edge(A, /* outer /* inner */ text , text */ pair(B, C))",
+            "edge(A, /* outer /* inner */ text , text */B)",
+        ] {
+            assert_eq!(predicate_head(source), Some(("edge", 2)), "{source}");
+            assert_eq!(
+                canonical_predicate_head(source, 6),
+                Some("edge/2".to_owned()),
+                "{source}"
+            );
+            assert_eq!(
+                canonical_nonterminal_head(source, 7),
+                Some("edge//2".to_owned()),
+                "{source}"
+            );
+        }
+    }
+
+    #[test]
+    fn comment_markers_in_quoted_arguments_remain_data() {
+        for source in [
+            "edge('/*', B)",
+            "edge(\"/* inner */ , */\", B)",
+            "edge(`/* inner */ , */`, B)",
+        ] {
+            assert_eq!(predicate_head(source), Some(("edge", 2)), "{source}");
+        }
+    }
+
+    #[test]
+    fn unterminated_or_empty_nested_comments_do_not_gain_identity() {
+        for source in [
+            "edge(A, /* outer /* inner */ B)",
+            "edge(A, /* outer /* inner B */)",
+            "edge(A, /* unterminated)",
+            "edge(A, /* outer /* inner */)",
+            "edge(/* outer /* inner */ */)",
+            "edge(A, /* outer /* inner */ */)",
+            "edge(/* outer /* inner */ */, B)",
+            "edge(A, /* outer /* inner */ tail *)",
+            "edge(A, /* outer /* inner */ tail */ /* second unterminated)",
+        ] {
+            assert_eq!(predicate_head(source), None, "{source}");
+            assert_eq!(canonical_predicate_head(source, 64), None, "{source}");
+            assert_eq!(canonical_nonterminal_head(source, 64), None, "{source}");
         }
     }
 
