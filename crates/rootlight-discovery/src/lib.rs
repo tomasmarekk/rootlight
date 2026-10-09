@@ -46,7 +46,7 @@ pub use incremental::{
 };
 
 /// Current deterministic manifest and source-classification revision.
-pub const DISCOVERY_MANIFEST_VERSION: &str = "1.39";
+pub const DISCOVERY_MANIFEST_VERSION: &str = "1.40";
 /// Stable source-free diagnostic emitted when the entry budget truncates discovery.
 pub const DISCOVERY_ENTRY_LIMIT_DIAGNOSTIC_CODE: &str = "DISCOVERY_ENTRY_LIMIT";
 /// Stable source-free diagnostic emitted when retained source bytes truncate discovery.
@@ -2331,6 +2331,14 @@ const LANGUAGE_CAPABILITIES: &[LanguageCapability] = &[
         detectors: &["content", "extension"],
         maximum_tier: "tier_d",
         analyzers: &["source-fallback"],
+    },
+    LanguageCapability {
+        language: "pascal",
+        suffixes: &[".pas", ".dpr", ".lpr"],
+        aliases: &["delphi", "object-pascal"],
+        detectors: &["extension", "configuration"],
+        maximum_tier: "tier_d",
+        analyzers: &["treesitter"],
     },
     LanguageCapability {
         language: "perl",
@@ -6219,6 +6227,247 @@ max_source_file_bytes = 2097152
         assert_eq!(capability.detectors, &["extension"]);
         assert_eq!(capability.maximum_tier, "tier_d");
         assert_eq!(capability.analyzers, &["treesitter"]);
+    }
+
+    #[test]
+    fn pascal_source_suffixes_advertise_only_dedicated_routes() {
+        let suffixes = [".pas", ".dpr", ".lpr"];
+        for suffix in suffixes {
+            for path in [
+                format!("src/Written{suffix}"),
+                format!("src/WRITTEN{}", suffix.to_ascii_uppercase()),
+            ] {
+                assert_eq!(extension_language(&path), Some("pascal"), "{path}");
+                assert_eq!(
+                    classify(
+                        &RelativePath::parse(Path::new(&path)).unwrap(),
+                        b"begin\nend.\n",
+                    )
+                    .1,
+                    vec![LanguageSignal {
+                        language: "pascal".to_owned(),
+                        evidence: LanguageEvidence::Extension,
+                    }],
+                    "{path}",
+                );
+            }
+            assert_eq!(
+                extension_language(&format!("src/Written{suffix}.bak")),
+                None,
+            );
+        }
+        for alias in ["pascal", "delphi", "object-pascal"] {
+            assert_eq!(canonical_language(alias), Some("pascal"));
+        }
+        let capability = language_capabilities()
+            .iter()
+            .find(|capability| capability.language == "pascal")
+            .expect("Pascal capability exists");
+        assert_eq!(capability.suffixes, suffixes);
+        assert_eq!(capability.aliases, ["delphi", "object-pascal"]);
+        assert_eq!(capability.detectors, ["extension", "configuration"]);
+        assert_eq!(capability.maximum_tier, "tier_d");
+        assert_eq!(capability.analyzers, ["treesitter"]);
+    }
+
+    #[test]
+    fn pascal_shared_and_data_suffixes_do_not_claim_source_syntax() {
+        for path in ["src/Written.pp", "src/WRITTEN.PP"] {
+            assert_eq!(extension_language(path), None);
+            for source in [
+                "unit Written;\ninterface\nimplementation\nend.\n",
+                "program Written;\nbegin\nend.\n",
+                "class example { notify { 'ready': } }\n",
+            ] {
+                assert!(
+                    classify(
+                        &RelativePath::parse(Path::new(path)).unwrap(),
+                        source.as_bytes()
+                    )
+                    .1
+                    .iter()
+                    .all(|signal| signal.language != "pascal"),
+                    "{path}: {source}",
+                );
+            }
+        }
+        for (path, source) in [
+            (
+                "ui/Form.dfm",
+                "object Form: TForm\n  Caption = 'Ready'\nend\n",
+            ),
+            ("ui/FORM.DFM", "object Form: TForm\nend\n"),
+            ("Project.dproj", "<Project><PropertyGroup /></Project>\n"),
+            ("PROJECT.DPROJ", "<Project />\n"),
+        ] {
+            assert_eq!(extension_language(path), None);
+            assert!(
+                classify(
+                    &RelativePath::parse(Path::new(path)).unwrap(),
+                    source.as_bytes()
+                )
+                .1
+                .iter()
+                .all(|signal| signal.language != "pascal"),
+                "{path}",
+            );
+        }
+    }
+
+    #[test]
+    fn configured_pascal_preserves_source_bytes_and_policy_barriers() {
+        let temporary = local_tempdir();
+        let signal = |language: &str, evidence| LanguageSignal {
+            language: language.to_owned(),
+            evidence,
+        };
+        let written = "\u{feff}unit Written;\r\ninterface\r\nconst Caption = '\u{03bb}';\r\nimplementation\r\nend.\r\n";
+        let mut cases = vec![
+            (
+                "Module.pas",
+                written.as_bytes().to_vec(),
+                "utf-8",
+                vec![signal("pascal", LanguageEvidence::Extension)],
+            ),
+            (
+                "Program.dpr",
+                b"program Written;\nbegin\nend.\n".to_vec(),
+                "utf-8",
+                vec![signal("pascal", LanguageEvidence::Extension)],
+            ),
+            (
+                "Project.lpr",
+                b"program Written;\r\nbegin\r\nend.\r\n".to_vec(),
+                "utf-8",
+                vec![signal("pascal", LanguageEvidence::Extension)],
+            ),
+            (
+                "Configured.pp",
+                written.as_bytes().to_vec(),
+                "utf-8",
+                vec![signal("pascal", LanguageEvidence::Configuration)],
+            ),
+            (
+                "Default.pp",
+                b"class example { notify { 'ready': } }\n".to_vec(),
+                "utf-8",
+                vec![signal("puppet", LanguageEvidence::Configuration)],
+            ),
+            (
+                "Overridden.pas",
+                written.as_bytes().to_vec(),
+                "utf-8",
+                vec![
+                    signal("pascal", LanguageEvidence::Extension),
+                    signal("unsupported-language", LanguageEvidence::Configuration),
+                ],
+            ),
+            (
+                "Form.dfm",
+                b"object Form: TForm\nend\n".to_vec(),
+                "utf-8",
+                Vec::new(),
+            ),
+            (
+                "Project.dproj",
+                b"<Project />\n".to_vec(),
+                "utf-8",
+                Vec::new(),
+            ),
+        ];
+        for (path, little_endian, encoding) in [
+            ("Utf16LE.pas", true, "utf-16le"),
+            ("Utf16BE.dpr", false, "utf-16be"),
+        ] {
+            let bytes = written
+                .encode_utf16()
+                .flat_map(|unit| {
+                    if little_endian {
+                        unit.to_le_bytes()
+                    } else {
+                        unit.to_be_bytes()
+                    }
+                })
+                .collect::<Vec<_>>();
+            cases.push((
+                path,
+                bytes,
+                encoding,
+                vec![signal("pascal", LanguageEvidence::Extension)],
+            ));
+        }
+        for (path, bytes, _, _) in &cases {
+            write_fixture(&temporary, path, bytes);
+        }
+        write_fixture(&temporary, "denied.pas", written.as_bytes());
+        write_fixture(&temporary, "binary.pas", b"\0binary");
+        let config = ConfigSnapshot::resolve(&[rootlight_config::ConfigLayer {
+            source: rootlight_config::ConfigSource::User,
+            contents: "version='1.3'\n[extensions.source-languages]\nversion='1.0'\ncritical=true\n[extensions.source-languages.data.extensions]\npp='puppet'\n[extensions.source-languages.data.paths]\n'Configured.pp'='pascal'\n'Overridden.pas'='unsupported-language'\n'denied.pas'='pascal'\n'binary.pas'='pascal'\n",
+        }])
+        .unwrap();
+        assert_eq!(
+            config.source_language_for_path("Configured.pp"),
+            Some("pascal")
+        );
+        assert_eq!(
+            config.source_language_for_path("Default.pp"),
+            Some("puppet")
+        );
+        let root = fixture_root(&temporary, b"configured-pascal");
+        let policy = DiscoveryPolicy::build(
+            vec![PolicyRule {
+                layer: PolicyLayer::Operation,
+                pattern: "denied.pas".to_owned(),
+                source: "fixture".to_owned(),
+            }],
+            true,
+        )
+        .unwrap();
+        let (manifest, snapshots) = discover_with_snapshots(
+            &root,
+            &config,
+            &policy,
+            limits(),
+            BTreeMap::new(),
+            &Cancellation::new(),
+        )
+        .unwrap()
+        .into_parts();
+        assert_eq!(manifest.configuration_hash, config.hash());
+        assert_eq!(manifest.inputs.len(), cases.len());
+        assert_eq!(snapshots.len(), cases.len());
+        assert!(manifest.coverage.complete);
+        for (path, bytes, encoding, signals) in cases {
+            let input = manifest
+                .inputs
+                .iter()
+                .find(|input| input.path == path)
+                .unwrap();
+            let relative = RelativePath::parse(Path::new(path)).unwrap();
+            assert_eq!(input.file, root.file_id(&relative), "{path}");
+            assert_eq!(input.class, InputClass::Source, "{path}");
+            assert_eq!(input.encoding, encoding, "{path}");
+            assert_eq!(input.bytes, u64::try_from(bytes.len()).unwrap(), "{path}");
+            assert_eq!(input.content_hash, content_hash(&bytes), "{path}");
+            assert_eq!(snapshots[&input.file].content(), bytes, "{path}");
+            assert_eq!(input.language_signals, signals, "{path}");
+            assert!(input.project_language_witnesses.is_empty(), "{path}");
+        }
+        assert_eq!(manifest.exclusions.len(), 2);
+        for (path, reason) in [
+            ("denied.pas", ExclusionReason::Policy),
+            ("binary.pas", ExclusionReason::Binary),
+        ] {
+            assert!(
+                manifest
+                    .exclusions
+                    .iter()
+                    .any(|entry| entry.path == path && entry.reason == reason),
+                "{path}",
+            );
+            assert!(!manifest.inputs.iter().any(|input| input.path == path));
+        }
     }
 
     #[test]
