@@ -1,0 +1,2007 @@
+{
+  "schema": "rootlight.apex-source-provenance.v1",
+  "package": {
+    "name": "tree-sitter-sfapex",
+    "version": "3.0.1",
+    "repository": "https://github.com/aheber/tree-sitter-sfapex",
+    "local_binding_scope": "unpublished_apex_only_static_binding_with_complete_original_four_component_sources_retained",
+    "local_binding_is_upstream_unmodified": false
+  },
+  "upstream": {
+    "published_crate": {
+      "url": "https://static.crates.io/crates/tree-sitter-sfapex/tree-sitter-sfapex-3.0.1.crate",
+      "bytes": 530869,
+      "sha256": "e902b5d7951d1477ff43ad5ec8b2e6adae029cce593a770c64e10362ee7dec7b",
+      "retained_path": "upstream/tree-sitter-sfapex-3.0.1.crate",
+      "expanded_tar_bytes": 9891328,
+      "member_count": 45,
+      "regular_file_count": 45,
+      "regular_file_bytes": 9858531,
+      "supplied_license_paths": []
+    },
+    "authored_revision": {
+      "revision": "da568eee10ce4724a40f368b2b7e795dacb4f1ba",
+      "url": "https://codeload.github.com/aheber/tree-sitter-sfapex/tar.gz/da568eee10ce4724a40f368b2b7e795dacb4f1ba",
+      "bytes": 977159,
+      "sha256": "ae9e1b2e96f01501b6906f361fdd3206e8128862d137477c7d17d14ba9373ae1",
+      "retained_path": "upstream/tree-sitter-sfapex-da568eee10ce4724a40f368b2b7e795dacb4f1ba.tar.gz",
+      "expanded_tar_bytes": 13025280,
+      "member_count": 235,
+      "regular_file_count": 196,
+      "regular_file_bytes": 12849778,
+      "directory_count": 39,
+      "original_directory_mode": 509,
+      "association_evidence": {
+        "published_vcs_path": ".cargo_vcs_info.json",
+        "published_vcs_sha256": "bf358621b5684cf585f3a374b83aa3c01b6f1b320874d4e01b76c4293031c850",
+        "published_vcs_sha1": "da568eee10ce4724a40f368b2b7e795dacb4f1ba",
+        "published_vcs_path_in_vcs": "",
+        "authored_global_pax_comment": "da568eee10ce4724a40f368b2b7e795dacb4f1ba",
+        "scope": "observed_published_metadata_and_exact_revision_archive_not_a_verified_signature"
+      }
+    },
+    "archive_signatures_verified": false,
+    "current_remote_head_equivalence_claimed": false
+  },
+  "published_source_originals": {
+    "count": 45,
+    "bytes": 9858531,
+    "all_members_retained": true,
+    "retention_policy": "Every original member is retained byte-exact at its original relative path except the normalized Cargo.toml, retained as Cargo.toml.upstream. Cargo.toml.orig and bindings/rust/build.rs and bindings/rust/lib.rs remain unmodified.",
+    "member_inventory": [
+      {
+        "path": ".cargo_vcs_info.json",
+        "bytes": 94,
+        "sha256": "bf358621b5684cf585f3a374b83aa3c01b6f1b320874d4e01b76c4293031c850",
+        "original_archive_mode": 420,
+        "original_executable_intent": false,
+        "retained_path": ".cargo_vcs_info.json",
+        "retained_bytes_unmodified": true
+      },
+      {
+        "path": "Cargo.lock",
+        "bytes": 5626,
+        "sha256": "3529929fec70ab6cd60329c9d3d533eef47863ca1990f36b3835bc0470ace026",
+        "original_archive_mode": 420,
+        "original_executable_intent": false,
+        "retained_path": "Cargo.lock",
+        "retained_bytes_unmodified": true
+      },
+      {
+        "path": "Cargo.toml",
+        "bytes": 1551,
+        "sha256": "c05d1d7acd746785866cde391a9e1452406ad8595bbd17f6f94cbf10962c72eb",
+        "original_archive_mode": 420,
+        "original_executable_intent": false,
+        "retained_path": "Cargo.toml.upstream",
+        "retained_bytes_unmodified": true
+      },
+      {
+        "path": "Cargo.toml.orig",
+        "bytes": 898,
+        "sha256": "f860b6380b6e93e319b4bbc2d8326aec7e067c00d0694cf15c1d21091d752525",
+        "original_archive_mode": 420,
+        "original_executable_intent": false,
+        "retained_path": "Cargo.toml.orig",
+        "retained_bytes_unmodified": true
+      },
+      {
+        "path": "README.md",
+        "bytes": 7388,
+        "sha256": "c30fc2734c881fe3a4ee786a53edc5ab6f5c09b2af333595d5994eae27cfc3ee",
+        "original_archive_mode": 420,
+        "original_executable_intent": false,
+        "retained_path": "README.md",
+        "retained_bytes_unmodified": true
+      },
+      {
+        "path": "apex/grammar.js",
+        "bytes": 25973,
+        "sha256": "544364d35048d5920585b4c5458a9e7817132ce4c0d35f3932fb78c0e145b2bf",
+        "original_archive_mode": 420,
+        "original_executable_intent": false,
+        "retained_path": "apex/grammar.js",
+        "retained_bytes_unmodified": true
+      },
+      {
+        "path": "apex/queries/highlights.scm",
+        "bytes": 5057,
+        "sha256": "77b861b3539ffff4f73e2028d610427c23f9baefcef48dc1f65af805e29ee7cb",
+        "original_archive_mode": 420,
+        "original_executable_intent": false,
+        "retained_path": "apex/queries/highlights.scm",
+        "retained_bytes_unmodified": true
+      },
+      {
+        "path": "apex/queries/locals.scm",
+        "bytes": 377,
+        "sha256": "ff293647041add58c79298b7b41dd460ed4c9bd8b06a46fff0eb762809af009a",
+        "original_archive_mode": 420,
+        "original_executable_intent": false,
+        "retained_path": "apex/queries/locals.scm",
+        "retained_bytes_unmodified": true
+      },
+      {
+        "path": "apex/queries/tags.scm",
+        "bytes": 571,
+        "sha256": "b76c43c8e92708aae20caccb77f2c893f76f8fe6cb65ff0ae714b499772a04b3",
+        "original_archive_mode": 420,
+        "original_executable_intent": false,
+        "retained_path": "apex/queries/tags.scm",
+        "retained_bytes_unmodified": true
+      },
+      {
+        "path": "apex/src/grammar.json",
+        "bytes": 250742,
+        "sha256": "beac39ed60f630039bfd7cfe6bacf09bb0214ecabb6b5a36e8f066ff3d19ca89",
+        "original_archive_mode": 420,
+        "original_executable_intent": false,
+        "retained_path": "apex/src/grammar.json",
+        "retained_bytes_unmodified": true
+      },
+      {
+        "path": "apex/src/node-types.json",
+        "bytes": 99219,
+        "sha256": "b8303c379717b0d8916bbc36cedab856033b3467de7bb34e65b37de4cfa6c655",
+        "original_archive_mode": 420,
+        "original_executable_intent": false,
+        "retained_path": "apex/src/node-types.json",
+        "retained_bytes_unmodified": true
+      },
+      {
+        "path": "apex/src/parser.c",
+        "bytes": 7561581,
+        "sha256": "17c58f2ef3726022a7b24b5564dadf59d46641e24a1cddf725dc247986b9586e",
+        "original_archive_mode": 420,
+        "original_executable_intent": false,
+        "retained_path": "apex/src/parser.c",
+        "retained_bytes_unmodified": true
+      },
+      {
+        "path": "apex/src/tree_sitter/alloc.h",
+        "bytes": 985,
+        "sha256": "b29c1c9fb7cc82f58c84b376df1297d6e2737a1d655fd356db0859e3c29c2fea",
+        "original_archive_mode": 420,
+        "original_executable_intent": false,
+        "retained_path": "apex/src/tree_sitter/alloc.h",
+        "retained_bytes_unmodified": true
+      },
+      {
+        "path": "apex/src/tree_sitter/array.h",
+        "bytes": 13269,
+        "sha256": "31e60a1bff6f715afacce03b5b70efe42b58371b4f9595dd4af52a577ff9608c",
+        "original_archive_mode": 420,
+        "original_executable_intent": false,
+        "retained_path": "apex/src/tree_sitter/array.h",
+        "retained_bytes_unmodified": true
+      },
+      {
+        "path": "apex/src/tree_sitter/parser.h",
+        "bytes": 7624,
+        "sha256": "180b893c8734778fd32f372dfbc27bd6ad1cd2221f26150b31256ff6716320d2",
+        "original_archive_mode": 420,
+        "original_executable_intent": false,
+        "retained_path": "apex/src/tree_sitter/parser.h",
+        "retained_bytes_unmodified": true
+      },
+      {
+        "path": "bindings/rust/build.rs",
+        "bytes": 798,
+        "sha256": "0c446949be3e5095ee60df1d90f7d09e41db6a5e90262af53db5514f9f7b5437",
+        "original_archive_mode": 420,
+        "original_executable_intent": false,
+        "retained_path": "bindings/rust/build.rs",
+        "retained_bytes_unmodified": true
+      },
+      {
+        "path": "bindings/rust/lib.rs",
+        "bytes": 5989,
+        "sha256": "8f0e396c90f1474e68b58705f12a89233c35b3fd3aa6d52995f4f7f6872e139b",
+        "original_archive_mode": 420,
+        "original_executable_intent": false,
+        "retained_path": "bindings/rust/lib.rs",
+        "retained_bytes_unmodified": true
+      },
+      {
+        "path": "common/common.js",
+        "bytes": 995,
+        "sha256": "1c0e18e87b5bd0056d4648cbe7c74dfc7f9dffccb7318d2b5a13cb9f96b8d3d2",
+        "original_archive_mode": 420,
+        "original_executable_intent": false,
+        "retained_path": "common/common.js",
+        "retained_bytes_unmodified": true
+      },
+      {
+        "path": "common/soql-grammar.js",
+        "bytes": 12547,
+        "sha256": "49e8a2073c29e221f28787eb7661ae7f76f0309ea041c2ea4b357ce60afccc63",
+        "original_archive_mode": 420,
+        "original_executable_intent": false,
+        "retained_path": "common/soql-grammar.js",
+        "retained_bytes_unmodified": true
+      },
+      {
+        "path": "common/sosl-grammar.js",
+        "bytes": 3735,
+        "sha256": "ac57322b667c25bc055aaa76f2798a64fffac3262f062d82ece0e6cf92b113c5",
+        "original_archive_mode": 420,
+        "original_executable_intent": false,
+        "retained_path": "common/sosl-grammar.js",
+        "retained_bytes_unmodified": true
+      },
+      {
+        "path": "sflog/grammar.js",
+        "bytes": 2228,
+        "sha256": "484ca490307889ff37ebc533353b8f5faa4a6dabc04c16fd4c1301af3576e36d",
+        "original_archive_mode": 420,
+        "original_executable_intent": false,
+        "retained_path": "sflog/grammar.js",
+        "retained_bytes_unmodified": true
+      },
+      {
+        "path": "sflog/queries/highlights.scm",
+        "bytes": 569,
+        "sha256": "ea48d874a74f7e9c2ef6b53a508da54126c14f19535535cc8e7f17b133948ef7",
+        "original_archive_mode": 420,
+        "original_executable_intent": false,
+        "retained_path": "sflog/queries/highlights.scm",
+        "retained_bytes_unmodified": true
+      },
+      {
+        "path": "sflog/src/grammar.json",
+        "bytes": 9229,
+        "sha256": "19672a53ac71e99f0bca58685d2130f5c1602fdb9a0b7980e6647d7c92d2b9b4",
+        "original_archive_mode": 420,
+        "original_executable_intent": false,
+        "retained_path": "sflog/src/grammar.json",
+        "retained_bytes_unmodified": true
+      },
+      {
+        "path": "sflog/src/node-types.json",
+        "bytes": 6922,
+        "sha256": "cb26ac6a28aab49ce59af14f39e113359696af9525886504eb6935d43f9ed00b",
+        "original_archive_mode": 420,
+        "original_executable_intent": false,
+        "retained_path": "sflog/src/node-types.json",
+        "retained_bytes_unmodified": true
+      },
+      {
+        "path": "sflog/src/parser.c",
+        "bytes": 52114,
+        "sha256": "3448a47b5cd9d38a4b26336e25aca511f78b169939360e097f9ad0da635be955",
+        "original_archive_mode": 420,
+        "original_executable_intent": false,
+        "retained_path": "sflog/src/parser.c",
+        "retained_bytes_unmodified": true
+      },
+      {
+        "path": "sflog/src/tree_sitter/alloc.h",
+        "bytes": 985,
+        "sha256": "b29c1c9fb7cc82f58c84b376df1297d6e2737a1d655fd356db0859e3c29c2fea",
+        "original_archive_mode": 420,
+        "original_executable_intent": false,
+        "retained_path": "sflog/src/tree_sitter/alloc.h",
+        "retained_bytes_unmodified": true
+      },
+      {
+        "path": "sflog/src/tree_sitter/array.h",
+        "bytes": 13269,
+        "sha256": "31e60a1bff6f715afacce03b5b70efe42b58371b4f9595dd4af52a577ff9608c",
+        "original_archive_mode": 420,
+        "original_executable_intent": false,
+        "retained_path": "sflog/src/tree_sitter/array.h",
+        "retained_bytes_unmodified": true
+      },
+      {
+        "path": "sflog/src/tree_sitter/parser.h",
+        "bytes": 7624,
+        "sha256": "180b893c8734778fd32f372dfbc27bd6ad1cd2221f26150b31256ff6716320d2",
+        "original_archive_mode": 420,
+        "original_executable_intent": false,
+        "retained_path": "sflog/src/tree_sitter/parser.h",
+        "retained_bytes_unmodified": true
+      },
+      {
+        "path": "soql/grammar.js",
+        "bytes": 472,
+        "sha256": "d69d3932a0d11242f9d4fdef1341139fd36fe15331b955485d3d6fff619b60b4",
+        "original_archive_mode": 420,
+        "original_executable_intent": false,
+        "retained_path": "soql/grammar.js",
+        "retained_bytes_unmodified": true
+      },
+      {
+        "path": "soql/queries/highlights-distinct.scm",
+        "bytes": 31,
+        "sha256": "df023111c98e0d9f0fda38371750cb8ea13d4d0c2459f36e9f1d2a0daf5811d9",
+        "original_archive_mode": 420,
+        "original_executable_intent": false,
+        "retained_path": "soql/queries/highlights-distinct.scm",
+        "retained_bytes_unmodified": true
+      },
+      {
+        "path": "soql/queries/highlights.scm",
+        "bytes": 2120,
+        "sha256": "fd7dc9c373cd283af3de324718c7d5c5551af159a4c22cfffc76712282d56e15",
+        "original_archive_mode": 420,
+        "original_executable_intent": false,
+        "retained_path": "soql/queries/highlights.scm",
+        "retained_bytes_unmodified": true
+      },
+      {
+        "path": "soql/src/grammar.json",
+        "bytes": 78077,
+        "sha256": "d0983d9b389cccc3e6e337dbab326ee436c6396c8828f0762cbd2c91eba92ec4",
+        "original_archive_mode": 420,
+        "original_executable_intent": false,
+        "retained_path": "soql/src/grammar.json",
+        "retained_bytes_unmodified": true
+      },
+      {
+        "path": "soql/src/node-types.json",
+        "bytes": 28718,
+        "sha256": "2fd16731b19316a0f2667bcb928d334bf90e3511d5f4d7193b597f274dbb5930",
+        "original_archive_mode": 420,
+        "original_executable_intent": false,
+        "retained_path": "soql/src/node-types.json",
+        "retained_bytes_unmodified": true
+      },
+      {
+        "path": "soql/src/parser.c",
+        "bytes": 699572,
+        "sha256": "0195f4b453b65ebbcb71644a2f21dea2c729fc142fd9fbfd90ed76c601385243",
+        "original_archive_mode": 420,
+        "original_executable_intent": false,
+        "retained_path": "soql/src/parser.c",
+        "retained_bytes_unmodified": true
+      },
+      {
+        "path": "soql/src/tree_sitter/alloc.h",
+        "bytes": 985,
+        "sha256": "b29c1c9fb7cc82f58c84b376df1297d6e2737a1d655fd356db0859e3c29c2fea",
+        "original_archive_mode": 420,
+        "original_executable_intent": false,
+        "retained_path": "soql/src/tree_sitter/alloc.h",
+        "retained_bytes_unmodified": true
+      },
+      {
+        "path": "soql/src/tree_sitter/array.h",
+        "bytes": 13269,
+        "sha256": "31e60a1bff6f715afacce03b5b70efe42b58371b4f9595dd4af52a577ff9608c",
+        "original_archive_mode": 420,
+        "original_executable_intent": false,
+        "retained_path": "soql/src/tree_sitter/array.h",
+        "retained_bytes_unmodified": true
+      },
+      {
+        "path": "soql/src/tree_sitter/parser.h",
+        "bytes": 7624,
+        "sha256": "180b893c8734778fd32f372dfbc27bd6ad1cd2221f26150b31256ff6716320d2",
+        "original_archive_mode": 420,
+        "original_executable_intent": false,
+        "retained_path": "soql/src/tree_sitter/parser.h",
+        "retained_bytes_unmodified": true
+      },
+      {
+        "path": "sosl/grammar.js",
+        "bytes": 744,
+        "sha256": "2c7c792d357e3e8419b53a5410dfba0f471eb422e49d1fdb7d849d2a6f7a028a",
+        "original_archive_mode": 420,
+        "original_executable_intent": false,
+        "retained_path": "sosl/grammar.js",
+        "retained_bytes_unmodified": true
+      },
+      {
+        "path": "sosl/queries/highlights.scm",
+        "bytes": 352,
+        "sha256": "14cec21c00313043791c8bf5d041672efccea6b2ea1be9555d18f862163c03aa",
+        "original_archive_mode": 420,
+        "original_executable_intent": false,
+        "retained_path": "sosl/queries/highlights.scm",
+        "retained_bytes_unmodified": true
+      },
+      {
+        "path": "sosl/src/grammar.json",
+        "bytes": 95617,
+        "sha256": "1fc44246039df36736e48f164fa32db42744f9f23b781e3bf463124503882e82",
+        "original_archive_mode": 420,
+        "original_executable_intent": false,
+        "retained_path": "sosl/src/grammar.json",
+        "retained_bytes_unmodified": true
+      },
+      {
+        "path": "sosl/src/node-types.json",
+        "bytes": 37011,
+        "sha256": "5e9535078f2d298c388bc1f43c248a4c8d10dea7f3f7420373d8112a4e21e6d0",
+        "original_archive_mode": 420,
+        "original_executable_intent": false,
+        "retained_path": "sosl/src/node-types.json",
+        "retained_bytes_unmodified": true
+      },
+      {
+        "path": "sosl/src/parser.c",
+        "bytes": 774102,
+        "sha256": "c7c1e3134005085328c630711c0426b3f444ce6b28f6aa89775fc31d61ebb21a",
+        "original_archive_mode": 420,
+        "original_executable_intent": false,
+        "retained_path": "sosl/src/parser.c",
+        "retained_bytes_unmodified": true
+      },
+      {
+        "path": "sosl/src/tree_sitter/alloc.h",
+        "bytes": 985,
+        "sha256": "b29c1c9fb7cc82f58c84b376df1297d6e2737a1d655fd356db0859e3c29c2fea",
+        "original_archive_mode": 420,
+        "original_executable_intent": false,
+        "retained_path": "sosl/src/tree_sitter/alloc.h",
+        "retained_bytes_unmodified": true
+      },
+      {
+        "path": "sosl/src/tree_sitter/array.h",
+        "bytes": 13269,
+        "sha256": "31e60a1bff6f715afacce03b5b70efe42b58371b4f9595dd4af52a577ff9608c",
+        "original_archive_mode": 420,
+        "original_executable_intent": false,
+        "retained_path": "sosl/src/tree_sitter/array.h",
+        "retained_bytes_unmodified": true
+      },
+      {
+        "path": "sosl/src/tree_sitter/parser.h",
+        "bytes": 7624,
+        "sha256": "180b893c8734778fd32f372dfbc27bd6ad1cd2221f26150b31256ff6716320d2",
+        "original_archive_mode": 420,
+        "original_executable_intent": false,
+        "retained_path": "sosl/src/tree_sitter/parser.h",
+        "retained_bytes_unmodified": true
+      }
+    ]
+  },
+  "authored_archive_originals": {
+    "count": 196,
+    "bytes": 12849778,
+    "retention_policy": "The complete authored archive is retained unchanged as inert evidence. Only its authentic LICENSE is additionally materialized as the active package LICENSE; the remaining authored tree is not substituted for the complete published source roster.",
+    "member_prefix": "tree-sitter-sfapex-da568eee10ce4724a40f368b2b7e795dacb4f1ba",
+    "retained_archive_path": "upstream/tree-sitter-sfapex-da568eee10ce4724a40f368b2b7e795dacb4f1ba.tar.gz",
+    "member_inventory": [
+      {
+        "path": ".gitattributes",
+        "bytes": 202,
+        "sha256": "ffefd2f63140980fc26f2282294934a016616f8ccbd777912e57622a5d0f22e4",
+        "original_archive_mode": 436
+      },
+      {
+        "path": ".github/workflows/publish-release.yml",
+        "bytes": 323,
+        "sha256": "045306161d1813b9da18e8b3d20af05deff61f3007053717b049de459af0eb44",
+        "original_archive_mode": 436
+      },
+      {
+        "path": ".github/workflows/test.yml",
+        "bytes": 597,
+        "sha256": "9f30a526074af34301620093b9e07daddd7eb7631ad5716c8d394a2093e149ac",
+        "original_archive_mode": 436
+      },
+      {
+        "path": ".gitignore",
+        "bytes": 482,
+        "sha256": "82591c8e6418687c010469bf9672edb5c317c29b59c94a7815b3a0d9b1a645f5",
+        "original_archive_mode": 436
+      },
+      {
+        "path": "Cargo.toml",
+        "bytes": 898,
+        "sha256": "f860b6380b6e93e319b4bbc2d8326aec7e067c00d0694cf15c1d21091d752525",
+        "original_archive_mode": 436
+      },
+      {
+        "path": "LICENSE",
+        "bytes": 1079,
+        "sha256": "c3d045abbc0a8dec1b00737c0668f6dbb028d248521b74e79778c726671925ed",
+        "original_archive_mode": 436
+      },
+      {
+        "path": "README.md",
+        "bytes": 7388,
+        "sha256": "c30fc2734c881fe3a4ee786a53edc5ab6f5c09b2af333595d5994eae27cfc3ee",
+        "original_archive_mode": 436
+      },
+      {
+        "path": "apex/grammar.js",
+        "bytes": 25973,
+        "sha256": "544364d35048d5920585b4c5458a9e7817132ce4c0d35f3932fb78c0e145b2bf",
+        "original_archive_mode": 436
+      },
+      {
+        "path": "apex/package.json",
+        "bytes": 38,
+        "sha256": "392059492558367174617f026009e4f1e65e1dc5e02a53ce0bfd81b85263fd8f",
+        "original_archive_mode": 436
+      },
+      {
+        "path": "apex/queries/highlights.scm",
+        "bytes": 5057,
+        "sha256": "77b861b3539ffff4f73e2028d610427c23f9baefcef48dc1f65af805e29ee7cb",
+        "original_archive_mode": 436
+      },
+      {
+        "path": "apex/queries/locals.scm",
+        "bytes": 377,
+        "sha256": "ff293647041add58c79298b7b41dd460ed4c9bd8b06a46fff0eb762809af009a",
+        "original_archive_mode": 436
+      },
+      {
+        "path": "apex/queries/tags.scm",
+        "bytes": 571,
+        "sha256": "b76c43c8e92708aae20caccb77f2c893f76f8fe6cb65ff0ae714b499772a04b3",
+        "original_archive_mode": 436
+      },
+      {
+        "path": "apex/src/grammar.json",
+        "bytes": 250742,
+        "sha256": "beac39ed60f630039bfd7cfe6bacf09bb0214ecabb6b5a36e8f066ff3d19ca89",
+        "original_archive_mode": 436
+      },
+      {
+        "path": "apex/src/node-types.json",
+        "bytes": 99219,
+        "sha256": "b8303c379717b0d8916bbc36cedab856033b3467de7bb34e65b37de4cfa6c655",
+        "original_archive_mode": 436
+      },
+      {
+        "path": "apex/src/parser.c",
+        "bytes": 7561581,
+        "sha256": "17c58f2ef3726022a7b24b5564dadf59d46641e24a1cddf725dc247986b9586e",
+        "original_archive_mode": 436
+      },
+      {
+        "path": "apex/src/tree_sitter/alloc.h",
+        "bytes": 985,
+        "sha256": "b29c1c9fb7cc82f58c84b376df1297d6e2737a1d655fd356db0859e3c29c2fea",
+        "original_archive_mode": 436
+      },
+      {
+        "path": "apex/src/tree_sitter/array.h",
+        "bytes": 13269,
+        "sha256": "31e60a1bff6f715afacce03b5b70efe42b58371b4f9595dd4af52a577ff9608c",
+        "original_archive_mode": 436
+      },
+      {
+        "path": "apex/src/tree_sitter/parser.h",
+        "bytes": 7624,
+        "sha256": "180b893c8734778fd32f372dfbc27bd6ad1cd2221f26150b31256ff6716320d2",
+        "original_archive_mode": 436
+      },
+      {
+        "path": "apex/test/corpus/annotations.txt",
+        "bytes": 5131,
+        "sha256": "be4573622610758b3854aa1bb66e352779d573b6dc54a069d845e636bfc8357b",
+        "original_archive_mode": 436
+      },
+      {
+        "path": "apex/test/corpus/anonymous.txt",
+        "bytes": 3857,
+        "sha256": "d223d4866b1c50de3d128550e3e33e59605bd133db64a980bd345f87162e3a07",
+        "original_archive_mode": 436
+      },
+      {
+        "path": "apex/test/corpus/class.txt",
+        "bytes": 22790,
+        "sha256": "962a3c00ed279fdb9bb4fe6fa0ce1733c5b52917e2e9d6a8e7e7bdc08b383293",
+        "original_archive_mode": 436
+      },
+      {
+        "path": "apex/test/corpus/comments.txt",
+        "bytes": 4634,
+        "sha256": "fb9e78428594063d1d20951f6851322e36806b85e950f7ddbe68809a026a34ba",
+        "original_archive_mode": 436
+      },
+      {
+        "path": "apex/test/corpus/constructor.txt",
+        "bytes": 4614,
+        "sha256": "650db1d55ca87a18d01fe66453af5dc18736d029b4e16338ae649d383bcea644",
+        "original_archive_mode": 436
+      },
+      {
+        "path": "apex/test/corpus/control.txt",
+        "bytes": 11860,
+        "sha256": "cc3c2990e263170eca33bc8956ec6517c67f6180414a4fd4080a0f75be936587",
+        "original_archive_mode": 436
+      },
+      {
+        "path": "apex/test/corpus/dml_keywords.txt",
+        "bytes": 11192,
+        "sha256": "a411f3fdc5132192c2518dfb90de23c4365b2bdf2aa3d47a6ce07fd55747a6a0",
+        "original_archive_mode": 436
+      },
+      {
+        "path": "apex/test/corpus/ending-sensitive-crlf.txt",
+        "bytes": 369,
+        "sha256": "1c11b493ecbed1c68f14c5f777b21cd9e1672ddea968210beec1f355b46ca799",
+        "original_archive_mode": 436
+      },
+      {
+        "path": "apex/test/corpus/ending-sensitive-lf.txt",
+        "bytes": 365,
+        "sha256": "93b120ef8408e16a3700475428e37607eb4d7ca3efc0858066d6d51321da7606",
+        "original_archive_mode": 436
+      },
+      {
+        "path": "apex/test/corpus/enums.txt",
+        "bytes": 1283,
+        "sha256": "58e13ceecbcb8b6deca207eab6595ca174fc3f580d544dfed6cfcbbc1edbf9a6",
+        "original_archive_mode": 436
+      },
+      {
+        "path": "apex/test/corpus/exceptions.txt",
+        "bytes": 5443,
+        "sha256": "24304cf95d285866fa1d0952a1b119e44a483be4fbe75fdb0663a1f404c70076",
+        "original_archive_mode": 436
+      },
+      {
+        "path": "apex/test/corpus/expressions.txt",
+        "bytes": 5456,
+        "sha256": "dc6c9e9f7b67b2806c5c1c760692b6ad36113d149f1f062a5422d60601cd43df",
+        "original_archive_mode": 436
+      },
+      {
+        "path": "apex/test/corpus/instanceof.txt",
+        "bytes": 1308,
+        "sha256": "1ea5b49e231d5d970dcde4840e8f6ff92fa538ff86a3e068e98a84ea7cf61e9b",
+        "original_archive_mode": 436
+      },
+      {
+        "path": "apex/test/corpus/methods.txt",
+        "bytes": 5389,
+        "sha256": "3fcc7243b6130c060b37dd544f93e7b84bb9682bda8aaa294f79e6bd7854ec8a",
+        "original_archive_mode": 436
+      },
+      {
+        "path": "apex/test/corpus/operators.txt",
+        "bytes": 34370,
+        "sha256": "b280dfda57fe54f966a013857f265284c4703b16e3d2504ff72a1a20056470e2",
+        "original_archive_mode": 436
+      },
+      {
+        "path": "apex/test/corpus/precedence.txt TODO",
+        "bytes": 131,
+        "sha256": "063a4161d091acbd6756fdf74642c2c64c38942c851cb1c26c86b6c6d49c11f5",
+        "original_archive_mode": 436
+      },
+      {
+        "path": "apex/test/corpus/properties.txt",
+        "bytes": 8513,
+        "sha256": "24dcd6dad9f9ec1ffafd4e9fe04c07af9efd4fd59c490813367852d58eea45a1",
+        "original_archive_mode": 436
+      },
+      {
+        "path": "apex/test/corpus/queries.txt",
+        "bytes": 28102,
+        "sha256": "46172f102cadd6f70f96ffe9804f75f670fb2e0491a306efa5fb5cdfe19744f3",
+        "original_archive_mode": 436
+      },
+      {
+        "path": "apex/test/corpus/switch.txt",
+        "bytes": 13706,
+        "sha256": "e61e118a40816e2e842f892e7d221770cdf5bd2f5fc9fcb171a569a8c6940105",
+        "original_archive_mode": 436
+      },
+      {
+        "path": "apex/test/corpus/triggers.txt",
+        "bytes": 1035,
+        "sha256": "23980311245cf25a10c598ddb6e39e2a162dc4ad8c38f7321c1310925f9501b8",
+        "original_archive_mode": 436
+      },
+      {
+        "path": "apex/test/corpus/variables.txt",
+        "bytes": 15192,
+        "sha256": "2d1bde01e2e80b86f2cfbbd4c13dfacab67c681c8bb6fce7d3ab6243f8101b16",
+        "original_archive_mode": 436
+      },
+      {
+        "path": "apex/test/highlight/annotations.cls",
+        "bytes": 1597,
+        "sha256": "0e70bbf38ce505fdafb1cb55f369da7e11d4a2f5ff3a54dac18e4a7c89e761a0",
+        "original_archive_mode": 436
+      },
+      {
+        "path": "apex/test/highlight/constructors.cls",
+        "bytes": 1144,
+        "sha256": "a3d6fc7bea5c3a20a18dc5de62ab17950257d65a55996f1f7f78a301a333b06e",
+        "original_archive_mode": 436
+      },
+      {
+        "path": "apex/test/highlight/control.cls",
+        "bytes": 6722,
+        "sha256": "566b4d7115c31230d2d1c5af4f29dda76cb789b669a776dc9487411b2d462a03",
+        "original_archive_mode": 436
+      },
+      {
+        "path": "apex/test/highlight/dml_keywords.cls",
+        "bytes": 1460,
+        "sha256": "77da543320c9e17c8fd03eb9bad8df3180668cc9424f4736f9b864efd5741802",
+        "original_archive_mode": 436
+      },
+      {
+        "path": "apex/test/highlight/enum_declaration.cls",
+        "bytes": 323,
+        "sha256": "ed2f93cc0e803ae82ca21a1299fbcf5f7ee1efda2e4495180287f1ec8d6136ff",
+        "original_archive_mode": 436
+      },
+      {
+        "path": "apex/test/highlight/enum_in_class.cls",
+        "bytes": 1044,
+        "sha256": "2c67f56d7407c6b4711ede2aee4d641cfe8d9523022c155921bc8a1010194c30",
+        "original_archive_mode": 436
+      },
+      {
+        "path": "apex/test/highlight/exceptions.cls",
+        "bytes": 2385,
+        "sha256": "8734b9b257ca6ed6007b81e539cf21096239ae5475d72d970a310298cd5083d6",
+        "original_archive_mode": 436
+      },
+      {
+        "path": "apex/test/highlight/field_access.cls",
+        "bytes": 1326,
+        "sha256": "be44747e6bb73b3099adcad635922181f9ee6224725ea72c3594f4c00c1ff606",
+        "original_archive_mode": 436
+      },
+      {
+        "path": "apex/test/highlight/instanceof.cls",
+        "bytes": 1283,
+        "sha256": "ddeaf032ec4b325104316846e03710a25f648eac753478c63f86cafc61165e2f",
+        "original_archive_mode": 436
+      },
+      {
+        "path": "apex/test/highlight/interface_declaration.cls",
+        "bytes": 375,
+        "sha256": "5b649e2f28026762a5e5191e03c28e8ab3752d3a16ff7b0e2856c4ca9cd40d79",
+        "original_archive_mode": 436
+      },
+      {
+        "path": "apex/test/highlight/interfaces_implemented.cls",
+        "bytes": 412,
+        "sha256": "7c0d0fe2336cab186668b0a7baddfc15ae55c9bb8e829dae5d9dd91cfa87dd6b",
+        "original_archive_mode": 436
+      },
+      {
+        "path": "apex/test/highlight/methods.cls",
+        "bytes": 2578,
+        "sha256": "2d9dd41a5c4e32741c14f6f211c71de924eff33f1c680dcd1e85b16e08e292df",
+        "original_archive_mode": 436
+      },
+      {
+        "path": "apex/test/highlight/properties.cls",
+        "bytes": 4420,
+        "sha256": "1afa60b6a82dd0a759b091a76bdabce3614310b8fd6c82a62268d40bf42ba11b",
+        "original_archive_mode": 436
+      },
+      {
+        "path": "apex/test/highlight/queries.cls",
+        "bytes": 11498,
+        "sha256": "ea0d3c5901cb549165b081ccf90b7da97b3ebba80ff5d298579400c8b8bd93de",
+        "original_archive_mode": 436
+      },
+      {
+        "path": "apex/test/highlight/switch.cls",
+        "bytes": 7537,
+        "sha256": "e86236a71618af1b319442c6972fbc25d85a2aedb20eeb5100ff21e0e5f84a72",
+        "original_archive_mode": 436
+      },
+      {
+        "path": "apex/test/highlight/trigger.trigger",
+        "bytes": 926,
+        "sha256": "442afac662089ccd0e734b62da170feb71fa9f68139d681b2e0aca244570ca74",
+        "original_archive_mode": 436
+      },
+      {
+        "path": "apex/test/highlight/variables.cls",
+        "bytes": 7588,
+        "sha256": "a74376faa9ebada6b8c4db80d119b9598f7cdb4614431f8d91f002fbe6fd211b",
+        "original_archive_mode": 436
+      },
+      {
+        "path": "apex/test/tags/calledmethods.cls",
+        "bytes": 276,
+        "sha256": "76634128f94201348f7703fbe9bc8aeb7349e1feb28746408dd0ea0146dd42f3",
+        "original_archive_mode": 436
+      },
+      {
+        "path": "apex/test/tags/class.cls",
+        "bytes": 50,
+        "sha256": "4418774c417621a1c14be5dc116cf3b0cf01f646d4bba9eeae164d577272fa8e",
+        "original_archive_mode": 436
+      },
+      {
+        "path": "apex/test/tags/enum.cls",
+        "bytes": 72,
+        "sha256": "1a5a521be37a3b49b3b78e411f6b62f7f624cbd5af120a66155856463cf9ac5a",
+        "original_archive_mode": 436
+      },
+      {
+        "path": "apex/test/tags/interface.cls",
+        "bytes": 102,
+        "sha256": "929eb3b5a6d81854611a795b354c021227b8c27a9cf63aefb3f07fb1b5358bf3",
+        "original_archive_mode": 436
+      },
+      {
+        "path": "apex/test/tags/interfaceimpl.cls",
+        "bytes": 127,
+        "sha256": "ec5034f71496fab3a827078267ceb823ce769987ff38fbaec1820ea05e20018e",
+        "original_archive_mode": 436
+      },
+      {
+        "path": "apex/test/tags/nestedclass.cls",
+        "bytes": 628,
+        "sha256": "35da95dc66dd3a31c4018007e572b44e114a9eb39d5b5eebfe054f29a8d939ca",
+        "original_archive_mode": 436
+      },
+      {
+        "path": "apex/tree-sitter.json",
+        "bytes": 920,
+        "sha256": "c3628e63247c044dbbd0438bd3b90f3d6661cf4d7e5a2f687049c926a1c73d3d",
+        "original_archive_mode": 436
+      },
+      {
+        "path": "binding.gyp",
+        "bytes": 608,
+        "sha256": "4a16f7497b2616af477a954a82e0766719e84dd78305abf782f87ebf5a8c3395",
+        "original_archive_mode": 436
+      },
+      {
+        "path": "bindings/node/apex.js",
+        "bytes": 42,
+        "sha256": "ba49e73008e1f682749dd4b4f6c118549332527044d8cf46ab7dd0810c2887fb",
+        "original_archive_mode": 436
+      },
+      {
+        "path": "bindings/node/binding.cc",
+        "bytes": 1605,
+        "sha256": "d390928113334541d14eac2e973a3f0d70b4695ee44cb3fb452ef9d75ec21a69",
+        "original_archive_mode": 436
+      },
+      {
+        "path": "bindings/node/index.d.ts",
+        "bytes": 163,
+        "sha256": "5dd29ce83749674a5d2db59a4fb37b4fecfd2d8322707fd7076b27518e3f34ec",
+        "original_archive_mode": 436
+      },
+      {
+        "path": "bindings/node/index.js",
+        "bytes": 424,
+        "sha256": "bd3f1c524ff5941c9362a0915834c723c431d2811ce857f588e88c00408795b6",
+        "original_archive_mode": 436
+      },
+      {
+        "path": "bindings/node/sflog.js",
+        "bytes": 43,
+        "sha256": "a721ac5d62516f5b1e103b00698d6da38b41995ad0714577344173eb4ab50ab6",
+        "original_archive_mode": 436
+      },
+      {
+        "path": "bindings/node/soql.js",
+        "bytes": 42,
+        "sha256": "203a16e726238b8f07722129649cef840faa5e2521c2f33d29dedeaec022723f",
+        "original_archive_mode": 436
+      },
+      {
+        "path": "bindings/node/sosl.js",
+        "bytes": 42,
+        "sha256": "485c2d4601fa5bf7dbbb703635e2104a97d3870201cbee6db154d9d6d0258e41",
+        "original_archive_mode": 436
+      },
+      {
+        "path": "bindings/rust/build.rs",
+        "bytes": 798,
+        "sha256": "0c446949be3e5095ee60df1d90f7d09e41db6a5e90262af53db5514f9f7b5437",
+        "original_archive_mode": 436
+      },
+      {
+        "path": "bindings/rust/lib.rs",
+        "bytes": 5989,
+        "sha256": "8f0e396c90f1474e68b58705f12a89233c35b3fd3aa6d52995f4f7f6872e139b",
+        "original_archive_mode": 436
+      },
+      {
+        "path": "bindings/web/README.md",
+        "bytes": 7388,
+        "sha256": "c30fc2734c881fe3a4ee786a53edc5ab6f5c09b2af333595d5994eae27cfc3ee",
+        "original_archive_mode": 436
+      },
+      {
+        "path": "bindings/web/index.d.ts",
+        "bytes": 524,
+        "sha256": "adb31f3898d2faef2c32498b91f301c2fdec1fcda6cce9ffd4cd0d8b7210c1e6",
+        "original_archive_mode": 436
+      },
+      {
+        "path": "bindings/web/index.js",
+        "bytes": 2376,
+        "sha256": "3055a60a1ef74a75362080f4b31fdafd2f8039673695dabd9b942ff9c0090734",
+        "original_archive_mode": 436
+      },
+      {
+        "path": "bindings/web/package-lock.json",
+        "bytes": 607,
+        "sha256": "d3604a134776fd650702a0c68e28a2eb6f573ee7b211bc7af399a6be35a77079",
+        "original_archive_mode": 436
+      },
+      {
+        "path": "bindings/web/package.json",
+        "bytes": 491,
+        "sha256": "b2a61d27211e90eea300c2d1e1d1385a826b65f8f81be001dfab30ceec77aa77",
+        "original_archive_mode": 436
+      },
+      {
+        "path": "common/common.js",
+        "bytes": 995,
+        "sha256": "1c0e18e87b5bd0056d4648cbe7c74dfc7f9dffccb7318d2b5a13cb9f96b8d3d2",
+        "original_archive_mode": 436
+      },
+      {
+        "path": "common/soql-grammar.js",
+        "bytes": 12547,
+        "sha256": "49e8a2073c29e221f28787eb7661ae7f76f0309ea041c2ea4b357ce60afccc63",
+        "original_archive_mode": 436
+      },
+      {
+        "path": "common/sosl-grammar.js",
+        "bytes": 3735,
+        "sha256": "ac57322b667c25bc055aaa76f2798a64fffac3262f062d82ece0e6cf92b113c5",
+        "original_archive_mode": 436
+      },
+      {
+        "path": "docs/.nojekyll",
+        "bytes": 0,
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "original_archive_mode": 436
+      },
+      {
+        "path": "docs/playground/index.html",
+        "bytes": 13974,
+        "sha256": "c85324a3bc5bd20da814ac6677d1ff8abd4cb4b45964af2d8ccd3bcf84f29334",
+        "original_archive_mode": 436
+      },
+      {
+        "path": "docs/playground/playground.js",
+        "bytes": 20571,
+        "sha256": "f85b9c46cd5127b4a8dc1f3b495b412c8d2d653254be9a173b7c3d32ea55f949",
+        "original_archive_mode": 436
+      },
+      {
+        "path": "docs/playground/tree-sitter-apex.wasm",
+        "bytes": 1647994,
+        "sha256": "4d1a839e650bf56a3d85f27e639dc028ae173045284c4fd8e0e8a57fcb430747",
+        "original_archive_mode": 509
+      },
+      {
+        "path": "docs/playground/tree-sitter-sflog.wasm",
+        "bytes": 12484,
+        "sha256": "f335c9ba0f8890daec9efc96a6e8705cc8acb9d556097bf3e231640faf8291ca",
+        "original_archive_mode": 509
+      },
+      {
+        "path": "docs/playground/tree-sitter-soql.wasm",
+        "bytes": 178858,
+        "sha256": "42bb112d6f5469ced683926c8df3bc9e305646f91ec76302352280931c5c076f",
+        "original_archive_mode": 509
+      },
+      {
+        "path": "docs/playground/tree-sitter-sosl.wasm",
+        "bytes": 198943,
+        "sha256": "fea16225fb16e9cecbc42188635ec03aff6fcaad0ffdce0f178ff80ee2a931dc",
+        "original_archive_mode": 509
+      },
+      {
+        "path": "docs/playground/web-tree-sitter.js",
+        "bytes": 153666,
+        "sha256": "0c868236a47296b4ff3c1570f20e0899e4a784ff6e5cd7bfc9c3a55225463e4a",
+        "original_archive_mode": 436
+      },
+      {
+        "path": "docs/playground/web-tree-sitter.wasm",
+        "bytes": 196763,
+        "sha256": "082795b88fe15e4b64043f835b4d7160fbf95e801855122acc9509239b5ef916",
+        "original_archive_mode": 436
+      },
+      {
+        "path": "nvim-treesitter-setup.md",
+        "bytes": 1839,
+        "sha256": "17bf62e3bb1f4f007e0c5a6ed742c63021c43ff04cb69281bd2d3bacacc55111",
+        "original_archive_mode": 436
+      },
+      {
+        "path": "package-lock.json",
+        "bytes": 23253,
+        "sha256": "7bf4d172212310a7ea3cad12759f74c4dd63e9788c042976382f67a3a58d4652",
+        "original_archive_mode": 436
+      },
+      {
+        "path": "package.json",
+        "bytes": 3604,
+        "sha256": "e393307814f6c69c3ebe373cb416b975dded5cf5e0110f592acd06c820c6a880",
+        "original_archive_mode": 436
+      },
+      {
+        "path": "scripts/copyFile.mjs",
+        "bytes": 147,
+        "sha256": "4cb61aaf5751aaa80847fa3560b61f69d3ac54f79d7b22bd1ef4b33c2498869b",
+        "original_archive_mode": 436
+      },
+      {
+        "path": "scripts/ghPublish.mjs",
+        "bytes": 338,
+        "sha256": "af646746985f19e07eaca7f01205516ed18b46a5f80ef88c9421c33c552a315b",
+        "original_archive_mode": 436
+      },
+      {
+        "path": "sflog/grammar.js",
+        "bytes": 2228,
+        "sha256": "484ca490307889ff37ebc533353b8f5faa4a6dabc04c16fd4c1301af3576e36d",
+        "original_archive_mode": 436
+      },
+      {
+        "path": "sflog/package.json",
+        "bytes": 39,
+        "sha256": "c88ad29362efd0e7f973a6a273716f0a4f9edc9d3ebc02fb513d49356d7f6655",
+        "original_archive_mode": 436
+      },
+      {
+        "path": "sflog/queries/highlights.scm",
+        "bytes": 569,
+        "sha256": "ea48d874a74f7e9c2ef6b53a508da54126c14f19535535cc8e7f17b133948ef7",
+        "original_archive_mode": 436
+      },
+      {
+        "path": "sflog/src/grammar.json",
+        "bytes": 9229,
+        "sha256": "19672a53ac71e99f0bca58685d2130f5c1602fdb9a0b7980e6647d7c92d2b9b4",
+        "original_archive_mode": 436
+      },
+      {
+        "path": "sflog/src/node-types.json",
+        "bytes": 6922,
+        "sha256": "cb26ac6a28aab49ce59af14f39e113359696af9525886504eb6935d43f9ed00b",
+        "original_archive_mode": 436
+      },
+      {
+        "path": "sflog/src/parser.c",
+        "bytes": 52114,
+        "sha256": "3448a47b5cd9d38a4b26336e25aca511f78b169939360e097f9ad0da635be955",
+        "original_archive_mode": 436
+      },
+      {
+        "path": "sflog/src/tree_sitter/alloc.h",
+        "bytes": 985,
+        "sha256": "b29c1c9fb7cc82f58c84b376df1297d6e2737a1d655fd356db0859e3c29c2fea",
+        "original_archive_mode": 436
+      },
+      {
+        "path": "sflog/src/tree_sitter/array.h",
+        "bytes": 13269,
+        "sha256": "31e60a1bff6f715afacce03b5b70efe42b58371b4f9595dd4af52a577ff9608c",
+        "original_archive_mode": 436
+      },
+      {
+        "path": "sflog/src/tree_sitter/parser.h",
+        "bytes": 7624,
+        "sha256": "180b893c8734778fd32f372dfbc27bd6ad1cd2221f26150b31256ff6716320d2",
+        "original_archive_mode": 436
+      },
+      {
+        "path": "sflog/test/corpus/LIMIT_USAGE_FOR_NS.txt",
+        "bytes": 2949,
+        "sha256": "60f836f68fdc13555dce55fb17b2f832e3bef0dc8ee14201b013c313e375edff",
+        "original_archive_mode": 436
+      },
+      {
+        "path": "sflog/test/corpus/anonymous-crlf.txt",
+        "bytes": 1791,
+        "sha256": "886b53e7401e28901a5ab8d2017b0d638c9b210280d41ba8dd9aff0620d36972",
+        "original_archive_mode": 436
+      },
+      {
+        "path": "sflog/test/corpus/anonymous-lf.txt",
+        "bytes": 1789,
+        "sha256": "ff13e165897df867965dd1d03c7a127f9613595c233d9c6615664bec1b860369",
+        "original_archive_mode": 436
+      },
+      {
+        "path": "sflog/test/corpus/anonymous.txt",
+        "bytes": 2494,
+        "sha256": "822c774d5f29fce114391af63773b52c7ef08060905e39dd222676a78e6fa8d8",
+        "original_archive_mode": 436
+      },
+      {
+        "path": "sflog/test/corpus/debug_json.txt",
+        "bytes": 2038,
+        "sha256": "b820188669839a093653074529cd43e56439faecfc1aa31cd9c27fe9e886d257",
+        "original_archive_mode": 436
+      },
+      {
+        "path": "sflog/test/corpus/header.txt",
+        "bytes": 2665,
+        "sha256": "adf420ba3fc580e9c64d37145e619cd12c047b1a391b7f63ed16f1cc2a0ab770",
+        "original_archive_mode": 436
+      },
+      {
+        "path": "sflog/test/corpus/limits.txt",
+        "bytes": 1921,
+        "sha256": "14bb03baad2ad371751383d348769bc42bfedabd8011d231b7296833932a88b5",
+        "original_archive_mode": 436
+      },
+      {
+        "path": "sflog/test/corpus/log_entries.txt",
+        "bytes": 2683,
+        "sha256": "ad465aa59043480d6aa11d5b0b83ae2032eb6628c4166cf2a5c8170f7a8f0941",
+        "original_archive_mode": 436
+      },
+      {
+        "path": "sflog/test/corpus/sample1.txt",
+        "bytes": 1936,
+        "sha256": "bc6fc8c4d32ca14cdb3b0ffa896e62419f9cf773893a2041339eb8016077b069",
+        "original_archive_mode": 436
+      },
+      {
+        "path": "sflog/tree-sitter.json",
+        "bytes": 770,
+        "sha256": "650256c25b1fbdf7fb27893b255f4315f62cc3c06e6ebd34c0e6bf69c6f40004",
+        "original_archive_mode": 436
+      },
+      {
+        "path": "soql/grammar.js",
+        "bytes": 472,
+        "sha256": "d69d3932a0d11242f9d4fdef1341139fd36fe15331b955485d3d6fff619b60b4",
+        "original_archive_mode": 436
+      },
+      {
+        "path": "soql/package.json",
+        "bytes": 38,
+        "sha256": "e6b07b756525365c6f56948f5212783bd2a5ca567e2812dc69d7f106f9af28dc",
+        "original_archive_mode": 436
+      },
+      {
+        "path": "soql/queries/highlights-distinct.scm",
+        "bytes": 31,
+        "sha256": "df023111c98e0d9f0fda38371750cb8ea13d4d0c2459f36e9f1d2a0daf5811d9",
+        "original_archive_mode": 436
+      },
+      {
+        "path": "soql/queries/highlights.scm",
+        "bytes": 2120,
+        "sha256": "fd7dc9c373cd283af3de324718c7d5c5551af159a4c22cfffc76712282d56e15",
+        "original_archive_mode": 436
+      },
+      {
+        "path": "soql/src/grammar.json",
+        "bytes": 78077,
+        "sha256": "d0983d9b389cccc3e6e337dbab326ee436c6396c8828f0762cbd2c91eba92ec4",
+        "original_archive_mode": 436
+      },
+      {
+        "path": "soql/src/node-types.json",
+        "bytes": 28718,
+        "sha256": "2fd16731b19316a0f2667bcb928d334bf90e3511d5f4d7193b597f274dbb5930",
+        "original_archive_mode": 436
+      },
+      {
+        "path": "soql/src/parser.c",
+        "bytes": 699572,
+        "sha256": "0195f4b453b65ebbcb71644a2f21dea2c729fc142fd9fbfd90ed76c601385243",
+        "original_archive_mode": 436
+      },
+      {
+        "path": "soql/src/tree_sitter/alloc.h",
+        "bytes": 985,
+        "sha256": "b29c1c9fb7cc82f58c84b376df1297d6e2737a1d655fd356db0859e3c29c2fea",
+        "original_archive_mode": 436
+      },
+      {
+        "path": "soql/src/tree_sitter/array.h",
+        "bytes": 13269,
+        "sha256": "31e60a1bff6f715afacce03b5b70efe42b58371b4f9595dd4af52a577ff9608c",
+        "original_archive_mode": 436
+      },
+      {
+        "path": "soql/src/tree_sitter/parser.h",
+        "bytes": 7624,
+        "sha256": "180b893c8734778fd32f372dfbc27bd6ad1cd2221f26150b31256ff6716320d2",
+        "original_archive_mode": 436
+      },
+      {
+        "path": "soql/test/corpus/aggregate.txt",
+        "bytes": 5429,
+        "sha256": "2c8891c85b1410b3295b2b80b5bf22312ab76a4e190382eb653cfe3248bc1540",
+        "original_archive_mode": 436
+      },
+      {
+        "path": "soql/test/corpus/bindvariables.txt",
+        "bytes": 3600,
+        "sha256": "ca7f6815573cfc71d614d530154d439a97bd3b66008aba87a8a4ac5cf0f2811c",
+        "original_archive_mode": 436
+      },
+      {
+        "path": "soql/test/corpus/dates.txt",
+        "bytes": 43116,
+        "sha256": "066c8531a40ee989caacce191d66db6ad73b1870573f0557f6416e86bdf1d116",
+        "original_archive_mode": 436
+      },
+      {
+        "path": "soql/test/corpus/fields.txt",
+        "bytes": 2961,
+        "sha256": "441bf2f904ab7cc3a40fe664851509c8e60029f2d02624143d5263c3ad5c1872",
+        "original_archive_mode": 436
+      },
+      {
+        "path": "soql/test/corpus/for.txt",
+        "bytes": 2477,
+        "sha256": "d39a46ca68d124fa263b71d87e4442fea58b5b29c1e81b1891cd06ee4af5e03f",
+        "original_archive_mode": 436
+      },
+      {
+        "path": "soql/test/corpus/format.txt",
+        "bytes": 2526,
+        "sha256": "0bd2d0dac29f5a0d2d1638e228d91b0b400997ab67bcc253d1026f06e2d77051",
+        "original_archive_mode": 436
+      },
+      {
+        "path": "soql/test/corpus/group_by.txt",
+        "bytes": 15289,
+        "sha256": "38b3f073d8dc637e3e35649f608656c039bf7ddc99bef50e82e6c2327775e319",
+        "original_archive_mode": 436
+      },
+      {
+        "path": "soql/test/corpus/limit.txt",
+        "bytes": 1079,
+        "sha256": "af7ab7fe8e578a5d7194bff492fd340b3a2417807944685d70f6fd39c323de67",
+        "original_archive_mode": 436
+      },
+      {
+        "path": "soql/test/corpus/location.txt",
+        "bytes": 2394,
+        "sha256": "a14685c79a6de4631c3ed69e52e900c5636f56bc8293cada8df90903a1ea32aa",
+        "original_archive_mode": 436
+      },
+      {
+        "path": "soql/test/corpus/logical_operators.txt",
+        "bytes": 6175,
+        "sha256": "f3409aef656e04e1213b9c5be7e6cefb47d97cf213e7ad0e5dfffe99aafb1d01",
+        "original_archive_mode": 436
+      },
+      {
+        "path": "soql/test/corpus/offset.txt",
+        "bytes": 1112,
+        "sha256": "fe8468aff3503bd5bdbe8e168f88cbf60c59f11170c6aa8e81f7f889a831b03d",
+        "original_archive_mode": 436
+      },
+      {
+        "path": "soql/test/corpus/order_by.txt",
+        "bytes": 5722,
+        "sha256": "ca0ebd1fd93cef732391c362e3c97f83e032ee57528838388211b51d866b31e1",
+        "original_archive_mode": 436
+      },
+      {
+        "path": "soql/test/corpus/relationships.txt",
+        "bytes": 8581,
+        "sha256": "5bff89d778d9840efdc9173e1fe3abc41763acd7c827db8a7054eacd7e1d9aef",
+        "original_archive_mode": 436
+      },
+      {
+        "path": "soql/test/corpus/select.txt",
+        "bytes": 33989,
+        "sha256": "706cca5868a2559f067a8a79063e861b88cdd978834ba3fa06ad57b8d0f43a5c",
+        "original_archive_mode": 436
+      },
+      {
+        "path": "soql/test/corpus/type_of.txt",
+        "bytes": 4237,
+        "sha256": "32ba3df8596b8e11144fe76ff379d5909301240eb6200997639d6404c12d25fe",
+        "original_archive_mode": 436
+      },
+      {
+        "path": "soql/test/corpus/update.txt",
+        "bytes": 2999,
+        "sha256": "a09da044b81443bad0d790e94a9e7effe86bc76586e8efa18f3e542771622edd",
+        "original_archive_mode": 436
+      },
+      {
+        "path": "soql/test/corpus/using.txt",
+        "bytes": 6425,
+        "sha256": "b8043b57facb2751925a9e8722a6c325121d60d7faa7593b2fa76307e32fc8c3",
+        "original_archive_mode": 436
+      },
+      {
+        "path": "soql/test/corpus/with.txt",
+        "bytes": 6742,
+        "sha256": "d4e658717c07d34c37235691ebeb6a487473b7a431e21434b21a77b1f4b3ab63",
+        "original_archive_mode": 436
+      },
+      {
+        "path": "soql/test/highlight/COUNT.soql",
+        "bytes": 178,
+        "sha256": "5de08616cedb3dfc05ba157a12fd7b0bf5ee875d30a6152462a01c832063b507",
+        "original_archive_mode": 436
+      },
+      {
+        "path": "soql/test/highlight/GROUP_BY.soql",
+        "bytes": 469,
+        "sha256": "101176cc45399153a25909367b6c3087144467718591b64c7213beff61a3ed54",
+        "original_archive_mode": 436
+      },
+      {
+        "path": "soql/test/highlight/HAVING.soql",
+        "bytes": 969,
+        "sha256": "608eafe06b8570d226ba9c29344a131a18c93b55ffb99a3df73e1cf775061f41",
+        "original_archive_mode": 436
+      },
+      {
+        "path": "soql/test/highlight/LIMIT.soql",
+        "bytes": 476,
+        "sha256": "10db44f59082375f46337505bb1d2699268dd7a0b6c6b038ae9263a03e7fc432",
+        "original_archive_mode": 436
+      },
+      {
+        "path": "soql/test/highlight/OFFSET_ORDER_BY.soql",
+        "bytes": 462,
+        "sha256": "92ec5b17d450676adcba5b0775ddde7ae863ebd0072cfc9e56089954a5a5ed0a",
+        "original_archive_mode": 436
+      },
+      {
+        "path": "soql/test/highlight/OFFSET_ORDER_BY_LIMIT.soql",
+        "bytes": 619,
+        "sha256": "377acac656a01861b747c73509521fff839781a3e80e9ffd971f233aeb0f211f",
+        "original_archive_mode": 436
+      },
+      {
+        "path": "soql/test/highlight/ORDERY_BY.soql",
+        "bytes": 351,
+        "sha256": "4a41e2cdd0f106ca8d0d0d9f7e0e218f4e0dcec0cc5bdc6968f6f2afb55bc453",
+        "original_archive_mode": 436
+      },
+      {
+        "path": "soql/test/highlight/ORDER_BY_LIMIT.soql",
+        "bytes": 945,
+        "sha256": "c935e4433aac96d169f13c9360098f363cb4697465d0a80aa55f4823860be60e",
+        "original_archive_mode": 436
+      },
+      {
+        "path": "soql/test/highlight/WHERE.soql",
+        "bytes": 420,
+        "sha256": "fb0fcccf82e18afbe7122fd07d44c2b2438f0c9d47243d99b00fd00e02f66ce6",
+        "original_archive_mode": 436
+      },
+      {
+        "path": "soql/test/highlight/child-to-parent-2.soql",
+        "bytes": 607,
+        "sha256": "6b8c5870caa3b7d365af505b4f15df3d1cc36a13aa267069efa7c19c4dbe70ff",
+        "original_archive_mode": 436
+      },
+      {
+        "path": "soql/test/highlight/child-to-parent-CUSTOM_OBJECTS.soql",
+        "bytes": 920,
+        "sha256": "a4239a7ad7c601f6643c4a10b331d280510c53d103847d6f1b504bf03aef34e7",
+        "original_archive_mode": 436
+      },
+      {
+        "path": "soql/test/highlight/child-to-parent.soql",
+        "bytes": 328,
+        "sha256": "efe493f2c9deec1d74c9dcf8411a4bfe2210479f57ce5b22cbe5c4dd121ef24d",
+        "original_archive_mode": 436
+      },
+      {
+        "path": "soql/test/highlight/header_comments.soql",
+        "bytes": 329,
+        "sha256": "035525b2b699aaac8f84a045497535826094f23a7a821ebc425c615d6df8a2b6",
+        "original_archive_mode": 436
+      },
+      {
+        "path": "soql/test/highlight/highlight_partial_from.soql",
+        "bytes": 196,
+        "sha256": "0c70788c51d66bc4b56a384f338373bc1a87faee96432f93691be68f3f34b42b",
+        "original_archive_mode": 436
+      },
+      {
+        "path": "soql/test/highlight/parent-to-child-2.soql",
+        "bytes": 653,
+        "sha256": "d6f9f8c19b5f73d8338ec67149e436a18dae4ad588b3761402fa0837cc854a3f",
+        "original_archive_mode": 436
+      },
+      {
+        "path": "soql/test/highlight/parent-to-child.soql",
+        "bytes": 390,
+        "sha256": "981889098983017c06f5421d65fca6c327410af1da56b5de69b57b9f63c42ded",
+        "original_archive_mode": 436
+      },
+      {
+        "path": "soql/test/highlight/parent-to-child_CUSTOM_OBJECTS.soql",
+        "bytes": 672,
+        "sha256": "cdf71e8a560f9f4e353fd99ae6b2712dcabdbdfea3c27fd823fe778c1ea2041b",
+        "original_archive_mode": 436
+      },
+      {
+        "path": "soql/test/highlight/relationship-WHERE.soql",
+        "bytes": 1466,
+        "sha256": "fadd571fb33a2ebb91ab9db924b44a1c42c852583c3737a4e031bd25b832bc48",
+        "original_archive_mode": 436
+      },
+      {
+        "path": "soql/test/highlight/relationship-polymorphic-key.soql",
+        "bytes": 368,
+        "sha256": "e23a408de3ad0ff34d775456d6ed9614b880a974301905dafd8cd2eab3c9c9e8",
+        "original_archive_mode": 436
+      },
+      {
+        "path": "soql/test/highlight/relationship-polymorphic-key_2.soql",
+        "bytes": 525,
+        "sha256": "20781c049ee1eaf2b49aa598e659dac89f496755e0edcf7ad9ffea1ee931f1fb",
+        "original_archive_mode": 436
+      },
+      {
+        "path": "soql/test/highlight/relationship-polymorphic-key_3.soql",
+        "bytes": 127,
+        "sha256": "ed7788cbce340b9f88416b9244ee295f6e317cfa310b63b0d29555f0ab7f3ced",
+        "original_archive_mode": 436
+      },
+      {
+        "path": "soql/test/highlight/relationship-timerange.soql",
+        "bytes": 1102,
+        "sha256": "d5281524fbb9d29b1931ecc6e3f54ec89247b63898862d42fae767bdab2a4acc",
+        "original_archive_mode": 436
+      },
+      {
+        "path": "soql/test/highlight/relationship-with-aggregate.soql",
+        "bytes": 1770,
+        "sha256": "1f9e46e93103a684e8039ac776867ca23e4456c63b97a3d4b96e7355f623a3ba",
+        "original_archive_mode": 436
+      },
+      {
+        "path": "soql/test/highlight/relationship_TYPEOF.soql",
+        "bytes": 1494,
+        "sha256": "09a3acdbf2a128968b0c1917726e1ec121565e2ded284683b87cbbf67d4b9c17",
+        "original_archive_mode": 436
+      },
+      {
+        "path": "soql/test/highlight/simple-query.soql",
+        "bytes": 242,
+        "sha256": "bad8d980dfc3499eb443496c642bf29d7ada5315d0b9a5bffad733b9097309c9",
+        "original_archive_mode": 436
+      },
+      {
+        "path": "soql/test/highlight/simple_account.soql",
+        "bytes": 260,
+        "sha256": "3dfd342cfeec3235fcec6edd58481b92feca572672a4fd6e80dca711052666a4",
+        "original_archive_mode": 436
+      },
+      {
+        "path": "soql/test/highlight/some_functions.soql",
+        "bytes": 1280,
+        "sha256": "60533f3e3926508789920f2b559486a9af4c541c6da26647fd3f5a0df2946eb8",
+        "original_archive_mode": 436
+      },
+      {
+        "path": "soql/test/highlight/timestamp_literals.soql",
+        "bytes": 329,
+        "sha256": "edd6b333f5765587a9fcb4fe2e347750830027223b9ecd6254a3cf6598932a39",
+        "original_archive_mode": 436
+      },
+      {
+        "path": "soql/test/highlight/verbose.soql",
+        "bytes": 5168,
+        "sha256": "babd69974dd481cb38e2f96f7435da33818f1e8d28841521504220f7644d18b4",
+        "original_archive_mode": 436
+      },
+      {
+        "path": "soql/tree-sitter.json",
+        "bytes": 825,
+        "sha256": "1c03a3707095cf4dbb59449520f964e70803604e5cddd990a2dbea536f8201b5",
+        "original_archive_mode": 436
+      },
+      {
+        "path": "sosl/grammar.js",
+        "bytes": 744,
+        "sha256": "2c7c792d357e3e8419b53a5410dfba0f471eb422e49d1fdb7d849d2a6f7a028a",
+        "original_archive_mode": 436
+      },
+      {
+        "path": "sosl/package.json",
+        "bytes": 38,
+        "sha256": "7b8d20e6b1935c3811def572868ceda368d77ae5aba901d00c3f0aea0e38cb0e",
+        "original_archive_mode": 436
+      },
+      {
+        "path": "sosl/queries/highlights.scm",
+        "bytes": 352,
+        "sha256": "14cec21c00313043791c8bf5d041672efccea6b2ea1be9555d18f862163c03aa",
+        "original_archive_mode": 436
+      },
+      {
+        "path": "sosl/src/grammar.json",
+        "bytes": 95617,
+        "sha256": "1fc44246039df36736e48f164fa32db42744f9f23b781e3bf463124503882e82",
+        "original_archive_mode": 436
+      },
+      {
+        "path": "sosl/src/node-types.json",
+        "bytes": 37011,
+        "sha256": "5e9535078f2d298c388bc1f43c248a4c8d10dea7f3f7420373d8112a4e21e6d0",
+        "original_archive_mode": 436
+      },
+      {
+        "path": "sosl/src/parser.c",
+        "bytes": 774102,
+        "sha256": "c7c1e3134005085328c630711c0426b3f444ce6b28f6aa89775fc31d61ebb21a",
+        "original_archive_mode": 436
+      },
+      {
+        "path": "sosl/src/tree_sitter/alloc.h",
+        "bytes": 985,
+        "sha256": "b29c1c9fb7cc82f58c84b376df1297d6e2737a1d655fd356db0859e3c29c2fea",
+        "original_archive_mode": 436
+      },
+      {
+        "path": "sosl/src/tree_sitter/array.h",
+        "bytes": 13269,
+        "sha256": "31e60a1bff6f715afacce03b5b70efe42b58371b4f9595dd4af52a577ff9608c",
+        "original_archive_mode": 436
+      },
+      {
+        "path": "sosl/src/tree_sitter/parser.h",
+        "bytes": 7624,
+        "sha256": "180b893c8734778fd32f372dfbc27bd6ad1cd2221f26150b31256ff6716320d2",
+        "original_archive_mode": 436
+      },
+      {
+        "path": "sosl/test/corpus/examples.txt",
+        "bytes": 9880,
+        "sha256": "98cb21087ba889a1468f886f61e1551c747cf367d4d885ff9bf8ebe88d60dc51",
+        "original_archive_mode": 436
+      },
+      {
+        "path": "sosl/test/corpus/fields.txt",
+        "bytes": 2643,
+        "sha256": "499c7082d5c60900fbfbe511af0d13ea9a1770d1f9190f59cd830465fb8decfa",
+        "original_archive_mode": 436
+      },
+      {
+        "path": "sosl/test/corpus/find.txt",
+        "bytes": 6769,
+        "sha256": "82e39712c1bd44726c3a429b702e6f58356d9bb4d9e41066af23beecd43c7382",
+        "original_archive_mode": 436
+      },
+      {
+        "path": "sosl/test/corpus/functions.txt",
+        "bytes": 6745,
+        "sha256": "6c0594076318a19af38798a6db84e85a3ebd172d84b92b408c313725dfdf2ec8",
+        "original_archive_mode": 436
+      },
+      {
+        "path": "sosl/test/corpus/in.txt",
+        "bytes": 2442,
+        "sha256": "546d3a408720814a2a4e145b647d062a8f120874dd40f98bb5f1ad0a5cd6f7c1",
+        "original_archive_mode": 436
+      },
+      {
+        "path": "sosl/test/corpus/limit.txt",
+        "bytes": 1506,
+        "sha256": "4b49e10efc5fe32b018d83fd422e6af0f1e2ca467d7d16f35124b76769599637",
+        "original_archive_mode": 436
+      },
+      {
+        "path": "sosl/test/corpus/offset.txt",
+        "bytes": 716,
+        "sha256": "1f676a96b1d239a6760ba2530e0517388daf91e3a176a902094e1dd4a3f99cf0",
+        "original_archive_mode": 436
+      },
+      {
+        "path": "sosl/test/corpus/order_by.txt",
+        "bytes": 5172,
+        "sha256": "159082215cc04dce0f196b809239ad0860ee2cd61b7050ba507fbed4a562f332",
+        "original_archive_mode": 436
+      },
+      {
+        "path": "sosl/test/corpus/returning.txt",
+        "bytes": 10233,
+        "sha256": "3f4955cfe800150acbc97f4728b4d83e932573dfca0852f1db853923c032b42c",
+        "original_archive_mode": 436
+      },
+      {
+        "path": "sosl/test/corpus/update.txt",
+        "bytes": 2600,
+        "sha256": "e5fd5438a6a2d30e77acb8f2ad0c4fa7c98b4c42215d271184eb6da2af3a6eb6",
+        "original_archive_mode": 436
+      },
+      {
+        "path": "sosl/test/corpus/where.txt",
+        "bytes": 19154,
+        "sha256": "da244ffce7ca5d4e98eb3f5b4d4a8663649c3682696ef7633883d8379838250b",
+        "original_archive_mode": 436
+      },
+      {
+        "path": "sosl/test/corpus/with.txt",
+        "bytes": 16775,
+        "sha256": "2bfca31dc34f9e7a80050347bb220979a69b349f32ee6e6156d96837770f4fa5",
+        "original_archive_mode": 436
+      },
+      {
+        "path": "sosl/test/highlight/verbose.sosl",
+        "bytes": 2362,
+        "sha256": "2cd0d233348f9402fa17e4a19dd93fef5d2149f5e9150b0bffd925767e09a1a8",
+        "original_archive_mode": 436
+      },
+      {
+        "path": "sosl/tree-sitter.json",
+        "bytes": 875,
+        "sha256": "4a8d273ed2832a5b81ace06d79b3274ee88912f07bc5b35abf30c88b5cc33135",
+        "original_archive_mode": 436
+      },
+      {
+        "path": "tree-sitter.json",
+        "bytes": 1659,
+        "sha256": "1659f8169d2f242fe0042eb7b34046dc864968a55bd7db3f268828baf62c1eed",
+        "original_archive_mode": 436
+      }
+    ],
+    "archived_executable_members": [
+      "docs/playground/tree-sitter-apex.wasm",
+      "docs/playground/tree-sitter-sflog.wasm",
+      "docs/playground/tree-sitter-soql.wasm",
+      "docs/playground/tree-sitter-sosl.wasm"
+    ],
+    "archived_executable_intent_applied_to_materialized_files": false
+  },
+  "publication_to_authored_comparison": {
+    "published_member_count": 45,
+    "byte_equal_mapped_member_count": 42,
+    "comparison_scope": "Exact published bytes against the acquired authored revision; not a comparison against a floating upstream branch.",
+    "mapping_rule": "Published Cargo.toml.orig maps to authored Cargo.toml; all other names map unchanged.",
+    "differences": [
+      {
+        "published_path": ".cargo_vcs_info.json",
+        "authored_present": false,
+        "classification": "publication_only_metadata"
+      },
+      {
+        "published_path": "Cargo.lock",
+        "authored_present": false,
+        "classification": "publication_only_lockfile"
+      },
+      {
+        "published_path": "Cargo.toml",
+        "authored_path": "Cargo.toml",
+        "classification": "registry_normalized_manifest_not_byte_equal_to_authored_manifest"
+      }
+    ]
+  },
+  "licenses": {
+    "active": {
+      "path": "LICENSE",
+      "spdx_expression": "MIT",
+      "copyright": "Copyright (c) 2012 Anthony Heber",
+      "bytes": 1079,
+      "sha256": "c3d045abbc0a8dec1b00737c0668f6dbb028d248521b74e79778c726671925ed",
+      "source_archive": "upstream/tree-sitter-sfapex-da568eee10ce4724a40f368b2b7e795dacb4f1ba.tar.gz",
+      "source_member": "tree-sitter-sfapex-da568eee10ce4724a40f368b2b7e795dacb4f1ba/LICENSE",
+      "published_crate_included_this_notice": false
+    },
+    "supplemental_java": {
+      "path": "LICENSE-JAVA",
+      "spdx_expression": "MIT",
+      "copyright": "Copyright (c) 2017 Ayman Nadeem",
+      "bytes": 1069,
+      "sha256": "52ed137b039cd9c46409bc22e89938af911c95b157feae2d040b51e6084369a7",
+      "exact_existing_project_source": "adapters/licenses/tree-sitter-java-0.23.5-LICENSE",
+      "existing_project_source_revision": "94703d5a6bed02b98e438d7cad1136c01a60ba2c",
+      "existing_project_source_version": "0.23.5",
+      "upstream_attribution_path": "apex/grammar.js",
+      "upstream_attribution_url": "https://github.com/tree-sitter/tree-sitter-java/blob/master/grammar.js",
+      "scope": "Supplemental authentic Java MIT notice retained because Apex declares Java adaptation. The exact historical Java ancestry revision is not established, and this existing project revision is not claimed to be that ancestor."
+    },
+    "historical_java_ancestry_qualified": false,
+    "legal_notice_completeness_qualified": false
+  },
+  "local_binding_changes": [
+    {
+      "path": "Cargo.toml",
+      "kind": "local_replacement_of_registry_normalized_manifest",
+      "original_bytes": 1551,
+      "original_sha256": "c05d1d7acd746785866cde391a9e1452406ad8595bbd17f6f94cbf10962c72eb",
+      "original_retained_path": "Cargo.toml.upstream",
+      "local_bytes": 547,
+      "local_sha256": "de314c86037a87f2dcae9c03b4e1b62d46d3e39735d2c78516a1136939c58dd8",
+      "purpose": "Keep the original package identity while selecting only the local static Apex build and exact existing Rust build dependencies; disable publication."
+    },
+    {
+      "path": "build.rs",
+      "kind": "new_local_apex_only_static_build_wrapper",
+      "original_path": null,
+      "original_four_component_build_retained_path": "bindings/rust/build.rs",
+      "local_bytes": 774,
+      "local_sha256": "38ad4ee38e1997c7c29c83c2d0a0d3502cfcac2491ecb37819d20c3cf616eb37",
+      "purpose": "Compile only the unchanged Apex C parser with its supplied headers. No script execution, source acquisition, or grammar generation is performed."
+    },
+    {
+      "path": "src/lib.rs",
+      "kind": "new_local_apex_only_language_binding",
+      "original_path": null,
+      "original_four_component_binding_retained_path": "bindings/rust/lib.rs",
+      "local_bytes": 991,
+      "local_sha256": "c635def106f6aa8a393e6ae39c335fe59c86f8af8c6bda077baefb45718d07a6",
+      "purpose": "Preserve the upstream apex::LANGUAGE and apex::NODE_TYPES API while not exposing SOQL, SOSL, or SFLOG as separately built languages. The C factory returns an immutable process-lifetime static table."
+    }
+  ],
+  "source_and_build_boundary": {
+    "active_language": "apex",
+    "native_factory": "tree_sitter_apex",
+    "generated_language_abi": 15,
+    "c_standard": "c11",
+    "external_scanner_required": false,
+    "active_static_inputs": [
+      "apex/src/parser.c",
+      "apex/src/tree_sitter/parser.h",
+      "apex/src/tree_sitter/alloc.h",
+      "apex/src/tree_sitter/array.h",
+      "apex/src/node-types.json"
+    ],
+    "local_build_inputs": [
+      "Cargo.toml",
+      "build.rs",
+      "src/lib.rs"
+    ],
+    "preferred_source_entrypoint": "apex/grammar.js",
+    "preferred_source_import_closure": [
+      "common/common.js",
+      "common/sosl-grammar.js",
+      "common/soql-grammar.js"
+    ],
+    "other_components_retained_inert": [
+      "soql",
+      "sosl",
+      "sflog"
+    ],
+    "original_rust_bindings_retained_inert": [
+      "bindings/rust/build.rs",
+      "bindings/rust/lib.rs"
+    ],
+    "original_package_metadata_retained_inert": [
+      "Cargo.toml.upstream",
+      "Cargo.toml.orig",
+      "Cargo.lock"
+    ],
+    "declared_dependencies": {
+      "tree-sitter-language": "=0.1.7",
+      "cc": "=1.2.67"
+    },
+    "declared_rust_version": "1.90",
+    "declared_minimum_rust_version_verified": false,
+    "root_dependency_closure_or_lockfile_modified": false,
+    "build_time_source_downloads_enabled": false,
+    "grammar_generation_or_package_lifecycle_required_by_local_wrapper": false,
+    "preferred_source_generation_tool_dependency_closure_qualified": false
+  },
+  "native_table_width_observation": {
+    "scope": "Literal generated C ACTIONS, STATE, SHIFT, and SHIFT_REPEAT indexes against the supplied uint16_t table/state widths; not a complete C analysis or semantic qualification.",
+    "actual_exit_code": 0,
+    "receipt": {
+      "schema": "rootlight.apex-native-table-lexical-check/1",
+      "bytes": 3532,
+      "sha256": "3a487a7bca6845886076b3115777f0c2b65859e214575596a13195218e0ad89f",
+      "retained_in_source_package": false
+    },
+    "validator_source_sha256": "780ad41767803bee4b4ce7fafc19a8b611e468f3f975656a1bbeb1e2ac406bb2",
+    "standalone_checker_executable_sha256": "ab7794022e114330bd020e0de1e76e4b66fec561cea35fbb698a14df27572a95",
+    "supplied_parser_header_sha256": "180b893c8734778fd32f372dfbc27bd6ad1cd2221f26150b31256ff6716320d2",
+    "components": [
+      {
+        "component": "apex",
+        "parser_bytes": 7561581,
+        "parser_sha256": "17c58f2ef3726022a7b24b5564dadf59d46641e24a1cddf725dc247986b9586e",
+        "generated_language_version": 15,
+        "action_references": 56426,
+        "state_references": 42658,
+        "maximum_action_index": 8635,
+        "maximum_state_index": 5340,
+        "lexical_width_check_passed": true,
+        "static_parser_retained_path": "apex/src/parser.c",
+        "supplied_parser_header_retained_path": "apex/src/tree_sitter/parser.h",
+        "generated_state_count": 5341,
+        "external_token_count": 0,
+        "native_parse_observed": true
+      },
+      {
+        "component": "soql",
+        "parser_bytes": 699572,
+        "parser_sha256": "0195f4b453b65ebbcb71644a2f21dea2c729fc142fd9fbfd90ed76c601385243",
+        "generated_language_version": 15,
+        "action_references": 2474,
+        "state_references": 1766,
+        "maximum_action_index": 1724,
+        "maximum_state_index": 811,
+        "lexical_width_check_passed": true,
+        "static_parser_retained_path": "soql/src/parser.c",
+        "supplied_parser_header_retained_path": "soql/src/tree_sitter/parser.h",
+        "generated_state_count": 812,
+        "external_token_count": 0,
+        "native_parse_observed": false
+      },
+      {
+        "component": "sosl",
+        "parser_bytes": 774102,
+        "parser_sha256": "c7c1e3134005085328c630711c0426b3f444ce6b28f6aa89775fc31d61ebb21a",
+        "generated_language_version": 15,
+        "action_references": 2880,
+        "state_references": 2092,
+        "maximum_action_index": 1920,
+        "maximum_state_index": 935,
+        "lexical_width_check_passed": true,
+        "static_parser_retained_path": "sosl/src/parser.c",
+        "supplied_parser_header_retained_path": "sosl/src/tree_sitter/parser.h",
+        "generated_state_count": 936,
+        "external_token_count": 0,
+        "native_parse_observed": false
+      },
+      {
+        "component": "sflog",
+        "parser_bytes": 52114,
+        "parser_sha256": "3448a47b5cd9d38a4b26336e25aca511f78b169939360e097f9ad0da635be955",
+        "generated_language_version": 15,
+        "action_references": 113,
+        "state_references": 79,
+        "maximum_action_index": 152,
+        "maximum_state_index": 52,
+        "lexical_width_check_passed": true,
+        "static_parser_retained_path": "sflog/src/parser.c",
+        "supplied_parser_header_retained_path": "sflog/src/tree_sitter/parser.h",
+        "generated_state_count": 53,
+        "external_token_count": 0,
+        "native_parse_observed": false
+      }
+    ]
+  },
+  "local_native_validation_observation": {
+    "scope": "Six ordinary source-bound native fixtures and local Rust quality checks for the unchanged supplied Apex parser plus the local binding. This does not qualify Rootlight product integration or a language corpus.",
+    "runtime": {
+      "name": "tree-sitter",
+      "version": "0.26.11"
+    },
+    "binding_dependencies": {
+      "tree-sitter-language": "0.1.7",
+      "cc": "1.2.67"
+    },
+    "toolchain": {
+      "rustc": "1.97.1 (8bab26f4f 2026-07-14)",
+      "cargo": "1.97.1 (c980f4866 2026-06-30)",
+      "rustfmt": "1.9.0-stable (8bab26f4f6 2026-07-14)",
+      "host": "x86_64-pc-windows-msvc"
+    },
+    "isolated_lock": {
+      "bytes": 5735,
+      "sha256": "53ca4dcccbc1ad604fd8a9d2e0c1c133321b28735f4e422303047d9e41ff4312",
+      "package_rows_including_root_harness": 26,
+      "retained_in_source_package": false,
+      "original_package_lock_replaced": false
+    },
+    "fixture": {
+      "source_bytes": 15073,
+      "source_sha256": "36138943f7f66c46c27b4ca4b56831f7a9592194bb2fd0cb21be9762023bc3e2",
+      "executed_formatted_bytes": 15559,
+      "executed_formatted_sha256": "6fb133c28c856789f9877ba4942ea04f2d741faddc4ee6423b44228c84a86994",
+      "formatting_changed_only_fixture_copy": true,
+      "local_three_wrapper_inputs_byte_equal_before_and_after_format": true,
+      "retained_in_source_package": false
+    },
+    "commands": [
+      {
+        "program": "cargo",
+        "operation": "generate-lockfile",
+        "offline": true,
+        "locked": false,
+        "actual_exit_code": 0
+      },
+      {
+        "program": "cargo",
+        "operation": "test",
+        "target": "apex_syntax",
+        "offline": true,
+        "locked": true,
+        "actual_exit_code": 0,
+        "tests_passed": 6,
+        "tests_failed": 0,
+        "tests_ignored": 0
+      },
+      {
+        "program": "cargo",
+        "operation": "clippy",
+        "target": "isolated_harness_all_targets_all_features",
+        "offline": true,
+        "locked": true,
+        "warnings_denied": true,
+        "actual_exit_code": 0
+      },
+      {
+        "program": "cargo",
+        "operation": "clippy",
+        "target": "tree-sitter-sfapex_all_targets",
+        "offline": true,
+        "locked": true,
+        "warnings_denied": true,
+        "actual_exit_code": 0
+      }
+    ],
+    "receipt": {
+      "schema": "rootlight.apex-native-diagnostic-checks/1",
+      "bytes": 4492,
+      "sha256": "6c2112596ff9346782dd63ade32d91b0aa93beed4335e45a3b7823f78381ae55",
+      "retained_in_source_package": false
+    },
+    "conservation_receipt": {
+      "bytes": 19936,
+      "sha256": "25511715e5b819e03b6a37d8784c9f4a778f31cbf50ff6acdef6b9b8b328030d",
+      "retained_in_source_package": false
+    },
+    "logs": [
+      {
+        "scope": "native_fixtures",
+        "bytes": 1629,
+        "sha256": "6a7414bdbaeae18792df0ff99d6592460a8f657c6aa4417aa3308008b95e554d",
+        "format": "combined_tool_output_transcript_not_independent_raw_child_streams",
+        "retained_in_source_package": false
+      },
+      {
+        "scope": "harness_clippy",
+        "bytes": 659,
+        "sha256": "1a6ed55b7784f3631b755b3e7682f20b142aae5e1cdfa0f18c5499ce2940c731",
+        "format": "combined_tool_output_transcript_not_independent_raw_child_streams",
+        "retained_in_source_package": false
+      },
+      {
+        "scope": "rejected_irrelevant_feature_selection_before_check",
+        "bytes": 65,
+        "sha256": "e8ba25ea0890bf6630709e9f811ccb71944e489015181c521f81c609f9040c2a",
+        "format": "combined_tool_output_transcript_not_independent_raw_child_streams",
+        "retained_in_source_package": false
+      },
+      {
+        "scope": "wrapper_clippy",
+        "bytes": 209,
+        "sha256": "8af610ed9c37e9e0e1a5fdfd86cb4bc9cfbf6386990a6a53d5e7b7d4effaea41",
+        "format": "combined_tool_output_transcript_not_independent_raw_child_streams",
+        "retained_in_source_package": false
+      }
+    ],
+    "warm_dependency_inputs_used": true,
+    "declared_msrv_1_90_verified": false,
+    "empty_dependency_cache_qualified": false,
+    "independently_blocked_network_build_qualified": false
+  },
+  "materialization": {
+    "complete_published_regular_inventory_retained": true,
+    "original_archive_modes_preserved_in_metadata": true,
+    "materialized_executable_intent_applied": false,
+    "linked_reparse_or_multilink_files_accepted": false,
+    "fresh_destination_required": true,
+    "original_archive_bytes_modified": false,
+    "original_authored_member_bytes_modified": false,
+    "original_published_member_bytes_modified": false
+  },
+  "local_source_identity": {
+    "profile": "rootlight-vendored-source-v1",
+    "basis": "Complete sorted relative-file paths and their SHA-256 values, including original archives, notices, local binding, PATCHES.md, and this provenance document.",
+    "digest_embedded": false,
+    "reason": "The complete source identity is computed externally after metadata is written, avoiding a self-referential hash."
+  },
+  "qualifications": {
+    "pinned_source_retention_verified": true,
+    "bounded_apex_native_fixtures_passed": true,
+    "local_binding_clippy_passed": true,
+    "whole_language_qualified": false,
+    "full_semantic_completeness_proven": false,
+    "salesforce_compiler_or_runtime_qualified": false,
+    "production_frontend_or_service_integration_qualified": false,
+    "installed_mcp_qualified": false,
+    "source_security_qualified": false,
+    "legal_notice_completeness_qualified": false,
+    "historical_java_ancestry_qualified": false,
+    "empty_dependency_cache_qualified": false,
+    "independently_blocked_network_build_qualified": false,
+    "declared_msrv_1_90_verified": false
+  }
+}
