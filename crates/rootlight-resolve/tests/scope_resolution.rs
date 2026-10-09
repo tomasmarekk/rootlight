@@ -599,6 +599,10 @@ fn markdown_references_are_not_promoted_by_code_symbol_scoring() {
 fn language_owned_targets_are_not_promoted_or_replaced_by_name_scoring() {
     for (language, syntax) in [
         ("yaml", "yaml.alias.reference"),
+        ("fortran", "fortran.identifier.reference"),
+        ("fortran", "fortran.application.reference"),
+        ("fortran", "fortran.explicit_subroutine.call"),
+        ("fortran", "fortran.use.import"),
         ("nix", "nix.identifier.reference"),
         ("nix", "nix.inherited_name.reference"),
         ("nix", "nix.member_name.reference"),

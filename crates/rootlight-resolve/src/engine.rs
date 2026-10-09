@@ -1399,6 +1399,13 @@ fn unresolved_reason(role: OccurrenceRole, kind_rejection_total: u64) -> Unresol
 }
 
 pub(crate) fn resolvable_occurrence(occurrence: &OccurrenceRecord) -> bool {
+    // Fortran USE association, case-insensitive binding and call-or-index
+    // disambiguation require language-owned proof, not same-spelling scoring.
+    if occurrence.syntax_kind.starts_with("fortran.")
+        && matches!(occurrence.target, OccurrenceTarget::Unresolved { .. })
+    {
+        return false;
+    }
     // Duplicate local type declarations can collapse to one durable identity.
     // The parser retains the written ambiguity, which name scoring must not erase.
     if occurrence.syntax_kind == "elm.ambiguous_type.reference" {

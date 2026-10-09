@@ -978,6 +978,10 @@ fn structural_parse_context_hash(
     let mut hasher = blake3::Hasher::new();
     hasher.update(b"rootlight.treesitter.structural-artifact-context/1\0");
     hash_sized_bytes(&mut hasher, NATIVE_SOURCE_PROJECTION_POLICY.as_bytes())?;
+    hash_sized_bytes(
+        &mut hasher,
+        crate::runtime::FORTRAN_TEMPLATE_PROJECTION_POLICY.as_bytes(),
+    )?;
     hash_sized_bytes(&mut hasher, request.source().path().identity_bytes())?;
     hash_sized_bytes(&mut hasher, request.language().as_str().as_bytes())?;
     hash_sized_bytes(&mut hasher, request.encoding().as_str().as_bytes())?;
@@ -6327,10 +6331,31 @@ fn source_coverage_gaps(fact: &SyntaxFact) -> impl Iterator<Item = (FactDomain, 
                 "fsharp-conditional-namespace-owner-unavailable",
             )),
         )
+        .chain(fortran_source_identity_gap(fact).map(|reason| (FactDomain::Occurrences, reason)))
+        .chain(fortran_source_identity_gap(fact).map(|reason| (FactDomain::Relations, reason)))
+}
+
+fn fortran_source_identity_gap(fact: &SyntaxFact) -> Option<&'static str> {
+    match fact.syntax_kind().as_str() {
+        "fortran.template_source.expression" => Some("fortran-template-expansion-unavailable"),
+        "fortran.unsupported_header.expression" => Some("fortran-source-identity-unavailable"),
+        _ => None,
+    }
 }
 
 fn source_coverage_gap(fact: &SyntaxFact) -> Option<(FactDomain, &'static str)> {
     match fact.syntax_kind().as_str() {
+        "fortran.template_source.expression" => Some((
+            FactDomain::Entities,
+            "fortran-template-expansion-unavailable",
+        )),
+        "fortran.unsupported_header.expression" => {
+            Some((FactDomain::Entities, "fortran-source-identity-unavailable"))
+        }
+        "fortran.procedure_linkage.expression" => Some((
+            FactDomain::Relations,
+            "fortran-procedure-linkage-unavailable",
+        )),
         "fsharp.unsupported_attribute.expression" => Some((
             FactDomain::Relations,
             "fsharp-attribute-binding-analysis-unavailable",
@@ -6741,6 +6766,13 @@ fn structural_resolution_text<'a>(
     terminal_call_name: Option<&'a str>,
     maximum_name_bytes: usize,
 ) -> Option<std::borrow::Cow<'a, str>> {
+    if language == "fortran" && fact.kind() == SyntaxFactKind::Occurrence {
+        return rootlight_adapter_sdk::structural_captured_name_for_language(
+            language,
+            terminal_call_name.unwrap_or(text),
+            maximum_name_bytes,
+        );
+    }
     if language == "fsharp"
         && fact.syntax_kind().as_str() == "fsharp.simple_function_body_read.reference"
     {
@@ -7597,6 +7629,7 @@ fn is_explicit_file_module(fact: &SyntaxFact, language: &str) -> bool {
                 | "groovy.file.module"
                 | "haskell.file.module"
                 | "fsharp.file.module"
+                | "fortran.file.module"
                 | "vba.file.module"
                 | "vba.class.module"
                 | "solidity.file.module"
@@ -7635,6 +7668,7 @@ fn is_explicit_file_module(fact: &SyntaxFact, language: &str) -> bool {
                 | "haskell"
                 | "fsharp"
                 | "fsharp-signature"
+                | "fortran"
                 | "vba"
                 | "visual-basic-classic"
                 | "astro"
@@ -7742,8 +7776,9 @@ fn supports_declaration_signature(
     declaration: &SyntaxFact,
     definition: Option<&SyntaxFact>,
 ) -> bool {
-    if matches!(language, "fsharp" | "fsharp-signature")
-        && declaration.syntax_kind().as_str() == "fsharp.file.module"
+    if (matches!(language, "fsharp" | "fsharp-signature")
+        && declaration.syntax_kind().as_str() == "fsharp.file.module")
+        || (language == "fortran" && declaration.syntax_kind().as_str() == "fortran.file.module")
     {
         return false;
     }
@@ -7765,7 +7800,8 @@ fn supports_signature(kind: EntityKind, language: &str) -> bool {
     matches!(language, "fsharp" | "fsharp-signature")
         || (kind == EntityKind::Variable && language == "haskell")
         || (kind == EntityKind::Property && matches!(language, "vba" | "visual-basic-classic"))
-        || (kind == EntityKind::Module && matches!(language, "cobol-fixed" | "cobol-free"))
+        || (kind == EntityKind::Module
+            && matches!(language, "cobol-fixed" | "cobol-free" | "fortran"))
         || matches!(
             kind,
             EntityKind::Function
@@ -7822,6 +7858,9 @@ fn source_reference_gap(fact: &SyntaxFact) -> Option<&'static str> {
         return Some(HASKELL_BINDING_UNAVAILABLE);
     }
     match fact.syntax_kind().as_str() {
+        "fortran.identifier.reference" => Some("fortran-binding-target-unavailable"),
+        "fortran.application.reference" => Some("fortran-call-or-index-target-unavailable"),
+        "fortran.explicit_subroutine.call" => Some("fortran-call-target-unavailable"),
         "fsharp.simple_function_body_read.reference" => {
             Some("fsharp-formal-binding-target-unavailable")
         }
@@ -7938,6 +7977,8 @@ fn source_reference_gap(fact: &SyntaxFact) -> Option<&'static str> {
 fn import_target_gap(fact: &SyntaxFact) -> &'static str {
     if fact.syntax_kind().as_str() == "cobol.copy.import" {
         "cobol-copy-target-unavailable"
+    } else if fact.syntax_kind().as_str() == "fortran.use.import" {
+        "fortran-use-association-target-unavailable"
     } else {
         "unresolved-import-target"
     }

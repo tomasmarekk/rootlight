@@ -34,7 +34,12 @@ struct LanguageCase {
     source: &'static str,
 }
 
-const CASES: [LanguageCase; 40] = [
+const CASES: [LanguageCase; 41] = [
+    LanguageCase {
+        name: "sample.f90",
+        language: "fortran",
+        source: "module Sample\ncontains\nsubroutine Measure(Value)\ninteger :: Value\nend subroutine Measure\nend module Sample\n",
+    },
     LanguageCase {
         name: "structural.rs",
         language: "rust",

@@ -57,6 +57,7 @@ exclude = [
     "third_party/tree-sitter-css-0.25.0",
     "third_party/tree-sitter-cobol-0.0.1",
     "third_party/tree-sitter-fsharp-0.3.12",
+    "third_party/tree-sitter-fortran-0.6.0",
     "third_party/tree-sitter-kotlin-ng-1.1.0",
     "third_party/tree-sitter-haskell-0.23.1",
     "third_party/tree-sitter-html-0.23.2",
@@ -122,6 +123,7 @@ thiserror = { version = "2.0.18", default-features = false, features = ["std"] }
 tiktoken-rs = { version = "=0.12.0", default-features = false }
 tree-sitter = { version = "=0.26.11", default-features = false, features = ["std"] }
 tree-sitter-cobol = { path = "third_party/tree-sitter-cobol-0.0.1", version = "=0.0.1", default-features = false }
+tree-sitter-fortran = { version = "=0.6.0", default-features = false }
 tree-sitter-haskell = { version = "=0.23.1", default-features = false }
 tree-sitter-bash = { version = "=0.25.1", default-features = false }
 tree-sitter-json = { version = "=0.24.8", default-features = false }
@@ -168,6 +170,7 @@ yaml-rust2 = { version = "0.10.4", default-features = false }
 zip = { version = "=2.4.2", default-features = false }
 
 [patch.crates-io]
+tree-sitter-fortran = { path = "third_party/tree-sitter-fortran-0.6.0" }
 tree-sitter-kotlin-ng = { path = "third_party/tree-sitter-kotlin-ng-1.1.0" }
 tree-sitter-haskell = { path = "third_party/tree-sitter-haskell-0.23.1" }
 dekobon-tree-sitter-groovy = { path = "third_party/dekobon-tree-sitter-groovy-0.2.0" }

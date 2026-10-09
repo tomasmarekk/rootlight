@@ -40,7 +40,7 @@ mod profile;
 
 const SCHEMA: &str = "rootlight-adapter-diagnostics/1";
 const MAX_INVENTORY_BYTES: u64 = 256 * 1024 * 1024;
-const ANALYZER_BINARY_SEED: &[u8] = b"rootlight.first-slice.treesitter-structural/229";
+const ANALYZER_BINARY_SEED: &[u8] = b"rootlight.first-slice.treesitter-structural/230";
 const USAGE: &str =
     "usage: adapter_diagnostics REPOSITORY SAVED_INVENTORY_JSON [--max-fatal-errors COUNT]";
 

@@ -2139,6 +2139,14 @@ const LANGUAGE_CAPABILITIES: &[LanguageCapability] = &[
         analyzers: &["native"],
     },
     LanguageCapability {
+        language: "fortran",
+        suffixes: &[".f90", ".f95", ".f03", ".f08", ".fypp"],
+        aliases: &[],
+        detectors: &["extension"],
+        maximum_tier: "tier_d",
+        analyzers: &["treesitter"],
+    },
+    LanguageCapability {
         language: "fsharp",
         // `.fs` also denotes Forth; a bounded content hint or assignment is required.
         suffixes: &[".fsscript", ".fsx"],
@@ -6021,6 +6029,36 @@ max_source_file_bytes = 2097152
         assert_eq!(extension_language("scripts/REPORT.AWK"), Some("awk"));
         assert_ne!(extension_language("scripts/report.awk.bak"), Some("awk"));
         assert_eq!(canonical_language("gawk"), Some("awk"));
+    }
+
+    #[test]
+    fn fortran_free_form_suffixes_preserve_physical_template_routing() {
+        let suffixes = [".f90", ".f95", ".f03", ".f08", ".fypp"];
+        for suffix in suffixes {
+            assert_eq!(
+                extension_language(&format!("src/Sample{suffix}")),
+                Some("fortran")
+            );
+            assert_eq!(
+                extension_language(&format!("src/SAMPLE{}", suffix.to_ascii_uppercase())),
+                Some("fortran")
+            );
+            assert_ne!(
+                extension_language(&format!("src/Sample{suffix}.bak")),
+                Some("fortran")
+            );
+        }
+        for path in ["src/Sample.f", "src/Sample.for", "src/Sample.ftn"] {
+            assert_ne!(extension_language(path), Some("fortran"));
+        }
+        let capability = language_capabilities()
+            .iter()
+            .find(|capability| capability.language == "fortran")
+            .expect("Fortran capability exists");
+        assert_eq!(capability.suffixes, suffixes);
+        assert_eq!(capability.detectors, &["extension"]);
+        assert_eq!(capability.maximum_tier, "tier_d");
+        assert_eq!(capability.analyzers, &["treesitter"]);
     }
 
     #[test]

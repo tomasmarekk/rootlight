@@ -14,6 +14,7 @@ resolver = "3"
 [dev-dependencies]
 tree-sitter-kotlin-ng = { path = "../../third_party/tree-sitter-kotlin-ng-1.1.0", version = "=1.1.0", default-features = false }
 tree-sitter-cobol = { path = "../../third_party/tree-sitter-cobol-0.0.1", version = "=0.0.1", default-features = false }
+tree-sitter-fortran = { path = "../../third_party/tree-sitter-fortran-0.6.0", version = "=0.6.0", default-features = false }
 tree-sitter-fsharp = { path = "../../third_party/tree-sitter-fsharp-0.3.12", version = "=0.3.12", default-features = false }
 tree-sitter-haskell = { path = "../../third_party/tree-sitter-haskell-0.23.1", version = "=0.23.1", default-features = false }
 tree-sitter-vba = { path = "../../third_party/tree-sitter-vba-0.14.1", version = "=0.14.1", default-features = false }

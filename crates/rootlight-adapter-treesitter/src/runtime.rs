@@ -7,10 +7,12 @@
 
 mod embedded;
 mod expression;
+mod fortran;
 mod fsharp_admission;
 mod markdown;
 mod perl;
 
+pub(crate) use fortran::FORTRAN_TEMPLATE_PROJECTION_POLICY;
 pub use fsharp_admission::{FSharpAdmissionKind, FSharpAdmissionWitness};
 
 #[cfg(test)]
@@ -581,7 +583,18 @@ impl TreeSitterProvider {
         {
             return Err(provider_failure(parse_work_limit.failure_code));
         }
-        let source_bytes = source.as_bytes();
+        let fortran_input = if request.language().as_str() == "fortran" && context.is_none() {
+            Some(fortran::FortranParseInput::new(
+                source,
+                request.limits().max_reported_memory_bytes(),
+                cancellation,
+            )?)
+        } else {
+            None
+        };
+        let source_bytes = fortran_input
+            .as_ref()
+            .map_or_else(|| source.as_bytes(), fortran::FortranParseInput::as_bytes);
         let mut lease = self.pool.acquire(cancellation).map_err(map_pool_error)?;
         let parser = lease.parser_mut().map_err(map_pool_error)?;
         parser
@@ -971,6 +984,7 @@ impl ParseCache {
         self.entries.push_back(CachedParse {
             entry_id,
             projection_policy: NATIVE_SOURCE_PROJECTION_POLICY,
+            fortran_projection_policy: FORTRAN_TEMPLATE_PROJECTION_POLICY,
             identity,
             source,
             tree: Some(tree.clone()),
@@ -1000,6 +1014,7 @@ impl ParseCache {
 struct CachedParse {
     entry_id: u64,
     projection_policy: &'static str,
+    fortran_projection_policy: &'static str,
     identity: ParseIdentity,
     source: Arc<Vec<u8>>,
     tree: Option<Tree>,
@@ -1012,6 +1027,7 @@ impl CachedParse {
         Self {
             entry_id: 0,
             projection_policy: NATIVE_SOURCE_PROJECTION_POLICY,
+            fortran_projection_policy: FORTRAN_TEMPLATE_PROJECTION_POLICY,
             identity: invalid_identity(),
             source: Arc::new(Vec::new()),
             tree: None,
@@ -1024,6 +1040,7 @@ impl CachedParse {
         Self {
             entry_id: self.entry_id,
             projection_policy: self.projection_policy,
+            fortran_projection_policy: self.fortran_projection_policy,
             identity: self.identity.clone(),
             source: self.source.clone(),
             tree: self.tree.clone(),
@@ -1123,7 +1140,9 @@ fn prepare_reuse(
     if let Some(reason) = cached.invalidation {
         return Ok((None, ReuseStatus::Invalidated(reason)));
     }
-    if cached.projection_policy != NATIVE_SOURCE_PROJECTION_POLICY {
+    if cached.projection_policy != NATIVE_SOURCE_PROJECTION_POLICY
+        || cached.fortran_projection_policy != FORTRAN_TEMPLATE_PROJECTION_POLICY
+    {
         return Ok((
             None,
             ReuseStatus::Invalidated(ReuseInvalidation::FrontendRoute),
@@ -1163,6 +1182,18 @@ fn prepare_reuse(
         // SourceEdit is explicitly sequential UTF-8. Applying it to physical
         // UTF-16 or to a projected tree would fabricate an edit contract.
         return Ok((None, ReuseStatus::Invalidated(ReuseInvalidation::Encoding)));
+    }
+    if current.family == GrammarFamily::Fortran
+        && !edits.is_empty()
+        && (fortran::needs_projection(current_source, cancellation)?
+            || fortran::needs_projection(&cached.source, cancellation)?)
+    {
+        // Physical edits do not describe changes to a template parse view:
+        // one marker may change the interpretation of later physical bytes.
+        return Ok((
+            None,
+            ReuseStatus::Invalidated(ReuseInvalidation::FrontendRoute),
+        ));
     }
     if cached.identity.content_hash != current.content_hash && edits.is_empty() {
         return Ok((
@@ -3623,6 +3654,7 @@ mod tests {
         let cached = CachedParse {
             entry_id: 1,
             projection_policy: NATIVE_SOURCE_PROJECTION_POLICY,
+            fortran_projection_policy: FORTRAN_TEMPLATE_PROJECTION_POLICY,
             identity: base.clone(),
             source: Arc::new(b"fn one() {}".to_vec()),
             tree: Some(tree),

@@ -16,7 +16,7 @@ const GRAMMAR_LOCK_PATH: &str = "adapters/grammars.lock";
 const CARGO_LOCK_PATH: &str = "Cargo.lock";
 const ADAPTER_PACKAGE: &str = "rootlight-adapter-treesitter";
 const GRAMMAR_LOCK_SHA256: &str =
-    "a832ab6730d3090fe804df5c87fd818ff9216d996d773c544c2a9d60ca1c466f";
+    "1c778799fa881841fd0fd9e6f25f7d891c4e5f196ca056fdc358270e98b9be7e";
 const JAVA_LICENSE_PATH: &str = "adapters/licenses/tree-sitter-java-0.23.5-LICENSE";
 const JAVA_LICENSE_SHA256: &str =
     "52ed137b039cd9c46409bc22e89938af911c95b157feae2d040b51e6084369a7";
@@ -36,7 +36,7 @@ const RUBY_LICENSE_PATH: &str = "adapters/licenses/tree-sitter-ruby-0.23.1-LICEN
 const RUBY_LICENSE_SHA256: &str =
     "ee006f02a3d856df282e409be2a86e24a65bb573a98b9c28343771141351bb6b";
 
-const EXPECTED_PACKAGES: [(&str, &str, &str); 34] = [
+const EXPECTED_PACKAGES: [(&str, &str, &str); 35] = [
     (
         "tree-sitter",
         "0.26.11",
@@ -206,6 +206,11 @@ const EXPECTED_PACKAGES: [(&str, &str, &str); 34] = [
         "tree-sitter-haskell",
         "0.23.1",
         "977c51e504548cba13fc27cb5a2edab2124cf6716a1934915d07ab99523b05a4",
+    ),
+    (
+        "tree-sitter-fortran",
+        "0.6.0",
+        "ea5fea41363a9b59666001dc26c4b356d4e164da27c6ce31145e00aba6bf9b16",
     ),
 ];
 
@@ -381,7 +386,7 @@ fn validate_manifest(manifest: &GrammarLock) -> Result<(), GrammarLockError> {
         ));
     }
     validate_runtime(&manifest.runtime)?;
-    if manifest.grammars.len() != 39 {
+    if manifest.grammars.len() != 40 {
         return Err(GrammarLockError::GrammarCount(manifest.grammars.len()));
     }
     let mut languages = BTreeSet::new();
@@ -417,6 +422,7 @@ fn validate_manifest(manifest: &GrammarLock) -> Result<(), GrammarLockError> {
         "dart",
         "fsharp",
         "fsharp-signature",
+        "fortran",
         "go",
         "groovy",
         "haskell",
@@ -1099,7 +1105,7 @@ pub(crate) enum GrammarLockError {
     InvalidDigest { label: &'static str },
     #[error("grammar lock field {0} must not be empty")]
     EmptyField(&'static str),
-    #[error("grammar lock contains {0} grammars instead of 39")]
+    #[error("grammar lock contains {0} grammars instead of 40")]
     GrammarCount(usize),
     #[error("grammar lock repeats language {0}")]
     DuplicateLanguage(String),
@@ -1233,6 +1239,57 @@ mod tests {
             )
             .expect("both profiles authenticate the complete reviewed source tree");
         }
+    }
+
+    #[test]
+    fn fortran_retains_original_inputs_and_declares_scanner_patch() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
+        let manifest: GrammarLock =
+            toml::from_str(include_str!("../../adapters/grammars.lock")).unwrap();
+        let grammar = manifest
+            .grammars
+            .iter()
+            .find(|grammar| grammar.language == "fortran")
+            .unwrap();
+        let sources = grammar.vendored.as_ref().unwrap();
+        for (path, expected) in [
+            (
+                "src/scanner.c.orig",
+                "84487995be2bdfeba996baa7c983affb8dd33d0c38faeaadaab7a4b1fda9aa7c",
+            ),
+            (
+                "upstream/tree-sitter-fortran-0.6.0.crate",
+                "ea5fea41363a9b59666001dc26c4b356d4e164da27c6ce31145e00aba6bf9b16",
+            ),
+            (
+                "upstream/tree-sitter-fortran-48593829df8a929bfe58528eedcf405171921005.tar.gz",
+                "e7f87ad365f254b4048b7a3655407ea669382ff2b4ae7cfd3f5cbdabab16dacd",
+            ),
+        ] {
+            assert_eq!(sources.files.get(path).map(String::as_str), Some(expected));
+        }
+        for path in [
+            "grammar.js",
+            "src/node-types.json",
+            "LICENSE",
+            "PATCHES.md",
+            "SOURCE-PROVENANCE.json",
+        ] {
+            assert!(
+                sources.files.contains_key(path),
+                "missing retained input: {path}"
+            );
+        }
+        assert_ne!(
+            sources.files["src/scanner.c"],
+            sources.files["src/scanner.c.orig"]
+        );
+        validate_vendored_tree(
+            &root.join("third_party/tree-sitter-fortran-0.6.0"),
+            grammar,
+            sources,
+        )
+        .expect("the complete authored tree and local safety patch are authenticated");
     }
 
     #[test]

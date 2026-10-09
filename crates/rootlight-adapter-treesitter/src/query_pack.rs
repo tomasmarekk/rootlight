@@ -21,6 +21,7 @@ use crate::{
 mod cobol;
 mod dart;
 mod ecmascript;
+mod fortran;
 mod fsharp;
 mod groovy;
 mod haskell;
@@ -347,6 +348,10 @@ impl QueryPack {
         }
         if family == GrammarFamily::Perl {
             expected.retain(|name| !matches!(*name, "call" | "import"));
+        }
+        if family == GrammarFamily::Fortran {
+            expected.retain(|name| *name != "documentation");
+            expected.push("expression");
         }
         if matches!(
             family,
@@ -704,6 +709,16 @@ impl QueryPack {
                     continue;
                 }
                 let mut capture = *capture;
+                if input.family == GrammarFamily::Fortran
+                    && !fortran::retain_capture(
+                        capture.node,
+                        role,
+                        input.source,
+                        input.cancellation,
+                    )?
+                {
+                    continue;
+                }
                 if input.family == GrammarFamily::Groovy
                     && role == StructuralRole::Reference
                     && groovy::nonlexical_identifier(capture.node)
@@ -1098,6 +1113,9 @@ fn candidate_for_capture(
     cancellation: &Cancellation,
     fsharp_captures: &mut fsharp::CaptureCache,
 ) -> Result<QueryCandidate, AdapterError> {
+    if family == GrammarFamily::Fortran {
+        return fortran::candidate(capture.node, role, source, cancellation);
+    }
     if family.is_classic_basic()
         && role == StructuralRole::Reference
         && let Some(range) = vba::qualified_pointer_range(capture.node, source, cancellation)?
@@ -1467,6 +1485,7 @@ fn candidate_for_capture(
             GrammarFamily::Scala => "scala.call_name",
             GrammarFamily::Dart => "dart.call_name",
             GrammarFamily::PowerShell => "powershell.call_name",
+            GrammarFamily::Fortran => "fortran.subroutine_name",
             _ => return Err(query_failure("query-call-name-family")),
         },
         StructuralRole::Call => match family {
@@ -1490,6 +1509,7 @@ fn candidate_for_capture(
             GrammarFamily::Scala => "scala.call",
             GrammarFamily::Dart => "dart.call",
             GrammarFamily::PowerShell => "powershell.call",
+            GrammarFamily::Fortran => "fortran.explicit_subroutine",
             GrammarFamily::Css => return Err(query_failure("query-css-call-kind")),
             GrammarFamily::Json => return Err(query_failure("query-json-call-kind")),
             GrammarFamily::Toml => return Err(query_failure("query-toml-call-kind")),
@@ -1887,6 +1907,7 @@ const fn supports_terminal_call_name(family: GrammarFamily) -> bool {
             | GrammarFamily::Nix
             | GrammarFamily::Groovy
             | GrammarFamily::Haskell
+            | GrammarFamily::Fortran
     )
 }
 
@@ -2447,6 +2468,10 @@ impl QueryPackRegistry {
             ),
             (GrammarFamily::FSharp, include_str!("../queries/fsharp.scm")),
             (
+                GrammarFamily::Fortran,
+                include_str!("../queries/fortran.scm"),
+            ),
+            (
                 GrammarFamily::FSharpSignature,
                 include_str!("../queries/fsharp_signature.scm"),
             ),
@@ -2576,6 +2601,7 @@ mod tests {
             GrammarFamily::FSharpSignature,
             GrammarFamily::CobolFixed,
             GrammarFamily::CobolFree,
+            GrammarFamily::Fortran,
         ] {
             let pack = registry.get(family).expect("family has a query pack");
             let mut names = pack.identity_query.capture_names().to_vec();
@@ -2586,6 +2612,10 @@ mod tests {
             }
             if family == GrammarFamily::Perl {
                 expected.retain(|name| !matches!(*name, "call" | "import"));
+            }
+            if family == GrammarFamily::Fortran {
+                expected.retain(|name| *name != "documentation");
+                expected.push("expression");
             }
             if matches!(
                 family,

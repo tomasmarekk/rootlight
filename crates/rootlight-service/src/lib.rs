@@ -241,8 +241,8 @@ const PROJECT_FACTS_TRUNCATED_CODE: &str = "project-adapter-facts-truncated";
 const PROJECT_FACTS_TRUNCATED_MESSAGE: &str =
     "additional project semantic facts were omitted by aggregate resource limits";
 const AGGREGATE_DIAGNOSTICS_TRUNCATED_CODE: &str = "aggregate-diagnostics-truncated";
-const ANALYZER_BINARY_SEED: &[u8] = b"rootlight.first-slice.treesitter-structural/229";
-const RESOLVER_BINARY_SEED: &[u8] = b"rootlight.first-slice.resolve/101";
+const ANALYZER_BINARY_SEED: &[u8] = b"rootlight.first-slice.treesitter-structural/230";
+const RESOLVER_BINARY_SEED: &[u8] = b"rootlight.first-slice.resolve/102";
 const INCREMENTAL_PROVIDER_SEED: &[u8] = b"rootlight.first-slice.incremental-provider/1";
 const LANGUAGE_DISPOSITION_PROVIDER_SEED: &[u8] = b"rootlight.first-slice.language-disposition/11";
 const SOURCE_FILE_FALLBACK_PROVIDER_SEED: &[u8] = b"rootlight.source-file-fallback/4";
@@ -31278,6 +31278,8 @@ mod tests {
             "sample.css",
             "sample.fsx",
             "sample.fsi",
+            "sample.f90",
+            "sample.fypp",
             "sample.go",
             "sample.groovy",
             "sample.hs",

@@ -93,6 +93,8 @@ pub enum GrammarFamily {
     CobolFixed,
     /// Explicit free-format COBOL syntax without fixed-column filtering.
     CobolFree,
+    /// Free-form Fortran physical source without compiler or template expansion.
+    Fortran,
 }
 
 impl GrammarFamily {
@@ -227,6 +229,7 @@ impl GrammarRegistry {
             GrammarFamily::FSharpSignature,
             GrammarFamily::CobolFixed,
             GrammarFamily::CobolFree,
+            GrammarFamily::Fortran,
         ] {
             let language = language_for(family);
             let abi_version = language.abi_version();
@@ -362,6 +365,7 @@ pub(crate) fn language_for(family: GrammarFamily) -> Language {
         GrammarFamily::FSharpSignature => tree_sitter_fsharp::LANGUAGE_SIGNATURE.into(),
         GrammarFamily::CobolFixed => tree_sitter_cobol::FIXED.into(),
         GrammarFamily::CobolFree => tree_sitter_cobol::FREE.into(),
+        GrammarFamily::Fortran => tree_sitter_fortran::LANGUAGE.into(),
     }
 }
 
@@ -393,6 +397,15 @@ const fn identity_for(family: GrammarFamily) -> GrammarIdentity {
         GrammarFamily::CobolFree => GrammarIdentity {
             language_id: "cobol-free",
             ..identity_for(GrammarFamily::CobolFixed)
+        },
+        GrammarFamily::Fortran => GrammarIdentity {
+            language_id: "fortran",
+            grammar_version: "0.6.0",
+            source_package_sha256: "ea5fea41363a9b59666001dc26c4b356d4e164da27c6ce31145e00aba6bf9b16",
+            parser_sha256: "2379275cc5e7f0e34258e36b63f4b6ef45d67cb8d02a4d7a68204ece0c53a230",
+            scanner_sha256: Some(
+                "f84e26bb8d11ba646bd144bff66cec8dbaa683002efbf8849e60e29fbe40104d",
+            ),
         },
         GrammarFamily::CobolFixed => GrammarIdentity {
             language_id: "cobol-fixed",
@@ -756,7 +769,7 @@ mod tests {
     fn registry_contains_each_audited_family_once_with_checked_abi() {
         let registry = GrammarRegistry::audited().expect("audited grammars initialize");
 
-        assert_eq!(registry.descriptors().len(), 40);
+        assert_eq!(registry.descriptors().len(), 41);
         for family in [
             GrammarFamily::Rust,
             GrammarFamily::Python,
@@ -798,6 +811,7 @@ mod tests {
             GrammarFamily::FSharpSignature,
             GrammarFamily::CobolFixed,
             GrammarFamily::CobolFree,
+            GrammarFamily::Fortran,
         ] {
             let descriptor = registry.get(family).expect("family is registered");
             assert!(
@@ -972,6 +986,7 @@ mod tests {
                 "tree-sitter-cobol",
             ),
             (GrammarFamily::CobolFree, "cobol-free", "tree-sitter-cobol"),
+            (GrammarFamily::Fortran, "fortran", "tree-sitter-fortran"),
             (GrammarFamily::Perl, "perl", "ts-parser-perl"),
             (
                 GrammarFamily::Groovy,

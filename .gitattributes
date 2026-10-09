@@ -27,6 +27,8 @@ third_party/tree-sitter-cobol-0.0.1/** -text
 third_party/tree-sitter-kotlin-ng-1.1.0/** -text
 # F# preferred sources, generated tables and originals retain exact input bytes.
 third_party/tree-sitter-fsharp-0.3.12/** -text
+# Fortran preferred sources and retained archives preserve exact upstream bytes.
+third_party/tree-sitter-fortran-0.6.0/** -text whitespace=-blank-at-eol,-blank-at-eof,-space-before-tab,cr-at-eol
 # Preserve the upstream scanner's final blank line in both retained versions.
 third_party/tree-sitter-fsharp-0.3.12/common/scanner.h* whitespace=-blank-at-eof
 # Upstream corpus whitespace is intentional parser input, not local formatting.

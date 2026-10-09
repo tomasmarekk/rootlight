@@ -1,0 +1,63 @@
+{
+  "name": "tree-sitter-fortran",
+  "version": "0.6.0",
+  "description": "Fortran grammar for tree-sitter",
+  "keywords": [
+    "parser",
+    "fortran",
+    "tree-sitter"
+  ],
+  "homepage": "https://github.com/stadelmanma/tree-sitter-fortran#readme",
+  "bugs": {
+    "url": "https://github.com/stadelmanma/tree-sitter-fortran/issues"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/stadelmanma/tree-sitter-fortran.git"
+  },
+  "license": "MIT",
+  "author": "Matt Stadelman <stadelmanma@gmail.com> (https://github.com/stadelmanma)",
+  "type": "commonjs",
+  "main": "bindings/node",
+  "types": "bindings/node",
+  "directories": {
+    "example": "examples",
+    "test": "test"
+  },
+  "files": [
+    "grammar.js",
+    "binding.gyp",
+    "prebuilds/**",
+    "bindings/node/*",
+    "queries/*",
+    "src/**"
+  ],
+  "scripts": {
+    "generate": "tree-sitter generate",
+    "install": "node-gyp-build",
+    "prestart": "tree-sitter build --wasm",
+    "start": "tree-sitter playground",
+    "test": "tree-sitter test"
+  },
+  "dependencies": {
+    "node-addon-api": "^7.1.0",
+    "node-gyp-build": "^4.8.0"
+  },
+  "devDependencies": {
+    "eslint": "^7.13.0",
+    "eslint-config-standard": "^16.0.1",
+    "eslint-plugin-import": "^2.22.1",
+    "eslint-plugin-node": "^11.1.0",
+    "eslint-plugin-promise": "^4.2.1",
+    "prebuildify": "^6.0.0",
+    "tree-sitter-cli": "==0.26.3"
+  },
+  "peerDependencies": {
+    "tree-sitter": "==0.26.0"
+  },
+  "peerDependenciesMeta": {
+    "tree_sitter": {
+      "optional": true
+    }
+  }
+}

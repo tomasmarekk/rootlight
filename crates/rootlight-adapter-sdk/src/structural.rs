@@ -33,6 +33,23 @@ pub fn structural_entity_kind(fact: &SyntaxFact) -> Option<EntityKind> {
         SyntaxFactKind::Declaration if label == "cobol.program.declaration" => {
             Some(EntityKind::Module)
         }
+        SyntaxFactKind::Declaration if label == "fortran.program.declaration" => {
+            Some(EntityKind::Module)
+        }
+        SyntaxFactKind::Declaration
+            if matches!(
+                label,
+                "fortran.subroutine.declaration"
+                    | "fortran.separate_module_procedure.declaration"
+                    | "fortran.interface_function.declaration"
+                    | "fortran.interface_subroutine.declaration"
+            ) =>
+        {
+            Some(EntityKind::Function)
+        }
+        SyntaxFactKind::Declaration if label == "fortran.derived_type.declaration" => {
+            Some(EntityKind::Struct)
+        }
         SyntaxFactKind::Declaration
             if matches!(
                 label,
@@ -334,12 +351,16 @@ pub fn structural_entity_classification_gap(
 ///
 /// Both file and project lowering use this rule. External VBA declarations
 /// describe imported procedures, not methods implemented by an instance.
+/// Fortran interface bodies likewise describe procedure contracts, not methods.
 #[must_use]
 pub fn structural_type_member_kind(fact: &SyntaxFact, kind: EntityKind) -> EntityKind {
     match (kind, fact.syntax_kind().as_str()) {
         (
             EntityKind::Function,
-            "vba.external_function.declaration" | "vba.external_sub_function.declaration",
+            "vba.external_function.declaration"
+            | "vba.external_sub_function.declaration"
+            | "fortran.interface_function.declaration"
+            | "fortran.interface_subroutine.declaration",
         ) => kind,
         (EntityKind::Function, _) => EntityKind::Method,
         (EntityKind::Variable, "vba.variable.declaration") => EntityKind::Field,
@@ -447,7 +468,14 @@ pub fn structural_captured_name_for_language<'a>(
     text: &'a str,
     maximum_bytes: usize,
 ) -> Option<Cow<'a, str>> {
-    if matches!(language, "javascript" | "typescript") {
+    if language == "fortran" {
+        (text.len() <= maximum_bytes
+            && text.as_bytes().first().is_some_and(u8::is_ascii_alphabetic)
+            && text
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_'))
+        .then_some(Cow::Borrowed(text))
+    } else if matches!(language, "javascript" | "typescript") {
         crate::canonical_ecmascript_identifier(text, maximum_bytes)
             .or_else(|| structural_captured_name(text, maximum_bytes).map(Cow::Borrowed))
     } else if language == "groovy" {
@@ -910,6 +938,68 @@ mod tests {
             );
             assert_eq!(structural_entity_kind(&fact), Some(base), "{label}");
             assert_eq!(structural_type_member_kind(&fact, base), member, "{label}");
+        }
+    }
+
+    #[test]
+    fn fortran_written_kinds_and_names_do_not_imply_binding_equivalence() {
+        use crate::SyntaxKindLabel;
+        use rootlight_ids::FileId;
+        use rootlight_ir::SourceSpan;
+
+        for (label, kind) in [
+            ("fortran.program.declaration", EntityKind::Module),
+            ("fortran.function.declaration", EntityKind::Function),
+            ("fortran.subroutine.declaration", EntityKind::Function),
+            (
+                "fortran.interface_function.declaration",
+                EntityKind::Function,
+            ),
+            (
+                "fortran.interface_subroutine.declaration",
+                EntityKind::Function,
+            ),
+            (
+                "fortran.separate_module_procedure.declaration",
+                EntityKind::Function,
+            ),
+            ("fortran.derived_type.declaration", EntityKind::Struct),
+            ("fortran.field.declaration", EntityKind::Field),
+            ("fortran.parameter.declaration", EntityKind::Parameter),
+            ("fortran.variable.declaration", EntityKind::Variable),
+        ] {
+            let fact = SyntaxFact::new(
+                1,
+                None,
+                SyntaxFactKind::Declaration,
+                SourceSpan::new(FileId::from_bytes([3; 20]), 0, 1).unwrap(),
+                0,
+                SyntaxKindLabel::new(label).unwrap(),
+            );
+            assert_eq!(structural_entity_kind(&fact), Some(kind), "{label}");
+            if label.starts_with("fortran.interface_") {
+                assert_eq!(structural_type_member_kind(&fact, kind), kind);
+            }
+        }
+        for name in ["MixedName", "value_2"] {
+            assert_eq!(
+                structural_captured_name_for_language("fortran", name, name.len()).as_deref(),
+                Some(name)
+            );
+            assert!(
+                structural_captured_name_for_language("fortran", name, name.len() - 1).is_none()
+            );
+        }
+        for name in [
+            "",
+            "_value",
+            "1value",
+            "value$",
+            "value_${KIND}$",
+            "value member",
+            "caf\u{e9}",
+        ] {
+            assert!(structural_captured_name_for_language("fortran", name, 64).is_none());
         }
     }
 

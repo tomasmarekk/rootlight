@@ -90,7 +90,12 @@ fn incremental_executor_enforces_deadline_and_explicit_memory_admission() {
 
 #[test]
 fn every_audited_grammar_parses_a_clean_representative_file() {
-    let cases: [(&str, &str, &[u8]); 40] = [
+    let cases: [(&str, &str, &[u8]); 41] = [
+        (
+            "sample.f90",
+            "fortran",
+            b"module Sample\ncontains\nsubroutine Measure(Value)\ninteger :: Value\nend subroutine Measure\nend module Sample\n",
+        ),
         (
             "Sample.fs",
             "fsharp",
