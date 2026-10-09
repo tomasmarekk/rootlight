@@ -35,7 +35,7 @@ pub fn predicate_head(text: &str) -> Option<(&str, usize)> {
 
 fn unquoted_name_end(head: &str) -> Option<usize> {
     let first = head.chars().next()?;
-    if !first.is_lowercase() && !(first.is_alphabetic() && !first.is_uppercase()) {
+    if !(first.is_lowercase() || first.is_alphabetic() && !first.is_uppercase()) {
         return None;
     }
     head.char_indices()
