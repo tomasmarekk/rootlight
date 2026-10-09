@@ -41,6 +41,15 @@ third_party/tree-sitter-asm-0.24.0/patches/** whitespace=-blank-at-eol,-blank-at
 third_party/tree-sitter-glsl-0.2.0/** -text
 third_party/tree-sitter-glsl-0.2.0/upstream/** whitespace=-blank-at-eol,-blank-at-eof,-space-before-tab,cr-at-eol conflict-marker-size=32
 third_party/tree-sitter-glsl-0.2.0/patches/** whitespace=-blank-at-eol,-blank-at-eof,-space-before-tab,cr-at-eol
+# HLSL preferred sources and retained originals preserve authenticated bytes.
+third_party/tree-sitter-hlsl-0.2.0/** -text
+third_party/tree-sitter-hlsl-0.2.0/upstream/** whitespace=-blank-at-eol,-blank-at-eof,-space-before-tab,cr-at-eol conflict-marker-size=32
+third_party/tree-sitter-hlsl-0.2.0/patches/** whitespace=-blank-at-eol,-blank-at-eof,-space-before-tab,cr-at-eol
+# These authenticated corpus files use 32-character Setext-style separators.
+third_party/tree-sitter-hlsl-0.2.0/upstream/c-authored/test/corpus/microsoft.txt conflict-marker-size=64
+third_party/tree-sitter-hlsl-0.2.0/upstream/cpp-authored/test/corpus/c/microsoft.txt conflict-marker-size=64
+third_party/tree-sitter-hlsl-0.2.0/upstream/cpp-authored/test/corpus/microsoft.txt conflict-marker-size=64
+third_party/tree-sitter-hlsl-0.2.0/upstream/cpp-authored/test/corpus/types.txt conflict-marker-size=64
 # Published Pascal indentation is retained in both preferred-source versions.
 third_party/tree-sitter-pascal-0.10.2/grammar.js* whitespace=-space-before-tab
 # Retained Kotlin registry inputs and scanner originals remain byte-exact.

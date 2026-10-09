@@ -1,0 +1,41 @@
+--- a/grammar.js
++++ b/grammar.js
+@@ -5,10 +5,14 @@
+ 
+     conflicts: ($, original) => original.concat([
+         [$.function_declarator],
++        [$._top_level_item],
+     ]),
+ 
+     rules: {
+-        _top_level_item: (_, original) => original,
++        _top_level_item: ($, original) => choice(
++            seq($.cbuffer_specifier, optional(';')),
++            original
++        ),
+ 
+         function_definition: ($, original) => seq(
+             optional(
+@@ -81,11 +85,21 @@
+                 seq(
+                     optional(field('name', $._class_name)),
+                     optional($.virtual_specifier),
+-                    optional($.base_class_clause),
++                    optional(choice(
++                        field('binding', $.resource_binding),
++                        $.base_class_clause
++                    )),
+                     field('body', $.field_declaration_list)
+                 )
+             )
+         )),
++
++        resource_binding: $ => seq(
++            ':', 'register', '(',
++            field('register', alias(/[tubscTUBSC][0-9]+/, $.identifier)),
++            optional(seq(',', field('space', alias(/space[0-9]+/, $.identifier)))),
++            ')'
++        ),
+ 
+         hlsl_attribute: $ => seq('[',
+             $.expression,

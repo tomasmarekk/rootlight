@@ -1,0 +1,211 @@
+{
+  "archive_identity_pins": [
+    {
+      "archive": "upstream/archives/tree-sitter-hlsl-0.2.0.crate",
+      "bytes": 1229317,
+      "sha256": "0ef1d03e58f55c1e313ac3418540f941a49a59605bd9447e1441091fafbd5df6"
+    },
+    {
+      "archive": "upstream/archives/hlsl-authored.tar.gz",
+      "bytes": 1368023,
+      "sha256": "74a429f42fe4e3fc781be15dbca42145589e4b72aae12222502f169239296ff3"
+    },
+    {
+      "archive": "upstream/archives/cpp-authored.tar.gz",
+      "bytes": 1178431,
+      "sha256": "8154b5b842b7a41f88ce6831738d6743af62e4c85598cf9d2f80384f0f356be0"
+    },
+    {
+      "archive": "upstream/archives/c-authored.tar.gz",
+      "bytes": 378608,
+      "sha256": "b79cec7ba0b0133f7d1f406340b294466af514c3e1a042555ed0cc8d5cec5d29"
+    }
+  ],
+  "archived_upstream_lifecycle_activated": false,
+  "authored_revision": "bab9111922d53d43668fabb61869bec51bbcb915",
+  "build_and_packaging_acceptance_verified": false,
+  "complete_product_source_closure_proven": false,
+  "cryptographic_upstream_signature_verified": false,
+  "empty_dependency_cache_verified": false,
+  "external_scanner": true,
+  "inherited_permissive_local_buffer_branches_are_hlsl_validity_proof": false,
+  "installed_mcp_verified": false,
+  "inventory": {
+    "bytes": 158997,
+    "path": "SOURCE-INVENTORY.json",
+    "sha256": "d9766cd920a2c2e2c2cc964a80a28d03076b2cf54e85a2ed7a9ef82f5fea9b19"
+  },
+  "isolated_native_evidence": {
+    "actual_test_exit_codes": [
+      0,
+      0
+    ],
+    "fixture_pin": {
+      "bytes": 15432,
+      "sha256": "de74d454d89a67e4c9debdaf64e578921c16fee274bcd80e3a70495632fa0714"
+    },
+    "groups": 7,
+    "leaf_bytes": 1729,
+    "lock_pin": {
+      "bytes": 5653,
+      "sha256": "2ed1a48d607f31c7b721442846608cd923cccb5710d454adcb89aaf81e176391"
+    },
+    "malformed_original_state_executed": false,
+    "nodes": 294,
+    "observations": 9,
+    "receipt_pin": {
+      "bytes": 250819,
+      "sha256": "defe59e8236925ff5b1b14538a7fab4133c4c03402630c913c0cf502ca31aa33"
+    },
+    "relocated_wrapper_executed": false,
+    "rust_toolchains": [
+      "1.97.1",
+      "1.90.0"
+    ],
+    "scope": "exact_preferred_table_scanner_and_isolated_wrapper_not_relocated_package",
+    "scoped_clippy_exit_code": 0,
+    "source_bytes": 1901,
+    "trusted_original_producer_only": true,
+    "whitespace_gap_bytes": 172
+  },
+  "license": "MIT",
+  "local_generation": {
+    "abi": 14,
+    "exact_generated_outputs": [
+      {
+        "bytes": 449707,
+        "path": "src/grammar.json",
+        "sha256": "20338f028a058f2aeedf0f2f3d43ad1ffc8fd6e4c7216c313560b192905a9d2f"
+      },
+      {
+        "bytes": 158808,
+        "path": "src/node-types.json",
+        "sha256": "cff278db5c81ccba2daf7ef7323cd65eacd0bc6813348620fe2d2cd12149b289"
+      },
+      {
+        "bytes": 19515123,
+        "path": "src/parser.c",
+        "sha256": "e517558d2e54a956326c780e243f48040d7a56df64f86aa359b1479e67dba003"
+      },
+      {
+        "bytes": 985,
+        "path": "src/tree_sitter/alloc.h",
+        "sha256": "b29c1c9fb7cc82f58c84b376df1297d6e2737a1d655fd356db0859e3c29c2fea"
+      },
+      {
+        "bytes": 13269,
+        "path": "src/tree_sitter/array.h",
+        "sha256": "31e60a1bff6f715afacce03b5b70efe42b58371b4f9595dd4af52a577ff9608c"
+      },
+      {
+        "bytes": 7624,
+        "path": "src/tree_sitter/parser.h",
+        "sha256": "180b893c8734778fd32f372dfbc27bd6ad1cd2221f26150b31256ff6716320d2"
+      }
+    ],
+    "external_token_count": 2,
+    "node": "24.11.1",
+    "producer_count": 2,
+    "receipt_pin": {
+      "bytes": 9031,
+      "sha256": "e268e3c146458adfee52721db8b8d944999cc7051eb41868a0783764a6a0a9b3"
+    },
+    "recorded_tool_pins": [
+      {
+        "bytes": 9720320,
+        "role": "generator",
+        "sha256": "a61249a07c4a6d01d0bbbb5b7c058e29e12c119ef7fb5bede0b7fd916a7c56f0"
+      },
+      {
+        "bytes": 89894400,
+        "role": "node",
+        "sha256": "f13ac3ca23248dc389507e8fe38c34489ab7edb3e6d6700eb6da6a0b7e128eaf"
+      },
+      {
+        "bytes": 249856,
+        "role": "lexical_guard",
+        "sha256": "ab7794022e114330bd020e0de1e76e4b66fec561cea35fbb698a14df27572a95"
+      }
+    ],
+    "six_output_pairs_literal_equal": true,
+    "state_count": 8842,
+    "symbol_count": 582,
+    "tree_sitter_cli": "0.26.8",
+    "upstream_original_table_reproduced": false
+  },
+  "local_modification_paths": [
+    "grammar.js",
+    "src/scanner.c",
+    "Cargo.toml",
+    "bindings/rust/build.rs",
+    "bindings/rust/lib.rs"
+  ],
+  "local_unpublished_binding": true,
+  "notice_paths": [
+    "LICENSE",
+    "notices/tree-sitter-cpp-LICENSE",
+    "notices/tree-sitter-c-LICENSE"
+  ],
+  "os_network_denial_verified": false,
+  "package": "tree-sitter-hlsl",
+  "patch_document": "PATCHES.md",
+  "patch_evidence": "patches/",
+  "physical_cbuffer_name_is_declaration_scope_or_resolved_identity": false,
+  "preferred_callback_evidence": {
+    "accepted_lengths": 16,
+    "callback_stdout_pin": {
+      "bytes": 96,
+      "sha256": "effc81fb8d8dc2e64b41c268c225a478508d685812809d1c070f8c98de53303f"
+    },
+    "compiled_logs_and_stdout_replayed_not_new_execution": true,
+    "compiler_stdout_pin": {
+      "bytes": 401,
+      "sha256": "546f2a84c881169497b7096088520cfd6026bf9796ab645e3e887f1de8ecdf9b"
+    },
+    "fixture_private_allocation_failure": true,
+    "inherited_compiler_warning_count": 2,
+    "null_payload": true,
+    "recorded_by_root_actual_callback_exit_code": 0,
+    "recorded_by_root_actual_compiler_exit_code": 0,
+    "rejected_lengths": 5,
+    "root_terminal_observation_not_new_execution": true,
+    "scanner_pin": {
+      "bytes": 5403,
+      "sha256": "599f387a256272fe8da1a76d9c1402679882146d9a18a641cb8252a6fae64b37"
+    },
+    "source_pin": {
+      "bytes": 4171,
+      "sha256": "016b6f0a071e92180dedbc48af56063b8b7c2f9849ebbcaa9c9463af8d26c062"
+    },
+    "warning_clean_claim": false,
+    "wchar_bytes": 2
+  },
+  "preferred_generation_parent_closure": {
+    "build_time_generation": false,
+    "c": {
+      "authored_version": "0.23.5",
+      "retained_tree": "upstream/c-authored",
+      "revision": "2a265d69a4caf57108a73ad2ed1e6922dd2f998c"
+    },
+    "cpp": {
+      "authored_version": "0.23.4",
+      "retained_tree": "upstream/cpp-authored",
+      "revision": "e5cea0ec884c5c3d2d1e41a741a66ce13da4d945"
+    },
+    "cpp_import": "tree-sitter-c/grammar",
+    "hlsl_import": "tree-sitter-cpp/grammar",
+    "registry_substitution": false,
+    "standalone_cpp_to_c_registry_lock_retained_separately": true
+  },
+  "production_integration_verified": false,
+  "published_checksum_vcs_authored_pax_api_associations_observed": true,
+  "relocated_wrapper_executed": false,
+  "repository": "https://github.com/theHamsta/tree-sitter-hlsl",
+  "runtime_register_or_profile_assignment_verified": false,
+  "schema": "rootlight.hlsl-source-provenance/1",
+  "source_download_or_generation_at_build_time": false,
+  "unsafe_original_scanner_inert": true,
+  "version": "0.2.0",
+  "whole_language_coverage_verified": false,
+  "whole_language_syntax_validity_verified": false
+}

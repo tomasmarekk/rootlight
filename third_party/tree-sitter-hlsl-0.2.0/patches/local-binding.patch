@@ -1,0 +1,149 @@
+--- a/Cargo.toml
++++ b/Cargo.toml
+@@ -1,25 +1,22 @@
++# Local unpublished binding for retained MIT HLSL, C++ and C grammar sources.
++# Compilation uses the static repaired table and scanner without generation.
+ [package]
+ name = "tree-sitter-hlsl"
+-description = "HLSL grammar for the tree-sitter parsing library"
+ version = "0.2.0"
+-keywords = ["incremental", "parsing", "hlsl"]
+-categories = ["parsing", "text-editors"]
++edition = "2024"
++rust-version = "1.90"
++license = "MIT"
+ repository = "https://github.com/theHamsta/tree-sitter-hlsl"
+-edition = "2024"
+-license = "MIT"
+ authors = ["tree-sitter-c authors around Max Brunsfeld", "Stephan Seitz"]
+-
++description = "Pinned HLSL grammar with a local static language binding"
++publish = false
+ build = "bindings/rust/build.rs"
+-include = ["bindings/rust/*", "grammar.js", "queries/*", "src/*"]
+ 
+ [lib]
+ path = "bindings/rust/lib.rs"
+ 
+ [dependencies]
+-tree-sitter-language = "0.1"
+-
+-[dev-dependencies]
+-tree-sitter = "0.25.3"
++tree-sitter-language = "=0.1.7"
+ 
+ [build-dependencies]
+-cc = "1.0.73"
++cc = "=1.2.67"
+--- a/bindings/rust/build.rs
++++ b/bindings/rust/build.rs
+@@ -1,22 +1,24 @@
++//! Compiles only the retained ABI14 HLSL table and hardened external scanner.
++//! Acquisition, generation and archived upstream lifecycle hooks never run here.
++
+ fn main() {
+-    let src_dir = std::path::Path::new("src");
++    let mut builder = cc::Build::new();
++    builder
++        .std("c11")
++        .include("src")
++        .file("src/parser.c")
++        .file("src/scanner.c");
++    #[cfg(target_env = "msvc")]
++    builder.flag("-utf-8");
++    builder.compile("tree-sitter-hlsl");
+ 
+-    let mut c_config = cc::Build::new();
+-    c_config.include(src_dir);
+-    c_config
+-        .flag_if_supported("-Wno-unused-parameter")
+-        .flag_if_supported("-Wno-unused-but-set-variable")
+-        .flag_if_supported("-Wno-trigraphs");
+-    #[cfg(target_env = "msvc")]
+-    c_config.flag("-utf-8");
+-
+-    let parser_path = src_dir.join("parser.c");
+-    c_config.file(&parser_path);
+-
+-    let scanner_path = src_dir.join("scanner.c");
+-    c_config.file(&scanner_path);
+-    println!("cargo:rerun-if-changed={}", scanner_path.to_str().unwrap());
+-
+-    c_config.compile("parser");
+-    println!("cargo:rerun-if-changed={}", parser_path.to_str().unwrap());
++    for path in [
++        "src/parser.c",
++        "src/scanner.c",
++        "src/tree_sitter/parser.h",
++        "src/tree_sitter/alloc.h",
++        "src/tree_sitter/array.h",
++    ] {
++        println!("cargo:rerun-if-changed={path}");
++    }
+ }
+--- a/bindings/rust/lib.rs
++++ b/bindings/rust/lib.rs
+@@ -1,21 +1,6 @@
+-//! This crate provides hlsl language support for the [tree-sitter][] parsing library.
+-//!
+-//! Typically, you will use the [LANGUAGE_RUST][] constant to add this language to a
+-//! tree-sitter [Parser][], and then use the parser to parse some code:
+-//!
+-//! ```
+-//! use tree_sitter_hlsl::LANGUAGE_HLSL;
+-//!
+-//! let code = "";
+-//! let mut parser = tree_sitter::Parser::new();
+-//! parser
+-//!     .set_language(&LANGUAGE_HLSL.into())
+-//!     .expect("Error loading HLSL language");
+-//! let tree = parser.parse(code, None).unwrap();
+-//! ```
+-//!
+-//! [Parser]: https://docs.rs/tree-sitter/*/tree_sitter/struct.Parser.html
+-//! [tree-sitter]: https://tree-sitter.github.io/
++//! Static language handle for the pinned HLSL grammar and hardened scanner.
++//! Physical syntax does not establish shader-profile validity, evaluated
++//! register assignment, preprocessor selection or runtime symbol identity.
+ 
+ use tree_sitter_language::LanguageFn;
+ 
+@@ -23,32 +8,12 @@
+     fn tree_sitter_hlsl() -> *const ();
+ }
+ 
+-/// Get the tree-sitter [LanguageFn][] for this grammar.
+-///
+-/// [LanguageFn]: https://docs.rs/tree-sitter-language/*/tree_sitter_language/struct.LanguageFn.html
++/// Provides the process-lifetime immutable locally generated ABI14 table.
++// SAFETY: src/parser.c defines this exact C factory and returns its immutable
++// static TSLanguage table. LanguageFn retains the factory; the runtime checks
++// ABI compatibility when loading it. The paired external scanner is linked
++// from the retained locally hardened src/scanner.c.
+ pub const LANGUAGE_HLSL: LanguageFn = unsafe { LanguageFn::from_raw(tree_sitter_hlsl) };
+ 
+-/// The content of the [`node-types.json`][] file for this grammar.
+-///
+-/// [`node-types.json`]: https://tree-sitter.github.io/tree-sitter/using-parsers#static-node-types
++/// Describes the exact locally generated named nodes and physical fields.
+ pub const NODE_TYPES: &str = include_str!("../../src/node-types.json");
+-
+-// Uncomment these to include any queries that this grammar contains
+-
+-// pub const HIGHLIGHTS_QUERY: &'static str = include_str!("../../queries/highlights.scm");
+-// pub const INJECTIONS_QUERY: &'static str = include_str!("../../queries/injections.scm");
+-// pub const LOCALS_QUERY: &'static str = include_str!("../../queries/locals.scm");
+-// pub const TAGS_QUERY: &'static str = include_str!("../../queries/tags.scm");
+-
+-#[cfg(test)]
+-mod tests {
+-    use crate::LANGUAGE_HLSL;
+-
+-    #[test]
+-    fn test_can_load_grammar() {
+-        let mut parser = tree_sitter::Parser::new();
+-        parser
+-            .set_language(&LANGUAGE_HLSL.into())
+-            .expect("Error loading HLSL language");
+-    }
+-}
