@@ -6,6 +6,9 @@ use rootlight_ir::EntityKind;
 
 use crate::{SyntaxFact, SyntaxFactKind};
 
+#[path = "structural_common_lisp.rs"]
+mod common_lisp;
+
 #[path = "structural_fsharp.rs"]
 mod fsharp;
 
@@ -18,11 +21,16 @@ pub use fsharp::StructuralClassificationGap;
 /// additionally requires the caller's language-specific scope evidence.
 /// Unsupported F# declaration shapes return `None`; callers must retain the
 /// corresponding [`structural_entity_classification_gap`] in entity coverage.
+/// Common Lisp accepts only exact reviewed declaration labels; unknown labels
+/// never fall through to the shared substring classifier.
 #[must_use]
 pub fn structural_entity_kind(fact: &SyntaxFact) -> Option<EntityKind> {
     let label = fact.syntax_kind().as_str();
     if label.starts_with("fsharp.") {
         return fsharp::entity_kind(fact).ok().flatten();
+    }
+    if label.starts_with("common_lisp.") {
+        return common_lisp::entity_kind(fact);
     }
     match fact.kind() {
         SyntaxFactKind::Module if label == "vba.class.module" => Some(EntityKind::Class),
@@ -545,6 +553,10 @@ pub fn structural_captured_name(text: &str, maximum_bytes: usize) -> Option<&str
 /// macro expansion, name literals and runtime dataset identity remain unavailable.
 /// Pascal retains raw ASCII identifiers, including written `&` escapes and dotted
 /// module names, without case folding, de-escaping or qualifier binding.
+/// Common Lisp retains complete written symbol captures, including bars, single
+/// escapes and package punctuation; caller-owned native evidence must prove the
+/// capture is a symbol, not an arbitrary form. Reader and package identities
+/// remain unavailable; neither case nor escape spelling is normalized.
 /// Other languages retain
 /// the shared borrowed-name contract. Source and canonical output must both fit
 /// `maximum_bytes`. Invalid names, excess bytes or allocation failure return `None`.
@@ -567,6 +579,8 @@ pub fn structural_captured_name_for_language<'a>(
         sas_captured_name(text, maximum_bytes).map(Cow::Borrowed)
     } else if language == "pascal" {
         pascal_captured_name(text, maximum_bytes).map(Cow::Borrowed)
+    } else if language == "common-lisp" {
+        common_lisp::captured_name(text, maximum_bytes).map(Cow::Borrowed)
     } else if matches!(language, "javascript" | "typescript") {
         crate::canonical_ecmascript_identifier(text, maximum_bytes)
             .or_else(|| structural_captured_name(text, maximum_bytes).map(Cow::Borrowed))
@@ -737,6 +751,9 @@ fn plsql_captured_name(text: &str, maximum_bytes: usize) -> Option<&str> {
 /// spelling only for reviewed capture labels in `fsharp` or `fsharp-signature`.
 /// All source bytes, including delimiters and spaces, count against the limit;
 /// this does not infer resolved name equivalence or admit other capture roles.
+/// Common Lisp admits only `common_lisp.name.definition` occurrence facts in
+/// `common-lisp`. Exact written spelling is preserved, and other labels, roles
+/// or languages cannot acquire a shared-name fallback for that namespace.
 /// Other roles use
 /// [`structural_captured_name_for_language`]. The caller retains
 /// the original source span and validates its association with its declaration.
@@ -747,6 +764,14 @@ pub fn structural_captured_name_for_fact<'a>(
     text: &'a str,
     maximum_bytes: usize,
 ) -> Option<Cow<'a, str>> {
+    if language == "common-lisp" || fact.syntax_kind().as_str().starts_with("common_lisp.") {
+        return (language == "common-lisp"
+            && fact.kind() == SyntaxFactKind::Occurrence
+            && fact.syntax_kind().as_str() == "common_lisp.name.definition")
+            .then(|| common_lisp::captured_name(text, maximum_bytes))
+            .flatten()
+            .map(Cow::Borrowed);
+    }
     if matches!(language, "fsharp" | "fsharp-signature") {
         if fact.kind() != SyntaxFactKind::Occurrence {
             return None;
