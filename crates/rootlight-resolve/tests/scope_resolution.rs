@@ -121,6 +121,177 @@ fn assembly_written_uses_require_assembler_owned_target_proof() {
 }
 
 #[test]
+fn glsl_written_uses_require_shader_owned_target_proof() {
+    for (syntax, role, kind) in [
+        (
+            "glsl.identifier.reference",
+            OccurrenceRole::Read,
+            EntityKind::Variable,
+        ),
+        (
+            "glsl.member.reference",
+            OccurrenceRole::Reference,
+            EntityKind::Field,
+        ),
+        (
+            "glsl.unproven_call.reference",
+            OccurrenceRole::CallSite,
+            EntityKind::Function,
+        ),
+    ] {
+        for cross_file in [false, true] {
+            let mut fixture = Fixture::new();
+            let file = if cross_file {
+                fixture.add_file(2, "src/other.glsl")
+            } else {
+                fixture.primary_file
+            };
+            let first = fixture.add_entity(10, "target", file, kind, None);
+            let second = fixture.add_entity(11, "target", file, kind, None);
+            fixture.add_occurrence(20, "target", fixture.primary_file, role, None);
+            for record in &mut fixture.document.files {
+                record.language = "glsl".to_owned();
+            }
+            fixture.document.provenance[0].language = "glsl".to_owned();
+            for entity in &mut fixture.document.entities {
+                entity.language = "glsl".to_owned();
+                entity.qualified_name = "target".to_owned();
+            }
+            let mut symbols = vec![first, second];
+            symbols.sort_unstable();
+            for target in [
+                OccurrenceTarget::Unresolved {
+                    text_hash: content_hash(b"target"),
+                },
+                OccurrenceTarget::Resolved { symbol: first },
+                OccurrenceTarget::Candidates {
+                    symbols: symbols.clone(),
+                    total_count: 2,
+                    completeness: CoverageStatus::Complete,
+                },
+            ] {
+                let occurrence = &mut fixture.document.occurrences[0];
+                occurrence.syntax_kind = syntax.to_owned();
+                occurrence.target = target;
+                let original = occurrence.clone();
+                fixture.validate();
+                let engine = ResolutionEngine::default();
+                let cancellation = Cancellation::new();
+                let estimate = engine
+                    .estimate_work(&fixture.document, &cancellation)
+                    .unwrap();
+                let batch = engine.resolve(&fixture.document, &cancellation).unwrap();
+                let independently_ambiguous =
+                    matches!(original.target, OccurrenceTarget::Candidates { .. });
+                if independently_ambiguous {
+                    assert!(estimate.required > 0, "{syntax}: {cross_file}");
+                    assert_eq!(batch.decisions.len(), 1);
+                    assert!(matches!(
+                        batch.decisions[0].outcome,
+                        ResolutionOutcome::Candidates { .. }
+                    ));
+                } else {
+                    assert_eq!(estimate.required, 0, "{syntax}: {cross_file}: {original:?}");
+                    assert!(batch.decisions.is_empty());
+                }
+                let context = ResolverFactContext::new(fixture.content_hash);
+                let applied = engine
+                    .apply(fixture.document.clone(), context, &cancellation)
+                    .unwrap();
+                let streamed = engine
+                    .apply_document(fixture.document.clone(), context, &cancellation)
+                    .unwrap();
+                let (bounded, bounded_estimate) = engine
+                    .apply_document_bounded(fixture.document.clone(), context, &cancellation)
+                    .unwrap();
+                assert_eq!(bounded_estimate, estimate);
+                assert_eq!(bounded, streamed);
+                assert_eq!(streamed, applied.document);
+                if independently_ambiguous {
+                    let retained = &bounded.occurrences[0];
+                    assert_eq!(retained.target, original.target);
+                    assert_eq!(retained.source, original.source);
+                    assert_eq!(retained.syntactic_text_hash, original.syntactic_text_hash);
+                    assert_eq!(retained.syntax_kind, original.syntax_kind);
+                    assert_eq!(retained.role, original.role);
+                    assert!(!bounded.relations.iter().any(|relation| matches!(
+                        relation.predicate,
+                        RelationPredicate::Calls | RelationPredicate::RefersTo
+                    )));
+                } else {
+                    assert_eq!(bounded.occurrences, [original]);
+                    assert!(bounded.relations.is_empty());
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn glsl_resolved_definition_retains_its_physical_identity() {
+    let mut fixture = Fixture::new();
+    let symbol = fixture.add_entity(
+        10,
+        "target",
+        fixture.primary_file,
+        EntityKind::Function,
+        None,
+    );
+    fixture.add_occurrence(
+        20,
+        "target",
+        fixture.primary_file,
+        OccurrenceRole::Definition,
+        None,
+    );
+    fixture.document.files[0].language = "glsl".to_owned();
+    fixture.document.provenance[0].language = "glsl".to_owned();
+    fixture.document.entities[0].language = "glsl".to_owned();
+    let source = fixture.document.entities[0]
+        .evidence
+        .source
+        .clone()
+        .unwrap();
+    let occurrence = &mut fixture.document.occurrences[0];
+    occurrence.target = OccurrenceTarget::Resolved { symbol };
+    occurrence.syntax_kind = "glsl.name.definition".to_owned();
+    occurrence.source = source.clone();
+    occurrence.evidence.source = Some(source);
+    let original = occurrence.clone();
+    fixture.validate();
+    let engine = ResolutionEngine::default();
+    let cancellation = Cancellation::new();
+    assert_eq!(
+        engine
+            .estimate_work(&fixture.document, &cancellation)
+            .unwrap()
+            .required,
+        0
+    );
+    assert!(
+        engine
+            .resolve(&fixture.document, &cancellation)
+            .unwrap()
+            .decisions
+            .is_empty()
+    );
+    let context = ResolverFactContext::new(fixture.content_hash);
+    let applied = engine
+        .apply(fixture.document.clone(), context, &cancellation)
+        .unwrap();
+    let streamed = engine
+        .apply_document(fixture.document.clone(), context, &cancellation)
+        .unwrap();
+    let (bounded, _) = engine
+        .apply_document_bounded(fixture.document, context, &cancellation)
+        .unwrap();
+    assert_eq!(bounded, streamed);
+    assert_eq!(streamed, applied.document);
+    assert_eq!(bounded.occurrences, [original]);
+    assert!(bounded.relations.is_empty());
+}
+
+#[test]
 fn common_lisp_unproven_reads_retain_exact_written_source() {
     for (spelling, role, syntax, kind) in [
         (

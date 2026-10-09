@@ -1420,6 +1420,13 @@ pub(crate) fn resolvable_occurrence(occurrence: &OccurrenceRecord) -> bool {
     {
         return false;
     }
+    // GLSL scopes, interface members and shader targets require language-owned
+    // binding proof; matching written names cannot resolve an adapter gap.
+    if occurrence.syntax_kind.starts_with("glsl.")
+        && matches!(occurrence.target, OccurrenceTarget::Unresolved { .. })
+    {
+        return false;
+    }
     // Apex member/overload/platform targets require language-owned proof;
     // spelling scores cannot supply a target the adapter left unresolved.
     if occurrence.syntax_kind.starts_with("apex.")
@@ -1730,6 +1737,9 @@ mod source_owned_target_tests {
             "pascal.identifier.reference",
             "pascal.unit_reference.reference",
             "pascal.member_reference.reference",
+            "glsl.identifier.reference",
+            "glsl.member.reference",
+            "glsl.unproven_call.reference",
         ] {
             occurrence.syntax_kind = syntax.to_owned();
             assert!(!resolvable_occurrence(&occurrence), "{syntax}");
@@ -1748,11 +1758,30 @@ mod source_owned_target_tests {
             "sas.macro_call.reference",
             "apex.unproven_call.reference",
             "pascal.member_reference.reference",
+            "glsl.identifier.reference",
+            "glsl.member.reference",
+            "glsl.unproven_call.reference",
         ] {
             occurrence.syntax_kind = syntax.to_owned();
             assert!(
                 resolvable_occurrence(&occurrence),
                 "the guard does not erase independent target proof"
+            );
+        }
+        occurrence.target = OccurrenceTarget::Candidates {
+            symbols: vec![SymbolId::from_bytes([6; 20]), SymbolId::from_bytes([7; 20])],
+            total_count: 2,
+            completeness: CoverageStatus::Complete,
+        };
+        for syntax in [
+            "glsl.identifier.reference",
+            "glsl.member.reference",
+            "glsl.unproven_call.reference",
+        ] {
+            occurrence.syntax_kind = syntax.to_owned();
+            assert!(
+                resolvable_occurrence(&occurrence),
+                "independent ambiguity remains eligible"
             );
         }
         occurrence.role = OccurrenceRole::Definition;
