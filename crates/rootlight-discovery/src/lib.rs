@@ -26,6 +26,7 @@ use rootlight_vfs::{
 use serde::{Deserialize, Serialize};
 
 mod apex;
+mod common_lisp;
 mod encoding;
 mod fsharp;
 mod fsproj;
@@ -46,7 +47,7 @@ pub use incremental::{
 };
 
 /// Current deterministic manifest and source-classification revision.
-pub const DISCOVERY_MANIFEST_VERSION: &str = "1.41";
+pub const DISCOVERY_MANIFEST_VERSION: &str = "1.42";
 /// Stable source-free diagnostic emitted when the entry budget truncates discovery.
 pub const DISCOVERY_ENTRY_LIMIT_DIAGNOSTIC_CODE: &str = "DISCOVERY_ENTRY_LIMIT";
 /// Stable source-free diagnostic emitted when retained source bytes truncate discovery.
@@ -1856,6 +1857,17 @@ fn classify_prefix(
             evidence: LanguageEvidence::Shebang,
         });
     }
+    if common_lisp::is_content_candidate(&normalized)
+        && common_lisp::has_content_hint(
+            &content[..content.len().min(MAX_CLASSIFICATION_BYTES)],
+            prefix_truncated,
+        )
+    {
+        signals.insert(LanguageSignal {
+            language: "common-lisp".to_owned(),
+            evidence: LanguageEvidence::Content,
+        });
+    }
     let content_hint = if Path::new(&normalized)
         .extension()
         .and_then(|extension| extension.to_str())
@@ -2106,6 +2118,14 @@ const LANGUAGE_CAPABILITIES: &[LanguageCapability] = &[
         detectors: &["configuration"],
         maximum_tier: "tier_d",
         analyzers: &["treesitter"],
+    },
+    LanguageCapability {
+        language: "common-lisp",
+        suffixes: &[".lisp", ".asd"],
+        aliases: &["commonlisp", "common_lisp"],
+        detectors: &["content", "extension"],
+        maximum_tier: "tier_d",
+        analyzers: &["source-fallback"],
     },
     LanguageCapability {
         language: "cpp",
@@ -6750,6 +6770,174 @@ max_source_file_bytes = 2097152
             assert_eq!(canonical_language(language), Some(expected));
         }
         assert_eq!(canonical_language("unknown"), None);
+    }
+
+    #[test]
+    fn common_lisp_capability_reports_only_installed_source_fallback() {
+        let capability = language_capabilities()
+            .iter()
+            .find(|entry| entry.language == "common-lisp")
+            .expect("Common Lisp capability");
+        assert_eq!(capability.suffixes, [".lisp", ".asd"]);
+        assert_eq!(capability.aliases, ["commonlisp", "common_lisp"]);
+        assert_eq!(capability.detectors, ["content", "extension"]);
+        assert_eq!(capability.maximum_tier, "tier_d");
+        assert_eq!(capability.analyzers, ["source-fallback"]);
+        for alias in ["common-lisp", "commonlisp", "common_lisp"] {
+            assert_eq!(canonical_language(alias), Some("common-lisp"));
+        }
+        for alias in ["lisp", "cl", "scheme", "emacs-lisp"] {
+            assert_ne!(canonical_language(alias), Some("common-lisp"));
+        }
+        for path in ["src/Package.LISP", "system.asd"] {
+            assert_eq!(extension_language(path), Some("common-lisp"));
+        }
+        for path in [
+            "kernel.cl",
+            "script.lsp",
+            "library.scm",
+            "library.ss",
+            "library.sld",
+            "editor.el",
+            "package.lisp.bak",
+        ] {
+            assert_ne!(extension_language(path), Some("common-lisp"));
+        }
+    }
+
+    #[test]
+    fn common_lisp_content_requires_a_distinctive_written_opening_header() {
+        for path in [
+            "package.lisp",
+            "system.asd",
+            "ambiguous.cl",
+            "ambiguous.lsp",
+            "entry",
+        ] {
+            let path = RelativePath::parse(Path::new(path)).expect("fixture path");
+            for source in [
+                "(defpackage :sample (:use :cl))",
+                "\u{feff}; header\r\n#| outer #| inner |# tail |# (IN-PACKAGE #:sample)",
+                "(defclass widget (parent) ())",
+                "(defgeneric measure (value))",
+                "(defmethod measure :before ((value widget)) value)",
+                "(defmethod (setf measure) (new-value (value widget)) new-value)",
+                "(asdf:defsystem \"sample\" :components ())",
+                "(ASDF::DEFSYSTEM #:sample)",
+                "(cl:defun measure (value) value)",
+                "(COMMON-LISP:DEFMACRO with-value (value) value)",
+            ] {
+                let (_, signals) = classify(&path, source.as_bytes());
+                assert!(
+                    signals.contains(&LanguageSignal {
+                        language: "common-lisp".to_owned(),
+                        evidence: LanguageEvidence::Content,
+                    }),
+                    "{}: {source}",
+                    path.as_str(),
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn common_lisp_content_does_not_admit_other_lisp_suffixes_or_generic_defun() {
+        for name in [
+            "library.scm",
+            "library.ss",
+            "library.sld",
+            "editor.el",
+            "backup.lisp.bak",
+        ] {
+            let path = RelativePath::parse(Path::new(name)).expect("fixture path");
+            let (_, signals) = classify(&path, b"(defpackage :sample (:use :cl))");
+            assert!(
+                !signals
+                    .iter()
+                    .any(|signal| signal.language == "common-lisp"),
+                "{name}"
+            );
+        }
+        for name in ["kernel.cl", "script.lsp", "entry"] {
+            let path = RelativePath::parse(Path::new(name)).expect("fixture path");
+            for source in [
+                b"(defun measure (value) value)".as_slice(),
+                b"__kernel void measure(global float* values) {}",
+                b"(define (measure value) value)",
+            ] {
+                let (_, signals) = classify(&path, source);
+                assert!(
+                    !signals
+                        .iter()
+                        .any(|signal| signal.language == "common-lisp"),
+                    "{name}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn common_lisp_content_preserves_independent_foreign_evidence() {
+        let path = RelativePath::parse(Path::new("package.lisp")).expect("fixture path");
+        let (_, signals) = classify(&path, b"(defpackage :sample) ; fn main(\n");
+        for signal in [
+            LanguageSignal {
+                language: "common-lisp".to_owned(),
+                evidence: LanguageEvidence::Extension,
+            },
+            LanguageSignal {
+                language: "common-lisp".to_owned(),
+                evidence: LanguageEvidence::Content,
+            },
+            LanguageSignal {
+                language: "rust".to_owned(),
+                evidence: LanguageEvidence::Content,
+            },
+        ] {
+            assert!(signals.contains(&signal), "{signal:?}");
+        }
+        let path = RelativePath::parse(Path::new("entry")).expect("fixture path");
+        let (_, signals) = classify(&path, b"#!/usr/bin/python3\n(defpackage :sample)\n");
+        assert!(signals.contains(&LanguageSignal {
+            language: "python".to_owned(),
+            evidence: LanguageEvidence::Shebang
+        }));
+        assert!(
+            !signals
+                .iter()
+                .any(|signal| signal.language == "common-lisp")
+        );
+    }
+
+    #[test]
+    fn common_lisp_content_is_bounded_and_retains_only_proved_utf8_headers() {
+        let path = RelativePath::parse(Path::new("ambiguous.cl")).expect("fixture path");
+        let expected = LanguageSignal {
+            language: "common-lisp".to_owned(),
+            evidence: LanguageEvidence::Content,
+        };
+        for (tail, remainder, recognized) in [
+            ("(defpackag", "e :sample)", false),
+            ("(defpackage :sample", ")", false),
+            ("(defclass widget ", "() ())", false),
+            ("(defclass widget (", ") ())", true),
+        ] {
+            let mut source = vec![b' '; MAX_CLASSIFICATION_BYTES - tail.len()];
+            source.extend_from_slice(tail.as_bytes());
+            source.extend_from_slice(remainder.as_bytes());
+            let (_, signals) = classify(&path, &source);
+            assert_eq!(signals.contains(&expected), recognized, "{tail}");
+        }
+        let mut source = b"(defpackage :sample)\n; ".to_vec();
+        source.resize(MAX_CLASSIFICATION_BYTES - 1, b' ');
+        source.extend_from_slice("é".as_bytes());
+        let (_, signals) = classify(&path, &source);
+        assert!(signals.contains(&expected));
+        source[MAX_CLASSIFICATION_BYTES - 2] = 0xff;
+        let (_, signals) = classify(&path, &source);
+        assert!(!signals.contains(&expected));
+        let (_, signals) = classify(&path, b"(defpackage :sample)\xc3");
+        assert!(!signals.contains(&expected));
     }
 
     #[test]
