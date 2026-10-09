@@ -1,0 +1,27 @@
+diff --git a/upstream/glsl-authored/grammar.js b/grammar.js
+index 905283354..7a79b6727 100644
+--- a/upstream/glsl-authored/grammar.js
++++ b/grammar.js
+@@ -1,3 +1,5 @@
++// GLSL precision declarations retain their written qualifier and type.
++// The exact C parent still owns all unchanged declaration branches.
+ const C = require("tree-sitter-c/grammar")
+ 
+ module.exports = grammar(C, {
+@@ -42,7 +44,15 @@ module.exports = grammar(C, {
+         extension_behavior: $ => choice("require", "enable", "warn", "disable"),
+ 
+         declaration: ($, original) =>
+-            choice(seq(choice("invariant", "precise"), $.identifier, ";"), seq(
++            choice(seq(
++                'precision',
++                field('precision', choice('highp', 'mediump', 'lowp')),
++                field('type', choice(
++                    alias(choice('int', 'float'), $.primitive_type),
++                    $._type_identifier,
++                )),
++                ';',
++            ), seq(choice("invariant", "precise"), $.identifier, ";"), seq(
+                 repeat(
+                     choice(
+                         'in',

@@ -1,0 +1,22 @@
+# Local unpublished binding for retained MIT GLSL and C grammar sources.
+# Compilation uses the static repaired table without acquisition or generation.
+[package]
+name = "tree-sitter-glsl"
+version = "0.2.0"
+edition = "2024"
+rust-version = "1.90"
+license = "MIT"
+repository = "https://github.com/theHamsta/tree-sitter-glsl"
+authors = ["tree-sitter-c authors around Max Brunsfeld", "Stephan Seitz"]
+description = "Pinned GLSL grammar with a local static language binding"
+publish = false
+build = "bindings/rust/build.rs"
+
+[lib]
+path = "bindings/rust/lib.rs"
+
+[dependencies]
+tree-sitter-language = "=0.1.7"
+
+[build-dependencies]
+cc = "=1.2.67"

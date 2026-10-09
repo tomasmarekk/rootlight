@@ -1,0 +1,155 @@
+--- a/Cargo.toml
++++ b/Cargo.toml
+@@ -1,30 +1,22 @@
++# Local unpublished binding for retained MIT GLSL and C grammar sources.
++# Compilation uses the static repaired table without acquisition or generation.
+ [package]
+ name = "tree-sitter-glsl"
+-description = "GLSL grammar for the tree-sitter parsing library"
+ version = "0.2.0"
+-keywords = ["incremental", "parsing", "glsl"]
+-categories = ["parsing", "text-editors"]
++edition = "2024"
++rust-version = "1.90"
++license = "MIT"
+ repository = "https://github.com/theHamsta/tree-sitter-glsl"
+-edition = "2024"
+-license = "MIT"
+ authors = ["tree-sitter-c authors around Max Brunsfeld", "Stephan Seitz"]
+-
++description = "Pinned GLSL grammar with a local static language binding"
++publish = false
+ build = "bindings/rust/build.rs"
+-include = [
+-  "bindings/rust/*",
+-  "grammar.js",
+-  "queries/*",
+-  "src/*",
+-]
+ 
+ [lib]
+ path = "bindings/rust/lib.rs"
+ 
+ [dependencies]
+-tree-sitter-language = "0.1"
+-
+-[dev-dependencies]
+-tree-sitter = "0.25.3"
++tree-sitter-language = "=0.1.7"
+ 
+ [build-dependencies]
+-cc = "1.0.83"
++cc = "=1.2.67"
+--- a/bindings/rust/build.rs
++++ b/bindings/rust/build.rs
+@@ -1,27 +1,19 @@
++//! Compiles the retained ABI14 GLSL table using the qualified C11 profile.
++//! Grammar generation, archived lifecycle hooks and acquisition never run here.
++
+ fn main() {
+-    let src_dir = std::path::Path::new("src");
++    let mut builder = cc::Build::new();
++    builder.std("c11").include("src").file("src/parser.c");
++    #[cfg(target_env = "msvc")]
++    builder.flag("-utf-8");
++    builder.compile("tree-sitter-glsl");
+ 
+-    let mut c_config = cc::Build::new();
+-    c_config.include(&src_dir);
+-    c_config
+-        .flag_if_supported("-Wno-unused-parameter")
+-        .flag_if_supported("-Wno-unused-but-set-variable")
+-        .flag_if_supported("-Wno-trigraphs");
+-    #[cfg(target_env = "msvc")]
+-    c_config.flag("-utf-8");
+-
+-    let parser_path = src_dir.join("parser.c");
+-    c_config.file(&parser_path);
+-
+-    // If your language uses an external scanner written in C,
+-    // then include this block of code:
+-
+-    /*
+-    let scanner_path = src_dir.join("scanner.c");
+-    c_config.file(&scanner_path);
+-    println!("cargo:rerun-if-changed={}", scanner_path.to_str().unwrap());
+-    */
+-
+-    println!("cargo:rerun-if-changed={}", parser_path.to_str().unwrap());
+-    c_config.compile("parser");
++    for path in [
++        "src/parser.c",
++        "src/tree_sitter/parser.h",
++        "src/tree_sitter/alloc.h",
++        "src/tree_sitter/array.h",
++    ] {
++        println!("cargo:rerun-if-changed={path}");
++    }
+ }
+--- a/bindings/rust/lib.rs
++++ b/bindings/rust/lib.rs
+@@ -1,21 +1,6 @@
+-//! This crate provides glsl language support for the [tree-sitter][] parsing library.
+-//!
+-//! Typically, you will use the [LANGUAGE_GLSL][] constant to add this language to a
+-//! tree-sitter [Parser][], and then use the parser to parse some code:
+-//!
+-//! ```
+-//! use tree_sitter_glsl::LANGUAGE_GLSL;
+-//!
+-//! let code = "";
+-//! let mut parser = tree_sitter::Parser::new();
+-//! parser
+-//!     .set_language(&LANGUAGE_GLSL.into())
+-//!     .expect("Error loading glsl language");
+-//! let tree = parser.parse(code, None).unwrap();
+-//! ```
+-//!
+-//! [Parser]: https://docs.rs/tree-sitter/*/tree_sitter/struct.Parser.html
+-//! [tree-sitter]: https://tree-sitter.github.io/
++//! Static language handle for the pinned GLSL grammar with repaired precision.
++//! Physical syntax does not prove shader-profile validity, preprocessor
++//! selection, linked interface identity or runtime binding.
+ 
+ use tree_sitter_language::LanguageFn;
+ 
+@@ -23,32 +8,14 @@
+     fn tree_sitter_glsl() -> *const ();
+ }
+ 
+-/// The tree-sitter [`LanguageFn`] for GLSL.
+-///
+-/// [LanguageFn]: https://docs.rs/tree-sitter-language/*/tree_sitter_language/struct.LanguageFn.html
++/// Provides the process-lifetime immutable locally generated ABI14 table.
++// SAFETY: src/parser.c defines this exact C factory and returns its immutable
++// static TSLanguage table. LanguageFn retains the factory; the runtime checks
++// ABI compatibility when loading it.
+ pub const LANGUAGE_GLSL: LanguageFn = unsafe { LanguageFn::from_raw(tree_sitter_glsl) };
+ 
+-/// The content of the [`node-types.json`][] file for this grammar.
+-///
+-/// [`node-types.json`]: https://tree-sitter.github.io/tree-sitter/using-parsers#static-node-types
++/// Describes the exact locally generated named nodes and physical fields.
+ pub const NODE_TYPES: &str = include_str!("../../src/node-types.json");
+ 
+-// Uncomment these to include any queries that this grammar contains
+-
+- pub const HIGHLIGHTS_QUERY: &str = include_str!("../../queries/highlights.scm");
+-// pub const INJECTIONS_QUERY: &'static str = include_str!("../../queries/injections.scm");
+-// pub const LOCALS_QUERY: &'static str = include_str!("../../queries/locals.scm");
+-// pub const TAGS_QUERY: &'static str = include_str!("../../queries/tags.scm");
+-
+-#[cfg(test)]
+-mod tests {
+-    use crate::LANGUAGE_GLSL;
+-
+-    #[test]
+-    fn test_can_load_grammar() {
+-        let mut parser = tree_sitter::Parser::new();
+-        parser
+-            .set_language(&LANGUAGE_GLSL.into())
+-            .expect("Error loading GLSL language");
+-    }
+-}
++/// Preserves the upstream highlighting query without claiming SDK qualification.
++pub const HIGHLIGHTS_QUERY: &str = include_str!("../../queries/highlights.scm");

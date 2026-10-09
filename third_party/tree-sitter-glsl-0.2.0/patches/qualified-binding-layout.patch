@@ -1,0 +1,62 @@
+--- qualified/build.rs
++++ package/bindings/rust/build.rs
+@@ -1,18 +1,19 @@
+-//! Compiles only the authenticated original GLSL 0.2.0 native C table.
+-//! This first-party wrapper excludes upstream build/install hooks, grammar
+-//! generation, source acquisition and production adapter integration.
++//! Compiles the retained ABI14 GLSL table using the qualified C11 profile.
++//! Grammar generation, archived lifecycle hooks and acquisition never run here.
+ 
+ fn main() {
+     let mut builder = cc::Build::new();
+-    builder
+-        .std("c11")
+-        .include("native/src")
+-        .file("native/src/parser.c");
++    builder.std("c11").include("src").file("src/parser.c");
+     #[cfg(target_env = "msvc")]
+     builder.flag("-utf-8");
+-    builder.compile("rootlight-glsl-native-witness");
++    builder.compile("tree-sitter-glsl");
+ 
+-    for path in ["native/src/parser.c", "native/src/tree_sitter/parser.h"] {
++    for path in [
++        "src/parser.c",
++        "src/tree_sitter/parser.h",
++        "src/tree_sitter/alloc.h",
++        "src/tree_sitter/array.h",
++    ] {
+         println!("cargo:rerun-if-changed={path}");
+     }
+ }
+--- qualified/src/lib.rs
++++ package/bindings/rust/lib.rs
+@@ -1,6 +1,6 @@
+-//! Independent binding for the unchanged GLSL 0.2.0 generated parser.
+-//! Physical syntax and source spans do not establish shader-profile validity,
+-//! preprocessor selection, linked interface identity or runtime binding.
++//! Static language handle for the pinned GLSL grammar with repaired precision.
++//! Physical syntax does not prove shader-profile validity, preprocessor
++//! selection, linked interface identity or runtime binding.
+ 
+ use tree_sitter_language::LanguageFn;
+ 
+@@ -8,8 +8,14 @@
+     fn tree_sitter_glsl() -> *const ();
+ }
+ 
+-/// Provides the original process-lifetime immutable ABI14 grammar table.
+-// SAFETY: the authenticated linked native/src/parser.c defines this exact C
+-// factory and returns a static immutable TSLanguage. LanguageFn retains that
+-// factory; the selected Tree-sitter runtime checks its ABI before parsing.
++/// Provides the process-lifetime immutable locally generated ABI14 table.
++// SAFETY: src/parser.c defines this exact C factory and returns its immutable
++// static TSLanguage table. LanguageFn retains the factory; the runtime checks
++// ABI compatibility when loading it.
+ pub const LANGUAGE_GLSL: LanguageFn = unsafe { LanguageFn::from_raw(tree_sitter_glsl) };
++
++/// Describes the exact locally generated named nodes and physical fields.
++pub const NODE_TYPES: &str = include_str!("../../src/node-types.json");
++
++/// Preserves the upstream highlighting query without claiming SDK qualification.
++pub const HIGHLIGHTS_QUERY: &str = include_str!("../../queries/highlights.scm");

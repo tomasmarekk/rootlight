@@ -1,0 +1,155 @@
+{
+  "archive_identity_pins": [
+    {
+      "archive": "upstream/archives/tree-sitter-glsl-0.2.0.crate",
+      "bytes": 348917,
+      "sha256": "df0ee57cbf4c2b35d3a7f17a01bf33c0ef2e85987cb85e516ac8c6904c4e62ac"
+    },
+    {
+      "archive": "upstream/archives/glsl-authored.tar.gz",
+      "bytes": 401926,
+      "sha256": "66841e54d853408507cffa58ac494000b944b2293ea010007114dea8859c46d1"
+    },
+    {
+      "archive": "upstream/archives/c-authored.tar.gz",
+      "bytes": 378608,
+      "sha256": "b79cec7ba0b0133f7d1f406340b294466af514c3e1a042555ed0cc8d5cec5d29"
+    }
+  ],
+  "archived_upstream_lifecycle_activated": false,
+  "authored_revision": "a6a297b59bd615589d55f4529313dc2c87e815b8",
+  "build_and_packaging_acceptance_verified": false,
+  "complete_product_source_closure_proven": false,
+  "cryptographic_upstream_signature_verified": false,
+  "discard_dedicated_statement_or_resolved_reference_verified": false,
+  "empty_dependency_cache_verified": false,
+  "external_scanner": false,
+  "installed_mcp_verified": false,
+  "inventory": {
+    "bytes": 103556,
+    "path": "SOURCE-INVENTORY.json",
+    "sha256": "d8ecd9317ffe737ec027763062d14df461a81862fe00a23e0f3cd21800d21029"
+  },
+  "isolated_native_evidence": {
+    "actual_native_exit_codes": [
+      0,
+      0
+    ],
+    "fixture_pin": {
+      "bytes": 16160,
+      "sha256": "0b26a2540f9c6fd9051aae4c243a19bf9b633511a275088263d63920d98331d7"
+    },
+    "full_source_observations_per_profile": 8,
+    "independent_replay_pin": {
+      "bytes": 4382,
+      "sha256": "221d74c6068d96e3b05dd561c9ee47cd8d8d274a020439eac270b238a58506b1"
+    },
+    "receipt_pin": {
+      "bytes": 348478,
+      "sha256": "ee8e3d1f2d1f7c0c76c2de2b10e8f94829e0cee6cc9a5934dcab8849599d4dcb"
+    },
+    "relocated_wrapper_executed": false,
+    "rust_toolchains": [
+      "1.97.1",
+      "1.90.0"
+    ],
+    "scope": "exact_generated_table_and_isolated_wrapper_not_relocated_package",
+    "scoped_clippy_exit_code": 0,
+    "unchanged_groups_per_profile": 6
+  },
+  "license": "MIT",
+  "local_generation": {
+    "abi": 14,
+    "exact_generated_outputs": [
+      {
+        "bytes": 257431,
+        "path": "src/grammar.json",
+        "sha256": "f1f15c7471d86a53c8b6855a7900f5d80c977da2aeb54b24658f9e46ee9270e2"
+      },
+      {
+        "bytes": 88476,
+        "path": "src/node-types.json",
+        "sha256": "cb760c0d7fff0d5debb1ef137dea7ecaee1d8dc1aad9ec4aebacf11d824a9f7f"
+      },
+      {
+        "bytes": 5705153,
+        "path": "src/parser.c",
+        "sha256": "3ac0649813439a3a9180f36ec35ff68067f16f4a3962471fbcb3fbe69579c339"
+      },
+      {
+        "bytes": 985,
+        "path": "src/tree_sitter/alloc.h",
+        "sha256": "b29c1c9fb7cc82f58c84b376df1297d6e2737a1d655fd356db0859e3c29c2fea"
+      },
+      {
+        "bytes": 13269,
+        "path": "src/tree_sitter/array.h",
+        "sha256": "31e60a1bff6f715afacce03b5b70efe42b58371b4f9595dd4af52a577ff9608c"
+      },
+      {
+        "bytes": 7624,
+        "path": "src/tree_sitter/parser.h",
+        "sha256": "180b893c8734778fd32f372dfbc27bd6ad1cd2221f26150b31256ff6716320d2"
+      }
+    ],
+    "external_token_count": 0,
+    "node": "24.11.1",
+    "producer_count": 2,
+    "receipt_pin": {
+      "bytes": 8918,
+      "sha256": "237bd5fc34b8e9186b2a88d1c8ba5911e5bb4eb3682c98b29b113af2ffbdda95"
+    },
+    "recorded_tool_pins": [
+      {
+        "bytes": 9720320,
+        "role": "generator",
+        "sha256": "a61249a07c4a6d01d0bbbb5b7c058e29e12c119ef7fb5bede0b7fd916a7c56f0"
+      },
+      {
+        "bytes": 89894400,
+        "role": "node",
+        "sha256": "f13ac3ca23248dc389507e8fe38c34489ab7edb3e6d6700eb6da6a0b7e128eaf"
+      },
+      {
+        "bytes": 249856,
+        "role": "lexical_guard",
+        "sha256": "ab7794022e114330bd020e0de1e76e4b66fec561cea35fbb698a14df27572a95"
+      }
+    ],
+    "six_output_pairs_literal_equal": true,
+    "state_count": 2574,
+    "symbol_count": 409,
+    "tree_sitter_cli": "0.26.8",
+    "upstream_original_table_reproduced": false
+  },
+  "local_modification_paths": [
+    "grammar.js",
+    "Cargo.toml",
+    "bindings/rust/build.rs",
+    "bindings/rust/lib.rs"
+  ],
+  "local_unpublished_binding": true,
+  "notice_paths": [
+    "LICENSE",
+    "notices/tree-sitter-c-LICENSE"
+  ],
+  "os_network_denial_verified": false,
+  "package": "tree-sitter-glsl",
+  "patch_document": "PATCHES.md",
+  "patch_evidence": "patches/",
+  "precision_semantic_propagation_verified": false,
+  "preferred_generation_parent": {
+    "authored_version": "0.23.5",
+    "name": "tree-sitter-c",
+    "registry_publication": null,
+    "retained_tree": "upstream/c-authored",
+    "revision": "2a265d69a4caf57108a73ad2ed1e6922dd2f998c"
+  },
+  "production_integration_verified": false,
+  "published_glsl_checksum_vcs_and_authored_pax_api_associations_observed": true,
+  "repository": "https://github.com/theHamsta/tree-sitter-glsl",
+  "schema": "rootlight.glsl-source-provenance/1",
+  "source_download_or_generation_at_build_time": false,
+  "version": "0.2.0",
+  "whole_language_coverage_verified": false
+}
