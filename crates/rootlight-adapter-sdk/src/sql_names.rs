@@ -44,13 +44,14 @@ pub(crate) fn canonical_sql_name(text: &str, maximum_bytes: usize) -> Option<Cow
 
 fn take_name(text: &str) -> Option<(&str, &str)> {
     let first = text.chars().next()?;
-    let end = if matches!(first, '"' | '`' | '\'') {
+    let end = if matches!(first, '"' | '`' | '\'' | '[') {
+        let closing = if first == '[' { ']' } else { first };
         // Keep escape spelling intact: the grammar/dialect owns its meaning.
         let mut characters = text.char_indices().skip(1).peekable();
         loop {
             let (offset, character) = characters.next()?;
-            if character == first {
-                if characters.peek().is_some_and(|(_, next)| *next == first) {
+            if character == closing {
+                if characters.peek().is_some_and(|(_, next)| *next == closing) {
                     characters.next();
                 } else {
                     break offset.checked_add(character.len_utf8())?;
@@ -138,6 +139,74 @@ mod tests {
             assert_eq!(name, expected);
             assert_eq!(canonical_sql_name(&name, name.len()).unwrap(), name);
         }
+    }
+
+    #[test]
+    fn bracket_delimited_names_preserve_exact_raw_spelling() {
+        for source in [
+            "[Store]",
+            "[Order Items]",
+            "[schema].[Order Items]",
+            "[database].[schema].[Entry]",
+            "schema.[Entry]",
+            "[schema].\"Entry\"",
+            "[a]]b]",
+            "[a]]]",
+            "[[name]",
+            "[1]",
+            "[]",
+            "[π Ж]",
+            "[a/*b*/.c--d]",
+            "[a\r\nb]",
+        ] {
+            let name = canonical_sql_name(source, source.len()).unwrap();
+            assert!(matches!(name, Cow::Borrowed(_)));
+            assert_eq!(name, source);
+            assert_eq!(canonical_sql_name(source, source.len() - 1), None);
+        }
+    }
+
+    #[test]
+    fn bracket_delimiters_keep_inner_trivia_while_normalizing_path_trivia() {
+        for (source, expected) in [
+            (
+                " /* prefix */ [Data Base] /* separator */ . [a]]b] ",
+                "[Data Base].[a]]b]",
+            ),
+            ("[schema]-- ignored.dot\r\n.[Entry]", "[schema].[Entry]"),
+            ("[a . b] . [c/*d*/]", "[a . b].[c/*d*/]"),
+            ("[π Ж] . schema . [x]]y]", "[π Ж].schema.[x]]y]"),
+        ] {
+            let name = canonical_sql_name(source, source.len()).unwrap();
+            assert_eq!(name, expected);
+            assert_eq!(canonical_sql_name(&name, name.len()).unwrap(), name);
+            assert_eq!(canonical_sql_name(source, source.len() - 1), None);
+        }
+    }
+
+    #[test]
+    fn malformed_or_unbounded_brackets_never_become_partial_identities() {
+        for source in [
+            "[",
+            "[open",
+            "[a]]",
+            "[a]]b",
+            "[a]b",
+            "[a].[open",
+            "[a].",
+            "[a]..[b]",
+            "[a][b]",
+            "[a] /* open",
+            "[a\0b]",
+            "[a].[b\0c]",
+        ] {
+            assert_eq!(canonical_sql_name(source, 256), None, "{source:?}");
+        }
+        assert_eq!(canonical_sql_name("[π]", 3), None);
+        assert_eq!(
+            canonical_sql_name("[a] /* bounded source */ . [b]", 7),
+            None
+        );
     }
 
     #[test]
