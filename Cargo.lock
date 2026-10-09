@@ -1655,6 +1655,7 @@ dependencies = [
  "tree-sitter-glsl",
  "tree-sitter-go",
  "tree-sitter-haskell",
+ "tree-sitter-hlsl",
  "tree-sitter-html",
  "tree-sitter-java",
  "tree-sitter-json",
@@ -3085,6 +3086,14 @@ dependencies = [
 [[package]]
 name = "tree-sitter-haskell"
 version = "0.23.1"
+dependencies = [
+ "cc",
+ "tree-sitter-language",
+]
+
+[[package]]
+name = "tree-sitter-hlsl"
+version = "0.2.0"
 dependencies = [
  "cc",
  "tree-sitter-language",

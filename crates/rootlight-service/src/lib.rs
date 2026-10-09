@@ -243,7 +243,7 @@ const PROJECT_FACTS_TRUNCATED_CODE: &str = "project-adapter-facts-truncated";
 const PROJECT_FACTS_TRUNCATED_MESSAGE: &str =
     "additional project semantic facts were omitted by aggregate resource limits";
 const AGGREGATE_DIAGNOSTICS_TRUNCATED_CODE: &str = "aggregate-diagnostics-truncated";
-const ANALYZER_BINARY_SEED: &[u8] = b"rootlight.first-slice.treesitter-structural/231";
+const ANALYZER_BINARY_SEED: &[u8] = b"rootlight.first-slice.treesitter-structural/232";
 const RESOLVER_BINARY_SEED: &[u8] = b"rootlight.first-slice.resolve/103";
 const INCREMENTAL_PROVIDER_SEED: &[u8] = b"rootlight.first-slice.incremental-provider/1";
 const LANGUAGE_DISPOSITION_PROVIDER_SEED: &[u8] = b"rootlight.first-slice.language-disposition/12";
@@ -31833,6 +31833,278 @@ mod tests {
             .unwrap();
         assert_eq!(read.data.chunks.len(), 1);
         assert_eq!(read.data.chunks[0].bytes, source.as_bytes());
+    }
+
+    #[test]
+    fn hlsl_source_queries_preserve_written_identity_and_partial_semantics() {
+        let source = "cbuffer Constants : register(b0) { float Gain; };\nfloat Shade(float Value) { return Shade(Value) + Gain; }\n";
+        let fixture = TempDir::new().unwrap();
+        write_language_fixture(fixture.path(), &[("shader.hlsl", source)]);
+        let mut service = FirstSliceService::new(2).expect("native service initializes");
+        let mut absent = service.analyzers.clone();
+        assert!(absent.remove("hlsl").is_some());
+        assert!(absent.contains_key("cpp"));
+        for path in [
+            "shader.hlsl",
+            "SHADER.HLSL",
+            "shader.hlsli",
+            "SHADER.HLSLI",
+            "shader.fxh",
+            "SHADER.FXH",
+        ] {
+            let input = ManifestInput {
+                file: FileId::from_bytes([3; 20]),
+                path: path.to_owned(),
+                content_hash: content_hash(source.as_bytes()),
+                bytes: u64::try_from(source.len()).unwrap(),
+                encoding: "utf-8".to_owned(),
+                class: InputClass::Source,
+                language_signals: vec![rootlight_discovery::LanguageSignal {
+                    language: "cpp".to_owned(),
+                    evidence: LanguageEvidence::Content,
+                }],
+                project_language_witnesses: Vec::new(),
+                decisive_rule: None,
+            };
+            assert_eq!(detected_source_language(&input), Some("hlsl"));
+            assert_eq!(
+                source_language_route(&input, &service.analyzers),
+                Some("hlsl")
+            );
+            assert_eq!(
+                supported_source_language(&input, &service.analyzers),
+                Some("hlsl")
+            );
+            assert_eq!(source_language_route(&input, &absent), None);
+        }
+        let registry = GrammarRegistry::audited().unwrap();
+        let descriptor = registry
+            .descriptors()
+            .iter()
+            .find(|descriptor| descriptor.family() == GrammarFamily::Hlsl)
+            .expect("distinct HLSL native family");
+        assert_eq!(descriptor.language().as_str(), "hlsl");
+        let frontend = format!("tree-sitter-hlsl-{}", descriptor.grammar_version());
+        let receipt = service
+            .index_repository(fixture.path(), &deadline())
+            .unwrap();
+        assert_eq!(receipt.indexed_files, 1);
+        let generation = service
+            .loaded_generation_snapshot(receipt.generation)
+            .unwrap();
+        let document = generation.document();
+        assert_eq!(document.files.len(), 1);
+        let file = &document.files[0];
+        assert_eq!(file.path, "shader.hlsl");
+        assert_eq!(file.language, "hlsl");
+        let parser = document
+            .provenance
+            .iter()
+            .find(|record| record.id == file.provenance)
+            .unwrap();
+        assert_eq!(parser.producer_kind, ProducerKind::Parser);
+        assert_eq!(parser.language, "hlsl");
+        assert_eq!(parser.tier, AnalysisTier::TierD);
+        assert_eq!(parser.frontend_version.as_deref(), Some(frontend.as_str()));
+        assert_eq!(
+            parser.binary_digest,
+            grammar_binary_digest(descriptor).unwrap()
+        );
+        for (name, kind) in [
+            ("Shade", EntityKind::Function),
+            ("Value", EntityKind::Parameter),
+            ("Gain", EntityKind::Variable),
+        ] {
+            assert!(document.entities.iter().any(|entity| {
+                entity.canonical_name == name && entity.kind == kind && entity.language == "hlsl"
+            }));
+        }
+        assert!(
+            !document
+                .entities
+                .iter()
+                .any(|entity| entity.canonical_name == "Constants")
+        );
+        let coverage = service
+            .source_file_coverage_until(receipt.generation, file.id, &deadline())
+            .unwrap();
+        assert_eq!(coverage.language, "hlsl");
+        assert_eq!(coverage.tier, AnalysisTier::TierD);
+        assert_eq!(coverage.status, CoverageStatus::Bounded);
+        assert_eq!(coverage.reason, None);
+        for detail in [
+            "hlsl-buffer-binding-and-layout-unavailable",
+            "hlsl-binding-and-dispatch-target-unavailable",
+            "hlsl-body-binding-and-call-analysis-unavailable",
+        ] {
+            assert!(
+                document.skipped_regions.iter().any(|gap| {
+                    gap.domain == rootlight_ir::FactDomain::Relations
+                        && gap.detail == detail
+                        && gap.source.generation() == receipt.generation
+                        && gap.source.span().file() == file.id
+                }),
+                "{detail}"
+            );
+        }
+        let call = document
+            .occurrences
+            .iter()
+            .find(|occurrence| occurrence.syntax_kind == "hlsl.unproven_call.reference")
+            .expect("written call-shaped use is retained");
+        assert_eq!(call.role, OccurrenceRole::Reference);
+        assert!(matches!(call.target, OccurrenceTarget::Unresolved { .. }));
+        assert!(!document.occurrences.iter().any(|occurrence| {
+            matches!(
+                occurrence.role,
+                OccurrenceRole::CallSite | OccurrenceRole::ImportUse
+            )
+        }));
+        let located = service
+            .code_locate(
+                receipt.generation,
+                "Shade".to_owned(),
+                LocateMode::Exact,
+                10,
+                0,
+                &deadline(),
+            )
+            .unwrap();
+        assert_eq!(located.data.generation, receipt.generation);
+        let hit = located
+            .data
+            .hits
+            .iter()
+            .find(|hit| hit.symbol.is_some())
+            .expect("written function locates");
+        assert_eq!(hit.identifier, "Shade");
+        assert_eq!(hit.language, "hlsl");
+        assert_eq!(hit.file, file.id);
+        assert_eq!(
+            located
+                .data
+                .hits
+                .iter()
+                .filter_map(|hit| hit.symbol)
+                .collect::<BTreeSet<_>>(),
+            BTreeSet::from([hit.symbol.unwrap()])
+        );
+        let explained = service
+            .symbol_explain(receipt.generation, hit.symbol.unwrap(), &deadline())
+            .unwrap();
+        assert_eq!(explained.data.generation, receipt.generation);
+        assert_eq!(explained.data.entity.canonical_name, "Shade");
+        assert_eq!(explained.data.entity.kind, EntityKind::Function);
+        assert_eq!(
+            explained.data.signature.as_ref().unwrap().text(),
+            "float Shade(float Value)"
+        );
+        let reference = explained.data.entity.evidence.source.unwrap();
+        assert_eq!(reference.repository(), receipt.repository);
+        assert_eq!(reference.generation(), receipt.generation);
+        assert_eq!(reference.span().file(), file.id);
+        assert_eq!(reference.content_hash(), content_hash(source.as_bytes()));
+        let start = usize::try_from(reference.span().start_byte()).unwrap();
+        let end = usize::try_from(reference.span().end_byte()).unwrap();
+        assert_eq!(
+            &source[start..end],
+            "float Shade(float Value) { return Shade(Value) + Gain; }"
+        );
+        let read = service
+            .source_read_with_options_and_budget(
+                receipt.generation,
+                vec![reference],
+                SourceReadOptions::new()
+                    .with_context_lines_before(0)
+                    .with_context_lines_after(0),
+                FirstSliceBudget::default(),
+                &deadline(),
+            )
+            .unwrap();
+        assert_eq!(read.data.chunks.len(), 1);
+        assert_eq!(read.data.chunks[0].bytes, source.as_bytes()[start..end]);
+        let text = service
+            .code_locate(
+                receipt.generation,
+                "Constants".to_owned(),
+                LocateMode::Text,
+                10,
+                0,
+                &deadline(),
+            )
+            .unwrap();
+        assert!(
+            text.data
+                .hits
+                .iter()
+                .any(|hit| hit.path == "shader.hlsl" && hit.symbol.is_none())
+        );
+        assert!(text.data.hits.iter().all(|hit| hit.symbol.is_none()));
+    }
+
+    #[test]
+    fn hlsl_headers_publish_native_written_facts_and_exact_source() {
+        let source = "float IncludeValue;\n";
+        let fixture = TempDir::new().unwrap();
+        write_language_fixture(
+            fixture.path(),
+            &[("shared.hlsli", source), ("shared.fxh", source)],
+        );
+        let mut service = FirstSliceService::new(2).unwrap();
+        let receipt = service
+            .index_repository(fixture.path(), &deadline())
+            .unwrap();
+        assert_eq!(receipt.indexed_files, 2);
+        let generation = service
+            .loaded_generation_snapshot(receipt.generation)
+            .unwrap();
+        let document = generation.document();
+        assert_eq!(document.files.len(), 2);
+        assert_eq!(
+            document
+                .entities
+                .iter()
+                .filter(|entity| entity.canonical_name == "IncludeValue")
+                .count(),
+            2
+        );
+        for file in &document.files {
+            assert!(matches!(file.path.as_str(), "shared.hlsli" | "shared.fxh"));
+            assert_eq!(file.language, "hlsl");
+            let parser = document
+                .provenance
+                .iter()
+                .find(|record| record.id == file.provenance)
+                .unwrap();
+            assert_eq!(
+                parser.frontend_version.as_deref(),
+                Some("tree-sitter-hlsl-0.2.0")
+            );
+            assert_eq!(parser.producer_kind, ProducerKind::Parser);
+            assert!(document.entities.iter().any(|entity| {
+                entity.canonical_name == "IncludeValue"
+                    && entity.kind == EntityKind::Variable
+                    && entity.evidence.source.as_ref().is_some_and(|reference| {
+                        reference.span().file() == file.id
+                            && reference.generation() == receipt.generation
+                    })
+            }));
+            let reference = file.evidence.source.clone().unwrap();
+            assert_eq!(reference.repository(), receipt.repository);
+            assert_eq!(reference.generation(), receipt.generation);
+            assert_eq!(reference.span().file(), file.id);
+            assert_eq!(reference.content_hash(), content_hash(source.as_bytes()));
+            assert_eq!(reference.span().start_byte(), 0);
+            assert_eq!(
+                reference.span().end_byte(),
+                u64::try_from(source.len()).unwrap()
+            );
+            let read = service
+                .source_read(receipt.generation, vec![reference], &deadline())
+                .unwrap();
+            assert_eq!(read.data.chunks.len(), 1);
+            assert_eq!(read.data.chunks[0].bytes, source.as_bytes());
+        }
     }
 
     #[test]

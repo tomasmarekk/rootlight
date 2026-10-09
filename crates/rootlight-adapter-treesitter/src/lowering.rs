@@ -4295,7 +4295,14 @@ impl<'context, 'source> Lowering<'context, 'source> {
                 // Alternate VBA branches need separate source identities without selecting one.
                 let written_scope_identity = if matches!(
                     self.language_for_fact(fact),
-                    "r" | "powershell" | "nix" | "matlab" | "perl" | "groovy" | "haskell" | "glsl"
+                    "r" | "powershell"
+                        | "nix"
+                        | "matlab"
+                        | "perl"
+                        | "groovy"
+                        | "haskell"
+                        | "glsl"
+                        | "hlsl"
                 ) || fact.syntax_kind().as_str()
                     == "vba.preprocessor_branch.scope"
                 {
@@ -6123,20 +6130,20 @@ fn materialize_entity(
     }
     debug_assert_eq!(qualified_name.len(), draft.qualified_length);
     let semantic_kind = entity_kind_identity_label(draft.kind);
-    // Assembly, Common Lisp and GLSL headers are source evidence, not runtime binding or
+    // Assembly, Common Lisp and shader headers are source evidence, not runtime binding or
     // overload identities. Haskell equations likewise retain one lexical binding.
-    let signature_discriminator =
-        if matches!(draft.language.as_str(), "assembly" | "common-lisp" | "glsl")
-            || (draft.language == "haskell"
-                && matches!(
-                    draft.kind,
-                    EntityKind::Function | EntityKind::Method | EntityKind::Variable
-                ))
-        {
-            &[][..]
-        } else {
-            draft.signature.as_bytes()
-        };
+    let signature_discriminator = if matches!(
+        draft.language.as_str(),
+        "assembly" | "common-lisp" | "glsl" | "hlsl"
+    ) || (draft.language == "haskell"
+        && matches!(
+            draft.kind,
+            EntityKind::Function | EntityKind::Method | EntityKind::Variable
+        )) {
+        &[][..]
+    } else {
+        draft.signature.as_bytes()
+    };
     let identity_guard = entity_identity_guard(
         full_source.repository(),
         &draft.language,
@@ -6416,6 +6423,9 @@ fn common_lisp_source_gap(fact: &SyntaxFact) -> Option<(FactDomain, &'static str
 }
 
 fn source_coverage_gap(fact: &SyntaxFact) -> Option<(FactDomain, &'static str)> {
+    if let Some(gap) = hlsl_source_gap(fact) {
+        return Some(gap);
+    }
     if let Some(gap) = glsl_source_gap(fact) {
         return Some(gap);
     }
@@ -6426,6 +6436,10 @@ fn source_coverage_gap(fact: &SyntaxFact) -> Option<(FactDomain, &'static str)> 
         return Some(gap);
     }
     match fact.syntax_kind().as_str() {
+        "hlsl.file.module" if fact.kind() == SyntaxFactKind::Module => Some((
+            FactDomain::Relations,
+            "hlsl-shader-binding-linking-and-preprocessing-unavailable",
+        )),
         "glsl.file.module" if fact.kind() == SyntaxFactKind::Module => Some((
             FactDomain::Relations,
             "glsl-shader-linking-and-preprocessing-unavailable",
@@ -6681,6 +6695,43 @@ fn source_coverage_gap(fact: &SyntaxFact) -> Option<(FactDomain, &'static str)> 
     }
 }
 
+fn hlsl_source_gap(fact: &SyntaxFact) -> Option<(FactDomain, &'static str)> {
+    if fact.kind() != SyntaxFactKind::Signature {
+        return None;
+    }
+    Some(match fact.syntax_kind().as_str() {
+        "hlsl.unsupported_owner.expression" => (
+            FactDomain::Entities,
+            "hlsl-written-owner-analysis-unavailable",
+        ),
+        "hlsl.parameter_context.expression" => (
+            FactDomain::Entities,
+            "hlsl-parameter-owner-analysis-unavailable",
+        ),
+        "hlsl.shared_header.expression" => (
+            FactDomain::Extensions,
+            "hlsl-shared-declaration-header-association-unavailable",
+        ),
+        "hlsl.preprocessor_context.expression" => (
+            FactDomain::Relations,
+            "hlsl-preprocessor-selection-unavailable",
+        ),
+        "hlsl.annotation_context.expression" => (
+            FactDomain::Relations,
+            "hlsl-shader-annotation-and-profile-evaluation-unavailable",
+        ),
+        "hlsl.buffer_context.expression" => (
+            FactDomain::Relations,
+            "hlsl-buffer-binding-and-layout-unavailable",
+        ),
+        "hlsl.body_semantics.expression" => (
+            FactDomain::Relations,
+            "hlsl-body-binding-and-call-analysis-unavailable",
+        ),
+        _ => return None,
+    })
+}
+
 fn glsl_source_gap(fact: &SyntaxFact) -> Option<(FactDomain, &'static str)> {
     // Expressions are scoped qualifications, not callable header signatures.
     if fact.kind() != SyntaxFactKind::Signature {
@@ -6765,6 +6816,26 @@ fn json_data_identity(parent: Option<[u8; 32]>, kind: &str, position: u64) -> [u
 }
 
 fn uses_written_source_identity(language: &str, kind: EntityKind, label: &str) -> bool {
+    if language == "hlsl" {
+        return matches!(
+            (kind, label),
+            (
+                EntityKind::Function,
+                "hlsl.function.declaration" | "hlsl.prototype.declaration"
+            ) | (
+                EntityKind::Variable,
+                "hlsl.variable.declaration"
+                    | "hlsl.variable_fragment.declaration"
+                    | "hlsl.buffer_member.declaration"
+                    | "hlsl.buffer_member_fragment.declaration"
+            ) | (EntityKind::Parameter, "hlsl.parameter.declaration")
+                | (
+                    EntityKind::Field,
+                    "hlsl.field.declaration" | "hlsl.field_fragment.declaration"
+                )
+                | (EntityKind::Struct, "hlsl.struct.declaration")
+        );
+    }
     if language == "glsl" {
         return matches!(
             (kind, label),
@@ -6840,6 +6911,8 @@ fn written_source_identity(
         "rootlight.assembly-source-occurrence/1"
     } else if language == "glsl" {
         "rootlight.glsl-source-occurrence/1"
+    } else if language == "hlsl" {
+        "rootlight.hlsl-source-occurrence/1"
     } else {
         "rootlight.powershell-source-occurrence/1"
     };
@@ -7841,6 +7914,9 @@ fn test_source_path(path: &str) -> bool {
 }
 
 fn is_explicit_file_module(fact: &SyntaxFact, language: &str) -> bool {
+    if fact.syntax_kind().as_str() == "hlsl.file.module" {
+        return fact.kind() == SyntaxFactKind::Module && language == "hlsl";
+    }
     if fact.syntax_kind().as_str() == "glsl.file.module" {
         return fact.kind() == SyntaxFactKind::Module && language == "glsl";
     }
@@ -8022,6 +8098,17 @@ fn supports_declaration_signature(
     declaration: &SyntaxFact,
     definition: Option<&SyntaxFact>,
 ) -> bool {
+    if language == "hlsl" {
+        // A source fragment cannot borrow its sibling names' complete header.
+        return declaration.kind() == SyntaxFactKind::Declaration
+            && uses_written_source_identity(language, kind, declaration.syntax_kind().as_str())
+            && !matches!(
+                declaration.syntax_kind().as_str(),
+                "hlsl.variable_fragment.declaration"
+                    | "hlsl.field_fragment.declaration"
+                    | "hlsl.buffer_member_fragment.declaration"
+            );
+    }
     if (matches!(language, "fsharp" | "fsharp-signature")
         && declaration.syntax_kind().as_str() == "fsharp.file.module")
         || (language == "fortran" && declaration.syntax_kind().as_str() == "fortran.file.module")
@@ -8060,6 +8147,11 @@ fn supports_signature(kind: EntityKind, language: &str) -> bool {
     // Classic BASIC accessors share a name but have distinct Get/Let/Set headers.
     // The same rule governs identity, evidence emission and admission accounting.
     matches!(language, "fsharp" | "fsharp-signature")
+        || (language == "hlsl"
+            && matches!(
+                kind,
+                EntityKind::Variable | EntityKind::Field | EntityKind::Parameter
+            ))
         || (language == "glsl"
             && matches!(
                 kind,
@@ -8115,6 +8207,14 @@ fn automatic_instantiation_gap(fact: &SyntaxFact) -> Option<&'static str> {
 }
 
 fn source_reference_gap(fact: &SyntaxFact) -> Option<&'static str> {
+    if fact.kind() == SyntaxFactKind::Occurrence
+        && matches!(
+            fact.syntax_kind().as_str(),
+            "hlsl.identifier.reference" | "hlsl.member.reference" | "hlsl.unproven_call.reference"
+        )
+    {
+        return Some("hlsl-binding-and-dispatch-target-unavailable");
+    }
     if fact.kind() == SyntaxFactKind::Occurrence
         && matches!(
             fact.syntax_kind().as_str(),
@@ -8269,6 +8369,24 @@ fn import_target_gap(fact: &SyntaxFact) -> &'static str {
 }
 
 fn occurrence_role(fact: &SyntaxFact) -> Option<OccurrenceRole> {
+    if fact.syntax_kind().as_str().starts_with("hlsl.") {
+        // The inherited C++ grammar does not establish import, call or binding roles.
+        return match (fact.kind(), fact.syntax_kind().as_str()) {
+            (
+                SyntaxFactKind::Occurrence,
+                "hlsl.identifier.reference"
+                | "hlsl.member.reference"
+                | "hlsl.unproven_call.reference",
+            ) => Some(OccurrenceRole::Reference),
+            (SyntaxFactKind::Comment, "hlsl.comment.comment") => {
+                Some(OccurrenceRole::Documentation)
+            }
+            (SyntaxFactKind::StringLiteral, "hlsl.string.string") => {
+                Some(OccurrenceRole::StringEvidence)
+            }
+            _ => None,
+        };
+    }
     if nix_paths::is_segment(fact) {
         return None;
     }
@@ -9341,6 +9459,387 @@ mod tests {
         assert_ne!(
             written_source_identity("assembly", None, "assembly.source_label.declaration", 1),
             written_source_identity("assembly", None, "assembly.source_label.declaration", 2)
+        );
+    }
+
+    #[test]
+    fn hlsl_file_and_written_owners_do_not_claim_shader_binding() {
+        let file = FileId::from_bytes([3; 20]);
+        let fact = |kind, label: &str| {
+            SyntaxFact::new(
+                1,
+                None,
+                kind,
+                SourceSpan::new(file, 0, 30).unwrap(),
+                0,
+                SyntaxKindLabel::new(label).unwrap(),
+            )
+        };
+        let module = fact(SyntaxFactKind::Module, "hlsl.file.module");
+        assert!(is_explicit_file_module(&module, "hlsl"));
+        assert!(!is_explicit_file_module(&module, "cpp"));
+        assert!(!is_explicit_file_module(&module, "glsl"));
+        assert!(!is_explicit_file_module(
+            &fact(SyntaxFactKind::Declaration, "hlsl.file.module"),
+            "hlsl"
+        ));
+        assert!(!supports_declaration_signature(
+            EntityKind::Module,
+            "hlsl",
+            &module,
+            None
+        ));
+        assert_eq!(
+            source_coverage_gaps(&module).collect::<Vec<_>>(),
+            [(
+                FactDomain::Relations,
+                "hlsl-shader-binding-linking-and-preprocessing-unavailable"
+            )]
+        );
+        assert!(
+            source_coverage_gaps(&fact(SyntaxFactKind::Declaration, "hlsl.file.module"))
+                .next()
+                .is_none()
+        );
+        let owners = [
+            (EntityKind::Function, "hlsl.function.declaration"),
+            (EntityKind::Function, "hlsl.prototype.declaration"),
+            (EntityKind::Variable, "hlsl.variable.declaration"),
+            (EntityKind::Variable, "hlsl.variable_fragment.declaration"),
+            (EntityKind::Variable, "hlsl.buffer_member.declaration"),
+            (
+                EntityKind::Variable,
+                "hlsl.buffer_member_fragment.declaration",
+            ),
+            (EntityKind::Parameter, "hlsl.parameter.declaration"),
+            (EntityKind::Field, "hlsl.field.declaration"),
+            (EntityKind::Field, "hlsl.field_fragment.declaration"),
+            (EntityKind::Struct, "hlsl.struct.declaration"),
+        ];
+        for (expected, label) in owners {
+            for kind in [
+                EntityKind::Function,
+                EntityKind::Method,
+                EntityKind::Variable,
+                EntityKind::Parameter,
+                EntityKind::Field,
+                EntityKind::Struct,
+                EntityKind::Namespace,
+                EntityKind::Module,
+            ] {
+                assert_eq!(
+                    uses_written_source_identity("hlsl", kind, label),
+                    kind == expected
+                );
+            }
+            assert_eq!(
+                structural_entity_kind(&fact(SyntaxFactKind::Declaration, label)),
+                Some(expected)
+            );
+            assert!(!uses_written_source_identity("cpp", expected, label));
+            assert!(!uses_written_source_identity("glsl", expected, label));
+            assert!(!uses_written_source_identity(
+                "hlsl",
+                expected,
+                &format!("{label}.extra")
+            ));
+        }
+        for label in [
+            "hlsl.cbuffer.declaration",
+            "hlsl.buffer_context.expression",
+            "hlsl.buffer.scope",
+        ] {
+            let buffer = fact(SyntaxFactKind::Declaration, label);
+            assert!(structural_entity_kind(&buffer).is_none());
+            assert!(!uses_written_source_identity(
+                "hlsl",
+                EntityKind::Struct,
+                label
+            ));
+            assert!(!uses_written_source_identity(
+                "hlsl",
+                EntityKind::Variable,
+                label
+            ));
+            assert!(!supports_declaration_signature(
+                EntityKind::Struct,
+                "hlsl",
+                &buffer,
+                None
+            ));
+        }
+        assert_eq!(
+            written_source_identity("hlsl", None, "hlsl.function.declaration", 1),
+            source_occurrence_identity(
+                "rootlight.hlsl-source-occurrence/1",
+                None,
+                "hlsl.function.declaration",
+                1
+            )
+        );
+        assert_ne!(
+            written_source_identity("hlsl", None, "hlsl.function.declaration", 1),
+            written_source_identity("hlsl", None, "hlsl.function.declaration", 2)
+        );
+        assert_ne!(
+            written_source_identity("hlsl", None, "hlsl.function.declaration", 1),
+            written_source_identity("hlsl", None, "hlsl.prototype.declaration", 1)
+        );
+    }
+
+    #[test]
+    fn hlsl_context_domains_and_signature_ownership_are_exact() {
+        let file = FileId::from_bytes([3; 20]);
+        let fact = |kind, label: &str| {
+            SyntaxFact::new(
+                1,
+                None,
+                kind,
+                SourceSpan::new(file, 0, 30).unwrap(),
+                0,
+                SyntaxKindLabel::new(label).unwrap(),
+            )
+        };
+        for (base, domain, detail) in [
+            (
+                "unsupported_owner",
+                FactDomain::Entities,
+                "hlsl-written-owner-analysis-unavailable",
+            ),
+            (
+                "parameter_context",
+                FactDomain::Entities,
+                "hlsl-parameter-owner-analysis-unavailable",
+            ),
+            (
+                "shared_header",
+                FactDomain::Extensions,
+                "hlsl-shared-declaration-header-association-unavailable",
+            ),
+            (
+                "preprocessor_context",
+                FactDomain::Relations,
+                "hlsl-preprocessor-selection-unavailable",
+            ),
+            (
+                "annotation_context",
+                FactDomain::Relations,
+                "hlsl-shader-annotation-and-profile-evaluation-unavailable",
+            ),
+            (
+                "buffer_context",
+                FactDomain::Relations,
+                "hlsl-buffer-binding-and-layout-unavailable",
+            ),
+            (
+                "body_semantics",
+                FactDomain::Relations,
+                "hlsl-body-binding-and-call-analysis-unavailable",
+            ),
+        ] {
+            let label = format!("hlsl.{base}.expression");
+            let expression = fact(SyntaxFactKind::Signature, &label);
+            assert_eq!(
+                source_coverage_gaps(&expression).collect::<Vec<_>>(),
+                [(domain, detail)]
+            );
+            assert!(!is_signature_capture(&expression));
+            assert!(
+                source_coverage_gaps(&fact(SyntaxFactKind::Declaration, &label))
+                    .next()
+                    .is_none()
+            );
+            for wrong in [format!("{label}.extra"), label.replace("hlsl.", "cpp.")] {
+                assert!(
+                    source_coverage_gaps(&fact(SyntaxFactKind::Signature, &wrong))
+                        .next()
+                        .is_none()
+                );
+            }
+        }
+        let definition = fact(SyntaxFactKind::Occurrence, "hlsl.name.definition");
+        for (label, kind) in [
+            ("hlsl.variable_fragment.declaration", EntityKind::Variable),
+            ("hlsl.field_fragment.declaration", EntityKind::Field),
+            (
+                "hlsl.buffer_member_fragment.declaration",
+                EntityKind::Variable,
+            ),
+        ] {
+            let fragment = fact(SyntaxFactKind::Declaration, label);
+            assert!(!supports_declaration_signature(
+                kind, "hlsl", &fragment, None
+            ));
+            assert!(!supports_declaration_signature(
+                kind,
+                "hlsl",
+                &fragment,
+                Some(&definition)
+            ));
+        }
+        for (label, kind) in [
+            ("hlsl.variable.declaration", EntityKind::Variable),
+            ("hlsl.buffer_member.declaration", EntityKind::Variable),
+            ("hlsl.field.declaration", EntityKind::Field),
+            ("hlsl.parameter.declaration", EntityKind::Parameter),
+        ] {
+            assert!(supports_signature(kind, "hlsl"));
+            assert!(supports_declaration_signature(
+                kind,
+                "hlsl",
+                &fact(SyntaxFactKind::Declaration, label),
+                Some(&definition)
+            ));
+            assert!(!supports_declaration_signature(
+                kind,
+                "hlsl",
+                &fact(SyntaxFactKind::Module, label),
+                Some(&definition)
+            ));
+            assert!(!supports_declaration_signature(
+                kind,
+                "hlsl",
+                &fact(SyntaxFactKind::Declaration, &format!("{label}.extra")),
+                Some(&definition)
+            ));
+        }
+        assert!(is_signature_capture(&fact(
+            SyntaxFactKind::Signature,
+            "hlsl.header.signature"
+        )));
+        assert!(!is_signature_capture(&fact(
+            SyntaxFactKind::Declaration,
+            "hlsl.header.signature"
+        )));
+    }
+
+    #[test]
+    fn hlsl_unproven_uses_have_exact_reference_roles_and_target_gaps() {
+        let file = FileId::from_bytes([3; 20]);
+        let fact = |kind, label: &str| {
+            SyntaxFact::new(
+                1,
+                None,
+                kind,
+                SourceSpan::new(file, 0, 5).unwrap(),
+                0,
+                SyntaxKindLabel::new(label).unwrap(),
+            )
+        };
+        for label in [
+            "hlsl.identifier.reference",
+            "hlsl.member.reference",
+            "hlsl.unproven_call.reference",
+        ] {
+            let occurrence = fact(SyntaxFactKind::Occurrence, label);
+            assert_eq!(
+                source_reference_gap(&occurrence),
+                Some("hlsl-binding-and-dispatch-target-unavailable")
+            );
+            assert_eq!(
+                occurrence_role(&occurrence),
+                Some(OccurrenceRole::Reference)
+            );
+            for kind in [
+                SyntaxFactKind::Signature,
+                SyntaxFactKind::Declaration,
+                SyntaxFactKind::Import,
+                SyntaxFactKind::Comment,
+            ] {
+                let wrong = fact(kind, label);
+                assert!(source_reference_gap(&wrong).is_none());
+                assert!(occurrence_role(&wrong).is_none());
+            }
+            let wrong = fact(SyntaxFactKind::Occurrence, &format!("{label}.extra"));
+            assert!(source_reference_gap(&wrong).is_none());
+            assert!(occurrence_role(&wrong).is_none());
+        }
+        for label in [
+            "hlsl.name.definition",
+            "hlsl.cbuffer.definition",
+            "hlsl.buffer.reference",
+            "hlsl.buffer.scope",
+            "hlsl.constructor.call",
+            "hlsl.import.import",
+        ] {
+            let unsupported = fact(SyntaxFactKind::Occurrence, label);
+            assert!(source_reference_gap(&unsupported).is_none());
+            assert!(occurrence_role(&unsupported).is_none());
+        }
+        assert_eq!(
+            occurrence_role(&fact(SyntaxFactKind::Comment, "hlsl.comment.comment")),
+            Some(OccurrenceRole::Documentation)
+        );
+        assert_eq!(
+            occurrence_role(&fact(SyntaxFactKind::StringLiteral, "hlsl.string.string")),
+            Some(OccurrenceRole::StringEvidence)
+        );
+    }
+
+    #[test]
+    fn hlsl_unresolved_records_retain_current_generation_and_file_provenance() {
+        let repository = RepositoryId::from_bytes([1; 16]);
+        let file = FileId::from_bytes([3; 20]);
+        let span = SourceSpan::new(file, 0, 5).unwrap();
+        let fact = SyntaxFact::new(
+            1,
+            None,
+            SyntaxFactKind::Occurrence,
+            span,
+            0,
+            SyntaxKindLabel::new("hlsl.unproven_call.reference").unwrap(),
+        );
+        let source =
+            |generation| SourceRef::new(repository, generation, span, content_hash(b"Shade"), None);
+        let first_source = source(GenerationId::from_bytes([2; 20]));
+        let second_source = source(GenerationId::from_bytes([4; 20]));
+        let occurrence = |source: SourceRef| {
+            unresolved_occurrence(
+                &fact,
+                occurrence_role(&fact).unwrap(),
+                None,
+                derive_fact("hlsl-source-provenance", b"fixture").id(),
+                Confidence::new(SYNTAX_CONFIDENCE).unwrap(),
+                source,
+                "Shade",
+            )
+            .unwrap()
+        };
+        let first = occurrence(first_source.clone());
+        let second = occurrence(second_source.clone());
+        assert_ne!(first.id, second.id);
+        for (record, source) in [(&first, &first_source), (&second, &second_source)] {
+            assert_eq!(record.generation, source.generation());
+            assert_eq!(record.file, file);
+            assert_eq!(&record.source, source);
+            assert_eq!(record.evidence.source.as_ref(), Some(source));
+            assert!(record.enclosing.is_none());
+            assert!(matches!(record.target, OccurrenceTarget::Unresolved { .. }));
+            assert_eq!(record.role, OccurrenceRole::Reference);
+            assert_eq!(record.syntax_kind, "hlsl.unproven_call.reference");
+        }
+        validate_fact_graph(
+            std::slice::from_ref(&fact),
+            &[],
+            &second_source,
+            &Cancellation::new(),
+        )
+        .unwrap();
+        let foreign_source = SourceRef::new(
+            repository,
+            second_source.generation(),
+            SourceSpan::new(FileId::from_bytes([6; 20]), 0, 5).unwrap(),
+            content_hash(b"Shade"),
+            None,
+        );
+        assert!(
+            validate_fact_graph(
+                std::slice::from_ref(&fact),
+                &[],
+                &foreign_source,
+                &Cancellation::new()
+            )
+            .is_err()
         );
     }
 

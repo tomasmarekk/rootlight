@@ -21,6 +21,7 @@ tree-sitter-cobol.workspace = true
 tree-sitter-plsql.workspace = true
 tree-sitter-asm.workspace = true
 tree-sitter-glsl.workspace = true
+tree-sitter-hlsl.workspace = true
 tree-sitter-fortran.workspace = true
 tree-sitter-fsharp = { path = "../../third_party/tree-sitter-fsharp-0.3.12", version = "=0.3.12", default-features = false }
 tree-sitter-haskell.workspace = true

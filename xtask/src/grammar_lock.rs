@@ -19,7 +19,7 @@ const GRAMMAR_LOCK_PATH: &str = "adapters/grammars.lock";
 const CARGO_LOCK_PATH: &str = "Cargo.lock";
 const ADAPTER_PACKAGE: &str = "rootlight-adapter-treesitter";
 const GRAMMAR_LOCK_SHA256: &str =
-    "2fc8fa84c72aa5baeded644aeb0220c78d3d74e6c6a5fe1373fbab146335d73c";
+    "8194633142462dc6c31a7d8a8e584dec2cef74708d8c54606b8436e6c7e0804d";
 const JAVA_LICENSE_PATH: &str = "adapters/licenses/tree-sitter-java-0.23.5-LICENSE";
 const JAVA_LICENSE_SHA256: &str =
     "52ed137b039cd9c46409bc22e89938af911c95b157feae2d040b51e6084369a7";
@@ -217,7 +217,7 @@ const EXPECTED_PACKAGES: [(&str, &str, &str); 35] = [
     ),
 ];
 
-const EXPECTED_LOCAL_PACKAGES: [(&str, &str, &str, &str); 6] = [
+const EXPECTED_LOCAL_PACKAGES: [(&str, &str, &str, &str); 7] = [
     (
         "tree-sitter-asm",
         "0.24.0",
@@ -229,6 +229,12 @@ const EXPECTED_LOCAL_PACKAGES: [(&str, &str, &str, &str); 6] = [
         "0.2.0",
         "third_party/tree-sitter-glsl-0.2.0",
         "64c10d88da00b674b3e7280b4bfa12650a49f88a1e4c00a55e76798823c83815",
+    ),
+    (
+        "tree-sitter-hlsl",
+        "0.2.0",
+        "third_party/tree-sitter-hlsl-0.2.0",
+        "bc876400ce323fce73c6927f3fff9c92be29fde8ebb90fb60e67542f53c8c516",
     ),
     (
         "tree-sitter-vba",
@@ -286,6 +292,21 @@ pub(crate) fn check(metadata: &Metadata, root: &Path) -> Result<(), GrammarLockE
         root,
         "third_party/tree-sitter-asm-0.24.0/notices/LICENSE",
         "0e9f43573925c2e4b49f328a45c4df22c882191d77d876b0d18ecd60bd21e17c",
+    )?;
+    validate_local_license(
+        root,
+        "third_party/tree-sitter-hlsl-0.2.0/LICENSE",
+        "dec735ccc031754dd05e6556dd9e959915eb367cf01cf009c77a1a38786932b1",
+    )?;
+    validate_local_license(
+        root,
+        "third_party/tree-sitter-hlsl-0.2.0/notices/tree-sitter-cpp-LICENSE",
+        "2e0110e07abef7c2548b26ec9d6969775617ca539a0dc8dbeeb14d6452c711d1",
+    )?;
+    validate_local_license(
+        root,
+        "third_party/tree-sitter-hlsl-0.2.0/notices/tree-sitter-c-LICENSE",
+        "2e0110e07abef7c2548b26ec9d6969775617ca539a0dc8dbeeb14d6452c711d1",
     )?;
     validate_local_license(
         root,
@@ -412,7 +433,7 @@ fn validate_manifest(manifest: &GrammarLock) -> Result<(), GrammarLockError> {
         ));
     }
     validate_runtime(&manifest.runtime)?;
-    if manifest.grammars.len() != 43 {
+    if manifest.grammars.len() != 44 {
         return Err(GrammarLockError::GrammarCount(manifest.grammars.len()));
     }
     let mut languages = BTreeSet::new();
@@ -454,6 +475,7 @@ fn validate_manifest(manifest: &GrammarLock) -> Result<(), GrammarLockError> {
         "go",
         "groovy",
         "haskell",
+        "hlsl",
         "html",
         "sql",
         "java",
@@ -1173,7 +1195,7 @@ pub(crate) enum GrammarLockError {
     InvalidDigest { label: &'static str },
     #[error("grammar lock field {0} must not be empty")]
     EmptyField(&'static str),
-    #[error("grammar lock contains {0} grammars instead of 43")]
+    #[error("grammar lock contains {0} grammars instead of 44")]
     GrammarCount(usize),
     #[error("grammar lock repeats language {0}")]
     DuplicateLanguage(String),
@@ -1606,6 +1628,281 @@ mod tests {
         }
         validate_vendored_tree(&directory, grammar, sources)
             .expect("all original GLSL and C inputs, notices and native tables agree");
+    }
+
+    #[test]
+    fn hlsl_retains_originals_and_authenticates_scoped_native_tables() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
+        let manifest: GrammarLock =
+            toml::from_str(include_str!("../../adapters/grammars.lock")).unwrap();
+        let grammar = manifest
+            .grammars
+            .iter()
+            .find(|grammar| grammar.language == "hlsl")
+            .expect("HLSL source evidence is present");
+        let sources = grammar.vendored.as_ref().unwrap();
+        let directory = root.join("third_party/tree-sitter-hlsl-0.2.0");
+        assert!(grammar.crates_io_checksum.is_none());
+        assert_eq!(grammar.abi, 14);
+        assert_eq!(
+            grammar.scanner_sha256,
+            "599f387a256272fe8da1a76d9c1402679882146d9a18a641cb8252a6fae64b37"
+        );
+        assert_eq!(sources.files.len(), 243);
+        assert_eq!(sources.parser_path.as_deref(), Some("src/parser.c"));
+        assert_eq!(sources.scanner_path.as_deref(), Some("src/scanner.c"));
+        assert_eq!(sources.license_path.as_deref(), Some("LICENSE"));
+        assert_eq!(
+            grammar.license_sha256,
+            "dec735ccc031754dd05e6556dd9e959915eb367cf01cf009c77a1a38786932b1"
+        );
+        assert_eq!(
+            sources.files["notices/tree-sitter-c-LICENSE"],
+            "2e0110e07abef7c2548b26ec9d6969775617ca539a0dc8dbeeb14d6452c711d1"
+        );
+        assert_eq!(
+            sources.files["notices/tree-sitter-cpp-LICENSE"],
+            "2e0110e07abef7c2548b26ec9d6969775617ca539a0dc8dbeeb14d6452c711d1"
+        );
+        let binding: toml::Value = toml::from_str(include_str!(
+            "../../third_party/tree-sitter-hlsl-0.2.0/Cargo.toml"
+        ))
+        .unwrap();
+        assert_eq!(
+            binding["package"]["name"].as_str(),
+            Some(grammar.crate_name.as_str())
+        );
+        assert_eq!(
+            binding["package"]["version"].as_str(),
+            Some(grammar.crate_version.as_str())
+        );
+        assert_eq!(binding["package"]["publish"].as_bool(), Some(false));
+        assert_eq!(binding["package"]["rust-version"].as_str(), Some("1.90"));
+        assert_eq!(
+            binding["package"]["build"].as_str(),
+            Some("bindings/rust/build.rs")
+        );
+        let inventory: serde_json::Value = serde_json::from_str(include_str!(
+            "../../third_party/tree-sitter-hlsl-0.2.0/SOURCE-INVENTORY.json"
+        ))
+        .unwrap();
+        assert_eq!(inventory["schema"], "rootlight.hlsl-source-inventory/1");
+        assert_eq!(inventory["original_regular_file_count"], 212);
+        assert_eq!(inventory["original_regular_file_bytes"], 66_498_950);
+        assert_eq!(inventory["original_directory_record_count"], 65);
+        assert_eq!(
+            inventory["original_modes_and_executable_intent_retained"],
+            true
+        );
+        assert_eq!(inventory["archive_modes_applied"], false);
+        let mut payload_paths = BTreeSet::new();
+        for payload in inventory["payload_files"].as_array().unwrap() {
+            let path = payload["path"].as_str().unwrap();
+            assert!(is_source_relative_path(path));
+            assert!(payload_paths.insert(path));
+            assert_eq!(
+                sources.files.get(path).map(String::as_str),
+                payload["sha256"].as_str()
+            );
+            assert_eq!(
+                fs::metadata(directory.join(path)).unwrap().len(),
+                payload["bytes"]
+            );
+        }
+        assert_eq!(payload_paths.len(), 241);
+        payload_paths.extend(["SOURCE-INVENTORY.json", "SOURCE-PROVENANCE.json"]);
+        assert_eq!(
+            payload_paths,
+            sources.files.keys().map(String::as_str).collect()
+        );
+        let mut original_paths = BTreeSet::new();
+        let mut original_bytes = 0u64;
+        let mut original_directories = 0usize;
+        assert_eq!(inventory["sources"].as_array().unwrap().len(), 4);
+        for archive in inventory["sources"].as_array().unwrap() {
+            let retained_tree = archive["retained_tree"].as_str().unwrap();
+            let archive_path = archive["archive"].as_str().unwrap();
+            assert_eq!(
+                sources.files.get(archive_path).map(String::as_str),
+                archive["sha256"].as_str()
+            );
+            let members = archive["inventory"]["members"].as_array().unwrap();
+            for member in members {
+                let member_path = member["path"].as_str().unwrap();
+                let path = if member_path.is_empty() {
+                    assert_eq!(member["directory"], true);
+                    retained_tree.to_owned()
+                } else {
+                    format!("{retained_tree}/{member_path}")
+                };
+                assert!(is_source_relative_path(&path));
+                let is_directory = member["directory"].as_bool().unwrap();
+                assert_eq!(
+                    member["executable_intent"].as_bool(),
+                    Some(!is_directory && member["raw_mode"].as_u64().unwrap() & 0o111 != 0)
+                );
+                if is_directory {
+                    assert!(archived_directory_materialized(
+                        &directory.join(&path),
+                        member_path,
+                        members
+                    ));
+                    original_directories += 1;
+                } else {
+                    assert!(original_paths.insert(path.clone()));
+                    assert_eq!(
+                        sources.files.get(&path).map(String::as_str),
+                        member["sha256"].as_str()
+                    );
+                    original_bytes += member["bytes"].as_u64().unwrap();
+                }
+            }
+        }
+        assert_eq!(original_paths.len(), 212);
+        assert_eq!(original_bytes, 66_498_950);
+        assert_eq!(original_directories, 65);
+        let provenance: serde_json::Value = serde_json::from_str(include_str!(
+            "../../third_party/tree-sitter-hlsl-0.2.0/SOURCE-PROVENANCE.json"
+        ))
+        .unwrap();
+        assert_eq!(provenance["schema"], "rootlight.hlsl-source-provenance/1");
+        assert_eq!(provenance["package"], grammar.crate_name);
+        assert_eq!(provenance["version"], grammar.crate_version);
+        assert_eq!(provenance["authored_revision"], grammar.commit);
+        assert_eq!(provenance["license"], "MIT");
+        assert_eq!(
+            provenance["notice_paths"],
+            json!([
+                "LICENSE",
+                "notices/tree-sitter-cpp-LICENSE",
+                "notices/tree-sitter-c-LICENSE"
+            ])
+        );
+        let parents = &provenance["preferred_generation_parent_closure"];
+        assert_eq!(
+            parents["cpp"]["revision"],
+            "e5cea0ec884c5c3d2d1e41a741a66ce13da4d945"
+        );
+        assert_eq!(
+            parents["c"]["revision"],
+            "2a265d69a4caf57108a73ad2ed1e6922dd2f998c"
+        );
+        assert_eq!(parents["hlsl_import"], "tree-sitter-cpp/grammar");
+        assert_eq!(parents["cpp_import"], "tree-sitter-c/grammar");
+        assert_eq!(parents["registry_substitution"], false);
+        assert_eq!(parents["build_time_generation"], false);
+        let archive_pins = provenance["archive_identity_pins"].as_array().unwrap();
+        assert_eq!(archive_pins.len(), 4);
+        for pin in archive_pins {
+            let path = pin["archive"].as_str().unwrap();
+            assert_eq!(
+                sources.files.get(path).map(String::as_str),
+                pin["sha256"].as_str()
+            );
+            assert_eq!(
+                fs::metadata(directory.join(path)).unwrap().len(),
+                pin["bytes"]
+            );
+            let archived = inventory["sources"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|source| source["archive"] == pin["archive"])
+                .expect("each provenance archive has an exact source inventory");
+            assert_eq!(archived["sha256"], pin["sha256"]);
+            assert_eq!(archived["bytes"], pin["bytes"]);
+        }
+        assert_eq!(
+            provenance["inventory"]["sha256"],
+            sources.files["SOURCE-INVENTORY.json"]
+        );
+        assert_eq!(
+            provenance["inventory"]["bytes"],
+            fs::metadata(directory.join("SOURCE-INVENTORY.json"))
+                .unwrap()
+                .len()
+        );
+        let generation = &provenance["local_generation"];
+        assert_eq!(generation["abi"], 14);
+        assert_eq!(generation["state_count"], 8_842);
+        assert_eq!(generation["symbol_count"], 582);
+        assert_eq!(generation["external_token_count"], 2);
+        assert_eq!(generation["producer_count"], 2);
+        assert_eq!(generation["six_output_pairs_literal_equal"], true);
+        let mut generated_paths = BTreeSet::new();
+        for output in generation["exact_generated_outputs"].as_array().unwrap() {
+            let path = output["path"].as_str().unwrap();
+            assert!(generated_paths.insert(path));
+            assert_eq!(
+                sources.files.get(path).map(String::as_str),
+                output["sha256"].as_str()
+            );
+            assert_eq!(
+                fs::metadata(directory.join(path)).unwrap().len(),
+                output["bytes"]
+            );
+        }
+        assert_eq!(
+            generated_paths,
+            BTreeSet::from([
+                "src/grammar.json",
+                "src/node-types.json",
+                "src/parser.c",
+                "src/tree_sitter/alloc.h",
+                "src/tree_sitter/array.h",
+                "src/tree_sitter/parser.h",
+            ])
+        );
+        // The published record authenticates the isolated proof, not a later
+        // relocated run or product binding qualification.
+        let native = &provenance["isolated_native_evidence"];
+        assert_eq!(native["relocated_wrapper_executed"], false);
+        assert_eq!(native["groups"], 7);
+        assert_eq!(native["observations"], 9);
+        assert_eq!(native["actual_test_exit_codes"], json!([0, 0]));
+        assert_eq!(native["scoped_clippy_exit_code"], 0);
+        assert_eq!(native["source_bytes"], 1_901);
+        assert_eq!(native["leaf_bytes"], 1_729);
+        assert_eq!(native["whitespace_gap_bytes"], 172);
+        assert_eq!(native["trusted_original_producer_only"], true);
+        assert_eq!(native["malformed_original_state_executed"], false);
+        let callbacks = &provenance["preferred_callback_evidence"];
+        assert_eq!(callbacks["scanner_pin"]["sha256"], grammar.scanner_sha256);
+        assert_eq!(callbacks["scanner_pin"]["bytes"], 5_403);
+        assert_eq!(callbacks["accepted_lengths"], 16);
+        assert_eq!(callbacks["rejected_lengths"], 5);
+        assert_eq!(callbacks["null_payload"], true);
+        assert_eq!(callbacks["fixture_private_allocation_failure"], true);
+        assert_eq!(callbacks["recorded_by_root_actual_compiler_exit_code"], 0);
+        assert_eq!(callbacks["recorded_by_root_actual_callback_exit_code"], 0);
+        assert_eq!(callbacks["inherited_compiler_warning_count"], 2);
+        assert_eq!(callbacks["warning_clean_claim"], false);
+        assert_eq!(provenance["unsafe_original_scanner_inert"], true);
+        assert_ne!(
+            sources.files["src/scanner.c"],
+            sources.files["upstream/hlsl-published/src/scanner.c"]
+        );
+        for claim in [
+            "production_integration_verified",
+            "whole_language_coverage_verified",
+            "installed_mcp_verified",
+            "build_and_packaging_acceptance_verified",
+            "complete_product_source_closure_proven",
+            "empty_dependency_cache_verified",
+            "os_network_denial_verified",
+            "source_download_or_generation_at_build_time",
+            "archived_upstream_lifecycle_activated",
+            "whole_language_syntax_validity_verified",
+            "relocated_wrapper_executed",
+            "physical_cbuffer_name_is_declaration_scope_or_resolved_identity",
+            "runtime_register_or_profile_assignment_verified",
+            "inherited_permissive_local_buffer_branches_are_hlsl_validity_proof",
+        ] {
+            assert_eq!(provenance[claim], false, "{claim}");
+        }
+        validate_vendored_tree(&directory, grammar, sources).expect(
+            "all original HLSL, C++ and C inputs, notices and preferred native tables agree",
+        );
     }
 
     #[test]

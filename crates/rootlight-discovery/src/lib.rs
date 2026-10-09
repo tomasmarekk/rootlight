@@ -2234,11 +2234,11 @@ const LANGUAGE_CAPABILITIES: &[LanguageCapability] = &[
     },
     LanguageCapability {
         language: "hlsl",
-        suffixes: &[".hlsl"],
+        suffixes: &[".hlsl", ".hlsli", ".fxh"],
         aliases: &[],
         detectors: &["extension"],
         maximum_tier: "tier_d",
-        analyzers: &["source-fallback"],
+        analyzers: &["treesitter"],
     },
     LanguageCapability {
         language: "html",
@@ -6825,7 +6825,11 @@ max_source_file_bytes = 2097152
                 &[".vert", ".frag", ".vsh", ".fsh", ".glsl"][..],
                 &["treesitter"][..],
             ),
-            ("hlsl", &[".hlsl"][..], &["source-fallback"][..]),
+            (
+                "hlsl",
+                &[".hlsl", ".hlsli", ".fxh"][..],
+                &["treesitter"][..],
+            ),
         ] {
             let capability = language_capabilities()
                 .iter()
@@ -6866,14 +6870,16 @@ max_source_file_bytes = 2097152
         for path in [
             "program.fs",
             "program.fx",
-            "program.fxh",
-            "program.hlsli",
+            "program.fxh.bak",
+            "program.hlslx",
             "program.geom",
             "program.tesc",
             "program.tese",
             "program.comp",
             "program.glsl.map",
             "program.hlsl.txt",
+            "program.hlsli.bak",
+            "program.fxh.txt",
             "shaders.vert/program",
         ] {
             assert!(!matches!(extension_language(path), Some("glsl" | "hlsl")));
