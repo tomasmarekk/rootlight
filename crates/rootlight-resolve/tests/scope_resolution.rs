@@ -38,6 +38,89 @@ mod fsharp_binding;
 mod groovy_import;
 
 #[test]
+fn assembly_written_uses_require_assembler_owned_target_proof() {
+    for (syntax, role, kind) in [
+        (
+            "assembly.identifier.reference",
+            OccurrenceRole::Read,
+            EntityKind::Variable,
+        ),
+        (
+            "assembly.macro.reference",
+            OccurrenceRole::MacroUse,
+            EntityKind::Function,
+        ),
+        (
+            "assembly.label.reference",
+            OccurrenceRole::Reference,
+            EntityKind::Variable,
+        ),
+        (
+            "assembly.unproven_call.reference",
+            OccurrenceRole::CallSite,
+            EntityKind::Function,
+        ),
+    ] {
+        for cross_file in [false, true] {
+            for resolved in [false, true] {
+                let mut fixture = Fixture::new();
+                let file = if cross_file {
+                    fixture.add_file(2, "src/other.asm")
+                } else {
+                    fixture.primary_file
+                };
+                let symbol = fixture.add_entity(10, "target", file, kind, None);
+                fixture.add_occurrence(20, "target", fixture.primary_file, role, None);
+                for record in &mut fixture.document.files {
+                    record.language = "assembly".to_owned();
+                }
+                fixture.document.provenance[0].language = "assembly".to_owned();
+                fixture.document.entities[0].language = "assembly".to_owned();
+                fixture.document.entities[0].qualified_name = "target".to_owned();
+                let occurrence = &mut fixture.document.occurrences[0];
+                occurrence.syntax_kind = syntax.to_owned();
+                if resolved {
+                    occurrence.target = OccurrenceTarget::Resolved { symbol };
+                }
+                let original = occurrence.clone();
+                fixture.validate();
+                let engine = ResolutionEngine::default();
+                let cancellation = Cancellation::new();
+                let estimate = engine
+                    .estimate_work(&fixture.document, &cancellation)
+                    .unwrap();
+                assert_eq!(
+                    estimate.required, 0,
+                    "{syntax}: cross_file={cross_file}, resolved={resolved}"
+                );
+                assert!(
+                    engine
+                        .resolve(&fixture.document, &cancellation)
+                        .unwrap()
+                        .decisions
+                        .is_empty()
+                );
+                let context = ResolverFactContext::new(fixture.content_hash);
+                let applied = engine
+                    .apply(fixture.document.clone(), context, &cancellation)
+                    .unwrap();
+                let streamed = engine
+                    .apply_document(fixture.document.clone(), context, &cancellation)
+                    .unwrap();
+                let (bounded, bounded_estimate) = engine
+                    .apply_document_bounded(fixture.document, context, &cancellation)
+                    .unwrap();
+                assert_eq!(bounded_estimate, estimate);
+                assert_eq!(bounded, streamed);
+                assert_eq!(streamed, applied.document);
+                assert_eq!(bounded.occurrences, [original]);
+                assert!(bounded.relations.is_empty());
+            }
+        }
+    }
+}
+
+#[test]
 fn common_lisp_unproven_reads_retain_exact_written_source() {
     for (spelling, role, syntax, kind) in [
         (

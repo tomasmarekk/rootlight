@@ -1399,6 +1399,13 @@ fn unresolved_reason(role: OccurrenceRole, kind_rejection_total: u64) -> Unresol
 }
 
 pub(crate) fn resolvable_occurrence(occurrence: &OccurrenceRecord) -> bool {
+    // Assembly expansion, dialect scopes and address/value lookup require
+    // assembler-owned proof; physical spelling alone cannot establish a target.
+    if occurrence.syntax_kind.starts_with("assembly.")
+        && matches!(occurrence.target, OccurrenceTarget::Unresolved { .. })
+    {
+        return false;
+    }
     // Common Lisp readtable, package and function/macro bindings need
     // language-owned proof; written qualification does not establish a target.
     if occurrence.syntax_kind.starts_with("common_lisp.")
@@ -1708,6 +1715,10 @@ mod source_owned_target_tests {
             },
         };
         for syntax in [
+            "assembly.identifier.reference",
+            "assembly.macro.reference",
+            "assembly.label.reference",
+            "assembly.unproven_call.reference",
             "common_lisp.symbol.reference",
             "common_lisp.function.scoped_call",
             "sas.macro_call.reference",
@@ -1732,6 +1743,7 @@ mod source_owned_target_tests {
             symbol: SymbolId::from_bytes([6; 20]),
         };
         for syntax in [
+            "assembly.unproven_call.reference",
             "common_lisp.function.scoped_call",
             "sas.macro_call.reference",
             "apex.unproven_call.reference",
