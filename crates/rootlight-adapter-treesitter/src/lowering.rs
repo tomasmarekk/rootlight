@@ -9141,6 +9141,120 @@ mod tests {
     }
 
     #[test]
+    fn assembly_file_identity_and_binding_gaps_are_source_only() {
+        let file = FileId::from_bytes([3; 20]);
+        let fact = |kind, label| {
+            SyntaxFact::new(
+                1,
+                None,
+                kind,
+                SourceSpan::new(file, 0, 30).unwrap(),
+                0,
+                SyntaxKindLabel::new(label).unwrap(),
+            )
+        };
+        let module = fact(SyntaxFactKind::Module, "assembly.file.module");
+        assert!(is_explicit_file_module(&module, "assembly"));
+        assert!(!is_explicit_file_module(&module, "python"));
+        assert!(!is_explicit_file_module(
+            &fact(SyntaxFactKind::Declaration, "assembly.file.module"),
+            "assembly"
+        ));
+        assert!(!is_explicit_file_module(
+            &fact(SyntaxFactKind::Module, "assembly.segment.declaration"),
+            "assembly"
+        ));
+        assert_eq!(
+            source_coverage_gaps(&module).collect::<Vec<_>>(),
+            [(
+                FactDomain::Relations,
+                "assembly-expansion-and-binding-unavailable"
+            )]
+        );
+        assert_eq!(
+            written_source_identity("assembly", None, "assembly.source_label.declaration", 1),
+            source_occurrence_identity(
+                "rootlight.assembly-source-occurrence/1",
+                None,
+                "assembly.source_label.declaration",
+                1
+            )
+        );
+        assert_ne!(
+            written_source_identity("assembly", None, "assembly.source_label.declaration", 1),
+            written_source_identity("assembly", None, "assembly.source_label.declaration", 2)
+        );
+    }
+
+    #[test]
+    fn assembly_written_identity_requires_exact_owner_kind_and_label() {
+        let owners = [
+            (EntityKind::Function, "assembly.procedure.declaration"),
+            (EntityKind::Function, "assembly.macro.declaration"),
+            (EntityKind::Module, "assembly.segment.declaration"),
+            (EntityKind::Constant, "assembly.constant.declaration"),
+            (EntityKind::Constant, "assembly.source_constant.declaration"),
+            (EntityKind::Variable, "assembly.data.declaration"),
+            (
+                EntityKind::StatementLabel,
+                "assembly.source_label.declaration",
+            ),
+        ];
+        for (expected, label) in owners {
+            assert!(uses_written_source_identity("assembly", expected, label));
+            for kind in [
+                EntityKind::Function,
+                EntityKind::Module,
+                EntityKind::Constant,
+                EntityKind::Variable,
+                EntityKind::StatementLabel,
+            ] {
+                assert_eq!(
+                    uses_written_source_identity("assembly", kind, label),
+                    kind == expected
+                );
+            }
+            assert!(!uses_written_source_identity(
+                "assembly",
+                expected,
+                &format!("{label}.extra")
+            ));
+            assert!(!uses_written_source_identity("rust", expected, label));
+        }
+        assert!(!uses_written_source_identity(
+            "assembly",
+            EntityKind::Module,
+            "assembly.file.module"
+        ));
+        assert!(!uses_written_source_identity(
+            "assembly",
+            EntityKind::Function,
+            "rust.function.declaration"
+        ));
+        for language in [
+            "r",
+            "powershell",
+            "nix",
+            "matlab",
+            "perl",
+            "groovy",
+            "tcl",
+            "common-lisp",
+        ] {
+            assert!(uses_written_source_identity(
+                language,
+                EntityKind::Function,
+                "written.function.declaration"
+            ));
+            assert!(!uses_written_source_identity(
+                language,
+                EntityKind::Module,
+                "written.module.declaration"
+            ));
+        }
+    }
+
+    #[test]
     fn common_lisp_file_identity_and_binding_gaps_are_source_only() {
         let file = FileId::from_bytes([3; 20]);
         let fact = |kind, label| {
