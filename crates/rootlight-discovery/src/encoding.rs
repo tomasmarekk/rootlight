@@ -20,13 +20,21 @@ pub(super) fn classify(
 ) -> Result<Option<SourceClassification>, DiscoveryError> {
     cancellation.check()?;
     if !matches!(content, [0xff, 0xfe, ..] | [0xfe, 0xff, ..]) {
+        // Binary containers can have a NUL-free prefix; suffixes do not prove text.
+        let binary_signature = content.starts_with(b"%PDF-")
+            || content.starts_with(b"\x89PNG\r\n\x1a\n")
+            || content.starts_with(b"PK\x03\x04")
+            || content.starts_with(b"PK\x05\x06")
+            || content.starts_with(b"PK\x07\x08");
         let sample = content.get(..content.len().min(MAX_CLASSIFICATION_BYTES));
         return Ok(
-            (!sample.is_some_and(|sample| sample.contains(&0))).then_some(SourceClassification {
-                encoding: "utf-8",
-                decoded_prefix: None,
-                prefix_truncated: content.len() > MAX_CLASSIFICATION_BYTES,
-            }),
+            (!binary_signature && !sample.is_some_and(|sample| sample.contains(&0))).then_some(
+                SourceClassification {
+                    encoding: "utf-8",
+                    decoded_prefix: None,
+                    prefix_truncated: content.len() > MAX_CLASSIFICATION_BYTES,
+                },
+            ),
         );
     }
     let Some(text) = rootlight_vfs::SourceText::parse(content, cancellation)? else {
@@ -168,6 +176,35 @@ mod tests {
                 Some(expected.as_str())
             );
             assert!(classified.prefix_truncated);
+        }
+    }
+
+    #[test]
+    fn binary_format_signatures_do_not_require_a_nul_byte() {
+        for content in [
+            b"%PDF-1.7\n1 0 obj\n<< /Type /Catalog >>\nendobj\n".as_slice(),
+            b"\x89PNG\r\n\x1a\nopaque payload",
+            b"PK\x03\x04opaque archive",
+            b"PK\x05\x06empty archive",
+            b"PK\x07\x08spanned archive",
+        ] {
+            assert!(!content.contains(&0));
+            assert!(classify(content, &Cancellation::new()).unwrap().is_none());
+        }
+        for content in [
+            b"let header = \"%PDF-1.7\";".as_slice(),
+            b"// PK\x03\x04 is an archive signature",
+            b"%PDF",
+            b"PK\x03",
+        ] {
+            assert!(classify(content, &Cancellation::new()).unwrap().is_some());
+        }
+        for little_endian in [true, false] {
+            assert!(
+                classify(&encoded("%PDF-1.7", little_endian), &Cancellation::new())
+                    .unwrap()
+                    .is_some()
+            );
         }
     }
 

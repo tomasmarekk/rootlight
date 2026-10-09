@@ -45,7 +45,7 @@ pub use incremental::{
 };
 
 /// Current deterministic manifest and source-classification revision.
-pub const DISCOVERY_MANIFEST_VERSION: &str = "1.36";
+pub const DISCOVERY_MANIFEST_VERSION: &str = "1.37";
 /// Stable source-free diagnostic emitted when the entry budget truncates discovery.
 pub const DISCOVERY_ENTRY_LIMIT_DIAGNOSTIC_CODE: &str = "DISCOVERY_ENTRY_LIMIT";
 /// Stable source-free diagnostic emitted when retained source bytes truncate discovery.
@@ -3181,6 +3181,36 @@ mod tests {
         state.run().unwrap();
         assert!(cancellation.cancel(CancellationReason::ClientRequest));
         assert!(matches!(state.finish(), Err(DiscoveryError::Cancelled(_))));
+    }
+
+    #[test]
+    fn binary_format_signatures_override_source_suffixes() {
+        let temporary = local_tempdir();
+        let pdf = b"%PDF-1.7\n1 0 obj\n<< /Type /Catalog >>\nendobj\n";
+        for path in ["document.data", "misleading.rs"] {
+            write_fixture(&temporary, path, pdf);
+        }
+        write_fixture(&temporary, "archive.txt", b"PK\x03\x04opaque archive");
+        write_fixture(&temporary, "source.pdf", b"let signature = \"%PDF-1.7\";\n");
+        let root = fixture_root(&temporary, b"binary-format-signatures");
+        let policy = DiscoveryPolicy::build(Vec::new(), true).unwrap();
+        let manifest = discover(&root, &config(), &policy, limits(), &Cancellation::new()).unwrap();
+        assert_eq!(manifest.inputs.len(), 1);
+        assert_eq!(manifest.inputs[0].path, "source.pdf");
+        assert_eq!(manifest.inputs[0].encoding, "utf-8");
+        for path in ["document.data", "misleading.rs", "archive.txt"] {
+            assert!(
+                manifest
+                    .exclusions
+                    .iter()
+                    .any(|entry| { entry.path == path && entry.reason == ExclusionReason::Binary })
+            );
+        }
+        assert_eq!(
+            manifest,
+            discover_manifest_streaming(&root, &config(), &policy, limits(), &Cancellation::new())
+                .unwrap()
+        );
     }
 
     #[test]
