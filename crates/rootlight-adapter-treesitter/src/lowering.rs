@@ -6414,6 +6414,9 @@ fn common_lisp_source_gap(fact: &SyntaxFact) -> Option<(FactDomain, &'static str
 }
 
 fn source_coverage_gap(fact: &SyntaxFact) -> Option<(FactDomain, &'static str)> {
+    if let Some(gap) = assembly_source_gap(fact) {
+        return Some(gap);
+    }
     if let Some(gap) = common_lisp_source_gap(fact) {
         return Some(gap);
     }
@@ -6667,6 +6670,35 @@ fn source_coverage_gap(fact: &SyntaxFact) -> Option<(FactDomain, &'static str)> 
         }
         _ => None,
     }
+}
+
+fn assembly_source_gap(fact: &SyntaxFact) -> Option<(FactDomain, &'static str)> {
+    if fact.kind() != SyntaxFactKind::Signature {
+        return None;
+    }
+    Some(match fact.syntax_kind().as_str() {
+        "assembly.unsupported_owner.expression" => (
+            FactDomain::Entities,
+            "assembly-written-owner-analysis-unavailable",
+        ),
+        "assembly.macro_parameter_context.expression" => (
+            FactDomain::Entities,
+            "assembly-macro-parameter-owner-analysis-unavailable",
+        ),
+        "assembly.directive_context.expression" => (
+            FactDomain::Entities,
+            "assembly-directive-owner-analysis-unavailable",
+        ),
+        "assembly.operand_context.expression" | "assembly.file_semantics.expression" => (
+            FactDomain::Occurrences,
+            "assembly-source-use-analysis-unavailable",
+        ),
+        "assembly.owner_semantics.expression" => (
+            FactDomain::Relations,
+            "assembly-expansion-and-binding-unavailable",
+        ),
+        _ => return None,
+    })
 }
 
 fn json_data_identity(parent: Option<[u8; 32]>, kind: &str, position: u64) -> [u8; 32] {
@@ -9184,6 +9216,76 @@ mod tests {
             written_source_identity("assembly", None, "assembly.source_label.declaration", 1),
             written_source_identity("assembly", None, "assembly.source_label.declaration", 2)
         );
+    }
+
+    #[test]
+    fn assembly_source_contexts_keep_exact_scoped_gap_domains() {
+        let file = FileId::from_bytes([3; 20]);
+        let fact = |kind, label: &str| {
+            SyntaxFact::new(
+                1,
+                None,
+                kind,
+                SourceSpan::new(file, 4, 24).unwrap(),
+                0,
+                SyntaxKindLabel::new(label).unwrap(),
+            )
+        };
+        for (label, domain, reason) in [
+            (
+                "assembly.unsupported_owner.expression",
+                FactDomain::Entities,
+                "assembly-written-owner-analysis-unavailable",
+            ),
+            (
+                "assembly.macro_parameter_context.expression",
+                FactDomain::Entities,
+                "assembly-macro-parameter-owner-analysis-unavailable",
+            ),
+            (
+                "assembly.directive_context.expression",
+                FactDomain::Entities,
+                "assembly-directive-owner-analysis-unavailable",
+            ),
+            (
+                "assembly.operand_context.expression",
+                FactDomain::Occurrences,
+                "assembly-source-use-analysis-unavailable",
+            ),
+            (
+                "assembly.file_semantics.expression",
+                FactDomain::Occurrences,
+                "assembly-source-use-analysis-unavailable",
+            ),
+            (
+                "assembly.owner_semantics.expression",
+                FactDomain::Relations,
+                "assembly-expansion-and-binding-unavailable",
+            ),
+        ] {
+            assert_eq!(
+                source_coverage_gaps(&fact(SyntaxFactKind::Signature, label)).collect::<Vec<_>>(),
+                [(domain, reason)],
+                "{label}"
+            );
+            for kind in [
+                SyntaxFactKind::Declaration,
+                SyntaxFactKind::Occurrence,
+                SyntaxFactKind::Scope,
+            ] {
+                assert!(source_coverage_gaps(&fact(kind, label)).next().is_none());
+            }
+            for invalid in [
+                format!("{label}.extra"),
+                label.replace("assembly.", "rust."),
+            ] {
+                assert!(
+                    source_coverage_gaps(&fact(SyntaxFactKind::Signature, &invalid))
+                        .next()
+                        .is_none()
+                );
+            }
+        }
     }
 
     #[test]
