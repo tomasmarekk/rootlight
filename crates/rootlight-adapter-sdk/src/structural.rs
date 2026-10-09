@@ -39,6 +39,37 @@ pub fn structural_entity_kind(fact: &SyntaxFact) -> Option<EntityKind> {
         SyntaxFactKind::Declaration
             if matches!(
                 label,
+                "plsql.package.declaration" | "plsql.package_body.declaration"
+            ) =>
+        {
+            Some(EntityKind::Module)
+        }
+        SyntaxFactKind::Declaration
+            if matches!(
+                label,
+                "plsql.procedure.declaration" | "plsql.function.declaration"
+            ) =>
+        {
+            Some(EntityKind::Function)
+        }
+        SyntaxFactKind::Declaration if label == "plsql.record_type.declaration" => {
+            Some(EntityKind::Struct)
+        }
+        SyntaxFactKind::Declaration if label == "plsql.field.declaration" => {
+            Some(EntityKind::Field)
+        }
+        SyntaxFactKind::Declaration if label == "plsql.parameter.declaration" => {
+            Some(EntityKind::Parameter)
+        }
+        SyntaxFactKind::Declaration if label == "plsql.variable.declaration" => {
+            Some(EntityKind::Variable)
+        }
+        SyntaxFactKind::Declaration if label == "plsql.trigger.declaration" => {
+            Some(EntityKind::DatabaseObject)
+        }
+        SyntaxFactKind::Declaration
+            if matches!(
+                label,
                 "fortran.subroutine.declaration"
                     | "fortran.separate_module_procedure.declaration"
                     | "fortran.interface_function.declaration"
@@ -459,6 +490,8 @@ pub fn structural_captured_name(text: &str, maximum_bytes: usize) -> Option<&str
 /// Empty, control-bearing, edge-whitespace and quote-prefixed names retain an
 /// injective JSON-quoted identity, including unpaired UTF-16 units. Interpolated
 /// names are unavailable rather than evaluated; source spans retain all quoting.
+/// PL/SQL retains exact ordinary or double-quoted identifier spelling; source
+/// identity does not establish case folding or database name-resolution equivalence.
 /// Other languages retain
 /// the shared borrowed-name contract. Source and canonical output must both fit
 /// `maximum_bytes`. Invalid names, excess bytes or allocation failure return `None`.
@@ -475,6 +508,8 @@ pub fn structural_captured_name_for_language<'a>(
                 .bytes()
                 .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_'))
         .then_some(Cow::Borrowed(text))
+    } else if language == "plsql" {
+        plsql_captured_name(text, maximum_bytes).map(Cow::Borrowed)
     } else if matches!(language, "javascript" | "typescript") {
         crate::canonical_ecmascript_identifier(text, maximum_bytes)
             .or_else(|| structural_captured_name(text, maximum_bytes).map(Cow::Borrowed))
@@ -563,6 +598,32 @@ pub fn structural_captured_name_for_language<'a>(
     } else {
         structural_captured_name(text, maximum_bytes).map(Cow::Borrowed)
     }
+}
+
+fn plsql_captured_name(text: &str, maximum_bytes: usize) -> Option<&str> {
+    if text.is_empty() || text.len() > maximum_bytes || text.contains('\0') {
+        return None;
+    }
+    if let Some(quoted) = text
+        .strip_prefix('"')
+        .and_then(|name| name.strip_suffix('"'))
+    {
+        if quoted.is_empty() {
+            return None;
+        }
+        let mut characters = quoted.chars();
+        while let Some(character) = characters.next() {
+            if character == '"' && characters.next() != Some('"') {
+                return None;
+            }
+        }
+        return Some(text);
+    }
+    (text.as_bytes().first().is_some_and(u8::is_ascii_alphabetic)
+        && text
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'$' | b'#')))
+    .then_some(text)
 }
 
 /// Interprets a reviewed name capture with its structural role and language.
@@ -1001,6 +1062,76 @@ mod tests {
         ] {
             assert!(structural_captured_name_for_language("fortran", name, 64).is_none());
         }
+    }
+
+    #[test]
+    fn plsql_source_kinds_and_names_do_not_infer_database_binding() {
+        use crate::SyntaxKindLabel;
+        use rootlight_ids::FileId;
+        use rootlight_ir::SourceSpan;
+
+        for (label, kind) in [
+            ("plsql.package.declaration", EntityKind::Module),
+            ("plsql.package_body.declaration", EntityKind::Module),
+            ("plsql.procedure.declaration", EntityKind::Function),
+            ("plsql.function.declaration", EntityKind::Function),
+            ("plsql.record_type.declaration", EntityKind::Struct),
+            ("plsql.field.declaration", EntityKind::Field),
+            ("plsql.parameter.declaration", EntityKind::Parameter),
+            ("plsql.variable.declaration", EntityKind::Variable),
+            ("plsql.trigger.declaration", EntityKind::DatabaseObject),
+        ] {
+            let fact = SyntaxFact::new(
+                1,
+                None,
+                SyntaxFactKind::Declaration,
+                SourceSpan::new(FileId::from_bytes([3; 20]), 0, 1).unwrap(),
+                0,
+                SyntaxKindLabel::new(label).unwrap(),
+            );
+            assert_eq!(structural_entity_kind(&fact), Some(kind), "{label}");
+        }
+        for name in [
+            "MixedName",
+            "Value_2$#",
+            "\"Case Name\"",
+            "\"a\"\"b\"",
+            "\"π\"",
+        ] {
+            assert_eq!(
+                structural_captured_name_for_language("plsql", name, name.len()).as_deref(),
+                Some(name)
+            );
+            assert!(structural_captured_name_for_language("plsql", name, name.len() - 1).is_none());
+        }
+        for name in [
+            "",
+            "_value",
+            "1value",
+            "value.member",
+            "value()",
+            "value member",
+            "caf\u{e9}",
+            "\"\"",
+            "\"open",
+            "\"a\"b\"",
+            "\"a\0b\"",
+            "`value`",
+            "'value'",
+        ] {
+            assert!(
+                structural_captured_name_for_language("plsql", name, 64).is_none(),
+                "{name:?}"
+            );
+        }
+        assert_ne!(
+            structural_captured_name_for_language("plsql", "CaseName", 64),
+            structural_captured_name_for_language("plsql", "casename", 64)
+        );
+        assert_ne!(
+            structural_captured_name_for_language("plsql", "\"CaseName\"", 64),
+            structural_captured_name_for_language("plsql", "CaseName", 64)
+        );
     }
 
     #[test]

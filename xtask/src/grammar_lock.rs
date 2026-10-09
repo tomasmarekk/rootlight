@@ -16,7 +16,7 @@ const GRAMMAR_LOCK_PATH: &str = "adapters/grammars.lock";
 const CARGO_LOCK_PATH: &str = "Cargo.lock";
 const ADAPTER_PACKAGE: &str = "rootlight-adapter-treesitter";
 const GRAMMAR_LOCK_SHA256: &str =
-    "1c778799fa881841fd0fd9e6f25f7d891c4e5f196ca056fdc358270e98b9be7e";
+    "61c7d08e950d07cb994be922d62a68a073d328a1e24e46247dda88b7acf10e00";
 const JAVA_LICENSE_PATH: &str = "adapters/licenses/tree-sitter-java-0.23.5-LICENSE";
 const JAVA_LICENSE_SHA256: &str =
     "52ed137b039cd9c46409bc22e89938af911c95b157feae2d040b51e6084369a7";
@@ -214,7 +214,7 @@ const EXPECTED_PACKAGES: [(&str, &str, &str); 35] = [
     ),
 ];
 
-const EXPECTED_LOCAL_PACKAGES: [(&str, &str, &str, &str); 3] = [
+const EXPECTED_LOCAL_PACKAGES: [(&str, &str, &str, &str); 4] = [
     (
         "tree-sitter-vba",
         "0.14.1",
@@ -226,6 +226,12 @@ const EXPECTED_LOCAL_PACKAGES: [(&str, &str, &str, &str); 3] = [
         "0.0.1",
         "third_party/tree-sitter-cobol-0.0.1",
         "de05274f23c60ac2cb9a90af56d9eedb6f7aa94e77a1407b87c178202e6eafb8",
+    ),
+    (
+        "tree-sitter-plsql",
+        "0.0.1",
+        "third_party/tree-sitter-plsql-0.0.1",
+        "7d4adf5f85fb5c0957b0c54a88ebc8a4a36bafb343535ad696a23aa5454b66fd",
     ),
     (
         "tree-sitter-fsharp",
@@ -386,7 +392,7 @@ fn validate_manifest(manifest: &GrammarLock) -> Result<(), GrammarLockError> {
         ));
     }
     validate_runtime(&manifest.runtime)?;
-    if manifest.grammars.len() != 40 {
+    if manifest.grammars.len() != 41 {
         return Err(GrammarLockError::GrammarCount(manifest.grammars.len()));
     }
     let mut languages = BTreeSet::new();
@@ -438,6 +444,7 @@ fn validate_manifest(manifest: &GrammarLock) -> Result<(), GrammarLockError> {
         "nix",
         "objective-c",
         "perl",
+        "plsql",
         "php",
         "powershell",
         "python",
@@ -1105,7 +1112,7 @@ pub(crate) enum GrammarLockError {
     InvalidDigest { label: &'static str },
     #[error("grammar lock field {0} must not be empty")]
     EmptyField(&'static str),
-    #[error("grammar lock contains {0} grammars instead of 40")]
+    #[error("grammar lock contains {0} grammars instead of 41")]
     GrammarCount(usize),
     #[error("grammar lock repeats language {0}")]
     DuplicateLanguage(String),
@@ -1290,6 +1297,133 @@ mod tests {
             sources,
         )
         .expect("the complete authored tree and local safety patch are authenticated");
+    }
+
+    #[test]
+    fn plsql_retains_original_inputs_and_authenticates_local_generation() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
+        let manifest: GrammarLock =
+            toml::from_str(include_str!("../../adapters/grammars.lock")).unwrap();
+        let grammar = manifest
+            .grammars
+            .iter()
+            .find(|grammar| grammar.language == "plsql")
+            .unwrap();
+        let sources = grammar.vendored.as_ref().unwrap();
+        assert!(grammar.crates_io_checksum.is_none());
+        assert_eq!(grammar.abi, 14);
+        assert_eq!(grammar.scanner_sha256, "none");
+        assert_eq!(sources.files.len(), 39);
+        let provenance: serde_json::Value = serde_json::from_str(include_str!(
+            "../../third_party/tree-sitter-plsql-0.0.1/SOURCE-PROVENANCE.json"
+        ))
+        .unwrap();
+        let originals = provenance["upstream_original_files"].as_array().unwrap();
+        assert_eq!(originals.len(), 27);
+        for original in originals {
+            let retained = original["retained_path"].as_str().unwrap();
+            assert_eq!(
+                sources.files.get(retained).map(String::as_str),
+                original["sha256"].as_str(),
+                "retained original source differs: {retained}"
+            );
+        }
+        let changes = provenance["source_modifications"].as_array().unwrap();
+        assert_eq!(changes.len(), 8);
+        for change in changes {
+            let path = change["path"].as_str().unwrap();
+            let original = change["original_path"].as_str().unwrap();
+            assert_eq!(
+                sources.files.get(path).map(String::as_str),
+                change["local_sha256"].as_str()
+            );
+            assert_eq!(
+                sources.files.get(original).map(String::as_str),
+                change["original_sha256"].as_str()
+            );
+            assert_ne!(sources.files[path], sources.files[original]);
+            assert_eq!(
+                change["patch_document_sha256"].as_str(),
+                sources.files.get("PATCHES.md").map(String::as_str)
+            );
+        }
+        assert_eq!(
+            provenance["original_generated_parser_unchanged"],
+            serde_json::Value::Bool(false)
+        );
+        assert_eq!(
+            provenance["preferred_grammar_unchanged"],
+            serde_json::Value::Bool(false)
+        );
+        assert_eq!(provenance["generated_parser_language_abi"], 14);
+        assert_eq!(provenance["generated_parser_state_count"], 10577);
+        assert_eq!(provenance["generated_parser_external_token_count"], 0);
+        let generation = &provenance["local_generation"];
+        assert_eq!(generation["version"], "0.24.4");
+        assert_eq!(generation["javascript_runtime"], "Node.js 24.11.1");
+        assert_eq!(
+            generation["preferred_input_sha256"].as_str(),
+            sources.files.get("grammar.js").map(String::as_str)
+        );
+        assert_eq!(generation["independent_regeneration_count"], 2);
+        assert_eq!(
+            generation["independent_regeneration_exit_codes"],
+            serde_json::json!([0, 0])
+        );
+        assert_eq!(
+            generation["independent_regeneration_stderr_bytes"],
+            serde_json::json!([0, 0])
+        );
+        assert_eq!(
+            generation["independent_regenerations_byte_identical"],
+            serde_json::Value::Bool(true)
+        );
+        let outputs = generation["generated_output_sha256"].as_object().unwrap();
+        assert_eq!(outputs.len(), 6);
+        for (path, checksum) in outputs {
+            assert_eq!(
+                checksum.as_str(),
+                sources.files.get(path).map(String::as_str),
+                "generated source differs: {path}"
+            );
+        }
+        let generated_originals = generation["original_generated_copies"].as_array().unwrap();
+        assert_eq!(generated_originals.len(), 4);
+        for original in generated_originals {
+            let path = original.as_str().unwrap();
+            assert!(originals.iter().any(|input| input["retained_path"] == path));
+        }
+        let headers = generation["new_generator_headers"].as_array().unwrap();
+        assert_eq!(headers.len(), 2);
+        for header in headers {
+            let path = header.as_str().unwrap();
+            assert!(outputs.contains_key(path));
+            assert!(originals.iter().all(|input| input["path"] != path));
+        }
+        for claim in [
+            "binary_signature_independently_verified",
+            "upstream_original_tables_reproduced",
+            "all_tree_behavioral_equivalence_proven",
+            "os_network_denial_verified",
+        ] {
+            assert_eq!(generation[claim], serde_json::Value::Bool(false));
+        }
+        for claim in [
+            "native_parser_execution_verified",
+            "source_to_binary_reproduction_verified",
+            "full_plsql_conformance_proven",
+            "build_and_packaging_acceptance_verified",
+        ] {
+            assert_eq!(provenance[claim], serde_json::Value::Bool(false));
+        }
+        validate_vendored_tree(
+            &root.join("third_party/tree-sitter-plsql-0.0.1"),
+            grammar,
+            sources,
+        )
+        .expect(
+            "the original upstream tree, local grammar and generated sources are authenticated",
+        );
     }
 
     #[test]

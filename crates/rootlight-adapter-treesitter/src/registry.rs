@@ -95,6 +95,8 @@ pub enum GrammarFamily {
     CobolFree,
     /// Free-form Fortran physical source without compiler or template expansion.
     Fortran,
+    /// Oracle PL/SQL written source without compiler or catalog evaluation.
+    PlSql,
 }
 
 impl GrammarFamily {
@@ -187,7 +189,7 @@ impl GrammarRegistry {
     /// Returns [`RegistryError`] if an SDK label is invalid or a linked grammar
     /// falls outside Tree-sitter's supported ABI interval.
     pub fn audited() -> Result<Self, RegistryError> {
-        let mut descriptors = Vec::with_capacity(40);
+        let mut descriptors = Vec::with_capacity(42);
         for family in [
             GrammarFamily::Rust,
             GrammarFamily::Python,
@@ -230,6 +232,7 @@ impl GrammarRegistry {
             GrammarFamily::CobolFixed,
             GrammarFamily::CobolFree,
             GrammarFamily::Fortran,
+            GrammarFamily::PlSql,
         ] {
             let language = language_for(family);
             let abi_version = language.abi_version();
@@ -366,6 +369,7 @@ pub(crate) fn language_for(family: GrammarFamily) -> Language {
         GrammarFamily::CobolFixed => tree_sitter_cobol::FIXED.into(),
         GrammarFamily::CobolFree => tree_sitter_cobol::FREE.into(),
         GrammarFamily::Fortran => tree_sitter_fortran::LANGUAGE.into(),
+        GrammarFamily::PlSql => tree_sitter_plsql::LANGUAGE.into(),
     }
 }
 
@@ -406,6 +410,13 @@ const fn identity_for(family: GrammarFamily) -> GrammarIdentity {
             scanner_sha256: Some(
                 "f84e26bb8d11ba646bd144bff66cec8dbaa683002efbf8849e60e29fbe40104d",
             ),
+        },
+        GrammarFamily::PlSql => GrammarIdentity {
+            language_id: "plsql",
+            grammar_version: "0.0.1",
+            source_package_sha256: "7d4adf5f85fb5c0957b0c54a88ebc8a4a36bafb343535ad696a23aa5454b66fd",
+            parser_sha256: "1fa49f5fea82d2f3a28fd2a3eec111e7982ba4b1b4f25118380ea7aaad26d2be",
+            scanner_sha256: None,
         },
         GrammarFamily::CobolFixed => GrammarIdentity {
             language_id: "cobol-fixed",
@@ -769,7 +780,7 @@ mod tests {
     fn registry_contains_each_audited_family_once_with_checked_abi() {
         let registry = GrammarRegistry::audited().expect("audited grammars initialize");
 
-        assert_eq!(registry.descriptors().len(), 41);
+        assert_eq!(registry.descriptors().len(), 42);
         for family in [
             GrammarFamily::Rust,
             GrammarFamily::Python,
@@ -812,6 +823,7 @@ mod tests {
             GrammarFamily::CobolFixed,
             GrammarFamily::CobolFree,
             GrammarFamily::Fortran,
+            GrammarFamily::PlSql,
         ] {
             let descriptor = registry.get(family).expect("family is registered");
             assert!(
@@ -987,6 +999,7 @@ mod tests {
             ),
             (GrammarFamily::CobolFree, "cobol-free", "tree-sitter-cobol"),
             (GrammarFamily::Fortran, "fortran", "tree-sitter-fortran"),
+            (GrammarFamily::PlSql, "plsql", "tree-sitter-plsql"),
             (GrammarFamily::Perl, "perl", "ts-parser-perl"),
             (
                 GrammarFamily::Groovy,
@@ -1018,6 +1031,7 @@ mod tests {
                         family,
                         GrammarFamily::Vba | GrammarFamily::FSharp | GrammarFamily::FSharpSignature
                     ) || family.is_cobol()
+                        || family == GrammarFamily::PlSql
                     {
                         "vendored_source_sha256"
                     } else {

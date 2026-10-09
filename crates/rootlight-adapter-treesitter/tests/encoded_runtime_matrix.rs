@@ -34,7 +34,12 @@ struct LanguageCase {
     source: &'static str,
 }
 
-const CASES: [LanguageCase; 41] = [
+const CASES: [LanguageCase; 42] = [
+    LanguageCase {
+        name: "sample.pks",
+        language: "plsql",
+        source: "create or replace package Sample as\nprocedure Adjust(Value in number);\nend Sample;\n/\n",
+    },
     LanguageCase {
         name: "sample.f90",
         language: "fortran",

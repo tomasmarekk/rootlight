@@ -31972,7 +31972,7 @@
   },
   "frontend_external_source_closure_verified": false,
   "licensing_scope": "supplied metadata and present files; not a completeness or authorship assessment",
-  "local_package_count": 83,
+  "local_package_count": 84,
   "local_packages": [
     {
       "name": "dekobon-tree-sitter-groovy",
@@ -32263,6 +32263,10 @@
       "version": "3.0.2"
     },
     {
+      "name": "tree-sitter-plsql",
+      "version": "0.0.1"
+    },
+    {
       "name": "tree-sitter-powershell",
       "version": "0.26.4"
     },
@@ -32309,10 +32313,10 @@
   ],
   "lockfiles": [
     {
-      "local_package_count": 73,
+      "local_package_count": 74,
       "path": "Cargo.lock",
       "registry_package_count": 302,
-      "sha256": "9d0e9370b2cd00c35d98d47167891fad872ddcba31ea1c3e3ba114b96effa756"
+      "sha256": "37e77421b647b6e8dcea1c01c97021e080292774107da4d63fa429d89c4e10be"
     },
     {
       "local_package_count": 12,

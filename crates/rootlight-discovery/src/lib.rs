@@ -2332,6 +2332,14 @@ const LANGUAGE_CAPABILITIES: &[LanguageCapability] = &[
         analyzers: &["treesitter", "project-adapter"],
     },
     LanguageCapability {
+        language: "plsql",
+        suffixes: &[".pks", ".pkb", ".plb", ".pls"],
+        aliases: &["pl-sql"],
+        detectors: &["extension"],
+        maximum_tier: "tier_d",
+        analyzers: &["treesitter"],
+    },
+    LanguageCapability {
         language: "powershell",
         suffixes: &[".ps1", ".psd1", ".psm1"],
         aliases: &["pwsh"],
@@ -6029,6 +6037,35 @@ max_source_file_bytes = 2097152
         assert_eq!(extension_language("scripts/REPORT.AWK"), Some("awk"));
         assert_ne!(extension_language("scripts/report.awk.bak"), Some("awk"));
         assert_eq!(canonical_language("gawk"), Some("awk"));
+    }
+
+    #[test]
+    fn plsql_dedicated_suffixes_do_not_replace_default_sql() {
+        let suffixes = [".pks", ".pkb", ".plb", ".pls"];
+        for suffix in suffixes {
+            assert_eq!(
+                extension_language(&format!("src/Package{suffix}")),
+                Some("plsql")
+            );
+            assert_eq!(
+                extension_language(&format!("src/PACKAGE{}", suffix.to_ascii_uppercase())),
+                Some("plsql")
+            );
+            assert_ne!(
+                extension_language(&format!("src/Package{suffix}.bak")),
+                Some("plsql")
+            );
+        }
+        assert_eq!(extension_language("src/schema.sql"), Some("sql"));
+        assert_eq!(canonical_language("pl-sql"), Some("plsql"));
+        let capability = language_capabilities()
+            .iter()
+            .find(|capability| capability.language == "plsql")
+            .expect("PL/SQL capability exists");
+        assert_eq!(capability.suffixes, suffixes);
+        assert_eq!(capability.detectors, &["extension"]);
+        assert_eq!(capability.maximum_tier, "tier_d");
+        assert_eq!(capability.analyzers, &["treesitter"]);
     }
 
     #[test]

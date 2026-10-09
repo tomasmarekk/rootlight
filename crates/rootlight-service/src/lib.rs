@@ -22,6 +22,8 @@ mod generation_admission;
 #[cfg(test)]
 mod haskell_native_tests;
 pub mod office_package;
+#[cfg(test)]
+mod plsql_native_tests;
 mod refinement;
 pub mod source_archive;
 #[cfg(test)]
@@ -241,10 +243,10 @@ const PROJECT_FACTS_TRUNCATED_CODE: &str = "project-adapter-facts-truncated";
 const PROJECT_FACTS_TRUNCATED_MESSAGE: &str =
     "additional project semantic facts were omitted by aggregate resource limits";
 const AGGREGATE_DIAGNOSTICS_TRUNCATED_CODE: &str = "aggregate-diagnostics-truncated";
-const ANALYZER_BINARY_SEED: &[u8] = b"rootlight.first-slice.treesitter-structural/230";
-const RESOLVER_BINARY_SEED: &[u8] = b"rootlight.first-slice.resolve/102";
+const ANALYZER_BINARY_SEED: &[u8] = b"rootlight.first-slice.treesitter-structural/231";
+const RESOLVER_BINARY_SEED: &[u8] = b"rootlight.first-slice.resolve/103";
 const INCREMENTAL_PROVIDER_SEED: &[u8] = b"rootlight.first-slice.incremental-provider/1";
-const LANGUAGE_DISPOSITION_PROVIDER_SEED: &[u8] = b"rootlight.first-slice.language-disposition/11";
+const LANGUAGE_DISPOSITION_PROVIDER_SEED: &[u8] = b"rootlight.first-slice.language-disposition/12";
 const SOURCE_FILE_FALLBACK_PROVIDER_SEED: &[u8] = b"rootlight.source-file-fallback/4";
 const INCREMENTAL_UNIT_SEED: &str = "rootlight.first-slice.repository-unit";
 const INCREMENTAL_FILE_UNIT_SEED: &str = "rootlight.first-slice.file-unit";
@@ -31293,6 +31295,7 @@ mod tests {
             "sample.nix",
             "sample.pl",
             "sample.php",
+            "sample.pks",
             "sample.py",
             "sample.R",
             "sample.rb",
@@ -31332,6 +31335,10 @@ mod tests {
                     "meter.cls",
                     "Attribute VB_Name = \"Meter\"\nSub Run()\nEnd Sub\n",
                 ),
+                (
+                    "route.pks",
+                    "create or replace package RouteKit as\nprocedure Inspect(Value in number);\nend RouteKit;\n/\n",
+                ),
             ],
         );
         let mut service = FirstSliceService::new(2).expect("service initializes");
@@ -31349,7 +31356,7 @@ mod tests {
             .expect("MATLAB source is retained");
         assert_eq!(matlab.language, "matlab");
         mapped.insert(matlab.language.as_str());
-        assert_eq!(receipt.indexed_files, 3);
+        assert_eq!(receipt.indexed_files, 4);
         assert_eq!(source_language_from_path("clock.bas"), None);
         let vba = generation
             .document()
@@ -31367,6 +31374,25 @@ mod tests {
             .unwrap();
         assert_eq!(classic.language, "visual-basic-classic");
         mapped.insert(classic.language.as_str());
+        let plsql = generation
+            .document()
+            .files
+            .iter()
+            .find(|file| file.path == "route.pks")
+            .expect("PL/SQL source is retained through its ordinary suffix route");
+        assert_eq!(plsql.language, "plsql");
+        assert_eq!(source_language_from_path("sample.pks"), Some("plsql"));
+        assert!(generation.document().entities.iter().any(|entity| {
+            entity.language == "plsql"
+                && entity.kind == EntityKind::Function
+                && entity.canonical_name == "Inspect"
+                && entity
+                    .evidence
+                    .source
+                    .as_ref()
+                    .is_some_and(|source| source.span().file() == plsql.id)
+        }));
+        mapped.insert(plsql.language.as_str());
         // A COBOL suffix identifies source, not a fixed/free parser format.
         for language in ["cobol-fixed", "cobol-free"] {
             let capability = language_capabilities()

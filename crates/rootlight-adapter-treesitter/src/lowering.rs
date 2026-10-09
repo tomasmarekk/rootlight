@@ -6333,6 +6333,26 @@ fn source_coverage_gaps(fact: &SyntaxFact) -> impl Iterator<Item = (FactDomain, 
         )
         .chain(fortran_source_identity_gap(fact).map(|reason| (FactDomain::Occurrences, reason)))
         .chain(fortran_source_identity_gap(fact).map(|reason| (FactDomain::Relations, reason)))
+        .chain(
+            (fact.syntax_kind().as_str() == "plsql.unsupported_owner.expression")
+                .then_some((FactDomain::Occurrences, "plsql-source-identity-unavailable")),
+        )
+        .chain(
+            (fact.syntax_kind().as_str() == "plsql.unsupported_owner.expression")
+                .then_some((FactDomain::Relations, "plsql-source-identity-unavailable")),
+        )
+        .chain(
+            (fact.syntax_kind().as_str() == "plsql.conditional_selection.expression").then_some((
+                FactDomain::Occurrences,
+                "plsql-conditional-selection-unavailable",
+            )),
+        )
+        .chain(
+            (fact.syntax_kind().as_str() == "plsql.conditional_selection.expression").then_some((
+                FactDomain::Relations,
+                "plsql-conditional-selection-unavailable",
+            )),
+        )
 }
 
 fn fortran_source_identity_gap(fact: &SyntaxFact) -> Option<&'static str> {
@@ -6345,6 +6365,25 @@ fn fortran_source_identity_gap(fact: &SyntaxFact) -> Option<&'static str> {
 
 fn source_coverage_gap(fact: &SyntaxFact) -> Option<(FactDomain, &'static str)> {
     match fact.syntax_kind().as_str() {
+        "plsql.unsupported_owner.expression" => {
+            Some((FactDomain::Entities, "plsql-source-identity-unavailable"))
+        }
+        "plsql.conditional_selection.expression" => Some((
+            FactDomain::Entities,
+            "plsql-conditional-selection-unavailable",
+        )),
+        "plsql.external_implementation.expression" => Some((
+            FactDomain::Relations,
+            "plsql-external-implementation-unavailable",
+        )),
+        "plsql.declaration_linkage.expression" => Some((
+            FactDomain::Relations,
+            "plsql-declaration-linkage-unavailable",
+        )),
+        "plsql.application_shape.expression" => Some((
+            FactDomain::Relations,
+            "plsql-call-or-index-target-unavailable",
+        )),
         "fortran.template_source.expression" => Some((
             FactDomain::Entities,
             "fortran-template-expansion-unavailable",
@@ -6766,7 +6805,7 @@ fn structural_resolution_text<'a>(
     terminal_call_name: Option<&'a str>,
     maximum_name_bytes: usize,
 ) -> Option<std::borrow::Cow<'a, str>> {
-    if language == "fortran" && fact.kind() == SyntaxFactKind::Occurrence {
+    if matches!(language, "fortran" | "plsql") && fact.kind() == SyntaxFactKind::Occurrence {
         return rootlight_adapter_sdk::structural_captured_name_for_language(
             language,
             terminal_call_name.unwrap_or(text),
@@ -7630,6 +7669,7 @@ fn is_explicit_file_module(fact: &SyntaxFact, language: &str) -> bool {
                 | "haskell.file.module"
                 | "fsharp.file.module"
                 | "fortran.file.module"
+                | "plsql.file.module"
                 | "vba.file.module"
                 | "vba.class.module"
                 | "solidity.file.module"
@@ -7669,6 +7709,7 @@ fn is_explicit_file_module(fact: &SyntaxFact, language: &str) -> bool {
                 | "fsharp"
                 | "fsharp-signature"
                 | "fortran"
+                | "plsql"
                 | "vba"
                 | "visual-basic-classic"
                 | "astro"
@@ -7779,6 +7820,7 @@ fn supports_declaration_signature(
     if (matches!(language, "fsharp" | "fsharp-signature")
         && declaration.syntax_kind().as_str() == "fsharp.file.module")
         || (language == "fortran" && declaration.syntax_kind().as_str() == "fortran.file.module")
+        || (language == "plsql" && declaration.syntax_kind().as_str() == "plsql.file.module")
     {
         return false;
     }
@@ -7801,7 +7843,8 @@ fn supports_signature(kind: EntityKind, language: &str) -> bool {
         || (kind == EntityKind::Variable && language == "haskell")
         || (kind == EntityKind::Property && matches!(language, "vba" | "visual-basic-classic"))
         || (kind == EntityKind::Module
-            && matches!(language, "cobol-fixed" | "cobol-free" | "fortran"))
+            && matches!(language, "cobol-fixed" | "cobol-free" | "fortran" | "plsql"))
+        || (language == "plsql" && kind == EntityKind::DatabaseObject)
         || matches!(
             kind,
             EntityKind::Function
@@ -7858,6 +7901,8 @@ fn source_reference_gap(fact: &SyntaxFact) -> Option<&'static str> {
         return Some(HASKELL_BINDING_UNAVAILABLE);
     }
     match fact.syntax_kind().as_str() {
+        "plsql.identifier.reference" => Some("plsql-binding-target-unavailable"),
+        "plsql.application.reference" => Some("plsql-call-or-index-target-unavailable"),
         "fortran.identifier.reference" => Some("fortran-binding-target-unavailable"),
         "fortran.application.reference" => Some("fortran-call-or-index-target-unavailable"),
         "fortran.explicit_subroutine.call" => Some("fortran-call-target-unavailable"),
@@ -8949,6 +8994,44 @@ mod tests {
                         "fsharp-conditional-namespace-owner-unavailable",
                     ),
                 ],
+            );
+        }
+    }
+
+    #[test]
+    fn plsql_conditional_and_external_evidence_do_not_claim_selected_targets() {
+        let file = FileId::from_bytes([3; 20]);
+        for (label, domains, detail) in [
+            (
+                "plsql.conditional_selection.expression",
+                &[
+                    FactDomain::Entities,
+                    FactDomain::Occurrences,
+                    FactDomain::Relations,
+                ][..],
+                "plsql-conditional-selection-unavailable",
+            ),
+            (
+                "plsql.external_implementation.expression",
+                &[FactDomain::Relations][..],
+                "plsql-external-implementation-unavailable",
+            ),
+        ] {
+            let fact = SyntaxFact::new(
+                2,
+                Some(1),
+                SyntaxFactKind::Signature,
+                SourceSpan::new(file, 2, 10).unwrap(),
+                1,
+                SyntaxKindLabel::new(label).unwrap(),
+            );
+            assert!(!is_signature_capture(&fact));
+            assert_eq!(
+                source_coverage_gaps(&fact).collect::<Vec<_>>(),
+                domains
+                    .iter()
+                    .map(|domain| (*domain, detail))
+                    .collect::<Vec<_>>(),
             );
         }
     }

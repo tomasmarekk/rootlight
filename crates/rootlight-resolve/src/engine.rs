@@ -1399,6 +1399,13 @@ fn unresolved_reason(role: OccurrenceRole, kind_rejection_total: u64) -> Unresol
 }
 
 pub(crate) fn resolvable_occurrence(occurrence: &OccurrenceRecord) -> bool {
+    // Package/schema lookup, overload selection and call-or-index syntax need
+    // PL/SQL-owned evidence; spelling scores cannot establish those targets.
+    if occurrence.syntax_kind.starts_with("plsql.")
+        && matches!(occurrence.target, OccurrenceTarget::Unresolved { .. })
+    {
+        return false;
+    }
     // Fortran USE association, case-insensitive binding and call-or-index
     // disambiguation require language-owned proof, not same-spelling scoring.
     if occurrence.syntax_kind.starts_with("fortran.")

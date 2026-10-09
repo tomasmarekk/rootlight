@@ -1663,6 +1663,7 @@ dependencies = [
  "tree-sitter-nix",
  "tree-sitter-objc",
  "tree-sitter-php",
+ "tree-sitter-plsql",
  "tree-sitter-powershell",
  "tree-sitter-python",
  "tree-sitter-r",
@@ -3158,6 +3159,14 @@ name = "tree-sitter-php"
 version = "0.24.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0d8c17c3ab69052c5eeaa7ff5cd972dd1bc25d1b97ee779fec391ad3b5df5592"
+dependencies = [
+ "cc",
+ "tree-sitter-language",
+]
+
+[[package]]
+name = "tree-sitter-plsql"
+version = "0.0.1"
 dependencies = [
  "cc",
  "tree-sitter-language",

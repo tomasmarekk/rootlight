@@ -23,6 +23,8 @@ source-inputs/producer-dependencies/**/archives/*.tgz binary
 third_party/tree-sitter-haskell-0.23.1/** -text
 # Retained COBOL preferred sources and originals preserve exact source bytes.
 third_party/tree-sitter-cobol-0.0.1/** -text
+# Retained PL/SQL upstream inputs and originals preserve exact source bytes.
+third_party/tree-sitter-plsql-0.0.1/** -text whitespace=-blank-at-eol,-blank-at-eof,-space-before-tab,cr-at-eol
 # Retained Kotlin registry inputs and scanner originals remain byte-exact.
 third_party/tree-sitter-kotlin-ng-1.1.0/** -text
 # F# preferred sources, generated tables and originals retain exact input bytes.

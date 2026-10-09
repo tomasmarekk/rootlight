@@ -30,6 +30,7 @@ mod matlab;
 mod nix;
 mod objective_c;
 mod perl;
+mod plsql;
 mod powershell;
 mod r;
 mod scala;
@@ -353,6 +354,10 @@ impl QueryPack {
             expected.retain(|name| *name != "documentation");
             expected.push("expression");
         }
+        if family == GrammarFamily::PlSql {
+            expected.retain(|name| !matches!(*name, "call" | "import" | "documentation"));
+            expected.push("expression");
+        }
         if matches!(
             family,
             GrammarFamily::FSharp | GrammarFamily::FSharpSignature
@@ -666,6 +671,7 @@ impl QueryPack {
         // belongs only to the optional scan that also normalizes call evidence.
         let mut fsharp_captures =
             fsharp::CaptureCache::new(limits.captures, input.normalize_calls, limits.body_nodes);
+        let mut plsql_captures = plsql::CaptureCache::new(limits.captures.min(limits.body_nodes));
         // A full-extent root can still omit bytes between included ranges, while
         // standalone roots may exclude leading or trailing trivia from their span.
         let fsharp_complete_source = !input.normalize_calls
@@ -709,6 +715,22 @@ impl QueryPack {
                     continue;
                 }
                 let mut capture = *capture;
+                if input.family == GrammarFamily::PlSql {
+                    let admitted = plsql::retain_capture(
+                        capture.node,
+                        role,
+                        input.source,
+                        input.cancellation,
+                        &mut plsql_captures,
+                    )?;
+                    if plsql_captures.exhausted() {
+                        limit = Some(QueryLimit::Capture);
+                        break 'query;
+                    }
+                    if !admitted {
+                        continue;
+                    }
+                }
                 if input.family == GrammarFamily::Fortran
                     && !fortran::retain_capture(
                         capture.node,
@@ -931,6 +953,7 @@ impl QueryPack {
                     input.source,
                     input.cancellation,
                     &mut fsharp_captures,
+                    &mut plsql_captures,
                 );
                 if fsharp_captures.exhausted() {
                     limit = Some(QueryLimit::Capture);
@@ -1112,7 +1135,11 @@ fn candidate_for_capture(
     source: &[u8],
     cancellation: &Cancellation,
     fsharp_captures: &mut fsharp::CaptureCache,
+    plsql_captures: &mut plsql::CaptureCache,
 ) -> Result<QueryCandidate, AdapterError> {
+    if family == GrammarFamily::PlSql {
+        return plsql::candidate(capture.node, role, source, cancellation, plsql_captures);
+    }
     if family == GrammarFamily::Fortran {
         return fortran::candidate(capture.node, role, source, cancellation);
     }
@@ -1510,6 +1537,7 @@ fn candidate_for_capture(
             GrammarFamily::Dart => "dart.call",
             GrammarFamily::PowerShell => "powershell.call",
             GrammarFamily::Fortran => "fortran.explicit_subroutine",
+            GrammarFamily::PlSql => return Err(query_failure("query-plsql-unproven-call")),
             GrammarFamily::Css => return Err(query_failure("query-css-call-kind")),
             GrammarFamily::Json => return Err(query_failure("query-json-call-kind")),
             GrammarFamily::Toml => return Err(query_failure("query-toml-call-kind")),
@@ -2419,7 +2447,7 @@ impl QueryPackRegistry {
     }
 
     fn compile_audited() -> Result<Self, GrammarFamily> {
-        let mut packs = Vec::with_capacity(40);
+        let mut packs = Vec::with_capacity(42);
         for (family, source) in [
             (GrammarFamily::Rust, include_str!("../queries/rust.scm")),
             (GrammarFamily::Python, include_str!("../queries/python.scm")),
@@ -2471,6 +2499,7 @@ impl QueryPackRegistry {
                 GrammarFamily::Fortran,
                 include_str!("../queries/fortran.scm"),
             ),
+            (GrammarFamily::PlSql, include_str!("../queries/plsql.scm")),
             (
                 GrammarFamily::FSharpSignature,
                 include_str!("../queries/fsharp_signature.scm"),
