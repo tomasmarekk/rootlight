@@ -563,8 +563,9 @@ pub fn structural_captured_name(text: &str, maximum_bytes: usize) -> Option<&str
 /// escapes and package punctuation; caller-owned native evidence must prove the
 /// capture is a symbol, not an arbitrary form. Reader and package identities
 /// remain unavailable; neither case nor escape spelling is normalized.
-/// Assembly currently accepts only complete MASM identifiers in proved owner
-/// contexts; GAS/local label spelling and assembler resolution are separate.
+/// Assembly's language-only fallback accepts complete MASM identifiers. Other
+/// reviewed source labels require [`structural_captured_name_for_fact`]; this
+/// lexical fallback does not establish a dialect or assembled binding.
 /// Other languages retain
 /// the shared borrowed-name contract. Source and canonical output must both fit
 /// `maximum_bytes`. Invalid names, excess bytes or allocation failure return `None`.
@@ -764,6 +765,9 @@ fn plsql_captured_name(text: &str, maximum_bytes: usize) -> Option<&str> {
 /// Common Lisp admits only `common_lisp.name.definition` occurrence facts in
 /// `common-lisp`. Exact written spelling is preserved, and other labels, roles
 /// or languages cannot acquire a shared-name fallback for that namespace.
+/// Assembly likewise requires exact definition labels, separating MASM names
+/// from reviewed native label/constant spelling. Numeric directional labels and
+/// assembler binding are not inferred; the original capture remains caller-owned.
 /// Other roles use
 /// [`structural_captured_name_for_language`]. The caller retains
 /// the original source span and validates its association with its declaration.
@@ -775,10 +779,8 @@ pub fn structural_captured_name_for_fact<'a>(
     maximum_bytes: usize,
 ) -> Option<Cow<'a, str>> {
     if language == "assembly" || fact.syntax_kind().as_str().starts_with("assembly.") {
-        return (language == "assembly"
-            && fact.kind() == SyntaxFactKind::Occurrence
-            && fact.syntax_kind().as_str() == "assembly.masm_name.definition")
-            .then(|| assembly::captured_name(text, maximum_bytes))
+        return (language == "assembly" && fact.kind() == SyntaxFactKind::Occurrence)
+            .then(|| assembly::captured_name_for_fact(fact, text, maximum_bytes))
             .flatten()
             .map(Cow::Borrowed);
     }

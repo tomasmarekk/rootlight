@@ -1,4 +1,4 @@
-//! Assembly classifications describe written MASM owners, not assembled symbols.
+//! Assembly classifications describe written owners, not assembled symbols.
 //! Native callers must prove complete owner/name captures and matching closers.
 
 use rootlight_ir::EntityKind;
@@ -22,6 +22,8 @@ pub(super) fn entity_kind(fact: &SyntaxFact) -> Option<EntityKind> {
         "assembly.segment.declaration" => Some(EntityKind::Module),
         "assembly.constant.declaration" => Some(EntityKind::Constant),
         "assembly.data.declaration" => Some(EntityKind::Variable),
+        "assembly.source_label.declaration" => Some(EntityKind::StatementLabel),
+        "assembly.source_constant.declaration" => Some(EntityKind::Constant),
         _ => None,
     }
 }
@@ -40,6 +42,38 @@ pub(super) fn captured_name(text: &str, maximum_bytes: usize) -> Option<&str> {
         && bytes
             .iter()
             .all(|byte| alpha(*byte) || byte.is_ascii_digit()))
+    .then_some(text)
+}
+
+pub(super) fn captured_name_for_fact<'a>(
+    fact: &SyntaxFact,
+    text: &'a str,
+    maximum_bytes: usize,
+) -> Option<&'a str> {
+    match fact.syntax_kind().as_str() {
+        "assembly.masm_name.definition" => captured_name(text, maximum_bytes),
+        "assembly.source_label.definition" => source_name(text, maximum_bytes, true),
+        "assembly.source_constant.definition" => source_name(text, maximum_bytes, false),
+        _ => None,
+    }
+}
+
+/// Retains the reviewed native label/word subset without dialect normalization.
+///
+/// Numeric labels need directional occurrence proof, and `.` is the location
+/// counter rather than an ordinary symbol. Neither is admitted by this boundary.
+/// Native callers distinguish labels/constants from instruction and operand names;
+/// this is not the complete GNU assembler symbol grammar or assembled identity.
+/// <https://sourceware.org/binutils/docs/as/Symbol-Names.html>.
+fn source_name(text: &str, maximum_bytes: usize, dotted: bool) -> Option<&str> {
+    let first = |byte: u8| byte.is_ascii_alphabetic() || byte == b'_' || (dotted && byte == b'.');
+    let bytes = text.as_bytes();
+    (bytes.len() <= maximum_bytes
+        && text != "."
+        && bytes.first().is_some_and(|byte| first(*byte))
+        && bytes
+            .iter()
+            .all(|byte| first(*byte) || byte.is_ascii_digit()))
     .then_some(text)
 }
 
@@ -257,5 +291,131 @@ mod tests {
                 .is_none()
             );
         }
+    }
+
+    #[test]
+    fn assembly_source_labels_and_constants_keep_physical_kinds() {
+        for (label, expected) in [
+            (
+                "assembly.source_label.declaration",
+                EntityKind::StatementLabel,
+            ),
+            ("assembly.source_constant.declaration", EntityKind::Constant),
+        ] {
+            assert_eq!(
+                structural_entity_kind(&fact(SyntaxFactKind::Declaration, label)),
+                Some(expected),
+                "{label}"
+            );
+            for kind in [
+                SyntaxFactKind::Module,
+                SyntaxFactKind::Scope,
+                SyntaxFactKind::Occurrence,
+            ] {
+                assert_eq!(structural_entity_kind(&fact(kind, label)), None);
+            }
+            assert_eq!(
+                structural_entity_kind(&fact(
+                    SyntaxFactKind::Declaration,
+                    &format!("{label}.extra")
+                )),
+                None
+            );
+        }
+    }
+
+    #[test]
+    fn assembly_source_name_captures_do_not_inherit_masm_or_numeric_binding() {
+        let label = fact(
+            SyntaxFactKind::Occurrence,
+            "assembly.source_label.definition",
+        );
+        let constant = fact(
+            SyntaxFactKind::Occurrence,
+            "assembly.source_constant.definition",
+        );
+        for name in ["entry", "Entry", "local.label", ".label", ".L1", "_entry2"] {
+            assert_eq!(
+                structural_captured_name_for_fact("assembly", &label, name, name.len()),
+                Some(Cow::Borrowed(name))
+            );
+            assert!(
+                structural_captured_name_for_fact("assembly", &label, name, name.len() - 1)
+                    .is_none()
+            );
+        }
+        for name in ["mask", "Mask", "_value2"] {
+            assert_eq!(
+                structural_captured_name_for_fact("assembly", &constant, name, name.len()),
+                Some(Cow::Borrowed(name))
+            );
+        }
+        for name in [
+            "",
+            ".",
+            "1",
+            "1f",
+            "1b",
+            " entry",
+            "entry ",
+            "entry:",
+            "two words",
+            "%eax",
+            "$entry",
+            "@entry",
+            "?entry",
+            "λ",
+            "a\0b",
+        ] {
+            assert!(
+                structural_captured_name_for_fact("assembly", &label, name, 64).is_none(),
+                "{name:?}"
+            );
+            assert!(
+                structural_captured_name_for_fact("assembly", &constant, name, 64).is_none(),
+                "{name:?}"
+            );
+        }
+        for name in ["local.label", ".label"] {
+            assert!(structural_captured_name_for_fact("assembly", &constant, name, 64).is_none());
+        }
+        for syntax in [
+            "assembly.source_label.definition",
+            "assembly.source_constant.definition",
+        ] {
+            for kind in [
+                SyntaxFactKind::Declaration,
+                SyntaxFactKind::Module,
+                SyntaxFactKind::Scope,
+            ] {
+                assert!(
+                    structural_captured_name_for_fact("assembly", &fact(kind, syntax), "entry", 64)
+                        .is_none()
+                );
+            }
+            assert!(
+                structural_captured_name_for_fact(
+                    "rust",
+                    &fact(SyntaxFactKind::Occurrence, syntax),
+                    "entry",
+                    64
+                )
+                .is_none()
+            );
+        }
+        assert!(
+            structural_captured_name_for_fact(
+                "assembly",
+                &fact(
+                    SyntaxFactKind::Occurrence,
+                    "assembly.source_label.reference"
+                ),
+                "entry",
+                64
+            )
+            .is_none()
+        );
+        // A label-specific native proof never broadens the language-only fallback.
+        assert!(structural_captured_name_for_language("assembly", ".label", 64).is_none());
     }
 }
