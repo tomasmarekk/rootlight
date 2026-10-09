@@ -555,7 +555,7 @@ const fn identity_for(family: GrammarFamily) -> GrammarIdentity {
             language_id: "sql",
             grammar_version: "0.3.11",
             source_package_sha256: "9d198ad3c319c02e43c21efa1ec796b837afcb96ffaef1a40c1978fbdcec7d17",
-            parser_sha256: "852e088fb8470952cdb2a1b78c1c58626c7d91562b26baa4672d51f9754bf580",
+            parser_sha256: "f6484888d88d312503e5aba2e3a857aa91a9dc84ba5226fedad02e7f4cdafb31",
             scanner_sha256: Some(
                 "97bf059ac5609e4e11feb44177eb6e89650100287105a1cdd7b203b55e6893f7",
             ),

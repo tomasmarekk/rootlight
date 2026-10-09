@@ -53,13 +53,14 @@ module.exports = grammar({
             $.transaction,
             $.statement,
             $.block,
+            $.tsql_declare,
           ),
           ';',
         ),
       ),
       // optionally, a single statement without a terminating ;
       optional(
-        $.statement,
+        choice($.statement, $.tsql_declare),
       ),
     ),
 
@@ -327,6 +328,12 @@ module.exports = grammar({
     keyword_statement: _ => make_keyword("statement"),
     keyword_execute: _ => make_keyword("execute"),
     keyword_procedure: _ => make_keyword("procedure"),
+    keyword_proc: _ => make_keyword("proc"),
+    keyword_output: _ => make_keyword("output"),
+    keyword_readonly: _ => make_keyword("readonly"),
+    keyword_nocount: _ => make_keyword("nocount"),
+    keyword_identity: _ => make_keyword("identity"),
+    keyword_max: _ => make_keyword("max"),
     keyword_object_id: _ => make_keyword("object_id"),
 
     // Hive Keywords
@@ -501,6 +508,7 @@ module.exports = grammar({
           $.varchar,
           $.nchar,
           $.nvarchar,
+          $.tsql_type,
           $.numeric,
           $.keyword_string,
           $.keyword_text,
@@ -573,7 +581,10 @@ module.exports = grammar({
     ),
 
     binary: $ => parametric_type($, $.keyword_binary, ['precision']),
-    varbinary: $ => parametric_type($, $.keyword_varbinary, ['precision']),
+    varbinary: $ => choice(
+      parametric_type($, $.keyword_varbinary, ['precision']),
+      prec.right(2, seq($.keyword_varbinary, '(', $.keyword_max, ')')),
+    ),
 
     // TODO: should qualify against /\\b(0?[1-9]|[1-4][0-9]|5[0-4])\\b/g
     float: $  => choice(
@@ -597,9 +608,42 @@ module.exports = grammar({
       parametric_type($, $.keyword_numeric, ['precision', 'scale']),
     ),
     char: $ => parametric_type($, $.keyword_char),
-    varchar: $ => parametric_type($, $.keyword_varchar),
+    varchar: $ => choice(
+      parametric_type($, $.keyword_varchar),
+      prec.right(2, seq($.keyword_varchar, '(', $.keyword_max, ')')),
+    ),
     nchar: $ => parametric_type($, $.keyword_nchar),
-    nvarchar: $ => parametric_type($, $.keyword_nvarchar),
+    nvarchar: $ => choice(
+      parametric_type($, $.keyword_nvarchar),
+      prec.right(2, seq($.keyword_nvarchar, '(', $.keyword_max, ')')),
+    ),
+
+    tsql_type: $ => prec.right(2, seq(
+      field('name', alias($.tsql_type_reference, $.object_reference)),
+      optional(seq(
+        '(',
+        choice(
+          $.keyword_max,
+          seq(
+            field('precision', alias($._natural_number, $.literal)),
+            optional(seq(',', field('scale', alias($._natural_number, $.literal)))),
+          ),
+        ),
+        ')',
+      )),
+    )),
+
+    tsql_type_reference: $ => choice(
+      seq(
+        field('database', alias($._tsql_type_bracket_identifier, $.identifier)), '.',
+        field('schema', $.identifier), '.', field('name', $.identifier),
+      ),
+      seq(
+        field('schema', alias($._tsql_type_bracket_identifier, $.identifier)), '.',
+        field('name', $.identifier),
+      ),
+      field('name', alias($._tsql_type_bracket_identifier, $.identifier)),
+    ),
 
     _include_time_zone: $ => seq(
       choice($.keyword_with, $.keyword_without),
@@ -700,6 +744,7 @@ module.exports = grammar({
     ),
 
     _ddl_statement: $ => choice(
+      $.tsql_procedure,
       $._create_statement,
       $._alter_statement,
       $._drop_statement,
@@ -873,6 +918,110 @@ module.exports = grammar({
       $.function_argument,
       false,
     ),
+
+    tsql_procedure: $ => seq(
+      field('header', $.tsql_procedure_header),
+      field('as', $.keyword_as),
+      field('body', $.tsql_body),
+    ),
+
+    tsql_procedure_header: $ => seq(
+      choice(
+        seq($.keyword_create, optional(seq($.keyword_or, $.keyword_alter))),
+        $.keyword_alter,
+      ),
+      choice($.keyword_proc, $.keyword_procedure),
+      field('object', alias($.tsql_object_reference, $.object_reference)),
+      optional(field('parameters', $.tsql_parameters)),
+    ),
+
+    tsql_object_reference: $ => choice(
+      seq(
+        field('database', alias($._tsql_object_identifier, $.identifier)), '.',
+        field('schema', alias($._tsql_object_identifier, $.identifier)), '.',
+        field('name', alias($._tsql_object_identifier, $.identifier)),
+      ),
+      seq(
+        field('schema', alias($._tsql_object_identifier, $.identifier)), '.',
+        field('name', alias($._tsql_object_identifier, $.identifier)),
+      ),
+      field('name', alias($._tsql_object_identifier, $.identifier)),
+    ),
+
+    _tsql_object_identifier: $ => choice(
+      $._identifier,
+      $._double_quote_string,
+      $._bracket_identifier,
+    ),
+
+    tsql_parameters: $ => comma_list($.tsql_parameter, true),
+
+    tsql_parameter: $ => seq(
+      field('name', alias($._tsql_parameter, $.identifier)),
+      optional($.keyword_as),
+      field('type', $._type),
+      optional(seq('=', field('default', $.literal))),
+      optional(field('mode', choice($.keyword_out, $.keyword_output, $.keyword_readonly))),
+    ),
+
+    tsql_declare: $ => seq(
+      $.keyword_declare,
+      choice(comma_list($.tsql_variable, true), $.tsql_table_variable),
+    ),
+
+    tsql_variable: $ => seq(
+      field('name', alias($._tsql_parameter, $.identifier)),
+      optional($.keyword_as),
+      field('type', $._type),
+      optional(seq('=', field('value', $._expression))),
+    ),
+
+    tsql_table_variable: $ => seq(
+      field('name', alias($._tsql_parameter, $.identifier)),
+      optional($.keyword_as),
+      field('type', $.keyword_table),
+      field('columns', $.column_definitions),
+    ),
+
+    // Without a batch delimiter, only a closed block or one typed statement
+    // proves the body boundary; an unbounded statement list would absorb siblings.
+    tsql_body: $ => choice(
+      seq(
+        field('begin', $.keyword_begin),
+        optional(';'),
+        repeat(seq($._tsql_body_statement, optional(';'))),
+        field('end', $.keyword_end),
+      ),
+      field('statement', $._tsql_simple_statement),
+    ),
+
+    _tsql_body_statement: $ => choice(
+      $.tsql_block,
+      $._tsql_simple_statement,
+    ),
+
+    _tsql_simple_statement: $ => choice(
+      $.tsql_declare,
+      $.tsql_set_nocount,
+      $.tsql_return,
+      $.set_statement,
+      $.create_table,
+      $._dml_write,
+      optional_parenthesis($._dml_read),
+    ),
+
+    tsql_block: $ => seq(
+      field('begin', $.keyword_begin),
+      optional(';'),
+      repeat(seq($._tsql_body_statement, optional(';'))),
+      field('end', $.keyword_end),
+    ),
+
+    tsql_set_nocount: $ => seq(
+      $.keyword_set, $.keyword_nocount, choice($.keyword_on, $.keyword_off),
+    ),
+
+    tsql_return: $ => prec.right(seq($.keyword_return, optional($._expression))),
 
     _comment_target: $ => choice(
       // TODO: access method
@@ -2751,6 +2900,7 @@ module.exports = grammar({
       $._default_expression,
       $._primary_key,
       $.keyword_auto_increment,
+      $.tsql_identity,
       $.direction,
       $._column_comment,
       $._check_constraint,
@@ -2765,6 +2915,17 @@ module.exports = grammar({
       ),
       $.keyword_unique
     )),
+
+    tsql_identity: $ => seq(
+      $.keyword_identity,
+      optional(seq(
+        '(',
+        field('seed', alias($._integer, $.literal)),
+        ',',
+        field('increment', alias($._integer, $.literal)),
+        ')',
+      )),
+    ),
 
     _check_constraint: $ => seq(
       optional(
@@ -3613,10 +3774,17 @@ module.exports = grammar({
     identifier: $ => choice(
       $._identifier,
       $._double_quote_string,
+      $._bracket_identifier,
       $._tsql_parameter,
       seq("`", $._identifier, "`"),
     ),
-    _tsql_parameter: $ => seq('@', $._identifier),
+    _tsql_parameter: _ => /@[A-Za-z_\u00C0-\u017F][0-9A-Za-z_\u00C0-\u017F]*/,
+    // A subscript or array delimiter wins when both dialect interpretations are
+    // possible; declaration/name-only positions still admit the complete raw token.
+    _bracket_identifier: _ => token(prec(-1, /\[([^\]\r\n]|\]\])+\]/)),
+    // Only a type-start position admits this token, so it cannot replace the
+    // PostgreSQL '[' delimiter following an already parsed expression or type.
+    _tsql_type_bracket_identifier: _ => token(prec(1, /\[([^\]\r\n]|\]\])+\]/)),
     // support nordic chars and umlaue
     _identifier: _ => /[A-Za-z_\u00C0-\u017F][0-9A-Za-z_\u00C0-\u017F]*/,
   }

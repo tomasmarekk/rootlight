@@ -16,7 +16,7 @@ const GRAMMAR_LOCK_PATH: &str = "adapters/grammars.lock";
 const CARGO_LOCK_PATH: &str = "Cargo.lock";
 const ADAPTER_PACKAGE: &str = "rootlight-adapter-treesitter";
 const GRAMMAR_LOCK_SHA256: &str =
-    "3f249a7cb3de3e5de00bbc1be82bde457e51b485f2c20b5b08e048189eeab1f5";
+    "da2534f38d968c0c0475807c17d73812cca407fc2779d8421227a0ef99f1645d";
 const JAVA_LICENSE_PATH: &str = "adapters/licenses/tree-sitter-java-0.23.5-LICENSE";
 const JAVA_LICENSE_SHA256: &str =
     "52ed137b039cd9c46409bc22e89938af911c95b157feae2d040b51e6084369a7";
@@ -1297,6 +1297,67 @@ mod tests {
             sources,
         )
         .expect("the complete authored tree and local safety patch are authenticated");
+    }
+
+    #[test]
+    fn sql_retains_published_inputs_and_authenticates_local_tables() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
+        let manifest: GrammarLock =
+            toml::from_str(include_str!("../../adapters/grammars.lock")).unwrap();
+        let grammar = manifest
+            .grammars
+            .iter()
+            .find(|grammar| grammar.language == "sql")
+            .unwrap();
+        let sources = grammar.vendored.as_ref().unwrap();
+        assert_eq!(sources.files.len(), 25);
+        for (path, expected) in [
+            (
+                "grammar.js.orig",
+                "6b1f0554a355d8fe3b341ef25c7236cf4b433f85b632e39ade62931b78de16bc",
+            ),
+            (
+                "src/grammar.json.orig",
+                "d0ce0452876e14e73b533dd2a3010fbded021a55d153d6e6842cd0127efa971c",
+            ),
+            (
+                "src/node-types.json.orig",
+                "227cb2197775686cc0b0064aa08e709f7f9575b724b2339371b10fb209e37d73",
+            ),
+            (
+                "src/parser.c.orig",
+                "852e088fb8470952cdb2a1b78c1c58626c7d91562b26baa4672d51f9754bf580",
+            ),
+            (
+                "src/tree_sitter/alloc.h.orig",
+                "b29c1c9fb7cc82f58c84b376df1297d6e2737a1d655fd356db0859e3c29c2fea",
+            ),
+            (
+                "src/tree_sitter/array.h.orig",
+                "5bdf6ed1a78e3409fd443e085ca967a64c188a5d082aaf7f819bccd53a471c94",
+            ),
+            (
+                "src/tree_sitter/parser.h.orig",
+                "a1f6ef161fbaf48a0e10fca90ef5290a062462b307b3898aa562993853b9f80a",
+            ),
+        ] {
+            assert_eq!(sources.files.get(path).map(String::as_str), Some(expected));
+        }
+        assert_ne!(
+            sources.files["grammar.js"],
+            sources.files["grammar.js.orig"]
+        );
+        assert_ne!(
+            sources.files["src/parser.c"],
+            sources.files["src/parser.c.orig"]
+        );
+        assert_eq!(grammar.parser_sha256, sources.files["src/parser.c"]);
+        validate_vendored_tree(
+            &root.join("third_party/tree-sitter-sequel-0.3.11"),
+            grammar,
+            sources,
+        )
+        .expect("the retained published inputs and active SQL native tables are authenticated");
     }
 
     #[test]
