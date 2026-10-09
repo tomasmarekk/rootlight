@@ -7,6 +7,68 @@ use super::*;
 use rootlight_ir::{EntityKind, EntityVisibility, NormalizedIrDocument, OccurrenceTarget};
 
 #[test]
+fn common_lisp_file_module_keeps_path_without_package_or_header_identity() {
+    const TEXT: &str = "(defpackage :written)\n";
+    const PATH: &str = "src/package.lisp";
+    let (_directory, snapshot, source) = source_fixture_for(TEXT, PATH, b"common-lisp-file-module");
+    let facts = vec![
+        SyntaxFact::new(
+            1,
+            None,
+            SyntaxFactKind::Root,
+            source.span(),
+            0,
+            label("common_lisp.file.root"),
+        ),
+        SyntaxFact::new(
+            2,
+            Some(1),
+            SyntaxFactKind::Module,
+            source.span(),
+            1,
+            label("common_lisp.file.module"),
+        ),
+    ];
+    let output = analyze_custom(
+        &snapshot,
+        &source,
+        LanguageId::new("common-lisp").unwrap(),
+        &limits(IrLimits::default()),
+        facts,
+    )
+    .expect("explicit file fact supplies a path, not Lisp package semantics");
+    let document = output.document();
+    assert_eq!(document.entities.len(), 1);
+    let module = &document.entities[0];
+    assert_eq!(module.kind, EntityKind::Module);
+    assert_eq!(module.canonical_name, PATH);
+    assert_eq!(module.display_name, PATH);
+    assert_eq!(module.visibility, EntityVisibility::Unknown);
+    assert_eq!(module.flags, [EntityFlag::Synthetic]);
+    assert!(document.occurrences.is_empty());
+    assert_eq!(document.relations.len(), 1);
+    let containment = &document.relations[0];
+    assert_eq!(
+        containment.predicate,
+        rootlight_ir::RelationPredicate::Contains
+    );
+    assert_eq!(
+        containment.subject,
+        rootlight_ir::RelationEndpoint::File(source.span().file())
+    );
+    assert_eq!(
+        containment.object,
+        rootlight_ir::RelationEndpoint::Entity(module.id)
+    );
+    assert_eq!(containment.evidence.source.as_ref(), Some(&source));
+    assert!(
+        document.skipped_regions.iter().any(|region| {
+            region.detail == "common-lisp-reader-and-runtime-binding-unavailable"
+        })
+    );
+}
+
+#[test]
 fn common_lisp_written_declarations_do_not_merge_binding_names() {
     let document = written_document(false, "item", "item");
     assert_eq!(document.entities.len(), 6);

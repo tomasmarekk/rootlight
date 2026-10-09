@@ -6,8 +6,13 @@ use rootlight_ir::EntityKind;
 
 use crate::{SyntaxFact, SyntaxFactKind};
 
-/// Classifies exact written declaration kinds without proving runtime identity.
+/// Classifies an exact file module or declaration without proving runtime identity.
 pub(super) fn entity_kind(fact: &SyntaxFact) -> Option<EntityKind> {
+    if fact.kind() == SyntaxFactKind::Module
+        && fact.syntax_kind().as_str() == "common_lisp.file.module"
+    {
+        return Some(EntityKind::Module);
+    }
     if fact.kind() != SyntaxFactKind::Declaration {
         return None;
     }
@@ -86,6 +91,63 @@ mod tests {
             0,
             SyntaxKindLabel::new(label).unwrap(),
         )
+    }
+
+    #[test]
+    fn common_lisp_file_module_has_exact_physical_kind() {
+        let module = fact(SyntaxFactKind::Module, "common_lisp.file.module");
+        assert_eq!(structural_entity_kind(&module), Some(EntityKind::Module));
+        assert_eq!(
+            structural_entity_kind_from_source(&module, "written source"),
+            Some(EntityKind::Module)
+        );
+    }
+
+    #[test]
+    fn common_lisp_file_module_rejects_unreviewed_labels_and_roles() {
+        for kind in [
+            SyntaxFactKind::Root,
+            SyntaxFactKind::Declaration,
+            SyntaxFactKind::Signature,
+            SyntaxFactKind::Import,
+            SyntaxFactKind::Scope,
+            SyntaxFactKind::Occurrence,
+            SyntaxFactKind::Comment,
+            SyntaxFactKind::StringLiteral,
+            SyntaxFactKind::EmbeddedRegion,
+            SyntaxFactKind::ErrorRecovery,
+        ] {
+            let wrong_role = fact(kind, "common_lisp.file.module");
+            assert_eq!(structural_entity_kind(&wrong_role), None, "{kind:?}");
+            assert_eq!(
+                structural_entity_kind_from_source(&wrong_role, "written source"),
+                None,
+                "{kind:?}"
+            );
+        }
+        for label in [
+            "common_lisp.unknown.module",
+            "common_lisp.package.module",
+            "common_lisp.file.module.extra",
+            "common_lisp.file.declaration",
+        ] {
+            assert_eq!(
+                structural_entity_kind(&fact(SyntaxFactKind::Module, label)),
+                None,
+                "{label}"
+            );
+        }
+        for label in [
+            "unknown.file.module",
+            "commonlisp.file.module",
+            "common_lisp_extra.file.module",
+        ] {
+            assert_eq!(
+                super::entity_kind(&fact(SyntaxFactKind::Module, label)),
+                None,
+                "{label}"
+            );
+        }
     }
 
     #[test]

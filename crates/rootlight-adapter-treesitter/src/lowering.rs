@@ -6376,6 +6376,10 @@ fn fortran_source_identity_gap(fact: &SyntaxFact) -> Option<&'static str> {
 
 fn source_coverage_gap(fact: &SyntaxFact) -> Option<(FactDomain, &'static str)> {
     match fact.syntax_kind().as_str() {
+        "common_lisp.file.module" if fact.kind() == SyntaxFactKind::Module => Some((
+            FactDomain::Relations,
+            "common-lisp-reader-and-runtime-binding-unavailable",
+        )),
         "plsql.unsupported_owner.expression" => {
             Some((FactDomain::Entities, "plsql-source-identity-unavailable"))
         }
@@ -7658,6 +7662,9 @@ fn test_source_path(path: &str) -> bool {
 }
 
 fn is_explicit_file_module(fact: &SyntaxFact, language: &str) -> bool {
+    if fact.syntax_kind().as_str() == "common_lisp.file.module" {
+        return fact.kind() == SyntaxFactKind::Module && language == "common-lisp";
+    }
     fact.kind() == SyntaxFactKind::Module
         && matches!(
             fact.syntax_kind().as_str(),
@@ -7834,6 +7841,8 @@ fn supports_declaration_signature(
         && declaration.syntax_kind().as_str() == "fsharp.file.module")
         || (language == "fortran" && declaration.syntax_kind().as_str() == "fortran.file.module")
         || (language == "plsql" && declaration.syntax_kind().as_str() == "plsql.file.module")
+        || (language == "common-lisp"
+            && declaration.syntax_kind().as_str() == "common_lisp.file.module")
     {
         return false;
     }
@@ -7914,6 +7923,9 @@ fn source_reference_gap(fact: &SyntaxFact) -> Option<&'static str> {
         return Some(HASKELL_BINDING_UNAVAILABLE);
     }
     match fact.syntax_kind().as_str() {
+        "common_lisp.symbol.reference" if fact.kind() == SyntaxFactKind::Occurrence => {
+            Some("common-lisp-binding-target-unavailable")
+        }
         "plsql.identifier.reference" => Some("plsql-binding-target-unavailable"),
         "plsql.application.reference" => Some("plsql-call-or-index-target-unavailable"),
         "fortran.identifier.reference" => Some("fortran-binding-target-unavailable"),
@@ -9047,6 +9059,60 @@ mod tests {
                     .collect::<Vec<_>>(),
             );
         }
+    }
+
+    #[test]
+    fn common_lisp_file_identity_and_binding_gaps_are_source_only() {
+        let file = FileId::from_bytes([3; 20]);
+        let fact = |kind, label| {
+            SyntaxFact::new(
+                1,
+                None,
+                kind,
+                SourceSpan::new(file, 0, 30).unwrap(),
+                0,
+                SyntaxKindLabel::new(label).unwrap(),
+            )
+        };
+        let module = fact(SyntaxFactKind::Module, "common_lisp.file.module");
+        assert!(is_explicit_file_module(&module, "common-lisp"));
+        assert!(!is_explicit_file_module(&module, "python"));
+        assert!(!is_explicit_file_module(
+            &fact(SyntaxFactKind::Declaration, "common_lisp.file.module"),
+            "common-lisp"
+        ));
+        assert!(!supports_declaration_signature(
+            EntityKind::Module,
+            "common-lisp",
+            &module,
+            None
+        ));
+        assert_eq!(
+            source_coverage_gaps(&module).collect::<Vec<_>>(),
+            [(
+                FactDomain::Relations,
+                "common-lisp-reader-and-runtime-binding-unavailable"
+            )]
+        );
+        let reference = fact(SyntaxFactKind::Occurrence, "common_lisp.symbol.reference");
+        assert_eq!(
+            source_reference_gap(&reference),
+            Some("common-lisp-binding-target-unavailable")
+        );
+        assert!(
+            source_reference_gap(&fact(
+                SyntaxFactKind::Occurrence,
+                "common_lisp.name.definition"
+            ))
+            .is_none()
+        );
+        assert!(
+            source_reference_gap(&fact(
+                SyntaxFactKind::Declaration,
+                "common_lisp.symbol.reference"
+            ))
+            .is_none()
+        );
     }
 
     #[test]
