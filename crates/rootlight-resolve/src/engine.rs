@@ -1420,9 +1420,9 @@ pub(crate) fn resolvable_occurrence(occurrence: &OccurrenceRecord) -> bool {
     {
         return false;
     }
-    // GLSL scopes, interface members and shader targets require language-owned
+    // GLSL/HLSL scopes, members and shader targets require language-owned
     // binding proof; matching written names cannot resolve an adapter gap.
-    if occurrence.syntax_kind.starts_with("glsl.")
+    if (occurrence.syntax_kind.starts_with("glsl.") || occurrence.syntax_kind.starts_with("hlsl."))
         && matches!(occurrence.target, OccurrenceTarget::Unresolved { .. })
     {
         return false;
@@ -1740,6 +1740,9 @@ mod source_owned_target_tests {
             "glsl.identifier.reference",
             "glsl.member.reference",
             "glsl.unproven_call.reference",
+            "hlsl.identifier.reference",
+            "hlsl.member.reference",
+            "hlsl.unproven_call.reference",
         ] {
             occurrence.syntax_kind = syntax.to_owned();
             assert!(!resolvable_occurrence(&occurrence), "{syntax}");
@@ -1761,6 +1764,9 @@ mod source_owned_target_tests {
             "glsl.identifier.reference",
             "glsl.member.reference",
             "glsl.unproven_call.reference",
+            "hlsl.identifier.reference",
+            "hlsl.member.reference",
+            "hlsl.unproven_call.reference",
         ] {
             occurrence.syntax_kind = syntax.to_owned();
             assert!(
@@ -1777,6 +1783,9 @@ mod source_owned_target_tests {
             "glsl.identifier.reference",
             "glsl.member.reference",
             "glsl.unproven_call.reference",
+            "hlsl.identifier.reference",
+            "hlsl.member.reference",
+            "hlsl.unproven_call.reference",
         ] {
             occurrence.syntax_kind = syntax.to_owned();
             assert!(

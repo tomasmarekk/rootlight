@@ -122,27 +122,37 @@ fn assembly_written_uses_require_assembler_owned_target_proof() {
 
 #[test]
 fn glsl_written_uses_require_shader_owned_target_proof() {
+    shader_written_uses_require_owned_target_proof("glsl");
+}
+
+#[test]
+fn hlsl_written_uses_require_shader_owned_target_proof() {
+    shader_written_uses_require_owned_target_proof("hlsl");
+}
+
+fn shader_written_uses_require_owned_target_proof(language: &str) {
     for (syntax, role, kind) in [
         (
-            "glsl.identifier.reference",
+            "identifier.reference",
             OccurrenceRole::Read,
             EntityKind::Variable,
         ),
         (
-            "glsl.member.reference",
+            "member.reference",
             OccurrenceRole::Reference,
             EntityKind::Field,
         ),
         (
-            "glsl.unproven_call.reference",
+            "unproven_call.reference",
             OccurrenceRole::CallSite,
             EntityKind::Function,
         ),
     ] {
+        let syntax = format!("{language}.{syntax}");
         for cross_file in [false, true] {
             let mut fixture = Fixture::new();
             let file = if cross_file {
-                fixture.add_file(2, "src/other.glsl")
+                fixture.add_file(2, &format!("src/other.{language}"))
             } else {
                 fixture.primary_file
             };
@@ -150,11 +160,11 @@ fn glsl_written_uses_require_shader_owned_target_proof() {
             let second = fixture.add_entity(11, "target", file, kind, None);
             fixture.add_occurrence(20, "target", fixture.primary_file, role, None);
             for record in &mut fixture.document.files {
-                record.language = "glsl".to_owned();
+                record.language = language.to_owned();
             }
-            fixture.document.provenance[0].language = "glsl".to_owned();
+            fixture.document.provenance[0].language = language.to_owned();
             for entity in &mut fixture.document.entities {
-                entity.language = "glsl".to_owned();
+                entity.language = language.to_owned();
                 entity.qualified_name = "target".to_owned();
             }
             let mut symbols = vec![first, second];
@@ -229,6 +239,15 @@ fn glsl_written_uses_require_shader_owned_target_proof() {
 
 #[test]
 fn glsl_resolved_definition_retains_its_physical_identity() {
+    shader_resolved_definition_retains_its_physical_identity("glsl");
+}
+
+#[test]
+fn hlsl_resolved_definition_retains_its_physical_identity() {
+    shader_resolved_definition_retains_its_physical_identity("hlsl");
+}
+
+fn shader_resolved_definition_retains_its_physical_identity(language: &str) {
     let mut fixture = Fixture::new();
     let symbol = fixture.add_entity(
         10,
@@ -244,9 +263,9 @@ fn glsl_resolved_definition_retains_its_physical_identity() {
         OccurrenceRole::Definition,
         None,
     );
-    fixture.document.files[0].language = "glsl".to_owned();
-    fixture.document.provenance[0].language = "glsl".to_owned();
-    fixture.document.entities[0].language = "glsl".to_owned();
+    fixture.document.files[0].language = language.to_owned();
+    fixture.document.provenance[0].language = language.to_owned();
+    fixture.document.entities[0].language = language.to_owned();
     let source = fixture.document.entities[0]
         .evidence
         .source
@@ -254,7 +273,7 @@ fn glsl_resolved_definition_retains_its_physical_identity() {
         .unwrap();
     let occurrence = &mut fixture.document.occurrences[0];
     occurrence.target = OccurrenceTarget::Resolved { symbol };
-    occurrence.syntax_kind = "glsl.name.definition".to_owned();
+    occurrence.syntax_kind = format!("{language}.name.definition");
     occurrence.source = source.clone();
     occurrence.evidence.source = Some(source);
     let original = occurrence.clone();
