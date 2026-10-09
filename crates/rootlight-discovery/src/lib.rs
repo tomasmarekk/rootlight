@@ -25,6 +25,7 @@ use rootlight_vfs::{
 };
 use serde::{Deserialize, Serialize};
 
+mod apex;
 mod encoding;
 mod fsharp;
 mod fsproj;
@@ -45,7 +46,7 @@ pub use incremental::{
 };
 
 /// Current deterministic manifest and source-classification revision.
-pub const DISCOVERY_MANIFEST_VERSION: &str = "1.37";
+pub const DISCOVERY_MANIFEST_VERSION: &str = "1.39";
 /// Stable source-free diagnostic emitted when the entry budget truncates discovery.
 pub const DISCOVERY_ENTRY_LIMIT_DIAGNOSTIC_CODE: &str = "DISCOVERY_ENTRY_LIMIT";
 /// Stable source-free diagnostic emitted when retained source bytes truncate discovery.
@@ -1872,6 +1873,14 @@ fn classify_prefix(
         Some("prolog")
     } else if is_ambiguous_basic_source(&normalized) {
         let sample = &content[..content.len().min(MAX_CLASSIFICATION_BYTES)];
+        // A class export shares its suffix with Apex. Retain both independent
+        // hints when they conflict; parser availability must not choose one.
+        if normalized.ends_with(".cls") && apex::has_content_hint(sample, prefix_truncated) {
+            signals.insert(LanguageSignal {
+                language: "apex".to_owned(),
+                evidence: LanguageEvidence::Content,
+            });
+        }
         if vba::has_content_hint(sample) {
             Some("vba")
         } else {
@@ -2017,6 +2026,14 @@ const LANGUAGE_CAPABILITIES: &[LanguageCapability] = &[
         detectors: &["extension"],
         maximum_tier: "tier_d",
         analyzers: &["agda-native-structural-1"],
+    },
+    LanguageCapability {
+        language: "apex",
+        suffixes: &[],
+        aliases: &[],
+        detectors: &["content", "configuration"],
+        maximum_tier: "tier_d",
+        analyzers: &["treesitter"],
     },
     LanguageCapability {
         language: "assembly",
@@ -2394,6 +2411,14 @@ const LANGUAGE_CAPABILITIES: &[LanguageCapability] = &[
         detectors: &["content", "extension", "manifest"],
         maximum_tier: "tier_b",
         analyzers: &["treesitter", "project-adapter"],
+    },
+    LanguageCapability {
+        language: "sas",
+        suffixes: &[".sas"],
+        aliases: &[],
+        detectors: &["extension"],
+        maximum_tier: "tier_d",
+        analyzers: &["treesitter"],
     },
     LanguageCapability {
         language: "sass",
@@ -6067,6 +6092,133 @@ max_source_file_bytes = 2097152
         assert_eq!(extension_language("scripts/REPORT.AWK"), Some("awk"));
         assert_ne!(extension_language("scripts/report.awk.bak"), Some("awk"));
         assert_eq!(canonical_language("gawk"), Some("awk"));
+    }
+
+    #[test]
+    fn apex_class_content_does_not_take_over_basic_suffixes() {
+        for path in ["src/Box.cls", "src/BOX.CLS"] {
+            let path = RelativePath::parse(Path::new(path)).unwrap();
+            let (_, signals) = classify(&path, b"@IsTest public class Box {}");
+            assert!(signals.iter().any(|signal| {
+                signal.language == "apex" && signal.evidence == LanguageEvidence::Content
+            }));
+        }
+        for path in ["src/Box.bas", "src/Box.frm", "src/Box.cls.bak"] {
+            let path = RelativePath::parse(Path::new(path)).unwrap();
+            let (_, signals) = classify(&path, b"public class Box {}");
+            assert!(!signals.iter().any(|signal| signal.language == "apex"));
+        }
+        let path = RelativePath::parse(Path::new("src/Box.cls")).unwrap();
+        for source in [
+            "VERSION 1.0 CLASS\r\nAttribute VB_Name = \"Box\"\r\n",
+            "Attribute VB_Name = \"Box\"\nvalue = \"public class Fake {}\"\n",
+            "Attribute VB_Name = \"Box\"\nRem documentation; public class Fake {}\n",
+            "Attribute VB_Name = \"Box\"\nvalue = 1: Rem documentation; class Fake {}\n",
+            "// public class Fake {}",
+            "public class Incomplete",
+        ] {
+            let (_, signals) = classify(&path, source.as_bytes());
+            assert!(
+                !signals.iter().any(|signal| signal.language == "apex"),
+                "{source}"
+            );
+        }
+        let (_, signals) = classify(
+            &path,
+            b"Attribute VB_Name = \"Box\"\r\npublic class Other {}\r\n",
+        );
+        for language in ["apex", "visual-basic-classic"] {
+            assert!(signals.iter().any(|signal| {
+                signal.language == language && signal.evidence == LanguageEvidence::Content
+            }));
+        }
+        let capability = language_capabilities()
+            .iter()
+            .find(|capability| capability.language == "apex")
+            .unwrap();
+        assert!(capability.suffixes.is_empty());
+        assert_eq!(capability.detectors, &["content", "configuration"]);
+        assert_eq!(capability.analyzers, &["treesitter"]);
+    }
+
+    #[test]
+    fn apex_class_hints_require_a_complete_bounded_original_header() {
+        let path = RelativePath::parse(Path::new("src/Box.cls")).unwrap();
+        let prefix = "public class Box extends ";
+        let truncated = format!("{prefix}{}Base {{}}", " ".repeat(MAX_CLASSIFICATION_BYTES));
+        let (_, signals) = classify(&path, truncated.as_bytes());
+        assert!(!signals.iter().any(|signal| signal.language == "apex"));
+        for little_endian in [true, false] {
+            let source = "\u{feff}@IsTest\r\nprivate class Box {}";
+            let encoded = source
+                .encode_utf16()
+                .flat_map(|unit| {
+                    if little_endian {
+                        unit.to_le_bytes()
+                    } else {
+                        unit.to_be_bytes()
+                    }
+                })
+                .collect::<Vec<_>>();
+            let classification = encoding::classify(&encoded, &Cancellation::new())
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                classification.encoding,
+                if little_endian {
+                    "utf-16le"
+                } else {
+                    "utf-16be"
+                }
+            );
+            let projected = classification.decoded_prefix.as_deref().unwrap();
+            let (_, signals) = classify_prefix(
+                &path,
+                projected.as_bytes(),
+                classification.prefix_truncated,
+                true,
+            );
+            assert!(signals.iter().any(|signal| {
+                signal.language == "apex" && signal.evidence == LanguageEvidence::Content
+            }));
+        }
+    }
+
+    #[test]
+    fn apex_complete_headers_survive_unrelated_split_utf8_sample_tails() {
+        let path = RelativePath::parse(Path::new("src/Written.cls")).unwrap();
+        let mut source = b"public class Written {}\n// ".to_vec();
+        source.resize(MAX_CLASSIFICATION_BYTES - 1, b' ');
+        source.extend_from_slice("é".as_bytes());
+        assert!(std::str::from_utf8(&source).is_ok());
+        assert!(classify(&path, &source).1.iter().any(|signal| {
+            signal.language == "apex" && signal.evidence == LanguageEvidence::Content
+        }));
+        source[MAX_CLASSIFICATION_BYTES - 2] = 0xff;
+        assert!(
+            !classify(&path, &source)
+                .1
+                .iter()
+                .any(|signal| signal.language == "apex")
+        );
+    }
+
+    #[test]
+    fn sas_extension_preserves_distinct_sass_and_backup_routes() {
+        for path in ["src/measure.sas", "src/MEASURE.SAS"] {
+            assert_eq!(extension_language(path), Some("sas"));
+        }
+        assert_ne!(extension_language("src/measure.sas.bak"), Some("sas"));
+        assert_eq!(extension_language("src/theme.sass"), Some("sass"));
+        assert_eq!(canonical_language("sas"), Some("sas"));
+        let capability = language_capabilities()
+            .iter()
+            .find(|capability| capability.language == "sas")
+            .expect("SAS capability exists");
+        assert_eq!(capability.suffixes, &[".sas"]);
+        assert_eq!(capability.detectors, &["extension"]);
+        assert_eq!(capability.maximum_tier, "tier_d");
+        assert_eq!(capability.analyzers, &["treesitter"]);
     }
 
     #[test]
