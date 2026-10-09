@@ -1,0 +1,21 @@
+# Local unpublished binding for pinned MIT and CC0 Common Lisp grammar sources.
+# Compilation uses retained static inputs; no acquisition or generation occurs.
+[package]
+name = "tree-sitter-commonlisp"
+version = "0.4.1"
+edition = "2024"
+rust-version = "1.90"
+license = "MIT AND CC0-1.0"
+repository = "https://github.com/tree-sitter-grammars/tree-sitter-commonlisp"
+description = "Pinned Common Lisp grammar with a local static language binding"
+publish = false
+build = "bindings/rust/build.rs"
+
+[lib]
+path = "bindings/rust/lib.rs"
+
+[dependencies]
+tree-sitter-language = "=0.1.7"
+
+[build-dependencies]
+cc = "=1.2.67"

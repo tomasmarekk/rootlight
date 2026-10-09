@@ -29,6 +29,11 @@ third_party/tree-sitter-plsql-0.0.1/** -text whitespace=-blank-at-eol,-blank-at-
 third_party/tree-sitter-sfapex-3.0.1/** -text
 third_party/tree-sitter-sas-0.4.2/** -text
 third_party/tree-sitter-pascal-0.10.2/** -text
+# Common Lisp preferred, derived and complete original inputs remain byte-exact.
+third_party/tree-sitter-commonlisp-0.4.1/** -text
+third_party/tree-sitter-commonlisp-0.4.1/upstream/** whitespace=-blank-at-eol,-blank-at-eof,-space-before-tab,cr-at-eol conflict-marker-size=32
+third_party/tree-sitter-commonlisp-0.4.1/upstream/archives/** binary
+third_party/tree-sitter-commonlisp-0.4.1/patches/** whitespace=-blank-at-eol,-blank-at-eof,-space-before-tab,cr-at-eol
 # Published Pascal indentation is retained in both preferred-source versions.
 third_party/tree-sitter-pascal-0.10.2/grammar.js* whitespace=-space-before-tab
 # Retained Kotlin registry inputs and scanner originals remain byte-exact.

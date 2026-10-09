@@ -1,0 +1,50 @@
+--- qualified/Cargo.toml
++++ package/Cargo.toml
+@@ -1,40 +1,21 @@
+-# Isolated preferred-source repair qualification, not a published dependency.
+-# Only local directory sources and the declared pinned runtime graph are used.
++# Local unpublished binding for pinned MIT and CC0 Common Lisp grammar sources.
++# Compilation uses retained static inputs; no acquisition or generation occurs.
+ [package]
+ name = "tree-sitter-commonlisp"
+ version = "0.4.1"
+ edition = "2024"
+ rust-version = "1.90"
+-license = "MIT"
++license = "MIT AND CC0-1.0"
++repository = "https://github.com/tree-sitter-grammars/tree-sitter-commonlisp"
++description = "Pinned Common Lisp grammar with a local static language binding"
+ publish = false
+-build = "build.rs"
+-
+-[workspace]
+-resolver = "3"
++build = "bindings/rust/build.rs"
+ 
+ [lib]
+-path = "src/lib.rs"
++path = "bindings/rust/lib.rs"
+ 
+ [dependencies]
+ tree-sitter-language = "=0.1.7"
+ 
+ [build-dependencies]
+ cc = "=1.2.67"
+-
+-[dev-dependencies]
+-tree-sitter = { version = "=0.26.11", default-features = false, features = ["std"] }
+-
+-[[test]]
+-name = "common_lisp_syntax"
+-path = "tests/common_lisp_syntax.rs"
+-
+-[[test]]
+-name = "repair_edges"
+-path = "tests/repair_edges.rs"
+-
+-[lints.rust]
+-missing_docs = "deny"
+-unsafe_op_in_unsafe_fn = "deny"
+-
+-[lints.clippy]
+-undocumented_unsafe_blocks = "deny"

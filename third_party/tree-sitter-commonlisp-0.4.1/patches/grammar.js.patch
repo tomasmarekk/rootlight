@@ -1,0 +1,120 @@
+--- a/grammar.js
++++ b/grammar.js
+@@ -25,7 +25,7 @@
+ }
+ 
+ const SYMBOL_HEAD =
+-    /[^:\f\n\r\t ()\[\]{}"^;`\\,#'\u000B\u001C\u001D\u001E\u001F\u2028\u2029\u1680\u2000\u2001\u2002\u2003\u2004\u2005\u2006\u2008\u2009\u200a\u205f\u3000]/;
++    /[^:|\f\n\r\t ()\[\]{}"^;`\\,#'\u000B\u001C\u001D\u001E\u001F\u2028\u2029\u1680\u2000\u2001\u2002\u2003\u2004\u2005\u2006\u2008\u2009\u200a\u205f\u3000]/;
+ 
+ const SYMBOL_WITHOUT_SLASH =
+     /[^:\f\n\r\t ()\[\]{}"^;/`\\,#'\u000B\u001C\u001D\u001E\u001F\u2028\u2029\u1680\u2000\u2001\u2002\u2003\u2004\u2005\u2006\u2008\u2009\u200a\u205f\u3000]/;
+@@ -34,9 +34,22 @@
+     choice(SYMBOL_HEAD,
+         /[#']/);
+ 
++// Preserve written escape segments without applying readtable case or interning.
++const SINGLE_ESCAPE = seq('\\', /[\s\S]/);
++const MULTIPLE_ESCAPE =
++    seq('|', repeat(choice(/[^|\\]/, SINGLE_ESCAPE)), '|');
++
+ const SYMBOL =
+-    token(seq(SYMBOL_HEAD,
+-        repeat(SYMBOL_BODY)));
++    token(seq(choice(SYMBOL_HEAD, SINGLE_ESCAPE),
++        repeat(choice(SYMBOL_BODY, SINGLE_ESCAPE))));
++
++// A bar segment may appear anywhere in one raw symbol, not only at its start.
++const FANCY_SYMBOL =
++    token(seq(choice(
++        MULTIPLE_ESCAPE,
++        seq(choice(SYMBOL_HEAD, SINGLE_ESCAPE),
++            repeat(choice(SYMBOL_BODY, SINGLE_ESCAPE)), MULTIPLE_ESCAPE)),
++        repeat(choice(SYMBOL_BODY, SINGLE_ESCAPE, MULTIPLE_ESCAPE))));
+ 
+ const STRING =
+     token(seq('"',
+@@ -127,19 +140,23 @@
+     name: 'commonlisp',
+ 
+     extras: ($, original) => [...original, $.block_comment],
++    externals: $ => [$.block_comment],
+     conflicts: ($,
+         original) => [...original,
+         [$.for_clause_word, $.package_lit],
++        [$.for_clause_word, $.defun_keyword, $.package_lit],
+         [$.with_clause, $.package_lit],
++        [$.with_clause, $.defun_keyword, $.package_lit],
+         [$.with_clause],
+         [$.for_clause],
+-        [$.accumulation_clause]],
++        [$.accumulation_clause],
++        [$.defun_header, $._form],
++        [$.defun, $._bare_list_lit],
++        [$.defun]],
+ 
+ 
+     rules: {
+-        block_comment: _ => token(seq('#|', repeat(choice(/[^|]/, /\|[^#]/)), '|#')),
+-
+-        fancy_literal: _ => token(seq('|', repeat(/[^|]/), '|')),
++        fancy_literal: _ => FANCY_SYMBOL,
+ 
+         _ws: _ =>
+             WHITESPACE,
+@@ -161,7 +178,7 @@
+                 field('value', ($._form))),
+ 
+         defun: $ =>
+-            prec(PREC.SPECIAL, seq(field('open', "("),
++            prec.dynamic(PREC.SPECIAL, seq(field('open', "("),
+                 optional($._gap),
+                 $.defun_header,
+                 optional($._gap),
+@@ -274,7 +291,7 @@
+         defun_keyword: _ => prec(10, clSymbol(choice('defun', 'defmacro', 'defgeneric', 'defmethod'))),
+ 
+         defun_header: $ =>
+-            prec(PREC.SPECIAL, choice(
++            prec.dynamic(PREC.SPECIAL, choice(
+                 seq(field('keyword', $.defun_keyword),
+                     repeat($._gap),
+                     choice($.unquoting_lit, $.unquote_splicing_lit)
+@@ -306,16 +323,16 @@
+                 seq(field('open', choice('#P', '#p')), alias(STRING, $.str_lit))),
+ 
+         _bare_list_lit: $ =>
+-            choice(prec(PREC.SPECIAL, $.defun),
++            choice(prec.dynamic(PREC.SPECIAL, $.defun),
+                 prec(PREC.SPECIAL, $.loop_macro),
+                 seq(field('open', "("),
+                     repeat(choice(field('value', $._form), $._gap)),
+                     field('close', ")"))),
+ 
+         package_lit: $ => prec(PREC.PACKAGE_LIT, choice(seq(
+-            field('package', choice($.sym_lit, 'cl')), // Make optional, instead of keywords?
++            field('package', choice($.sym_lit, $.fancy_literal, 'cl')), // Make optional, instead of keywords?
+             choice(':', '::'),
+-            field('symbol', $.sym_lit)
++            field('symbol', choice($.sym_lit, $.fancy_literal))
+         ), prec(1, 'cl'))),
+ 
+         _package_lit_without_slash: $ => seq(
+@@ -336,7 +353,7 @@
+             alias(repeat1(SYMBOL_WITHOUT_SLASH), $.sym_lit),
+ 
+         kwd_symbol: _ =>
+-            seq(SYMBOL),
++            choice(SYMBOL, FANCY_SYMBOL),
+ 
+         self_referential_reader_macro: _ => /#\d+[=#]/,
+ 
+@@ -355,6 +372,8 @@
+                     $.nil_lit,
+                     $.path_lit,
+                     $.sym_lit,
++                    // A spelling is not a reserved runtime defining operator.
++                    alias($.defun_keyword, $.sym_lit),
+                     $.package_lit,
+                     $.list_lit,
+                     $.set_lit,

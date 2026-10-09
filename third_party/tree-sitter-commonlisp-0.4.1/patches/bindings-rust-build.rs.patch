@@ -1,0 +1,66 @@
+--- a/bindings/rust/build.rs
++++ b/bindings/rust/build.rs
+@@ -1,43 +1,27 @@
++//! Compiles the retained ABI14 table and stateless block-comment scanner.
++//! No grammar generator, package hook or source acquisition runs during builds.
++
+ fn main() {
+-    let src_dir = std::path::Path::new("src");
+-
+-    let mut c_config = cc::Build::new();
+-    c_config.include(&src_dir);
+-    c_config
++    let mut builder = cc::Build::new();
++    builder
++        .std("c11")
++        .include("src")
++        .file("src/parser.c")
++        .file("src/scanner.c")
+         .flag_if_supported("-Wno-unused-parameter")
+         .flag_if_supported("-Wno-unused-but-set-variable")
+         .flag_if_supported("-Wno-trigraphs");
+     #[cfg(target_env = "msvc")]
+-    c_config.flag("-utf-8");
++    builder.flag("-utf-8");
++    builder.compile("tree-sitter-commonlisp");
+ 
+-    let parser_path = src_dir.join("parser.c");
+-    c_config.file(&parser_path);
+-
+-    // If your language uses an external scanner written in C,
+-    // then include this block of code:
+-
+-    /*
+-    let scanner_path = src_dir.join("scanner.c");
+-    c_config.file(&scanner_path);
+-    println!("cargo:rerun-if-changed={}", scanner_path.to_str().unwrap());
+-    */
+-
+-    println!("cargo:rerun-if-changed={}", parser_path.to_str().unwrap());
+-    c_config.compile("parser");
+-
+-    // If your language uses an external scanner written in C++,
+-    // then include this block of code:
+-
+-    /*
+-    let mut cpp_config = cc::Build::new();
+-    cpp_config.cpp(true);
+-    cpp_config.include(&src_dir);
+-    cpp_config
+-        .flag_if_supported("-Wno-unused-parameter")
+-        .flag_if_supported("-Wno-unused-but-set-variable");
+-    let scanner_path = src_dir.join("scanner.cc");
+-    cpp_config.file(&scanner_path);
+-    println!("cargo:rerun-if-changed={}", scanner_path.to_str().unwrap());
+-    cpp_config.compile("scanner");
+-    */
++    for path in [
++        "src/parser.c",
++        "src/scanner.c",
++        "src/tree_sitter/parser.h",
++        "src/tree_sitter/alloc.h",
++        "src/tree_sitter/array.h",
++    ] {
++        println!("cargo:rerun-if-changed={path}");
++    }
+ }

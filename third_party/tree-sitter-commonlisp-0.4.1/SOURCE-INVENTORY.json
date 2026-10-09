@@ -1,0 +1,1947 @@
+{
+  "archive_file_modes_applied": false,
+  "directories": [
+    "bindings",
+    "bindings/rust",
+    "notices",
+    "patches",
+    "src",
+    "src/tree_sitter",
+    "upstream",
+    "upstream/archives",
+    "upstream/authored",
+    "upstream/authored/.github",
+    "upstream/authored/.github/workflows",
+    "upstream/authored/bindings",
+    "upstream/authored/bindings/c",
+    "upstream/authored/bindings/go",
+    "upstream/authored/bindings/node",
+    "upstream/authored/bindings/python",
+    "upstream/authored/bindings/python/tests",
+    "upstream/authored/bindings/python/tree_sitter_commonlisp",
+    "upstream/authored/bindings/rust",
+    "upstream/authored/bindings/swift",
+    "upstream/authored/bindings/swift/TreeSitterCommonlisp",
+    "upstream/authored/bindings/swift/TreeSitterCommonlispTests",
+    "upstream/authored/queries",
+    "upstream/authored/src",
+    "upstream/authored/src/tree_sitter",
+    "upstream/authored/test",
+    "upstream/authored/test/Petalisp",
+    "upstream/authored/test/corpus",
+    "upstream/authored/test/sly",
+    "upstream/authored/test/tags",
+    "upstream/clojure",
+    "upstream/clojure/bindings",
+    "upstream/clojure/bindings/node",
+    "upstream/clojure/bindings/rust",
+    "upstream/clojure/src",
+    "upstream/clojure/src/tree_sitter",
+    "upstream/metadata",
+    "upstream/published",
+    "upstream/published/bindings",
+    "upstream/published/bindings/rust",
+    "upstream/published/queries",
+    "upstream/published/src",
+    "upstream/published/src/tree_sitter"
+  ],
+  "original_bytes_preserved": true,
+  "original_regular_file_bytes": 12929403,
+  "original_regular_file_count": 79,
+  "payload_files": [
+    {
+      "bytes": 616,
+      "origin": {
+        "kind": "local_publication_binding_or_document"
+      },
+      "path": "Cargo.toml",
+      "sha256": "860e2544b26ec0f4873e2fd19cb12f7d07bc60a6e2928779719fd24c12c458bd"
+    },
+    {
+      "bytes": 1080,
+      "origin": {
+        "archive": "tree-sitter-commonlisp-9db594efb43574c5fe4a1f880568b1f0d0ee6057.tar.gz",
+        "kind": "exact_notice",
+        "member": "LICENSE.md"
+      },
+      "path": "LICENSE.md",
+      "sha256": "00bb7f417416e8233ae465209e72eaa6162d53b061add7d9bed0238552a6fa0c"
+    },
+    {
+      "bytes": 6387,
+      "origin": {
+        "kind": "local_publication_binding_or_document"
+      },
+      "path": "PATCHES.md",
+      "sha256": "6fbbd173dcbd342e302d4eda063dc21ed80258c3f8dc6012b4eadf0ca156d05d"
+    },
+    {
+      "bytes": 831,
+      "origin": {
+        "kind": "local_publication_binding_or_document"
+      },
+      "path": "bindings/rust/build.rs",
+      "sha256": "f51e8e4dd5e1dc6883edbf3fb7561b6fa291d5956ebf5e5c8c1050b62883dba6"
+    },
+    {
+      "bytes": 819,
+      "origin": {
+        "kind": "local_publication_binding_or_document"
+      },
+      "path": "bindings/rust/lib.rs",
+      "sha256": "1adaddbcf329594ccde405c06e0c0b7129ee5b6772ca92e818c37130eb24476a"
+    },
+    {
+      "bytes": 13846,
+      "origin": {
+        "kind": "accepted_local_preferred_source"
+      },
+      "path": "grammar.js",
+      "sha256": "086b2e3773eff6cf1aae2a7e3d2257b2521ca3e3a3082b258e41e290dc1b6176"
+    },
+    {
+      "bytes": 7048,
+      "origin": {
+        "archive": "tree-sitter-clojure-95c7959c461406381b42113dcf4591008c663d21.tar.gz",
+        "kind": "exact_notice",
+        "member": "COPYING.txt"
+      },
+      "path": "notices/clojure-COPYING.txt",
+      "sha256": "a2010f343487d3f7618affe54f789f5487602331c0a8d03f49e9a7c547cf0499"
+    },
+    {
+      "bytes": 1136,
+      "origin": {
+        "kind": "exact_authored_to_local_diff"
+      },
+      "path": "patches/Cargo.toml.patch",
+      "sha256": "f810f50ca0e8c0432eaccc4209bda929aaae0cd1e88ca6af065b6c893a4cc1c6"
+    },
+    {
+      "bytes": 2147,
+      "origin": {
+        "kind": "exact_authored_to_local_diff"
+      },
+      "path": "patches/bindings-rust-build.rs.patch",
+      "sha256": "960003c87bdd3d95d533be0a0f555d01f6ab6911f5b0f525011431344178353c"
+    },
+    {
+      "bytes": 2655,
+      "origin": {
+        "kind": "exact_authored_to_local_diff"
+      },
+      "path": "patches/bindings-rust-lib.rs.patch",
+      "sha256": "9bf4685e5d1f55d98317326795c7afca9723184a1fb1cc12ed0ead43c179130c"
+    },
+    {
+      "bytes": 4575,
+      "origin": {
+        "kind": "exact_authored_to_local_diff"
+      },
+      "path": "patches/grammar.js.patch",
+      "sha256": "358af061a5bca29807fe4f62f7aea7792c2bec24906de06f713246e58d4b07aa"
+    },
+    {
+      "bytes": 1332,
+      "origin": {
+        "kind": "qualified_wrapper_to_package_diff"
+      },
+      "path": "patches/qualified-to-package-Cargo.toml.patch",
+      "sha256": "9c04d3406c51747c15c282e11bd2deaefc35f713102c0aff2dbff6f30a6b2e42"
+    },
+    {
+      "bytes": 1342,
+      "origin": {
+        "kind": "qualified_wrapper_to_package_diff"
+      },
+      "path": "patches/qualified-to-package-build.rs.patch",
+      "sha256": "ada34debd052bc9d982f51e42160d6f5882a523d0dd1b97eb8a2e9a47d742356"
+    },
+    {
+      "bytes": 1517,
+      "origin": {
+        "kind": "qualified_wrapper_to_package_diff"
+      },
+      "path": "patches/qualified-to-package-lib.rs.patch",
+      "sha256": "6f7f2fb6eddcf8c2ee152af2fc11b5efd0837f41b345bef585143c191733a303"
+    },
+    {
+      "bytes": 2331,
+      "origin": {
+        "kind": "locally_authored_scanner_diff"
+      },
+      "path": "patches/scanner.c.patch",
+      "sha256": "007a78a92507cade1a80d73c31d150077beb3556be31731442b2074d4c1bc089"
+    },
+    {
+      "bytes": 132243,
+      "origin": {
+        "kind": "accepted_generated_output",
+        "producer_count": 2
+      },
+      "path": "src/grammar.json",
+      "sha256": "3cfd4b567d009908bd0d937ae60be231bacb9dd4d71e06408c313fe04a6278e8"
+    },
+    {
+      "bytes": 93470,
+      "origin": {
+        "kind": "accepted_generated_output",
+        "producer_count": 2
+      },
+      "path": "src/node-types.json",
+      "sha256": "b2f7bd1f7589385a99af9e35337cd62e52eb49c551ab4b814e68e0734c4b231b"
+    },
+    {
+      "bytes": 6503770,
+      "origin": {
+        "kind": "accepted_generated_output",
+        "producer_count": 2
+      },
+      "path": "src/parser.c",
+      "sha256": "c4518318808f6f93881d0f4cbcffc068d396ca0ee43ffc48d61962d0484d4e22"
+    },
+    {
+      "bytes": 2205,
+      "origin": {
+        "kind": "accepted_local_preferred_source"
+      },
+      "path": "src/scanner.c",
+      "sha256": "b5b8b12151c53c39302ceec717066da08acd1da5d4f594c58a6dd7fde3749d2e"
+    },
+    {
+      "bytes": 985,
+      "origin": {
+        "kind": "accepted_generated_output",
+        "producer_count": 2
+      },
+      "path": "src/tree_sitter/alloc.h",
+      "sha256": "b29c1c9fb7cc82f58c84b376df1297d6e2737a1d655fd356db0859e3c29c2fea"
+    },
+    {
+      "bytes": 13269,
+      "origin": {
+        "kind": "accepted_generated_output",
+        "producer_count": 2
+      },
+      "path": "src/tree_sitter/array.h",
+      "sha256": "31e60a1bff6f715afacce03b5b70efe42b58371b4f9595dd4af52a577ff9608c"
+    },
+    {
+      "bytes": 7624,
+      "origin": {
+        "kind": "accepted_generated_output",
+        "producer_count": 2
+      },
+      "path": "src/tree_sitter/parser.h",
+      "sha256": "180b893c8734778fd32f372dfbc27bd6ad1cd2221f26150b31256ff6716320d2"
+    },
+    {
+      "bytes": 47548,
+      "origin": {
+        "archive": "tree-sitter-clojure-95c7959c461406381b42113dcf4591008c663d21.tar.gz",
+        "kind": "original_archive"
+      },
+      "path": "upstream/archives/tree-sitter-clojure-95c7959c461406381b42113dcf4591008c663d21.tar.gz",
+      "sha256": "2008d63049215d63920bd11290a83061d4efe0718a3009826479f3926464b6a4"
+    },
+    {
+      "bytes": 254644,
+      "origin": {
+        "archive": "tree-sitter-commonlisp-0.4.1.crate",
+        "kind": "original_archive"
+      },
+      "path": "upstream/archives/tree-sitter-commonlisp-0.4.1.crate",
+      "sha256": "36c662ae95eee8c5ada519d4fe87261c5fbcc3ffaac4b10c03d460154cd6a9b2"
+    },
+    {
+      "bytes": 299808,
+      "origin": {
+        "archive": "tree-sitter-commonlisp-9db594efb43574c5fe4a1f880568b1f0d0ee6057.tar.gz",
+        "kind": "original_archive"
+      },
+      "path": "upstream/archives/tree-sitter-commonlisp-9db594efb43574c5fe4a1f880568b1f0d0ee6057.tar.gz",
+      "sha256": "d5421c73789565b0fc56d2f1187c9d379519d0226a7bd36932b94064ec14ff07"
+    },
+    {
+      "bytes": 502,
+      "origin": {
+        "archive": "tree-sitter-commonlisp-9db594efb43574c5fe4a1f880568b1f0d0ee6057.tar.gz",
+        "kind": "original_member",
+        "member": ".editorconfig"
+      },
+      "path": "upstream/authored/.editorconfig",
+      "sha256": "9b6da2df3a325dbed2f93e1909dccdda3efa2eba84565b6ef7f0295c5551b770"
+    },
+    {
+      "bytes": 266,
+      "origin": {
+        "archive": "tree-sitter-commonlisp-9db594efb43574c5fe4a1f880568b1f0d0ee6057.tar.gz",
+        "kind": "original_member",
+        "member": ".gitattributes"
+      },
+      "path": "upstream/authored/.gitattributes",
+      "sha256": "fe17aaa634b5b625393d17915f507e4410961b663a2be9cd505503f57008fb17"
+    },
+    {
+      "bytes": 1165,
+      "origin": {
+        "archive": "tree-sitter-commonlisp-9db594efb43574c5fe4a1f880568b1f0d0ee6057.tar.gz",
+        "kind": "original_member",
+        "member": ".github/workflows/ci.yml"
+      },
+      "path": "upstream/authored/.github/workflows/ci.yml",
+      "sha256": "a01c35c05d40b91a258a5dd6306ce4219510fcb6eca4a3c8654057e0cc2acce4"
+    },
+    {
+      "bytes": 484,
+      "origin": {
+        "archive": "tree-sitter-commonlisp-9db594efb43574c5fe4a1f880568b1f0d0ee6057.tar.gz",
+        "kind": "original_member",
+        "member": ".github/workflows/publish.yml"
+      },
+      "path": "upstream/authored/.github/workflows/publish.yml",
+      "sha256": "c242be0941967fb616ddd70189f21ff5c18afdd0f759712ca3c466f25fe7f775"
+    },
+    {
+      "bytes": 35,
+      "origin": {
+        "archive": "tree-sitter-commonlisp-9db594efb43574c5fe4a1f880568b1f0d0ee6057.tar.gz",
+        "kind": "original_member",
+        "member": ".gitignore"
+      },
+      "path": "upstream/authored/.gitignore",
+      "sha256": "9da110975ada363b7377fd7a448b37a44f0a0f03ac9494622c6efa2ea9596fc4"
+    },
+    {
+      "bytes": 186,
+      "origin": {
+        "archive": "tree-sitter-commonlisp-9db594efb43574c5fe4a1f880568b1f0d0ee6057.tar.gz",
+        "kind": "original_member",
+        "member": ".gitmodules"
+      },
+      "path": "upstream/authored/.gitmodules",
+      "sha256": "a8a96959ba2e1f4be8d3a3b2af638039e9da2dd81effa2488cb7753c217f94fb"
+    },
+    {
+      "bytes": 31,
+      "origin": {
+        "archive": "tree-sitter-commonlisp-9db594efb43574c5fe4a1f880568b1f0d0ee6057.tar.gz",
+        "kind": "original_member",
+        "member": ".npmignore"
+      },
+      "path": "upstream/authored/.npmignore",
+      "sha256": "a478b78bd51f1d016548c230dce6a827d63307987150a14fdc443116ab0635c4"
+    },
+    {
+      "bytes": 5160,
+      "origin": {
+        "archive": "tree-sitter-commonlisp-9db594efb43574c5fe4a1f880568b1f0d0ee6057.tar.gz",
+        "kind": "original_member",
+        "member": "Cargo.lock"
+      },
+      "path": "upstream/authored/Cargo.lock",
+      "sha256": "35361efcaf0dd2db50a7fc830f50d13172fbdc21ae3ded2633c85cef42d1c1c9"
+    },
+    {
+      "bytes": 614,
+      "origin": {
+        "archive": "tree-sitter-commonlisp-9db594efb43574c5fe4a1f880568b1f0d0ee6057.tar.gz",
+        "kind": "original_member",
+        "member": "Cargo.toml"
+      },
+      "path": "upstream/authored/Cargo.toml",
+      "sha256": "716589771efc0aaa7633fbdc1201fdd9f414b80d560f5e9b6d812a5cd4344960"
+    },
+    {
+      "bytes": 1080,
+      "origin": {
+        "archive": "tree-sitter-commonlisp-9db594efb43574c5fe4a1f880568b1f0d0ee6057.tar.gz",
+        "kind": "original_member",
+        "member": "LICENSE.md"
+      },
+      "path": "upstream/authored/LICENSE.md",
+      "sha256": "00bb7f417416e8233ae465209e72eaa6162d53b061add7d9bed0238552a6fa0c"
+    },
+    {
+      "bytes": 3567,
+      "origin": {
+        "archive": "tree-sitter-commonlisp-9db594efb43574c5fe4a1f880568b1f0d0ee6057.tar.gz",
+        "kind": "original_member",
+        "member": "Makefile"
+      },
+      "path": "upstream/authored/Makefile",
+      "sha256": "46783e69289d741f1905a2376f7b6fa7c95137933a596555dbed5160e35a5ec9"
+    },
+    {
+      "bytes": 1887,
+      "origin": {
+        "archive": "tree-sitter-commonlisp-9db594efb43574c5fe4a1f880568b1f0d0ee6057.tar.gz",
+        "kind": "original_member",
+        "member": "Package.swift"
+      },
+      "path": "upstream/authored/Package.swift",
+      "sha256": "97ba1b1948294897a5ec75e628301e8ddc130dcbc43a393a4b15eb7ce6c7b529"
+    },
+    {
+      "bytes": 2904,
+      "origin": {
+        "archive": "tree-sitter-commonlisp-9db594efb43574c5fe4a1f880568b1f0d0ee6057.tar.gz",
+        "kind": "original_member",
+        "member": "README.md"
+      },
+      "path": "upstream/authored/README.md",
+      "sha256": "9545bb15cbec1c8af11a75438205e49541304932789a42895161a40c3e0487b1"
+    },
+    {
+      "bytes": 462,
+      "origin": {
+        "archive": "tree-sitter-commonlisp-9db594efb43574c5fe4a1f880568b1f0d0ee6057.tar.gz",
+        "kind": "original_member",
+        "member": "binding.gyp"
+      },
+      "path": "upstream/authored/binding.gyp",
+      "sha256": "46397da184929daff3075571cee07514f54d5a8d84d8cb57fcb1ea1eafc872f4"
+    },
+    {
+      "bytes": 262,
+      "origin": {
+        "archive": "tree-sitter-commonlisp-9db594efb43574c5fe4a1f880568b1f0d0ee6057.tar.gz",
+        "kind": "original_member",
+        "member": "bindings/c/tree-sitter-commonlisp.h"
+      },
+      "path": "upstream/authored/bindings/c/tree-sitter-commonlisp.h",
+      "sha256": "e8eaf4fb9c099d9d2cc85f3968e5c285af69fd0c9871011555997eaad4a4e44d"
+    },
+    {
+      "bytes": 270,
+      "origin": {
+        "archive": "tree-sitter-commonlisp-9db594efb43574c5fe4a1f880568b1f0d0ee6057.tar.gz",
+        "kind": "original_member",
+        "member": "bindings/c/tree-sitter-commonlisp.pc.in"
+      },
+      "path": "upstream/authored/bindings/c/tree-sitter-commonlisp.pc.in",
+      "sha256": "c811de795b68e7d9cdc3f41dbe5ae074e2f622ed5862c172237931871e1be707"
+    },
+    {
+      "bytes": 328,
+      "origin": {
+        "archive": "tree-sitter-commonlisp-9db594efb43574c5fe4a1f880568b1f0d0ee6057.tar.gz",
+        "kind": "original_member",
+        "member": "bindings/go/binding.go"
+      },
+      "path": "upstream/authored/bindings/go/binding.go",
+      "sha256": "f359d5013470634bcca799ca8624c23adaea355cbb310f5a4677536c4b24a072"
+    },
+    {
+      "bytes": 345,
+      "origin": {
+        "archive": "tree-sitter-commonlisp-9db594efb43574c5fe4a1f880568b1f0d0ee6057.tar.gz",
+        "kind": "original_member",
+        "member": "bindings/go/binding_test.go"
+      },
+      "path": "upstream/authored/bindings/go/binding_test.go",
+      "sha256": "7ee3943f6027ca1ab0722b39635fdb70fee7fe5e14294eb8d68cc105be53e793"
+    },
+    {
+      "bytes": 140,
+      "origin": {
+        "archive": "tree-sitter-commonlisp-9db594efb43574c5fe4a1f880568b1f0d0ee6057.tar.gz",
+        "kind": "original_member",
+        "member": "bindings/go/go.mod"
+      },
+      "path": "upstream/authored/bindings/go/go.mod",
+      "sha256": "10955d01edaf6601cb1c3fdfa10f8b8751920225dc1c67e2b97331a0c4958511"
+    },
+    {
+      "bytes": 1481,
+      "origin": {
+        "archive": "tree-sitter-commonlisp-9db594efb43574c5fe4a1f880568b1f0d0ee6057.tar.gz",
+        "kind": "original_member",
+        "member": "bindings/go/go.sum"
+      },
+      "path": "upstream/authored/bindings/go/go.sum",
+      "sha256": "508d73c1545d69d0d51119d13e04669f9d209c72d2b02dd8e9b045bb9fc1a964"
+    },
+    {
+      "bytes": 599,
+      "origin": {
+        "archive": "tree-sitter-commonlisp-9db594efb43574c5fe4a1f880568b1f0d0ee6057.tar.gz",
+        "kind": "original_member",
+        "member": "bindings/node/binding.cc"
+      },
+      "path": "upstream/authored/bindings/node/binding.cc",
+      "sha256": "038ba99a6380638e74f7f7a711171d9df240fcc9c1b2ac0315fc44e1175ba540"
+    },
+    {
+      "bytes": 452,
+      "origin": {
+        "archive": "tree-sitter-commonlisp-9db594efb43574c5fe4a1f880568b1f0d0ee6057.tar.gz",
+        "kind": "original_member",
+        "member": "bindings/node/index.d.ts"
+      },
+      "path": "upstream/authored/bindings/node/index.d.ts",
+      "sha256": "5f593f781f7cb12a3dcdcab2f9c063a77b9965f537bb01c5c05958947f5ff8fd"
+    },
+    {
+      "bytes": 201,
+      "origin": {
+        "archive": "tree-sitter-commonlisp-9db594efb43574c5fe4a1f880568b1f0d0ee6057.tar.gz",
+        "kind": "original_member",
+        "member": "bindings/node/index.js"
+      },
+      "path": "upstream/authored/bindings/node/index.js",
+      "sha256": "609bdf22b8fd183025b3c24e8587f6211d50358e8f2e4c526b9217349ed9dbc0"
+    },
+    {
+      "bytes": 611,
+      "origin": {
+        "archive": "tree-sitter-commonlisp-9db594efb43574c5fe4a1f880568b1f0d0ee6057.tar.gz",
+        "kind": "original_member",
+        "member": "bindings/python/tests/test_import.py"
+      },
+      "path": "upstream/authored/bindings/python/tests/test_import.py",
+      "sha256": "d830e3406cfd4a95cc235a8b299027268ba2384bcc5c4f94a20d8ba8ae2745b6"
+    },
+    {
+      "bytes": 93,
+      "origin": {
+        "archive": "tree-sitter-commonlisp-9db594efb43574c5fe4a1f880568b1f0d0ee6057.tar.gz",
+        "kind": "original_member",
+        "member": "bindings/python/tree_sitter_commonlisp/__init__.py"
+      },
+      "path": "upstream/authored/bindings/python/tree_sitter_commonlisp/__init__.py",
+      "sha256": "66080bad4dd69b3391cee6b43d5375c239b2b2db67a4cf54e904dd4adb38ae88"
+    },
+    {
+      "bytes": 27,
+      "origin": {
+        "archive": "tree-sitter-commonlisp-9db594efb43574c5fe4a1f880568b1f0d0ee6057.tar.gz",
+        "kind": "original_member",
+        "member": "bindings/python/tree_sitter_commonlisp/__init__.pyi"
+      },
+      "path": "upstream/authored/bindings/python/tree_sitter_commonlisp/__init__.pyi",
+      "sha256": "f317fb6d8d6cce00d8f47449ec5277dba4a8e121603224917c20782c00e44e95"
+    },
+    {
+      "bytes": 644,
+      "origin": {
+        "archive": "tree-sitter-commonlisp-9db594efb43574c5fe4a1f880568b1f0d0ee6057.tar.gz",
+        "kind": "original_member",
+        "member": "bindings/python/tree_sitter_commonlisp/binding.c"
+      },
+      "path": "upstream/authored/bindings/python/tree_sitter_commonlisp/binding.c",
+      "sha256": "88c0172cb95b1fd7de3fc28f428befa9e6582519da11824dd7e982e03ab5c0e3"
+    },
+    {
+      "bytes": 0,
+      "origin": {
+        "archive": "tree-sitter-commonlisp-9db594efb43574c5fe4a1f880568b1f0d0ee6057.tar.gz",
+        "kind": "original_member",
+        "member": "bindings/python/tree_sitter_commonlisp/py.typed"
+      },
+      "path": "upstream/authored/bindings/python/tree_sitter_commonlisp/py.typed",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "bytes": 1381,
+      "origin": {
+        "archive": "tree-sitter-commonlisp-9db594efb43574c5fe4a1f880568b1f0d0ee6057.tar.gz",
+        "kind": "original_member",
+        "member": "bindings/rust/build.rs"
+      },
+      "path": "upstream/authored/bindings/rust/build.rs",
+      "sha256": "87af5b1b1c0ef9a4ac5ba7537df5d470a32f421ed748fa5e7286256e2a56647d"
+    },
+    {
+      "bytes": 1990,
+      "origin": {
+        "archive": "tree-sitter-commonlisp-9db594efb43574c5fe4a1f880568b1f0d0ee6057.tar.gz",
+        "kind": "original_member",
+        "member": "bindings/rust/lib.rs"
+      },
+      "path": "upstream/authored/bindings/rust/lib.rs",
+      "sha256": "e2df82b7b29a55db499a0d3ec0d00f4a59de2deb7e6be052191b47755b0a2841"
+    },
+    {
+      "bytes": 262,
+      "origin": {
+        "archive": "tree-sitter-commonlisp-9db594efb43574c5fe4a1f880568b1f0d0ee6057.tar.gz",
+        "kind": "original_member",
+        "member": "bindings/swift/TreeSitterCommonlisp/commonlisp.h"
+      },
+      "path": "upstream/authored/bindings/swift/TreeSitterCommonlisp/commonlisp.h",
+      "sha256": "e8eaf4fb9c099d9d2cc85f3968e5c285af69fd0c9871011555997eaad4a4e44d"
+    },
+    {
+      "bytes": 384,
+      "origin": {
+        "archive": "tree-sitter-commonlisp-9db594efb43574c5fe4a1f880568b1f0d0ee6057.tar.gz",
+        "kind": "original_member",
+        "member": "bindings/swift/TreeSitterCommonlispTests/TreeSitterCommonlispTests.swift"
+      },
+      "path": "upstream/authored/bindings/swift/TreeSitterCommonlispTests/TreeSitterCommonlispTests.swift",
+      "sha256": "dd39795c4dc1cb3f6bcd2d23e2006f22e2f0ce0fc7ed8c64585b03ee59181774"
+    },
+    {
+      "bytes": 12893,
+      "origin": {
+        "archive": "tree-sitter-commonlisp-9db594efb43574c5fe4a1f880568b1f0d0ee6057.tar.gz",
+        "kind": "original_member",
+        "member": "grammar.js"
+      },
+      "path": "upstream/authored/grammar.js",
+      "sha256": "67694aa144004e79088da09c29652bca050b6600097cb79be4e2f164bd5c6882"
+    },
+    {
+      "bytes": 14198,
+      "origin": {
+        "archive": "tree-sitter-commonlisp-9db594efb43574c5fe4a1f880568b1f0d0ee6057.tar.gz",
+        "kind": "original_member",
+        "member": "package-lock.json"
+      },
+      "path": "upstream/authored/package-lock.json",
+      "sha256": "58c90f4a9003552614e8eff14fd1c424b57fd211d22cb8e56798f910a18c828b"
+    },
+    {
+      "bytes": 1131,
+      "origin": {
+        "archive": "tree-sitter-commonlisp-9db594efb43574c5fe4a1f880568b1f0d0ee6057.tar.gz",
+        "kind": "original_member",
+        "member": "package.json"
+      },
+      "path": "upstream/authored/package.json",
+      "sha256": "3ba24210ff798abb567d4a25d4ff9c28519f018b3376b47c05f9f2e2c1981004"
+    },
+    {
+      "bytes": 769,
+      "origin": {
+        "archive": "tree-sitter-commonlisp-9db594efb43574c5fe4a1f880568b1f0d0ee6057.tar.gz",
+        "kind": "original_member",
+        "member": "pyproject.toml"
+      },
+      "path": "upstream/authored/pyproject.toml",
+      "sha256": "a3e7582eddb31a0ccb9740b20d4994afddc4d8f298ff02f7e28edd63836f31ec"
+    },
+    {
+      "bytes": 4615,
+      "origin": {
+        "archive": "tree-sitter-commonlisp-9db594efb43574c5fe4a1f880568b1f0d0ee6057.tar.gz",
+        "kind": "original_member",
+        "member": "queries/tags.scm"
+      },
+      "path": "upstream/authored/queries/tags.scm",
+      "sha256": "6800ea8d8b843730b56d9da5ce73192de212cb541f00385e49ffa2f8c1a6839b"
+    },
+    {
+      "bytes": 1623,
+      "origin": {
+        "archive": "tree-sitter-commonlisp-9db594efb43574c5fe4a1f880568b1f0d0ee6057.tar.gz",
+        "kind": "original_member",
+        "member": "setup.py"
+      },
+      "path": "upstream/authored/setup.py",
+      "sha256": "0fe47f159ba77bd1661354dd7a7c9a80fbaa6c2a2ba63fcab60a7c516d197117"
+    },
+    {
+      "bytes": 114339,
+      "origin": {
+        "archive": "tree-sitter-commonlisp-9db594efb43574c5fe4a1f880568b1f0d0ee6057.tar.gz",
+        "kind": "original_member",
+        "member": "src/grammar.json"
+      },
+      "path": "upstream/authored/src/grammar.json",
+      "sha256": "a9ed06fc1e039f23146fefb8a0e0e038fae44ac5f1125171a057df84bb0d4144"
+    },
+    {
+      "bytes": 93257,
+      "origin": {
+        "archive": "tree-sitter-commonlisp-9db594efb43574c5fe4a1f880568b1f0d0ee6057.tar.gz",
+        "kind": "original_member",
+        "member": "src/node-types.json"
+      },
+      "path": "upstream/authored/src/node-types.json",
+      "sha256": "8ed5f1a827720c8591046f6b395b6288a9fe140d3d874cd2ceca87e23efde86e"
+    },
+    {
+      "bytes": 5878289,
+      "origin": {
+        "archive": "tree-sitter-commonlisp-9db594efb43574c5fe4a1f880568b1f0d0ee6057.tar.gz",
+        "kind": "original_member",
+        "member": "src/parser.c"
+      },
+      "path": "upstream/authored/src/parser.c",
+      "sha256": "96f34705d1c5a2b0a281e40c2c35aff72859439a5ae91dc7eaccca3a660db130"
+    },
+    {
+      "bytes": 985,
+      "origin": {
+        "archive": "tree-sitter-commonlisp-9db594efb43574c5fe4a1f880568b1f0d0ee6057.tar.gz",
+        "kind": "original_member",
+        "member": "src/tree_sitter/alloc.h"
+      },
+      "path": "upstream/authored/src/tree_sitter/alloc.h",
+      "sha256": "b29c1c9fb7cc82f58c84b376df1297d6e2737a1d655fd356db0859e3c29c2fea"
+    },
+    {
+      "bytes": 10431,
+      "origin": {
+        "archive": "tree-sitter-commonlisp-9db594efb43574c5fe4a1f880568b1f0d0ee6057.tar.gz",
+        "kind": "original_member",
+        "member": "src/tree_sitter/array.h"
+      },
+      "path": "upstream/authored/src/tree_sitter/array.h",
+      "sha256": "5bdf6ed1a78e3409fd443e085ca967a64c188a5d082aaf7f819bccd53a471c94"
+    },
+    {
+      "bytes": 7039,
+      "origin": {
+        "archive": "tree-sitter-commonlisp-9db594efb43574c5fe4a1f880568b1f0d0ee6057.tar.gz",
+        "kind": "original_member",
+        "member": "src/tree_sitter/parser.h"
+      },
+      "path": "upstream/authored/src/tree_sitter/parser.h",
+      "sha256": "a1f6ef161fbaf48a0e10fca90ef5290a062462b307b3898aa562993853b9f80a"
+    },
+    {
+      "bytes": 185,
+      "origin": {
+        "archive": "tree-sitter-commonlisp-9db594efb43574c5fe4a1f880568b1f0d0ee6057.tar.gz",
+        "kind": "original_member",
+        "member": "test.lisp"
+      },
+      "path": "upstream/authored/test.lisp",
+      "sha256": "baf38e0e20ee7a31931c266d3ecc8847997b781160b3e9012cdc509ad3f77326"
+    },
+    {
+      "bytes": 35156,
+      "origin": {
+        "archive": "tree-sitter-commonlisp-9db594efb43574c5fe4a1f880568b1f0d0ee6057.tar.gz",
+        "kind": "original_member",
+        "member": "test/corpus/basic.txt"
+      },
+      "path": "upstream/authored/test/corpus/basic.txt",
+      "sha256": "8b0a6ede84bf2558fe3cab9846f00bf50f276d2fcccafb2254295240f03a06ea"
+    },
+    {
+      "bytes": 2559,
+      "origin": {
+        "archive": "tree-sitter-commonlisp-9db594efb43574c5fe4a1f880568b1f0d0ee6057.tar.gz",
+        "kind": "original_member",
+        "member": "test/tags/tags-test.lisp"
+      },
+      "path": "upstream/authored/test/tags/tags-test.lisp",
+      "sha256": "05d507e3f7cd0def3fabc5aa2708d6a3982f5ff7feb4d58879c84109f5fb9834"
+    },
+    {
+      "bytes": 751,
+      "origin": {
+        "archive": "tree-sitter-commonlisp-9db594efb43574c5fe4a1f880568b1f0d0ee6057.tar.gz",
+        "kind": "original_member",
+        "member": "tree-sitter.json"
+      },
+      "path": "upstream/authored/tree-sitter.json",
+      "sha256": "a9d5200b26f48a56cbaec44af5d31c84433f94196a61aab7ddd316322672a140"
+    },
+    {
+      "bytes": 41,
+      "origin": {
+        "archive": "tree-sitter-clojure-95c7959c461406381b42113dcf4591008c663d21.tar.gz",
+        "kind": "original_member",
+        "member": ".gitignore"
+      },
+      "path": "upstream/clojure/.gitignore",
+      "sha256": "95d4735660d626f9ad5d39c8cd7698441de759baa3ada9adf08ca77b68c40c29"
+    },
+    {
+      "bytes": 7048,
+      "origin": {
+        "archive": "tree-sitter-clojure-95c7959c461406381b42113dcf4591008c663d21.tar.gz",
+        "kind": "original_member",
+        "member": "COPYING.txt"
+      },
+      "path": "upstream/clojure/COPYING.txt",
+      "sha256": "a2010f343487d3f7618affe54f789f5487602331c0a8d03f49e9a7c547cf0499"
+    },
+    {
+      "bytes": 513,
+      "origin": {
+        "archive": "tree-sitter-clojure-95c7959c461406381b42113dcf4591008c663d21.tar.gz",
+        "kind": "original_member",
+        "member": "Cargo.toml"
+      },
+      "path": "upstream/clojure/Cargo.toml",
+      "sha256": "97a4ff32a655ebb95d1cc0cbcc35287f58cf91c58e3a87d104250ea391f889bc"
+    },
+    {
+      "bytes": 5187,
+      "origin": {
+        "archive": "tree-sitter-clojure-95c7959c461406381b42113dcf4591008c663d21.tar.gz",
+        "kind": "original_member",
+        "member": "README.md"
+      },
+      "path": "upstream/clojure/README.md",
+      "sha256": "144f7d3fec0bbc2dee3ebcbe4eaa02bac16553ce0d295549903d118527cede44"
+    },
+    {
+      "bytes": 873,
+      "origin": {
+        "archive": "tree-sitter-clojure-95c7959c461406381b42113dcf4591008c663d21.tar.gz",
+        "kind": "original_member",
+        "member": "bindings/node/binding.cc"
+      },
+      "path": "upstream/clojure/bindings/node/binding.cc",
+      "sha256": "bada0b5d6434ab91b7947f890eec3f9896653146a9a89626916fbf85c2984a4a"
+    },
+    {
+      "bytes": 465,
+      "origin": {
+        "archive": "tree-sitter-clojure-95c7959c461406381b42113dcf4591008c663d21.tar.gz",
+        "kind": "original_member",
+        "member": "bindings/node/index.js"
+      },
+      "path": "upstream/clojure/bindings/node/index.js",
+      "sha256": "fa08c348bea6759e197af9085fdb1dc94f3ab0d9405742aadad776cbca46d383"
+    },
+    {
+      "bytes": 1319,
+      "origin": {
+        "archive": "tree-sitter-clojure-95c7959c461406381b42113dcf4591008c663d21.tar.gz",
+        "kind": "original_member",
+        "member": "bindings/rust/build.rs"
+      },
+      "path": "upstream/clojure/bindings/rust/build.rs",
+      "sha256": "949c88a2b24de7d814889b059992583409c316ebdfd0da30545540fb20efe2d1"
+    },
+    {
+      "bytes": 1958,
+      "origin": {
+        "archive": "tree-sitter-clojure-95c7959c461406381b42113dcf4591008c663d21.tar.gz",
+        "kind": "original_member",
+        "member": "bindings/rust/lib.rs"
+      },
+      "path": "upstream/clojure/bindings/rust/lib.rs",
+      "sha256": "42f7c6d8f3f33b2a913d60579d267137bcf5a47ae4a5c1f9784d9dca6515452f"
+    },
+    {
+      "bytes": 11868,
+      "origin": {
+        "archive": "tree-sitter-clojure-95c7959c461406381b42113dcf4591008c663d21.tar.gz",
+        "kind": "original_member",
+        "member": "grammar.js"
+      },
+      "path": "upstream/clojure/grammar.js",
+      "sha256": "e342724c7ec05b75bdb37709364265686150dda298ef02e2bfbcc0421126578e"
+    },
+    {
+      "bytes": 11572,
+      "origin": {
+        "archive": "tree-sitter-clojure-95c7959c461406381b42113dcf4591008c663d21.tar.gz",
+        "kind": "original_member",
+        "member": "notes.txt"
+      },
+      "path": "upstream/clojure/notes.txt",
+      "sha256": "a227548a2ddce3f7ca90e241cd64fa689c324940ea845416455f3fb2d175e138"
+    },
+    {
+      "bytes": 916,
+      "origin": {
+        "archive": "tree-sitter-clojure-95c7959c461406381b42113dcf4591008c663d21.tar.gz",
+        "kind": "original_member",
+        "member": "package-lock.json"
+      },
+      "path": "upstream/clojure/package-lock.json",
+      "sha256": "c85c78a83b95cbb81f7c2d1d1a6817820785231d492d1c2e382ff13883dee9fc"
+    },
+    {
+      "bytes": 585,
+      "origin": {
+        "archive": "tree-sitter-clojure-95c7959c461406381b42113dcf4591008c663d21.tar.gz",
+        "kind": "original_member",
+        "member": "package.json"
+      },
+      "path": "upstream/clojure/package.json",
+      "sha256": "22a1340cbd2bf395d1ad6a32ed14b5959c81df82c74ed15bf217b50013c66899"
+    },
+    {
+      "bytes": 39729,
+      "origin": {
+        "archive": "tree-sitter-clojure-95c7959c461406381b42113dcf4591008c663d21.tar.gz",
+        "kind": "original_member",
+        "member": "src/grammar.json"
+      },
+      "path": "upstream/clojure/src/grammar.json",
+      "sha256": "9a7c8bc61a3cda5bc64be3c7209631f768684aa83f0d1d4e349b859073817b25"
+    },
+    {
+      "bytes": 61414,
+      "origin": {
+        "archive": "tree-sitter-clojure-95c7959c461406381b42113dcf4591008c663d21.tar.gz",
+        "kind": "original_member",
+        "member": "src/node-types.json"
+      },
+      "path": "upstream/clojure/src/node-types.json",
+      "sha256": "245e3a1e33383d33922d0541e8ab06f157987e331b3b785de7f41435b8f44366"
+    },
+    {
+      "bytes": 439282,
+      "origin": {
+        "archive": "tree-sitter-clojure-95c7959c461406381b42113dcf4591008c663d21.tar.gz",
+        "kind": "original_member",
+        "member": "src/parser.c"
+      },
+      "path": "upstream/clojure/src/parser.c",
+      "sha256": "5607db8cc468e6d665cfe392c2a8ad1c9b419e9f2945f1d83eed9a6eaebcedd7"
+    },
+    {
+      "bytes": 5326,
+      "origin": {
+        "archive": "tree-sitter-clojure-95c7959c461406381b42113dcf4591008c663d21.tar.gz",
+        "kind": "original_member",
+        "member": "src/tree_sitter/parser.h"
+      },
+      "path": "upstream/clojure/src/tree_sitter/parser.h",
+      "sha256": "05729ff0c43ba3aebd8429a71e13c25a5dc7944e0eb725438bc98fda44573285"
+    },
+    {
+      "bytes": 1886,
+      "origin": {
+        "kind": "original_public_metadata"
+      },
+      "path": "upstream/metadata/registry-version.json",
+      "sha256": "4586e922ca253c16b585b8efeb29d1a02a3cfd287593c64057811dd4efe80aab"
+    },
+    {
+      "bytes": 94,
+      "origin": {
+        "archive": "tree-sitter-commonlisp-0.4.1.crate",
+        "kind": "original_member",
+        "member": ".cargo_vcs_info.json"
+      },
+      "path": "upstream/published/.cargo_vcs_info.json",
+      "sha256": "f1fff3cd1af0f24a57975919c94c390d3f9df1d8e1d60f8aeac4147693ec8bb6"
+    },
+    {
+      "bytes": 5160,
+      "origin": {
+        "archive": "tree-sitter-commonlisp-0.4.1.crate",
+        "kind": "original_member",
+        "member": "Cargo.lock"
+      },
+      "path": "upstream/published/Cargo.lock",
+      "sha256": "35361efcaf0dd2db50a7fc830f50d13172fbdc21ae3ded2633c85cef42d1c1c9"
+    },
+    {
+      "bytes": 1283,
+      "origin": {
+        "archive": "tree-sitter-commonlisp-0.4.1.crate",
+        "kind": "original_member",
+        "member": "Cargo.toml"
+      },
+      "path": "upstream/published/Cargo.toml",
+      "sha256": "a2667b996763aaca441badb7e734c58531b574b9c72b47c10b73ab283fe0874b"
+    },
+    {
+      "bytes": 614,
+      "origin": {
+        "archive": "tree-sitter-commonlisp-0.4.1.crate",
+        "kind": "original_member",
+        "member": "Cargo.toml.orig"
+      },
+      "path": "upstream/published/Cargo.toml.orig",
+      "sha256": "716589771efc0aaa7633fbdc1201fdd9f414b80d560f5e9b6d812a5cd4344960"
+    },
+    {
+      "bytes": 2904,
+      "origin": {
+        "archive": "tree-sitter-commonlisp-0.4.1.crate",
+        "kind": "original_member",
+        "member": "README.md"
+      },
+      "path": "upstream/published/README.md",
+      "sha256": "9545bb15cbec1c8af11a75438205e49541304932789a42895161a40c3e0487b1"
+    },
+    {
+      "bytes": 1381,
+      "origin": {
+        "archive": "tree-sitter-commonlisp-0.4.1.crate",
+        "kind": "original_member",
+        "member": "bindings/rust/build.rs"
+      },
+      "path": "upstream/published/bindings/rust/build.rs",
+      "sha256": "87af5b1b1c0ef9a4ac5ba7537df5d470a32f421ed748fa5e7286256e2a56647d"
+    },
+    {
+      "bytes": 1990,
+      "origin": {
+        "archive": "tree-sitter-commonlisp-0.4.1.crate",
+        "kind": "original_member",
+        "member": "bindings/rust/lib.rs"
+      },
+      "path": "upstream/published/bindings/rust/lib.rs",
+      "sha256": "e2df82b7b29a55db499a0d3ec0d00f4a59de2deb7e6be052191b47755b0a2841"
+    },
+    {
+      "bytes": 12893,
+      "origin": {
+        "archive": "tree-sitter-commonlisp-0.4.1.crate",
+        "kind": "original_member",
+        "member": "grammar.js"
+      },
+      "path": "upstream/published/grammar.js",
+      "sha256": "67694aa144004e79088da09c29652bca050b6600097cb79be4e2f164bd5c6882"
+    },
+    {
+      "bytes": 4615,
+      "origin": {
+        "archive": "tree-sitter-commonlisp-0.4.1.crate",
+        "kind": "original_member",
+        "member": "queries/tags.scm"
+      },
+      "path": "upstream/published/queries/tags.scm",
+      "sha256": "6800ea8d8b843730b56d9da5ce73192de212cb541f00385e49ffa2f8c1a6839b"
+    },
+    {
+      "bytes": 114339,
+      "origin": {
+        "archive": "tree-sitter-commonlisp-0.4.1.crate",
+        "kind": "original_member",
+        "member": "src/grammar.json"
+      },
+      "path": "upstream/published/src/grammar.json",
+      "sha256": "a9ed06fc1e039f23146fefb8a0e0e038fae44ac5f1125171a057df84bb0d4144"
+    },
+    {
+      "bytes": 93257,
+      "origin": {
+        "archive": "tree-sitter-commonlisp-0.4.1.crate",
+        "kind": "original_member",
+        "member": "src/node-types.json"
+      },
+      "path": "upstream/published/src/node-types.json",
+      "sha256": "8ed5f1a827720c8591046f6b395b6288a9fe140d3d874cd2ceca87e23efde86e"
+    },
+    {
+      "bytes": 5878289,
+      "origin": {
+        "archive": "tree-sitter-commonlisp-0.4.1.crate",
+        "kind": "original_member",
+        "member": "src/parser.c"
+      },
+      "path": "upstream/published/src/parser.c",
+      "sha256": "96f34705d1c5a2b0a281e40c2c35aff72859439a5ae91dc7eaccca3a660db130"
+    },
+    {
+      "bytes": 985,
+      "origin": {
+        "archive": "tree-sitter-commonlisp-0.4.1.crate",
+        "kind": "original_member",
+        "member": "src/tree_sitter/alloc.h"
+      },
+      "path": "upstream/published/src/tree_sitter/alloc.h",
+      "sha256": "b29c1c9fb7cc82f58c84b376df1297d6e2737a1d655fd356db0859e3c29c2fea"
+    },
+    {
+      "bytes": 10431,
+      "origin": {
+        "archive": "tree-sitter-commonlisp-0.4.1.crate",
+        "kind": "original_member",
+        "member": "src/tree_sitter/array.h"
+      },
+      "path": "upstream/published/src/tree_sitter/array.h",
+      "sha256": "5bdf6ed1a78e3409fd443e085ca967a64c188a5d082aaf7f819bccd53a471c94"
+    },
+    {
+      "bytes": 7039,
+      "origin": {
+        "archive": "tree-sitter-commonlisp-0.4.1.crate",
+        "kind": "original_member",
+        "member": "src/tree_sitter/parser.h"
+      },
+      "path": "upstream/published/src/tree_sitter/parser.h",
+      "sha256": "a1f6ef161fbaf48a0e10fca90ef5290a062462b307b3898aa562993853b9f80a"
+    }
+  ],
+  "schema": "rootlight.common-lisp-source-inventory/1",
+  "scope": "all_payload_files_excluding_the_two_self_describing_metadata_files",
+  "sources": [
+    {
+      "archive": "tree-sitter-commonlisp-0.4.1.crate",
+      "bytes": 254644,
+      "inventory": {
+        "authored_commit_comment_verified": false,
+        "expanded_tar_bytes": 6148608,
+        "member_count": 15,
+        "members": [
+          {
+            "bytes": 94,
+            "directory": false,
+            "executable_intent": false,
+            "path": ".cargo_vcs_info.json",
+            "raw_mode": 420,
+            "sha256": "f1fff3cd1af0f24a57975919c94c390d3f9df1d8e1d60f8aeac4147693ec8bb6"
+          },
+          {
+            "bytes": 5160,
+            "directory": false,
+            "executable_intent": false,
+            "path": "Cargo.lock",
+            "raw_mode": 420,
+            "sha256": "35361efcaf0dd2db50a7fc830f50d13172fbdc21ae3ded2633c85cef42d1c1c9"
+          },
+          {
+            "bytes": 1283,
+            "directory": false,
+            "executable_intent": false,
+            "path": "Cargo.toml",
+            "raw_mode": 420,
+            "sha256": "a2667b996763aaca441badb7e734c58531b574b9c72b47c10b73ab283fe0874b"
+          },
+          {
+            "bytes": 614,
+            "directory": false,
+            "executable_intent": false,
+            "path": "Cargo.toml.orig",
+            "raw_mode": 420,
+            "sha256": "716589771efc0aaa7633fbdc1201fdd9f414b80d560f5e9b6d812a5cd4344960"
+          },
+          {
+            "bytes": 2904,
+            "directory": false,
+            "executable_intent": false,
+            "path": "README.md",
+            "raw_mode": 420,
+            "sha256": "9545bb15cbec1c8af11a75438205e49541304932789a42895161a40c3e0487b1"
+          },
+          {
+            "bytes": 1381,
+            "directory": false,
+            "executable_intent": false,
+            "path": "bindings/rust/build.rs",
+            "raw_mode": 420,
+            "sha256": "87af5b1b1c0ef9a4ac5ba7537df5d470a32f421ed748fa5e7286256e2a56647d"
+          },
+          {
+            "bytes": 1990,
+            "directory": false,
+            "executable_intent": false,
+            "path": "bindings/rust/lib.rs",
+            "raw_mode": 420,
+            "sha256": "e2df82b7b29a55db499a0d3ec0d00f4a59de2deb7e6be052191b47755b0a2841"
+          },
+          {
+            "bytes": 12893,
+            "directory": false,
+            "executable_intent": false,
+            "path": "grammar.js",
+            "raw_mode": 420,
+            "sha256": "67694aa144004e79088da09c29652bca050b6600097cb79be4e2f164bd5c6882"
+          },
+          {
+            "bytes": 4615,
+            "directory": false,
+            "executable_intent": false,
+            "path": "queries/tags.scm",
+            "raw_mode": 420,
+            "sha256": "6800ea8d8b843730b56d9da5ce73192de212cb541f00385e49ffa2f8c1a6839b"
+          },
+          {
+            "bytes": 114339,
+            "directory": false,
+            "executable_intent": false,
+            "path": "src/grammar.json",
+            "raw_mode": 420,
+            "sha256": "a9ed06fc1e039f23146fefb8a0e0e038fae44ac5f1125171a057df84bb0d4144"
+          },
+          {
+            "bytes": 93257,
+            "directory": false,
+            "executable_intent": false,
+            "path": "src/node-types.json",
+            "raw_mode": 420,
+            "sha256": "8ed5f1a827720c8591046f6b395b6288a9fe140d3d874cd2ceca87e23efde86e"
+          },
+          {
+            "bytes": 5878289,
+            "directory": false,
+            "executable_intent": false,
+            "path": "src/parser.c",
+            "raw_mode": 420,
+            "sha256": "96f34705d1c5a2b0a281e40c2c35aff72859439a5ae91dc7eaccca3a660db130"
+          },
+          {
+            "bytes": 985,
+            "directory": false,
+            "executable_intent": false,
+            "path": "src/tree_sitter/alloc.h",
+            "raw_mode": 420,
+            "sha256": "b29c1c9fb7cc82f58c84b376df1297d6e2737a1d655fd356db0859e3c29c2fea"
+          },
+          {
+            "bytes": 10431,
+            "directory": false,
+            "executable_intent": false,
+            "path": "src/tree_sitter/array.h",
+            "raw_mode": 420,
+            "sha256": "5bdf6ed1a78e3409fd443e085ca967a64c188a5d082aaf7f819bccd53a471c94"
+          },
+          {
+            "bytes": 7039,
+            "directory": false,
+            "executable_intent": false,
+            "path": "src/tree_sitter/parser.h",
+            "raw_mode": 420,
+            "sha256": "a1f6ef161fbaf48a0e10fca90ef5290a062462b307b3898aa562993853b9f80a"
+          }
+        ],
+        "prefix": "tree-sitter-commonlisp-0.4.1",
+        "regular_file_bytes": 6135274,
+        "regular_file_count": 15
+      },
+      "kind": "published",
+      "retained_tree": "upstream/published",
+      "sha256": "36c662ae95eee8c5ada519d4fe87261c5fbcc3ffaac4b10c03d460154cd6a9b2"
+    },
+    {
+      "archive": "tree-sitter-commonlisp-9db594efb43574c5fe4a1f880568b1f0d0ee6057.tar.gz",
+      "bytes": 299808,
+      "inventory": {
+        "authored_commit_comment_verified": true,
+        "expanded_tar_bytes": 6256640,
+        "member_count": 70,
+        "members": [
+          {
+            "bytes": 0,
+            "directory": true,
+            "executable_intent": false,
+            "path": "",
+            "raw_mode": 509
+          },
+          {
+            "bytes": 502,
+            "directory": false,
+            "executable_intent": false,
+            "path": ".editorconfig",
+            "raw_mode": 436,
+            "sha256": "9b6da2df3a325dbed2f93e1909dccdda3efa2eba84565b6ef7f0295c5551b770"
+          },
+          {
+            "bytes": 266,
+            "directory": false,
+            "executable_intent": false,
+            "path": ".gitattributes",
+            "raw_mode": 436,
+            "sha256": "fe17aaa634b5b625393d17915f507e4410961b663a2be9cd505503f57008fb17"
+          },
+          {
+            "bytes": 0,
+            "directory": true,
+            "executable_intent": false,
+            "path": ".github",
+            "raw_mode": 509
+          },
+          {
+            "bytes": 0,
+            "directory": true,
+            "executable_intent": false,
+            "path": ".github/workflows",
+            "raw_mode": 509
+          },
+          {
+            "bytes": 1165,
+            "directory": false,
+            "executable_intent": false,
+            "path": ".github/workflows/ci.yml",
+            "raw_mode": 436,
+            "sha256": "a01c35c05d40b91a258a5dd6306ce4219510fcb6eca4a3c8654057e0cc2acce4"
+          },
+          {
+            "bytes": 484,
+            "directory": false,
+            "executable_intent": false,
+            "path": ".github/workflows/publish.yml",
+            "raw_mode": 436,
+            "sha256": "c242be0941967fb616ddd70189f21ff5c18afdd0f759712ca3c466f25fe7f775"
+          },
+          {
+            "bytes": 35,
+            "directory": false,
+            "executable_intent": false,
+            "path": ".gitignore",
+            "raw_mode": 436,
+            "sha256": "9da110975ada363b7377fd7a448b37a44f0a0f03ac9494622c6efa2ea9596fc4"
+          },
+          {
+            "bytes": 186,
+            "directory": false,
+            "executable_intent": false,
+            "path": ".gitmodules",
+            "raw_mode": 436,
+            "sha256": "a8a96959ba2e1f4be8d3a3b2af638039e9da2dd81effa2488cb7753c217f94fb"
+          },
+          {
+            "bytes": 31,
+            "directory": false,
+            "executable_intent": false,
+            "path": ".npmignore",
+            "raw_mode": 436,
+            "sha256": "a478b78bd51f1d016548c230dce6a827d63307987150a14fdc443116ab0635c4"
+          },
+          {
+            "bytes": 5160,
+            "directory": false,
+            "executable_intent": false,
+            "path": "Cargo.lock",
+            "raw_mode": 436,
+            "sha256": "35361efcaf0dd2db50a7fc830f50d13172fbdc21ae3ded2633c85cef42d1c1c9"
+          },
+          {
+            "bytes": 614,
+            "directory": false,
+            "executable_intent": false,
+            "path": "Cargo.toml",
+            "raw_mode": 436,
+            "sha256": "716589771efc0aaa7633fbdc1201fdd9f414b80d560f5e9b6d812a5cd4344960"
+          },
+          {
+            "bytes": 1080,
+            "directory": false,
+            "executable_intent": false,
+            "path": "LICENSE.md",
+            "raw_mode": 436,
+            "sha256": "00bb7f417416e8233ae465209e72eaa6162d53b061add7d9bed0238552a6fa0c"
+          },
+          {
+            "bytes": 3567,
+            "directory": false,
+            "executable_intent": false,
+            "path": "Makefile",
+            "raw_mode": 436,
+            "sha256": "46783e69289d741f1905a2376f7b6fa7c95137933a596555dbed5160e35a5ec9"
+          },
+          {
+            "bytes": 1887,
+            "directory": false,
+            "executable_intent": false,
+            "path": "Package.swift",
+            "raw_mode": 436,
+            "sha256": "97ba1b1948294897a5ec75e628301e8ddc130dcbc43a393a4b15eb7ce6c7b529"
+          },
+          {
+            "bytes": 2904,
+            "directory": false,
+            "executable_intent": false,
+            "path": "README.md",
+            "raw_mode": 436,
+            "sha256": "9545bb15cbec1c8af11a75438205e49541304932789a42895161a40c3e0487b1"
+          },
+          {
+            "bytes": 462,
+            "directory": false,
+            "executable_intent": false,
+            "path": "binding.gyp",
+            "raw_mode": 436,
+            "sha256": "46397da184929daff3075571cee07514f54d5a8d84d8cb57fcb1ea1eafc872f4"
+          },
+          {
+            "bytes": 0,
+            "directory": true,
+            "executable_intent": false,
+            "path": "bindings",
+            "raw_mode": 509
+          },
+          {
+            "bytes": 0,
+            "directory": true,
+            "executable_intent": false,
+            "path": "bindings/c",
+            "raw_mode": 509
+          },
+          {
+            "bytes": 262,
+            "directory": false,
+            "executable_intent": false,
+            "path": "bindings/c/tree-sitter-commonlisp.h",
+            "raw_mode": 436,
+            "sha256": "e8eaf4fb9c099d9d2cc85f3968e5c285af69fd0c9871011555997eaad4a4e44d"
+          },
+          {
+            "bytes": 270,
+            "directory": false,
+            "executable_intent": false,
+            "path": "bindings/c/tree-sitter-commonlisp.pc.in",
+            "raw_mode": 436,
+            "sha256": "c811de795b68e7d9cdc3f41dbe5ae074e2f622ed5862c172237931871e1be707"
+          },
+          {
+            "bytes": 0,
+            "directory": true,
+            "executable_intent": false,
+            "path": "bindings/go",
+            "raw_mode": 509
+          },
+          {
+            "bytes": 328,
+            "directory": false,
+            "executable_intent": false,
+            "path": "bindings/go/binding.go",
+            "raw_mode": 436,
+            "sha256": "f359d5013470634bcca799ca8624c23adaea355cbb310f5a4677536c4b24a072"
+          },
+          {
+            "bytes": 345,
+            "directory": false,
+            "executable_intent": false,
+            "path": "bindings/go/binding_test.go",
+            "raw_mode": 436,
+            "sha256": "7ee3943f6027ca1ab0722b39635fdb70fee7fe5e14294eb8d68cc105be53e793"
+          },
+          {
+            "bytes": 140,
+            "directory": false,
+            "executable_intent": false,
+            "path": "bindings/go/go.mod",
+            "raw_mode": 436,
+            "sha256": "10955d01edaf6601cb1c3fdfa10f8b8751920225dc1c67e2b97331a0c4958511"
+          },
+          {
+            "bytes": 1481,
+            "directory": false,
+            "executable_intent": false,
+            "path": "bindings/go/go.sum",
+            "raw_mode": 436,
+            "sha256": "508d73c1545d69d0d51119d13e04669f9d209c72d2b02dd8e9b045bb9fc1a964"
+          },
+          {
+            "bytes": 0,
+            "directory": true,
+            "executable_intent": false,
+            "path": "bindings/node",
+            "raw_mode": 509
+          },
+          {
+            "bytes": 599,
+            "directory": false,
+            "executable_intent": false,
+            "path": "bindings/node/binding.cc",
+            "raw_mode": 436,
+            "sha256": "038ba99a6380638e74f7f7a711171d9df240fcc9c1b2ac0315fc44e1175ba540"
+          },
+          {
+            "bytes": 452,
+            "directory": false,
+            "executable_intent": false,
+            "path": "bindings/node/index.d.ts",
+            "raw_mode": 436,
+            "sha256": "5f593f781f7cb12a3dcdcab2f9c063a77b9965f537bb01c5c05958947f5ff8fd"
+          },
+          {
+            "bytes": 201,
+            "directory": false,
+            "executable_intent": false,
+            "path": "bindings/node/index.js",
+            "raw_mode": 436,
+            "sha256": "609bdf22b8fd183025b3c24e8587f6211d50358e8f2e4c526b9217349ed9dbc0"
+          },
+          {
+            "bytes": 0,
+            "directory": true,
+            "executable_intent": false,
+            "path": "bindings/python",
+            "raw_mode": 509
+          },
+          {
+            "bytes": 0,
+            "directory": true,
+            "executable_intent": false,
+            "path": "bindings/python/tests",
+            "raw_mode": 509
+          },
+          {
+            "bytes": 611,
+            "directory": false,
+            "executable_intent": false,
+            "path": "bindings/python/tests/test_import.py",
+            "raw_mode": 436,
+            "sha256": "d830e3406cfd4a95cc235a8b299027268ba2384bcc5c4f94a20d8ba8ae2745b6"
+          },
+          {
+            "bytes": 0,
+            "directory": true,
+            "executable_intent": false,
+            "path": "bindings/python/tree_sitter_commonlisp",
+            "raw_mode": 509
+          },
+          {
+            "bytes": 93,
+            "directory": false,
+            "executable_intent": false,
+            "path": "bindings/python/tree_sitter_commonlisp/__init__.py",
+            "raw_mode": 436,
+            "sha256": "66080bad4dd69b3391cee6b43d5375c239b2b2db67a4cf54e904dd4adb38ae88"
+          },
+          {
+            "bytes": 27,
+            "directory": false,
+            "executable_intent": false,
+            "path": "bindings/python/tree_sitter_commonlisp/__init__.pyi",
+            "raw_mode": 436,
+            "sha256": "f317fb6d8d6cce00d8f47449ec5277dba4a8e121603224917c20782c00e44e95"
+          },
+          {
+            "bytes": 644,
+            "directory": false,
+            "executable_intent": false,
+            "path": "bindings/python/tree_sitter_commonlisp/binding.c",
+            "raw_mode": 436,
+            "sha256": "88c0172cb95b1fd7de3fc28f428befa9e6582519da11824dd7e982e03ab5c0e3"
+          },
+          {
+            "bytes": 0,
+            "directory": false,
+            "executable_intent": false,
+            "path": "bindings/python/tree_sitter_commonlisp/py.typed",
+            "raw_mode": 436,
+            "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+          },
+          {
+            "bytes": 0,
+            "directory": true,
+            "executable_intent": false,
+            "path": "bindings/rust",
+            "raw_mode": 509
+          },
+          {
+            "bytes": 1381,
+            "directory": false,
+            "executable_intent": false,
+            "path": "bindings/rust/build.rs",
+            "raw_mode": 436,
+            "sha256": "87af5b1b1c0ef9a4ac5ba7537df5d470a32f421ed748fa5e7286256e2a56647d"
+          },
+          {
+            "bytes": 1990,
+            "directory": false,
+            "executable_intent": false,
+            "path": "bindings/rust/lib.rs",
+            "raw_mode": 436,
+            "sha256": "e2df82b7b29a55db499a0d3ec0d00f4a59de2deb7e6be052191b47755b0a2841"
+          },
+          {
+            "bytes": 0,
+            "directory": true,
+            "executable_intent": false,
+            "path": "bindings/swift",
+            "raw_mode": 509
+          },
+          {
+            "bytes": 0,
+            "directory": true,
+            "executable_intent": false,
+            "path": "bindings/swift/TreeSitterCommonlisp",
+            "raw_mode": 509
+          },
+          {
+            "bytes": 262,
+            "directory": false,
+            "executable_intent": false,
+            "path": "bindings/swift/TreeSitterCommonlisp/commonlisp.h",
+            "raw_mode": 436,
+            "sha256": "e8eaf4fb9c099d9d2cc85f3968e5c285af69fd0c9871011555997eaad4a4e44d"
+          },
+          {
+            "bytes": 0,
+            "directory": true,
+            "executable_intent": false,
+            "path": "bindings/swift/TreeSitterCommonlispTests",
+            "raw_mode": 509
+          },
+          {
+            "bytes": 384,
+            "directory": false,
+            "executable_intent": false,
+            "path": "bindings/swift/TreeSitterCommonlispTests/TreeSitterCommonlispTests.swift",
+            "raw_mode": 436,
+            "sha256": "dd39795c4dc1cb3f6bcd2d23e2006f22e2f0ce0fc7ed8c64585b03ee59181774"
+          },
+          {
+            "bytes": 12893,
+            "directory": false,
+            "executable_intent": false,
+            "path": "grammar.js",
+            "raw_mode": 436,
+            "sha256": "67694aa144004e79088da09c29652bca050b6600097cb79be4e2f164bd5c6882"
+          },
+          {
+            "bytes": 14198,
+            "directory": false,
+            "executable_intent": false,
+            "path": "package-lock.json",
+            "raw_mode": 436,
+            "sha256": "58c90f4a9003552614e8eff14fd1c424b57fd211d22cb8e56798f910a18c828b"
+          },
+          {
+            "bytes": 1131,
+            "directory": false,
+            "executable_intent": false,
+            "path": "package.json",
+            "raw_mode": 436,
+            "sha256": "3ba24210ff798abb567d4a25d4ff9c28519f018b3376b47c05f9f2e2c1981004"
+          },
+          {
+            "bytes": 769,
+            "directory": false,
+            "executable_intent": false,
+            "path": "pyproject.toml",
+            "raw_mode": 436,
+            "sha256": "a3e7582eddb31a0ccb9740b20d4994afddc4d8f298ff02f7e28edd63836f31ec"
+          },
+          {
+            "bytes": 0,
+            "directory": true,
+            "executable_intent": false,
+            "path": "queries",
+            "raw_mode": 509
+          },
+          {
+            "bytes": 4615,
+            "directory": false,
+            "executable_intent": false,
+            "path": "queries/tags.scm",
+            "raw_mode": 436,
+            "sha256": "6800ea8d8b843730b56d9da5ce73192de212cb541f00385e49ffa2f8c1a6839b"
+          },
+          {
+            "bytes": 1623,
+            "directory": false,
+            "executable_intent": false,
+            "path": "setup.py",
+            "raw_mode": 436,
+            "sha256": "0fe47f159ba77bd1661354dd7a7c9a80fbaa6c2a2ba63fcab60a7c516d197117"
+          },
+          {
+            "bytes": 0,
+            "directory": true,
+            "executable_intent": false,
+            "path": "src",
+            "raw_mode": 509
+          },
+          {
+            "bytes": 114339,
+            "directory": false,
+            "executable_intent": false,
+            "path": "src/grammar.json",
+            "raw_mode": 436,
+            "sha256": "a9ed06fc1e039f23146fefb8a0e0e038fae44ac5f1125171a057df84bb0d4144"
+          },
+          {
+            "bytes": 93257,
+            "directory": false,
+            "executable_intent": false,
+            "path": "src/node-types.json",
+            "raw_mode": 436,
+            "sha256": "8ed5f1a827720c8591046f6b395b6288a9fe140d3d874cd2ceca87e23efde86e"
+          },
+          {
+            "bytes": 5878289,
+            "directory": false,
+            "executable_intent": false,
+            "path": "src/parser.c",
+            "raw_mode": 436,
+            "sha256": "96f34705d1c5a2b0a281e40c2c35aff72859439a5ae91dc7eaccca3a660db130"
+          },
+          {
+            "bytes": 0,
+            "directory": true,
+            "executable_intent": false,
+            "path": "src/tree_sitter",
+            "raw_mode": 509
+          },
+          {
+            "bytes": 985,
+            "directory": false,
+            "executable_intent": false,
+            "path": "src/tree_sitter/alloc.h",
+            "raw_mode": 436,
+            "sha256": "b29c1c9fb7cc82f58c84b376df1297d6e2737a1d655fd356db0859e3c29c2fea"
+          },
+          {
+            "bytes": 10431,
+            "directory": false,
+            "executable_intent": false,
+            "path": "src/tree_sitter/array.h",
+            "raw_mode": 436,
+            "sha256": "5bdf6ed1a78e3409fd443e085ca967a64c188a5d082aaf7f819bccd53a471c94"
+          },
+          {
+            "bytes": 7039,
+            "directory": false,
+            "executable_intent": false,
+            "path": "src/tree_sitter/parser.h",
+            "raw_mode": 436,
+            "sha256": "a1f6ef161fbaf48a0e10fca90ef5290a062462b307b3898aa562993853b9f80a"
+          },
+          {
+            "bytes": 185,
+            "directory": false,
+            "executable_intent": false,
+            "path": "test.lisp",
+            "raw_mode": 436,
+            "sha256": "baf38e0e20ee7a31931c266d3ecc8847997b781160b3e9012cdc509ad3f77326"
+          },
+          {
+            "bytes": 0,
+            "directory": true,
+            "executable_intent": false,
+            "path": "test",
+            "raw_mode": 509
+          },
+          {
+            "bytes": 0,
+            "directory": true,
+            "executable_intent": false,
+            "path": "test/Petalisp",
+            "raw_mode": 509
+          },
+          {
+            "bytes": 0,
+            "directory": true,
+            "executable_intent": false,
+            "path": "test/corpus",
+            "raw_mode": 509
+          },
+          {
+            "bytes": 35156,
+            "directory": false,
+            "executable_intent": false,
+            "path": "test/corpus/basic.txt",
+            "raw_mode": 436,
+            "sha256": "8b0a6ede84bf2558fe3cab9846f00bf50f276d2fcccafb2254295240f03a06ea"
+          },
+          {
+            "bytes": 0,
+            "directory": true,
+            "executable_intent": false,
+            "path": "test/sly",
+            "raw_mode": 509
+          },
+          {
+            "bytes": 0,
+            "directory": true,
+            "executable_intent": false,
+            "path": "test/tags",
+            "raw_mode": 509
+          },
+          {
+            "bytes": 2559,
+            "directory": false,
+            "executable_intent": false,
+            "path": "test/tags/tags-test.lisp",
+            "raw_mode": 436,
+            "sha256": "05d507e3f7cd0def3fabc5aa2708d6a3982f5ff7feb4d58879c84109f5fb9834"
+          },
+          {
+            "bytes": 751,
+            "directory": false,
+            "executable_intent": false,
+            "path": "tree-sitter.json",
+            "raw_mode": 436,
+            "sha256": "a9d5200b26f48a56cbaec44af5d31c84433f94196a61aab7ddd316322672a140"
+          }
+        ],
+        "prefix": "tree-sitter-commonlisp-9db594efb43574c5fe4a1f880568b1f0d0ee6057",
+        "regular_file_bytes": 6206033,
+        "regular_file_count": 48
+      },
+      "kind": "authored",
+      "retained_tree": "upstream/authored",
+      "sha256": "d5421c73789565b0fc56d2f1187c9d379519d0226a7bd36932b94064ec14ff07"
+    },
+    {
+      "archive": "tree-sitter-clojure-95c7959c461406381b42113dcf4591008c663d21.tar.gz",
+      "bytes": 47548,
+      "inventory": {
+        "authored_commit_comment_verified": true,
+        "expanded_tar_bytes": 614400,
+        "member_count": 22,
+        "members": [
+          {
+            "bytes": 0,
+            "directory": true,
+            "executable_intent": false,
+            "path": "",
+            "raw_mode": 509
+          },
+          {
+            "bytes": 41,
+            "directory": false,
+            "executable_intent": false,
+            "path": ".gitignore",
+            "raw_mode": 436,
+            "sha256": "95d4735660d626f9ad5d39c8cd7698441de759baa3ada9adf08ca77b68c40c29"
+          },
+          {
+            "bytes": 7048,
+            "directory": false,
+            "executable_intent": false,
+            "path": "COPYING.txt",
+            "raw_mode": 436,
+            "sha256": "a2010f343487d3f7618affe54f789f5487602331c0a8d03f49e9a7c547cf0499"
+          },
+          {
+            "bytes": 513,
+            "directory": false,
+            "executable_intent": false,
+            "path": "Cargo.toml",
+            "raw_mode": 436,
+            "sha256": "97a4ff32a655ebb95d1cc0cbcc35287f58cf91c58e3a87d104250ea391f889bc"
+          },
+          {
+            "bytes": 5187,
+            "directory": false,
+            "executable_intent": false,
+            "path": "README.md",
+            "raw_mode": 436,
+            "sha256": "144f7d3fec0bbc2dee3ebcbe4eaa02bac16553ce0d295549903d118527cede44"
+          },
+          {
+            "bytes": 0,
+            "directory": true,
+            "executable_intent": false,
+            "path": "bindings",
+            "raw_mode": 509
+          },
+          {
+            "bytes": 0,
+            "directory": true,
+            "executable_intent": false,
+            "path": "bindings/node",
+            "raw_mode": 509
+          },
+          {
+            "bytes": 873,
+            "directory": false,
+            "executable_intent": false,
+            "path": "bindings/node/binding.cc",
+            "raw_mode": 436,
+            "sha256": "bada0b5d6434ab91b7947f890eec3f9896653146a9a89626916fbf85c2984a4a"
+          },
+          {
+            "bytes": 465,
+            "directory": false,
+            "executable_intent": false,
+            "path": "bindings/node/index.js",
+            "raw_mode": 436,
+            "sha256": "fa08c348bea6759e197af9085fdb1dc94f3ab0d9405742aadad776cbca46d383"
+          },
+          {
+            "bytes": 0,
+            "directory": true,
+            "executable_intent": false,
+            "path": "bindings/rust",
+            "raw_mode": 509
+          },
+          {
+            "bytes": 1319,
+            "directory": false,
+            "executable_intent": false,
+            "path": "bindings/rust/build.rs",
+            "raw_mode": 436,
+            "sha256": "949c88a2b24de7d814889b059992583409c316ebdfd0da30545540fb20efe2d1"
+          },
+          {
+            "bytes": 1958,
+            "directory": false,
+            "executable_intent": false,
+            "path": "bindings/rust/lib.rs",
+            "raw_mode": 436,
+            "sha256": "42f7c6d8f3f33b2a913d60579d267137bcf5a47ae4a5c1f9784d9dca6515452f"
+          },
+          {
+            "bytes": 11868,
+            "directory": false,
+            "executable_intent": false,
+            "path": "grammar.js",
+            "raw_mode": 436,
+            "sha256": "e342724c7ec05b75bdb37709364265686150dda298ef02e2bfbcc0421126578e"
+          },
+          {
+            "bytes": 11572,
+            "directory": false,
+            "executable_intent": false,
+            "path": "notes.txt",
+            "raw_mode": 436,
+            "sha256": "a227548a2ddce3f7ca90e241cd64fa689c324940ea845416455f3fb2d175e138"
+          },
+          {
+            "bytes": 916,
+            "directory": false,
+            "executable_intent": false,
+            "path": "package-lock.json",
+            "raw_mode": 436,
+            "sha256": "c85c78a83b95cbb81f7c2d1d1a6817820785231d492d1c2e382ff13883dee9fc"
+          },
+          {
+            "bytes": 585,
+            "directory": false,
+            "executable_intent": false,
+            "path": "package.json",
+            "raw_mode": 436,
+            "sha256": "22a1340cbd2bf395d1ad6a32ed14b5959c81df82c74ed15bf217b50013c66899"
+          },
+          {
+            "bytes": 0,
+            "directory": true,
+            "executable_intent": false,
+            "path": "src",
+            "raw_mode": 509
+          },
+          {
+            "bytes": 39729,
+            "directory": false,
+            "executable_intent": false,
+            "path": "src/grammar.json",
+            "raw_mode": 436,
+            "sha256": "9a7c8bc61a3cda5bc64be3c7209631f768684aa83f0d1d4e349b859073817b25"
+          },
+          {
+            "bytes": 61414,
+            "directory": false,
+            "executable_intent": false,
+            "path": "src/node-types.json",
+            "raw_mode": 436,
+            "sha256": "245e3a1e33383d33922d0541e8ab06f157987e331b3b785de7f41435b8f44366"
+          },
+          {
+            "bytes": 439282,
+            "directory": false,
+            "executable_intent": false,
+            "path": "src/parser.c",
+            "raw_mode": 436,
+            "sha256": "5607db8cc468e6d665cfe392c2a8ad1c9b419e9f2945f1d83eed9a6eaebcedd7"
+          },
+          {
+            "bytes": 0,
+            "directory": true,
+            "executable_intent": false,
+            "path": "src/tree_sitter",
+            "raw_mode": 509
+          },
+          {
+            "bytes": 5326,
+            "directory": false,
+            "executable_intent": false,
+            "path": "src/tree_sitter/parser.h",
+            "raw_mode": 436,
+            "sha256": "05729ff0c43ba3aebd8429a71e13c25a5dc7944e0eb725438bc98fda44573285"
+          }
+        ],
+        "prefix": "tree-sitter-clojure-95c7959c461406381b42113dcf4591008c663d21",
+        "regular_file_bytes": 588096,
+        "regular_file_count": 16
+      },
+      "kind": "clojure",
+      "retained_tree": "upstream/clojure",
+      "sha256": "2008d63049215d63920bd11290a83061d4efe0718a3009826479f3926464b6a4"
+    }
+  ]
+}

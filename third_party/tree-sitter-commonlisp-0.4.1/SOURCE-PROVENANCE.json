@@ -1,0 +1,159 @@
+{
+  "archive_identity_pins": [
+    {
+      "archive": "tree-sitter-commonlisp-0.4.1.crate",
+      "bytes": 254644,
+      "sha256": "36c662ae95eee8c5ada519d4fe87261c5fbcc3ffaac4b10c03d460154cd6a9b2"
+    },
+    {
+      "archive": "tree-sitter-commonlisp-9db594efb43574c5fe4a1f880568b1f0d0ee6057.tar.gz",
+      "bytes": 299808,
+      "sha256": "d5421c73789565b0fc56d2f1187c9d379519d0226a7bd36932b94064ec14ff07"
+    },
+    {
+      "archive": "tree-sitter-clojure-95c7959c461406381b42113dcf4591008c663d21.tar.gz",
+      "bytes": 47548,
+      "sha256": "2008d63049215d63920bd11290a83061d4efe0718a3009826479f3926464b6a4"
+    }
+  ],
+  "archive_signature_or_signed_git_object_verified": false,
+  "authored_revision": "9db594efb43574c5fe4a1f880568b1f0d0ee6057",
+  "build_and_packaging_acceptance_verified": false,
+  "complete_historical_notice_chain_verified": false,
+  "complete_product_source_closure_proven": false,
+  "direct_preferred_import": {
+    "bytes": 11868,
+    "fresh_generation_projection_only": true,
+    "further_imports": [],
+    "npm_lifecycle_activated": false,
+    "retained_source": "upstream/clojure/grammar.js",
+    "sha256": "e342724c7ec05b75bdb37709364265686150dda298ef02e2bfbcc0421126578e",
+    "specifier": "tree-sitter-clojure/grammar"
+  },
+  "empty_dependency_cache_verified": false,
+  "generation_at_build_time": false,
+  "inherited_repository": "https://github.com/theHamsta/tree-sitter-clojure",
+  "inherited_revision": "95c7959c461406381b42113dcf4591008c663d21",
+  "installed_mcp_verified": false,
+  "inventory": {
+    "bytes": 66683,
+    "path": "SOURCE-INVENTORY.json",
+    "sha256": "3eb1637baa990d2b1c5156d1a5afc15653baf2d427774755c7d3de857d91ab1b"
+  },
+  "isolated_native_evidence": {
+    "additive_fixture_pin": {
+      "bytes": 4833,
+      "sha256": "c7f341f2d167acad3f490def7f56531ac5ec1386e9852eadff6f48d6176c8370"
+    },
+    "additive_groups": 5,
+    "all_targets_clippy_deny_warnings_exit_code": 0,
+    "current_exit_code": 0,
+    "current_rust": "1.97.1",
+    "minimum_exit_code": 0,
+    "minimum_rust": "1.90.0",
+    "receipt_pin": {
+      "bytes": 13607,
+      "sha256": "2cd0d7b827559a0033630aad900d2314e51275b9903eb355bdc53ac77dd21ba7"
+    },
+    "relocated_package_wrapper_executed": false,
+    "scope": "exact_parser_scanner_and_prior_isolated_wrapper_not_relocated_package",
+    "syntax_groups": 10,
+    "unchanged_frozen_fixture_pin": {
+      "bytes": 18447,
+      "sha256": "37a90a1043fdef57b73e5ce946ed125129ec4094ab9067b89334b2e5c560106b"
+    }
+  },
+  "local_generation": {
+    "abi": 14,
+    "actual_exit_codes": [
+      0,
+      0
+    ],
+    "actual_producers": 2,
+    "command": "tree-sitter generate --abi 14 --js-runtime node grammar.js",
+    "external_token_count": 1,
+    "lexical_guard_exit_codes": [
+      0,
+      0
+    ],
+    "node": "24.11.1",
+    "outputs": {
+      "src/grammar.json": {
+        "bytes": 132243,
+        "sha256": "3cfd4b567d009908bd0d937ae60be231bacb9dd4d71e06408c313fe04a6278e8"
+      },
+      "src/node-types.json": {
+        "bytes": 93470,
+        "sha256": "b2f7bd1f7589385a99af9e35337cd62e52eb49c551ab4b814e68e0734c4b231b"
+      },
+      "src/parser.c": {
+        "bytes": 6503770,
+        "sha256": "c4518318808f6f93881d0f4cbcffc068d396ca0ee43ffc48d61962d0484d4e22"
+      },
+      "src/tree_sitter/alloc.h": {
+        "bytes": 985,
+        "sha256": "b29c1c9fb7cc82f58c84b376df1297d6e2737a1d655fd356db0859e3c29c2fea"
+      },
+      "src/tree_sitter/array.h": {
+        "bytes": 13269,
+        "sha256": "31e60a1bff6f715afacce03b5b70efe42b58371b4f9595dd4af52a577ff9608c"
+      },
+      "src/tree_sitter/parser.h": {
+        "bytes": 7624,
+        "sha256": "180b893c8734778fd32f372dfbc27bd6ad1cd2221f26150b31256ff6716320d2"
+      }
+    },
+    "receipt_pin": {
+      "bytes": 8465,
+      "sha256": "55034dfa0e1afd9e0421c29a73f5b5f3a3ec94777eaca0ce175c5183e3fea471"
+    },
+    "six_outputs_literal_equal": true,
+    "state_count": 4220,
+    "stderr_empty": false,
+    "symbol_count": 183,
+    "tool_pins": [
+      {
+        "bytes": 9720320,
+        "role": "generator",
+        "sha256": "a61249a07c4a6d01d0bbbb5b7c058e29e12c119ef7fb5bede0b7fd916a7c56f0"
+      },
+      {
+        "bytes": 249856,
+        "role": "lexical_probe",
+        "sha256": "ab7794022e114330bd020e0de1e76e4b66fec561cea35fbb698a14df27572a95"
+      },
+      {
+        "bytes": 89894400,
+        "role": "node",
+        "sha256": "f13ac3ca23248dc389507e8fe38c34489ab7edb3e6d6700eb6da6a0b7e128eaf"
+      }
+    ],
+    "tree_sitter_cli": "0.26.8",
+    "upstream_original_tables_reproduced": false,
+    "warnings_preserved": true
+  },
+  "local_modification_paths": [
+    "Cargo.toml",
+    "bindings/rust/build.rs",
+    "bindings/rust/lib.rs",
+    "grammar.js",
+    "src/scanner.c"
+  ],
+  "local_patch_evidence": "patches/",
+  "local_unpublished_binding": true,
+  "notice_paths": [
+    "LICENSE.md",
+    "notices/clojure-COPYING.txt"
+  ],
+  "os_network_denial_verified": false,
+  "package": "tree-sitter-commonlisp",
+  "patch_document": "PATCHES.md",
+  "production_integration_verified": false,
+  "publication_vcs_and_authored_pax_associations_observed": true,
+  "repository": "https://github.com/tree-sitter-grammars/tree-sitter-commonlisp",
+  "schema": "rootlight.common-lisp-source-provenance/1",
+  "source_download_at_build_time": false,
+  "upstream_lifecycle_or_corpus_executed": false,
+  "version": "0.4.1",
+  "whole_language_coverage_verified": false
+}

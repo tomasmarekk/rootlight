@@ -1,0 +1,38 @@
+--- qualified/build.rs
++++ package/build.rs
+@@ -1,13 +1,13 @@
+-//! Compiles only separately regenerated preferred tables and the authored scanner.
+-//! Source acquisition and grammar/lifecycle execution remain outside Cargo.
++//! Compiles the retained ABI14 table and stateless block-comment scanner.
++//! No grammar generator, package hook or source acquisition runs during builds.
+ 
+ fn main() {
+     let mut builder = cc::Build::new();
+     builder
+         .std("c11")
+-        .include("native/src")
+-        .file("native/src/parser.c")
+-        .file("native/src/scanner.c")
++        .include("src")
++        .file("src/parser.c")
++        .file("src/scanner.c")
+         .flag_if_supported("-Wno-unused-parameter")
+         .flag_if_supported("-Wno-unused-but-set-variable")
+         .flag_if_supported("-Wno-trigraphs");
+@@ -16,11 +16,11 @@
+     builder.compile("tree-sitter-commonlisp");
+ 
+     for path in [
+-        "native/src/parser.c",
+-        "native/src/scanner.c",
+-        "native/src/tree_sitter/parser.h",
+-        "native/src/tree_sitter/alloc.h",
+-        "native/src/tree_sitter/array.h",
++        "src/parser.c",
++        "src/scanner.c",
++        "src/tree_sitter/parser.h",
++        "src/tree_sitter/alloc.h",
++        "src/tree_sitter/array.h",
+     ] {
+         println!("cargo:rerun-if-changed={path}");
+     }

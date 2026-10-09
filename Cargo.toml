@@ -56,6 +56,7 @@ exclude = [
     "third_party/tree-sitter-bash-0.25.1",
     "third_party/tree-sitter-css-0.25.0",
     "third_party/tree-sitter-cobol-0.0.1",
+    "third_party/tree-sitter-commonlisp-0.4.1",
     "third_party/tree-sitter-plsql-0.0.1",
     "third_party/tree-sitter-fsharp-0.3.12",
     "third_party/tree-sitter-fortran-0.6.0",
