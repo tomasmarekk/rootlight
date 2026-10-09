@@ -15,6 +15,9 @@ mod common_lisp;
 #[path = "structural_fsharp.rs"]
 mod fsharp;
 
+#[path = "structural_glsl.rs"]
+mod glsl;
+
 pub use fsharp::StructuralClassificationGap;
 
 /// Returns the grammar-reviewed base entity kind for one structural syntax fact.
@@ -24,7 +27,7 @@ pub use fsharp::StructuralClassificationGap;
 /// additionally requires the caller's language-specific scope evidence.
 /// Unsupported F# declaration shapes return `None`; callers must retain the
 /// corresponding [`structural_entity_classification_gap`] in entity coverage.
-/// Assembly and Common Lisp accept only exact reviewed declaration labels;
+/// Assembly, Common Lisp and GLSL accept only exact reviewed declaration labels;
 /// unknown labels never fall through to the shared substring classifier.
 #[must_use]
 pub fn structural_entity_kind(fact: &SyntaxFact) -> Option<EntityKind> {
@@ -37,6 +40,9 @@ pub fn structural_entity_kind(fact: &SyntaxFact) -> Option<EntityKind> {
     }
     if label.starts_with("common_lisp.") {
         return common_lisp::entity_kind(fact);
+    }
+    if label.starts_with("glsl.") {
+        return glsl::entity_kind(fact);
     }
     match fact.kind() {
         SyntaxFactKind::Module if label == "vba.class.module" => Some(EntityKind::Class),
@@ -566,6 +572,8 @@ pub fn structural_captured_name(text: &str, maximum_bytes: usize) -> Option<&str
 /// Assembly's language-only fallback accepts complete MASM identifiers. Other
 /// reviewed source labels require [`structural_captured_name_for_fact`]; this
 /// lexical fallback does not establish a dialect or assembled binding.
+/// GLSL borrows complete ASCII identifiers; native capture context, shader
+/// reserved words and linked targets remain the caller's separate evidence.
 /// Other languages retain
 /// the shared borrowed-name contract. Source and canonical output must both fit
 /// `maximum_bytes`. Invalid names, excess bytes or allocation failure return `None`.
@@ -577,6 +585,8 @@ pub fn structural_captured_name_for_language<'a>(
 ) -> Option<Cow<'a, str>> {
     if language == "assembly" {
         assembly::captured_name(text, maximum_bytes).map(Cow::Borrowed)
+    } else if language == "glsl" {
+        glsl::captured_name(text, maximum_bytes).map(Cow::Borrowed)
     } else if language == "fortran" {
         (text.len() <= maximum_bytes
             && text.as_bytes().first().is_some_and(u8::is_ascii_alphabetic)
@@ -768,6 +778,8 @@ fn plsql_captured_name(text: &str, maximum_bytes: usize) -> Option<&str> {
 /// Assembly likewise requires exact definition labels, separating MASM names
 /// from reviewed native label/constant spelling. Numeric directional labels and
 /// assembler binding are not inferred; the original capture remains caller-owned.
+/// GLSL admits only exact reviewed definition and unresolved source-use labels;
+/// other roles or foreign languages cannot acquire a name through its namespace.
 /// Other roles use
 /// [`structural_captured_name_for_language`]. The caller retains
 /// the original source span and validates its association with its declaration.
@@ -778,6 +790,12 @@ pub fn structural_captured_name_for_fact<'a>(
     text: &'a str,
     maximum_bytes: usize,
 ) -> Option<Cow<'a, str>> {
+    if language == "glsl" || fact.syntax_kind().as_str().starts_with("glsl.") {
+        return (language == "glsl")
+            .then(|| glsl::captured_name_for_fact(fact, text, maximum_bytes))
+            .flatten()
+            .map(Cow::Borrowed);
+    }
     if language == "assembly" || fact.syntax_kind().as_str().starts_with("assembly.") {
         return (language == "assembly" && fact.kind() == SyntaxFactKind::Occurrence)
             .then(|| assembly::captured_name_for_fact(fact, text, maximum_bytes))
