@@ -38,6 +38,9 @@ mod yaml_ownership;
 #[path = "lowering_contract/perl_calls.rs"]
 mod perl_calls;
 
+#[path = "lowering_contract/common_lisp_identity.rs"]
+mod common_lisp_identity;
+
 #[test]
 fn json_key_captures_lower_to_exact_source_bound_properties() {
     assert_data_key_captures(

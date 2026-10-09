@@ -4787,7 +4787,7 @@ impl<'context, 'source> Lowering<'context, 'source> {
                 ))
             } else if matches!(
                 self.language_for_fact(fact),
-                "r" | "powershell" | "nix" | "matlab" | "perl" | "groovy" | "tcl"
+                "r" | "powershell" | "nix" | "matlab" | "perl" | "groovy" | "tcl" | "common-lisp"
             ) && kind != EntityKind::Module
             {
                 // Separate written occurrences and their children without claiming
@@ -4887,6 +4887,16 @@ impl<'context, 'source> Lowering<'context, 'source> {
                             &name,
                             maximum,
                         )
+                    } else if self.language_for_fact(fact) == "common-lisp" {
+                        // Whitespace inside escaped symbols or string specializers
+                        // belongs to the exact written header, not formatting.
+                        let mut written = String::new();
+                        (signature_text.len() <= maximum
+                            && written.try_reserve_exact(signature_text.len()).is_ok())
+                        .then(|| {
+                            written.push_str(signature_text);
+                            written
+                        })
                     } else {
                         canonical_symbol_signature(signature_text, maximum)
                     };
@@ -6113,13 +6123,14 @@ fn materialize_entity(
     }
     debug_assert_eq!(qualified_name.len(), draft.qualified_length);
     let semantic_kind = entity_kind_identity_label(draft.kind);
-    // Repeated Haskell equations are one written lexical binding. Pattern heads
-    // and type annotations remain evidence, not overload or arity identities.
-    let signature_discriminator = if draft.language == "haskell"
-        && matches!(
-            draft.kind,
-            EntityKind::Function | EntityKind::Method | EntityKind::Variable
-        ) {
+    // Common Lisp headers are exact source evidence, not runtime binding or
+    // overload identities. Haskell equations likewise retain one lexical binding.
+    let signature_discriminator = if draft.language == "common-lisp"
+        || (draft.language == "haskell"
+            && matches!(
+                draft.kind,
+                EntityKind::Function | EntityKind::Method | EntityKind::Variable
+            )) {
         &[][..]
     } else {
         draft.signature.as_bytes()
@@ -6644,6 +6655,8 @@ fn written_source_identity(
         "rootlight.vba-preprocessor-branch/1"
     } else if language == "haskell" {
         "rootlight.haskell-source-scope/1"
+    } else if language == "common-lisp" {
+        "rootlight.common-lisp-source-occurrence/1"
     } else {
         "rootlight.powershell-source-occurrence/1"
     };
