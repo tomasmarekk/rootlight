@@ -19,7 +19,7 @@ const GRAMMAR_LOCK_PATH: &str = "adapters/grammars.lock";
 const CARGO_LOCK_PATH: &str = "Cargo.lock";
 const ADAPTER_PACKAGE: &str = "rootlight-adapter-treesitter";
 const GRAMMAR_LOCK_SHA256: &str =
-    "eb17952519e94bfc5da18b5ab1f4cf817b288ac39f7dd96931691c9cd239d495";
+    "2fc8fa84c72aa5baeded644aeb0220c78d3d74e6c6a5fe1373fbab146335d73c";
 const JAVA_LICENSE_PATH: &str = "adapters/licenses/tree-sitter-java-0.23.5-LICENSE";
 const JAVA_LICENSE_SHA256: &str =
     "52ed137b039cd9c46409bc22e89938af911c95b157feae2d040b51e6084369a7";
@@ -217,12 +217,18 @@ const EXPECTED_PACKAGES: [(&str, &str, &str); 35] = [
     ),
 ];
 
-const EXPECTED_LOCAL_PACKAGES: [(&str, &str, &str, &str); 5] = [
+const EXPECTED_LOCAL_PACKAGES: [(&str, &str, &str, &str); 6] = [
     (
         "tree-sitter-asm",
         "0.24.0",
         "third_party/tree-sitter-asm-0.24.0",
         "05ab716e887d01045e6357cbce255e427546bc540035703105de8a42d2a1a95e",
+    ),
+    (
+        "tree-sitter-glsl",
+        "0.2.0",
+        "third_party/tree-sitter-glsl-0.2.0",
+        "64c10d88da00b674b3e7280b4bfa12650a49f88a1e4c00a55e76798823c83815",
     ),
     (
         "tree-sitter-vba",
@@ -406,7 +412,7 @@ fn validate_manifest(manifest: &GrammarLock) -> Result<(), GrammarLockError> {
         ));
     }
     validate_runtime(&manifest.runtime)?;
-    if manifest.grammars.len() != 42 {
+    if manifest.grammars.len() != 43 {
         return Err(GrammarLockError::GrammarCount(manifest.grammars.len()));
     }
     let mut languages = BTreeSet::new();
@@ -444,6 +450,7 @@ fn validate_manifest(manifest: &GrammarLock) -> Result<(), GrammarLockError> {
         "fsharp",
         "fsharp-signature",
         "fortran",
+        "glsl",
         "go",
         "groovy",
         "haskell",
@@ -1166,7 +1173,7 @@ pub(crate) enum GrammarLockError {
     InvalidDigest { label: &'static str },
     #[error("grammar lock field {0} must not be empty")]
     EmptyField(&'static str),
-    #[error("grammar lock contains {0} grammars instead of 42")]
+    #[error("grammar lock contains {0} grammars instead of 43")]
     GrammarCount(usize),
     #[error("grammar lock repeats language {0}")]
     DuplicateLanguage(String),
@@ -1208,6 +1215,64 @@ pub(crate) enum GrammarLockError {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    // Git stores files; authenticated archive inventories retain empty directories.
+    fn archived_directory_materialized(
+        path: &Path,
+        member_path: &str,
+        members: &[serde_json::Value],
+    ) -> bool {
+        match fs::symlink_metadata(path) {
+            Ok(metadata) => {
+                #[cfg(windows)]
+                {
+                    use std::os::windows::fs::MetadataExt;
+                    if metadata.file_attributes() & 0x400 != 0 {
+                        return false;
+                    }
+                }
+                metadata.is_dir() && !metadata.file_type().is_symlink()
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                !members.iter().any(|member| {
+                    let relative = member["path"].as_str().expect("archive member path");
+                    !member["directory"].as_bool().expect("archive member kind")
+                        && (member_path.is_empty()
+                            || relative == member_path
+                            || relative
+                                .strip_prefix(member_path)
+                                .is_some_and(|suffix| suffix.starts_with('/')))
+                })
+            }
+            Err(_) => false,
+        }
+    }
+
+    #[test]
+    fn archived_empty_directories_do_not_require_git_inodes() {
+        let root = tempfile::tempdir().unwrap();
+        let members = json!([
+            {"path": "", "directory": true},
+            {"path": "used/nested/item", "directory": false},
+            {"path": "empty/nested", "directory": true},
+            {"path": "emptyish/item", "directory": false}
+        ]);
+        let members = members.as_array().unwrap();
+        let empty = root.path().join("empty");
+        assert!(archived_directory_materialized(&empty, "empty", members));
+        for member_path in ["", "used", "used/nested", "emptyish"] {
+            assert!(!archived_directory_materialized(
+                &root.path().join("absent"),
+                member_path,
+                members
+            ));
+        }
+        fs::write(&empty, b"not a directory").unwrap();
+        assert!(!archived_directory_materialized(&empty, "empty", members));
+        let present = root.path().join("present");
+        fs::create_dir(&present).unwrap();
+        assert!(archived_directory_materialized(&present, "empty", members));
+    }
 
     const FIXTURE_PARSER: &[u8] =
         b"static const uint16_t table[] = {ACTIONS(7), STATE(9)}; SHIFT(9), SHIFT_REPEAT(9)";
@@ -1344,6 +1409,203 @@ mod tests {
         }
         validate_vendored_tree(&directory, grammar, sources)
             .expect("all original Assembly inputs, the primary notice and native tables agree");
+    }
+
+    #[test]
+    fn glsl_retains_originals_and_authenticates_scoped_native_tables() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
+        let manifest: GrammarLock =
+            toml::from_str(include_str!("../../adapters/grammars.lock")).unwrap();
+        let grammar = manifest
+            .grammars
+            .iter()
+            .find(|grammar| grammar.language == "glsl")
+            .expect("GLSL source evidence is present");
+        let sources = grammar.vendored.as_ref().unwrap();
+        let directory = root.join("third_party/tree-sitter-glsl-0.2.0");
+        assert!(grammar.crates_io_checksum.is_none());
+        assert_eq!(grammar.abi, 14);
+        assert_eq!(grammar.scanner_sha256, "none");
+        assert_eq!(sources.files.len(), 161);
+        assert_eq!(sources.parser_path.as_deref(), Some("src/parser.c"));
+        assert_eq!(sources.license_path.as_deref(), Some("LICENSE"));
+        assert_eq!(
+            grammar.license_sha256,
+            "f44d7107a33801260dc82624c91a71ebf5918b4038a0fb0e3ef60e2dd9ba1999"
+        );
+        assert_eq!(
+            sources.files["notices/tree-sitter-c-LICENSE"],
+            "2e0110e07abef7c2548b26ec9d6969775617ca539a0dc8dbeeb14d6452c711d1"
+        );
+        let binding: toml::Value = toml::from_str(include_str!(
+            "../../third_party/tree-sitter-glsl-0.2.0/Cargo.toml"
+        ))
+        .unwrap();
+        assert_eq!(
+            binding["package"]["name"].as_str(),
+            Some(grammar.crate_name.as_str())
+        );
+        assert_eq!(
+            binding["package"]["version"].as_str(),
+            Some(grammar.crate_version.as_str())
+        );
+        assert_eq!(binding["package"]["publish"].as_bool(), Some(false));
+        assert_eq!(binding["package"]["rust-version"].as_str(), Some("1.90"));
+        assert_eq!(
+            binding["package"]["build"].as_str(),
+            Some("bindings/rust/build.rs")
+        );
+        let inventory: serde_json::Value = serde_json::from_str(include_str!(
+            "../../third_party/tree-sitter-glsl-0.2.0/SOURCE-INVENTORY.json"
+        ))
+        .unwrap();
+        assert_eq!(inventory["schema"], "rootlight.glsl-source-inventory/1");
+        assert_eq!(inventory["original_regular_file_count"], 134);
+        assert_eq!(inventory["original_regular_file_bytes"], 16_566_104);
+        assert_eq!(inventory["original_directory_record_count"], 44);
+        assert_eq!(
+            inventory["original_modes_and_executable_intent_retained"],
+            true
+        );
+        let mut payload_paths = BTreeSet::new();
+        for payload in inventory["payload_files"].as_array().unwrap() {
+            let path = payload["path"].as_str().unwrap();
+            assert!(is_source_relative_path(path));
+            assert!(payload_paths.insert(path));
+            assert_eq!(
+                sources.files.get(path).map(String::as_str),
+                payload["sha256"].as_str()
+            );
+            assert_eq!(
+                fs::metadata(directory.join(path)).unwrap().len(),
+                payload["bytes"]
+            );
+        }
+        assert_eq!(payload_paths.len(), 159);
+        payload_paths.extend(["SOURCE-INVENTORY.json", "SOURCE-PROVENANCE.json"]);
+        assert_eq!(
+            payload_paths,
+            sources.files.keys().map(String::as_str).collect()
+        );
+        let mut original_paths = BTreeSet::new();
+        let mut original_bytes = 0u64;
+        let mut original_directories = 0usize;
+        assert_eq!(inventory["sources"].as_array().unwrap().len(), 3);
+        for archive in inventory["sources"].as_array().unwrap() {
+            let retained_tree = archive["retained_tree"].as_str().unwrap();
+            let archive_path = archive["archive"].as_str().unwrap();
+            assert_eq!(
+                sources.files.get(archive_path).map(String::as_str),
+                archive["sha256"].as_str()
+            );
+            let members = archive["inventory"]["members"].as_array().unwrap();
+            for member in members {
+                let member_path = member["path"].as_str().unwrap();
+                let path = if member_path.is_empty() {
+                    assert_eq!(member["directory"], true);
+                    retained_tree.to_owned()
+                } else {
+                    format!("{retained_tree}/{member_path}")
+                };
+                assert!(is_source_relative_path(&path));
+                if member["directory"].as_bool().unwrap() {
+                    assert!(archived_directory_materialized(
+                        &directory.join(&path),
+                        member_path,
+                        members
+                    ));
+                    original_directories += 1;
+                } else {
+                    assert!(original_paths.insert(path.clone()));
+                    assert_eq!(
+                        sources.files.get(&path).map(String::as_str),
+                        member["sha256"].as_str()
+                    );
+                    original_bytes += member["bytes"].as_u64().unwrap();
+                }
+            }
+        }
+        assert_eq!(original_paths.len(), 134);
+        assert_eq!(original_bytes, 16_566_104);
+        assert_eq!(original_directories, 44);
+        let provenance: serde_json::Value = serde_json::from_str(include_str!(
+            "../../third_party/tree-sitter-glsl-0.2.0/SOURCE-PROVENANCE.json"
+        ))
+        .unwrap();
+        assert_eq!(provenance["schema"], "rootlight.glsl-source-provenance/1");
+        assert_eq!(provenance["package"], grammar.crate_name);
+        assert_eq!(provenance["version"], grammar.crate_version);
+        assert_eq!(provenance["authored_revision"], grammar.commit);
+        assert_eq!(provenance["license"], "MIT");
+        assert_eq!(
+            provenance["notice_paths"],
+            json!(["LICENSE", "notices/tree-sitter-c-LICENSE"])
+        );
+        assert!(provenance["preferred_generation_parent"]["registry_publication"].is_null());
+        assert_eq!(
+            provenance["inventory"]["sha256"],
+            sources.files["SOURCE-INVENTORY.json"]
+        );
+        assert_eq!(
+            provenance["inventory"]["bytes"],
+            fs::metadata(directory.join("SOURCE-INVENTORY.json"))
+                .unwrap()
+                .len()
+        );
+        let generation = &provenance["local_generation"];
+        assert_eq!(generation["abi"], 14);
+        assert_eq!(generation["state_count"], 2_574);
+        assert_eq!(generation["symbol_count"], 409);
+        assert_eq!(generation["external_token_count"], 0);
+        assert_eq!(generation["producer_count"], 2);
+        assert_eq!(generation["six_output_pairs_literal_equal"], true);
+        let mut generated_paths = BTreeSet::new();
+        for output in generation["exact_generated_outputs"].as_array().unwrap() {
+            let path = output["path"].as_str().unwrap();
+            assert!(generated_paths.insert(path));
+            assert_eq!(
+                sources.files.get(path).map(String::as_str),
+                output["sha256"].as_str()
+            );
+            assert_eq!(
+                fs::metadata(directory.join(path)).unwrap().len(),
+                output["bytes"]
+            );
+        }
+        assert_eq!(
+            generated_paths,
+            BTreeSet::from([
+                "src/grammar.json",
+                "src/node-types.json",
+                "src/parser.c",
+                "src/tree_sitter/alloc.h",
+                "src/tree_sitter/array.h",
+                "src/tree_sitter/parser.h",
+            ])
+        );
+        // The published record authenticates the isolated proof, not a later
+        // relocated run or product binding qualification.
+        let native = &provenance["isolated_native_evidence"];
+        assert_eq!(native["relocated_wrapper_executed"], false);
+        assert_eq!(native["unchanged_groups_per_profile"], 6);
+        assert_eq!(native["full_source_observations_per_profile"], 8);
+        for claim in [
+            "production_integration_verified",
+            "whole_language_coverage_verified",
+            "installed_mcp_verified",
+            "build_and_packaging_acceptance_verified",
+            "complete_product_source_closure_proven",
+            "empty_dependency_cache_verified",
+            "os_network_denial_verified",
+            "source_download_or_generation_at_build_time",
+            "archived_upstream_lifecycle_activated",
+            "precision_semantic_propagation_verified",
+            "discard_dedicated_statement_or_resolved_reference_verified",
+        ] {
+            assert_eq!(provenance[claim], false, "{claim}");
+        }
+        validate_vendored_tree(&directory, grammar, sources)
+            .expect("all original GLSL and C inputs, notices and native tables agree");
     }
 
     #[test]

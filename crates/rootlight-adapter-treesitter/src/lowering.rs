@@ -4289,13 +4289,13 @@ impl<'context, 'source> Lowering<'context, 'source> {
                 // Lexical bindings must not depend on sibling positions. JSON
                 // data is different: array positions are part of its address,
                 // while whitespace and value-body edits are not.
-                // These dynamic languages record source occurrences, not evaluated environments. Anonymous
+                // These source-only scopes are occurrences, not evaluated environments. Anonymous
                 // sibling functions need distinct parameter owners, including when their
                 // headers match. Offsets and function bodies must not affect identity.
                 // Alternate VBA branches need separate source identities without selecting one.
                 let written_scope_identity = if matches!(
                     self.language_for_fact(fact),
-                    "r" | "powershell" | "nix" | "matlab" | "perl" | "groovy" | "haskell"
+                    "r" | "powershell" | "nix" | "matlab" | "perl" | "groovy" | "haskell" | "glsl"
                 ) || fact.syntax_kind().as_str()
                     == "vba.preprocessor_branch.scope"
                 {
@@ -6123,18 +6123,20 @@ fn materialize_entity(
     }
     debug_assert_eq!(qualified_name.len(), draft.qualified_length);
     let semantic_kind = entity_kind_identity_label(draft.kind);
-    // Assembly and Common Lisp headers are source evidence, not runtime binding or
+    // Assembly, Common Lisp and GLSL headers are source evidence, not runtime binding or
     // overload identities. Haskell equations likewise retain one lexical binding.
-    let signature_discriminator = if matches!(draft.language.as_str(), "assembly" | "common-lisp")
-        || (draft.language == "haskell"
-            && matches!(
-                draft.kind,
-                EntityKind::Function | EntityKind::Method | EntityKind::Variable
-            )) {
-        &[][..]
-    } else {
-        draft.signature.as_bytes()
-    };
+    let signature_discriminator =
+        if matches!(draft.language.as_str(), "assembly" | "common-lisp" | "glsl")
+            || (draft.language == "haskell"
+                && matches!(
+                    draft.kind,
+                    EntityKind::Function | EntityKind::Method | EntityKind::Variable
+                ))
+        {
+            &[][..]
+        } else {
+            draft.signature.as_bytes()
+        };
     let identity_guard = entity_identity_guard(
         full_source.repository(),
         &draft.language,
@@ -6414,6 +6416,9 @@ fn common_lisp_source_gap(fact: &SyntaxFact) -> Option<(FactDomain, &'static str
 }
 
 fn source_coverage_gap(fact: &SyntaxFact) -> Option<(FactDomain, &'static str)> {
+    if let Some(gap) = glsl_source_gap(fact) {
+        return Some(gap);
+    }
     if let Some(gap) = assembly_source_gap(fact) {
         return Some(gap);
     }
@@ -6421,6 +6426,10 @@ fn source_coverage_gap(fact: &SyntaxFact) -> Option<(FactDomain, &'static str)> 
         return Some(gap);
     }
     match fact.syntax_kind().as_str() {
+        "glsl.file.module" if fact.kind() == SyntaxFactKind::Module => Some((
+            FactDomain::Relations,
+            "glsl-shader-linking-and-preprocessing-unavailable",
+        )),
         "assembly.file.module" if fact.kind() == SyntaxFactKind::Module => Some((
             FactDomain::Relations,
             "assembly-expansion-and-binding-unavailable",
@@ -6672,6 +6681,44 @@ fn source_coverage_gap(fact: &SyntaxFact) -> Option<(FactDomain, &'static str)> 
     }
 }
 
+fn glsl_source_gap(fact: &SyntaxFact) -> Option<(FactDomain, &'static str)> {
+    // Expressions are scoped qualifications, not callable header signatures.
+    if fact.kind() != SyntaxFactKind::Signature {
+        return None;
+    }
+    Some(match fact.syntax_kind().as_str() {
+        "glsl.unsupported_owner.expression" => (
+            FactDomain::Entities,
+            "glsl-written-owner-analysis-unavailable",
+        ),
+        "glsl.parameter_context.expression" => (
+            FactDomain::Entities,
+            "glsl-unnamed-parameter-owner-unavailable",
+        ),
+        "glsl.shared_declaration_header.expression" => (
+            FactDomain::Extensions,
+            "glsl-shared-declaration-header-association-unavailable",
+        ),
+        "glsl.preprocessor_context.expression" => (
+            FactDomain::Relations,
+            "glsl-preprocessor-selection-unavailable",
+        ),
+        "glsl.shader_environment.expression" => (
+            FactDomain::Relations,
+            "glsl-shader-linking-and-interface-binding-unavailable",
+        ),
+        "glsl.qualifier_context.expression" | "glsl.precision_context.expression" => (
+            FactDomain::Relations,
+            "glsl-qualifier-and-profile-evaluation-unavailable",
+        ),
+        "glsl.discard_context.expression" | "glsl.body_semantics.expression" => (
+            FactDomain::Relations,
+            "glsl-body-binding-and-call-analysis-unavailable",
+        ),
+        _ => return None,
+    })
+}
+
 fn assembly_source_gap(fact: &SyntaxFact) -> Option<(FactDomain, &'static str)> {
     if fact.kind() != SyntaxFactKind::Signature {
         return None;
@@ -6718,6 +6765,28 @@ fn json_data_identity(parent: Option<[u8; 32]>, kind: &str, position: u64) -> [u
 }
 
 fn uses_written_source_identity(language: &str, kind: EntityKind, label: &str) -> bool {
+    if language == "glsl" {
+        return matches!(
+            (kind, label),
+            (
+                EntityKind::Function,
+                "glsl.function.declaration" | "glsl.prototype.declaration"
+            ) | (
+                EntityKind::Variable,
+                "glsl.variable.declaration"
+                    | "glsl.variable_fragment.declaration"
+                    | "glsl.interface_instance.declaration"
+            ) | (EntityKind::Parameter, "glsl.parameter.declaration")
+                | (
+                    EntityKind::Field,
+                    "glsl.field.declaration" | "glsl.field_fragment.declaration"
+                )
+                | (
+                    EntityKind::Struct,
+                    "glsl.struct.declaration" | "glsl.interface_block.declaration"
+                )
+        );
+    }
     if language == "assembly" {
         // Segments are written containers too, not assembled namespaces. Keep
         // each complete physical owner distinct without promoting name equality.
@@ -6769,6 +6838,8 @@ fn written_source_identity(
         "rootlight.common-lisp-source-occurrence/1"
     } else if language == "assembly" {
         "rootlight.assembly-source-occurrence/1"
+    } else if language == "glsl" {
+        "rootlight.glsl-source-occurrence/1"
     } else {
         "rootlight.powershell-source-occurrence/1"
     };
@@ -7770,6 +7841,9 @@ fn test_source_path(path: &str) -> bool {
 }
 
 fn is_explicit_file_module(fact: &SyntaxFact, language: &str) -> bool {
+    if fact.syntax_kind().as_str() == "glsl.file.module" {
+        return fact.kind() == SyntaxFactKind::Module && language == "glsl";
+    }
     if fact.syntax_kind().as_str() == "assembly.file.module" {
         return fact.kind() == SyntaxFactKind::Module && language == "assembly";
     }
@@ -7953,9 +8027,21 @@ fn supports_declaration_signature(
         || (language == "fortran" && declaration.syntax_kind().as_str() == "fortran.file.module")
         || (language == "plsql" && declaration.syntax_kind().as_str() == "plsql.file.module")
         || (language == "assembly" && declaration.syntax_kind().as_str() == "assembly.file.module")
+        || (language == "glsl" && declaration.syntax_kind().as_str() == "glsl.file.module")
         || (language == "common-lisp"
             && declaration.syntax_kind().as_str() == "common_lisp.file.module")
     {
+        return false;
+    }
+    if language == "glsl"
+        && matches!(
+            declaration.syntax_kind().as_str(),
+            "glsl.variable_fragment.declaration"
+                | "glsl.field_fragment.declaration"
+                | "glsl.interface_instance.declaration"
+        )
+    {
+        // Separate written names do not each own their complete shared header.
         return false;
     }
     if language == "haskell" {
@@ -7974,6 +8060,11 @@ fn supports_signature(kind: EntityKind, language: &str) -> bool {
     // Classic BASIC accessors share a name but have distinct Get/Let/Set headers.
     // The same rule governs identity, evidence emission and admission accounting.
     matches!(language, "fsharp" | "fsharp-signature")
+        || (language == "glsl"
+            && matches!(
+                kind,
+                EntityKind::Variable | EntityKind::Field | EntityKind::Parameter
+            ))
         || (kind == EntityKind::Variable && language == "haskell")
         || (kind == EntityKind::Property && matches!(language, "vba" | "visual-basic-classic"))
         || (kind == EntityKind::Module
@@ -8024,6 +8115,14 @@ fn automatic_instantiation_gap(fact: &SyntaxFact) -> Option<&'static str> {
 }
 
 fn source_reference_gap(fact: &SyntaxFact) -> Option<&'static str> {
+    if fact.kind() == SyntaxFactKind::Occurrence
+        && matches!(
+            fact.syntax_kind().as_str(),
+            "glsl.identifier.reference" | "glsl.member.reference" | "glsl.unproven_call.reference"
+        )
+    {
+        return Some("glsl-binding-and-dispatch-target-unavailable");
+    }
     if fact.syntax_kind().as_str().starts_with("cobol.")
         && fact.kind() == SyntaxFactKind::Occurrence
         && !is_definition_capture(fact)
@@ -8214,6 +8313,16 @@ fn occurrence_role(fact: &SyntaxFact) -> Option<OccurrenceRole> {
             None
         }
         SyntaxFactKind::Occurrence if is_call_name_capture(fact) => None,
+        SyntaxFactKind::Occurrence
+            if matches!(
+                fact.syntax_kind().as_str(),
+                "glsl.identifier.reference"
+                    | "glsl.member.reference"
+                    | "glsl.unproven_call.reference"
+            ) =>
+        {
+            Some(OccurrenceRole::Reference)
+        }
         SyntaxFactKind::Occurrence
             if fact.syntax_kind().as_str().starts_with("haskell.")
                 && (fact.syntax_kind().as_str().contains("type")
@@ -9232,6 +9341,218 @@ mod tests {
         assert_ne!(
             written_source_identity("assembly", None, "assembly.source_label.declaration", 1),
             written_source_identity("assembly", None, "assembly.source_label.declaration", 2)
+        );
+    }
+
+    #[test]
+    fn glsl_file_and_written_owners_do_not_claim_shader_binding() {
+        let file = FileId::from_bytes([3; 20]);
+        let fact = |kind, label: &str| {
+            SyntaxFact::new(
+                1,
+                None,
+                kind,
+                SourceSpan::new(file, 0, 30).unwrap(),
+                0,
+                SyntaxKindLabel::new(label).unwrap(),
+            )
+        };
+        let module = fact(SyntaxFactKind::Module, "glsl.file.module");
+        assert!(is_explicit_file_module(&module, "glsl"));
+        assert!(!is_explicit_file_module(&module, "c"));
+        assert!(!is_explicit_file_module(
+            &fact(SyntaxFactKind::Declaration, "glsl.file.module"),
+            "glsl"
+        ));
+        assert!(!supports_declaration_signature(
+            EntityKind::Module,
+            "glsl",
+            &module,
+            None
+        ));
+        assert_eq!(
+            source_coverage_gaps(&module).collect::<Vec<_>>(),
+            [(
+                FactDomain::Relations,
+                "glsl-shader-linking-and-preprocessing-unavailable"
+            )]
+        );
+        let owners = [
+            (EntityKind::Function, "glsl.function.declaration"),
+            (EntityKind::Function, "glsl.prototype.declaration"),
+            (EntityKind::Variable, "glsl.variable.declaration"),
+            (EntityKind::Variable, "glsl.variable_fragment.declaration"),
+            (EntityKind::Variable, "glsl.interface_instance.declaration"),
+            (EntityKind::Parameter, "glsl.parameter.declaration"),
+            (EntityKind::Field, "glsl.field.declaration"),
+            (EntityKind::Field, "glsl.field_fragment.declaration"),
+            (EntityKind::Struct, "glsl.struct.declaration"),
+            (EntityKind::Struct, "glsl.interface_block.declaration"),
+        ];
+        for (expected, label) in owners {
+            for kind in [
+                EntityKind::Function,
+                EntityKind::Variable,
+                EntityKind::Parameter,
+                EntityKind::Field,
+                EntityKind::Struct,
+                EntityKind::Module,
+            ] {
+                assert_eq!(
+                    uses_written_source_identity("glsl", kind, label),
+                    kind == expected
+                );
+            }
+            assert!(!uses_written_source_identity("c", expected, label));
+            assert!(!uses_written_source_identity(
+                "glsl",
+                expected,
+                &format!("{label}.extra")
+            ));
+        }
+        assert_ne!(
+            written_source_identity("glsl", None, "glsl.function.declaration", 1),
+            written_source_identity("glsl", None, "glsl.function.declaration", 2)
+        );
+    }
+
+    #[test]
+    fn glsl_context_domains_are_exact_and_do_not_project_headers() {
+        let file = FileId::from_bytes([3; 20]);
+        let fact = |kind, label: &str| {
+            SyntaxFact::new(
+                1,
+                None,
+                kind,
+                SourceSpan::new(file, 0, 30).unwrap(),
+                0,
+                SyntaxKindLabel::new(label).unwrap(),
+            )
+        };
+        for (base, domain, detail) in [
+            (
+                "unsupported_owner",
+                FactDomain::Entities,
+                "glsl-written-owner-analysis-unavailable",
+            ),
+            (
+                "parameter_context",
+                FactDomain::Entities,
+                "glsl-unnamed-parameter-owner-unavailable",
+            ),
+            (
+                "shared_declaration_header",
+                FactDomain::Extensions,
+                "glsl-shared-declaration-header-association-unavailable",
+            ),
+            (
+                "preprocessor_context",
+                FactDomain::Relations,
+                "glsl-preprocessor-selection-unavailable",
+            ),
+            (
+                "shader_environment",
+                FactDomain::Relations,
+                "glsl-shader-linking-and-interface-binding-unavailable",
+            ),
+            (
+                "qualifier_context",
+                FactDomain::Relations,
+                "glsl-qualifier-and-profile-evaluation-unavailable",
+            ),
+            (
+                "precision_context",
+                FactDomain::Relations,
+                "glsl-qualifier-and-profile-evaluation-unavailable",
+            ),
+            (
+                "discard_context",
+                FactDomain::Relations,
+                "glsl-body-binding-and-call-analysis-unavailable",
+            ),
+            (
+                "body_semantics",
+                FactDomain::Relations,
+                "glsl-body-binding-and-call-analysis-unavailable",
+            ),
+        ] {
+            let label = format!("glsl.{base}.expression");
+            let expression = fact(SyntaxFactKind::Signature, &label);
+            assert_eq!(
+                source_coverage_gaps(&expression).collect::<Vec<_>>(),
+                [(domain, detail)]
+            );
+            assert!(!is_signature_capture(&expression));
+            assert!(
+                source_coverage_gaps(&fact(SyntaxFactKind::Declaration, &label))
+                    .next()
+                    .is_none()
+            );
+            for wrong in [format!("{label}.extra"), label.replace("glsl.", "c.")] {
+                assert!(
+                    source_coverage_gaps(&fact(SyntaxFactKind::Signature, &wrong))
+                        .next()
+                        .is_none()
+                );
+            }
+        }
+        for label in [
+            "glsl.variable_fragment.declaration",
+            "glsl.field_fragment.declaration",
+            "glsl.interface_instance.declaration",
+        ] {
+            assert!(!supports_declaration_signature(
+                EntityKind::Variable,
+                "glsl",
+                &fact(SyntaxFactKind::Declaration, label),
+                None
+            ));
+        }
+        for kind in [
+            EntityKind::Variable,
+            EntityKind::Field,
+            EntityKind::Parameter,
+        ] {
+            assert!(supports_signature(kind, "glsl"));
+        }
+    }
+
+    #[test]
+    fn glsl_unproven_source_uses_have_typed_target_gaps() {
+        let file = FileId::from_bytes([3; 20]);
+        let fact = |kind, label: &str| {
+            SyntaxFact::new(
+                1,
+                None,
+                kind,
+                SourceSpan::new(file, 0, 30).unwrap(),
+                0,
+                SyntaxKindLabel::new(label).unwrap(),
+            )
+        };
+        for label in [
+            "glsl.identifier.reference",
+            "glsl.member.reference",
+            "glsl.unproven_call.reference",
+        ] {
+            let occurrence = fact(SyntaxFactKind::Occurrence, label);
+            assert_eq!(
+                source_reference_gap(&occurrence),
+                Some("glsl-binding-and-dispatch-target-unavailable")
+            );
+            assert_eq!(
+                occurrence_role(&occurrence),
+                Some(OccurrenceRole::Reference)
+            );
+            assert!(source_reference_gap(&fact(SyntaxFactKind::Signature, label)).is_none());
+            assert!(
+                source_reference_gap(&fact(SyntaxFactKind::Occurrence, &format!("{label}.extra")))
+                    .is_none()
+            );
+        }
+        assert!(
+            source_reference_gap(&fact(SyntaxFactKind::Occurrence, "glsl.name.definition"))
+                .is_none()
         );
     }
 

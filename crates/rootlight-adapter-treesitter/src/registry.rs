@@ -99,6 +99,8 @@ pub enum GrammarFamily {
     PlSql,
     /// Assembly written owners without expansion, ISA validation or assembled binding.
     Assembly,
+    /// GLSL written source without shader linking or preprocessor selection.
+    Glsl,
 }
 
 impl GrammarFamily {
@@ -191,7 +193,7 @@ impl GrammarRegistry {
     /// Returns [`RegistryError`] if an SDK label is invalid or a linked grammar
     /// falls outside Tree-sitter's supported ABI interval.
     pub fn audited() -> Result<Self, RegistryError> {
-        let mut descriptors = Vec::with_capacity(43);
+        let mut descriptors = Vec::with_capacity(44);
         for family in [
             GrammarFamily::Rust,
             GrammarFamily::Python,
@@ -236,6 +238,7 @@ impl GrammarRegistry {
             GrammarFamily::Fortran,
             GrammarFamily::PlSql,
             GrammarFamily::Assembly,
+            GrammarFamily::Glsl,
         ] {
             let language = language_for(family);
             let abi_version = language.abi_version();
@@ -374,6 +377,7 @@ pub(crate) fn language_for(family: GrammarFamily) -> Language {
         GrammarFamily::Fortran => tree_sitter_fortran::LANGUAGE.into(),
         GrammarFamily::PlSql => tree_sitter_plsql::LANGUAGE.into(),
         GrammarFamily::Assembly => tree_sitter_asm::LANGUAGE_ASSEMBLY.into(),
+        GrammarFamily::Glsl => tree_sitter_glsl::LANGUAGE_GLSL.into(),
     }
 }
 
@@ -388,6 +392,13 @@ struct GrammarIdentity {
 
 const fn identity_for(family: GrammarFamily) -> GrammarIdentity {
     match family {
+        GrammarFamily::Glsl => GrammarIdentity {
+            language_id: "glsl",
+            grammar_version: "0.2.0",
+            source_package_sha256: "64c10d88da00b674b3e7280b4bfa12650a49f88a1e4c00a55e76798823c83815",
+            parser_sha256: "3ac0649813439a3a9180f36ec35ff68067f16f4a3962471fbcb3fbe69579c339",
+            scanner_sha256: None,
+        },
         GrammarFamily::Assembly => GrammarIdentity {
             language_id: "assembly",
             grammar_version: "0.24.0",
@@ -791,7 +802,7 @@ mod tests {
     fn registry_contains_each_audited_family_once_with_checked_abi() {
         let registry = GrammarRegistry::audited().expect("audited grammars initialize");
 
-        assert_eq!(registry.descriptors().len(), 43);
+        assert_eq!(registry.descriptors().len(), 44);
         for family in [
             GrammarFamily::Rust,
             GrammarFamily::Python,
@@ -836,6 +847,7 @@ mod tests {
             GrammarFamily::Fortran,
             GrammarFamily::PlSql,
             GrammarFamily::Assembly,
+            GrammarFamily::Glsl,
         ] {
             let descriptor = registry.get(family).expect("family is registered");
             assert!(
@@ -1047,6 +1059,7 @@ mod tests {
             (GrammarFamily::Fortran, "fortran", "tree-sitter-fortran"),
             (GrammarFamily::PlSql, "plsql", "tree-sitter-plsql"),
             (GrammarFamily::Assembly, "assembly", "tree-sitter-asm"),
+            (GrammarFamily::Glsl, "glsl", "tree-sitter-glsl"),
             (GrammarFamily::Perl, "perl", "ts-parser-perl"),
             (
                 GrammarFamily::Groovy,
@@ -1080,6 +1093,7 @@ mod tests {
                     ) || family.is_cobol()
                         || family == GrammarFamily::PlSql
                         || family == GrammarFamily::Assembly
+                        || family == GrammarFamily::Glsl
                     {
                         "vendored_source_sha256"
                     } else {

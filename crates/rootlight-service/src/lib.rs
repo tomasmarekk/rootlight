@@ -6401,6 +6401,8 @@ impl FirstSliceService {
                 format!("tree-sitter-sequel-{}", descriptor.grammar_version())
             } else if descriptor.family() == GrammarFamily::Assembly {
                 format!("tree-sitter-asm-{}", descriptor.grammar_version())
+            } else if descriptor.family() == GrammarFamily::Glsl {
+                format!("tree-sitter-glsl-{}", descriptor.grammar_version())
             } else if matches!(
                 descriptor.family(),
                 GrammarFamily::Vba | GrammarFamily::VisualBasicClassic
@@ -31284,6 +31286,7 @@ mod tests {
             "sample.fsi",
             "sample.f90",
             "sample.fypp",
+            "sample.glsl",
             "sample.go",
             "sample.groovy",
             "sample.hs",
@@ -31725,6 +31728,111 @@ mod tests {
             assert_eq!(read.data.chunks.len(), 1);
             assert_eq!(read.data.chunks[0].bytes, source.as_bytes());
         }
+    }
+
+    #[test]
+    fn glsl_source_routes_keep_native_identity_and_partial_semantics() {
+        let source = "float shade(float value) { return value; }\n";
+        let fixture = TempDir::new().unwrap();
+        write_language_fixture(fixture.path(), &[("shader.frag", source)]);
+        let mut service = FirstSliceService::new(2).expect("native service initializes");
+        let mut absent = service.analyzers.clone();
+        assert!(absent.remove("glsl").is_some());
+        assert!(absent.contains_key("c"));
+        for suffix in ["vert", "frag", "vsh", "fsh", "glsl"] {
+            for path in [
+                format!("shader.{suffix}"),
+                format!("SHADER.{}", suffix.to_ascii_uppercase()),
+            ] {
+                let input = ManifestInput {
+                    file: FileId::from_bytes([3; 20]),
+                    path,
+                    content_hash: content_hash(source.as_bytes()),
+                    bytes: u64::try_from(source.len()).unwrap(),
+                    encoding: "utf-8".to_owned(),
+                    class: InputClass::Source,
+                    language_signals: vec![rootlight_discovery::LanguageSignal {
+                        language: "c".to_owned(),
+                        evidence: LanguageEvidence::Content,
+                    }],
+                    project_language_witnesses: Vec::new(),
+                    decisive_rule: None,
+                };
+                assert_eq!(detected_source_language(&input), Some("glsl"));
+                assert_eq!(
+                    source_language_route(&input, &service.analyzers),
+                    Some("glsl")
+                );
+                assert_eq!(
+                    supported_source_language(&input, &service.analyzers),
+                    Some("glsl")
+                );
+                assert_eq!(source_language_route(&input, &absent), None);
+            }
+        }
+        let registry = GrammarRegistry::audited().unwrap();
+        let descriptor = registry
+            .descriptors()
+            .iter()
+            .find(|descriptor| descriptor.family() == GrammarFamily::Glsl)
+            .expect("distinct GLSL native family");
+        assert_eq!(descriptor.language().as_str(), "glsl");
+        let frontend = format!("tree-sitter-glsl-{}", descriptor.grammar_version());
+        let receipt = service
+            .index_repository(fixture.path(), &deadline())
+            .expect("written shader source publishes");
+        assert_eq!(receipt.indexed_files, 1);
+        let generation = service
+            .loaded_generation_snapshot(receipt.generation)
+            .unwrap();
+        let document = generation.document();
+        assert_eq!(document.files.len(), 1);
+        let file = &document.files[0];
+        assert_eq!(file.path, "shader.frag");
+        assert_eq!(file.language, "glsl");
+        assert!(document.entities.iter().any(|entity| {
+            entity.kind == EntityKind::Function
+                && entity.language == "glsl"
+                && entity.canonical_name == "shade"
+                && entity.evidence.source.as_ref().is_some_and(|reference| {
+                    reference.span().file() == file.id
+                        && reference.generation() == receipt.generation
+                })
+        }));
+        let parser = document
+            .provenance
+            .iter()
+            .find(|record| record.id == file.provenance)
+            .unwrap();
+        assert_eq!(parser.producer_kind, ProducerKind::Parser);
+        assert_eq!(parser.language, "glsl");
+        assert_eq!(parser.tier, AnalysisTier::TierD);
+        assert_eq!(parser.frontend_version.as_deref(), Some(frontend.as_str()));
+        assert_eq!(
+            parser.binary_digest,
+            grammar_binary_digest(descriptor).unwrap()
+        );
+        let coverage = service
+            .source_file_coverage_until(receipt.generation, file.id, &deadline())
+            .unwrap();
+        assert_eq!(coverage.language, "glsl");
+        assert_eq!(coverage.tier, AnalysisTier::TierD);
+        assert_eq!(coverage.reason, None);
+        assert_eq!(coverage.status, CoverageStatus::Bounded);
+        let reference = file.evidence.source.clone().unwrap();
+        assert_eq!(reference.repository(), receipt.repository);
+        assert_eq!(reference.generation(), receipt.generation);
+        assert_eq!(reference.content_hash(), content_hash(source.as_bytes()));
+        assert_eq!(reference.span().start_byte(), 0);
+        assert_eq!(
+            reference.span().end_byte(),
+            u64::try_from(source.len()).unwrap()
+        );
+        let read = service
+            .source_read(receipt.generation, vec![reference], &deadline())
+            .unwrap();
+        assert_eq!(read.data.chunks.len(), 1);
+        assert_eq!(read.data.chunks[0].bytes, source.as_bytes());
     }
 
     #[test]

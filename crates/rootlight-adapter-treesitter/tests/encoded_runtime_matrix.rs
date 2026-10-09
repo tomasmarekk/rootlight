@@ -34,7 +34,12 @@ struct LanguageCase {
     source: &'static str,
 }
 
-const CASES: [LanguageCase; 43] = [
+const CASES: [LanguageCase; 44] = [
+    LanguageCase {
+        name: "written.glsl",
+        language: "glsl",
+        source: "float Written(float Value) { return Value; }\n",
+    },
     LanguageCase {
         name: "written.asm",
         language: "assembly",

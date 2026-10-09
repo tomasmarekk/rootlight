@@ -2045,7 +2045,7 @@ const LANGUAGE_CAPABILITIES: &[LanguageCapability] = &[
         aliases: &[],
         detectors: &["content", "configuration"],
         maximum_tier: "tier_d",
-        analyzers: &["treesitter"],
+        analyzers: &["source-fallback"],
     },
     LanguageCapability {
         language: "assembly",
@@ -2206,7 +2206,7 @@ const LANGUAGE_CAPABILITIES: &[LanguageCapability] = &[
         aliases: &[],
         detectors: &["extension"],
         maximum_tier: "tier_d",
-        analyzers: &["source-fallback"],
+        analyzers: &["treesitter"],
     },
     LanguageCapability {
         language: "go",
@@ -2374,7 +2374,7 @@ const LANGUAGE_CAPABILITIES: &[LanguageCapability] = &[
         aliases: &["delphi", "object-pascal"],
         detectors: &["extension", "configuration"],
         maximum_tier: "tier_d",
-        analyzers: &["treesitter"],
+        analyzers: &["source-fallback"],
     },
     LanguageCapability {
         language: "perl",
@@ -2462,7 +2462,7 @@ const LANGUAGE_CAPABILITIES: &[LanguageCapability] = &[
         aliases: &[],
         detectors: &["extension"],
         maximum_tier: "tier_d",
-        analyzers: &["treesitter"],
+        analyzers: &["source-fallback"],
     },
     LanguageCapability {
         language: "sass",
@@ -6182,7 +6182,7 @@ max_source_file_bytes = 2097152
             .unwrap();
         assert!(capability.suffixes.is_empty());
         assert_eq!(capability.detectors, &["content", "configuration"]);
-        assert_eq!(capability.analyzers, &["treesitter"]);
+        assert_eq!(capability.analyzers, &["source-fallback"]);
     }
 
     #[test]
@@ -6262,7 +6262,7 @@ max_source_file_bytes = 2097152
         assert_eq!(capability.suffixes, &[".sas"]);
         assert_eq!(capability.detectors, &["extension"]);
         assert_eq!(capability.maximum_tier, "tier_d");
-        assert_eq!(capability.analyzers, &["treesitter"]);
+        assert_eq!(capability.analyzers, &["source-fallback"]);
     }
 
     #[test]
@@ -6303,7 +6303,7 @@ max_source_file_bytes = 2097152
         assert_eq!(capability.aliases, ["delphi", "object-pascal"]);
         assert_eq!(capability.detectors, ["extension", "configuration"]);
         assert_eq!(capability.maximum_tier, "tier_d");
-        assert_eq!(capability.analyzers, ["treesitter"]);
+        assert_eq!(capability.analyzers, ["source-fallback"]);
     }
 
     #[test]
@@ -6818,10 +6818,14 @@ max_source_file_bytes = 2097152
     }
 
     #[test]
-    fn shader_suffixes_retain_distinct_source_fallback_capabilities() {
-        for (language, suffixes) in [
-            ("glsl", &[".vert", ".frag", ".vsh", ".fsh", ".glsl"][..]),
-            ("hlsl", &[".hlsl"][..]),
+    fn shader_suffixes_retain_distinct_installed_capabilities() {
+        for (language, suffixes, analyzers) in [
+            (
+                "glsl",
+                &[".vert", ".frag", ".vsh", ".fsh", ".glsl"][..],
+                &["treesitter"][..],
+            ),
+            ("hlsl", &[".hlsl"][..], &["source-fallback"][..]),
         ] {
             let capability = language_capabilities()
                 .iter()
@@ -6831,7 +6835,7 @@ max_source_file_bytes = 2097152
             assert!(capability.aliases.is_empty());
             assert_eq!(capability.detectors, ["extension"]);
             assert_eq!(capability.maximum_tier, "tier_d");
-            assert_eq!(capability.analyzers, ["source-fallback"]);
+            assert_eq!(capability.analyzers, analyzers);
             assert_eq!(canonical_language(language), Some(language));
             for suffix in suffixes {
                 for path in [
