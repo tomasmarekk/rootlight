@@ -1,0 +1,143 @@
+{
+  "archive_identity_pins": [
+    {
+      "archive": "upstream/tree-sitter-asm-0.24.0.crate",
+      "bytes": 21383,
+      "sha256": "743a0377253cd5505841e61ba1093a04b3a949b2b751752ff956040dda14f1bc"
+    },
+    {
+      "archive": "upstream/tree-sitter-asm-5bb5b03e3c1ce5853b5282b9fba060f7c7bbf11e.tar.gz",
+      "bytes": 33263,
+      "sha256": "e2697e8e84a2b30e22c1f0be2a5435d87c46a5c1dbe467e3640c5803f76811f4"
+    }
+  ],
+  "archive_signature_or_signed_git_object_verified": false,
+  "archived_upstream_lifecycle_activated": false,
+  "authored_revision": "5bb5b03e3c1ce5853b5282b9fba060f7c7bbf11e",
+  "build_and_packaging_acceptance_verified": false,
+  "complete_product_source_closure_proven": false,
+  "copyright": "Copyright (c) 2023 RubixDev",
+  "empty_dependency_cache_verified": false,
+  "external_scanner": false,
+  "generation_at_build_time": false,
+  "installed_mcp_verified": false,
+  "inventory": {
+    "bytes": 54147,
+    "path": "SOURCE-INVENTORY.json",
+    "sha256": "01ad05e2cae259ab9a961d73bff261f3cbeea7ac28ac440f4e2f3e80c4346faa"
+  },
+  "isolated_native_evidence": {
+    "all_targets_all_features_clippy_deny_warnings_exit_code": 0,
+    "current_exit_code": 0,
+    "current_rust": "1.97.1",
+    "exact_operand_contracts_per_profile": 22,
+    "minimum_exit_code": 0,
+    "minimum_rust": "1.90.0",
+    "original_corpus_sections_per_profile": 32,
+    "physical_masm_owner_contracts_per_profile": 5,
+    "qualified_fixture_pin": {
+      "bytes": 17715,
+      "sha256": "af605556a122045065b9728eedd40b9ef9a94c254b5d8e50c62cf9b4f418a097"
+    },
+    "receipt_pin": {
+      "bytes": 16525,
+      "sha256": "32b2b595667a58c400646155b0ea51af99784df23c5c618b103a689bd3c0f7cb"
+    },
+    "relocated_package_wrapper_executed": false,
+    "scope": "exact_generated_table_and_qualified_isolated_wrapper_not_relocated_package",
+    "source_observations_per_profile": 38,
+    "syntax_groups_per_profile": 7
+  },
+  "license": "MIT",
+  "local_generation": {
+    "abi": 14,
+    "actual_exit_codes": [
+      0,
+      0
+    ],
+    "actual_producers": 2,
+    "command": "tree-sitter generate --abi 14 --js-runtime node grammar.js",
+    "external_token_count": 0,
+    "generator_stderr_empty": true,
+    "lexical_guard_exit_codes": [
+      0,
+      0
+    ],
+    "node": "24.11.1",
+    "outputs": {
+      "src/grammar.json": {
+        "bytes": 34464,
+        "sha256": "fabe8dd10d331ed444c6317940fea33a4bbd58c2b04d321cf42606203d6d64ae"
+      },
+      "src/node-types.json": {
+        "bytes": 13537,
+        "sha256": "a5fa12c456ab631f34e418f0317324243a50b0978cf056689a4491528bbfa144"
+      },
+      "src/parser.c": {
+        "bytes": 207258,
+        "sha256": "eca05ffdbf8d5e8788bf73776812003d8975f8b1648554b241200aa6da37a798"
+      },
+      "src/tree_sitter/alloc.h": {
+        "bytes": 985,
+        "sha256": "b29c1c9fb7cc82f58c84b376df1297d6e2737a1d655fd356db0859e3c29c2fea"
+      },
+      "src/tree_sitter/array.h": {
+        "bytes": 13269,
+        "sha256": "31e60a1bff6f715afacce03b5b70efe42b58371b4f9595dd4af52a577ff9608c"
+      },
+      "src/tree_sitter/parser.h": {
+        "bytes": 7624,
+        "sha256": "180b893c8734778fd32f372dfbc27bd6ad1cd2221f26150b31256ff6716320d2"
+      }
+    },
+    "receipt_pin": {
+      "bytes": 8932,
+      "sha256": "86fb87494ee780dcadd4e8173431c8a7c91688a8a08c19712f44598cfe68db06"
+    },
+    "recorded_tool_pins": [
+      {
+        "bytes": 9720320,
+        "role": "generator",
+        "sha256": "a61249a07c4a6d01d0bbbb5b7c058e29e12c119ef7fb5bede0b7fd916a7c56f0"
+      },
+      {
+        "bytes": 89894400,
+        "role": "node",
+        "sha256": "f13ac3ca23248dc389507e8fe38c34489ab7edb3e6d6700eb6da6a0b7e128eaf"
+      },
+      {
+        "bytes": 249856,
+        "role": "lexical_guard",
+        "sha256": "ab7794022e114330bd020e0de1e76e4b66fec561cea35fbb698a14df27572a95"
+      }
+    ],
+    "six_outputs_literal_equal": true,
+    "state_count": 179,
+    "symbol_count": 84,
+    "tree_sitter_cli": "0.26.8",
+    "upstream_original_tables_reproduced": false
+  },
+  "local_modification_paths": [
+    "Cargo.toml",
+    "bindings/rust/build.rs",
+    "bindings/rust/lib.rs",
+    "grammar.js"
+  ],
+  "local_patch_evidence": "patches/",
+  "local_unpublished_binding": true,
+  "notice_paths": [
+    "notices/LICENSE"
+  ],
+  "os_network_denial_verified": false,
+  "package": "tree-sitter-asm",
+  "patch_document": "PATCHES.md",
+  "preferred_source_imports": [],
+  "primary_registry_checksum_and_published_vcs_and_authored_pax_associations_observed": true,
+  "production_integration_verified": false,
+  "published_archive_contains_license": false,
+  "repository": "https://github.com/RubixDev/tree-sitter-asm",
+  "schema": "rootlight.assembly-source-provenance/1",
+  "source_download_at_build_time": false,
+  "version": "0.24.0",
+  "whole_language_coverage_verified": false
+}

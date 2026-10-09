@@ -1,0 +1,10 @@
+--- a/grammar.js
++++ b/grammar.js
+@@ -9,6 +9,7 @@
+         $.block_comment,
+     ],
+     conflicts: $ => [
++        [$.masm_body],
+         [
+             $._expr,
+             $._tc_expr,

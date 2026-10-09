@@ -1,0 +1,92 @@
+--- a/grammar.js
++++ b/grammar.js
+@@ -1,3 +1,6 @@
++// Physical Assembly owners extend the retained upstream instruction grammar.
++// MASM containers preserve written boundaries; assembler binding and expansion
++// are not inferred from these source nodes.
+ module.exports = grammar({
+     name: 'asm',
+     extras: $ => [
+@@ -13,15 +16,81 @@
+     ],
+ 
+     rules: {
++        program: $ => seq(repeat('\n'), sep(repeat1('\n'), $._item)),
+-        program: $ => sep(repeat1('\n'), $._item),
+         _item: $ =>
+             choice(
++                $.procedure_definition,
++                $.macro_definition,
++                $.segment_definition,
++                $.data_definition,
++                $.constant_definition,
+                 $.meta,
+                 $.label,
+                 $.const,
+                 $.instruction,
+             ),
+ 
++        procedure_definition: $ =>
++            seq(
++                field('name', $.ident),
++                field('header', $.procedure_header),
++                repeat1('\n'),
++                optional(field('body', $.masm_body)),
++                field('end_name', $.ident),
++                $._masm_endp,
++            ),
++        procedure_header: $ =>
++            seq($._masm_proc, optional(choice($._masm_near, $._masm_far))),
++        macro_definition: $ =>
++            seq(
++                field('name', $.ident),
++                field('header', $.macro_header),
++                repeat1('\n'),
++                optional(field('body', $.masm_body)),
++                $._masm_endm,
++            ),
++        macro_header: $ =>
++            seq($._masm_macro, optional(field('parameters', $.masm_parameters))),
++        masm_parameters: $ => seq($.ident, repeat(seq(',', $.ident))),
++        segment_definition: $ =>
++            seq(
++                field('name', $.ident),
++                field('header', $.segment_header),
++                repeat1('\n'),
++                optional(field('body', $.masm_body)),
++                field('end_name', $.ident),
++                $._masm_ends,
++            ),
++        segment_header: $ => $._masm_segment,
++        // Newlines remain syntax: a closer is never part of the captured body.
++        masm_body: $ =>
++            seq($._item, repeat(seq(repeat1('\n'), $._item)), repeat1('\n')),
++        data_definition: $ =>
++            seq(
++                field('name', $.ident),
++                field('type', $._masm_db),
++                field('value', $.masm_initializer),
++            ),
++        masm_initializer: $ =>
++            seq($._masm_initializer_value, repeat(seq(',', $._masm_initializer_value))),
++        _masm_initializer_value: $ => choice($._tc_expr, $.float, $.masm_string),
++        masm_string: $ => /'[^'\r\n]*'/,
++        constant_definition: $ =>
++            seq(field('name', $.ident), $._masm_equ, field('value', $._tc_expr)),
++
++        // These markers are valid only in MASM owner/header states. Keeping the
++        // ordinary token precedence preserves longest-match identifier spelling.
++        _masm_proc: $ => token(/[Pp][Rr][Oo][Cc]/),
++        _masm_endp: $ => token(/[Ee][Nn][Dd][Pp]/),
++        _masm_near: $ => token(/[Nn][Ee][Aa][Rr]/),
++        _masm_far: $ => token(/[Ff][Aa][Rr]/),
++        _masm_macro: $ => token(/[Mm][Aa][Cc][Rr][Oo]/),
++        _masm_endm: $ => token(/[Ee][Nn][Dd][Mm]/),
++        _masm_segment: $ => token(/[Ss][Ee][Gg][Mm][Ee][Nn][Tt]/),
++        _masm_ends: $ => token(/[Ee][Nn][Dd][Ss]/),
++        _masm_db: $ => token(/[Dd][Bb]/),
++        _masm_equ: $ => token(/[Ee][Qq][Uu]/),
++
+         meta: $ =>
+             seq(
+                 field('kind', $.meta_ident),
