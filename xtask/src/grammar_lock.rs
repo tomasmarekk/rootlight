@@ -9,7 +9,10 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use crate::cargo_metadata::{Dependency, DependencyKind, Metadata};
+use crate::{
+    cargo_metadata::{Dependency, DependencyKind, Metadata},
+    native_table_bounds,
+};
 use serde::Deserialize;
 
 const GRAMMAR_LOCK_PATH: &str = "adapters/grammars.lock";
@@ -863,6 +866,30 @@ fn validate_vendored_tree(
     let invalid = || GrammarLockError::PackageEvidence {
         package: grammar.crate_name.clone(),
     };
+    // Resolve the ABI header beside the selected parser, including nested
+    // grammar profiles; a package-level header is not an interchangeable input.
+    let parser_path = vendored.parser_path.as_deref().unwrap_or("src/parser.c");
+    let scanner_path = vendored.scanner_path.as_deref().unwrap_or("src/scanner.c");
+    let license_path = vendored.license_path.as_deref().unwrap_or("LICENSE");
+    for path in [parser_path, scanner_path, license_path] {
+        if !is_source_relative_path(path) {
+            return Err(invalid());
+        }
+    }
+    let header_path = Path::new(parser_path)
+        .parent()
+        .ok_or_else(invalid)?
+        .join("tree_sitter/parser.h")
+        .to_string_lossy()
+        .replace('\\', "/");
+    if !is_source_relative_path(&header_path)
+        || !vendored.files.contains_key(parser_path)
+        || !vendored.files.contains_key(&header_path)
+    {
+        return Err(invalid());
+    }
+    let mut parser_bytes = None;
+    let mut header_bytes = None;
     let mut observed = BTreeSet::new();
     let mut pending = vec![directory.to_owned()];
     while let Some(path) = pending.pop() {
@@ -911,6 +938,11 @@ fn validate_vendored_tree(
                 source,
             })?;
             require_digest("vendored grammar source", &bytes, digest)?;
+            if relative == parser_path {
+                parser_bytes = Some(bytes);
+            } else if relative == header_path {
+                header_bytes = Some(bytes);
+            }
             observed.insert(relative);
         }
     }
@@ -918,22 +950,32 @@ fn validate_vendored_tree(
         return Err(invalid());
     }
     let scanner = (grammar.scanner_sha256 != "none").then_some(&grammar.scanner_sha256);
-    // Explicit source paths accommodate multi-grammar packages without accepting
-    // a digest from an unrelated file or resolving a path outside the package.
-    let parser_path = vendored.parser_path.as_deref().unwrap_or("src/parser.c");
-    let scanner_path = vendored.scanner_path.as_deref().unwrap_or("src/scanner.c");
-    let license_path = vendored.license_path.as_deref().unwrap_or("LICENSE");
-    for path in [parser_path, scanner_path, license_path] {
-        if !is_source_relative_path(path) {
-            return Err(invalid());
-        }
-    }
     if vendored.files.get(parser_path) != Some(&grammar.parser_sha256)
         || vendored.files.get(scanner_path) != scanner
         || vendored.files.get(license_path) != Some(&grammar.license_sha256)
     {
         return Err(invalid());
     }
+    // Use the exact bytes authenticated during the regular-file inventory;
+    // reopening either path here would leave a second, unauthenticated read.
+    let parser_bytes = parser_bytes.ok_or_else(invalid)?;
+    let header_bytes = header_bytes.ok_or_else(invalid)?;
+    let parser = std::str::from_utf8(&parser_bytes).map_err(|source| GrammarLockError::Utf8 {
+        path: directory.join(parser_path),
+        source,
+    })?;
+    let header = std::str::from_utf8(&header_bytes).map_err(|source| GrammarLockError::Utf8 {
+        path: directory.join(&header_path),
+        source,
+    })?;
+    native_table_bounds::validate(parser, header).map_err(|source| {
+        GrammarLockError::NativeTableBounds {
+            package: grammar.crate_name.clone(),
+            parser_path: directory.join(parser_path),
+            header_path: directory.join(&header_path),
+            source,
+        }
+    })?;
     Ok(())
 }
 
@@ -1128,6 +1170,14 @@ pub(crate) enum GrammarLockError {
     InvalidSourcePath(String),
     #[error("grammar ABI {abi} is unsupported for {language}")]
     GrammarAbi { language: String, abi: usize },
+    #[error("native table ABI validation failed for {package}: parser {}, header {}", parser_path.display(), header_path.display())]
+    NativeTableBounds {
+        package: String,
+        parser_path: PathBuf,
+        header_path: PathBuf,
+        #[source]
+        source: native_table_bounds::NativeTableBoundsError,
+    },
     #[error("grammar {language} must remain at structural analysis tier D")]
     InvalidAnalysisTier { language: String },
     #[error("grammar lock omits the {0} audit caveat")]
@@ -1146,6 +1196,10 @@ pub(crate) enum GrammarLockError {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    const FIXTURE_PARSER: &[u8] =
+        b"static const uint16_t table[] = {ACTIONS(7), STATE(9)}; SHIFT(9), SHIFT_REPEAT(9)";
+    const FIXTURE_HEADER: &[u8] = b"typedef uint16_t TSStateId; struct TSLanguage { const uint16_t *parse_table; const uint16_t *small_parse_table; };";
 
     #[test]
     fn checked_in_manifest_matches_the_reviewed_runtime_and_grammar_set() {
@@ -1606,7 +1660,7 @@ mod tests {
             )
             .is_err()
         );
-        fs::write(directory.path().join("src/parser.c"), b"parser").unwrap();
+        fs::write(directory.path().join("src/parser.c"), FIXTURE_PARSER).unwrap();
         fs::write(directory.path().join("extra.h"), b"extra").unwrap();
         assert!(
             validate_vendored_tree(
@@ -1715,7 +1769,7 @@ mod tests {
         fs::write(directory.path().join("src/scanner.c"), b"scanner").expect("scanner restores");
         fs::remove_file(directory.path().join("src/parser.c")).expect("fixture parser removes");
         assert!(validate_vendored_tree(directory.path(), &grammar, vendored).is_err());
-        fs::write(directory.path().join("src/parser.c"), b"parser").expect("parser restores");
+        fs::write(directory.path().join("src/parser.c"), FIXTURE_PARSER).expect("parser restores");
         fs::write(directory.path().join("src/extra.h"), b"extra")
             .expect("unreviewed header writes");
         assert!(validate_vendored_tree(directory.path(), &grammar, vendored).is_err());
@@ -1745,9 +1799,9 @@ mod tests {
         )
         .unwrap();
         let vendored = grammar.vendored.as_mut().unwrap();
-        for name in ["parser", "scanner"] {
-            let digest = vendored.files.remove(&format!("src/{name}.c")).unwrap();
-            vendored.files.insert(format!("block/src/{name}.c"), digest);
+        for path in ["src/parser.c", "src/scanner.c", "src/tree_sitter/parser.h"] {
+            let digest = vendored.files.remove(path).unwrap();
+            vendored.files.insert(format!("block/{path}"), digest);
         }
         vendored.parser_path = Some("block/src/parser.c".into());
         vendored.scanner_path = Some("block/src/scanner.c".into());
@@ -1884,13 +1938,234 @@ mod tests {
         );
     }
 
+    #[test]
+    fn authenticated_native_tables_still_reject_uint16_narrowing_with_typed_source() {
+        use std::error::Error as _;
+
+        for (name, kind) in [
+            ("ACTIONS", native_table_bounds::IndexMacro::Actions),
+            ("STATE", native_table_bounds::IndexMacro::State),
+            ("SHIFT", native_table_bounds::IndexMacro::Shift),
+            ("SHIFT_REPEAT", native_table_bounds::IndexMacro::ShiftRepeat),
+        ] {
+            let (directory, mut grammar) = vendored_fixture();
+            let parser = format!("/* generated table */\n{name}(70779)");
+            replace_fixture_input(
+                directory.path(),
+                &mut grammar,
+                "src/parser.c",
+                parser.as_bytes(),
+            );
+            let error = validate_vendored_tree(
+                directory.path(),
+                &grammar,
+                grammar.vendored.as_ref().unwrap(),
+            )
+            .unwrap_err();
+            let expected = native_table_bounds::NativeTableBoundsError::IndexOutOfRange {
+                kind,
+                offset: parser.find(name).unwrap(),
+                value: 70779,
+                maximum: u16::MAX,
+            };
+            assert_eq!(
+                error
+                    .source()
+                    .unwrap()
+                    .downcast_ref::<native_table_bounds::NativeTableBoundsError>(),
+                Some(&expected)
+            );
+            assert!(matches!(error, GrammarLockError::NativeTableBounds {
+                package, parser_path, header_path, source,
+            } if package == "tree-sitter-fixture"
+                && parser_path == directory.path().join("src/parser.c")
+                && header_path == directory.path().join("src/tree_sitter/parser.h")
+                && source == expected));
+        }
+    }
+
+    #[test]
+    fn authenticated_native_macro_expressions_are_not_literal_width_proofs() {
+        for parser in ["ACTIONS(offset)", "ACTIONS(1+2)", "SHIFT(-1)", "STATE()"] {
+            let (directory, mut grammar) = vendored_fixture();
+            replace_fixture_input(
+                directory.path(),
+                &mut grammar,
+                "src/parser.c",
+                parser.as_bytes(),
+            );
+            assert!(matches!(
+                validate_vendored_tree(
+                    directory.path(),
+                    &grammar,
+                    grammar.vendored.as_ref().unwrap(),
+                ),
+                Err(GrammarLockError::NativeTableBounds {
+                    source: native_table_bounds::NativeTableBoundsError::InvalidLiteral { .. },
+                    ..
+                })
+            ));
+        }
+    }
+
+    #[test]
+    fn native_width_checks_do_not_replace_exact_source_authentication() {
+        let (directory, grammar) = vendored_fixture();
+        fs::write(directory.path().join("src/parser.c"), b"ACTIONS(70779)").unwrap();
+        assert!(matches!(
+            validate_vendored_tree(
+                directory.path(),
+                &grammar,
+                grammar.vendored.as_ref().unwrap(),
+            ),
+            Err(GrammarLockError::DigestMismatch {
+                label: "vendored grammar source",
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn native_header_requires_the_authenticated_selected_parser_sibling() {
+        let (directory, mut grammar) = vendored_fixture();
+        fs::remove_file(directory.path().join("src/tree_sitter/parser.h")).unwrap();
+        fs::create_dir(directory.path().join("tree_sitter")).unwrap();
+        fs::write(
+            directory.path().join("tree_sitter/parser.h"),
+            FIXTURE_HEADER,
+        )
+        .unwrap();
+        let files = &mut grammar.vendored.as_mut().unwrap().files;
+        let digest = files.remove("src/tree_sitter/parser.h").unwrap();
+        files.insert("tree_sitter/parser.h".into(), digest);
+        assert!(matches!(
+            validate_vendored_tree(
+                directory.path(),
+                &grammar,
+                grammar.vendored.as_ref().unwrap(),
+            ),
+            Err(GrammarLockError::PackageEvidence { .. })
+        ));
+    }
+
+    #[test]
+    fn native_header_cannot_be_a_directory_even_with_an_inventory_entry() {
+        let (directory, mut grammar) = vendored_fixture();
+        let path = directory.path().join("src/tree_sitter/parser.h");
+        fs::remove_file(&path).unwrap();
+        fs::create_dir(&path).unwrap();
+        fs::write(path.join("other.h"), FIXTURE_HEADER).unwrap();
+        grammar.vendored.as_mut().unwrap().files.insert(
+            "src/tree_sitter/parser.h/other.h".into(),
+            sha256_hex(FIXTURE_HEADER),
+        );
+        assert!(matches!(
+            validate_vendored_tree(
+                directory.path(),
+                &grammar,
+                grammar.vendored.as_ref().unwrap(),
+            ),
+            Err(GrammarLockError::PackageEvidence { .. })
+        ));
+    }
+
+    #[test]
+    fn authenticated_wider_header_does_not_redefine_the_runtime_abi() {
+        for (original, replacement, member) in [
+            (
+                "typedef uint16_t TSStateId",
+                "typedef uint32_t TSStateId",
+                native_table_bounds::AbiMember::StateId,
+            ),
+            (
+                "const uint16_t *parse_table",
+                "const uint32_t *parse_table",
+                native_table_bounds::AbiMember::ParseTable,
+            ),
+            (
+                "const uint16_t *small_parse_table",
+                "const uint32_t *small_parse_table",
+                native_table_bounds::AbiMember::SmallParseTable,
+            ),
+        ] {
+            let (directory, mut grammar) = vendored_fixture();
+            let header = std::str::from_utf8(FIXTURE_HEADER)
+                .unwrap()
+                .replace(original, replacement);
+            replace_fixture_input(
+                directory.path(),
+                &mut grammar,
+                "src/tree_sitter/parser.h",
+                header.as_bytes(),
+            );
+            assert!(matches!(validate_vendored_tree(
+                directory.path(), &grammar, grammar.vendored.as_ref().unwrap(),
+            ), Err(GrammarLockError::NativeTableBounds {
+                source: native_table_bounds::NativeTableBoundsError::HeaderDeclaration { member: observed }, ..
+            }) if observed == member));
+        }
+    }
+
+    #[test]
+    fn authenticated_parser_and_header_must_be_utf8_before_lexical_validation() {
+        for path in ["src/parser.c", "src/tree_sitter/parser.h"] {
+            let (directory, mut grammar) = vendored_fixture();
+            replace_fixture_input(directory.path(), &mut grammar, path, b"\xff");
+            assert!(matches!(validate_vendored_tree(
+                directory.path(), &grammar, grammar.vendored.as_ref().unwrap(),
+            ), Err(GrammarLockError::Utf8 { path: observed, .. }) if observed == directory.path().join(path)));
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn native_parser_and_header_cannot_follow_authenticated_external_symlinks() {
+        for path in ["src/parser.c", "src/tree_sitter/parser.h"] {
+            let (directory, grammar) = vendored_fixture();
+            let external = tempfile::tempdir().unwrap();
+            let bytes = fs::read(directory.path().join(path)).unwrap();
+            let target = external.path().join("source");
+            fs::write(&target, bytes).unwrap();
+            fs::remove_file(directory.path().join(path)).unwrap();
+            std::os::unix::fs::symlink(target, directory.path().join(path)).unwrap();
+            assert!(matches!(
+                validate_vendored_tree(
+                    directory.path(),
+                    &grammar,
+                    grammar.vendored.as_ref().unwrap(),
+                ),
+                Err(GrammarLockError::PackageEvidence { .. })
+            ));
+        }
+    }
+
+    fn replace_fixture_input(
+        directory: &Path,
+        grammar: &mut GrammarEvidence,
+        path: &str,
+        bytes: &[u8],
+    ) {
+        fs::write(directory.join(path), bytes).unwrap();
+        let digest = sha256_hex(bytes);
+        grammar
+            .vendored
+            .as_mut()
+            .unwrap()
+            .files
+            .insert(path.into(), digest.clone());
+        if path == "src/parser.c" {
+            grammar.parser_sha256 = digest;
+        }
+    }
+
     fn vendored_fixture() -> (tempfile::TempDir, GrammarEvidence) {
         let directory = tempfile::tempdir().expect("fixture directory");
-        fs::create_dir(directory.path().join("src")).expect("source directory");
+        fs::create_dir_all(directory.path().join("src/tree_sitter")).expect("source directory");
         let mut files = BTreeMap::new();
         for (path, bytes) in [
             ("Cargo.toml", b"manifest".as_slice()),
-            ("src/parser.c", b"parser"),
+            ("src/parser.c", FIXTURE_PARSER),
+            ("src/tree_sitter/parser.h", FIXTURE_HEADER),
             ("src/scanner.c", b"scanner"),
             ("LICENSE", b"license"),
         ] {
@@ -1906,7 +2181,7 @@ mod tests {
             repository: "https://example.invalid/grammar".into(),
             tag: "v1.0.0".into(),
             commit: "fixture".into(),
-            parser_sha256: sha256_hex(b"parser"),
+            parser_sha256: sha256_hex(FIXTURE_PARSER),
             scanner_sha256: sha256_hex(b"scanner"),
             abi: 15,
             analysis_tier: "D".into(),

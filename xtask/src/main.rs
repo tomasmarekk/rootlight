@@ -18,6 +18,7 @@ mod incident;
 mod license;
 mod mcp_compatibility;
 mod mcp_vertical;
+mod native_table_bounds;
 mod package;
 mod policy;
 mod protobuf_compatibility;
