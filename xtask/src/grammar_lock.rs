@@ -19,7 +19,7 @@ const GRAMMAR_LOCK_PATH: &str = "adapters/grammars.lock";
 const CARGO_LOCK_PATH: &str = "Cargo.lock";
 const ADAPTER_PACKAGE: &str = "rootlight-adapter-treesitter";
 const GRAMMAR_LOCK_SHA256: &str =
-    "f1dd53298348301ce5164dcabf20a0c4d5b63c3bc97f368e2addd0ed88659e50";
+    "53a64ff586d68e247dd5f55b7a594f1027dc97f537ca86a6d958b8a37b26d4ba";
 const JAVA_LICENSE_PATH: &str = "adapters/licenses/tree-sitter-java-0.23.5-LICENSE";
 const JAVA_LICENSE_SHA256: &str =
     "52ed137b039cd9c46409bc22e89938af911c95b157feae2d040b51e6084369a7";
@@ -217,7 +217,13 @@ const EXPECTED_PACKAGES: [(&str, &str, &str); 35] = [
     ),
 ];
 
-const EXPECTED_LOCAL_PACKAGES: [(&str, &str, &str, &str); 9] = [
+const EXPECTED_LOCAL_PACKAGES: [(&str, &str, &str, &str); 10] = [
+    (
+        "tree-sitter-wgsl",
+        "0.0.9",
+        "third_party/tree-sitter-wgsl-0.0.9",
+        "4a6bd6793fc477b90b2ded2d5c7f449485e1c19473fad36b90fb8777e0b60b3e",
+    ),
     (
         "tree-sitter-asm",
         "0.24.0",
@@ -455,7 +461,7 @@ fn validate_manifest(manifest: &GrammarLock) -> Result<(), GrammarLockError> {
         ));
     }
     validate_runtime(&manifest.runtime)?;
-    if manifest.grammars.len() != 46 {
+    if manifest.grammars.len() != 47 {
         return Err(GrammarLockError::GrammarCount(manifest.grammars.len()));
     }
     let mut languages = BTreeSet::new();
@@ -526,6 +532,7 @@ fn validate_manifest(manifest: &GrammarLock) -> Result<(), GrammarLockError> {
         "yaml",
         "typescript",
         "vba",
+        "wgsl",
     ]);
     if languages != expected_languages {
         return Err(GrammarLockError::LanguageSet);
@@ -1673,6 +1680,157 @@ mod tests {
         }
         validate_vendored_tree(&directory, grammar, sources)
             .expect("all original GLSL and C inputs, notices and native tables agree");
+    }
+
+    #[test]
+    fn wgsl_retains_complete_originals_and_exact_preferred_native_and_notice_inputs() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
+        let manifest: GrammarLock =
+            toml::from_str(include_str!("../../adapters/grammars.lock")).unwrap();
+        let grammar = manifest
+            .grammars
+            .iter()
+            .find(|grammar| grammar.language == "wgsl")
+            .unwrap();
+        let sources = grammar.vendored.as_ref().unwrap();
+        let directory = root.join("third_party/tree-sitter-wgsl-0.0.9");
+        assert!(grammar.crates_io_checksum.is_none());
+        assert_eq!(grammar.abi, 14);
+        assert_eq!(
+            grammar.vendored_source_sha256.as_deref(),
+            Some("4a6bd6793fc477b90b2ded2d5c7f449485e1c19473fad36b90fb8777e0b60b3e")
+        );
+        assert_eq!(sources.files.len(), 38);
+        assert_eq!(sources.parser_path.as_deref(), Some("src/parser.c"));
+        assert_eq!(sources.scanner_path.as_deref(), Some("src/scanner.c"));
+        assert_eq!(sources.license_path.as_deref(), Some("LICENSE.md"));
+        let inventory: serde_json::Value = serde_json::from_str(include_str!(
+            "../../third_party/tree-sitter-wgsl-0.0.9/SOURCE-INVENTORY.json"
+        ))
+        .unwrap();
+        assert_eq!(inventory["schema"], "rootlight.wgsl-source-inventory/1");
+        assert_eq!(inventory["original_regular_file_count"], 13);
+        assert_eq!(inventory["original_regular_file_bytes"], 207_378);
+        assert_eq!(inventory["original_directory_record_count"], 3);
+        assert_eq!(
+            inventory["original_modes_and_executable_intent_retained"],
+            true
+        );
+        assert_eq!(inventory["archive_modes_applied"], false);
+        let mut payloads = BTreeSet::new();
+        for member in inventory["payload_files"].as_array().unwrap() {
+            let path = member["path"].as_str().unwrap();
+            assert!(payloads.insert(path));
+            assert_eq!(
+                sources.files.get(path).map(String::as_str),
+                member["sha256"].as_str()
+            );
+            assert_eq!(
+                fs::metadata(directory.join(path)).unwrap().len(),
+                member["bytes"]
+            );
+        }
+        assert_eq!(payloads.len(), 36);
+        payloads.extend(["SOURCE-INVENTORY.json", "SOURCE-PROVENANCE.json"]);
+        assert_eq!(payloads, sources.files.keys().map(String::as_str).collect());
+        let archives = inventory["sources"].as_array().unwrap();
+        assert_eq!(archives.len(), 1);
+        let archived = &archives[0];
+        assert_eq!(
+            sources
+                .files
+                .get(archived["archive"].as_str().unwrap())
+                .map(String::as_str),
+            archived["sha256"].as_str()
+        );
+        let members = archived["inventory"]["members"].as_array().unwrap();
+        let retained_tree = archived["retained_tree"].as_str().unwrap();
+        let mut originals = 0;
+        let mut directories = 0;
+        let mut original_bytes = 0u64;
+        for member in members {
+            let path = member["path"].as_str().unwrap();
+            let retained = if path.is_empty() {
+                retained_tree.to_owned()
+            } else {
+                format!("{retained_tree}/{path}")
+            };
+            let is_directory = member["directory"].as_bool().unwrap();
+            assert_eq!(
+                member["executable_intent"].as_bool(),
+                Some(!is_directory && member["raw_mode"].as_u64().unwrap() & 0o111 != 0)
+            );
+            if is_directory {
+                assert!(archived_directory_materialized(
+                    &directory.join(&retained),
+                    path,
+                    members
+                ));
+                directories += 1;
+            } else {
+                assert_eq!(
+                    sources.files.get(&retained).map(String::as_str),
+                    member["sha256"].as_str()
+                );
+                originals += 1;
+                original_bytes += member["bytes"].as_u64().unwrap();
+            }
+        }
+        assert_eq!((originals, directories, original_bytes), (13, 3, 207_378));
+        let provenance: serde_json::Value = serde_json::from_str(include_str!(
+            "../../third_party/tree-sitter-wgsl-0.0.9/SOURCE-PROVENANCE.json"
+        ))
+        .unwrap();
+        assert_eq!(provenance["authored_revision"], grammar.commit);
+        assert_eq!(provenance["mirror_original_wasm"]["retained_inert"], true);
+        assert_eq!(provenance["mirror_original_wasm"]["executed"], false);
+        assert_eq!(provenance["local_generation"]["producer_count"], 1);
+        assert_eq!(
+            provenance["local_generation"]["twin_producer_reproducibility_verified"],
+            false
+        );
+        assert_eq!(provenance["original_scanner_inert"], true);
+        assert_eq!(
+            provenance["preferred_scanner"]["sha256"],
+            grammar.scanner_sha256
+        );
+        for claim in [
+            "installed_mcp_verified",
+            "whole_language_coverage_verified",
+            "complete_product_source_closure_proven",
+            "empty_dependency_cache_verified",
+            "os_network_denial_verified",
+            "source_download_or_generation_at_build_time",
+            "archived_upstream_lifecycle_activated",
+            "license_policy_or_legal_acceptance_verified",
+        ] {
+            assert_eq!(provenance[claim], false, "{claim}");
+        }
+        validate_vendored_tree(&directory, grammar, sources).unwrap();
+        for (path, digest) in [
+            (
+                "third_party/tree-sitter-wgsl-0.0.9/LICENSE.md",
+                "18d40c8ea3118033e6b4725efa522ac00bceb8ae429a1a0fa4356152bb07dc56",
+            ),
+            (
+                "third_party/tree-sitter-wgsl-0.0.9/notices/gpuweb-bsd-463e2f34-LICENSE.txt",
+                "83d286b68d185bc8d3299b655e317ed888a9b7af1fe3a518b0237ab03896a0d7",
+            ),
+            (
+                "third_party/tree-sitter-wgsl-0.0.9/notices/w3c-software-license-2023.html",
+                "5497437f8e227f2a64def93edfccc6a85088a5c8e1924cacf419090e57c7c058",
+            ),
+            (
+                "third_party/tree-sitter-wgsl-0.0.9/notices/tree-sitter-MIT-LICENSE",
+                "c5cfb43042b6b72045f4ba997834d0a7786d2793d91680868b5815b39f14fc78",
+            ),
+            (
+                "crates/rootlight-unicode/data/XID-16.0.0-LICENSE.txt",
+                "f7db81051789b729fea528a63ec4c938fdcb93d9d61d97dc8cc2e9df6d47f2a1",
+            ),
+        ] {
+            validate_local_license(&root, path, digest).unwrap();
+        }
     }
 
     #[test]

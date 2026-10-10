@@ -43,6 +43,7 @@ mod sql;
 mod sql_admission;
 pub(super) mod vba;
 mod vba_calls;
+mod wgsl;
 mod yaml;
 
 const QUERY_CURSOR_MATCH_LIMIT: u32 = 4096;
@@ -368,6 +369,15 @@ impl QueryPack {
                 | GrammarFamily::Hlsl
         ) {
             expected.retain(|name| !matches!(*name, "call" | "import" | "documentation"));
+            expected.push("expression");
+        }
+        if family == GrammarFamily::Wgsl {
+            expected.retain(|name| {
+                !matches!(
+                    *name,
+                    "call" | "comment" | "documentation" | "import" | "string"
+                )
+            });
             expected.push("expression");
         }
         if family == GrammarFamily::Apex {
@@ -700,6 +710,7 @@ impl QueryPack {
             assembly::CaptureCache::new(limits.captures.min(limits.body_nodes));
         let mut glsl_captures = glsl::CaptureCache::new(limits.captures.min(limits.body_nodes));
         let mut hlsl_captures = hlsl::CaptureCache::new(limits.captures.min(limits.body_nodes));
+        let mut wgsl_captures = wgsl::CaptureCache::new(limits.captures.min(limits.body_nodes));
         // A full-extent root can still omit bytes between included ranges, while
         // standalone roots may exclude leading or trailing trivia from their span.
         let fsharp_complete_source = !input.normalize_calls
@@ -743,6 +754,22 @@ impl QueryPack {
                     continue;
                 }
                 let mut capture = *capture;
+                if input.family == GrammarFamily::Wgsl {
+                    let admitted = wgsl::retain_capture(
+                        capture.node,
+                        role,
+                        input.source,
+                        input.cancellation,
+                        &mut wgsl_captures,
+                    )?;
+                    if wgsl_captures.exhausted() {
+                        limit = Some(QueryLimit::Capture);
+                        break 'query;
+                    }
+                    if !admitted {
+                        continue;
+                    }
+                }
                 if input.family == GrammarFamily::Hlsl {
                     let admitted = hlsl::retain_capture(
                         capture.node,
@@ -1059,7 +1086,15 @@ impl QueryPack {
                 {
                     continue;
                 }
-                let candidate = if input.family == GrammarFamily::Hlsl {
+                let candidate = if input.family == GrammarFamily::Wgsl {
+                    wgsl::candidate(
+                        capture.node,
+                        role,
+                        input.source,
+                        input.cancellation,
+                        &mut wgsl_captures,
+                    )
+                } else if input.family == GrammarFamily::Hlsl {
                     hlsl::candidate(
                         capture.node,
                         role,
@@ -1116,6 +1151,7 @@ impl QueryPack {
                     || assembly_captures.exhausted()
                     || glsl_captures.exhausted()
                     || hlsl_captures.exhausted()
+                    || wgsl_captures.exhausted()
                 {
                     limit = Some(QueryLimit::Capture);
                     break 'query;
@@ -1703,6 +1739,7 @@ fn candidate_for_capture(
             GrammarFamily::Assembly => return Err(query_failure("query-assembly-unproven-call")),
             GrammarFamily::Glsl => return Err(query_failure("query-glsl-unproven-call")),
             GrammarFamily::Hlsl => return Err(query_failure("query-hlsl-unproven-call")),
+            GrammarFamily::Wgsl => return Err(query_failure("query-wgsl-unproven-call")),
             GrammarFamily::CommonLisp => {
                 return Err(query_failure("query-common-lisp-unproven-call"));
             }
@@ -2619,7 +2656,7 @@ impl QueryPackRegistry {
     }
 
     fn compile_audited() -> Result<Self, GrammarFamily> {
-        let mut packs = Vec::with_capacity(47);
+        let mut packs = Vec::with_capacity(48);
         for (family, source) in [
             (GrammarFamily::Rust, include_str!("../queries/rust.scm")),
             (GrammarFamily::Python, include_str!("../queries/python.scm")),
@@ -2675,6 +2712,7 @@ impl QueryPackRegistry {
             (GrammarFamily::PlSql, include_str!("../queries/plsql.scm")),
             (GrammarFamily::Glsl, include_str!("../queries/glsl.scm")),
             (GrammarFamily::Hlsl, include_str!("../queries/hlsl.scm")),
+            (GrammarFamily::Wgsl, include_str!("../queries/wgsl.scm")),
             (
                 GrammarFamily::CommonLisp,
                 include_str!("../queries/common_lisp.scm"),
@@ -2819,6 +2857,7 @@ mod tests {
             GrammarFamily::Assembly,
             GrammarFamily::Glsl,
             GrammarFamily::Hlsl,
+            GrammarFamily::Wgsl,
         ] {
             let pack = registry.get(family).expect("family has a query pack");
             let mut names = pack.identity_query.capture_names().to_vec();
@@ -2832,6 +2871,15 @@ mod tests {
             }
             if family == GrammarFamily::Fortran {
                 expected.retain(|name| *name != "documentation");
+                expected.push("expression");
+            }
+            if family == GrammarFamily::Wgsl {
+                expected.retain(|name| {
+                    !matches!(
+                        *name,
+                        "call" | "comment" | "documentation" | "import" | "string"
+                    )
+                });
                 expected.push("expression");
             }
             if family == GrammarFamily::Apex {

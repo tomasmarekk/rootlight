@@ -130,12 +130,22 @@ fn hlsl_written_uses_require_shader_owned_target_proof() {
     shader_written_uses_require_owned_target_proof("hlsl");
 }
 
+#[test]
+fn wgsl_written_uses_require_shader_owned_target_proof() {
+    shader_written_uses_require_owned_target_proof("wgsl");
+}
+
 fn shader_written_uses_require_owned_target_proof(language: &str) {
     for (syntax, role, kind) in [
         (
             "identifier.reference",
             OccurrenceRole::Read,
             EntityKind::Variable,
+        ),
+        (
+            "type.reference",
+            OccurrenceRole::Reference,
+            EntityKind::Struct,
         ),
         (
             "member.reference",
@@ -245,6 +255,11 @@ fn glsl_resolved_definition_retains_its_physical_identity() {
 #[test]
 fn hlsl_resolved_definition_retains_its_physical_identity() {
     shader_resolved_definition_retains_its_physical_identity("hlsl");
+}
+
+#[test]
+fn wgsl_resolved_definition_retains_its_physical_identity() {
+    shader_resolved_definition_retains_its_physical_identity("wgsl");
 }
 
 fn shader_resolved_definition_retains_its_physical_identity(language: &str) {

@@ -1,0 +1,82 @@
+diff --git a/Cargo.toml b/Cargo.toml
+new file mode 100644
+--- /dev/null
++++ b/Cargo.toml
+@@ -0,0 +1,21 @@
++# Local unpublished binding for retained WGSL source and a hardened scanner.
++# Compilation uses static ABI14 inputs without generation or acquisition.
++[package]
++name = "tree-sitter-wgsl"
++version = "0.0.9"
++edition = "2024"
++rust-version = "1.90"
++license-file = "LICENSE.md"
++repository = "https://github.com/gpuweb/tree-sitter-wgsl"
++description = "Pinned WGSL grammar with a local static language binding"
++publish = false
++build = "bindings/rust/build.rs"
++
++[lib]
++path = "bindings/rust/lib.rs"
++
++[dependencies]
++tree-sitter-language = "=0.1.7"
++
++[build-dependencies]
++cc = "=1.2.67"
+diff --git a/bindings/rust/build.rs b/bindings/rust/build.rs
+new file mode 100644
+--- /dev/null
++++ b/bindings/rust/build.rs
+@@ -0,0 +1,24 @@
++//! Compiles only the retained ABI14 WGSL table and hardened external scanner.
++//! Acquisition, generation and archived upstream lifecycle hooks never run here.
++
++fn main() {
++    let mut builder = cc::Build::new();
++    builder
++        .std("c11")
++        .include("src")
++        .file("src/parser.c")
++        .file("src/scanner.c");
++    #[cfg(target_env = "msvc")]
++    builder.flag("-utf-8");
++    builder.compile("tree-sitter-wgsl");
++
++    for path in [
++        "src/parser.c",
++        "src/scanner.c",
++        "src/tree_sitter/parser.h",
++        "src/tree_sitter/alloc.h",
++        "src/tree_sitter/array.h",
++    ] {
++        println!("cargo:rerun-if-changed={path}");
++    }
++}
+diff --git a/bindings/rust/lib.rs b/bindings/rust/lib.rs
+new file mode 100644
+--- /dev/null
++++ b/bindings/rust/lib.rs
+@@ -0,0 +1,22 @@
++//! Static language handle for the pinned WGSL grammar and hardened scanner.
++//! Physical syntax does not prove shader validation, evaluated constants,
++//! overload resolution, linked resource identity or runtime binding.
++
++use tree_sitter_language::LanguageFn;
++
++unsafe extern "C" {
++    fn tree_sitter_wgsl() -> *const ();
++}
++
++/// Provides the process-lifetime immutable locally generated ABI14 table.
++// SAFETY: src/parser.c defines this exact C factory and returns its immutable
++// static TSLanguage table. LanguageFn retains the factory; the runtime checks
++// ABI compatibility when loading it. The paired external scanner is linked
++// from the retained locally hardened src/scanner.c.
++pub const LANGUAGE_WGSL: LanguageFn = unsafe { LanguageFn::from_raw(tree_sitter_wgsl) };
++
++/// Describes the exact locally generated named nodes and physical fields.
++pub const NODE_TYPES: &str = include_str!("../../src/node-types.json");
++
++/// Retains the original highlighting query without claiming SDK qualification.
++pub const HIGHLIGHTS_QUERY: &str = include_str!("../../queries/highlights.scm");

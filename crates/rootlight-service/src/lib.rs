@@ -243,8 +243,8 @@ const PROJECT_FACTS_TRUNCATED_CODE: &str = "project-adapter-facts-truncated";
 const PROJECT_FACTS_TRUNCATED_MESSAGE: &str =
     "additional project semantic facts were omitted by aggregate resource limits";
 const AGGREGATE_DIAGNOSTICS_TRUNCATED_CODE: &str = "aggregate-diagnostics-truncated";
-const ANALYZER_BINARY_SEED: &[u8] = b"rootlight.first-slice.treesitter-structural/235";
-const RESOLVER_BINARY_SEED: &[u8] = b"rootlight.first-slice.resolve/103";
+const ANALYZER_BINARY_SEED: &[u8] = b"rootlight.first-slice.treesitter-structural/236";
+const RESOLVER_BINARY_SEED: &[u8] = b"rootlight.first-slice.resolve/104";
 const INCREMENTAL_PROVIDER_SEED: &[u8] = b"rootlight.first-slice.incremental-provider/1";
 const LANGUAGE_DISPOSITION_PROVIDER_SEED: &[u8] = b"rootlight.first-slice.language-disposition/12";
 const SOURCE_FILE_FALLBACK_PROVIDER_SEED: &[u8] = b"rootlight.source-file-fallback/4";
@@ -13898,10 +13898,10 @@ impl FirstSliceService {
                 .reduce(lower_coverage_status)
                 .ok_or(FirstSliceError::CatalogCorrupt)?;
             let reason = document.diagnostics.iter().find_map(|diagnostic| {
-                if !diagnostic
+                if diagnostic
                     .source
                     .as_ref()
-                    .is_some_and(|source| source.span().file() == file.id)
+                    .is_none_or(|source| source.span().file() != file.id)
                 {
                     return None;
                 }
@@ -31330,6 +31330,7 @@ mod tests {
             "sample.toml",
             "sample.ts",
             "sample.yaml",
+            "sample.wgsl",
         ]
         .into_iter()
         .filter_map(source_language_from_path)
@@ -31893,6 +31894,223 @@ mod tests {
             .unwrap();
         assert_eq!(read.data.chunks.len(), 1);
         assert_eq!(read.data.chunks[0].bytes, source.as_bytes());
+    }
+
+    #[test]
+    fn wgsl_source_queries_retain_written_facts_and_complete_original_source() {
+        let source = "struct Uniforms { scale: f32, }\nalias Δ = vec2<f32>;\nvar<private> counter: i32;\n@compute @workgroup_size(1)\nfn Main() { var local: i32 = 1; counter = local; }\n";
+        let comments = "/* **/ alias Next = i32;\n/* outer /* inner */ close */ fn Later() {}\n";
+        let fixture = TempDir::new().unwrap();
+        write_language_fixture(
+            fixture.path(),
+            &[("shader.wgsl", source), ("comments.wgsl", comments)],
+        );
+        let mut service = FirstSliceService::new(2).unwrap();
+        let mut absent = service.analyzers.clone();
+        assert!(absent.remove("wgsl").is_some());
+        assert!(absent.contains_key("glsl"));
+        assert!(absent.contains_key("hlsl"));
+        for path in ["shader.wgsl", "SHADER.WGSL"] {
+            let input = ManifestInput {
+                file: FileId::from_bytes([3; 20]),
+                path: path.to_owned(),
+                content_hash: content_hash(source.as_bytes()),
+                bytes: u64::try_from(source.len()).unwrap(),
+                encoding: "utf-8".to_owned(),
+                class: InputClass::Source,
+                language_signals: vec![rootlight_discovery::LanguageSignal {
+                    language: "hlsl".to_owned(),
+                    evidence: LanguageEvidence::Content,
+                }],
+                project_language_witnesses: Vec::new(),
+                decisive_rule: None,
+            };
+            assert_eq!(detected_source_language(&input), Some("wgsl"));
+            assert_eq!(
+                source_language_route(&input, &service.analyzers),
+                Some("wgsl")
+            );
+            assert_eq!(
+                supported_source_language(&input, &service.analyzers),
+                Some("wgsl")
+            );
+            assert_eq!(source_language_route(&input, &absent), None);
+        }
+        let registry = GrammarRegistry::audited().unwrap();
+        let descriptor = registry.get(GrammarFamily::Wgsl).unwrap();
+        let receipt = service
+            .index_repository(fixture.path(), &deadline())
+            .unwrap();
+        assert_eq!(receipt.indexed_files, 2);
+        let generation = service
+            .loaded_generation_snapshot(receipt.generation)
+            .unwrap();
+        let document = generation.document();
+        assert_eq!(document.files.len(), 2);
+        for file in &document.files {
+            assert_eq!(file.language, "wgsl");
+            let raw = if file.path == "shader.wgsl" {
+                source
+            } else {
+                assert_eq!(file.path, "comments.wgsl");
+                comments
+            };
+            assert_eq!(file.content_hash, content_hash(raw.as_bytes()));
+            let parser = document
+                .provenance
+                .iter()
+                .find(|record| record.id == file.provenance)
+                .unwrap();
+            assert_eq!(parser.language, "wgsl");
+            assert_eq!(parser.producer_kind, ProducerKind::Parser);
+            assert_eq!(
+                parser.frontend_version.as_deref(),
+                Some("tree-sitter-wgsl-0.0.9")
+            );
+            assert_eq!(
+                parser.binary_digest,
+                grammar_binary_digest(descriptor).unwrap()
+            );
+            let coverage = service
+                .source_file_coverage_until(receipt.generation, file.id, &deadline())
+                .unwrap();
+            assert_eq!(coverage.language, "wgsl");
+            assert_eq!(coverage.tier, AnalysisTier::TierD);
+            assert_eq!(coverage.status, CoverageStatus::Bounded);
+            assert_eq!(coverage.reason, None);
+            let gap = document
+                .skipped_regions
+                .iter()
+                .find(|gap| {
+                    gap.domain == rootlight_ir::FactDomain::Occurrences
+                        && gap.detail == "wgsl-hidden-comments-have-source-only-availability"
+                        && gap.source.span().file() == file.id
+                })
+                .unwrap();
+            assert_eq!(gap.source.repository(), receipt.repository);
+            assert_eq!(gap.source.generation(), receipt.generation);
+            assert_eq!(gap.source.content_hash(), content_hash(raw.as_bytes()));
+            assert_eq!(gap.source.span().start_byte(), 0);
+            assert_eq!(
+                gap.source.span().end_byte(),
+                u64::try_from(raw.len()).unwrap()
+            );
+            let read = service
+                .source_read_with_options_and_budget(
+                    receipt.generation,
+                    vec![gap.source.clone()],
+                    SourceReadOptions::new()
+                        .with_context_lines_before(0)
+                        .with_context_lines_after(0),
+                    FirstSliceBudget::default(),
+                    &deadline(),
+                )
+                .unwrap();
+            assert_eq!(read.data.chunks.len(), 1);
+            assert_eq!(read.data.chunks[0].bytes, raw.as_bytes());
+        }
+        for (name, kind) in [
+            ("Uniforms", EntityKind::Struct),
+            ("scale", EntityKind::Field),
+            ("Δ", EntityKind::TypeAlias),
+            ("counter", EntityKind::Variable),
+            ("Main", EntityKind::Function),
+            ("local", EntityKind::Variable),
+            ("Next", EntityKind::TypeAlias),
+            ("Later", EntityKind::Function),
+        ] {
+            assert!(
+                document
+                    .entities
+                    .iter()
+                    .any(|entity| entity.canonical_name == name
+                        && entity.kind == kind
+                        && entity.language == "wgsl"),
+                "{name}"
+            );
+        }
+        assert!(
+            document
+                .relations
+                .iter()
+                .all(|relation| relation.predicate == RelationPredicate::Contains)
+        );
+        assert!(!document.occurrences.iter().any(|occurrence| matches!(
+            occurrence.role,
+            OccurrenceRole::CallSite
+                | OccurrenceRole::ImportUse
+                | OccurrenceRole::Documentation
+                | OccurrenceRole::StringEvidence
+        )));
+        let located = service
+            .code_locate(
+                receipt.generation,
+                "Main".to_owned(),
+                LocateMode::Exact,
+                10,
+                0,
+                &deadline(),
+            )
+            .unwrap();
+        assert_eq!(located.data.generation, receipt.generation);
+        let symbols = located
+            .data
+            .hits
+            .iter()
+            .filter_map(|hit| hit.symbol)
+            .collect::<BTreeSet<_>>();
+        assert_eq!(symbols.len(), 1);
+        let explained = service
+            .symbol_explain(receipt.generation, *symbols.first().unwrap(), &deadline())
+            .unwrap();
+        assert_eq!(explained.data.entity.canonical_name, "Main");
+        assert_eq!(explained.data.entity.language, "wgsl");
+        assert_eq!(explained.data.entity.kind, EntityKind::Function);
+        assert_eq!(
+            explained.data.signature.as_ref().unwrap().text(),
+            "@compute @workgroup_size(1)\nfn Main()"
+        );
+        let reference = explained.data.entity.evidence.source.unwrap();
+        assert_eq!(reference.repository(), receipt.repository);
+        assert_eq!(reference.generation(), receipt.generation);
+        assert_eq!(reference.content_hash(), content_hash(source.as_bytes()));
+        let start = usize::try_from(reference.span().start_byte()).unwrap();
+        let end = usize::try_from(reference.span().end_byte()).unwrap();
+        assert_eq!(
+            &source[start..end],
+            "@compute @workgroup_size(1)\nfn Main() { var local: i32 = 1; counter = local; }"
+        );
+        let text = service
+            .code_locate(
+                receipt.generation,
+                "outer".to_owned(),
+                LocateMode::Text,
+                10,
+                0,
+                &deadline(),
+            )
+            .unwrap();
+        assert!(
+            text.data
+                .hits
+                .iter()
+                .any(|hit| hit.path == "comments.wgsl" && hit.symbol.is_none())
+        );
+        assert!(text.data.hits.iter().all(|hit| hit.symbol.is_none()));
+        for path in ["shader.wgsl", "comments.wgsl"] {
+            let path_hit = service
+                .code_locate(
+                    receipt.generation,
+                    path.to_owned(),
+                    LocateMode::Exact,
+                    8,
+                    0,
+                    &deadline(),
+                )
+                .unwrap();
+            assert_eq!(path_hit.data.generation, receipt.generation);
+            assert!(path_hit.data.hits.iter().any(|hit| hit.path == path));
+        }
     }
 
     #[test]
@@ -37504,6 +37722,7 @@ mod tests {
             b"rootlight.first-slice.treesitter-structural/232",
             b"rootlight.first-slice.treesitter-structural/233",
             b"rootlight.first-slice.treesitter-structural/234",
+            b"rootlight.first-slice.treesitter-structural/235",
         ] {
             let previous_parser = hash_static_components(&[
                 PARSER_PROVIDER_SET_SEED,
@@ -37516,13 +37735,14 @@ mod tests {
             assert_ne!(parser, previous_parser);
         }
         for previous in [
-            b"rootlight.first-slice.resolve/40",
+            b"rootlight.first-slice.resolve/40".as_slice(),
             b"rootlight.first-slice.resolve/94",
             b"rootlight.first-slice.resolve/95",
             b"rootlight.first-slice.resolve/96",
             b"rootlight.first-slice.resolve/97",
             b"rootlight.first-slice.resolve/98",
             b"rootlight.first-slice.resolve/99",
+            b"rootlight.first-slice.resolve/103",
         ] {
             let previous_resolver = hash_static_components(&[
                 PROVIDER_SET_SEED,

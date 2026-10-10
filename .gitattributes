@@ -50,6 +50,14 @@ third_party/tree-sitter-hlsl-0.2.0/upstream/c-authored/test/corpus/microsoft.txt
 third_party/tree-sitter-hlsl-0.2.0/upstream/cpp-authored/test/corpus/c/microsoft.txt conflict-marker-size=64
 third_party/tree-sitter-hlsl-0.2.0/upstream/cpp-authored/test/corpus/microsoft.txt conflict-marker-size=64
 third_party/tree-sitter-hlsl-0.2.0/upstream/cpp-authored/test/corpus/types.txt conflict-marker-size=64
+# WGSL preferred, derived and complete original inputs remain byte-exact.
+third_party/tree-sitter-wgsl-0.0.9/** -text
+third_party/tree-sitter-wgsl-0.0.9/upstream/** whitespace=-blank-at-eol,-blank-at-eof,-space-before-tab,cr-at-eol
+third_party/tree-sitter-wgsl-0.0.9/patches/** whitespace=-blank-at-eol,-blank-at-eof,-space-before-tab,cr-at-eol
+third_party/tree-sitter-wgsl-0.0.9/upstream/archives/** binary
+adapters/licenses/tree-sitter-wgsl-0.0.9-* -text
+adapters/licenses/Unicode-XID-16.0.0-LICENSE -text
+crates/rootlight-unicode/data/XID-16.0.0-LICENSE.txt -text
 # Published Pascal indentation is retained in both preferred-source versions.
 third_party/tree-sitter-pascal-0.10.2/grammar.js* whitespace=-space-before-tab
 # Retained Kotlin registry inputs and scanner originals remain byte-exact.

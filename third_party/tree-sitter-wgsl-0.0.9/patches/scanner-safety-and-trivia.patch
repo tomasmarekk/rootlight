@@ -1,0 +1,645 @@
+--- upstream/src/scanner.c
++++ proposal-v2/src/scanner.c
+@@ -1,3 +1,6 @@
++// Local safety and trivia patch for the authenticated WGSL external scanner.
++// The original grammar/token ABI is unchanged; rejected scans preserve state.
++
+ #include "tree_sitter/parser.h"
+ #include <assert.h>
+ #include <stdbool.h>
+@@ -547,15 +550,18 @@
+   assert(queue->count > 0);
+   bool value = bitqueue_get(queue, 0);
+   queue->count--;
+-  queue->read_offset++;
++  queue->read_offset = (queue->read_offset + 1) % BITQUEUE_CAPACITY;
+   return value;
+ }
+ 
+ /// Appends a bit to the back of the queue
+-static void bitqueue_push_back(BitQueue *queue, bool value) {
+-  assert(queue->count < BITQUEUE_CAPACITY);
++static bool bitqueue_push_back(BitQueue *queue, bool value) {
++  if (queue->count >= BITQUEUE_CAPACITY) {
++    return false;
++  }
+   queue->count++;
+   bitqueue_set(queue, queue->count - 1, value);
++  return true;
+ }
+ 
+ /// @returns true if the queue holds no bits.
+@@ -564,6 +570,11 @@
+ /// @returns the number of bits held by the queue.
+ static size_t bitqueue_count(const BitQueue *queue) { return queue->count; }
+ 
++static bool bitqueue_valid(const BitQueue *queue) {
++  return queue->count <= BITQUEUE_CAPACITY &&
++         queue->read_offset < BITQUEUE_CAPACITY;
++}
++
+ #if ENABLE_LOGGING
+ static void bitqueue_to_chars(const BitQueue *queue, char *str) {
+   sprintf(str, "%zu:", queue->count);
+@@ -620,15 +631,18 @@
+   return false;
+ }
+ 
+-/// Attempts to match an identifier pattern that starts with XIDStart followed
+-/// by any number of XIDContinue code points.
++/// Matches XIDStart plus XIDContinue, or '_' plus at least one XIDContinue.
++/// The latter matches the retained grammar's written underscore-prefix rule.
+ static bool lexer_match_identifier(Lexer *lexer) {
+-  if (!is_xid_start(lexer_peek(lexer))) {
++  if (!is_xid_start(lexer_peek(lexer)) && lexer_peek(lexer) != '_') {
+     return false;
+   }
+ 
+   bool is_ascii = true;
+   CodePoint start = lexer_next(lexer);
++  if (start == '_' && !is_xid_continue(lexer_peek(lexer))) {
++    return false;
++  }
+   if (start >= 0x80) {
+     is_ascii = false;
+   }
+@@ -652,29 +666,32 @@
+   return true;
+ }
+ 
+-/// Attempts to match a /* block comment */
+-static bool lexer_match_block_comment(Lexer *lexer) {
+-  // TODO(dneto): Need to un-advance if matched '/' but not '*'
+-  if (!lexer_match(lexer, '/') || !lexer_match(lexer, '*')) {
+-    return false;
+-  }
+-
++static bool lexer_match_block_comment_body(Lexer *lexer) {
+   size_t nesting = 1;
+-  while (nesting > 0 && !lexer_match(lexer, kEOF)) {
+-    // TODO(dneto): If we match '/' but not '*' there is no way to un-advance
+-    // back to make '/' the lookahead.
+-    if (lexer_match(lexer, '/') && lexer_match(lexer, '*')) {
++  while (nesting != 0) {
++    if (lexer_peek(lexer) == kEOF) {
++      return false;
++    }
++    CodePoint current = lexer_next(lexer);
++    if (current == '/' && lexer_match(lexer, '*')) {
++      if (nesting == SIZE_MAX) {
++        return false;
++      }
+       nesting++;
+-      // TODO(dneto): Same here, need to be able to un-advance to before '*'
+-    } else if (lexer_match(lexer, '*') && lexer_match(lexer, '/')) {
++    } else if (current == '*' && lexer_match(lexer, '/')) {
+       nesting--;
+-    } else {
+-      lexer_next(lexer);
+     }
+   }
+   return true;
+ }
+ 
++/// Returns true only for a complete nested block comment.
++/// A failed opener may consume '/', so callers must reject the whole scan.
++static bool lexer_match_block_comment(Lexer *lexer) {
++  return lexer_match(lexer, '/') && lexer_match(lexer, '*') &&
++         lexer_match_block_comment_body(lexer);
++}
++
+ /// Advances the lexer while the next code point is considered blankspace
+ static void lexer_skip_blankspace(Lexer *lexer) {
+   while (is_space(lexer_peek(lexer))) {
+@@ -682,11 +699,49 @@
+   }
+ }
+ 
++typedef enum {
++  TRIVIA_COMPLETE,
++  TRIVIA_SLASH,
++  TRIVIA_INVALID,
++} TriviaResult;
++
++// A non-comment slash is consumed once and reported separately: it must not
++// expose a following '<' as if it immediately followed an identifier.
++static TriviaResult lexer_skip_trivia(Lexer *lexer) {
++  for (;;) {
++    lexer_skip_blankspace(lexer);
++    if (!lexer_match(lexer, '/')) {
++      return TRIVIA_COMPLETE;
++    }
++    if (lexer_match(lexer, '*')) {
++      if (!lexer_match_block_comment_body(lexer)) {
++        return TRIVIA_INVALID;
++      }
++    } else if (lexer_match(lexer, '/')) {
++      // The retained grammar's generated line-comment lexer terminates at LF.
++      while (lexer_peek(lexer) != kEOF && lexer_peek(lexer) != '\n') {
++        lexer_next(lexer);
++      }
++    } else {
++      return TRIVIA_SLASH;
++    }
++  }
++}
++
+ typedef struct {
+   BitQueue lt_is_tmpl; // Queue of disambiguated '<'
+   BitQueue gt_is_tmpl; // Queue of disambiguated '>'
+ } ScannerState;
+ 
++_Static_assert(sizeof(ScannerState) <= TREE_SITTER_SERIALIZATION_BUFFER_SIZE,
++               "scanner state must fit the runtime serialization buffer");
++_Static_assert(sizeof(ScannerState) == 2 * sizeof(BitQueue),
++               "scanner state must retain the two-queue payload layout");
++
++static bool scanner_state_valid(const ScannerState *state) {
++  return bitqueue_valid(&state->lt_is_tmpl) && bitqueue_valid(&state->gt_is_tmpl);
++}
++
+ typedef struct {
+   ScannerState state;
+ } Scanner;
+@@ -710,19 +765,25 @@
+   array->capacity = 0;
+ }
+ 
+-static void stack_entry_array_push(StackEntryArray *array, StackEntry entry) {
++static bool stack_entry_array_push(StackEntryArray *array, StackEntry entry) {
+   if (array->size == array->capacity) {
++    if (array->capacity > SIZE_MAX / 2) {
++      return false;
++    }
+     size_t new_capacity = array->capacity == 0 ? 1 : array->capacity * 2;
++    if (new_capacity > SIZE_MAX / sizeof(StackEntry)) {
++      return false;
++    }
+     StackEntry *new_data =
+         realloc(array->data, new_capacity * sizeof(StackEntry));
+     if (new_data == NULL) {
+-      /* Handle allocation failure */
+-      return;
++      return false;
+     }
+     array->data = new_data;
+     array->capacity = new_capacity;
+   }
+   array->data[array->size++] = entry;
++  return true;
+ }
+ 
+ static void stack_entry_array_pop(StackEntryArray *array) {
+@@ -754,16 +815,26 @@
+ /// Updates #state with the disambiguated '<' and '>' tokens.
+ /// The following assumptions are made on entry:
+ /// * lexer has just advanced to the end of an identifier
+-/// On exit, all '<' and '>' template tokens will be paired up to the closing
+-/// '>' for the first '<'.
+-static void classify_template_args(Scanner *scanner, Lexer *lexer) {
++/// Returns false on capacity, allocation or malformed-comment failure; the
++/// exported scan restores the prior state instead of emitting partial evidence.
++static bool classify_template_args(Scanner *scanner, Lexer *lexer) {
+   LOG("classify_template_args()");
+ 
+   if (!lexer_match(lexer, '<')) {
+     LOG("  missing '<'");
+-    return;
++    return false;
+   }
+ 
++  // An adjacent root '<<' is a shift, not a candidate template opener.
++  // Do not pair a later unrelated '>' with the first shift code point.
++  if (lexer_match(lexer, '<')) {
++    if (!bitqueue_push_back(&scanner->state.lt_is_tmpl, false) ||
++        !bitqueue_push_back(&scanner->state.lt_is_tmpl, false)) {
++      return false;
++    }
++    return true;
++  }
++
+   // The current expression nesting depth.
+   size_t expr_depth = 0;
+ 
+@@ -774,18 +845,26 @@
+ 
+   LOG("classify_template_args() '<' (initial)");
+   StackEntry entry = {bitqueue_count(&scanner->state.lt_is_tmpl), expr_depth};
+-  stack_entry_array_push(&lt_stack, entry);
++  if (!stack_entry_array_push(&lt_stack, entry)) {
++    goto failed;
++  }
+   // Default to less-than (or less-than-equal, or left-shift, or
+   // left-shift-equal)
+-  bitqueue_push_back(&scanner->state.lt_is_tmpl, false);
+-
+-  while (!stack_entry_array_empty(&lt_stack) && !lexer_match(lexer, kEOF)) {
+-    lexer_skip_blankspace(lexer);
++  if (!bitqueue_push_back(&scanner->state.lt_is_tmpl, false)) {
++    goto failed;
++  }
+ 
+-    // TODO: skip line-ending comments.
+-    if (lexer_match_block_comment(lexer)) {
++  while (!stack_entry_array_empty(&lt_stack) && lexer_peek(lexer) != kEOF) {
++    TriviaResult trivia = lexer_skip_trivia(lexer);
++    if (trivia == TRIVIA_INVALID) {
++      goto failed;
++    }
++    if (trivia == TRIVIA_SLASH) {
+       continue;
+     }
++    if (lexer_peek(lexer) == kEOF) {
++      break;
++    }
+ 
+     // A template list can't contain an assignment or a compound assignment.
+     // There is logic below which clears the stack when reaching one of those.
+@@ -795,10 +874,15 @@
+ 
+     // Look for a nested template-list.
+     if (lexer_match_identifier(lexer)) {
+-      lexer_skip_blankspace(lexer);
+-      if (lexer_match(lexer, '<')) {
++      trivia = lexer_skip_trivia(lexer);
++      if (trivia == TRIVIA_INVALID) {
++        goto failed;
++      }
++      if (trivia == TRIVIA_COMPLETE && lexer_match(lexer, '<')) {
+         LOG("classify_template_args() '<' after ident");
+-        bitqueue_push_back(&scanner->state.lt_is_tmpl, false);
++        if (!bitqueue_push_back(&scanner->state.lt_is_tmpl, false)) {
++          goto failed;
++        }
+ 
+         if (lexer_match(lexer, '=')) {
+           // We entered the loop at "ident<=". No template arg can start with
+@@ -808,11 +892,15 @@
+           // We entered the loop at "ident<<". No template arg can start with
+           // '<', so consider "<<" to be a single token. Litmus test: "alias z
+           // = a<b<<c>;"
+-          bitqueue_push_back(&scanner->state.lt_is_tmpl, false);
++          if (!bitqueue_push_back(&scanner->state.lt_is_tmpl, false)) {
++            goto failed;
++          }
+         } else {
+           StackEntry new_entry = {
+               bitqueue_count(&scanner->state.lt_is_tmpl) - 1, expr_depth};
+-          stack_entry_array_push(&lt_stack, new_entry);
++          if (!stack_entry_array_push(&lt_stack, new_entry)) {
++            goto failed;
++          }
+         }
+       }
+       continue;
+@@ -824,7 +912,9 @@
+     if (lexer_match(lexer, '<')) {
+       // Litmus test: "alias z =a<1<<c<d>()>;"
+       LOG("classify_template_args() '<'");
+-      bitqueue_push_back(&scanner->state.lt_is_tmpl, false);
++      if (!bitqueue_push_back(&scanner->state.lt_is_tmpl, false)) {
++        goto failed;
++      }
+       continue;
+     }
+ 
+@@ -833,12 +923,16 @@
+       StackEntry *back = stack_entry_array_back(&lt_stack);
+       if (back != NULL && back->expr_depth == expr_depth) {
+         LOG("   TEMPLATE MATCH");
+-        bitqueue_push_back(&scanner->state.gt_is_tmpl, true);
++        if (!bitqueue_push_back(&scanner->state.gt_is_tmpl, true)) {
++          goto failed;
++        }
+         bitqueue_set(&scanner->state.lt_is_tmpl, back->index, true);
+         stack_entry_array_pop(&lt_stack);
+       } else {
+         LOG("   non-template '>'");
+-        bitqueue_push_back(&scanner->state.gt_is_tmpl, false);
++        if (!bitqueue_push_back(&scanner->state.gt_is_tmpl, false)) {
++          goto failed;
++        }
+         // Pre-emptvely allow >= as a comparison operator:
+         // Skip over '=', if present.
+         lexer_match(lexer, '=');
+@@ -857,6 +951,9 @@
+     if (lexer_match(lexer, '(') || lexer_match(lexer, '[')) {
+       LOG("   %c expr_depth++", (int)was);
+       // Entering a nested expression
++      if (expr_depth == SIZE_MAX) {
++        goto failed;
++      }
+       expr_depth++;
+       continue;
+     }
+@@ -909,9 +1006,15 @@
+ 
+     bool short_circuit = false;
+     if (lexer_match(lexer, '&')) {
+-      short_circuit = lexer_match(lexer, '&');
++      if (!lexer_match(lexer, '&')) {
++        continue;
++      }
++      short_circuit = true;
+     } else if (lexer_match(lexer, '|')) {
+-      short_circuit = lexer_match(lexer, '|');
++      if (!lexer_match(lexer, '|')) {
++        continue;
++      }
++      short_circuit = true;
+     }
+     if (short_circuit) {
+       LOG("   short-circuiting expression");
+@@ -931,6 +1034,11 @@
+   }
+ 
+   stack_entry_array_free(&lt_stack);
++  return true;
++
++failed:
++  stack_entry_array_free(&lt_stack);
++  return false;
+ }
+ 
+ static char *valids(const bool *const valid_symbols) {
+@@ -949,173 +1057,116 @@
+   return result;
+ }
+ 
+-/// The external token scanner function. Handles block comments and
+-/// template-argument-list vs less-than / greater-than disambiguation.
+-/// @return true if lexer->result_symbol was assigned a Token, or
+-/// false if the token should be taken from the regular WGSL tree-sitter
+-/// grammar.
++static bool scanner_emit(TSLexer *lexer, const bool *valid_symbols,
++                         enum Token token) {
++  if (!valid_symbols[token]) {
++    return false;
++  }
++  lexer->mark_end(lexer);
++  lexer->result_symbol = token;
++  return true;
++}
++
++/// Handles nested comments and template/operator disambiguation.
++/// False rejects the entire speculative scan; no unavailable token is emitted.
+ static bool scanner_scan(Scanner *scanner, TSLexer *ts_lexer,
+-                  const bool *const valid_symbols) {
++                         const bool *valid_symbols) {
+   Lexer lexer;
+   lexer_init(&lexer, ts_lexer);
+-
+   LOG("scan: '%c' [%u] %s", (char)lexer_peek(&lexer),
+       ts_lexer->get_column(ts_lexer), valids(valid_symbols));
+ 
+   if (valid_symbols[ERROR]) {
+-    ts_lexer->result_symbol = ERROR;
+-    return true;
++    return false;
+   }
+ 
+   if (valid_symbols[DISAMBIGUATE_TEMPLATE]) {
+-    // The parser is telling us the _disambiguate_template token
+-    // may appear at the current position.
+-    // The next token may be the start of a template list, so
+-    // scan forward and use the token-list disambiguation
+-    // algorithm to mark template-list-start and template-list-end
+-    // tokens.  These are recorded in the lt and gt bit queues.
+-
+-    // Call mark_end so that we can "advance" past codepoints without
+-    // automatically including them in the resulting token.
+     ts_lexer->mark_end(ts_lexer);
+-    ts_lexer->result_symbol = DISAMBIGUATE_TEMPLATE;
+-
+-    // TODO(dneto): should also skip comments, both line comments
+-    // and block comments.
+-    // https://github.com/gpuweb/gpuweb/issues/3876
+-    lexer_skip_blankspace(&lexer);
+-    if (lexer_peek(&lexer) == '<') {
+-      if (bitqueue_empty(&scanner->state.lt_is_tmpl)) {
+-        classify_template_args(scanner, &lexer);
+-      }
++    TriviaResult trivia = lexer_skip_trivia(&lexer);
++    if (trivia == TRIVIA_INVALID) {
++      return false;
+     }
+-
+-    // This has to return true so that Treesitter will save
+-    // the state generated by the disambiguation scan.
++    if (trivia == TRIVIA_COMPLETE && lexer_peek(&lexer) == '<' &&
++        bitqueue_empty(&scanner->state.lt_is_tmpl) &&
++        !classify_template_args(scanner, &lexer)) {
++      return false;
++    }
++    // The zero-length marker commits lookahead state without consuming trivia.
++    ts_lexer->result_symbol = DISAMBIGUATE_TEMPLATE;
+     return true;
+   }
+ 
+   lexer_skip_blankspace(&lexer);
+-
+-  // TODO(dneto): checkpoint and rewind if failed.
+-  if (lexer_match_block_comment(&lexer)) {
+-    ts_lexer->mark_end(ts_lexer);
+-    ts_lexer->result_symbol = BLOCK_COMMENT;
+-    return true;
++  if (lexer_peek(&lexer) == '/') {
++    if (!valid_symbols[BLOCK_COMMENT] || !lexer_match_block_comment(&lexer)) {
++      return false;
++    }
++    return scanner_emit(ts_lexer, valid_symbols, BLOCK_COMMENT);
+   }
+ 
+-  // TODO(dneto): Check valid array first.
++  enum Token token;
+   if (lexer_match(&lexer, '<')) {
+     if (!bitqueue_empty(&scanner->state.lt_is_tmpl) &&
+         bitqueue_pop_front(&scanner->state.lt_is_tmpl)) {
+-      ts_lexer->mark_end(ts_lexer);
+-      ts_lexer->result_symbol = TEMPLATE_ARGS_START;
+-      return true;
+-    }
+-    if (lexer_match(&lexer, '=')) {
+-      ts_lexer->mark_end(ts_lexer);
+-      ts_lexer->result_symbol = LESS_THAN_EQUAL;
+-      return true;
+-    }
+-    if (lexer_match(&lexer, '<')) {
+-      // Consume the '<' in the lt queue.
+-      // Litmus test: "alias z = a<1<<c<d>()>;"
+-      if (!bitqueue_empty(&scanner->state.lt_is_tmpl)) {
+-        bitqueue_pop_front(&scanner->state.lt_is_tmpl);
+-      }
+-      if (lexer_match(&lexer, '=')) {
+-        ts_lexer->mark_end(ts_lexer);
+-        ts_lexer->result_symbol = SHIFT_LEFT_ASSIGN;
+-        return true;
++      token = TEMPLATE_ARGS_START;
++    } else if (lexer_match(&lexer, '=')) {
++      token = LESS_THAN_EQUAL;
++    } else if (lexer_match(&lexer, '<')) {
++      if (!bitqueue_empty(&scanner->state.lt_is_tmpl) &&
++          bitqueue_pop_front(&scanner->state.lt_is_tmpl)) {
++        return false;
+       }
+-      ts_lexer->mark_end(ts_lexer);
+-      ts_lexer->result_symbol = SHIFT_LEFT;
+-      return true;
++      token = lexer_match(&lexer, '=') ? SHIFT_LEFT_ASSIGN : SHIFT_LEFT;
++    } else {
++      token = LESS_THAN;
+     }
+-    ts_lexer->mark_end(ts_lexer);
+-    ts_lexer->result_symbol = LESS_THAN;
+-    return true;
++    return scanner_emit(ts_lexer, valid_symbols, token);
+   }
+ 
+-  // TODO(dneto): check valid array first.
+   if (lexer_match(&lexer, '>')) {
+     if (!bitqueue_empty(&scanner->state.gt_is_tmpl) &&
+         bitqueue_pop_front(&scanner->state.gt_is_tmpl)) {
+-      ts_lexer->mark_end(ts_lexer);
+-      ts_lexer->result_symbol = TEMPLATE_ARGS_END;
+-      return true;
+-    }
+-    if (lexer_match(&lexer, '=')) {
+-      ts_lexer->mark_end(ts_lexer);
+-      ts_lexer->result_symbol = GREATER_THAN_EQUAL;
+-      return true;
+-    }
+-    if (lexer_match(&lexer, '>')) {
+-      // Consume the '>' in the gt queue.
+-      if (!bitqueue_empty(&scanner->state.gt_is_tmpl)) {
+-        bitqueue_pop_front(&scanner->state.gt_is_tmpl);
+-      }
+-      if (lexer_match(&lexer, '=')) {
+-        ts_lexer->mark_end(ts_lexer);
+-        ts_lexer->result_symbol = SHIFT_RIGHT_ASSIGN;
+-        return true;
++      token = TEMPLATE_ARGS_END;
++    } else if (lexer_match(&lexer, '=')) {
++      token = GREATER_THAN_EQUAL;
++    } else if (lexer_match(&lexer, '>')) {
++      if (!bitqueue_empty(&scanner->state.gt_is_tmpl) &&
++          bitqueue_pop_front(&scanner->state.gt_is_tmpl)) {
++        return false;
+       }
+-      ts_lexer->mark_end(ts_lexer);
+-      ts_lexer->result_symbol = SHIFT_RIGHT;
+-      return true;
++      token = lexer_match(&lexer, '=') ? SHIFT_RIGHT_ASSIGN : SHIFT_RIGHT;
++    } else {
++      token = GREATER_THAN;
+     }
+-    ts_lexer->mark_end(ts_lexer);
+-    ts_lexer->result_symbol = GREATER_THAN;
+-    return true;
++    return scanner_emit(ts_lexer, valid_symbols, token);
+   }
+ 
+-  return false; // Use regular parsing
++  return false;
+ }
+ 
+-/// Serializes the scanner state into @p buffer.
++/// Serializes valid nonempty state into the runtime's fixed-capacity buffer.
+ static unsigned scanner_serialize(Scanner *scanner, char *buffer) {
+-  if (bitqueue_empty(&scanner->state.lt_is_tmpl) &&
+-      bitqueue_empty(&scanner->state.gt_is_tmpl)) {
++  if (!scanner_state_valid(&scanner->state) ||
++      (bitqueue_empty(&scanner->state.lt_is_tmpl) &&
++       bitqueue_empty(&scanner->state.gt_is_tmpl))) {
+     return 0;
+   }
+-#if ENABLE_LOGGING
+-  char lt_str[256], gt_str[256];
+-  bitqueue_to_chars(&scanner->state.lt_is_tmpl, lt_str);
+-  bitqueue_to_chars(&scanner->state.gt_is_tmpl, gt_str);
+-  LOG("serialize(lt_is_tmpl: %s, gt_is_tmpl: %s)", lt_str, gt_str);
+-#endif
+-  size_t bytes_written = 0;
+-  memcpy(buffer + bytes_written, &scanner->state.lt_is_tmpl,
+-         sizeof(scanner->state.lt_is_tmpl));
+-  bytes_written += sizeof(scanner->state.lt_is_tmpl);
+-  memcpy(buffer + bytes_written, &scanner->state.gt_is_tmpl,
+-         sizeof(scanner->state.gt_is_tmpl));
+-  bytes_written += sizeof(scanner->state.gt_is_tmpl);
+-  // TODO(dneto): implicit conversion be narrowing.
+-  return (unsigned)bytes_written;
++  memcpy(buffer, &scanner->state, sizeof(scanner->state));
++  return (unsigned)sizeof(scanner->state);
+ }
+ 
+-/// Deserializes the scanner state from @p buffer.
++/// Restores only an exact, validated payload; empty or invalid input resets it.
+ static void scanner_deserialize(Scanner *scanner, const char *buffer,
+-                         unsigned length) {
+-  if (length == 0) {
+-    memset(&scanner->state, 0, sizeof(scanner->state));
+-  } else {
+-    size_t bytes_read = 0;
+-    memcpy(&scanner->state.lt_is_tmpl, buffer + bytes_read,
+-           sizeof(scanner->state.lt_is_tmpl));
+-    bytes_read += sizeof(scanner->state.lt_is_tmpl);
+-    memcpy(&scanner->state.gt_is_tmpl, buffer + bytes_read,
+-           sizeof(scanner->state.gt_is_tmpl));
+-    bytes_read += sizeof(scanner->state.gt_is_tmpl);
+-#if ENABLE_LOGGING
+-    char lt_str[256], gt_str[256];
+-    bitqueue_to_chars(&scanner->state.lt_is_tmpl, lt_str);
+-    bitqueue_to_chars(&scanner->state.gt_is_tmpl, gt_str);
+-    LOG("deserialize(lt_is_tmpl: %s, gt_is_tmpl: %s)", lt_str, gt_str);
+-#endif
+-    assert(bytes_read == length);
++                                unsigned length) {
++  memset(&scanner->state, 0, sizeof(scanner->state));
++  if (length == 0 || buffer == NULL || length != sizeof(ScannerState)) {
++    return;
+   }
++  ScannerState state;
++  memcpy(&state, buffer, sizeof(state));
++  if (scanner_state_valid(&state)) {
++    memcpy(&scanner->state, &state, sizeof(state));
++  }
+ }
+ // Called once when language is set on a parser.
+ // Allocates memory for storing scanner state.
+@@ -1136,6 +1187,9 @@
+ unsigned tree_sitter_wgsl_external_scanner_serialize(void *payload,
+                                                      char *buffer) {
+   Scanner *scanner = (Scanner *)payload;
++  if (scanner == NULL || buffer == NULL) {
++    return 0;
++  }
+   return scanner_serialize(scanner, buffer);
+ }
+ 
+@@ -1145,17 +1199,26 @@
+                                                    const char *buffer,
+                                                    unsigned length) {
+   Scanner *scanner = (Scanner *)payload;
+-  scanner_deserialize(scanner, buffer, length);
++  if (scanner != NULL) {
++    scanner_deserialize(scanner, buffer, length);
++  }
+ }
+ 
+ // Scans for tokens.
+ bool tree_sitter_wgsl_external_scanner_scan(void *payload, TSLexer *lexer,
+                                             const bool *valid_symbols) {
+   Scanner *scanner = (Scanner *)payload;
++  if (scanner == NULL || lexer == NULL || valid_symbols == NULL ||
++      !scanner_state_valid(&scanner->state)) {
++    return false;
++  }
++  ScannerState before;
++  memcpy(&before, &scanner->state, sizeof(before));
+   if (scanner_scan(scanner, lexer, valid_symbols)) {
+     LOG("scan returned: %s",
+         tree_sitter_wgsl_str((enum Token)lexer->result_symbol, false));
+     return true;
+   }
++  memcpy(&scanner->state, &before, sizeof(before));
+   return false;
+ }

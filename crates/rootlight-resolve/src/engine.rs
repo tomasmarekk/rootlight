@@ -1420,9 +1420,11 @@ pub(crate) fn resolvable_occurrence(occurrence: &OccurrenceRecord) -> bool {
     {
         return false;
     }
-    // GLSL/HLSL scopes, members and shader targets require language-owned
-    // binding proof; matching written names cannot resolve an adapter gap.
-    if (occurrence.syntax_kind.starts_with("glsl.") || occurrence.syntax_kind.starts_with("hlsl."))
+    // Shader scopes, types and members require language-owned binding proof;
+    // matching written names cannot resolve an adapter gap.
+    if (occurrence.syntax_kind.starts_with("glsl.")
+        || occurrence.syntax_kind.starts_with("hlsl.")
+        || occurrence.syntax_kind.starts_with("wgsl."))
         && matches!(occurrence.target, OccurrenceTarget::Unresolved { .. })
     {
         return false;
@@ -1743,6 +1745,10 @@ mod source_owned_target_tests {
             "hlsl.identifier.reference",
             "hlsl.member.reference",
             "hlsl.unproven_call.reference",
+            "wgsl.identifier.reference",
+            "wgsl.type.reference",
+            "wgsl.member.reference",
+            "wgsl.unproven_call.reference",
         ] {
             occurrence.syntax_kind = syntax.to_owned();
             assert!(!resolvable_occurrence(&occurrence), "{syntax}");
@@ -1767,6 +1773,10 @@ mod source_owned_target_tests {
             "hlsl.identifier.reference",
             "hlsl.member.reference",
             "hlsl.unproven_call.reference",
+            "wgsl.identifier.reference",
+            "wgsl.type.reference",
+            "wgsl.member.reference",
+            "wgsl.unproven_call.reference",
         ] {
             occurrence.syntax_kind = syntax.to_owned();
             assert!(
@@ -1786,6 +1796,10 @@ mod source_owned_target_tests {
             "hlsl.identifier.reference",
             "hlsl.member.reference",
             "hlsl.unproven_call.reference",
+            "wgsl.identifier.reference",
+            "wgsl.type.reference",
+            "wgsl.member.reference",
+            "wgsl.unproven_call.reference",
         ] {
             occurrence.syntax_kind = syntax.to_owned();
             assert!(

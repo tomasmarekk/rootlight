@@ -1,0 +1,507 @@
+{
+  "schema": "rootlight.wgsl-source-inventory/1",
+  "scope": "all_payload_except_two_self_describing_metadata_files",
+  "archive_modes_applied": false,
+  "original_modes_and_executable_intent_retained": true,
+  "original_regular_file_count": 13,
+  "original_regular_file_bytes": 207378,
+  "original_directory_record_count": 3,
+  "directories": [
+    "bindings",
+    "bindings/rust",
+    "notices",
+    "patches",
+    "queries",
+    "src",
+    "src/tree_sitter",
+    "upstream",
+    "upstream/archives",
+    "upstream/authored",
+    "upstream/authored/queries",
+    "upstream/authored/src",
+    "upstream/metadata"
+  ],
+  "payload_files": [
+    {
+      "path": "Cargo.toml",
+      "bytes": 574,
+      "sha256": "cb1dfeac8c3f994ae9888470e148b9448634bc9dc4edde0795625ff34d1470a7",
+      "origin": {
+        "kind": "new_local_static_binding_or_change_notice"
+      }
+    },
+    {
+      "path": "LICENSE.md",
+      "bytes": 353,
+      "sha256": "18d40c8ea3118033e6b4725efa522ac00bceb8ae429a1a0fa4356152bb07dc56",
+      "origin": {
+        "kind": "exact_original_active_source_or_notice"
+      }
+    },
+    {
+      "path": "PATCHES.md",
+      "bytes": 5030,
+      "sha256": "4f4ebd8e4c5021afb7b05cacaecc6f92e3e162888824afeea6e35032e9948469",
+      "origin": {
+        "kind": "new_local_static_binding_or_change_notice"
+      }
+    },
+    {
+      "path": "bindings/rust/build.rs",
+      "bytes": 674,
+      "sha256": "993d004d25b8231584ba6e5a8e58473579266f3f8c9960a82aa651bf882431a2",
+      "origin": {
+        "kind": "new_local_static_binding_or_change_notice"
+      }
+    },
+    {
+      "path": "bindings/rust/lib.rs",
+      "bytes": 1086,
+      "sha256": "5834fbbad25e31c2d2bb840ddd1e52a2020143d4a0953727d3fae5f52f4977aa",
+      "origin": {
+        "kind": "new_local_static_binding_or_change_notice"
+      }
+    },
+    {
+      "path": "grammar.js",
+      "bytes": 15012,
+      "sha256": "0c48fad09d812cf39c448553ebf801b72b9ae2dda0e2af98515b9c90cb0828ad",
+      "origin": {
+        "kind": "exact_original_active_source_or_notice"
+      }
+    },
+    {
+      "path": "notices/gpuweb-bsd-463e2f34-LICENSE.txt",
+      "bytes": 1505,
+      "sha256": "83d286b68d185bc8d3299b655e317ed888a9b7af1fe3a518b0237ab03896a0d7",
+      "origin": {
+        "kind": "separately_attributed_referenced_notice"
+      }
+    },
+    {
+      "path": "notices/tree-sitter-MIT-LICENSE",
+      "bytes": 1080,
+      "sha256": "c5cfb43042b6b72045f4ba997834d0a7786d2793d91680868b5815b39f14fc78",
+      "origin": {
+        "kind": "existing_versioned_runtime_notice"
+      }
+    },
+    {
+      "path": "notices/w3c-software-license-2023.html",
+      "bytes": 26132,
+      "sha256": "5497437f8e227f2a64def93edfccc6a85088a5c8e1924cacf419090e57c7c058",
+      "origin": {
+        "kind": "separately_attributed_referenced_notice"
+      }
+    },
+    {
+      "path": "patches/local-binding.patch",
+      "bytes": 2785,
+      "sha256": "d3fcd0b4de6cae3124ee9c1b52b251f42f79f3bb5f82b500088b03ffdc0cda4f",
+      "origin": {
+        "kind": "new_binding_creation_patch"
+      }
+    },
+    {
+      "path": "patches/scanner-safety-and-trivia.patch",
+      "bytes": 22571,
+      "sha256": "95cebc848c074b16a3c5fb07dfc6673b1db506a71ac71136e38dfc9aa2d1c46c",
+      "origin": {
+        "kind": "complete_original_to_preferred_patch"
+      }
+    },
+    {
+      "path": "queries/highlights.scm",
+      "bytes": 1559,
+      "sha256": "f382448369805ac83cb0742d1c6668acadfeff9f650eefe0be39865ecf1dbce9",
+      "origin": {
+        "kind": "exact_original_active_source_or_notice"
+      }
+    },
+    {
+      "path": "src/grammar.json",
+      "bytes": 73144,
+      "sha256": "983d080c46a13cf7f178c4a5941c258d74b93f11267eb20294cdd4c446ee10fb",
+      "origin": {
+        "kind": "exact_canonical_generated_output"
+      }
+    },
+    {
+      "path": "src/node-types.json",
+      "bytes": 41789,
+      "sha256": "a118379afa87dc273013b56e12da32011c4041eae45b99156e47a996103a995a",
+      "origin": {
+        "kind": "exact_canonical_generated_output"
+      }
+    },
+    {
+      "path": "src/parser.c",
+      "bytes": 888935,
+      "sha256": "5b9871e51dccd8b1ee74b5f8c82c425f1fca06bd9ecba70c0269984ba5d068d2",
+      "origin": {
+        "kind": "exact_canonical_generated_output"
+      }
+    },
+    {
+      "path": "src/scanner.c",
+      "bytes": 48906,
+      "sha256": "44ad757cee5a1e0ca4b486805667cbb60029dbd7d7057f7d713cea946ab27f4a",
+      "origin": {
+        "kind": "exact_reviewed_preferred_scanner"
+      }
+    },
+    {
+      "path": "src/tree_sitter/alloc.h",
+      "bytes": 985,
+      "sha256": "b29c1c9fb7cc82f58c84b376df1297d6e2737a1d655fd356db0859e3c29c2fea",
+      "origin": {
+        "kind": "exact_canonical_generated_output"
+      }
+    },
+    {
+      "path": "src/tree_sitter/array.h",
+      "bytes": 13269,
+      "sha256": "31e60a1bff6f715afacce03b5b70efe42b58371b4f9595dd4af52a577ff9608c",
+      "origin": {
+        "kind": "exact_canonical_generated_output"
+      }
+    },
+    {
+      "path": "src/tree_sitter/parser.h",
+      "bytes": 7624,
+      "sha256": "180b893c8734778fd32f372dfbc27bd6ad1cd2221f26150b31256ff6716320d2",
+      "origin": {
+        "kind": "exact_canonical_generated_output"
+      }
+    },
+    {
+      "path": "upstream/archives/tree-sitter-wgsl-52e3c620a9c316cc8c1d504dd1908eb8cebe255b.tar.gz",
+      "bytes": 50313,
+      "sha256": "51c783b1ac76da03ead3e53509b03f3ad6383cf899bd3c8ea53f19bcc7e1452b",
+      "origin": {
+        "kind": "exact_original_archive"
+      }
+    },
+    {
+      "path": "upstream/authored/.editorconfig",
+      "bytes": 541,
+      "sha256": "90496ff136741e183308ae716913a90325bb20f5a83194b37aee5182501c81ee",
+      "origin": {
+        "kind": "original_authored_archive_member"
+      }
+    },
+    {
+      "path": "upstream/authored/.gitattributes",
+      "bytes": 975,
+      "sha256": "eb0be13e2b94d874f6b7f8554bf06b4d0bc1e91b901eaf40ee5b06327352f813",
+      "origin": {
+        "kind": "original_authored_archive_member"
+      }
+    },
+    {
+      "path": "upstream/authored/.gitignore",
+      "bytes": 617,
+      "sha256": "f5c97a6cfda48ae7421db4671add89ff3179ee53688d4de16383c6576ea57841",
+      "origin": {
+        "kind": "original_authored_archive_member"
+      }
+    },
+    {
+      "path": "upstream/authored/LICENSE.md",
+      "bytes": 353,
+      "sha256": "18d40c8ea3118033e6b4725efa522ac00bceb8ae429a1a0fa4356152bb07dc56",
+      "origin": {
+        "kind": "original_authored_archive_member"
+      }
+    },
+    {
+      "path": "upstream/authored/README.md",
+      "bytes": 550,
+      "sha256": "c1891bcb09556e05e37af5a651c34cffedcb5b41a002ef544ca004798b50e115",
+      "origin": {
+        "kind": "original_authored_archive_member"
+      }
+    },
+    {
+      "path": "upstream/authored/binding.gyp",
+      "bytes": 670,
+      "sha256": "29a4741683e52130251170488c3a879afcefff9495ebc5bb65baa25f3b0c1247",
+      "origin": {
+        "kind": "original_authored_archive_member"
+      }
+    },
+    {
+      "path": "upstream/authored/config.toml",
+      "bytes": 82,
+      "sha256": "79a4c7a01bcc7c8716723c0e08924fc3926e63bcfd7df392bf4d56157e302630",
+      "origin": {
+        "kind": "original_authored_archive_member"
+      }
+    },
+    {
+      "path": "upstream/authored/grammar.js",
+      "bytes": 15012,
+      "sha256": "0c48fad09d812cf39c448553ebf801b72b9ae2dda0e2af98515b9c90cb0828ad",
+      "origin": {
+        "kind": "original_authored_archive_member"
+      }
+    },
+    {
+      "path": "upstream/authored/package.json",
+      "bytes": 1198,
+      "sha256": "e97f8a52303fa2ca1d8c1cfbfc4e34cc4a5e43691f434a215cb90ac1395be4d1",
+      "origin": {
+        "kind": "original_authored_archive_member"
+      }
+    },
+    {
+      "path": "upstream/authored/queries/highlights.scm",
+      "bytes": 1559,
+      "sha256": "f382448369805ac83cb0742d1c6668acadfeff9f650eefe0be39865ecf1dbce9",
+      "origin": {
+        "kind": "original_authored_archive_member"
+      }
+    },
+    {
+      "path": "upstream/authored/src/scanner.c",
+      "bytes": 47678,
+      "sha256": "d9887efe2f327edd0ea5bfaed3ad7d06d28bdba3681c6c7c7d5bdeb83c1f12cb",
+      "origin": {
+        "kind": "original_authored_archive_member"
+      }
+    },
+    {
+      "path": "upstream/authored/tree-sitter-wgsl.wasm",
+      "bytes": 137439,
+      "sha256": "255d362442747047a96de04554ae26139fc8fecc6d8ed4ee640363968b149514",
+      "origin": {
+        "kind": "original_authored_archive_member"
+      }
+    },
+    {
+      "path": "upstream/authored/tree-sitter.json",
+      "bytes": 704,
+      "sha256": "fc302b11bf783fb31da5f6c29b8f5b86197b572d5cf8aaf41558cd2ae47ad997",
+      "origin": {
+        "kind": "original_authored_archive_member"
+      }
+    },
+    {
+      "path": "upstream/metadata/inert-source-review.json",
+      "bytes": 18660,
+      "sha256": "ddac80acf8ae90bda5fe24b0b22c1ce3639f1c1a58b210fecd56006ba0fd458f",
+      "origin": {
+        "kind": "original_identity_and_member_evidence"
+      }
+    },
+    {
+      "path": "upstream/metadata/mirror-commit.json",
+      "bytes": 5690,
+      "sha256": "20ae94889598d7f890353fd252e89511c73c2a449c900fe86170b2fd6b2c352f",
+      "origin": {
+        "kind": "original_identity_and_member_evidence"
+      }
+    },
+    {
+      "path": "upstream/metadata/mirror-tree.json",
+      "bytes": 3567,
+      "sha256": "c3f65f54b8ed72e10a4d8176d5affa2111f6a6635cba5178a8e1de27f18d7aed",
+      "origin": {
+        "kind": "original_identity_and_member_evidence"
+      }
+    }
+  ],
+  "sources": [
+    {
+      "archive": "upstream/archives/tree-sitter-wgsl-52e3c620a9c316cc8c1d504dd1908eb8cebe255b.tar.gz",
+      "bytes": 50313,
+      "sha256": "51c783b1ac76da03ead3e53509b03f3ad6383cf899bd3c8ea53f19bcc7e1452b",
+      "public_origin": "https://codeload.github.com/gpuweb/tree-sitter-wgsl/tar.gz/52e3c620a9c316cc8c1d504dd1908eb8cebe255b",
+      "retained_tree": "upstream/authored",
+      "inventory": {
+        "authored_commit_comment_verified": true,
+        "expanded_tar_bytes": 225280,
+        "member_count": 16,
+        "members": [
+          {
+            "bytes": 0,
+            "directory": true,
+            "executable_intent": false,
+            "path": "",
+            "raw_mode": 509
+          },
+          {
+            "bytes": 541,
+            "directory": false,
+            "executable_intent": false,
+            "git_blob": "65330c40cf52c881db76140fc54b6fb1d4c9f11b",
+            "git_mode": "100644",
+            "path": ".editorconfig",
+            "raw_mode": 436,
+            "sha256": "90496ff136741e183308ae716913a90325bb20f5a83194b37aee5182501c81ee"
+          },
+          {
+            "bytes": 975,
+            "directory": false,
+            "executable_intent": false,
+            "git_blob": "7772c942b286d4c49f01a3cae14eba7ab6f9d631",
+            "git_mode": "100644",
+            "path": ".gitattributes",
+            "raw_mode": 436,
+            "sha256": "eb0be13e2b94d874f6b7f8554bf06b4d0bc1e91b901eaf40ee5b06327352f813"
+          },
+          {
+            "bytes": 617,
+            "directory": false,
+            "executable_intent": false,
+            "git_blob": "77d0e4c0a749d0ea7e0c57355e9fe090ac4c25e8",
+            "git_mode": "100644",
+            "path": ".gitignore",
+            "raw_mode": 436,
+            "sha256": "f5c97a6cfda48ae7421db4671add89ff3179ee53688d4de16383c6576ea57841"
+          },
+          {
+            "bytes": 353,
+            "directory": false,
+            "executable_intent": false,
+            "git_blob": "dc17af6231e994ba8a6ff0813914820946cfe6b5",
+            "git_mode": "100644",
+            "path": "LICENSE.md",
+            "raw_mode": 436,
+            "sha256": "18d40c8ea3118033e6b4725efa522ac00bceb8ae429a1a0fa4356152bb07dc56"
+          },
+          {
+            "bytes": 550,
+            "directory": false,
+            "executable_intent": false,
+            "git_blob": "91c6916185ee05994fe7fdfa66854b23853d86d5",
+            "git_mode": "100644",
+            "path": "README.md",
+            "raw_mode": 436,
+            "sha256": "c1891bcb09556e05e37af5a651c34cffedcb5b41a002ef544ca004798b50e115"
+          },
+          {
+            "bytes": 670,
+            "directory": false,
+            "executable_intent": false,
+            "git_blob": "ecb5f6a397fb874d9123d813560830f78174d72f",
+            "git_mode": "100644",
+            "path": "binding.gyp",
+            "raw_mode": 436,
+            "sha256": "29a4741683e52130251170488c3a879afcefff9495ebc5bb65baa25f3b0c1247"
+          },
+          {
+            "bytes": 82,
+            "directory": false,
+            "executable_intent": false,
+            "git_blob": "8e6735f5d7ae21b4f3a6c54843999c71037313df",
+            "git_mode": "100644",
+            "path": "config.toml",
+            "raw_mode": 436,
+            "sha256": "79a4c7a01bcc7c8716723c0e08924fc3926e63bcfd7df392bf4d56157e302630"
+          },
+          {
+            "bytes": 15012,
+            "directory": false,
+            "executable_intent": false,
+            "git_blob": "1ade00147998c6a563d58b26af789529b378df94",
+            "git_mode": "100644",
+            "path": "grammar.js",
+            "raw_mode": 436,
+            "sha256": "0c48fad09d812cf39c448553ebf801b72b9ae2dda0e2af98515b9c90cb0828ad"
+          },
+          {
+            "bytes": 1198,
+            "directory": false,
+            "executable_intent": false,
+            "git_blob": "0bbc53f202a298a0e95124ff94f30ed9c0b8443e",
+            "git_mode": "100644",
+            "path": "package.json",
+            "raw_mode": 436,
+            "sha256": "e97f8a52303fa2ca1d8c1cfbfc4e34cc4a5e43691f434a215cb90ac1395be4d1"
+          },
+          {
+            "bytes": 0,
+            "directory": true,
+            "executable_intent": false,
+            "path": "queries",
+            "raw_mode": 509
+          },
+          {
+            "bytes": 1559,
+            "directory": false,
+            "executable_intent": false,
+            "git_blob": "d9bc199cda7a7436c4129b12c3cb395033f02da1",
+            "git_mode": "100644",
+            "path": "queries/highlights.scm",
+            "raw_mode": 436,
+            "sha256": "f382448369805ac83cb0742d1c6668acadfeff9f650eefe0be39865ecf1dbce9"
+          },
+          {
+            "bytes": 0,
+            "directory": true,
+            "executable_intent": false,
+            "path": "src",
+            "raw_mode": 509
+          },
+          {
+            "bytes": 47678,
+            "directory": false,
+            "executable_intent": false,
+            "git_blob": "084b3fc7badaeb3e7699f0f209e7d7c7c3afeaa4",
+            "git_mode": "100644",
+            "path": "src/scanner.c",
+            "raw_mode": 436,
+            "sha256": "d9887efe2f327edd0ea5bfaed3ad7d06d28bdba3681c6c7c7d5bdeb83c1f12cb"
+          },
+          {
+            "bytes": 137439,
+            "directory": false,
+            "executable_intent": true,
+            "git_blob": "5837d07c495e9a463589793e6a2198f0b0a8dc44",
+            "git_mode": "100755",
+            "path": "tree-sitter-wgsl.wasm",
+            "raw_mode": 509,
+            "sha256": "255d362442747047a96de04554ae26139fc8fecc6d8ed4ee640363968b149514"
+          },
+          {
+            "bytes": 704,
+            "directory": false,
+            "executable_intent": false,
+            "git_blob": "55a92e24f49dabfdaa5f005673022218b17ef64e",
+            "git_mode": "100644",
+            "path": "tree-sitter.json",
+            "raw_mode": 436,
+            "sha256": "fc302b11bf783fb31da5f6c29b8f5b86197b572d5cf8aaf41558cd2ae47ad997"
+          }
+        ],
+        "prefix": "tree-sitter-wgsl-52e3c620a9c316cc8c1d504dd1908eb8cebe255b",
+        "regular_file_bytes": 207378,
+        "regular_file_count": 13
+      }
+    }
+  ],
+  "referenced_notice_sources": [
+    {
+      "path": "notices/gpuweb-bsd-463e2f34-LICENSE.txt",
+      "attribution": "Referenced raw notice evidence; separate from the thirteen mirror source files",
+      "bytes": 1505,
+      "sha256": "83d286b68d185bc8d3299b655e317ed888a9b7af1fe3a518b0237ab03896a0d7",
+      "url": "https://raw.githubusercontent.com/gpuweb/admin/463e2f34b1160e346d40ef82f31b644506e16cb2/SourceCodeLicense/LICENSE.txt"
+    },
+    {
+      "path": "notices/w3c-software-license-2023.html",
+      "attribution": "Referenced raw notice evidence; separate from the thirteen mirror source files",
+      "bytes": 26132,
+      "sha256": "5497437f8e227f2a64def93edfccc6a85088a5c8e1924cacf419090e57c7c058",
+      "url": "https://www.w3.org/copyright/software-license-2023/"
+    }
+  ],
+  "support_header_notice_source": {
+    "path": "notices/tree-sitter-MIT-LICENSE",
+    "source": "versioned tree-sitter 0.26.11 runtime LICENSE",
+    "bytes": 1080,
+    "sha256": "c5cfb43042b6b72045f4ba997834d0a7786d2793d91680868b5815b39f14fc78",
+    "historical_mirror_producer_association": false
+  }
+}

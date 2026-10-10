@@ -1,0 +1,21 @@
+# Local unpublished binding for retained WGSL source and a hardened scanner.
+# Compilation uses static ABI14 inputs without generation or acquisition.
+[package]
+name = "tree-sitter-wgsl"
+version = "0.0.9"
+edition = "2024"
+rust-version = "1.90"
+license-file = "LICENSE.md"
+repository = "https://github.com/gpuweb/tree-sitter-wgsl"
+description = "Pinned WGSL grammar with a local static language binding"
+publish = false
+build = "bindings/rust/build.rs"
+
+[lib]
+path = "bindings/rust/lib.rs"
+
+[dependencies]
+tree-sitter-language = "=0.1.7"
+
+[build-dependencies]
+cc = "=1.2.67"

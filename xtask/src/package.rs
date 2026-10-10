@@ -60,7 +60,13 @@ const EXPECTED_TARGETS: [&str; 5] = [
     "x86_64-pc-windows-msvc",
     "x86_64-unknown-linux-gnu",
 ];
-const DISTRIBUTION_LICENSES: [&str; 20] = [
+const DISTRIBUTION_LICENSES: [&str; 26] = [
+    "tree-sitter-wgsl-0.0.9-LICENSE.md",
+    "tree-sitter-wgsl-0.0.9-GPUWeb-BSD-LICENSE.txt",
+    "tree-sitter-wgsl-0.0.9-W3C-LICENSE.html",
+    "tree-sitter-wgsl-0.0.9-Tree-sitter-MIT-LICENSE",
+    "tree-sitter-wgsl-0.0.9-PATCHES.md",
+    "Unicode-XID-16.0.0-LICENSE",
     "dekobon-tree-sitter-groovy-0.2.0-LICENSE-APACHE",
     "dekobon-tree-sitter-groovy-0.2.0-LICENSE-MIT",
     "tree-sitter-nix-0.3.0-LICENSE",
@@ -2296,8 +2302,25 @@ mod tests {
         assert!(names.contains(&"share/rootlight/web/assets/app-a1b2c3d4.js".to_owned()));
         assert!(names.contains(&EXPECTED_WEB_NOTICE_DESTINATION.to_owned()));
         assert!(names.contains(&"NOTICE".to_owned()));
+        let bundle = lifecycle_license_bundle(&first.archive).expect("lifecycle license bundle");
+        let mut bundle = ZipArchive::new(Cursor::new(bundle)).expect("license ZIP parses");
         for filename in DISTRIBUTION_LICENSES {
             assert!(names.contains(&format!("licenses/{filename}")));
+            let expected = fs::read(workspace.join("adapters/licenses").join(filename)).unwrap();
+            let mut packaged = Vec::new();
+            archive
+                .by_name(&format!("licenses/{filename}"))
+                .unwrap()
+                .read_to_end(&mut packaged)
+                .unwrap();
+            assert_eq!(packaged, expected, "archive notice {filename}");
+            let mut lifecycle = Vec::new();
+            bundle
+                .by_name(&format!("licenses/{filename}"))
+                .unwrap()
+                .read_to_end(&mut lifecycle)
+                .unwrap();
+            assert_eq!(lifecycle, expected, "lifecycle notice {filename}");
         }
         verify(&VerifyOptions {
             archive: first.archive.clone(),

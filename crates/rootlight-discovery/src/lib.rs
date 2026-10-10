@@ -2553,6 +2553,14 @@ const LANGUAGE_CAPABILITIES: &[LanguageCapability] = &[
         analyzers: &["treesitter"],
     },
     LanguageCapability {
+        language: "wgsl",
+        suffixes: &[".wgsl"],
+        aliases: &[],
+        detectors: &["extension"],
+        maximum_tier: "tier_d",
+        analyzers: &["treesitter"],
+    },
+    LanguageCapability {
         language: "yaml",
         suffixes: &[".yaml", ".yml"],
         aliases: &["yml"],
@@ -6814,6 +6822,48 @@ max_source_file_bytes = 2097152
                     evidence: LanguageEvidence::Extension,
                 }]
             );
+        }
+    }
+
+    #[test]
+    fn wgsl_admission_uses_only_its_exact_installed_suffix_and_canonical_name() {
+        let capability = language_capabilities()
+            .iter()
+            .find(|entry| entry.language == "wgsl")
+            .unwrap();
+        assert_eq!(capability.suffixes, [".wgsl"]);
+        assert!(capability.aliases.is_empty());
+        assert_eq!(capability.detectors, ["extension"]);
+        assert_eq!(capability.analyzers, ["treesitter"]);
+        assert_eq!(capability.maximum_tier, "tier_d");
+        assert_eq!(canonical_language("wgsl"), Some("wgsl"));
+        for path in ["shader.wgsl", "SHADER.WGSL"] {
+            assert_eq!(extension_language(path), Some("wgsl"));
+            let (class, signals) = classify(
+                &RelativePath::parse(Path::new(path)).unwrap(),
+                b"fn Main() {}\n",
+            );
+            assert_eq!(class, InputClass::Source);
+            assert_eq!(
+                signals,
+                [LanguageSignal {
+                    language: "wgsl".to_owned(),
+                    evidence: LanguageEvidence::Extension
+                }]
+            );
+        }
+        for path in [
+            "shader.wgsl.bak",
+            "shader.wgslx",
+            "shader.wgsl/source",
+            "source.wgs",
+        ] {
+            assert_ne!(extension_language(path), Some("wgsl"));
+        }
+        assert_eq!(extension_language("shader.glsl"), Some("glsl"));
+        assert_eq!(extension_language("shader.hlsl"), Some("hlsl"));
+        for language in ["shader", "source.wgsl", "hlsl", "glsl"] {
+            assert_ne!(canonical_language(language), Some("wgsl"));
         }
     }
 

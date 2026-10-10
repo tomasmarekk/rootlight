@@ -91,6 +91,8 @@ mod solidity_native;
 mod sql_native;
 #[path = "analyzer_e2e/vba_native.rs"]
 mod vba_native;
+#[path = "analyzer_e2e/wgsl_native.rs"]
+mod wgsl_native;
 #[path = "analyzer_e2e/yaml_native.rs"]
 mod yaml_native;
 const EXPECTED_DOMAINS: [FactDomain; 8] = [

@@ -1,0 +1,231 @@
+{
+  "schema": "rootlight.wgsl-source-provenance/1",
+  "status": "source_only_publication_candidate_pending_review",
+  "package": "tree-sitter-wgsl",
+  "version": "0.0.9",
+  "version_source": "exact authored package.json; not registry publication",
+  "repository": "https://github.com/gpuweb/tree-sitter-wgsl",
+  "authored_revision": "52e3c620a9c316cc8c1d504dd1908eb8cebe255b",
+  "authored_root_tree": "471479523e8d0796b6b53582e12e7aec9acaf5d2",
+  "archive_identity_pins": [
+    {
+      "archive": "upstream/archives/tree-sitter-wgsl-52e3c620a9c316cc8c1d504dd1908eb8cebe255b.tar.gz",
+      "bytes": 50313,
+      "sha256": "51c783b1ac76da03ead3e53509b03f3ad6383cf899bd3c8ea53f19bcc7e1452b"
+    }
+  ],
+  "inventory": {
+    "path": "SOURCE-INVENTORY.json",
+    "bytes": 16706,
+    "sha256": "c9b1cd55a0a275db53efd8420da5f5f20a8cabc8e1b45d580daf0b1de0415822"
+  },
+  "mirror_original_files": 13,
+  "mirror_original_file_bytes": 207378,
+  "mirror_original_wasm": {
+    "path": "upstream/authored/tree-sitter-wgsl.wasm",
+    "bytes": 137439,
+    "sha256": "255d362442747047a96de04554ae26139fc8fecc6d8ed4ee640363968b149514",
+    "git_mode": "100755",
+    "executable_intent": true,
+    "retained_inert": true,
+    "preferred_native_source": false,
+    "executed": false
+  },
+  "license_file": "LICENSE.md",
+  "original_package_declared_license": "BSD-3-Clause",
+  "retained_license_statement": "Original LICENSE.md separately refers to W3C Software and Document License and GPU for the Web 3-Clause BSD License; neither is removed or replaced by the package.json shorthand.",
+  "notice_paths": [
+    "LICENSE.md",
+    "notices/w3c-software-license-2023.html",
+    "notices/gpuweb-bsd-463e2f34-LICENSE.txt",
+    "notices/tree-sitter-MIT-LICENSE"
+  ],
+  "distribution_notices_integrated": false,
+  "distribution_notice_gap": {
+    "component": "xtask/src/package.rs::DISTRIBUTION_LICENSES and lifecycle_license_bundle",
+    "scope": "Existing fixed adapter notice roster does not package WGSL notices.",
+    "required_preserved_inputs": [
+      "LICENSE.md",
+      "notices/w3c-software-license-2023.html",
+      "notices/gpuweb-bsd-463e2f34-LICENSE.txt",
+      "notices/tree-sitter-MIT-LICENSE",
+      "PATCHES.md"
+    ],
+    "policy_relaxation_proposed": false,
+    "acceptance_verified": false
+  },
+  "license_policy_or_legal_acceptance_verified": false,
+  "cryptographic_upstream_signature_verified": false,
+  "historical_mirror_grammar_or_wasm_producer_association_verified": false,
+  "local_unpublished_binding": true,
+  "new_binding_paths": [
+    "Cargo.toml",
+    "bindings/rust/build.rs",
+    "bindings/rust/lib.rs"
+  ],
+  "local_modification_paths": [
+    "src/scanner.c"
+  ],
+  "patch_document": "PATCHES.md",
+  "patch_evidence": [
+    "patches/scanner-safety-and-trivia.patch",
+    "patches/local-binding.patch"
+  ],
+  "external_scanner": true,
+  "original_scanner_inert": true,
+  "preferred_scanner": {
+    "path": "src/scanner.c",
+    "bytes": 48906,
+    "sha256": "44ad757cee5a1e0ca4b486805667cbb60029dbd7d7057f7d713cea946ab27f4a",
+    "capacity": 64,
+    "capacity_increased": false,
+    "external_token_order_changed": false,
+    "unicode_property_equivalence_verified": false
+  },
+  "local_generation": {
+    "abi": 14,
+    "tree_sitter_cli": "0.26.8",
+    "node": "24.11.1",
+    "producer_count": 1,
+    "actual_child_exit": 0,
+    "grammar_original_unchanged": true,
+    "undefined_reserved_inline_warning_retained": true,
+    "original_wasm_reproduced": false,
+    "twin_producer_reproducibility_verified": false,
+    "exact_generated_outputs": [
+      {
+        "path": "src/grammar.json",
+        "bytes": 73144,
+        "sha256": "983d080c46a13cf7f178c4a5941c258d74b93f11267eb20294cdd4c446ee10fb"
+      },
+      {
+        "path": "src/node-types.json",
+        "bytes": 41789,
+        "sha256": "a118379afa87dc273013b56e12da32011c4041eae45b99156e47a996103a995a"
+      },
+      {
+        "path": "src/parser.c",
+        "bytes": 888935,
+        "sha256": "5b9871e51dccd8b1ee74b5f8c82c425f1fca06bd9ecba70c0269984ba5d068d2"
+      },
+      {
+        "path": "src/tree_sitter/alloc.h",
+        "bytes": 985,
+        "sha256": "b29c1c9fb7cc82f58c84b376df1297d6e2737a1d655fd356db0859e3c29c2fea"
+      },
+      {
+        "path": "src/tree_sitter/array.h",
+        "bytes": 13269,
+        "sha256": "31e60a1bff6f715afacce03b5b70efe42b58371b4f9595dd4af52a577ff9608c"
+      },
+      {
+        "path": "src/tree_sitter/parser.h",
+        "bytes": 7624,
+        "sha256": "180b893c8734778fd32f372dfbc27bd6ad1cd2221f26150b31256ff6716320d2"
+      }
+    ],
+    "state_count": 899,
+    "large_state_count": 17,
+    "symbol_count": 247,
+    "token_count": 115,
+    "external_token_count": 13,
+    "receipt_pin": {
+      "bytes": 2924,
+      "sha256": "2257d65de5913311d278295eea7b7526eccd89f978935ebee4b2a64fd745dad1"
+    },
+    "inputs_pin": {
+      "bytes": 5451,
+      "sha256": "b2536b5b7d808214e599178d536ba56b77a03317264a09c7f064c5e8156bcc84"
+    },
+    "recorded_tool_pins": [
+      {
+        "role": "generator",
+        "bytes": 9720320,
+        "sha256": "a61249a07c4a6d01d0bbbb5b7c058e29e12c119ef7fb5bede0b7fd916a7c56f0"
+      },
+      {
+        "role": "node",
+        "bytes": 89894400,
+        "sha256": "f13ac3ca23248dc389507e8fe38c34489ab7edb3e6d6700eb6da6a0b7e128eaf"
+      }
+    ],
+    "first_party_tool_producer_association": false
+  },
+  "preferred_callback_evidence": {
+    "receipt_pin": {
+      "bytes": 41592,
+      "sha256": "f8c402fb9bdcfc3ed33851ba34ae7a603aad83c4f2b7c26cbbe59f7b3f85becc"
+    },
+    "scope": "separately selected direct-C callback groups, not relocated Rust binding",
+    "status": "callback_comparison_passed_native_pending",
+    "original_groups": 8,
+    "preferred_groups": 8,
+    "all_preferred_groups_passed": true,
+    "complete_original_group_disposition_retained": true,
+    "compiler_warning_clean_claimed": false
+  },
+  "isolated_native_evidence": {
+    "receipt_pin": {
+      "bytes": 111038,
+      "sha256": "3059f37e51cc75feee35c15a9767a6584389aa63efafb3dcdd54cca12e37e5e5"
+    },
+    "scope": "exact original canonical table and preferred v2 scanner with reviewed Tree-sitter 0.26.11 runtime in direct-C harness",
+    "status": "native_witnesses_passed_product_pending",
+    "groups": 8,
+    "full_source_snapshots": 10,
+    "actual_phase_count": 14,
+    "actual_child_exit_codes": [
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0
+    ],
+    "body_only_incremental_and_clean_equivalence": true,
+    "leaf_and_whitespace_gap_source_conservation": true,
+    "malformed_and_capacity_recovery_remain_explicit": true,
+    "compiler_warning_clean_claimed": false,
+    "relocated_rust_binding_executed": false,
+    "rust_current_or_minimum_profile_verified": false,
+    "required_compiled_artifacts_in_original_receipt": 5,
+    "original_receipt_complete_generated_output_closure": false,
+    "separately_observed_inert_windows_export_outputs": [
+      {
+        "basename": "native-witnesses.lib",
+        "bytes": 1932,
+        "sha256": "5fe3eefa610c67d75bf1e8d8684366053390dc7ded0de35708627911095b7bdd",
+        "executed": false,
+        "compiler_or_link_input": false
+      },
+      {
+        "basename": "native-witnesses.exp",
+        "bytes": 872,
+        "sha256": "54fe963df2704efdbc705510ef48eadc21fbb6ca845695f79deba0006b908930",
+        "executed": false,
+        "compiler_or_link_input": false
+      }
+    ],
+    "original_receipt_not_rewritten": true
+  },
+  "source_download_or_generation_at_build_time": false,
+  "archived_upstream_lifecycle_activated": false,
+  "wasm_execution": false,
+  "source_publication_verified": false,
+  "relocated_package_qualification_verified": false,
+  "production_integration_verified": false,
+  "installed_mcp_verified": false,
+  "whole_language_coverage_verified": false,
+  "empty_dependency_cache_verified": false,
+  "os_network_denial_verified": false,
+  "build_and_packaging_acceptance_verified": false,
+  "complete_product_source_closure_proven": false
+}

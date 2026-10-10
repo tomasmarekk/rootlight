@@ -4303,6 +4303,7 @@ impl<'context, 'source> Lowering<'context, 'source> {
                         | "haskell"
                         | "glsl"
                         | "hlsl"
+                        | "wgsl"
                 ) || fact.syntax_kind().as_str()
                     == "vba.preprocessor_branch.scope"
                 {
@@ -6134,7 +6135,7 @@ fn materialize_entity(
     // overload identities. Haskell equations likewise retain one lexical binding.
     let signature_discriminator = if matches!(
         draft.language.as_str(),
-        "assembly" | "common-lisp" | "glsl" | "hlsl"
+        "assembly" | "common-lisp" | "glsl" | "hlsl" | "wgsl"
     ) || (draft.language == "haskell"
         && matches!(
             draft.kind,
@@ -6439,7 +6440,39 @@ fn common_lisp_source_gap(fact: &SyntaxFact) -> Option<(FactDomain, &'static str
     })
 }
 
+fn wgsl_source_gap(fact: &SyntaxFact) -> Option<(FactDomain, &'static str)> {
+    if fact.kind() != SyntaxFactKind::Signature {
+        return None;
+    }
+    Some(match fact.syntax_kind().as_str() {
+        "wgsl.unsupported_owner.expression" => (
+            FactDomain::Entities,
+            "wgsl-written-owner-analysis-unavailable",
+        ),
+        "wgsl.source_availability.expression" => (
+            FactDomain::Occurrences,
+            "wgsl-hidden-comments-have-source-only-availability",
+        ),
+        "wgsl.annotation_context.expression" => (
+            FactDomain::Relations,
+            "wgsl-attribute-and-pipeline-binding-unavailable",
+        ),
+        "wgsl.directive_context.expression" => (
+            FactDomain::Relations,
+            "wgsl-directive-and-feature-validation-unavailable",
+        ),
+        "wgsl.body_semantics.expression" => (
+            FactDomain::Relations,
+            "wgsl-body-binding-and-call-analysis-unavailable",
+        ),
+        _ => return None,
+    })
+}
+
 fn source_coverage_gap(fact: &SyntaxFact) -> Option<(FactDomain, &'static str)> {
+    if let Some(gap) = wgsl_source_gap(fact) {
+        return Some(gap);
+    }
     if let Some(gap) = hlsl_source_gap(fact) {
         return Some(gap);
     }
@@ -6456,6 +6489,10 @@ fn source_coverage_gap(fact: &SyntaxFact) -> Option<(FactDomain, &'static str)> 
         return Some((FactDomain::Entities, reason));
     }
     match fact.syntax_kind().as_str() {
+        "wgsl.file.module" if fact.kind() == SyntaxFactKind::Module => Some((
+            FactDomain::Relations,
+            "wgsl-type-resource-and-pipeline-binding-unavailable",
+        )),
         "hlsl.file.module" if fact.kind() == SyntaxFactKind::Module => Some((
             FactDomain::Relations,
             "hlsl-shader-binding-linking-and-preprocessing-unavailable",
@@ -6853,6 +6890,23 @@ fn json_data_identity(parent: Option<[u8; 32]>, kind: &str, position: u64) -> [u
 }
 
 fn uses_written_source_identity(language: &str, kind: EntityKind, label: &str) -> bool {
+    if language == "wgsl" {
+        return matches!(
+            (kind, label),
+            (EntityKind::Function, "wgsl.function.declaration")
+                | (EntityKind::Struct, "wgsl.struct.declaration")
+                | (EntityKind::TypeAlias, "wgsl.type_alias.declaration")
+                | (
+                    EntityKind::Variable,
+                    "wgsl.variable.declaration"
+                        | "wgsl.let.declaration"
+                        | "wgsl.override.declaration"
+                )
+                | (EntityKind::Constant, "wgsl.constant.declaration")
+                | (EntityKind::Parameter, "wgsl.parameter.declaration")
+                | (EntityKind::Field, "wgsl.field.declaration")
+        );
+    }
     if language == "hlsl" {
         return matches!(
             (kind, label),
@@ -6948,6 +7002,8 @@ fn written_source_identity(
         "rootlight.assembly-source-occurrence/1"
     } else if language == "glsl" {
         "rootlight.glsl-source-occurrence/1"
+    } else if language == "wgsl" {
+        "rootlight.wgsl-source-occurrence/1"
     } else if language == "hlsl" {
         "rootlight.hlsl-source-occurrence/1"
     } else {
@@ -7951,6 +8007,9 @@ fn test_source_path(path: &str) -> bool {
 }
 
 fn is_explicit_file_module(fact: &SyntaxFact, language: &str) -> bool {
+    if fact.syntax_kind().as_str() == "wgsl.file.module" {
+        return fact.kind() == SyntaxFactKind::Module && language == "wgsl";
+    }
     if fact.syntax_kind().as_str() == "hlsl.file.module" {
         return fact.kind() == SyntaxFactKind::Module && language == "hlsl";
     }
@@ -8193,6 +8252,15 @@ fn supports_signature(kind: EntityKind, language: &str) -> bool {
     // Classic BASIC accessors share a name but have distinct Get/Let/Set headers.
     // The same rule governs identity, evidence emission and admission accounting.
     matches!(language, "fsharp" | "fsharp-signature")
+        || (language == "wgsl"
+            && matches!(
+                kind,
+                EntityKind::Variable
+                    | EntityKind::Constant
+                    | EntityKind::TypeAlias
+                    | EntityKind::Field
+                    | EntityKind::Parameter
+            ))
         || (language == "hlsl"
             && matches!(
                 kind,
@@ -8254,6 +8322,17 @@ fn automatic_instantiation_gap(fact: &SyntaxFact) -> Option<&'static str> {
 }
 
 fn source_reference_gap(fact: &SyntaxFact) -> Option<&'static str> {
+    if fact.kind() == SyntaxFactKind::Occurrence
+        && matches!(
+            fact.syntax_kind().as_str(),
+            "wgsl.identifier.reference"
+                | "wgsl.type.reference"
+                | "wgsl.member.reference"
+                | "wgsl.unproven_call.reference"
+        )
+    {
+        return Some("wgsl-binding-and-dispatch-target-unavailable");
+    }
     if fact.kind() == SyntaxFactKind::Occurrence
         && matches!(
             fact.syntax_kind().as_str(),
@@ -8419,6 +8498,18 @@ fn import_target_gap(fact: &SyntaxFact) -> &'static str {
 }
 
 fn occurrence_role(fact: &SyntaxFact) -> Option<OccurrenceRole> {
+    if fact.syntax_kind().as_str().starts_with("wgsl.") {
+        return match (fact.kind(), fact.syntax_kind().as_str()) {
+            (
+                SyntaxFactKind::Occurrence,
+                "wgsl.identifier.reference"
+                | "wgsl.type.reference"
+                | "wgsl.member.reference"
+                | "wgsl.unproven_call.reference",
+            ) => Some(OccurrenceRole::Reference),
+            _ => None,
+        };
+    }
     if fact.syntax_kind().as_str().starts_with("hlsl.") {
         // The inherited C++ grammar does not establish import, call or binding roles.
         return match (fact.kind(), fact.syntax_kind().as_str()) {
