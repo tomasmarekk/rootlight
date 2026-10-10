@@ -34,7 +34,12 @@ struct LanguageCase {
     source: &'static str,
 }
 
-const CASES: [LanguageCase; 48] = [
+const CASES: [LanguageCase; 49] = [
+    LanguageCase {
+        name: "written.scm",
+        language: "scheme",
+        source: "(define (measure value) (+ value 1))\n",
+    },
     LanguageCase {
         name: "written.wgsl",
         language: "wgsl",

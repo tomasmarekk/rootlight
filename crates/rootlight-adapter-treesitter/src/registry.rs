@@ -101,6 +101,8 @@ pub enum GrammarFamily {
     PlSql,
     /// Common Lisp written forms without reader, macro or runtime binding inference.
     CommonLisp,
+    /// Scheme written owners without macro expansion or runtime binding inference.
+    Scheme,
     /// Assembly written owners without expansion, ISA validation or assembled binding.
     Assembly,
     /// GLSL written source without shader linking or preprocessor selection.
@@ -201,7 +203,7 @@ impl GrammarRegistry {
     /// Returns [`RegistryError`] if an SDK label is invalid or a linked grammar
     /// falls outside Tree-sitter's supported ABI interval.
     pub fn audited() -> Result<Self, RegistryError> {
-        let mut descriptors = Vec::with_capacity(48);
+        let mut descriptors = Vec::with_capacity(49);
         for family in [
             GrammarFamily::Rust,
             GrammarFamily::Python,
@@ -247,6 +249,7 @@ impl GrammarRegistry {
             GrammarFamily::Fortran,
             GrammarFamily::PlSql,
             GrammarFamily::CommonLisp,
+            GrammarFamily::Scheme,
             GrammarFamily::Assembly,
             GrammarFamily::Glsl,
             GrammarFamily::Hlsl,
@@ -390,6 +393,7 @@ pub(crate) fn language_for(family: GrammarFamily) -> Language {
         GrammarFamily::Fortran => tree_sitter_fortran::LANGUAGE.into(),
         GrammarFamily::PlSql => tree_sitter_plsql::LANGUAGE.into(),
         GrammarFamily::CommonLisp => tree_sitter_commonlisp::LANGUAGE_COMMONLISP.into(),
+        GrammarFamily::Scheme => tree_sitter_scheme::LANGUAGE_SCHEME.into(),
         GrammarFamily::Assembly => tree_sitter_asm::LANGUAGE_ASSEMBLY.into(),
         GrammarFamily::Glsl => tree_sitter_glsl::LANGUAGE_GLSL.into(),
         GrammarFamily::Hlsl => tree_sitter_hlsl::LANGUAGE_HLSL.into(),
@@ -438,6 +442,13 @@ const fn identity_for(family: GrammarFamily) -> GrammarIdentity {
             grammar_version: "0.24.0",
             source_package_sha256: "05ab716e887d01045e6357cbce255e427546bc540035703105de8a42d2a1a95e",
             parser_sha256: "eca05ffdbf8d5e8788bf73776812003d8975f8b1648554b241200aa6da37a798",
+            scanner_sha256: None,
+        },
+        GrammarFamily::Scheme => GrammarIdentity {
+            language_id: "scheme",
+            grammar_version: "0.24.7-1",
+            source_package_sha256: "d1477c4b209d9db6337e4a646cf8c2134422b432f14c00e74068ef2105829b6f",
+            parser_sha256: "e0893150ff554e9d3610119e935cf56532d03b4793617b2989573950e9362df1",
             scanner_sha256: None,
         },
         GrammarFamily::CommonLisp => GrammarIdentity {
@@ -852,7 +863,7 @@ mod tests {
     fn registry_contains_each_audited_family_once_with_checked_abi() {
         let registry = GrammarRegistry::audited().expect("audited grammars initialize");
 
-        assert_eq!(registry.descriptors().len(), 48);
+        assert_eq!(registry.descriptors().len(), 49);
         for family in [
             GrammarFamily::Rust,
             GrammarFamily::Python,
@@ -898,6 +909,7 @@ mod tests {
             GrammarFamily::Fortran,
             GrammarFamily::PlSql,
             GrammarFamily::CommonLisp,
+            GrammarFamily::Scheme,
             GrammarFamily::Assembly,
             GrammarFamily::Glsl,
             GrammarFamily::Hlsl,
@@ -1118,6 +1130,11 @@ mod tests {
                 "common-lisp",
                 "tree-sitter-commonlisp",
             ),
+            (
+                GrammarFamily::Scheme,
+                "scheme",
+                "tree-sitter-scheme-native-local",
+            ),
             (GrammarFamily::Assembly, "assembly", "tree-sitter-asm"),
             (GrammarFamily::Glsl, "glsl", "tree-sitter-glsl"),
             (GrammarFamily::Hlsl, "hlsl", "tree-sitter-hlsl"),
@@ -1156,6 +1173,7 @@ mod tests {
                         || family == GrammarFamily::Apex
                         || family == GrammarFamily::PlSql
                         || family == GrammarFamily::CommonLisp
+                        || family == GrammarFamily::Scheme
                         || family == GrammarFamily::Assembly
                         || family == GrammarFamily::Glsl
                         || family == GrammarFamily::Hlsl

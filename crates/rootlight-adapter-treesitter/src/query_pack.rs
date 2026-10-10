@@ -39,6 +39,7 @@ mod plsql;
 mod powershell;
 mod r;
 mod scala;
+mod scheme;
 mod sql;
 mod sql_admission;
 pub(super) mod vba;
@@ -365,6 +366,7 @@ impl QueryPack {
             family,
             GrammarFamily::PlSql
                 | GrammarFamily::CommonLisp
+                | GrammarFamily::Scheme
                 | GrammarFamily::Glsl
                 | GrammarFamily::Hlsl
         ) {
@@ -706,6 +708,7 @@ impl QueryPack {
         let mut apex_captures = apex::CaptureCache::new(limits.captures.min(limits.body_nodes));
         let mut common_lisp_captures =
             common_lisp::CaptureCache::new(limits.captures.min(limits.body_nodes));
+        let mut scheme_captures = scheme::CaptureCache::new(limits.captures.min(limits.body_nodes));
         let mut assembly_captures =
             assembly::CaptureCache::new(limits.captures.min(limits.body_nodes));
         let mut glsl_captures = glsl::CaptureCache::new(limits.captures.min(limits.body_nodes));
@@ -827,6 +830,22 @@ impl QueryPack {
                         &mut common_lisp_captures,
                     )?;
                     if common_lisp_captures.exhausted() {
+                        limit = Some(QueryLimit::Capture);
+                        break 'query;
+                    }
+                    if !admitted {
+                        continue;
+                    }
+                }
+                if input.family == GrammarFamily::Scheme {
+                    let admitted = scheme::retain_capture(
+                        capture.node,
+                        role,
+                        input.source,
+                        input.cancellation,
+                        &mut scheme_captures,
+                    )?;
+                    if scheme_captures.exhausted() {
                         limit = Some(QueryLimit::Capture);
                         break 'query;
                     }
@@ -1126,6 +1145,14 @@ impl QueryPack {
                         input.cancellation,
                         &mut common_lisp_captures,
                     )
+                } else if input.family == GrammarFamily::Scheme {
+                    scheme::candidate(
+                        capture.node,
+                        role,
+                        input.source,
+                        input.cancellation,
+                        &mut scheme_captures,
+                    )
                 } else if input.family == GrammarFamily::Apex {
                     apex::candidate(
                         capture.node,
@@ -1148,6 +1175,7 @@ impl QueryPack {
                 if fsharp_captures.exhausted()
                     || apex_captures.exhausted()
                     || common_lisp_captures.exhausted()
+                    || scheme_captures.exhausted()
                     || assembly_captures.exhausted()
                     || glsl_captures.exhausted()
                     || hlsl_captures.exhausted()
@@ -1743,6 +1771,7 @@ fn candidate_for_capture(
             GrammarFamily::CommonLisp => {
                 return Err(query_failure("query-common-lisp-unproven-call"));
             }
+            GrammarFamily::Scheme => return Err(query_failure("query-scheme-unproven-call")),
             GrammarFamily::Css => return Err(query_failure("query-css-call-kind")),
             GrammarFamily::Json => return Err(query_failure("query-json-call-kind")),
             GrammarFamily::Toml => return Err(query_failure("query-toml-call-kind")),
@@ -2656,7 +2685,7 @@ impl QueryPackRegistry {
     }
 
     fn compile_audited() -> Result<Self, GrammarFamily> {
-        let mut packs = Vec::with_capacity(48);
+        let mut packs = Vec::with_capacity(49);
         for (family, source) in [
             (GrammarFamily::Rust, include_str!("../queries/rust.scm")),
             (GrammarFamily::Python, include_str!("../queries/python.scm")),
@@ -2717,6 +2746,7 @@ impl QueryPackRegistry {
                 GrammarFamily::CommonLisp,
                 include_str!("../queries/common_lisp.scm"),
             ),
+            (GrammarFamily::Scheme, include_str!("../queries/scheme.scm")),
             (
                 GrammarFamily::Assembly,
                 include_str!("../queries/assembly.scm"),
@@ -2854,6 +2884,7 @@ mod tests {
             GrammarFamily::CobolFree,
             GrammarFamily::Fortran,
             GrammarFamily::CommonLisp,
+            GrammarFamily::Scheme,
             GrammarFamily::Assembly,
             GrammarFamily::Glsl,
             GrammarFamily::Hlsl,
@@ -2894,7 +2925,10 @@ mod tests {
             }
             if matches!(
                 family,
-                GrammarFamily::CommonLisp | GrammarFamily::Glsl | GrammarFamily::Hlsl
+                GrammarFamily::CommonLisp
+                    | GrammarFamily::Scheme
+                    | GrammarFamily::Glsl
+                    | GrammarFamily::Hlsl
             ) {
                 expected.retain(|name| !matches!(*name, "call" | "import" | "documentation"));
                 expected.push("expression");

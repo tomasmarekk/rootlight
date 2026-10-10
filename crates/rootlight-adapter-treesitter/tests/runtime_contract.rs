@@ -90,7 +90,8 @@ fn incremental_executor_enforces_deadline_and_explicit_memory_admission() {
 
 #[test]
 fn every_audited_grammar_parses_a_clean_representative_file() {
-    let cases: [(&str, &str, &[u8]); 48] = [
+    let cases: [(&str, &str, &[u8]); 49] = [
+        ("written.scm", "scheme", b"(define (measure value) (+ value 1))\n"),
         ("written.wgsl", "wgsl", b"fn Written(Value: f32) -> f32 { return Value; }\n"),
         ("written.hlsl", "hlsl", b"float Written(float Value) { return Value; }\n"),
         ("written.glsl", "glsl", b"float Written(float Value) { return Value; }\n"),

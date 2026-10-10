@@ -4895,7 +4895,7 @@ impl<'context, 'source> Lowering<'context, 'source> {
                             &name,
                             maximum,
                         )
-                    } else if self.language_for_fact(fact) == "common-lisp" {
+                    } else if matches!(self.language_for_fact(fact), "common-lisp" | "scheme") {
                         // Whitespace inside escaped symbols or string specializers
                         // belongs to the exact written header, not formatting.
                         let mut written = String::new();
@@ -6131,11 +6131,11 @@ fn materialize_entity(
     }
     debug_assert_eq!(qualified_name.len(), draft.qualified_length);
     let semantic_kind = entity_kind_identity_label(draft.kind);
-    // Assembly, Common Lisp and shader headers are source evidence, not runtime binding or
+    // Assembly, Lisp and shader headers are source evidence, not runtime binding or
     // overload identities. Haskell equations likewise retain one lexical binding.
     let signature_discriminator = if matches!(
         draft.language.as_str(),
-        "assembly" | "common-lisp" | "glsl" | "hlsl" | "wgsl"
+        "assembly" | "common-lisp" | "scheme" | "glsl" | "hlsl" | "wgsl"
     ) || (draft.language == "haskell"
         && matches!(
             draft.kind,
@@ -6401,6 +6401,42 @@ fn apex_source_identity_gap(fact: &SyntaxFact) -> Option<&'static str> {
     }
 }
 
+fn scheme_source_gap(fact: &SyntaxFact) -> Option<(FactDomain, &'static str)> {
+    if fact.kind() != SyntaxFactKind::Signature {
+        return None;
+    }
+    Some(match fact.syntax_kind().as_str() {
+        "scheme.unsupported_owner.expression" => (
+            FactDomain::Entities,
+            "scheme-written-owner-analysis-unavailable",
+        ),
+        "scheme.parameter_context.expression" => (
+            FactDomain::Entities,
+            "scheme-parameter-owner-analysis-unavailable",
+        ),
+        "scheme.record_context.expression" => (
+            FactDomain::Entities,
+            "scheme-record-clause-and-generated-member-analysis-unavailable",
+        ),
+        "scheme.local_macro_context.expression" => (
+            FactDomain::Entities,
+            "scheme-local-macro-owner-analysis-unavailable",
+        ),
+        "scheme.reader_context.expression" => (
+            FactDomain::Relations,
+            "scheme-reader-environment-unavailable",
+        ),
+        "scheme.macro_context.expression" => {
+            (FactDomain::Relations, "scheme-macro-expansion-unavailable")
+        }
+        "scheme.body_semantics.expression" | "scheme.source_reference_gap.expression" => (
+            FactDomain::Relations,
+            "scheme-binding-and-call-analysis-unavailable",
+        ),
+        _ => return None,
+    })
+}
+
 fn common_lisp_source_gap(fact: &SyntaxFact) -> Option<(FactDomain, &'static str)> {
     // Expression captures use the SDK's Signature fact role. The exact label
     // also distinguishes these qualifications from real declaration headers.
@@ -6485,6 +6521,9 @@ fn source_coverage_gap(fact: &SyntaxFact) -> Option<(FactDomain, &'static str)> 
     if let Some(gap) = common_lisp_source_gap(fact) {
         return Some(gap);
     }
+    if let Some(gap) = scheme_source_gap(fact) {
+        return Some(gap);
+    }
     if let Some(reason) = apex_source_identity_gap(fact) {
         return Some((FactDomain::Entities, reason));
     }
@@ -6508,6 +6547,10 @@ fn source_coverage_gap(fact: &SyntaxFact) -> Option<(FactDomain, &'static str)> 
         "common_lisp.file.module" if fact.kind() == SyntaxFactKind::Module => Some((
             FactDomain::Relations,
             "common-lisp-reader-and-runtime-binding-unavailable",
+        )),
+        "scheme.file.module" if fact.kind() == SyntaxFactKind::Module => Some((
+            FactDomain::Relations,
+            "scheme-reader-library-and-runtime-binding-unavailable",
         )),
         "apex.file.module" => Some((
             FactDomain::Relations,
@@ -6972,7 +7015,14 @@ fn uses_written_source_identity(language: &str, kind: EntityKind, label: &str) -
     kind != EntityKind::Module
         && matches!(
             language,
-            "r" | "powershell" | "nix" | "matlab" | "perl" | "groovy" | "tcl" | "common-lisp"
+            "r" | "powershell"
+                | "nix"
+                | "matlab"
+                | "perl"
+                | "groovy"
+                | "tcl"
+                | "common-lisp"
+                | "scheme"
         )
 }
 
@@ -6998,6 +7048,8 @@ fn written_source_identity(
         "rootlight.haskell-source-scope/1"
     } else if language == "common-lisp" {
         "rootlight.common-lisp-source-occurrence/1"
+    } else if language == "scheme" {
+        "rootlight.scheme-source-occurrence/1"
     } else if language == "assembly" {
         "rootlight.assembly-source-occurrence/1"
     } else if language == "glsl" {
@@ -7996,6 +8048,9 @@ fn is_explicit_file_module(fact: &SyntaxFact, language: &str) -> bool {
     if fact.syntax_kind().as_str() == "common_lisp.file.module" {
         return fact.kind() == SyntaxFactKind::Module && language == "common-lisp";
     }
+    if fact.syntax_kind().as_str() == "scheme.file.module" {
+        return fact.kind() == SyntaxFactKind::Module && language == "scheme";
+    }
     fact.kind() == SyntaxFactKind::Module
         && matches!(
             fact.syntax_kind().as_str(),
@@ -8190,6 +8245,7 @@ fn supports_declaration_signature(
         || (language == "glsl" && declaration.syntax_kind().as_str() == "glsl.file.module")
         || (language == "common-lisp"
             && declaration.syntax_kind().as_str() == "common_lisp.file.module")
+        || (language == "scheme" && declaration.syntax_kind().as_str() == "scheme.file.module")
     {
         return false;
     }
@@ -8339,6 +8395,9 @@ fn source_reference_gap(fact: &SyntaxFact) -> Option<&'static str> {
     match fact.syntax_kind().as_str() {
         "common_lisp.symbol.reference" if fact.kind() == SyntaxFactKind::Occurrence => {
             Some("common-lisp-binding-target-unavailable")
+        }
+        "scheme.symbol.reference" if fact.kind() == SyntaxFactKind::Occurrence => {
+            Some("scheme-binding-target-unavailable")
         }
         "apex.identifier.reference" | "apex.member.reference" | "apex.unproven_call.reference" => {
             Some("apex-binding-and-dispatch-target-unavailable")
@@ -10434,6 +10493,89 @@ mod tests {
                 EntityKind::Module,
                 "written.module.declaration"
             ));
+        }
+    }
+
+    #[test]
+    fn scheme_written_identity_and_gaps_do_not_imply_runtime_binding() {
+        fn fact(kind: SyntaxFactKind, label: &str) -> SyntaxFact {
+            SyntaxFact::new(
+                1,
+                None,
+                kind,
+                SourceSpan::new(FileId::from_bytes([3; 20]), 4, 30).unwrap(),
+                0,
+                SyntaxKindLabel::new(label).unwrap(),
+            )
+        }
+        let module = fact(SyntaxFactKind::Module, "scheme.file.module");
+        assert!(is_explicit_file_module(&module, "scheme"));
+        assert!(!is_explicit_file_module(&module, "common-lisp"));
+        assert!(!is_explicit_file_module(
+            &fact(SyntaxFactKind::Declaration, "scheme.file.module"),
+            "scheme"
+        ));
+        assert!(!supports_declaration_signature(
+            EntityKind::Module,
+            "scheme",
+            &module,
+            None
+        ));
+        assert_eq!(
+            source_coverage_gaps(&module).collect::<Vec<_>>(),
+            [(
+                FactDomain::Relations,
+                "scheme-reader-library-and-runtime-binding-unavailable"
+            )]
+        );
+        assert!(uses_written_source_identity(
+            "scheme",
+            EntityKind::Function,
+            "scheme.procedure.declaration"
+        ));
+        assert_ne!(
+            written_source_identity("scheme", None, "function", 0),
+            written_source_identity("common-lisp", None, "function", 0)
+        );
+        assert_ne!(
+            written_source_identity("scheme", None, "function", 0),
+            written_source_identity("scheme", None, "function", 1)
+        );
+        assert_eq!(
+            source_reference_gap(&fact(SyntaxFactKind::Occurrence, "scheme.symbol.reference")),
+            Some("scheme-binding-target-unavailable")
+        );
+        for (kind, label) in [
+            (SyntaxFactKind::Occurrence, "scheme.name.definition"),
+            (SyntaxFactKind::Declaration, "scheme.symbol.reference"),
+        ] {
+            assert!(source_reference_gap(&fact(kind, label)).is_none());
+        }
+        for (label, expected_domain) in [
+            ("scheme.unsupported_owner.expression", FactDomain::Entities),
+            ("scheme.parameter_context.expression", FactDomain::Entities),
+            ("scheme.record_context.expression", FactDomain::Entities),
+            (
+                "scheme.local_macro_context.expression",
+                FactDomain::Entities,
+            ),
+            ("scheme.reader_context.expression", FactDomain::Relations),
+            ("scheme.macro_context.expression", FactDomain::Relations),
+            ("scheme.body_semantics.expression", FactDomain::Relations),
+            (
+                "scheme.source_reference_gap.expression",
+                FactDomain::Relations,
+            ),
+        ] {
+            let captured = fact(SyntaxFactKind::Signature, label);
+            let (domain, reason) = scheme_source_gap(&captured).unwrap();
+            assert_eq!(domain, expected_domain);
+            assert!(reason.starts_with("scheme-"));
+            assert!(scheme_source_gap(&fact(SyntaxFactKind::Declaration, label)).is_none());
+            assert!(
+                scheme_source_gap(&fact(SyntaxFactKind::Signature, &format!("{label}.extra")))
+                    .is_none()
+            );
         }
     }
 

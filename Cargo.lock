@@ -1675,6 +1675,7 @@ dependencies = [
  "tree-sitter-ruby",
  "tree-sitter-rust",
  "tree-sitter-scala",
+ "tree-sitter-scheme-native-local",
  "tree-sitter-sequel",
  "tree-sitter-sfapex",
  "tree-sitter-solidity",
@@ -3259,6 +3260,14 @@ dependencies = [
 [[package]]
 name = "tree-sitter-scala"
 version = "0.26.2"
+dependencies = [
+ "cc",
+ "tree-sitter-language",
+]
+
+[[package]]
+name = "tree-sitter-scheme-native-local"
+version = "0.24.7-1"
 dependencies = [
  "cc",
  "tree-sitter-language",

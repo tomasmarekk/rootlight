@@ -60,7 +60,8 @@ const EXPECTED_TARGETS: [&str; 5] = [
     "x86_64-pc-windows-msvc",
     "x86_64-unknown-linux-gnu",
 ];
-const DISTRIBUTION_LICENSES: [&str; 26] = [
+const DISTRIBUTION_LICENSES: [&str; 28] = [
+    "tree-sitter-0.26.11-LICENSE",
     "tree-sitter-wgsl-0.0.9-LICENSE.md",
     "tree-sitter-wgsl-0.0.9-GPUWeb-BSD-LICENSE.txt",
     "tree-sitter-wgsl-0.0.9-W3C-LICENSE.html",
@@ -87,6 +88,7 @@ const DISTRIBUTION_LICENSES: [&str; 26] = [
     "tree-sitter-swift-0.7.3-LICENSE",
     "tree-sitter-toml-ng-0.7.0-LICENSE",
     "tree-sitter-typescript-0.23.2-LICENSE",
+    "tree-sitter-scheme-0.24.7-1-LICENSE",
 ];
 const EXPECTED_WEB_ASSET_TREE: &str = "rootlight-web-ui";
 const EXPECTED_WEB_ASSET_DESTINATION: &str = "share/rootlight/web";
@@ -579,6 +581,16 @@ struct ArchiveBuild<'a> {
     output_dir: &'a Path,
 }
 
+fn distribution_license_path(workspace: &Path, filename: &str) -> PathBuf {
+    // Read retained vendor notices directly instead of maintaining a second copy.
+    match filename {
+        "tree-sitter-scheme-0.24.7-1-LICENSE" => {
+            workspace.join("third_party/tree-sitter-scheme-0.24.7-1/upstream/LICENSE")
+        }
+        _ => workspace.join("adapters/licenses").join(filename),
+    }
+}
+
 fn build_archive(
     workspace: &Path,
     spec: &PackageSpec,
@@ -661,7 +673,7 @@ fn build_archive(
             "third_party_license",
             0o644,
             read_regular_bounded(
-                &workspace.join("adapters").join("licenses").join(filename),
+                &distribution_license_path(workspace, filename),
                 MAX_THIRD_PARTY_LICENSE_BYTES,
             )?,
         )?);
@@ -2181,6 +2193,24 @@ mod tests {
     }
 
     #[test]
+    fn local_grammar_distribution_notices_match_retained_sources() {
+        let workspace = workspace_root().expect("workspace root");
+        let (filename, source, expected_bytes, expected_sha256) = (
+            "tree-sitter-scheme-0.24.7-1-LICENSE",
+            "third_party/tree-sitter-scheme-0.24.7-1/upstream/LICENSE",
+            1062,
+            "cc35bd4a973bf6067558e88b56d9a369e02c36e240b2b537aef8f751b7808fd7",
+        );
+        assert!(DISTRIBUTION_LICENSES.contains(&filename));
+        let path = distribution_license_path(&workspace, filename);
+        assert_eq!(path, workspace.join(source));
+        let bytes = read_regular_bounded(&path, MAX_THIRD_PARTY_LICENSE_BYTES)
+            .expect("retained grammar notice");
+        assert_eq!(bytes.len(), expected_bytes, "notice length {filename}");
+        assert_eq!(sha256(&bytes), expected_sha256, "notice digest {filename}");
+    }
+
+    #[test]
     fn package_archive_is_deterministic_and_manifest_bound() {
         let workspace = workspace_root().expect("workspace root");
         let spec = load_spec(&workspace).expect("spec parses");
@@ -2306,7 +2336,7 @@ mod tests {
         let mut bundle = ZipArchive::new(Cursor::new(bundle)).expect("license ZIP parses");
         for filename in DISTRIBUTION_LICENSES {
             assert!(names.contains(&format!("licenses/{filename}")));
-            let expected = fs::read(workspace.join("adapters/licenses").join(filename)).unwrap();
+            let expected = fs::read(distribution_license_path(&workspace, filename)).unwrap();
             let mut packaged = Vec::new();
             archive
                 .by_name(&format!("licenses/{filename}"))

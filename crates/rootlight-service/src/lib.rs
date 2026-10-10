@@ -243,8 +243,8 @@ const PROJECT_FACTS_TRUNCATED_CODE: &str = "project-adapter-facts-truncated";
 const PROJECT_FACTS_TRUNCATED_MESSAGE: &str =
     "additional project semantic facts were omitted by aggregate resource limits";
 const AGGREGATE_DIAGNOSTICS_TRUNCATED_CODE: &str = "aggregate-diagnostics-truncated";
-const ANALYZER_BINARY_SEED: &[u8] = b"rootlight.first-slice.treesitter-structural/237";
-const RESOLVER_BINARY_SEED: &[u8] = b"rootlight.first-slice.resolve/104";
+const ANALYZER_BINARY_SEED: &[u8] = b"rootlight.first-slice.treesitter-structural/238";
+const RESOLVER_BINARY_SEED: &[u8] = b"rootlight.first-slice.resolve/105";
 const INCREMENTAL_PROVIDER_SEED: &[u8] = b"rootlight.first-slice.incremental-provider/1";
 const LANGUAGE_DISPOSITION_PROVIDER_SEED: &[u8] = b"rootlight.first-slice.language-disposition/12";
 const SOURCE_FILE_FALLBACK_PROVIDER_SEED: &[u8] = b"rootlight.source-file-fallback/4";
@@ -6403,6 +6403,11 @@ impl FirstSliceService {
                 format!("tree-sitter-sfapex-{}", descriptor.grammar_version())
             } else if descriptor.family() == GrammarFamily::CommonLisp {
                 format!("tree-sitter-commonlisp-{}", descriptor.grammar_version())
+            } else if descriptor.family() == GrammarFamily::Scheme {
+                format!(
+                    "tree-sitter-scheme-native-local-{}",
+                    descriptor.grammar_version()
+                )
             } else if descriptor.family() == GrammarFamily::Assembly {
                 format!("tree-sitter-asm-{}", descriptor.grammar_version())
             } else if descriptor.family() == GrammarFamily::Glsl {
@@ -16980,8 +16985,11 @@ fn source_language_from_path(path: &str) -> Option<&'static str> {
     if is_ambiguous_c_header(path) {
         return None;
     }
-    filename_language(path)
-        .or_else(|| extension_language(path).filter(|language| *language != "objective-c"))
+    filename_language(path).or_else(|| {
+        // Discovery fences Tree-sitter queries from Scheme extension evidence.
+        // A path-only fallback must not bypass that content decision.
+        extension_language(path).filter(|language| !matches!(*language, "objective-c" | "scheme"))
+    })
 }
 
 fn shared_classic_source_language(input: &ManifestInput) -> Option<&str> {
@@ -31361,6 +31369,7 @@ mod tests {
                     "create or replace package RouteKit as\nprocedure Inspect(Value in number);\nend RouteKit;\n/\n",
                 ),
                 ("Written.lisp", "(defun written (value) value)\n"),
+                ("written.scm", "(define (measure value) value)\n"),
                 (
                     "written.cls",
                     "public class Written { public Integer Read(Integer Value) { return Value; } }\n",
@@ -31382,7 +31391,7 @@ mod tests {
             .expect("MATLAB source is retained");
         assert_eq!(matlab.language, "matlab");
         mapped.insert(matlab.language.as_str());
-        assert_eq!(receipt.indexed_files, 6);
+        assert_eq!(receipt.indexed_files, 7);
         assert_eq!(source_language_from_path("clock.bas"), None);
         let vba = generation
             .document()
@@ -31459,6 +31468,25 @@ mod tests {
                     .is_some_and(|source| source.span().file() == apex.id)
         }));
         mapped.insert(apex.language.as_str());
+        assert_eq!(source_language_from_path("written.scm"), None);
+        let scheme = generation
+            .document()
+            .files
+            .iter()
+            .find(|file| file.path == "written.scm")
+            .expect("Scheme source is retained through discovery evidence");
+        assert_eq!(scheme.language, "scheme");
+        assert!(generation.document().entities.iter().any(|entity| {
+            entity.language == "scheme"
+                && entity.kind == EntityKind::Function
+                && entity.canonical_name == "measure"
+                && entity
+                    .evidence
+                    .source
+                    .as_ref()
+                    .is_some_and(|source| source.span().file() == scheme.id)
+        }));
+        mapped.insert(scheme.language.as_str());
         // A COBOL suffix identifies source, not a fixed/free parser format.
         for language in ["cobol-fixed", "cobol-free"] {
             let capability = language_capabilities()
@@ -31502,6 +31530,128 @@ mod tests {
             .collect::<BTreeSet<_>>();
 
         assert_eq!(mapped, registered);
+    }
+
+    #[test]
+    fn scheme_routes_preserve_query_fences_and_exact_sources() {
+        let source = "(define (measure value) value)\n";
+        let query = "(identifier) @name\n";
+        let fixture = TempDir::new().unwrap();
+        write_language_fixture(
+            fixture.path(),
+            &[("ordinary.scm", source), ("query.scm", query)],
+        );
+        let mut service = FirstSliceService::new(2).unwrap();
+        let receipt = service
+            .index_repository(fixture.path(), &deadline())
+            .unwrap();
+        let generation = service
+            .loaded_generation_snapshot(receipt.generation)
+            .unwrap();
+        let document = generation.document();
+        assert_eq!(document.files.len(), 2);
+        for (path, bytes, language) in [
+            ("ordinary.scm", source.as_bytes(), "scheme"),
+            ("query.scm", query.as_bytes(), "unknown"),
+        ] {
+            let file = document
+                .files
+                .iter()
+                .find(|file| file.path == path)
+                .unwrap();
+            assert_eq!(file.language, language);
+            let reference = file.evidence.source.clone().unwrap();
+            assert_eq!(reference.repository(), receipt.repository);
+            assert_eq!(reference.generation(), receipt.generation);
+            assert_eq!(reference.span().file(), file.id);
+            assert_eq!(reference.content_hash(), content_hash(bytes));
+            let read = service
+                .source_read(receipt.generation, vec![reference], &deadline())
+                .unwrap();
+            assert_eq!(read.data.chunks.len(), 1);
+            assert_eq!(read.data.chunks[0].bytes, bytes);
+            if language == "unknown" {
+                assert!(document.entities.iter().all(|entity| {
+                    entity
+                        .evidence
+                        .source
+                        .as_ref()
+                        .is_none_or(|source| source.span().file() != file.id)
+                }));
+            } else {
+                assert!(document.entities.iter().any(|entity| {
+                    entity.language == "scheme" && entity.canonical_name == "measure"
+                }));
+                let references: Vec<_> = document
+                    .occurrences
+                    .iter()
+                    .filter(|site| site.syntax_kind == "scheme.symbol.reference")
+                    .collect();
+                assert_eq!(references.len(), 1);
+                assert!(matches!(
+                    references[0].target,
+                    OccurrenceTarget::Unresolved { .. }
+                ));
+            }
+        }
+    }
+
+    #[test]
+    fn scheme_routes_require_admitted_or_configured_language_evidence() {
+        let service = FirstSliceService::new(2).unwrap();
+        let mut input = ManifestInput {
+            file: FileId::from_bytes([3; 20]),
+            path: "written.SCM".to_owned(),
+            content_hash: content_hash(b""),
+            bytes: 0,
+            encoding: "utf-8".to_owned(),
+            class: InputClass::Source,
+            language_signals: Vec::new(),
+            project_language_witnesses: Vec::new(),
+            decisive_rule: None,
+        };
+        assert_eq!(source_language_from_path(&input.path), None);
+        assert_eq!(detected_source_language(&input), None);
+        assert_eq!(source_language_route(&input, &service.analyzers), None);
+        input
+            .language_signals
+            .push(rootlight_discovery::LanguageSignal {
+                language: "scheme".to_owned(),
+                evidence: LanguageEvidence::Extension,
+            });
+        assert_eq!(detected_source_language(&input), Some("scheme"));
+        assert_eq!(
+            source_language_route(&input, &service.analyzers),
+            Some("scheme")
+        );
+        let mut absent = service.analyzers.clone();
+        assert!(absent.remove("scheme").is_some());
+        assert_eq!(source_language_route(&input, &absent), None);
+        input.language_signals.clear();
+        input
+            .language_signals
+            .push(rootlight_discovery::LanguageSignal {
+                language: "scheme".to_owned(),
+                evidence: LanguageEvidence::Configuration,
+            });
+        assert_eq!(
+            source_language_route(&input, &service.analyzers),
+            Some("scheme")
+        );
+        input
+            .language_signals
+            .push(rootlight_discovery::LanguageSignal {
+                language: "rust".to_owned(),
+                evidence: LanguageEvidence::Configuration,
+            });
+        assert_eq!(detected_source_language(&input), None);
+        assert_eq!(source_language_route(&input, &service.analyzers), None);
+        input.language_signals.remove(0);
+        assert_eq!(detected_source_language(&input), Some("rust"));
+        assert_eq!(
+            source_language_route(&input, &service.analyzers),
+            Some("rust")
+        );
     }
 
     #[test]
@@ -37724,6 +37874,7 @@ mod tests {
             b"rootlight.first-slice.treesitter-structural/234",
             b"rootlight.first-slice.treesitter-structural/235",
             b"rootlight.first-slice.treesitter-structural/236",
+            b"rootlight.first-slice.treesitter-structural/237",
         ] {
             let previous_parser = hash_static_components(&[
                 PARSER_PROVIDER_SET_SEED,
@@ -37744,6 +37895,7 @@ mod tests {
             b"rootlight.first-slice.resolve/98",
             b"rootlight.first-slice.resolve/99",
             b"rootlight.first-slice.resolve/103",
+            b"rootlight.first-slice.resolve/104",
         ] {
             let previous_resolver = hash_static_components(&[
                 PROVIDER_SET_SEED,

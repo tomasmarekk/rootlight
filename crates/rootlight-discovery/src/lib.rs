@@ -35,6 +35,7 @@ mod matlab;
 mod objective_c;
 mod office;
 mod prolog;
+mod scheme;
 mod shebang;
 mod vba;
 
@@ -47,7 +48,7 @@ pub use incremental::{
 };
 
 /// Current deterministic manifest and source-classification revision.
-pub const DISCOVERY_MANIFEST_VERSION: &str = "1.42";
+pub const DISCOVERY_MANIFEST_VERSION: &str = "1.43";
 /// Stable source-free diagnostic emitted when the entry budget truncates discovery.
 pub const DISCOVERY_ENTRY_LIMIT_DIAGNOSTIC_CODE: &str = "DISCOVERY_ENTRY_LIMIT";
 /// Stable source-free diagnostic emitted when retained source bytes truncate discovery.
@@ -1833,7 +1834,9 @@ fn classify_prefix(
 
     let mut signals = BTreeSet::new();
     let extension = extension_language(&normalized);
-    if let Some(language) = extension {
+    if let Some(language) = extension
+        && (language != "scheme" || scheme::extension_allowed(content, prefix_truncated))
+    {
         signals.insert(LanguageSignal {
             language: language.to_owned(),
             evidence: LanguageEvidence::Extension,
@@ -2477,6 +2480,14 @@ const LANGUAGE_CAPABILITIES: &[LanguageCapability] = &[
         suffixes: &[".sc", ".scala", ".sbt"],
         aliases: &[],
         detectors: &["extension"],
+        maximum_tier: "tier_d",
+        analyzers: &["treesitter"],
+    },
+    LanguageCapability {
+        language: "scheme",
+        suffixes: &[".scm"],
+        aliases: &[],
+        detectors: &["content", "extension", "configuration"],
         maximum_tier: "tier_d",
         analyzers: &["treesitter"],
     },
@@ -6940,6 +6951,204 @@ max_source_file_bytes = 2097152
         for alias in ["shader", "source.glsl", "source.cpp", "c", "cpp"] {
             assert!(!matches!(canonical_language(alias), Some("glsl" | "hlsl")));
         }
+    }
+
+    #[test]
+    fn scheme_capability_keeps_a_distinct_canonical_suffix() {
+        let capability = language_capabilities()
+            .iter()
+            .find(|entry| entry.language == "scheme")
+            .expect("Scheme capability");
+        assert_eq!(capability.suffixes, [".scm"]);
+        assert!(capability.aliases.is_empty());
+        assert_eq!(
+            capability.detectors,
+            ["content", "extension", "configuration"]
+        );
+        assert_eq!(capability.maximum_tier, "tier_d");
+        assert_eq!(capability.analyzers, ["treesitter"]);
+        assert_eq!(canonical_language("scheme"), Some("scheme"));
+        for alias in [
+            "Scheme",
+            "lisp",
+            "common-lisp",
+            "racket",
+            "emacs-lisp",
+            "scheme-native",
+        ] {
+            assert_ne!(canonical_language(alias), Some("scheme"), "{alias}");
+        }
+        for name in ["src/library.scm", "src/LIBRARY.SCM"] {
+            assert_eq!(extension_language(name), Some("scheme"));
+            let path = RelativePath::parse(Path::new(name)).unwrap();
+            assert_eq!(
+                classify(&path, b"(define (visit value) value)").1,
+                vec![LanguageSignal {
+                    language: "scheme".to_owned(),
+                    evidence: LanguageEvidence::Extension,
+                }],
+            );
+        }
+        for name in [
+            "library.ss",
+            "library.sls",
+            "library.sld",
+            "library.rkt",
+            "editor.el",
+            "package.lisp",
+            "kernel.cl",
+            "library.scm.bak",
+            "directory.scm/library",
+        ] {
+            assert_ne!(extension_language(name), Some("scheme"), "{name}");
+        }
+    }
+
+    #[test]
+    fn scheme_query_fence_preserves_source_and_independent_language_signals() {
+        let path = RelativePath::parse(Path::new("syntax.scm")).unwrap();
+        for source in [
+            b"(written) @name".as_slice(),
+            b"(written) @name\n; fn main(",
+            b"#!/usr/bin/python3\n(written) @name",
+        ] {
+            let (class, signals) = classify(&path, source);
+            assert_eq!(class, InputClass::Source);
+            assert!(!signals.iter().any(|signal| signal.language == "scheme"));
+        }
+        assert!(
+            classify(&path, b"(written) @name\n; fn main(")
+                .1
+                .contains(&LanguageSignal {
+                    language: "rust".to_owned(),
+                    evidence: LanguageEvidence::Content,
+                })
+        );
+        assert!(
+            classify(&path, b"#!/usr/bin/python3\n(written) @name")
+                .1
+                .contains(&LanguageSignal {
+                    language: "python".to_owned(),
+                    evidence: LanguageEvidence::Shebang,
+                })
+        );
+        for name in ["syntax.rs", "syntax.py", "syntax.lisp"] {
+            let expected = extension_language(name).unwrap();
+            let path = RelativePath::parse(Path::new(name)).unwrap();
+            assert!(
+                classify(&path, b"(written) @name")
+                    .1
+                    .contains(&LanguageSignal {
+                        language: expected.to_owned(),
+                        evidence: LanguageEvidence::Extension,
+                    })
+            );
+        }
+        for source in [
+            b"(display \"(written) @name\")".as_slice(),
+            b"; (written) @name\n(define value 1)",
+            b"'((written) @name)",
+            b"(define |(written) @name| 1)",
+        ] {
+            assert!(
+                classify(&path, source)
+                    .1
+                    .iter()
+                    .any(|signal| signal.language == "scheme")
+            );
+        }
+        for source in [b"\"unterminated".as_slice(), b"(written) @name\xff"] {
+            assert!(
+                !classify(&path, source)
+                    .1
+                    .iter()
+                    .any(|signal| signal.language == "scheme")
+            );
+        }
+        let open = format!(
+            "(define (visit value){}",
+            " ".repeat(MAX_CLASSIFICATION_BYTES)
+        );
+        assert!(
+            classify(&path, open.as_bytes())
+                .1
+                .iter()
+                .any(|signal| signal.language == "scheme")
+        );
+    }
+
+    #[test]
+    fn configured_scheme_suffixes_and_query_overrides_preserve_source_bytes() {
+        let temporary = local_tempdir();
+        let extension = vec![LanguageSignal {
+            language: "scheme".to_owned(),
+            evidence: LanguageEvidence::Extension,
+        }];
+        let configured = vec![LanguageSignal {
+            language: "scheme".to_owned(),
+            evidence: LanguageEvidence::Configuration,
+        }];
+        let cases = [
+            ("ordinary.scm", b"(define value 1)".as_slice(), extension),
+            ("query.scm", b"(written) @name".as_slice(), Vec::new()),
+            (
+                "Configured.scm",
+                b"(written) @name".as_slice(),
+                configured.clone(),
+            ),
+            (
+                "library.ss",
+                b"(define value 1)".as_slice(),
+                configured.clone(),
+            ),
+            (
+                "library.sls",
+                b"(define value 1)".as_slice(),
+                configured.clone(),
+            ),
+            ("library.sld", b"(define value 1)".as_slice(), configured),
+        ];
+        for (path, source, _) in &cases {
+            write_fixture(&temporary, path, source);
+        }
+        write_fixture(&temporary, "binary.scm", b"\0binary");
+        let config = ConfigSnapshot::resolve(&[rootlight_config::ConfigLayer {
+            source: rootlight_config::ConfigSource::User,
+            contents: "version='1.3'\n[extensions.source-languages]\nversion='1.0'\ncritical=true\n[extensions.source-languages.data.extensions]\nss='scheme'\nsls='scheme'\nsld='scheme'\n[extensions.source-languages.data.paths]\n'Configured.scm'='scheme'\n'binary.scm'='scheme'\n",
+        }]).unwrap();
+        let root = fixture_root(&temporary, b"configured-scheme");
+        let policy = DiscoveryPolicy::build(Vec::new(), true).unwrap();
+        let (manifest, snapshots) = discover_with_snapshots(
+            &root,
+            &config,
+            &policy,
+            limits(),
+            BTreeMap::new(),
+            &Cancellation::new(),
+        )
+        .unwrap()
+        .into_parts();
+        assert_eq!(manifest.configuration_hash, config.hash());
+        assert_eq!(manifest.inputs.len(), cases.len());
+        assert_eq!(snapshots.len(), cases.len());
+        assert!(manifest.coverage.complete);
+        for (path, source, signals) in cases {
+            let input = manifest
+                .inputs
+                .iter()
+                .find(|input| input.path == path)
+                .unwrap();
+            assert_eq!(input.class, InputClass::Source, "{path}");
+            assert_eq!(input.encoding, "utf-8", "{path}");
+            assert_eq!(input.content_hash, content_hash(source), "{path}");
+            assert_eq!(input.bytes, u64::try_from(source.len()).unwrap(), "{path}");
+            assert_eq!(snapshots[&input.file].content(), source, "{path}");
+            assert_eq!(input.language_signals, signals, "{path}");
+            assert!(input.project_language_witnesses.is_empty(), "{path}");
+        }
+        assert_eq!(manifest.exclusions.len(), 1);
+        assert_eq!(manifest.exclusions[0].path, "binary.scm");
+        assert_eq!(manifest.exclusions[0].reason, ExclusionReason::Binary);
     }
 
     #[test]

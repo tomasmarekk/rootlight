@@ -85,6 +85,8 @@ mod powershell_native;
 mod r_native;
 #[path = "analyzer_e2e/scala_native.rs"]
 mod scala_native;
+#[path = "analyzer_e2e/scheme_native.rs"]
+mod scheme_native;
 #[path = "analyzer_e2e/solidity_native.rs"]
 mod solidity_native;
 #[path = "analyzer_e2e/sql_native.rs"]

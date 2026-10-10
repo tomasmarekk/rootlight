@@ -57,6 +57,7 @@ exclude = [
     "third_party/tree-sitter-css-0.25.0",
     "third_party/tree-sitter-cobol-0.0.1",
     "third_party/tree-sitter-commonlisp-0.4.1",
+    "third_party/tree-sitter-scheme-0.24.7-1",
     "third_party/tree-sitter-asm-0.24.0",
     "third_party/tree-sitter-glsl-0.2.0",
     "third_party/tree-sitter-sfapex-3.0.1",
@@ -132,6 +133,7 @@ tree-sitter = { version = "=0.26.11", default-features = false, features = ["std
 tree-sitter-cobol = { path = "third_party/tree-sitter-cobol-0.0.1", version = "=0.0.1", default-features = false }
 tree-sitter-plsql = { path = "third_party/tree-sitter-plsql-0.0.1", version = "=0.0.1", default-features = false }
 tree-sitter-commonlisp = { path = "third_party/tree-sitter-commonlisp-0.4.1", version = "=0.4.1", default-features = false }
+tree-sitter-scheme = { package = "tree-sitter-scheme-native-local", path = "third_party/tree-sitter-scheme-0.24.7-1", version = "=0.24.7-1" }
 tree-sitter-asm = { path = "third_party/tree-sitter-asm-0.24.0", version = "=0.24.0", default-features = false }
 tree-sitter-glsl = { path = "third_party/tree-sitter-glsl-0.2.0", version = "=0.2.0", default-features = false }
 tree-sitter-sfapex = { path = "third_party/tree-sitter-sfapex-3.0.1", version = "=3.0.1", default-features = false }

@@ -1413,6 +1413,13 @@ pub(crate) fn resolvable_occurrence(occurrence: &OccurrenceRecord) -> bool {
     {
         return false;
     }
+    // Scheme lexical environments, reader state and macro expansion need
+    // language-owned proof; matching source spelling cannot establish a target.
+    if occurrence.syntax_kind.starts_with("scheme.")
+        && matches!(occurrence.target, OccurrenceTarget::Unresolved { .. })
+    {
+        return false;
+    }
     // Written qualifiers, overloads and accessor names do not prove Pascal
     // targets. Preserve unresolved source until language-owned binding exists.
     if occurrence.syntax_kind.starts_with("pascal.")
@@ -1730,6 +1737,7 @@ mod source_owned_target_tests {
             "assembly.unproven_call.reference",
             "common_lisp.symbol.reference",
             "common_lisp.function.scoped_call",
+            "scheme.symbol.reference",
             "sas.macro_call.reference",
             "sas.macro_variable.reference",
             "sas.dataset.reference",
@@ -1764,6 +1772,7 @@ mod source_owned_target_tests {
         for syntax in [
             "assembly.unproven_call.reference",
             "common_lisp.function.scoped_call",
+            "scheme.symbol.reference",
             "sas.macro_call.reference",
             "apex.unproven_call.reference",
             "pascal.member_reference.reference",
@@ -1790,6 +1799,7 @@ mod source_owned_target_tests {
             completeness: CoverageStatus::Complete,
         };
         for syntax in [
+            "scheme.symbol.reference",
             "glsl.identifier.reference",
             "glsl.member.reference",
             "glsl.unproven_call.reference",
