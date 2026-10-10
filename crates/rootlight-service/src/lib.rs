@@ -34511,16 +34511,18 @@ mod tests {
     #[test]
     fn unsupported_primary_languages_remain_visible_in_coverage() {
         let fixture = TempDir::new().expect("fixture root exists");
-        let languages = [("analysis.mlx", "matlab"), ("boot.asm", "assembly")];
-        for (path, _) in languages {
-            fs::write(fixture.path().join(path), "unsupported fixture\n")
-                .expect("unsupported source writes");
+        let languages = [
+            ("analysis.mlx", "matlab", "unsupported fixture\n", 0),
+            ("boot.asm", "assembly", "entry: nop\n", 1),
+        ];
+        for (path, _, text, _) in languages {
+            fs::write(fixture.path().join(path), text).expect("source fixture writes");
         }
         let mut service = FirstSliceService::new(2).expect("service initializes");
 
         let receipt = service
             .index_repository(fixture.path(), &deadline())
-            .expect("unsupported language dispositions publish");
+            .expect("native and unsupported language dispositions publish");
         let status = service
             .repository_status(receipt.repository, None)
             .expect("unsupported repository status resolves");
@@ -34535,8 +34537,8 @@ mod tests {
             })
             .collect::<BTreeMap<_, _>>();
 
-        for (_, language) in languages {
-            assert_eq!(coverage[language], (1, 0));
+        for (_, language, _, indexed_files) in languages {
+            assert_eq!(coverage[language], (1, indexed_files));
         }
     }
 
@@ -34561,25 +34563,20 @@ mod tests {
                     "unclassified.sourceblob",
                     "lexicalMarker λ\r\n",
                     "unknown",
-                    UnsupportedSourceDisposition::Language,
+                    Some(UnsupportedSourceDisposition::Language),
                 ),
                 (
                     "headless.fs",
                     "let value = 1\r\n",
                     "unknown",
-                    UnsupportedSourceDisposition::Language,
+                    Some(UnsupportedSourceDisposition::Language),
                 ),
-                (
-                    "boot.asm",
-                    "entry: nop\r\n",
-                    "assembly",
-                    UnsupportedSourceDisposition::Language,
-                ),
+                ("boot.asm", "entry:\r\nnop\r\n", "assembly", None),
                 (
                     "sample.awk",
                     "function value() { return 1 }\r\n",
                     "awk",
-                    UnsupportedSourceDisposition::Encoding,
+                    Some(UnsupportedSourceDisposition::Encoding),
                 ),
             ];
             for (path, text, _, _) in cases {
@@ -34604,7 +34601,13 @@ mod tests {
                 .unwrap();
             let document = snapshot.document();
             assert_eq!(document.files.len(), 5);
-            assert!(document.entities.is_empty());
+            assert_eq!(
+                document.entities.len(),
+                2,
+                "unexpected UTF-16 Assembly facts: entities={:#?}, diagnostics={:#?}",
+                document.entities,
+                document.diagnostics
+            );
             assert!(
                 document
                     .files
@@ -34629,6 +34632,115 @@ mod tests {
                 );
                 assert_eq!(file.content_hash, content_hash(&bytes));
                 assert_eq!(file.byte_length, u64::try_from(bytes.len()).unwrap());
+                let reference = file.evidence.source.clone().unwrap();
+                assert_eq!(reference.repository(), receipt.repository);
+                assert_eq!(reference.generation(), receipt.generation);
+                assert_eq!(reference.content_hash(), file.content_hash);
+                assert_eq!(
+                    reference.span(),
+                    SourceSpan::new(file.id, 0, file.byte_length).unwrap()
+                );
+                let coverage = service
+                    .source_file_coverage_until(receipt.generation, file.id, &deadline())
+                    .unwrap();
+                let Some(disposition) = disposition else {
+                    assert_eq!(language, "assembly");
+                    assert_eq!(coverage.reason, None);
+                    assert!(matches!(
+                        coverage.status,
+                        CoverageStatus::Bounded | CoverageStatus::Unknown
+                    ));
+                    assert!(!document.diagnostics.iter().any(|diagnostic| {
+                        diagnostic
+                            .source
+                            .as_ref()
+                            .is_some_and(|source| source.span().file() == file.id)
+                            && matches!(
+                                diagnostic.code.as_str(),
+                                "unsupported-language" | "unsupported-encoding"
+                            )
+                    }));
+                    let module = document
+                        .entities
+                        .iter()
+                        .find(|entity| entity.kind == EntityKind::Module)
+                        .unwrap();
+                    assert_eq!(module.canonical_name, path);
+                    assert_eq!(module.display_name, path);
+                    assert_eq!(module.flags, [rootlight_ir::EntityFlag::Synthetic]);
+                    assert_eq!(module.evidence.source.as_ref(), Some(&reference));
+                    let label = document
+                        .entities
+                        .iter()
+                        .find(|entity| entity.kind == EntityKind::StatementLabel)
+                        .unwrap();
+                    assert_eq!(label.canonical_name, "entry");
+                    assert_eq!(label.display_name, "entry");
+                    assert!(label.flags.is_empty());
+                    let label_source = SourceRef::new(
+                        receipt.repository,
+                        receipt.generation,
+                        SourceSpan::new(file.id, 2, 14).unwrap(),
+                        file.content_hash,
+                        None,
+                    );
+                    assert_eq!(label.evidence.source.as_ref(), Some(&label_source));
+                    assert_eq!(document.occurrences.len(), 1);
+                    let definition = &document.occurrences[0];
+                    assert_eq!(definition.role, OccurrenceRole::Definition);
+                    assert_eq!(
+                        definition.target,
+                        OccurrenceTarget::Resolved { symbol: label.id }
+                    );
+                    assert_eq!(
+                        definition.source,
+                        SourceRef::new(
+                            receipt.repository,
+                            receipt.generation,
+                            SourceSpan::new(file.id, 2, 12).unwrap(),
+                            file.content_hash,
+                            None,
+                        )
+                    );
+                    assert_eq!(definition.evidence.source.as_ref(), Some(&label_source));
+                    assert!(document.skipped_regions.iter().any(|region| {
+                        region.source == reference
+                            && region.domain == rootlight_ir::FactDomain::Relations
+                            && region.reason == SkippedRegionReason::UnsupportedConstruct
+                            && region.detail == "assembly-expansion-and-binding-unavailable"
+                    }));
+                    let located = service
+                        .code_locate(
+                            receipt.generation,
+                            "entry".to_owned(),
+                            LocateMode::Prefix,
+                            10,
+                            0,
+                            &deadline(),
+                        )
+                        .unwrap();
+                    let hits = located.data.hits;
+                    assert_eq!(
+                        hits.len(),
+                        2,
+                        "unexpected UTF-16 Assembly locate hits: {hits:#?}"
+                    );
+                    assert!(hits.iter().all(|hit| hit.file == file.id));
+                    let label_hit = hits
+                        .iter()
+                        .find(|hit| hit.symbol == Some(label.id))
+                        .unwrap();
+                    assert_eq!(label_hit.kind, "statement_label");
+                    assert_eq!(label_hit.identifier, "entry");
+                    assert_eq!(label_hit.path, path);
+                    assert_eq!(label_hit.source.as_ref(), Some(&label_source));
+                    let file_hit = hits.iter().find(|hit| hit.symbol.is_none()).unwrap();
+                    assert_eq!(file_hit.kind, "file");
+                    assert_eq!(file_hit.identifier, path);
+                    assert_eq!(file_hit.path, path);
+                    assert_eq!(file_hit.source.as_ref(), Some(&reference));
+                    continue;
+                };
                 let (code, skipped_reason, coverage_reason) = match disposition {
                     UnsupportedSourceDisposition::Language => (
                         "unsupported-language",
@@ -34646,17 +34758,6 @@ mod tests {
                         FirstSliceSourceCoverageReason::ResourceBounded,
                     ),
                 };
-                let reference = file.evidence.source.clone().unwrap();
-                assert_eq!(reference.repository(), receipt.repository);
-                assert_eq!(reference.generation(), receipt.generation);
-                assert_eq!(reference.content_hash(), file.content_hash);
-                assert_eq!(
-                    reference.span(),
-                    SourceSpan::new(file.id, 0, file.byte_length).unwrap()
-                );
-                let coverage = service
-                    .source_file_coverage_until(receipt.generation, file.id, &deadline())
-                    .unwrap();
                 assert_eq!(coverage.status, CoverageStatus::Unknown);
                 assert_eq!(coverage.reason, Some(coverage_reason));
                 assert!(document.diagnostics.iter().any(|diagnostic| {
@@ -34722,11 +34823,31 @@ mod tests {
                     .data
                     .hits
                     .iter()
-                    .find(|hit| hit.file == file.id)
+                    .find(|hit| hit.file == file.id && hit.symbol.is_none())
                     .unwrap();
                 assert!(hit.symbol.is_none());
                 assert_eq!(hit.kind, "file");
                 assert_eq!(hit.source.as_ref(), Some(&reference));
+                if path == "boot.asm" {
+                    let module = document
+                        .entities
+                        .iter()
+                        .find(|entity| entity.kind == EntityKind::Module)
+                        .unwrap();
+                    assert!(located.data.hits.iter().any(|hit| {
+                        hit.symbol == Some(module.id)
+                            && hit.file == file.id
+                            && hit.source.as_ref() == Some(&reference)
+                    }));
+                } else {
+                    assert!(
+                        located
+                            .data
+                            .hits
+                            .iter()
+                            .all(|hit| hit.file != file.id || hit.symbol.is_none())
+                    );
+                }
             }
             let opaque = document
                 .files
