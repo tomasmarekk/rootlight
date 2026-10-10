@@ -162,6 +162,7 @@ dependencies = [
  "tree-sitter-r",
  "tree-sitter-scala",
  "tree-sitter-sequel",
+ "tree-sitter-sfapex",
  "tree-sitter-solidity",
  "tree-sitter-swift",
  "tree-sitter-toml-ng",
@@ -422,6 +423,14 @@ dependencies = [
 [[package]]
 name = "tree-sitter-sequel"
 version = "0.3.11"
+dependencies = [
+ "cc",
+ "tree-sitter-language",
+]
+
+[[package]]
+name = "tree-sitter-sfapex"
+version = "3.0.1"
 dependencies = [
  "cc",
  "tree-sitter-language",

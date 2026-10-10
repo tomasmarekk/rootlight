@@ -6353,6 +6353,14 @@ fn source_coverage_gaps(fact: &SyntaxFact) -> impl Iterator<Item = (FactDomain, 
         )
         .chain(fortran_source_identity_gap(fact).map(|reason| (FactDomain::Occurrences, reason)))
         .chain(fortran_source_identity_gap(fact).map(|reason| (FactDomain::Relations, reason)))
+        .chain(apex_source_identity_gap(fact).map(|reason| (FactDomain::Occurrences, reason)))
+        .chain(apex_source_identity_gap(fact).map(|reason| (FactDomain::Relations, reason)))
+        .chain(
+            (fact.syntax_kind().as_str() == "apex.annotation_semantics.expression").then_some((
+                FactDomain::Occurrences,
+                "apex-annotation-binding-unavailable",
+            )),
+        )
         .chain(
             (fact.syntax_kind().as_str() == "plsql.unsupported_owner.expression")
                 .then_some((FactDomain::Occurrences, "plsql-source-identity-unavailable")),
@@ -6379,6 +6387,15 @@ fn fortran_source_identity_gap(fact: &SyntaxFact) -> Option<&'static str> {
     match fact.syntax_kind().as_str() {
         "fortran.template_source.expression" => Some("fortran-template-expansion-unavailable"),
         "fortran.unsupported_header.expression" => Some("fortran-source-identity-unavailable"),
+        _ => None,
+    }
+}
+
+fn apex_source_identity_gap(fact: &SyntaxFact) -> Option<&'static str> {
+    match fact.syntax_kind().as_str() {
+        "apex.unsupported_owner.expression" => Some("apex-source-identity-unavailable"),
+        "apex.accessor_semantics.expression" => Some("apex-accessor-semantics-unavailable"),
+        "apex.body_semantics.expression" => Some("apex-body-binding-and-call-analysis-unavailable"),
         _ => None,
     }
 }
@@ -6435,6 +6452,9 @@ fn source_coverage_gap(fact: &SyntaxFact) -> Option<(FactDomain, &'static str)> 
     if let Some(gap) = common_lisp_source_gap(fact) {
         return Some(gap);
     }
+    if let Some(reason) = apex_source_identity_gap(fact) {
+        return Some((FactDomain::Entities, reason));
+    }
     match fact.syntax_kind().as_str() {
         "hlsl.file.module" if fact.kind() == SyntaxFactKind::Module => Some((
             FactDomain::Relations,
@@ -6452,6 +6472,23 @@ fn source_coverage_gap(fact: &SyntaxFact) -> Option<(FactDomain, &'static str)> 
             FactDomain::Relations,
             "common-lisp-reader-and-runtime-binding-unavailable",
         )),
+        "apex.file.module" => Some((
+            FactDomain::Relations,
+            "apex-compiler-and-platform-semantics-unavailable",
+        )),
+        "apex.shared_field_header.expression" => Some((
+            FactDomain::Relations,
+            "apex-shared-field-header-association-unavailable",
+        )),
+        "apex.application.expression" => {
+            Some((FactDomain::Relations, "apex-call-target-unavailable"))
+        }
+        "apex.member_access.expression" => {
+            Some((FactDomain::Relations, "apex-member-target-unavailable"))
+        }
+        "apex.annotation_semantics.expression" => {
+            Some((FactDomain::Relations, "apex-annotation-binding-unavailable"))
+        }
         "plsql.unsupported_owner.expression" => {
             Some((FactDomain::Entities, "plsql-source-identity-unavailable"))
         }
@@ -7951,6 +7988,7 @@ fn is_explicit_file_module(fact: &SyntaxFact, language: &str) -> bool {
                 | "fsharp.file.module"
                 | "fortran.file.module"
                 | "plsql.file.module"
+                | "apex.file.module"
                 | "vba.file.module"
                 | "vba.class.module"
                 | "solidity.file.module"
@@ -7991,6 +8029,7 @@ fn is_explicit_file_module(fact: &SyntaxFact, language: &str) -> bool {
                 | "fsharp-signature"
                 | "fortran"
                 | "plsql"
+                | "apex"
                 | "vba"
                 | "visual-basic-classic"
                 | "astro"
@@ -8113,6 +8152,7 @@ fn supports_declaration_signature(
         && declaration.syntax_kind().as_str() == "fsharp.file.module")
         || (language == "fortran" && declaration.syntax_kind().as_str() == "fortran.file.module")
         || (language == "plsql" && declaration.syntax_kind().as_str() == "plsql.file.module")
+        || (language == "apex" && declaration.syntax_kind().as_str() == "apex.file.module")
         || (language == "assembly" && declaration.syntax_kind().as_str() == "assembly.file.module")
         || (language == "glsl" && declaration.syntax_kind().as_str() == "glsl.file.module")
         || (language == "common-lisp"
@@ -8129,6 +8169,12 @@ fn supports_declaration_signature(
         )
     {
         // Separate written names do not each own their complete shared header.
+        return false;
+    }
+    if language == "apex" && declaration.syntax_kind().as_str() == "apex.field_fragment.declaration"
+    {
+        // Initializers widen a fragment without supplying its shared type.
+        // Such a fragment cannot acquire a unique complete field header.
         return false;
     }
     if language == "haskell" {
@@ -8157,6 +8203,7 @@ fn supports_signature(kind: EntityKind, language: &str) -> bool {
                 kind,
                 EntityKind::Variable | EntityKind::Field | EntityKind::Parameter
             ))
+        || (language == "apex" && matches!(kind, EntityKind::Field | EntityKind::Parameter))
         || (kind == EntityKind::Variable && language == "haskell")
         || (kind == EntityKind::Property && matches!(language, "vba" | "visual-basic-classic"))
         || (kind == EntityKind::Module
@@ -8239,6 +8286,9 @@ fn source_reference_gap(fact: &SyntaxFact) -> Option<&'static str> {
     match fact.syntax_kind().as_str() {
         "common_lisp.symbol.reference" if fact.kind() == SyntaxFactKind::Occurrence => {
             Some("common-lisp-binding-target-unavailable")
+        }
+        "apex.identifier.reference" | "apex.member.reference" | "apex.unproven_call.reference" => {
+            Some("apex-binding-and-dispatch-target-unavailable")
         }
         "plsql.identifier.reference" => Some("plsql-binding-target-unavailable"),
         "plsql.application.reference" => Some("plsql-call-or-index-target-unavailable"),
@@ -8437,6 +8487,9 @@ fn occurrence_role(fact: &SyntaxFact) -> Option<OccurrenceRole> {
                 "glsl.identifier.reference"
                     | "glsl.member.reference"
                     | "glsl.unproven_call.reference"
+                    | "apex.identifier.reference"
+                    | "apex.member.reference"
+                    | "apex.unproven_call.reference"
             ) =>
         {
             Some(OccurrenceRole::Reference)
@@ -9399,6 +9452,101 @@ mod tests {
                     .iter()
                     .map(|domain| (*domain, detail))
                     .collect::<Vec<_>>(),
+            );
+        }
+    }
+
+    #[test]
+    fn apex_source_gaps_and_shared_fields_do_not_invent_headers() {
+        let file = FileId::from_bytes([3; 20]);
+        for (label, detail) in [
+            (
+                "apex.unsupported_owner.expression",
+                "apex-source-identity-unavailable",
+            ),
+            (
+                "apex.accessor_semantics.expression",
+                "apex-accessor-semantics-unavailable",
+            ),
+            (
+                "apex.body_semantics.expression",
+                "apex-body-binding-and-call-analysis-unavailable",
+            ),
+        ] {
+            let fact = SyntaxFact::new(
+                2,
+                Some(1),
+                SyntaxFactKind::Signature,
+                SourceSpan::new(file, 2, 10).unwrap(),
+                1,
+                SyntaxKindLabel::new(label).unwrap(),
+            );
+            assert!(!is_signature_capture(&fact));
+            assert_eq!(
+                source_coverage_gaps(&fact).collect::<Vec<_>>(),
+                [
+                    FactDomain::Entities,
+                    FactDomain::Occurrences,
+                    FactDomain::Relations
+                ]
+                .map(|domain| (domain, detail)),
+            );
+        }
+        let fragment = SyntaxFact::new(
+            1,
+            None,
+            SyntaxFactKind::Declaration,
+            SourceSpan::new(file, 0, 30).unwrap(),
+            0,
+            SyntaxKindLabel::new("apex.field_fragment.declaration").unwrap(),
+        );
+        assert!(!supports_declaration_signature(
+            EntityKind::Field,
+            "apex",
+            &fragment,
+            None
+        ));
+        assert!(supports_signature(EntityKind::Field, "apex"));
+        assert!(supports_signature(EntityKind::Parameter, "apex"));
+        let module = SyntaxFact::new(
+            1,
+            None,
+            SyntaxFactKind::Module,
+            fragment.span(),
+            0,
+            SyntaxKindLabel::new("apex.file.module").unwrap(),
+        );
+        assert!(is_explicit_file_module(&module, "apex"));
+        assert!(!supports_declaration_signature(
+            EntityKind::Module,
+            "apex",
+            &module,
+            None
+        ));
+        assert_eq!(
+            source_coverage_gaps(&module).collect::<Vec<_>>(),
+            vec![(
+                FactDomain::Relations,
+                "apex-compiler-and-platform-semantics-unavailable"
+            )]
+        );
+        for label in [
+            "apex.identifier.reference",
+            "apex.member.reference",
+            "apex.unproven_call.reference",
+        ] {
+            let reference = SyntaxFact::new(
+                2,
+                Some(1),
+                SyntaxFactKind::Occurrence,
+                SourceSpan::new(file, 2, 10).unwrap(),
+                1,
+                SyntaxKindLabel::new(label).unwrap(),
+            );
+            assert_eq!(occurrence_role(&reference), Some(OccurrenceRole::Reference));
+            assert_eq!(
+                source_reference_gap(&reference),
+                Some("apex-binding-and-dispatch-target-unavailable")
             );
         }
     }

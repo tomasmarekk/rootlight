@@ -18,6 +18,7 @@ use crate::{
     registry::{language_for, native_family_for_source},
 };
 
+mod apex;
 mod assembly;
 mod cobol;
 mod dart;
@@ -365,6 +366,10 @@ impl QueryPack {
             expected.retain(|name| !matches!(*name, "call" | "import" | "documentation"));
             expected.push("expression");
         }
+        if family == GrammarFamily::Apex {
+            expected.retain(|name| !matches!(*name, "call" | "import"));
+            expected.push("expression");
+        }
         if family == GrammarFamily::Assembly {
             expected
                 .retain(|name| !matches!(*name, "call" | "import" | "documentation" | "reference"));
@@ -684,6 +689,7 @@ impl QueryPack {
         let mut fsharp_captures =
             fsharp::CaptureCache::new(limits.captures, input.normalize_calls, limits.body_nodes);
         let mut plsql_captures = plsql::CaptureCache::new(limits.captures.min(limits.body_nodes));
+        let mut apex_captures = apex::CaptureCache::new(limits.captures.min(limits.body_nodes));
         let mut assembly_captures =
             assembly::CaptureCache::new(limits.captures.min(limits.body_nodes));
         let mut glsl_captures = glsl::CaptureCache::new(limits.captures.min(limits.body_nodes));
@@ -772,6 +778,22 @@ impl QueryPack {
                         &mut assembly_captures,
                     )?;
                     if assembly_captures.exhausted() {
+                        limit = Some(QueryLimit::Capture);
+                        break 'query;
+                    }
+                    if !admitted {
+                        continue;
+                    }
+                }
+                if input.family == GrammarFamily::Apex {
+                    let admitted = apex::retain_capture(
+                        capture.node,
+                        role,
+                        input.source,
+                        input.cancellation,
+                        &mut apex_captures,
+                    )?;
+                    if apex_captures.exhausted() {
                         limit = Some(QueryLimit::Capture);
                         break 'query;
                     }
@@ -1039,6 +1061,14 @@ impl QueryPack {
                         input.cancellation,
                         &mut assembly_captures,
                     )
+                } else if input.family == GrammarFamily::Apex {
+                    apex::candidate(
+                        capture.node,
+                        role,
+                        input.source,
+                        input.cancellation,
+                        &mut apex_captures,
+                    )
                 } else {
                     candidate_for_capture(
                         input.family,
@@ -1051,6 +1081,7 @@ impl QueryPack {
                     )
                 };
                 if fsharp_captures.exhausted()
+                    || apex_captures.exhausted()
                     || assembly_captures.exhausted()
                     || glsl_captures.exhausted()
                     || hlsl_captures.exhausted()
@@ -1619,6 +1650,7 @@ fn candidate_for_capture(
             GrammarFamily::Python => "python.call",
             GrammarFamily::JavaScript => "javascript.call",
             GrammarFamily::Java => "java.call",
+            GrammarFamily::Apex => return Err(query_failure("query-apex-unproven-call")),
             GrammarFamily::Go => "go.call",
             GrammarFamily::TypeScript => "typescript.call",
             GrammarFamily::C => "c.call",
@@ -2553,7 +2585,7 @@ impl QueryPackRegistry {
     }
 
     fn compile_audited() -> Result<Self, GrammarFamily> {
-        let mut packs = Vec::with_capacity(45);
+        let mut packs = Vec::with_capacity(46);
         for (family, source) in [
             (GrammarFamily::Rust, include_str!("../queries/rust.scm")),
             (GrammarFamily::Python, include_str!("../queries/python.scm")),
@@ -2562,6 +2594,7 @@ impl QueryPackRegistry {
                 include_str!("../queries/javascript.scm"),
             ),
             (GrammarFamily::Java, include_str!("../queries/java.scm")),
+            (GrammarFamily::Apex, include_str!("../queries/apex.scm")),
             (GrammarFamily::Go, include_str!("../queries/go.scm")),
             (
                 GrammarFamily::TypeScript,
@@ -2706,6 +2739,7 @@ mod tests {
             GrammarFamily::Python,
             GrammarFamily::JavaScript,
             GrammarFamily::Java,
+            GrammarFamily::Apex,
             GrammarFamily::Go,
             GrammarFamily::TypeScript,
             GrammarFamily::C,
@@ -2759,6 +2793,10 @@ mod tests {
             }
             if family == GrammarFamily::Fortran {
                 expected.retain(|name| *name != "documentation");
+                expected.push("expression");
+            }
+            if family == GrammarFamily::Apex {
+                expected.retain(|name| !matches!(*name, "call" | "import"));
                 expected.push("expression");
             }
             if family == GrammarFamily::Assembly {

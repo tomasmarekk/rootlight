@@ -21,6 +21,8 @@ pub enum GrammarFamily {
     JavaScript,
     /// Java grammar.
     Java,
+    /// Apex written source without Salesforce compiler or runtime inference.
+    Apex,
     /// Go grammar.
     Go,
     /// TypeScript grammar.
@@ -195,12 +197,13 @@ impl GrammarRegistry {
     /// Returns [`RegistryError`] if an SDK label is invalid or a linked grammar
     /// falls outside Tree-sitter's supported ABI interval.
     pub fn audited() -> Result<Self, RegistryError> {
-        let mut descriptors = Vec::with_capacity(45);
+        let mut descriptors = Vec::with_capacity(46);
         for family in [
             GrammarFamily::Rust,
             GrammarFamily::Python,
             GrammarFamily::JavaScript,
             GrammarFamily::Java,
+            GrammarFamily::Apex,
             GrammarFamily::Go,
             GrammarFamily::TypeScript,
             GrammarFamily::C,
@@ -342,6 +345,7 @@ pub(crate) fn language_for(family: GrammarFamily) -> Language {
         // around type annotations that otherwise trigger file-wide recovery.
         GrammarFamily::JavaScript => tree_sitter_typescript::LANGUAGE_TSX.into(),
         GrammarFamily::Java => tree_sitter_java::LANGUAGE.into(),
+        GrammarFamily::Apex => tree_sitter_sfapex::apex::LANGUAGE.into(),
         GrammarFamily::Go => tree_sitter_go::LANGUAGE.into(),
         GrammarFamily::TypeScript => tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into(),
         GrammarFamily::C => tree_sitter_c::LANGUAGE.into(),
@@ -417,6 +421,13 @@ const fn identity_for(family: GrammarFamily) -> GrammarIdentity {
             grammar_version: "0.24.0",
             source_package_sha256: "05ab716e887d01045e6357cbce255e427546bc540035703105de8a42d2a1a95e",
             parser_sha256: "eca05ffdbf8d5e8788bf73776812003d8975f8b1648554b241200aa6da37a798",
+            scanner_sha256: None,
+        },
+        GrammarFamily::Apex => GrammarIdentity {
+            language_id: "apex",
+            grammar_version: "3.0.1",
+            source_package_sha256: "13538adab5f9df36571a3f4541b5bc8081b1fc857735db0f1aef397d17b435ed",
+            parser_sha256: "17c58f2ef3726022a7b24b5564dadf59d46641e24a1cddf725dc247986b9586e",
             scanner_sha256: None,
         },
         GrammarFamily::FSharpSignature => GrammarIdentity {
@@ -815,12 +826,13 @@ mod tests {
     fn registry_contains_each_audited_family_once_with_checked_abi() {
         let registry = GrammarRegistry::audited().expect("audited grammars initialize");
 
-        assert_eq!(registry.descriptors().len(), 45);
+        assert_eq!(registry.descriptors().len(), 46);
         for family in [
             GrammarFamily::Rust,
             GrammarFamily::Python,
             GrammarFamily::JavaScript,
             GrammarFamily::Java,
+            GrammarFamily::Apex,
             GrammarFamily::Go,
             GrammarFamily::TypeScript,
             GrammarFamily::C,
@@ -1026,6 +1038,7 @@ mod tests {
                 "tree-sitter-typescript",
             ),
             (GrammarFamily::Java, "java", "tree-sitter-java"),
+            (GrammarFamily::Apex, "apex", "tree-sitter-sfapex"),
             (GrammarFamily::Go, "go", "tree-sitter-go"),
             (
                 GrammarFamily::TypeScript,
@@ -1106,6 +1119,7 @@ mod tests {
                         family,
                         GrammarFamily::Vba | GrammarFamily::FSharp | GrammarFamily::FSharpSignature
                     ) || family.is_cobol()
+                        || family == GrammarFamily::Apex
                         || family == GrammarFamily::PlSql
                         || family == GrammarFamily::Assembly
                         || family == GrammarFamily::Glsl

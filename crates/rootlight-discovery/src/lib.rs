@@ -2045,7 +2045,7 @@ const LANGUAGE_CAPABILITIES: &[LanguageCapability] = &[
         aliases: &[],
         detectors: &["content", "configuration"],
         maximum_tier: "tier_d",
-        analyzers: &["source-fallback"],
+        analyzers: &["treesitter"],
     },
     LanguageCapability {
         language: "assembly",
@@ -6182,7 +6182,7 @@ max_source_file_bytes = 2097152
             .unwrap();
         assert!(capability.suffixes.is_empty());
         assert_eq!(capability.detectors, &["content", "configuration"]);
-        assert_eq!(capability.analyzers, &["source-fallback"]);
+        assert_eq!(capability.analyzers, &["treesitter"]);
     }
 
     #[test]

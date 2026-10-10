@@ -19,7 +19,7 @@ const GRAMMAR_LOCK_PATH: &str = "adapters/grammars.lock";
 const CARGO_LOCK_PATH: &str = "Cargo.lock";
 const ADAPTER_PACKAGE: &str = "rootlight-adapter-treesitter";
 const GRAMMAR_LOCK_SHA256: &str =
-    "8194633142462dc6c31a7d8a8e584dec2cef74708d8c54606b8436e6c7e0804d";
+    "a2e0e0dad25b228429206cccb6de62c39cd82ca19db6c3947c79d9fcb30a512a";
 const JAVA_LICENSE_PATH: &str = "adapters/licenses/tree-sitter-java-0.23.5-LICENSE";
 const JAVA_LICENSE_SHA256: &str =
     "52ed137b039cd9c46409bc22e89938af911c95b157feae2d040b51e6084369a7";
@@ -217,7 +217,7 @@ const EXPECTED_PACKAGES: [(&str, &str, &str); 35] = [
     ),
 ];
 
-const EXPECTED_LOCAL_PACKAGES: [(&str, &str, &str, &str); 7] = [
+const EXPECTED_LOCAL_PACKAGES: [(&str, &str, &str, &str); 8] = [
     (
         "tree-sitter-asm",
         "0.24.0",
@@ -235,6 +235,12 @@ const EXPECTED_LOCAL_PACKAGES: [(&str, &str, &str, &str); 7] = [
         "0.2.0",
         "third_party/tree-sitter-hlsl-0.2.0",
         "bc876400ce323fce73c6927f3fff9c92be29fde8ebb90fb60e67542f53c8c516",
+    ),
+    (
+        "tree-sitter-sfapex",
+        "3.0.1",
+        "third_party/tree-sitter-sfapex-3.0.1",
+        "13538adab5f9df36571a3f4541b5bc8081b1fc857735db0f1aef397d17b435ed",
     ),
     (
         "tree-sitter-vba",
@@ -307,6 +313,16 @@ pub(crate) fn check(metadata: &Metadata, root: &Path) -> Result<(), GrammarLockE
         root,
         "third_party/tree-sitter-hlsl-0.2.0/notices/tree-sitter-c-LICENSE",
         "2e0110e07abef7c2548b26ec9d6969775617ca539a0dc8dbeeb14d6452c711d1",
+    )?;
+    validate_local_license(
+        root,
+        "third_party/tree-sitter-sfapex-3.0.1/LICENSE",
+        "c3d045abbc0a8dec1b00737c0668f6dbb028d248521b74e79778c726671925ed",
+    )?;
+    validate_local_license(
+        root,
+        "third_party/tree-sitter-sfapex-3.0.1/LICENSE-JAVA",
+        JAVA_LICENSE_SHA256,
     )?;
     validate_local_license(
         root,
@@ -433,7 +449,7 @@ fn validate_manifest(manifest: &GrammarLock) -> Result<(), GrammarLockError> {
         ));
     }
     validate_runtime(&manifest.runtime)?;
-    if manifest.grammars.len() != 44 {
+    if manifest.grammars.len() != 45 {
         return Err(GrammarLockError::GrammarCount(manifest.grammars.len()));
     }
     let mut languages = BTreeSet::new();
@@ -458,6 +474,7 @@ fn validate_manifest(manifest: &GrammarLock) -> Result<(), GrammarLockError> {
         }
     }
     let expected_languages = BTreeSet::from([
+        "apex",
         "assembly",
         "astro",
         "bash",
@@ -1195,7 +1212,7 @@ pub(crate) enum GrammarLockError {
     InvalidDigest { label: &'static str },
     #[error("grammar lock field {0} must not be empty")]
     EmptyField(&'static str),
-    #[error("grammar lock contains {0} grammars instead of 44")]
+    #[error("grammar lock contains {0} grammars instead of 45")]
     GrammarCount(usize),
     #[error("grammar lock repeats language {0}")]
     DuplicateLanguage(String),
@@ -2247,6 +2264,71 @@ mod tests {
         .expect(
             "the original upstream tree, local grammar and generated sources are authenticated",
         );
+    }
+
+    #[test]
+    fn apex_preserves_published_sources_and_qualifies_only_native_observations() {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("..");
+        let bytes = fs::read(root.join(GRAMMAR_LOCK_PATH)).unwrap();
+        let manifest: GrammarLock = toml::from_str(std::str::from_utf8(&bytes).unwrap()).unwrap();
+        let grammar = manifest
+            .grammars
+            .iter()
+            .find(|grammar| grammar.language == "apex")
+            .unwrap();
+        let sources = grammar.vendored.as_ref().unwrap();
+        assert_eq!(
+            grammar.parser_sha256,
+            "17c58f2ef3726022a7b24b5564dadf59d46641e24a1cddf725dc247986b9586e"
+        );
+        assert_eq!(grammar.abi, 15);
+        assert_eq!(grammar.scanner_sha256, "none");
+        assert_eq!(sources.files.len(), 54);
+        assert_eq!(sources.parser_path.as_deref(), Some("apex/src/parser.c"));
+        let provenance: serde_json::Value = serde_json::from_str(include_str!(
+            "../../third_party/tree-sitter-sfapex-3.0.1/SOURCE-PROVENANCE.json"
+        ))
+        .unwrap();
+        let originals = provenance["published_source_originals"]["member_inventory"]
+            .as_array()
+            .unwrap();
+        assert_eq!(originals.len(), 45);
+        let mut total = 0u64;
+        for original in originals {
+            let retained = original["retained_path"].as_str().unwrap();
+            assert_eq!(
+                sources.files.get(retained).map(String::as_str),
+                original["sha256"].as_str()
+            );
+            assert_eq!(original["retained_bytes_unmodified"], true);
+            total += original["bytes"].as_u64().unwrap();
+        }
+        assert_eq!(total, 9_858_531);
+        for claim in [
+            "whole_language_qualified",
+            "full_semantic_completeness_proven",
+            "salesforce_compiler_or_runtime_qualified",
+            "production_frontend_or_service_integration_qualified",
+            "installed_mcp_qualified",
+            "source_security_qualified",
+            "legal_notice_completeness_qualified",
+            "historical_java_ancestry_qualified",
+            "empty_dependency_cache_qualified",
+            "independently_blocked_network_build_qualified",
+            "declared_msrv_1_90_verified",
+        ] {
+            assert_eq!(
+                provenance["qualifications"][claim],
+                serde_json::Value::Bool(false),
+                "{claim}"
+            );
+        }
+        validate_vendored_tree(
+            &root.join("third_party/tree-sitter-sfapex-3.0.1"),
+            grammar,
+            sources,
+        )
+        .unwrap();
     }
 
     #[test]

@@ -59,6 +59,7 @@ exclude = [
     "third_party/tree-sitter-commonlisp-0.4.1",
     "third_party/tree-sitter-asm-0.24.0",
     "third_party/tree-sitter-glsl-0.2.0",
+    "third_party/tree-sitter-sfapex-3.0.1",
     "third_party/tree-sitter-hlsl-0.2.0",
     "third_party/tree-sitter-plsql-0.0.1",
     "third_party/tree-sitter-fsharp-0.3.12",
@@ -131,6 +132,7 @@ tree-sitter-cobol = { path = "third_party/tree-sitter-cobol-0.0.1", version = "=
 tree-sitter-plsql = { path = "third_party/tree-sitter-plsql-0.0.1", version = "=0.0.1", default-features = false }
 tree-sitter-asm = { path = "third_party/tree-sitter-asm-0.24.0", version = "=0.24.0", default-features = false }
 tree-sitter-glsl = { path = "third_party/tree-sitter-glsl-0.2.0", version = "=0.2.0", default-features = false }
+tree-sitter-sfapex = { path = "third_party/tree-sitter-sfapex-3.0.1", version = "=3.0.1", default-features = false }
 tree-sitter-hlsl = { path = "third_party/tree-sitter-hlsl-0.2.0", version = "=0.2.0", default-features = false }
 tree-sitter-fortran = { version = "=0.6.0", default-features = false }
 tree-sitter-haskell = { version = "=0.23.1", default-features = false }

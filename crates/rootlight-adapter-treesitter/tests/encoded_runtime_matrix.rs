@@ -34,7 +34,7 @@ struct LanguageCase {
     source: &'static str,
 }
 
-const CASES: [LanguageCase; 45] = [
+const CASES: [LanguageCase; 46] = [
     LanguageCase {
         name: "written.hlsl",
         language: "hlsl",
@@ -49,6 +49,11 @@ const CASES: [LanguageCase; 45] = [
         name: "written.asm",
         language: "assembly",
         source: "Written PROC\nnop\nWritten ENDP\n",
+    },
+    LanguageCase {
+        name: "sample.cls",
+        language: "apex",
+        source: "public class Written { public Integer Read(Integer Value) { return Value; } }\n",
     },
     LanguageCase {
         name: "sample.pks",

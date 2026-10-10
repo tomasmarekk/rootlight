@@ -43,6 +43,8 @@ const BINARY_SEED: &[u8] = b"rootlight-treesitter-e2e-binary";
 const BUILD_CONTEXT_SEED: &[u8] = b"rootlight-treesitter-e2e-build";
 const CONFIGURATION_SEED: &[u8] = b"rootlight-treesitter-e2e-configuration";
 
+#[path = "analyzer_e2e/apex_native.rs"]
+mod apex_native;
 #[path = "analyzer_e2e/assembly_native.rs"]
 mod assembly_native;
 #[path = "analyzer_e2e/astro_native.rs"]

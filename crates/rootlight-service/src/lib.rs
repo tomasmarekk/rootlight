@@ -243,7 +243,7 @@ const PROJECT_FACTS_TRUNCATED_CODE: &str = "project-adapter-facts-truncated";
 const PROJECT_FACTS_TRUNCATED_MESSAGE: &str =
     "additional project semantic facts were omitted by aggregate resource limits";
 const AGGREGATE_DIAGNOSTICS_TRUNCATED_CODE: &str = "aggregate-diagnostics-truncated";
-const ANALYZER_BINARY_SEED: &[u8] = b"rootlight.first-slice.treesitter-structural/232";
+const ANALYZER_BINARY_SEED: &[u8] = b"rootlight.first-slice.treesitter-structural/233";
 const RESOLVER_BINARY_SEED: &[u8] = b"rootlight.first-slice.resolve/103";
 const INCREMENTAL_PROVIDER_SEED: &[u8] = b"rootlight.first-slice.incremental-provider/1";
 const LANGUAGE_DISPOSITION_PROVIDER_SEED: &[u8] = b"rootlight.first-slice.language-disposition/12";
@@ -6399,6 +6399,8 @@ impl FirstSliceService {
                 )
             } else if descriptor.family() == GrammarFamily::Sql {
                 format!("tree-sitter-sequel-{}", descriptor.grammar_version())
+            } else if descriptor.family() == GrammarFamily::Apex {
+                format!("tree-sitter-sfapex-{}", descriptor.grammar_version())
             } else if descriptor.family() == GrammarFamily::Assembly {
                 format!("tree-sitter-asm-{}", descriptor.grammar_version())
             } else if descriptor.family() == GrammarFamily::Glsl {
@@ -16821,7 +16823,7 @@ fn source_language_route<'a>(
         return analyzers.contains_key(language).then_some(language);
     }
     if is_ambiguous_basic_source(&input.path) {
-        let language = basic_content_language(input)?;
+        let language = shared_classic_source_language(input)?;
         return analyzers.contains_key(language).then_some(language);
     }
     if is_shared_fsharp_source(&input.path) {
@@ -16921,7 +16923,7 @@ fn detected_source_language(input: &ManifestInput) -> Option<&str> {
             .then_some(language.language.as_str());
     }
     if is_ambiguous_basic_source(&input.path) {
-        return basic_content_language(input);
+        return shared_classic_source_language(input);
     }
     if is_shared_fsharp_source(&input.path) {
         return fsharp_source_language(input);
@@ -16980,13 +16982,21 @@ fn source_language_from_path(path: &str) -> Option<&'static str> {
         .or_else(|| extension_language(path).filter(|language| *language != "objective-c"))
 }
 
-fn basic_content_language(input: &ManifestInput) -> Option<&str> {
-    // Shared suffixes do not authorize unrelated content or shebang routing.
-    input.language_signals.iter().find_map(|signal| {
-        (signal.evidence == LanguageEvidence::Content
-            && matches!(signal.language.as_str(), "vba" | "visual-basic-classic"))
-        .then_some(signal.language.as_str())
-    })
+fn shared_classic_source_language(input: &ManifestInput) -> Option<&str> {
+    let class_suffix = Path::new(&input.path)
+        .extension()
+        .and_then(|suffix| suffix.to_str())
+        .is_some_and(|suffix| suffix.eq_ignore_ascii_case("cls"));
+    // Only .cls shares the Apex format. .bas/.frm remain classic exports;
+    // neither extension fallback nor analyzer availability resolves a conflict.
+    let mut matched = input.language_signals.iter().filter(|signal| {
+        signal.evidence == LanguageEvidence::Content
+            && (matches!(signal.language.as_str(), "vba" | "visual-basic-classic")
+                || (class_suffix && signal.language == "apex"))
+    });
+    let language = matched.next()?;
+    (!matched.any(|other| other.language != language.language))
+        .then_some(language.language.as_str())
 }
 
 fn prolog_content_language(input: &ManifestInput) -> Option<&str> {
@@ -31277,6 +31287,7 @@ mod tests {
     fn every_audited_grammar_has_a_declared_source_route() {
         let registry = GrammarRegistry::audited().expect("audited grammar registry initializes");
         let mut mapped = [
+            "sample.asm",
             "sample.astro",
             "sample.c",
             "sample.cpp",
@@ -31290,6 +31301,7 @@ mod tests {
             "sample.go",
             "sample.groovy",
             "sample.hs",
+            "sample.hlsl",
             "sample.html",
             "sample.java",
             "sample.js",
@@ -31344,6 +31356,10 @@ mod tests {
                     "route.pks",
                     "create or replace package RouteKit as\nprocedure Inspect(Value in number);\nend RouteKit;\n/\n",
                 ),
+                (
+                    "written.cls",
+                    "public class Written { public Integer Read(Integer Value) { return Value; } }\n",
+                ),
             ],
         );
         let mut service = FirstSliceService::new(2).expect("service initializes");
@@ -31361,7 +31377,7 @@ mod tests {
             .expect("MATLAB source is retained");
         assert_eq!(matlab.language, "matlab");
         mapped.insert(matlab.language.as_str());
-        assert_eq!(receipt.indexed_files, 4);
+        assert_eq!(receipt.indexed_files, 5);
         assert_eq!(source_language_from_path("clock.bas"), None);
         let vba = generation
             .document()
@@ -31398,6 +31414,25 @@ mod tests {
                     .is_some_and(|source| source.span().file() == plsql.id)
         }));
         mapped.insert(plsql.language.as_str());
+        let apex = generation
+            .document()
+            .files
+            .iter()
+            .find(|file| file.path == "written.cls")
+            .expect("Apex source is retained through a complete native header hint");
+        assert_eq!(apex.language, "apex");
+        assert_eq!(source_language_from_path("written.cls"), None);
+        assert!(generation.document().entities.iter().any(|entity| {
+            entity.language == "apex"
+                && entity.kind == EntityKind::Class
+                && entity.canonical_name == "Written"
+                && entity
+                    .evidence
+                    .source
+                    .as_ref()
+                    .is_some_and(|source| source.span().file() == apex.id)
+        }));
+        mapped.insert(apex.language.as_str());
         // A COBOL suffix identifies source, not a fixed/free parser format.
         for language in ["cobol-fixed", "cobol-free"] {
             let capability = language_capabilities()
@@ -32105,6 +32140,59 @@ mod tests {
             assert_eq!(read.data.chunks.len(), 1);
             assert_eq!(read.data.chunks[0].bytes, source.as_bytes());
         }
+    }
+
+    #[test]
+    fn shared_classic_routes_preserve_conflicts_and_analyzer_absence() {
+        let mut input = ManifestInput {
+            file: FileId::from_bytes([3; 20]),
+            path: "written.CLS".to_owned(),
+            content_hash: content_hash(b""),
+            bytes: 0,
+            encoding: "utf-8".to_owned(),
+            class: InputClass::Source,
+            language_signals: vec![rootlight_discovery::LanguageSignal {
+                language: "apex".to_owned(),
+                evidence: LanguageEvidence::Content,
+            }],
+            project_language_witnesses: Vec::new(),
+            decisive_rule: None,
+        };
+        assert_eq!(detected_source_language(&input), Some("apex"));
+        let service = FirstSliceService::new(2).unwrap();
+        assert_eq!(
+            source_language_route(&input, &service.analyzers),
+            Some("apex")
+        );
+        let mut absent = service.analyzers;
+        absent.remove("apex");
+        assert_eq!(source_language_route(&input, &absent), None);
+        input
+            .language_signals
+            .push(rootlight_discovery::LanguageSignal {
+                language: "visual-basic-classic".to_owned(),
+                evidence: LanguageEvidence::Content,
+            });
+        assert_eq!(detected_source_language(&input), None);
+        assert_eq!(source_language_route(&input, &absent), None);
+        for suffix in ["bas", "frm"] {
+            input.path = format!("written.{suffix}");
+            assert_eq!(
+                shared_classic_source_language(&input),
+                Some("visual-basic-classic")
+            );
+        }
+        input.path = "written.cls".to_owned();
+        input
+            .language_signals
+            .push(rootlight_discovery::LanguageSignal {
+                language: "visual-basic-classic".to_owned(),
+                evidence: LanguageEvidence::Configuration,
+            });
+        assert_eq!(
+            source_language_route(&input, &absent),
+            Some("visual-basic-classic")
+        );
     }
 
     #[test]
@@ -37267,6 +37355,7 @@ mod tests {
             b"rootlight.first-slice.treesitter-structural/222",
             b"rootlight.first-slice.treesitter-structural/223",
             b"rootlight.first-slice.treesitter-structural/224",
+            b"rootlight.first-slice.treesitter-structural/232",
         ] {
             let previous_parser = hash_static_components(&[
                 PARSER_PROVIDER_SET_SEED,
