@@ -985,6 +985,54 @@ mod tests {
                 .count(),
             1
         );
+        let file_scopes = captures
+            .iter()
+            .filter(|capture| {
+                capture.role == StructuralRole::Scope && capture.syntax == "common_lisp.file"
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(file_scopes.len(), 1);
+        assert_eq!(
+            (
+                file_scopes[0].start,
+                file_scopes[0].end,
+                file_scopes[0].native_depth
+            ),
+            (0, source.len(), 0),
+        );
+        let mut scopes = captures
+            .iter()
+            .filter(|capture| {
+                capture.role == StructuralRole::Scope && capture.syntax != "common_lisp.file"
+            })
+            .collect::<Vec<_>>();
+        scopes.sort_unstable_by_key(|scope| (scope.start, scope.end));
+        let owners = [
+            (
+                "common_lisp.function",
+                "(defun |Mixed Name| (argument) argument)",
+            ),
+            ("common_lisp.macro", "(CL:DEFMACRO BUILD (INPUT) INPUT)"),
+        ];
+        assert_eq!(scopes.len(), owners.len(), "scopes={scopes:?}");
+        for (scope, (syntax, written)) in scopes.into_iter().zip(owners) {
+            let start = source.find(written).unwrap();
+            let end = start + written.len();
+            assert_eq!((scope.start, scope.end, scope.syntax), (start, end, syntax));
+            let declaration = captures
+                .iter()
+                .find(|capture| {
+                    capture.role == StructuralRole::Declaration
+                        && capture.syntax == syntax
+                        && capture.start == start
+                        && capture.end == end
+                })
+                .unwrap();
+            assert_eq!(
+                scope.native_depth,
+                declaration.native_depth.checked_add(1).unwrap(),
+            );
+        }
     }
 
     #[test]
