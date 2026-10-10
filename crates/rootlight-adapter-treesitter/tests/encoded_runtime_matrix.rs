@@ -34,7 +34,7 @@ struct LanguageCase {
     source: &'static str,
 }
 
-const CASES: [LanguageCase; 46] = [
+const CASES: [LanguageCase; 47] = [
     LanguageCase {
         name: "written.hlsl",
         language: "hlsl",
@@ -49,6 +49,11 @@ const CASES: [LanguageCase; 46] = [
         name: "written.asm",
         language: "assembly",
         source: "Written PROC\nnop\nWritten ENDP\n",
+    },
+    LanguageCase {
+        name: "written.lisp",
+        language: "common-lisp",
+        source: "(defun written (value) value)\n",
     },
     LanguageCase {
         name: "sample.cls",

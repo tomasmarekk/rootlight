@@ -49,6 +49,8 @@ mod apex_native;
 mod assembly_native;
 #[path = "analyzer_e2e/astro_native.rs"]
 mod astro_native;
+#[path = "analyzer_e2e/common_lisp_native.rs"]
+mod common_lisp_native;
 #[path = "analyzer_e2e/dart_native.rs"]
 mod dart_native;
 #[path = "analyzer_e2e/ecmascript_exports.rs"]

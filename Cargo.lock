@@ -1647,6 +1647,7 @@ dependencies = [
  "tree-sitter-c",
  "tree-sitter-c-sharp",
  "tree-sitter-cobol",
+ "tree-sitter-commonlisp",
  "tree-sitter-cpp",
  "tree-sitter-css",
  "tree-sitter-dart",
@@ -3017,6 +3018,14 @@ dependencies = [
 [[package]]
 name = "tree-sitter-cobol"
 version = "0.0.1"
+dependencies = [
+ "cc",
+ "tree-sitter-language",
+]
+
+[[package]]
+name = "tree-sitter-commonlisp"
+version = "0.4.1"
 dependencies = [
  "cc",
  "tree-sitter-language",

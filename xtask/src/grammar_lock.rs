@@ -19,7 +19,7 @@ const GRAMMAR_LOCK_PATH: &str = "adapters/grammars.lock";
 const CARGO_LOCK_PATH: &str = "Cargo.lock";
 const ADAPTER_PACKAGE: &str = "rootlight-adapter-treesitter";
 const GRAMMAR_LOCK_SHA256: &str =
-    "a2e0e0dad25b228429206cccb6de62c39cd82ca19db6c3947c79d9fcb30a512a";
+    "f1dd53298348301ce5164dcabf20a0c4d5b63c3bc97f368e2addd0ed88659e50";
 const JAVA_LICENSE_PATH: &str = "adapters/licenses/tree-sitter-java-0.23.5-LICENSE";
 const JAVA_LICENSE_SHA256: &str =
     "52ed137b039cd9c46409bc22e89938af911c95b157feae2d040b51e6084369a7";
@@ -217,7 +217,7 @@ const EXPECTED_PACKAGES: [(&str, &str, &str); 35] = [
     ),
 ];
 
-const EXPECTED_LOCAL_PACKAGES: [(&str, &str, &str, &str); 8] = [
+const EXPECTED_LOCAL_PACKAGES: [(&str, &str, &str, &str); 9] = [
     (
         "tree-sitter-asm",
         "0.24.0",
@@ -235,6 +235,12 @@ const EXPECTED_LOCAL_PACKAGES: [(&str, &str, &str, &str); 8] = [
         "0.2.0",
         "third_party/tree-sitter-hlsl-0.2.0",
         "bc876400ce323fce73c6927f3fff9c92be29fde8ebb90fb60e67542f53c8c516",
+    ),
+    (
+        "tree-sitter-commonlisp",
+        "0.4.1",
+        "third_party/tree-sitter-commonlisp-0.4.1",
+        "f07da8ce6df2522d0ae98708338b2cb4b50c0be8ac9e052976ad5736c70bf462",
     ),
     (
         "tree-sitter-sfapex",
@@ -449,7 +455,7 @@ fn validate_manifest(manifest: &GrammarLock) -> Result<(), GrammarLockError> {
         ));
     }
     validate_runtime(&manifest.runtime)?;
-    if manifest.grammars.len() != 45 {
+    if manifest.grammars.len() != 46 {
         return Err(GrammarLockError::GrammarCount(manifest.grammars.len()));
     }
     let mut languages = BTreeSet::new();
@@ -481,6 +487,7 @@ fn validate_manifest(manifest: &GrammarLock) -> Result<(), GrammarLockError> {
         "c",
         "cobol-fixed",
         "cobol-free",
+        "common-lisp",
         "cpp",
         "csharp",
         "css",
@@ -1212,7 +1219,7 @@ pub(crate) enum GrammarLockError {
     InvalidDigest { label: &'static str },
     #[error("grammar lock field {0} must not be empty")]
     EmptyField(&'static str),
-    #[error("grammar lock contains {0} grammars instead of 45")]
+    #[error("grammar lock contains {0} grammars instead of 46")]
     GrammarCount(usize),
     #[error("grammar lock repeats language {0}")]
     DuplicateLanguage(String),
@@ -1328,6 +1335,27 @@ mod tests {
         let manifest: GrammarLock = toml::from_str(include_str!("../../adapters/grammars.lock"))
             .expect("grammar lock parses");
         validate_manifest(&manifest).expect("reviewed runtime and grammar identities agree");
+    }
+
+    #[test]
+    fn checked_in_common_lisp_vendor_binds_the_primary_notice() {
+        let manifest: GrammarLock =
+            toml::from_str(include_str!("../../adapters/grammars.lock")).unwrap();
+        let grammar = manifest
+            .grammars
+            .iter()
+            .find(|grammar| grammar.language == "common-lisp")
+            .expect("Common Lisp source evidence is present");
+        let vendored = grammar.vendored.as_ref().expect("local source evidence");
+        let directory = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join(&vendored.manifest_path)
+            .parent()
+            .unwrap()
+            .to_owned();
+        validate_vendored_tree(&directory, grammar, vendored)
+            .expect("all source pins and the exact primary notice agree");
+        assert_eq!(vendored.license_path.as_deref(), Some("LICENSE.md"));
     }
 
     #[test]

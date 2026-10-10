@@ -2125,7 +2125,7 @@ const LANGUAGE_CAPABILITIES: &[LanguageCapability] = &[
         aliases: &["commonlisp", "common_lisp"],
         detectors: &["content", "extension"],
         maximum_tier: "tier_d",
-        analyzers: &["source-fallback"],
+        analyzers: &["treesitter"],
     },
     LanguageCapability {
         language: "cpp",
@@ -6893,7 +6893,7 @@ max_source_file_bytes = 2097152
     }
 
     #[test]
-    fn common_lisp_capability_reports_only_installed_source_fallback() {
+    fn common_lisp_capability_reports_installed_written_source_provider() {
         let capability = language_capabilities()
             .iter()
             .find(|entry| entry.language == "common-lisp")
@@ -6902,7 +6902,7 @@ max_source_file_bytes = 2097152
         assert_eq!(capability.aliases, ["commonlisp", "common_lisp"]);
         assert_eq!(capability.detectors, ["content", "extension"]);
         assert_eq!(capability.maximum_tier, "tier_d");
-        assert_eq!(capability.analyzers, ["source-fallback"]);
+        assert_eq!(capability.analyzers, ["treesitter"]);
         for alias in ["common-lisp", "commonlisp", "common_lisp"] {
             assert_eq!(canonical_language(alias), Some("common-lisp"));
         }

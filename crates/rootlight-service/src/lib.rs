@@ -243,7 +243,7 @@ const PROJECT_FACTS_TRUNCATED_CODE: &str = "project-adapter-facts-truncated";
 const PROJECT_FACTS_TRUNCATED_MESSAGE: &str =
     "additional project semantic facts were omitted by aggregate resource limits";
 const AGGREGATE_DIAGNOSTICS_TRUNCATED_CODE: &str = "aggregate-diagnostics-truncated";
-const ANALYZER_BINARY_SEED: &[u8] = b"rootlight.first-slice.treesitter-structural/233";
+const ANALYZER_BINARY_SEED: &[u8] = b"rootlight.first-slice.treesitter-structural/234";
 const RESOLVER_BINARY_SEED: &[u8] = b"rootlight.first-slice.resolve/103";
 const INCREMENTAL_PROVIDER_SEED: &[u8] = b"rootlight.first-slice.incremental-provider/1";
 const LANGUAGE_DISPOSITION_PROVIDER_SEED: &[u8] = b"rootlight.first-slice.language-disposition/12";
@@ -6401,6 +6401,8 @@ impl FirstSliceService {
                 format!("tree-sitter-sequel-{}", descriptor.grammar_version())
             } else if descriptor.family() == GrammarFamily::Apex {
                 format!("tree-sitter-sfapex-{}", descriptor.grammar_version())
+            } else if descriptor.family() == GrammarFamily::CommonLisp {
+                format!("tree-sitter-commonlisp-{}", descriptor.grammar_version())
             } else if descriptor.family() == GrammarFamily::Assembly {
                 format!("tree-sitter-asm-{}", descriptor.grammar_version())
             } else if descriptor.family() == GrammarFamily::Glsl {
@@ -31308,6 +31310,7 @@ mod tests {
             "sample.json",
             "sample.kt",
             "sample.lua",
+            "sample.lisp",
             "sample.md",
             "sample.nix",
             "sample.pl",
@@ -31356,6 +31359,7 @@ mod tests {
                     "route.pks",
                     "create or replace package RouteKit as\nprocedure Inspect(Value in number);\nend RouteKit;\n/\n",
                 ),
+                ("Written.lisp", "(defun written (value) value)\n"),
                 (
                     "written.cls",
                     "public class Written { public Integer Read(Integer Value) { return Value; } }\n",
@@ -31377,7 +31381,7 @@ mod tests {
             .expect("MATLAB source is retained");
         assert_eq!(matlab.language, "matlab");
         mapped.insert(matlab.language.as_str());
-        assert_eq!(receipt.indexed_files, 5);
+        assert_eq!(receipt.indexed_files, 6);
         assert_eq!(source_language_from_path("clock.bas"), None);
         let vba = generation
             .document()
@@ -31414,6 +31418,27 @@ mod tests {
                     .is_some_and(|source| source.span().file() == plsql.id)
         }));
         mapped.insert(plsql.language.as_str());
+        let common_lisp = generation
+            .document()
+            .files
+            .iter()
+            .find(|file| file.path == "Written.lisp")
+            .expect("Common Lisp source is retained through its dedicated suffix");
+        assert_eq!(common_lisp.language, "common-lisp");
+        assert_eq!(
+            source_language_from_path("sample.lisp"),
+            Some("common-lisp")
+        );
+        assert!(generation.document().entities.iter().any(|entity| {
+            entity.language == "common-lisp"
+                && entity.kind == EntityKind::Function
+                && entity.canonical_name == "written"
+                && entity.evidence.source.as_ref().is_some_and(|source| {
+                    source.generation() == receipt.generation
+                        && source.span().file() == common_lisp.id
+                })
+        }));
+        mapped.insert(common_lisp.language.as_str());
         let apex = generation
             .document()
             .files
@@ -37356,6 +37381,7 @@ mod tests {
             b"rootlight.first-slice.treesitter-structural/223",
             b"rootlight.first-slice.treesitter-structural/224",
             b"rootlight.first-slice.treesitter-structural/232",
+            b"rootlight.first-slice.treesitter-structural/233",
         ] {
             let previous_parser = hash_static_components(&[
                 PARSER_PROVIDER_SET_SEED,

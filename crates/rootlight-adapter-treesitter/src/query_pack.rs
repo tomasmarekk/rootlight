@@ -21,6 +21,7 @@ use crate::{
 mod apex;
 mod assembly;
 mod cobol;
+mod common_lisp;
 mod dart;
 mod ecmascript;
 mod fortran;
@@ -361,7 +362,10 @@ impl QueryPack {
         }
         if matches!(
             family,
-            GrammarFamily::PlSql | GrammarFamily::Glsl | GrammarFamily::Hlsl
+            GrammarFamily::PlSql
+                | GrammarFamily::CommonLisp
+                | GrammarFamily::Glsl
+                | GrammarFamily::Hlsl
         ) {
             expected.retain(|name| !matches!(*name, "call" | "import" | "documentation"));
             expected.push("expression");
@@ -690,6 +694,8 @@ impl QueryPack {
             fsharp::CaptureCache::new(limits.captures, input.normalize_calls, limits.body_nodes);
         let mut plsql_captures = plsql::CaptureCache::new(limits.captures.min(limits.body_nodes));
         let mut apex_captures = apex::CaptureCache::new(limits.captures.min(limits.body_nodes));
+        let mut common_lisp_captures =
+            common_lisp::CaptureCache::new(limits.captures.min(limits.body_nodes));
         let mut assembly_captures =
             assembly::CaptureCache::new(limits.captures.min(limits.body_nodes));
         let mut glsl_captures = glsl::CaptureCache::new(limits.captures.min(limits.body_nodes));
@@ -778,6 +784,22 @@ impl QueryPack {
                         &mut assembly_captures,
                     )?;
                     if assembly_captures.exhausted() {
+                        limit = Some(QueryLimit::Capture);
+                        break 'query;
+                    }
+                    if !admitted {
+                        continue;
+                    }
+                }
+                if input.family == GrammarFamily::CommonLisp {
+                    let admitted = common_lisp::retain_capture(
+                        capture.node,
+                        role,
+                        input.source,
+                        input.cancellation,
+                        &mut common_lisp_captures,
+                    )?;
+                    if common_lisp_captures.exhausted() {
                         limit = Some(QueryLimit::Capture);
                         break 'query;
                     }
@@ -1061,6 +1083,14 @@ impl QueryPack {
                         input.cancellation,
                         &mut assembly_captures,
                     )
+                } else if input.family == GrammarFamily::CommonLisp {
+                    common_lisp::candidate(
+                        capture.node,
+                        role,
+                        input.source,
+                        input.cancellation,
+                        &mut common_lisp_captures,
+                    )
                 } else if input.family == GrammarFamily::Apex {
                     apex::candidate(
                         capture.node,
@@ -1082,6 +1112,7 @@ impl QueryPack {
                 };
                 if fsharp_captures.exhausted()
                     || apex_captures.exhausted()
+                    || common_lisp_captures.exhausted()
                     || assembly_captures.exhausted()
                     || glsl_captures.exhausted()
                     || hlsl_captures.exhausted()
@@ -1672,6 +1703,9 @@ fn candidate_for_capture(
             GrammarFamily::Assembly => return Err(query_failure("query-assembly-unproven-call")),
             GrammarFamily::Glsl => return Err(query_failure("query-glsl-unproven-call")),
             GrammarFamily::Hlsl => return Err(query_failure("query-hlsl-unproven-call")),
+            GrammarFamily::CommonLisp => {
+                return Err(query_failure("query-common-lisp-unproven-call"));
+            }
             GrammarFamily::Css => return Err(query_failure("query-css-call-kind")),
             GrammarFamily::Json => return Err(query_failure("query-json-call-kind")),
             GrammarFamily::Toml => return Err(query_failure("query-toml-call-kind")),
@@ -2585,7 +2619,7 @@ impl QueryPackRegistry {
     }
 
     fn compile_audited() -> Result<Self, GrammarFamily> {
-        let mut packs = Vec::with_capacity(46);
+        let mut packs = Vec::with_capacity(47);
         for (family, source) in [
             (GrammarFamily::Rust, include_str!("../queries/rust.scm")),
             (GrammarFamily::Python, include_str!("../queries/python.scm")),
@@ -2641,6 +2675,10 @@ impl QueryPackRegistry {
             (GrammarFamily::PlSql, include_str!("../queries/plsql.scm")),
             (GrammarFamily::Glsl, include_str!("../queries/glsl.scm")),
             (GrammarFamily::Hlsl, include_str!("../queries/hlsl.scm")),
+            (
+                GrammarFamily::CommonLisp,
+                include_str!("../queries/common_lisp.scm"),
+            ),
             (
                 GrammarFamily::Assembly,
                 include_str!("../queries/assembly.scm"),
@@ -2777,6 +2815,7 @@ mod tests {
             GrammarFamily::CobolFixed,
             GrammarFamily::CobolFree,
             GrammarFamily::Fortran,
+            GrammarFamily::CommonLisp,
             GrammarFamily::Assembly,
             GrammarFamily::Glsl,
             GrammarFamily::Hlsl,
@@ -2805,7 +2844,10 @@ mod tests {
                 });
                 expected.push("expression");
             }
-            if matches!(family, GrammarFamily::Glsl | GrammarFamily::Hlsl) {
+            if matches!(
+                family,
+                GrammarFamily::CommonLisp | GrammarFamily::Glsl | GrammarFamily::Hlsl
+            ) {
                 expected.retain(|name| !matches!(*name, "call" | "import" | "documentation"));
                 expected.push("expression");
             }

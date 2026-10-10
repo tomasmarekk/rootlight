@@ -19,6 +19,7 @@ thiserror.workspace = true
 tree-sitter.workspace = true
 tree-sitter-cobol.workspace = true
 tree-sitter-plsql.workspace = true
+tree-sitter-commonlisp.workspace = true
 tree-sitter-asm.workspace = true
 tree-sitter-glsl.workspace = true
 tree-sitter-sfapex.workspace = true

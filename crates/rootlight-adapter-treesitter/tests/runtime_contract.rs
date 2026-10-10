@@ -90,10 +90,11 @@ fn incremental_executor_enforces_deadline_and_explicit_memory_admission() {
 
 #[test]
 fn every_audited_grammar_parses_a_clean_representative_file() {
-    let cases: [(&str, &str, &[u8]); 46] = [
+    let cases: [(&str, &str, &[u8]); 47] = [
         ("written.hlsl", "hlsl", b"float Written(float Value) { return Value; }\n"),
         ("written.glsl", "glsl", b"float Written(float Value) { return Value; }\n"),
         ("written.asm", "assembly", b"Written PROC\nnop\nWritten ENDP\n"),
+        ("written.lisp", "common-lisp", b"(defun written (value) value)\n"),
         ("sample.cls", "apex", b"public class Written { public Integer Read(Integer Value) { return Value; } }\n"),
         ("sample.pks", "plsql", b"create or replace package Sample as\nprocedure Adjust(Value in number);\nend Sample;\n/\n"),
         (

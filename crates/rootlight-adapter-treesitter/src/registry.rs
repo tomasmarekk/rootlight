@@ -99,6 +99,8 @@ pub enum GrammarFamily {
     Fortran,
     /// Oracle PL/SQL written source without compiler or catalog evaluation.
     PlSql,
+    /// Common Lisp written forms without reader, macro or runtime binding inference.
+    CommonLisp,
     /// Assembly written owners without expansion, ISA validation or assembled binding.
     Assembly,
     /// GLSL written source without shader linking or preprocessor selection.
@@ -197,7 +199,7 @@ impl GrammarRegistry {
     /// Returns [`RegistryError`] if an SDK label is invalid or a linked grammar
     /// falls outside Tree-sitter's supported ABI interval.
     pub fn audited() -> Result<Self, RegistryError> {
-        let mut descriptors = Vec::with_capacity(46);
+        let mut descriptors = Vec::with_capacity(47);
         for family in [
             GrammarFamily::Rust,
             GrammarFamily::Python,
@@ -242,6 +244,7 @@ impl GrammarRegistry {
             GrammarFamily::CobolFree,
             GrammarFamily::Fortran,
             GrammarFamily::PlSql,
+            GrammarFamily::CommonLisp,
             GrammarFamily::Assembly,
             GrammarFamily::Glsl,
             GrammarFamily::Hlsl,
@@ -383,6 +386,7 @@ pub(crate) fn language_for(family: GrammarFamily) -> Language {
         GrammarFamily::CobolFree => tree_sitter_cobol::FREE.into(),
         GrammarFamily::Fortran => tree_sitter_fortran::LANGUAGE.into(),
         GrammarFamily::PlSql => tree_sitter_plsql::LANGUAGE.into(),
+        GrammarFamily::CommonLisp => tree_sitter_commonlisp::LANGUAGE_COMMONLISP.into(),
         GrammarFamily::Assembly => tree_sitter_asm::LANGUAGE_ASSEMBLY.into(),
         GrammarFamily::Glsl => tree_sitter_glsl::LANGUAGE_GLSL.into(),
         GrammarFamily::Hlsl => tree_sitter_hlsl::LANGUAGE_HLSL.into(),
@@ -422,6 +426,15 @@ const fn identity_for(family: GrammarFamily) -> GrammarIdentity {
             source_package_sha256: "05ab716e887d01045e6357cbce255e427546bc540035703105de8a42d2a1a95e",
             parser_sha256: "eca05ffdbf8d5e8788bf73776812003d8975f8b1648554b241200aa6da37a798",
             scanner_sha256: None,
+        },
+        GrammarFamily::CommonLisp => GrammarIdentity {
+            language_id: "common-lisp",
+            grammar_version: "0.4.1",
+            source_package_sha256: "f07da8ce6df2522d0ae98708338b2cb4b50c0be8ac9e052976ad5736c70bf462",
+            parser_sha256: "c4518318808f6f93881d0f4cbcffc068d396ca0ee43ffc48d61962d0484d4e22",
+            scanner_sha256: Some(
+                "b5b8b12151c53c39302ceec717066da08acd1da5d4f594c58a6dd7fde3749d2e",
+            ),
         },
         GrammarFamily::Apex => GrammarIdentity {
             language_id: "apex",
@@ -826,7 +839,7 @@ mod tests {
     fn registry_contains_each_audited_family_once_with_checked_abi() {
         let registry = GrammarRegistry::audited().expect("audited grammars initialize");
 
-        assert_eq!(registry.descriptors().len(), 46);
+        assert_eq!(registry.descriptors().len(), 47);
         for family in [
             GrammarFamily::Rust,
             GrammarFamily::Python,
@@ -871,6 +884,7 @@ mod tests {
             GrammarFamily::CobolFree,
             GrammarFamily::Fortran,
             GrammarFamily::PlSql,
+            GrammarFamily::CommonLisp,
             GrammarFamily::Assembly,
             GrammarFamily::Glsl,
             GrammarFamily::Hlsl,
@@ -1085,6 +1099,11 @@ mod tests {
             (GrammarFamily::CobolFree, "cobol-free", "tree-sitter-cobol"),
             (GrammarFamily::Fortran, "fortran", "tree-sitter-fortran"),
             (GrammarFamily::PlSql, "plsql", "tree-sitter-plsql"),
+            (
+                GrammarFamily::CommonLisp,
+                "common-lisp",
+                "tree-sitter-commonlisp",
+            ),
             (GrammarFamily::Assembly, "assembly", "tree-sitter-asm"),
             (GrammarFamily::Glsl, "glsl", "tree-sitter-glsl"),
             (GrammarFamily::Hlsl, "hlsl", "tree-sitter-hlsl"),
@@ -1121,6 +1140,7 @@ mod tests {
                     ) || family.is_cobol()
                         || family == GrammarFamily::Apex
                         || family == GrammarFamily::PlSql
+                        || family == GrammarFamily::CommonLisp
                         || family == GrammarFamily::Assembly
                         || family == GrammarFamily::Glsl
                         || family == GrammarFamily::Hlsl
