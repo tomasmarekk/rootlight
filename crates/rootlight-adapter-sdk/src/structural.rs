@@ -21,6 +21,9 @@ mod glsl;
 #[path = "structural_hlsl.rs"]
 mod hlsl;
 
+#[path = "structural_scheme.rs"]
+mod scheme;
+
 pub use fsharp::StructuralClassificationGap;
 
 /// Returns the grammar-reviewed base entity kind for one structural syntax fact.
@@ -30,8 +33,8 @@ pub use fsharp::StructuralClassificationGap;
 /// additionally requires the caller's language-specific scope evidence.
 /// Unsupported F# declaration shapes return `None`; callers must retain the
 /// corresponding [`structural_entity_classification_gap`] in entity coverage.
-/// Assembly, Common Lisp, GLSL and HLSL accept only exact reviewed declaration labels;
-/// unknown labels never fall through to the shared substring classifier.
+/// Assembly, Common Lisp, GLSL, HLSL and Scheme accept only exact reviewed
+/// declaration labels; unknown labels never use the shared substring classifier.
 /// HLSL buffer labels and contexts are not declarations, types or named scopes.
 #[must_use]
 pub fn structural_entity_kind(fact: &SyntaxFact) -> Option<EntityKind> {
@@ -50,6 +53,9 @@ pub fn structural_entity_kind(fact: &SyntaxFact) -> Option<EntityKind> {
     }
     if label.starts_with("hlsl.") {
         return hlsl::entity_kind(fact);
+    }
+    if label.starts_with("scheme.") {
+        return scheme::entity_kind(fact);
     }
     match fact.kind() {
         SyntaxFactKind::Module if label == "vba.class.module" => Some(EntityKind::Class),
@@ -583,6 +589,9 @@ pub fn structural_captured_name(text: &str, maximum_bytes: usize) -> Option<&str
 /// reserved words and linked targets remain the caller's separate evidence.
 /// HLSL likewise borrows complete ASCII spelling without reserved-word or
 /// shader-binding proof; native callers distinguish names from buffer labels.
+/// Scheme borrows complete written default-reader symbols without decoding
+/// escapes or applying reader directives. Native proof owns Unicode categories
+/// and the symbol's source context; bars are not Common Lisp token fragments.
 /// Other languages retain
 /// the shared borrowed-name contract. Source and canonical output must both fit
 /// `maximum_bytes`. Invalid names, excess bytes or allocation failure return `None`.
@@ -598,6 +607,8 @@ pub fn structural_captured_name_for_language<'a>(
         glsl::captured_name(text, maximum_bytes).map(Cow::Borrowed)
     } else if language == "hlsl" {
         hlsl::captured_name(text, maximum_bytes).map(Cow::Borrowed)
+    } else if language == "scheme" {
+        scheme::captured_name(text, maximum_bytes).map(Cow::Borrowed)
     } else if language == "fortran" {
         (text.len() <= maximum_bytes
             && text.as_bytes().first().is_some_and(u8::is_ascii_alphabetic)
@@ -793,6 +804,9 @@ fn plsql_captured_name(text: &str, maximum_bytes: usize) -> Option<&str> {
 /// other roles or foreign languages cannot acquire a name through its namespace.
 /// HLSL uses its own exact occurrence labels with the same namespace fence;
 /// buffer labels and contexts are not admitted as definition or reference names.
+/// Scheme admits only `scheme.name.definition` and `scheme.symbol.reference`
+/// occurrences in `scheme`, preserving raw spelling without reader equivalence.
+/// Unknown labels, other roles and foreign languages never use a generic fallback.
 /// Other roles use
 /// [`structural_captured_name_for_language`]. The caller retains
 /// the original source span and validates its association with its declaration.
@@ -803,6 +817,12 @@ pub fn structural_captured_name_for_fact<'a>(
     text: &'a str,
     maximum_bytes: usize,
 ) -> Option<Cow<'a, str>> {
+    if language == "scheme" || fact.syntax_kind().as_str().starts_with("scheme.") {
+        return (language == "scheme")
+            .then(|| scheme::captured_name_for_fact(fact, text, maximum_bytes))
+            .flatten()
+            .map(Cow::Borrowed);
+    }
     if language == "hlsl" || fact.syntax_kind().as_str().starts_with("hlsl.") {
         return (language == "hlsl")
             .then(|| hlsl::captured_name_for_fact(fact, text, maximum_bytes))
