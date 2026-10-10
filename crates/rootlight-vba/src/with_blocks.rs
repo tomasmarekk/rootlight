@@ -232,11 +232,11 @@ pub(crate) fn statement_with_boundary<E>(
             }
             // A decimal trailing point can precede a FLOAT Hash suffix. This
             // boundary reader leaves complete numeric validity to its consumers.
-            b'#' if !directive
-                && !source
+            b'#' if !(directive
+                || source
                     .get(cursor.wrapping_sub(1))
                     .is_some_and(|b| b.is_ascii_alphanumeric() || *b == b')')
-                && !(source.get(cursor.wrapping_sub(1)) == Some(&b'.')
+                || source.get(cursor.wrapping_sub(1)) == Some(&b'.')
                     && source
                         .get(cursor.wrapping_sub(2))
                         .is_some_and(u8::is_ascii_digit)) =>

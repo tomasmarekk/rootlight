@@ -191,7 +191,7 @@ pub fn call_chain_statement<E>(
     let Some(atom) = reader.atom(start, tokens.len(), check)? else {
         return Ok(CallChainRead::Unsupported);
     };
-    if !atom.chained && !(explicit && atom.indexed_result) {
+    if !(atom.chained || explicit && atom.indexed_result) {
         return Ok(CallChainRead::Unsupported);
     }
     let cursor = atom.next;
