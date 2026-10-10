@@ -24,6 +24,9 @@ mod hlsl;
 #[path = "structural_scheme.rs"]
 mod scheme;
 
+#[path = "structural_wgsl.rs"]
+mod wgsl;
+
 pub use fsharp::StructuralClassificationGap;
 
 /// Returns the grammar-reviewed base entity kind for one structural syntax fact.
@@ -33,7 +36,7 @@ pub use fsharp::StructuralClassificationGap;
 /// additionally requires the caller's language-specific scope evidence.
 /// Unsupported F# declaration shapes return `None`; callers must retain the
 /// corresponding [`structural_entity_classification_gap`] in entity coverage.
-/// Assembly, Common Lisp, GLSL, HLSL and Scheme accept only exact reviewed
+/// Assembly, Common Lisp, GLSL, HLSL, Scheme and WGSL accept only exact reviewed
 /// declaration labels; unknown labels never use the shared substring classifier.
 /// HLSL buffer labels and contexts are not declarations, types or named scopes.
 #[must_use]
@@ -56,6 +59,9 @@ pub fn structural_entity_kind(fact: &SyntaxFact) -> Option<EntityKind> {
     }
     if label.starts_with("scheme.") {
         return scheme::entity_kind(fact);
+    }
+    if label.starts_with("wgsl.") {
+        return wgsl::entity_kind(fact);
     }
     match fact.kind() {
         SyntaxFactKind::Module if label == "vba.class.module" => Some(EntityKind::Class),
@@ -592,6 +598,8 @@ pub fn structural_captured_name(text: &str, maximum_bytes: usize) -> Option<&str
 /// Scheme borrows complete written default-reader symbols without decoding
 /// escapes or applying reader directives. Native proof owns Unicode categories
 /// and the symbol's source context; bars are not Common Lisp token fragments.
+/// WGSL borrows complete Unicode 16 XID names without normalization or folding;
+/// native context owns reserved words, shader validity and binding evidence.
 /// Other languages retain
 /// the shared borrowed-name contract. Source and canonical output must both fit
 /// `maximum_bytes`. Invalid names, excess bytes or allocation failure return `None`.
@@ -609,6 +617,8 @@ pub fn structural_captured_name_for_language<'a>(
         hlsl::captured_name(text, maximum_bytes).map(Cow::Borrowed)
     } else if language == "scheme" {
         scheme::captured_name(text, maximum_bytes).map(Cow::Borrowed)
+    } else if language == "wgsl" {
+        wgsl::captured_name(text, maximum_bytes).map(Cow::Borrowed)
     } else if language == "fortran" {
         (text.len() <= maximum_bytes
             && text.as_bytes().first().is_some_and(u8::is_ascii_alphabetic)
@@ -807,6 +817,8 @@ fn plsql_captured_name(text: &str, maximum_bytes: usize) -> Option<&str> {
 /// Scheme admits only `scheme.name.definition` and `scheme.symbol.reference`
 /// occurrences in `scheme`, preserving raw spelling without reader equivalence.
 /// Unknown labels, other roles and foreign languages never use a generic fallback.
+/// WGSL uses exact definition and unresolved-use labels in its own namespace;
+/// accepted source spelling does not establish shader or call-target bindings.
 /// Other roles use
 /// [`structural_captured_name_for_language`]. The caller retains
 /// the original source span and validates its association with its declaration.
@@ -820,6 +832,12 @@ pub fn structural_captured_name_for_fact<'a>(
     if language == "scheme" || fact.syntax_kind().as_str().starts_with("scheme.") {
         return (language == "scheme")
             .then(|| scheme::captured_name_for_fact(fact, text, maximum_bytes))
+            .flatten()
+            .map(Cow::Borrowed);
+    }
+    if language == "wgsl" || fact.syntax_kind().as_str().starts_with("wgsl.") {
+        return (language == "wgsl")
+            .then(|| wgsl::captured_name_for_fact(fact, text, maximum_bytes))
             .flatten()
             .map(Cow::Borrowed);
     }
@@ -1956,6 +1974,109 @@ mod tests {
             assert!(structural_captured_name_for_language("markdown", source, 128).is_none());
         }
         assert!(structural_captured_name_for_language("rust", "Storage *rules*", 128).is_none());
+    }
+
+    #[test]
+    fn wgsl_public_dispatch_preserves_exact_namespace_roles_and_raw_unicode_names() {
+        let fact = |kind, label| {
+            SyntaxFact::new(
+                1,
+                None,
+                kind,
+                rootlight_ir::SourceSpan::new(rootlight_ids::FileId::from_bytes([7; 20]), 0, 1)
+                    .unwrap(),
+                0,
+                crate::SyntaxKindLabel::new(label).unwrap(),
+            )
+        };
+        for (label, kind) in [
+            ("wgsl.function.declaration", EntityKind::Function),
+            ("wgsl.struct.declaration", EntityKind::Struct),
+            ("wgsl.type_alias.declaration", EntityKind::TypeAlias),
+            ("wgsl.constant.declaration", EntityKind::Constant),
+            ("wgsl.override.declaration", EntityKind::Variable),
+            ("wgsl.parameter.declaration", EntityKind::Parameter),
+            ("wgsl.field.declaration", EntityKind::Field),
+        ] {
+            assert_eq!(
+                structural_entity_kind(&fact(SyntaxFactKind::Declaration, label)),
+                Some(kind)
+            );
+            assert_eq!(
+                structural_entity_kind(&fact(SyntaxFactKind::Occurrence, label)),
+                None
+            );
+        }
+        for label in [
+            "wgsl.unknown.declaration",
+            "wgsl.function.declaration.extra",
+            "wgsl.shader_resource.declaration",
+        ] {
+            assert_eq!(
+                structural_entity_kind(&fact(SyntaxFactKind::Declaration, label)),
+                None
+            );
+        }
+        for raw in ["Δ", "é", "e\u{301}", "_value"] {
+            assert_eq!(
+                structural_captured_name_for_language("wgsl", raw, raw.len()),
+                Some(Cow::Borrowed(raw))
+            );
+            assert_eq!(
+                structural_captured_name_for_language("wgsl", raw, raw.len() - 1),
+                None
+            );
+            for label in [
+                "wgsl.name.definition",
+                "wgsl.identifier.reference",
+                "wgsl.type.reference",
+                "wgsl.member.reference",
+                "wgsl.unproven_call.reference",
+            ] {
+                let occurrence = fact(SyntaxFactKind::Occurrence, label);
+                assert_eq!(
+                    structural_captured_name_for_fact("wgsl", &occurrence, raw, raw.len()),
+                    Some(Cow::Borrowed(raw))
+                );
+                assert_eq!(
+                    structural_captured_name_for_fact("hlsl", &occurrence, raw, raw.len()),
+                    None
+                );
+                assert_eq!(
+                    structural_captured_name_for_fact(
+                        "wgsl",
+                        &fact(SyntaxFactKind::Signature, label),
+                        raw,
+                        raw.len()
+                    ),
+                    None
+                );
+            }
+        }
+        for raw in ["_", "name.member", " name", "name()", "\u{301}name"] {
+            assert_eq!(
+                structural_captured_name_for_language("wgsl", raw, usize::MAX),
+                None
+            );
+        }
+        assert_eq!(
+            structural_captured_name_for_fact(
+                "wgsl",
+                &fact(SyntaxFactKind::Occurrence, "hlsl.name.definition"),
+                "Name",
+                16
+            ),
+            None
+        );
+        assert_eq!(
+            structural_captured_name_for_fact(
+                "wgsl",
+                &fact(SyntaxFactKind::Occurrence, "wgsl.unknown.reference"),
+                "Name",
+                16
+            ),
+            None
+        );
     }
 
     #[test]
