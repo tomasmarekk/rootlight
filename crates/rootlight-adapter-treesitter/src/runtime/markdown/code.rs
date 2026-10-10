@@ -223,13 +223,7 @@ impl TreeSitterProvider {
             ensure_embedded_data_module(family, body.byte_range(), &mut captures, cancellation)?;
             for capture in &mut captures {
                 cancellation.check()?;
-                if capture.role == StructuralRole::Module && capture.syntax.ends_with(".file") {
-                    capture.start = body.start_byte();
-                    capture.end = body.end_byte();
-                }
-                if capture.start < body.start_byte() || capture.end > body.end_byte() {
-                    return Err(provider_failure("markdown-code-capture-span"));
-                }
+                bind_embedded_capture(capture, &body.byte_range(), source.as_bytes().len())?;
             }
             try_reserve_cancellable(
                 candidates,
@@ -241,6 +235,35 @@ impl TreeSitterProvider {
         }
         Ok(limited)
     }
+}
+
+fn bind_embedded_capture(
+    capture: &mut QueryCandidate,
+    body: &std::ops::Range<usize>,
+    host_length: usize,
+) -> Result<(), AdapterError> {
+    let file_module = capture.role == StructuralRole::Module && capture.syntax.ends_with(".file");
+    // Some native file roots deliberately include the entire physical input.
+    // Only their synthetic root facts may be rebound; child evidence must fit
+    // its original fence without clipping or borrowing neighboring examples.
+    let synthetic_root = capture.native_depth == 0
+        && capture.start == 0
+        && capture.end == host_length
+        && ((capture.role == StructuralRole::Scope && capture.syntax.ends_with(".file"))
+            || (capture.role == StructuralRole::Expression
+                && (capture.syntax.ends_with(".source_availability")
+                    || matches!(
+                        capture.syntax,
+                        "assembly.file_semantics" | "pascal.file_semantics"
+                    ))));
+    if file_module || synthetic_root {
+        capture.start = body.start;
+        capture.end = body.end;
+    }
+    if capture.start < body.start || capture.end > body.end {
+        return Err(provider_failure("markdown-code-capture-span"));
+    }
+    Ok(())
 }
 
 fn ensure_embedded_data_module(
@@ -426,6 +449,103 @@ mod tests {
         path::Path,
         time::{Duration, Instant},
     };
+
+    #[test]
+    fn embedded_file_roots_are_bound_to_their_own_body() {
+        for (role, syntax) in [
+            (StructuralRole::Module, "glsl.file"),
+            (StructuralRole::Scope, "glsl.file"),
+            (StructuralRole::Scope, "hlsl.file"),
+            (StructuralRole::Scope, "wgsl.file"),
+            (StructuralRole::Expression, "wgsl.source_availability"),
+            (StructuralRole::Expression, "assembly.file_semantics"),
+            (StructuralRole::Expression, "pascal.file_semantics"),
+        ] {
+            for body in [8..25, 40..57] {
+                let mut capture = QueryCandidate {
+                    start: 0,
+                    end: 64,
+                    role,
+                    syntax,
+                    required: matches!(role, StructuralRole::Module | StructuralRole::Scope),
+                    native_depth: 0,
+                };
+                let expected = QueryCandidate {
+                    start: body.start,
+                    end: body.end,
+                    ..capture
+                };
+                bind_embedded_capture(&mut capture, &body, 64).unwrap();
+                assert_eq!(capture, expected);
+                bind_embedded_capture(&mut capture, &body, 64).unwrap();
+                assert_eq!(capture, expected);
+            }
+        }
+    }
+
+    #[test]
+    fn embedded_nonroot_captures_cannot_be_cropped_into_the_body() {
+        for (role, syntax, depth, range) in [
+            (StructuralRole::Scope, "wgsl.file", 1, 0..64),
+            (StructuralRole::Scope, "wgsl.file", 0, 0..63),
+            (StructuralRole::Scope, "wgsl.body", 0, 0..64),
+            (StructuralRole::Definition, "wgsl.file", 0, 0..64),
+            (StructuralRole::Expression, "wgsl.file", 0, 0..64),
+            (
+                StructuralRole::Expression,
+                "unknown.file_semantics",
+                0,
+                0..64,
+            ),
+            (
+                StructuralRole::Expression,
+                "assembly.file_semantics",
+                1,
+                0..64,
+            ),
+            (
+                StructuralRole::Expression,
+                "pascal.file_semantics",
+                0,
+                0..63,
+            ),
+            (
+                StructuralRole::Expression,
+                "wgsl.source_availability",
+                1,
+                0..64,
+            ),
+            (StructuralRole::Reference, "glsl.identifier", 2, 7..12),
+            (StructuralRole::Declaration, "hlsl.function", 1, 12..26),
+        ] {
+            let mut capture = QueryCandidate {
+                start: range.start,
+                end: range.end,
+                role,
+                syntax,
+                required: true,
+                native_depth: depth,
+            };
+            let original = capture;
+            assert!(matches!(
+                bind_embedded_capture(&mut capture, &(8..25), 64),
+                Err(AdapterError::ProviderFailed { code })
+                    if code.as_str() == "markdown-code-capture-span"
+            ));
+            assert_eq!(capture, original);
+        }
+        let mut inside = QueryCandidate {
+            start: 10,
+            end: 15,
+            role: StructuralRole::Definition,
+            syntax: "wgsl.name",
+            required: true,
+            native_depth: 1,
+        };
+        let original = inside;
+        bind_embedded_capture(&mut inside, &(8..25), 64).unwrap();
+        assert_eq!(inside, original);
+    }
 
     #[test]
     fn embedded_data_module_is_required_with_or_without_optional_captures() {

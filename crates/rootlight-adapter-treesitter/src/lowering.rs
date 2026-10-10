@@ -7877,48 +7877,7 @@ fn language_for_fact_with_ranges<'a>(
     ranges: &'a [rootlight_adapter_sdk::IncludedRange],
 ) -> &'a str {
     if request.language().as_str() == "markdown"
-        && fact.syntax_kind().as_str().starts_with("objective_c.")
-    {
-        return "objective-c";
-    }
-    if request.language().as_str() == "markdown"
-        && let Some((language, _)) = fact.syntax_kind().as_str().split_once('.')
-        && matches!(
-            language,
-            "rust"
-                | "javascript"
-                | "typescript"
-                | "python"
-                | "c"
-                | "cpp"
-                | "csharp"
-                | "go"
-                | "java"
-                | "groovy"
-                | "haskell"
-                | "kotlin"
-                | "lua"
-                | "php"
-                | "ruby"
-                | "swift"
-                | "css"
-                | "bash"
-                | "json"
-                | "toml"
-                | "yaml"
-                | "html"
-                | "sql"
-                | "r"
-                | "nix"
-                | "matlab"
-                | "perl"
-                | "solidity"
-                | "scala"
-                | "dart"
-                | "powershell"
-                | "astro"
-                | "vba"
-        )
+        && let Some(language) = markdown_language_for_syntax(fact.syntax_kind().as_str())
     {
         return language;
     }
@@ -7939,6 +7898,21 @@ fn language_for_fact_with_ranges<'a>(
             rootlight_adapter_sdk::IncludedRange::language,
         )
         .as_str()
+}
+
+fn markdown_language_for_syntax(syntax: &str) -> Option<&str> {
+    let (language, _) = syntax.split_once('.')?;
+    match language {
+        "objective_c" => Some("objective-c"),
+        "common_lisp" => Some("common-lisp"),
+        "rust" | "javascript" | "typescript" | "python" | "c" | "cpp" | "csharp" | "go"
+        | "java" | "groovy" | "haskell" | "kotlin" | "lua" | "php" | "ruby" | "swift" | "css"
+        | "bash" | "json" | "toml" | "yaml" | "html" | "sql" | "r" | "nix" | "matlab" | "perl"
+        | "solidity" | "scala" | "dart" | "powershell" | "astro" | "vba" | "fortran" | "plsql"
+        | "sas" | "apex" | "pascal" | "assembly" | "scheme" | "glsl" | "hlsl" | "wgsl" | "xml"
+        | "dtd" => Some(language),
+        _ => None,
+    }
 }
 
 fn containing_range(
@@ -9231,6 +9205,37 @@ mod tests {
             assert!(
                 structural_resolution_text("groovy", &fact, text, None, text.len() - 1).is_none()
             );
+        }
+    }
+
+    #[test]
+    fn markdown_native_prefixes_keep_declared_languages() {
+        for language in [
+            "fortran", "plsql", "sas", "apex", "pascal", "assembly", "scheme", "glsl", "hlsl",
+            "wgsl", "xml", "dtd", "rust", "python",
+        ] {
+            assert_eq!(
+                markdown_language_for_syntax(&format!("{language}.name.definition")),
+                Some(language)
+            );
+        }
+        assert_eq!(
+            markdown_language_for_syntax("common_lisp.name.definition"),
+            Some("common-lisp")
+        );
+        assert_eq!(
+            markdown_language_for_syntax("objective_c.method.definition"),
+            Some("objective-c")
+        );
+        // Profile-dependent grammars need their proven fence language, not a prefix guess.
+        for syntax in [
+            "unknown.name.definition",
+            "markdown.heading.declaration",
+            "glsl",
+            "fsharp.name.definition",
+            "cobol.name.definition",
+        ] {
+            assert_eq!(markdown_language_for_syntax(syntax), None);
         }
     }
 

@@ -3200,6 +3200,221 @@ fn assert_malformed_data_fence_ownership(
 }
 
 #[test]
+fn markdown_shader_file_roots_keep_independent_fence_source_owners() {
+    let cases = [
+        LanguageCase {
+            name: "glsl",
+            path: "src/example.glsl",
+            frontend: "tree-sitter-glsl-0.2.0",
+            source: "float Scale() { return 1.0; }\n",
+            ..MARKDOWN
+        },
+        LanguageCase {
+            name: "hlsl",
+            path: "src/example.hlsl",
+            frontend: "tree-sitter-hlsl-0.2.0",
+            source: "float Scale() { return 1.0; }\n",
+            ..MARKDOWN
+        },
+        LanguageCase {
+            name: "wgsl",
+            path: "src/example.wgsl",
+            frontend: "tree-sitter-wgsl-0.0.9",
+            source: "fn Scale() -> f32 { return 1.0; }\n",
+            ..MARKDOWN
+        },
+    ];
+    let provider = Arc::new(provider());
+    let budget = limits();
+    for ending in ["\n", "\r\n"] {
+        let mut source = format!("# Shader examples λ😀{ending}{ending}Prelude.{ending}{ending}");
+        let mut bodies = Vec::new();
+        for _ in 0..2 {
+            for case in cases {
+                source.push_str(&format!("~~~{}{ending}", case.name));
+                let start = source.len();
+                source.push_str(&case.source.replace('\n', ending));
+                bodies.push((case, start..source.len()));
+                source.push_str(&format!("~~~{ending}{ending}Neighbor λ😀.{ending}{ending}"));
+            }
+        }
+        source.push_str(&format!("Tail λ😀.{ending}"));
+        let fixture = Fixture::new(MARKDOWN, source.as_bytes());
+        let initial = request(&fixture.snapshot, &fixture.source, MARKDOWN, &budget);
+        let parsed = rootlight_adapter_sdk::execute_parse(
+            provider.as_ref(),
+            &initial.to_parse_request(),
+            MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
+            &deadline(),
+        )
+        .expect("shader file roots belong to their included fence body");
+        let result = analyze(
+            &analyzer(&provider, MARKDOWN),
+            &initial,
+            &ExtensionSupport::default(),
+        );
+        validate_ir_document(result.document(), budget.ir(), &ExtensionSupport::default()).unwrap();
+        let document = result.document();
+        let mut identities = BTreeSet::new();
+        for (case, body) in &bodies {
+            let start = u64::try_from(body.start).unwrap();
+            let end = u64::try_from(body.end).unwrap();
+            let local = |span: SourceSpan| start <= span.start_byte() && span.end_byte() <= end;
+            let prefix = format!("{}.", case.name);
+            for fact in parsed
+                .facts()
+                .iter()
+                .filter(|fact| fact.syntax_kind().as_str().starts_with(&prefix))
+            {
+                assert!(bodies.iter().any(|(owner, range)| {
+                    owner.name == case.name
+                        && fact.span().start_byte() >= u64::try_from(range.start).unwrap()
+                        && fact.span().end_byte() <= u64::try_from(range.end).unwrap()
+                }));
+                assert_eq!(fact.span().file(), fixture.source.span().file());
+            }
+            for syntax in [
+                format!("{}.file.module", case.name),
+                format!("{}.file.scope", case.name),
+            ] {
+                let roots: Vec<_> = parsed
+                    .facts()
+                    .iter()
+                    .filter(|fact| fact.syntax_kind().as_str() == syntax && local(fact.span()))
+                    .collect();
+                assert_eq!(roots.len(), 1, "{}: {syntax}", case.name);
+                assert_eq!(roots[0].span().start_byte(), start);
+                assert_eq!(roots[0].span().end_byte(), end);
+            }
+            if case.name == "wgsl" {
+                let availability: Vec<_> = parsed
+                    .facts()
+                    .iter()
+                    .filter(|fact| {
+                        fact.syntax_kind().as_str() == "wgsl.source_availability.expression"
+                            && local(fact.span())
+                    })
+                    .collect();
+                assert_eq!(availability.len(), 1);
+                assert_eq!(availability[0].span().start_byte(), start);
+                assert_eq!(availability[0].span().end_byte(), end);
+            }
+            let functions: Vec<_> = document
+                .entities
+                .iter()
+                .filter(|entity| {
+                    entity.language == case.name
+                        && entity.kind == EntityKind::Function
+                        && entity.canonical_name == "Scale"
+                        && entity
+                            .evidence
+                            .source
+                            .as_ref()
+                            .is_some_and(|site| local(site.span()))
+                })
+                .collect();
+            assert_eq!(functions.len(), 1, "{}", case.name);
+            let function = functions[0];
+            assert!(
+                identities.insert(function.id),
+                "same-name fences need distinct owners"
+            );
+            let owner_source = function.evidence.source.as_ref().unwrap();
+            let owner_text = case.source.trim_end_matches('\n');
+            assert_eq!(owner_source.span().start_byte(), start);
+            assert_eq!(
+                owner_source.span().end_byte(),
+                start + u64::try_from(owner_text.len()).unwrap()
+            );
+            assert_eq!(owner_source.content_hash(), fixture.source.content_hash());
+            assert_eq!(owner_source.generation(), fixture.source.generation());
+            assert_eq!(owner_source.repository(), fixture.source.repository());
+            assert_eq!(owner_source.span().file(), fixture.source.span().file());
+            assert_eq!(
+                source
+                    .get(body.start..body.start + owner_text.len())
+                    .unwrap(),
+                owner_text
+            );
+            let definitions: Vec<_> = document
+                .occurrences
+                .iter()
+                .filter(|site| site.role == OccurrenceRole::Definition && local(site.source.span()))
+                .collect();
+            assert_eq!(definitions.len(), 1);
+            let definition = definitions[0];
+            assert_eq!(
+                definition.target,
+                OccurrenceTarget::Resolved {
+                    symbol: function.id
+                }
+            );
+            let name_start = start + u64::try_from(owner_text.find("Scale").unwrap()).unwrap();
+            assert_eq!(definition.source.span().start_byte(), name_start);
+            assert_eq!(definition.source.span().end_byte(), name_start + 5);
+            assert_eq!(definition.syntactic_text_hash, content_hash(b"Scale"));
+            assert_eq!(
+                definition.source.content_hash(),
+                fixture.source.content_hash()
+            );
+            assert_eq!(definition.source.generation(), fixture.source.generation());
+            assert_eq!(definition.source.repository(), fixture.source.repository());
+            assert_eq!(
+                definition.source.span().file(),
+                fixture.source.span().file()
+            );
+            assert_eq!(
+                definition.id,
+                rootlight_ir::derive_occurrence_record_id(definition).unwrap()
+            );
+
+            let standalone_source = case.source.replace('\n', ending);
+            let standalone = Fixture::new(*case, standalone_source.as_bytes());
+            let standalone_result = analyze(
+                &analyzer(&provider, *case),
+                &request(&standalone.snapshot, &standalone.source, *case, &budget),
+                &ExtensionSupport::default(),
+            );
+            let standalone_function = standalone_result
+                .document()
+                .entities
+                .iter()
+                .find(|entity| {
+                    entity.kind == EntityKind::Function && entity.canonical_name == "Scale"
+                })
+                .unwrap();
+            assert_eq!(function.kind, standalone_function.kind);
+            assert_eq!(function.language, standalone_function.language);
+            assert_eq!(function.canonical_name, standalone_function.canonical_name);
+            let signatures = |result: &AnalysisOutput, symbol| {
+                result
+                    .document()
+                    .extensions
+                    .iter()
+                    .filter_map(|envelope| {
+                        if envelope.namespace != rootlight_ir::LEXICAL_EXTENSION_NAMESPACE {
+                            return None;
+                        }
+                        let evidence =
+                            rootlight_ir::decode_lexical_evidence_envelope(envelope).unwrap();
+                        (evidence.kind() == rootlight_ir::LexicalEvidenceKind::Signature
+                            && evidence.subject() == rootlight_ir::FactRef::Entity(symbol))
+                        .then(|| evidence.text().to_owned())
+                    })
+                    .collect::<Vec<_>>()
+            };
+            let embedded_signatures = signatures(&result, function.id);
+            assert!(!embedded_signatures.is_empty());
+            assert_eq!(
+                embedded_signatures,
+                signatures(&standalone_result, standalone_function.id)
+            );
+        }
+        assert_eq!(identities.len(), bodies.len());
+    }
+}
+
+#[test]
 fn markdown_fenced_examples_keep_distinct_owners_and_original_coordinates() {
     let source = "# Examples\r\n\r\n> ~~~rust\r\n> fn greet() {}\r\n> ~~~\r\n\r\n~~~rust\r\nfn greet() {}\r\n~~~\r\n";
     let result = output(source);
