@@ -815,9 +815,9 @@ fn owner_proof(
             proof.syntax = "hlsl.struct";
         }
         "parameter_declaration" => {
-            if !node
+            if node
                 .parent()
-                .is_some_and(|parent| parent.kind() == "parameter_list")
+                .is_none_or(|parent| parent.kind() != "parameter_list")
                 || !parameter_shape(node, source, cancellation)?
             {
                 return Ok(None);

@@ -1285,10 +1285,10 @@ impl<'a> FSharpBindings<'a> {
             if !function.valid()
                 || function.scope.one() != Some(scope)
                 || !contains(scope, read)
-                || !function
+                || function
                     .header
                     .one()
-                    .is_some_and(|header| header.span().end_byte() <= read.span().start_byte())
+                    .is_none_or(|header| header.span().end_byte() > read.span().start_byte())
             {
                 return Ok(None);
             }
@@ -1388,10 +1388,10 @@ impl<'a> FSharpBindings<'a> {
             if !function.valid()
                 || function.scope.one() != Some(scope)
                 || !contains(scope, read)
-                || !function
+                || function
                     .header
                     .one()
-                    .is_some_and(|header| header.span().end_byte() <= read.span().start_byte())
+                    .is_none_or(|header| header.span().end_byte() > read.span().start_byte())
             {
                 return QualifiedRoot::Closed;
             }

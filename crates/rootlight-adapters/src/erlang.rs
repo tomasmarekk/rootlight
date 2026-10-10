@@ -539,7 +539,7 @@ fn is_clause_head(masked: &[u8], start: usize, end: usize, form_end: usize) -> b
     let previous = (0..start)
         .rev()
         .find(|&index| !masked[index].is_ascii_whitespace());
-    if !previous.is_some_and(|index| masked[index] == b';') {
+    if previous.is_none_or(|index| masked[index] != b';') {
         return false;
     }
     let next = masked.get(end..form_end).unwrap_or_default();

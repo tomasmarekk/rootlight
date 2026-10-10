@@ -240,8 +240,8 @@ fn valid_suffix(value: &str, query: bool) -> bool {
             {
                 return false;
             }
-        } else if !super::unreserved(c)
-            && !matches!(
+        } else if !(super::unreserved(c)
+            || matches!(
                 c,
                 '!' | '$'
                     | '&'
@@ -258,7 +258,7 @@ fn valid_suffix(value: &str, query: bool) -> bool {
                     | '/'
                     | '?'
             )
-            && !(query
+            || query
                 && matches!(c, '\u{e000}'..='\u{f8ff}' | '\u{f0000}'..='\u{ffffd}' | '\u{100000}'..='\u{10fffd}'))
         {
             return false;

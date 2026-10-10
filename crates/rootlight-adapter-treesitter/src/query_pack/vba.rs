@@ -172,11 +172,11 @@ pub(super) fn retain_capture(node: Node<'_>, role: StructuralRole, source: &[u8]
     {
         return false;
     }
-    !matches!(parent.kind(), "attribute_statement" | "label_statement")
-        && !(matches!(
+    !(matches!(parent.kind(), "attribute_statement" | "label_statement")
+        || (matches!(
             parent.kind(),
             "qualified_member_expression" | "implicit_member_expression"
-        ) && parent.child_by_field_name("member") == Some(node))
+        ) && parent.child_by_field_name("member") == Some(node)))
 }
 
 pub(super) fn syntax(node: Node<'_>, role: StructuralRole) -> Option<&'static str> {

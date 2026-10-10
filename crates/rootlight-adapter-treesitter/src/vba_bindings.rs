@@ -1035,9 +1035,9 @@ impl<'a> VbaBindings<'a> {
                 }
                 if !instance_context
                     || self.class_symbol.is_none()
-                    || !self
+                    || self
                         .class_module
-                        .is_some_and(|class| class.span() == scope.span())
+                        .is_none_or(|class| class.span() != scope.span())
                 {
                     return Ok(None);
                 }
@@ -2391,9 +2391,9 @@ impl<'a> VbaBindings<'a> {
                     continue;
                 }
                 if !instance_context
-                    || !self
+                    || self
                         .class_module
-                        .is_some_and(|class| class.span() == scope.span())
+                        .is_none_or(|class| class.span() != scope.span())
                 {
                     return Ok(None);
                 }
@@ -2656,9 +2656,9 @@ impl<'a> VbaBindings<'a> {
             // RaiseEvent selects an explicitly declared event of this object
             // module, not a procedure-local value or a host-provided event.
             if !instance_context
-                || !self
+                || self
                     .class_module
-                    .is_some_and(|class| class.span() == scope.span())
+                    .is_none_or(|class| class.span() != scope.span())
                 || self.foreign_event_scopes.contains(&owner)
             {
                 return Ok(None);
@@ -2936,9 +2936,9 @@ impl<'a> VbaBindings<'a> {
             let count = group
                 .partition_point(|header| header.span().start_byte() < branch.span().start_byte());
             if count == 0
-                || !valid_prefixes
+                || valid_prefixes
                     .get(&owner)
-                    .is_some_and(|valid| count <= *valid)
+                    .is_none_or(|valid| count > *valid)
             {
                 continue;
             }

@@ -70,7 +70,7 @@ fn atom_name_end(source: &str) -> Option<usize> {
         .then_some(closing + 2);
     }
     let first = source.chars().next()?;
-    if !first.is_lowercase() && !(first.is_alphabetic() && !first.is_uppercase()) {
+    if !(first.is_lowercase() || first.is_alphabetic() && !first.is_uppercase()) {
         return None;
     }
     source

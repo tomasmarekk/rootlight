@@ -270,9 +270,9 @@ fn root_container_header(
     container: Node<'_>,
     cancellation: &Cancellation,
 ) -> Result<Option<usize>, AdapterError> {
-    if !container
+    if container
         .parent()
-        .is_some_and(|parent| parent.kind() == "file")
+        .is_none_or(|parent| parent.kind() != "file")
     {
         return Ok(None);
     }

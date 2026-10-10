@@ -9888,9 +9888,9 @@ fn source_metadata_quote_correlates(
         || usage.results > MAX_FIRST_SLICE_BUDGET_RESULTS
         || usage.json_bytes > MAX_FIRST_SLICE_BUDGET_JSON_BYTES
         || usage.estimated_tokens > MAX_FIRST_SLICE_BUDGET_ESTIMATED_TOKENS
-        || !usage
+        || usage
             .memory_bytes
-            .is_some_and(|bytes| bytes <= MAX_FIRST_SLICE_BUDGET_MEMORY_BYTES)
+            .is_none_or(|bytes| bytes > MAX_FIRST_SLICE_BUDGET_MEMORY_BYTES)
     {
         return false;
     }

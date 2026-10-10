@@ -237,14 +237,14 @@ impl<'a> LexicalBindings<'a> {
         result.recursive = super::recursive::RecursiveBindings::new(plan, symbols, cancellation)?;
         for fact in plan.facts.values().copied() {
             cancellation.check()?;
-            if !matches!(
+            if !(matches!(
                 fact.kind(),
                 SyntaxFactKind::Declaration | SyntaxFactKind::Import
-            ) && !(fact.kind() == SyntaxFactKind::Scope
+            ) || (fact.kind() == SyntaxFactKind::Scope
                 && matches!(
                     fact.syntax_kind().as_str(),
                     "fsharp.preprocessor.scope" | "fsharp.preprocessor_branch.scope"
-                ))
+                )))
             {
                 continue;
             }
@@ -303,10 +303,10 @@ impl<'a> LexicalBindings<'a> {
                     );
                 if !reviewed_open
                     && !reviewed_container
-                    && !plan
+                    && plan
                         .qualified_types
                         .get(&fact.local_id())
-                        .is_some_and(|record| record.name.is_some())
+                        .is_none_or(|record| record.name.is_none())
                 {
                     result
                         .qualified_barriers

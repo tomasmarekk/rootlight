@@ -954,11 +954,11 @@ impl CaptureCache {
             return Ok(false);
         };
         if !self.match_expression(owner, cancellation)?
-            || !self
+            || self
                 .matches
                 .get(&owner.id())
                 .and_then(Option::as_ref)
-                .is_some_and(|summary| summary.rules == rules.id())
+                .is_none_or(|summary| summary.rules != rules.id())
         {
             return Ok(false);
         }
@@ -2340,9 +2340,9 @@ impl CaptureCache {
                 if !self.match_ancestor(current, parent, source, cancellation)? {
                     break;
                 }
-            } else if !matches!(parent.kind(), "paren_expression" | "begin_end_expression")
-                && !(parent.kind() == "sequential_expression"
-                    && sequential_region(parent, cancellation)?)
+            } else if !(matches!(parent.kind(), "paren_expression" | "begin_end_expression")
+                || (parent.kind() == "sequential_expression"
+                    && sequential_region(parent, cancellation)?))
             {
                 break;
             }
@@ -3012,11 +3012,11 @@ impl CaptureCache {
             }
             if parent.kind() == "fun_expression" {
                 if !self.lambda(parent, source, cancellation)?
-                    || !self
+                    || self
                         .lambdas
                         .get(&parent.id())
                         .and_then(Option::as_ref)
-                        .is_some_and(|summary| summary.body == current.id())
+                        .is_none_or(|summary| summary.body != current.id())
                 {
                     return Ok(());
                 }
@@ -3939,10 +3939,10 @@ fn signature_plain_value(
                 let mut cursor = child.walk();
                 for part in child.named_children(&mut cursor) {
                     cancellation.check()?;
-                    if !part.is_extra()
-                        && !(part.kind() == "identifier_pattern" && valid(part))
-                        && !(part.kind() == "access_modifier"
-                            && source.get(part.byte_range()) == Some(b"public"))
+                    if !(part.is_extra()
+                        || (part.kind() == "identifier_pattern" && valid(part))
+                        || (part.kind() == "access_modifier"
+                            && source.get(part.byte_range()) == Some(b"public")))
                     {
                         return Ok(false);
                     }

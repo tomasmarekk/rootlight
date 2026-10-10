@@ -618,11 +618,11 @@ impl<'a> FSharpIndex<'a> {
             else {
                 continue;
             };
-            if !modules
+            if modules
                 .get(&owner.span())
                 .copied()
                 .flatten()
-                .is_some_and(|unique| unique.id == module.id)
+                .is_none_or(|unique| unique.id != module.id)
             {
                 continue;
             }

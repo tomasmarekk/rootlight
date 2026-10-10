@@ -292,7 +292,7 @@ fn complete_parenthesized_annotation(source: &str, colon: usize) -> bool {
                     b']' => b'[',
                     _ => b'{',
                 };
-                if !owners.pop().is_some_and(|(owner, _)| owner == expected) {
+                if owners.pop().is_none_or(|(owner, _)| owner != expected) {
                     return false;
                 }
             }
