@@ -34,6 +34,10 @@ third_party/tree-sitter-commonlisp-0.4.1/** -text
 third_party/tree-sitter-commonlisp-0.4.1/upstream/** whitespace=-blank-at-eol,-blank-at-eof,-space-before-tab,cr-at-eol conflict-marker-size=32
 third_party/tree-sitter-commonlisp-0.4.1/upstream/archives/** binary
 third_party/tree-sitter-commonlisp-0.4.1/patches/** whitespace=-blank-at-eol,-blank-at-eof,-space-before-tab,cr-at-eol
+# Scheme retains the complete authenticated authored tree and original archive.
+third_party/tree-sitter-scheme-0.24.7-1/** -text
+third_party/tree-sitter-scheme-0.24.7-1/upstream/** whitespace=-blank-at-eol,-blank-at-eof,-space-before-tab,cr-at-eol conflict-marker-size=32
+third_party/tree-sitter-scheme-0.24.7-1/upstream/archives/** binary
 # Assembly and GLSL retain authenticated source and patch-context bytes.
 third_party/tree-sitter-asm-0.24.0/** -text
 third_party/tree-sitter-asm-0.24.0/upstream/** whitespace=-blank-at-eol,-blank-at-eof,-space-before-tab,cr-at-eol conflict-marker-size=32

@@ -16,6 +16,7 @@ AGENTS.md
 
 # Authenticated upstream metadata is versioned input, not local operating context.
 !/source-inputs/cargo/*/AGENTS.md
+!/third_party/tree-sitter-scheme-0.24.7-1/upstream/AGENTS.md
 
 # Operating-system files
 .DS_Store

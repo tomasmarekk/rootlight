@@ -1,0 +1,2771 @@
+{
+  "schema": "rootlight.scheme-source-inventory/1",
+  "scope": "all_payload_files_excluding_the_two_self_describing_metadata_files",
+  "original_bytes_preserved": true,
+  "original_regular_file_count": 104,
+  "original_regular_file_bytes": 1219347,
+  "archive_file_modes_applied": false,
+  "directories": [
+    "notices",
+    "upstream",
+    "upstream/.github",
+    "upstream/.github/workflows",
+    "upstream/archives",
+    "upstream/bindings",
+    "upstream/bindings/c",
+    "upstream/bindings/go",
+    "upstream/bindings/node",
+    "upstream/bindings/python",
+    "upstream/bindings/python/tests",
+    "upstream/bindings/python/tree_sitter_scheme",
+    "upstream/bindings/rust",
+    "upstream/bindings/swift",
+    "upstream/bindings/swift/TreeSitterScheme",
+    "upstream/bindings/swift/TreeSitterSchemeTests",
+    "upstream/dialects",
+    "upstream/dialects/guile",
+    "upstream/dialects/guile/queries",
+    "upstream/dialects/guile/test",
+    "upstream/dialects/guile/test/corpus",
+    "upstream/dialects/chez",
+    "upstream/dialects/chez/queries",
+    "upstream/dialects/chez/test",
+    "upstream/dialects/chez/test/corpus",
+    "upstream/dialects/chicken",
+    "upstream/dialects/chicken/queries",
+    "upstream/dialects/chicken/src",
+    "upstream/dialects/chicken/test",
+    "upstream/dialects/chicken/test/corpus",
+    "upstream/dialects/r5rs",
+    "upstream/dialects/r5rs/queries",
+    "upstream/dialects/r5rs/test",
+    "upstream/dialects/r5rs/test/corpus",
+    "upstream/dialects/r6rs",
+    "upstream/dialects/r6rs/queries",
+    "upstream/dialects/r6rs/test",
+    "upstream/dialects/r6rs/test/corpus",
+    "upstream/dialects/r7rs",
+    "upstream/dialects/r7rs/queries",
+    "upstream/dialects/r7rs/test",
+    "upstream/dialects/r7rs/test/corpus",
+    "upstream/docs",
+    "upstream/grammar",
+    "upstream/metadata",
+    "upstream/queries",
+    "upstream/scripts",
+    "upstream/src",
+    "upstream/src/tree_sitter",
+    "upstream/test",
+    "upstream/test/corpus"
+  ],
+  "payload_files": [
+    {
+      "path": "build.rs",
+      "bytes": 511,
+      "sha256": "c9ba4fa579b91cf95155e6da34f03fd24a146e6898e411a94ef0cf5606a7e7b2",
+      "origin": {
+        "kind": "local_static_binding_or_document"
+      }
+    },
+    {
+      "path": "Cargo.toml",
+      "bytes": 409,
+      "sha256": "de048f254082bb40940a3e625cee645918567a7ea3ddcf10589ddec211565ba4",
+      "origin": {
+        "kind": "local_static_binding_or_document"
+      }
+    },
+    {
+      "path": "lib.rs",
+      "bytes": 543,
+      "sha256": "84eae89892eb669867188a1e091036ec39b2ee498a157ac7582665f7019e6150",
+      "origin": {
+        "kind": "local_static_binding_or_document"
+      }
+    },
+    {
+      "path": "notices/tree-sitter-runtime-LICENSE",
+      "bytes": 1080,
+      "sha256": "c5cfb43042b6b72045f4ba997834d0a7786d2793d91680868b5815b39f14fc78",
+      "origin": {
+        "kind": "exact_referenced_runtime_notice"
+      }
+    },
+    {
+      "path": "PATCHES.md",
+      "bytes": 3509,
+      "sha256": "6e7bba5c98b4b148634af001fc80fd6e2da8bbf0a004e4a4225c05d9a76f5feb",
+      "origin": {
+        "kind": "local_static_binding_or_document"
+      }
+    },
+    {
+      "path": "upstream/.editorconfig",
+      "bytes": 154,
+      "sha256": "1c23ccb31f1146cb07f62c49948f53b1229ba93516bb3d0c3769db67a950520f",
+      "origin": {
+        "kind": "exact_authored_member",
+        "archive": "tree-sitter-scheme-1b112d9571e4f62fb3d095d52a51f1da7756fb94.tar.gz",
+        "member": ".editorconfig",
+        "git_mode": "100644"
+      }
+    },
+    {
+      "path": "upstream/.gitattributes",
+      "bytes": 266,
+      "sha256": "fe17aaa634b5b625393d17915f507e4410961b663a2be9cd505503f57008fb17",
+      "origin": {
+        "kind": "exact_authored_member",
+        "archive": "tree-sitter-scheme-1b112d9571e4f62fb3d095d52a51f1da7756fb94.tar.gz",
+        "member": ".gitattributes",
+        "git_mode": "100644"
+      }
+    },
+    {
+      "path": "upstream/.github/workflows/build.yml",
+      "bytes": 700,
+      "sha256": "a640c09fd171d3caca7372d643ed67b0decc903c14658b2560bc51758acc47be",
+      "origin": {
+        "kind": "exact_authored_member",
+        "archive": "tree-sitter-scheme-1b112d9571e4f62fb3d095d52a51f1da7756fb94.tar.gz",
+        "member": ".github/workflows/build.yml",
+        "git_mode": "100644"
+      }
+    },
+    {
+      "path": "upstream/.github/workflows/test.yml",
+      "bytes": 2412,
+      "sha256": "5ac9207c75daf9a28b4b8a6b4baa0babec0d29dd887d8da65ae6cedc4cedaa50",
+      "origin": {
+        "kind": "exact_authored_member",
+        "archive": "tree-sitter-scheme-1b112d9571e4f62fb3d095d52a51f1da7756fb94.tar.gz",
+        "member": ".github/workflows/test.yml",
+        "git_mode": "100644"
+      }
+    },
+    {
+      "path": "upstream/.gitignore",
+      "bytes": 476,
+      "sha256": "434aec39a53d3aac553dab3e44e1f24669ce350e8280f090684e339a30789b4d",
+      "origin": {
+        "kind": "exact_authored_member",
+        "archive": "tree-sitter-scheme-1b112d9571e4f62fb3d095d52a51f1da7756fb94.tar.gz",
+        "member": ".gitignore",
+        "git_mode": "100644"
+      }
+    },
+    {
+      "path": "upstream/AGENTS.md",
+      "bytes": 898,
+      "sha256": "4d3c67a8a4b7e7d3e3b157f85199d363f65a9210525e30ea52dcb22c90f35027",
+      "origin": {
+        "kind": "exact_authored_member",
+        "archive": "tree-sitter-scheme-1b112d9571e4f62fb3d095d52a51f1da7756fb94.tar.gz",
+        "member": "AGENTS.md",
+        "git_mode": "100644"
+      }
+    },
+    {
+      "path": "upstream/archives/tree-sitter-scheme-1b112d9571e4f62fb3d095d52a51f1da7756fb94.tar.gz",
+      "bytes": 130084,
+      "sha256": "03d426ac358c702d11ef3fe543310402bc1976c7db62372abef23f0fb188277a",
+      "origin": {
+        "kind": "original_authored_archive"
+      }
+    },
+    {
+      "path": "upstream/archives/.gitattributes",
+      "bytes": 94,
+      "sha256": "53d52d5ec512864b11a8b301b386a7a408d266420707c43c008fcfabf9f7dc22",
+      "origin": {
+        "kind": "local_archive_storage_control",
+        "authored_upstream_file": false
+      }
+    },
+    {
+      "path": "upstream/binding.gyp",
+      "bytes": 647,
+      "sha256": "16726e0f0391637161773c768e848a5d117fb56bc3358406438f97c34d13b0f2",
+      "origin": {
+        "kind": "exact_authored_member",
+        "archive": "tree-sitter-scheme-1b112d9571e4f62fb3d095d52a51f1da7756fb94.tar.gz",
+        "member": "binding.gyp",
+        "git_mode": "100644"
+      }
+    },
+    {
+      "path": "upstream/bindings/c/tree-sitter-scheme.h",
+      "bytes": 246,
+      "sha256": "9b36aee66caf5cd8e13e0d21e8418aa122a836c4b76545f91f71979e8ac0dfd2",
+      "origin": {
+        "kind": "exact_authored_member",
+        "archive": "tree-sitter-scheme-1b112d9571e4f62fb3d095d52a51f1da7756fb94.tar.gz",
+        "member": "bindings/c/tree-sitter-scheme.h",
+        "git_mode": "100644"
+      }
+    },
+    {
+      "path": "upstream/bindings/c/tree-sitter-scheme.pc.in",
+      "bytes": 297,
+      "sha256": "b319cf7c7a96b939ac8c54510826372b52c93ca30c4e5ab4d4b4e1a4b28b0b2b",
+      "origin": {
+        "kind": "exact_authored_member",
+        "archive": "tree-sitter-scheme-1b112d9571e4f62fb3d095d52a51f1da7756fb94.tar.gz",
+        "member": "bindings/c/tree-sitter-scheme.pc.in",
+        "git_mode": "100644"
+      }
+    },
+    {
+      "path": "upstream/bindings/go/binding_test.go",
+      "bytes": 364,
+      "sha256": "5edde51450716b42eeeb4f7833c61b509dd49daef090f346fc6d79f04f23ac7a",
+      "origin": {
+        "kind": "exact_authored_member",
+        "archive": "tree-sitter-scheme-1b112d9571e4f62fb3d095d52a51f1da7756fb94.tar.gz",
+        "member": "bindings/go/binding_test.go",
+        "git_mode": "100644"
+      }
+    },
+    {
+      "path": "upstream/bindings/go/binding.go",
+      "bytes": 320,
+      "sha256": "79884313abc328531ba00916f302e4f43a56090143a74327b1d609c81f9a11ef",
+      "origin": {
+        "kind": "exact_authored_member",
+        "archive": "tree-sitter-scheme-1b112d9571e4f62fb3d095d52a51f1da7756fb94.tar.gz",
+        "member": "bindings/go/binding.go",
+        "git_mode": "100644"
+      }
+    },
+    {
+      "path": "upstream/bindings/node/binding_test.js",
+      "bytes": 250,
+      "sha256": "c35f2aaec5d06fa42a4cea226fa4cb841a04a7506e70086c2ea5d9fd67d8c482",
+      "origin": {
+        "kind": "exact_authored_member",
+        "archive": "tree-sitter-scheme-1b112d9571e4f62fb3d095d52a51f1da7756fb94.tar.gz",
+        "member": "bindings/node/binding_test.js",
+        "git_mode": "100644"
+      }
+    },
+    {
+      "path": "upstream/bindings/node/binding.cc",
+      "bytes": 585,
+      "sha256": "03bedcfcec225b1761442bfbf5be75c2a3da1168254fd7c8150f1c20d626efb0",
+      "origin": {
+        "kind": "exact_authored_member",
+        "archive": "tree-sitter-scheme-1b112d9571e4f62fb3d095d52a51f1da7756fb94.tar.gz",
+        "member": "bindings/node/binding.cc",
+        "git_mode": "100644"
+      }
+    },
+    {
+      "path": "upstream/bindings/node/index.d.ts",
+      "bytes": 452,
+      "sha256": "5f593f781f7cb12a3dcdcab2f9c063a77b9965f537bb01c5c05958947f5ff8fd",
+      "origin": {
+        "kind": "exact_authored_member",
+        "archive": "tree-sitter-scheme-1b112d9571e4f62fb3d095d52a51f1da7756fb94.tar.gz",
+        "member": "bindings/node/index.d.ts",
+        "git_mode": "100644"
+      }
+    },
+    {
+      "path": "upstream/bindings/node/index.js",
+      "bytes": 455,
+      "sha256": "6b0635901614d7e1684b22cde2fb822a5ad70a6e2307f1ed2cecc62ea9be8c7d",
+      "origin": {
+        "kind": "exact_authored_member",
+        "archive": "tree-sitter-scheme-1b112d9571e4f62fb3d095d52a51f1da7756fb94.tar.gz",
+        "member": "bindings/node/index.js",
+        "git_mode": "100644"
+      }
+    },
+    {
+      "path": "upstream/bindings/python/tests/test_binding.py",
+      "bytes": 296,
+      "sha256": "d5c331857c858184765454cc95337d3a4f440f6b606264a1573904eb1ff08fc4",
+      "origin": {
+        "kind": "exact_authored_member",
+        "archive": "tree-sitter-scheme-1b112d9571e4f62fb3d095d52a51f1da7756fb94.tar.gz",
+        "member": "bindings/python/tests/test_binding.py",
+        "git_mode": "100644"
+      }
+    },
+    {
+      "path": "upstream/bindings/python/tree_sitter_scheme/__init__.py",
+      "bytes": 1154,
+      "sha256": "ad4989bba5b71b306d195fb48e07fc9f8b2e968b0e041a67f2b1d499bffbeeef",
+      "origin": {
+        "kind": "exact_authored_member",
+        "archive": "tree-sitter-scheme-1b112d9571e4f62fb3d095d52a51f1da7756fb94.tar.gz",
+        "member": "bindings/python/tree_sitter_scheme/__init__.py",
+        "git_mode": "100644"
+      }
+    },
+    {
+      "path": "upstream/bindings/python/tree_sitter_scheme/__init__.pyi",
+      "bytes": 247,
+      "sha256": "a22c459bc957b1965661ae5c4708fa6eb6ea877eff7f3376acb13e7665fdfeb0",
+      "origin": {
+        "kind": "exact_authored_member",
+        "archive": "tree-sitter-scheme-1b112d9571e4f62fb3d095d52a51f1da7756fb94.tar.gz",
+        "member": "bindings/python/tree_sitter_scheme/__init__.pyi",
+        "git_mode": "100644"
+      }
+    },
+    {
+      "path": "upstream/bindings/python/tree_sitter_scheme/binding.c",
+      "bytes": 683,
+      "sha256": "7fc6172c0df3322cd5feb968338f7e2eaf3941b5b5c2438b976ff606d49830f8",
+      "origin": {
+        "kind": "exact_authored_member",
+        "archive": "tree-sitter-scheme-1b112d9571e4f62fb3d095d52a51f1da7756fb94.tar.gz",
+        "member": "bindings/python/tree_sitter_scheme/binding.c",
+        "git_mode": "100644"
+      }
+    },
+    {
+      "path": "upstream/bindings/python/tree_sitter_scheme/py.typed",
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "origin": {
+        "kind": "exact_authored_member",
+        "archive": "tree-sitter-scheme-1b112d9571e4f62fb3d095d52a51f1da7756fb94.tar.gz",
+        "member": "bindings/python/tree_sitter_scheme/py.typed",
+        "git_mode": "100644"
+      }
+    },
+    {
+      "path": "upstream/bindings/rust/build.rs",
+      "bytes": 660,
+      "sha256": "8c174c6af643282200d574f2a1baafba48b5e205b6b82191960f9c0538606f58",
+      "origin": {
+        "kind": "exact_authored_member",
+        "archive": "tree-sitter-scheme-1b112d9571e4f62fb3d095d52a51f1da7756fb94.tar.gz",
+        "member": "bindings/rust/build.rs",
+        "git_mode": "100644"
+      }
+    },
+    {
+      "path": "upstream/bindings/rust/lib.rs",
+      "bytes": 1951,
+      "sha256": "41296dd6aa9f97b51f3f1db6be57e76bff21f70291e450ce9be481c15968340e",
+      "origin": {
+        "kind": "exact_authored_member",
+        "archive": "tree-sitter-scheme-1b112d9571e4f62fb3d095d52a51f1da7756fb94.tar.gz",
+        "member": "bindings/rust/lib.rs",
+        "git_mode": "100644"
+      }
+    },
+    {
+      "path": "upstream/bindings/swift/TreeSitterScheme/scheme.h",
+      "bytes": 246,
+      "sha256": "9b36aee66caf5cd8e13e0d21e8418aa122a836c4b76545f91f71979e8ac0dfd2",
+      "origin": {
+        "kind": "exact_authored_member",
+        "archive": "tree-sitter-scheme-1b112d9571e4f62fb3d095d52a51f1da7756fb94.tar.gz",
+        "member": "bindings/swift/TreeSitterScheme/scheme.h",
+        "git_mode": "100644"
+      }
+    },
+    {
+      "path": "upstream/bindings/swift/TreeSitterSchemeTests/TreeSitterSchemeTests.swift",
+      "bytes": 367,
+      "sha256": "b1f5093ed0325d6d4377e630eee91d483e6526d5f96592f33577c7317bd0ca6a",
+      "origin": {
+        "kind": "exact_authored_member",
+        "archive": "tree-sitter-scheme-1b112d9571e4f62fb3d095d52a51f1da7756fb94.tar.gz",
+        "member": "bindings/swift/TreeSitterSchemeTests/TreeSitterSchemeTests.swift",
+        "git_mode": "100644"
+      }
+    },
+    {
+      "path": "upstream/Cargo.lock",
+      "bytes": 5627,
+      "sha256": "7ba4bf534b3f6ef4152b83e7256c2cec7b00ff80ad9d78e3a36038d25ca1cfd6",
+      "origin": {
+        "kind": "exact_authored_member",
+        "archive": "tree-sitter-scheme-1b112d9571e4f62fb3d095d52a51f1da7756fb94.tar.gz",
+        "member": "Cargo.lock",
+        "git_mode": "100644"
+      }
+    },
+    {
+      "path": "upstream/Cargo.toml",
+      "bytes": 654,
+      "sha256": "a02648f9aa1bd4f775c03ebd7c5e3f2fd3976829e9ee4893abe5ed94f1dde6a6",
+      "origin": {
+        "kind": "exact_authored_member",
+        "archive": "tree-sitter-scheme-1b112d9571e4f62fb3d095d52a51f1da7756fb94.tar.gz",
+        "member": "Cargo.toml",
+        "git_mode": "100644"
+      }
+    },
+    {
+      "path": "upstream/CMakeLists.txt",
+      "bytes": 2449,
+      "sha256": "ddb354b242cce2bf8a7c801a4035fc832d0b741acfff51efbde278115ffcac07",
+      "origin": {
+        "kind": "exact_authored_member",
+        "archive": "tree-sitter-scheme-1b112d9571e4f62fb3d095d52a51f1da7756fb94.tar.gz",
+        "member": "CMakeLists.txt",
+        "git_mode": "100644"
+      }
+    },
+    {
+      "path": "upstream/CONTRIBUTING.md",
+      "bytes": 1613,
+      "sha256": "c2b8cdb53a111b6b3634bf4a419d06f42d898e91d03f59afd39839a7773635de",
+      "origin": {
+        "kind": "exact_authored_member",
+        "archive": "tree-sitter-scheme-1b112d9571e4f62fb3d095d52a51f1da7756fb94.tar.gz",
+        "member": "CONTRIBUTING.md",
+        "git_mode": "100644"
+      }
+    },
+    {
+      "path": "upstream/dialects/guile/grammar.js",
+      "bytes": 4071,
+      "sha256": "6781317aaa66e0613bc3a0deb1cc40f1e452034c3ac6f29e382acd297b60f7b5",
+      "origin": {
+        "kind": "exact_authored_member",
+        "archive": "tree-sitter-scheme-1b112d9571e4f62fb3d095d52a51f1da7756fb94.tar.gz",
+        "member": "dialects/guile/grammar.js",
+        "git_mode": "100644"
+      }
+    },
+    {
+      "path": "upstream/dialects/guile/queries/highlights.scm",
+      "bytes": 471,
+      "sha256": "1536c1d389a89408f5de9a8a9bea46f9d8a72b9c4a1fa40b84ba6f7b63c13ba3",
+      "origin": {
+        "kind": "exact_authored_member",
+        "archive": "tree-sitter-scheme-1b112d9571e4f62fb3d095d52a51f1da7756fb94.tar.gz",
+        "member": "dialects/guile/queries/highlights.scm",
+        "git_mode": "100644"
+      }
+    },
+    {
+      "path": "upstream/dialects/guile/test/corpus/guile.scm",
+      "bytes": 6658,
+      "sha256": "d616116a5643c16db627db5e4ffbd4392e18bd809a7558d9bc02cfa87b9309fd",
+      "origin": {
+        "kind": "exact_authored_member",
+        "archive": "tree-sitter-scheme-1b112d9571e4f62fb3d095d52a51f1da7756fb94.tar.gz",
+        "member": "dialects/guile/test/corpus/guile.scm",
+        "git_mode": "100644"
+      }
+    },
+    {
+      "path": "upstream/dialects/guile/tree-sitter.json",
+      "bytes": 479,
+      "sha256": "cc7b6243a1b89de0e3b765ef0b870db2434efad006e11e30971c5f4205074708",
+      "origin": {
+        "kind": "exact_authored_member",
+        "archive": "tree-sitter-scheme-1b112d9571e4f62fb3d095d52a51f1da7756fb94.tar.gz",
+        "member": "dialects/guile/tree-sitter.json",
+        "git_mode": "100644"
+      }
+    },
+    {
+      "path": "upstream/dialects/chez/grammar.js",
+      "bytes": 5049,
+      "sha256": "6c937feb4a8684c0cd614206aaffd832a5c2a7e648852cc2d2de166cc8310565",
+      "origin": {
+        "kind": "exact_authored_member",
+        "archive": "tree-sitter-scheme-1b112d9571e4f62fb3d095d52a51f1da7756fb94.tar.gz",
+        "member": "dialects/chez/grammar.js",
+        "git_mode": "100644"
+      }
+    },
+    {
+      "path": "upstream/dialects/chez/queries/highlights.scm",
+      "bytes": 477,
+      "sha256": "57378cb6ef84b841053811fd70a2fffd22217ab1e8f068a104d525687ac120e1",
+      "origin": {
+        "kind": "exact_authored_member",
+        "archive": "tree-sitter-scheme-1b112d9571e4f62fb3d095d52a51f1da7756fb94.tar.gz",
+        "member": "dialects/chez/queries/highlights.scm",
+        "git_mode": "100644"
+      }
+    },
+    {
+      "path": "upstream/dialects/chez/test/corpus/chez.scm",
+      "bytes": 6824,
+      "sha256": "f63d12bf01ff323e644498c0f5a2d89214e4900ba11a6d2bd5d09612068b2d85",
+      "origin": {
+        "kind": "exact_authored_member",
+        "archive": "tree-sitter-scheme-1b112d9571e4f62fb3d095d52a51f1da7756fb94.tar.gz",
+        "member": "dialects/chez/test/corpus/chez.scm",
+        "git_mode": "100644"
+      }
+    },
+    {
+      "path": "upstream/dialects/chez/tree-sitter.json",
+      "bytes": 474,
+      "sha256": "ed418e79a93553f78bb7e3dbb43632846e984ac9530ad120265cdb9f69f3e3b6",
+      "origin": {
+        "kind": "exact_authored_member",
+        "archive": "tree-sitter-scheme-1b112d9571e4f62fb3d095d52a51f1da7756fb94.tar.gz",
+        "member": "dialects/chez/tree-sitter.json",
+        "git_mode": "100644"
+      }
+    },
+    {
+      "path": "upstream/dialects/chicken/grammar.js",
+      "bytes": 5624,
+      "sha256": "617192d652a5f260f322a0544c8ed5934454f5d96882aa66bcef8e3adafe40bb",
+      "origin": {
+        "kind": "exact_authored_member",
+        "archive": "tree-sitter-scheme-1b112d9571e4f62fb3d095d52a51f1da7756fb94.tar.gz",
+        "member": "dialects/chicken/grammar.js",
+        "git_mode": "100644"
+      }
+    },
+    {
+      "path": "upstream/dialects/chicken/queries/highlights.scm",
+      "bytes": 627,
+      "sha256": "59447d0b83e33256554a0a21e0fd0d114e28e3b602dd988abad7c75a5071b08d",
+      "origin": {
+        "kind": "exact_authored_member",
+        "archive": "tree-sitter-scheme-1b112d9571e4f62fb3d095d52a51f1da7756fb94.tar.gz",
+        "member": "dialects/chicken/queries/highlights.scm",
+        "git_mode": "100644"
+      }
+    },
+    {
+      "path": "upstream/dialects/chicken/src/scanner.c",
+      "bytes": 8679,
+      "sha256": "6f5dfbed76a305cca6469233164cb55b693ba8787741d560217abe1550602a14",
+      "origin": {
+        "kind": "exact_authored_member",
+        "archive": "tree-sitter-scheme-1b112d9571e4f62fb3d095d52a51f1da7756fb94.tar.gz",
+        "member": "dialects/chicken/src/scanner.c",
+        "git_mode": "100644"
+      }
+    },
+    {
+      "path": "upstream/dialects/chicken/test/corpus/chicken.scm",
+      "bytes": 9180,
+      "sha256": "db0d37302628d4b634a6d1176f00418e264aa4445643334b347ab74135932931",
+      "origin": {
+        "kind": "exact_authored_member",
+        "archive": "tree-sitter-scheme-1b112d9571e4f62fb3d095d52a51f1da7756fb94.tar.gz",
+        "member": "dialects/chicken/test/corpus/chicken.scm",
+        "git_mode": "100644"
+      }
+    },
+    {
+      "path": "upstream/dialects/chicken/test/incremental.c",
+      "bytes": 5405,
+      "sha256": "c13c67de2ed9ad49736cebf84a822be5e75dfbac75852ee74623520b6344a1ec",
+      "origin": {
+        "kind": "exact_authored_member",
+        "archive": "tree-sitter-scheme-1b112d9571e4f62fb3d095d52a51f1da7756fb94.tar.gz",
+        "member": "dialects/chicken/test/incremental.c",
+        "git_mode": "100644"
+      }
+    },
+    {
+      "path": "upstream/dialects/chicken/tree-sitter.json",
+      "bytes": 477,
+      "sha256": "302200bd8849f6ad81fd37e7f7fda75fa8b497b80db31158a93a3ecee0a8e26f",
+      "origin": {
+        "kind": "exact_authored_member",
+        "archive": "tree-sitter-scheme-1b112d9571e4f62fb3d095d52a51f1da7756fb94.tar.gz",
+        "member": "dialects/chicken/tree-sitter.json",
+        "git_mode": "100644"
+      }
+    },
+    {
+      "path": "upstream/dialects/r5rs/grammar.js",
+      "bytes": 1980,
+      "sha256": "10e3756be8ddf5fcc3040d3a06df8f32572d2ed35643514ed996389877cbe5a9",
+      "origin": {
+        "kind": "exact_authored_member",
+        "archive": "tree-sitter-scheme-1b112d9571e4f62fb3d095d52a51f1da7756fb94.tar.gz",
+        "member": "dialects/r5rs/grammar.js",
+        "git_mode": "100644"
+      }
+    },
+    {
+      "path": "upstream/dialects/r5rs/queries/highlights.scm",
+      "bytes": 2737,
+      "sha256": "f1b53cf2b0f820a90434976df58ea1a000f97e4b8c6e789b47e825e99aab22b8",
+      "origin": {
+        "kind": "exact_authored_member",
+        "archive": "tree-sitter-scheme-1b112d9571e4f62fb3d095d52a51f1da7756fb94.tar.gz",
+        "member": "dialects/r5rs/queries/highlights.scm",
+        "git_mode": "100644"
+      }
+    },
+    {
+      "path": "upstream/dialects/r5rs/test/corpus/r5rs.scm",
+      "bytes": 2039,
+      "sha256": "1ec674b1cefbef23fc7384398adf384d34d9ad3c14d5c6a1e1894c62ec9e5fcc",
+      "origin": {
+        "kind": "exact_authored_member",
+        "archive": "tree-sitter-scheme-1b112d9571e4f62fb3d095d52a51f1da7756fb94.tar.gz",
+        "member": "dialects/r5rs/test/corpus/r5rs.scm",
+        "git_mode": "100644"
+      }
+    },
+    {
+      "path": "upstream/dialects/r5rs/tree-sitter.json",
+      "bytes": 474,
+      "sha256": "45527a8bc8701e4ed4c5d9d3d933d08469634e28e44f3c468a144238a484aac7",
+      "origin": {
+        "kind": "exact_authored_member",
+        "archive": "tree-sitter-scheme-1b112d9571e4f62fb3d095d52a51f1da7756fb94.tar.gz",
+        "member": "dialects/r5rs/tree-sitter.json",
+        "git_mode": "100644"
+      }
+    },
+    {
+      "path": "upstream/dialects/r6rs/grammar.js",
+      "bytes": 2579,
+      "sha256": "98133b8a68ec2487644d4828d22f7ef0e69788f69512474992bf41a46ffccdb1",
+      "origin": {
+        "kind": "exact_authored_member",
+        "archive": "tree-sitter-scheme-1b112d9571e4f62fb3d095d52a51f1da7756fb94.tar.gz",
+        "member": "dialects/r6rs/grammar.js",
+        "git_mode": "100644"
+      }
+    },
+    {
+      "path": "upstream/dialects/r6rs/queries/highlights.scm",
+      "bytes": 282,
+      "sha256": "9b1714972cfb3e0002d4ab89617029ae7c29df363315bff0f07f813ea8cdf7d6",
+      "origin": {
+        "kind": "exact_authored_member",
+        "archive": "tree-sitter-scheme-1b112d9571e4f62fb3d095d52a51f1da7756fb94.tar.gz",
+        "member": "dialects/r6rs/queries/highlights.scm",
+        "git_mode": "100644"
+      }
+    },
+    {
+      "path": "upstream/dialects/r6rs/test/corpus/r6rs.scm",
+      "bytes": 2257,
+      "sha256": "c32de8ba0aed7d2ce967cd4f5e59ec68c75407a2a2a77b86411d5ccc78423a3d",
+      "origin": {
+        "kind": "exact_authored_member",
+        "archive": "tree-sitter-scheme-1b112d9571e4f62fb3d095d52a51f1da7756fb94.tar.gz",
+        "member": "dialects/r6rs/test/corpus/r6rs.scm",
+        "git_mode": "100644"
+      }
+    },
+    {
+      "path": "upstream/dialects/r6rs/tree-sitter.json",
+      "bytes": 474,
+      "sha256": "b7e0e38a9eaa0b876f64fdc8d59b0ea03ba66bf2dda10ec0bb986a5469e77925",
+      "origin": {
+        "kind": "exact_authored_member",
+        "archive": "tree-sitter-scheme-1b112d9571e4f62fb3d095d52a51f1da7756fb94.tar.gz",
+        "member": "dialects/r6rs/tree-sitter.json",
+        "git_mode": "100644"
+      }
+    },
+    {
+      "path": "upstream/dialects/r7rs/grammar.js",
+      "bytes": 2436,
+      "sha256": "0b3ed9468b8f2aeb8bf180c090c907d4164f4118df4f33a9d67533a230cc78d3",
+      "origin": {
+        "kind": "exact_authored_member",
+        "archive": "tree-sitter-scheme-1b112d9571e4f62fb3d095d52a51f1da7756fb94.tar.gz",
+        "member": "dialects/r7rs/grammar.js",
+        "git_mode": "100644"
+      }
+    },
+    {
+      "path": "upstream/dialects/r7rs/queries/highlights.scm",
+      "bytes": 327,
+      "sha256": "ced4e61769f10edb4c63b544c60252d2200a5cc88f4707295634660a21d8cb5d",
+      "origin": {
+        "kind": "exact_authored_member",
+        "archive": "tree-sitter-scheme-1b112d9571e4f62fb3d095d52a51f1da7756fb94.tar.gz",
+        "member": "dialects/r7rs/queries/highlights.scm",
+        "git_mode": "100644"
+      }
+    },
+    {
+      "path": "upstream/dialects/r7rs/test/corpus/r7rs.scm",
+      "bytes": 2247,
+      "sha256": "608d8aa9a2ad0411cfca8907f5107b6196ee838047a31395bfce30439d009528",
+      "origin": {
+        "kind": "exact_authored_member",
+        "archive": "tree-sitter-scheme-1b112d9571e4f62fb3d095d52a51f1da7756fb94.tar.gz",
+        "member": "dialects/r7rs/test/corpus/r7rs.scm",
+        "git_mode": "100644"
+      }
+    },
+    {
+      "path": "upstream/dialects/r7rs/tree-sitter.json",
+      "bytes": 480,
+      "sha256": "de3ee3ab5ed148576ea28c0856e5b7febc69e923cf3c433e16e03c6098d50d3a",
+      "origin": {
+        "kind": "exact_authored_member",
+        "archive": "tree-sitter-scheme-1b112d9571e4f62fb3d095d52a51f1da7756fb94.tar.gz",
+        "member": "dialects/r7rs/tree-sitter.json",
+        "git_mode": "100644"
+      }
+    },
+    {
+      "path": "upstream/docs/design.md",
+      "bytes": 11657,
+      "sha256": "32297f694305718f2261022b5d254ca4f7de32a32614906dc10e89de0e8dbac5",
+      "origin": {
+        "kind": "exact_authored_member",
+        "archive": "tree-sitter-scheme-1b112d9571e4f62fb3d095d52a51f1da7756fb94.tar.gz",
+        "member": "docs/design.md",
+        "git_mode": "100644"
+      }
+    },
+    {
+      "path": "upstream/docs/dialect-workflow.md",
+      "bytes": 4268,
+      "sha256": "02e1e34d0cd81251343e4f7ec70b6115d65a8ac1190729596e597f928615576b",
+      "origin": {
+        "kind": "exact_authored_member",
+        "archive": "tree-sitter-scheme-1b112d9571e4f62fb3d095d52a51f1da7756fb94.tar.gz",
+        "member": "docs/dialect-workflow.md",
+        "git_mode": "100644"
+      }
+    },
+    {
+      "path": "upstream/docs/guile-scheme-syntax.md",
+      "bytes": 18145,
+      "sha256": "3759c6836faa761233283ec74ac4a2f896e6b3babe9754eac8877d43bd9604f8",
+      "origin": {
+        "kind": "exact_authored_member",
+        "archive": "tree-sitter-scheme-1b112d9571e4f62fb3d095d52a51f1da7756fb94.tar.gz",
+        "member": "docs/guile-scheme-syntax.md",
+        "git_mode": "100644"
+      }
+    },
+    {
+      "path": "upstream/docs/chez-scheme-syntax.md",
+      "bytes": 20422,
+      "sha256": "d95b0c56eb1cb04f668997028bf7a999b621e1b08b96e9d1f8ecb679c49d95d3",
+      "origin": {
+        "kind": "exact_authored_member",
+        "archive": "tree-sitter-scheme-1b112d9571e4f62fb3d095d52a51f1da7756fb94.tar.gz",
+        "member": "docs/chez-scheme-syntax.md",
+        "git_mode": "100644"
+      }
+    },
+    {
+      "path": "upstream/docs/chicken-scheme-syntax.md",
+      "bytes": 22416,
+      "sha256": "9ab5f776973c94dacf28482c73c87a6aab1ec3b2f3a0d12c3b54577d93529b0d",
+      "origin": {
+        "kind": "exact_authored_member",
+        "archive": "tree-sitter-scheme-1b112d9571e4f62fb3d095d52a51f1da7756fb94.tar.gz",
+        "member": "docs/chicken-scheme-syntax.md",
+        "git_mode": "100644"
+      }
+    },
+    {
+      "path": "upstream/docs/mental_model.md",
+      "bytes": 4375,
+      "sha256": "176dc6b90cd966ed3cf5f1b1ead73e114fcd80f4a028a04d20f5f6aee500de9a",
+      "origin": {
+        "kind": "exact_authored_member",
+        "archive": "tree-sitter-scheme-1b112d9571e4f62fb3d095d52a51f1da7756fb94.tar.gz",
+        "member": "docs/mental_model.md",
+        "git_mode": "100644"
+      }
+    },
+    {
+      "path": "upstream/go.mod",
+      "bytes": 113,
+      "sha256": "45b0ff8a1590c32ed7c81f7791c21271048167cb244a49e5a866bdc6551c3069",
+      "origin": {
+        "kind": "exact_authored_member",
+        "archive": "tree-sitter-scheme-1b112d9571e4f62fb3d095d52a51f1da7756fb94.tar.gz",
+        "member": "go.mod",
+        "git_mode": "100644"
+      }
+    },
+    {
+      "path": "upstream/grammar.js",
+      "bytes": 4459,
+      "sha256": "5f81aadf9fa3583391801c09dad0db55db5d59e80ddc473f111d323245478bf3",
+      "origin": {
+        "kind": "exact_authored_member",
+        "archive": "tree-sitter-scheme-1b112d9571e4f62fb3d095d52a51f1da7756fb94.tar.gz",
+        "member": "grammar.js",
+        "git_mode": "100644"
+      }
+    },
+    {
+      "path": "upstream/grammar/abbreviations.js",
+      "bytes": 830,
+      "sha256": "012ac1ad6e2b37253d50d865b2297cfa891926046517063f5c827cbd78945e75",
+      "origin": {
+        "kind": "exact_authored_member",
+        "archive": "tree-sitter-scheme-1b112d9571e4f62fb3d095d52a51f1da7756fb94.tar.gz",
+        "member": "grammar/abbreviations.js",
+        "git_mode": "100644"
+      }
+    },
+    {
+      "path": "upstream/grammar/collections.js",
+      "bytes": 2659,
+      "sha256": "485eaca1eafa3dfd1660e9ffae172bfbf652f9169277491b94b3311c84bf2fa7",
+      "origin": {
+        "kind": "exact_authored_member",
+        "archive": "tree-sitter-scheme-1b112d9571e4f62fb3d095d52a51f1da7756fb94.tar.gz",
+        "member": "grammar/collections.js",
+        "git_mode": "100644"
+      }
+    },
+    {
+      "path": "upstream/grammar/core.js",
+      "bytes": 778,
+      "sha256": "b281f12cc19c4b791b697828ca9dc7fbe0abc174ae5c369c0a3924c94e754e32",
+      "origin": {
+        "kind": "exact_authored_member",
+        "archive": "tree-sitter-scheme-1b112d9571e4f62fb3d095d52a51f1da7756fb94.tar.gz",
+        "member": "grammar/core.js",
+        "git_mode": "100644"
+      }
+    },
+    {
+      "path": "upstream/grammar/hash-forms.js",
+      "bytes": 2332,
+      "sha256": "b74a546e61a25105626b0907595be136547ea1f9d6e769d484c926c5d0418b53",
+      "origin": {
+        "kind": "exact_authored_member",
+        "archive": "tree-sitter-scheme-1b112d9571e4f62fb3d095d52a51f1da7756fb94.tar.gz",
+        "member": "grammar/hash-forms.js",
+        "git_mode": "100644"
+      }
+    },
+    {
+      "path": "upstream/grammar/index.js",
+      "bytes": 1280,
+      "sha256": "cbec8f18863dd2e60d2b02b1ffded0ade6eb7cf08cbb45421c79d1206dd0a017",
+      "origin": {
+        "kind": "exact_authored_member",
+        "archive": "tree-sitter-scheme-1b112d9571e4f62fb3d095d52a51f1da7756fb94.tar.gz",
+        "member": "grammar/index.js",
+        "git_mode": "100644"
+      }
+    },
+    {
+      "path": "upstream/grammar/intertoken.js",
+      "bytes": 2325,
+      "sha256": "87a831ff9b2545322970634e684089b8b4ff80ff349fd23486ffb96c09820c08",
+      "origin": {
+        "kind": "exact_authored_member",
+        "archive": "tree-sitter-scheme-1b112d9571e4f62fb3d095d52a51f1da7756fb94.tar.gz",
+        "member": "grammar/intertoken.js",
+        "git_mode": "100644"
+      }
+    },
+    {
+      "path": "upstream/grammar/literals.js",
+      "bytes": 3270,
+      "sha256": "866430c95c7ab9ef57451636a70241df120dc259d56be111b8bf3cd737e304c2",
+      "origin": {
+        "kind": "exact_authored_member",
+        "archive": "tree-sitter-scheme-1b112d9571e4f62fb3d095d52a51f1da7756fb94.tar.gz",
+        "member": "grammar/literals.js",
+        "git_mode": "100644"
+      }
+    },
+    {
+      "path": "upstream/grammar/number.js",
+      "bytes": 9482,
+      "sha256": "75ff705f4e4de81119fb4c004625d391b639dcdb258c8c70d31c3e7f7a0a4eab",
+      "origin": {
+        "kind": "exact_authored_member",
+        "archive": "tree-sitter-scheme-1b112d9571e4f62fb3d095d52a51f1da7756fb94.tar.gz",
+        "member": "grammar/number.js",
+        "git_mode": "100644"
+      }
+    },
+    {
+      "path": "upstream/grammar/string.js",
+      "bytes": 1915,
+      "sha256": "9e9b13432ff13f39697d21687ecb42fe13695af5b3d8e6e72646d75dedc90f05",
+      "origin": {
+        "kind": "exact_authored_member",
+        "archive": "tree-sitter-scheme-1b112d9571e4f62fb3d095d52a51f1da7756fb94.tar.gz",
+        "member": "grammar/string.js",
+        "git_mode": "100644"
+      }
+    },
+    {
+      "path": "upstream/grammar/symbol.js",
+      "bytes": 6278,
+      "sha256": "07f9af60c26e0d6c325adcb362bc6f491c116a42d2a850228a5a5231723e016c",
+      "origin": {
+        "kind": "exact_authored_member",
+        "archive": "tree-sitter-scheme-1b112d9571e4f62fb3d095d52a51f1da7756fb94.tar.gz",
+        "member": "grammar/symbol.js",
+        "git_mode": "100644"
+      }
+    },
+    {
+      "path": "upstream/LICENSE",
+      "bytes": 1062,
+      "sha256": "cc35bd4a973bf6067558e88b56d9a369e02c36e240b2b537aef8f751b7808fd7",
+      "origin": {
+        "kind": "exact_authored_member",
+        "archive": "tree-sitter-scheme-1b112d9571e4f62fb3d095d52a51f1da7756fb94.tar.gz",
+        "member": "LICENSE",
+        "git_mode": "100644"
+      }
+    },
+    {
+      "path": "upstream/Makefile",
+      "bytes": 3178,
+      "sha256": "34c31fb6bd34cac03daefe3c6a7376e2106606b11b956714a2d8b2796725f123",
+      "origin": {
+        "kind": "exact_authored_member",
+        "archive": "tree-sitter-scheme-1b112d9571e4f62fb3d095d52a51f1da7756fb94.tar.gz",
+        "member": "Makefile",
+        "git_mode": "100644"
+      }
+    },
+    {
+      "path": "upstream/metadata/github-commit.json",
+      "bytes": 1621,
+      "sha256": "91be4f2984a88753b8bf357dbdfaf1d3b9ab9e6a6ac503f68389b264c9bb42cd",
+      "origin": {
+        "kind": "original_public_git_metadata"
+      }
+    },
+    {
+      "path": "upstream/metadata/github-tree.json",
+      "bytes": 35416,
+      "sha256": "648647d90bf3624982cd9c10e2a28109b630318980442858486afbe33283d3eb",
+      "origin": {
+        "kind": "original_public_git_metadata"
+      }
+    },
+    {
+      "path": "upstream/nodes.md",
+      "bytes": 796,
+      "sha256": "24ab935092f2552ed65d14139bca579986bdaa50401345fe54107cadd5e61c92",
+      "origin": {
+        "kind": "exact_authored_member",
+        "archive": "tree-sitter-scheme-1b112d9571e4f62fb3d095d52a51f1da7756fb94.tar.gz",
+        "member": "nodes.md",
+        "git_mode": "100644"
+      }
+    },
+    {
+      "path": "upstream/package-lock.json",
+      "bytes": 12849,
+      "sha256": "9fb1cb627851a64d5cb09724202fd694813064320f3d08c93f8c349404bb13b9",
+      "origin": {
+        "kind": "exact_authored_member",
+        "archive": "tree-sitter-scheme-1b112d9571e4f62fb3d095d52a51f1da7756fb94.tar.gz",
+        "member": "package-lock.json",
+        "git_mode": "100644"
+      }
+    },
+    {
+      "path": "upstream/package.json",
+      "bytes": 2492,
+      "sha256": "4268d81214bfeff3fc9f742f050c737a5ed91c6110e582d1510fcd21e012ca5c",
+      "origin": {
+        "kind": "exact_authored_member",
+        "archive": "tree-sitter-scheme-1b112d9571e4f62fb3d095d52a51f1da7756fb94.tar.gz",
+        "member": "package.json",
+        "git_mode": "100644"
+      }
+    },
+    {
+      "path": "upstream/Package.swift",
+      "bytes": 1054,
+      "sha256": "7a25f65e46010a27e468a0fa277a5b9274613d53355377d14e4175665bad9720",
+      "origin": {
+        "kind": "exact_authored_member",
+        "archive": "tree-sitter-scheme-1b112d9571e4f62fb3d095d52a51f1da7756fb94.tar.gz",
+        "member": "Package.swift",
+        "git_mode": "100644"
+      }
+    },
+    {
+      "path": "upstream/pnpm-lock.yaml",
+      "bytes": 6516,
+      "sha256": "d937addbd2b80f51511020b178dd8ef70a76cc1c372fe93e3f0a1a8c5e9d93ec",
+      "origin": {
+        "kind": "exact_authored_member",
+        "archive": "tree-sitter-scheme-1b112d9571e4f62fb3d095d52a51f1da7756fb94.tar.gz",
+        "member": "pnpm-lock.yaml",
+        "git_mode": "100644"
+      }
+    },
+    {
+      "path": "upstream/pyproject.toml",
+      "bytes": 733,
+      "sha256": "094623f7f27bf2e0164424789815ce117459844901968488f802185350f50a80",
+      "origin": {
+        "kind": "exact_authored_member",
+        "archive": "tree-sitter-scheme-1b112d9571e4f62fb3d095d52a51f1da7756fb94.tar.gz",
+        "member": "pyproject.toml",
+        "git_mode": "100644"
+      }
+    },
+    {
+      "path": "upstream/queries/highlights.scm",
+      "bytes": 3288,
+      "sha256": "6f042dd6e6d1bab5531019fd1caf995ba8830661bf1d568c6c4d3f41ca030c1b",
+      "origin": {
+        "kind": "exact_authored_member",
+        "archive": "tree-sitter-scheme-1b112d9571e4f62fb3d095d52a51f1da7756fb94.tar.gz",
+        "member": "queries/highlights.scm",
+        "git_mode": "100644"
+      }
+    },
+    {
+      "path": "upstream/README.md",
+      "bytes": 4955,
+      "sha256": "3c261678417d58d1615808913bf027a2cea6cdc8c6d0f5038541324dd757df11",
+      "origin": {
+        "kind": "exact_authored_member",
+        "archive": "tree-sitter-scheme-1b112d9571e4f62fb3d095d52a51f1da7756fb94.tar.gz",
+        "member": "README.md",
+        "git_mode": "100644"
+      }
+    },
+    {
+      "path": "upstream/scripts/run-dialect.js",
+      "bytes": 2504,
+      "sha256": "d4f37823c1d78c0cdd2fc4386aa5a537194643963f17ac6bb102d5fd1b10a572",
+      "origin": {
+        "kind": "exact_authored_member",
+        "archive": "tree-sitter-scheme-1b112d9571e4f62fb3d095d52a51f1da7756fb94.tar.gz",
+        "member": "scripts/run-dialect.js",
+        "git_mode": "100644"
+      }
+    },
+    {
+      "path": "upstream/scripts/test-chicken-incremental.js",
+      "bytes": 1439,
+      "sha256": "e7654b9cf31e3625748e564c1d42f8e754dc0da8dea3a89767d46938da9e80e0",
+      "origin": {
+        "kind": "exact_authored_member",
+        "archive": "tree-sitter-scheme-1b112d9571e4f62fb3d095d52a51f1da7756fb94.tar.gz",
+        "member": "scripts/test-chicken-incremental.js",
+        "git_mode": "100644"
+      }
+    },
+    {
+      "path": "upstream/scripts/write-guile-whitespace-corpus.js",
+      "bytes": 1386,
+      "sha256": "1c3e16be41050494dee452c5908a52dacfe7fff14bacf9a296d22f2617ae3598",
+      "origin": {
+        "kind": "exact_authored_member",
+        "archive": "tree-sitter-scheme-1b112d9571e4f62fb3d095d52a51f1da7756fb94.tar.gz",
+        "member": "scripts/write-guile-whitespace-corpus.js",
+        "git_mode": "100644"
+      }
+    },
+    {
+      "path": "upstream/scripts/write-chez-line-ending-corpus.js",
+      "bytes": 1169,
+      "sha256": "2158f7d1ef78f9a8e52c077a958705bf534b4cc0a6858a7b26ab93cfde47732d",
+      "origin": {
+        "kind": "exact_authored_member",
+        "archive": "tree-sitter-scheme-1b112d9571e4f62fb3d095d52a51f1da7756fb94.tar.gz",
+        "member": "scripts/write-chez-line-ending-corpus.js",
+        "git_mode": "100644"
+      }
+    },
+    {
+      "path": "upstream/scripts/write-chicken-scanner-corpus.js",
+      "bytes": 2181,
+      "sha256": "ad3a6494b3bd0caa07132a644a2c56d56280616f884416a618ea036ed96e9052",
+      "origin": {
+        "kind": "exact_authored_member",
+        "archive": "tree-sitter-scheme-1b112d9571e4f62fb3d095d52a51f1da7756fb94.tar.gz",
+        "member": "scripts/write-chicken-scanner-corpus.js",
+        "git_mode": "100644"
+      }
+    },
+    {
+      "path": "upstream/scripts/write-r6rs-line-ending-corpus.js",
+      "bytes": 1213,
+      "sha256": "bade33e113001ff1851bfc7a818120109c2f5c45c012ce4d16905f1c2086cf4a",
+      "origin": {
+        "kind": "exact_authored_member",
+        "archive": "tree-sitter-scheme-1b112d9571e4f62fb3d095d52a51f1da7756fb94.tar.gz",
+        "member": "scripts/write-r6rs-line-ending-corpus.js",
+        "git_mode": "100644"
+      }
+    },
+    {
+      "path": "upstream/scripts/write-r7rs-line-ending-corpus.js",
+      "bytes": 905,
+      "sha256": "fc44c72ddc6405d68f215f4a609bc7af108e4220da54baf2002241de676e6760",
+      "origin": {
+        "kind": "exact_authored_member",
+        "archive": "tree-sitter-scheme-1b112d9571e4f62fb3d095d52a51f1da7756fb94.tar.gz",
+        "member": "scripts/write-r7rs-line-ending-corpus.js",
+        "git_mode": "100644"
+      }
+    },
+    {
+      "path": "upstream/setup.py",
+      "bytes": 1761,
+      "sha256": "e5c126a47e57308f0bc90dec0b26643d3e9eda88207d336749007136f8cd4b86",
+      "origin": {
+        "kind": "exact_authored_member",
+        "archive": "tree-sitter-scheme-1b112d9571e4f62fb3d095d52a51f1da7756fb94.tar.gz",
+        "member": "setup.py",
+        "git_mode": "100644"
+      }
+    },
+    {
+      "path": "upstream/shell.nix",
+      "bytes": 166,
+      "sha256": "9f90b84029625905f43cd72862559b62bae8a6f48cdf3dcedb5f8c669da322cd",
+      "origin": {
+        "kind": "exact_authored_member",
+        "archive": "tree-sitter-scheme-1b112d9571e4f62fb3d095d52a51f1da7756fb94.tar.gz",
+        "member": "shell.nix",
+        "git_mode": "100644"
+      }
+    },
+    {
+      "path": "upstream/src/grammar.json",
+      "bytes": 567658,
+      "sha256": "244bfcaa227cf3f6b468a54bbc08e9f5d5aa1e764bd952c7e85a8b40bb0768b2",
+      "origin": {
+        "kind": "exact_authored_member",
+        "archive": "tree-sitter-scheme-1b112d9571e4f62fb3d095d52a51f1da7756fb94.tar.gz",
+        "member": "src/grammar.json",
+        "git_mode": "100644"
+      }
+    },
+    {
+      "path": "upstream/src/node-types.json",
+      "bytes": 28007,
+      "sha256": "fdabbd7aae3e4f5105df9c8e83d6635022b63ac834afada7defc034596c66960",
+      "origin": {
+        "kind": "exact_authored_member",
+        "archive": "tree-sitter-scheme-1b112d9571e4f62fb3d095d52a51f1da7756fb94.tar.gz",
+        "member": "src/node-types.json",
+        "git_mode": "100644"
+      }
+    },
+    {
+      "path": "upstream/src/parser.c",
+      "bytes": 328122,
+      "sha256": "e0893150ff554e9d3610119e935cf56532d03b4793617b2989573950e9362df1",
+      "origin": {
+        "kind": "exact_authored_member",
+        "archive": "tree-sitter-scheme-1b112d9571e4f62fb3d095d52a51f1da7756fb94.tar.gz",
+        "member": "src/parser.c",
+        "git_mode": "100644"
+      }
+    },
+    {
+      "path": "upstream/src/tree_sitter/alloc.h",
+      "bytes": 985,
+      "sha256": "b29c1c9fb7cc82f58c84b376df1297d6e2737a1d655fd356db0859e3c29c2fea",
+      "origin": {
+        "kind": "exact_authored_member",
+        "archive": "tree-sitter-scheme-1b112d9571e4f62fb3d095d52a51f1da7756fb94.tar.gz",
+        "member": "src/tree_sitter/alloc.h",
+        "git_mode": "100644"
+      }
+    },
+    {
+      "path": "upstream/src/tree_sitter/array.h",
+      "bytes": 13453,
+      "sha256": "20e6ba85abb9d5b7e2e6dedf675c9424a057a06feee03aa3e2dd48a1cb4bf8a2",
+      "origin": {
+        "kind": "exact_authored_member",
+        "archive": "tree-sitter-scheme-1b112d9571e4f62fb3d095d52a51f1da7756fb94.tar.gz",
+        "member": "src/tree_sitter/array.h",
+        "git_mode": "100644"
+      }
+    },
+    {
+      "path": "upstream/src/tree_sitter/parser.h",
+      "bytes": 7624,
+      "sha256": "180b893c8734778fd32f372dfbc27bd6ad1cd2221f26150b31256ff6716320d2",
+      "origin": {
+        "kind": "exact_authored_member",
+        "archive": "tree-sitter-scheme-1b112d9571e4f62fb3d095d52a51f1da7756fb94.tar.gz",
+        "member": "src/tree_sitter/parser.h",
+        "git_mode": "100644"
+      }
+    },
+    {
+      "path": "upstream/test/corpus/common.scm",
+      "bytes": 1968,
+      "sha256": "621a2e037c3fa9556455995559779565c0e16d3919969b9bb8160b204bd098a6",
+      "origin": {
+        "kind": "exact_authored_member",
+        "archive": "tree-sitter-scheme-1b112d9571e4f62fb3d095d52a51f1da7756fb94.tar.gz",
+        "member": "test/corpus/common.scm",
+        "git_mode": "100644"
+      }
+    },
+    {
+      "path": "upstream/test/corpus/ext.scm",
+      "bytes": 139,
+      "sha256": "12a676f4546d3953886adccd8717be72b03f42210639175c314d667d3901a86e",
+      "origin": {
+        "kind": "exact_authored_member",
+        "archive": "tree-sitter-scheme-1b112d9571e4f62fb3d095d52a51f1da7756fb94.tar.gz",
+        "member": "test/corpus/ext.scm",
+        "git_mode": "100644"
+      }
+    },
+    {
+      "path": "upstream/test/corpus/r5rs-only.scm",
+      "bytes": 1721,
+      "sha256": "578f2df505d08f182f4a6e0b934939805b4babf3062509024dacc43b472454d6",
+      "origin": {
+        "kind": "exact_authored_member",
+        "archive": "tree-sitter-scheme-1b112d9571e4f62fb3d095d52a51f1da7756fb94.tar.gz",
+        "member": "test/corpus/r5rs-only.scm",
+        "git_mode": "100644"
+      }
+    },
+    {
+      "path": "upstream/test/corpus/r5rs.scm",
+      "bytes": 1143,
+      "sha256": "53f88852c8be2976fae2d986a08a184ef6be3969cf2bf7f19af652a4e16dbe2b",
+      "origin": {
+        "kind": "exact_authored_member",
+        "archive": "tree-sitter-scheme-1b112d9571e4f62fb3d095d52a51f1da7756fb94.tar.gz",
+        "member": "test/corpus/r5rs.scm",
+        "git_mode": "100644"
+      }
+    },
+    {
+      "path": "upstream/test/corpus/r6rs.scm",
+      "bytes": 1969,
+      "sha256": "56887e8a59df91e491de54d3569de5a37451d0cf32b9b719fb04b335bf05403c",
+      "origin": {
+        "kind": "exact_authored_member",
+        "archive": "tree-sitter-scheme-1b112d9571e4f62fb3d095d52a51f1da7756fb94.tar.gz",
+        "member": "test/corpus/r6rs.scm",
+        "git_mode": "100644"
+      }
+    },
+    {
+      "path": "upstream/test/corpus/r7rs.scm",
+      "bytes": 2029,
+      "sha256": "b02050dac43db172f13e27d2d15fd99a1112ae6039bae827aab69733183a445e",
+      "origin": {
+        "kind": "exact_authored_member",
+        "archive": "tree-sitter-scheme-1b112d9571e4f62fb3d095d52a51f1da7756fb94.tar.gz",
+        "member": "test/corpus/r7rs.scm",
+        "git_mode": "100644"
+      }
+    },
+    {
+      "path": "upstream/tree-sitter.json",
+      "bytes": 602,
+      "sha256": "3b7cd97ffd3a71b1fd63280217b7bd8776c8eda8db37647b3c10863dea50e8c1",
+      "origin": {
+        "kind": "exact_authored_member",
+        "archive": "tree-sitter-scheme-1b112d9571e4f62fb3d095d52a51f1da7756fb94.tar.gz",
+        "member": "tree-sitter.json",
+        "git_mode": "100644"
+      }
+    }
+  ],
+  "sources": [
+    {
+      "kind": "authored_git_revision_archive",
+      "archive": "tree-sitter-scheme-1b112d9571e4f62fb3d095d52a51f1da7756fb94.tar.gz",
+      "bytes": 130084,
+      "sha256": "03d426ac358c702d11ef3fe543310402bc1976c7db62372abef23f0fb188277a",
+      "retained_tree": "upstream",
+      "inventory": {
+        "authored_commit_comment_verified": true,
+        "expanded_tar_bytes": 1331200,
+        "member_count": 152,
+        "members": [
+          {
+            "bytes": 0,
+            "directory": true,
+            "executable_intent": false,
+            "git_mode": "040000",
+            "git_tree": "b90f665139a09d1ce6ebd07c433049907b3a352c",
+            "path": "",
+            "raw_mode": 509
+          },
+          {
+            "bytes": 154,
+            "directory": false,
+            "executable_intent": false,
+            "git_blob": "8476907fbf4cb6275fa5862ca705240733915b54",
+            "git_mode": "100644",
+            "path": ".editorconfig",
+            "raw_mode": 436,
+            "sha256": "1c23ccb31f1146cb07f62c49948f53b1229ba93516bb3d0c3769db67a950520f"
+          },
+          {
+            "bytes": 266,
+            "directory": false,
+            "executable_intent": false,
+            "git_blob": "ffb52abeccb5891893f58abc2f87944fc9760d00",
+            "git_mode": "100644",
+            "path": ".gitattributes",
+            "raw_mode": 436,
+            "sha256": "fe17aaa634b5b625393d17915f507e4410961b663a2be9cd505503f57008fb17"
+          },
+          {
+            "bytes": 0,
+            "directory": true,
+            "executable_intent": false,
+            "git_mode": "040000",
+            "git_tree": "c17805f222dda13e39ecde34a3b8cba3c723f904",
+            "path": ".github",
+            "raw_mode": 509
+          },
+          {
+            "bytes": 0,
+            "directory": true,
+            "executable_intent": false,
+            "git_mode": "040000",
+            "git_tree": "e7650b9c4ee0ea86743501c9b92c922ef474bc8e",
+            "path": ".github/workflows",
+            "raw_mode": 509
+          },
+          {
+            "bytes": 700,
+            "directory": false,
+            "executable_intent": false,
+            "git_blob": "b54a902d457b85b05f57bb52f526457d2467f81a",
+            "git_mode": "100644",
+            "path": ".github/workflows/build.yml",
+            "raw_mode": 436,
+            "sha256": "a640c09fd171d3caca7372d643ed67b0decc903c14658b2560bc51758acc47be"
+          },
+          {
+            "bytes": 2412,
+            "directory": false,
+            "executable_intent": false,
+            "git_blob": "9c59150b3667d1480e5c0c519eca0ad59e549c47",
+            "git_mode": "100644",
+            "path": ".github/workflows/test.yml",
+            "raw_mode": 436,
+            "sha256": "5ac9207c75daf9a28b4b8a6b4baa0babec0d29dd887d8da65ae6cedc4cedaa50"
+          },
+          {
+            "bytes": 476,
+            "directory": false,
+            "executable_intent": false,
+            "git_blob": "ad4741a63a2bd66d7241a36b3d653fc5e4743af6",
+            "git_mode": "100644",
+            "path": ".gitignore",
+            "raw_mode": 436,
+            "sha256": "434aec39a53d3aac553dab3e44e1f24669ce350e8280f090684e339a30789b4d"
+          },
+          {
+            "bytes": 898,
+            "directory": false,
+            "executable_intent": false,
+            "git_blob": "1141d064f4a4f05ce7388930fdb32f1917cf84d5",
+            "git_mode": "100644",
+            "path": "AGENTS.md",
+            "raw_mode": 436,
+            "sha256": "4d3c67a8a4b7e7d3e3b157f85199d363f65a9210525e30ea52dcb22c90f35027"
+          },
+          {
+            "bytes": 2449,
+            "directory": false,
+            "executable_intent": false,
+            "git_blob": "0c6578c85bdbd5aca3dcab0492102f027c1d8b1e",
+            "git_mode": "100644",
+            "path": "CMakeLists.txt",
+            "raw_mode": 436,
+            "sha256": "ddb354b242cce2bf8a7c801a4035fc832d0b741acfff51efbde278115ffcac07"
+          },
+          {
+            "bytes": 1613,
+            "directory": false,
+            "executable_intent": false,
+            "git_blob": "9223314ad7f7c54ebac479b8d2a751e96d1faaa4",
+            "git_mode": "100644",
+            "path": "CONTRIBUTING.md",
+            "raw_mode": 436,
+            "sha256": "c2b8cdb53a111b6b3634bf4a419d06f42d898e91d03f59afd39839a7773635de"
+          },
+          {
+            "bytes": 5627,
+            "directory": false,
+            "executable_intent": false,
+            "git_blob": "de3de2bf1850e12ff04c1eb25029f8d3607311a5",
+            "git_mode": "100644",
+            "path": "Cargo.lock",
+            "raw_mode": 436,
+            "sha256": "7ba4bf534b3f6ef4152b83e7256c2cec7b00ff80ad9d78e3a36038d25ca1cfd6"
+          },
+          {
+            "bytes": 654,
+            "directory": false,
+            "executable_intent": false,
+            "git_blob": "766e91467f65596865508c2c1b0982e5a1981031",
+            "git_mode": "100644",
+            "path": "Cargo.toml",
+            "raw_mode": 436,
+            "sha256": "a02648f9aa1bd4f775c03ebd7c5e3f2fd3976829e9ee4893abe5ed94f1dde6a6"
+          },
+          {
+            "bytes": 1062,
+            "directory": false,
+            "executable_intent": false,
+            "git_blob": "44ce726cdd205a2046750da1f3524c4f3605a57b",
+            "git_mode": "100644",
+            "path": "LICENSE",
+            "raw_mode": 436,
+            "sha256": "cc35bd4a973bf6067558e88b56d9a369e02c36e240b2b537aef8f751b7808fd7"
+          },
+          {
+            "bytes": 3178,
+            "directory": false,
+            "executable_intent": false,
+            "git_blob": "b66be8e113e6750c081f29eaceec480bf35f6f9d",
+            "git_mode": "100644",
+            "path": "Makefile",
+            "raw_mode": 436,
+            "sha256": "34c31fb6bd34cac03daefe3c6a7376e2106606b11b956714a2d8b2796725f123"
+          },
+          {
+            "bytes": 1054,
+            "directory": false,
+            "executable_intent": false,
+            "git_blob": "57268d88c2f04b53b0d4b16bdecabe863889b1c9",
+            "git_mode": "100644",
+            "path": "Package.swift",
+            "raw_mode": 436,
+            "sha256": "7a25f65e46010a27e468a0fa277a5b9274613d53355377d14e4175665bad9720"
+          },
+          {
+            "bytes": 4955,
+            "directory": false,
+            "executable_intent": false,
+            "git_blob": "96d9efdcbbfef0bbddfd2b6d5676e3e1559b54d2",
+            "git_mode": "100644",
+            "path": "README.md",
+            "raw_mode": 436,
+            "sha256": "3c261678417d58d1615808913bf027a2cea6cdc8c6d0f5038541324dd757df11"
+          },
+          {
+            "bytes": 647,
+            "directory": false,
+            "executable_intent": false,
+            "git_blob": "797314c76d2107890078a7d0ff22e67f11c99b18",
+            "git_mode": "100644",
+            "path": "binding.gyp",
+            "raw_mode": 436,
+            "sha256": "16726e0f0391637161773c768e848a5d117fb56bc3358406438f97c34d13b0f2"
+          },
+          {
+            "bytes": 0,
+            "directory": true,
+            "executable_intent": false,
+            "git_mode": "040000",
+            "git_tree": "ce585a5adf834a6e970dc3b944013bb152b5e915",
+            "path": "bindings",
+            "raw_mode": 509
+          },
+          {
+            "bytes": 0,
+            "directory": true,
+            "executable_intent": false,
+            "git_mode": "040000",
+            "git_tree": "49f938deb10d46acfa90e285895718928847dcaf",
+            "path": "bindings/c",
+            "raw_mode": 509
+          },
+          {
+            "bytes": 246,
+            "directory": false,
+            "executable_intent": false,
+            "git_blob": "718db358e79cfbb6056bb5b3728f719053dac86a",
+            "git_mode": "100644",
+            "path": "bindings/c/tree-sitter-scheme.h",
+            "raw_mode": 436,
+            "sha256": "9b36aee66caf5cd8e13e0d21e8418aa122a836c4b76545f91f71979e8ac0dfd2"
+          },
+          {
+            "bytes": 297,
+            "directory": false,
+            "executable_intent": false,
+            "git_blob": "2f758971bd07ebb15a5f7c0094919edc979c394e",
+            "git_mode": "100644",
+            "path": "bindings/c/tree-sitter-scheme.pc.in",
+            "raw_mode": 436,
+            "sha256": "b319cf7c7a96b939ac8c54510826372b52c93ca30c4e5ab4d4b4e1a4b28b0b2b"
+          },
+          {
+            "bytes": 0,
+            "directory": true,
+            "executable_intent": false,
+            "git_mode": "040000",
+            "git_tree": "e8bc3af3c3cdae7fe92773d8d6240f73c4f899b0",
+            "path": "bindings/go",
+            "raw_mode": 509
+          },
+          {
+            "bytes": 320,
+            "directory": false,
+            "executable_intent": false,
+            "git_blob": "b95ed23e28bf1e5d141b22e0d364d969e39bf2b1",
+            "git_mode": "100644",
+            "path": "bindings/go/binding.go",
+            "raw_mode": 436,
+            "sha256": "79884313abc328531ba00916f302e4f43a56090143a74327b1d609c81f9a11ef"
+          },
+          {
+            "bytes": 364,
+            "directory": false,
+            "executable_intent": false,
+            "git_blob": "95dccb30845ca5e68e7623a034fb2fa106e59086",
+            "git_mode": "100644",
+            "path": "bindings/go/binding_test.go",
+            "raw_mode": 436,
+            "sha256": "5edde51450716b42eeeb4f7833c61b509dd49daef090f346fc6d79f04f23ac7a"
+          },
+          {
+            "bytes": 0,
+            "directory": true,
+            "executable_intent": false,
+            "git_mode": "040000",
+            "git_tree": "88270cbcf5bc547afe1aad89a35a19b8de2ee7ce",
+            "path": "bindings/node",
+            "raw_mode": 509
+          },
+          {
+            "bytes": 585,
+            "directory": false,
+            "executable_intent": false,
+            "git_blob": "2e003f6e7524640f3cf84249a768184c8ad681e4",
+            "git_mode": "100644",
+            "path": "bindings/node/binding.cc",
+            "raw_mode": 436,
+            "sha256": "03bedcfcec225b1761442bfbf5be75c2a3da1168254fd7c8150f1c20d626efb0"
+          },
+          {
+            "bytes": 250,
+            "directory": false,
+            "executable_intent": false,
+            "git_blob": "55becacfb0c7f5eeb85c8dd9ddcab336503434da",
+            "git_mode": "100644",
+            "path": "bindings/node/binding_test.js",
+            "raw_mode": 436,
+            "sha256": "c35f2aaec5d06fa42a4cea226fa4cb841a04a7506e70086c2ea5d9fd67d8c482"
+          },
+          {
+            "bytes": 452,
+            "directory": false,
+            "executable_intent": false,
+            "git_blob": "efe259eed03f0556c577165d98dacc404a6f59ab",
+            "git_mode": "100644",
+            "path": "bindings/node/index.d.ts",
+            "raw_mode": 436,
+            "sha256": "5f593f781f7cb12a3dcdcab2f9c063a77b9965f537bb01c5c05958947f5ff8fd"
+          },
+          {
+            "bytes": 455,
+            "directory": false,
+            "executable_intent": false,
+            "git_blob": "af7157ec5e662a1a90aa793ad6630ec7f5bba17f",
+            "git_mode": "100644",
+            "path": "bindings/node/index.js",
+            "raw_mode": 436,
+            "sha256": "6b0635901614d7e1684b22cde2fb822a5ad70a6e2307f1ed2cecc62ea9be8c7d"
+          },
+          {
+            "bytes": 0,
+            "directory": true,
+            "executable_intent": false,
+            "git_mode": "040000",
+            "git_tree": "65a02224a5c1debe2fa19f517c47714783e7d828",
+            "path": "bindings/python",
+            "raw_mode": 509
+          },
+          {
+            "bytes": 0,
+            "directory": true,
+            "executable_intent": false,
+            "git_mode": "040000",
+            "git_tree": "5e072f0a9f245382cd7e4ae38e5e0e794a7ce438",
+            "path": "bindings/python/tests",
+            "raw_mode": 509
+          },
+          {
+            "bytes": 296,
+            "directory": false,
+            "executable_intent": false,
+            "git_blob": "a636cd70e1fca4eed7168bfe0498f24c7dad243a",
+            "git_mode": "100644",
+            "path": "bindings/python/tests/test_binding.py",
+            "raw_mode": 436,
+            "sha256": "d5c331857c858184765454cc95337d3a4f440f6b606264a1573904eb1ff08fc4"
+          },
+          {
+            "bytes": 0,
+            "directory": true,
+            "executable_intent": false,
+            "git_mode": "040000",
+            "git_tree": "0f08745339782efe29e9b22fe2e01c489cb0e00e",
+            "path": "bindings/python/tree_sitter_scheme",
+            "raw_mode": 509
+          },
+          {
+            "bytes": 1154,
+            "directory": false,
+            "executable_intent": false,
+            "git_blob": "a53b485a037c80b34cbd639f8dcd377ff2c3ed38",
+            "git_mode": "100644",
+            "path": "bindings/python/tree_sitter_scheme/__init__.py",
+            "raw_mode": 436,
+            "sha256": "ad4989bba5b71b306d195fb48e07fc9f8b2e968b0e041a67f2b1d499bffbeeef"
+          },
+          {
+            "bytes": 247,
+            "directory": false,
+            "executable_intent": false,
+            "git_blob": "abf6633f32670b50af307e8deb2e6ce2109d816f",
+            "git_mode": "100644",
+            "path": "bindings/python/tree_sitter_scheme/__init__.pyi",
+            "raw_mode": 436,
+            "sha256": "a22c459bc957b1965661ae5c4708fa6eb6ea877eff7f3376acb13e7665fdfeb0"
+          },
+          {
+            "bytes": 683,
+            "directory": false,
+            "executable_intent": false,
+            "git_blob": "7d5cf4e1f3c09a97f47ab0bd68e1aa45f8c01ffa",
+            "git_mode": "100644",
+            "path": "bindings/python/tree_sitter_scheme/binding.c",
+            "raw_mode": 436,
+            "sha256": "7fc6172c0df3322cd5feb968338f7e2eaf3941b5b5c2438b976ff606d49830f8"
+          },
+          {
+            "bytes": 0,
+            "directory": false,
+            "executable_intent": false,
+            "git_blob": "e69de29bb2d1d6434b8b29ae775ad8c2e48c5391",
+            "git_mode": "100644",
+            "path": "bindings/python/tree_sitter_scheme/py.typed",
+            "raw_mode": 436,
+            "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+          },
+          {
+            "bytes": 0,
+            "directory": true,
+            "executable_intent": false,
+            "git_mode": "040000",
+            "git_tree": "e343022eac2e2168fd51a742f544144b6778e8f8",
+            "path": "bindings/rust",
+            "raw_mode": 509
+          },
+          {
+            "bytes": 660,
+            "directory": false,
+            "executable_intent": false,
+            "git_blob": "1e6da6960bc2cef9c6417e0928b19311f145456c",
+            "git_mode": "100644",
+            "path": "bindings/rust/build.rs",
+            "raw_mode": 436,
+            "sha256": "8c174c6af643282200d574f2a1baafba48b5e205b6b82191960f9c0538606f58"
+          },
+          {
+            "bytes": 1951,
+            "directory": false,
+            "executable_intent": false,
+            "git_blob": "f91a9800e557ea9502b2a61d45fabc82435e65cb",
+            "git_mode": "100644",
+            "path": "bindings/rust/lib.rs",
+            "raw_mode": 436,
+            "sha256": "41296dd6aa9f97b51f3f1db6be57e76bff21f70291e450ce9be481c15968340e"
+          },
+          {
+            "bytes": 0,
+            "directory": true,
+            "executable_intent": false,
+            "git_mode": "040000",
+            "git_tree": "a2d367bbaef4718e74c9cffe5fc32ba87cefcf65",
+            "path": "bindings/swift",
+            "raw_mode": 509
+          },
+          {
+            "bytes": 0,
+            "directory": true,
+            "executable_intent": false,
+            "git_mode": "040000",
+            "git_tree": "0173ab72384111e26124e82c87b3a8eb03bf5fbc",
+            "path": "bindings/swift/TreeSitterScheme",
+            "raw_mode": 509
+          },
+          {
+            "bytes": 246,
+            "directory": false,
+            "executable_intent": false,
+            "git_blob": "718db358e79cfbb6056bb5b3728f719053dac86a",
+            "git_mode": "100644",
+            "path": "bindings/swift/TreeSitterScheme/scheme.h",
+            "raw_mode": 436,
+            "sha256": "9b36aee66caf5cd8e13e0d21e8418aa122a836c4b76545f91f71979e8ac0dfd2"
+          },
+          {
+            "bytes": 0,
+            "directory": true,
+            "executable_intent": false,
+            "git_mode": "040000",
+            "git_tree": "ec499abf5255f21658332b845a6d9619f0c44067",
+            "path": "bindings/swift/TreeSitterSchemeTests",
+            "raw_mode": 509
+          },
+          {
+            "bytes": 367,
+            "directory": false,
+            "executable_intent": false,
+            "git_blob": "a6d5ae018bcd7671db6e6d653639390203211652",
+            "git_mode": "100644",
+            "path": "bindings/swift/TreeSitterSchemeTests/TreeSitterSchemeTests.swift",
+            "raw_mode": 436,
+            "sha256": "b1f5093ed0325d6d4377e630eee91d483e6526d5f96592f33577c7317bd0ca6a"
+          },
+          {
+            "bytes": 0,
+            "directory": true,
+            "executable_intent": false,
+            "git_mode": "040000",
+            "git_tree": "9dd88dae6d6dc5f2e596f38714ac8bb381c85b38",
+            "path": "dialects",
+            "raw_mode": 509
+          },
+          {
+            "bytes": 0,
+            "directory": true,
+            "executable_intent": false,
+            "git_mode": "040000",
+            "git_tree": "bf63857db9f338bf3cb338428940f13eec3d5fb1",
+            "path": "dialects/chez",
+            "raw_mode": 509
+          },
+          {
+            "bytes": 5049,
+            "directory": false,
+            "executable_intent": false,
+            "git_blob": "d7c573be5a95f87e922440f603d4c66976e8eb6a",
+            "git_mode": "100644",
+            "path": "dialects/chez/grammar.js",
+            "raw_mode": 436,
+            "sha256": "6c937feb4a8684c0cd614206aaffd832a5c2a7e648852cc2d2de166cc8310565"
+          },
+          {
+            "bytes": 0,
+            "directory": true,
+            "executable_intent": false,
+            "git_mode": "040000",
+            "git_tree": "5202d066c7f40c4659c2b03a414ccb8458fdeb2b",
+            "path": "dialects/chez/queries",
+            "raw_mode": 509
+          },
+          {
+            "bytes": 477,
+            "directory": false,
+            "executable_intent": false,
+            "git_blob": "70bc87a7cf85518952da0319a53677e6b5192f12",
+            "git_mode": "100644",
+            "path": "dialects/chez/queries/highlights.scm",
+            "raw_mode": 436,
+            "sha256": "57378cb6ef84b841053811fd70a2fffd22217ab1e8f068a104d525687ac120e1"
+          },
+          {
+            "bytes": 0,
+            "directory": true,
+            "executable_intent": false,
+            "git_mode": "040000",
+            "git_tree": "636c46ec0938fdba8fb954314971f211bfdc576d",
+            "path": "dialects/chez/test",
+            "raw_mode": 509
+          },
+          {
+            "bytes": 0,
+            "directory": true,
+            "executable_intent": false,
+            "git_mode": "040000",
+            "git_tree": "0c11d6ce50b8aeb45d85d8588fc197eb54a1d1c9",
+            "path": "dialects/chez/test/corpus",
+            "raw_mode": 509
+          },
+          {
+            "bytes": 6824,
+            "directory": false,
+            "executable_intent": false,
+            "git_blob": "a810b04579cdbc4bede076e93810bd4ab61b2cbe",
+            "git_mode": "100644",
+            "path": "dialects/chez/test/corpus/chez.scm",
+            "raw_mode": 436,
+            "sha256": "f63d12bf01ff323e644498c0f5a2d89214e4900ba11a6d2bd5d09612068b2d85"
+          },
+          {
+            "bytes": 474,
+            "directory": false,
+            "executable_intent": false,
+            "git_blob": "8a55ab578da908b8eff31c825ebee3c5d0cb7667",
+            "git_mode": "100644",
+            "path": "dialects/chez/tree-sitter.json",
+            "raw_mode": 436,
+            "sha256": "ed418e79a93553f78bb7e3dbb43632846e984ac9530ad120265cdb9f69f3e3b6"
+          },
+          {
+            "bytes": 0,
+            "directory": true,
+            "executable_intent": false,
+            "git_mode": "040000",
+            "git_tree": "04f073e072bb76cb6a05f742c7c67d570364b660",
+            "path": "dialects/chicken",
+            "raw_mode": 509
+          },
+          {
+            "bytes": 5624,
+            "directory": false,
+            "executable_intent": false,
+            "git_blob": "7abe57dc5d85f414b0afe17a5082e9eb57367e02",
+            "git_mode": "100644",
+            "path": "dialects/chicken/grammar.js",
+            "raw_mode": 436,
+            "sha256": "617192d652a5f260f322a0544c8ed5934454f5d96882aa66bcef8e3adafe40bb"
+          },
+          {
+            "bytes": 0,
+            "directory": true,
+            "executable_intent": false,
+            "git_mode": "040000",
+            "git_tree": "1168e4bc696ea9757f23b565c487e6b6f7fca7f2",
+            "path": "dialects/chicken/queries",
+            "raw_mode": 509
+          },
+          {
+            "bytes": 627,
+            "directory": false,
+            "executable_intent": false,
+            "git_blob": "924e140e1c9e2252421f10dd38ada218c7a27f70",
+            "git_mode": "100644",
+            "path": "dialects/chicken/queries/highlights.scm",
+            "raw_mode": 436,
+            "sha256": "59447d0b83e33256554a0a21e0fd0d114e28e3b602dd988abad7c75a5071b08d"
+          },
+          {
+            "bytes": 0,
+            "directory": true,
+            "executable_intent": false,
+            "git_mode": "040000",
+            "git_tree": "6d99fa7c55dfbefae87bc20e1d1d928d2d1df556",
+            "path": "dialects/chicken/src",
+            "raw_mode": 509
+          },
+          {
+            "bytes": 8679,
+            "directory": false,
+            "executable_intent": false,
+            "git_blob": "38c20675f3b80b4afc6bb4278b120d3351f722c7",
+            "git_mode": "100644",
+            "path": "dialects/chicken/src/scanner.c",
+            "raw_mode": 436,
+            "sha256": "6f5dfbed76a305cca6469233164cb55b693ba8787741d560217abe1550602a14"
+          },
+          {
+            "bytes": 0,
+            "directory": true,
+            "executable_intent": false,
+            "git_mode": "040000",
+            "git_tree": "8618780834039215f386c052b9943ead20a5312e",
+            "path": "dialects/chicken/test",
+            "raw_mode": 509
+          },
+          {
+            "bytes": 0,
+            "directory": true,
+            "executable_intent": false,
+            "git_mode": "040000",
+            "git_tree": "28ec6e4c5769e84e7e302553e765ca29d97b88bd",
+            "path": "dialects/chicken/test/corpus",
+            "raw_mode": 509
+          },
+          {
+            "bytes": 9180,
+            "directory": false,
+            "executable_intent": false,
+            "git_blob": "1805662203d49c4ea70a82da22f4917bd855d5c7",
+            "git_mode": "100644",
+            "path": "dialects/chicken/test/corpus/chicken.scm",
+            "raw_mode": 436,
+            "sha256": "db0d37302628d4b634a6d1176f00418e264aa4445643334b347ab74135932931"
+          },
+          {
+            "bytes": 5405,
+            "directory": false,
+            "executable_intent": false,
+            "git_blob": "db3b99789c0da237097aba15cde4729256fa9124",
+            "git_mode": "100644",
+            "path": "dialects/chicken/test/incremental.c",
+            "raw_mode": 436,
+            "sha256": "c13c67de2ed9ad49736cebf84a822be5e75dfbac75852ee74623520b6344a1ec"
+          },
+          {
+            "bytes": 477,
+            "directory": false,
+            "executable_intent": false,
+            "git_blob": "3b4ea56236ffe6438b0ca8a3f35aa37369e29dba",
+            "git_mode": "100644",
+            "path": "dialects/chicken/tree-sitter.json",
+            "raw_mode": 436,
+            "sha256": "302200bd8849f6ad81fd37e7f7fda75fa8b497b80db31158a93a3ecee0a8e26f"
+          },
+          {
+            "bytes": 0,
+            "directory": true,
+            "executable_intent": false,
+            "git_mode": "040000",
+            "git_tree": "f70b00f12585da6c9c02078c196f8e1cefffa98b",
+            "path": "dialects/guile",
+            "raw_mode": 509
+          },
+          {
+            "bytes": 4071,
+            "directory": false,
+            "executable_intent": false,
+            "git_blob": "713b10e56c037b85aa1b191d952b8b9951366b67",
+            "git_mode": "100644",
+            "path": "dialects/guile/grammar.js",
+            "raw_mode": 436,
+            "sha256": "6781317aaa66e0613bc3a0deb1cc40f1e452034c3ac6f29e382acd297b60f7b5"
+          },
+          {
+            "bytes": 0,
+            "directory": true,
+            "executable_intent": false,
+            "git_mode": "040000",
+            "git_tree": "379c4de0c7d72208a7576d2e0de36308b4ebc665",
+            "path": "dialects/guile/queries",
+            "raw_mode": 509
+          },
+          {
+            "bytes": 471,
+            "directory": false,
+            "executable_intent": false,
+            "git_blob": "7da7d1eed0a5636091f9fcc10b2debe01bbb595d",
+            "git_mode": "100644",
+            "path": "dialects/guile/queries/highlights.scm",
+            "raw_mode": 436,
+            "sha256": "1536c1d389a89408f5de9a8a9bea46f9d8a72b9c4a1fa40b84ba6f7b63c13ba3"
+          },
+          {
+            "bytes": 0,
+            "directory": true,
+            "executable_intent": false,
+            "git_mode": "040000",
+            "git_tree": "32791d87ef23c6f6157b6762e88677e5bc7fa35d",
+            "path": "dialects/guile/test",
+            "raw_mode": 509
+          },
+          {
+            "bytes": 0,
+            "directory": true,
+            "executable_intent": false,
+            "git_mode": "040000",
+            "git_tree": "e1d892b573fa8489cd38b1ed26e45c27b6adcc43",
+            "path": "dialects/guile/test/corpus",
+            "raw_mode": 509
+          },
+          {
+            "bytes": 6658,
+            "directory": false,
+            "executable_intent": false,
+            "git_blob": "79ae0bdeb427c4f2118ab54b85e51cd736cd4286",
+            "git_mode": "100644",
+            "path": "dialects/guile/test/corpus/guile.scm",
+            "raw_mode": 436,
+            "sha256": "d616116a5643c16db627db5e4ffbd4392e18bd809a7558d9bc02cfa87b9309fd"
+          },
+          {
+            "bytes": 479,
+            "directory": false,
+            "executable_intent": false,
+            "git_blob": "97fadd8d9ebf3eda50915c79d9dd6ef4c574a079",
+            "git_mode": "100644",
+            "path": "dialects/guile/tree-sitter.json",
+            "raw_mode": 436,
+            "sha256": "cc7b6243a1b89de0e3b765ef0b870db2434efad006e11e30971c5f4205074708"
+          },
+          {
+            "bytes": 0,
+            "directory": true,
+            "executable_intent": false,
+            "git_mode": "040000",
+            "git_tree": "2c3da05a7204c2f5d982c8715450a5a2d97e34f3",
+            "path": "dialects/r5rs",
+            "raw_mode": 509
+          },
+          {
+            "bytes": 1980,
+            "directory": false,
+            "executable_intent": false,
+            "git_blob": "6d237cf1fe0bb9b0849675c2737672034c9f11e6",
+            "git_mode": "100644",
+            "path": "dialects/r5rs/grammar.js",
+            "raw_mode": 436,
+            "sha256": "10e3756be8ddf5fcc3040d3a06df8f32572d2ed35643514ed996389877cbe5a9"
+          },
+          {
+            "bytes": 0,
+            "directory": true,
+            "executable_intent": false,
+            "git_mode": "040000",
+            "git_tree": "2ac46ecec20f7fd7e7a57399dc31a8189f5dc74b",
+            "path": "dialects/r5rs/queries",
+            "raw_mode": 509
+          },
+          {
+            "bytes": 2737,
+            "directory": false,
+            "executable_intent": false,
+            "git_blob": "477decd63beb8a74eecfc13aaa24cff259a9c553",
+            "git_mode": "100644",
+            "path": "dialects/r5rs/queries/highlights.scm",
+            "raw_mode": 436,
+            "sha256": "f1b53cf2b0f820a90434976df58ea1a000f97e4b8c6e789b47e825e99aab22b8"
+          },
+          {
+            "bytes": 0,
+            "directory": true,
+            "executable_intent": false,
+            "git_mode": "040000",
+            "git_tree": "b8c8b0a7a638770a636503ab6c012c231a61d452",
+            "path": "dialects/r5rs/test",
+            "raw_mode": 509
+          },
+          {
+            "bytes": 0,
+            "directory": true,
+            "executable_intent": false,
+            "git_mode": "040000",
+            "git_tree": "fb7c745e955aea1855114222a6ed3a00f88714c6",
+            "path": "dialects/r5rs/test/corpus",
+            "raw_mode": 509
+          },
+          {
+            "bytes": 2039,
+            "directory": false,
+            "executable_intent": false,
+            "git_blob": "69752b1c840eed6d5b72496010017c30f317e635",
+            "git_mode": "100644",
+            "path": "dialects/r5rs/test/corpus/r5rs.scm",
+            "raw_mode": 436,
+            "sha256": "1ec674b1cefbef23fc7384398adf384d34d9ad3c14d5c6a1e1894c62ec9e5fcc"
+          },
+          {
+            "bytes": 474,
+            "directory": false,
+            "executable_intent": false,
+            "git_blob": "ba08239e1722e2f8fe489d1c37f46a3c5d76d35a",
+            "git_mode": "100644",
+            "path": "dialects/r5rs/tree-sitter.json",
+            "raw_mode": 436,
+            "sha256": "45527a8bc8701e4ed4c5d9d3d933d08469634e28e44f3c468a144238a484aac7"
+          },
+          {
+            "bytes": 0,
+            "directory": true,
+            "executable_intent": false,
+            "git_mode": "040000",
+            "git_tree": "8a75b1a0d46a0e1c3ae2dca28bb8250d470d01bb",
+            "path": "dialects/r6rs",
+            "raw_mode": 509
+          },
+          {
+            "bytes": 2579,
+            "directory": false,
+            "executable_intent": false,
+            "git_blob": "04345829cdf544f34aaa766e3766693b261e08fe",
+            "git_mode": "100644",
+            "path": "dialects/r6rs/grammar.js",
+            "raw_mode": 436,
+            "sha256": "98133b8a68ec2487644d4828d22f7ef0e69788f69512474992bf41a46ffccdb1"
+          },
+          {
+            "bytes": 0,
+            "directory": true,
+            "executable_intent": false,
+            "git_mode": "040000",
+            "git_tree": "6f53431d11f032dcd5fe486c36b7e0fadc6b10c6",
+            "path": "dialects/r6rs/queries",
+            "raw_mode": 509
+          },
+          {
+            "bytes": 282,
+            "directory": false,
+            "executable_intent": false,
+            "git_blob": "4191944d620a8248cd4581e76b2d8a1bece6a97b",
+            "git_mode": "100644",
+            "path": "dialects/r6rs/queries/highlights.scm",
+            "raw_mode": 436,
+            "sha256": "9b1714972cfb3e0002d4ab89617029ae7c29df363315bff0f07f813ea8cdf7d6"
+          },
+          {
+            "bytes": 0,
+            "directory": true,
+            "executable_intent": false,
+            "git_mode": "040000",
+            "git_tree": "aaa72d5e27284e69dac50e4fb96c1086c6a33521",
+            "path": "dialects/r6rs/test",
+            "raw_mode": 509
+          },
+          {
+            "bytes": 0,
+            "directory": true,
+            "executable_intent": false,
+            "git_mode": "040000",
+            "git_tree": "076477f57c1447793e85651cf4d5f0c0d07337dc",
+            "path": "dialects/r6rs/test/corpus",
+            "raw_mode": 509
+          },
+          {
+            "bytes": 2257,
+            "directory": false,
+            "executable_intent": false,
+            "git_blob": "cd2f4d57dc4a04e63c05151bf9a7a1d215062473",
+            "git_mode": "100644",
+            "path": "dialects/r6rs/test/corpus/r6rs.scm",
+            "raw_mode": 436,
+            "sha256": "c32de8ba0aed7d2ce967cd4f5e59ec68c75407a2a2a77b86411d5ccc78423a3d"
+          },
+          {
+            "bytes": 474,
+            "directory": false,
+            "executable_intent": false,
+            "git_blob": "37e6ad726f5a6a864597cce1bff692bd1d3e62b9",
+            "git_mode": "100644",
+            "path": "dialects/r6rs/tree-sitter.json",
+            "raw_mode": 436,
+            "sha256": "b7e0e38a9eaa0b876f64fdc8d59b0ea03ba66bf2dda10ec0bb986a5469e77925"
+          },
+          {
+            "bytes": 0,
+            "directory": true,
+            "executable_intent": false,
+            "git_mode": "040000",
+            "git_tree": "c02e4b7486d9d04454ecb713a238bc9b4d766fca",
+            "path": "dialects/r7rs",
+            "raw_mode": 509
+          },
+          {
+            "bytes": 2436,
+            "directory": false,
+            "executable_intent": false,
+            "git_blob": "e39ca30eda72a2589a2dc1e475e6ecb6416fd737",
+            "git_mode": "100644",
+            "path": "dialects/r7rs/grammar.js",
+            "raw_mode": 436,
+            "sha256": "0b3ed9468b8f2aeb8bf180c090c907d4164f4118df4f33a9d67533a230cc78d3"
+          },
+          {
+            "bytes": 0,
+            "directory": true,
+            "executable_intent": false,
+            "git_mode": "040000",
+            "git_tree": "8a154c823a8a61b8eb96a16680ce38da02f9758e",
+            "path": "dialects/r7rs/queries",
+            "raw_mode": 509
+          },
+          {
+            "bytes": 327,
+            "directory": false,
+            "executable_intent": false,
+            "git_blob": "5be4abbc5272c680a944491e0f9caecf0736fd45",
+            "git_mode": "100644",
+            "path": "dialects/r7rs/queries/highlights.scm",
+            "raw_mode": 436,
+            "sha256": "ced4e61769f10edb4c63b544c60252d2200a5cc88f4707295634660a21d8cb5d"
+          },
+          {
+            "bytes": 0,
+            "directory": true,
+            "executable_intent": false,
+            "git_mode": "040000",
+            "git_tree": "4cf361b4650590151b9b3f344307fe5562254020",
+            "path": "dialects/r7rs/test",
+            "raw_mode": 509
+          },
+          {
+            "bytes": 0,
+            "directory": true,
+            "executable_intent": false,
+            "git_mode": "040000",
+            "git_tree": "d5bcafae523041762be285bc8f9ab68c6d916257",
+            "path": "dialects/r7rs/test/corpus",
+            "raw_mode": 509
+          },
+          {
+            "bytes": 2247,
+            "directory": false,
+            "executable_intent": false,
+            "git_blob": "7d96ef81ac0dcde40bf5c18055e73cc371bef341",
+            "git_mode": "100644",
+            "path": "dialects/r7rs/test/corpus/r7rs.scm",
+            "raw_mode": 436,
+            "sha256": "608d8aa9a2ad0411cfca8907f5107b6196ee838047a31395bfce30439d009528"
+          },
+          {
+            "bytes": 480,
+            "directory": false,
+            "executable_intent": false,
+            "git_blob": "3a442df875b27ec27cc0c431216ceb27ce268b7e",
+            "git_mode": "100644",
+            "path": "dialects/r7rs/tree-sitter.json",
+            "raw_mode": 436,
+            "sha256": "de3ee3ab5ed148576ea28c0856e5b7febc69e923cf3c433e16e03c6098d50d3a"
+          },
+          {
+            "bytes": 0,
+            "directory": true,
+            "executable_intent": false,
+            "git_mode": "040000",
+            "git_tree": "7211d5180378d04ea758b14a47674bb688a8caa1",
+            "path": "docs",
+            "raw_mode": 509
+          },
+          {
+            "bytes": 20422,
+            "directory": false,
+            "executable_intent": false,
+            "git_blob": "94e9ba142810b96e5365e9feb97c73db2d88513d",
+            "git_mode": "100644",
+            "path": "docs/chez-scheme-syntax.md",
+            "raw_mode": 436,
+            "sha256": "d95b0c56eb1cb04f668997028bf7a999b621e1b08b96e9d1f8ecb679c49d95d3"
+          },
+          {
+            "bytes": 22416,
+            "directory": false,
+            "executable_intent": false,
+            "git_blob": "8b7c5b9e4060cfa08a8189165234897040c61058",
+            "git_mode": "100644",
+            "path": "docs/chicken-scheme-syntax.md",
+            "raw_mode": 436,
+            "sha256": "9ab5f776973c94dacf28482c73c87a6aab1ec3b2f3a0d12c3b54577d93529b0d"
+          },
+          {
+            "bytes": 11657,
+            "directory": false,
+            "executable_intent": false,
+            "git_blob": "4bc5b08cf6a0ebe363bfc216d7c22a9b263c8dfe",
+            "git_mode": "100644",
+            "path": "docs/design.md",
+            "raw_mode": 436,
+            "sha256": "32297f694305718f2261022b5d254ca4f7de32a32614906dc10e89de0e8dbac5"
+          },
+          {
+            "bytes": 4268,
+            "directory": false,
+            "executable_intent": false,
+            "git_blob": "e8cfc26cfbcf733a1dd25f540e8149d2d9dbb624",
+            "git_mode": "100644",
+            "path": "docs/dialect-workflow.md",
+            "raw_mode": 436,
+            "sha256": "02e1e34d0cd81251343e4f7ec70b6115d65a8ac1190729596e597f928615576b"
+          },
+          {
+            "bytes": 18145,
+            "directory": false,
+            "executable_intent": false,
+            "git_blob": "3ea07bfac42f84410b5e09b6319f22f0e1465c7c",
+            "git_mode": "100644",
+            "path": "docs/guile-scheme-syntax.md",
+            "raw_mode": 436,
+            "sha256": "3759c6836faa761233283ec74ac4a2f896e6b3babe9754eac8877d43bd9604f8"
+          },
+          {
+            "bytes": 4375,
+            "directory": false,
+            "executable_intent": false,
+            "git_blob": "3eb8ceabb666dec09680b4386690b06d05993049",
+            "git_mode": "100644",
+            "path": "docs/mental_model.md",
+            "raw_mode": 436,
+            "sha256": "176dc6b90cd966ed3cf5f1b1ead73e114fcd80f4a028a04d20f5f6aee500de9a"
+          },
+          {
+            "bytes": 113,
+            "directory": false,
+            "executable_intent": false,
+            "git_blob": "6bcd4149bbe3e90c37ae248e99947c10cc7436db",
+            "git_mode": "100644",
+            "path": "go.mod",
+            "raw_mode": 436,
+            "sha256": "45b0ff8a1590c32ed7c81f7791c21271048167cb244a49e5a866bdc6551c3069"
+          },
+          {
+            "bytes": 4459,
+            "directory": false,
+            "executable_intent": false,
+            "git_blob": "2503ee5a3533c5edc946119ceefda1f5e9f25763",
+            "git_mode": "100644",
+            "path": "grammar.js",
+            "raw_mode": 436,
+            "sha256": "5f81aadf9fa3583391801c09dad0db55db5d59e80ddc473f111d323245478bf3"
+          },
+          {
+            "bytes": 0,
+            "directory": true,
+            "executable_intent": false,
+            "git_mode": "040000",
+            "git_tree": "34e4a08941d0515b5c0a29304ea1333cf7438035",
+            "path": "grammar",
+            "raw_mode": 509
+          },
+          {
+            "bytes": 830,
+            "directory": false,
+            "executable_intent": false,
+            "git_blob": "6378dbe5d160f839426979e958f8d29c2eb1ab5c",
+            "git_mode": "100644",
+            "path": "grammar/abbreviations.js",
+            "raw_mode": 436,
+            "sha256": "012ac1ad6e2b37253d50d865b2297cfa891926046517063f5c827cbd78945e75"
+          },
+          {
+            "bytes": 2659,
+            "directory": false,
+            "executable_intent": false,
+            "git_blob": "ac84b01f8951b59cf32800cdbb07e0468bfb556d",
+            "git_mode": "100644",
+            "path": "grammar/collections.js",
+            "raw_mode": 436,
+            "sha256": "485eaca1eafa3dfd1660e9ffae172bfbf652f9169277491b94b3311c84bf2fa7"
+          },
+          {
+            "bytes": 778,
+            "directory": false,
+            "executable_intent": false,
+            "git_blob": "6eae925438d154d1f0974da2e23fa372739610e1",
+            "git_mode": "100644",
+            "path": "grammar/core.js",
+            "raw_mode": 436,
+            "sha256": "b281f12cc19c4b791b697828ca9dc7fbe0abc174ae5c369c0a3924c94e754e32"
+          },
+          {
+            "bytes": 2332,
+            "directory": false,
+            "executable_intent": false,
+            "git_blob": "4ddfffdb14b15216fc4b14626bd87a2ddb9897af",
+            "git_mode": "100644",
+            "path": "grammar/hash-forms.js",
+            "raw_mode": 436,
+            "sha256": "b74a546e61a25105626b0907595be136547ea1f9d6e769d484c926c5d0418b53"
+          },
+          {
+            "bytes": 1280,
+            "directory": false,
+            "executable_intent": false,
+            "git_blob": "8b4d53e7b56e5d066675251b280eaf8f40643557",
+            "git_mode": "100644",
+            "path": "grammar/index.js",
+            "raw_mode": 436,
+            "sha256": "cbec8f18863dd2e60d2b02b1ffded0ade6eb7cf08cbb45421c79d1206dd0a017"
+          },
+          {
+            "bytes": 2325,
+            "directory": false,
+            "executable_intent": false,
+            "git_blob": "609a343674ebbaf44b5b740872e6dce63397b852",
+            "git_mode": "100644",
+            "path": "grammar/intertoken.js",
+            "raw_mode": 436,
+            "sha256": "87a831ff9b2545322970634e684089b8b4ff80ff349fd23486ffb96c09820c08"
+          },
+          {
+            "bytes": 3270,
+            "directory": false,
+            "executable_intent": false,
+            "git_blob": "79f62b15e5dd37f2e457e5549837fd571ffc5790",
+            "git_mode": "100644",
+            "path": "grammar/literals.js",
+            "raw_mode": 436,
+            "sha256": "866430c95c7ab9ef57451636a70241df120dc259d56be111b8bf3cd737e304c2"
+          },
+          {
+            "bytes": 9482,
+            "directory": false,
+            "executable_intent": false,
+            "git_blob": "8f49bb82666f4ed4e604db3b5f9002eebd037618",
+            "git_mode": "100644",
+            "path": "grammar/number.js",
+            "raw_mode": 436,
+            "sha256": "75ff705f4e4de81119fb4c004625d391b639dcdb258c8c70d31c3e7f7a0a4eab"
+          },
+          {
+            "bytes": 1915,
+            "directory": false,
+            "executable_intent": false,
+            "git_blob": "2714a0961673721b49913aa5959b5a1f2ea5fdde",
+            "git_mode": "100644",
+            "path": "grammar/string.js",
+            "raw_mode": 436,
+            "sha256": "9e9b13432ff13f39697d21687ecb42fe13695af5b3d8e6e72646d75dedc90f05"
+          },
+          {
+            "bytes": 6278,
+            "directory": false,
+            "executable_intent": false,
+            "git_blob": "1bbd606f0d98226c95085363c741305f12d7d812",
+            "git_mode": "100644",
+            "path": "grammar/symbol.js",
+            "raw_mode": 436,
+            "sha256": "07f9af60c26e0d6c325adcb362bc6f491c116a42d2a850228a5a5231723e016c"
+          },
+          {
+            "bytes": 796,
+            "directory": false,
+            "executable_intent": false,
+            "git_blob": "a2e75957c4dd97c21799efe9e9278baa3440ac0f",
+            "git_mode": "100644",
+            "path": "nodes.md",
+            "raw_mode": 436,
+            "sha256": "24ab935092f2552ed65d14139bca579986bdaa50401345fe54107cadd5e61c92"
+          },
+          {
+            "bytes": 12849,
+            "directory": false,
+            "executable_intent": false,
+            "git_blob": "9155f094093bb93bba1e609e6819a637760e7a23",
+            "git_mode": "100644",
+            "path": "package-lock.json",
+            "raw_mode": 436,
+            "sha256": "9fb1cb627851a64d5cb09724202fd694813064320f3d08c93f8c349404bb13b9"
+          },
+          {
+            "bytes": 2492,
+            "directory": false,
+            "executable_intent": false,
+            "git_blob": "9d8c9c5aa3d4099aecc01cd0e3bf1a522a283e13",
+            "git_mode": "100644",
+            "path": "package.json",
+            "raw_mode": 436,
+            "sha256": "4268d81214bfeff3fc9f742f050c737a5ed91c6110e582d1510fcd21e012ca5c"
+          },
+          {
+            "bytes": 6516,
+            "directory": false,
+            "executable_intent": false,
+            "git_blob": "5a2dcef419948723d4ae6cee3eeba445e209db8d",
+            "git_mode": "100644",
+            "path": "pnpm-lock.yaml",
+            "raw_mode": 436,
+            "sha256": "d937addbd2b80f51511020b178dd8ef70a76cc1c372fe93e3f0a1a8c5e9d93ec"
+          },
+          {
+            "bytes": 733,
+            "directory": false,
+            "executable_intent": false,
+            "git_blob": "1dbd33d4b035b61710f54e5a443cbecdaecdebb9",
+            "git_mode": "100644",
+            "path": "pyproject.toml",
+            "raw_mode": 436,
+            "sha256": "094623f7f27bf2e0164424789815ce117459844901968488f802185350f50a80"
+          },
+          {
+            "bytes": 0,
+            "directory": true,
+            "executable_intent": false,
+            "git_mode": "040000",
+            "git_tree": "9f46b54ee3e97b2f9e06eff72769855c2cb6ed74",
+            "path": "queries",
+            "raw_mode": 509
+          },
+          {
+            "bytes": 3288,
+            "directory": false,
+            "executable_intent": false,
+            "git_blob": "7ced1fec1b81e012501c3c6d14fb0edf52a18a6a",
+            "git_mode": "100644",
+            "path": "queries/highlights.scm",
+            "raw_mode": 436,
+            "sha256": "6f042dd6e6d1bab5531019fd1caf995ba8830661bf1d568c6c4d3f41ca030c1b"
+          },
+          {
+            "bytes": 0,
+            "directory": true,
+            "executable_intent": false,
+            "git_mode": "040000",
+            "git_tree": "35629665ad2d61a5a352f54bf8bf68dea3e7d729",
+            "path": "scripts",
+            "raw_mode": 509
+          },
+          {
+            "bytes": 2504,
+            "directory": false,
+            "executable_intent": false,
+            "git_blob": "31f56589c92df8fb423d3e5e48f91fca3fbafeed",
+            "git_mode": "100644",
+            "path": "scripts/run-dialect.js",
+            "raw_mode": 436,
+            "sha256": "d4f37823c1d78c0cdd2fc4386aa5a537194643963f17ac6bb102d5fd1b10a572"
+          },
+          {
+            "bytes": 1439,
+            "directory": false,
+            "executable_intent": false,
+            "git_blob": "06139ed9feb1cd67cb261c17e405956cf367c17d",
+            "git_mode": "100644",
+            "path": "scripts/test-chicken-incremental.js",
+            "raw_mode": 436,
+            "sha256": "e7654b9cf31e3625748e564c1d42f8e754dc0da8dea3a89767d46938da9e80e0"
+          },
+          {
+            "bytes": 1169,
+            "directory": false,
+            "executable_intent": false,
+            "git_blob": "6191b67a547c0b227335d2e90d77ad56b19fa892",
+            "git_mode": "100644",
+            "path": "scripts/write-chez-line-ending-corpus.js",
+            "raw_mode": 436,
+            "sha256": "2158f7d1ef78f9a8e52c077a958705bf534b4cc0a6858a7b26ab93cfde47732d"
+          },
+          {
+            "bytes": 2181,
+            "directory": false,
+            "executable_intent": false,
+            "git_blob": "911c534db7272afcdd9509b9543919bd17ca030e",
+            "git_mode": "100644",
+            "path": "scripts/write-chicken-scanner-corpus.js",
+            "raw_mode": 436,
+            "sha256": "ad3a6494b3bd0caa07132a644a2c56d56280616f884416a618ea036ed96e9052"
+          },
+          {
+            "bytes": 1386,
+            "directory": false,
+            "executable_intent": false,
+            "git_blob": "985f89ceadd5aa1997ed27803e1514628a127044",
+            "git_mode": "100644",
+            "path": "scripts/write-guile-whitespace-corpus.js",
+            "raw_mode": 436,
+            "sha256": "1c3e16be41050494dee452c5908a52dacfe7fff14bacf9a296d22f2617ae3598"
+          },
+          {
+            "bytes": 1213,
+            "directory": false,
+            "executable_intent": false,
+            "git_blob": "1de38eab9a647753c0ee4606609ca068d475f6e4",
+            "git_mode": "100644",
+            "path": "scripts/write-r6rs-line-ending-corpus.js",
+            "raw_mode": 436,
+            "sha256": "bade33e113001ff1851bfc7a818120109c2f5c45c012ce4d16905f1c2086cf4a"
+          },
+          {
+            "bytes": 905,
+            "directory": false,
+            "executable_intent": false,
+            "git_blob": "79953b8de8de054b2bea090a52c4ed4a447aa92d",
+            "git_mode": "100644",
+            "path": "scripts/write-r7rs-line-ending-corpus.js",
+            "raw_mode": 436,
+            "sha256": "fc44c72ddc6405d68f215f4a609bc7af108e4220da54baf2002241de676e6760"
+          },
+          {
+            "bytes": 1761,
+            "directory": false,
+            "executable_intent": false,
+            "git_blob": "cfd6220a301ae164634108350ab9ecae458cf04d",
+            "git_mode": "100644",
+            "path": "setup.py",
+            "raw_mode": 436,
+            "sha256": "e5c126a47e57308f0bc90dec0b26643d3e9eda88207d336749007136f8cd4b86"
+          },
+          {
+            "bytes": 166,
+            "directory": false,
+            "executable_intent": false,
+            "git_blob": "486c38db5d4a5d2cecbda43d5d7ccf82df6b0e5c",
+            "git_mode": "100644",
+            "path": "shell.nix",
+            "raw_mode": 436,
+            "sha256": "9f90b84029625905f43cd72862559b62bae8a6f48cdf3dcedb5f8c669da322cd"
+          },
+          {
+            "bytes": 0,
+            "directory": true,
+            "executable_intent": false,
+            "git_mode": "040000",
+            "git_tree": "671c680c11a26af8e2fadb2205dc406d27f5d4d0",
+            "path": "src",
+            "raw_mode": 509
+          },
+          {
+            "bytes": 567658,
+            "directory": false,
+            "executable_intent": false,
+            "git_blob": "7a883b5cf098d532ea245dfe88921d589465da4c",
+            "git_mode": "100644",
+            "path": "src/grammar.json",
+            "raw_mode": 436,
+            "sha256": "244bfcaa227cf3f6b468a54bbc08e9f5d5aa1e764bd952c7e85a8b40bb0768b2"
+          },
+          {
+            "bytes": 28007,
+            "directory": false,
+            "executable_intent": false,
+            "git_blob": "f4bd28f97f0749d204a9236a0cc62ab61a59d1e5",
+            "git_mode": "100644",
+            "path": "src/node-types.json",
+            "raw_mode": 436,
+            "sha256": "fdabbd7aae3e4f5105df9c8e83d6635022b63ac834afada7defc034596c66960"
+          },
+          {
+            "bytes": 328122,
+            "directory": false,
+            "executable_intent": false,
+            "git_blob": "5392b021fc9bdfca074031707712f2872bc008f0",
+            "git_mode": "100644",
+            "path": "src/parser.c",
+            "raw_mode": 436,
+            "sha256": "e0893150ff554e9d3610119e935cf56532d03b4793617b2989573950e9362df1"
+          },
+          {
+            "bytes": 0,
+            "directory": true,
+            "executable_intent": false,
+            "git_mode": "040000",
+            "git_tree": "7a998b3e6557b557a1e0da23cbe2d77f8fa15339",
+            "path": "src/tree_sitter",
+            "raw_mode": 509
+          },
+          {
+            "bytes": 985,
+            "directory": false,
+            "executable_intent": false,
+            "git_blob": "1abdd1201578605b8d05a3001f01ebc0d58826d9",
+            "git_mode": "100644",
+            "path": "src/tree_sitter/alloc.h",
+            "raw_mode": 436,
+            "sha256": "b29c1c9fb7cc82f58c84b376df1297d6e2737a1d655fd356db0859e3c29c2fea"
+          },
+          {
+            "bytes": 13453,
+            "directory": false,
+            "executable_intent": false,
+            "git_blob": "eba3da4062cb5c384dd5cc57bab16cc2a2da2539",
+            "git_mode": "100644",
+            "path": "src/tree_sitter/array.h",
+            "raw_mode": 436,
+            "sha256": "20e6ba85abb9d5b7e2e6dedf675c9424a057a06feee03aa3e2dd48a1cb4bf8a2"
+          },
+          {
+            "bytes": 7624,
+            "directory": false,
+            "executable_intent": false,
+            "git_blob": "858107deb9e4a1ffcd2ed5e6ffe98a5fcab3e1f6",
+            "git_mode": "100644",
+            "path": "src/tree_sitter/parser.h",
+            "raw_mode": 436,
+            "sha256": "180b893c8734778fd32f372dfbc27bd6ad1cd2221f26150b31256ff6716320d2"
+          },
+          {
+            "bytes": 0,
+            "directory": true,
+            "executable_intent": false,
+            "git_mode": "040000",
+            "git_tree": "4f58e7eb4e6caf843c73544c599777d713f3c0fa",
+            "path": "test",
+            "raw_mode": 509
+          },
+          {
+            "bytes": 0,
+            "directory": true,
+            "executable_intent": false,
+            "git_mode": "040000",
+            "git_tree": "34915ce555c5cdeecbb607d26f1c6320ee99b97f",
+            "path": "test/corpus",
+            "raw_mode": 509
+          },
+          {
+            "bytes": 1968,
+            "directory": false,
+            "executable_intent": false,
+            "git_blob": "b69246739b92bf4db030f5436e87c3ff45540a45",
+            "git_mode": "100644",
+            "path": "test/corpus/common.scm",
+            "raw_mode": 436,
+            "sha256": "621a2e037c3fa9556455995559779565c0e16d3919969b9bb8160b204bd098a6"
+          },
+          {
+            "bytes": 139,
+            "directory": false,
+            "executable_intent": false,
+            "git_blob": "240a6d32a8f7bb74976265178820adce40de44f9",
+            "git_mode": "100644",
+            "path": "test/corpus/ext.scm",
+            "raw_mode": 436,
+            "sha256": "12a676f4546d3953886adccd8717be72b03f42210639175c314d667d3901a86e"
+          },
+          {
+            "bytes": 1721,
+            "directory": false,
+            "executable_intent": false,
+            "git_blob": "6e36fac1c288f63b5fbcc3594e011a841a8fca3c",
+            "git_mode": "100644",
+            "path": "test/corpus/r5rs-only.scm",
+            "raw_mode": 436,
+            "sha256": "578f2df505d08f182f4a6e0b934939805b4babf3062509024dacc43b472454d6"
+          },
+          {
+            "bytes": 1143,
+            "directory": false,
+            "executable_intent": false,
+            "git_blob": "d4b2d90c399340ab9bce9eeae87c5dff567be1ec",
+            "git_mode": "100644",
+            "path": "test/corpus/r5rs.scm",
+            "raw_mode": 436,
+            "sha256": "53f88852c8be2976fae2d986a08a184ef6be3969cf2bf7f19af652a4e16dbe2b"
+          },
+          {
+            "bytes": 1969,
+            "directory": false,
+            "executable_intent": false,
+            "git_blob": "9f5e599fa89277f9acb0d02af7d21b203d042b22",
+            "git_mode": "100644",
+            "path": "test/corpus/r6rs.scm",
+            "raw_mode": 436,
+            "sha256": "56887e8a59df91e491de54d3569de5a37451d0cf32b9b719fb04b335bf05403c"
+          },
+          {
+            "bytes": 2029,
+            "directory": false,
+            "executable_intent": false,
+            "git_blob": "2aa36d099e59b1e17e9dc8c0b6f30f168b7df140",
+            "git_mode": "100644",
+            "path": "test/corpus/r7rs.scm",
+            "raw_mode": 436,
+            "sha256": "b02050dac43db172f13e27d2d15fd99a1112ae6039bae827aab69733183a445e"
+          },
+          {
+            "bytes": 602,
+            "directory": false,
+            "executable_intent": false,
+            "git_blob": "b36ffbaaed15c483151f9b14bbeeb98a2928f17f",
+            "git_mode": "100644",
+            "path": "tree-sitter.json",
+            "raw_mode": 436,
+            "sha256": "3b7cd97ffd3a71b1fd63280217b7bd8776c8eda8db37647b3c10863dea50e8c1"
+          }
+        ],
+        "prefix": "tree-sitter-scheme-1b112d9571e4f62fb3d095d52a51f1da7756fb94",
+        "regular_file_bytes": 1219347,
+        "regular_file_count": 104
+      }
+    }
+  ]
+}

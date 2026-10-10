@@ -1,0 +1,130 @@
+{
+  "schema": "rootlight.scheme-source-provenance/1",
+  "package": "tree-sitter-scheme-native-local",
+  "version": "0.24.7-1",
+  "repository": "https://github.com/6cdh/tree-sitter-scheme",
+  "authored_revision": "1b112d9571e4f62fb3d095d52a51f1da7756fb94",
+  "authored_git_tree": "b90f665139a09d1ce6ebd07c433049907b3a352c",
+  "nominal_upstream_manifest_version": "0.24.7-1",
+  "registry_distribution_association_verified": false,
+  "local_unpublished_binding": true,
+  "local_binding_paths": [
+    "Cargo.toml",
+    "build.rs",
+    "lib.rs"
+  ],
+  "upstream_regular_files": 104,
+  "upstream_regular_file_bytes": 1219347,
+  "original_authored_sources_modified": false,
+  "archive_identity_pins": [
+    {
+      "archive": "tree-sitter-scheme-1b112d9571e4f62fb3d095d52a51f1da7756fb94.tar.gz",
+      "bytes": 130084,
+      "sha256": "03d426ac358c702d11ef3fe543310402bc1976c7db62372abef23f0fb188277a"
+    }
+  ],
+  "notice_paths": [
+    "upstream/LICENSE",
+    "notices/tree-sitter-runtime-LICENSE"
+  ],
+  "primary_license": {
+    "spdx": "MIT",
+    "path": "upstream/LICENSE",
+    "bytes": 1062,
+    "sha256": "cc35bd4a973bf6067558e88b56d9a369e02c36e240b2b537aef8f751b7808fd7",
+    "copyright": "2022 6cdh"
+  },
+  "profile": {
+    "selected": "repository_root_default_scheme_reader",
+    "abi": 15,
+    "parser_path": "upstream/src/parser.c",
+    "parser_sha256": "e0893150ff554e9d3610119e935cf56532d03b4793617b2989573950e9362df1",
+    "external_scanner": false,
+    "retained_dialect_selectors": 6,
+    "dialect_generation_or_execution": false,
+    "optimization_disabling_pragmas_retained": true
+  },
+  "generation_at_build_time": false,
+  "source_download_at_build_time": false,
+  "upstream_lifecycle_or_corpus_executed": false,
+  "isolated_native_evidence": {
+    "scope": "exact_default_parser_header_and_three_isolated_binding_files_not_relocated_package",
+    "current_rust": "1.97.1",
+    "minimum_rust": "1.90.0",
+    "current_exit_code": 0,
+    "minimum_exit_code": 0,
+    "all_targets_all_features_clippy_deny_warnings_exit_code": 0,
+    "unchanged_native_groups": 9,
+    "literal_source_conservation_cases": 29,
+    "native_result": {
+      "bytes": 619476,
+      "sha256": "9c2971ad87e927aeada3c573c8be90fb046bc3fc8b3e24b4affb3a6d300ecb01"
+    },
+    "independent_verification": {
+      "bytes": 38609,
+      "sha256": "57602994e49f37c431a3868b79ea8ad48e64d2b7f10ccd9f147c0339f9753c12"
+    },
+    "prior_wrapper_failure_preserved": {
+      "bytes": 613247,
+      "sha256": "5dae0a81ae2e521ff06e19e26347d309384d6c84517d7e85b2cd4045e3ad0b48",
+      "reason": "generated_two_name_executable_aliases_required_scoped_artifact_identity_validation"
+    },
+    "relocated_package_wrapper_executed": false,
+    "qualified_binding_files": [
+      {
+        "path": "Cargo.toml",
+        "bytes": 409,
+        "sha256": "de048f254082bb40940a3e625cee645918567a7ea3ddcf10589ddec211565ba4"
+      },
+      {
+        "path": "build.rs",
+        "bytes": 511,
+        "sha256": "c9ba4fa579b91cf95155e6da34f03fd24a146e6898e411a94ef0cf5606a7e7b2"
+      },
+      {
+        "path": "lib.rs",
+        "bytes": 579,
+        "sha256": "ad6d873630f8d5489351d8c21c15f72787bd897b736eca838e31301593d550d4"
+      }
+    ]
+  },
+  "patch_document": "PATCHES.md",
+  "archive_signature_or_signed_git_object_verified": false,
+  "complete_historical_notice_chain_verified": false,
+  "complete_product_source_closure_proven": false,
+  "empty_dependency_cache_verified": false,
+  "os_network_denial_verified": false,
+  "build_and_packaging_acceptance_verified": false,
+  "production_integration_verified": false,
+  "installed_mcp_verified": false,
+  "whole_language_coverage_verified": false,
+  "inventory": {
+    "path": "SOURCE-INVENTORY.json",
+    "bytes": 101300,
+    "sha256": "fcbfda6e44019a2c1c34f6f66e63d94f5a67584c8427abd0b6f139fd07296ccc"
+  },
+  "local_binding_derivation": {
+    "path": "lib.rs",
+    "original_qualified_binding": {
+      "bytes": 579,
+      "sha256": "ad6d873630f8d5489351d8c21c15f72787bd897b736eca838e31301593d550d4"
+    },
+    "current_binding": {
+      "bytes": 543,
+      "sha256": "84eae89892eb669867188a1e091036ec39b2ee498a157ac7582665f7019e6150"
+    },
+    "change": "production_binding_purpose_and_static_table_safety_comments_only",
+    "executable_rust_tokens_unchanged": true,
+    "new_behavioral_execution_claimed": false
+  },
+  "local_storage_controls": [
+    {
+      "path": "upstream/archives/.gitattributes",
+      "bytes": 94,
+      "sha256": "53d52d5ec512864b11a8b301b386a7a408d266420707c43c008fcfabf9f7dc22",
+      "purpose": "preserve_original_archive_bytes_against_retained_authored_text_filters",
+      "authored_upstream_file": false,
+      "build_hook": false
+    }
+  ]
+}

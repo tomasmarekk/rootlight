@@ -1,0 +1,2 @@
+# Preserve authenticated archive bytes against retained upstream text filters.
+*.tar.gz -text
