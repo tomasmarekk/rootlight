@@ -623,6 +623,88 @@ fn indexed_readers_share_bounded_stable_cursor_semantics() {
 }
 
 #[test]
+fn signature_batch_seal_reopen_recovers_exact_child_headers_and_subject_postings() {
+    let directory = TempDir::new().unwrap();
+    let cancellation = Cancellation::new();
+    let context = default_context(&cancellation);
+    let mut document = indexed_fixture_snapshot().document().clone();
+    let first = document.entities[0].clone();
+    let mut second = first.clone();
+    second.id = rootlight_ids::SymbolId::from_bytes([202; 20]);
+    second.canonical_name = "second_header".to_owned();
+    second.display_name = "second_header".to_owned();
+    second.qualified_name = "second_header".to_owned();
+    let file = document
+        .files
+        .iter()
+        .find(|file| file.id == first.evidence.source.as_ref().unwrap().span().file())
+        .unwrap();
+    second.evidence.source = Some(SourceRef::new(
+        document.repository,
+        document.generation,
+        SourceSpan::new(file.id, 1, 2).unwrap(),
+        file.content_hash,
+        None,
+    ));
+    document.entities.push(second.clone());
+    let children = [
+        (&first, "fn first_header()"),
+        (&second, "(defun second_header ())"),
+    ]
+    .into_iter()
+    .map(|(entity, text)| {
+        let lexical = rootlight_ir::LexicalEvidenceV1::from_complete_text(
+            rootlight_ir::LexicalEvidenceKind::Signature,
+            rootlight_ir::FactRef::Entity(entity.id),
+            rootlight_ir::LexicalEvidenceFormat::SourceText,
+            text,
+        )
+        .unwrap();
+        rootlight_ir::new_lexical_evidence_envelope(
+            document.repository,
+            document.generation,
+            entity.provenance,
+            entity.evidence.source.clone().unwrap(),
+            &lexical,
+        )
+        .unwrap()
+    })
+    .collect::<Vec<_>>();
+    document
+        .extensions
+        .push(rootlight_ir::new_lexical_signature_batch_envelope(&children).unwrap());
+    let expected = snapshot(document);
+    let reader = OracleWriter::create_in(directory.path())
+        .unwrap()
+        .seal_unverified_for_test(expected.clone(), &context)
+        .unwrap();
+    drop(reader);
+    let reader = OracleReader::open_in(directory.path(), &context).unwrap();
+    let reopened = reader.read(&context).unwrap();
+    assert_eq!(reopened, expected);
+    let ordinal = reopened
+        .document()
+        .extensions
+        .iter()
+        .position(|extension| extension.version == rootlight_ir::LEXICAL_SIGNATURE_BATCH_VERSION)
+        .unwrap();
+    assert_eq!(reopened.lexical_ordinals_for_symbol(first.id), &[ordinal]);
+    assert_eq!(reopened.lexical_ordinals_for_symbol(second.id), &[ordinal]);
+    assert!(
+        reopened
+            .lexical_ordinals_for_symbol(rootlight_ids::SymbolId::from_bytes([203; 20]))
+            .is_empty()
+    );
+    let reconstructed = rootlight_ir::decode_lexical_signature_batch_envelope(
+        &reopened.document().extensions[ordinal],
+    )
+    .unwrap();
+    let mut expected_children = children;
+    expected_children.sort_unstable_by_key(|child| child.id);
+    assert_eq!(reconstructed, expected_children);
+}
+
+#[test]
 fn oracle_is_exactly_named_and_cannot_be_overwritten() {
     let directory = TempDir::new().expect("temporary generation directory is created");
     write_fixture(directory.path());

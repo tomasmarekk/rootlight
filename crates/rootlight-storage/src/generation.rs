@@ -451,8 +451,8 @@ impl GenerationSnapshot {
 
     /// Returns canonical lexical ordinals derived solely from the entity.
     ///
-    /// Summary batches are excluded. Payload decoding and signature-conflict
-    /// checks remain query responsibilities; this index does not infer a kind.
+    /// Summary batches are excluded. A signature batch contributes one ordinal
+    /// for each distinct child subject; conflict checks remain query-owned.
     #[must_use]
     pub fn lexical_ordinals_for_symbol(&self, symbol: SymbolId) -> &[usize] {
         self.symbol_explain_indexes.lexical.ordinals(symbol)
@@ -699,7 +699,8 @@ impl SymbolExplainIndexes {
         let mut entries = reserved_index_vec(counts.lexical)?;
         for (ordinal, envelope) in document.extensions.iter().enumerate() {
             checkpoint().map_err(IndexConstructionError::Checkpoint)?;
-            if let Some(symbol) = lexical_entity_owner(envelope) {
+            for symbol in lexical_entity_owners(envelope) {
+                checkpoint().map_err(IndexConstructionError::Checkpoint)?;
                 entries.push((symbol, ordinal));
             }
         }
@@ -774,7 +775,8 @@ impl SymbolPostingCounts {
         }
         for envelope in &document.extensions {
             checkpoint().map_err(IndexConstructionError::Checkpoint)?;
-            if lexical_entity_owner(envelope).is_some() {
+            for _ in lexical_entity_owners(envelope) {
+                checkpoint().map_err(IndexConstructionError::Checkpoint)?;
                 result.lexical = result
                     .lexical
                     .checked_add(1)
@@ -836,6 +838,7 @@ fn direct_relation_entities(relation: &rootlight_ir::RelationRecord) -> [Option<
 fn lexical_entity_owner(envelope: &rootlight_ir::ExtensionEnvelope) -> Option<SymbolId> {
     if envelope.namespace != LEXICAL_EXTENSION_NAMESPACE
         || envelope.version == LEXICAL_SUMMARY_BATCH_VERSION
+        || envelope.version == rootlight_ir::LEXICAL_SIGNATURE_BATCH_VERSION
     {
         return None;
     }
@@ -843,6 +846,22 @@ fn lexical_entity_owner(envelope: &rootlight_ir::ExtensionEnvelope) -> Option<Sy
         [FactRef::Entity(symbol)] => Some(*symbol),
         _ => None,
     }
+}
+
+fn lexical_entity_owners(
+    envelope: &rootlight_ir::ExtensionEnvelope,
+) -> impl Iterator<Item = SymbolId> + '_ {
+    let batch = envelope.namespace == LEXICAL_EXTENSION_NAMESPACE
+        && envelope.version == rootlight_ir::LEXICAL_SIGNATURE_BATCH_VERSION;
+    let direct = lexical_entity_owner(envelope);
+    envelope
+        .evidence
+        .derivation
+        .iter()
+        .filter_map(move |reference| match reference {
+            FactRef::Entity(symbol) if batch || Some(*symbol) == direct => Some(*symbol),
+            _ => None,
+        })
 }
 
 // Heap sorting checks cancellation during comparisons without allocating a
@@ -1914,6 +1933,31 @@ fn verify_snapshot_identities(
                     .map_err(IdentityVerificationError::Control)?;
             }
             LEXICAL_EXTENSION_NAMESPACE => {
+                if envelope.version == rootlight_ir::LEXICAL_SIGNATURE_BATCH_VERSION {
+                    let children =
+                        rootlight_ir::decode_lexical_signature_batch_envelope_with_checkpoint(
+                            envelope,
+                            || context.check().is_ok(),
+                        );
+                    context
+                        .check()
+                        .map_err(IdentityVerificationError::Control)?;
+                    let children = children.map_err(|_| {
+                        IdentityVerificationError::IdentityMismatch(
+                            IdentityMismatchComponent::LexicalEvidence,
+                        )
+                    })?;
+                    for child in children {
+                        context
+                            .check()
+                            .map_err(IdentityVerificationError::Control)?;
+                        verify_signature_child_owner(snapshot, &child)?;
+                    }
+                    context
+                        .check()
+                        .map_err(IdentityVerificationError::Control)?;
+                    continue;
+                }
                 if envelope.version == LEXICAL_SUMMARY_BATCH_VERSION {
                     let children =
                         decode_lexical_summary_batch_envelope(envelope).map_err(|_| {
@@ -2163,6 +2207,41 @@ fn symbol_claim_source_matches(
         && provenance
             .derivation_parents
             .contains(&rootlight_ir::FactRef::File(claim_source.span().file()))
+}
+
+fn verify_signature_child_owner(
+    snapshot: &GenerationSnapshot,
+    child: &rootlight_ir::ExtensionEnvelope,
+) -> Result<(), IdentityVerificationError> {
+    let invalid =
+        || IdentityVerificationError::IdentityMismatch(IdentityMismatchComponent::LexicalEvidence);
+    let evidence = rootlight_ir::decode_lexical_evidence_envelope(child).map_err(|_| invalid())?;
+    let FactRef::Entity(symbol) = evidence.subject() else {
+        return Err(invalid());
+    };
+    let document = snapshot.document();
+    let entity = document
+        .entities
+        .binary_search_by_key(&symbol, |entity| entity.id)
+        .ok()
+        .and_then(|index| document.entities.get(index))
+        .ok_or_else(invalid)?;
+    let source = child.evidence.source.as_ref().ok_or_else(invalid)?;
+    let definition = entity.evidence.source.as_ref().ok_or_else(invalid)?;
+    let file = snapshot
+        .find_file(source.span().file())
+        .ok_or_else(invalid)?;
+    // A parameter's written type can lie outside its name anchor. Ownership
+    // binds file/hash/producer, not an invented declaration-span containment.
+    if entity.provenance != child.provenance
+        || definition.span().file() != source.span().file()
+        || definition.content_hash() != source.content_hash()
+        || file.content_hash != source.content_hash()
+        || source.span().end_byte() > file.byte_length
+    {
+        return Err(invalid());
+    }
+    Ok(())
 }
 
 fn map_claim_error(
@@ -3319,6 +3398,151 @@ mod tests {
         assert!(snapshot.relation_ordinals_for_symbol(missing).is_empty());
         assert!(snapshot.occurrence_ordinals_for_symbol(missing).is_empty());
         assert!(snapshot.lexical_ordinals_for_symbol(missing).is_empty());
+    }
+
+    #[test]
+    fn signature_batch_postings_charge_and_preserve_every_distinct_child_subject() {
+        let (metadata, mut document, first, second) = symbol_posting_fixture();
+        let source = document.entities[0].evidence.source.clone().unwrap();
+        let provenance = document.entities[0].provenance;
+        let children = [(first, "fn first()"), (second, "fn second()")]
+            .into_iter()
+            .map(|(symbol, text)| {
+                let lexical = rootlight_ir::LexicalEvidenceV1::from_complete_text(
+                    rootlight_ir::LexicalEvidenceKind::Signature,
+                    FactRef::Entity(symbol),
+                    rootlight_ir::LexicalEvidenceFormat::SourceText,
+                    text,
+                )
+                .unwrap();
+                rootlight_ir::new_lexical_evidence_envelope(
+                    document.repository,
+                    document.generation,
+                    provenance,
+                    source.clone(),
+                    &lexical,
+                )
+                .unwrap()
+            })
+            .collect::<Vec<_>>();
+        document.extensions =
+            vec![rootlight_ir::new_lexical_signature_batch_envelope(&children).unwrap()];
+        let counts = SymbolPostingCounts::count(&document, &mut || Ok::<_, ()>(())).unwrap();
+        assert_eq!(counts.lexical, 2);
+        let snapshot = GenerationSnapshot::new(
+            metadata,
+            document,
+            &IrLimits::default(),
+            &ExtensionSupport::default(),
+        )
+        .unwrap();
+        assert_eq!(snapshot.lexical_ordinals_for_symbol(first), &[0]);
+        assert_eq!(snapshot.lexical_ordinals_for_symbol(second), &[0]);
+        assert!(
+            snapshot
+                .lexical_ordinals_for_symbol(SymbolId::from_bytes([99; 20]))
+                .is_empty()
+        );
+        for child in rootlight_ir::decode_lexical_signature_batch_envelope(
+            &snapshot.document().extensions[0],
+        )
+        .unwrap()
+        {
+            verify_signature_child_owner(&snapshot, &child).unwrap();
+        }
+        let cancellation = Cancellation::new();
+        let context = GenerationContext::new(&cancellation, GenerationBudget::default());
+        let estimate = GenerationSnapshot::estimate_symbol_explain_index_memory_bytes(
+            snapshot.document(),
+            &context,
+        )
+        .unwrap();
+        assert!(estimate >= snapshot.retained_symbol_explain_index_bytes());
+    }
+
+    #[test]
+    fn signature_batch_child_ownership_accepts_external_parameter_header_and_rejects_foreign_association()
+     {
+        let (metadata, mut document, first, _) = symbol_posting_fixture();
+        let file = document.files[0].clone();
+        let full_source = file.evidence.source.clone().unwrap();
+        let name = SourceRef::new(
+            document.repository,
+            document.generation,
+            rootlight_ir::SourceSpan::new(file.id, 0, 1).unwrap(),
+            file.content_hash,
+            None,
+        );
+        let header = SourceRef::new(
+            document.repository,
+            document.generation,
+            rootlight_ir::SourceSpan::new(file.id, 1, file.byte_length).unwrap(),
+            file.content_hash,
+            None,
+        );
+        let entity = document
+            .entities
+            .iter_mut()
+            .find(|entity| entity.id == first)
+            .unwrap();
+        entity.kind = rootlight_ir::EntityKind::Parameter;
+        entity.evidence.source = Some(name);
+        let provenance = entity.provenance;
+        let lexical = rootlight_ir::LexicalEvidenceV1::from_complete_text(
+            rootlight_ir::LexicalEvidenceKind::Signature,
+            FactRef::Entity(first),
+            rootlight_ir::LexicalEvidenceFormat::SourceText,
+            ": number",
+        )
+        .unwrap();
+        let child = rootlight_ir::new_lexical_evidence_envelope(
+            document.repository,
+            document.generation,
+            provenance,
+            header,
+            &lexical,
+        )
+        .unwrap();
+        document.extensions = vec![
+            rootlight_ir::new_lexical_signature_batch_envelope(std::slice::from_ref(&child))
+                .unwrap(),
+        ];
+        let snapshot = GenerationSnapshot::new(
+            metadata,
+            document.clone(),
+            &IrLimits::default(),
+            &ExtensionSupport::default(),
+        )
+        .unwrap();
+        verify_signature_child_owner(&snapshot, &child).unwrap();
+        let foreign = rootlight_ir::new_lexical_evidence_envelope(
+            document.repository,
+            document.generation,
+            FactId::from_bytes([88; 20]),
+            child.evidence.source.clone().unwrap(),
+            &lexical,
+        )
+        .unwrap();
+        rootlight_ir::decode_lexical_evidence_envelope(&foreign).unwrap();
+        assert!(verify_signature_child_owner(&snapshot, &foreign).is_err());
+        let entity = document
+            .entities
+            .iter_mut()
+            .find(|entity| entity.id == first)
+            .unwrap();
+        entity.evidence.source = Some(document.files[1].evidence.source.clone().unwrap());
+        let foreign = GenerationSnapshot::new(
+            metadata,
+            document,
+            &IrLimits::default(),
+            &ExtensionSupport::default(),
+        )
+        .unwrap();
+        assert!(verify_signature_child_owner(&foreign, &child).is_err());
+        assert!(
+            child.evidence.source.as_ref().unwrap().span().start_byte()
+                > full_source.span().start_byte()
+        );
     }
 
     #[test]

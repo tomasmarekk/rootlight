@@ -289,8 +289,16 @@ pub(super) fn retain_structural_occurrences(
                     ) =>
                 {
                     if extension.namespace == LEXICAL_EXTENSION_NAMESPACE
-                        && extension.version == rootlight_ir::LEXICAL_SUMMARY_BATCH_VERSION
+                        && (extension.version == rootlight_ir::LEXICAL_SUMMARY_BATCH_VERSION
+                            || extension.version == rootlight_ir::LEXICAL_SIGNATURE_BATCH_VERSION)
                     {
+                        if extension.version == rootlight_ir::LEXICAL_SIGNATURE_BATCH_VERSION {
+                            let children = rootlight_ir::decode_lexical_signature_batch_envelope_with_checkpoint(
+                                extension, || cancellation.check().is_ok(),
+                            );
+                            check_cancellation(cancellation)?;
+                            children.map_err(|_| FirstSliceError::Identity)?;
+                        }
                         for subject in &extension.evidence.derivation {
                             associated.entry(*subject).or_default().insert(record.key());
                         }
@@ -435,7 +443,15 @@ pub(super) fn retain_structural_occurrences(
         };
         if let Some(group) = group {
             let count = optional_counts.entry(group).or_default();
-            *count = count.checked_add(1).ok_or(FirstSliceError::Limits)?;
+            let logical = match record {
+                Record::Extension(extension)
+                    if extension.namespace == LEXICAL_EXTENSION_NAMESPACE =>
+                {
+                    super::optional_extension_logical_count(extension)?
+                }
+                _ => 1,
+            };
+            *count = count.checked_add(logical).ok_or(FirstSliceError::Limits)?;
         }
     }
     for reference in retained {
@@ -484,4 +500,110 @@ fn reserve<T>(records: &mut Vec<T>, total: usize) -> Result<(), FirstSliceError>
     records
         .try_reserve_exact(additional)
         .map_err(|_| FirstSliceError::Limits)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn signature_batch_refinement_retains_each_owned_subject_and_logical_coverage() {
+        let rootlight_ir::IrDocument::NormalizedV1_1(mut structural) =
+            rootlight_ir::decode_ir_document(
+                include_bytes!("../../../tests/fixtures/compatibility/ir/1.1/document.json"),
+                &IrLimits::default(),
+                &rootlight_ir::ExtensionSupport::default(),
+            )
+            .unwrap()
+        else {
+            panic!("fixture uses normalized IR");
+        };
+        let first = structural.entities[0].clone();
+        let mut second = first.clone();
+        second.id = rootlight_ids::SymbolId::from_bytes([205; 20]);
+        second.canonical_name = "second".to_owned();
+        second.display_name = "second".to_owned();
+        second.qualified_name = "second".to_owned();
+        structural.entities.push(second.clone());
+        let children = [(&first, "fn first()"), (&second, "fn second()")]
+            .into_iter()
+            .map(|(entity, text)| {
+                let lexical = rootlight_ir::LexicalEvidenceV1::from_complete_text(
+                    rootlight_ir::LexicalEvidenceKind::Signature,
+                    FactRef::Entity(entity.id),
+                    rootlight_ir::LexicalEvidenceFormat::SourceText,
+                    text,
+                )
+                .unwrap();
+                rootlight_ir::new_lexical_evidence_envelope(
+                    structural.repository,
+                    structural.generation,
+                    entity.provenance,
+                    entity.evidence.source.clone().unwrap(),
+                    &lexical,
+                )
+                .unwrap()
+            })
+            .collect::<Vec<_>>();
+        structural.extensions =
+            vec![rootlight_ir::new_lexical_signature_batch_envelope(&children).unwrap()];
+        let source = first.evidence.source.clone().unwrap();
+        let mut coverage = CoverageRecord {
+            id: FactId::from_bytes([0; 20]),
+            repository: structural.repository,
+            generation: structural.generation,
+            scope: CoverageScope::File(source.span().file()),
+            domain: FactDomain::Extensions,
+            tier: rootlight_ir::AnalysisTier::TierB,
+            status: CoverageStatus::Complete,
+            discovered: 2,
+            indexed: 2,
+            skipped: 0,
+            provenance: first.provenance,
+            evidence: FactEvidence {
+                source: Some(source),
+                derivation: Vec::new(),
+            },
+        };
+        coverage.id = derive_coverage_record_id(&coverage).unwrap();
+        structural.coverage_records.push(coverage);
+        let mut project = structural.clone();
+        project.entities.clear();
+        project.occurrences.clear();
+        project.relations.clear();
+        project.extensions.clear();
+        project.coverage_records.clear();
+        project.skipped_regions.clear();
+        project.diagnostics.clear();
+        let retained = retain_structural_occurrences(
+            project,
+            &[structural],
+            &IrLimits::default(),
+            &Cancellation::new(),
+        )
+        .unwrap();
+        assert!(retained.entities.iter().any(|entity| entity.id == first.id));
+        assert!(
+            retained
+                .entities
+                .iter()
+                .any(|entity| entity.id == second.id)
+        );
+        assert_eq!(retained.extensions.len(), 1);
+        let mut expected = children;
+        expected.sort_unstable_by_key(|child| child.id);
+        assert_eq!(
+            rootlight_ir::decode_lexical_signature_batch_envelope(&retained.extensions[0]).unwrap(),
+            expected
+        );
+        let coverage = retained
+            .coverage_records
+            .iter()
+            .find(|coverage| coverage.domain == FactDomain::Extensions)
+            .unwrap();
+        assert_eq!(
+            (coverage.discovered, coverage.indexed, coverage.skipped),
+            (2, 2, 0)
+        );
+    }
 }

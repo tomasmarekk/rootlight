@@ -118,33 +118,51 @@ impl<'generation> LexicalProjectionBuilder<'generation> {
             cancellation
                 .check()
                 .map_err(|cancelled| QueryError::Cancelled(cancelled.reason()))?;
-            signatures.observe(envelope)?;
+            signatures.observe_with_checkpoint(envelope, || {
+                cancellation
+                    .check()
+                    .map_err(|cancelled| QueryError::Cancelled(cancelled.reason()))
+            })?;
         }
-        for entity in &document.entities {
-            cancellation
-                .check()
-                .map_err(|cancelled| QueryError::Cancelled(cancelled.reason()))?;
-            // External models remain graph endpoints but have no repository
-            // definition to publish as a lexical source hit.
-            if entity.kind == EntityKind::ExternalSymbol
-                && entity.flags.contains(&EntityFlag::External)
-                && entity.flags.contains(&EntityFlag::Synthetic)
-                && entity.evidence.source.is_none()
-            {
-                continue;
-            }
-            let signature = signatures.evidence(entity.id)?;
-            let (entity, next_text_bytes) = project_entity_document(
-                document,
-                entity,
-                signature.as_ref(),
-                text_bytes,
-                budget,
-                cancellation,
-            )?;
-            projected.push(entity);
-            text_bytes = next_text_bytes;
-        }
+        signatures.visit_with_checkpoint(
+            || {
+                cancellation
+                    .check()
+                    .map_err(|cancelled| QueryError::Cancelled(cancelled.reason()))
+            },
+            |event| {
+                let SignatureVisit::Evidence(symbol, signature) = event else {
+                    return Ok(true);
+                };
+                let entity = document
+                    .entities
+                    .binary_search_by_key(&symbol, |entity| entity.id)
+                    .ok()
+                    .and_then(|index| document.entities.get(index))
+                    .ok_or(QueryError::IndexDrift)?;
+                // External models remain graph endpoints but have no repository
+                // definition to publish as a lexical source hit.
+                if entity.kind == EntityKind::ExternalSymbol
+                    && entity.flags.contains(&EntityFlag::External)
+                    && entity.flags.contains(&EntityFlag::Synthetic)
+                    && entity.evidence.source.is_none()
+                {
+                    return Ok(true);
+                }
+                let (entity, next_text_bytes) = project_entity_document(
+                    document,
+                    entity,
+                    signature.as_ref(),
+                    text_bytes,
+                    budget,
+                    cancellation,
+                )?;
+                projected.push(entity);
+                text_bytes = next_text_bytes;
+                Ok(true)
+            },
+        )?;
+        projected.sort_unstable_by_key(|document| document.symbol_id);
         let mut unsupported_files = document
             .diagnostics
             .iter()
@@ -710,30 +728,42 @@ fn project_scoped_source_documents(
         cancellation
             .check()
             .map_err(|cancelled| QueryError::Cancelled(cancelled.reason()))?;
-        signatures.observe(envelope)?;
+        signatures.observe_with_checkpoint(envelope, || {
+            cancellation
+                .check()
+                .map_err(|cancelled| QueryError::Cancelled(cancelled.reason()))
+        })?;
     }
-    for entity in document.entities.iter().filter(|entity| {
-        entity
-            .evidence
-            .source
-            .as_ref()
-            .is_some_and(|evidence| evidence.span().file() == file.id)
-    }) {
-        cancellation
-            .check()
-            .map_err(|cancelled| QueryError::Cancelled(cancelled.reason()))?;
-        let signature = signatures.evidence(entity.id)?;
-        let (entity, next_text_bytes) = project_entity_document(
-            document,
-            entity,
-            signature.as_ref(),
-            text_bytes,
-            budget,
-            cancellation,
-        )?;
-        projected.push(entity);
-        text_bytes = next_text_bytes;
-    }
+    signatures.visit_with_checkpoint(
+        || {
+            cancellation
+                .check()
+                .map_err(|cancelled| QueryError::Cancelled(cancelled.reason()))
+        },
+        |event| {
+            let SignatureVisit::Evidence(symbol, signature) = event else {
+                return Ok(true);
+            };
+            let entity = document
+                .entities
+                .binary_search_by_key(&symbol, |entity| entity.id)
+                .ok()
+                .and_then(|index| document.entities.get(index))
+                .ok_or(QueryError::IndexDrift)?;
+            let (entity, next_text_bytes) = project_entity_document(
+                document,
+                entity,
+                signature.as_ref(),
+                text_bytes,
+                budget,
+                cancellation,
+            )?;
+            projected.push(entity);
+            text_bytes = next_text_bytes;
+            Ok(true)
+        },
+    )?;
+    projected.sort_unstable_by_key(|document| document.symbol_id);
     let (source, _) = project_source_document(
         generation,
         source,
@@ -838,14 +868,22 @@ fn project_entity_document(
     ))
 }
 
-/// One bounded extension pass selects unique canonical payloads without retaining
-/// a decoded header for every entity. Conflicts remain absent for the whole scan.
+/// One bounded extension pass selects references, not a generation-wide header
+/// expansion. A second grouped pass decodes each chosen batch only once.
 pub(super) struct RetainedSignatureIndex<'document> {
-    candidates: Vec<(
-        SymbolId,
-        Option<&'document rootlight_ir::ExtensionEnvelope>,
-        bool,
-    )>,
+    candidates: Vec<(SymbolId, Option<SignatureReference<'document>>, bool)>,
+}
+
+#[derive(Clone, Copy)]
+struct SignatureReference<'document> {
+    envelope: &'document rootlight_ir::ExtensionEnvelope,
+    child: Option<usize>,
+    payload_hash: rootlight_ids::ContentHash,
+}
+
+pub(super) enum SignatureVisit<'document> {
+    Workspace(&'document rootlight_ir::ExtensionEnvelope),
+    Evidence(SymbolId, Option<rootlight_ir::LexicalEvidenceV1>),
 }
 
 impl<'document> RetainedSignatureIndex<'document> {
@@ -869,6 +907,14 @@ impl<'document> RetainedSignatureIndex<'document> {
     }
 
     pub(super) fn candidate(&self, envelope: &rootlight_ir::ExtensionEnvelope) -> bool {
+        if envelope.namespace == rootlight_ir::LEXICAL_EXTENSION_NAMESPACE
+            && envelope.version == rootlight_ir::LEXICAL_SIGNATURE_BATCH_VERSION
+        {
+            return envelope.evidence.derivation.iter().any(|subject| {
+                matches!(subject, rootlight_ir::FactRef::Entity(symbol)
+                    if self.candidates.binary_search_by_key(symbol, |candidate| candidate.0).is_ok())
+            });
+        }
         Self::subject(envelope).is_some_and(|symbol| {
             self.candidates
                 .binary_search_by_key(&symbol, |candidate| candidate.0)
@@ -879,6 +925,7 @@ impl<'document> RetainedSignatureIndex<'document> {
     fn subject(envelope: &rootlight_ir::ExtensionEnvelope) -> Option<SymbolId> {
         if envelope.namespace != rootlight_ir::LEXICAL_EXTENSION_NAMESPACE
             || envelope.version == rootlight_ir::LEXICAL_SUMMARY_BATCH_VERSION
+            || envelope.version == rootlight_ir::LEXICAL_SIGNATURE_BATCH_VERSION
         {
             return None;
         }
@@ -888,17 +935,41 @@ impl<'document> RetainedSignatureIndex<'document> {
         }
     }
 
-    pub(super) fn observe(
+    pub(super) fn observe_with_checkpoint(
         &mut self,
         envelope: &'document rootlight_ir::ExtensionEnvelope,
+        mut checkpoint: impl FnMut() -> Result<(), QueryError>,
     ) -> Result<(), QueryError> {
-        let Some(symbol) = Self::subject(envelope) else {
+        checkpoint()?;
+        if !self.candidate(envelope) {
             return Ok(());
-        };
-        let Ok(index) = self
-            .candidates
-            .binary_search_by_key(&symbol, |candidate| candidate.0)
-        else {
+        }
+        if envelope.version == rootlight_ir::LEXICAL_SIGNATURE_BATCH_VERSION {
+            let children = rootlight_ir::decode_lexical_signature_batch_envelope_with_checkpoint(
+                envelope,
+                || checkpoint().is_ok(),
+            );
+            checkpoint()?;
+            let children = children.map_err(|_| QueryError::IndexDrift)?;
+            for (position, child) in children.iter().enumerate() {
+                checkpoint()?;
+                let evidence = rootlight_ir::decode_lexical_evidence_envelope(child)
+                    .map_err(|_| QueryError::IndexDrift)?;
+                let rootlight_ir::FactRef::Entity(symbol) = evidence.subject() else {
+                    return Err(QueryError::IndexDrift);
+                };
+                self.observe_reference(
+                    symbol,
+                    SignatureReference {
+                        envelope,
+                        child: Some(position),
+                        payload_hash: rootlight_ids::content_hash(child.payload.as_bytes()),
+                    },
+                );
+            }
+            return Ok(());
+        }
+        let Some(symbol) = Self::subject(envelope) else {
             return Ok(());
         };
         let evidence = rootlight_ir::decode_lexical_evidence_envelope(envelope)
@@ -906,42 +977,108 @@ impl<'document> RetainedSignatureIndex<'document> {
         if evidence.kind() != rootlight_ir::LexicalEvidenceKind::Signature {
             return Ok(());
         }
-        let (_, previous, conflicting) = &mut self.candidates[index];
-        if previous.is_some_and(|previous| previous.payload != envelope.payload) {
-            // Canonical encoding makes payload equality equivalent to the
-            // retained evidence equality used by symbol.explain.
-            *conflicting = true;
-        }
-        *previous = Some(envelope);
+        self.observe_reference(
+            symbol,
+            SignatureReference {
+                envelope,
+                child: None,
+                payload_hash: rootlight_ids::content_hash(envelope.payload.as_bytes()),
+            },
+        );
         Ok(())
     }
 
-    pub(super) fn envelope(
-        &self,
-        symbol: SymbolId,
-    ) -> Option<&'document rootlight_ir::ExtensionEnvelope> {
-        let index = self
+    fn observe_reference(&mut self, symbol: SymbolId, reference: SignatureReference<'document>) {
+        let Ok(index) = self
             .candidates
             .binary_search_by_key(&symbol, |candidate| candidate.0)
-            .ok()?;
-        let (_, envelope, conflicting) = self.candidates[index];
-        (!conflicting).then_some(envelope).flatten()
+        else {
+            return;
+        };
+        let (_, previous, conflicting) = &mut self.candidates[index];
+        if previous.is_some_and(|previous| previous.payload_hash != reference.payload_hash) {
+            // Canonical child payloads include the exact subject and source
+            // mapping. Batch wrapping must not change direct conflict semantics.
+            *conflicting = true;
+        }
+        *previous = Some(reference);
     }
 
-    pub(super) fn evidence(
-        &self,
-        symbol: SymbolId,
-    ) -> Result<Option<rootlight_ir::LexicalEvidenceV1>, QueryError> {
-        self.envelope(symbol)
-            .map(|envelope| {
-                rootlight_ir::decode_lexical_evidence_envelope(envelope)
-                    .map_err(|_| QueryError::IndexDrift)
-            })
-            .transpose()
+    pub(super) fn visit_with_checkpoint(
+        mut self,
+        mut checkpoint: impl FnMut() -> Result<(), QueryError>,
+        mut visit: impl FnMut(SignatureVisit<'document>) -> Result<bool, QueryError>,
+    ) -> Result<bool, QueryError> {
+        checkpoint()?;
+        self.candidates
+            .sort_unstable_by_key(|(symbol, reference, conflicting)| {
+                (
+                    reference
+                        .filter(|_| !conflicting)
+                        .map(|reference| reference.envelope.id),
+                    reference.and_then(|reference| reference.child),
+                    *symbol,
+                )
+            });
+        checkpoint()?;
+        let mut offset = 0;
+        while offset < self.candidates.len() {
+            checkpoint()?;
+            let (symbol, reference, conflicting) = self.candidates[offset];
+            let Some(reference) = reference.filter(|_| !conflicting) else {
+                if !visit(SignatureVisit::Evidence(symbol, None))? {
+                    return Ok(false);
+                }
+                offset += 1;
+                continue;
+            };
+            let envelope = reference.envelope;
+            if !visit(SignatureVisit::Workspace(envelope))? {
+                return Ok(false);
+            }
+            let end = offset
+                + self.candidates[offset..].partition_point(|(_, candidate, conflict)| {
+                    !conflict
+                        && candidate.is_some_and(|candidate| candidate.envelope.id == envelope.id)
+                });
+            let children = if envelope.version == rootlight_ir::LEXICAL_SIGNATURE_BATCH_VERSION {
+                let children =
+                    rootlight_ir::decode_lexical_signature_batch_envelope_with_checkpoint(
+                        envelope,
+                        || checkpoint().is_ok(),
+                    );
+                checkpoint()?;
+                Some(children.map_err(|_| QueryError::IndexDrift)?)
+            } else {
+                None
+            };
+            for &(symbol, reference, _) in &self.candidates[offset..end] {
+                checkpoint()?;
+                let reference = reference.ok_or(QueryError::IndexDrift)?;
+                let child = match (reference.child, &children) {
+                    (Some(position), Some(children)) => {
+                        children.get(position).ok_or(QueryError::IndexDrift)?
+                    }
+                    (None, None) => envelope,
+                    _ => return Err(QueryError::IndexDrift),
+                };
+                let evidence = rootlight_ir::decode_lexical_evidence_envelope(child)
+                    .map_err(|_| QueryError::IndexDrift)?;
+                if evidence.subject() != rootlight_ir::FactRef::Entity(symbol) {
+                    return Err(QueryError::IndexDrift);
+                }
+                if !visit(SignatureVisit::Evidence(symbol, Some(evidence)))? {
+                    return Ok(false);
+                }
+            }
+            offset = end;
+        }
+        checkpoint()?;
+        Ok(true)
     }
 
     pub(super) const fn entry_bytes() -> usize {
-        std::mem::size_of::<(SymbolId, Option<&rootlight_ir::ExtensionEnvelope>, bool)>()
+        std::mem::size_of::<(SymbolId, Option<SignatureReference<'_>>, bool)>()
     }
 }
 

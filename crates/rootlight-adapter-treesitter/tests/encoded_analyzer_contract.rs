@@ -312,12 +312,21 @@ fn assert_native_payloads(fixture: &Fixture, language: &str, document: &Normaliz
 
 fn assert_encoded_signatures(fixture: &Fixture, document: &NormalizedIrDocument) {
     let mut count = 0;
+    let mut signatures = Vec::new();
     for envelope in &document.extensions {
         if envelope.namespace != rootlight_ir::LEXICAL_EXTENSION_NAMESPACE
             || envelope.version == rootlight_ir::LEXICAL_SUMMARY_BATCH_VERSION
         {
             continue;
         }
+        if envelope.version == rootlight_ir::LEXICAL_SIGNATURE_BATCH_VERSION {
+            signatures
+                .extend(rootlight_ir::decode_lexical_signature_batch_envelope(envelope).unwrap());
+        } else {
+            signatures.push(envelope.clone());
+        }
+    }
+    for envelope in &signatures {
         let lexical = decode_lexical_evidence_envelope(envelope).unwrap();
         if lexical.kind() != LexicalEvidenceKind::Signature {
             continue;

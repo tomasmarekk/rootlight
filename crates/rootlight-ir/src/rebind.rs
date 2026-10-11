@@ -898,13 +898,28 @@ impl FactNodeRef<'_> {
                 dependencies.push(record.provenance);
                 collect_evidence_dependencies(&record.evidence, dependencies, checkpoint)?;
                 if record.namespace == LEXICAL_EXTENSION_NAMESPACE {
-                    if record.version == LEXICAL_SUMMARY_BATCH_VERSION {
-                        for child in decode_lexical_summary_batch_envelope(record)
-                            .map_err(|_| NormalizedRebindError::IdentityRecipe)?
-                        {
+                    if record.version == LEXICAL_SUMMARY_BATCH_VERSION
+                        || record.version == crate::LEXICAL_SIGNATURE_BATCH_VERSION
+                    {
+                        let children = if record.version == crate::LEXICAL_SIGNATURE_BATCH_VERSION {
+                            crate::decode_lexical_signature_batch_envelope_with_checkpoint(
+                                record,
+                                &mut *checkpoint,
+                            )
+                        } else {
+                            decode_lexical_summary_batch_envelope(record)
+                        };
+                        ensure_projection_continues(checkpoint)?;
+                        for child in children.map_err(|_| NormalizedRebindError::IdentityRecipe)? {
+                            ensure_projection_continues(checkpoint)?;
                             let evidence = decode_lexical_evidence_envelope(&child)
                                 .map_err(|_| NormalizedRebindError::IdentityRecipe)?;
-                            collect_fact_ref_dependency(evidence.subject(), dependencies);
+                            // Version 5 authenticates the exact child-subject union
+                            // already collected from the outer evidence. Avoid a
+                            // second hidden fan-in outside the dependency charge.
+                            if record.version != crate::LEXICAL_SIGNATURE_BATCH_VERSION {
+                                collect_fact_ref_dependency(evidence.subject(), dependencies);
+                            }
                         }
                     } else {
                         let evidence = decode_lexical_evidence_envelope(record)
@@ -1392,7 +1407,7 @@ fn rebind_node(
         }
         FactNode::Extension(record) => {
             ensure_projection_continues(checkpoint)?;
-            let extension = rebind_extension(record, repository, generation, ids)?;
+            let extension = rebind_extension(record, repository, generation, ids, checkpoint)?;
             ensure_projection_continues(checkpoint)?;
             let id = extension.id;
             target.extensions.push(extension);
@@ -1551,6 +1566,7 @@ fn rebind_extension(
     repository: rootlight_ids::RepositoryId,
     generation: GenerationId,
     ids: &FactIdMap,
+    checkpoint: &mut impl FnMut() -> bool,
 ) -> Result<ExtensionEnvelope, NormalizedRebindError> {
     let provenance = remap_id(extension.provenance, ids)?;
     let source = extension
@@ -1641,12 +1657,24 @@ fn rebind_extension(
                 .map_err(|_| NormalizedRebindError::IdentityRecipe)
         }
         LEXICAL_EXTENSION_NAMESPACE => {
-            if extension.version == LEXICAL_SUMMARY_BATCH_VERSION {
-                let children = decode_lexical_summary_batch_envelope(&extension)
-                    .map_err(|_| NormalizedRebindError::IdentityRecipe)?;
+            if extension.version == LEXICAL_SUMMARY_BATCH_VERSION
+                || extension.version == crate::LEXICAL_SIGNATURE_BATCH_VERSION
+            {
+                let signatures = extension.version == crate::LEXICAL_SIGNATURE_BATCH_VERSION;
+                let children = if signatures {
+                    crate::decode_lexical_signature_batch_envelope_with_checkpoint(
+                        &extension,
+                        &mut *checkpoint,
+                    )
+                } else {
+                    decode_lexical_summary_batch_envelope(&extension)
+                };
+                ensure_projection_continues(checkpoint)?;
+                let children = children.map_err(|_| NormalizedRebindError::IdentityRecipe)?;
                 let rebound = children
                     .into_iter()
                     .map(|child| {
+                        ensure_projection_continues(checkpoint)?;
                         let evidence = decode_lexical_evidence_envelope(&child)
                             .map_err(|_| NormalizedRebindError::IdentityRecipe)?;
                         let subject = rebind_fact_ref(evidence.subject(), ids)?;
@@ -1663,8 +1691,12 @@ fn rebind_extension(
                         .map_err(|_| NormalizedRebindError::IdentityRecipe)
                     })
                     .collect::<Result<Vec<_>, _>>()?;
-                return new_lexical_summary_batch_envelope(&rebound)
-                    .map_err(|_| NormalizedRebindError::IdentityRecipe);
+                return (if signatures {
+                    crate::new_lexical_signature_batch_envelope(&rebound)
+                } else {
+                    new_lexical_summary_batch_envelope(&rebound)
+                })
+                .map_err(|_| NormalizedRebindError::IdentityRecipe);
             }
             let evidence = decode_lexical_evidence_envelope(&extension)
                 .map_err(|_| NormalizedRebindError::IdentityRecipe)?;
@@ -3792,6 +3824,70 @@ mod tests {
                 &IrLimits::default(),
                 &ExtensionSupport::default(),
                 || true,
+            )
+            .unwrap()
+        );
+    }
+
+    #[test]
+    fn signature_batch_rebinds_every_child_and_preserves_generation_neutral_digest() {
+        let mut original = fixture_with_lexical_extension();
+        let entity = &original.entities[0];
+        let children = ["fn first(value: usize)", "fn second(value: usize)"]
+            .into_iter()
+            .map(|text| {
+                let evidence = LexicalEvidenceV1::from_complete_text(
+                    LexicalEvidenceKind::Signature,
+                    FactRef::Entity(entity.id),
+                    LexicalEvidenceFormat::SourceText,
+                    text,
+                )
+                .unwrap();
+                new_lexical_evidence_envelope(
+                    original.repository,
+                    original.generation,
+                    entity.provenance,
+                    entity.evidence.source.clone().unwrap(),
+                    &evidence,
+                )
+                .unwrap()
+            })
+            .collect::<Vec<_>>();
+        original.extensions = vec![crate::new_lexical_signature_batch_envelope(&children).unwrap()];
+        let original = canonical_preserving_extensions(
+            original,
+            &IrLimits::default(),
+            &ExtensionSupport::default(),
+        )
+        .unwrap();
+        let generation = GenerationId::from_bytes([94; 20]);
+        let rebound = rebind_document(
+            original.clone(),
+            generation,
+            &IrLimits::default(),
+            &ExtensionSupport::default(),
+        )
+        .unwrap();
+        let children =
+            crate::decode_lexical_signature_batch_envelope(&rebound.extensions[0]).unwrap();
+        assert_eq!(children.len(), 2);
+        assert_ne!(rebound.extensions[0].id, original.extensions[0].id);
+        assert!(children.iter().all(|child| child.generation == generation
+            && child.evidence.source.as_ref().unwrap().generation() == generation
+            && child.evidence.derivation == [FactRef::Entity(rebound.entities[0].id)]));
+        assert_eq!(
+            canonical_generation_neutral_digests(
+                &original,
+                &IrLimits::default(),
+                &ExtensionSupport::default(),
+                || true
+            )
+            .unwrap(),
+            canonical_generation_neutral_digests(
+                &rebound,
+                &IrLimits::default(),
+                &ExtensionSupport::default(),
+                || true
             )
             .unwrap()
         );

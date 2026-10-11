@@ -711,6 +711,7 @@ where
         } else {
             collect_symbol_signature(
                 document,
+                plan.symbol,
                 self.generation.lexical_ordinals_for_symbol(plan.symbol),
                 &mut tracker,
                 &control,
@@ -3002,7 +3003,10 @@ fn hydrate_locate_signatures(
         return Ok(false);
     }
     let lookup_bytes = symbol_count
-        .checked_mul(crate::projection::RetainedSignatureIndex::entry_bytes())
+        .checked_mul(
+            crate::projection::RetainedSignatureIndex::entry_bytes()
+                + std::mem::size_of::<(usize, rootlight_ir::LexicalEvidenceV1)>(),
+        )
         .ok_or(QueryError::MemoryUnavailable)?;
     let lookup_bytes = checked_usize_to_u64(lookup_bytes)?;
     if !tracker.can_add(QueryResource::MemoryBytes, lookup_bytes) {
@@ -3030,50 +3034,105 @@ fn hydrate_locate_signatures(
             return Ok(true);
         }
         tracker.add_memory(scratch)?;
-        signatures.observe(envelope)?;
+        let rows = signature_decode_rows(envelope);
+        if !tracker.can_add(QueryResource::Rows, rows) {
+            record_limit(limiting_resources, QueryResource::Rows)?;
+            return Ok(true);
+        }
+        tracker.add_rows(rows)?;
+        signatures.observe_with_checkpoint(envelope, || control.check())?;
     }
     // No hit receives evidence until the whole candidate scan has completed,
     // so later conflicting declarations cannot invalidate a published prefix.
-    let mut incomplete = false;
-    for hit in hits {
-        control.check()?;
-        let Some(symbol) = hit.symbol else {
-            continue;
-        };
-        let Some(envelope) = signatures.envelope(symbol) else {
-            continue;
-        };
-        let scratch = signature_decode_bytes(envelope)?;
-        if !tracker.can_add(QueryResource::MemoryBytes, scratch) {
-            record_limit(limiting_resources, QueryResource::MemoryBytes)?;
-            incomplete = true;
-            continue;
-        }
-        tracker.add_memory(scratch)?;
-        let evidence = signatures.evidence(symbol)?.ok_or(QueryError::IndexDrift)?;
-        let source_bytes = signature_source_bytes(&evidence, control)?;
-        if !tracker.can_add(QueryResource::SourceBytes, source_bytes) {
-            record_limit(limiting_resources, QueryResource::SourceBytes)?;
-            incomplete = true;
-            continue;
-        }
-        if !tracker.can_add(QueryResource::Results, 1) {
-            record_limit(limiting_resources, QueryResource::Results)?;
-            incomplete = true;
-            continue;
-        }
-        tracker.add_source_bytes(source_bytes)?;
-        tracker.add_results(1)?;
-        hit.signature = Some(evidence);
+    let mut staged = Vec::new();
+    staged
+        .try_reserve_exact(symbol_count)
+        .map_err(|_| QueryError::MemoryUnavailable)?;
+    let complete = signatures.visit_with_checkpoint(
+        || control.check(),
+        |event| {
+            match event {
+                crate::projection::SignatureVisit::Workspace(envelope) => {
+                    let scratch = signature_decode_bytes(envelope)?;
+                    if !tracker.can_add(QueryResource::MemoryBytes, scratch) {
+                        record_limit(limiting_resources, QueryResource::MemoryBytes)?;
+                        return Ok(false);
+                    }
+                    let rows = signature_decode_rows(envelope);
+                    if !tracker.can_add(QueryResource::Rows, rows) {
+                        record_limit(limiting_resources, QueryResource::Rows)?;
+                        return Ok(false);
+                    }
+                    tracker.add_memory(scratch)?;
+                    tracker.add_rows(rows)?;
+                }
+                crate::projection::SignatureVisit::Evidence(symbol, Some(evidence)) => {
+                    let source_bytes = signature_source_bytes(&evidence, control)?;
+                    for (index, _) in hits
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, hit)| hit.symbol == Some(symbol))
+                    {
+                        control.check()?;
+                        if !tracker.can_add(QueryResource::SourceBytes, source_bytes) {
+                            record_limit(limiting_resources, QueryResource::SourceBytes)?;
+                            return Ok(false);
+                        }
+                        if !tracker.can_add(QueryResource::Results, 1) {
+                            record_limit(limiting_resources, QueryResource::Results)?;
+                            return Ok(false);
+                        }
+                        let retained = evidence
+                            .text()
+                            .len()
+                            .checked_add(evidence.source_parts().map_or(0, std::mem::size_of_val))
+                            .ok_or(QueryError::MemoryUnavailable)?;
+                        let retained = checked_usize_to_u64(retained)?;
+                        if !tracker.can_add(QueryResource::MemoryBytes, retained) {
+                            record_limit(limiting_resources, QueryResource::MemoryBytes)?;
+                            return Ok(false);
+                        }
+                        tracker.add_memory(retained)?;
+                        tracker.add_source_bytes(source_bytes)?;
+                        tracker.add_results(1)?;
+                        staged.push((index, evidence.clone()));
+                    }
+                }
+                crate::projection::SignatureVisit::Evidence(_, None) => {}
+            }
+            Ok(true)
+        },
+    )?;
+    if !complete {
+        return Ok(true);
     }
-    Ok(incomplete)
+    control.check()?;
+    for (index, evidence) in staged {
+        hits.get_mut(index).ok_or(QueryError::IndexDrift)?.signature = Some(evidence);
+    }
+    Ok(false)
 }
 
 fn signature_decode_bytes(envelope: &rootlight_ir::ExtensionEnvelope) -> Result<u64, QueryError> {
+    if envelope.version == rootlight_ir::LEXICAL_SIGNATURE_BATCH_VERSION {
+        return checked_usize_to_u64(
+            rootlight_ir::lexical_signature_batch_decode_workspace_bytes(envelope)
+                .map_err(|_| QueryError::IndexDrift)?,
+        );
+    }
     checked_usize_to_u64(envelope.payload.len())?
         .checked_mul(4)
         .and_then(|bytes| bytes.checked_add(512))
         .ok_or(QueryError::MemoryUnavailable)
+}
+
+fn signature_decode_rows(envelope: &rootlight_ir::ExtensionEnvelope) -> u64 {
+    if envelope.version == rootlight_ir::LEXICAL_SIGNATURE_BATCH_VERSION {
+        // Reserve the bounded hidden-child work before any reconstruction.
+        128
+    } else {
+        0
+    }
 }
 
 fn signature_source_bytes(
@@ -3098,12 +3157,21 @@ fn signature_source_bytes(
 
 fn collect_symbol_signature(
     document: &NormalizedIrDocument,
+    symbol: SymbolId,
     ordinals: &[usize],
     tracker: &mut UsageTracker,
     control: &QueryControl<'_>,
     limiting_resources: &mut Vec<QueryResource>,
 ) -> Result<Option<rootlight_ir::LexicalEvidenceV1>, QueryError> {
-    let mut signature = None;
+    let lookup_bytes =
+        checked_usize_to_u64(crate::projection::RetainedSignatureIndex::entry_bytes())?;
+    if !tracker.can_add(QueryResource::MemoryBytes, lookup_bytes) {
+        record_limit(limiting_resources, QueryResource::MemoryBytes)?;
+        return Ok(None);
+    }
+    tracker.add_memory(lookup_bytes)?;
+    let mut signatures =
+        crate::projection::RetainedSignatureIndex::new(std::iter::once(symbol), 1)?;
     for &ordinal in ordinals {
         control.check()?;
         let envelope = document
@@ -3115,6 +3183,9 @@ fn collect_symbol_signature(
             return Ok(None);
         }
         tracker.add_rows(1)?;
+        if !signatures.candidate(envelope) {
+            continue;
+        }
         // Reserve decode and canonical-validation scratch before allocating.
         // The generation has already admitted each bounded envelope payload.
         let bytes = signature_decode_bytes(envelope)?;
@@ -3123,19 +3194,45 @@ fn collect_symbol_signature(
             return Ok(None);
         }
         tracker.add_memory(bytes)?;
-        let evidence = rootlight_ir::decode_lexical_evidence_envelope(envelope)
-            .map_err(|_| QueryError::IndexDrift)?;
-        if evidence.kind() != rootlight_ir::LexicalEvidenceKind::Signature {
-            continue;
-        }
-        if signature
-            .as_ref()
-            .is_some_and(|previous| previous != &evidence)
-        {
-            // Conflicting retained declarations cannot yield one exact signature.
+        let rows = signature_decode_rows(envelope);
+        if !tracker.can_add(QueryResource::Rows, rows) {
+            record_limit(limiting_resources, QueryResource::Rows)?;
             return Ok(None);
         }
-        signature = Some(evidence);
+        tracker.add_rows(rows)?;
+        signatures.observe_with_checkpoint(envelope, || control.check())?;
+    }
+    let mut signature = None;
+    let complete = signatures.visit_with_checkpoint(
+        || control.check(),
+        |event| {
+            match event {
+                crate::projection::SignatureVisit::Workspace(envelope) => {
+                    let bytes = signature_decode_bytes(envelope)?;
+                    if !tracker.can_add(QueryResource::MemoryBytes, bytes) {
+                        record_limit(limiting_resources, QueryResource::MemoryBytes)?;
+                        return Ok(false);
+                    }
+                    let rows = signature_decode_rows(envelope);
+                    if !tracker.can_add(QueryResource::Rows, rows) {
+                        record_limit(limiting_resources, QueryResource::Rows)?;
+                        return Ok(false);
+                    }
+                    tracker.add_memory(bytes)?;
+                    tracker.add_rows(rows)?;
+                }
+                crate::projection::SignatureVisit::Evidence(subject, evidence) => {
+                    if subject != symbol {
+                        return Err(QueryError::IndexDrift);
+                    }
+                    signature = evidence;
+                }
+            }
+            Ok(true)
+        },
+    )?;
+    if !complete {
+        return Ok(None);
     }
     if let Some(evidence) = &signature {
         let source_bytes = signature_source_bytes(evidence, control)?;

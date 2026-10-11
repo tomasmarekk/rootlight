@@ -24,6 +24,12 @@ pub const LEXICAL_PROJECTION_VERSION: &str = "2";
 pub const LEXICAL_SUMMARY_BATCH_VERSION: &str = "3";
 /// Lexical envelope version for strictly transcoded original-byte projections.
 pub const LEXICAL_ENCODED_PROJECTION_VERSION: &str = "4";
+/// Lexical envelope version for independently source-linked signature batches.
+pub const LEXICAL_SIGNATURE_BATCH_VERSION: &str = "5";
+/// Maximum signatures in one independently validated lexical envelope.
+pub const MAX_LEXICAL_SIGNATURE_BATCH_ENTRIES: usize = 128;
+/// Maximum canonical JSON bytes in one signature batch, before caller limits.
+pub const MAX_LEXICAL_SIGNATURE_BATCH_PAYLOAD_BYTES: usize = 1024 * 1024;
 /// Maximum summaries in one independently validated lexical envelope.
 pub const MAX_LEXICAL_SUMMARY_BATCH_ENTRIES: usize = 128;
 /// Maximum retained UTF-8 bytes in one signature.
@@ -39,6 +45,7 @@ pub const MAX_LEXICAL_PAYLOAD_BYTES: usize = 25 * 1024;
 
 const LEXICAL_FACT_DOMAIN: &str = "rootlight.lexical/v1";
 const LEXICAL_SUMMARY_BATCH_DOMAIN: &str = "rootlight.lexical.summary-batch/v1";
+const LEXICAL_SIGNATURE_BATCH_DOMAIN: &str = "rootlight.lexical.signature-batch/v1";
 const MAX_LEXICAL_SUMMARY_BATCH_PAYLOAD_BYTES: usize = 1024 * 1024;
 const MAX_UTF8_BOUNDARY_BACKTRACK: usize = 3;
 
@@ -752,8 +759,8 @@ struct LexicalSummaryBatchIdentity<'a> {
 /// Packs a bounded set of complete source-linked summaries into one envelope.
 ///
 /// Every child remains independently reconstructible with its original source,
-/// provenance, subject, payload, and deterministic identity. Signatures are
-/// deliberately excluded so symbol queries keep their direct envelope lookup.
+/// provenance, subject, payload, and deterministic identity. This legacy version
+/// remains summary-only; entity signatures use the separate version 5 codec.
 ///
 /// # Errors
 ///
@@ -912,6 +919,251 @@ fn derive_lexical_summary_batch_id(
     let bytes =
         serde_json::to_vec(&identity).map_err(|_| LexicalExtensionError::PayloadEncoding)?;
     Ok(derive_fact(LEXICAL_SUMMARY_BATCH_DOMAIN, &bytes).id())
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct LexicalSignatureBatchPayload {
+    #[serde(deserialize_with = "bounded_signature_entries")]
+    entries: Vec<LexicalSummaryBatchEntry>,
+}
+
+fn bounded_signature_entries<'de, D>(
+    deserializer: D,
+) -> Result<Vec<LexicalSummaryBatchEntry>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    struct Entries;
+    impl<'de> serde::de::Visitor<'de> for Entries {
+        type Value = Vec<LexicalSummaryBatchEntry>;
+
+        fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+            formatter.write_str("one to 128 signature entries")
+        }
+
+        fn visit_seq<A>(self, mut sequence: A) -> Result<Self::Value, A::Error>
+        where
+            A: serde::de::SeqAccess<'de>,
+        {
+            let mut entries = Vec::new();
+            entries
+                .try_reserve_exact(MAX_LEXICAL_SIGNATURE_BATCH_ENTRIES)
+                .map_err(serde::de::Error::custom)?;
+            loop {
+                if entries.len() == MAX_LEXICAL_SIGNATURE_BATCH_ENTRIES {
+                    if sequence.next_element::<serde::de::IgnoredAny>()?.is_some() {
+                        return Err(serde::de::Error::custom("too many signature entries"));
+                    }
+                    break;
+                }
+                let Some(entry) = sequence.next_element()? else {
+                    break;
+                };
+                entries.push(entry);
+            }
+            if entries.is_empty() {
+                return Err(serde::de::Error::custom("empty signature batch"));
+            }
+            Ok(entries)
+        }
+    }
+    deserializer.deserialize_seq(Entries)
+}
+
+/// Packs complete entity signatures without substituting one child's source.
+///
+/// Children must belong to one file, repository, generation and producer. The
+/// canonical order uses child identity; physical partitioning belongs to the
+/// caller. Summary version 3 remains summary-only and byte-compatible.
+///
+/// # Errors
+/// Rejects empty, oversized, duplicate, truncated, non-entity, mixed-owner or
+/// malformed children. No partial batch is returned.
+pub fn new_lexical_signature_batch_envelope(
+    entries: &[ExtensionEnvelope],
+) -> Result<ExtensionEnvelope, LexicalExtensionError> {
+    if entries.is_empty() || entries.len() > MAX_LEXICAL_SIGNATURE_BATCH_ENTRIES {
+        return Err(LexicalExtensionError::MalformedPayload);
+    }
+    let mut ordered = entries.iter().collect::<Vec<_>>();
+    ordered.sort_unstable_by_key(|entry| entry.id);
+    let first = ordered[0];
+    let first_source = first
+        .evidence
+        .source
+        .as_ref()
+        .ok_or(LexicalExtensionError::MissingDirectSourceEvidence)?;
+    let mut previous_id = None;
+    let mut payload_entries = Vec::with_capacity(ordered.len());
+    let mut derivation = Vec::with_capacity(ordered.len());
+    for entry in ordered {
+        if previous_id.replace(entry.id) == Some(entry.id)
+            || entry.repository != first.repository
+            || entry.generation != first.generation
+            || entry.provenance != first.provenance
+        {
+            return Err(LexicalExtensionError::EnvelopeIdentityMismatch);
+        }
+        let evidence = decode_lexical_evidence_envelope(entry)?;
+        if evidence.kind() != LexicalEvidenceKind::Signature
+            || evidence.is_truncated()
+            || !matches!(evidence.subject(), FactRef::Entity(_))
+        {
+            return Err(LexicalExtensionError::IncompatibleFormat);
+        }
+        let source = entry
+            .evidence
+            .source
+            .as_ref()
+            .ok_or(LexicalExtensionError::MissingDirectSourceEvidence)?;
+        if source.span().file() != first_source.span().file()
+            || source.content_hash() != first_source.content_hash()
+        {
+            return Err(LexicalExtensionError::FileSubjectSourceMismatch);
+        }
+        payload_entries.push(LexicalSummaryBatchEntry {
+            source: source.clone(),
+            payload: entry.payload.clone(),
+        });
+        derivation.push(evidence.subject());
+    }
+    derivation.sort_unstable();
+    derivation.dedup();
+    let payload = serde_json::to_string(&LexicalSignatureBatchPayload {
+        entries: payload_entries,
+    })
+    .map_err(|_| LexicalExtensionError::PayloadEncoding)?;
+    if payload.len() > MAX_LEXICAL_SIGNATURE_BATCH_PAYLOAD_BYTES {
+        return Err(LexicalExtensionError::PayloadTooLarge {
+            observed: payload.len(),
+            limit: MAX_LEXICAL_SIGNATURE_BATCH_PAYLOAD_BYTES,
+        });
+    }
+    let identity = LexicalSummaryBatchIdentity {
+        repository: first.repository,
+        generation: first.generation,
+        provenance: first.provenance,
+        payload: &payload,
+    };
+    let bytes =
+        serde_json::to_vec(&identity).map_err(|_| LexicalExtensionError::PayloadEncoding)?;
+    let id = derive_fact(LEXICAL_SIGNATURE_BATCH_DOMAIN, &bytes).id();
+    Ok(ExtensionEnvelope {
+        id,
+        repository: first.repository,
+        generation: first.generation,
+        namespace: LEXICAL_EXTENSION_NAMESPACE.to_owned(),
+        version: LEXICAL_SIGNATURE_BATCH_VERSION.to_owned(),
+        criticality: ExtensionCriticality::Noncritical,
+        payload,
+        provenance: first.provenance,
+        evidence: FactEvidence {
+            source: Some(first_source.clone()),
+            derivation,
+        },
+    })
+}
+
+/// Reconstructs every signature child and authenticates the entire batch.
+///
+/// # Errors
+/// Rejects invalid children, noncanonical order, altered source, derivation or
+/// ownership, and any mismatched batch identity.
+pub fn decode_lexical_signature_batch_envelope(
+    envelope: &ExtensionEnvelope,
+) -> Result<Vec<ExtensionEnvelope>, LexicalExtensionError> {
+    decode_lexical_signature_batch_envelope_with_checkpoint(envelope, || true)
+}
+
+/// Validates a signature batch with cooperative checks around each child.
+///
+/// # Errors
+/// Returns the ordinary batch errors, or [`LexicalExtensionError::Interrupted`]
+/// when the caller stops decoding. No prefix is published.
+pub fn decode_lexical_signature_batch_envelope_with_checkpoint(
+    envelope: &ExtensionEnvelope,
+    mut checkpoint: impl FnMut() -> bool,
+) -> Result<Vec<ExtensionEnvelope>, LexicalExtensionError> {
+    if !checkpoint() {
+        return Err(LexicalExtensionError::Interrupted);
+    }
+    if envelope.namespace != LEXICAL_EXTENSION_NAMESPACE {
+        return Err(LexicalExtensionError::UnsupportedNamespace);
+    }
+    if envelope.version != LEXICAL_SIGNATURE_BATCH_VERSION {
+        return Err(LexicalExtensionError::UnsupportedVersion);
+    }
+    if envelope.criticality != ExtensionCriticality::Noncritical {
+        return Err(LexicalExtensionError::WrongCriticality);
+    }
+    if envelope.payload.len() > MAX_LEXICAL_SIGNATURE_BATCH_PAYLOAD_BYTES {
+        return Err(LexicalExtensionError::PayloadTooLarge {
+            observed: envelope.payload.len(),
+            limit: MAX_LEXICAL_SIGNATURE_BATCH_PAYLOAD_BYTES,
+        });
+    }
+    let payload: LexicalSignatureBatchPayload = serde_json::from_str(&envelope.payload)
+        .map_err(|_| LexicalExtensionError::MalformedPayload)?;
+    let mut entries = Vec::with_capacity(payload.entries.len());
+    for entry in payload.entries {
+        if !checkpoint() {
+            return Err(LexicalExtensionError::Interrupted);
+        }
+        validate_source_owner(envelope.repository, envelope.generation, &entry.source)?;
+        let evidence = decode_lexical_evidence(&entry.payload)?;
+        entries.push(new_lexical_evidence_envelope(
+            envelope.repository,
+            envelope.generation,
+            envelope.provenance,
+            entry.source,
+            &evidence,
+        )?);
+    }
+    if !checkpoint() {
+        return Err(LexicalExtensionError::Interrupted);
+    }
+    let canonical = new_lexical_signature_batch_envelope(&entries)?;
+    if canonical != *envelope {
+        return Err(LexicalExtensionError::EnvelopeIdentityMismatch);
+    }
+    if !checkpoint() {
+        return Err(LexicalExtensionError::Interrupted);
+    }
+    Ok(entries)
+}
+
+/// Bounds temporary reconstruction storage before a query decodes a batch.
+///
+/// The charge includes encoded strings, canonical re-encoding, identity bytes,
+/// reconstructed children, decoded evidence and bounded metadata vectors. It
+/// is a conservative workspace allowance, not an allocator or RSS measurement.
+///
+/// # Errors
+/// Rejects a payload over the batch cap or arithmetic overflow.
+pub fn lexical_signature_batch_decode_workspace_bytes(
+    envelope: &ExtensionEnvelope,
+) -> Result<usize, LexicalExtensionError> {
+    if envelope.payload.len() > MAX_LEXICAL_SIGNATURE_BATCH_PAYLOAD_BYTES {
+        return Err(LexicalExtensionError::PayloadTooLarge {
+            observed: envelope.payload.len(),
+            limit: MAX_LEXICAL_SIGNATURE_BATCH_PAYLOAD_BYTES,
+        });
+    }
+    let fixed = std::mem::size_of::<LexicalSummaryBatchEntry>()
+        + std::mem::size_of::<ExtensionEnvelope>() * 2
+        + std::mem::size_of::<LexicalEvidence>()
+        + std::mem::size_of::<FactRef>() * 2;
+    envelope
+        .payload
+        .len()
+        .checked_mul(8)
+        .and_then(|bytes| {
+            fixed
+                .checked_mul(MAX_LEXICAL_SIGNATURE_BATCH_ENTRIES)
+                .and_then(|fixed| bytes.checked_add(fixed))
+        })
+        .ok_or(LexicalExtensionError::PayloadEncoding)
 }
 
 fn retained_prefix(input: &str, limit: usize) -> (&str, bool) {
@@ -1115,6 +1367,9 @@ fn lexical_subject_schema(generator: &mut schemars::SchemaGenerator) -> schemars
 /// Source-free failures for the lexical extension boundary.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum LexicalExtensionError {
+    /// Caller stopped bounded reconstruction before publication.
+    #[error("lexical reconstruction interrupted")]
+    Interrupted,
     /// A projection was partial, unordered, oversized or outside its source.
     #[error("lexical source projection is invalid")]
     InvalidSourceProjection,
@@ -1307,6 +1562,132 @@ mod tests {
             new_lexical_summary_batch_envelope(&[signature]),
             Err(LexicalExtensionError::IncompatibleFormat)
         );
+    }
+
+    #[test]
+    fn signature_batch_preserves_complete_children_and_legacy_summary_contract() {
+        let document = normalized_fixture();
+        let source = document.entities[0].evidence.source.clone().unwrap();
+        let children = [
+            "fn header()",
+            "(defun header (value))",
+            "fn header(value: f32)",
+        ]
+        .into_iter()
+        .enumerate()
+        .map(|(index, text)| {
+            let evidence = LexicalEvidenceV1::from_complete_text(
+                LexicalEvidenceKind::Signature,
+                FactRef::Entity(SymbolId::from_bytes([u8::try_from(index + 1).unwrap(); 20])),
+                LexicalEvidenceFormat::SourceText,
+                text,
+            )
+            .unwrap();
+            new_lexical_evidence_envelope(
+                document.repository,
+                document.generation,
+                document.entities[0].provenance,
+                source.clone(),
+                &evidence,
+            )
+            .unwrap()
+        })
+        .collect::<Vec<_>>();
+        let batch = new_lexical_signature_batch_envelope(&children).unwrap();
+        assert_eq!(batch.version, "5");
+        let mut expected = children.clone();
+        expected.sort_unstable_by_key(|child| child.id);
+        assert_eq!(
+            decode_lexical_signature_batch_envelope(&batch).unwrap(),
+            expected
+        );
+        let mut reordered = children.clone();
+        reordered.reverse();
+        assert_eq!(
+            new_lexical_signature_batch_envelope(&reordered).unwrap(),
+            batch
+        );
+        assert!(new_lexical_summary_batch_envelope(&children).is_err());
+        assert!(decode_lexical_evidence_envelope(&batch).is_err());
+        assert!(decode_lexical_summary_batch_envelope(&batch).is_err());
+        assert!(new_lexical_signature_batch_envelope(&vec![children[0].clone(); 129]).is_err());
+        assert!(
+            new_lexical_signature_batch_envelope(&[children[0].clone(), children[0].clone()])
+                .is_err()
+        );
+        let mut wrong = batch.clone();
+        wrong.evidence.derivation.pop();
+        assert!(decode_lexical_signature_batch_envelope(&wrong).is_err());
+        let mut wrong = batch.clone();
+        wrong.evidence.source = None;
+        assert!(decode_lexical_signature_batch_envelope(&wrong).is_err());
+        assert_eq!(
+            decode_lexical_signature_batch_envelope_with_checkpoint(&batch, || false),
+            Err(LexicalExtensionError::Interrupted)
+        );
+        let mut calls = 0;
+        assert_eq!(
+            decode_lexical_signature_batch_envelope_with_checkpoint(&batch, || {
+                calls += 1;
+                calls < 3
+            }),
+            Err(LexicalExtensionError::Interrupted)
+        );
+    }
+
+    #[test]
+    fn signature_batch_preserves_projection_and_encoded_mapping_and_rejects_hidden_corruption() {
+        let document = normalized_fixture();
+        let file = document.files[0].id;
+        let provenance = document.entities[0].provenance;
+        let raw = b"fn first() { body }\nfn second()";
+        let source = SourceRef::new(
+            document.repository,
+            document.generation,
+            crate::SourceSpan::new(file, 0, u64::try_from(raw.len()).unwrap()).unwrap(),
+            content_hash(raw),
+            None,
+        );
+        let projection =
+            SourceTextProjection::from_source(std::str::from_utf8(raw).unwrap(), &[0..10, 20..31])
+                .unwrap();
+        let projected = LexicalEvidenceV1::from_source_projection(
+            FactRef::Entity(SymbolId::from_bytes([41; 20])),
+            projection,
+        );
+        let first = new_lexical_evidence_envelope(
+            document.repository,
+            document.generation,
+            provenance,
+            source.clone(),
+            &projected,
+        )
+        .unwrap();
+        let batch = new_lexical_signature_batch_envelope(&[first]).unwrap();
+        for child in decode_lexical_signature_batch_envelope(&batch).unwrap() {
+            decode_lexical_evidence_envelope(&child)
+                .unwrap()
+                .verify_source_bytes(raw)
+                .unwrap();
+        }
+        let mut payload: serde_json::Value = serde_json::from_str(&batch.payload).unwrap();
+        payload["entries"][0]["payload"] = serde_json::json!("{}");
+        let mut wrong = batch.clone();
+        wrong.payload = serde_json::to_string(&payload).unwrap();
+        assert!(decode_lexical_signature_batch_envelope(&wrong).is_err());
+        for encoding in [SourceTextEncoding::Utf16Le, SourceTextEncoding::Utf16Be] {
+            let (encoded_raw, expected, child) = encoded_projection_fixture(encoding);
+            let encoded_batch =
+                new_lexical_signature_batch_envelope(std::slice::from_ref(&child)).unwrap();
+            let children = decode_lexical_signature_batch_envelope(&encoded_batch).unwrap();
+            assert_eq!(children, [child]);
+            let evidence = decode_lexical_evidence_envelope(&children[0]).unwrap();
+            assert_eq!(evidence, expected);
+            evidence.verify_source_bytes(&encoded_raw).unwrap();
+        }
+        let mut oversized = batch;
+        oversized.payload = "x".repeat(MAX_LEXICAL_SIGNATURE_BATCH_PAYLOAD_BYTES + 1);
+        assert!(lexical_signature_batch_decode_workspace_bytes(&oversized).is_err());
     }
 
     #[test]

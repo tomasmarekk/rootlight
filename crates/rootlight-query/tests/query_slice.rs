@@ -2422,6 +2422,305 @@ fn signature_snapshot(signatures: &[&str]) -> (GenerationSnapshot, SymbolId) {
     )
 }
 
+fn signature_batch_snapshot(direct: Option<&str>) -> (GenerationSnapshot, SymbolId, SymbolId) {
+    let (base, first) = signature_snapshot(&["fn first(FirstOnly)"]);
+    let mut document = base.document().clone();
+    let first_child = document
+        .extensions
+        .iter()
+        .find(|extension| extension.namespace == rootlight_ir::LEXICAL_EXTENSION_NAMESPACE)
+        .unwrap()
+        .clone();
+    let mut neighbor = document
+        .entities
+        .iter()
+        .find(|entity| entity.id == first)
+        .unwrap()
+        .clone();
+    neighbor.id = SymbolId::from_bytes([201; 20]);
+    neighbor.language = "common-lisp".to_owned();
+    neighbor.canonical_name = "neighbor".to_owned();
+    neighbor.display_name = "neighbor".to_owned();
+    neighbor.qualified_name = "neighbor".to_owned();
+    let second = neighbor.id;
+    let lexical = rootlight_ir::LexicalEvidenceV1::from_complete_text(
+        rootlight_ir::LexicalEvidenceKind::Signature,
+        rootlight_ir::FactRef::Entity(second),
+        rootlight_ir::LexicalEvidenceFormat::SourceText,
+        "(defun neighbor (NeighborOnly))",
+    )
+    .unwrap();
+    let second_child = rootlight_ir::new_lexical_evidence_envelope(
+        document.repository,
+        document.generation,
+        neighbor.provenance,
+        neighbor.evidence.source.clone().unwrap(),
+        &lexical,
+    )
+    .unwrap();
+    document.entities.push(neighbor);
+    document
+        .extensions
+        .retain(|extension| extension.namespace != rootlight_ir::LEXICAL_EXTENSION_NAMESPACE);
+    document.extensions.push(
+        rootlight_ir::new_lexical_signature_batch_envelope(&[first_child.clone(), second_child])
+            .unwrap(),
+    );
+    if let Some(text) = direct {
+        let evidence = rootlight_ir::LexicalEvidenceV1::from_complete_text(
+            rootlight_ir::LexicalEvidenceKind::Signature,
+            rootlight_ir::FactRef::Entity(first),
+            rootlight_ir::LexicalEvidenceFormat::SourceText,
+            text,
+        )
+        .unwrap();
+        document.extensions.push(
+            rootlight_ir::new_lexical_evidence_envelope(
+                document.repository,
+                document.generation,
+                first_child.provenance,
+                first_child.evidence.source.unwrap(),
+                &evidence,
+            )
+            .unwrap(),
+        );
+    }
+    (
+        GenerationSnapshot::new(
+            base.metadata(),
+            document,
+            &IrLimits::default(),
+            &ExtensionSupport::default(),
+        )
+        .unwrap(),
+        first,
+        second,
+    )
+}
+
+#[test]
+fn signature_batch_explanations_select_exact_children_and_deduplicate_direct_evidence() {
+    for direct in [None, Some("fn first(FirstOnly)")] {
+        let (snapshot, first, second) = signature_batch_snapshot(direct);
+        let search = fixture_search(&snapshot);
+        let service = QueryService::new(&snapshot, &search).unwrap();
+        for (symbol, text) in [
+            (first, "fn first(FirstOnly)"),
+            (second, "(defun neighbor (NeighborOnly))"),
+        ] {
+            let budget =
+                QueryBudget::new().with_max_source_bytes(u64::try_from(text.len()).unwrap());
+            let result = service
+                .execute_symbol_explain(
+                    &service.plan_symbol_explain(symbol, budget).unwrap(),
+                    &Cancellation::new(),
+                )
+                .unwrap();
+            let signature = result.data.signature.as_ref().unwrap();
+            assert_eq!(signature.subject(), rootlight_ir::FactRef::Entity(symbol));
+            assert_eq!(signature.text(), text);
+            assert_eq!(
+                result.usage.source_bytes,
+                u64::try_from(text.len()).unwrap()
+            );
+            assert_exact_response_accounting(&result);
+        }
+    }
+}
+
+#[test]
+fn signature_batch_projection_and_locate_do_not_leak_neighbor_headers() {
+    let (snapshot, first, second) = signature_batch_snapshot(None);
+    let cancellation = Cancellation::new();
+    let projected =
+        project_lexical_documents(&snapshot, BuildBudget::default(), &cancellation).unwrap();
+    assert_eq!(
+        projected
+            .iter()
+            .find(|document| document.symbol_id == Some(first))
+            .unwrap()
+            .signature
+            .as_deref(),
+        Some("fn first(FirstOnly)")
+    );
+    assert_eq!(
+        projected
+            .iter()
+            .find(|document| document.symbol_id == Some(second))
+            .unwrap()
+            .signature
+            .as_deref(),
+        Some("(defun neighbor (NeighborOnly))")
+    );
+    let search = rootlight_search::LexicalIndex::build_ephemeral(
+        snapshot.metadata().generation(),
+        projected,
+        BuildBudget::default(),
+        &cancellation,
+    )
+    .unwrap();
+    let service = QueryService::new(&snapshot, &search).unwrap();
+    for (needle, symbol) in [("FirstOnly", first), ("NeighborOnly", second)] {
+        let plan = service
+            .plan_code_locate(
+                needle.to_owned(),
+                LocateMode::Text,
+                10,
+                0,
+                SearchBudget::default(),
+                QueryBudget::new(),
+            )
+            .unwrap();
+        let result = service.execute_code_locate(&plan, &cancellation).unwrap();
+        assert_eq!(result.data.hits.len(), 1);
+        assert_eq!(result.data.hits[0].symbol, Some(symbol));
+        assert_eq!(
+            result.data.hits[0].signature.as_ref().unwrap().subject(),
+            rootlight_ir::FactRef::Entity(symbol)
+        );
+        assert_exact_response_accounting(&result);
+    }
+}
+
+#[test]
+fn signature_batch_conflicts_and_malformed_hidden_neighbors_fail_closed() {
+    let (snapshot, first, second) = signature_batch_snapshot(Some("fn first(ConflictingOnly)"));
+    let projected =
+        project_lexical_documents(&snapshot, BuildBudget::default(), &Cancellation::new()).unwrap();
+    assert!(
+        projected
+            .iter()
+            .find(|document| document.symbol_id == Some(first))
+            .unwrap()
+            .signature
+            .is_none()
+    );
+    assert!(
+        projected
+            .iter()
+            .find(|document| document.symbol_id == Some(second))
+            .unwrap()
+            .signature
+            .is_some()
+    );
+    let search = fixture_search(&snapshot);
+    let service = QueryService::new(&snapshot, &search).unwrap();
+    assert!(
+        service
+            .execute_symbol_explain(
+                &service
+                    .plan_symbol_explain(first, QueryBudget::new())
+                    .unwrap(),
+                &Cancellation::new(),
+            )
+            .unwrap()
+            .data
+            .signature
+            .is_none()
+    );
+    let mut document = snapshot.document().clone();
+    let batch = document
+        .extensions
+        .iter_mut()
+        .find(|extension| extension.version == rootlight_ir::LEXICAL_SIGNATURE_BATCH_VERSION)
+        .unwrap();
+    let mut payload: serde_json::Value = serde_json::from_str(&batch.payload).unwrap();
+    let entries = payload["entries"].as_array().unwrap();
+    let child_position = |symbol| {
+        entries
+            .iter()
+            .position(|entry| {
+                rootlight_ir::decode_lexical_evidence(entry["payload"].as_str().unwrap())
+                    .unwrap()
+                    .subject()
+                    == rootlight_ir::FactRef::Entity(symbol)
+            })
+            .unwrap()
+    };
+    let first_position = child_position(first);
+    let neighbor_position = child_position(second);
+    assert_ne!(first_position, neighbor_position);
+    let selected_entry = entries[first_position].clone();
+    let selected_evidence =
+        rootlight_ir::decode_lexical_evidence(selected_entry["payload"].as_str().unwrap()).unwrap();
+    assert_eq!(
+        selected_evidence.subject(),
+        rootlight_ir::FactRef::Entity(first)
+    );
+    assert_eq!(selected_evidence.text(), "fn first(FirstOnly)");
+    payload["entries"][neighbor_position]["payload"] = serde_json::json!("{}");
+    assert_eq!(payload["entries"][first_position], selected_entry);
+    batch.payload = serde_json::to_string(&payload).unwrap();
+    let invalid = GenerationSnapshot::new(
+        snapshot.metadata(),
+        document,
+        &IrLimits::default(),
+        &ExtensionSupport::default(),
+    )
+    .unwrap();
+    assert!(matches!(
+        project_lexical_documents(&invalid, BuildBudget::default(), &Cancellation::new()),
+        Err(QueryError::IndexDrift)
+    ));
+    let search = fixture_search(&invalid);
+    let service = QueryService::new(&invalid, &search).unwrap();
+    assert!(matches!(
+        service.execute_symbol_explain(
+            &service
+                .plan_symbol_explain(first, QueryBudget::new())
+                .unwrap(),
+            &Cancellation::new(),
+        ),
+        Err(QueryError::IndexDrift)
+    ));
+}
+
+#[test]
+fn signature_batch_query_limits_and_cancellation_do_not_publish_partial_headers() {
+    let (snapshot, first, _) = signature_batch_snapshot(None);
+    let search = fixture_search(&snapshot);
+    let service = QueryService::new(&snapshot, &search).unwrap();
+    assert!(matches!(
+        service.plan_symbol_explain(first, QueryBudget::new().with_max_results(1)),
+        Err(QueryError::PlanRejected {
+            resource: QueryResource::Results,
+        })
+    ));
+    for budget in [
+        QueryBudget::new().with_max_rows(2),
+        QueryBudget::new().with_max_memory_bytes(1_024),
+        QueryBudget::new().with_max_source_bytes(1),
+        QueryBudget::new().with_max_results(2),
+    ] {
+        let result = service.execute_symbol_explain(
+            &service.plan_symbol_explain(first, budget).unwrap(),
+            &Cancellation::new(),
+        );
+        match result {
+            Ok(result) => {
+                assert!(result.data.signature.is_none());
+                assert!(result.data.truncated);
+                assert!(result.usage.rows <= budget.max_rows());
+                assert!(result.usage.memory_bytes <= budget.max_memory_bytes());
+                assert_exact_response_accounting(&result);
+            }
+            Err(QueryError::BudgetExceeded { .. }) => {}
+            Err(error) => panic!("unexpected bounded signature failure: {error:?}"),
+        }
+    }
+    let cancellation = Cancellation::new();
+    assert!(cancellation.cancel(CancellationReason::ClientRequest));
+    assert!(matches!(
+        service.execute_symbol_explain(
+            &service
+                .plan_symbol_explain(first, QueryBudget::new())
+                .unwrap(),
+            &cancellation,
+        ),
+        Err(QueryError::Cancelled(CancellationReason::ClientRequest))
+    ));
+}
+
 fn explain_posting_snapshot(unrelated_count: u8) -> (GenerationSnapshot, SymbolId) {
     let (base, symbol) = signature_snapshot(&["fn fixture()"]);
     let mut document = base.document().clone();

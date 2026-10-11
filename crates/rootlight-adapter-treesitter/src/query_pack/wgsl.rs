@@ -291,6 +291,10 @@ fn following_semicolon<'tree>(
     while let Some(child) = next {
         cancellation.check()?;
         if child.is_extra() {
+            // Recovery nodes can be extra siblings; only clean trivia may bridge to the terminator.
+            if child.is_error() || !clean(child, source) {
+                return Ok(None);
+            }
             next = child.next_sibling();
             continue;
         }
@@ -516,10 +520,11 @@ fn owner_proof(
             }
             let variable = direct_named(node, "variable_decl", cancellation)?;
             let typed = direct_named(node, "optionally_typed_ident", cancellation)?;
-            let (name, syntax) = match (variable, typed) {
+            let (name, syntax, header_end) = match (variable, typed) {
                 (Some(variable), None) if node.kind() != "global_value_decl" => (
                     variable_name(variable, source, cancellation)?,
                     "wgsl.variable",
+                    variable.end_byte(),
                 ),
                 (None, Some(typed)) if node.kind() != "global_variable_decl" => {
                     let syntax = if token(node, source, b"const", cancellation)? {
@@ -535,14 +540,25 @@ fn owner_proof(
                     } else {
                         return Ok(None);
                     };
-                    (optionally_typed_name(typed, source, cancellation)?, syntax)
+                    (
+                        optionally_typed_name(typed, source, cancellation)?,
+                        syntax,
+                        typed.end_byte(),
+                    )
                 }
                 _ => return Ok(None),
             };
             let Some(name) = name else {
                 return Ok(None);
             };
+            if name.start_byte() < node.start_byte()
+                || name.end_byte() > header_end
+                || header_end > node.end_byte()
+            {
+                return Ok(None);
+            }
             proof.extent = extent;
+            proof.header = node.start_byte()..header_end;
             proof.name = Some(name.byte_range());
             proof.syntax = syntax;
         }
@@ -906,6 +922,343 @@ mod tests {
                     && capture.start == definition.start
                     && capture.end == definition.end
             }));
+        }
+    }
+
+    #[test]
+    fn scalar_headers_exclude_initializers_and_preserve_owner_evidence() {
+        let source = "const Typed: f32 = 1.25;\nconst Inferred = input.value;\nvar<private> global: vec2<f32> = vec2<f32>(1.0, 2.0);\nvar<private> idle: u32;\n@id(2) override Capacity: u32 = capacity();\noverride Enabled = true;\nalias Pair = vec2<f32>;\nfn Evaluate(input: Pair) { let local = input.value; const Local: u32 = 2u; var mutable: Pair = rebuild(input); var inferred = 0u; }\n";
+        let (tree, captures) = extract(source);
+        assert!(
+            !tree.root_node().has_error(),
+            "{}",
+            tree.root_node().to_sexp()
+        );
+        for (name, syntax, full, header) in [
+            (
+                "Typed",
+                "wgsl.constant",
+                "const Typed: f32 = 1.25;",
+                "const Typed: f32",
+            ),
+            (
+                "Inferred",
+                "wgsl.constant",
+                "const Inferred = input.value;",
+                "const Inferred",
+            ),
+            (
+                "global",
+                "wgsl.variable",
+                "var<private> global: vec2<f32> = vec2<f32>(1.0, 2.0);",
+                "var<private> global: vec2<f32>",
+            ),
+            (
+                "idle",
+                "wgsl.variable",
+                "var<private> idle: u32;",
+                "var<private> idle: u32",
+            ),
+            (
+                "Capacity",
+                "wgsl.override",
+                "@id(2) override Capacity: u32 = capacity();",
+                "@id(2) override Capacity: u32",
+            ),
+            (
+                "Enabled",
+                "wgsl.override",
+                "override Enabled = true;",
+                "override Enabled",
+            ),
+            ("local", "wgsl.let", "let local = input.value;", "let local"),
+            (
+                "Local",
+                "wgsl.constant",
+                "const Local: u32 = 2u;",
+                "const Local: u32",
+            ),
+            (
+                "mutable",
+                "wgsl.variable",
+                "var mutable: Pair = rebuild(input);",
+                "var mutable: Pair",
+            ),
+            (
+                "inferred",
+                "wgsl.variable",
+                "var inferred = 0u;",
+                "var inferred",
+            ),
+        ] {
+            let start = source.find(full).unwrap();
+            let name_start = start + header.find(name).unwrap();
+            let definitions = captures
+                .iter()
+                .filter(|capture| {
+                    capture.role == StructuralRole::Definition
+                        && capture.start == name_start
+                        && capture.end == name_start + name.len()
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(definitions.len(), 1, "{name}");
+            let definition = definitions[0];
+            assert_eq!(definition.syntax, "wgsl.name");
+            assert!(definition.required);
+            let owners = captures
+                .iter()
+                .filter(|capture| {
+                    capture.role == StructuralRole::Declaration
+                        && capture.syntax == syntax
+                        && capture.start == start
+                        && capture.end == start + full.len()
+                        && capture.native_depth == definition.native_depth
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(owners.len(), 1, "{name}");
+            assert_eq!(source.get(owners[0].start..owners[0].end), Some(full));
+            let headers = captures
+                .iter()
+                .filter(|capture| {
+                    capture.role == StructuralRole::Signature
+                        && capture.start == start
+                        && capture.native_depth == definition.native_depth
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(headers.len(), 1, "{name}");
+            assert_eq!(headers[0].syntax, "wgsl.header");
+            assert_eq!(headers[0].end, start + header.len(), "{name}");
+            assert_eq!(source.get(headers[0].start..headers[0].end), Some(header));
+            assert!(headers[0].start <= definition.start && definition.end <= headers[0].end);
+            assert!(headers[0].end < owners[0].end);
+        }
+        for (raw, syntax) in [
+            ("capacity", "wgsl.unproven_call"),
+            ("rebuild", "wgsl.unproven_call"),
+            ("value", "wgsl.member"),
+        ] {
+            for (start, _) in source.match_indices(raw) {
+                assert!(captures.iter().any(|capture| {
+                    capture.role == StructuralRole::Reference
+                        && capture.syntax == syntax
+                        && capture.start == start
+                        && capture.end == start + raw.len()
+                }));
+                assert!(captures.iter().any(|header| {
+                    header.role == StructuralRole::Signature
+                        && header.end <= start
+                        && captures.iter().any(|owner| {
+                            owner.role == StructuralRole::Declaration
+                                && owner.start == header.start
+                                && owner.native_depth == header.native_depth
+                                && start + raw.len() < owner.end
+                        })
+                }));
+            }
+        }
+        assert!(has(
+            &captures,
+            "wgsl.body_semantics",
+            StructuralRole::Expression
+        ));
+        assert!(captures.iter().all(|capture| !matches!(
+            capture.role,
+            StructuralRole::Call | StructuralRole::CallName | StructuralRole::ScopedCall
+        )));
+        assert!(captures.iter().any(|capture| {
+            capture.role == StructuralRole::Signature
+                && source.get(capture.start..capture.end) == Some("alias Pair = vec2<f32>")
+        }));
+    }
+
+    #[test]
+    fn scalar_headers_change_only_with_written_declarations() {
+        for (prefix, suffix, name, header) in [
+            (
+                "const Written: i32 = ",
+                ";\n",
+                "Written",
+                "const Written: i32",
+            ),
+            (
+                "var<private> Written: i32 = ",
+                ";\n",
+                "Written",
+                "var<private> Written: i32",
+            ),
+            (
+                "fn Evaluate() { let local: i32 = ",
+                "; }\n",
+                "local",
+                "let local: i32",
+            ),
+        ] {
+            let mut identities = Vec::new();
+            let mut headers = Vec::new();
+            for initializer in ["compute()", "object.value"] {
+                let source = format!("{prefix}{initializer}{suffix}");
+                let (tree, captures) = extract(&source);
+                assert!(
+                    !tree.root_node().has_error(),
+                    "{}",
+                    tree.root_node().to_sexp()
+                );
+                let definition = captures
+                    .iter()
+                    .find(|capture| {
+                        capture.role == StructuralRole::Definition
+                            && source.get(capture.start..capture.end) == Some(name)
+                    })
+                    .unwrap();
+                identities.push((
+                    definition.start,
+                    definition.end,
+                    definition.syntax,
+                    definition.native_depth,
+                ));
+                let start = source.find(header).unwrap();
+                let signature = captures
+                    .iter()
+                    .find(|capture| {
+                        capture.role == StructuralRole::Signature && capture.start == start
+                    })
+                    .unwrap();
+                assert_eq!(signature.end, start + header.len());
+                assert_eq!(source.get(signature.start..signature.end), Some(header));
+                headers.push((signature.start, signature.end, signature.syntax));
+                let owner = captures
+                    .iter()
+                    .find(|capture| {
+                        capture.role == StructuralRole::Declaration && capture.start == start
+                    })
+                    .unwrap();
+                assert_eq!(
+                    source.get(owner.start..owner.end),
+                    Some(&source[start..prefix.len() + initializer.len() + 1])
+                );
+            }
+            assert_eq!(identities[0], identities[1]);
+            assert_eq!(headers[0], headers[1]);
+        }
+        let mut identities = Vec::new();
+        for (source, header) in [
+            ("const Written: f32 = 1.0;", "const Written: f32"),
+            ("const Written: i32 = 1;", "const Written: i32"),
+        ] {
+            let (tree, captures) = extract(source);
+            assert!(!tree.root_node().has_error());
+            let definition = captures
+                .iter()
+                .find(|capture| capture.role == StructuralRole::Definition)
+                .unwrap();
+            identities.push((
+                definition.start,
+                definition.end,
+                definition.syntax,
+                definition.native_depth,
+            ));
+            let signature = captures
+                .iter()
+                .find(|capture| capture.role == StructuralRole::Signature)
+                .unwrap();
+            assert_eq!(source.get(signature.start..signature.end), Some(header));
+        }
+        assert_eq!(identities[0], identities[1]);
+    }
+
+    #[test]
+    fn scalar_headers_reject_incomplete_owners_and_foreign_children() {
+        for source in [
+            "const Broken: u32 = 1u\n",
+            "const Broken: = 1u;\n",
+            "var<private> Broken: u32 = call(;\n",
+            "fn Evaluate() { let Broken = 1u }\n",
+        ] {
+            let (tree, captures) = extract(source);
+            assert!(
+                tree.root_node().has_error(),
+                "source={source:?}; tree={}",
+                tree.root_node().to_sexp()
+            );
+            assert!(
+                !names(source, &captures).contains(&"Broken"),
+                "source={source:?}; tree={}",
+                tree.root_node().to_sexp()
+            );
+            assert!(
+                !captures.iter().any(|capture| {
+                    capture.role == StructuralRole::Signature
+                        && source
+                            .get(capture.start..capture.end)
+                            .is_some_and(|header| header.contains("Broken"))
+                }),
+                "source={source:?}; tree={}",
+                tree.root_node().to_sexp()
+            );
+        }
+        let source = "const Written: u32 = 1u /* clean trivia */;\n";
+        let (comment_tree, captures) = extract(source);
+        assert!(
+            !comment_tree.root_node().has_error(),
+            "source={source:?}; tree={}",
+            comment_tree.root_node().to_sexp()
+        );
+        assert_eq!(names(source, &captures), ["Written"]);
+        assert!(captures.iter().any(|capture| {
+            capture.role == StructuralRole::Signature
+                && source.get(capture.start..capture.end) == Some("const Written: u32")
+        }));
+        assert!(captures.iter().any(|capture| {
+            capture.role == StructuralRole::Declaration
+                && source.get(capture.start..capture.end)
+                    == Some("const Written: u32 = 1u /* clean trivia */;")
+        }));
+        let source = "const Written = factory(Foreign);\n";
+        let tree = tree(source);
+        assert!(!tree.root_node().has_error());
+        let owner = tree.root_node().named_child(0).unwrap();
+        let cancellation = Cancellation::new();
+        let initializer = direct_named(owner, "expression", &cancellation)
+            .unwrap()
+            .unwrap();
+        let typed = direct_named(owner, "optionally_typed_ident", &cancellation)
+            .unwrap()
+            .unwrap();
+        let proof = owner_proof(owner, source.as_bytes(), &cancellation)
+            .unwrap()
+            .unwrap();
+        assert_eq!(source.get(proof.header), Some("const Written"));
+        assert_eq!(
+            source.get(proof.extent),
+            Some("const Written = factory(Foreign);")
+        );
+        for foreign in [initializer, typed] {
+            assert!(
+                owner_proof(foreign, source.as_bytes(), &cancellation)
+                    .unwrap()
+                    .is_none()
+            );
+            let mut cache = CaptureCache::new(128);
+            assert!(
+                !retain_capture(
+                    foreign,
+                    StructuralRole::Signature,
+                    source.as_bytes(),
+                    &cancellation,
+                    &mut cache
+                )
+                .unwrap()
+            );
+            assert!(
+                candidate(
+                    foreign,
+                    StructuralRole::Signature,
+                    source.as_bytes(),
+                    &cancellation,
+                    &mut cache
+                )
+                .is_err()
+            );
         }
     }
 

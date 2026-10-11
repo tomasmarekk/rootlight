@@ -243,7 +243,7 @@ const PROJECT_FACTS_TRUNCATED_CODE: &str = "project-adapter-facts-truncated";
 const PROJECT_FACTS_TRUNCATED_MESSAGE: &str =
     "additional project semantic facts were omitted by aggregate resource limits";
 const AGGREGATE_DIAGNOSTICS_TRUNCATED_CODE: &str = "aggregate-diagnostics-truncated";
-const ANALYZER_BINARY_SEED: &[u8] = b"rootlight.first-slice.treesitter-structural/239";
+const ANALYZER_BINARY_SEED: &[u8] = b"rootlight.first-slice.treesitter-structural/240";
 const RESOLVER_BINARY_SEED: &[u8] = b"rootlight.first-slice.resolve/106";
 const INCREMENTAL_PROVIDER_SEED: &[u8] = b"rootlight.first-slice.incremental-provider/1";
 const LANGUAGE_DISPOSITION_PROVIDER_SEED: &[u8] = b"rootlight.first-slice.language-disposition/12";
@@ -20960,6 +20960,11 @@ struct LexicalKindProbe {
 }
 
 fn is_lexical_signature(extension: &ExtensionEnvelope) -> Result<bool, FirstSliceError> {
+    if extension.version == rootlight_ir::LEXICAL_SIGNATURE_BATCH_VERSION {
+        rootlight_ir::decode_lexical_signature_batch_envelope(extension)
+            .map_err(|_| FirstSliceError::Identity)?;
+        return Ok(true);
+    }
     if extension.version == rootlight_ir::LEXICAL_SUMMARY_BATCH_VERSION {
         return Ok(false);
     }
@@ -20971,6 +20976,11 @@ fn is_lexical_signature(extension: &ExtensionEnvelope) -> Result<bool, FirstSlic
 }
 
 fn optional_extension_logical_count(extension: &ExtensionEnvelope) -> Result<u64, FirstSliceError> {
+    if extension.version == rootlight_ir::LEXICAL_SIGNATURE_BATCH_VERSION {
+        let entries = rootlight_ir::decode_lexical_signature_batch_envelope(extension)
+            .map_err(|_| FirstSliceError::Identity)?;
+        return u64::try_from(entries.len()).map_err(|_| FirstSliceError::Limits);
+    }
     if extension.version == rootlight_ir::LEXICAL_SUMMARY_BATCH_VERSION {
         let entries = rootlight_ir::decode_lexical_summary_batch_envelope(extension)
             .map_err(|_| FirstSliceError::Identity)?;
@@ -20994,7 +21004,7 @@ fn compact_lexical_summaries_with_cancellation(
     cancellation: &Cancellation,
 ) -> Result<(), FirstSliceError> {
     check_cancellation(cancellation)?;
-    let mut grouped = BTreeMap::<(FileId, FactId), Vec<ExtensionEnvelope>>::new();
+    let mut grouped = BTreeMap::<(FileId, FactId, bool), Vec<ExtensionEnvelope>>::new();
     let mut retained = Vec::new();
     retained
         .try_reserve_exact(source.extensions.len())
@@ -21003,22 +21013,43 @@ fn compact_lexical_summaries_with_cancellation(
         check_cancellation(cancellation)?;
         if extension.namespace != LEXICAL_EXTENSION_NAMESPACE
             || extension.version == rootlight_ir::LEXICAL_SUMMARY_BATCH_VERSION
-            || is_lexical_signature(&extension)?
+            || extension.version == rootlight_ir::LEXICAL_SIGNATURE_BATCH_VERSION
         {
+            if extension.namespace == LEXICAL_EXTENSION_NAMESPACE
+                && extension.version == rootlight_ir::LEXICAL_SIGNATURE_BATCH_VERSION
+            {
+                let result = rootlight_ir::decode_lexical_signature_batch_envelope_with_checkpoint(
+                    &extension,
+                    || cancellation.check().is_ok(),
+                );
+                check_cancellation(cancellation)?;
+                result.map_err(|_| FirstSliceError::Identity)?;
+            }
             retained.push(extension);
             continue;
         }
+        let signature = is_lexical_signature(&extension)?;
+        if signature {
+            let evidence = rootlight_ir::decode_lexical_evidence_envelope(&extension)
+                .map_err(|_| FirstSliceError::Identity)?;
+            if evidence.is_truncated() || !matches!(evidence.subject(), FactRef::Entity(_)) {
+                retained.push(extension);
+                continue;
+            }
+        }
         let file = extension_file(&extension)?;
-        let entries = grouped.entry((file, extension.provenance)).or_default();
+        let entries = grouped
+            .entry((file, extension.provenance, signature))
+            .or_default();
         entries
             .try_reserve(1)
             .map_err(|_| FirstSliceError::Limits)?;
         entries.push(extension);
     }
-    for mut entries in grouped.into_values() {
+    for ((_, _, signature), mut entries) in grouped {
         check_cancellation(cancellation)?;
         // Fact IDs change with the generation. Partition by source location so
-        // clean rebuilds pack the same logical summaries into the same batches.
+        // clean rebuilds pack the same logical evidence into the same batches.
         entries.sort_unstable_by_key(lexical_summary_span);
         check_cancellation(cancellation)?;
         let mut offset = 0;
@@ -21028,7 +21059,7 @@ fn compact_lexical_summaries_with_cancellation(
                 (entries.len() - offset).min(rootlight_ir::MAX_LEXICAL_SUMMARY_BATCH_ENTRIES);
             let batch = loop {
                 check_cancellation(cancellation)?;
-                // Co-located summaries can refer to different generation-bound
+                // Co-located evidence can refer to different generation-bound
                 // facts. Never let their incidental ID order choose membership
                 // on opposite sides of a batch or payload-size boundary.
                 while count > 0
@@ -21048,9 +21079,16 @@ fn compact_lexical_summaries_with_cancellation(
                 if count < 8 {
                     break None;
                 }
-                match rootlight_ir::new_lexical_summary_batch_envelope(
-                    &entries[offset..offset + count],
-                ) {
+                let batch = if signature {
+                    rootlight_ir::new_lexical_signature_batch_envelope(
+                        &entries[offset..offset + count],
+                    )
+                } else {
+                    rootlight_ir::new_lexical_summary_batch_envelope(
+                        &entries[offset..offset + count],
+                    )
+                };
+                match batch {
                     Ok(batch) if batch.payload.len() <= limits.max_extension_payload_bytes => {
                         break Some(batch);
                     }
@@ -38091,6 +38129,7 @@ mod tests {
             b"rootlight.first-slice.treesitter-structural/236",
             b"rootlight.first-slice.treesitter-structural/237",
             b"rootlight.first-slice.treesitter-structural/238",
+            b"rootlight.first-slice.treesitter-structural/239",
         ] {
             let previous_parser = hash_static_components(&[
                 PARSER_PROVIDER_SET_SEED,
@@ -60881,6 +60920,264 @@ mod tests {
     }
 
     #[test]
+    fn signature_batch_pressure_preserves_more_than_ten_thousand_logical_headers() {
+        let rootlight_ir::IrDocument::NormalizedV1_1(mut document) =
+            rootlight_ir::decode_ir_document(
+                include_bytes!("../../../tests/fixtures/compatibility/ir/1.1/document.json"),
+                &IrLimits::default(),
+                &rootlight_ir::ExtensionSupport::default(),
+            )
+            .unwrap()
+        else {
+            panic!("fixture uses normalized IR");
+        };
+        let repository = document.repository;
+        let manifest_hash = content_hash(b"synthetic signature manifest");
+        let configuration_hash = content_hash(b"synthetic signature config");
+        let provider_set_hash = content_hash(b"synthetic signature providers");
+        let generation = derive_generation(GenerationIdentity {
+            repository,
+            parent: None,
+            manifest_hash,
+            config_hash: configuration_hash,
+            provider_set_hash,
+            format_version: generation_format_version(),
+        })
+        .id();
+        document.extensions.clear();
+        let mut document = rootlight_ir::CanonicalNormalizedFileChunk::new(
+            &document,
+            &IrLimits::default(),
+            &rootlight_ir::ExtensionSupport::default(),
+        )
+        .unwrap()
+        .rebind(
+            generation,
+            &IrLimits::default(),
+            &rootlight_ir::ExtensionSupport::default(),
+        )
+        .unwrap();
+        let file_template = document.files[0].clone();
+        let entity_template = document.entities[0].clone();
+        let provenance = entity_template.provenance;
+        document.extensions.clear();
+        let mut expected_headers = Vec::new();
+        let mut sources = BTreeMap::new();
+        for file_index in 0_u8..81 {
+            let mut file_bytes = [94_u8; 20];
+            file_bytes[0] = file_index;
+            let file = FileId::from_bytes(file_bytes);
+            let mut source_text = String::new();
+            let mut headers = Vec::new();
+            for entry_index in 0_u64..128 {
+                let mut bytes = [93_u8; 20];
+                bytes[..8]
+                    .copy_from_slice(&(u64::from(file_index) * 128 + entry_index).to_le_bytes());
+                let symbol = SymbolId::from_bytes(bytes);
+                let name = format!(
+                    "PressureWitness{:06}",
+                    u64::from(file_index) * 128 + entry_index
+                );
+                let (language, text) = match entry_index % 3 {
+                    0 => ("rust", format!("fn {name}(value: usize)")),
+                    1 => ("wgsl", format!("fn {name}(value: f32)")),
+                    _ => ("common-lisp", format!("(defun {name} (value))")),
+                };
+                let start = source_text.len() as u64;
+                source_text.push_str(&text);
+                let end = source_text.len() as u64;
+                source_text.push('\n');
+                headers.push((symbol, name, language, text, start, end));
+            }
+            let hash = content_hash(source_text.as_bytes());
+            let mut file_record = file_template.clone();
+            file_record.id = file;
+            file_record.path = format!("pressure/{file_index}.txt");
+            file_record.path_locator = None;
+            file_record.content_hash = hash;
+            file_record.byte_length = source_text.len() as u64;
+            file_record.language = "synthetic".to_owned();
+            file_record.evidence.source = Some(SourceRef::new(
+                repository,
+                generation,
+                SourceSpan::new(file, 0, file_record.byte_length).unwrap(),
+                hash,
+                None,
+            ));
+            document.files.push(file_record);
+            for (symbol, name, language, text, start, end) in headers {
+                let source = SourceRef::new(
+                    repository,
+                    generation,
+                    SourceSpan::new(file, start, end).unwrap(),
+                    hash,
+                    None,
+                );
+                let mut entity = entity_template.clone();
+                entity.id = symbol;
+                entity.canonical_name = name.clone();
+                entity.display_name = name.clone();
+                entity.qualified_name = name;
+                entity.language = language.to_owned();
+                entity.container = Some(rootlight_ir::ContainerRef::File(file));
+                entity.evidence.source = Some(source.clone());
+                document.entities.push(entity);
+                let evidence = rootlight_ir::LexicalEvidenceV1::from_complete_text(
+                    rootlight_ir::LexicalEvidenceKind::Signature,
+                    FactRef::Entity(symbol),
+                    rootlight_ir::LexicalEvidenceFormat::SourceText,
+                    &text,
+                )
+                .unwrap();
+                expected_headers.push((symbol, text, source.clone()));
+                document.extensions.push(
+                    rootlight_ir::new_lexical_evidence_envelope(
+                        repository, generation, provenance, source, &evidence,
+                    )
+                    .unwrap(),
+                );
+            }
+            sources.insert(file, source_text);
+        }
+        let mut expected = document.extensions.clone();
+        expected.sort_unstable_by_key(|entry| entry.id);
+        document.extensions.reverse();
+        compact_lexical_summaries(&mut document, &IrLimits::default()).unwrap();
+        assert_eq!(document.extensions.len(), 81);
+        assert!(document.extensions.len() < MAX_RETAINED_OPTIONAL_EXTENSIONS);
+        assert!(
+            extension_payload_bytes(document.extensions.iter()).unwrap()
+                < MAX_RETAINED_OPTIONAL_EXTENSION_BYTES
+        );
+        assert_eq!(
+            document
+                .extensions
+                .iter()
+                .map(|entry| optional_extension_logical_count(entry).unwrap())
+                .sum::<u64>(),
+            81 * 128
+        );
+        let mut reconstructed = document
+            .extensions
+            .iter()
+            .flat_map(|batch| {
+                assert!(is_lexical_signature(batch).unwrap());
+                rootlight_ir::decode_lexical_signature_batch_envelope(batch).unwrap()
+            })
+            .collect::<Vec<_>>();
+        reconstructed.sort_unstable_by_key(|entry| entry.id);
+        assert_eq!(reconstructed, expected);
+        let packed = document.extensions.clone();
+        compact_lexical_summaries(&mut document, &IrLimits::default()).unwrap();
+        assert_eq!(document.extensions, packed);
+        let metadata = GenerationMetadata::new(
+            repository,
+            generation,
+            None,
+            manifest_hash,
+            configuration_hash,
+            provider_set_hash,
+        )
+        .unwrap();
+        let snapshot = GenerationSnapshot::new(
+            metadata,
+            document,
+            &IrLimits::default(),
+            &rootlight_ir::ExtensionSupport::default(),
+        )
+        .unwrap();
+        let cancellation = Cancellation::new();
+        let projected = rootlight_query::project_lexical_documents(
+            &snapshot,
+            BuildBudget::default(),
+            &cancellation,
+        )
+        .unwrap();
+        let signatures = projected
+            .into_iter()
+            .filter_map(|document| Some((document.symbol_id?, document.signature?)))
+            .collect::<BTreeMap<_, _>>();
+        assert_eq!(signatures.len(), 81 * 128);
+        for (symbol, text, source) in expected_headers {
+            assert_eq!(signatures.get(&symbol), Some(&text));
+            assert_eq!(snapshot.lexical_ordinals_for_symbol(symbol).len(), 1);
+            assert_eq!(
+                &sources[&source.span().file()][usize::try_from(source.span().start_byte()).unwrap()
+                    ..usize::try_from(source.span().end_byte()).unwrap()],
+                text,
+            );
+        }
+    }
+
+    #[test]
+    fn signature_batch_escaping_halves_groups_and_fallback_never_truncates_children() {
+        let repository = derive_repository(b"signature-batch-bounds").id();
+        let generation = GenerationId::from_bytes([73; 20]);
+        let file = FileId::from_bytes([74; 20]);
+        let provenance = FactId::from_bytes([75; 20]);
+        let mut original = NormalizedIrDocument::empty(repository, generation);
+        for index in 0_u8..128 {
+            let text = "\0".repeat(rootlight_ir::MAX_LEXICAL_SIGNATURE_BYTES);
+            let evidence = rootlight_ir::LexicalEvidenceV1::from_complete_text(
+                rootlight_ir::LexicalEvidenceKind::Signature,
+                FactRef::Entity(SymbolId::from_bytes([index; 20])),
+                rootlight_ir::LexicalEvidenceFormat::SourceText,
+                &text,
+            )
+            .unwrap();
+            let source = SourceRef::new(
+                repository,
+                generation,
+                SourceSpan::new(file, u64::from(index), u64::from(index) + 1).unwrap(),
+                content_hash(b"synthetic source"),
+                None,
+            );
+            original.extensions.push(
+                rootlight_ir::new_lexical_evidence_envelope(
+                    repository, generation, provenance, source, &evidence,
+                )
+                .unwrap(),
+            );
+        }
+        for maximum in [
+            rootlight_ir::MAX_LEXICAL_SIGNATURE_BATCH_PAYLOAD_BYTES,
+            rootlight_ir::MAX_LEXICAL_PAYLOAD_BYTES,
+        ] {
+            let mut limits = IrLimits::default();
+            limits.max_extension_payload_bytes = maximum;
+            let mut document = original.clone();
+            compact_lexical_summaries(&mut document, &limits).unwrap();
+            let mut reconstructed = Vec::new();
+            for envelope in document.extensions {
+                assert!(envelope.payload.len() <= maximum);
+                if envelope.version == rootlight_ir::LEXICAL_SIGNATURE_BATCH_VERSION {
+                    reconstructed.extend(
+                        rootlight_ir::decode_lexical_signature_batch_envelope(&envelope).unwrap(),
+                    );
+                } else {
+                    reconstructed.push(envelope);
+                }
+            }
+            let mut expected = original.extensions.clone();
+            expected.sort_unstable_by_key(|entry| entry.id);
+            reconstructed.sort_unstable_by_key(|entry| entry.id);
+            assert_eq!(reconstructed, expected);
+        }
+        let cancellation = Cancellation::new();
+        assert!(cancellation.cancel(CancellationReason::ClientRequest));
+        let expected = original.extensions.clone();
+        assert!(matches!(
+            compact_lexical_summaries_with_cancellation(
+                &mut original,
+                &IrLimits::default(),
+                &cancellation
+            ),
+            Err(FirstSliceError::Cancelled(_))
+        ));
+        assert_eq!(original.extensions, expected);
+    }
+
+    #[test]
     fn normalized_append_admits_aggregate_nested_and_string_usage_atomically() {
         let repository = derive_repository(b"aggregate-document-admission").id();
         let generation = GenerationId::from_bytes([47; 20]);
@@ -60939,6 +61236,92 @@ mod tests {
             assert_eq!(target, before);
             assert_eq!(state, state_before);
         }
+    }
+
+    #[test]
+    fn signature_batch_eviction_conserves_logical_extension_coverage() {
+        let repository = derive_repository(b"signature-batch-eviction").id();
+        let generation = GenerationId::from_bytes([76; 20]);
+        let file = FileId::from_bytes([77; 20]);
+        let provenance = FactId::from_bytes([78; 20]);
+        let source = SourceRef::new(
+            repository,
+            generation,
+            SourceSpan::new(file, 0, 1).unwrap(),
+            content_hash(b"x"),
+            None,
+        );
+        let children = [(80, "fn first()"), (81, "fn second()")]
+            .into_iter()
+            .map(|(id, text)| {
+                let lexical = rootlight_ir::LexicalEvidenceV1::from_complete_text(
+                    rootlight_ir::LexicalEvidenceKind::Signature,
+                    FactRef::Entity(SymbolId::from_bytes([id; 20])),
+                    rootlight_ir::LexicalEvidenceFormat::SourceText,
+                    text,
+                )
+                .unwrap();
+                rootlight_ir::new_lexical_evidence_envelope(
+                    repository,
+                    generation,
+                    provenance,
+                    source.clone(),
+                    &lexical,
+                )
+                .unwrap()
+            })
+            .collect::<Vec<_>>();
+        let mut target = NormalizedIrDocument::empty(repository, generation);
+        target
+            .extensions
+            .push(rootlight_ir::new_lexical_signature_batch_envelope(&children).unwrap());
+        let mut coverage = CoverageRecord {
+            id: FactId::from_bytes([0; 20]),
+            repository,
+            generation,
+            scope: CoverageScope::File(file),
+            domain: IrFactDomain::Extensions,
+            tier: AnalysisTier::TierB,
+            status: CoverageStatus::Complete,
+            discovered: 2,
+            indexed: 2,
+            skipped: 0,
+            provenance,
+            evidence: FactEvidence {
+                source: Some(source.clone()),
+                derivation: Vec::new(),
+            },
+        };
+        coverage.id = derive_coverage_record_id(&coverage).unwrap();
+        target.coverage_records.push(coverage);
+        let state = DocumentAppendState::from_document(&target).unwrap();
+        let mut next = NormalizedIrDocument::empty(repository, generation);
+        next.extensions.push(ExtensionEnvelope {
+            id: FactId::from_bytes([79; 20]),
+            repository,
+            generation,
+            namespace: "test.required".to_owned(),
+            version: "1".to_owned(),
+            criticality: rootlight_ir::ExtensionCriticality::Noncritical,
+            payload: "{}".to_owned(),
+            provenance,
+            evidence: FactEvidence {
+                source: Some(source),
+                derivation: Vec::new(),
+            },
+        });
+        let mut limits = IrLimits::default();
+        limits.max_extensions = 1;
+        let state =
+            truncate_optional_extensions(&mut target, &mut next, &state, 0, 0, &limits).unwrap();
+        assert!(target.extensions.is_empty());
+        assert_eq!(state.truncated_extensions, 2);
+        let coverage = &target.coverage_records[0];
+        assert_eq!(
+            (coverage.discovered, coverage.indexed, coverage.skipped),
+            (2, 0, 2)
+        );
+        assert_eq!(coverage.status, CoverageStatus::Bounded);
     }
 
     #[test]
@@ -61931,11 +62314,10 @@ mod tests {
             )
             .expect("independent repeated source writes");
         }
-        let cancellation = deadline();
         let (budget, root_identity, repository) = {
             let sizing = FirstSliceService::new(3).expect("sizing service initializes");
             let prepared = sizing
-                .prepare_rust_fixture(fixture.path(), &cancellation)
+                .prepare_rust_fixture(fixture.path(), &deadline())
                 .expect("unconstrained cache prepares");
             let FirstSliceIndexPreparation::Pending(pending) = &prepared else {
                 panic!("initial fixture requires a generation");
@@ -61964,7 +62346,7 @@ mod tests {
             .expect("sizing identity is preserved");
         service.structural_artifacts.maximum_bytes = budget;
         let first = service
-            .index_rust_fixture(fixture.path(), &cancellation)
+            .index_rust_fixture(fixture.path(), &deadline())
             .expect("initial generation publishes");
         let artifacts = service
             .structural_artifacts
@@ -61982,7 +62364,7 @@ mod tests {
         fs::write(fixture.path().join("src/alpha.rs"), source("alpha", 2))
             .expect("one body changes");
         let second = service
-            .index_rust_fixture(fixture.path(), &cancellation)
+            .index_rust_fixture(fixture.path(), &deadline())
             .expect("successor publishes");
         let evidence = service.incremental_evidence(second.generation).unwrap();
         assert_eq!(evidence.parsed_files(), 1);
@@ -61990,12 +62372,14 @@ mod tests {
         assert_eq!(evidence.lowered_files(), 1);
         assert!(evidence.reused_normalized_facts() > 0);
         assert!(service.structural_artifacts.retained_bytes <= budget);
-        assert_fresh_equivalent(
+        // This compares hundreds of independent queries, not one timed request.
+        // Keep each operation bounded without sharing its elapsed deadline.
+        assert_fresh_equivalent_with_cancellations(
             &service,
             fixture.path(),
             first.generation,
             &second,
-            &cancellation,
+            deadline,
         );
     }
 
@@ -63384,6 +63768,18 @@ mod tests {
         successor: &FirstSliceIndexReceipt,
         cancellation: &Cancellation,
     ) {
+        assert_fresh_equivalent_with_cancellations(incremental, root, parent, successor, || {
+            cancellation.clone()
+        });
+    }
+
+    fn assert_fresh_equivalent_with_cancellations(
+        incremental: &FirstSliceService,
+        root: &Path,
+        parent: GenerationId,
+        successor: &FirstSliceIndexReceipt,
+        mut operation_cancellation: impl FnMut() -> Cancellation,
+    ) {
         let evidence = incremental
             .incremental_evidence(successor.generation)
             .expect("successor evidence remains retained");
@@ -63422,7 +63818,7 @@ mod tests {
                 .clone(),
         );
         let rebuilt = fresh
-            .index_rust_fixture(root, cancellation)
+            .index_rust_fixture(root, &operation_cancellation())
             .expect("fresh logical rebuild publishes");
         assert_eq!(rebuilt.repository, successor.repository);
         assert_eq!(rebuilt.parent, successor.parent);
@@ -63432,11 +63828,18 @@ mod tests {
             "generation-neutral public identity must match the fresh logical projection"
         );
 
-        let incremental_snapshot =
-            equivalence_snapshot(incremental, successor.generation, cancellation);
-        let clean_snapshot = equivalence_snapshot(&fresh, rebuilt.generation, cancellation);
+        let incremental_snapshot = equivalence_snapshot_with_cancellations(
+            incremental,
+            successor.generation,
+            &mut operation_cancellation,
+        );
+        let clean_snapshot = equivalence_snapshot_with_cancellations(
+            &fresh,
+            rebuilt.generation,
+            &mut operation_cancellation,
+        );
         incremental_snapshot
-            .compare_clean(&clean_snapshot, cancellation)
+            .compare_clean(&clean_snapshot, &operation_cancellation())
             .expect("equivalence comparison completes")
             .require_equivalent()
             .expect("incremental successor equals the fresh logical rebuild");
@@ -63446,6 +63849,14 @@ mod tests {
         service: &FirstSliceService,
         generation: GenerationId,
         cancellation: &Cancellation,
+    ) -> EquivalenceSnapshot {
+        equivalence_snapshot_with_cancellations(service, generation, || cancellation.clone())
+    }
+
+    fn equivalence_snapshot_with_cancellations(
+        service: &FirstSliceService,
+        generation: GenerationId,
+        mut operation_cancellation: impl FnMut() -> Cancellation,
     ) -> EquivalenceSnapshot {
         let snapshot = service
             .loaded_generation_snapshot(generation)
@@ -63474,12 +63885,13 @@ mod tests {
                         LocateMode::Exact,
                         64,
                         0,
-                        cancellation,
+                        &operation_cancellation(),
                     )
                     .expect("equivalence locate query succeeds");
                 json!({"query": query, "response": response.data})
             })
             .collect::<Vec<_>>();
+        let cancellation = operation_cancellation();
         let coverage = json!({
             "coverage": document.coverage_records,
             "skipped_regions": document.skipped_regions,
@@ -63526,46 +63938,46 @@ mod tests {
                 LogicalDomain::Discovery,
                 &discovery_inputs,
                 u64::try_from(discovery_inputs.len()).expect("input count fits u64"),
-                cancellation,
+                &cancellation,
             ),
             logical_component(
                 LogicalDomain::NormalizedIr,
                 document,
                 normalized_records,
-                cancellation,
+                &cancellation,
             ),
             logical_component(
                 LogicalDomain::LogicalStore,
                 document,
                 normalized_records,
-                cancellation,
+                &cancellation,
             ),
             logical_component(
                 LogicalDomain::QueryOutputs,
                 &query_outputs,
                 u64::try_from(query_outputs.len()).expect("query count fits u64"),
-                cancellation,
+                &cancellation,
             ),
             logical_component(
                 LogicalDomain::Coverage,
                 &coverage,
                 coverage_records,
-                cancellation,
+                &cancellation,
             ),
             logical_component(
                 LogicalDomain::Provenance,
                 &document.provenance,
                 u64::try_from(document.provenance.len()).expect("provenance count fits u64"),
-                cancellation,
+                &cancellation,
             ),
             logical_component(
                 LogicalDomain::StableIds,
                 &stable_ids,
                 stable_records,
-                cancellation,
+                &cancellation,
             ),
         ];
-        EquivalenceSnapshot::new(components, cancellation)
+        EquivalenceSnapshot::new(components, &cancellation)
             .expect("complete equivalence snapshot builds")
     }
 
