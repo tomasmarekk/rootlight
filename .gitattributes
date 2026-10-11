@@ -38,6 +38,10 @@ third_party/tree-sitter-commonlisp-0.4.1/patches/** whitespace=-blank-at-eol,-bl
 third_party/tree-sitter-scheme-0.24.7-1/** -text
 third_party/tree-sitter-scheme-0.24.7-1/upstream/** whitespace=-blank-at-eol,-blank-at-eof,-space-before-tab,cr-at-eol conflict-marker-size=32
 third_party/tree-sitter-scheme-0.24.7-1/upstream/archives/** binary
+# OCaml retains exact published native inputs, original sidecars and release archive.
+third_party/tree-sitter-ocaml-0.25.0/** -text
+third_party/tree-sitter-ocaml-0.25.0/** whitespace=-blank-at-eol,-blank-at-eof,-space-before-tab,cr-at-eol
+third_party/tree-sitter-ocaml-0.25.0/upstream/*.tar.gz binary
 # Assembly and GLSL retain authenticated source and patch-context bytes.
 third_party/tree-sitter-asm-0.24.0/** -text
 third_party/tree-sitter-asm-0.24.0/upstream/** whitespace=-blank-at-eol,-blank-at-eof,-space-before-tab,cr-at-eol conflict-marker-size=32

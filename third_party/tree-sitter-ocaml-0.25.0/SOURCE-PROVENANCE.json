@@ -1,0 +1,122 @@
+{
+  "schema": "rootlight.ocaml-source-provenance/1",
+  "package": "tree-sitter-ocaml",
+  "version": "0.25.0",
+  "local_unpublished_binding": true,
+  "repository": "https://github.com/tree-sitter/tree-sitter-ocaml",
+  "release": "https://github.com/tree-sitter/tree-sitter-ocaml/releases/tag/v0.25.0",
+  "declared_release_tag_object": "815f48f3b85f37e3a6aca71ec15d3442284877a6",
+  "declared_release_commit": "6902a86ab5b3b80c622030210aae2d8cb95eb775",
+  "archive_signature_or_signed_git_object_verified": false,
+  "archive_git_tree_reconstruction_verified": false,
+  "archive": {
+    "path": "upstream/tree-sitter-ocaml-v0.25.0.tar.gz",
+    "url": "https://github.com/tree-sitter/tree-sitter-ocaml/releases/download/v0.25.0/tree-sitter-ocaml.tar.gz",
+    "bytes": 1957373,
+    "sha256": "55cdd7443a7838e650ed070ad28ed4dd774867331da01df2cc5ad3272f5598bd",
+    "official_release_asset_checksum_matched": true
+  },
+  "upstream_registry_archive_checksum": null,
+  "modified_binding_registry_publication_verified": false,
+  "original_published_regular_files": 115,
+  "original_published_regular_file_bytes": 37241337,
+  "original_expanded_directories": 52,
+  "original_inputs_retained_byte_exact": true,
+  "inert_metadata_retention": [
+    {
+      "archive_member": ".gitattributes",
+      "retained_path": ".gitattributes.upstream",
+      "bytes": 485,
+      "sha256": "384926f57f601db7d2857a4981b783e95c2982ab4b8f2e8553beace071dad121"
+    },
+    {
+      "archive_member": ".gitignore",
+      "retained_path": ".gitignore.upstream",
+      "bytes": 340,
+      "sha256": "9e290da3ff65053231cc4ed5a97130e102fc839409cae9a1617ad9c2caed4ab2"
+    }
+  ],
+  "inventory": {
+    "path": "SOURCE-INVENTORY.json",
+    "bytes": 60041,
+    "sha256": "33de203655fdee44a08cd6b3b20aedb1d0fe2c232bf9d1b113324b5b163b8cac"
+  },
+  "patch_document": {
+    "path": "PATCHES.md",
+    "bytes": 4543,
+    "sha256": "73699fd65e76b5c05a0d6f13b41998f0d1afbb18ade86447b644e4b1faaae079"
+  },
+  "primary_license": {
+    "spdx": "MIT",
+    "path": "LICENSE",
+    "bytes": 1094,
+    "sha256": "f977a20805dd6e275f14bc090a5f8e638401dad4df366841c1060f12c75b74ae",
+    "copyright": "2020 Max Brunsfeld and Pieter Goetschalckx"
+  },
+  "local_source_identity": {
+    "profile": "rootlight-vendored-source-v1",
+    "basis": "complete sorted relative-path and lowercase file-SHA-256 inventory; source digest is bound externally by the grammar lock, not embedded recursively",
+    "complete_package_file_count": 121
+  },
+  "source_modifications": [
+    {
+      "path": "common/scanner.h",
+      "original_path": "common/scanner.h.orig",
+      "original_bytes": 14631,
+      "original_sha256": "e4934793536f53c076b24b16de2f6a48a125c632e6cce58c80c02d6d65f8dbed",
+      "local_bytes": 17973,
+      "local_sha256": "7ad1a807e2a157a5aa6c16bb85697a36b4cb7d01e9313cd5296659be12d57030",
+      "purpose": "bounded two-pass UTF-8 scanner-state serialization and transactional checked decoding without changing scanner tokens or parser tables"
+    },
+    {
+      "path": "Cargo.toml",
+      "original_path": "Cargo.toml.upstream",
+      "original_bytes": 813,
+      "original_sha256": "8fe07d99a526c08a1ce3f87b82381e2c89b1f61420071e1da17f7e87d7ca5509",
+      "local_bytes": 1001,
+      "local_sha256": "3c4b7cc73479b6368c8067da8e19d94b07a6b1320e1632e82dfb04fbffa749bd",
+      "purpose": "unpublished local binding with Rust 1.90 minimum and exact existing language-handle, C-build and development runtime dependency identities"
+    }
+  ],
+  "preferred_grammars_unchanged": true,
+  "generated_parsers_unchanged": true,
+  "scanner_wrappers_unchanged": true,
+  "upstream_rust_library_unchanged": true,
+  "upstream_rust_build_script_unchanged": true,
+  "retained_native_grammar_count": 3,
+  "native_language_abi": 15,
+  "external_token_count": 7,
+  "source_download_at_build_time": false,
+  "generation_at_build_time": false,
+  "upstream_lifecycle_or_example_scripts_executed": false,
+  "upstream_queries_adopted_as_product_semantics": false,
+  "isolated_native_qualification": {
+    "scope": "exact repaired common header, original native implementation/interface parser inputs and unchanged four-test consumer; not the relocated package or its modified local manifest",
+    "toolchains": ["1.97.1", "1.90.0"],
+    "tests_passed_per_toolchain": 4,
+    "exact_tests": [
+      "scanner_round_trip_preserves_multicodepoint_delimiter",
+      "restored_quoted_string_parse_matches_clean_tree",
+      "implementation_keeps_written_definitions_and_applications",
+      "interface_keeps_abstract_signature_without_implementation"
+    ],
+    "implementation_and_interface_execution_verified": true,
+    "type_fragment_compiled": true,
+    "type_fragment_execution_verified": false,
+    "source_conservation_verified": true,
+    "original_scanner_round_trip_failed_both_toolchains": true,
+    "relocated_package_and_local_manifest_executed": false,
+    "unbounded_delimiter_incremental_equivalence": false
+  },
+  "production_integration_verified": false,
+  "abstract_type_ir_vocabulary_adopted": false,
+  "whole_language_coverage_verified": false,
+  "installed_mcp_verified": false,
+  "generated_table_reproduction_verified": false,
+  "source_to_binary_reproduction_verified": false,
+  "complete_product_source_closure_proven": false,
+  "complete_legal_notice_chain_verified": false,
+  "empty_dependency_cache_acceptance_verified": false,
+  "os_network_denial_verified": false,
+  "build_and_packaging_acceptance_verified": false
+}

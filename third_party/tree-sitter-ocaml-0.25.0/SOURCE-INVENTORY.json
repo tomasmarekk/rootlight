@@ -1,0 +1,1834 @@
+{
+  "schema": "rootlight.ocaml-source-inventory/1",
+  "archive": {
+    "path": "upstream/tree-sitter-ocaml-v0.25.0.tar.gz",
+    "bytes": 1957373,
+    "sha256": "55cdd7443a7838e650ed070ad28ed4dd774867331da01df2cc5ad3272f5598bd"
+  },
+  "original_file_count": 115,
+  "original_file_bytes": 37241337,
+  "original_directories": [
+    ".github",
+    ".github/workflows",
+    "bindings",
+    "bindings/c",
+    "bindings/c/tree_sitter",
+    "bindings/go",
+    "bindings/node",
+    "bindings/python",
+    "bindings/python/tests",
+    "bindings/python/tree_sitter_ocaml",
+    "bindings/rust",
+    "bindings/swift",
+    "bindings/swift/TreeSitterOCaml",
+    "bindings/swift/TreeSitterOCamlTests",
+    "common",
+    "examples",
+    "examples/0install",
+    "examples/bap",
+    "examples/base",
+    "examples/cmdliner",
+    "examples/dune",
+    "examples/eio",
+    "examples/js_of_ocaml",
+    "examples/lablgtk",
+    "examples/lwt",
+    "examples/melange",
+    "examples/merlin",
+    "examples/ocaml",
+    "examples/ocaml-cohttp",
+    "examples/ocaml-lsp",
+    "examples/ocamlformat",
+    "examples/opam",
+    "examples/owl",
+    "examples/ppxlib",
+    "examples/pyre-check",
+    "grammars",
+    "grammars/interface",
+    "grammars/interface/src",
+    "grammars/interface/src/tree_sitter",
+    "grammars/ocaml",
+    "grammars/ocaml/src",
+    "grammars/ocaml/src/tree_sitter",
+    "grammars/type",
+    "grammars/type/src",
+    "grammars/type/src/tree_sitter",
+    "queries",
+    "test",
+    "test/corpus",
+    "test/corpus/ocaml_interface",
+    "test/corpus/ocaml_type",
+    "test/highlight",
+    "test/tags"
+  ],
+  "original_files": [
+    {
+      "path": ".clang-format",
+      "retained_path": ".clang-format",
+      "bytes": 21,
+      "sha256": "51977317b1771c3789febc994d1072092996de145e0f588a9ed6fe8deac2cbea",
+      "archive_mode": 420,
+      "executable": false
+    },
+    {
+      "path": ".editorconfig",
+      "retained_path": ".editorconfig",
+      "bytes": 546,
+      "sha256": "c2241a0fb766273596a95f4e73f5c6d6ee55058f24da33b0752e14f8ea8bf8aa",
+      "archive_mode": 420,
+      "executable": false
+    },
+    {
+      "path": ".gitattributes",
+      "retained_path": ".gitattributes.upstream",
+      "bytes": 485,
+      "sha256": "384926f57f601db7d2857a4981b783e95c2982ab4b8f2e8553beace071dad121",
+      "archive_mode": 420,
+      "executable": false
+    },
+    {
+      "path": ".github/FUNDING.yml",
+      "retained_path": ".github/FUNDING.yml",
+      "bytes": 31,
+      "sha256": "c110a1d05e8ae627fe4c73ef25c28cd7528c2b92130814916d036815f1fd71a8",
+      "archive_mode": 420,
+      "executable": false
+    },
+    {
+      "path": ".github/workflows/ci.yml",
+      "retained_path": ".github/workflows/ci.yml",
+      "bytes": 2182,
+      "sha256": "57a10cfd66180511d136be24aea20c8eafc94feb672ad6c08196e89f02cfa136",
+      "archive_mode": 420,
+      "executable": false
+    },
+    {
+      "path": ".github/workflows/fuzz.yml",
+      "retained_path": ".github/workflows/fuzz.yml",
+      "bytes": 756,
+      "sha256": "5add9eac019ef10a8b3fcd2f14bf9e1c67a4ff959af475641000d2dd96d54282",
+      "archive_mode": 420,
+      "executable": false
+    },
+    {
+      "path": ".github/workflows/publish.yml",
+      "retained_path": ".github/workflows/publish.yml",
+      "bytes": 647,
+      "sha256": "2cbbd9c2cbdf9314167facba4623a05e18aa49bb5ff14594e618b4e4e199cc27",
+      "archive_mode": 420,
+      "executable": false
+    },
+    {
+      "path": ".gitignore",
+      "retained_path": ".gitignore.upstream",
+      "bytes": 340,
+      "sha256": "9e290da3ff65053231cc4ed5a97130e102fc839409cae9a1617ad9c2caed4ab2",
+      "archive_mode": 420,
+      "executable": false
+    },
+    {
+      "path": ".gitmodules",
+      "retained_path": ".gitmodules",
+      "bytes": 1861,
+      "sha256": "ea2ca6e79a7c87c177f0630ac86a5a95a6317b42467a7fecdf87405f444d9880",
+      "archive_mode": 420,
+      "executable": false
+    },
+    {
+      "path": "binding.gyp",
+      "retained_path": "binding.gyp",
+      "bytes": 809,
+      "sha256": "3bc98af09fd38240f5b8fb158952fe264af558620bc90a3202278499ad06bd5e",
+      "archive_mode": 420,
+      "executable": false
+    },
+    {
+      "path": "bindings/c/tree_sitter/tree-sitter-ocaml-interface.h",
+      "retained_path": "bindings/c/tree_sitter/tree-sitter-ocaml-interface.h",
+      "bytes": 252,
+      "sha256": "233f5302b527d32d3a45b9794c01c5cf8b41012d83f4adb1a5700c654ecd85a4",
+      "archive_mode": 420,
+      "executable": false
+    },
+    {
+      "path": "bindings/c/tree_sitter/tree-sitter-ocaml-type.h",
+      "retained_path": "bindings/c/tree_sitter/tree-sitter-ocaml-type.h",
+      "bytes": 247,
+      "sha256": "054756bade977ff70cc4793fec2627fa1342334dd52e2d709c2ee9ef463ea1e2",
+      "archive_mode": 420,
+      "executable": false
+    },
+    {
+      "path": "bindings/c/tree_sitter/tree-sitter-ocaml.h",
+      "retained_path": "bindings/c/tree_sitter/tree-sitter-ocaml.h",
+      "bytes": 242,
+      "sha256": "6c446a3b8ea2300a5bb904caaba73708a9e83f8d85c81a89ba708ee4f6560cb3",
+      "archive_mode": 420,
+      "executable": false
+    },
+    {
+      "path": "bindings/c/tree-sitter-ocaml-interface.pc.in",
+      "retained_path": "bindings/c/tree-sitter-ocaml-interface.pc.in",
+      "bytes": 327,
+      "sha256": "9b1464c819dc2c665a7d2b44a222229ce9cf119cd4ea52f893dba085cd5aa27e",
+      "archive_mode": 420,
+      "executable": false
+    },
+    {
+      "path": "bindings/c/tree-sitter-ocaml-type.pc.in",
+      "retained_path": "bindings/c/tree-sitter-ocaml-type.pc.in",
+      "bytes": 317,
+      "sha256": "9363ff08100333ef4719ac1b873cc3f9fede1ea3fad3eb43018162da135e63ba",
+      "archive_mode": 420,
+      "executable": false
+    },
+    {
+      "path": "bindings/c/tree-sitter-ocaml.pc.in",
+      "retained_path": "bindings/c/tree-sitter-ocaml.pc.in",
+      "bytes": 295,
+      "sha256": "596f17c238d4fec5451238b14608422d683473fe7e03c6b4c686596d4d27b44d",
+      "archive_mode": 420,
+      "executable": false
+    },
+    {
+      "path": "bindings/go/binding_interface.go",
+      "retained_path": "bindings/go/binding_interface.go",
+      "bytes": 382,
+      "sha256": "bd011b44a900a9b2cddf7d6a6eba689bd73e1ad3abc910a190a469ff6aa54b8c",
+      "archive_mode": 420,
+      "executable": false
+    },
+    {
+      "path": "bindings/go/binding_ocaml.go",
+      "retained_path": "bindings/go/binding_ocaml.go",
+      "bytes": 340,
+      "sha256": "c34258c1ed9c6d047a1a87e785b2b78b6d308c93ebd628ff37012c5bcbedf74b",
+      "archive_mode": 420,
+      "executable": false
+    },
+    {
+      "path": "bindings/go/binding_test.go",
+      "retained_path": "bindings/go/binding_test.go",
+      "bytes": 1560,
+      "sha256": "7a2f38fc472d077fb2cae56c4c50cf43ce33a83836e7a0beff316cd18809e6e7",
+      "archive_mode": 420,
+      "executable": false
+    },
+    {
+      "path": "bindings/go/binding_type.go",
+      "retained_path": "bindings/go/binding_type.go",
+      "bytes": 352,
+      "sha256": "c382e0f75b07062b928747f83ca2fa68865dd669c0f942c009b23cb46dd4922b",
+      "archive_mode": 420,
+      "executable": false
+    },
+    {
+      "path": "bindings/node/binding_test.js",
+      "retained_path": "bindings/node/binding_test.js",
+      "bytes": 1402,
+      "sha256": "1928be149c64950ade9368d3382345605253e92e5eaba1d1c64d9b7e37988a3b",
+      "archive_mode": 420,
+      "executable": false
+    },
+    {
+      "path": "bindings/node/binding.cc",
+      "retained_path": "bindings/node/binding.cc",
+      "bytes": 1516,
+      "sha256": "18d8dd4b83824b019743da2f8c43f7eb2b43bcd745ff0ba0456c64d9fa8ea685",
+      "archive_mode": 420,
+      "executable": false
+    },
+    {
+      "path": "bindings/node/index.d.ts",
+      "retained_path": "bindings/node/index.d.ts",
+      "bytes": 1697,
+      "sha256": "f8d94dbbe53476eaf71c250e5c46d6e1ada90a2ac5ff719587a1e674cee9c849",
+      "archive_mode": 420,
+      "executable": false
+    },
+    {
+      "path": "bindings/node/index.js",
+      "retained_path": "bindings/node/index.js",
+      "bytes": 1290,
+      "sha256": "10154f29cda6d12096084ecebc447be24f8af6a43aa4302489fd65123055fadd",
+      "archive_mode": 420,
+      "executable": false
+    },
+    {
+      "path": "bindings/python/README.md",
+      "retained_path": "bindings/python/README.md",
+      "bytes": 1398,
+      "sha256": "6a129527917962d811f5c9c7e71941a22d6d373719892351a5803247e759707c",
+      "archive_mode": 420,
+      "executable": false
+    },
+    {
+      "path": "bindings/python/tests/test_binding.py",
+      "retained_path": "bindings/python/tests/test_binding.py",
+      "bytes": 1022,
+      "sha256": "a6ce2b9cc92c90f3de7069b46dea706f40324f8b66e85cce66b4a5d33de7bb6a",
+      "archive_mode": 420,
+      "executable": false
+    },
+    {
+      "path": "bindings/python/tree_sitter_ocaml/__init__.py",
+      "retained_path": "bindings/python/tree_sitter_ocaml/__init__.py",
+      "bytes": 1175,
+      "sha256": "5c74df8b98e51177dad0e9c184465d00103da5099348012e38841f20f256b6e4",
+      "archive_mode": 420,
+      "executable": false
+    },
+    {
+      "path": "bindings/python/tree_sitter_ocaml/__init__.pyi",
+      "retained_path": "bindings/python/tree_sitter_ocaml/__init__.pyi",
+      "bytes": 593,
+      "sha256": "ef94dce1608fc1e0bbb5df6ffc55df80e3ce8ea468bf6c879893ad678f5c873d",
+      "archive_mode": 420,
+      "executable": false
+    },
+    {
+      "path": "bindings/python/tree_sitter_ocaml/binding.c",
+      "retained_path": "bindings/python/tree_sitter_ocaml/binding.c",
+      "bytes": 1585,
+      "sha256": "43fbebd08f32fd6a0d855c48d976e88f4cf164fd533b01c18796fb0497185b66",
+      "archive_mode": 420,
+      "executable": false
+    },
+    {
+      "path": "bindings/python/tree_sitter_ocaml/py.typed",
+      "retained_path": "bindings/python/tree_sitter_ocaml/py.typed",
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "archive_mode": 420,
+      "executable": false
+    },
+    {
+      "path": "bindings/rust/build.rs",
+      "retained_path": "bindings/rust/build.rs",
+      "bytes": 2097,
+      "sha256": "587085664369557ca69b484ccb52dab5103deee1adaf904c73a94aed204362f4",
+      "archive_mode": 420,
+      "executable": false
+    },
+    {
+      "path": "bindings/rust/lib.rs",
+      "retained_path": "bindings/rust/lib.rs",
+      "bytes": 4855,
+      "sha256": "a801ecc5aa81aae025ca3d7daf0ce95c0317de2a30512d350aea4ca421117aa3",
+      "archive_mode": 420,
+      "executable": false
+    },
+    {
+      "path": "bindings/rust/README.md",
+      "retained_path": "bindings/rust/README.md",
+      "bytes": 2027,
+      "sha256": "45ecc37e8df1468d26b03cb3bcc1ac0c5e869824d165f3b140553c6a280bb1e8",
+      "archive_mode": 420,
+      "executable": false
+    },
+    {
+      "path": "bindings/swift/TreeSitterOCaml/ocaml.h",
+      "retained_path": "bindings/swift/TreeSitterOCaml/ocaml.h",
+      "bytes": 332,
+      "sha256": "3422b3ef1f7908a80e92291c540880ed7753f5e3053dcc61eedfcceaae67fb75",
+      "archive_mode": 420,
+      "executable": false
+    },
+    {
+      "path": "bindings/swift/TreeSitterOCamlTests/TreeSitterOCamlTests.swift",
+      "retained_path": "bindings/swift/TreeSitterOCamlTests/TreeSitterOCamlTests.swift",
+      "bytes": 1312,
+      "sha256": "96d145a4964bd4e13c6f8b00d05b78cb93d755e2006274fc99fd80f89e012d7c",
+      "archive_mode": 420,
+      "executable": false
+    },
+    {
+      "path": "Cargo.lock",
+      "retained_path": "Cargo.lock",
+      "bytes": 5626,
+      "sha256": "ccd17f144a452ef6615a073924ac4c8d221ed6b18219274ce6b7ec2fee1cfa43",
+      "archive_mode": 420,
+      "executable": false
+    },
+    {
+      "path": "Cargo.toml",
+      "retained_path": "Cargo.toml.upstream",
+      "bytes": 813,
+      "sha256": "8fe07d99a526c08a1ce3f87b82381e2c89b1f61420071e1da17f7e87d7ca5509",
+      "archive_mode": 420,
+      "executable": false
+    },
+    {
+      "path": "CMakeLists.txt",
+      "retained_path": "CMakeLists.txt",
+      "bytes": 3916,
+      "sha256": "544e771355e50fd5983059e1888782b553ff3d9a49012812f54d9e86961236a4",
+      "archive_mode": 420,
+      "executable": false
+    },
+    {
+      "path": "common/common.mak",
+      "retained_path": "common/common.mak",
+      "bytes": 4094,
+      "sha256": "0ae9ee8c00f30bc3945742bf7e15ade81c984d1d76be32d1d2541ccba1ef8929",
+      "archive_mode": 420,
+      "executable": false
+    },
+    {
+      "path": "common/scanner.h",
+      "retained_path": "common/scanner.h.orig",
+      "bytes": 14631,
+      "sha256": "e4934793536f53c076b24b16de2f6a48a125c632e6cce58c80c02d6d65f8dbed",
+      "archive_mode": 420,
+      "executable": false
+    },
+    {
+      "path": "eslint.config.mjs",
+      "retained_path": "eslint.config.mjs",
+      "bytes": 89,
+      "sha256": "e7b2dbe4f462cf890b53cc2d140aef6785fa31caabaaf6a11a38bf12a3ece091",
+      "archive_mode": 420,
+      "executable": false
+    },
+    {
+      "path": "go.mod",
+      "retained_path": "go.mod",
+      "bytes": 664,
+      "sha256": "070a89bff9dee5626341c05f8c3b0f4e31b247385d79eaa5198976b71a123782",
+      "archive_mode": 420,
+      "executable": false
+    },
+    {
+      "path": "go.sum",
+      "retained_path": "go.sum",
+      "bytes": 3458,
+      "sha256": "7da2bfeaed6268d33a466dc51e3d3760d0076f22c6f2152c0ff7975d9ddb0c26",
+      "archive_mode": 420,
+      "executable": false
+    },
+    {
+      "path": "grammars/interface/CMakeLists.txt",
+      "retained_path": "grammars/interface/CMakeLists.txt",
+      "bytes": 95,
+      "sha256": "cd94380c57d14ab677aa1f7138e2697b41e34b365dae6849f8866d1fdc349110",
+      "archive_mode": 420,
+      "executable": false
+    },
+    {
+      "path": "grammars/interface/grammar.js",
+      "retained_path": "grammars/interface/grammar.js",
+      "bytes": 233,
+      "sha256": "433b19b5dd272f356c5f0feadb68ffc5357d3dbd752a284a6dccfc857e3fdf8d",
+      "archive_mode": 420,
+      "executable": false
+    },
+    {
+      "path": "grammars/interface/Makefile",
+      "retained_path": "grammars/interface/Makefile",
+      "bytes": 64,
+      "sha256": "0e4c789487c89cc1f9ae924828d6e63faee4c2dd0308cb52411549324c6230d1",
+      "archive_mode": 420,
+      "executable": false
+    },
+    {
+      "path": "grammars/interface/package.json",
+      "retained_path": "grammars/interface/package.json",
+      "bytes": 66,
+      "sha256": "f85bd10742d0f8bc01dc752fd2d710f13567088513c34235432eccf0ad55bb13",
+      "archive_mode": 420,
+      "executable": false
+    },
+    {
+      "path": "grammars/interface/src/grammar.json",
+      "retained_path": "grammars/interface/src/grammar.json",
+      "bytes": 265947,
+      "sha256": "b58c498dd25ca2fdabc4d9875cb91924bb767508095fef9599338523e191bc41",
+      "archive_mode": 420,
+      "executable": false
+    },
+    {
+      "path": "grammars/interface/src/node-types.json",
+      "retained_path": "grammars/interface/src/node-types.json",
+      "bytes": 111609,
+      "sha256": "489a3580a6e7c44f994955715fccb65fb4bcc16106d03b522fe67ea43ca507f4",
+      "archive_mode": 420,
+      "executable": false
+    },
+    {
+      "path": "grammars/interface/src/parser.c",
+      "retained_path": "grammars/interface/src/parser.c",
+      "bytes": 11263964,
+      "sha256": "ceabd19beddb37631cf79dbe8a037a5549a63aa9e65b08361a37aa5c03b1dfc2",
+      "archive_mode": 420,
+      "executable": false
+    },
+    {
+      "path": "grammars/interface/src/scanner.c",
+      "retained_path": "grammars/interface/src/scanner.c",
+      "bytes": 913,
+      "sha256": "8ba5a82e6d2a4e9fb8ff2f54c0b3d2bc677625f3509dfdf85fc65bfa7d67d1d5",
+      "archive_mode": 420,
+      "executable": false
+    },
+    {
+      "path": "grammars/interface/src/tree_sitter/alloc.h",
+      "retained_path": "grammars/interface/src/tree_sitter/alloc.h",
+      "bytes": 985,
+      "sha256": "b29c1c9fb7cc82f58c84b376df1297d6e2737a1d655fd356db0859e3c29c2fea",
+      "archive_mode": 420,
+      "executable": false
+    },
+    {
+      "path": "grammars/interface/src/tree_sitter/array.h",
+      "retained_path": "grammars/interface/src/tree_sitter/array.h",
+      "bytes": 13269,
+      "sha256": "31e60a1bff6f715afacce03b5b70efe42b58371b4f9595dd4af52a577ff9608c",
+      "archive_mode": 420,
+      "executable": false
+    },
+    {
+      "path": "grammars/interface/src/tree_sitter/parser.h",
+      "retained_path": "grammars/interface/src/tree_sitter/parser.h",
+      "bytes": 7624,
+      "sha256": "180b893c8734778fd32f372dfbc27bd6ad1cd2221f26150b31256ff6716320d2",
+      "archive_mode": 420,
+      "executable": false
+    },
+    {
+      "path": "grammars/ocaml/CMakeLists.txt",
+      "retained_path": "grammars/ocaml/CMakeLists.txt",
+      "bytes": 76,
+      "sha256": "1a719b9e22643e482f07ea070fad1089a4a7a90be21703f19f1cc385f017f130",
+      "archive_mode": 420,
+      "executable": false
+    },
+    {
+      "path": "grammars/ocaml/grammar.js",
+      "retained_path": "grammars/ocaml/grammar.js",
+      "bytes": 53556,
+      "sha256": "54c307709534048dd0d6928b000f3e76508bb560ca2941ad3fbc04cb3acce6a3",
+      "archive_mode": 420,
+      "executable": false
+    },
+    {
+      "path": "grammars/ocaml/Makefile",
+      "retained_path": "grammars/ocaml/Makefile",
+      "bytes": 54,
+      "sha256": "bed7d4b1ed41f74694af8fe7711a44d59f9208dd640f636112794ddd4d941242",
+      "archive_mode": 420,
+      "executable": false
+    },
+    {
+      "path": "grammars/ocaml/package.json",
+      "retained_path": "grammars/ocaml/package.json",
+      "bytes": 62,
+      "sha256": "e8bec23af89410611234855e968da06cb07165d987ff348f2c8b8f849a82f861",
+      "archive_mode": 420,
+      "executable": false
+    },
+    {
+      "path": "grammars/ocaml/src/grammar.json",
+      "retained_path": "grammars/ocaml/src/grammar.json",
+      "bytes": 266257,
+      "sha256": "6984a9408abe4a9e903e504d75d1a275ddf625dec7a82ae5d1db4c82418fac63",
+      "archive_mode": 420,
+      "executable": false
+    },
+    {
+      "path": "grammars/ocaml/src/node-types.json",
+      "retained_path": "grammars/ocaml/src/node-types.json",
+      "bytes": 111900,
+      "sha256": "ee6af09cee9d5a3f8281fc95ab6e34f6a28f54efdff52ff1b1c649bdd780dc43",
+      "archive_mode": 420,
+      "executable": false
+    },
+    {
+      "path": "grammars/ocaml/src/parser.c",
+      "retained_path": "grammars/ocaml/src/parser.c",
+      "bytes": 13302368,
+      "sha256": "7af6bd695378fcb00fe138ebe618e6fa1696d5b967a677b6262c470565ac9157",
+      "archive_mode": 420,
+      "executable": false
+    },
+    {
+      "path": "grammars/ocaml/src/scanner.c",
+      "retained_path": "grammars/ocaml/src/scanner.c",
+      "bytes": 992,
+      "sha256": "fa23af8a5db2aaaf7041b60f7e762c23f1b5950388a592e2bc4dcffaffa75f5b",
+      "archive_mode": 420,
+      "executable": false
+    },
+    {
+      "path": "grammars/ocaml/src/tree_sitter/alloc.h",
+      "retained_path": "grammars/ocaml/src/tree_sitter/alloc.h",
+      "bytes": 985,
+      "sha256": "b29c1c9fb7cc82f58c84b376df1297d6e2737a1d655fd356db0859e3c29c2fea",
+      "archive_mode": 420,
+      "executable": false
+    },
+    {
+      "path": "grammars/ocaml/src/tree_sitter/array.h",
+      "retained_path": "grammars/ocaml/src/tree_sitter/array.h",
+      "bytes": 13269,
+      "sha256": "31e60a1bff6f715afacce03b5b70efe42b58371b4f9595dd4af52a577ff9608c",
+      "archive_mode": 420,
+      "executable": false
+    },
+    {
+      "path": "grammars/ocaml/src/tree_sitter/parser.h",
+      "retained_path": "grammars/ocaml/src/tree_sitter/parser.h",
+      "bytes": 7624,
+      "sha256": "180b893c8734778fd32f372dfbc27bd6ad1cd2221f26150b31256ff6716320d2",
+      "archive_mode": 420,
+      "executable": false
+    },
+    {
+      "path": "grammars/type/CMakeLists.txt",
+      "retained_path": "grammars/type/CMakeLists.txt",
+      "bytes": 85,
+      "sha256": "17d3acde3e98be6347c04a05d9c3b473482822be3e73d3fe3e010d0721facdde",
+      "archive_mode": 420,
+      "executable": false
+    },
+    {
+      "path": "grammars/type/grammar.js",
+      "retained_path": "grammars/type/grammar.js",
+      "bytes": 385,
+      "sha256": "4efb27b4c58df394b1e2ee1db2258b355f59bf5a5854f6c65a75cfb0c35d367a",
+      "archive_mode": 420,
+      "executable": false
+    },
+    {
+      "path": "grammars/type/Makefile",
+      "retained_path": "grammars/type/Makefile",
+      "bytes": 59,
+      "sha256": "1909e6bea8af5b65cee580f33490b495a4099f53602a30c037ed4046a3f05342",
+      "archive_mode": 420,
+      "executable": false
+    },
+    {
+      "path": "grammars/type/package.json",
+      "retained_path": "grammars/type/package.json",
+      "bytes": 61,
+      "sha256": "1cb47159d1720eb168f3cffc85d339490eff9aab70dcac313e6bd6c75fbd5336",
+      "archive_mode": 420,
+      "executable": false
+    },
+    {
+      "path": "grammars/type/src/grammar.json",
+      "retained_path": "grammars/type/src/grammar.json",
+      "bytes": 266352,
+      "sha256": "16d58a11c43f2caa806eeebacf9507464e97efb5b548f92946cf6ce6a824dbe9",
+      "archive_mode": 420,
+      "executable": false
+    },
+    {
+      "path": "grammars/type/src/node-types.json",
+      "retained_path": "grammars/type/src/node-types.json",
+      "bytes": 111587,
+      "sha256": "616478bda4b3de1bd6f7c816997530f868ba885685523445c67d4231157b4f66",
+      "archive_mode": 420,
+      "executable": false
+    },
+    {
+      "path": "grammars/type/src/parser.c",
+      "retained_path": "grammars/type/src/parser.c",
+      "bytes": 11194056,
+      "sha256": "ee9e7f37fd41eeb222bcf06894b5481ceecf5fe9f70164645c9973cf006a6cf4",
+      "archive_mode": 420,
+      "executable": false
+    },
+    {
+      "path": "grammars/type/src/scanner.c",
+      "retained_path": "grammars/type/src/scanner.c",
+      "bytes": 888,
+      "sha256": "8fc60c2e60db9e50c9c68f81a17dfe78dd3493f38f1d822a813bd73e42afae9d",
+      "archive_mode": 420,
+      "executable": false
+    },
+    {
+      "path": "grammars/type/src/tree_sitter/alloc.h",
+      "retained_path": "grammars/type/src/tree_sitter/alloc.h",
+      "bytes": 985,
+      "sha256": "b29c1c9fb7cc82f58c84b376df1297d6e2737a1d655fd356db0859e3c29c2fea",
+      "archive_mode": 420,
+      "executable": false
+    },
+    {
+      "path": "grammars/type/src/tree_sitter/array.h",
+      "retained_path": "grammars/type/src/tree_sitter/array.h",
+      "bytes": 13269,
+      "sha256": "31e60a1bff6f715afacce03b5b70efe42b58371b4f9595dd4af52a577ff9608c",
+      "archive_mode": 420,
+      "executable": false
+    },
+    {
+      "path": "grammars/type/src/tree_sitter/parser.h",
+      "retained_path": "grammars/type/src/tree_sitter/parser.h",
+      "bytes": 7624,
+      "sha256": "180b893c8734778fd32f372dfbc27bd6ad1cd2221f26150b31256ff6716320d2",
+      "archive_mode": 420,
+      "executable": false
+    },
+    {
+      "path": "LICENSE",
+      "retained_path": "LICENSE",
+      "bytes": 1094,
+      "sha256": "f977a20805dd6e275f14bc090a5f8e638401dad4df366841c1060f12c75b74ae",
+      "archive_mode": 420,
+      "executable": false
+    },
+    {
+      "path": "Makefile",
+      "retained_path": "Makefile",
+      "bytes": 376,
+      "sha256": "33f6a871ce6a8327e6ad5ff083c3cdd5e405eb629c7d0818612f84de56206cef",
+      "archive_mode": 420,
+      "executable": false
+    },
+    {
+      "path": "package-lock.json",
+      "retained_path": "package-lock.json",
+      "bytes": 57650,
+      "sha256": "f5244bc73470f6941ad9256b1f6e7759f658633e40ffa8e064cc62afdaeed5b0",
+      "archive_mode": 420,
+      "executable": false
+    },
+    {
+      "path": "package.json",
+      "retained_path": "package.json",
+      "bytes": 1496,
+      "sha256": "b0c594a03e8f062436fa5e65b1d552f0c8ace1da7b747ac7be266bf9d20c5fbd",
+      "archive_mode": 420,
+      "executable": false
+    },
+    {
+      "path": "Package.resolved",
+      "retained_path": "Package.resolved",
+      "bytes": 590,
+      "sha256": "27cd656cf54e961506e0a935ea74d98ec3fef3003ff26456d6cfbca68c5b3ead",
+      "archive_mode": 420,
+      "executable": false
+    },
+    {
+      "path": "Package.swift",
+      "retained_path": "Package.swift",
+      "bytes": 1283,
+      "sha256": "637cc5fcbef7bed31e89b9c1ee2f4c8d02b95e6a22066c29a79c0e90714c6788",
+      "archive_mode": 420,
+      "executable": false
+    },
+    {
+      "path": "pyproject.toml",
+      "retained_path": "pyproject.toml",
+      "bytes": 764,
+      "sha256": "b7483dcf4ffc049333f37fc8b25b0c8b19081e05720238dc28af7629dbb6fe39",
+      "archive_mode": 420,
+      "executable": false
+    },
+    {
+      "path": "queries/highlights.scm",
+      "retained_path": "queries/highlights.scm",
+      "bytes": 3169,
+      "sha256": "9bdabb038c60c159cef48f4d9f775bdd951230190dd7721da9aaea073a2c8cce",
+      "archive_mode": 420,
+      "executable": false
+    },
+    {
+      "path": "queries/locals.scm",
+      "retained_path": "queries/locals.scm",
+      "bytes": 345,
+      "sha256": "594e282fa69c85a54255e54f574c525c9400b8357db81c314ab4b93e59f49363",
+      "archive_mode": 420,
+      "executable": false
+    },
+    {
+      "path": "queries/tags.scm",
+      "retained_path": "queries/tags.scm",
+      "bytes": 3707,
+      "sha256": "bed0a869d8e842e9a5b4e84f0f4940293801b3791c21dcee8b9f73f67776a2d1",
+      "archive_mode": 420,
+      "executable": false
+    },
+    {
+      "path": "README.md",
+      "retained_path": "README.md",
+      "bytes": 1594,
+      "sha256": "4d8d35292683354f7908276d2831a67f8275001c06a0dae302ec8b3285516aa4",
+      "archive_mode": 420,
+      "executable": false
+    },
+    {
+      "path": "setup.py",
+      "retained_path": "setup.py",
+      "bytes": 2556,
+      "sha256": "16f9417d2e7e56b083c0e28ceebb46a50176c2ba26210ed076680e61bf10aa38",
+      "archive_mode": 420,
+      "executable": false
+    },
+    {
+      "path": "test/corpus/attributes.txt",
+      "retained_path": "test/corpus/attributes.txt",
+      "bytes": 5126,
+      "sha256": "8b5d1a8ab66b4a593212782e4307d9df68b2fabafe2572a932976c1e218ede24",
+      "archive_mode": 420,
+      "executable": false
+    },
+    {
+      "path": "test/corpus/comments.txt",
+      "retained_path": "test/corpus/comments.txt",
+      "bytes": 1311,
+      "sha256": "cb95bb76fb41dc109da7293f807376e7331927a8d8eec8c804d7753320d0cd85",
+      "archive_mode": 420,
+      "executable": false
+    },
+    {
+      "path": "test/corpus/expressions.txt",
+      "retained_path": "test/corpus/expressions.txt",
+      "bytes": 23716,
+      "sha256": "a6125ef5cafbf633a0b1b7b29e38f38ef3a7091f97a2cde6670d70dc07ec8b9f",
+      "archive_mode": 420,
+      "executable": false
+    },
+    {
+      "path": "test/corpus/module-expressions.txt",
+      "retained_path": "test/corpus/module-expressions.txt",
+      "bytes": 3432,
+      "sha256": "45f6c699b0057b6f2921f85ac5fb90cb298528fbc7de673db2898a8f0d284b6d",
+      "archive_mode": 420,
+      "executable": false
+    },
+    {
+      "path": "test/corpus/module-implementation.txt",
+      "retained_path": "test/corpus/module-implementation.txt",
+      "bytes": 4640,
+      "sha256": "91be0e125f233f56ccd06c24626964076e12f9b6934e549c1306e7c5963be5da",
+      "archive_mode": 420,
+      "executable": false
+    },
+    {
+      "path": "test/corpus/module-items.txt",
+      "retained_path": "test/corpus/module-items.txt",
+      "bytes": 7716,
+      "sha256": "103f02d3e8e174e6502c94bf150457f5c294592c51ddb77dd97599bd26b1fd84",
+      "archive_mode": 420,
+      "executable": false
+    },
+    {
+      "path": "test/corpus/module-types.txt",
+      "retained_path": "test/corpus/module-types.txt",
+      "bytes": 4119,
+      "sha256": "13e0fe8233fa860fa9ef5af36eab01bdb1ef7a059bc811339789c36836ec9858",
+      "archive_mode": 420,
+      "executable": false
+    },
+    {
+      "path": "test/corpus/ocaml_interface/module-specification.txt",
+      "retained_path": "test/corpus/ocaml_interface/module-specification.txt",
+      "bytes": 1019,
+      "sha256": "c06534e0757c1b7a6fc4933e596afe09316aa61b9b1ce344b75af064ab8c953a",
+      "archive_mode": 420,
+      "executable": false
+    },
+    {
+      "path": "test/corpus/ocaml_type/types.txt",
+      "retained_path": "test/corpus/ocaml_type/types.txt",
+      "bytes": 2442,
+      "sha256": "6354c75aaf130cc408262fbfdd3dc9429d05fea97943f58c485fbe61b834e59b",
+      "archive_mode": 420,
+      "executable": false
+    },
+    {
+      "path": "test/corpus/patterns.txt",
+      "retained_path": "test/corpus/patterns.txt",
+      "bytes": 6828,
+      "sha256": "1047fa6597dc45731d405d362dcf9f8c7aa529f74f1d3db371f521a96b195fa1",
+      "archive_mode": 420,
+      "executable": false
+    },
+    {
+      "path": "test/corpus/toplevel.txt",
+      "retained_path": "test/corpus/toplevel.txt",
+      "bytes": 624,
+      "sha256": "7bbc728cbb5ce7b13c12577d87c7a320306e2d2b32a5c827387a5a82bcadb646",
+      "archive_mode": 420,
+      "executable": false
+    },
+    {
+      "path": "test/corpus/types.txt",
+      "retained_path": "test/corpus/types.txt",
+      "bytes": 9768,
+      "sha256": "b72d4d520b7b3e00867239d9b9309056be11ec374e6d109be4de50a4407b4a23",
+      "archive_mode": 420,
+      "executable": false
+    },
+    {
+      "path": "test/files.txt",
+      "retained_path": "test/files.txt",
+      "bytes": 286,
+      "sha256": "5683187a7d4f8e2a5b01f5b3a61dcedb53b026cbec384da67ce4b7faa4a419b1",
+      "archive_mode": 420,
+      "executable": false
+    },
+    {
+      "path": "test/highlight/attributes.ml",
+      "retained_path": "test/highlight/attributes.ml",
+      "bytes": 97,
+      "sha256": "52ffc8902fcca2cfe7cbf76477dd052f765de71fa904e480e75d7e34fb3d8ac6",
+      "archive_mode": 420,
+      "executable": false
+    },
+    {
+      "path": "test/highlight/constants.ml",
+      "retained_path": "test/highlight/constants.ml",
+      "bytes": 473,
+      "sha256": "528383fccb1e6cf1502289b46bd4593384fbd5fb21b49a3cc9e4042393b37c93",
+      "archive_mode": 420,
+      "executable": false
+    },
+    {
+      "path": "test/highlight/functions.ml",
+      "retained_path": "test/highlight/functions.ml",
+      "bytes": 628,
+      "sha256": "20875f4a425a666ccb77119611932f2e9b5f9c426d8700ffc6a6b11b3a558ffc",
+      "archive_mode": 420,
+      "executable": false
+    },
+    {
+      "path": "test/highlight/locals.ml",
+      "retained_path": "test/highlight/locals.ml",
+      "bytes": 1084,
+      "sha256": "1e885eb3b4f35a1aeea015aae4e6fc37507c5ebbe69a123727cb48ede572831b",
+      "archive_mode": 420,
+      "executable": false
+    },
+    {
+      "path": "test/highlight/modules.ml",
+      "retained_path": "test/highlight/modules.ml",
+      "bytes": 732,
+      "sha256": "40c10329351ffcf1a0345c3a1733fc97df561be197f51b1692f70a89f2fdfa49",
+      "archive_mode": 420,
+      "executable": false
+    },
+    {
+      "path": "test/highlight/operators.ml",
+      "retained_path": "test/highlight/operators.ml",
+      "bytes": 313,
+      "sha256": "3105f30432432be369af1fe34e138078385a95abdfffb1409591c37d0f5a3166",
+      "archive_mode": 420,
+      "executable": false
+    },
+    {
+      "path": "test/highlight/types.ml",
+      "retained_path": "test/highlight/types.ml",
+      "bytes": 1097,
+      "sha256": "8e6ea800d60a42cc9c5e0ca5055d6a963a253acc3e623298ccad7a2707afb9b8",
+      "archive_mode": 420,
+      "executable": false
+    },
+    {
+      "path": "test/invalid-files.txt",
+      "retained_path": "test/invalid-files.txt",
+      "bytes": 2200,
+      "sha256": "e73d440d43d7fd1ef597cf3c6c9e8cd44113b53e18071c29d6eb8b47c235dcdc",
+      "archive_mode": 420,
+      "executable": false
+    },
+    {
+      "path": "test/parse-examples.sh",
+      "retained_path": "test/parse-examples.sh",
+      "bytes": 631,
+      "sha256": "3edda96c2a4a720969d7618f3ba1d5f6e3f7dc38cd77ae64db3679de818add6d",
+      "archive_mode": 493,
+      "executable": true
+    },
+    {
+      "path": "test/tags/classes.ml",
+      "retained_path": "test/tags/classes.ml",
+      "bytes": 209,
+      "sha256": "d59f37ea3d1c87c45ab0ef83644cb58ab4d267e8cec95bca1984db41475e751e",
+      "archive_mode": 420,
+      "executable": false
+    },
+    {
+      "path": "test/tags/functions.ml",
+      "retained_path": "test/tags/functions.ml",
+      "bytes": 381,
+      "sha256": "bb1b699db758eaf7b528c48d4d36d4c5d310b9e0ec13b77b8718cf42946b1e21",
+      "archive_mode": 420,
+      "executable": false
+    },
+    {
+      "path": "test/tags/modules.ml",
+      "retained_path": "test/tags/modules.ml",
+      "bytes": 673,
+      "sha256": "8ab0ab73dc87a9c89231d583e06073e0e55e26e8be596237d8ad6e5975eeaec1",
+      "archive_mode": 420,
+      "executable": false
+    },
+    {
+      "path": "test/tags/types.ml",
+      "retained_path": "test/tags/types.ml",
+      "bytes": 626,
+      "sha256": "0c2622e1e2a83e211aa19d01ed435d29a02eeaceeec080766b3c5657ac5903b5",
+      "archive_mode": 420,
+      "executable": false
+    },
+    {
+      "path": "tree-sitter.json",
+      "retained_path": "tree-sitter.json",
+      "bytes": 1695,
+      "sha256": "86a68fbc81651037727576a3b233bd1cea3224f7ba25b6806957d723678a7580",
+      "archive_mode": 420,
+      "executable": false
+    }
+  ],
+  "archive_explicit_directory_entries": 19,
+  "archive_regular_file_entries": 115,
+  "archive_executable_file_count": 1,
+  "archive_modes_recorded": true,
+  "archive_modes_applied_on_preparation_host": false,
+  "payload_files": [
+    {
+      "path": ".clang-format",
+      "bytes": 21,
+      "sha256": "51977317b1771c3789febc994d1072092996de145e0f588a9ed6fe8deac2cbea",
+      "executable": false,
+      "original_archive_member": true
+    },
+    {
+      "path": ".editorconfig",
+      "bytes": 546,
+      "sha256": "c2241a0fb766273596a95f4e73f5c6d6ee55058f24da33b0752e14f8ea8bf8aa",
+      "executable": false,
+      "original_archive_member": true
+    },
+    {
+      "path": ".gitattributes.upstream",
+      "bytes": 485,
+      "sha256": "384926f57f601db7d2857a4981b783e95c2982ab4b8f2e8553beace071dad121",
+      "executable": false,
+      "original_archive_member": true
+    },
+    {
+      "path": ".github/FUNDING.yml",
+      "bytes": 31,
+      "sha256": "c110a1d05e8ae627fe4c73ef25c28cd7528c2b92130814916d036815f1fd71a8",
+      "executable": false,
+      "original_archive_member": true
+    },
+    {
+      "path": ".github/workflows/ci.yml",
+      "bytes": 2182,
+      "sha256": "57a10cfd66180511d136be24aea20c8eafc94feb672ad6c08196e89f02cfa136",
+      "executable": false,
+      "original_archive_member": true
+    },
+    {
+      "path": ".github/workflows/fuzz.yml",
+      "bytes": 756,
+      "sha256": "5add9eac019ef10a8b3fcd2f14bf9e1c67a4ff959af475641000d2dd96d54282",
+      "executable": false,
+      "original_archive_member": true
+    },
+    {
+      "path": ".github/workflows/publish.yml",
+      "bytes": 647,
+      "sha256": "2cbbd9c2cbdf9314167facba4623a05e18aa49bb5ff14594e618b4e4e199cc27",
+      "executable": false,
+      "original_archive_member": true
+    },
+    {
+      "path": ".gitignore.upstream",
+      "bytes": 340,
+      "sha256": "9e290da3ff65053231cc4ed5a97130e102fc839409cae9a1617ad9c2caed4ab2",
+      "executable": false,
+      "original_archive_member": true
+    },
+    {
+      "path": ".gitmodules",
+      "bytes": 1861,
+      "sha256": "ea2ca6e79a7c87c177f0630ac86a5a95a6317b42467a7fecdf87405f444d9880",
+      "executable": false,
+      "original_archive_member": true
+    },
+    {
+      "path": "CMakeLists.txt",
+      "bytes": 3916,
+      "sha256": "544e771355e50fd5983059e1888782b553ff3d9a49012812f54d9e86961236a4",
+      "executable": false,
+      "original_archive_member": true
+    },
+    {
+      "path": "Cargo.lock",
+      "bytes": 5626,
+      "sha256": "ccd17f144a452ef6615a073924ac4c8d221ed6b18219274ce6b7ec2fee1cfa43",
+      "executable": false,
+      "original_archive_member": true
+    },
+    {
+      "path": "Cargo.toml",
+      "bytes": 1001,
+      "sha256": "3c4b7cc73479b6368c8067da8e19d94b07a6b1320e1632e82dfb04fbffa749bd",
+      "executable": false,
+      "original_archive_member": false
+    },
+    {
+      "path": "Cargo.toml.upstream",
+      "bytes": 813,
+      "sha256": "8fe07d99a526c08a1ce3f87b82381e2c89b1f61420071e1da17f7e87d7ca5509",
+      "executable": false,
+      "original_archive_member": true
+    },
+    {
+      "path": "LICENSE",
+      "bytes": 1094,
+      "sha256": "f977a20805dd6e275f14bc090a5f8e638401dad4df366841c1060f12c75b74ae",
+      "executable": false,
+      "original_archive_member": true
+    },
+    {
+      "path": "Makefile",
+      "bytes": 376,
+      "sha256": "33f6a871ce6a8327e6ad5ff083c3cdd5e405eb629c7d0818612f84de56206cef",
+      "executable": false,
+      "original_archive_member": true
+    },
+    {
+      "path": "PATCHES.md",
+      "bytes": 4543,
+      "sha256": "73699fd65e76b5c05a0d6f13b41998f0d1afbb18ade86447b644e4b1faaae079",
+      "executable": false,
+      "original_archive_member": false
+    },
+    {
+      "path": "Package.resolved",
+      "bytes": 590,
+      "sha256": "27cd656cf54e961506e0a935ea74d98ec3fef3003ff26456d6cfbca68c5b3ead",
+      "executable": false,
+      "original_archive_member": true
+    },
+    {
+      "path": "Package.swift",
+      "bytes": 1283,
+      "sha256": "637cc5fcbef7bed31e89b9c1ee2f4c8d02b95e6a22066c29a79c0e90714c6788",
+      "executable": false,
+      "original_archive_member": true
+    },
+    {
+      "path": "README.md",
+      "bytes": 1594,
+      "sha256": "4d8d35292683354f7908276d2831a67f8275001c06a0dae302ec8b3285516aa4",
+      "executable": false,
+      "original_archive_member": true
+    },
+    {
+      "path": "binding.gyp",
+      "bytes": 809,
+      "sha256": "3bc98af09fd38240f5b8fb158952fe264af558620bc90a3202278499ad06bd5e",
+      "executable": false,
+      "original_archive_member": true
+    },
+    {
+      "path": "bindings/c/tree-sitter-ocaml-interface.pc.in",
+      "bytes": 327,
+      "sha256": "9b1464c819dc2c665a7d2b44a222229ce9cf119cd4ea52f893dba085cd5aa27e",
+      "executable": false,
+      "original_archive_member": true
+    },
+    {
+      "path": "bindings/c/tree-sitter-ocaml-type.pc.in",
+      "bytes": 317,
+      "sha256": "9363ff08100333ef4719ac1b873cc3f9fede1ea3fad3eb43018162da135e63ba",
+      "executable": false,
+      "original_archive_member": true
+    },
+    {
+      "path": "bindings/c/tree-sitter-ocaml.pc.in",
+      "bytes": 295,
+      "sha256": "596f17c238d4fec5451238b14608422d683473fe7e03c6b4c686596d4d27b44d",
+      "executable": false,
+      "original_archive_member": true
+    },
+    {
+      "path": "bindings/c/tree_sitter/tree-sitter-ocaml-interface.h",
+      "bytes": 252,
+      "sha256": "233f5302b527d32d3a45b9794c01c5cf8b41012d83f4adb1a5700c654ecd85a4",
+      "executable": false,
+      "original_archive_member": true
+    },
+    {
+      "path": "bindings/c/tree_sitter/tree-sitter-ocaml-type.h",
+      "bytes": 247,
+      "sha256": "054756bade977ff70cc4793fec2627fa1342334dd52e2d709c2ee9ef463ea1e2",
+      "executable": false,
+      "original_archive_member": true
+    },
+    {
+      "path": "bindings/c/tree_sitter/tree-sitter-ocaml.h",
+      "bytes": 242,
+      "sha256": "6c446a3b8ea2300a5bb904caaba73708a9e83f8d85c81a89ba708ee4f6560cb3",
+      "executable": false,
+      "original_archive_member": true
+    },
+    {
+      "path": "bindings/go/binding_interface.go",
+      "bytes": 382,
+      "sha256": "bd011b44a900a9b2cddf7d6a6eba689bd73e1ad3abc910a190a469ff6aa54b8c",
+      "executable": false,
+      "original_archive_member": true
+    },
+    {
+      "path": "bindings/go/binding_ocaml.go",
+      "bytes": 340,
+      "sha256": "c34258c1ed9c6d047a1a87e785b2b78b6d308c93ebd628ff37012c5bcbedf74b",
+      "executable": false,
+      "original_archive_member": true
+    },
+    {
+      "path": "bindings/go/binding_test.go",
+      "bytes": 1560,
+      "sha256": "7a2f38fc472d077fb2cae56c4c50cf43ce33a83836e7a0beff316cd18809e6e7",
+      "executable": false,
+      "original_archive_member": true
+    },
+    {
+      "path": "bindings/go/binding_type.go",
+      "bytes": 352,
+      "sha256": "c382e0f75b07062b928747f83ca2fa68865dd669c0f942c009b23cb46dd4922b",
+      "executable": false,
+      "original_archive_member": true
+    },
+    {
+      "path": "bindings/node/binding.cc",
+      "bytes": 1516,
+      "sha256": "18d8dd4b83824b019743da2f8c43f7eb2b43bcd745ff0ba0456c64d9fa8ea685",
+      "executable": false,
+      "original_archive_member": true
+    },
+    {
+      "path": "bindings/node/binding_test.js",
+      "bytes": 1402,
+      "sha256": "1928be149c64950ade9368d3382345605253e92e5eaba1d1c64d9b7e37988a3b",
+      "executable": false,
+      "original_archive_member": true
+    },
+    {
+      "path": "bindings/node/index.d.ts",
+      "bytes": 1697,
+      "sha256": "f8d94dbbe53476eaf71c250e5c46d6e1ada90a2ac5ff719587a1e674cee9c849",
+      "executable": false,
+      "original_archive_member": true
+    },
+    {
+      "path": "bindings/node/index.js",
+      "bytes": 1290,
+      "sha256": "10154f29cda6d12096084ecebc447be24f8af6a43aa4302489fd65123055fadd",
+      "executable": false,
+      "original_archive_member": true
+    },
+    {
+      "path": "bindings/python/README.md",
+      "bytes": 1398,
+      "sha256": "6a129527917962d811f5c9c7e71941a22d6d373719892351a5803247e759707c",
+      "executable": false,
+      "original_archive_member": true
+    },
+    {
+      "path": "bindings/python/tests/test_binding.py",
+      "bytes": 1022,
+      "sha256": "a6ce2b9cc92c90f3de7069b46dea706f40324f8b66e85cce66b4a5d33de7bb6a",
+      "executable": false,
+      "original_archive_member": true
+    },
+    {
+      "path": "bindings/python/tree_sitter_ocaml/__init__.py",
+      "bytes": 1175,
+      "sha256": "5c74df8b98e51177dad0e9c184465d00103da5099348012e38841f20f256b6e4",
+      "executable": false,
+      "original_archive_member": true
+    },
+    {
+      "path": "bindings/python/tree_sitter_ocaml/__init__.pyi",
+      "bytes": 593,
+      "sha256": "ef94dce1608fc1e0bbb5df6ffc55df80e3ce8ea468bf6c879893ad678f5c873d",
+      "executable": false,
+      "original_archive_member": true
+    },
+    {
+      "path": "bindings/python/tree_sitter_ocaml/binding.c",
+      "bytes": 1585,
+      "sha256": "43fbebd08f32fd6a0d855c48d976e88f4cf164fd533b01c18796fb0497185b66",
+      "executable": false,
+      "original_archive_member": true
+    },
+    {
+      "path": "bindings/python/tree_sitter_ocaml/py.typed",
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "executable": false,
+      "original_archive_member": true
+    },
+    {
+      "path": "bindings/rust/README.md",
+      "bytes": 2027,
+      "sha256": "45ecc37e8df1468d26b03cb3bcc1ac0c5e869824d165f3b140553c6a280bb1e8",
+      "executable": false,
+      "original_archive_member": true
+    },
+    {
+      "path": "bindings/rust/build.rs",
+      "bytes": 2097,
+      "sha256": "587085664369557ca69b484ccb52dab5103deee1adaf904c73a94aed204362f4",
+      "executable": false,
+      "original_archive_member": true
+    },
+    {
+      "path": "bindings/rust/lib.rs",
+      "bytes": 4855,
+      "sha256": "a801ecc5aa81aae025ca3d7daf0ce95c0317de2a30512d350aea4ca421117aa3",
+      "executable": false,
+      "original_archive_member": true
+    },
+    {
+      "path": "bindings/swift/TreeSitterOCaml/ocaml.h",
+      "bytes": 332,
+      "sha256": "3422b3ef1f7908a80e92291c540880ed7753f5e3053dcc61eedfcceaae67fb75",
+      "executable": false,
+      "original_archive_member": true
+    },
+    {
+      "path": "bindings/swift/TreeSitterOCamlTests/TreeSitterOCamlTests.swift",
+      "bytes": 1312,
+      "sha256": "96d145a4964bd4e13c6f8b00d05b78cb93d755e2006274fc99fd80f89e012d7c",
+      "executable": false,
+      "original_archive_member": true
+    },
+    {
+      "path": "common/common.mak",
+      "bytes": 4094,
+      "sha256": "0ae9ee8c00f30bc3945742bf7e15ade81c984d1d76be32d1d2541ccba1ef8929",
+      "executable": false,
+      "original_archive_member": true
+    },
+    {
+      "path": "common/scanner.h",
+      "bytes": 17973,
+      "sha256": "7ad1a807e2a157a5aa6c16bb85697a36b4cb7d01e9313cd5296659be12d57030",
+      "executable": false,
+      "original_archive_member": false
+    },
+    {
+      "path": "common/scanner.h.orig",
+      "bytes": 14631,
+      "sha256": "e4934793536f53c076b24b16de2f6a48a125c632e6cce58c80c02d6d65f8dbed",
+      "executable": false,
+      "original_archive_member": true
+    },
+    {
+      "path": "eslint.config.mjs",
+      "bytes": 89,
+      "sha256": "e7b2dbe4f462cf890b53cc2d140aef6785fa31caabaaf6a11a38bf12a3ece091",
+      "executable": false,
+      "original_archive_member": true
+    },
+    {
+      "path": "go.mod",
+      "bytes": 664,
+      "sha256": "070a89bff9dee5626341c05f8c3b0f4e31b247385d79eaa5198976b71a123782",
+      "executable": false,
+      "original_archive_member": true
+    },
+    {
+      "path": "go.sum",
+      "bytes": 3458,
+      "sha256": "7da2bfeaed6268d33a466dc51e3d3760d0076f22c6f2152c0ff7975d9ddb0c26",
+      "executable": false,
+      "original_archive_member": true
+    },
+    {
+      "path": "grammars/interface/CMakeLists.txt",
+      "bytes": 95,
+      "sha256": "cd94380c57d14ab677aa1f7138e2697b41e34b365dae6849f8866d1fdc349110",
+      "executable": false,
+      "original_archive_member": true
+    },
+    {
+      "path": "grammars/interface/Makefile",
+      "bytes": 64,
+      "sha256": "0e4c789487c89cc1f9ae924828d6e63faee4c2dd0308cb52411549324c6230d1",
+      "executable": false,
+      "original_archive_member": true
+    },
+    {
+      "path": "grammars/interface/grammar.js",
+      "bytes": 233,
+      "sha256": "433b19b5dd272f356c5f0feadb68ffc5357d3dbd752a284a6dccfc857e3fdf8d",
+      "executable": false,
+      "original_archive_member": true
+    },
+    {
+      "path": "grammars/interface/package.json",
+      "bytes": 66,
+      "sha256": "f85bd10742d0f8bc01dc752fd2d710f13567088513c34235432eccf0ad55bb13",
+      "executable": false,
+      "original_archive_member": true
+    },
+    {
+      "path": "grammars/interface/src/grammar.json",
+      "bytes": 265947,
+      "sha256": "b58c498dd25ca2fdabc4d9875cb91924bb767508095fef9599338523e191bc41",
+      "executable": false,
+      "original_archive_member": true
+    },
+    {
+      "path": "grammars/interface/src/node-types.json",
+      "bytes": 111609,
+      "sha256": "489a3580a6e7c44f994955715fccb65fb4bcc16106d03b522fe67ea43ca507f4",
+      "executable": false,
+      "original_archive_member": true
+    },
+    {
+      "path": "grammars/interface/src/parser.c",
+      "bytes": 11263964,
+      "sha256": "ceabd19beddb37631cf79dbe8a037a5549a63aa9e65b08361a37aa5c03b1dfc2",
+      "executable": false,
+      "original_archive_member": true
+    },
+    {
+      "path": "grammars/interface/src/scanner.c",
+      "bytes": 913,
+      "sha256": "8ba5a82e6d2a4e9fb8ff2f54c0b3d2bc677625f3509dfdf85fc65bfa7d67d1d5",
+      "executable": false,
+      "original_archive_member": true
+    },
+    {
+      "path": "grammars/interface/src/tree_sitter/alloc.h",
+      "bytes": 985,
+      "sha256": "b29c1c9fb7cc82f58c84b376df1297d6e2737a1d655fd356db0859e3c29c2fea",
+      "executable": false,
+      "original_archive_member": true
+    },
+    {
+      "path": "grammars/interface/src/tree_sitter/array.h",
+      "bytes": 13269,
+      "sha256": "31e60a1bff6f715afacce03b5b70efe42b58371b4f9595dd4af52a577ff9608c",
+      "executable": false,
+      "original_archive_member": true
+    },
+    {
+      "path": "grammars/interface/src/tree_sitter/parser.h",
+      "bytes": 7624,
+      "sha256": "180b893c8734778fd32f372dfbc27bd6ad1cd2221f26150b31256ff6716320d2",
+      "executable": false,
+      "original_archive_member": true
+    },
+    {
+      "path": "grammars/ocaml/CMakeLists.txt",
+      "bytes": 76,
+      "sha256": "1a719b9e22643e482f07ea070fad1089a4a7a90be21703f19f1cc385f017f130",
+      "executable": false,
+      "original_archive_member": true
+    },
+    {
+      "path": "grammars/ocaml/Makefile",
+      "bytes": 54,
+      "sha256": "bed7d4b1ed41f74694af8fe7711a44d59f9208dd640f636112794ddd4d941242",
+      "executable": false,
+      "original_archive_member": true
+    },
+    {
+      "path": "grammars/ocaml/grammar.js",
+      "bytes": 53556,
+      "sha256": "54c307709534048dd0d6928b000f3e76508bb560ca2941ad3fbc04cb3acce6a3",
+      "executable": false,
+      "original_archive_member": true
+    },
+    {
+      "path": "grammars/ocaml/package.json",
+      "bytes": 62,
+      "sha256": "e8bec23af89410611234855e968da06cb07165d987ff348f2c8b8f849a82f861",
+      "executable": false,
+      "original_archive_member": true
+    },
+    {
+      "path": "grammars/ocaml/src/grammar.json",
+      "bytes": 266257,
+      "sha256": "6984a9408abe4a9e903e504d75d1a275ddf625dec7a82ae5d1db4c82418fac63",
+      "executable": false,
+      "original_archive_member": true
+    },
+    {
+      "path": "grammars/ocaml/src/node-types.json",
+      "bytes": 111900,
+      "sha256": "ee6af09cee9d5a3f8281fc95ab6e34f6a28f54efdff52ff1b1c649bdd780dc43",
+      "executable": false,
+      "original_archive_member": true
+    },
+    {
+      "path": "grammars/ocaml/src/parser.c",
+      "bytes": 13302368,
+      "sha256": "7af6bd695378fcb00fe138ebe618e6fa1696d5b967a677b6262c470565ac9157",
+      "executable": false,
+      "original_archive_member": true
+    },
+    {
+      "path": "grammars/ocaml/src/scanner.c",
+      "bytes": 992,
+      "sha256": "fa23af8a5db2aaaf7041b60f7e762c23f1b5950388a592e2bc4dcffaffa75f5b",
+      "executable": false,
+      "original_archive_member": true
+    },
+    {
+      "path": "grammars/ocaml/src/tree_sitter/alloc.h",
+      "bytes": 985,
+      "sha256": "b29c1c9fb7cc82f58c84b376df1297d6e2737a1d655fd356db0859e3c29c2fea",
+      "executable": false,
+      "original_archive_member": true
+    },
+    {
+      "path": "grammars/ocaml/src/tree_sitter/array.h",
+      "bytes": 13269,
+      "sha256": "31e60a1bff6f715afacce03b5b70efe42b58371b4f9595dd4af52a577ff9608c",
+      "executable": false,
+      "original_archive_member": true
+    },
+    {
+      "path": "grammars/ocaml/src/tree_sitter/parser.h",
+      "bytes": 7624,
+      "sha256": "180b893c8734778fd32f372dfbc27bd6ad1cd2221f26150b31256ff6716320d2",
+      "executable": false,
+      "original_archive_member": true
+    },
+    {
+      "path": "grammars/type/CMakeLists.txt",
+      "bytes": 85,
+      "sha256": "17d3acde3e98be6347c04a05d9c3b473482822be3e73d3fe3e010d0721facdde",
+      "executable": false,
+      "original_archive_member": true
+    },
+    {
+      "path": "grammars/type/Makefile",
+      "bytes": 59,
+      "sha256": "1909e6bea8af5b65cee580f33490b495a4099f53602a30c037ed4046a3f05342",
+      "executable": false,
+      "original_archive_member": true
+    },
+    {
+      "path": "grammars/type/grammar.js",
+      "bytes": 385,
+      "sha256": "4efb27b4c58df394b1e2ee1db2258b355f59bf5a5854f6c65a75cfb0c35d367a",
+      "executable": false,
+      "original_archive_member": true
+    },
+    {
+      "path": "grammars/type/package.json",
+      "bytes": 61,
+      "sha256": "1cb47159d1720eb168f3cffc85d339490eff9aab70dcac313e6bd6c75fbd5336",
+      "executable": false,
+      "original_archive_member": true
+    },
+    {
+      "path": "grammars/type/src/grammar.json",
+      "bytes": 266352,
+      "sha256": "16d58a11c43f2caa806eeebacf9507464e97efb5b548f92946cf6ce6a824dbe9",
+      "executable": false,
+      "original_archive_member": true
+    },
+    {
+      "path": "grammars/type/src/node-types.json",
+      "bytes": 111587,
+      "sha256": "616478bda4b3de1bd6f7c816997530f868ba885685523445c67d4231157b4f66",
+      "executable": false,
+      "original_archive_member": true
+    },
+    {
+      "path": "grammars/type/src/parser.c",
+      "bytes": 11194056,
+      "sha256": "ee9e7f37fd41eeb222bcf06894b5481ceecf5fe9f70164645c9973cf006a6cf4",
+      "executable": false,
+      "original_archive_member": true
+    },
+    {
+      "path": "grammars/type/src/scanner.c",
+      "bytes": 888,
+      "sha256": "8fc60c2e60db9e50c9c68f81a17dfe78dd3493f38f1d822a813bd73e42afae9d",
+      "executable": false,
+      "original_archive_member": true
+    },
+    {
+      "path": "grammars/type/src/tree_sitter/alloc.h",
+      "bytes": 985,
+      "sha256": "b29c1c9fb7cc82f58c84b376df1297d6e2737a1d655fd356db0859e3c29c2fea",
+      "executable": false,
+      "original_archive_member": true
+    },
+    {
+      "path": "grammars/type/src/tree_sitter/array.h",
+      "bytes": 13269,
+      "sha256": "31e60a1bff6f715afacce03b5b70efe42b58371b4f9595dd4af52a577ff9608c",
+      "executable": false,
+      "original_archive_member": true
+    },
+    {
+      "path": "grammars/type/src/tree_sitter/parser.h",
+      "bytes": 7624,
+      "sha256": "180b893c8734778fd32f372dfbc27bd6ad1cd2221f26150b31256ff6716320d2",
+      "executable": false,
+      "original_archive_member": true
+    },
+    {
+      "path": "package-lock.json",
+      "bytes": 57650,
+      "sha256": "f5244bc73470f6941ad9256b1f6e7759f658633e40ffa8e064cc62afdaeed5b0",
+      "executable": false,
+      "original_archive_member": true
+    },
+    {
+      "path": "package.json",
+      "bytes": 1496,
+      "sha256": "b0c594a03e8f062436fa5e65b1d552f0c8ace1da7b747ac7be266bf9d20c5fbd",
+      "executable": false,
+      "original_archive_member": true
+    },
+    {
+      "path": "pyproject.toml",
+      "bytes": 764,
+      "sha256": "b7483dcf4ffc049333f37fc8b25b0c8b19081e05720238dc28af7629dbb6fe39",
+      "executable": false,
+      "original_archive_member": true
+    },
+    {
+      "path": "queries/highlights.scm",
+      "bytes": 3169,
+      "sha256": "9bdabb038c60c159cef48f4d9f775bdd951230190dd7721da9aaea073a2c8cce",
+      "executable": false,
+      "original_archive_member": true
+    },
+    {
+      "path": "queries/locals.scm",
+      "bytes": 345,
+      "sha256": "594e282fa69c85a54255e54f574c525c9400b8357db81c314ab4b93e59f49363",
+      "executable": false,
+      "original_archive_member": true
+    },
+    {
+      "path": "queries/tags.scm",
+      "bytes": 3707,
+      "sha256": "bed0a869d8e842e9a5b4e84f0f4940293801b3791c21dcee8b9f73f67776a2d1",
+      "executable": false,
+      "original_archive_member": true
+    },
+    {
+      "path": "setup.py",
+      "bytes": 2556,
+      "sha256": "16f9417d2e7e56b083c0e28ceebb46a50176c2ba26210ed076680e61bf10aa38",
+      "executable": false,
+      "original_archive_member": true
+    },
+    {
+      "path": "test/corpus/attributes.txt",
+      "bytes": 5126,
+      "sha256": "8b5d1a8ab66b4a593212782e4307d9df68b2fabafe2572a932976c1e218ede24",
+      "executable": false,
+      "original_archive_member": true
+    },
+    {
+      "path": "test/corpus/comments.txt",
+      "bytes": 1311,
+      "sha256": "cb95bb76fb41dc109da7293f807376e7331927a8d8eec8c804d7753320d0cd85",
+      "executable": false,
+      "original_archive_member": true
+    },
+    {
+      "path": "test/corpus/expressions.txt",
+      "bytes": 23716,
+      "sha256": "a6125ef5cafbf633a0b1b7b29e38f38ef3a7091f97a2cde6670d70dc07ec8b9f",
+      "executable": false,
+      "original_archive_member": true
+    },
+    {
+      "path": "test/corpus/module-expressions.txt",
+      "bytes": 3432,
+      "sha256": "45f6c699b0057b6f2921f85ac5fb90cb298528fbc7de673db2898a8f0d284b6d",
+      "executable": false,
+      "original_archive_member": true
+    },
+    {
+      "path": "test/corpus/module-implementation.txt",
+      "bytes": 4640,
+      "sha256": "91be0e125f233f56ccd06c24626964076e12f9b6934e549c1306e7c5963be5da",
+      "executable": false,
+      "original_archive_member": true
+    },
+    {
+      "path": "test/corpus/module-items.txt",
+      "bytes": 7716,
+      "sha256": "103f02d3e8e174e6502c94bf150457f5c294592c51ddb77dd97599bd26b1fd84",
+      "executable": false,
+      "original_archive_member": true
+    },
+    {
+      "path": "test/corpus/module-types.txt",
+      "bytes": 4119,
+      "sha256": "13e0fe8233fa860fa9ef5af36eab01bdb1ef7a059bc811339789c36836ec9858",
+      "executable": false,
+      "original_archive_member": true
+    },
+    {
+      "path": "test/corpus/ocaml_interface/module-specification.txt",
+      "bytes": 1019,
+      "sha256": "c06534e0757c1b7a6fc4933e596afe09316aa61b9b1ce344b75af064ab8c953a",
+      "executable": false,
+      "original_archive_member": true
+    },
+    {
+      "path": "test/corpus/ocaml_type/types.txt",
+      "bytes": 2442,
+      "sha256": "6354c75aaf130cc408262fbfdd3dc9429d05fea97943f58c485fbe61b834e59b",
+      "executable": false,
+      "original_archive_member": true
+    },
+    {
+      "path": "test/corpus/patterns.txt",
+      "bytes": 6828,
+      "sha256": "1047fa6597dc45731d405d362dcf9f8c7aa529f74f1d3db371f521a96b195fa1",
+      "executable": false,
+      "original_archive_member": true
+    },
+    {
+      "path": "test/corpus/toplevel.txt",
+      "bytes": 624,
+      "sha256": "7bbc728cbb5ce7b13c12577d87c7a320306e2d2b32a5c827387a5a82bcadb646",
+      "executable": false,
+      "original_archive_member": true
+    },
+    {
+      "path": "test/corpus/types.txt",
+      "bytes": 9768,
+      "sha256": "b72d4d520b7b3e00867239d9b9309056be11ec374e6d109be4de50a4407b4a23",
+      "executable": false,
+      "original_archive_member": true
+    },
+    {
+      "path": "test/files.txt",
+      "bytes": 286,
+      "sha256": "5683187a7d4f8e2a5b01f5b3a61dcedb53b026cbec384da67ce4b7faa4a419b1",
+      "executable": false,
+      "original_archive_member": true
+    },
+    {
+      "path": "test/highlight/attributes.ml",
+      "bytes": 97,
+      "sha256": "52ffc8902fcca2cfe7cbf76477dd052f765de71fa904e480e75d7e34fb3d8ac6",
+      "executable": false,
+      "original_archive_member": true
+    },
+    {
+      "path": "test/highlight/constants.ml",
+      "bytes": 473,
+      "sha256": "528383fccb1e6cf1502289b46bd4593384fbd5fb21b49a3cc9e4042393b37c93",
+      "executable": false,
+      "original_archive_member": true
+    },
+    {
+      "path": "test/highlight/functions.ml",
+      "bytes": 628,
+      "sha256": "20875f4a425a666ccb77119611932f2e9b5f9c426d8700ffc6a6b11b3a558ffc",
+      "executable": false,
+      "original_archive_member": true
+    },
+    {
+      "path": "test/highlight/locals.ml",
+      "bytes": 1084,
+      "sha256": "1e885eb3b4f35a1aeea015aae4e6fc37507c5ebbe69a123727cb48ede572831b",
+      "executable": false,
+      "original_archive_member": true
+    },
+    {
+      "path": "test/highlight/modules.ml",
+      "bytes": 732,
+      "sha256": "40c10329351ffcf1a0345c3a1733fc97df561be197f51b1692f70a89f2fdfa49",
+      "executable": false,
+      "original_archive_member": true
+    },
+    {
+      "path": "test/highlight/operators.ml",
+      "bytes": 313,
+      "sha256": "3105f30432432be369af1fe34e138078385a95abdfffb1409591c37d0f5a3166",
+      "executable": false,
+      "original_archive_member": true
+    },
+    {
+      "path": "test/highlight/types.ml",
+      "bytes": 1097,
+      "sha256": "8e6ea800d60a42cc9c5e0ca5055d6a963a253acc3e623298ccad7a2707afb9b8",
+      "executable": false,
+      "original_archive_member": true
+    },
+    {
+      "path": "test/invalid-files.txt",
+      "bytes": 2200,
+      "sha256": "e73d440d43d7fd1ef597cf3c6c9e8cd44113b53e18071c29d6eb8b47c235dcdc",
+      "executable": false,
+      "original_archive_member": true
+    },
+    {
+      "path": "test/parse-examples.sh",
+      "bytes": 631,
+      "sha256": "3edda96c2a4a720969d7618f3ba1d5f6e3f7dc38cd77ae64db3679de818add6d",
+      "executable": true,
+      "original_archive_member": true
+    },
+    {
+      "path": "test/tags/classes.ml",
+      "bytes": 209,
+      "sha256": "d59f37ea3d1c87c45ab0ef83644cb58ab4d267e8cec95bca1984db41475e751e",
+      "executable": false,
+      "original_archive_member": true
+    },
+    {
+      "path": "test/tags/functions.ml",
+      "bytes": 381,
+      "sha256": "bb1b699db758eaf7b528c48d4d36d4c5d310b9e0ec13b77b8718cf42946b1e21",
+      "executable": false,
+      "original_archive_member": true
+    },
+    {
+      "path": "test/tags/modules.ml",
+      "bytes": 673,
+      "sha256": "8ab0ab73dc87a9c89231d583e06073e0e55e26e8be596237d8ad6e5975eeaec1",
+      "executable": false,
+      "original_archive_member": true
+    },
+    {
+      "path": "test/tags/types.ml",
+      "bytes": 626,
+      "sha256": "0c2622e1e2a83e211aa19d01ed435d29a02eeaceeec080766b3c5657ac5903b5",
+      "executable": false,
+      "original_archive_member": true
+    },
+    {
+      "path": "tree-sitter.json",
+      "bytes": 1695,
+      "sha256": "86a68fbc81651037727576a3b233bd1cea3224f7ba25b6806957d723678a7580",
+      "executable": false,
+      "original_archive_member": true
+    },
+    {
+      "path": "upstream/tree-sitter-ocaml-v0.25.0.tar.gz",
+      "bytes": 1957373,
+      "sha256": "55cdd7443a7838e650ed070ad28ed4dd774867331da01df2cc5ad3272f5598bd",
+      "executable": false,
+      "original_archive_member": false
+    }
+  ],
+  "payload_file_count": 119,
+  "payload_excludes": [
+    "SOURCE-INVENTORY.json",
+    "SOURCE-PROVENANCE.json"
+  ],
+  "complete_package_file_count": 121,
+  "originals_retained_byte_exact": true,
+  "production_admission": false
+}
