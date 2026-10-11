@@ -19854,6 +19854,8 @@ fn append_oversized_input_diagnostic(
 struct DocumentAppendState {
     usage: Option<IrDocumentUsage>,
     extension_payload_bytes: usize,
+    // None invalidates all extension totals, including the cached byte scalar.
+    required_extension_usage: Option<(usize, usize)>,
     truncated_diagnostics: u64,
     truncated_extensions: u64,
     truncated_skipped_regions: u64,
@@ -19861,18 +19863,12 @@ struct DocumentAppendState {
 
 impl DocumentAppendState {
     fn from_document(document: &NormalizedIrDocument) -> Result<Self, FirstSliceError> {
-        let extension_payload_bytes =
-            document
-                .extensions
-                .iter()
-                .try_fold(0_usize, |total, extension| {
-                    total
-                        .checked_add(extension.payload.len())
-                        .ok_or(FirstSliceError::Limits)
-                })?;
+        let (extension_payload_bytes, required_extension_usage) =
+            measure_target_extension_usage(&document.extensions, &Cancellation::new())?;
         Ok(Self {
             usage: None,
             extension_payload_bytes,
+            required_extension_usage: Some(required_extension_usage),
             truncated_diagnostics: 0,
             truncated_extensions: 0,
             truncated_skipped_regions: 0,
@@ -19881,6 +19877,7 @@ impl DocumentAppendState {
 
     fn invalidate_usage(&mut self) {
         self.usage = None;
+        self.required_extension_usage = None;
     }
 }
 
@@ -20656,8 +20653,12 @@ fn plan_optional_extensions(
     } = diagnostics;
     let (required_count, required_bytes) =
         required_extension_usage(&source.extensions, cancellation)?;
-    let (retained_required_count, retained_required_bytes) =
-        required_extension_usage(&target.extensions, cancellation)?;
+    let (target_extension_payload_bytes, (retained_required_count, retained_required_bytes)) =
+        match append_state.required_extension_usage {
+            Some(required) => (append_state.extension_payload_bytes, required),
+            None => measure_target_extension_usage(&target.extensions, cancellation)?,
+        };
+    check_cancellation(cancellation)?;
     let observed_required_count = retained_required_count
         .checked_add(required_count)
         .ok_or(FirstSliceError::Limits)?;
@@ -20720,14 +20721,13 @@ fn plan_optional_extensions(
         )
         .map_err(|_| FirstSliceError::Limits)?;
     let mut target_extension_count = target.extensions.len();
-    let mut target_extension_bytes = append_state.extension_payload_bytes;
+    let mut target_extension_bytes = target_extension_payload_bytes;
     let mut target_optional_count = target
         .extensions
         .len()
         .checked_sub(retained_required_count)
         .ok_or(FirstSliceError::Limits)?;
-    let mut target_optional_bytes = append_state
-        .extension_payload_bytes
+    let mut target_optional_bytes = target_extension_payload_bytes
         .checked_sub(retained_required_bytes)
         .ok_or(FirstSliceError::Limits)?;
     let mut summary_cursor = target.extensions.len();
@@ -20904,6 +20904,7 @@ fn plan_optional_extensions(
         extension_payload_bytes: target_extension_bytes
             .checked_add(retained_bytes)
             .ok_or(FirstSliceError::Limits)?,
+        required_extension_usage: Some((observed_required_count, observed_required_bytes)),
         truncated_diagnostics: append_state
             .truncated_diagnostics
             .checked_add(truncated_diagnostics)
@@ -20928,6 +20929,35 @@ fn plan_optional_extensions(
         coverage,
         next_state,
     })
+}
+
+fn measure_target_extension_usage(
+    extensions: &[ExtensionEnvelope],
+    cancellation: &Cancellation,
+) -> Result<(usize, (usize, usize)), FirstSliceError> {
+    extensions.iter().try_fold(
+        (0_usize, (0_usize, 0_usize)),
+        |(total, (required_count, required_bytes)), extension| {
+            check_cancellation(cancellation)?;
+            let payload_bytes = extension.payload.len();
+            let total = total
+                .checked_add(payload_bytes)
+                .ok_or(FirstSliceError::Limits)?;
+            let required = if extension.namespace == LEXICAL_EXTENSION_NAMESPACE {
+                (required_count, required_bytes)
+            } else {
+                (
+                    required_count
+                        .checked_add(1)
+                        .ok_or(FirstSliceError::Limits)?,
+                    required_bytes
+                        .checked_add(payload_bytes)
+                        .ok_or(FirstSliceError::Limits)?,
+                )
+            };
+            Ok((total, required))
+        },
+    )
 }
 
 fn required_extension_usage(
@@ -60921,6 +60951,186 @@ mod tests {
     }
 
     #[test]
+    fn required_extension_cache_rebuilds_all_totals_after_invalidation() {
+        let repository = derive_repository(b"required-extension-cache").id();
+        let generation = GenerationId::from_bytes([82; 20]);
+        let file = FileId::from_bytes([83; 20]);
+        let provenance = FactId::from_bytes([84; 20]);
+        let required = |id: u8, payload: &str| ExtensionEnvelope {
+            id: FactId::from_bytes([id; 20]),
+            repository,
+            generation,
+            namespace: "test.required".to_owned(),
+            version: "1".to_owned(),
+            criticality: rootlight_ir::ExtensionCriticality::Noncritical,
+            payload: payload.to_owned(),
+            provenance,
+            evidence: FactEvidence {
+                source: None,
+                derivation: Vec::new(),
+            },
+        };
+        let lexical = |text: &str| {
+            let evidence = rootlight_ir::LexicalEvidenceV1::from_complete_text(
+                rootlight_ir::LexicalEvidenceKind::CommentSummary,
+                FactRef::File(file),
+                rootlight_ir::LexicalEvidenceFormat::PlainText,
+                text,
+            )
+            .unwrap();
+            rootlight_ir::new_lexical_evidence_envelope(
+                repository,
+                generation,
+                provenance,
+                SourceRef::new(
+                    repository,
+                    generation,
+                    SourceSpan::new(file, 0, 1).unwrap(),
+                    content_hash(b"x"),
+                    None,
+                ),
+                &evidence,
+            )
+            .unwrap()
+        };
+        let assert_usage = |target: &NormalizedIrDocument, state: &DocumentAppendState| {
+            let required = target
+                .extensions
+                .iter()
+                .filter(|extension| extension.namespace != LEXICAL_EXTENSION_NAMESPACE);
+            assert_eq!(
+                state.required_extension_usage,
+                Some((
+                    required.clone().count(),
+                    required
+                        .map(|extension| extension.payload.len())
+                        .sum::<usize>(),
+                ))
+            );
+            assert_eq!(
+                state.extension_payload_bytes,
+                target
+                    .extensions
+                    .iter()
+                    .map(|extension| extension.payload.len())
+                    .sum::<usize>()
+            );
+        };
+        let mut target = NormalizedIrDocument::empty(repository, generation);
+        let mut state = DocumentAppendState::default();
+        assert_eq!(state.required_extension_usage, None);
+        for (id, payload, comment) in [(85, "é", "first note"), (86, "{}", "second note")] {
+            let mut source = NormalizedIrDocument::empty(repository, generation);
+            source.extensions = vec![required(id, payload), lexical(comment)];
+            append_normalized_document(&mut target, source, &IrLimits::default(), &mut state)
+                .unwrap();
+            assert_usage(&target, &state);
+            assert!(state.usage.is_some());
+        }
+        assert_usage(
+            &target,
+            &DocumentAppendState::from_document(&target).unwrap(),
+        );
+        target
+            .extensions
+            .retain(|extension| extension.namespace != LEXICAL_EXTENSION_NAMESPACE);
+        target.extensions[0].payload = "expanded payload".to_owned();
+        target.extensions.push(required(87, "é"));
+        state.invalidate_usage();
+        state.extension_payload_bytes = usize::MAX;
+        assert_eq!(state.required_extension_usage, None);
+        assert!(state.usage.is_none());
+        let mut source = NormalizedIrDocument::empty(repository, generation);
+        source.extensions = vec![required(88, "{}"), lexical("later note")];
+        append_normalized_document(&mut target, source, &IrLimits::default(), &mut state).unwrap();
+        assert_usage(&target, &state);
+        assert_eq!(state.required_extension_usage.unwrap().0, 4);
+        assert!(state.usage.is_some());
+    }
+
+    #[test]
+    fn required_extension_quotas_preserve_cached_and_invalidated_state() {
+        let repository = derive_repository(b"required-extension-quota-atomicity").id();
+        let generation = GenerationId::from_bytes([89; 20]);
+        let required = |id: u8| ExtensionEnvelope {
+            id: FactId::from_bytes([id; 20]),
+            repository,
+            generation,
+            namespace: "test.required".to_owned(),
+            version: "1".to_owned(),
+            criticality: rootlight_ir::ExtensionCriticality::Noncritical,
+            payload: "{}".to_owned(),
+            provenance: FactId::from_bytes([90; 20]),
+            evidence: FactEvidence {
+                source: None,
+                derivation: Vec::new(),
+            },
+        };
+        for invalidated in [false, true] {
+            for resource in [
+                FirstSliceResource::Extensions,
+                FirstSliceResource::ExtensionBytes,
+            ] {
+                let mut target = NormalizedIrDocument::empty(repository, generation);
+                let mut state = DocumentAppendState::from_document(&target).unwrap();
+                let mut first = NormalizedIrDocument::empty(repository, generation);
+                first.extensions.push(required(91));
+                append_normalized_document(&mut target, first, &IrLimits::default(), &mut state)
+                    .unwrap();
+                if invalidated {
+                    target.extensions.push(required(92));
+                    state.invalidate_usage();
+                    state.extension_payload_bytes = usize::MAX;
+                }
+                assert_eq!(state.required_extension_usage.is_none(), invalidated);
+                let mut source = NormalizedIrDocument::empty(repository, generation);
+                source.extensions = vec![required(93), required(94)];
+                let observed_count = target.extensions.len() + source.extensions.len();
+                let observed_bytes = target
+                    .extensions
+                    .iter()
+                    .chain(&source.extensions)
+                    .map(|extension| extension.payload.len())
+                    .sum::<usize>();
+                let mut limits = IrLimits::default();
+                limits.max_total_extension_bytes = observed_bytes - 1;
+                let observed = match resource {
+                    FirstSliceResource::Extensions => {
+                        limits.max_extensions = observed_count - 1;
+                        observed_count
+                    }
+                    FirstSliceResource::ExtensionBytes => observed_bytes,
+                    _ => unreachable!("fixture exercises only required extension quotas"),
+                };
+                let before = target.clone();
+                let state_before = state.clone();
+                assert_eq!(
+                    append_normalized_document(&mut target, source.clone(), &limits, &mut state),
+                    Err(resource_limit(resource, observed, observed - 1))
+                );
+                assert_eq!(target, before);
+                assert_eq!(state, state_before);
+                let cancelled = Cancellation::new();
+                assert!(cancelled.cancel(CancellationReason::ClientRequest));
+                assert_eq!(
+                    append_normalized_document_with_cancellation(
+                        &mut target,
+                        source,
+                        &limits,
+                        &mut state,
+                        &cancelled,
+                    ),
+                    Err(FirstSliceError::Cancelled(
+                        CancellationReason::ClientRequest
+                    ))
+                );
+                assert_eq!(target, before);
+                assert_eq!(state, state_before);
+            }
+        }
+    }
+
+    #[test]
     fn mixed_optional_evictions_keep_coverage_and_indices_consistent() {
         let repository = derive_repository(b"optional-extension-eviction").id();
         let generation = GenerationId::from_bytes([41; 20]);
@@ -60981,6 +61191,7 @@ mod tests {
         coverage.id = derive_coverage_record_id(&coverage).expect("coverage identity derives");
         target.coverage_records.push(coverage);
         let state = DocumentAppendState::from_document(&target).expect("append state initializes");
+        assert_eq!(state.required_extension_usage, Some((0, 0)));
         let mut next = NormalizedIrDocument::empty(repository, generation);
         next.extensions.push(ExtensionEnvelope {
             id: FactId::from_bytes([44; 20]),
@@ -61075,6 +61286,8 @@ mod tests {
         assert!(target.extensions.is_empty());
         assert_eq!(next.extensions.len(), 1);
         assert_eq!(next_state.truncated_extensions, 2);
+        assert_eq!(next_state.required_extension_usage, Some((1, 2)));
+        assert_eq!(next_state.extension_payload_bytes, 2);
         assert_eq!(target.coverage_records[0].indexed, 0);
         assert_eq!(target.coverage_records[0].skipped, 2);
         assert_eq!(target.coverage_records[0].status, CoverageStatus::Bounded);
@@ -61628,6 +61841,7 @@ mod tests {
         coverage.id = derive_coverage_record_id(&coverage).unwrap();
         target.coverage_records.push(coverage);
         let state = DocumentAppendState::from_document(&target).unwrap();
+        assert_eq!(state.required_extension_usage, Some((0, 0)));
         let mut next = NormalizedIrDocument::empty(repository, generation);
         next.extensions.push(ExtensionEnvelope {
             id: FactId::from_bytes([79; 20]),
@@ -61649,6 +61863,8 @@ mod tests {
             truncate_optional_extensions(&mut target, &mut next, &state, 0, 0, &limits).unwrap();
         assert!(target.extensions.is_empty());
         assert_eq!(state.truncated_extensions, 2);
+        assert_eq!(state.required_extension_usage, Some((1, 2)));
+        assert_eq!(state.extension_payload_bytes, 2);
         let coverage = &target.coverage_records[0];
         assert_eq!(
             (coverage.discovered, coverage.indexed, coverage.skipped),
