@@ -1684,6 +1684,7 @@ dependencies = [
  "tree-sitter-toml-ng",
  "tree-sitter-typescript",
  "tree-sitter-vba",
+ "tree-sitter-xml",
  "tree-sitter-yaml",
  "ts-parser-perl",
 ]
@@ -3343,6 +3344,14 @@ dependencies = [
 [[package]]
 name = "tree-sitter-wgsl"
 version = "0.0.9"
+dependencies = [
+ "cc",
+ "tree-sitter-language",
+]
+
+[[package]]
+name = "tree-sitter-xml"
+version = "0.7.0"
 dependencies = [
  "cc",
  "tree-sitter-language",

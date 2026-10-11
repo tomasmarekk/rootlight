@@ -30,6 +30,9 @@ mod scheme;
 #[path = "structural_wgsl.rs"]
 mod wgsl;
 
+#[path = "structural_xml.rs"]
+mod xml;
+
 pub use fsharp::StructuralClassificationGap;
 
 /// Returns the grammar-reviewed base entity kind for one structural syntax fact.
@@ -39,14 +42,17 @@ pub use fsharp::StructuralClassificationGap;
 /// additionally requires the caller's language-specific scope evidence.
 /// Unsupported F# declaration shapes return `None`; callers must retain the
 /// corresponding [`structural_entity_classification_gap`] in entity coverage.
-/// Assembly, Common Lisp, GLSL, HLSL, OCaml, Scheme and WGSL accept only exact
-/// reviewed labels; unknown labels never use the shared substring classifier.
+/// Assembly, Common Lisp, GLSL, HLSL, OCaml, Scheme, WGSL, XML and DTD accept
+/// only exact reviewed labels; unknown labels never use the substring classifier.
 /// HLSL buffer labels and contexts are not declarations, types or named scopes.
 #[must_use]
 pub fn structural_entity_kind(fact: &SyntaxFact) -> Option<EntityKind> {
     let label = fact.syntax_kind().as_str();
     if label.starts_with("ocaml.") || label.starts_with("ocaml_interface.") {
         return ocaml::entity_kind(fact);
+    }
+    if label.starts_with("xml.") || label.starts_with("dtd.") {
+        return xml::entity_kind(fact);
     }
     if label.starts_with("assembly.") {
         return assembly::entity_kind(fact);
@@ -606,11 +612,13 @@ pub fn structural_captured_name(text: &str, maximum_bytes: usize) -> Option<&str
 /// and the symbol's source context; bars are not Common Lisp token fragments.
 /// WGSL borrows complete Unicode 16 XID names without normalization or folding;
 /// native context owns reserved words, shader validity and binding evidence.
+/// XML and DTD borrow complete XML 1.0 fifth-edition Names without resolving
+/// QName prefixes, namespaces or expanded entities.
 /// OCaml profiles borrow raw bounded identifier spelling; native capture owns
 /// letter-category, keyword and declaration-context proof. Paths use exact fact labels.
-/// Other languages retain
-/// the shared borrowed-name contract. Source and canonical output must both fit
-/// `maximum_bytes`. Invalid names, excess bytes or allocation failure return `None`.
+/// Other languages retain the shared borrowed-name contract. Source and canonical
+/// output must both fit `maximum_bytes`. Invalid names, excess bytes or allocation
+/// failure return `None`.
 #[must_use]
 pub fn structural_captured_name_for_language<'a>(
     language: &str,
@@ -623,6 +631,8 @@ pub fn structural_captured_name_for_language<'a>(
         ocaml::captured_name(text, maximum_bytes).map(Cow::Borrowed)
     } else if language == "glsl" {
         glsl::captured_name(text, maximum_bytes).map(Cow::Borrowed)
+    } else if matches!(language, "xml" | "dtd") {
+        xml::captured_name(text, maximum_bytes).map(Cow::Borrowed)
     } else if language == "hlsl" {
         hlsl::captured_name(text, maximum_bytes).map(Cow::Borrowed)
     } else if language == "scheme" {
@@ -829,10 +839,11 @@ fn plsql_captured_name(text: &str, maximum_bytes: usize) -> Option<&str> {
 /// Unknown labels, other roles and foreign languages never use a generic fallback.
 /// WGSL uses exact definition and unresolved-use labels in its own namespace;
 /// accepted source spelling does not establish shader or call-target bindings.
+/// XML and DTD require exact occurrence labels in their own namespaces and retain
+/// raw Names without inferring namespace or entity-expansion bindings.
 /// OCaml separates implementation and interface namespaces. Written value paths
 /// retain all qualifiers without inferring module or application targets.
-/// Other roles use
-/// [`structural_captured_name_for_language`]. The caller retains
+/// Other roles use [`structural_captured_name_for_language`]. The caller retains
 /// the original source span and validates its association with its declaration.
 #[must_use]
 pub fn structural_captured_name_for_fact<'a>(
@@ -847,6 +858,12 @@ pub fn structural_captured_name_for_fact<'a>(
     {
         return ocaml::captured_name_for_fact(language, fact, text, maximum_bytes)
             .map(Cow::Borrowed);
+    }
+    if matches!(language, "xml" | "dtd")
+        || fact.syntax_kind().as_str().starts_with("xml.")
+        || fact.syntax_kind().as_str().starts_with("dtd.")
+    {
+        return xml::captured_name_for_fact(language, fact, text, maximum_bytes).map(Cow::Borrowed);
     }
     if language == "scheme" || fact.syntax_kind().as_str().starts_with("scheme.") {
         return (language == "scheme")

@@ -39,6 +39,14 @@ The Unicode 16 XID tables retain the exact Unicode-3.0 notice separately as
 licenses/Unicode-XID-16.0.0-LICENSE. This does not replace the notices for
 Rootlight's other versioned Unicode data.
 
+The local tree-sitter-xml 0.7.0 package provides separate XML and DTD language
+factories. Its exact upstream MIT license is included as
+licenses/tree-sitter-xml-0.7.0-LICENSE. The generated parser headers retain the
+Tree-sitter runtime MIT attribution, distributed as
+licenses/tree-sitter-0.26.11-LICENSE. The original archives, authored sources,
+local patches and notice provenance remain in the versioned source package;
+local vendoring does not imply original authorship or XML/DTD validity.
+
 The unpublished tree-sitter-scheme-native-local 0.24.7-1 binding uses the
 retained default reader from 6cdh/tree-sitter-scheme. Its exact upstream MIT
 notice is bundled as licenses/tree-sitter-scheme-0.24.7-1-LICENSE. The retained

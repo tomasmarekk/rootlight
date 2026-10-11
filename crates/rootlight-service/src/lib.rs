@@ -243,8 +243,8 @@ const PROJECT_FACTS_TRUNCATED_CODE: &str = "project-adapter-facts-truncated";
 const PROJECT_FACTS_TRUNCATED_MESSAGE: &str =
     "additional project semantic facts were omitted by aggregate resource limits";
 const AGGREGATE_DIAGNOSTICS_TRUNCATED_CODE: &str = "aggregate-diagnostics-truncated";
-const ANALYZER_BINARY_SEED: &[u8] = b"rootlight.first-slice.treesitter-structural/240";
-const RESOLVER_BINARY_SEED: &[u8] = b"rootlight.first-slice.resolve/106";
+const ANALYZER_BINARY_SEED: &[u8] = b"rootlight.first-slice.treesitter-structural/241";
+const RESOLVER_BINARY_SEED: &[u8] = b"rootlight.first-slice.resolve/107";
 const INCREMENTAL_PROVIDER_SEED: &[u8] = b"rootlight.first-slice.incremental-provider/1";
 const LANGUAGE_DISPOSITION_PROVIDER_SEED: &[u8] = b"rootlight.first-slice.language-disposition/12";
 const SOURCE_FILE_FALLBACK_PROVIDER_SEED: &[u8] = b"rootlight.source-file-fallback/4";
@@ -6431,6 +6431,8 @@ impl FirstSliceService {
                 format!("tree-sitter-asm-{}", descriptor.grammar_version())
             } else if descriptor.family() == GrammarFamily::Glsl {
                 format!("tree-sitter-glsl-{}", descriptor.grammar_version())
+            } else if descriptor.family() == GrammarFamily::Dtd {
+                format!("tree-sitter-xml-dtd-{}", descriptor.grammar_version())
             } else if matches!(
                 descriptor.family(),
                 GrammarFamily::Vba | GrammarFamily::VisualBasicClassic
@@ -31423,6 +31425,8 @@ mod tests {
             "sample.lisp",
             "sample.md",
             "sample.nix",
+            "sample.ml",
+            "sample.mli",
             "sample.pl",
             "sample.php",
             "sample.pks",
@@ -31441,6 +31445,8 @@ mod tests {
             "sample.ts",
             "sample.yaml",
             "sample.wgsl",
+            "sample.xml",
+            "sample.dtd",
         ]
         .into_iter()
         .filter_map(source_language_from_path)
@@ -32513,6 +32519,330 @@ mod tests {
             lexical
                 .iter()
                 .any(|item| item.language == "ocaml" && !item.declaration_only)
+        );
+    }
+
+    #[test]
+    fn xml_native_source_queries_preserve_written_qnames_and_parent_evidence() {
+        let source = "<p:Root xmlns:p=\"urn:example\" p:Value=\"raw\"><p:Child/></p:Root>";
+        let fixture = TempDir::new().unwrap();
+        write_language_fixture(fixture.path(), &[("written.xml", source)]);
+        let mut service = FirstSliceService::new(2).unwrap();
+        let mut absent = service.analyzers.clone();
+        assert!(absent.remove("xml").is_some());
+        assert!(absent.contains_key("html"));
+        for path in ["written.xml", "WRITTEN.XML"] {
+            let input = ManifestInput {
+                file: FileId::from_bytes([3; 20]),
+                path: path.to_owned(),
+                content_hash: content_hash(source.as_bytes()),
+                bytes: u64::try_from(source.len()).unwrap(),
+                encoding: "utf-8".to_owned(),
+                class: InputClass::Source,
+                language_signals: vec![rootlight_discovery::LanguageSignal {
+                    language: "html".to_owned(),
+                    evidence: LanguageEvidence::Content,
+                }],
+                project_language_witnesses: Vec::new(),
+                decisive_rule: None,
+            };
+            assert_eq!(detected_source_language(&input), Some("xml"));
+            assert_eq!(
+                source_language_route(&input, &service.analyzers),
+                Some("xml")
+            );
+            assert_eq!(source_language_route(&input, &absent), None);
+        }
+        let registry = GrammarRegistry::audited().unwrap();
+        let descriptor = registry
+            .descriptors()
+            .iter()
+            .find(|descriptor| descriptor.family() == GrammarFamily::Xml)
+            .unwrap();
+        let receipt = service
+            .index_repository(fixture.path(), &deadline())
+            .unwrap();
+        assert_eq!(receipt.indexed_files, 1);
+        let generation = service
+            .loaded_generation_snapshot(receipt.generation)
+            .unwrap();
+        let document = generation.document();
+        let file = &document.files[0];
+        assert_eq!(file.language, "xml");
+        assert_eq!(file.content_hash, content_hash(source.as_bytes()));
+        let parser = document
+            .provenance
+            .iter()
+            .find(|record| record.id == file.provenance)
+            .unwrap();
+        assert_eq!(parser.language, "xml");
+        assert_eq!(
+            parser.frontend_version.as_deref(),
+            Some("tree-sitter-xml-0.7.0")
+        );
+        assert_eq!(
+            parser.binary_digest,
+            grammar_binary_digest(descriptor).unwrap()
+        );
+        for (name, kind) in [
+            ("p:Root", EntityKind::MarkupElement),
+            ("p:Child", EntityKind::MarkupElement),
+            ("xmlns:p", EntityKind::MarkupAttribute),
+            ("p:Value", EntityKind::MarkupAttribute),
+        ] {
+            assert!(
+                document
+                    .entities
+                    .iter()
+                    .any(|entity| entity.canonical_name == name && entity.kind == kind)
+            );
+        }
+        assert!(!document.entities.iter().any(|entity| matches!(
+            entity.kind,
+            EntityKind::Namespace | EntityKind::Constant | EntityKind::TypeAlias
+        )));
+        assert!(document.skipped_regions.iter().any(|gap| gap.domain
+            == rootlight_ir::FactDomain::Relations
+            && gap.detail == "xml-namespace-entity-and-validity-analysis-unavailable"
+            && gap.source.generation() == receipt.generation
+            && gap.source.span().file() == file.id));
+        assert!(
+            document
+                .occurrences
+                .iter()
+                .filter(|occurrence| occurrence.role == OccurrenceRole::Reference)
+                .all(|occurrence| matches!(occurrence.target, OccurrenceTarget::Unresolved { .. }))
+        );
+        let parent_value = document
+            .occurrences
+            .iter()
+            .find(|occurrence| {
+                occurrence.role == OccurrenceRole::StringEvidence
+                    && source.get(
+                        usize::try_from(occurrence.source.span().start_byte()).unwrap()
+                            ..usize::try_from(occurrence.source.span().end_byte()).unwrap(),
+                    ) == Some("\"raw\"")
+            })
+            .unwrap();
+        assert_eq!(
+            parent_value.source.content_hash(),
+            content_hash(source.as_bytes())
+        );
+        let coverage = service
+            .source_file_coverage_until(receipt.generation, file.id, &deadline())
+            .unwrap();
+        assert_eq!(coverage.language, "xml");
+        assert_eq!(coverage.status, CoverageStatus::Bounded);
+        let located = service
+            .code_locate(
+                receipt.generation,
+                "p:Root".to_owned(),
+                LocateMode::Exact,
+                10,
+                0,
+                &deadline(),
+            )
+            .unwrap();
+        let hit = located
+            .data
+            .hits
+            .iter()
+            .find(|hit| hit.symbol.is_some())
+            .unwrap();
+        assert_eq!(hit.identifier, "p:Root");
+        assert_eq!(hit.language, "xml");
+        let explained = service
+            .symbol_explain(receipt.generation, hit.symbol.unwrap(), &deadline())
+            .unwrap();
+        assert_eq!(explained.data.entity.kind, EntityKind::MarkupElement);
+        assert_eq!(
+            explained.data.signature.as_ref().unwrap().text(),
+            "<p:Root xmlns:p=\"urn:example\" p:Value=\"raw\">"
+        );
+        let reference = explained.data.entity.evidence.source.unwrap();
+        assert_eq!(reference.repository(), receipt.repository);
+        assert_eq!(reference.generation(), receipt.generation);
+        assert_eq!(reference.span().file(), file.id);
+        assert_eq!(reference.content_hash(), content_hash(source.as_bytes()));
+        assert_eq!(
+            source.get(
+                usize::try_from(reference.span().start_byte()).unwrap()
+                    ..usize::try_from(reference.span().end_byte()).unwrap()
+            ),
+            Some(source)
+        );
+        let read = service
+            .source_read_with_options_and_budget(
+                receipt.generation,
+                vec![reference],
+                SourceReadOptions::new()
+                    .with_context_lines_before(0)
+                    .with_context_lines_after(0),
+                FirstSliceBudget::default(),
+                &deadline(),
+            )
+            .unwrap();
+        assert_eq!(read.data.chunks.len(), 1);
+        assert_eq!(read.data.chunks[0].bytes, source.as_bytes());
+    }
+
+    #[test]
+    fn dtd_native_source_queries_retain_declared_names_literals_and_explicit_gaps() {
+        let source = "<?go a?b\nc?><!ELEMENT root EMPTY><?after?>";
+        let fixture = TempDir::new().unwrap();
+        write_language_fixture(fixture.path(), &[("written.dtd", source)]);
+        let mut service = FirstSliceService::new(2).unwrap();
+        let mut absent = service.analyzers.clone();
+        assert!(absent.remove("dtd").is_some());
+        assert!(absent.contains_key("xml"));
+        for path in ["written.dtd", "WRITTEN.DTD"] {
+            let input = ManifestInput {
+                file: FileId::from_bytes([3; 20]),
+                path: path.to_owned(),
+                content_hash: content_hash(source.as_bytes()),
+                bytes: u64::try_from(source.len()).unwrap(),
+                encoding: "utf-8".to_owned(),
+                class: InputClass::Source,
+                language_signals: vec![rootlight_discovery::LanguageSignal {
+                    language: "html".to_owned(),
+                    evidence: LanguageEvidence::Content,
+                }],
+                project_language_witnesses: Vec::new(),
+                decisive_rule: None,
+            };
+            assert_eq!(detected_source_language(&input), Some("dtd"));
+            assert_eq!(
+                source_language_route(&input, &service.analyzers),
+                Some("dtd")
+            );
+            assert_eq!(source_language_route(&input, &absent), None);
+        }
+        let registry = GrammarRegistry::audited().unwrap();
+        let descriptor = registry
+            .descriptors()
+            .iter()
+            .find(|descriptor| descriptor.family() == GrammarFamily::Dtd)
+            .unwrap();
+        let receipt = service
+            .index_repository(fixture.path(), &deadline())
+            .unwrap();
+        assert_eq!(receipt.indexed_files, 1);
+        let generation = service
+            .loaded_generation_snapshot(receipt.generation)
+            .unwrap();
+        let document = generation.document();
+        let file = &document.files[0];
+        assert_eq!(file.language, "dtd");
+        let parser = document
+            .provenance
+            .iter()
+            .find(|record| record.id == file.provenance)
+            .unwrap();
+        assert_eq!(parser.language, "dtd");
+        assert_eq!(
+            parser.frontend_version.as_deref(),
+            Some("tree-sitter-xml-dtd-0.7.0")
+        );
+        assert_eq!(
+            parser.binary_digest,
+            grammar_binary_digest(descriptor).unwrap()
+        );
+        assert_eq!(document.entities.len(), 1);
+        assert_eq!(document.entities[0].kind, EntityKind::Module);
+        assert!(
+            !document
+                .occurrences
+                .iter()
+                .any(|occurrence| occurrence.role == OccurrenceRole::Definition)
+        );
+        assert!(
+            document
+                .occurrences
+                .iter()
+                .filter(|occurrence| occurrence.role == OccurrenceRole::Reference)
+                .all(|occurrence| matches!(occurrence.target, OccurrenceTarget::Unresolved { .. }))
+        );
+        for (domain, detail) in [
+            (
+                rootlight_ir::FactDomain::Entities,
+                "dtd-structural-declaration-kind-unavailable",
+            ),
+            (
+                rootlight_ir::FactDomain::Relations,
+                "dtd-entity-expansion-and-validity-analysis-unavailable",
+            ),
+        ] {
+            assert!(
+                document
+                    .skipped_regions
+                    .iter()
+                    .any(|gap| gap.domain == domain
+                        && gap.detail == detail
+                        && gap.source.generation() == receipt.generation
+                        && gap.source.span().file() == file.id)
+            );
+        }
+        assert!(document.occurrences.iter().any(|occurrence| occurrence.role
+            == OccurrenceRole::Reference
+            && occurrence.syntax_kind == "dtd.dtd_declared_name.reference"
+            && source.get(
+                usize::try_from(occurrence.source.span().start_byte()).unwrap()
+                    ..usize::try_from(occurrence.source.span().end_byte()).unwrap()
+            ) == Some("root")));
+        for expected in ["<?go a?b\nc?>", "<!ELEMENT root EMPTY>", "<?after?>"] {
+            let occurrence = document
+                .occurrences
+                .iter()
+                .find(|occurrence| {
+                    occurrence.role == OccurrenceRole::StringEvidence
+                        && source.get(
+                            usize::try_from(occurrence.source.span().start_byte()).unwrap()
+                                ..usize::try_from(occurrence.source.span().end_byte()).unwrap(),
+                        ) == Some(expected)
+                })
+                .unwrap();
+            let reference = occurrence.source.clone();
+            assert_eq!(reference.repository(), receipt.repository);
+            assert_eq!(reference.generation(), receipt.generation);
+            assert_eq!(reference.content_hash(), content_hash(source.as_bytes()));
+            let read = service
+                .source_read_with_options_and_budget(
+                    receipt.generation,
+                    vec![reference],
+                    SourceReadOptions::new()
+                        .with_context_lines_before(0)
+                        .with_context_lines_after(0),
+                    FirstSliceBudget::default(),
+                    &deadline(),
+                )
+                .unwrap();
+            assert_eq!(read.data.chunks.len(), 1);
+            assert_eq!(read.data.chunks[0].bytes, expected.as_bytes());
+        }
+        let located = service
+            .code_locate(
+                receipt.generation,
+                "root".to_owned(),
+                LocateMode::Text,
+                10,
+                0,
+                &deadline(),
+            )
+            .unwrap();
+        assert!(
+            located
+                .data
+                .hits
+                .iter()
+                .any(|hit| hit.path == "written.dtd" && hit.symbol.is_none())
+        );
+        assert!(located.data.hits.iter().all(|hit| hit.symbol.is_none()));
+        assert_eq!(
+            service
+                .source_file_coverage_until(receipt.generation, file.id, &deadline())
+                .unwrap()
+                .status,
+            CoverageStatus::Bounded
         );
     }
 

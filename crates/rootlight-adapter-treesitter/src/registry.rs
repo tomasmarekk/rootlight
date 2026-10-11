@@ -115,6 +115,10 @@ pub enum GrammarFamily {
     Hlsl,
     /// WGSL written shader syntax without type, resource or pipeline binding inference.
     Wgsl,
+    /// Written XML source; no DOM, namespace or validity inference.
+    Xml,
+    /// Written DTD source; no entity expansion or declaration-kind substitution.
+    Dtd,
 }
 
 impl GrammarFamily {
@@ -207,7 +211,7 @@ impl GrammarRegistry {
     /// Returns [`RegistryError`] if an SDK label is invalid or a linked grammar
     /// falls outside Tree-sitter's supported ABI interval.
     pub fn audited() -> Result<Self, RegistryError> {
-        let mut descriptors = Vec::with_capacity(51);
+        let mut descriptors = Vec::with_capacity(53);
         for family in [
             GrammarFamily::Rust,
             GrammarFamily::Python,
@@ -260,6 +264,8 @@ impl GrammarRegistry {
             GrammarFamily::Glsl,
             GrammarFamily::Hlsl,
             GrammarFamily::Wgsl,
+            GrammarFamily::Xml,
+            GrammarFamily::Dtd,
         ] {
             let language = language_for(family);
             let abi_version = language.abi_version();
@@ -406,6 +412,8 @@ pub(crate) fn language_for(family: GrammarFamily) -> Language {
         GrammarFamily::Glsl => tree_sitter_glsl::LANGUAGE_GLSL.into(),
         GrammarFamily::Hlsl => tree_sitter_hlsl::LANGUAGE_HLSL.into(),
         GrammarFamily::Wgsl => tree_sitter_wgsl::LANGUAGE_WGSL.into(),
+        GrammarFamily::Xml => tree_sitter_xml::LANGUAGE_XML.into(),
+        GrammarFamily::Dtd => tree_sitter_xml::LANGUAGE_DTD.into(),
     }
 }
 
@@ -436,6 +444,24 @@ const fn identity_for(family: GrammarFamily) -> GrammarIdentity {
             parser_sha256: "ceabd19beddb37631cf79dbe8a037a5549a63aa9e65b08361a37aa5c03b1dfc2",
             scanner_sha256: Some(
                 "8ba5a82e6d2a4e9fb8ff2f54c0b3d2bc677625f3509dfdf85fc65bfa7d67d1d5",
+            ),
+        },
+        GrammarFamily::Xml => GrammarIdentity {
+            language_id: "xml",
+            grammar_version: "0.7.0",
+            source_package_sha256: "4e87a41d7b5cb7f3d7f8931db78c4f0050f221257ac65fc0a7a213829ba97ef0",
+            parser_sha256: "16829db6dee156badeaf41e8874ab9862df27fd5715ef524932a4c68c4cd4b77",
+            scanner_sha256: Some(
+                "e5a8595c263774ddaad83ecf906e330832a578f6f231b5c51831ffaa87bda244",
+            ),
+        },
+        GrammarFamily::Dtd => GrammarIdentity {
+            language_id: "dtd",
+            grammar_version: "0.7.0",
+            source_package_sha256: "4e87a41d7b5cb7f3d7f8931db78c4f0050f221257ac65fc0a7a213829ba97ef0",
+            parser_sha256: "840fee13647a4124a81deb1ea8527e336c4b2fc884b1b714edb97111b5a46d48",
+            scanner_sha256: Some(
+                "cdb323ea613368705ade3c6904523848f262db38ee01f5722e2f16e0751bd71c",
             ),
         },
         GrammarFamily::Wgsl => GrammarIdentity {
@@ -889,7 +915,7 @@ mod tests {
     fn registry_contains_each_audited_family_once_with_checked_abi() {
         let registry = GrammarRegistry::audited().expect("audited grammars initialize");
 
-        assert_eq!(registry.descriptors().len(), 51);
+        assert_eq!(registry.descriptors().len(), 53);
         for family in [
             GrammarFamily::Rust,
             GrammarFamily::Python,
@@ -942,6 +968,8 @@ mod tests {
             GrammarFamily::Glsl,
             GrammarFamily::Hlsl,
             GrammarFamily::Wgsl,
+            GrammarFamily::Xml,
+            GrammarFamily::Dtd,
         ] {
             let descriptor = registry.get(family).expect("family is registered");
             assert!(
@@ -1184,6 +1212,8 @@ mod tests {
             (GrammarFamily::CobolFree, "cobol-free", "tree-sitter-cobol"),
             (GrammarFamily::Fortran, "fortran", "tree-sitter-fortran"),
             (GrammarFamily::PlSql, "plsql", "tree-sitter-plsql"),
+            (GrammarFamily::Xml, "xml", "tree-sitter-xml"),
+            (GrammarFamily::Dtd, "dtd", "tree-sitter-xml"),
             (
                 GrammarFamily::CommonLisp,
                 "common-lisp",
@@ -1245,6 +1275,8 @@ mod tests {
                         || family == GrammarFamily::Glsl
                         || family == GrammarFamily::Hlsl
                         || family == GrammarFamily::Wgsl
+                        || family == GrammarFamily::Xml
+                        || family == GrammarFamily::Dtd
                     {
                         "vendored_source_sha256"
                     } else {

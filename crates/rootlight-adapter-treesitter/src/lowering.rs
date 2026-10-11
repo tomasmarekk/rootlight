@@ -4898,9 +4898,13 @@ impl<'context, 'source> Lowering<'context, 'source> {
                             &name,
                             maximum,
                         )
-                    } else if matches!(self.language_for_fact(fact), "common-lisp" | "scheme") {
+                    } else if matches!(
+                        self.language_for_fact(fact),
+                        "common-lisp" | "scheme" | "xml"
+                    ) {
                         // Whitespace inside escaped symbols or string specializers
                         // belongs to the exact written header, not formatting.
+                        // XML attribute-value whitespace likewise remains significant source.
                         let mut written = String::new();
                         (signature_text.len() <= maximum
                             && written.try_reserve_exact(signature_text.len()).is_ok())
@@ -6138,7 +6142,7 @@ fn materialize_entity(
     // overload identities. Haskell equations likewise retain one lexical binding.
     let signature_discriminator = if matches!(
         draft.language.as_str(),
-        "assembly" | "common-lisp" | "scheme" | "glsl" | "hlsl" | "wgsl"
+        "assembly" | "common-lisp" | "scheme" | "glsl" | "hlsl" | "xml" | "wgsl"
     ) || (draft.language == "haskell"
         && matches!(
             draft.kind,
@@ -6334,6 +6338,53 @@ fn equivalent_entity_projection(left: &EntityRecord, right: &EntityRecord) -> bo
         && left.provenance == right.provenance
 }
 
+fn xml_source_reference(fact: &SyntaxFact) -> bool {
+    matches!(
+        fact.syntax_kind().as_str(),
+        "xml.end_name.reference"
+            | "xml.entity_name.reference"
+            | "xml.parameter_entity_name.reference"
+            | "xml.dtd_declared_name.reference"
+            | "xml.dtd_name.reference"
+            | "xml.pi_target.reference"
+            | "dtd.entity_name.reference"
+            | "dtd.parameter_entity_name.reference"
+            | "dtd.dtd_declared_name.reference"
+            | "dtd.dtd_name.reference"
+            | "dtd.pi_target.reference"
+    )
+}
+
+fn xml_owner_gap(fact: &SyntaxFact) -> Option<&'static str> {
+    (fact.kind() == SyntaxFactKind::Signature
+        && fact.syntax_kind().as_str() == "xml.unsupported_owner.signature")
+        .then_some("xml-written-owner-and-tag-agreement-unavailable")
+}
+
+fn xml_source_gap(fact: &SyntaxFact) -> Option<(FactDomain, &'static str)> {
+    if let Some(reason) = xml_owner_gap(fact) {
+        return Some((FactDomain::Entities, reason));
+    }
+    match (fact.kind(), fact.syntax_kind().as_str()) {
+        (SyntaxFactKind::Module, "xml.file.module") => Some((
+            FactDomain::Relations,
+            "xml-namespace-entity-and-validity-analysis-unavailable",
+        )),
+        (SyntaxFactKind::Module, "dtd.file.module") => Some((
+            FactDomain::Relations,
+            "dtd-entity-expansion-and-validity-analysis-unavailable",
+        )),
+        (
+            SyntaxFactKind::Signature,
+            "xml.dtd_declaration_source.signature" | "dtd.declaration_source.signature",
+        ) => Some((
+            FactDomain::Entities,
+            "dtd-structural-declaration-kind-unavailable",
+        )),
+        _ => None,
+    }
+}
+
 fn ocaml_owner_gap(fact: &SyntaxFact) -> Option<&'static str> {
     (fact.kind() == SyntaxFactKind::Signature
         && matches!(
@@ -6409,6 +6460,8 @@ fn source_coverage_gaps(fact: &SyntaxFact) -> impl Iterator<Item = (FactDomain, 
                 "fsharp-conditional-namespace-owner-unavailable",
             )),
         )
+        .chain(xml_owner_gap(fact).map(|reason| (FactDomain::Occurrences, reason)))
+        .chain(xml_owner_gap(fact).map(|reason| (FactDomain::Relations, reason)))
         .chain(ocaml_owner_gap(fact).map(|reason| (FactDomain::Occurrences, reason)))
         .chain(ocaml_owner_gap(fact).map(|reason| (FactDomain::Relations, reason)))
         .chain(ocaml_type_member_gap(fact).map(|reason| (FactDomain::Occurrences, reason)))
@@ -6570,6 +6623,9 @@ fn source_coverage_gap(fact: &SyntaxFact) -> Option<(FactDomain, &'static str)> 
         return Some(gap);
     }
     if let Some(gap) = wgsl_source_gap(fact) {
+        return Some(gap);
+    }
+    if let Some(gap) = xml_source_gap(fact) {
         return Some(gap);
     }
     if let Some(gap) = hlsl_source_gap(fact) {
@@ -7071,6 +7127,13 @@ fn uses_written_source_identity(language: &str, kind: EntityKind, label: &str) -
                 | (EntityKind::Field, "wgsl.field.declaration")
         );
     }
+    if language == "xml" {
+        return matches!(
+            (kind, label),
+            (EntityKind::MarkupElement, "xml.element.declaration")
+                | (EntityKind::MarkupAttribute, "xml.attribute.declaration")
+        );
+    }
     if language == "hlsl" {
         return matches!(
             (kind, label),
@@ -7178,7 +7241,9 @@ fn written_source_identity(
     kind: &str,
     position: u64,
 ) -> [u8; 32] {
-    let context = if language == "ocaml" {
+    let context = if language == "xml" {
+        "rootlight.xml-source-occurrence/1"
+    } else if language == "ocaml" {
         "rootlight.ocaml-source-occurrence/1"
     } else if language == "ocaml-interface" {
         "rootlight.ocaml-interface-source-occurrence/1"
@@ -8197,6 +8262,16 @@ fn is_explicit_file_module(fact: &SyntaxFact, language: &str) -> bool {
     if fact.syntax_kind().as_str() == "wgsl.file.module" {
         return fact.kind() == SyntaxFactKind::Module && language == "wgsl";
     }
+    if matches!(
+        fact.syntax_kind().as_str(),
+        "xml.file.module" | "dtd.file.module"
+    ) {
+        return fact.kind() == SyntaxFactKind::Module
+            && matches!(
+                (language, fact.syntax_kind().as_str()),
+                ("xml", "xml.file.module") | ("dtd", "dtd.file.module")
+            );
+    }
     if fact.syntax_kind().as_str() == "hlsl.file.module" {
         return fact.kind() == SyntaxFactKind::Module && language == "hlsl";
     }
@@ -8370,6 +8445,9 @@ fn is_signature_capture(fact: &SyntaxFact) -> bool {
                 | "typescript.conditional_consequence.signature"
         )
         && fact.syntax_kind().as_str() != "sql.body.signature"
+        && !matches!(fact.syntax_kind().as_str(),
+            "xml.dtd_declaration_source.signature" | "dtd.declaration_source.signature"
+            | "xml.unsupported_owner.signature")
         // Parameter-list markers prove binder ownership, not callable headers.
         && fact.syntax_kind().as_str() != "fsharp.simple_parameters.signature"
         && !fact.syntax_kind().as_str().starts_with("html.embedded_")
@@ -8427,6 +8505,13 @@ fn supports_declaration_signature(
     {
         return declaration.kind() == SyntaxFactKind::Declaration
             && uses_written_source_identity(language, kind, declaration.syntax_kind().as_str());
+    }
+    if language == "xml" {
+        return declaration.kind() == SyntaxFactKind::Declaration
+            && uses_written_source_identity(language, kind, declaration.syntax_kind().as_str());
+    }
+    if language == "dtd" {
+        return false;
     }
     if language == "hlsl" {
         // A source fragment cannot borrow its sibling names' complete header.
@@ -8492,6 +8577,15 @@ fn supports_signature(kind: EntityKind, language: &str) -> bool {
                 | EntityKind::Enum
                 | EntityKind::TypeAlias
         ) || (language == "ocaml" && kind == EntityKind::Parameter);
+    }
+    if language == "xml" {
+        return matches!(
+            kind,
+            EntityKind::MarkupElement | EntityKind::MarkupAttribute
+        );
+    }
+    if language == "dtd" {
+        return false;
     }
     // Classic BASIC accessors share a name but have distinct Get/Let/Set headers.
     // The same rule governs identity, evidence emission and admission accounting.
@@ -8584,6 +8678,9 @@ fn source_reference_gap(fact: &SyntaxFact) -> Option<&'static str> {
         )
     {
         return Some("wgsl-binding-and-dispatch-target-unavailable");
+    }
+    if fact.kind() == SyntaxFactKind::Occurrence && xml_source_reference(fact) {
+        return Some("xml-dtd-namespace-and-entity-target-unavailable");
     }
     if fact.kind() == SyntaxFactKind::Occurrence
         && matches!(
@@ -8786,6 +8883,35 @@ fn occurrence_role(fact: &SyntaxFact) -> Option<OccurrenceRole> {
                 | "wgsl.member.reference"
                 | "wgsl.unproven_call.reference",
             ) => Some(OccurrenceRole::Reference),
+            _ => None,
+        };
+    }
+    if fact.syntax_kind().as_str().starts_with("xml.")
+        || fact.syntax_kind().as_str().starts_with("dtd.")
+    {
+        return match fact.kind() {
+            SyntaxFactKind::Occurrence if xml_source_reference(fact) => {
+                Some(OccurrenceRole::Reference)
+            }
+            SyntaxFactKind::Comment
+                if matches!(
+                    fact.syntax_kind().as_str(),
+                    "xml.comment.comment"
+                        | "xml.comment.documentation"
+                        | "dtd.comment.comment"
+                        | "dtd.comment.documentation"
+                ) =>
+            {
+                Some(OccurrenceRole::Documentation)
+            }
+            SyntaxFactKind::StringLiteral
+                if matches!(
+                    fact.syntax_kind().as_str(),
+                    "xml.source_text.string" | "dtd.source_text.string"
+                ) =>
+            {
+                Some(OccurrenceRole::StringEvidence)
+            }
             _ => None,
         };
     }
@@ -10013,6 +10139,95 @@ mod tests {
         assert_ne!(
             written_source_identity("assembly", None, "assembly.source_label.declaration", 1),
             written_source_identity("assembly", None, "assembly.source_label.declaration", 2)
+        );
+    }
+
+    #[test]
+    fn xml_physical_identity_headers_and_dtd_gaps_are_exact() {
+        let file = FileId::from_bytes([3; 20]);
+        let fact = |kind, label: &str| {
+            SyntaxFact::new(
+                1,
+                None,
+                kind,
+                SourceSpan::new(file, 0, 8).unwrap(),
+                0,
+                SyntaxKindLabel::new(label).unwrap(),
+            )
+        };
+        for (kind, label) in [
+            (EntityKind::MarkupElement, "xml.element.declaration"),
+            (EntityKind::MarkupAttribute, "xml.attribute.declaration"),
+        ] {
+            assert!(uses_written_source_identity("xml", kind, label));
+            assert!(!uses_written_source_identity("html", kind, label));
+            assert!(!uses_written_source_identity(
+                "xml",
+                kind,
+                &format!("{label}.extra")
+            ));
+            assert!(supports_declaration_signature(
+                kind,
+                "xml",
+                &fact(SyntaxFactKind::Declaration, label),
+                None
+            ));
+        }
+        for language in ["xml", "dtd"] {
+            let label = format!("{language}.file.module");
+            let module = fact(SyntaxFactKind::Module, &label);
+            assert!(is_explicit_file_module(&module, language));
+            assert!(!is_explicit_file_module(&module, "html"));
+            assert!(!supports_declaration_signature(
+                EntityKind::Module,
+                language,
+                &module,
+                None
+            ));
+            assert!(
+                source_coverage_gaps(&module).any(|(domain, _)| domain == FactDomain::Relations)
+            );
+        }
+        for label in [
+            "xml.dtd_declaration_source.signature",
+            "dtd.declaration_source.signature",
+        ] {
+            let context = fact(SyntaxFactKind::Signature, label);
+            assert!(!is_signature_capture(&context));
+            assert_eq!(
+                source_coverage_gaps(&context).collect::<Vec<_>>(),
+                [(
+                    FactDomain::Entities,
+                    "dtd-structural-declaration-kind-unavailable"
+                )]
+            );
+            assert!(
+                source_coverage_gaps(&fact(SyntaxFactKind::Occurrence, label))
+                    .next()
+                    .is_none()
+            );
+        }
+        let rejected = fact(SyntaxFactKind::Signature, "xml.unsupported_owner.signature");
+        assert!(!is_signature_capture(&rejected));
+        assert_eq!(
+            source_coverage_gaps(&rejected)
+                .map(|(domain, _)| domain)
+                .collect::<Vec<_>>(),
+            [
+                FactDomain::Entities,
+                FactDomain::Occurrences,
+                FactDomain::Relations
+            ]
+        );
+        for label in ["xml.end_name.reference", "dtd.dtd_declared_name.reference"] {
+            let source = fact(SyntaxFactKind::Occurrence, label);
+            assert_eq!(occurrence_role(&source), Some(OccurrenceRole::Reference));
+            assert!(source_reference_gap(&source).is_some());
+            assert!(occurrence_role(&fact(SyntaxFactKind::Import, label)).is_none());
+        }
+        assert_ne!(
+            written_source_identity("xml", None, "xml.element.declaration", 0),
+            written_source_identity("xml", None, "xml.element.declaration", 1)
         );
     }
 

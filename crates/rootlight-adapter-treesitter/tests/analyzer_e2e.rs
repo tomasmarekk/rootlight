@@ -53,6 +53,8 @@ mod astro_native;
 mod common_lisp_native;
 #[path = "analyzer_e2e/dart_native.rs"]
 mod dart_native;
+#[path = "analyzer_e2e/dtd_native.rs"]
+mod dtd_native;
 #[path = "analyzer_e2e/ecmascript_exports.rs"]
 mod ecmascript_exports;
 #[path = "analyzer_e2e/ecmascript_imports.rs"]
@@ -97,6 +99,8 @@ mod sql_native;
 mod vba_native;
 #[path = "analyzer_e2e/wgsl_native.rs"]
 mod wgsl_native;
+#[path = "analyzer_e2e/xml_native.rs"]
+mod xml_native;
 #[path = "analyzer_e2e/yaml_native.rs"]
 mod yaml_native;
 const EXPECTED_DOMAINS: [FactDomain; 8] = [

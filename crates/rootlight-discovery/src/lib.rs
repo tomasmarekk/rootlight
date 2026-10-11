@@ -2244,6 +2244,22 @@ const LANGUAGE_CAPABILITIES: &[LanguageCapability] = &[
         analyzers: &["treesitter"],
     },
     LanguageCapability {
+        language: "xml",
+        suffixes: &[".xml"],
+        aliases: &[],
+        detectors: &["extension"],
+        maximum_tier: "tier_d",
+        analyzers: &["treesitter"],
+    },
+    LanguageCapability {
+        language: "dtd",
+        suffixes: &[".dtd"],
+        aliases: &[],
+        detectors: &["extension"],
+        maximum_tier: "tier_d",
+        analyzers: &["treesitter"],
+    },
+    LanguageCapability {
         language: "html",
         suffixes: &[".htm", ".html"],
         aliases: &[],
@@ -6850,6 +6866,52 @@ max_source_file_bytes = 2097152
                 }]
             );
         }
+    }
+
+    #[test]
+    fn xml_and_dtd_suffixes_route_to_distinct_native_families() {
+        for (language, suffix, source) in [
+            (
+                "xml",
+                ".xml",
+                "<root><item value=\"plain\"/><item value='other'>text</item></root>",
+            ),
+            ("dtd", ".dtd", "<!ELEMENT root EMPTY>"),
+        ] {
+            let capability = language_capabilities()
+                .iter()
+                .find(|entry| entry.language == language)
+                .unwrap();
+            assert_eq!(capability.suffixes, [suffix]);
+            assert!(capability.aliases.is_empty());
+            assert_eq!(capability.detectors, ["extension"]);
+            assert_eq!(capability.maximum_tier, "tier_d");
+            assert_eq!(capability.analyzers, ["treesitter"]);
+            assert_eq!(canonical_language(language), Some(language));
+            for path in [
+                format!("written{suffix}"),
+                format!("WRITTEN{}", suffix.to_ascii_uppercase()),
+            ] {
+                assert_eq!(extension_language(&path), Some(language));
+                let (class, signals) = classify(
+                    &RelativePath::parse(Path::new(&path)).unwrap(),
+                    source.as_bytes(),
+                );
+                assert_eq!(class, InputClass::Source);
+                assert_eq!(
+                    signals,
+                    [LanguageSignal {
+                        language: language.to_owned(),
+                        evidence: LanguageEvidence::Extension
+                    }]
+                );
+            }
+            assert_eq!(extension_language(&format!("written{suffix}.bak")), None);
+        }
+        assert_eq!(extension_language("written.html"), Some("html"));
+        assert_eq!(extension_language("written.htm"), Some("html"));
+        assert_ne!(canonical_language("html"), Some("xml"));
+        assert_ne!(canonical_language("xml"), Some("html"));
     }
 
     #[test]

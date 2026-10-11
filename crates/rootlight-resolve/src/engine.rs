@@ -1399,6 +1399,12 @@ fn unresolved_reason(role: OccurrenceRole, kind_rejection_total: u64) -> Unresol
 }
 
 pub(crate) fn resolvable_occurrence(occurrence: &OccurrenceRecord) -> bool {
+    // Written XML/DTD Names do not prove namespace, end-tag or entity targets.
+    if (occurrence.syntax_kind.starts_with("xml.") || occurrence.syntax_kind.starts_with("dtd."))
+        && matches!(occurrence.target, OccurrenceTarget::Unresolved { .. })
+    {
+        return false;
+    }
     // Assembly expansion, dialect scopes and address/value lookup require
     // assembler-owned proof; physical spelling alone cannot establish a target.
     if occurrence.syntax_kind.starts_with("assembly.")
@@ -1768,6 +1774,10 @@ mod source_owned_target_tests {
             "wgsl.type.reference",
             "wgsl.member.reference",
             "wgsl.unproven_call.reference",
+            "xml.end_name.reference",
+            "xml.entity_name.reference",
+            "dtd.dtd_declared_name.reference",
+            "dtd.parameter_entity_name.reference",
         ] {
             occurrence.syntax_kind = syntax.to_owned();
             assert!(!resolvable_occurrence(&occurrence), "{syntax}");
@@ -1800,6 +1810,10 @@ mod source_owned_target_tests {
             "wgsl.type.reference",
             "wgsl.member.reference",
             "wgsl.unproven_call.reference",
+            "xml.end_name.reference",
+            "xml.entity_name.reference",
+            "dtd.dtd_declared_name.reference",
+            "dtd.parameter_entity_name.reference",
         ] {
             occurrence.syntax_kind = syntax.to_owned();
             assert!(
@@ -1827,6 +1841,10 @@ mod source_owned_target_tests {
             "wgsl.type.reference",
             "wgsl.member.reference",
             "wgsl.unproven_call.reference",
+            "xml.end_name.reference",
+            "xml.entity_name.reference",
+            "dtd.dtd_declared_name.reference",
+            "dtd.parameter_entity_name.reference",
         ] {
             occurrence.syntax_kind = syntax.to_owned();
             assert!(

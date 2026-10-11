@@ -46,6 +46,7 @@ mod sql_admission;
 pub(super) mod vba;
 mod vba_calls;
 mod wgsl;
+mod xml;
 mod yaml;
 
 const QUERY_CURSOR_MATCH_LIMIT: u32 = 4096;
@@ -429,6 +430,17 @@ impl QueryPack {
         if family == GrammarFamily::Yaml {
             expected.retain(|name| !matches!(*name, "call" | "import"));
         }
+        if family == GrammarFamily::Xml {
+            expected.retain(|name| !matches!(*name, "call" | "import" | "scope"));
+        }
+        if family == GrammarFamily::Dtd {
+            expected.retain(|name| {
+                !matches!(
+                    *name,
+                    "call" | "import" | "scope" | "declaration" | "definition"
+                )
+            });
+        }
         if matches!(family, GrammarFamily::Html | GrammarFamily::Astro) {
             expected.retain(|name| !matches!(*name, "call" | "import" | "reference" | "scope"));
         }
@@ -722,6 +734,7 @@ impl QueryPack {
         let mut glsl_captures = glsl::CaptureCache::new(limits.captures.min(limits.body_nodes));
         let mut hlsl_captures = hlsl::CaptureCache::new(limits.captures.min(limits.body_nodes));
         let mut wgsl_captures = wgsl::CaptureCache::new(limits.captures.min(limits.body_nodes));
+        let mut xml_captures = xml::CaptureCache::new(limits.captures.min(limits.body_nodes));
         let mut ocaml_captures = ocaml::CaptureCache::new(limits.captures.min(limits.body_nodes));
         // A full-extent root can still omit bytes between included ranges, while
         // standalone roots may exclude leading or trailing trivia from their span.
@@ -779,6 +792,24 @@ impl QueryPack {
                         &mut ocaml_captures,
                     )?;
                     if ocaml_captures.exhausted() {
+                        limit = Some(QueryLimit::Capture);
+                        break 'query;
+                    }
+                    if let Some(candidate) = candidate {
+                        retain(candidate)?;
+                    }
+                    continue;
+                }
+                if matches!(input.family, GrammarFamily::Xml | GrammarFamily::Dtd) {
+                    let candidate = xml::candidate(
+                        input.family,
+                        capture.node,
+                        role,
+                        input.source,
+                        input.cancellation,
+                        &mut xml_captures,
+                    )?;
+                    if xml_captures.exhausted() {
                         limit = Some(QueryLimit::Capture);
                         break 'query;
                     }
@@ -1798,6 +1829,9 @@ fn candidate_for_capture(
             GrammarFamily::Glsl => return Err(query_failure("query-glsl-unproven-call")),
             GrammarFamily::Hlsl => return Err(query_failure("query-hlsl-unproven-call")),
             GrammarFamily::Wgsl => return Err(query_failure("query-wgsl-unproven-call")),
+            GrammarFamily::Xml | GrammarFamily::Dtd => {
+                return Err(query_failure("query-xml-unproven-call"));
+            }
             GrammarFamily::CommonLisp => {
                 return Err(query_failure("query-common-lisp-unproven-call"));
             }
@@ -2718,7 +2752,7 @@ impl QueryPackRegistry {
     }
 
     fn compile_audited() -> Result<Self, GrammarFamily> {
-        let mut packs = Vec::with_capacity(51);
+        let mut packs = Vec::with_capacity(53);
         for (family, source) in [
             (GrammarFamily::Rust, include_str!("../queries/rust.scm")),
             (GrammarFamily::Python, include_str!("../queries/python.scm")),
@@ -2775,6 +2809,8 @@ impl QueryPackRegistry {
             (GrammarFamily::Glsl, include_str!("../queries/glsl.scm")),
             (GrammarFamily::Hlsl, include_str!("../queries/hlsl.scm")),
             (GrammarFamily::Wgsl, include_str!("../queries/wgsl.scm")),
+            (GrammarFamily::Xml, include_str!("../queries/xml.scm")),
+            (GrammarFamily::Dtd, include_str!("../queries/dtd.scm")),
             (
                 GrammarFamily::CommonLisp,
                 include_str!("../queries/common_lisp.scm"),
@@ -2929,6 +2965,8 @@ mod tests {
             GrammarFamily::Glsl,
             GrammarFamily::Hlsl,
             GrammarFamily::Wgsl,
+            GrammarFamily::Xml,
+            GrammarFamily::Dtd,
         ] {
             let pack = registry.get(family).expect("family has a query pack");
             let mut names = pack.identity_query.capture_names().to_vec();
@@ -3013,6 +3051,17 @@ mod tests {
             }
             if family == GrammarFamily::Yaml {
                 expected.retain(|name| !matches!(*name, "call" | "import"));
+            }
+            if family == GrammarFamily::Xml {
+                expected.retain(|name| !matches!(*name, "call" | "import" | "scope"));
+            }
+            if family == GrammarFamily::Dtd {
+                expected.retain(|name| {
+                    !matches!(
+                        *name,
+                        "call" | "import" | "scope" | "declaration" | "definition"
+                    )
+                });
             }
             if matches!(family, GrammarFamily::Html | GrammarFamily::Astro) {
                 expected.retain(|name| !matches!(*name, "call" | "import" | "reference" | "scope"));

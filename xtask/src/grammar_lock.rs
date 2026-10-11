@@ -19,7 +19,7 @@ const GRAMMAR_LOCK_PATH: &str = "adapters/grammars.lock";
 const CARGO_LOCK_PATH: &str = "Cargo.lock";
 const ADAPTER_PACKAGE: &str = "rootlight-adapter-treesitter";
 const GRAMMAR_LOCK_SHA256: &str =
-    "22426f9eebe87987a83446ae9c7e85d8a92f318affbd37bad5e74a0a7e8f0ace";
+    "5e64cad8e05704a89cdbdeda96d66982c2e6bb051c23fc5ecc45bfa3a069218a";
 const JAVA_LICENSE_PATH: &str = "adapters/licenses/tree-sitter-java-0.23.5-LICENSE";
 const JAVA_LICENSE_SHA256: &str =
     "52ed137b039cd9c46409bc22e89938af911c95b157feae2d040b51e6084369a7";
@@ -217,12 +217,18 @@ const EXPECTED_PACKAGES: [(&str, &str, &str); 35] = [
     ),
 ];
 
-const EXPECTED_LOCAL_PACKAGES: [(&str, &str, &str, &str); 12] = [
+const EXPECTED_LOCAL_PACKAGES: [(&str, &str, &str, &str); 13] = [
     (
         "tree-sitter-wgsl",
         "0.0.9",
         "third_party/tree-sitter-wgsl-0.0.9",
         "4a6bd6793fc477b90b2ded2d5c7f449485e1c19473fad36b90fb8777e0b60b3e",
+    ),
+    (
+        "tree-sitter-xml",
+        "0.7.0",
+        "third_party/tree-sitter-xml-0.7.0",
+        "4e87a41d7b5cb7f3d7f8931db78c4f0050f221257ac65fc0a7a213829ba97ef0",
     ),
     (
         "tree-sitter-asm",
@@ -415,6 +421,16 @@ pub(crate) fn check(metadata: &Metadata, root: &Path) -> Result<(), GrammarLockE
     )?;
     validate_local_license(
         root,
+        "adapters/licenses/tree-sitter-xml-0.7.0-LICENSE",
+        "3297073719030b7261afd78b7267931ccc03a27f7a65ca6fc644316180f71bf6",
+    )?;
+    validate_local_license(
+        root,
+        "adapters/licenses/tree-sitter-0.26.11-LICENSE",
+        "c5cfb43042b6b72045f4ba997834d0a7786d2793d91680868b5815b39f14fc78",
+    )?;
+    validate_local_license(
+        root,
         "adapters/licenses/tree-sitter-html-0.23.2-LICENSE",
         "2e0110e07abef7c2548b26ec9d6969775617ca539a0dc8dbeeb14d6452c711d1",
     )?;
@@ -473,7 +489,7 @@ fn validate_manifest(manifest: &GrammarLock) -> Result<(), GrammarLockError> {
         ));
     }
     validate_runtime(&manifest.runtime)?;
-    if manifest.grammars.len() != 50 {
+    if manifest.grammars.len() != 52 {
         return Err(GrammarLockError::GrammarCount(manifest.grammars.len()));
     }
     let mut languages = BTreeSet::new();
@@ -510,6 +526,7 @@ fn validate_manifest(manifest: &GrammarLock) -> Result<(), GrammarLockError> {
         "csharp",
         "css",
         "dart",
+        "dtd",
         "fsharp",
         "fsharp-signature",
         "fortran",
@@ -544,6 +561,7 @@ fn validate_manifest(manifest: &GrammarLock) -> Result<(), GrammarLockError> {
         "rust",
         "swift",
         "toml",
+        "xml",
         "yaml",
         "typescript",
         "vba",
@@ -1241,7 +1259,7 @@ pub(crate) enum GrammarLockError {
     InvalidDigest { label: &'static str },
     #[error("grammar lock field {0} must not be empty")]
     EmptyField(&'static str),
-    #[error("grammar lock contains {0} grammars instead of 50")]
+    #[error("grammar lock contains {0} grammars instead of 52")]
     GrammarCount(usize),
     #[error("grammar lock repeats language {0}")]
     DuplicateLanguage(String),
@@ -1580,6 +1598,140 @@ mod tests {
         assert_eq!(
             sources.files["common/scanner.h.orig"],
             "e4934793536f53c076b24b16de2f6a48a125c632e6cce58c80c02d6d65f8dbed"
+        );
+    }
+
+    #[test]
+    fn xml_dtd_share_complete_sources_but_preserve_distinct_native_factories() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
+        let manifest: GrammarLock =
+            toml::from_str(include_str!("../../adapters/grammars.lock")).unwrap();
+        let directory = root.join("third_party/tree-sitter-xml-0.7.0");
+        let xml = manifest
+            .grammars
+            .iter()
+            .find(|grammar| grammar.language == "xml")
+            .unwrap();
+        let dtd = manifest
+            .grammars
+            .iter()
+            .find(|grammar| grammar.language == "dtd")
+            .unwrap();
+        let xml_sources = xml.vendored.as_ref().unwrap();
+        let dtd_sources = dtd.vendored.as_ref().unwrap();
+        assert_eq!(xml_sources.files, dtd_sources.files);
+        assert_eq!(xml_sources.files.len(), 148);
+        assert_eq!(xml_sources.parser_path.as_deref(), Some("xml/src/parser.c"));
+        assert_eq!(dtd_sources.parser_path.as_deref(), Some("dtd/src/parser.c"));
+        assert_eq!(
+            xml_sources.scanner_path.as_deref(),
+            Some("xml/src/scanner.c")
+        );
+        assert_eq!(
+            dtd_sources.scanner_path.as_deref(),
+            Some("dtd/src/scanner.c")
+        );
+        for grammar in [xml, dtd] {
+            assert!(grammar.crates_io_checksum.is_none());
+            assert_eq!(grammar.crate_name, "tree-sitter-xml");
+            assert_eq!(grammar.crate_version, "0.7.0");
+            assert_eq!(grammar.abi, 14);
+            assert_eq!(grammar.license, "MIT");
+            assert_eq!(
+                grammar.license_sha256,
+                "3297073719030b7261afd78b7267931ccc03a27f7a65ca6fc644316180f71bf6"
+            );
+            validate_vendored_tree(&directory, grammar, grammar.vendored.as_ref().unwrap())
+                .unwrap();
+        }
+        let binding: toml::Value = toml::from_str(include_str!(
+            "../../third_party/tree-sitter-xml-0.7.0/Cargo.toml"
+        ))
+        .unwrap();
+        assert_eq!(binding["package"]["name"].as_str(), Some("tree-sitter-xml"));
+        assert_eq!(binding["package"]["publish"].as_bool(), Some(false));
+        assert_eq!(binding["package"]["rust-version"].as_str(), Some("1.90"));
+        assert_eq!(
+            binding["package"]["build"].as_str(),
+            Some("bindings/rust/build.rs")
+        );
+        let inventory: serde_json::Value = serde_json::from_str(include_str!(
+            "../../third_party/tree-sitter-xml-0.7.0/SOURCE-INVENTORY.json"
+        ))
+        .unwrap();
+        assert_eq!(inventory["schema"], "rootlight.xml-source-inventory/1");
+        assert_eq!(inventory["original_source_frame_file_count"], 117);
+        assert_eq!(inventory["original_source_frame_bytes"], 1_751_022);
+        assert_eq!(
+            inventory["original_source_frame_directories"]
+                .as_array()
+                .unwrap()
+                .len(),
+            44
+        );
+        let mut paths = BTreeSet::new();
+        for payload in inventory["payload_files"].as_array().unwrap() {
+            let path = payload["path"].as_str().unwrap();
+            assert!(is_source_relative_path(path));
+            assert!(paths.insert(path));
+            assert_eq!(
+                xml_sources.files.get(path).map(String::as_str),
+                payload["sha256"].as_str()
+            );
+            assert_eq!(
+                fs::metadata(directory.join(path)).unwrap().len(),
+                payload["bytes"].as_u64().unwrap()
+            );
+        }
+        assert_eq!(paths.len(), 146);
+        paths.extend(["SOURCE-INVENTORY.json", "SOURCE-PROVENANCE.json"]);
+        assert_eq!(
+            paths,
+            xml_sources.files.keys().map(String::as_str).collect()
+        );
+        let provenance: serde_json::Value = serde_json::from_str(include_str!(
+            "../../third_party/tree-sitter-xml-0.7.0/SOURCE-PROVENANCE.json"
+        ))
+        .unwrap();
+        assert_eq!(provenance["schema"], "rootlight.xml-source-provenance/1");
+        assert_eq!(
+            provenance["upstream"]["revision"],
+            "4b64dd3a03ec002258d6268d712fd93716d6ab57"
+        );
+        assert_eq!(
+            provenance["preferred_source"]["xml_scanner_stateless"],
+            true
+        );
+        assert_eq!(
+            provenance["preferred_source"]["dtd_grammar_and_scanner_literal_upstream"],
+            true
+        );
+        assert_eq!(
+            provenance["native_written_syntax_evidence"]["fixed_sources"],
+            39
+        );
+        assert_eq!(
+            provenance["native_written_syntax_evidence"]["raw_snapshots"],
+            488
+        );
+        assert_eq!(
+            provenance["native_written_syntax_evidence"]["nontrivia_parent_range_gap_bytes"],
+            617
+        );
+        // These historical source-only flags must not be rewritten by integration.
+        for key in [
+            "source_publication_verified",
+            "relocated_package_qualification_verified",
+            "product_integration_verified",
+            "installed_mcp_verified",
+            "offline_empty_cache_network_denial_verified",
+            "distribution_notices_integrated",
+        ] {
+            assert_eq!(provenance[key], false, "{key}");
+        }
+        assert_eq!(
+            xml_sources.files["notices/tree-sitter-MIT-LICENSE"],
+            "c5cfb43042b6b72045f4ba997834d0a7786d2793d91680868b5815b39f14fc78"
         );
     }
 

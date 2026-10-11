@@ -34,7 +34,7 @@ struct LanguageCase {
     source: &'static str,
 }
 
-const CASES: [LanguageCase; 51] = [
+const CASES: [LanguageCase; 53] = [
     LanguageCase {
         name: "written.ml",
         language: "ocaml",
@@ -49,6 +49,16 @@ const CASES: [LanguageCase; 51] = [
         name: "written.scm",
         language: "scheme",
         source: "(define (measure value) (+ value 1))\n",
+    },
+    LanguageCase {
+        name: "written.xml",
+        language: "xml",
+        source: "<root><item value=\"plain\"/><item value='other'>text</item></root>",
+    },
+    LanguageCase {
+        name: "written.dtd",
+        language: "dtd",
+        source: "<!ELEMENT root EMPTY>",
     },
     LanguageCase {
         name: "written.wgsl",
