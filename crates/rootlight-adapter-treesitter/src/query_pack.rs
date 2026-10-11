@@ -34,6 +34,7 @@ mod markdown;
 mod matlab;
 mod nix;
 mod objective_c;
+mod ocaml;
 mod perl;
 mod plsql;
 mod powershell;
@@ -352,6 +353,13 @@ impl QueryPack {
         let mut identity_query = Query::new(&language, source).map_err(|_| family)?;
         let mut optional_query = Query::new(&language, source).map_err(|_| family)?;
         let mut expected = EXPECTED_CAPTURES.to_vec();
+        if matches!(family, GrammarFamily::Ocaml | GrammarFamily::OcamlInterface) {
+            expected.retain(|name| *name != "import");
+            if family == GrammarFamily::OcamlInterface {
+                expected.retain(|name| !matches!(*name, "call" | "reference"));
+            }
+            expected.push("expression");
+        }
         if matches!(family, GrammarFamily::CobolFixed | GrammarFamily::CobolFree) {
             expected.retain(|name| !matches!(*name, "call" | "module" | "documentation"));
         }
@@ -714,6 +722,7 @@ impl QueryPack {
         let mut glsl_captures = glsl::CaptureCache::new(limits.captures.min(limits.body_nodes));
         let mut hlsl_captures = hlsl::CaptureCache::new(limits.captures.min(limits.body_nodes));
         let mut wgsl_captures = wgsl::CaptureCache::new(limits.captures.min(limits.body_nodes));
+        let mut ocaml_captures = ocaml::CaptureCache::new(limits.captures.min(limits.body_nodes));
         // A full-extent root can still omit bytes between included ranges, while
         // standalone roots may exclude leading or trailing trivia from their span.
         let fsharp_complete_source = !input.normalize_calls
@@ -757,6 +766,27 @@ impl QueryPack {
                     continue;
                 }
                 let mut capture = *capture;
+                if matches!(
+                    input.family,
+                    GrammarFamily::Ocaml | GrammarFamily::OcamlInterface
+                ) {
+                    let candidate = ocaml::candidate(
+                        input.family,
+                        capture.node,
+                        role,
+                        input.source,
+                        input.cancellation,
+                        &mut ocaml_captures,
+                    )?;
+                    if ocaml_captures.exhausted() {
+                        limit = Some(QueryLimit::Capture);
+                        break 'query;
+                    }
+                    if let Some(candidate) = candidate {
+                        retain(candidate)?;
+                    }
+                    continue;
+                }
                 if input.family == GrammarFamily::Wgsl {
                     let admitted = wgsl::retain_capture(
                         capture.node,
@@ -1772,6 +1802,9 @@ fn candidate_for_capture(
                 return Err(query_failure("query-common-lisp-unproven-call"));
             }
             GrammarFamily::Scheme => return Err(query_failure("query-scheme-unproven-call")),
+            GrammarFamily::Ocaml | GrammarFamily::OcamlInterface => {
+                return Err(query_failure("query-ocaml-unproven-call"));
+            }
             GrammarFamily::Css => return Err(query_failure("query-css-call-kind")),
             GrammarFamily::Json => return Err(query_failure("query-json-call-kind")),
             GrammarFamily::Toml => return Err(query_failure("query-toml-call-kind")),
@@ -2685,7 +2718,7 @@ impl QueryPackRegistry {
     }
 
     fn compile_audited() -> Result<Self, GrammarFamily> {
-        let mut packs = Vec::with_capacity(49);
+        let mut packs = Vec::with_capacity(51);
         for (family, source) in [
             (GrammarFamily::Rust, include_str!("../queries/rust.scm")),
             (GrammarFamily::Python, include_str!("../queries/python.scm")),
@@ -2747,6 +2780,11 @@ impl QueryPackRegistry {
                 include_str!("../queries/common_lisp.scm"),
             ),
             (GrammarFamily::Scheme, include_str!("../queries/scheme.scm")),
+            (GrammarFamily::Ocaml, include_str!("../queries/ocaml.scm")),
+            (
+                GrammarFamily::OcamlInterface,
+                include_str!("../queries/ocaml-interface.scm"),
+            ),
             (
                 GrammarFamily::Assembly,
                 include_str!("../queries/assembly.scm"),
@@ -2885,6 +2923,8 @@ mod tests {
             GrammarFamily::Fortran,
             GrammarFamily::CommonLisp,
             GrammarFamily::Scheme,
+            GrammarFamily::Ocaml,
+            GrammarFamily::OcamlInterface,
             GrammarFamily::Assembly,
             GrammarFamily::Glsl,
             GrammarFamily::Hlsl,
@@ -2894,6 +2934,13 @@ mod tests {
             let mut names = pack.identity_query.capture_names().to_vec();
             names.sort_unstable();
             let mut expected = EXPECTED_CAPTURES.to_vec();
+            if matches!(family, GrammarFamily::Ocaml | GrammarFamily::OcamlInterface) {
+                expected.retain(|name| *name != "import");
+                if family == GrammarFamily::OcamlInterface {
+                    expected.retain(|name| !matches!(*name, "call" | "reference"));
+                }
+                expected.push("expression");
+            }
             if matches!(family, GrammarFamily::CobolFixed | GrammarFamily::CobolFree) {
                 expected.retain(|name| !matches!(*name, "call" | "module" | "documentation"));
             }

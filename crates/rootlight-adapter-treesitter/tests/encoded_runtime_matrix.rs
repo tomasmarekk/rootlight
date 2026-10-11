@@ -34,7 +34,17 @@ struct LanguageCase {
     source: &'static str,
 }
 
-const CASES: [LanguageCase; 49] = [
+const CASES: [LanguageCase; 51] = [
+    LanguageCase {
+        name: "written.ml",
+        language: "ocaml",
+        source: "let increment x = x + 1\n",
+    },
+    LanguageCase {
+        name: "written.mli",
+        language: "ocaml-interface",
+        source: "val increment : int -> int\n",
+    },
     LanguageCase {
         name: "written.scm",
         language: "scheme",

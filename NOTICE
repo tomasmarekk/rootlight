@@ -46,3 +46,12 @@ Tree-sitter runtime notice is included as licenses/tree-sitter-0.26.11-LICENSE.
 Original authored sources, archive and provenance remain in the versioned
 grammar package; the local binding version does not establish registry
 distribution equivalence.
+
+The unpublished local tree-sitter-ocaml 0.25.0 binding retains separate OCaml
+implementation and interface factories, the original release archive and all
+published source inputs. Its exact MIT notice, including Copyright (c) 2020
+Max Brunsfeld and Pieter Goetschalckx, is bundled as
+licenses/tree-sitter-ocaml-0.25.0-LICENSE. The local scanner-state repair and
+manifest changes are recorded with original inputs and provenance in the
+versioned source package; retention does not establish original authorship,
+registry-distribution equivalence or complete OCaml compiler semantics.

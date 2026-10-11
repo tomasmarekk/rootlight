@@ -1027,7 +1027,7 @@ fn entity_is_declaration_only(
     entity: &EntityRecord,
     path: &str,
 ) -> bool {
-    if path_is_declaration_only(path) {
+    if entity.language == "ocaml-interface" || path_is_declaration_only(path) {
         return true;
     }
     if matches!(
@@ -1127,6 +1127,61 @@ mod tests {
                 .iter()
                 .any(|path| super::path_is_declaration_only(path))
         );
+    }
+
+    #[test]
+    fn ocaml_interface_entities_are_declaration_only_in_any_host() {
+        use rootlight_ids::{FactId, GenerationId, RepositoryId, SymbolId};
+        use rootlight_ir::{
+            AnalysisTier, EntityKind, EntityRecord, EntityVisibility, FactEvidence,
+            NormalizedIrDocument,
+        };
+
+        let repository = RepositoryId::from_bytes([1; 16]);
+        let generation = GenerationId::from_bytes([2; 20]);
+        let document = NormalizedIrDocument::empty(repository, generation);
+        let mut entity = EntityRecord {
+            id: SymbolId::from_bytes([3; 20]),
+            repository,
+            generation,
+            kind: EntityKind::Function,
+            language: "ocaml-interface".to_owned(),
+            tier: AnalysisTier::TierD,
+            canonical_name: "written".to_owned(),
+            display_name: "written".to_owned(),
+            qualified_name: "written".to_owned(),
+            container: None,
+            visibility: EntityVisibility::Unknown,
+            flags: Vec::new(),
+            provenance: FactId::from_bytes([4; 20]),
+            evidence: FactEvidence {
+                source: None,
+                derivation: Vec::new(),
+            },
+        };
+        for kind in [
+            EntityKind::Function,
+            EntityKind::Module,
+            EntityKind::Struct,
+            EntityKind::Enum,
+        ] {
+            entity.kind = kind;
+            for path in [
+                "written.mli",
+                "WRITTEN.MLI",
+                "examples.md",
+                "configured.txt",
+            ] {
+                assert!(super::entity_is_declaration_only(&document, &entity, path));
+            }
+            entity.language = "ocaml".to_owned();
+            assert!(!super::entity_is_declaration_only(
+                &document,
+                &entity,
+                "written.ml"
+            ));
+            entity.language = "ocaml-interface".to_owned();
+        }
     }
 
     #[test]

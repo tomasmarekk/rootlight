@@ -60,7 +60,7 @@ const EXPECTED_TARGETS: [&str; 5] = [
     "x86_64-pc-windows-msvc",
     "x86_64-unknown-linux-gnu",
 ];
-const DISTRIBUTION_LICENSES: [&str; 28] = [
+const DISTRIBUTION_LICENSES: [&str; 29] = [
     "tree-sitter-0.26.11-LICENSE",
     "tree-sitter-wgsl-0.0.9-LICENSE.md",
     "tree-sitter-wgsl-0.0.9-GPUWeb-BSD-LICENSE.txt",
@@ -89,6 +89,7 @@ const DISTRIBUTION_LICENSES: [&str; 28] = [
     "tree-sitter-toml-ng-0.7.0-LICENSE",
     "tree-sitter-typescript-0.23.2-LICENSE",
     "tree-sitter-scheme-0.24.7-1-LICENSE",
+    "tree-sitter-ocaml-0.25.0-LICENSE",
 ];
 const EXPECTED_WEB_ASSET_TREE: &str = "rootlight-web-ui";
 const EXPECTED_WEB_ASSET_DESTINATION: &str = "share/rootlight/web";
@@ -586,6 +587,9 @@ fn distribution_license_path(workspace: &Path, filename: &str) -> PathBuf {
     match filename {
         "tree-sitter-scheme-0.24.7-1-LICENSE" => {
             workspace.join("third_party/tree-sitter-scheme-0.24.7-1/upstream/LICENSE")
+        }
+        "tree-sitter-ocaml-0.25.0-LICENSE" => {
+            workspace.join("third_party/tree-sitter-ocaml-0.25.0/LICENSE")
         }
         _ => workspace.join("adapters/licenses").join(filename),
     }
@@ -2195,19 +2199,28 @@ mod tests {
     #[test]
     fn local_grammar_distribution_notices_match_retained_sources() {
         let workspace = workspace_root().expect("workspace root");
-        let (filename, source, expected_bytes, expected_sha256) = (
-            "tree-sitter-scheme-0.24.7-1-LICENSE",
-            "third_party/tree-sitter-scheme-0.24.7-1/upstream/LICENSE",
-            1062,
-            "cc35bd4a973bf6067558e88b56d9a369e02c36e240b2b537aef8f751b7808fd7",
-        );
-        assert!(DISTRIBUTION_LICENSES.contains(&filename));
-        let path = distribution_license_path(&workspace, filename);
-        assert_eq!(path, workspace.join(source));
-        let bytes = read_regular_bounded(&path, MAX_THIRD_PARTY_LICENSE_BYTES)
-            .expect("retained grammar notice");
-        assert_eq!(bytes.len(), expected_bytes, "notice length {filename}");
-        assert_eq!(sha256(&bytes), expected_sha256, "notice digest {filename}");
+        for (filename, source, expected_bytes, expected_sha256) in [
+            (
+                "tree-sitter-ocaml-0.25.0-LICENSE",
+                "third_party/tree-sitter-ocaml-0.25.0/LICENSE",
+                1094,
+                "f977a20805dd6e275f14bc090a5f8e638401dad4df366841c1060f12c75b74ae",
+            ),
+            (
+                "tree-sitter-scheme-0.24.7-1-LICENSE",
+                "third_party/tree-sitter-scheme-0.24.7-1/upstream/LICENSE",
+                1062,
+                "cc35bd4a973bf6067558e88b56d9a369e02c36e240b2b537aef8f751b7808fd7",
+            ),
+        ] {
+            assert!(DISTRIBUTION_LICENSES.contains(&filename));
+            let path = distribution_license_path(&workspace, filename);
+            assert_eq!(path, workspace.join(source));
+            let bytes = read_regular_bounded(&path, MAX_THIRD_PARTY_LICENSE_BYTES)
+                .expect("retained grammar notice");
+            assert_eq!(bytes.len(), expected_bytes, "notice length {filename}");
+            assert_eq!(sha256(&bytes), expected_sha256, "notice digest {filename}");
+        }
     }
 
     #[test]

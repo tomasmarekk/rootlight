@@ -2247,6 +2247,8 @@ fn markdown_fenced_definitions_match_standalone_language_evidence() {
             dart_native::DART,
             powershell_native::POWERSHELL,
             objective_c_native::OBJECTIVE_C,
+            ocaml_native::OCAML,
+            ocaml_native::OCAML_INTERFACE,
             nix_native::NIX,
             matlab_native::MATLAB,
             perl_native::PERL,

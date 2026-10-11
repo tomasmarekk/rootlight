@@ -77,6 +77,8 @@ mod matlab_native;
 mod nix_native;
 #[path = "analyzer_e2e/objective_c_native.rs"]
 mod objective_c_native;
+#[path = "analyzer_e2e/ocaml_native.rs"]
+mod ocaml_native;
 #[path = "analyzer_e2e/perl_native.rs"]
 mod perl_native;
 #[path = "analyzer_e2e/powershell_native.rs"]

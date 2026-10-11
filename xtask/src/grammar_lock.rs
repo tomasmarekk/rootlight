@@ -19,7 +19,7 @@ const GRAMMAR_LOCK_PATH: &str = "adapters/grammars.lock";
 const CARGO_LOCK_PATH: &str = "Cargo.lock";
 const ADAPTER_PACKAGE: &str = "rootlight-adapter-treesitter";
 const GRAMMAR_LOCK_SHA256: &str =
-    "181c85c4c72d89e34de85a60860554c29e67759fcafdb9fa3a9c57e3826a61cb";
+    "22426f9eebe87987a83446ae9c7e85d8a92f318affbd37bad5e74a0a7e8f0ace";
 const JAVA_LICENSE_PATH: &str = "adapters/licenses/tree-sitter-java-0.23.5-LICENSE";
 const JAVA_LICENSE_SHA256: &str =
     "52ed137b039cd9c46409bc22e89938af911c95b157feae2d040b51e6084369a7";
@@ -217,7 +217,7 @@ const EXPECTED_PACKAGES: [(&str, &str, &str); 35] = [
     ),
 ];
 
-const EXPECTED_LOCAL_PACKAGES: [(&str, &str, &str, &str); 11] = [
+const EXPECTED_LOCAL_PACKAGES: [(&str, &str, &str, &str); 12] = [
     (
         "tree-sitter-wgsl",
         "0.0.9",
@@ -253,6 +253,12 @@ const EXPECTED_LOCAL_PACKAGES: [(&str, &str, &str, &str); 11] = [
         "0.24.7-1",
         "third_party/tree-sitter-scheme-0.24.7-1",
         "d1477c4b209d9db6337e4a646cf8c2134422b432f14c00e74068ef2105829b6f",
+    ),
+    (
+        "tree-sitter-ocaml",
+        "0.25.0",
+        "third_party/tree-sitter-ocaml-0.25.0",
+        "544e58ed05a66a74ef293db0c2825003d94c6e8426c38aff5603e3743c183f10",
     ),
     (
         "tree-sitter-sfapex",
@@ -467,7 +473,7 @@ fn validate_manifest(manifest: &GrammarLock) -> Result<(), GrammarLockError> {
         ));
     }
     validate_runtime(&manifest.runtime)?;
-    if manifest.grammars.len() != 48 {
+    if manifest.grammars.len() != 50 {
         return Err(GrammarLockError::GrammarCount(manifest.grammars.len()));
     }
     let mut languages = BTreeSet::new();
@@ -523,6 +529,8 @@ fn validate_manifest(manifest: &GrammarLock) -> Result<(), GrammarLockError> {
         "matlab",
         "nix",
         "objective-c",
+        "ocaml",
+        "ocaml-interface",
         "perl",
         "plsql",
         "php",
@@ -1233,7 +1241,7 @@ pub(crate) enum GrammarLockError {
     InvalidDigest { label: &'static str },
     #[error("grammar lock field {0} must not be empty")]
     EmptyField(&'static str),
-    #[error("grammar lock contains {0} grammars instead of 48")]
+    #[error("grammar lock contains {0} grammars instead of 50")]
     GrammarCount(usize),
     #[error("grammar lock repeats language {0}")]
     DuplicateLanguage(String),
@@ -1370,6 +1378,209 @@ mod tests {
         validate_vendored_tree(&directory, grammar, vendored)
             .expect("all source pins and the exact primary notice agree");
         assert_eq!(vendored.license_path.as_deref(), Some("LICENSE.md"));
+    }
+
+    #[test]
+    fn ocaml_profiles_share_complete_sources_and_distinct_native_parsers() {
+        let manifest: GrammarLock =
+            toml::from_str(include_str!("../../adapters/grammars.lock")).unwrap();
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
+        let directory = root.join("third_party/tree-sitter-ocaml-0.25.0");
+        let profiles: Vec<_> = manifest
+            .grammars
+            .iter()
+            .filter(|grammar| grammar.crate_name == "tree-sitter-ocaml")
+            .collect();
+        assert_eq!(profiles.len(), 2);
+        let expected_profiles = BTreeMap::from([
+            ("ocaml", "grammars/ocaml/src"),
+            ("ocaml-interface", "grammars/interface/src"),
+        ]);
+        assert_eq!(
+            profiles
+                .iter()
+                .map(|grammar| grammar.language.as_str())
+                .collect::<BTreeSet<_>>(),
+            expected_profiles.keys().copied().collect()
+        );
+        let sources = profiles[0].vendored.as_ref().unwrap();
+        assert_eq!(sources.files.len(), 121);
+        for grammar in &profiles {
+            let vendored = grammar.vendored.as_ref().unwrap();
+            let profile = expected_profiles[grammar.language.as_str()];
+            assert_eq!(vendored.files, sources.files);
+            assert_eq!(vendored.parser_path, Some(format!("{profile}/parser.c")));
+            assert_eq!(vendored.scanner_path, Some(format!("{profile}/scanner.c")));
+            assert_eq!(vendored.license_path.as_deref(), Some("LICENSE"));
+            assert!(grammar.crates_io_checksum.is_none());
+            assert_eq!(grammar.crate_version, "0.25.0");
+            assert_eq!(grammar.abi, 15);
+            assert_eq!(grammar.license, "MIT");
+            assert_eq!(
+                grammar.vendored_source_sha256.as_deref(),
+                Some("544e58ed05a66a74ef293db0c2825003d94c6e8426c38aff5603e3743c183f10")
+            );
+            validate_vendored_tree(&directory, grammar, vendored).unwrap();
+        }
+        let binding: toml::Value = toml::from_str(include_str!(
+            "../../third_party/tree-sitter-ocaml-0.25.0/Cargo.toml"
+        ))
+        .unwrap();
+        assert_eq!(
+            binding["package"]["name"].as_str(),
+            Some("tree-sitter-ocaml")
+        );
+        assert_eq!(binding["package"]["publish"].as_bool(), Some(false));
+        assert_eq!(binding["package"]["rust-version"].as_str(), Some("1.90"));
+        assert_eq!(
+            binding["package"]["build"].as_str(),
+            Some("bindings/rust/build.rs")
+        );
+        assert_eq!(
+            binding["lib"]["path"].as_str(),
+            Some("bindings/rust/lib.rs")
+        );
+        assert_eq!(
+            binding["dependencies"]["tree-sitter-language"].as_str(),
+            Some("=0.1.7")
+        );
+        assert_eq!(
+            binding["build-dependencies"]["cc"].as_str(),
+            Some("=1.2.67")
+        );
+    }
+
+    #[test]
+    fn ocaml_vendor_preserves_archive_inputs_and_declared_scanner_repair() {
+        let manifest: GrammarLock =
+            toml::from_str(include_str!("../../adapters/grammars.lock")).unwrap();
+        let grammar = manifest
+            .grammars
+            .iter()
+            .find(|grammar| grammar.language == "ocaml")
+            .unwrap();
+        let sources = grammar.vendored.as_ref().unwrap();
+        let directory =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../third_party/tree-sitter-ocaml-0.25.0");
+        validate_vendored_tree(&directory, grammar, sources).unwrap();
+        let inventory: serde_json::Value = serde_json::from_str(include_str!(
+            "../../third_party/tree-sitter-ocaml-0.25.0/SOURCE-INVENTORY.json"
+        ))
+        .unwrap();
+        assert_eq!(inventory["schema"], "rootlight.ocaml-source-inventory/1");
+        assert_eq!(inventory["original_file_count"], 115);
+        assert_eq!(inventory["original_file_bytes"], 37_241_337);
+        assert_eq!(
+            inventory["original_directories"].as_array().unwrap().len(),
+            52
+        );
+        assert_eq!(inventory["payload_file_count"], 119);
+        assert_eq!(inventory["complete_package_file_count"], 121);
+        let payloads = inventory["payload_files"].as_array().unwrap();
+        assert_eq!(payloads.len(), 119);
+        let mut paths = BTreeSet::new();
+        for payload in payloads {
+            let path = payload["path"].as_str().unwrap();
+            assert!(is_source_relative_path(path));
+            assert!(paths.insert(path));
+            assert_eq!(
+                sources.files.get(path).map(String::as_str),
+                payload["sha256"].as_str()
+            );
+            assert_eq!(
+                fs::metadata(directory.join(path)).unwrap().len(),
+                payload["bytes"].as_u64().unwrap()
+            );
+        }
+        paths.extend(["SOURCE-INVENTORY.json", "SOURCE-PROVENANCE.json"]);
+        assert_eq!(paths, sources.files.keys().map(String::as_str).collect());
+        let remaps = BTreeMap::from([
+            (".gitattributes", ".gitattributes.upstream"),
+            (".gitignore", ".gitignore.upstream"),
+            ("Cargo.toml", "Cargo.toml.upstream"),
+            ("common/scanner.h", "common/scanner.h.orig"),
+        ]);
+        let originals = inventory["original_files"].as_array().unwrap();
+        assert_eq!(originals.len(), 115);
+        let mut original_paths = BTreeSet::new();
+        let mut original_bytes = 0_u64;
+        let mut executable_paths = BTreeSet::new();
+        for original in originals {
+            let member = original["path"].as_str().unwrap();
+            assert!(is_source_relative_path(member));
+            let retained = remaps.get(member).copied().unwrap_or(member);
+            assert_eq!(original["retained_path"], retained);
+            assert!(original_paths.insert(retained));
+            assert_eq!(
+                sources.files.get(retained).map(String::as_str),
+                original["sha256"].as_str()
+            );
+            let bytes = original["bytes"].as_u64().unwrap();
+            original_bytes = original_bytes.checked_add(bytes).unwrap();
+            assert_eq!(fs::metadata(directory.join(retained)).unwrap().len(), bytes);
+            let executable = original["executable"].as_bool().unwrap();
+            assert_eq!(original["archive_mode"], if executable { 493 } else { 420 });
+            if executable {
+                executable_paths.insert(retained);
+            }
+        }
+        assert_eq!(original_bytes, 37_241_337);
+        assert_eq!(executable_paths, BTreeSet::from(["test/parse-examples.sh"]));
+        assert_eq!(
+            original_paths,
+            payloads
+                .iter()
+                .filter(|payload| payload["original_archive_member"].as_bool().unwrap())
+                .map(|payload| payload["path"].as_str().unwrap())
+                .collect()
+        );
+        assert_eq!(
+            payloads
+                .iter()
+                .filter(|payload| !payload["original_archive_member"].as_bool().unwrap())
+                .map(|payload| payload["path"].as_str().unwrap())
+                .collect::<BTreeSet<_>>(),
+            BTreeSet::from([
+                "Cargo.toml",
+                "PATCHES.md",
+                "common/scanner.h",
+                "upstream/tree-sitter-ocaml-v0.25.0.tar.gz",
+            ])
+        );
+        let provenance: serde_json::Value = serde_json::from_str(include_str!(
+            "../../third_party/tree-sitter-ocaml-0.25.0/SOURCE-PROVENANCE.json"
+        ))
+        .unwrap();
+        assert_eq!(provenance["schema"], "rootlight.ocaml-source-provenance/1");
+        assert_eq!(provenance["original_inputs_retained_byte_exact"], true);
+        assert_eq!(provenance["retained_native_grammar_count"], 3);
+        assert_eq!(provenance["preferred_grammars_unchanged"], true);
+        assert_eq!(provenance["generated_parsers_unchanged"], true);
+        assert_eq!(provenance["upstream_rust_library_unchanged"], true);
+        assert_eq!(provenance["upstream_rust_build_script_unchanged"], true);
+        for key in ["archive", "inventory", "patch_document", "primary_license"] {
+            let evidence = &provenance[key];
+            let path = evidence["path"].as_str().unwrap();
+            assert_eq!(
+                sources.files.get(path).map(String::as_str),
+                evidence["sha256"].as_str()
+            );
+            assert_eq!(
+                fs::metadata(directory.join(path)).unwrap().len(),
+                evidence["bytes"].as_u64().unwrap()
+            );
+        }
+        for key in ["path", "bytes", "sha256"] {
+            assert_eq!(provenance["archive"][key], inventory["archive"][key]);
+        }
+        assert_eq!(
+            sources.files["common/scanner.h"],
+            "7ad1a807e2a157a5aa6c16bb85697a36b4cb7d01e9313cd5296659be12d57030"
+        );
+        assert_eq!(
+            sources.files["common/scanner.h.orig"],
+            "e4934793536f53c076b24b16de2f6a48a125c632e6cce58c80c02d6d65f8dbed"
+        );
     }
 
     #[test]

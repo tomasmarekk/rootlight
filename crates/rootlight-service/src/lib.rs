@@ -243,8 +243,8 @@ const PROJECT_FACTS_TRUNCATED_CODE: &str = "project-adapter-facts-truncated";
 const PROJECT_FACTS_TRUNCATED_MESSAGE: &str =
     "additional project semantic facts were omitted by aggregate resource limits";
 const AGGREGATE_DIAGNOSTICS_TRUNCATED_CODE: &str = "aggregate-diagnostics-truncated";
-const ANALYZER_BINARY_SEED: &[u8] = b"rootlight.first-slice.treesitter-structural/238";
-const RESOLVER_BINARY_SEED: &[u8] = b"rootlight.first-slice.resolve/105";
+const ANALYZER_BINARY_SEED: &[u8] = b"rootlight.first-slice.treesitter-structural/239";
+const RESOLVER_BINARY_SEED: &[u8] = b"rootlight.first-slice.resolve/106";
 const INCREMENTAL_PROVIDER_SEED: &[u8] = b"rootlight.first-slice.incremental-provider/1";
 const LANGUAGE_DISPOSITION_PROVIDER_SEED: &[u8] = b"rootlight.first-slice.language-disposition/12";
 const SOURCE_FILE_FALLBACK_PROVIDER_SEED: &[u8] = b"rootlight.source-file-fallback/4";
@@ -6408,6 +6408,11 @@ impl FirstSliceService {
                     "tree-sitter-scheme-native-local-{}",
                     descriptor.grammar_version()
                 )
+            } else if matches!(
+                descriptor.family(),
+                GrammarFamily::Ocaml | GrammarFamily::OcamlInterface
+            ) {
+                format!("tree-sitter-ocaml-{}", descriptor.grammar_version())
             } else if descriptor.family() == GrammarFamily::Assembly {
                 format!("tree-sitter-asm-{}", descriptor.grammar_version())
             } else if descriptor.family() == GrammarFamily::Glsl {
@@ -32264,6 +32269,157 @@ mod tests {
     }
 
     #[test]
+    fn ocaml_native_source_routes_keep_interface_claims_and_exact_bytes() {
+        let implementation =
+            "type point = { x: int }\nlet increment x = x + 1\nlet result = increment 2\n";
+        let interface = "type abstract\ntype point = { x: int }\nval increment : int -> int\n";
+        let fixture = TempDir::new().unwrap();
+        write_language_fixture(
+            fixture.path(),
+            &[("written.ml", implementation), ("written.mli", interface)],
+        );
+        let mut service = FirstSliceService::new(2).unwrap();
+        for (language, path) in [("ocaml", "written.ml"), ("ocaml-interface", "written.mli")] {
+            let mut absent = service.analyzers.clone();
+            assert!(absent.remove(language).is_some());
+            let mut input = ManifestInput {
+                file: FileId::from_bytes([3; 20]),
+                path: path.to_owned(),
+                content_hash: content_hash(implementation.as_bytes()),
+                bytes: u64::try_from(implementation.len()).unwrap(),
+                encoding: "utf-8".to_owned(),
+                class: InputClass::Source,
+                language_signals: vec![rootlight_discovery::LanguageSignal {
+                    language: "haskell".to_owned(),
+                    evidence: LanguageEvidence::Content,
+                }],
+                project_language_witnesses: Vec::new(),
+                decisive_rule: None,
+            };
+            assert_eq!(detected_source_language(&input), Some(language));
+            assert_eq!(
+                source_language_route(&input, &service.analyzers),
+                Some(language)
+            );
+            assert_eq!(source_language_route(&input, &absent), None);
+            input.language_signals = vec![rootlight_discovery::LanguageSignal {
+                language: "rust".to_owned(),
+                evidence: LanguageEvidence::Configuration,
+            }];
+            assert_eq!(
+                source_language_route(&input, &service.analyzers),
+                Some("rust")
+            );
+        }
+        let receipt = service
+            .index_repository(fixture.path(), &deadline())
+            .unwrap();
+        assert_eq!(receipt.indexed_files, 2);
+        let generation = service
+            .loaded_generation_snapshot(receipt.generation)
+            .unwrap();
+        let document = generation.document();
+        assert!(
+            !document
+                .relations
+                .iter()
+                .any(|relation| relation.predicate == RelationPredicate::Calls)
+        );
+        assert!(
+            document
+                .occurrences
+                .iter()
+                .filter(|site| matches!(
+                    site.role,
+                    OccurrenceRole::Reference | OccurrenceRole::CallSite
+                ))
+                .all(|site| matches!(site.target, OccurrenceTarget::Unresolved { .. }))
+        );
+        for (language, path, source) in [
+            ("ocaml", "written.ml", implementation),
+            ("ocaml-interface", "written.mli", interface),
+        ] {
+            let file = document
+                .files
+                .iter()
+                .find(|file| file.path == path)
+                .unwrap();
+            assert_eq!(file.language, language);
+            assert_eq!(file.content_hash, content_hash(source.as_bytes()));
+            let provenance = document
+                .provenance
+                .iter()
+                .find(|record| record.id == file.provenance)
+                .unwrap();
+            assert_eq!(
+                provenance.frontend_version.as_deref(),
+                Some("tree-sitter-ocaml-0.25.0")
+            );
+            let located = service
+                .code_locate(
+                    receipt.generation,
+                    "increment".to_owned(),
+                    LocateMode::Exact,
+                    10,
+                    0,
+                    &deadline(),
+                )
+                .unwrap();
+            let hit = located
+                .data
+                .hits
+                .iter()
+                .find(|hit| hit.path == path && hit.symbol.is_some())
+                .unwrap();
+            assert_eq!(hit.language, language);
+            let explained = service
+                .symbol_explain(receipt.generation, hit.symbol.unwrap(), &deadline())
+                .unwrap();
+            assert_eq!(explained.data.entity.kind, EntityKind::Function);
+            let reference = file.evidence.source.as_ref().unwrap();
+            assert_eq!(reference.repository(), receipt.repository);
+            assert_eq!(reference.generation(), receipt.generation);
+            assert_eq!(reference.span().file(), file.id);
+            assert_eq!(reference.content_hash(), content_hash(source.as_bytes()));
+            let read = service
+                .source_read_with_options_and_budget(
+                    receipt.generation,
+                    vec![reference.clone()],
+                    SourceReadOptions::new()
+                        .with_context_lines_before(0)
+                        .with_context_lines_after(0),
+                    FirstSliceBudget::default(),
+                    &deadline(),
+                )
+                .unwrap();
+            assert_eq!(read.data.chunks.len(), 1);
+            assert_eq!(read.data.chunks[0].bytes, source.as_bytes());
+        }
+        let lexical = rootlight_query::project_lexical_documents(
+            &generation,
+            BuildBudget::default(),
+            &deadline(),
+        )
+        .unwrap();
+        assert!(
+            lexical
+                .iter()
+                .any(|item| item.language == "ocaml-interface")
+        );
+        assert!(
+            lexical
+                .iter()
+                .filter(|item| item.language == "ocaml-interface")
+                .all(|item| item.declaration_only)
+        );
+        assert!(
+            lexical
+                .iter()
+                .any(|item| item.language == "ocaml" && !item.declaration_only)
+        );
+    }
+
+    #[test]
     fn hlsl_source_queries_preserve_written_identity_and_partial_semantics() {
         let source = "cbuffer Constants : register(b0) { float Gain; };\nfloat Shade(float Value) { return Shade(Value) + Gain; }\n";
         let fixture = TempDir::new().unwrap();
@@ -37875,6 +38031,7 @@ mod tests {
             b"rootlight.first-slice.treesitter-structural/235",
             b"rootlight.first-slice.treesitter-structural/236",
             b"rootlight.first-slice.treesitter-structural/237",
+            b"rootlight.first-slice.treesitter-structural/238",
         ] {
             let previous_parser = hash_static_components(&[
                 PARSER_PROVIDER_SET_SEED,
@@ -37896,6 +38053,7 @@ mod tests {
             b"rootlight.first-slice.resolve/99",
             b"rootlight.first-slice.resolve/103",
             b"rootlight.first-slice.resolve/104",
+            b"rootlight.first-slice.resolve/105",
         ] {
             let previous_resolver = hash_static_components(&[
                 PROVIDER_SET_SEED,

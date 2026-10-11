@@ -1420,6 +1420,14 @@ pub(crate) fn resolvable_occurrence(occurrence: &OccurrenceRecord) -> bool {
     {
         return false;
     }
+    // Module paths and polymorphic applications require OCaml-owned binding
+    // evidence; matching raw names cannot override unresolved written uses.
+    if (occurrence.syntax_kind.starts_with("ocaml.")
+        || occurrence.syntax_kind.starts_with("ocaml_interface."))
+        && matches!(occurrence.target, OccurrenceTarget::Unresolved { .. })
+    {
+        return false;
+    }
     // Written qualifiers, overloads and accessor names do not prove Pascal
     // targets. Preserve unresolved source until language-owned binding exists.
     if occurrence.syntax_kind.starts_with("pascal.")
@@ -1738,6 +1746,9 @@ mod source_owned_target_tests {
             "common_lisp.symbol.reference",
             "common_lisp.function.scoped_call",
             "scheme.symbol.reference",
+            "ocaml.value.reference",
+            "ocaml.application.call",
+            "ocaml_interface.value.reference",
             "sas.macro_call.reference",
             "sas.macro_variable.reference",
             "sas.dataset.reference",
@@ -1773,6 +1784,9 @@ mod source_owned_target_tests {
             "assembly.unproven_call.reference",
             "common_lisp.function.scoped_call",
             "scheme.symbol.reference",
+            "ocaml.value.reference",
+            "ocaml.application.call",
+            "ocaml_interface.value.reference",
             "sas.macro_call.reference",
             "apex.unproven_call.reference",
             "pascal.member_reference.reference",
@@ -1800,6 +1814,9 @@ mod source_owned_target_tests {
         };
         for syntax in [
             "scheme.symbol.reference",
+            "ocaml.value.reference",
+            "ocaml.application.call",
+            "ocaml_interface.value.reference",
             "glsl.identifier.reference",
             "glsl.member.reference",
             "glsl.unproven_call.reference",

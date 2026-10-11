@@ -103,6 +103,10 @@ pub enum GrammarFamily {
     CommonLisp,
     /// Scheme written owners without macro expansion or runtime binding inference.
     Scheme,
+    /// OCaml written implementation syntax without type or module inference.
+    Ocaml,
+    /// OCaml written interfaces without implementation or conformance inference.
+    OcamlInterface,
     /// Assembly written owners without expansion, ISA validation or assembled binding.
     Assembly,
     /// GLSL written source without shader linking or preprocessor selection.
@@ -203,7 +207,7 @@ impl GrammarRegistry {
     /// Returns [`RegistryError`] if an SDK label is invalid or a linked grammar
     /// falls outside Tree-sitter's supported ABI interval.
     pub fn audited() -> Result<Self, RegistryError> {
-        let mut descriptors = Vec::with_capacity(49);
+        let mut descriptors = Vec::with_capacity(51);
         for family in [
             GrammarFamily::Rust,
             GrammarFamily::Python,
@@ -250,6 +254,8 @@ impl GrammarRegistry {
             GrammarFamily::PlSql,
             GrammarFamily::CommonLisp,
             GrammarFamily::Scheme,
+            GrammarFamily::Ocaml,
+            GrammarFamily::OcamlInterface,
             GrammarFamily::Assembly,
             GrammarFamily::Glsl,
             GrammarFamily::Hlsl,
@@ -394,6 +400,8 @@ pub(crate) fn language_for(family: GrammarFamily) -> Language {
         GrammarFamily::PlSql => tree_sitter_plsql::LANGUAGE.into(),
         GrammarFamily::CommonLisp => tree_sitter_commonlisp::LANGUAGE_COMMONLISP.into(),
         GrammarFamily::Scheme => tree_sitter_scheme::LANGUAGE_SCHEME.into(),
+        GrammarFamily::Ocaml => tree_sitter_ocaml::LANGUAGE_OCAML.into(),
+        GrammarFamily::OcamlInterface => tree_sitter_ocaml::LANGUAGE_OCAML_INTERFACE.into(),
         GrammarFamily::Assembly => tree_sitter_asm::LANGUAGE_ASSEMBLY.into(),
         GrammarFamily::Glsl => tree_sitter_glsl::LANGUAGE_GLSL.into(),
         GrammarFamily::Hlsl => tree_sitter_hlsl::LANGUAGE_HLSL.into(),
@@ -412,6 +420,24 @@ struct GrammarIdentity {
 
 const fn identity_for(family: GrammarFamily) -> GrammarIdentity {
     match family {
+        GrammarFamily::Ocaml => GrammarIdentity {
+            language_id: "ocaml",
+            grammar_version: "0.25.0",
+            source_package_sha256: "544e58ed05a66a74ef293db0c2825003d94c6e8426c38aff5603e3743c183f10",
+            parser_sha256: "7af6bd695378fcb00fe138ebe618e6fa1696d5b967a677b6262c470565ac9157",
+            scanner_sha256: Some(
+                "fa23af8a5db2aaaf7041b60f7e762c23f1b5950388a592e2bc4dcffaffa75f5b",
+            ),
+        },
+        GrammarFamily::OcamlInterface => GrammarIdentity {
+            language_id: "ocaml-interface",
+            grammar_version: "0.25.0",
+            source_package_sha256: "544e58ed05a66a74ef293db0c2825003d94c6e8426c38aff5603e3743c183f10",
+            parser_sha256: "ceabd19beddb37631cf79dbe8a037a5549a63aa9e65b08361a37aa5c03b1dfc2",
+            scanner_sha256: Some(
+                "8ba5a82e6d2a4e9fb8ff2f54c0b3d2bc677625f3509dfdf85fc65bfa7d67d1d5",
+            ),
+        },
         GrammarFamily::Wgsl => GrammarIdentity {
             language_id: "wgsl",
             grammar_version: "0.0.9",
@@ -863,7 +889,7 @@ mod tests {
     fn registry_contains_each_audited_family_once_with_checked_abi() {
         let registry = GrammarRegistry::audited().expect("audited grammars initialize");
 
-        assert_eq!(registry.descriptors().len(), 49);
+        assert_eq!(registry.descriptors().len(), 51);
         for family in [
             GrammarFamily::Rust,
             GrammarFamily::Python,
@@ -910,6 +936,8 @@ mod tests {
             GrammarFamily::PlSql,
             GrammarFamily::CommonLisp,
             GrammarFamily::Scheme,
+            GrammarFamily::Ocaml,
+            GrammarFamily::OcamlInterface,
             GrammarFamily::Assembly,
             GrammarFamily::Glsl,
             GrammarFamily::Hlsl,
@@ -927,6 +955,37 @@ mod tests {
                     .bytes()
                     .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
             );
+        }
+    }
+
+    #[test]
+    fn ocaml_profiles_keep_distinct_factories_and_shared_source_identity() {
+        let registry = GrammarRegistry::audited().unwrap();
+        let implementation = registry.get(GrammarFamily::Ocaml).unwrap();
+        let interface = registry.get(GrammarFamily::OcamlInterface).unwrap();
+        assert_eq!(implementation.language().as_str(), "ocaml");
+        assert_eq!(interface.language().as_str(), "ocaml-interface");
+        assert_eq!(implementation.grammar_version(), "0.25.0");
+        assert_eq!(
+            implementation.grammar_version(),
+            interface.grammar_version()
+        );
+        assert_eq!(
+            implementation.grammar_source_sha256(),
+            interface.grammar_source_sha256()
+        );
+        assert_ne!(implementation.parser_sha256(), interface.parser_sha256());
+        assert_ne!(implementation.scanner_sha256(), interface.scanner_sha256());
+        assert_eq!(implementation.abi_version(), 15);
+        assert_eq!(interface.abi_version(), 15);
+        assert_ne!(
+            language_for(GrammarFamily::Ocaml),
+            language_for(GrammarFamily::OcamlInterface)
+        );
+        for family in [GrammarFamily::Ocaml, GrammarFamily::OcamlInterface] {
+            for path in ["written.ml", "written.mli", "unqualified.txt"] {
+                assert_eq!(native_family_for_source(family, path), family);
+            }
         }
     }
 
@@ -1135,6 +1194,12 @@ mod tests {
                 "scheme",
                 "tree-sitter-scheme-native-local",
             ),
+            (GrammarFamily::Ocaml, "ocaml", "tree-sitter-ocaml"),
+            (
+                GrammarFamily::OcamlInterface,
+                "ocaml-interface",
+                "tree-sitter-ocaml",
+            ),
             (GrammarFamily::Assembly, "assembly", "tree-sitter-asm"),
             (GrammarFamily::Glsl, "glsl", "tree-sitter-glsl"),
             (GrammarFamily::Hlsl, "hlsl", "tree-sitter-hlsl"),
@@ -1174,6 +1239,8 @@ mod tests {
                         || family == GrammarFamily::PlSql
                         || family == GrammarFamily::CommonLisp
                         || family == GrammarFamily::Scheme
+                        || family == GrammarFamily::Ocaml
+                        || family == GrammarFamily::OcamlInterface
                         || family == GrammarFamily::Assembly
                         || family == GrammarFamily::Glsl
                         || family == GrammarFamily::Hlsl

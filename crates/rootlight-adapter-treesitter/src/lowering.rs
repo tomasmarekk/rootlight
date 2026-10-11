@@ -4304,6 +4304,9 @@ impl<'context, 'source> Lowering<'context, 'source> {
                         | "glsl"
                         | "hlsl"
                         | "wgsl"
+                ) || is_ocaml_written_scope(
+                    self.language_for_fact(fact),
+                    fact,
                 ) || fact.syntax_kind().as_str()
                     == "vba.preprocessor_branch.scope"
                 {
@@ -6331,6 +6334,60 @@ fn equivalent_entity_projection(left: &EntityRecord, right: &EntityRecord) -> bo
         && left.provenance == right.provenance
 }
 
+fn ocaml_owner_gap(fact: &SyntaxFact) -> Option<&'static str> {
+    (fact.kind() == SyntaxFactKind::Signature
+        && matches!(
+            fact.syntax_kind().as_str(),
+            "ocaml.unsupported_type.signature"
+                | "ocaml_interface.unsupported_type.signature"
+                | "ocaml.unsupported_construct.expression"
+                | "ocaml_interface.unsupported_construct.expression"
+        ))
+    .then_some("ocaml-written-owner-and-member-analysis-unavailable")
+}
+
+fn ocaml_type_member_gap(fact: &SyntaxFact) -> Option<&'static str> {
+    (fact.kind() == SyntaxFactKind::Signature
+        && matches!(
+            fact.syntax_kind().as_str(),
+            "ocaml.unsupported_type_members.expression"
+                | "ocaml_interface.unsupported_type_members.expression"
+        ))
+    .then_some("ocaml-type-member-identity-and-occurrence-analysis-unavailable")
+}
+
+fn ocaml_source_gap(fact: &SyntaxFact) -> Option<(FactDomain, &'static str)> {
+    if let Some(reason) = ocaml_owner_gap(fact) {
+        return Some((FactDomain::Entities, reason));
+    }
+    if let Some(reason) = ocaml_type_member_gap(fact) {
+        return Some((FactDomain::Entities, reason));
+    }
+    match (fact.kind(), fact.syntax_kind().as_str()) {
+        (SyntaxFactKind::Module, "ocaml.file.module" | "ocaml_interface.file.module") => Some((
+            FactDomain::Relations,
+            "ocaml-type-module-and-runtime-binding-unavailable",
+        )),
+        (SyntaxFactKind::Signature, "ocaml.source_availability.expression") => Some((
+            FactDomain::Occurrences,
+            "ocaml-pattern-and-operator-analysis-unavailable",
+        )),
+        (SyntaxFactKind::Signature, "ocaml_interface.source_availability.expression") => Some((
+            FactDomain::Occurrences,
+            "ocaml-interface-type-and-module-reference-analysis-unavailable",
+        )),
+        (
+            SyntaxFactKind::Signature,
+            "ocaml.unsupported_type_context.expression"
+            | "ocaml_interface.unsupported_type_context.expression",
+        ) => Some((
+            FactDomain::Relations,
+            "ocaml-type-and-member-binding-unavailable",
+        )),
+        _ => None,
+    }
+}
+
 fn source_coverage_gaps(fact: &SyntaxFact) -> impl Iterator<Item = (FactDomain, &'static str)> {
     // An unanalysed attribute omits both the authored decorator occurrence and
     // its binding relation. Lexical header evidence proves neither domain.
@@ -6352,6 +6409,9 @@ fn source_coverage_gaps(fact: &SyntaxFact) -> impl Iterator<Item = (FactDomain, 
                 "fsharp-conditional-namespace-owner-unavailable",
             )),
         )
+        .chain(ocaml_owner_gap(fact).map(|reason| (FactDomain::Occurrences, reason)))
+        .chain(ocaml_owner_gap(fact).map(|reason| (FactDomain::Relations, reason)))
+        .chain(ocaml_type_member_gap(fact).map(|reason| (FactDomain::Occurrences, reason)))
         .chain(fortran_source_identity_gap(fact).map(|reason| (FactDomain::Occurrences, reason)))
         .chain(fortran_source_identity_gap(fact).map(|reason| (FactDomain::Relations, reason)))
         .chain(apex_source_identity_gap(fact).map(|reason| (FactDomain::Occurrences, reason)))
@@ -6506,6 +6566,9 @@ fn wgsl_source_gap(fact: &SyntaxFact) -> Option<(FactDomain, &'static str)> {
 }
 
 fn source_coverage_gap(fact: &SyntaxFact) -> Option<(FactDomain, &'static str)> {
+    if let Some(gap) = ocaml_source_gap(fact) {
+        return Some(gap);
+    }
     if let Some(gap) = wgsl_source_gap(fact) {
         return Some(gap);
     }
@@ -6933,6 +6996,64 @@ fn json_data_identity(parent: Option<[u8; 32]>, kind: &str, position: u64) -> [u
 }
 
 fn uses_written_source_identity(language: &str, kind: EntityKind, label: &str) -> bool {
+    if matches!(language, "ocaml" | "ocaml-interface")
+        || label.starts_with("ocaml.")
+        || label.starts_with("ocaml_interface.")
+    {
+        return matches!(
+            (language, kind, label),
+            ("ocaml", EntityKind::Function, "ocaml.function.declaration")
+                | (
+                    "ocaml-interface",
+                    EntityKind::Function,
+                    "ocaml_interface.function.declaration"
+                )
+                | ("ocaml", EntityKind::Variable, "ocaml.variable.declaration")
+                | (
+                    "ocaml-interface",
+                    EntityKind::Variable,
+                    "ocaml_interface.variable.declaration"
+                )
+                | (
+                    "ocaml",
+                    EntityKind::Parameter,
+                    "ocaml.parameter.declaration"
+                )
+                | ("ocaml", EntityKind::Struct, "ocaml.struct.declaration")
+                | (
+                    "ocaml-interface",
+                    EntityKind::Struct,
+                    "ocaml_interface.struct.declaration"
+                )
+                | ("ocaml", EntityKind::Enum, "ocaml.enum.declaration")
+                | (
+                    "ocaml-interface",
+                    EntityKind::Enum,
+                    "ocaml_interface.enum.declaration"
+                )
+                | (
+                    "ocaml",
+                    EntityKind::TypeAlias,
+                    "ocaml.type_alias.declaration"
+                )
+                | (
+                    "ocaml-interface",
+                    EntityKind::TypeAlias,
+                    "ocaml_interface.type_alias.declaration"
+                )
+                | (
+                    "ocaml",
+                    EntityKind::Module,
+                    "ocaml.module.declaration" | "ocaml.module_type.declaration"
+                )
+                | (
+                    "ocaml-interface",
+                    EntityKind::Module,
+                    "ocaml_interface.module.declaration"
+                        | "ocaml_interface.module_type.declaration"
+                )
+        );
+    }
     if language == "wgsl" {
         return matches!(
             (kind, label),
@@ -7026,13 +7147,42 @@ fn uses_written_source_identity(language: &str, kind: EntityKind, label: &str) -
         )
 }
 
+fn is_ocaml_written_scope(language: &str, fact: &SyntaxFact) -> bool {
+    fact.kind() == SyntaxFactKind::Scope
+        && matches!(
+            (language, fact.syntax_kind().as_str()),
+            (
+                "ocaml",
+                "ocaml.file.scope"
+                    | "ocaml.function.scope"
+                    | "ocaml.module.scope"
+                    | "ocaml.module_type.scope"
+                    | "ocaml.struct.scope"
+                    | "ocaml.enum.scope"
+                    | "ocaml.binding_scope.scope"
+            ) | (
+                "ocaml-interface",
+                "ocaml_interface.file.scope"
+                    | "ocaml_interface.module.scope"
+                    | "ocaml_interface.module_type.scope"
+                    | "ocaml_interface.struct.scope"
+                    | "ocaml_interface.enum.scope"
+                    | "ocaml_interface.binding_scope.scope"
+            )
+        )
+}
+
 fn written_source_identity(
     language: &str,
     parent: Option<[u8; 32]>,
     kind: &str,
     position: u64,
 ) -> [u8; 32] {
-    let context = if language == "r" {
+    let context = if language == "ocaml" {
+        "rootlight.ocaml-source-occurrence/1"
+    } else if language == "ocaml-interface" {
+        "rootlight.ocaml-interface-source-occurrence/1"
+    } else if language == "r" {
         "rootlight.r-source-occurrence/1"
     } else if language == "nix" {
         "rootlight.nix-source-occurrence/1"
@@ -7957,12 +8107,13 @@ fn markdown_language_for_syntax(syntax: &str) -> Option<&str> {
     match language {
         "objective_c" => Some("objective-c"),
         "common_lisp" => Some("common-lisp"),
+        "ocaml_interface" => Some("ocaml-interface"),
         "rust" | "javascript" | "typescript" | "python" | "c" | "cpp" | "csharp" | "go"
         | "java" | "groovy" | "haskell" | "kotlin" | "lua" | "php" | "ruby" | "swift" | "css"
         | "bash" | "json" | "toml" | "yaml" | "html" | "sql" | "r" | "nix" | "matlab" | "perl"
         | "solidity" | "scala" | "dart" | "powershell" | "astro" | "vba" | "fortran" | "plsql"
         | "sas" | "apex" | "pascal" | "assembly" | "scheme" | "glsl" | "hlsl" | "wgsl" | "xml"
-        | "dtd" => Some(language),
+        | "dtd" | "ocaml" => Some(language),
         _ => None,
     }
 }
@@ -8033,6 +8184,16 @@ fn test_source_path(path: &str) -> bool {
 }
 
 fn is_explicit_file_module(fact: &SyntaxFact, language: &str) -> bool {
+    if matches!(
+        fact.syntax_kind().as_str(),
+        "ocaml.file.module" | "ocaml_interface.file.module"
+    ) {
+        return fact.kind() == SyntaxFactKind::Module
+            && matches!(
+                (language, fact.syntax_kind().as_str()),
+                ("ocaml", "ocaml.file.module") | ("ocaml-interface", "ocaml_interface.file.module")
+            );
+    }
     if fact.syntax_kind().as_str() == "wgsl.file.module" {
         return fact.kind() == SyntaxFactKind::Module && language == "wgsl";
     }
@@ -8126,6 +8287,15 @@ fn is_explicit_file_module(fact: &SyntaxFact, language: &str) -> bool {
 }
 
 fn is_definition_capture(fact: &SyntaxFact) -> bool {
+    if fact.syntax_kind().as_str().starts_with("ocaml.")
+        || fact.syntax_kind().as_str().starts_with("ocaml_interface.")
+    {
+        return fact.kind() == SyntaxFactKind::Occurrence
+            && matches!(
+                fact.syntax_kind().as_str(),
+                "ocaml.name.definition" | "ocaml_interface.name.definition"
+            );
+    }
     fact.kind() == SyntaxFactKind::Occurrence
         && fact.syntax_kind().as_str().ends_with(".definition")
 }
@@ -8163,6 +8333,29 @@ fn is_haskell_type_annotation(fact: &SyntaxFact) -> bool {
 }
 
 fn is_signature_capture(fact: &SyntaxFact) -> bool {
+    if fact.syntax_kind().as_str().starts_with("ocaml.")
+        || fact.syntax_kind().as_str().starts_with("ocaml_interface.")
+    {
+        return fact.kind() == SyntaxFactKind::Signature
+            && matches!(
+                fact.syntax_kind().as_str(),
+                "ocaml.function.signature"
+                    | "ocaml_interface.function.signature"
+                    | "ocaml.variable.signature"
+                    | "ocaml_interface.variable.signature"
+                    | "ocaml.parameter.signature"
+                    | "ocaml.struct.signature"
+                    | "ocaml_interface.struct.signature"
+                    | "ocaml.enum.signature"
+                    | "ocaml_interface.enum.signature"
+                    | "ocaml.type_alias.signature"
+                    | "ocaml_interface.type_alias.signature"
+                    | "ocaml.module.signature"
+                    | "ocaml_interface.module.signature"
+                    | "ocaml.module_type.signature"
+                    | "ocaml_interface.module_type.signature"
+            );
+    }
     // Host context spans can equal a whole embedded function, but are not its
     // callable header. Associating them would make the real signature ambiguous.
     fact.kind() == SyntaxFactKind::Signature
@@ -8225,6 +8418,16 @@ fn supports_declaration_signature(
     declaration: &SyntaxFact,
     definition: Option<&SyntaxFact>,
 ) -> bool {
+    if matches!(language, "ocaml" | "ocaml-interface")
+        || declaration.syntax_kind().as_str().starts_with("ocaml.")
+        || declaration
+            .syntax_kind()
+            .as_str()
+            .starts_with("ocaml_interface.")
+    {
+        return declaration.kind() == SyntaxFactKind::Declaration
+            && uses_written_source_identity(language, kind, declaration.syntax_kind().as_str());
+    }
     if language == "hlsl" {
         // A source fragment cannot borrow its sibling names' complete header.
         return declaration.kind() == SyntaxFactKind::Declaration
@@ -8279,6 +8482,17 @@ fn supports_declaration_signature(
 }
 
 fn supports_signature(kind: EntityKind, language: &str) -> bool {
+    if matches!(language, "ocaml" | "ocaml-interface") {
+        return matches!(
+            kind,
+            EntityKind::Function
+                | EntityKind::Variable
+                | EntityKind::Module
+                | EntityKind::Struct
+                | EntityKind::Enum
+                | EntityKind::TypeAlias
+        ) || (language == "ocaml" && kind == EntityKind::Parameter);
+    }
     // Classic BASIC accessors share a name but have distinct Get/Let/Set headers.
     // The same rule governs identity, evidence emission and admission accounting.
     matches!(language, "fsharp" | "fsharp-signature")
@@ -8352,6 +8566,14 @@ fn automatic_instantiation_gap(fact: &SyntaxFact) -> Option<&'static str> {
 }
 
 fn source_reference_gap(fact: &SyntaxFact) -> Option<&'static str> {
+    if fact.kind() == SyntaxFactKind::Occurrence
+        && matches!(
+            fact.syntax_kind().as_str(),
+            "ocaml.application.call" | "ocaml.value.reference"
+        )
+    {
+        return Some("ocaml-module-and-application-target-unavailable");
+    }
     if fact.kind() == SyntaxFactKind::Occurrence
         && matches!(
             fact.syntax_kind().as_str(),
@@ -8531,6 +8753,30 @@ fn import_target_gap(fact: &SyntaxFact) -> &'static str {
 }
 
 fn occurrence_role(fact: &SyntaxFact) -> Option<OccurrenceRole> {
+    if fact.syntax_kind().as_str().starts_with("ocaml.")
+        || fact.syntax_kind().as_str().starts_with("ocaml_interface.")
+    {
+        return match (fact.kind(), fact.syntax_kind().as_str()) {
+            (SyntaxFactKind::Occurrence, "ocaml.application.call") => {
+                Some(OccurrenceRole::CallSite)
+            }
+            (SyntaxFactKind::Occurrence, "ocaml.value.reference") => {
+                Some(OccurrenceRole::Reference)
+            }
+            (
+                SyntaxFactKind::Comment,
+                "ocaml.comment.comment"
+                | "ocaml.comment.documentation"
+                | "ocaml_interface.comment.comment"
+                | "ocaml_interface.comment.documentation",
+            ) => Some(OccurrenceRole::Documentation),
+            (
+                SyntaxFactKind::StringLiteral,
+                "ocaml.source_text.string" | "ocaml_interface.source_text.string",
+            ) => Some(OccurrenceRole::StringEvidence),
+            _ => None,
+        };
+    }
     if fact.syntax_kind().as_str().starts_with("wgsl.") {
         return match (fact.kind(), fact.syntax_kind().as_str()) {
             (
@@ -9271,7 +9517,7 @@ mod tests {
     fn markdown_native_prefixes_keep_declared_languages() {
         for language in [
             "fortran", "plsql", "sas", "apex", "pascal", "assembly", "scheme", "glsl", "hlsl",
-            "wgsl", "xml", "dtd", "rust", "python",
+            "wgsl", "xml", "dtd", "rust", "python", "ocaml",
         ] {
             assert_eq!(
                 markdown_language_for_syntax(&format!("{language}.name.definition")),
@@ -9286,6 +9532,10 @@ mod tests {
             markdown_language_for_syntax("objective_c.method.definition"),
             Some("objective-c")
         );
+        assert_eq!(
+            markdown_language_for_syntax("ocaml_interface.name.definition"),
+            Some("ocaml-interface")
+        );
         // Profile-dependent grammars need their proven fence language, not a prefix guess.
         for syntax in [
             "unknown.name.definition",
@@ -9293,6 +9543,7 @@ mod tests {
             "glsl",
             "fsharp.name.definition",
             "cobol.name.definition",
+            "ocaml-interface.name.definition",
         ] {
             assert_eq!(markdown_language_for_syntax(syntax), None);
         }
@@ -10493,6 +10744,348 @@ mod tests {
                 EntityKind::Module,
                 "written.module.declaration"
             ));
+        }
+    }
+
+    #[test]
+    fn ocaml_written_owners_fence_profiles_kinds_headers_and_scopes() {
+        let fact = |kind, label: &str| {
+            SyntaxFact::new(
+                1,
+                None,
+                kind,
+                SourceSpan::new(FileId::from_bytes([3; 20]), 4, 30).unwrap(),
+                0,
+                SyntaxKindLabel::new(label).unwrap(),
+            )
+        };
+        for (language, prefix) in [("ocaml", "ocaml"), ("ocaml-interface", "ocaml_interface")] {
+            for (name, kind) in [
+                ("function", EntityKind::Function),
+                ("variable", EntityKind::Variable),
+                ("module", EntityKind::Module),
+                ("module_type", EntityKind::Module),
+                ("struct", EntityKind::Struct),
+                ("enum", EntityKind::Enum),
+                ("type_alias", EntityKind::TypeAlias),
+            ] {
+                let label = format!("{prefix}.{name}.declaration");
+                let owner = fact(SyntaxFactKind::Declaration, &label);
+                assert!(uses_written_source_identity(language, kind, &label));
+                assert!(supports_declaration_signature(kind, language, &owner, None));
+                assert!(supports_signature(kind, language));
+                assert!(is_signature_capture(&fact(
+                    SyntaxFactKind::Signature,
+                    &format!("{prefix}.{name}.signature")
+                )));
+                for foreign in [
+                    "rust",
+                    "scheme",
+                    "ocaml-type",
+                    if language == "ocaml" {
+                        "ocaml-interface"
+                    } else {
+                        "ocaml"
+                    },
+                ] {
+                    assert!(!uses_written_source_identity(foreign, kind, &label));
+                    assert!(!supports_declaration_signature(kind, foreign, &owner, None));
+                }
+                assert!(!uses_written_source_identity(
+                    language,
+                    kind,
+                    &format!("{label}.extra")
+                ));
+                assert!(!supports_declaration_signature(
+                    kind,
+                    language,
+                    &fact(SyntaxFactKind::Scope, &label),
+                    None
+                ));
+            }
+            let module = fact(SyntaxFactKind::Module, &format!("{prefix}.file.module"));
+            assert!(is_explicit_file_module(&module, language));
+            assert!(!is_explicit_file_module(&module, "scheme"));
+            assert!(!uses_written_source_identity(
+                language,
+                EntityKind::Module,
+                module.syntax_kind().as_str()
+            ));
+            assert!(!supports_declaration_signature(
+                EntityKind::Module,
+                language,
+                &module,
+                None
+            ));
+            for name in [
+                "file",
+                "module",
+                "module_type",
+                "struct",
+                "enum",
+                "binding_scope",
+            ] {
+                let label = format!("{prefix}.{name}.scope");
+                assert!(is_ocaml_written_scope(
+                    language,
+                    &fact(SyntaxFactKind::Scope, &label)
+                ));
+                assert!(!is_ocaml_written_scope(
+                    "scheme",
+                    &fact(SyntaxFactKind::Scope, &label)
+                ));
+                assert!(!is_ocaml_written_scope(
+                    language,
+                    &fact(SyntaxFactKind::Declaration, &label)
+                ));
+                assert!(!is_ocaml_written_scope(
+                    language,
+                    &fact(SyntaxFactKind::Scope, &format!("{label}.extra"))
+                ));
+            }
+            assert!(!is_ocaml_written_scope(
+                language,
+                &fact(SyntaxFactKind::Scope, &format!("{prefix}.type_alias.scope"))
+            ));
+            assert_ne!(
+                written_source_identity(language, None, "owner", 0),
+                written_source_identity(language, None, "owner", 1)
+            );
+            assert_ne!(
+                written_source_identity(language, None, "owner", 0),
+                written_source_identity(language, Some([1; 32]), "owner", 0)
+            );
+        }
+        assert!(uses_written_source_identity(
+            "ocaml",
+            EntityKind::Parameter,
+            "ocaml.parameter.declaration"
+        ));
+        assert!(!uses_written_source_identity(
+            "ocaml-interface",
+            EntityKind::Parameter,
+            "ocaml_interface.parameter.declaration"
+        ));
+        assert!(supports_signature(EntityKind::Parameter, "ocaml"));
+        assert!(!supports_signature(
+            EntityKind::Parameter,
+            "ocaml-interface"
+        ));
+        assert!(is_ocaml_written_scope(
+            "ocaml",
+            &fact(SyntaxFactKind::Scope, "ocaml.function.scope")
+        ));
+        assert!(!is_ocaml_written_scope(
+            "ocaml-interface",
+            &fact(SyntaxFactKind::Scope, "ocaml_interface.function.scope")
+        ));
+        assert_ne!(
+            written_source_identity("ocaml", None, "owner", 0),
+            written_source_identity("ocaml-interface", None, "owner", 0)
+        );
+    }
+
+    #[test]
+    fn ocaml_source_markers_remain_scoped_gaps_not_lexical_headers() {
+        let fact = |kind, label: &str| {
+            SyntaxFact::new(
+                1,
+                None,
+                kind,
+                SourceSpan::new(FileId::from_bytes([3; 20]), 4, 30).unwrap(),
+                0,
+                SyntaxKindLabel::new(label).unwrap(),
+            )
+        };
+        for prefix in ["ocaml", "ocaml_interface"] {
+            for marker in [
+                "unsupported_type.signature",
+                "unsupported_construct.expression",
+            ] {
+                let label = format!("{prefix}.{marker}");
+                let captured = fact(SyntaxFactKind::Signature, &label);
+                assert!(!is_signature_capture(&captured));
+                assert_eq!(
+                    source_coverage_gaps(&captured).collect::<Vec<_>>(),
+                    [
+                        FactDomain::Entities,
+                        FactDomain::Occurrences,
+                        FactDomain::Relations
+                    ]
+                    .map(|domain| (
+                        domain,
+                        "ocaml-written-owner-and-member-analysis-unavailable"
+                    ))
+                );
+                assert!(
+                    source_coverage_gaps(&fact(SyntaxFactKind::Declaration, &label))
+                        .next()
+                        .is_none()
+                );
+                assert!(
+                    source_coverage_gaps(&fact(
+                        SyntaxFactKind::Signature,
+                        &format!("{label}.extra")
+                    ))
+                    .next()
+                    .is_none()
+                );
+            }
+            let context = fact(
+                SyntaxFactKind::Signature,
+                &format!("{prefix}.unsupported_type_context.expression"),
+            );
+            assert!(!is_signature_capture(&context));
+            assert_eq!(
+                source_coverage_gaps(&context).collect::<Vec<_>>(),
+                [(
+                    FactDomain::Relations,
+                    "ocaml-type-and-member-binding-unavailable"
+                )]
+            );
+            let label = format!("{prefix}.unsupported_type_members.expression");
+            let members = fact(SyntaxFactKind::Signature, &label);
+            assert!(!is_signature_capture(&members));
+            assert_eq!(
+                source_coverage_gaps(&members).collect::<Vec<_>>(),
+                [FactDomain::Entities, FactDomain::Occurrences].map(|domain| (
+                    domain,
+                    "ocaml-type-member-identity-and-occurrence-analysis-unavailable"
+                ))
+            );
+            assert!(
+                source_coverage_gaps(&fact(SyntaxFactKind::Declaration, &label))
+                    .next()
+                    .is_none()
+            );
+            assert!(
+                source_coverage_gaps(&fact(SyntaxFactKind::Signature, &format!("{label}.extra")))
+                    .next()
+                    .is_none()
+            );
+            let module = fact(SyntaxFactKind::Module, &format!("{prefix}.file.module"));
+            assert_eq!(
+                source_coverage_gaps(&module).collect::<Vec<_>>(),
+                [(
+                    FactDomain::Relations,
+                    "ocaml-type-module-and-runtime-binding-unavailable"
+                )]
+            );
+        }
+        for (label, reason) in [
+            (
+                "ocaml.source_availability.expression",
+                "ocaml-pattern-and-operator-analysis-unavailable",
+            ),
+            (
+                "ocaml_interface.source_availability.expression",
+                "ocaml-interface-type-and-module-reference-analysis-unavailable",
+            ),
+        ] {
+            let captured = fact(SyntaxFactKind::Signature, label);
+            assert!(!is_signature_capture(&captured));
+            assert_eq!(
+                source_coverage_gaps(&captured).collect::<Vec<_>>(),
+                [(FactDomain::Occurrences, reason)]
+            );
+            assert!(
+                source_coverage_gaps(&fact(SyntaxFactKind::Scope, label))
+                    .next()
+                    .is_none()
+            );
+        }
+    }
+
+    #[test]
+    fn ocaml_use_roles_keep_exact_unresolved_physical_source_records() {
+        let repository = RepositoryId::from_bytes([1; 16]);
+        let file = FileId::from_bytes([3; 20]);
+        let span = SourceSpan::new(file, 4, 15).unwrap();
+        let fact = |kind, label: &str| {
+            SyntaxFact::new(1, None, kind, span, 0, SyntaxKindLabel::new(label).unwrap())
+        };
+        for (label, role) in [
+            ("ocaml.application.call", OccurrenceRole::CallSite),
+            ("ocaml.value.reference", OccurrenceRole::Reference),
+        ] {
+            let captured = fact(SyntaxFactKind::Occurrence, label);
+            assert_eq!(occurrence_role(&captured), Some(role));
+            assert_eq!(
+                source_reference_gap(&captured),
+                Some("ocaml-module-and-application-target-unavailable")
+            );
+            for wrong in [
+                fact(SyntaxFactKind::Signature, label),
+                fact(SyntaxFactKind::Occurrence, &format!("{label}.extra")),
+            ] {
+                assert!(occurrence_role(&wrong).is_none());
+                assert!(source_reference_gap(&wrong).is_none());
+            }
+            let source = SourceRef::new(
+                repository,
+                GenerationId::from_bytes([2; 20]),
+                span,
+                content_hash(b"Reader.read"),
+                None,
+            );
+            let record = unresolved_occurrence(
+                &captured,
+                role,
+                None,
+                derive_fact("ocaml-source-provenance", b"fixture").id(),
+                Confidence::new(SYNTAX_CONFIDENCE).unwrap(),
+                source.clone(),
+                "Reader.read",
+            )
+            .unwrap();
+            assert_eq!(record.source, source);
+            assert_eq!(record.evidence.source.as_ref(), Some(&source));
+            assert_eq!(record.generation, source.generation());
+            assert_eq!(record.file, file);
+            assert_eq!(record.role, role);
+            assert_eq!(record.syntax_kind, label);
+            assert!(matches!(record.target, OccurrenceTarget::Unresolved { .. }));
+        }
+        for prefix in ["ocaml", "ocaml_interface"] {
+            let definition = fact(
+                SyntaxFactKind::Occurrence,
+                &format!("{prefix}.name.definition"),
+            );
+            assert!(is_definition_capture(&definition));
+            assert!(occurrence_role(&definition).is_none());
+            assert!(source_reference_gap(&definition).is_none());
+            for (kind, suffix, role) in [
+                (
+                    SyntaxFactKind::Comment,
+                    "comment.comment",
+                    OccurrenceRole::Documentation,
+                ),
+                (
+                    SyntaxFactKind::Comment,
+                    "comment.documentation",
+                    OccurrenceRole::Documentation,
+                ),
+                (
+                    SyntaxFactKind::StringLiteral,
+                    "source_text.string",
+                    OccurrenceRole::StringEvidence,
+                ),
+            ] {
+                let label = format!("{prefix}.{suffix}");
+                assert_eq!(occurrence_role(&fact(kind, &label)), Some(role));
+                assert!(occurrence_role(&fact(SyntaxFactKind::Occurrence, &label)).is_none());
+            }
+        }
+        for label in [
+            "ocaml_interface.application.call",
+            "ocaml_interface.value.reference",
+            "ocaml.unknown.call",
+            "ocaml.unknown.definition",
+        ] {
+            let captured = fact(SyntaxFactKind::Occurrence, label);
+            assert!(occurrence_role(&captured).is_none());
+            assert!(source_reference_gap(&captured).is_none());
+            assert!(!is_definition_capture(&captured));
         }
     }
 

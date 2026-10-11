@@ -21,6 +21,9 @@ mod glsl;
 #[path = "structural_hlsl.rs"]
 mod hlsl;
 
+#[path = "structural_ocaml.rs"]
+mod ocaml;
+
 #[path = "structural_scheme.rs"]
 mod scheme;
 
@@ -36,12 +39,15 @@ pub use fsharp::StructuralClassificationGap;
 /// additionally requires the caller's language-specific scope evidence.
 /// Unsupported F# declaration shapes return `None`; callers must retain the
 /// corresponding [`structural_entity_classification_gap`] in entity coverage.
-/// Assembly, Common Lisp, GLSL, HLSL, Scheme and WGSL accept only exact reviewed
-/// declaration labels; unknown labels never use the shared substring classifier.
+/// Assembly, Common Lisp, GLSL, HLSL, OCaml, Scheme and WGSL accept only exact
+/// reviewed labels; unknown labels never use the shared substring classifier.
 /// HLSL buffer labels and contexts are not declarations, types or named scopes.
 #[must_use]
 pub fn structural_entity_kind(fact: &SyntaxFact) -> Option<EntityKind> {
     let label = fact.syntax_kind().as_str();
+    if label.starts_with("ocaml.") || label.starts_with("ocaml_interface.") {
+        return ocaml::entity_kind(fact);
+    }
     if label.starts_with("assembly.") {
         return assembly::entity_kind(fact);
     }
@@ -600,6 +606,8 @@ pub fn structural_captured_name(text: &str, maximum_bytes: usize) -> Option<&str
 /// and the symbol's source context; bars are not Common Lisp token fragments.
 /// WGSL borrows complete Unicode 16 XID names without normalization or folding;
 /// native context owns reserved words, shader validity and binding evidence.
+/// OCaml profiles borrow raw bounded identifier spelling; native capture owns
+/// letter-category, keyword and declaration-context proof. Paths use exact fact labels.
 /// Other languages retain
 /// the shared borrowed-name contract. Source and canonical output must both fit
 /// `maximum_bytes`. Invalid names, excess bytes or allocation failure return `None`.
@@ -611,6 +619,8 @@ pub fn structural_captured_name_for_language<'a>(
 ) -> Option<Cow<'a, str>> {
     if language == "assembly" {
         assembly::captured_name(text, maximum_bytes).map(Cow::Borrowed)
+    } else if matches!(language, "ocaml" | "ocaml-interface") {
+        ocaml::captured_name(text, maximum_bytes).map(Cow::Borrowed)
     } else if language == "glsl" {
         glsl::captured_name(text, maximum_bytes).map(Cow::Borrowed)
     } else if language == "hlsl" {
@@ -819,6 +829,8 @@ fn plsql_captured_name(text: &str, maximum_bytes: usize) -> Option<&str> {
 /// Unknown labels, other roles and foreign languages never use a generic fallback.
 /// WGSL uses exact definition and unresolved-use labels in its own namespace;
 /// accepted source spelling does not establish shader or call-target bindings.
+/// OCaml separates implementation and interface namespaces. Written value paths
+/// retain all qualifiers without inferring module or application targets.
 /// Other roles use
 /// [`structural_captured_name_for_language`]. The caller retains
 /// the original source span and validates its association with its declaration.
@@ -829,6 +841,13 @@ pub fn structural_captured_name_for_fact<'a>(
     text: &'a str,
     maximum_bytes: usize,
 ) -> Option<Cow<'a, str>> {
+    if matches!(language, "ocaml" | "ocaml-interface")
+        || fact.syntax_kind().as_str().starts_with("ocaml.")
+        || fact.syntax_kind().as_str().starts_with("ocaml_interface.")
+    {
+        return ocaml::captured_name_for_fact(language, fact, text, maximum_bytes)
+            .map(Cow::Borrowed);
+    }
     if language == "scheme" || fact.syntax_kind().as_str().starts_with("scheme.") {
         return (language == "scheme")
             .then(|| scheme::captured_name_for_fact(fact, text, maximum_bytes))

@@ -2372,6 +2372,22 @@ const LANGUAGE_CAPABILITIES: &[LanguageCapability] = &[
         analyzers: &["source-fallback"],
     },
     LanguageCapability {
+        language: "ocaml",
+        suffixes: &[".ml"],
+        aliases: &[],
+        detectors: &["extension", "configuration"],
+        maximum_tier: "tier_d",
+        analyzers: &["treesitter"],
+    },
+    LanguageCapability {
+        language: "ocaml-interface",
+        suffixes: &[".mli"],
+        aliases: &[],
+        detectors: &["extension", "configuration"],
+        maximum_tier: "tier_d",
+        analyzers: &["treesitter"],
+    },
+    LanguageCapability {
         language: "pascal",
         suffixes: &[".pas", ".dpr", ".lpr"],
         aliases: &["delphi", "object-pascal"],
@@ -6833,6 +6849,49 @@ max_source_file_bytes = 2097152
                     evidence: LanguageEvidence::Extension,
                 }]
             );
+        }
+    }
+
+    #[test]
+    fn ocaml_profiles_keep_distinct_suffixes_and_readable_source() {
+        for (language, suffix, source) in [
+            ("ocaml", ".ml", "let increment x = x + 1\n"),
+            ("ocaml-interface", ".mli", "val increment : int -> int\n"),
+        ] {
+            let capability = language_capabilities()
+                .iter()
+                .find(|entry| entry.language == language)
+                .unwrap();
+            assert_eq!(capability.suffixes, [suffix]);
+            assert!(capability.aliases.is_empty());
+            assert_eq!(capability.detectors, ["extension", "configuration"]);
+            assert_eq!(capability.analyzers, ["treesitter"]);
+            assert_eq!(canonical_language(language), Some(language));
+            for path in [
+                format!("written{suffix}"),
+                format!("WRITTEN{}", suffix.to_ascii_uppercase()),
+            ] {
+                assert_eq!(extension_language(&path), Some(language));
+                let (class, signals) = classify(
+                    &RelativePath::parse(Path::new(&path)).unwrap(),
+                    source.as_bytes(),
+                );
+                assert_eq!(class, InputClass::Source);
+                assert_eq!(
+                    signals,
+                    [LanguageSignal {
+                        language: language.to_owned(),
+                        evidence: LanguageEvidence::Extension
+                    }]
+                );
+            }
+            assert_eq!(extension_language(&format!("written{suffix}.bak")), None);
+        }
+        for path in ["generator.mll", "generator.mly", "types.mlt", "source.sml"] {
+            assert!(!matches!(
+                extension_language(path),
+                Some("ocaml" | "ocaml-interface")
+            ));
         }
     }
 
