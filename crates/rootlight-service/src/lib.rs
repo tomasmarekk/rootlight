@@ -9,6 +9,7 @@
 pub mod catalog;
 #[cfg(test)]
 mod cobol_native_tests;
+mod compressed_chunk;
 mod compression;
 mod container_sources;
 mod coverage_languages;
@@ -113,11 +114,10 @@ use rootlight_incremental::{
 };
 pub use rootlight_incremental::{ChangeClass, FactDomain, FallbackReason, FileChangeKind};
 use rootlight_ir::{
-    AnalysisTier, BuildContextIdentity, CanonicalGenerationNeutralDigests,
-    CanonicalNormalizedFileChunk, CoverageRecord, CoverageScope, CoverageStatus, DiagnosticRecord,
-    DiagnosticSeverity, EntityKind, EntityRecord, ExtensionEnvelope, ExtensionSupport,
-    FILE_IDENTITY_CLAIM_NAMESPACE, FactDomain as IrFactDomain, FactEvidence, FactRef,
-    FileIdentityClaim, FileRecord, IrDocumentUsage, IrDocumentUsageError,
+    AnalysisTier, BuildContextIdentity, CanonicalGenerationNeutralDigests, CoverageRecord,
+    CoverageScope, CoverageStatus, DiagnosticRecord, DiagnosticSeverity, EntityKind, EntityRecord,
+    ExtensionEnvelope, ExtensionSupport, FILE_IDENTITY_CLAIM_NAMESPACE, FactDomain as IrFactDomain,
+    FactEvidence, FactRef, FileIdentityClaim, FileRecord, IrDocumentUsage, IrDocumentUsageError,
     IrDocumentValidationError, IrLimits, LEXICAL_EXTENSION_NAMESPACE, NormalizedIrDocument,
     NormalizedIrVersion, OccurrenceRecord, OccurrenceRole, ProducerIdentity, ProducerKind,
     ProvenanceRecord, RelationEndpoint, RelationPredicate, RelationRecord,
@@ -2645,7 +2645,7 @@ pub struct FirstSliceSourceCoverage {
 struct StructuralArtifactEntry {
     id: ArtifactId,
     artifact: Arc<TreeSitterStructuralArtifact>,
-    normalized: Option<Arc<CanonicalNormalizedFileChunk>>,
+    normalized: Option<Arc<compressed_chunk::CompressedNormalizedFileChunk>>,
 }
 
 impl StructuralArtifactEntry {
@@ -2655,7 +2655,7 @@ impl StructuralArtifactEntry {
             .checked_add(
                 self.normalized
                     .as_ref()
-                    .map_or(0, |chunk| chunk.encoded_bytes()),
+                    .map_or(0, |chunk| chunk.accounted_bytes()),
             )
             .ok_or(FirstSliceError::Retention)
     }
@@ -2719,7 +2719,7 @@ impl StructuralArtifactCollector {
             && let Some(chunk) = entry.normalized.take()
         {
             admitted_bytes = admitted_bytes
-                .checked_sub(chunk.encoded_bytes())
+                .checked_sub(chunk.accounted_bytes())
                 .ok_or(FirstSliceError::Retention)?;
         }
         while admitted_bytes > self.maximum_bytes && self.next_normalized < self.entries.len() {
@@ -2738,10 +2738,10 @@ impl StructuralArtifactCollector {
             if let Some(chunk) = retained.normalized.take() {
                 self.accounted_bytes = self
                     .accounted_bytes
-                    .checked_sub(chunk.encoded_bytes())
+                    .checked_sub(chunk.accounted_bytes())
                     .ok_or(FirstSliceError::Retention)?;
                 admitted_bytes = admitted_bytes
-                    .checked_sub(chunk.encoded_bytes())
+                    .checked_sub(chunk.accounted_bytes())
                     .ok_or(FirstSliceError::Retention)?;
             }
             self.next_normalized = self
@@ -5300,6 +5300,20 @@ impl GenerationMemoryReservation {
             .lock()
             .map_err(|_| FirstSliceError::Retention)?
             .resize_reservation(self.generation, memory_bytes, pending, durable_cache)
+    }
+
+    /// Releases only an admitted temporary peak; ordinary resize stays grow-only.
+    fn release_temporary(&mut self, memory_bytes: u64) -> Result<(), FirstSliceError> {
+        let mut cache = self.cache.lock().map_err(|_| FirstSliceError::Retention)?;
+        let current = cache
+            .reservations
+            .get_mut(&self.generation)
+            .ok_or(FirstSliceError::CatalogCorrupt)?;
+        if memory_bytes > *current {
+            return Err(FirstSliceError::Retention);
+        }
+        *current = memory_bytes;
+        Ok(())
     }
 }
 
@@ -8493,12 +8507,33 @@ impl FirstSliceService {
                 if let Some(entry) = reusable_entry {
                     // Normalized reuse is optional. Any policy, limit, extension,
                     // or identity rejection returns to the verified lowering path.
-                    let rebound = entry.normalized.as_ref().and_then(|chunk| {
-                        chunk
-                            .rebind(generation, self.analysis_limits.ir(), &self.extensions)
-                            .ok()
-                            .map(|document| (document, Arc::clone(chunk)))
-                    });
+                    let rebound = if let Some(chunk) = &entry.normalized {
+                        let (rebound, peak) = compressed_chunk::with_optional_staging(
+                            &mut output_admission,
+                            &mut memory_reservation,
+                            chunk.reconstruction_memory_bytes(),
+                            self.durable.is_some(),
+                            cancellation,
+                            || {
+                                chunk
+                                    .rebind(
+                                        generation,
+                                        self.analysis_limits.ir(),
+                                        &self.extensions,
+                                        cancellation,
+                                    )
+                                    .map(|document| (document, Arc::clone(chunk)))
+                            },
+                            |(_, chunk)| {
+                                u64::try_from(chunk.accounted_bytes())
+                                    .map_err(|_| FirstSliceError::Limits)
+                            },
+                        )?;
+                        reserved_memory_bytes = reserved_memory_bytes.max(peak);
+                        rebound
+                    } else {
+                        None
+                    };
                     let (document, artifact, normalized, normalized_reused, parser_reused) =
                         if let Some((document, normalized)) = rebound {
                             (
@@ -8631,7 +8666,7 @@ impl FirstSliceService {
                         Err(error) => return Err(map_adapter_error(error, cancellation).into()),
                     }
                 };
-            output_admission.admit_document(
+            let serialized_document_bytes = output_admission.admit_document(
                 &file_document,
                 &mut memory_reservation,
                 self.durable.is_some(),
@@ -8644,23 +8679,47 @@ impl FirstSliceService {
             } else {
                 reused_normalized_records.insert_document(&file_document)?;
             }
-            let normalized = normalized.or_else(|| {
-                CanonicalNormalizedFileChunk::new(
-                    &file_document,
-                    self.analysis_limits.ir(),
-                    &self.extensions,
-                )
-                .ok()
-                .map(Arc::new)
-            });
-            if let Some(chunk) = &normalized {
-                output_admission.admit_known_bytes(
-                    u64::try_from(chunk.encoded_bytes()).map_err(|_| FirstSliceError::Limits)?,
-                    &mut memory_reservation,
-                    self.durable.is_some(),
-                    cancellation,
-                )?;
-            }
+            let normalized = if normalized.is_some() {
+                normalized
+            } else {
+                let workspace = generation_neutral_workspace_bytes(&file_document, || {
+                    cancellation.check().is_ok()
+                });
+                match workspace {
+                    Ok(workspace_bytes) => {
+                        let (normalized, peak) = compressed_chunk::with_optional_staging(
+                            &mut output_admission,
+                            &mut memory_reservation,
+                            compressed_chunk::staged_memory_bytes(
+                                serialized_document_bytes,
+                                workspace_bytes,
+                            ),
+                            self.durable.is_some(),
+                            cancellation,
+                            || {
+                                compressed_chunk::CompressedNormalizedFileChunk::new(
+                                    &file_document,
+                                    self.analysis_limits.ir(),
+                                    &self.extensions,
+                                    workspace_bytes,
+                                    cancellation,
+                                )
+                                .map(Arc::new)
+                            },
+                            |chunk| {
+                                u64::try_from(chunk.accounted_bytes())
+                                    .map_err(|_| FirstSliceError::Limits)
+                            },
+                        )?;
+                        reserved_memory_bytes = reserved_memory_bytes.max(peak);
+                        normalized
+                    }
+                    Err(_) => {
+                        check_cancellation(cancellation)?;
+                        None
+                    }
+                }
+            };
             if project_adapter_supports_language(language) {
                 let language_documents = structural_documents.entry(language.clone()).or_default();
                 language_documents
@@ -56748,12 +56807,20 @@ mod tests {
                     pending.receipt.generation,
                     service.analysis_limits.ir(),
                     &service.extensions,
+                    &cancellation,
                 )
                 .expect("chunk recovers the admitted file document");
+            let serialized_bytes = normalized_document_serialized_bytes(&file_document)
+                .expect("admitted document has an exact serialized size");
+            let workspace_bytes = generation_neutral_workspace_bytes(&file_document, || true)
+                .expect("admitted document has bounded graph workspace");
             let expected = source_preflight
-                + normalized_document_serialized_bytes(&file_document)
-                    .expect("admitted document has an exact serialized size")
-                + u64::try_from(chunk.encoded_bytes()).expect("chunk size fits u64");
+                + serialized_bytes
+                + compressed_chunk::staged_memory_bytes(serialized_bytes, workspace_bytes)
+                    .expect("cache construction staging fits u64");
+            let live_reservation = source_preflight
+                + serialized_bytes
+                + u64::try_from(chunk.accounted_bytes()).expect("chunk size fits u64");
             assert_eq!(pending.reserved_memory_bytes, expected);
             assert_eq!(
                 service
@@ -56762,7 +56829,11 @@ mod tests {
                     .expect("generation cache remains available")
                     .reservations
                     .get(&pending.receipt.generation),
-                Some(&expected)
+                Some(&live_reservation)
+            );
+            assert!(
+                expected > live_reservation,
+                "temporary cache work was released"
             );
             expected
         };
@@ -61616,6 +61687,7 @@ mod tests {
                         second.generation,
                         service.analysis_limits.ir(),
                         &service.extensions,
+                        &cancellation,
                     )
                     .expect("unchanged chunk rebinds for the successor"),
             )
@@ -61840,6 +61912,94 @@ mod tests {
     }
 
     #[test]
+    fn compressed_normalized_cache_reuses_unchanged_lowering_within_the_same_bound() {
+        let fixture = TempDir::new().expect("fixture root exists");
+        fs::create_dir(fixture.path().join("src")).expect("source directory exists");
+        let source = |name: &str, value: u32| {
+            (0..80)
+                .map(|index| {
+                    format!(
+                        "/// Repeated documentation for a generic cache fixture.\npub fn {name}_{index}() -> u32 {{ {value} }}\n"
+                    )
+                })
+                .collect::<String>()
+        };
+        for name in ["alpha", "bravo", "delta"] {
+            fs::write(
+                fixture.path().join(format!("src/{name}.rs")),
+                source(name, 1),
+            )
+            .expect("independent repeated source writes");
+        }
+        let cancellation = deadline();
+        let (budget, root_identity, repository) = {
+            let sizing = FirstSliceService::new(3).expect("sizing service initializes");
+            let prepared = sizing
+                .prepare_rust_fixture(fixture.path(), &cancellation)
+                .expect("unconstrained cache prepares");
+            let FirstSliceIndexPreparation::Pending(pending) = &prepared else {
+                panic!("initial fixture requires a generation");
+            };
+            let mut parser_bytes = 0_usize;
+            let mut compressed_bytes = 0_usize;
+            let mut canonical_bytes = 0_usize;
+            for (_, entry) in pending.structural_artifacts.iter() {
+                parser_bytes += entry.artifact.accounted_bytes();
+                let chunk = entry
+                    .normalized
+                    .as_ref()
+                    .expect("complete chunk is retained");
+                compressed_bytes += chunk.accounted_bytes();
+                canonical_bytes += chunk.canonical_json_bytes();
+            }
+            assert!(compressed_bytes * 2 < canonical_bytes);
+            let budget = parser_bytes + compressed_bytes * 2;
+            assert!(budget < parser_bytes + canonical_bytes);
+            assert!(budget <= MAX_RETAINED_STRUCTURAL_ARTIFACT_BYTES);
+            (budget, pending.root_identity, pending.receipt.repository)
+        };
+        let mut service = FirstSliceService::new(3).expect("bounded service initializes");
+        service
+            .restore_repository_registration(root_identity, repository)
+            .expect("sizing identity is preserved");
+        service.structural_artifacts.maximum_bytes = budget;
+        let first = service
+            .index_rust_fixture(fixture.path(), &cancellation)
+            .expect("initial generation publishes");
+        let artifacts = service
+            .structural_artifacts
+            .generation(first.generation)
+            .unwrap();
+        assert_eq!(artifacts.len(), 3);
+        assert_eq!(
+            artifacts
+                .iter()
+                .filter(|(_, entry)| entry.normalized.is_some())
+                .count(),
+            3
+        );
+        assert!(artifacts.accounted_bytes <= budget);
+        fs::write(fixture.path().join("src/alpha.rs"), source("alpha", 2))
+            .expect("one body changes");
+        let second = service
+            .index_rust_fixture(fixture.path(), &cancellation)
+            .expect("successor publishes");
+        let evidence = service.incremental_evidence(second.generation).unwrap();
+        assert_eq!(evidence.parsed_files(), 1);
+        assert_eq!(evidence.reused_parser_artifacts(), 2);
+        assert_eq!(evidence.lowered_files(), 1);
+        assert!(evidence.reused_normalized_facts() > 0);
+        assert!(service.structural_artifacts.retained_bytes <= budget);
+        assert_fresh_equivalent(
+            &service,
+            fixture.path(),
+            first.generation,
+            &second,
+            &cancellation,
+        );
+    }
+
+    #[test]
     fn optional_normalized_cache_pressure_preserves_parser_reuse() {
         let fixture = TempDir::new().expect("fixture root exists");
         fs::create_dir(fixture.path().join("src")).expect("source directory exists");
@@ -61868,7 +62028,7 @@ mod tests {
                         .normalized
                         .as_ref()
                         .expect("source supports normalized reuse")
-                        .encoded_bytes()
+                        .accounted_bytes()
                 })
                 .min()
                 .expect("normalized chunks exist");
@@ -62163,7 +62323,7 @@ mod tests {
             .normalized
             .take()
             .expect("initial normalized chunk remains retained")
-            .encoded_bytes();
+            .accounted_bytes();
         artifacts.accounted_bytes = artifacts
             .accounted_bytes
             .checked_sub(normalized_bytes)

@@ -256,15 +256,32 @@ impl CanonicalGenerationNeutralDocument {
     /// Returns [`NormalizedRebindError`] when the input violates IR limits,
     /// contains an unsupported extension, has an incomplete or cyclic fact
     /// graph, or cannot reconstruct every typed identity.
+    #[cfg(test)]
     fn new(
         document: &NormalizedIrDocument,
         limits: &IrLimits,
         extensions: &ExtensionSupport,
     ) -> Result<Self, NormalizedRebindError> {
-        require_supported_extensions(document)?;
+        Self::new_with_checkpoint(document, limits, extensions, || true)
+    }
+
+    fn new_with_checkpoint(
+        document: &NormalizedIrDocument,
+        limits: &IrLimits,
+        extensions: &ExtensionSupport,
+        mut checkpoint: impl FnMut() -> bool,
+    ) -> Result<Self, NormalizedRebindError> {
+        ensure_projection_continues(&mut checkpoint)?;
+        require_supported_extensions_with_checkpoint(document, &mut checkpoint)?;
         let canonical = canonical_preserving_extensions(document.clone(), limits, extensions)?;
-        let (document, fact_id_map) =
-            rebind_document_with_map(canonical, GENERATION_NEUTRAL_ID, limits, extensions)?;
+        ensure_projection_continues(&mut checkpoint)?;
+        let (document, fact_id_map) = rebind_document_with_map_with_checkpoint(
+            canonical,
+            GENERATION_NEUTRAL_ID,
+            limits,
+            extensions,
+            checkpoint,
+        )?;
         Ok(Self {
             document,
             fact_id_map,
@@ -492,20 +509,56 @@ impl CanonicalNormalizedFileChunk {
         limits: &IrLimits,
         extensions: &ExtensionSupport,
     ) -> Result<Self, NormalizedRebindError> {
-        let neutral = CanonicalGenerationNeutralDocument::new(document, limits, extensions)?;
+        Self::new_with_checkpoint(document, limits, extensions, || true)
+    }
+
+    /// Creates a complete neutral chunk with cooperative identity and byte checkpoints.
+    ///
+    /// Validation and canonicalization remain bounded atomic phases bracketed
+    /// by checkpoints; graph reconstruction and serialization check throughout.
+    ///
+    /// # Errors
+    ///
+    /// Returns the failures from [`Self::new`], or
+    /// [`NormalizedRebindError::Interrupted`] when the caller stops work.
+    pub fn new_with_checkpoint(
+        document: &NormalizedIrDocument,
+        limits: &IrLimits,
+        extensions: &ExtensionSupport,
+        mut checkpoint: impl FnMut() -> bool,
+    ) -> Result<Self, NormalizedRebindError> {
+        let neutral = CanonicalGenerationNeutralDocument::new_with_checkpoint(
+            document,
+            limits,
+            extensions,
+            &mut checkpoint,
+        )?;
         let [file] = neutral.document.files.as_slice() else {
             return Err(NormalizedRebindError::NotSingleFile);
         };
         let file = file.id;
         let document = neutral.document;
-        let encoded =
-            serde_json::to_vec(&document).map_err(|_| NormalizedRebindError::IdentityRecipe)?;
+        let mut writer = ChunkJsonWriter {
+            encoded: Vec::new(),
+            checkpoint: &mut checkpoint,
+            failure: None,
+        };
+        if serde_json::to_writer(&mut writer, &document).is_err() {
+            return Err(writer
+                .failure
+                .unwrap_or(NormalizedRebindError::IdentityRecipe));
+        }
+        let encoded = writer.encoded;
         let encoded_bytes = encoded.len();
         let mut hasher = blake3::Hasher::new_derive_key(CHUNK_DIGEST_DOMAIN);
         let length =
             u64::try_from(encoded_bytes).map_err(|_| NormalizedRebindError::ResourceLimit)?;
         hasher.update(&length.to_be_bytes());
-        hasher.update(&encoded);
+        for bytes in encoded.chunks(RECORD_HASH_BUFFER_BYTES) {
+            ensure_projection_continues(&mut checkpoint)?;
+            hasher.update(bytes);
+        }
+        ensure_projection_continues(&mut checkpoint)?;
         Ok(Self {
             document,
             file,
@@ -532,6 +585,16 @@ impl CanonicalNormalizedFileChunk {
         self.encoded_bytes
     }
 
+    /// Consumes the chunk into its complete generation-neutral canonical document.
+    ///
+    /// Callers encoding a process-local reuse artifact can move this document
+    /// into their encoder and release it after completion instead of retaining
+    /// an uncompressed copy alongside encoded storage.
+    #[must_use]
+    pub fn into_document(self) -> NormalizedIrDocument {
+        self.document
+    }
+
     /// Rebinds the complete chunk to one child generation.
     ///
     /// # Errors
@@ -545,7 +608,59 @@ impl CanonicalNormalizedFileChunk {
         limits: &IrLimits,
         extensions: &ExtensionSupport,
     ) -> Result<NormalizedIrDocument, NormalizedRebindError> {
-        rebind_document(self.document.clone(), generation, limits, extensions)
+        self.rebind_with_checkpoint(generation, limits, extensions, || true)
+    }
+
+    /// Rebinds every identity and reference with cooperative graph checkpoints.
+    ///
+    /// # Errors
+    ///
+    /// Returns the failures from [`Self::rebind`], or
+    /// [`NormalizedRebindError::Interrupted`] when the caller stops work.
+    pub fn rebind_with_checkpoint(
+        &self,
+        generation: GenerationId,
+        limits: &IrLimits,
+        extensions: &ExtensionSupport,
+        mut checkpoint: impl FnMut() -> bool,
+    ) -> Result<NormalizedIrDocument, NormalizedRebindError> {
+        ensure_projection_continues(&mut checkpoint)?;
+        rebind_document_with_map_with_checkpoint(
+            self.document.clone(),
+            generation,
+            limits,
+            extensions,
+            checkpoint,
+        )
+        .map(|(document, _)| document)
+    }
+}
+
+struct ChunkJsonWriter<'a, F> {
+    encoded: Vec<u8>,
+    checkpoint: &'a mut F,
+    failure: Option<NormalizedRebindError>,
+}
+
+impl<F: FnMut() -> bool> std::io::Write for ChunkJsonWriter<'_, F> {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        let result = (|| {
+            ensure_projection_continues(self.checkpoint)?;
+            let count = bytes.len().min(RECORD_HASH_BUFFER_BYTES);
+            self.encoded
+                .try_reserve(count)
+                .map_err(|_| NormalizedRebindError::ResourceLimit)?;
+            self.encoded.extend_from_slice(&bytes[..count]);
+            Ok(count)
+        })();
+        result.map_err(|failure| {
+            self.failure = Some(failure);
+            std::io::Error::other("canonical chunk serialization stopped")
+        })
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
     }
 }
 
@@ -817,12 +932,6 @@ fn canonical_preserving_extensions(
     let mut preservation = extensions.clone();
     preservation.unknown_noncritical = UnknownNoncriticalExtensionPolicy::Preserve;
     canonicalize_ir_document(document, limits, &preservation).map_err(Into::into)
-}
-
-fn require_supported_extensions(
-    document: &NormalizedIrDocument,
-) -> Result<(), NormalizedRebindError> {
-    require_supported_extensions_with_checkpoint(document, &mut || true)
 }
 
 fn require_supported_extensions_with_checkpoint(
@@ -1097,6 +1206,7 @@ fn clear_fact_records(document: &mut NormalizedIrDocument) {
     document.extensions.clear();
 }
 
+#[cfg(test)]
 fn rebind_document(
     document: NormalizedIrDocument,
     generation: GenerationId,
@@ -1106,16 +1216,27 @@ fn rebind_document(
     rebind_document_with_map(document, generation, limits, extensions).map(|(document, _)| document)
 }
 
+#[cfg(test)]
 fn rebind_document_with_map(
     document: NormalizedIrDocument,
     generation: GenerationId,
     limits: &IrLimits,
     extensions: &ExtensionSupport,
 ) -> Result<(NormalizedIrDocument, FactIdMap), NormalizedRebindError> {
-    require_supported_extensions(&document)?;
+    rebind_document_with_map_with_checkpoint(document, generation, limits, extensions, || true)
+}
+
+fn rebind_document_with_map_with_checkpoint(
+    document: NormalizedIrDocument,
+    generation: GenerationId,
+    limits: &IrLimits,
+    extensions: &ExtensionSupport,
+    mut checkpoint: impl FnMut() -> bool,
+) -> Result<(NormalizedIrDocument, FactIdMap), NormalizedRebindError> {
+    ensure_projection_continues(&mut checkpoint)?;
+    require_supported_extensions_with_checkpoint(&document, &mut checkpoint)?;
     let mut rebound = NormalizedIrDocument::empty(document.repository, generation);
     rebound.version = document.version;
-    let mut checkpoint = || true;
     let ids = derive_fact_id_map(&document, generation, &mut checkpoint)?;
     for (_, location) in fact_locations(&document, &mut checkpoint)? {
         rebind_node(
@@ -1148,6 +1269,7 @@ fn rebind_document_with_map(
             .push(rebind_entity(record, generation, &ids, &mut checkpoint)?);
     }
     let rebound = canonical_preserving_extensions(rebound, limits, extensions)?;
+    ensure_projection_continues(&mut checkpoint)?;
     Ok((rebound, ids))
 }
 
@@ -2433,6 +2555,97 @@ mod tests {
         assert_eq!(first_chunk.file(), second_chunk.file());
         assert_eq!(first_chunk.digest(), second_chunk.digest());
         assert_eq!(first_chunk.encoded_bytes(), second_chunk.encoded_bytes());
+    }
+
+    #[test]
+    fn chunk_checkpoints_preserve_digest_and_stop_identity_work() {
+        let document = fixture_with_lexical_extension();
+        let limits = IrLimits::default();
+        let extensions = ExtensionSupport::default();
+        let expected = CanonicalNormalizedFileChunk::new(&document, &limits, &extensions).unwrap();
+        let calls = std::cell::Cell::new(0_usize);
+        let chunk = CanonicalNormalizedFileChunk::new_with_checkpoint(
+            &document,
+            &limits,
+            &extensions,
+            || {
+                calls.set(calls.get() + 1);
+                true
+            },
+        )
+        .unwrap();
+        assert_eq!(chunk, expected);
+        for allowance in [0, calls.get() / 2, calls.get() - 1] {
+            let mut remaining = allowance;
+            assert_eq!(
+                CanonicalNormalizedFileChunk::new_with_checkpoint(
+                    &document,
+                    &limits,
+                    &extensions,
+                    || {
+                        let proceed = remaining > 0;
+                        remaining = remaining.saturating_sub(1);
+                        proceed
+                    },
+                ),
+                Err(NormalizedRebindError::Interrupted),
+            );
+        }
+        let generation = GenerationId::from_bytes([91; 20]);
+        calls.set(0);
+        let rebound = chunk
+            .rebind_with_checkpoint(generation, &limits, &extensions, || {
+                calls.set(calls.get() + 1);
+                true
+            })
+            .unwrap();
+        assert_eq!(
+            rebound,
+            chunk.rebind(generation, &limits, &extensions).unwrap()
+        );
+        for allowance in [0, calls.get() / 2, calls.get() - 1] {
+            let mut remaining = allowance;
+            assert_eq!(
+                chunk.rebind_with_checkpoint(generation, &limits, &extensions, || {
+                    let proceed = remaining > 0;
+                    remaining = remaining.saturating_sub(1);
+                    proceed
+                }),
+                Err(NormalizedRebindError::Interrupted),
+            );
+        }
+        let file = chunk.file();
+        let digest = chunk.digest();
+        let neutral = chunk.into_document();
+        assert_eq!(neutral.generation, GENERATION_NEUTRAL_ID);
+        let reconstructed =
+            CanonicalNormalizedFileChunk::new(&neutral, &limits, &extensions).unwrap();
+        assert_eq!(reconstructed.file(), file);
+        assert_eq!(reconstructed.digest(), digest);
+    }
+
+    #[test]
+    fn chunk_json_writer_checks_between_bounded_output_chunks() {
+        use std::io::Write;
+
+        let mut remaining = 1_usize;
+        let mut checkpoint = || {
+            let proceed = remaining > 0;
+            remaining = remaining.saturating_sub(1);
+            proceed
+        };
+        let mut writer = ChunkJsonWriter {
+            encoded: Vec::new(),
+            checkpoint: &mut checkpoint,
+            failure: None,
+        };
+        assert!(
+            writer
+                .write_all(&vec![b'x'; 2 * RECORD_HASH_BUFFER_BYTES])
+                .is_err()
+        );
+        assert_eq!(writer.encoded.len(), RECORD_HASH_BUFFER_BYTES);
+        assert_eq!(writer.failure, Some(NormalizedRebindError::Interrupted));
     }
 
     #[test]
