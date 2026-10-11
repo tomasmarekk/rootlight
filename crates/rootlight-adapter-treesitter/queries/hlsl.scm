@@ -11,7 +11,7 @@
 
 (declaration declarator: (_) @declaration @definition @signature)
 (field_declaration declarator: (_) @declaration @definition @signature)
-[(compound_statement) (field_declaration_list)] @scope
+[(compound_statement) (field_declaration_list) (declaration_list)] @scope
 
 [(function_definition)
  (struct_specifier)
@@ -21,6 +21,7 @@
  (field_declaration)
  (compound_statement)
  (field_declaration_list)
+ (declaration_list)
  (cbuffer_specifier)
  (resource_binding)
  (semantics)

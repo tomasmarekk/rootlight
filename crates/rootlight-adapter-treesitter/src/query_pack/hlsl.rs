@@ -1,6 +1,7 @@
 //! HLSL captures preserve complete physical owners and unresolved written uses.
 //! Native C++ recognition is not shader binding evidence; buffer labels never
 //! become entities, name occurrences or named scopes in this dedicated contract.
+//! Namespace bodies supply proven physical containment, not namespace identities.
 
 use std::{collections::HashMap, ops::Range};
 
@@ -283,7 +284,6 @@ fn unsupported_cpp(node: Node<'_>) -> bool {
             | "ms_declspec_modifier"
             | "ms_call_modifier"
             | "gnu_asm_expression"
-            | "namespace_definition"
             | "namespace_alias_definition"
             | "template_declaration"
             | "alias_declaration"
@@ -558,7 +558,58 @@ fn conditional(node: Node<'_>) -> bool {
     )
 }
 
-fn physical_position(node: Node<'_>, cancellation: &Cancellation) -> Result<bool, AdapterError> {
+fn namespace_body<'tree>(
+    node: Node<'tree>,
+    source: &[u8],
+    cancellation: &Cancellation,
+) -> Result<Option<Node<'tree>>, AdapterError> {
+    if node.kind() != "namespace_definition" || !clean(node, source) {
+        return Ok(None);
+    }
+    let Some(body) = field(node, "body") else {
+        return Ok(None);
+    };
+    if body.kind() != "declaration_list" || !boundary(body, source, b"{", b"}", cancellation)? {
+        return Ok(None);
+    }
+    let name = field(node, "name");
+    if name.is_some_and(|name| {
+        name.kind() != "namespace_identifier"
+            || !clean(name, source)
+            || text(name, source).is_none_or(|raw| {
+                structural_captured_name_for_language("hlsl", raw, raw.len()).as_deref()
+                    != Some(raw)
+            })
+    }) {
+        return Ok(None);
+    }
+    let mut stage = 0;
+    let mut cursor = node.walk();
+    for child in node.children(&mut cursor) {
+        cancellation.check()?;
+        if child.is_extra() {
+            continue;
+        }
+        stage = match stage {
+            0 if text(child, source) == Some("namespace")
+                && child.start_byte() == node.start_byte() =>
+            {
+                1
+            }
+            1 if Some(child) == name => 2,
+            1 | 2 if child == body && child.end_byte() == node.end_byte() => 3,
+            _ => return Ok(None),
+        };
+    }
+    Ok((stage == 3).then_some(body))
+}
+
+fn physical_position(
+    node: Node<'_>,
+    source: &[u8],
+    cancellation: &Cancellation,
+    cache: &mut CaptureCache,
+) -> Result<bool, AdapterError> {
     let mut child = node;
     while let Some(parent) = child.parent() {
         cancellation.check()?;
@@ -568,6 +619,17 @@ fn physical_position(node: Node<'_>, cancellation: &Cancellation) -> Result<bool
             }
             child = parent;
             continue;
+        }
+        if parent.kind() == "declaration_list" {
+            return match parent.parent() {
+                Some(container) => Ok(container.kind() == "namespace_definition"
+                    && field(container, "body") == Some(parent)
+                    && cache.owner(container, source, cancellation)?.is_some()),
+                None => Ok(false),
+            };
+        }
+        if node.kind() == "namespace_definition" {
+            return Ok(parent.kind() == "translation_unit");
         }
         return Ok(matches!(
             parent.kind(),
@@ -605,6 +667,8 @@ fn owner_kind(node: Node<'_>) -> bool {
             | "cbuffer_specifier"
             | "compound_statement"
             | "field_declaration_list"
+            | "namespace_definition"
+            | "declaration_list"
     )
 }
 
@@ -615,7 +679,9 @@ fn declaration_proof(
     cache: &mut CaptureCache,
     mut proof: OwnerProof,
 ) -> Result<Option<OwnerProof>, AdapterError> {
-    if !physical_position(node, cancellation)? || !prefix_valid(node, source, cancellation)? {
+    if !physical_position(node, source, cancellation, cache)?
+        || !prefix_valid(node, source, cancellation)?
+    {
         return Ok(None);
     }
     let (Some(ty), Some(terminal)) = (field(node, "type"), semicolon(node, source, cancellation)?)
@@ -750,7 +816,8 @@ fn owner_proof(
     }
     match node.kind() {
         "function_definition" => {
-            if !physical_position(node, cancellation)? || !prefix_valid(node, source, cancellation)?
+            if !physical_position(node, source, cancellation, cache)?
+                || !prefix_valid(node, source, cancellation)?
             {
                 return Ok(None);
             }
@@ -799,7 +866,7 @@ fn owner_proof(
             };
             proof.header = header;
             if node.kind() == "cbuffer_specifier" {
-                if !physical_position(node, cancellation)?
+                if !physical_position(node, source, cancellation, cache)?
                     || field(node, "binding").is_some_and(|binding| {
                         binding.kind() != "resource_binding" || !clean(binding, source)
                     })
@@ -829,6 +896,26 @@ fn owner_proof(
                 None => None,
             };
             proof.syntax = "hlsl.parameter";
+            return Ok(Some(proof));
+        }
+        "namespace_definition" => {
+            if !physical_position(node, source, cancellation, cache)?
+                || namespace_body(node, source, cancellation)?.is_none()
+            {
+                return Ok(None);
+            }
+            return Ok(Some(proof));
+        }
+        "declaration_list" => {
+            let Some(container) = node.parent() else {
+                return Ok(None);
+            };
+            if container.kind() != "namespace_definition"
+                || field(container, "body") != Some(node)
+                || cache.owner(container, source, cancellation)?.is_none()
+            {
+                return Ok(None);
+            }
             return Ok(Some(proof));
         }
         "compound_statement" | "field_declaration_list" => {
@@ -873,8 +960,10 @@ fn child_use_context(context: UseContext, parent: Node<'_>, child: Node<'_>) -> 
             && ["condition", "name"]
                 .into_iter()
                 .any(|name| field(parent, name) == Some(child)))
-        || (matches!(parent.kind(), "function_definition" | "cbuffer_specifier")
-            && field(parent, "body") != Some(child))
+        || (matches!(
+            parent.kind(),
+            "function_definition" | "cbuffer_specifier" | "namespace_definition"
+        ) && field(parent, "body") != Some(child))
     {
         return UseContext::Excluded;
     }
@@ -943,7 +1032,10 @@ pub(super) fn retain_capture(
             }));
     }
     Ok(role == StructuralRole::Scope
-        && matches!(node.kind(), "compound_statement" | "field_declaration_list")
+        && matches!(
+            node.kind(),
+            "compound_statement" | "field_declaration_list" | "declaration_list"
+        )
         && !(node.kind() == "field_declaration_list"
             && node
                 .parent()
@@ -972,7 +1064,7 @@ fn expression_syntax(
     ) {
         return Ok("hlsl.annotation_context");
     }
-    if unsupported_cpp(node) || node.kind() == "ERROR" {
+    if node.kind() == "namespace_definition" || unsupported_cpp(node) || node.kind() == "ERROR" {
         return Ok("hlsl.unsupported_owner");
     }
     if owner_kind(node) {
@@ -1477,6 +1569,187 @@ mod tests {
     }
 
     #[test]
+    fn namespace_positions_reuse_only_ancestor_owner_cache() {
+        let mut source = String::from("namespace Shared {\n");
+        for index in 0..16 {
+            source.push_str(&format!("float Value{index};\n"));
+        }
+        source.push_str("}\n");
+        let parsed = tree(source.as_bytes());
+        assert!(!parsed.root_node().has_error());
+        let namespace = parsed.root_node().named_child(0).unwrap();
+        let body = field(namespace, "body").unwrap();
+        assert_eq!(body.named_child_count(), 16);
+        let cancellation = Cancellation::new();
+        let mut cache = CaptureCache::new(2);
+        for index in 0..body.named_child_count() {
+            let declaration = body.named_child(u32::try_from(index).unwrap()).unwrap();
+            assert!(
+                physical_position(declaration, source.as_bytes(), &cancellation, &mut cache)
+                    .unwrap()
+            );
+        }
+        assert_eq!(cache.entries.len(), 1);
+        assert!(
+            cache
+                .entries
+                .get(&namespace.id())
+                .and_then(|entry| entry.owner.as_ref())
+                .is_some_and(|proof| proof.as_ref().is_some_and(|proof| proof.name.is_none()))
+        );
+        let proof = cache
+            .owner(body, source.as_bytes(), &cancellation)
+            .unwrap()
+            .unwrap();
+        assert_eq!(proof.extent, body.byte_range());
+        assert!(proof.name.is_none());
+        for index in 0..body.named_child_count() {
+            let declaration = body.named_child(u32::try_from(index).unwrap()).unwrap();
+            assert!(
+                physical_position(declaration, source.as_bytes(), &cancellation, &mut cache)
+                    .unwrap()
+            );
+        }
+        assert_eq!(cache.entries.len(), 2);
+        assert!(!cache.exhausted());
+    }
+
+    #[test]
+    fn namespace_containers_preserve_nested_owners_without_namespace_identities() {
+        let source = "namespace Outer {\nnamespace Inner {\nstruct Payload { float Member; };\nfloat Global = Seed;\nfloat Prototype(float PrototypeValue);\nfloat Execute(float Input) { float Local = Input; return Global + Local + Prototype(Input); }\ncbuffer Bindings : register(b0) { float BufferValue; };\n}\n}\n";
+        let (tree, extraction) = extract(source, 1024);
+        assert!(
+            !tree.root_node().has_error(),
+            "{}",
+            tree.root_node().to_sexp()
+        );
+        assert!(extraction.limit.is_none());
+        let captures = &extraction.candidates;
+        assert_eq!(
+            names(source, captures, StructuralRole::Definition),
+            [
+                "Payload",
+                "Member",
+                "Global",
+                "Prototype",
+                "PrototypeValue",
+                "Execute",
+                "Input",
+                "Local",
+                "BufferValue"
+            ]
+        );
+        assert_eq!(
+            names(source, captures, StructuralRole::Reference),
+            ["Seed", "Input", "Global", "Local", "Prototype", "Input"]
+        );
+        let headers = names(source, captures, StructuralRole::Signature);
+        for header in [
+            "struct Payload",
+            "float Member",
+            "float Global = Seed",
+            "float Prototype(float PrototypeValue)",
+            "float Execute(float Input)",
+            "float Local = Input",
+            "float BufferValue",
+        ] {
+            assert!(headers.contains(&header), "{header}");
+        }
+        let outer = tree.root_node().named_child(0).unwrap();
+        let outer_body = namespace_body(outer, source.as_bytes(), &Cancellation::new())
+            .unwrap()
+            .unwrap();
+        let inner = outer_body.named_child(0).unwrap();
+        let inner_body = namespace_body(inner, source.as_bytes(), &Cancellation::new())
+            .unwrap()
+            .unwrap();
+        for body in [outer_body, inner_body] {
+            assert!(captures.iter().any(|capture| {
+                capture.role == StructuralRole::Scope
+                    && capture.syntax == "hlsl.body"
+                    && capture.start == body.start_byte()
+                    && capture.end == body.end_byte()
+            }));
+        }
+        for namespace in [outer, inner] {
+            let mut cache = CaptureCache::new(1024);
+            let proof = cache
+                .owner(namespace, source.as_bytes(), &Cancellation::new())
+                .unwrap()
+                .unwrap();
+            assert!(proof.name.is_none());
+            assert!(captures.iter().any(|capture| {
+                capture.role == StructuralRole::Expression
+                    && capture.syntax == "hlsl.unsupported_owner"
+                    && capture.start == namespace.start_byte()
+                    && capture.end == namespace.end_byte()
+            }));
+            for role in [
+                StructuralRole::Declaration,
+                StructuralRole::Definition,
+                StructuralRole::Signature,
+                StructuralRole::Reference,
+                StructuralRole::Scope,
+            ] {
+                assert!(
+                    !retain_capture(
+                        namespace,
+                        role,
+                        source.as_bytes(),
+                        &Cancellation::new(),
+                        &mut cache,
+                    )
+                    .unwrap()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn namespace_containers_keep_foreign_recovery_and_qualified_fences() {
+        for source in [
+            "namespace Outer { class Foreign { float Hidden; }; float Visible; }\n",
+            "namespace Outer { template <typename T> struct Foreign { T Hidden; }; float Visible; }\n",
+            "namespace Outer { float Qualified::Hidden(float Value) { return Value; } float Visible; }\n",
+            "namespace Alias = Foreign;\nfloat Visible;\n",
+        ] {
+            let (_, extraction) = extract(source, 1024);
+            assert_eq!(
+                names(source, &extraction.candidates, StructuralRole::Definition),
+                ["Visible"],
+                "{source}"
+            );
+            assert!(names(source, &extraction.candidates, StructuralRole::Reference).is_empty());
+            assert!(has(
+                &extraction.candidates,
+                "hlsl.unsupported_owner",
+                StructuralRole::Expression
+            ));
+        }
+        let source = "namespace Broken { float Hidden;\n";
+        let (tree, extraction) = extract(source, 1024);
+        assert!(tree.root_node().has_error());
+        assert!(names(source, &extraction.candidates, StructuralRole::Definition).is_empty());
+        assert!(names(source, &extraction.candidates, StructuralRole::Reference).is_empty());
+        assert!(has(
+            &extraction.candidates,
+            "hlsl.unsupported_owner",
+            StructuralRole::Expression
+        ));
+        let source =
+            "namespace Outer { float Read(float Input) { return Other::Value + Input; } }\n";
+        let (_, extraction) = extract(source, 1024);
+        assert_eq!(
+            names(source, &extraction.candidates, StructuralRole::Definition),
+            ["Read", "Input"]
+        );
+        assert_eq!(
+            names(source, &extraction.candidates, StructuralRole::Reference),
+            ["Input"]
+        );
+    }
+
+    #[test]
     fn comments_recovery_and_inherited_owners_cannot_launder_names() {
         let source = "/* float Phantom() { return Ghost; } λ */\n@;\nfloat Visible(float Value) { return Value; }\n";
         let (tree, extraction) = extract(source, 1024);
@@ -1499,7 +1772,7 @@ mod tests {
             "float Broken(float Value) { return Value;",
             "float Broken( { return Value; }",
             "Broken(float Value) { return Value; }",
-            "float *Pointer;\nclass Foreign { float Member; };\nnamespace Foreign { float Value; }\n",
+            "float *Pointer;\nclass Foreign { float Member; };\nnamespace Alias = Foreign;\n",
             "float First(), Second();",
         ] {
             let (_, extraction) = extract(source, 1024);

@@ -243,7 +243,7 @@ const PROJECT_FACTS_TRUNCATED_CODE: &str = "project-adapter-facts-truncated";
 const PROJECT_FACTS_TRUNCATED_MESSAGE: &str =
     "additional project semantic facts were omitted by aggregate resource limits";
 const AGGREGATE_DIAGNOSTICS_TRUNCATED_CODE: &str = "aggregate-diagnostics-truncated";
-const ANALYZER_BINARY_SEED: &[u8] = b"rootlight.first-slice.treesitter-structural/241";
+const ANALYZER_BINARY_SEED: &[u8] = b"rootlight.first-slice.treesitter-structural/242";
 const RESOLVER_BINARY_SEED: &[u8] = b"rootlight.first-slice.resolve/107";
 const INCREMENTAL_PROVIDER_SEED: &[u8] = b"rootlight.first-slice.incremental-provider/1";
 const LANGUAGE_DISPOSITION_PROVIDER_SEED: &[u8] = b"rootlight.first-slice.language-disposition/12";
@@ -38460,6 +38460,8 @@ mod tests {
             b"rootlight.first-slice.treesitter-structural/237",
             b"rootlight.first-slice.treesitter-structural/238",
             b"rootlight.first-slice.treesitter-structural/239",
+            b"rootlight.first-slice.treesitter-structural/240",
+            b"rootlight.first-slice.treesitter-structural/241",
         ] {
             let previous_parser = hash_static_components(&[
                 PARSER_PROVIDER_SET_SEED,
@@ -38482,6 +38484,7 @@ mod tests {
             b"rootlight.first-slice.resolve/103",
             b"rootlight.first-slice.resolve/104",
             b"rootlight.first-slice.resolve/105",
+            b"rootlight.first-slice.resolve/106",
         ] {
             let previous_resolver = hash_static_components(&[
                 PROVIDER_SET_SEED,

@@ -525,6 +525,199 @@ fn hlsl_shader_contexts_and_initializer_uses_do_not_claim_selection_or_targets()
 }
 
 #[test]
+fn hlsl_namespace_containers_preserve_written_owners_and_unresolved_uses() {
+    let source = "namespace Outer {\nnamespace Inner {\nstruct Payload { float Member; };\nfloat Global = Seed;\nfloat Prototype(float PrototypeValue);\nfloat Execute(float Input) { float Local = Input; return Global + Local + Prototype(Input); }\ncbuffer Bindings : register(b0) { float BufferValue; };\n}\n}\n";
+    let result = output(source);
+    assert!(result.document().diagnostics.is_empty());
+    assert_eq!(result.document().entities.len(), 10);
+    let namespace_gaps = result
+        .document()
+        .skipped_regions
+        .iter()
+        .filter(|gap| {
+            gap.domain == FactDomain::Entities
+                && gap.detail == "hlsl-written-owner-analysis-unavailable"
+                && text(source, &gap.source).starts_with("namespace ")
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(namespace_gaps.len(), 2);
+    for prefix in ["namespace Outer {", "namespace Inner {"] {
+        assert!(
+            namespace_gaps
+                .iter()
+                .any(|gap| { text(source, &gap.source).starts_with(prefix) })
+        );
+    }
+    for (name, kind) in [
+        ("Payload", EntityKind::Struct),
+        ("Member", EntityKind::Field),
+        ("Global", EntityKind::Variable),
+        ("Prototype", EntityKind::Function),
+        ("PrototypeValue", EntityKind::Parameter),
+        ("Execute", EntityKind::Function),
+        ("Input", EntityKind::Parameter),
+        ("Local", EntityKind::Variable),
+        ("BufferValue", EntityKind::Variable),
+    ] {
+        assert_definition(&result, source, name, kind);
+    }
+    assert_owner(&result, "Member", "Payload");
+    assert_owner(&result, "PrototypeValue", "Prototype");
+    assert_owner(&result, "Input", "Execute");
+    assert_declaration(
+        &result,
+        source,
+        "Payload",
+        "struct Payload { float Member; }",
+    );
+    assert_declaration(&result, source, "Member", "float Member;");
+    assert_declaration(&result, source, "Global", "float Global = Seed;");
+    assert_declaration(
+        &result,
+        source,
+        "Execute",
+        "float Execute(float Input) { float Local = Input; return Global + Local + Prototype(Input); }",
+    );
+    assert_eq!(signatures(&result, source, "Payload"), ["struct Payload"]);
+    assert_eq!(signatures(&result, source, "Member"), ["float Member"]);
+    assert_eq!(
+        signatures(&result, source, "Execute"),
+        ["float Execute(float Input)"]
+    );
+    let mut references = result
+        .document()
+        .occurrences
+        .iter()
+        .filter(|occurrence| occurrence.role == OccurrenceRole::Reference)
+        .collect::<Vec<_>>();
+    references.sort_unstable_by_key(|occurrence| {
+        (
+            occurrence.source.span().start_byte(),
+            occurrence.source.span().end_byte(),
+        )
+    });
+    assert_eq!(
+        references
+            .iter()
+            .map(|occurrence| text(source, &occurrence.source))
+            .collect::<Vec<_>>(),
+        ["Seed", "Input", "Global", "Local", "Prototype", "Input"]
+    );
+    for occurrence in references {
+        assert!(matches!(
+            occurrence.target,
+            OccurrenceTarget::Unresolved { .. }
+        ));
+        assert_gap(
+            &result,
+            source,
+            FactDomain::Relations,
+            "hlsl-binding-and-dispatch-target-unavailable",
+            text(source, &occurrence.source),
+        );
+    }
+    for name in ["Outer", "Inner", "Bindings"] {
+        assert!(
+            !result
+                .document()
+                .entities
+                .iter()
+                .any(|entity| entity.canonical_name == name)
+        );
+        assert!(
+            !result
+                .document()
+                .occurrences
+                .iter()
+                .any(|occurrence| { text(source, &occurrence.source) == name })
+        );
+    }
+    assert_gap(
+        &result,
+        source,
+        FactDomain::Relations,
+        "hlsl-buffer-binding-and-layout-unavailable",
+        "cbuffer Bindings",
+    );
+}
+
+#[test]
+fn hlsl_namespace_children_keep_malformed_foreign_and_qualified_fences() {
+    for (source, gap) in [
+        (
+            "namespace Outer { class Foreign { float Hidden; }; float Visible; }\n",
+            "class Foreign",
+        ),
+        (
+            "namespace Outer { template <typename T> struct Foreign { T Hidden; }; float Visible; }\n",
+            "template <typename T>",
+        ),
+        (
+            "namespace Outer { float Qualified::Hidden(float Value) { return Value; } float Visible; }\n",
+            "float Qualified::Hidden",
+        ),
+        (
+            "namespace Alias = Foreign;\nfloat Visible;\n",
+            "namespace Alias",
+        ),
+    ] {
+        let result = output(source);
+        assert_eq!(result.document().entities.len(), 2, "{source}");
+        assert_definition(&result, source, "Visible", EntityKind::Variable);
+        assert!(
+            !result
+                .document()
+                .occurrences
+                .iter()
+                .any(|occurrence| { occurrence.role == OccurrenceRole::Reference })
+        );
+        assert_gap(
+            &result,
+            source,
+            FactDomain::Entities,
+            "hlsl-written-owner-analysis-unavailable",
+            gap,
+        );
+    }
+    let source = "namespace Broken { float Hidden;\n";
+    let result = output(source);
+    assert_eq!(result.document().entities.len(), 1);
+    assert!(result.document().occurrences.is_empty());
+    assert!(
+        result
+            .document()
+            .diagnostics
+            .iter()
+            .any(|diagnostic| { diagnostic.code == "syntax-error-recovery" })
+    );
+    assert_gap(
+        &result,
+        source,
+        FactDomain::Entities,
+        "hlsl-written-owner-analysis-unavailable",
+        "namespace Broken",
+    );
+    let source = "namespace Outer { float Read(float Input) { return Other::Value + Input; } }\n";
+    let result = output(source);
+    assert_eq!(result.document().entities.len(), 3);
+    assert_definition(&result, source, "Read", EntityKind::Function);
+    assert_definition(&result, source, "Input", EntityKind::Parameter);
+    assert_owner(&result, "Input", "Read");
+    let references = result
+        .document()
+        .occurrences
+        .iter()
+        .filter(|occurrence| occurrence.role == OccurrenceRole::Reference)
+        .collect::<Vec<_>>();
+    assert_eq!(references.len(), 1);
+    assert_eq!(text(source, &references[0].source), "Input");
+    assert!(matches!(
+        references[0].target,
+        OccurrenceTarget::Unresolved { .. }
+    ));
+}
+
+#[test]
 fn hlsl_unsupported_parameters_and_recovery_keep_scoped_sibling_fences() {
     let source = "float Deferred(float Value = DefaultValue) { return Value; }\nfloat Visible(float Input) { return Input; }\n";
     let result = output(source);
@@ -547,7 +740,7 @@ fn hlsl_unsupported_parameters_and_recovery_keep_scoped_sibling_fences() {
         "float Deferred",
     );
     for source in [
-        "float *Pointer;\nclass Foreign { float Member; };\nnamespace Foreign { float Value; }\n",
+        "float *Pointer;\nclass Foreign { float Member; };\nnamespace Alias = Foreign;\n",
         "float First(), Second();",
         "float Broken(float Value) { return Value;",
     ] {
