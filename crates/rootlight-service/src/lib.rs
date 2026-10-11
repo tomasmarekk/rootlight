@@ -29020,6 +29020,7 @@ mod tests {
             Some(Arc::clone(&analyzer)),
         )
         .expect("project service initializes");
+        assert!(direct.analyzers.remove("assembly").is_some());
         limit_service_diagnostics(&mut direct, 3);
 
         let deep = direct
@@ -29071,6 +29072,7 @@ mod tests {
             &cancellation,
         )
         .expect("durable project service initializes");
+        assert!(service.analyzers.remove("assembly").is_some());
         limit_service_diagnostics(&mut service, 3);
 
         let structural = service
@@ -31209,6 +31211,7 @@ mod tests {
         write_language_fixture(fixture.path(), &[("src/lib.rs", "pub fn written() {}\n")]);
         let mut service =
             FirstSliceService::new_durable(2, paths.state_dir(), &deadline()).unwrap();
+        assert!(service.analyzers.remove("assembly").is_some());
         let first = service
             .index_repository(fixture.path(), &deadline())
             .unwrap();
@@ -51158,6 +51161,12 @@ mod tests {
             .iter()
             .map(|e| (e.id, (e.kind, e.canonical_name.clone(), e.container)))
             .collect::<BTreeMap<_, _>>();
+        let read_entry = identities
+            .iter()
+            .find_map(|(id, (kind, name, _))| {
+                (*kind == EntityKind::Function && name == "Read-Entry").then_some(*id)
+            })
+            .expect("written function identity exists");
         let noop = service
             .index_repository(fixture.path(), &deadline())
             .unwrap();
@@ -51181,14 +51190,16 @@ mod tests {
                 .loaded_generation_snapshot(receipt.generation)
                 .unwrap();
             let document = generation.document();
-            let projected = document
-                .extensions
+            let lexical = logical_lexical_envelopes(document);
+            let projected = lexical
                 .iter()
                 .find(|extension| {
-                    extension.namespace == rootlight_ir::LEXICAL_EXTENSION_NAMESPACE
-                        && extension.version == rootlight_ir::LEXICAL_PROJECTION_VERSION
+                    let evidence = rootlight_ir::decode_lexical_evidence_envelope(extension)
+                        .expect("logical lexical child validates");
+                    evidence.kind() == rootlight_ir::LexicalEvidenceKind::Signature
+                        && evidence.subject() == FactRef::Entity(read_entry)
                 })
-                .unwrap();
+                .expect("written function retains its logical signature");
             assert_eq!(projected.generation, receipt.generation);
             let signature = rootlight_ir::decode_lexical_evidence_envelope(projected).unwrap();
             assert_eq!(
@@ -54175,16 +54186,23 @@ mod tests {
             .expect("runtime paths are valid");
         paths.prepare_owner().expect("private paths prepare");
         let fixture = durable_test_tempdir();
-        let mut source = String::from(concat!(
+        let source = concat!(
             "pub fn stored_target(input: u32) -> u32 { input + 1 }\n",
             "pub fn stored_caller() -> u32 { stored_target(7) }\n",
-        ));
+        );
+        fs::write(fixture.path().join("lib.rs"), source).expect("fixture source writes");
+        let mut sources = BTreeMap::from([("lib.rs".to_owned(), source.to_owned())]);
+        // Keep physical payloads small so this fixture isolates closed registry
+        // keys rather than the independent transient cost of lexical batches.
         for ordinal in 0..30 {
-            source.push_str(&format!(
+            let source = format!(
                 "pub fn stored_extra_{ordinal}(input: u32) -> u32 {{ input + {ordinal} }}\n"
-            ));
+            );
+            let path = format!("extra_{ordinal}.rs");
+            fs::write(fixture.path().join(&path), &source)
+                .expect("additional fixture source writes");
+            assert!(sources.insert(path, source).is_none());
         }
-        fs::write(fixture.path().join("lib.rs"), &source).expect("fixture source writes");
         let cancellation = deadline();
         let (receipt, expected) = {
             let mut service = FirstSliceService::new_durable(2, paths.state_dir(), &cancellation)
@@ -54230,9 +54248,30 @@ mod tests {
         let manifest: serde_json::Value =
             serde_json::from_slice(&manifest_bytes).expect("manifest decodes");
         assert!(manifest["source_file_catalog"].is_null());
-        assert!(manifest["source_storage"].get("index_bytes").is_none());
+        assert_eq!(manifest["source_storage"]["version"], 2);
+        assert_eq!(manifest["source_storage"]["files"], sources.len());
+        assert_eq!(manifest["source_storage"]["packs"], 1);
+        let packed_index =
+            fs::read(directory.join("sources/index.msgpack")).expect("packed source index reads");
+        let packed_index_bytes = manifest["source_storage"]["index_bytes"]
+            .as_u64()
+            .expect("packed source index byte count exists");
+        assert!(packed_index_bytes > 0);
+        assert_eq!(
+            packed_index_bytes,
+            u64::try_from(packed_index.len()).expect("packed source index size is representable")
+        );
+        assert_eq!(
+            manifest["source_storage"]["index_digest"],
+            serde_json::to_value(content_hash(&packed_index))
+                .expect("packed source index digest serializes")
+        );
         let incremental_bytes = manifest["incremental_state"]["bytes"].as_u64().unwrap_or(0);
-        let staging_bytes = GENERATION_MEMORY_FIXED_OVERHEAD_BYTES + incremental_bytes * 8;
+        let staging_bytes = incremental_bytes
+            .checked_add(packed_index_bytes)
+            .and_then(|bytes| bytes.checked_mul(8))
+            .and_then(|bytes| bytes.checked_add(GENERATION_MEMORY_FIXED_OVERHEAD_BYTES))
+            .expect("fixture staging envelope is representable");
         let context = GenerationContext::new(&cancellation, GenerationBudget::default());
         let oracle = OracleReader::open_in(&directory, &context).expect("oracle header validates");
         let stats = oracle.stats();
@@ -54350,16 +54389,25 @@ mod tests {
         assert!(located.data.hits.iter().any(|hit| {
             hit.identifier == "stored_target" && hit.path == "lib.rs" && hit.symbol.is_some()
         }));
-        let reference = expected.files[0]
-            .evidence
-            .source
-            .clone()
-            .expect("fixture file has whole-source evidence");
-        let read = service
-            .source_read(receipt.generation, vec![reference], &cancellation)
-            .expect("all restored source bytes remain available");
-        assert_eq!(read.data.chunks.len(), 1);
-        assert_eq!(read.data.chunks[0].bytes, source.as_bytes());
+        assert_eq!(expected.files.len(), sources.len());
+        for file in &expected.files {
+            let reference = file
+                .evidence
+                .source
+                .clone()
+                .expect("fixture file has whole-source evidence");
+            let read = service
+                .source_read(receipt.generation, vec![reference], &cancellation)
+                .expect("all restored source bytes remain available");
+            assert_eq!(read.data.chunks.len(), 1);
+            assert_eq!(
+                read.data.chunks[0].bytes,
+                sources
+                    .get(&file.path)
+                    .expect("restored fixture path belongs to the written sources")
+                    .as_bytes()
+            );
+        }
         assert_eq!(
             fs::read(directory.join("manifest.json")).expect("manifest still reads"),
             manifest_bytes
@@ -64276,6 +64324,33 @@ mod tests {
             }
             fs::write(path, source).expect("fixture source writes");
         }
+    }
+
+    pub(super) fn logical_lexical_envelopes(
+        document: &NormalizedIrDocument,
+    ) -> Vec<ExtensionEnvelope> {
+        // Physical batching must not change child ownership and source assertions.
+        // Authenticate every batch or single envelope before exposing its children.
+        document
+            .extensions
+            .iter()
+            .filter(|envelope| envelope.namespace == rootlight_ir::LEXICAL_EXTENSION_NAMESPACE)
+            .flat_map(|envelope| match envelope.version.as_str() {
+                rootlight_ir::LEXICAL_SUMMARY_BATCH_VERSION => {
+                    rootlight_ir::decode_lexical_summary_batch_envelope(envelope)
+                        .expect("retained lexical summary batch authenticates")
+                }
+                rootlight_ir::LEXICAL_SIGNATURE_BATCH_VERSION => {
+                    rootlight_ir::decode_lexical_signature_batch_envelope(envelope)
+                        .expect("retained lexical signature batch authenticates")
+                }
+                _ => {
+                    rootlight_ir::decode_lexical_evidence_envelope(envelope)
+                        .expect("retained single lexical envelope authenticates");
+                    vec![envelope.clone()]
+                }
+            })
+            .collect()
     }
 
     fn limit_service_diagnostics(service: &mut FirstSliceService, max_diagnostics: usize) {

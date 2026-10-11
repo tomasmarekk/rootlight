@@ -1,6 +1,7 @@
 //! Durable F# profile selection, authored declarations and exact source identity.
 //! Structural declarations do not establish cross-file binding or execution.
 
+use super::tests::logical_lexical_envelopes;
 use super::*;
 use rootlight_ir::{ContainerRef, EntityKind, OccurrenceRole, OccurrenceTarget, RelationEndpoint};
 use std::fs;
@@ -11863,6 +11864,7 @@ fn assert_tuple_formal_generation(
         .loaded_generation_snapshot(receipt.generation)
         .unwrap();
     let document = snapshot.document();
+    let lexical_envelopes = logical_lexical_envelopes(document);
     assert_eq!(document.files.len(), 1);
     let file = &document.files[0];
     assert_eq!(
@@ -12021,13 +12023,9 @@ fn assert_tuple_formal_generation(
                 signature.complete_text_hash(),
                 content_hash(expected_header.as_bytes())
             );
-            let envelopes = document
-                .extensions
+            let envelopes = lexical_envelopes
                 .iter()
                 .filter_map(|envelope| {
-                    if envelope.namespace != rootlight_ir::LEXICAL_EXTENSION_NAMESPACE {
-                        return None;
-                    }
                     let lexical = rootlight_ir::decode_lexical_evidence_envelope(envelope).unwrap();
                     (lexical.kind() == rootlight_ir::LexicalEvidenceKind::Signature
                         && lexical.subject() == rootlight_ir::FactRef::Entity(*symbol))
@@ -12660,6 +12658,7 @@ fn assert_atomic_lambda_generation(
         .loaded_generation_snapshot(receipt.generation)
         .unwrap();
     let document = snapshot.document();
+    let lexical_envelopes = logical_lexical_envelopes(document);
     assert_eq!(document.files.len(), 1);
     let file = &document.files[0];
     assert_eq!(
@@ -12813,13 +12812,9 @@ fn assert_atomic_lambda_generation(
             pattern,
         );
         check_source(&header);
-        let retained = document
-            .extensions
+        let retained = lexical_envelopes
             .iter()
             .filter(|extension| {
-                if extension.namespace != rootlight_ir::LEXICAL_EXTENSION_NAMESPACE {
-                    return false;
-                }
                 let lexical = rootlight_ir::decode_lexical_evidence_envelope(extension).unwrap();
                 lexical.kind() == rootlight_ir::LexicalEvidenceKind::Signature
                     && lexical.subject() == rootlight_ir::FactRef::Entity(parameter.id)
@@ -13839,6 +13834,7 @@ fn assert_local_binding_generation(
         .loaded_generation_snapshot(receipt.generation)
         .unwrap();
     let document = snapshot.document();
+    let lexical_envelopes = logical_lexical_envelopes(document);
     assert_eq!(document.files.len(), 1);
     let file = &document.files[0];
     assert_eq!(
@@ -14135,13 +14131,9 @@ fn assert_local_binding_generation(
                 _ => panic!("unsupported fixture encoding"),
             }
         );
-        let retained = document
-            .extensions
+        let retained = lexical_envelopes
             .iter()
             .filter(|extension| {
-                if extension.namespace != rootlight_ir::LEXICAL_EXTENSION_NAMESPACE {
-                    return false;
-                }
                 let lexical = rootlight_ir::decode_lexical_evidence_envelope(extension).unwrap();
                 lexical.kind() == rootlight_ir::LexicalEvidenceKind::Signature
                     && lexical.subject() == rootlight_ir::FactRef::Entity(symbol)
