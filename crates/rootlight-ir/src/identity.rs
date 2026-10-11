@@ -18,8 +18,10 @@ use crate::{
 pub const FILE_IDENTITY_CLAIM_NAMESPACE: &str = "dev.rootlight.identity.file";
 /// Namespace carrying one unverified structured symbol-identity claim.
 pub const SYMBOL_IDENTITY_CLAIM_NAMESPACE: &str = "dev.rootlight.identity.symbol";
-/// Version of the producer-neutral identity-claim payload.
+/// Legacy identity-claim payload version, still used for file claims.
 pub const IDENTITY_CLAIM_VERSION: &str = "1.0";
+
+const COMPACT_SYMBOL_IDENTITY_CLAIM_VERSION: &str = "1.1";
 
 const PROVENANCE_FACT_DOMAIN: &str = "rootlight.provenance/v2";
 const OCCURRENCE_FACT_DOMAIN: &str = "rootlight.occurrence/v2";
@@ -100,6 +102,174 @@ impl SymbolIdentityClaim {
         })
         .id()
     }
+}
+
+// The wire encoding is separate from the public recipe so byte discriminators
+// remain lossless without expanding signature text into numeric JSON arrays.
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CompactSymbolIdentityClaim {
+    symbol: SymbolId,
+    repository: RepositoryId,
+    language: String,
+    kind: EntityKind,
+    container: Option<ContainerRef>,
+    container_identity: String,
+    declared_identity: String,
+    signature_discriminator: String,
+    build_context_discriminator: String,
+}
+
+impl CompactSymbolIdentityClaim {
+    fn from_claim(claim: &SymbolIdentityClaim) -> Result<Self, IdentityClaimError> {
+        Ok(Self {
+            symbol: claim.symbol,
+            repository: claim.repository,
+            language: claim.language.clone(),
+            kind: claim.kind,
+            container: claim.container,
+            container_identity: encode_claim_discriminator(&claim.container_identity)?,
+            declared_identity: claim.declared_identity.clone(),
+            signature_discriminator: encode_claim_discriminator(&claim.signature_discriminator)?,
+            build_context_discriminator: encode_claim_discriminator(
+                &claim.build_context_discriminator,
+            )?,
+        })
+    }
+
+    fn into_claim(
+        self,
+        checkpoint: &mut impl FnMut() -> bool,
+    ) -> Result<SymbolIdentityClaim, IdentityClaimError> {
+        Ok(SymbolIdentityClaim {
+            symbol: self.symbol,
+            repository: self.repository,
+            language: self.language,
+            kind: self.kind,
+            container: self.container,
+            container_identity: decode_claim_discriminator(&self.container_identity, checkpoint)?,
+            declared_identity: self.declared_identity,
+            signature_discriminator: decode_claim_discriminator(
+                &self.signature_discriminator,
+                checkpoint,
+            )?,
+            build_context_discriminator: decode_claim_discriminator(
+                &self.build_context_discriminator,
+                checkpoint,
+            )?,
+        })
+    }
+}
+
+fn encode_claim_discriminator(bytes: &[u8]) -> Result<String, IdentityClaimError> {
+    let text = std::str::from_utf8(bytes).ok();
+    let encoded_length = if text.is_some() {
+        bytes.len()
+    } else {
+        bytes
+            .len()
+            .checked_mul(2)
+            .ok_or(IdentityClaimError::MalformedPayload)?
+    }
+    .checked_add(2)
+    .ok_or(IdentityClaimError::MalformedPayload)?;
+    let mut encoded = String::new();
+    encoded
+        .try_reserve_exact(encoded_length)
+        .map_err(|_| IdentityClaimError::MalformedPayload)?;
+    if let Some(text) = text {
+        encoded.push_str("u:");
+        encoded.push_str(text);
+    } else {
+        const HEX: &[u8; 16] = b"0123456789abcdef";
+        encoded.push_str("h:");
+        for byte in bytes {
+            encoded.push(char::from(HEX[usize::from(byte >> 4)]));
+            encoded.push(char::from(HEX[usize::from(byte & 0x0f)]));
+        }
+    }
+    Ok(encoded)
+}
+
+fn decode_claim_discriminator(
+    encoded: &str,
+    checkpoint: &mut impl FnMut() -> bool,
+) -> Result<Vec<u8>, IdentityClaimError> {
+    if !checkpoint() {
+        return Err(IdentityClaimError::Interrupted);
+    }
+    let (content, hexadecimal) = if let Some(text) = encoded.strip_prefix("u:") {
+        (text.as_bytes(), false)
+    } else if let Some(hex) = encoded.strip_prefix("h:") {
+        if hex.len() % 2 != 0 {
+            return Err(IdentityClaimError::MalformedPayload);
+        }
+        (hex.as_bytes(), true)
+    } else {
+        return Err(IdentityClaimError::MalformedPayload);
+    };
+    let decoded_length = if hexadecimal {
+        content.len() / 2
+    } else {
+        content.len()
+    };
+    let mut bytes = Vec::new();
+    bytes
+        .try_reserve_exact(decoded_length)
+        .map_err(|_| IdentityClaimError::MalformedPayload)?;
+    for chunk in content.chunks(4 * 1024) {
+        if !checkpoint() {
+            return Err(IdentityClaimError::Interrupted);
+        }
+        if hexadecimal {
+            for pair in chunk.chunks_exact(2) {
+                let high = decode_claim_hex_digit(pair[0])?;
+                let low = decode_claim_hex_digit(pair[1])?;
+                bytes.push((high << 4) | low);
+            }
+        } else {
+            bytes.extend_from_slice(chunk);
+        }
+    }
+    if hexadecimal && claim_discriminator_is_utf8(&bytes, checkpoint)? {
+        return Err(IdentityClaimError::NoncanonicalPayload);
+    }
+    Ok(bytes)
+}
+
+fn decode_claim_hex_digit(byte: u8) -> Result<u8, IdentityClaimError> {
+    match byte {
+        b'0'..=b'9' => Ok(byte - b'0'),
+        b'a'..=b'f' => Ok(byte - b'a' + 10),
+        b'A'..=b'F' => Err(IdentityClaimError::NoncanonicalPayload),
+        _ => Err(IdentityClaimError::MalformedPayload),
+    }
+}
+
+fn claim_discriminator_is_utf8(
+    bytes: &[u8],
+    checkpoint: &mut impl FnMut() -> bool,
+) -> Result<bool, IdentityClaimError> {
+    let mut position = 0;
+    while position < bytes.len() {
+        if !checkpoint() {
+            return Err(IdentityClaimError::Interrupted);
+        }
+        let end = position + (bytes.len() - position).min(4 * 1024);
+        match std::str::from_utf8(&bytes[position..end]) {
+            Ok(_) => position = end,
+            Err(error) => {
+                if error.error_len().is_some() || end == bytes.len() {
+                    return Ok(false);
+                }
+                // An incomplete code point is retried with the next chunk;
+                // otherwise a valid boundary-spanning UTF-8 sequence could
+                // incorrectly permit the hexadecimal alternative.
+                position += error.valid_up_to();
+            }
+        }
+    }
+    Ok(true)
 }
 
 /// Canonicalizes source signature text for provider-independent symbol identity.
@@ -579,6 +749,9 @@ pub fn new_file_identity_claim_envelope(
 
 /// Builds a noncritical envelope carrying one unverified symbol claim.
 ///
+/// New envelopes use version 1.1 with lossless textual or hexadecimal byte
+/// discriminators. The structured claim and symbol identity recipe are unchanged.
+///
 /// # Errors
 ///
 /// Returns [`IdentityClaimError`] when the claim and direct source disagree or
@@ -595,11 +768,15 @@ pub fn new_symbol_identity_claim_envelope(
     {
         return Err(IdentityClaimError::EnvelopeMismatch);
     }
-    let payload = serde_json::to_string(claim).map_err(|_| IdentityClaimError::MalformedPayload)?;
-    identity_claim_envelope(
+    let wire = CompactSymbolIdentityClaim::from_claim(claim)?;
+    let payload = serde_json::to_string(&wire).map_err(|_| IdentityClaimError::MalformedPayload)?;
+    identity_claim_envelope_with_encoding(
         claim.repository,
         generation,
-        SYMBOL_IDENTITY_CLAIM_NAMESPACE,
+        (
+            SYMBOL_IDENTITY_CLAIM_NAMESPACE,
+            COMPACT_SYMBOL_IDENTITY_CLAIM_VERSION,
+        ),
         payload,
         provenance,
         source,
@@ -654,6 +831,8 @@ pub fn decode_file_identity_claim_envelope_with_checkpoint(
 
 /// Decodes and validates one symbol identity-claim envelope.
 ///
+/// Accepts canonical legacy version 1.0 and compact version 1.1 payloads.
+///
 /// # Errors
 ///
 /// Returns [`IdentityClaimError`] for a malformed, noncanonical, mismatched, or
@@ -675,7 +854,13 @@ pub fn decode_symbol_identity_claim_envelope_with_checkpoint(
     mut checkpoint: impl FnMut() -> bool,
 ) -> Result<SymbolIdentityClaim, IdentityClaimError> {
     require_claim_envelope(envelope, SYMBOL_IDENTITY_CLAIM_NAMESPACE)?;
-    let claim: SymbolIdentityClaim = decode_canonical_payload(&envelope.payload, &mut checkpoint)?;
+    let claim: SymbolIdentityClaim = if envelope.version == IDENTITY_CLAIM_VERSION {
+        decode_canonical_payload(&envelope.payload, &mut checkpoint)?
+    } else {
+        let wire: CompactSymbolIdentityClaim =
+            decode_canonical_payload(&envelope.payload, &mut checkpoint)?;
+        wire.into_claim(&mut checkpoint)?
+    };
     let _source = require_claim_evidence(envelope, FactRef::Entity(claim.symbol))?;
     if !checkpoint() {
         return Err(IdentityClaimError::Interrupted);
@@ -928,12 +1113,32 @@ fn identity_claim_envelope(
     source: SourceRef,
     subject: FactRef,
 ) -> Result<ExtensionEnvelope, IdentityClaimError> {
+    identity_claim_envelope_with_encoding(
+        repository,
+        generation,
+        (namespace, IDENTITY_CLAIM_VERSION),
+        payload,
+        provenance,
+        source,
+        subject,
+    )
+}
+
+fn identity_claim_envelope_with_encoding(
+    repository: RepositoryId,
+    generation: GenerationId,
+    (namespace, version): (&str, &str),
+    payload: String,
+    provenance: FactId,
+    source: SourceRef,
+    subject: FactRef,
+) -> Result<ExtensionEnvelope, IdentityClaimError> {
     let mut envelope = ExtensionEnvelope {
         id: FactId::from_bytes([0; 20]),
         repository,
         generation,
         namespace: namespace.to_owned(),
-        version: IDENTITY_CLAIM_VERSION.to_owned(),
+        version: version.to_owned(),
         criticality: ExtensionCriticality::Noncritical,
         payload,
         provenance,
@@ -950,8 +1155,11 @@ fn require_claim_envelope(
     envelope: &ExtensionEnvelope,
     namespace: &str,
 ) -> Result<(), IdentityClaimError> {
+    let supported_version = envelope.version == IDENTITY_CLAIM_VERSION
+        || (namespace == SYMBOL_IDENTITY_CLAIM_NAMESPACE
+            && envelope.version == COMPACT_SYMBOL_IDENTITY_CLAIM_VERSION);
     if envelope.namespace != namespace
-        || envelope.version != IDENTITY_CLAIM_VERSION
+        || !supported_version
         || envelope.criticality != ExtensionCriticality::Noncritical
     {
         return Err(IdentityClaimError::UnsupportedEnvelope);
@@ -1263,6 +1471,414 @@ mod tests {
             .expect("trait scope is bounded")
             .expect("trait scope is valid");
         assert_ne!(compact.header(), trait_impl.header());
+    }
+
+    #[test]
+    fn compact_symbol_claim_preserves_recipe_with_bounded_signature_overhead() {
+        let repository = RepositoryId::from_bytes([1; 16]);
+        let generation = GenerationId::from_bytes([2; 20]);
+        let file = FileId::from_bytes([3; 20]);
+        let provenance = FactId::from_bytes([4; 20]);
+        let container_identity = vec![0xff, 0, 0x80, 3];
+        let signature_discriminator =
+            format!("(value:\"λ\\quoted\",{})", "x".repeat(2048)).into_bytes();
+        let build_context_discriminator = vec![0xff; 32];
+        let expected_symbol = derive_symbol(SymbolIdentity {
+            repository,
+            language: "rust",
+            semantic_kind: "function",
+            container_identity: &container_identity,
+            declared_identity: "fixture",
+            signature_discriminator: &signature_discriminator,
+            build_context_discriminator: &build_context_discriminator,
+        })
+        .id();
+        let claim = SymbolIdentityClaim {
+            symbol: expected_symbol,
+            repository,
+            language: "rust".to_owned(),
+            kind: EntityKind::Function,
+            container: Some(ContainerRef::File(file)),
+            container_identity,
+            declared_identity: "fixture".to_owned(),
+            signature_discriminator,
+            build_context_discriminator,
+        };
+        let source = SourceRef::new(
+            repository,
+            generation,
+            SourceSpan::new(file, 0, 7).expect("fixture source span is valid"),
+            rootlight_ids::content_hash(b"fixture"),
+            None,
+        );
+        let envelope =
+            new_symbol_identity_claim_envelope(&claim, generation, provenance, source.clone())
+                .expect("symbol claim envelope is valid");
+
+        assert_eq!(
+            decode_symbol_identity_claim_envelope(&envelope)
+                .expect("symbol claim round trip is lossless"),
+            claim
+        );
+        assert_eq!(claim.derived_symbol(), expected_symbol);
+        assert_eq!(envelope.namespace, SYMBOL_IDENTITY_CLAIM_NAMESPACE);
+        assert_eq!(envelope.criticality, ExtensionCriticality::Noncritical);
+        assert_eq!(envelope.repository, repository);
+        assert_eq!(envelope.generation, generation);
+        assert_eq!(envelope.provenance, provenance);
+        assert_eq!(envelope.evidence.source, Some(source));
+        assert_eq!(
+            envelope.evidence.derivation,
+            vec![FactRef::Entity(expected_symbol)]
+        );
+        assert!(
+            envelope.payload.len() <= claim.signature_discriminator.len() + 1024,
+            "signature-like payload must have bounded overhead: {} bytes for {} signature bytes",
+            envelope.payload.len(),
+            claim.signature_discriminator.len()
+        );
+        assert_eq!(envelope.version, "1.1");
+    }
+
+    #[test]
+    fn compact_symbol_claim_round_trips_all_discriminator_bytes() {
+        for bytes in [
+            Vec::new(),
+            b"signature".to_vec(),
+            "λ\0\n\r\t\"\\\u{feff}".as_bytes().to_vec(),
+            (0..=u8::MAX).collect(),
+            vec![0xf0, 0x9f, 0x92],
+        ] {
+            let (claim, envelope) = symbol_claim_fixture(bytes.clone());
+            let wire: CompactSymbolIdentityClaim =
+                serde_json::from_str(&envelope.payload).expect("compact wire payload decodes");
+            let prefix = if std::str::from_utf8(&bytes).is_ok() {
+                "u:"
+            } else {
+                "h:"
+            };
+
+            assert!(wire.container_identity.starts_with(prefix));
+            assert!(wire.signature_discriminator.starts_with(prefix));
+            assert!(wire.build_context_discriminator.starts_with(prefix));
+            let decoded = decode_symbol_identity_claim_envelope(&envelope)
+                .expect("every discriminator byte survives");
+            assert_eq!(decoded, claim);
+            assert_eq!(decoded.derived_symbol(), claim.symbol);
+        }
+    }
+
+    #[test]
+    fn symbol_claim_decoder_accepts_canonical_legacy_payloads() {
+        let (claim, compact) = symbol_claim_fixture("λ\0\"\\signature".as_bytes().to_vec());
+        let legacy = legacy_symbol_claim_envelope(&claim, &compact);
+
+        assert_eq!(legacy.version, "1.0");
+        assert_ne!(legacy.id, compact.id);
+        assert_eq!(
+            decode_symbol_identity_claim_envelope(&legacy)
+                .expect("legacy numeric byte arrays remain supported"),
+            claim
+        );
+        assert_eq!(
+            decode_symbol_identity_claim_envelope(&compact)
+                .expect("compact claim retains the same recipe"),
+            claim
+        );
+    }
+
+    #[test]
+    fn symbol_claim_decoder_rejects_noncanonical_and_malformed_discriminators() {
+        let (claim, envelope) = symbol_claim_fixture(vec![0xff]);
+        for (encoded, expected) in [
+            ("h:", IdentityClaimError::NoncanonicalPayload),
+            ("h:00", IdentityClaimError::NoncanonicalPayload),
+            ("h:cebb", IdentityClaimError::NoncanonicalPayload),
+            ("h:FF", IdentityClaimError::NoncanonicalPayload),
+            ("h:f", IdentityClaimError::MalformedPayload),
+            ("h:fg", IdentityClaimError::MalformedPayload),
+            ("text", IdentityClaimError::MalformedPayload),
+            ("b:ff", IdentityClaimError::MalformedPayload),
+        ] {
+            let mut wire =
+                CompactSymbolIdentityClaim::from_claim(&claim).expect("valid claim encodes");
+            wire.signature_discriminator = encoded.to_owned();
+            let mut malformed = envelope.clone();
+            malformed.payload = serde_json::to_string(&wire).expect("wire fixture encodes");
+            malformed.id = derive_claim_envelope_id(&malformed).expect("fixture identity derives");
+
+            assert_eq!(
+                decode_symbol_identity_claim_envelope(&malformed),
+                Err(expected),
+                "encoded discriminator {encoded:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn symbol_claim_decoder_enforces_canonical_json_in_both_versions() {
+        let (claim, compact) = symbol_claim_fixture("λ".as_bytes().to_vec());
+        let legacy = legacy_symbol_claim_envelope(&claim, &compact);
+        for envelope in [compact, legacy] {
+            let mut spaced = envelope.clone();
+            spaced.payload.push(' ');
+            spaced.id = derive_claim_envelope_id(&spaced).expect("fixture identity derives");
+            assert_eq!(
+                decode_symbol_identity_claim_envelope(&spaced),
+                Err(IdentityClaimError::NoncanonicalPayload)
+            );
+
+            let mut unknown_field = envelope.clone();
+            unknown_field.payload.pop();
+            unknown_field.payload.push_str(",\"extra\":0}");
+            unknown_field.id =
+                derive_claim_envelope_id(&unknown_field).expect("fixture identity derives");
+            assert_eq!(
+                decode_symbol_identity_claim_envelope(&unknown_field),
+                Err(IdentityClaimError::MalformedPayload)
+            );
+
+            let mut duplicate_field = envelope.clone();
+            duplicate_field.payload.pop();
+            duplicate_field.payload.push_str(",\"language\":\"rust\"}");
+            duplicate_field.id =
+                derive_claim_envelope_id(&duplicate_field).expect("fixture identity derives");
+            assert_eq!(
+                decode_symbol_identity_claim_envelope(&duplicate_field),
+                Err(IdentityClaimError::MalformedPayload)
+            );
+        }
+        let (_, mut escaped) = symbol_claim_fixture("λ".as_bytes().to_vec());
+        escaped.payload = escaped.payload.replace('λ', "\\u03bb");
+        escaped.id = derive_claim_envelope_id(&escaped).expect("fixture identity derives");
+        assert_eq!(
+            decode_symbol_identity_claim_envelope(&escaped),
+            Err(IdentityClaimError::NoncanonicalPayload)
+        );
+    }
+
+    #[test]
+    fn symbol_claim_decoder_rejects_cross_version_and_mismatched_envelopes() {
+        let (claim, compact) = symbol_claim_fixture(b"signature".to_vec());
+        let legacy = legacy_symbol_claim_envelope(&claim, &compact);
+        for mut envelope in [compact.clone(), legacy] {
+            envelope.version = if envelope.version == "1.0" {
+                "1.1".to_owned()
+            } else {
+                "1.0".to_owned()
+            };
+            envelope.id = derive_claim_envelope_id(&envelope).expect("fixture identity derives");
+            assert_eq!(
+                decode_symbol_identity_claim_envelope(&envelope),
+                Err(IdentityClaimError::MalformedPayload)
+            );
+        }
+
+        for version in ["", "1.2", "2.0"] {
+            let mut envelope = compact.clone();
+            envelope.version = version.to_owned();
+            assert_eq!(
+                decode_symbol_identity_claim_envelope(&envelope),
+                Err(IdentityClaimError::UnsupportedEnvelope)
+            );
+        }
+
+        let mut unsupported = compact.clone();
+        unsupported.namespace = FILE_IDENTITY_CLAIM_NAMESPACE.to_owned();
+        assert_eq!(
+            decode_symbol_identity_claim_envelope(&unsupported),
+            Err(IdentityClaimError::UnsupportedEnvelope)
+        );
+        unsupported = compact.clone();
+        unsupported.criticality = ExtensionCriticality::Critical;
+        assert_eq!(
+            decode_symbol_identity_claim_envelope(&unsupported),
+            Err(IdentityClaimError::UnsupportedEnvelope)
+        );
+
+        let mut mismatched = compact.clone();
+        mismatched.id = FactId::from_bytes([9; 20]);
+        assert_eq!(
+            decode_symbol_identity_claim_envelope(&mismatched),
+            Err(IdentityClaimError::EnvelopeMismatch)
+        );
+        mismatched = compact.clone();
+        mismatched.evidence.derivation.clear();
+        mismatched.id = derive_claim_envelope_id(&mismatched).expect("fixture identity derives");
+        assert_eq!(
+            decode_symbol_identity_claim_envelope(&mismatched),
+            Err(IdentityClaimError::EnvelopeMismatch)
+        );
+        let mut wire = CompactSymbolIdentityClaim::from_claim(&claim).expect("valid claim encodes");
+        wire.symbol = SymbolId::from_bytes([9; 20]);
+        mismatched = compact;
+        mismatched.payload = serde_json::to_string(&wire).expect("wire fixture encodes");
+        mismatched.evidence.derivation = vec![FactRef::Entity(wire.symbol)];
+        mismatched.id = derive_claim_envelope_id(&mismatched).expect("fixture identity derives");
+        assert_eq!(
+            decode_symbol_identity_claim_envelope(&mismatched),
+            Err(IdentityClaimError::EnvelopeMismatch)
+        );
+    }
+
+    #[test]
+    fn compact_discriminator_conversion_checks_each_bounded_chunk() {
+        for encoded in [
+            format!("u:{}", "λ".repeat(16 * 1024)),
+            format!("h:{}ff", "61".repeat(16 * 1024)),
+        ] {
+            let mut checkpoints = 0;
+            let expected = decode_claim_discriminator(&encoded, &mut || {
+                checkpoints += 1;
+                true
+            })
+            .expect("large discriminator decodes");
+            assert!(expected.len() >= 16 * 1024);
+            assert!(checkpoints > 4);
+
+            for cutoff in 1..=checkpoints {
+                let mut observed = 0;
+                assert_eq!(
+                    decode_claim_discriminator(&encoded, &mut || {
+                        observed += 1;
+                        observed < cutoff
+                    }),
+                    Err(IdentityClaimError::Interrupted)
+                );
+                assert_eq!(observed, cutoff);
+            }
+        }
+    }
+
+    #[test]
+    fn hexadecimal_utf8_rejection_handles_boundary_spanning_code_points() {
+        let text = format!("{}λ{}", "x".repeat(4095), "x".repeat(4096));
+        let hex = text
+            .as_bytes()
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
+
+        assert_eq!(
+            decode_claim_discriminator(&format!("h:{hex}"), &mut || true),
+            Err(IdentityClaimError::NoncanonicalPayload)
+        );
+    }
+
+    #[test]
+    fn symbol_claim_decoder_stops_inside_compact_and_legacy_payloads() {
+        let (claim, compact) = symbol_claim_fixture(vec![b'x'; 16 * 1024]);
+        let legacy = legacy_symbol_claim_envelope(&claim, &compact);
+        for envelope in [compact, legacy] {
+            let mut checkpoints = 0;
+            assert_eq!(
+                decode_symbol_identity_claim_envelope_with_checkpoint(&envelope, || {
+                    checkpoints += 1;
+                    checkpoints < 3
+                }),
+                Err(IdentityClaimError::Interrupted)
+            );
+            assert_eq!(checkpoints, 3);
+        }
+    }
+
+    #[test]
+    fn file_claim_writer_retains_the_canonical_version_one_payload() {
+        let repository = RepositoryId::from_bytes([1; 16]);
+        let generation = GenerationId::from_bytes([2; 20]);
+        let path_identity = b"fixture.rs".to_vec();
+        let content_hash = rootlight_ids::content_hash(b"fixture");
+        let claim = FileIdentityClaim {
+            file: derive_file(FileIdentity {
+                repository,
+                path_identity: &path_identity,
+            })
+            .id(),
+            repository,
+            path: "fixture.rs".to_owned(),
+            path_identity,
+            content_hash,
+            byte_length: 7,
+        };
+        let source = SourceRef::new(
+            repository,
+            generation,
+            SourceSpan::new(claim.file, 0, 7).expect("fixture source span is valid"),
+            content_hash,
+            None,
+        );
+        let mut envelope = new_file_identity_claim_envelope(
+            &claim,
+            generation,
+            FactId::from_bytes([4; 20]),
+            source,
+        )
+        .expect("file claim envelope is valid");
+
+        assert_eq!(envelope.version, "1.0");
+        assert_eq!(envelope.payload, serde_json::to_string(&claim).unwrap());
+        assert_eq!(
+            decode_file_identity_claim_envelope(&envelope).expect("file claim still decodes"),
+            claim
+        );
+        envelope.version = "1.1".to_owned();
+        assert_eq!(
+            decode_file_identity_claim_envelope(&envelope),
+            Err(IdentityClaimError::UnsupportedEnvelope)
+        );
+    }
+
+    fn symbol_claim_fixture(bytes: Vec<u8>) -> (SymbolIdentityClaim, ExtensionEnvelope) {
+        let repository = RepositoryId::from_bytes([1; 16]);
+        let generation = GenerationId::from_bytes([2; 20]);
+        let file = FileId::from_bytes([3; 20]);
+        let mut claim = SymbolIdentityClaim {
+            symbol: SymbolId::from_bytes([0; 20]),
+            repository,
+            language: "rust".to_owned(),
+            kind: EntityKind::Function,
+            container: Some(ContainerRef::File(file)),
+            container_identity: bytes.clone(),
+            declared_identity: "fixture".to_owned(),
+            signature_discriminator: bytes.clone(),
+            build_context_discriminator: bytes,
+        };
+        claim.symbol = claim.derived_symbol();
+        let source = SourceRef::new(
+            repository,
+            generation,
+            SourceSpan::new(file, 0, 7).expect("fixture source span is valid"),
+            rootlight_ids::content_hash(b"fixture"),
+            None,
+        );
+        let envelope = new_symbol_identity_claim_envelope(
+            &claim,
+            generation,
+            FactId::from_bytes([4; 20]),
+            source,
+        )
+        .expect("symbol claim envelope is valid");
+        (claim, envelope)
+    }
+
+    fn legacy_symbol_claim_envelope(
+        claim: &SymbolIdentityClaim,
+        compact: &ExtensionEnvelope,
+    ) -> ExtensionEnvelope {
+        identity_claim_envelope(
+            claim.repository,
+            compact.generation,
+            SYMBOL_IDENTITY_CLAIM_NAMESPACE,
+            serde_json::to_string(claim).expect("legacy payload encodes"),
+            compact.provenance,
+            compact
+                .evidence
+                .source
+                .clone()
+                .expect("direct source exists"),
+            FactRef::Entity(claim.symbol),
+        )
+        .expect("legacy envelope recipe remains valid")
     }
 
     #[test]

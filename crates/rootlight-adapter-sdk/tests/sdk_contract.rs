@@ -792,6 +792,63 @@ fn raw_ir_quotas_cannot_be_bypassed_with_duplicate_batches() {
 }
 
 #[test]
+fn raw_extension_byte_quotas_count_duplicate_batches_before_canonicalization() {
+    let (_temporary, _snapshot, source) = source_fixture();
+    let (_file, provenance, _descriptor) = minimal_ir_records(&source);
+    let extension = ExtensionEnvelope {
+        id: "fact1_baeaqcaibaeaqcaibaeaqcaibaeaqcai4pro3da"
+            .parse()
+            .expect("checked extension identity parses"),
+        repository: source.repository(),
+        generation: source.generation(),
+        namespace: "test.raw-extension-bytes".to_owned(),
+        version: "1.0".to_owned(),
+        criticality: ExtensionCriticality::Noncritical,
+        payload: "x".repeat(16),
+        provenance: provenance.id,
+        evidence: FactEvidence {
+            source: Some(source.clone()),
+            derivation: Vec::new(),
+        },
+    };
+    let mut ir_limits = IrLimits::default();
+    ir_limits.max_extension_payload_bytes = 16;
+    ir_limits.max_total_extension_bytes = 32;
+    let analysis_limits = limits(1, ir_limits.clone());
+    let mut sink = BoundedIrSink::new(
+        source,
+        analysis_limits.ir_stream().clone(),
+        ir_limits,
+        ExtensionSupport::default(),
+    );
+    sink.push(IrBatch::new(
+        0,
+        vec![IrRecord::Extension(extension.clone())],
+    ))
+    .expect("first raw extension is accepted");
+    sink.push(IrBatch::new(
+        1,
+        vec![IrRecord::Extension(extension.clone())],
+    ))
+    .expect("raw duplicate reaches the exact extension byte quota");
+    let usage_at_limit = sink.staged_usage();
+    let budget_at_limit = sink.remaining_ir_budget();
+
+    assert_eq!(usage_at_limit.records(), 2);
+    assert_eq!(budget_at_limit.extension_bytes(), 0);
+    assert!(matches!(
+        sink.push(IrBatch::new(2, vec![IrRecord::Extension(extension)])),
+        Err(SinkError::StreamLimit {
+            resource: ResourceKind::ExtensionBytes,
+            observed: 48,
+            limit: 32,
+        })
+    ));
+    assert_eq!(sink.staged_usage(), usage_at_limit);
+    assert_eq!(sink.remaining_ir_budget(), budget_at_limit);
+}
+
+#[test]
 fn canonical_ir_is_independent_of_allowed_batch_order() {
     let (_temporary, snapshot, source) = source_fixture();
     let ir_limits = IrLimits::default();
