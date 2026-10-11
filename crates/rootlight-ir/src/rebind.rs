@@ -20,7 +20,7 @@ use crate::{
     SYMBOL_IDENTITY_CLAIM_NAMESPACE, SkippedRegion, SourceMappingRecord, SourceRef,
     UnknownNoncriticalExtensionPolicy, canonicalize_ir_document,
     decode_file_identity_claim_envelope, decode_lexical_evidence_envelope,
-    decode_lexical_summary_batch_envelope, decode_symbol_identity_claim_envelope,
+    decode_lexical_summary_batch_envelope, decode_symbol_identity_claim_envelope_with_checkpoint,
     derive_coverage_record_id, derive_diagnostic_record_id, derive_occurrence_record_id,
     derive_provenance_record_id, derive_relation_record_id, derive_skipped_region_id,
     derive_source_mapping_record_id, new_file_identity_claim_envelope,
@@ -1651,8 +1651,19 @@ fn rebind_extension(
                 .map_err(|_| NormalizedRebindError::IdentityRecipe)
         }
         SYMBOL_IDENTITY_CLAIM_NAMESPACE => {
-            let claim = decode_symbol_identity_claim_envelope(&extension)
-                .map_err(|_| NormalizedRebindError::IdentityRecipe)?;
+            let claim =
+                decode_symbol_identity_claim_envelope_with_checkpoint(&extension, &mut *checkpoint)
+                    .map_err(|error| match error {
+                        crate::IdentityClaimError::Interrupted => {
+                            NormalizedRebindError::Interrupted
+                        }
+                        crate::IdentityClaimError::MalformedPayload
+                        | crate::IdentityClaimError::NoncanonicalPayload
+                        | crate::IdentityClaimError::UnsupportedEnvelope
+                        | crate::IdentityClaimError::EnvelopeMismatch => {
+                            NormalizedRebindError::IdentityRecipe
+                        }
+                    })?;
             new_symbol_identity_claim_envelope(&claim, generation, provenance, source)
                 .map_err(|_| NormalizedRebindError::IdentityRecipe)
         }
@@ -1835,7 +1846,7 @@ mod tests {
     use crate::{
         ContainerRef, EntityKind, FileIdentityClaim, IrDocument, LEXICAL_EXTENSION_NAMESPACE,
         LexicalEvidenceFormat, LexicalEvidenceKind, LexicalEvidenceV1, SymbolIdentityClaim,
-        validate_ir_document,
+        decode_symbol_identity_claim_envelope, validate_ir_document,
     };
 
     #[test]
@@ -3977,14 +3988,32 @@ mod tests {
 
     #[test]
     fn rebind_migrates_legacy_symbol_claim_to_current_encoding() {
-        let (current, expected_file_claim, expected_symbol_claim) =
+        #[derive(Serialize)]
+        struct LegacyCompactSymbolClaim<'a> {
+            symbol: rootlight_ids::SymbolId,
+            repository: rootlight_ids::RepositoryId,
+            language: &'a str,
+            kind: EntityKind,
+            container: Option<ContainerRef>,
+            container_identity: String,
+            declared_identity: &'a str,
+            signature_discriminator: String,
+            build_context_discriminator: String,
+        }
+
+        let (mut current, expected_file_claim, expected_symbol_claim) =
             fixture_with_identity_extensions();
         let current_symbol = current
             .extensions
             .iter()
             .find(|extension| extension.namespace == SYMBOL_IDENTITY_CLAIM_NAMESPACE)
-            .expect("current symbol envelope exists");
-        assert_eq!(current_symbol.version, "1.1");
+            .expect("current symbol envelope exists")
+            .clone();
+        assert_eq!(current_symbol.version, "1.2");
+        current.entities[0]
+            .evidence
+            .derivation
+            .push(FactRef::Fact(current_symbol.id));
         let source = current_symbol
             .evidence
             .source
@@ -3998,39 +4027,6 @@ mod tests {
             source.content_hash(),
             source.line_hint(),
         );
-        let mut legacy = current.clone();
-        let legacy_symbol = legacy
-            .extensions
-            .iter_mut()
-            .find(|extension| extension.namespace == SYMBOL_IDENTITY_CLAIM_NAMESPACE)
-            .expect("legacy symbol envelope exists");
-        legacy_symbol.version = "1.0".to_owned();
-        legacy_symbol.payload = serde_json::to_string(&expected_symbol_claim)
-            .expect("legacy claim encodes canonically");
-
-        // Reconstruct the documented envelope recipe without exposing a private
-        // production encoder or deriving a legacy fixture through the new writer.
-        let mut envelope_value =
-            serde_json::to_value(&*legacy_symbol).expect("legacy envelope encodes");
-        assert!(
-            envelope_value
-                .as_object_mut()
-                .expect("legacy envelope is an object")
-                .remove("id")
-                .is_some()
-        );
-        legacy_symbol.id = rootlight_ids::derive_fact(
-            "rootlight.identity-claim-envelope/v1",
-            &serde_json::to_vec(&envelope_value).expect("legacy envelope recipe encodes"),
-        )
-        .id();
-        assert_ne!(legacy_symbol.id, current_symbol.id);
-        assert_eq!(
-            decode_symbol_identity_claim_envelope(legacy_symbol)
-                .expect("canonical legacy symbol claim decodes before migration"),
-            expected_symbol_claim
-        );
-
         let limits = IrLimits::default();
         let extensions = ExtensionSupport::default();
         let migrate = |document: &NormalizedIrDocument| {
@@ -4039,55 +4035,185 @@ mod tests {
                 .rebind(generation, &limits, &extensions)
                 .expect("identity document rebinds")
         };
-        let migrated_legacy = migrate(&legacy);
         let migrated_current = migrate(&current);
-        assert_eq!(migrated_legacy, migrated_current);
         let digest = |document: &NormalizedIrDocument| {
             canonical_generation_neutral_digests(document, &limits, &extensions, || true)
                 .expect("migrated identity document has a logical projection")
         };
-        assert_eq!(digest(&migrated_legacy), digest(&migrated_current));
-
-        for document in [&migrated_legacy, &migrated_current] {
-            assert_eq!(document.generation, generation);
-            assert_eq!(document.entities[0].id, expected_symbol_claim.symbol);
-            let file = document
+        // Legacy wire fields and discriminator prefixes are assembled independently
+        // so a new production writer cannot silently turn these into current fixtures.
+        let discriminator = |bytes: &[u8]| match std::str::from_utf8(bytes) {
+            Ok(text) => format!("u:{text}"),
+            Err(_) => format!(
+                "h:{}",
+                bytes
+                    .iter()
+                    .map(|byte| format!("{byte:02x}"))
+                    .collect::<String>()
+            ),
+        };
+        let compact = LegacyCompactSymbolClaim {
+            symbol: expected_symbol_claim.symbol,
+            repository: expected_symbol_claim.repository,
+            language: &expected_symbol_claim.language,
+            kind: expected_symbol_claim.kind,
+            container: expected_symbol_claim.container,
+            container_identity: discriminator(&expected_symbol_claim.container_identity),
+            declared_identity: &expected_symbol_claim.declared_identity,
+            signature_discriminator: discriminator(&expected_symbol_claim.signature_discriminator),
+            build_context_discriminator: discriminator(
+                &expected_symbol_claim.build_context_discriminator,
+            ),
+        };
+        let legacy_payloads = [
+            (
+                "1.0",
+                serde_json::to_string(&expected_symbol_claim)
+                    .expect("legacy structured claim encodes canonically"),
+            ),
+            (
+                "1.1",
+                serde_json::to_string(&compact).expect("legacy compact claim encodes canonically"),
+            ),
+        ];
+        let mut input_carriers = BTreeSet::from([current_symbol.id]);
+        for (version, payload) in legacy_payloads {
+            let mut legacy = current.clone();
+            let legacy_symbol = legacy
                 .extensions
-                .iter()
-                .find(|extension| extension.namespace == FILE_IDENTITY_CLAIM_NAMESPACE)
-                .expect("file claim survives migration");
-            let symbol = document
-                .extensions
-                .iter()
+                .iter_mut()
                 .find(|extension| extension.namespace == SYMBOL_IDENTITY_CLAIM_NAMESPACE)
-                .expect("symbol claim survives migration");
-            assert_eq!(file.version, "1.0");
-            assert_eq!(symbol.version, "1.1");
-            assert_eq!(
-                decode_file_identity_claim_envelope(file).expect("migrated file claim decodes"),
-                expected_file_claim
+                .expect("legacy symbol envelope exists");
+            legacy_symbol.version = version.to_owned();
+            legacy_symbol.payload = payload;
+            let mut envelope_value =
+                serde_json::to_value(&*legacy_symbol).expect("legacy envelope encodes");
+            assert!(
+                envelope_value
+                    .as_object_mut()
+                    .expect("legacy envelope is an object")
+                    .remove("id")
+                    .is_some()
             );
+            legacy_symbol.id = rootlight_ids::derive_fact(
+                "rootlight.identity-claim-envelope/v1",
+                &serde_json::to_vec(&envelope_value).expect("legacy envelope recipe encodes"),
+            )
+            .id();
+            assert!(input_carriers.insert(legacy_symbol.id));
             assert_eq!(
-                decode_symbol_identity_claim_envelope(symbol)
-                    .expect("migrated symbol claim decodes"),
+                decode_symbol_identity_claim_envelope(legacy_symbol)
+                    .expect("canonical legacy symbol claim decodes before migration"),
                 expected_symbol_claim
             );
-            assert_eq!(
-                file.evidence.derivation,
-                [FactRef::File(expected_file_claim.file)]
-            );
-            assert_eq!(
-                symbol.evidence.derivation,
-                [FactRef::Entity(expected_symbol_claim.symbol)]
-            );
-            for envelope in [file, symbol] {
-                assert_eq!(envelope.generation, generation);
-                assert_eq!(envelope.evidence.source.as_ref(), Some(&expected_source));
-                assert!(document.provenance.iter().any(|provenance| {
-                    provenance.id == envelope.provenance && provenance.generation == generation
-                }));
+            legacy.entities[0].evidence.derivation = vec![FactRef::Fact(legacy_symbol.id)];
+            let migrated_legacy = migrate(&legacy);
+            assert_eq!(migrated_legacy, migrated_current);
+            assert_eq!(digest(&migrated_legacy), digest(&migrated_current));
+
+            for document in [&migrated_legacy, &migrated_current] {
+                assert_eq!(document.generation, generation);
+                assert_eq!(document.files[0].id, expected_file_claim.file);
+                assert_eq!(document.entities[0].id, expected_symbol_claim.symbol);
+                let file = document
+                    .extensions
+                    .iter()
+                    .find(|extension| extension.namespace == FILE_IDENTITY_CLAIM_NAMESPACE)
+                    .expect("file claim survives migration");
+                let symbol = document
+                    .extensions
+                    .iter()
+                    .find(|extension| extension.namespace == SYMBOL_IDENTITY_CLAIM_NAMESPACE)
+                    .expect("symbol claim survives migration");
+                assert_eq!(file.version, "1.0");
+                assert_eq!(symbol.version, "1.2");
+                assert_eq!(
+                    document.entities[0].evidence.derivation,
+                    [FactRef::Fact(symbol.id)]
+                );
+                assert_eq!(
+                    decode_file_identity_claim_envelope(file).expect("migrated file claim decodes"),
+                    expected_file_claim
+                );
+                assert_eq!(
+                    decode_symbol_identity_claim_envelope(symbol)
+                        .expect("migrated symbol claim decodes"),
+                    expected_symbol_claim
+                );
+                assert_eq!(
+                    file.evidence.derivation,
+                    [FactRef::File(expected_file_claim.file)]
+                );
+                assert_eq!(
+                    symbol.evidence.derivation,
+                    [FactRef::Entity(expected_symbol_claim.symbol)]
+                );
+                for envelope in [file, symbol] {
+                    assert_eq!(envelope.generation, generation);
+                    assert_eq!(envelope.evidence.source.as_ref(), Some(&expected_source));
+                    assert!(document.provenance.iter().any(|provenance| {
+                        provenance.id == envelope.provenance && provenance.generation == generation
+                    }));
+                }
             }
         }
+    }
+
+    #[test]
+    fn symbol_claim_rebind_preserves_decoder_interruptions() {
+        let (document, _, _) = fixture_with_identity_extensions();
+        let symbol = document
+            .extensions
+            .iter()
+            .find(|extension| extension.namespace == SYMBOL_IDENTITY_CLAIM_NAMESPACE)
+            .expect("symbol envelope exists");
+        let ids = FactIdMap {
+            entries: vec![(symbol.provenance, Some(symbol.provenance))],
+        };
+        let generation = GenerationId::from_bytes([96; 20]);
+        let mut checkpoints = 0;
+        let rebound = rebind_extension(
+            symbol.clone(),
+            document.repository,
+            generation,
+            &ids,
+            &mut || {
+                checkpoints += 1;
+                true
+            },
+        )
+        .expect("symbol envelope rebinds with accepting checkpoints");
+        assert!(checkpoints >= 3);
+        assert_eq!(rebound.generation, generation);
+        for cutoff in 1..=checkpoints {
+            let mut observed = 0;
+            assert_eq!(
+                rebind_extension(
+                    symbol.clone(),
+                    document.repository,
+                    generation,
+                    &ids,
+                    &mut || {
+                        observed += 1;
+                        observed < cutoff
+                    },
+                ),
+                Err(NormalizedRebindError::Interrupted)
+            );
+            assert_eq!(observed, cutoff);
+        }
+        let mut malformed = symbol.clone();
+        malformed.payload = "{}".to_owned();
+        assert_eq!(
+            rebind_extension(
+                malformed,
+                document.repository,
+                generation,
+                &ids,
+                &mut || true,
+            ),
+            Err(NormalizedRebindError::IdentityRecipe)
+        );
     }
 
     #[test]

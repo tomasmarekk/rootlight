@@ -22,6 +22,7 @@ pub const SYMBOL_IDENTITY_CLAIM_NAMESPACE: &str = "dev.rootlight.identity.symbol
 pub const IDENTITY_CLAIM_VERSION: &str = "1.0";
 
 const COMPACT_SYMBOL_IDENTITY_CLAIM_VERSION: &str = "1.1";
+const POSITIONAL_SYMBOL_IDENTITY_CLAIM_VERSION: &str = "1.2";
 
 const PROVENANCE_FACT_DOMAIN: &str = "rootlight.provenance/v2";
 const OCCURRENCE_FACT_DOMAIN: &str = "rootlight.occurrence/v2";
@@ -155,6 +156,68 @@ impl CompactSymbolIdentityClaim {
             )?,
             build_context_discriminator: decode_claim_discriminator(
                 &self.build_context_discriminator,
+                checkpoint,
+            )?,
+        })
+    }
+}
+
+// Field order is the versioned wire contract. Repository and symbol IDs already
+// belong to the envelope and its exact entity evidence, not a second claim copy.
+#[derive(Serialize, Deserialize)]
+struct PositionalSymbolIdentityClaim(
+    String,
+    EntityKind,
+    Option<ContainerRef>,
+    String,
+    String,
+    String,
+    String,
+);
+
+impl PositionalSymbolIdentityClaim {
+    fn from_claim(claim: &SymbolIdentityClaim) -> Result<Self, IdentityClaimError> {
+        let wire = CompactSymbolIdentityClaim::from_claim(claim)?;
+        Ok(Self(
+            wire.language,
+            wire.kind,
+            wire.container,
+            wire.container_identity,
+            wire.declared_identity,
+            wire.signature_discriminator,
+            wire.build_context_discriminator,
+        ))
+    }
+
+    fn into_claim(
+        self,
+        repository: RepositoryId,
+        symbol: SymbolId,
+        checkpoint: &mut impl FnMut() -> bool,
+    ) -> Result<SymbolIdentityClaim, IdentityClaimError> {
+        let Self(
+            language,
+            kind,
+            container,
+            container_identity,
+            declared_identity,
+            signature_discriminator,
+            build_context_discriminator,
+        ) = self;
+        Ok(SymbolIdentityClaim {
+            symbol,
+            repository,
+            language,
+            kind,
+            container,
+            container_identity: decode_claim_discriminator(&container_identity, checkpoint)?,
+            declared_identity,
+            signature_discriminator: decode_claim_discriminator(
+                &signature_discriminator,
+                checkpoint,
+            )?,
+            build_context_discriminator: decode_claim_discriminator(
+                &build_context_discriminator,
                 checkpoint,
             )?,
         })
@@ -749,8 +812,9 @@ pub fn new_file_identity_claim_envelope(
 
 /// Builds a noncritical envelope carrying one unverified symbol claim.
 ///
-/// New envelopes use version 1.1 with lossless textual or hexadecimal byte
-/// discriminators. The structured claim and symbol identity recipe are unchanged.
+/// New envelopes use positional version 1.2 with lossless byte discriminators.
+/// Repository and symbol IDs are bound by envelope ownership and exact entity
+/// evidence. The structured claim and symbol identity recipe are unchanged.
 ///
 /// # Errors
 ///
@@ -768,14 +832,14 @@ pub fn new_symbol_identity_claim_envelope(
     {
         return Err(IdentityClaimError::EnvelopeMismatch);
     }
-    let wire = CompactSymbolIdentityClaim::from_claim(claim)?;
+    let wire = PositionalSymbolIdentityClaim::from_claim(claim)?;
     let payload = serde_json::to_string(&wire).map_err(|_| IdentityClaimError::MalformedPayload)?;
     identity_claim_envelope_with_encoding(
         claim.repository,
         generation,
         (
             SYMBOL_IDENTITY_CLAIM_NAMESPACE,
-            COMPACT_SYMBOL_IDENTITY_CLAIM_VERSION,
+            POSITIONAL_SYMBOL_IDENTITY_CLAIM_VERSION,
         ),
         payload,
         provenance,
@@ -831,7 +895,7 @@ pub fn decode_file_identity_claim_envelope_with_checkpoint(
 
 /// Decodes and validates one symbol identity-claim envelope.
 ///
-/// Accepts canonical legacy version 1.0 and compact version 1.1 payloads.
+/// Accepts canonical legacy 1.0, compact 1.1, and positional 1.2 payloads.
 ///
 /// # Errors
 ///
@@ -854,12 +918,23 @@ pub fn decode_symbol_identity_claim_envelope_with_checkpoint(
     mut checkpoint: impl FnMut() -> bool,
 ) -> Result<SymbolIdentityClaim, IdentityClaimError> {
     require_claim_envelope(envelope, SYMBOL_IDENTITY_CLAIM_NAMESPACE)?;
-    let claim: SymbolIdentityClaim = if envelope.version == IDENTITY_CLAIM_VERSION {
-        decode_canonical_payload(&envelope.payload, &mut checkpoint)?
-    } else {
-        let wire: CompactSymbolIdentityClaim =
-            decode_canonical_payload(&envelope.payload, &mut checkpoint)?;
-        wire.into_claim(&mut checkpoint)?
+    let claim: SymbolIdentityClaim = match envelope.version.as_str() {
+        IDENTITY_CLAIM_VERSION => decode_canonical_payload(&envelope.payload, &mut checkpoint)?,
+        COMPACT_SYMBOL_IDENTITY_CLAIM_VERSION => {
+            let wire: CompactSymbolIdentityClaim =
+                decode_canonical_payload(&envelope.payload, &mut checkpoint)?;
+            wire.into_claim(&mut checkpoint)?
+        }
+        POSITIONAL_SYMBOL_IDENTITY_CLAIM_VERSION => {
+            let [FactRef::Entity(symbol)] = envelope.evidence.derivation.as_slice() else {
+                return Err(IdentityClaimError::EnvelopeMismatch);
+            };
+            require_claim_evidence(envelope, FactRef::Entity(*symbol))?;
+            let wire: PositionalSymbolIdentityClaim =
+                decode_canonical_payload(&envelope.payload, &mut checkpoint)?;
+            wire.into_claim(envelope.repository, *symbol, &mut checkpoint)?
+        }
+        _ => return Err(IdentityClaimError::UnsupportedEnvelope),
     };
     let _source = require_claim_evidence(envelope, FactRef::Entity(claim.symbol))?;
     if !checkpoint() {
@@ -1157,7 +1232,8 @@ fn require_claim_envelope(
 ) -> Result<(), IdentityClaimError> {
     let supported_version = envelope.version == IDENTITY_CLAIM_VERSION
         || (namespace == SYMBOL_IDENTITY_CLAIM_NAMESPACE
-            && envelope.version == COMPACT_SYMBOL_IDENTITY_CLAIM_VERSION);
+            && (envelope.version == COMPACT_SYMBOL_IDENTITY_CLAIM_VERSION
+                || envelope.version == POSITIONAL_SYMBOL_IDENTITY_CLAIM_VERSION));
     if envelope.namespace != namespace
         || !supported_version
         || envelope.criticality != ExtensionCriticality::Noncritical
@@ -1474,7 +1550,7 @@ mod tests {
     }
 
     #[test]
-    fn compact_symbol_claim_preserves_recipe_with_bounded_signature_overhead() {
+    fn positional_symbol_claim_preserves_recipe_with_bounded_signature_overhead() {
         let repository = RepositoryId::from_bytes([1; 16]);
         let generation = GenerationId::from_bytes([2; 20]);
         let file = FileId::from_bytes([3; 20]);
@@ -1532,12 +1608,18 @@ mod tests {
             vec![FactRef::Entity(expected_symbol)]
         );
         assert!(
-            envelope.payload.len() <= claim.signature_discriminator.len() + 1024,
+            envelope.payload.len() <= claim.signature_discriminator.len() + 512,
             "signature-like payload must have bounded overhead: {} bytes for {} signature bytes",
             envelope.payload.len(),
             claim.signature_discriminator.len()
         );
-        assert_eq!(envelope.version, "1.1");
+        assert_eq!(envelope.version, "1.2");
+        let fields: serde_json::Value =
+            serde_json::from_str(&envelope.payload).expect("positional payload is JSON");
+        assert_eq!(fields.as_array().expect("payload is positional").len(), 7);
+        let compact = compact_symbol_claim_envelope(&claim, &envelope);
+        assert!(envelope.payload.len() < compact.payload.len());
+        assert_ne!(envelope.id, compact.id);
     }
 
     #[test]
@@ -1550,41 +1632,40 @@ mod tests {
             vec![0xf0, 0x9f, 0x92],
         ] {
             let (claim, envelope) = symbol_claim_fixture(bytes.clone());
-            let wire: CompactSymbolIdentityClaim =
-                serde_json::from_str(&envelope.payload).expect("compact wire payload decodes");
+            let wire: PositionalSymbolIdentityClaim =
+                serde_json::from_str(&envelope.payload).expect("positional wire payload decodes");
             let prefix = if std::str::from_utf8(&bytes).is_ok() {
                 "u:"
             } else {
                 "h:"
             };
 
-            assert!(wire.container_identity.starts_with(prefix));
-            assert!(wire.signature_discriminator.starts_with(prefix));
-            assert!(wire.build_context_discriminator.starts_with(prefix));
-            let decoded = decode_symbol_identity_claim_envelope(&envelope)
-                .expect("every discriminator byte survives");
-            assert_eq!(decoded, claim);
-            assert_eq!(decoded.derived_symbol(), claim.symbol);
+            assert!(wire.3.starts_with(prefix));
+            assert!(wire.5.starts_with(prefix));
+            assert!(wire.6.starts_with(prefix));
+            for carrier in symbol_claim_carriers(&claim, &envelope) {
+                let decoded = decode_symbol_identity_claim_envelope(&carrier)
+                    .expect("every discriminator byte survives");
+                assert_eq!(decoded, claim);
+                assert_eq!(decoded.derived_symbol(), claim.symbol);
+            }
         }
     }
 
     #[test]
-    fn symbol_claim_decoder_accepts_canonical_legacy_payloads() {
-        let (claim, compact) = symbol_claim_fixture("λ\0\"\\signature".as_bytes().to_vec());
-        let legacy = legacy_symbol_claim_envelope(&claim, &compact);
-
-        assert_eq!(legacy.version, "1.0");
-        assert_ne!(legacy.id, compact.id);
-        assert_eq!(
-            decode_symbol_identity_claim_envelope(&legacy)
-                .expect("legacy numeric byte arrays remain supported"),
-            claim
-        );
-        assert_eq!(
-            decode_symbol_identity_claim_envelope(&compact)
-                .expect("compact claim retains the same recipe"),
-            claim
-        );
+    fn symbol_claim_decoder_accepts_all_canonical_carrier_versions() {
+        let (claim, positional) = symbol_claim_fixture("λ\0\"\\signature".as_bytes().to_vec());
+        let carriers = symbol_claim_carriers(&claim, &positional);
+        for (carrier, version) in carriers.iter().zip(["1.0", "1.1", "1.2"]) {
+            assert_eq!(carrier.version, version);
+            let decoded = decode_symbol_identity_claim_envelope(carrier)
+                .expect("canonical carrier preserves the public claim");
+            assert_eq!(decoded, claim);
+            assert_eq!(decoded.derived_symbol(), claim.symbol);
+        }
+        assert_ne!(carriers[0].id, carriers[1].id);
+        assert_ne!(carriers[0].id, carriers[2].id);
+        assert_ne!(carriers[1].id, carriers[2].id);
     }
 
     #[test]
@@ -1600,26 +1681,33 @@ mod tests {
             ("text", IdentityClaimError::MalformedPayload),
             ("b:ff", IdentityClaimError::MalformedPayload),
         ] {
-            let mut wire =
+            let mut compact =
                 CompactSymbolIdentityClaim::from_claim(&claim).expect("valid claim encodes");
-            wire.signature_discriminator = encoded.to_owned();
-            let mut malformed = envelope.clone();
-            malformed.payload = serde_json::to_string(&wire).expect("wire fixture encodes");
-            malformed.id = derive_claim_envelope_id(&malformed).expect("fixture identity derives");
-
-            assert_eq!(
-                decode_symbol_identity_claim_envelope(&malformed),
-                Err(expected),
-                "encoded discriminator {encoded:?}"
-            );
+            compact.signature_discriminator = encoded.to_owned();
+            let mut positional =
+                PositionalSymbolIdentityClaim::from_claim(&claim).expect("valid claim encodes");
+            positional.5 = encoded.to_owned();
+            for (version, payload) in [
+                ("1.1", serde_json::to_string(&compact).unwrap()),
+                ("1.2", serde_json::to_string(&positional).unwrap()),
+            ] {
+                let mut malformed = envelope.clone();
+                malformed.version = version.to_owned();
+                malformed.payload = payload;
+                refresh_claim_envelope_id(&mut malformed);
+                assert_eq!(
+                    decode_symbol_identity_claim_envelope(&malformed),
+                    Err(expected),
+                    "version {version}, encoded discriminator {encoded:?}"
+                );
+            }
         }
     }
 
     #[test]
-    fn symbol_claim_decoder_enforces_canonical_json_in_both_versions() {
-        let (claim, compact) = symbol_claim_fixture("λ".as_bytes().to_vec());
-        let legacy = legacy_symbol_claim_envelope(&claim, &compact);
-        for envelope in [compact, legacy] {
+    fn symbol_claim_decoder_enforces_canonical_json_in_all_versions() {
+        let (claim, positional) = symbol_claim_fixture("λ".as_bytes().to_vec());
+        for envelope in symbol_claim_carriers(&claim, &positional) {
             let mut spaced = envelope.clone();
             spaced.payload.push(' ');
             spaced.id = derive_claim_envelope_id(&spaced).expect("fixture identity derives");
@@ -1628,6 +1716,9 @@ mod tests {
                 Err(IdentityClaimError::NoncanonicalPayload)
             );
 
+            if envelope.version == "1.2" {
+                continue;
+            }
             let mut unknown_field = envelope.clone();
             unknown_field.payload.pop();
             unknown_field.payload.push_str(",\"extra\":0}");
@@ -1659,23 +1750,24 @@ mod tests {
 
     #[test]
     fn symbol_claim_decoder_rejects_cross_version_and_mismatched_envelopes() {
-        let (claim, compact) = symbol_claim_fixture(b"signature".to_vec());
-        let legacy = legacy_symbol_claim_envelope(&claim, &compact);
-        for mut envelope in [compact.clone(), legacy] {
-            envelope.version = if envelope.version == "1.0" {
-                "1.1".to_owned()
-            } else {
-                "1.0".to_owned()
-            };
-            envelope.id = derive_claim_envelope_id(&envelope).expect("fixture identity derives");
-            assert_eq!(
-                decode_symbol_identity_claim_envelope(&envelope),
-                Err(IdentityClaimError::MalformedPayload)
-            );
+        let (claim, positional) = symbol_claim_fixture(b"signature".to_vec());
+        for carrier in symbol_claim_carriers(&claim, &positional) {
+            for version in ["1.0", "1.1", "1.2"] {
+                if version == carrier.version {
+                    continue;
+                }
+                let mut envelope = carrier.clone();
+                envelope.version = version.to_owned();
+                refresh_claim_envelope_id(&mut envelope);
+                assert_eq!(
+                    decode_symbol_identity_claim_envelope(&envelope),
+                    Err(IdentityClaimError::MalformedPayload)
+                );
+            }
         }
 
-        for version in ["", "1.2", "2.0"] {
-            let mut envelope = compact.clone();
+        for version in ["", "1.3", "2.0"] {
+            let mut envelope = positional.clone();
             envelope.version = version.to_owned();
             assert_eq!(
                 decode_symbol_identity_claim_envelope(&envelope),
@@ -1683,42 +1775,212 @@ mod tests {
             );
         }
 
-        let mut unsupported = compact.clone();
+        let mut unsupported = positional.clone();
         unsupported.namespace = FILE_IDENTITY_CLAIM_NAMESPACE.to_owned();
         assert_eq!(
             decode_symbol_identity_claim_envelope(&unsupported),
             Err(IdentityClaimError::UnsupportedEnvelope)
         );
-        unsupported = compact.clone();
+        unsupported = positional.clone();
         unsupported.criticality = ExtensionCriticality::Critical;
         assert_eq!(
             decode_symbol_identity_claim_envelope(&unsupported),
             Err(IdentityClaimError::UnsupportedEnvelope)
         );
 
-        let mut mismatched = compact.clone();
+        let mut mismatched = positional.clone();
         mismatched.id = FactId::from_bytes([9; 20]);
         assert_eq!(
             decode_symbol_identity_claim_envelope(&mismatched),
             Err(IdentityClaimError::EnvelopeMismatch)
         );
-        mismatched = compact.clone();
+        mismatched = positional.clone();
         mismatched.evidence.derivation.clear();
         mismatched.id = derive_claim_envelope_id(&mismatched).expect("fixture identity derives");
         assert_eq!(
             decode_symbol_identity_claim_envelope(&mismatched),
             Err(IdentityClaimError::EnvelopeMismatch)
         );
-        let mut wire = CompactSymbolIdentityClaim::from_claim(&claim).expect("valid claim encodes");
-        wire.symbol = SymbolId::from_bytes([9; 20]);
-        mismatched = compact;
-        mismatched.payload = serde_json::to_string(&wire).expect("wire fixture encodes");
-        mismatched.evidence.derivation = vec![FactRef::Entity(wire.symbol)];
+        mismatched = positional;
+        mismatched.evidence.derivation = vec![FactRef::Entity(SymbolId::from_bytes([9; 20]))];
         mismatched.id = derive_claim_envelope_id(&mismatched).expect("fixture identity derives");
         assert_eq!(
             decode_symbol_identity_claim_envelope(&mismatched),
             Err(IdentityClaimError::EnvelopeMismatch)
         );
+    }
+
+    #[test]
+    fn positional_symbol_claim_rejects_wrong_tuple_shapes_and_types() {
+        let (_, envelope) = symbol_claim_fixture(b"signature".to_vec());
+        let fields: serde_json::Value = serde_json::from_str(&envelope.payload).unwrap();
+        let fields = fields.as_array().unwrap();
+        let mut missing = fields.clone();
+        missing.pop();
+        let mut extra = fields.clone();
+        extra.push(serde_json::Value::Null);
+        let mut wrong_kind = fields.clone();
+        wrong_kind[1] = serde_json::Value::Null;
+        let mut wrong_container = fields.clone();
+        wrong_container[2] = serde_json::Value::String("file".to_owned());
+        let mut numeric_discriminator = fields.clone();
+        numeric_discriminator[3] = serde_json::json!([1, 2]);
+        let mut reordered = fields.clone();
+        reordered.swap(0, 1);
+        let mut wrong_identity = fields.clone();
+        wrong_identity[4] = serde_json::Value::Bool(false);
+        for fields in [
+            missing,
+            extra,
+            wrong_kind,
+            wrong_container,
+            numeric_discriminator,
+            reordered,
+            wrong_identity,
+        ] {
+            let mut malformed = envelope.clone();
+            malformed.payload = serde_json::to_string(&fields).unwrap();
+            refresh_claim_envelope_id(&mut malformed);
+            assert_eq!(
+                decode_symbol_identity_claim_envelope(&malformed),
+                Err(IdentityClaimError::MalformedPayload)
+            );
+        }
+        for payload in ["{}".to_owned(), format!("{}null", envelope.payload)] {
+            let mut malformed = envelope.clone();
+            malformed.payload = payload;
+            refresh_claim_envelope_id(&mut malformed);
+            assert_eq!(
+                decode_symbol_identity_claim_envelope(&malformed),
+                Err(IdentityClaimError::MalformedPayload)
+            );
+        }
+    }
+
+    #[test]
+    fn symbol_claim_decoder_requires_exact_owned_entity_evidence() {
+        let (claim, positional) = symbol_claim_fixture(b"signature".to_vec());
+        let other_symbol = SymbolId::from_bytes([9; 20]);
+        let file = FileId::from_bytes([3; 20]);
+        for carrier in symbol_claim_carriers(&claim, &positional) {
+            for derivation in [
+                Vec::new(),
+                vec![FactRef::File(file)],
+                vec![FactRef::Fact(carrier.provenance)],
+                vec![FactRef::Entity(other_symbol)],
+                vec![FactRef::Entity(claim.symbol); 2],
+                vec![FactRef::Entity(claim.symbol), FactRef::Entity(other_symbol)],
+                vec![FactRef::Entity(claim.symbol), FactRef::File(file)],
+            ] {
+                let mut mismatched = carrier.clone();
+                mismatched.evidence.derivation = derivation;
+                refresh_claim_envelope_id(&mut mismatched);
+                assert_eq!(
+                    decode_symbol_identity_claim_envelope(&mismatched),
+                    Err(IdentityClaimError::EnvelopeMismatch),
+                    "version {} must reject ambiguous or wrong entity evidence",
+                    carrier.version
+                );
+            }
+            let source = carrier.evidence.source.as_ref().unwrap();
+            for source in [
+                None,
+                Some(SourceRef::new(
+                    RepositoryId::from_bytes([9; 16]),
+                    source.generation(),
+                    source.span(),
+                    source.content_hash(),
+                    source.line_hint(),
+                )),
+                Some(SourceRef::new(
+                    source.repository(),
+                    GenerationId::from_bytes([9; 20]),
+                    source.span(),
+                    source.content_hash(),
+                    source.line_hint(),
+                )),
+            ] {
+                let mut mismatched = carrier.clone();
+                mismatched.evidence.source = source;
+                refresh_claim_envelope_id(&mut mismatched);
+                assert_eq!(
+                    decode_symbol_identity_claim_envelope(&mismatched),
+                    Err(IdentityClaimError::EnvelopeMismatch)
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn positional_symbol_claim_requires_ownership_before_payload_reconstruction() {
+        let (_, mut envelope) = symbol_claim_fixture(b"signature".to_vec());
+        envelope.payload = "[".to_owned();
+        refresh_claim_envelope_id(&mut envelope);
+        assert_eq!(
+            decode_symbol_identity_claim_envelope(&envelope),
+            Err(IdentityClaimError::MalformedPayload)
+        );
+        let mut missing_entity = envelope.clone();
+        missing_entity.evidence.derivation.clear();
+        refresh_claim_envelope_id(&mut missing_entity);
+        assert_eq!(
+            decode_symbol_identity_claim_envelope(&missing_entity),
+            Err(IdentityClaimError::EnvelopeMismatch)
+        );
+        envelope.evidence.source = None;
+        refresh_claim_envelope_id(&mut envelope);
+        assert_eq!(
+            decode_symbol_identity_claim_envelope(&envelope),
+            Err(IdentityClaimError::EnvelopeMismatch)
+        );
+    }
+
+    #[test]
+    fn symbol_claim_decoder_rechecks_recipe_after_carrier_id_is_refreshed() {
+        let (claim, positional) = symbol_claim_fixture(b"signature".to_vec());
+        for field in 0..6 {
+            let mut tampered = claim.clone();
+            match field {
+                0 => tampered.language = "other".to_owned(),
+                1 => tampered.kind = EntityKind::ExternalSymbol,
+                2 => tampered.container_identity.push(b'/'),
+                3 => tampered.declared_identity.push('_'),
+                4 => tampered.signature_discriminator.push(b'/'),
+                5 => tampered.build_context_discriminator.push(b'/'),
+                _ => unreachable!("fixture changes exactly the six recipe fields"),
+            }
+            let mut current = positional.clone();
+            current.payload = serde_json::to_string(
+                &PositionalSymbolIdentityClaim::from_claim(&tampered).unwrap(),
+            )
+            .unwrap();
+            refresh_claim_envelope_id(&mut current);
+            for carrier in symbol_claim_carriers(&tampered, &current) {
+                assert_eq!(
+                    decode_symbol_identity_claim_envelope(&carrier),
+                    Err(IdentityClaimError::EnvelopeMismatch),
+                    "version {}, recipe field {field}",
+                    carrier.version
+                );
+            }
+        }
+        for mut carrier in symbol_claim_carriers(&claim, &positional) {
+            let repository = RepositoryId::from_bytes([9; 16]);
+            let source = carrier.evidence.source.as_ref().unwrap();
+            carrier.evidence.source = Some(SourceRef::new(
+                repository,
+                source.generation(),
+                source.span(),
+                source.content_hash(),
+                source.line_hint(),
+            ));
+            carrier.repository = repository;
+            refresh_claim_envelope_id(&mut carrier);
+            assert_eq!(
+                decode_symbol_identity_claim_envelope(&carrier),
+                Err(IdentityClaimError::EnvelopeMismatch)
+            );
+        }
     }
 
     #[test]
@@ -1766,10 +2028,9 @@ mod tests {
     }
 
     #[test]
-    fn symbol_claim_decoder_stops_inside_compact_and_legacy_payloads() {
-        let (claim, compact) = symbol_claim_fixture(vec![b'x'; 16 * 1024]);
-        let legacy = legacy_symbol_claim_envelope(&claim, &compact);
-        for envelope in [compact, legacy] {
+    fn symbol_claim_decoder_stops_inside_all_carrier_payloads() {
+        let (claim, positional) = symbol_claim_fixture(vec![b'x'; 16 * 1024]);
+        for envelope in symbol_claim_carriers(&claim, &positional) {
             let mut checkpoints = 0;
             assert_eq!(
                 decode_symbol_identity_claim_envelope_with_checkpoint(&envelope, || {
@@ -1779,6 +2040,36 @@ mod tests {
                 Err(IdentityClaimError::Interrupted)
             );
             assert_eq!(checkpoints, 3);
+        }
+    }
+
+    #[test]
+    fn symbol_claim_decoder_checks_every_stage_for_all_carriers() {
+        let (claim, positional) = symbol_claim_fixture(vec![0xff; 8 * 1024]);
+        for envelope in symbol_claim_carriers(&claim, &positional) {
+            let mut checkpoints = 0;
+            assert_eq!(
+                decode_symbol_identity_claim_envelope_with_checkpoint(&envelope, || {
+                    checkpoints += 1;
+                    true
+                })
+                .unwrap(),
+                claim
+            );
+            assert!(checkpoints > 4);
+            for cutoff in 1..=checkpoints {
+                let mut observed = 0;
+                assert_eq!(
+                    decode_symbol_identity_claim_envelope_with_checkpoint(&envelope, || {
+                        observed += 1;
+                        observed < cutoff
+                    }),
+                    Err(IdentityClaimError::Interrupted),
+                    "version {}, checkpoint {cutoff}",
+                    envelope.version
+                );
+                assert_eq!(observed, cutoff);
+            }
         }
     }
 
@@ -1821,11 +2112,13 @@ mod tests {
             decode_file_identity_claim_envelope(&envelope).expect("file claim still decodes"),
             claim
         );
-        envelope.version = "1.1".to_owned();
-        assert_eq!(
-            decode_file_identity_claim_envelope(&envelope),
-            Err(IdentityClaimError::UnsupportedEnvelope)
-        );
+        for version in ["1.1", "1.2"] {
+            envelope.version = version.to_owned();
+            assert_eq!(
+                decode_file_identity_claim_envelope(&envelope),
+                Err(IdentityClaimError::UnsupportedEnvelope)
+            );
+        }
     }
 
     fn symbol_claim_fixture(bytes: Vec<u8>) -> (SymbolIdentityClaim, ExtensionEnvelope) {
@@ -1879,6 +2172,39 @@ mod tests {
             FactRef::Entity(claim.symbol),
         )
         .expect("legacy envelope recipe remains valid")
+    }
+
+    fn compact_symbol_claim_envelope(
+        claim: &SymbolIdentityClaim,
+        positional: &ExtensionEnvelope,
+    ) -> ExtensionEnvelope {
+        // Serialize the retained 1.1 wire directly; a new writer must not define
+        // the legacy fixture whose continued readability this test checks.
+        identity_claim_envelope_with_encoding(
+            claim.repository,
+            positional.generation,
+            (SYMBOL_IDENTITY_CLAIM_NAMESPACE, "1.1"),
+            serde_json::to_string(&CompactSymbolIdentityClaim::from_claim(claim).unwrap()).unwrap(),
+            positional.provenance,
+            positional.evidence.source.clone().unwrap(),
+            FactRef::Entity(claim.symbol),
+        )
+        .expect("compact envelope recipe remains valid")
+    }
+
+    fn symbol_claim_carriers(
+        claim: &SymbolIdentityClaim,
+        positional: &ExtensionEnvelope,
+    ) -> [ExtensionEnvelope; 3] {
+        [
+            legacy_symbol_claim_envelope(claim, positional),
+            compact_symbol_claim_envelope(claim, positional),
+            positional.clone(),
+        ]
+    }
+
+    fn refresh_claim_envelope_id(envelope: &mut ExtensionEnvelope) {
+        envelope.id = derive_claim_envelope_id(envelope).expect("fixture identity derives");
     }
 
     #[test]
