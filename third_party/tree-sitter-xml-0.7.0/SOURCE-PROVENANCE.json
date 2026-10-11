@@ -1,0 +1,173 @@
+{
+  "schema": "rootlight.xml-source-provenance/1",
+  "package": {
+    "name": "tree-sitter-xml",
+    "version": "0.7.0",
+    "unpublished_local_binding": true,
+    "rust_version": "1.90",
+    "language_handles": [
+      "LANGUAGE_XML",
+      "LANGUAGE_DTD"
+    ],
+    "license": "MIT",
+    "notice": "LICENSE"
+  },
+  "upstream": {
+    "repository": "https://github.com/tree-sitter-grammars/tree-sitter-xml",
+    "revision": "4b64dd3a03ec002258d6268d712fd93716d6ab57",
+    "git_tree": "c0ab4ece2a3b4859749f405bcd3ea1423f25e4f1",
+    "crate_url": "https://static.crates.io/crates/tree-sitter-xml/tree-sitter-xml-0.7.0.crate",
+    "crate_sha256": "e670041f591d994f54d597ddcd8f4ebc930e282c4c76a42268743b71f0c8b6b3",
+    "authored_url": "https://codeload.github.com/tree-sitter-grammars/tree-sitter-xml/tar.gz/4b64dd3a03ec002258d6268d712fd93716d6ab57",
+    "authored_sha256": "e93293550a10535197c6d682a79fcf2942f6a3b1277118d37beb0dcf0a6255cb",
+    "original_frame_files": 117,
+    "original_frame_bytes": 1751022,
+    "original_frame_directories": 44,
+    "published_license_present": false,
+    "license_source": "Exact authored revision LICENSE plus separately authenticated same-revision notice; no original archive was modified.",
+    "license_sha256": "3297073719030b7261afd78b7267931ccc03a27f7a65ca6fc644316180f71bf6",
+    "upstream_code_or_lifecycle_executed": false,
+    "upstream_signature_verified": false,
+    "original_archive_modes_applied": false,
+    "original_archive_modes_recorded_in": "upstream/acquisition-inventory.json",
+    "retained_path_mappings": [
+      {
+        "original_source_frame_path": "authored-files/.gitattributes",
+        "original_archive": "upstream/tree-sitter-xml-authored.tar.gz",
+        "original_archive_member": "tree-sitter-xml-4b64dd3a03ec002258d6268d712fd93716d6ab57/.gitattributes",
+        "retained_path": "upstream/authored-files/.gitattributes.upstream",
+        "bytes": 871,
+        "sha256": "f312680cbef613af38c9543e7dd4bf3ab4748f17a879de9bfa66eca0e0e204e3",
+        "authored_git_blob": "7fb9f4ab6ae4def19e68b8bb1f053969437518bd",
+        "authored_git_mode": "100644",
+        "raw_archive_mode": 436,
+        "executable_intent": false
+      },
+      {
+        "original_source_frame_path": "authored-files/.gitignore",
+        "original_archive": "upstream/tree-sitter-xml-authored.tar.gz",
+        "original_archive_member": "tree-sitter-xml-4b64dd3a03ec002258d6268d712fd93716d6ab57/.gitignore",
+        "retained_path": "upstream/authored-files/.gitignore.upstream",
+        "bytes": 324,
+        "sha256": "b3ab146577626a302df228cfdbe663020ecbed513dd0a02700b68fea1e8ce00e",
+        "authored_git_blob": "308fcab2cfa3ef886a298a6d331a7730f5fb091a",
+        "authored_git_mode": "100644",
+        "raw_archive_mode": 436,
+        "executable_intent": false
+      }
+    ]
+  },
+  "inventory": {
+    "path": "SOURCE-INVENTORY.json",
+    "bytes": 42798,
+    "sha256": "5fd8473757c63e0e03e13da341a659a38561fc9723b3ad085e03483e4bad7c9d"
+  },
+  "preferred_source": {
+    "patch": "patches/preferred-syntax.patch",
+    "overlay_count": 4,
+    "patch_hunk_counts": [
+      {
+        "path": "xml/grammar.js",
+        "hunks": 1
+      },
+      {
+        "path": "common/common.mjs",
+        "hunks": 2
+      },
+      {
+        "path": "xml/src/scanner.c",
+        "hunks": 1
+      },
+      {
+        "path": "common/scanner.h",
+        "hunks": 2
+      }
+    ],
+    "xml_scanner_stateless": true,
+    "dtd_grammar_and_scanner_literal_upstream": true,
+    "native_abi": 14,
+    "generated_files_hand_edited": false,
+    "written_names": "Exact UTF-8/XML1.0 fifth-edition Name spellings; no case folding, normalization or namespace/entity identity.",
+    "qname_limit": "The grammar may accept different opening and closing tag names. Native clean parsing is written syntax, not XML validity. Adapter admission must compare exact source bytes.",
+    "leaf_source_limit": "Native parser qualification counted 617 non-trivia leaf-gap bytes retained inside physical parent ranges; adapters must retain complete attribute/entity/PI/CDATA parents rather than promise complete leaf-only source."
+  },
+  "generation": {
+    "declared_tool": "tree-sitter-cli",
+    "version": "0.26.8",
+    "tool_bytes": 9720320,
+    "tool_sha256": "a61249a07c4a6d01d0bbbb5b7c058e29e12c119ef7fb5bede0b7fd916a7c56f0",
+    "js_runtime": "Node.js",
+    "js_runtime_version": "24.11.1",
+    "js_runtime_bytes": 89894400,
+    "js_runtime_sha256": "f13ac3ca23248dc389507e8fe38c34489ab7edb3e6d6700eb6da6a0b7e128eaf",
+    "abi": 14,
+    "actual_closed_pair": {
+      "record": "xml-parser-generation",
+      "sha256": "ff18dcc8ccfe22daa7ee6bfc36a87487dd4127b699284baedc82793b8424d5ba",
+      "bytes": 33270
+    },
+    "association": "Exact reviewed grammar/shared input bytes and unchanged DTD grammar produced the retained closed ABI14 outputs; original generator lock metadata does not prove this declared tool's build origin.",
+    "tool_first_party_compilation_verified": false,
+    "build_time_generation_or_acquisition_allowed": false
+  },
+  "native_written_syntax_evidence": {
+    "closed_result": {
+      "record": "xml-native-written-syntax-qualification",
+      "sha256": "6759be9d25c1f7452b45993b70122065e1e559296939b5f2bd060affe363345f",
+      "bytes": 664700
+    },
+    "independent_audit": {
+      "record": "xml-native-written-syntax-review",
+      "sha256": "52a309133ea33beeb628dc74f924e8fb05c817793fc0d265ccda8357bfef06a0",
+      "bytes": 16733
+    },
+    "actual_child_exits_zero": 8,
+    "fixed_sources": 39,
+    "all_cases": 591,
+    "raw_snapshots": 488,
+    "boundary": "Direct C runtime/scanner/table qualification, not this Rust package's relocated binding or Rootlight integration.",
+    "raw_clean_incremental_snapshots_emitted": false,
+    "incremental_evidence": "Two actual equal:true/code-asserted incremental comparisons; raw clean snapshots were not emitted.",
+    "nontrivia_parent_range_gap_bytes": 617
+  },
+  "binding": {
+    "patch": "patches/local-binding.patch",
+    "build_inputs": [
+      "xml/src/parser.c",
+      "xml/src/scanner.c",
+      "dtd/src/parser.c",
+      "dtd/src/scanner.c",
+      "common/scanner.h",
+      "xml/src/tree_sitter/parser.h",
+      "xml/src/tree_sitter/alloc.h",
+      "xml/src/tree_sitter/array.h",
+      "dtd/src/tree_sitter/parser.h",
+      "dtd/src/tree_sitter/alloc.h",
+      "dtd/src/tree_sitter/array.h"
+    ],
+    "direct_dependencies": [
+      {
+        "name": "tree-sitter-language",
+        "version": "0.1.7"
+      },
+      {
+        "name": "cc",
+        "version": "1.2.67",
+        "role": "build"
+      }
+    ],
+    "original_hook_reused": false,
+    "network_or_generator_in_build": false,
+    "source_only_not_compiled": true
+  },
+  "distribution_notices_integrated": false,
+  "distribution_notice_gap": "The exact XML MIT notice and generated-header/runtime MIT notice are retained. The fixed root package/adapter notice roster has no XML package entry yet; release distribution must add it without relabeling the retained source or claiming two independent upstream packages.",
+  "source_publication_verified": false,
+  "relocated_package_qualification_verified": false,
+  "product_integration_verified": false,
+  "installed_mcp_verified": false,
+  "offline_empty_cache_network_denial_verified": false,
+  "license_policy_or_legal_acceptance_verified": false,
+  "whole_language_coverage_percent": null,
+  "acceptance": "This is neutral source-only metadata. Later inert materialization, relocated package binding, product registration, installed MCP, release notices and offline acceptance require separate evidence; do not rewrite historical flags."
+}

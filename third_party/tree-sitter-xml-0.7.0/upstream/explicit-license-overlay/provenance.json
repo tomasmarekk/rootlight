@@ -1,0 +1,12 @@
+{
+  "bytes": 1058,
+  "kind": "separate same-pin notice; no original archive mutation",
+  "path": "LICENSE",
+  "schema": "rootlight.xml-license-overlay/1",
+  "sha256": "3297073719030b7261afd78b7267931ccc03a27f7a65ca6fc644316180f71bf6",
+  "source_archive": {
+    "bytes": 98364,
+    "sha256": "e93293550a10535197c6d682a79fcf2942f6a3b1277118d37beb0dcf0a6255cb"
+  },
+  "source_commit": "4b64dd3a03ec002258d6268d712fd93716d6ab57"
+}

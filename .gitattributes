@@ -66,6 +66,13 @@ third_party/tree-sitter-wgsl-0.0.9/upstream/archives/** binary
 adapters/licenses/tree-sitter-wgsl-0.0.9-* -text
 adapters/licenses/Unicode-XID-16.0.0-LICENSE -text
 crates/rootlight-unicode/data/XID-16.0.0-LICENSE.txt -text
+# XML/DTD preferred sources, original archives and provenance remain byte-exact.
+third_party/tree-sitter-xml-0.7.0/** -text
+third_party/tree-sitter-xml-0.7.0/upstream/** whitespace=-blank-at-eol,-blank-at-eof,-space-before-tab,cr-at-eol conflict-marker-size=32
+third_party/tree-sitter-xml-0.7.0/patches/** whitespace=-blank-at-eol,-blank-at-eof,-space-before-tab,cr-at-eol
+third_party/tree-sitter-xml-0.7.0/upstream/archives/** binary
+adapters/licenses/tree-sitter-xml-0.7.0-LICENSE -text
+adapters/licenses/tree-sitter-0.26.11-LICENSE -text
 # Published Pascal indentation is retained in both preferred-source versions.
 third_party/tree-sitter-pascal-0.10.2/grammar.js* whitespace=-space-before-tab
 # Retained Kotlin registry inputs and scanner originals remain byte-exact.

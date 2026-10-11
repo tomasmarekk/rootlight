@@ -1,0 +1,100 @@
+diff --git a/Cargo.toml b/Cargo.toml
+new file mode 100644
+--- /dev/null
++++ b/Cargo.toml
+@@ -0,0 +1,21 @@
++# Local unpublished binding for retained MIT XML and DTD grammar sources.
++# Compilation uses static ABI14 inputs without generation or acquisition.
++[package]
++name = "tree-sitter-xml"
++version = "0.7.0"
++edition = "2024"
++rust-version = "1.90"
++license = "MIT"
++repository = "https://github.com/tree-sitter-grammars/tree-sitter-xml"
++description = "Pinned XML and DTD grammars with local static language bindings"
++publish = false
++build = "bindings/rust/build.rs"
++
++[lib]
++path = "bindings/rust/lib.rs"
++
++[dependencies]
++tree-sitter-language = "=0.1.7"
++
++[build-dependencies]
++cc = "=1.2.67"
+diff --git a/bindings/rust/build.rs b/bindings/rust/build.rs
+new file mode 100644
+--- /dev/null
++++ b/bindings/rust/build.rs
+@@ -0,0 +1,28 @@
++//! Compiles only the retained ABI14 XML and DTD tables and paired scanners.
++//! Acquisition, generation and archived upstream lifecycle hooks never run here.
++
++fn main() {
++    for language in ["xml", "dtd"] {
++        let source = format!("{language}/src");
++        let mut builder = cc::Build::new();
++        builder
++            .std("c11")
++            .include(&source)
++            .file(format!("{source}/parser.c"))
++            .file(format!("{source}/scanner.c"));
++        #[cfg(target_env = "msvc")]
++        builder.flag("-utf-8");
++        builder.compile(&format!("tree-sitter-{language}"));
++
++        for path in [
++            "parser.c",
++            "scanner.c",
++            "tree_sitter/parser.h",
++            "tree_sitter/alloc.h",
++            "tree_sitter/array.h",
++        ] {
++            println!("cargo:rerun-if-changed={source}/{path}");
++        }
++    }
++    println!("cargo:rerun-if-changed=common/scanner.h");
++}
+diff --git a/bindings/rust/lib.rs b/bindings/rust/lib.rs
+new file mode 100644
+--- /dev/null
++++ b/bindings/rust/lib.rs
+@@ -0,0 +1,36 @@
++//! Static language handles for the pinned XML and DTD written-syntax grammars.
++//! Parsing does not establish XML validity, expanded entity values, external
++//! subset availability, namespace identity or DTD declaration resolution.
++
++use tree_sitter_language::LanguageFn;
++
++unsafe extern "C" {
++    fn tree_sitter_xml() -> *const ();
++    fn tree_sitter_dtd() -> *const ();
++}
++
++/// Provides the immutable process-lifetime locally generated ABI14 XML table.
++// SAFETY: xml/src/parser.c defines this exact C factory and returns its immutable
++// static TSLanguage table. LanguageFn retains the factory; the runtime checks
++// ABI compatibility when loading it. The paired stateless scanner is linked
++// from the retained preferred xml/src/scanner.c and common/scanner.h.
++pub const LANGUAGE_XML: LanguageFn = unsafe { LanguageFn::from_raw(tree_sitter_xml) };
++
++/// Provides the immutable process-lifetime locally generated ABI14 DTD table.
++// SAFETY: dtd/src/parser.c defines this exact C factory and returns its immutable
++// static TSLanguage table. LanguageFn retains the factory; the runtime checks
++// ABI compatibility when loading it. The paired dtd/src/scanner.c and shared
++// preferred common/scanner.h are linked with this table, not the XML factory.
++pub const LANGUAGE_DTD: LanguageFn = unsafe { LanguageFn::from_raw(tree_sitter_dtd) };
++
++/// Describes the exact generated XML named nodes and physical fields.
++pub const XML_NODE_TYPES: &str = include_str!("../../xml/src/node-types.json");
++
++/// Describes the exact generated DTD named nodes and physical fields.
++pub const DTD_NODE_TYPES: &str = include_str!("../../dtd/src/node-types.json");
++
++/// Retains the original XML highlighting query without claiming SDK qualification.
++pub const XML_HIGHLIGHTS_QUERY: &str = include_str!("../../queries/xml/highlights.scm");
++
++/// Retains the original DTD highlighting query without claiming SDK qualification.
++pub const DTD_HIGHLIGHTS_QUERY: &str = include_str!("../../queries/dtd/highlights.scm");

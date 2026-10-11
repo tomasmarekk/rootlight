@@ -1,0 +1,1313 @@
+{
+  "schema": "rootlight.xml-source-inventory/1",
+  "scope": "all_payload_except_two_self_describing_metadata_files",
+  "original_source_frame_file_count": 117,
+  "original_source_frame_bytes": 1751022,
+  "original_source_frame_directories": [
+    "authored-files",
+    "authored-files/.github",
+    "authored-files/.github/workflows",
+    "authored-files/bindings",
+    "authored-files/bindings/c",
+    "authored-files/bindings/go",
+    "authored-files/bindings/node",
+    "authored-files/bindings/python",
+    "authored-files/bindings/python/tests",
+    "authored-files/bindings/python/tree_sitter_xml",
+    "authored-files/bindings/rust",
+    "authored-files/bindings/swift",
+    "authored-files/bindings/swift/TreeSitterXMLTests",
+    "authored-files/bindings/swift/dtd",
+    "authored-files/bindings/swift/dtd/TreeSitterDTD",
+    "authored-files/bindings/swift/xml",
+    "authored-files/bindings/swift/xml/TreeSitterXML",
+    "authored-files/common",
+    "authored-files/dtd",
+    "authored-files/dtd/src",
+    "authored-files/dtd/src/tree_sitter",
+    "authored-files/queries",
+    "authored-files/queries/dtd",
+    "authored-files/queries/xml",
+    "authored-files/test",
+    "authored-files/test/corpus",
+    "authored-files/test/highlight",
+    "authored-files/xml",
+    "authored-files/xml/src",
+    "authored-files/xml/src/tree_sitter",
+    "explicit-license-overlay",
+    "published-files",
+    "published-files/bindings",
+    "published-files/bindings/rust",
+    "published-files/common",
+    "published-files/dtd",
+    "published-files/dtd/src",
+    "published-files/dtd/src/tree_sitter",
+    "published-files/queries",
+    "published-files/queries/dtd",
+    "published-files/queries/xml",
+    "published-files/xml",
+    "published-files/xml/src",
+    "published-files/xml/src/tree_sitter"
+  ],
+  "archive_modes_applied": false,
+  "original_modes_and_executable_intent_retained": true,
+  "directories": [
+    "bindings",
+    "bindings/rust",
+    "common",
+    "dtd",
+    "dtd/src",
+    "dtd/src/tree_sitter",
+    "notices",
+    "patches",
+    "queries",
+    "queries/dtd",
+    "queries/xml",
+    "upstream",
+    "upstream/authored-files",
+    "upstream/authored-files/.github",
+    "upstream/authored-files/.github/workflows",
+    "upstream/authored-files/bindings",
+    "upstream/authored-files/bindings/c",
+    "upstream/authored-files/bindings/go",
+    "upstream/authored-files/bindings/node",
+    "upstream/authored-files/bindings/python",
+    "upstream/authored-files/bindings/python/tests",
+    "upstream/authored-files/bindings/python/tree_sitter_xml",
+    "upstream/authored-files/bindings/rust",
+    "upstream/authored-files/bindings/swift",
+    "upstream/authored-files/bindings/swift/TreeSitterXMLTests",
+    "upstream/authored-files/bindings/swift/dtd",
+    "upstream/authored-files/bindings/swift/dtd/TreeSitterDTD",
+    "upstream/authored-files/bindings/swift/xml",
+    "upstream/authored-files/bindings/swift/xml/TreeSitterXML",
+    "upstream/authored-files/common",
+    "upstream/authored-files/dtd",
+    "upstream/authored-files/dtd/src",
+    "upstream/authored-files/dtd/src/tree_sitter",
+    "upstream/authored-files/queries",
+    "upstream/authored-files/queries/dtd",
+    "upstream/authored-files/queries/xml",
+    "upstream/authored-files/test",
+    "upstream/authored-files/test/corpus",
+    "upstream/authored-files/test/highlight",
+    "upstream/authored-files/xml",
+    "upstream/authored-files/xml/src",
+    "upstream/authored-files/xml/src/tree_sitter",
+    "upstream/explicit-license-overlay",
+    "upstream/published-files",
+    "upstream/published-files/bindings",
+    "upstream/published-files/bindings/rust",
+    "upstream/published-files/common",
+    "upstream/published-files/dtd",
+    "upstream/published-files/dtd/src",
+    "upstream/published-files/dtd/src/tree_sitter",
+    "upstream/published-files/queries",
+    "upstream/published-files/queries/dtd",
+    "upstream/published-files/queries/xml",
+    "upstream/published-files/xml",
+    "upstream/published-files/xml/src",
+    "upstream/published-files/xml/src/tree_sitter",
+    "xml",
+    "xml/src",
+    "xml/src/tree_sitter"
+  ],
+  "payload_files": [
+    {
+      "path": "Cargo.toml",
+      "bytes": 578,
+      "sha256": "c833e9f173edaf9f98983414b1e983622247fb3600c9cd2c77b632acb03df95a",
+      "origin": {
+        "kind": "first_party_static_binding_or_change_notice"
+      }
+    },
+    {
+      "path": "LICENSE",
+      "bytes": 1058,
+      "sha256": "3297073719030b7261afd78b7267931ccc03a27f7a65ca6fc644316180f71bf6",
+      "origin": {
+        "kind": "literal_original_active_source"
+      }
+    },
+    {
+      "path": "PATCHES.md",
+      "bytes": 3619,
+      "sha256": "f6b04d77d06615eeb46861f2b4c1fb5211b8414a392e5a166656181e6e90dd4f",
+      "origin": {
+        "kind": "first_party_static_binding_or_change_notice"
+      }
+    },
+    {
+      "path": "bindings/rust/build.rs",
+      "bytes": 927,
+      "sha256": "c3961b11df58e1b5866de300808fb39ebe3edbdda57a24b9ad3d7224997ea500",
+      "origin": {
+        "kind": "first_party_static_binding_or_change_notice"
+      }
+    },
+    {
+      "path": "bindings/rust/lib.rs",
+      "bytes": 1988,
+      "sha256": "ce14a7140024e963b02ae3058cdbff864f8feab9eb772bb4b241aebbbf6d304a",
+      "origin": {
+        "kind": "first_party_static_binding_or_change_notice"
+      }
+    },
+    {
+      "path": "common/common.mjs",
+      "bytes": 7058,
+      "sha256": "5a0801f0dd2d75e887673ff586e838a64c9ee3b9984ebdbc610d746725b92d93",
+      "origin": {
+        "kind": "exact_reviewed_preferred_source"
+      }
+    },
+    {
+      "path": "common/scanner.h",
+      "bytes": 4884,
+      "sha256": "be8f11628373d7b9184472d7e7949b9d76567c6da3d845afae047c995bc21124",
+      "origin": {
+        "kind": "exact_reviewed_preferred_source"
+      }
+    },
+    {
+      "path": "dtd/grammar.js",
+      "bytes": 1090,
+      "sha256": "cf67cc005837875dbac2147f73385565ecc166cdc8ce75ede2b31e65867ee762",
+      "origin": {
+        "kind": "literal_original_active_source"
+      }
+    },
+    {
+      "path": "dtd/src/grammar.json",
+      "bytes": 43407,
+      "sha256": "efa1269450f0e9c0819488a1be08fde0d1247d8e0e4610782c08b4ba06c906e0",
+      "origin": {
+        "kind": "exact_closed_preferred_canonical_generation"
+      }
+    },
+    {
+      "path": "dtd/src/node-types.json",
+      "bytes": 12260,
+      "sha256": "a9d83e7efcad5d96f16b4e664062cc602aa6408716bf6f5a7355186aaec311ff",
+      "origin": {
+        "kind": "exact_closed_preferred_canonical_generation"
+      }
+    },
+    {
+      "path": "dtd/src/parser.c",
+      "bytes": 173221,
+      "sha256": "840fee13647a4124a81deb1ea8527e336c4b2fc884b1b714edb97111b5a46d48",
+      "origin": {
+        "kind": "exact_closed_preferred_canonical_generation"
+      }
+    },
+    {
+      "path": "dtd/src/scanner.c",
+      "bytes": 1398,
+      "sha256": "cdb323ea613368705ade3c6904523848f262db38ee01f5722e2f16e0751bd71c",
+      "origin": {
+        "kind": "literal_original_active_source"
+      }
+    },
+    {
+      "path": "dtd/src/tree_sitter/alloc.h",
+      "bytes": 985,
+      "sha256": "b29c1c9fb7cc82f58c84b376df1297d6e2737a1d655fd356db0859e3c29c2fea",
+      "origin": {
+        "kind": "exact_closed_preferred_canonical_generation"
+      }
+    },
+    {
+      "path": "dtd/src/tree_sitter/array.h",
+      "bytes": 13269,
+      "sha256": "31e60a1bff6f715afacce03b5b70efe42b58371b4f9595dd4af52a577ff9608c",
+      "origin": {
+        "kind": "exact_closed_preferred_canonical_generation"
+      }
+    },
+    {
+      "path": "dtd/src/tree_sitter/parser.h",
+      "bytes": 7624,
+      "sha256": "180b893c8734778fd32f372dfbc27bd6ad1cd2221f26150b31256ff6716320d2",
+      "origin": {
+        "kind": "exact_closed_preferred_canonical_generation"
+      }
+    },
+    {
+      "path": "notices/tree-sitter-MIT-LICENSE",
+      "bytes": 1080,
+      "sha256": "c5cfb43042b6b72045f4ba997834d0a7786d2793d91680868b5815b39f14fc78",
+      "origin": {
+        "kind": "existing_runtime_parser_support_notice"
+      }
+    },
+    {
+      "path": "patches/local-binding.patch",
+      "bytes": 3962,
+      "sha256": "198507a8d983cae2f2c4780201bc8c80453cee416c3c994f66c0041b0070284b",
+      "origin": {
+        "kind": "exact_replayable_source_patch"
+      }
+    },
+    {
+      "path": "patches/preferred-syntax.patch",
+      "bytes": 20907,
+      "sha256": "f93bf9ff3d2a1b644a6cdf7dba5b311be533e3c4fd267c7334b5d6642688b8d3",
+      "origin": {
+        "kind": "exact_replayable_source_patch"
+      }
+    },
+    {
+      "path": "queries/dtd/highlights.scm",
+      "bytes": 1780,
+      "sha256": "5091ae8e8311c16a1bbdffa0ee8819b55b97b786cca12392a9252a5393206bc9",
+      "origin": {
+        "kind": "literal_original_active_source"
+      }
+    },
+    {
+      "path": "queries/xml/highlights.scm",
+      "bytes": 2281,
+      "sha256": "aa4a561c846928c3a4d885acbe690a60689661a45684babe16cf8b7a1509b610",
+      "origin": {
+        "kind": "literal_original_active_source"
+      }
+    },
+    {
+      "path": "tree-sitter.json",
+      "bytes": 1182,
+      "sha256": "ed5d1b704d3fc53180ab85ea8b3243b200080a6c81c8bee47c18b089cd97e4ea",
+      "origin": {
+        "kind": "literal_original_active_source"
+      }
+    },
+    {
+      "path": "upstream/LICENSE.exact-revision",
+      "bytes": 1058,
+      "sha256": "3297073719030b7261afd78b7267931ccc03a27f7a65ca6fc644316180f71bf6",
+      "origin": {
+        "kind": "literal_original_source_frame_input"
+      }
+    },
+    {
+      "path": "upstream/acquisition-inventory.json",
+      "bytes": 192210,
+      "sha256": "e891e8b85fe10066106171a8eefa4b6c04bac97b0890112d72a4a8035cdbb499",
+      "origin": {
+        "kind": "literal_original_source_frame_input"
+      }
+    },
+    {
+      "path": "upstream/authenticated-roster.json",
+      "bytes": 32825,
+      "sha256": "98e007f0713ce698d8073244757a7301898beb61f836049743dd2ac2c05c9499",
+      "origin": {
+        "kind": "literal_original_source_frame_input"
+      }
+    },
+    {
+      "path": "upstream/authored-files/.editorconfig",
+      "bytes": 594,
+      "sha256": "1e7e1331ec711fad1b55565f4f160ec9459f34b56a27b74f61ca88f8fec1c225",
+      "origin": {
+        "kind": "literal_original_source_frame_input"
+      }
+    },
+    {
+      "path": "upstream/authored-files/.gitattributes.upstream",
+      "bytes": 871,
+      "sha256": "f312680cbef613af38c9543e7dd4bf3ab4748f17a879de9bfa66eca0e0e204e3",
+      "origin": {
+        "kind": "literal_original_source_frame_input",
+        "original_source_frame_path": "authored-files/.gitattributes"
+      }
+    },
+    {
+      "path": "upstream/authored-files/.github/FUNDING.yml",
+      "bytes": 49,
+      "sha256": "00f5a75b2c6821d936afd817be6da96aab8067f4d6945766dedf8e7678291099",
+      "origin": {
+        "kind": "literal_original_source_frame_input"
+      }
+    },
+    {
+      "path": "upstream/authored-files/.github/workflows/ci.yml",
+      "bytes": 2897,
+      "sha256": "993308a010bf4f9cf88e97ae8f81b23a79fd150d53792f365a74ffd27f67be23",
+      "origin": {
+        "kind": "literal_original_source_frame_input"
+      }
+    },
+    {
+      "path": "upstream/authored-files/.github/workflows/publish.yml",
+      "bytes": 753,
+      "sha256": "fa6b8309f6c59632e6b3ec3d9164ef1d0f7fefa953e0f068ef66edeb97076b3f",
+      "origin": {
+        "kind": "literal_original_source_frame_input"
+      }
+    },
+    {
+      "path": "upstream/authored-files/.gitignore.upstream",
+      "bytes": 324,
+      "sha256": "b3ab146577626a302df228cfdbe663020ecbed513dd0a02700b68fea1e8ce00e",
+      "origin": {
+        "kind": "literal_original_source_frame_input",
+        "original_source_frame_path": "authored-files/.gitignore"
+      }
+    },
+    {
+      "path": "upstream/authored-files/CMakeLists.txt",
+      "bytes": 2732,
+      "sha256": "880383f9fb35b3dfc429a6338737e45414d3747162532a6b4cd8538d6dfafdcf",
+      "origin": {
+        "kind": "literal_original_source_frame_input"
+      }
+    },
+    {
+      "path": "upstream/authored-files/Cargo.lock",
+      "bytes": 2480,
+      "sha256": "d79a06b56bac664c58d2e1bcfd5feb1c6be3ae9a8c634347dcf3970b361f8ab7",
+      "origin": {
+        "kind": "literal_original_source_frame_input"
+      }
+    },
+    {
+      "path": "upstream/authored-files/Cargo.toml",
+      "bytes": 806,
+      "sha256": "ca1721bc0a229634026ab2d84d46530a86421380b920246f745d126e7af169f7",
+      "origin": {
+        "kind": "literal_original_source_frame_input"
+      }
+    },
+    {
+      "path": "upstream/authored-files/LICENSE",
+      "bytes": 1058,
+      "sha256": "3297073719030b7261afd78b7267931ccc03a27f7a65ca6fc644316180f71bf6",
+      "origin": {
+        "kind": "literal_original_source_frame_input"
+      }
+    },
+    {
+      "path": "upstream/authored-files/Makefile",
+      "bytes": 128,
+      "sha256": "1323512b3f08e41b021fd0a929d57177dfe6868428e851bdc251295a54eccc6f",
+      "origin": {
+        "kind": "literal_original_source_frame_input"
+      }
+    },
+    {
+      "path": "upstream/authored-files/Package.resolved",
+      "bytes": 333,
+      "sha256": "cef0ed0b229ba190f267939af963f3ca1411da00d4e32950b7085d6c46210104",
+      "origin": {
+        "kind": "literal_original_source_frame_input"
+      }
+    },
+    {
+      "path": "upstream/authored-files/Package.swift",
+      "bytes": 1467,
+      "sha256": "d5d72b0368761b4a3b7e13fb607c720be693ae7b1d6906db1eeda4aec96bb48b",
+      "origin": {
+        "kind": "literal_original_source_frame_input"
+      }
+    },
+    {
+      "path": "upstream/authored-files/README.md",
+      "bytes": 1350,
+      "sha256": "950a5a97be2b4b8abee61d0b7291a25d9b192b0b47dacb42ec27cf54c184df8c",
+      "origin": {
+        "kind": "literal_original_source_frame_input"
+      }
+    },
+    {
+      "path": "upstream/authored-files/binding.gyp",
+      "bytes": 667,
+      "sha256": "76c4c61c756011ff02d3987d4ad07c093f1451bc758eeb6e318ac6b5d9dffc3d",
+      "origin": {
+        "kind": "literal_original_source_frame_input"
+      }
+    },
+    {
+      "path": "upstream/authored-files/bindings/c/tree-sitter-dtd.h",
+      "bytes": 234,
+      "sha256": "99b9ba9983687d86df3833e217032201dd2cbac034ca8885ab3d607eeb16bac8",
+      "origin": {
+        "kind": "literal_original_source_frame_input"
+      }
+    },
+    {
+      "path": "upstream/authored-files/bindings/c/tree-sitter-dtd.pc.in",
+      "bytes": 303,
+      "sha256": "61fb99bb495c61c833055dd2059d5531b3e5de1bcf3eb70687d0b4ff96d8691e",
+      "origin": {
+        "kind": "literal_original_source_frame_input"
+      }
+    },
+    {
+      "path": "upstream/authored-files/bindings/c/tree-sitter-xml.h",
+      "bytes": 234,
+      "sha256": "24def48b06c7ff9821bd43715bafc2c629fa57afe4457dd8268c08666500f68f",
+      "origin": {
+        "kind": "literal_original_source_frame_input"
+      }
+    },
+    {
+      "path": "upstream/authored-files/bindings/c/tree-sitter-xml.pc.in",
+      "bytes": 303,
+      "sha256": "e4dbbc9c691755916c9ef9df20b08ff2c001618fc9965c022902c9e7193dc4eb",
+      "origin": {
+        "kind": "literal_original_source_frame_input"
+      }
+    },
+    {
+      "path": "upstream/authored-files/bindings/go/binding_test.go",
+      "bytes": 543,
+      "sha256": "32184afb5bea154cb547b9f27b5d41111a91559befa769fd96233809c61221f8",
+      "origin": {
+        "kind": "literal_original_source_frame_input"
+      }
+    },
+    {
+      "path": "upstream/authored-files/bindings/go/dtd.go",
+      "bytes": 317,
+      "sha256": "19067689e1b298435a5e77f837e45f78911349bf8af9977b0d85be5764f39572",
+      "origin": {
+        "kind": "literal_original_source_frame_input"
+      }
+    },
+    {
+      "path": "upstream/authored-files/bindings/go/xml.go",
+      "bytes": 317,
+      "sha256": "38710594ef426ac788565420123b74b61dcf1f2b077b6287c334678f80351754",
+      "origin": {
+        "kind": "literal_original_source_frame_input"
+      }
+    },
+    {
+      "path": "upstream/authored-files/bindings/node/binding.cc",
+      "bytes": 961,
+      "sha256": "fe0f42195d412a339db7e3f7fa3450433a6beb22d18d460de031f36ef6c27e20",
+      "origin": {
+        "kind": "literal_original_source_frame_input"
+      }
+    },
+    {
+      "path": "upstream/authored-files/bindings/node/binding_test.js",
+      "bytes": 398,
+      "sha256": "f079f363f1dfdd63c1c138b3aa0916632ac0479469b8eb81002190ba637105ae",
+      "origin": {
+        "kind": "literal_original_source_frame_input"
+      }
+    },
+    {
+      "path": "upstream/authored-files/bindings/node/dtd.js",
+      "bytes": 35,
+      "sha256": "d1f345a3041fbe6bbc81e86fddec62be003d2790209255bda5cae4275d441d44",
+      "origin": {
+        "kind": "literal_original_source_frame_input"
+      }
+    },
+    {
+      "path": "upstream/authored-files/bindings/node/index.d.ts",
+      "bytes": 478,
+      "sha256": "f51a4da077590f44daf2654908479b0657a5787e5531655f45b40da0db28c0dc",
+      "origin": {
+        "kind": "literal_original_source_frame_input"
+      }
+    },
+    {
+      "path": "upstream/authored-files/bindings/node/index.js",
+      "bytes": 288,
+      "sha256": "41460e11f79a5794fdebe1f810e947f07bbf3f594d3e2b26fcccfd9dcca5dcc7",
+      "origin": {
+        "kind": "literal_original_source_frame_input"
+      }
+    },
+    {
+      "path": "upstream/authored-files/bindings/node/xml.js",
+      "bytes": 35,
+      "sha256": "81eb70ba9de6092273c7bde4334bb87841407fe3491642b8088c13282e1e0d12",
+      "origin": {
+        "kind": "literal_original_source_frame_input"
+      }
+    },
+    {
+      "path": "upstream/authored-files/bindings/python/tests/test_binding.py",
+      "bytes": 492,
+      "sha256": "537fdbdf8f2aa8722ddea6dbf9d10f7f1ec091f1d28219af39e57472ebe9ef8f",
+      "origin": {
+        "kind": "literal_original_source_frame_input"
+      }
+    },
+    {
+      "path": "upstream/authored-files/bindings/python/tree_sitter_xml/__init__.py",
+      "bytes": 131,
+      "sha256": "a88c0e26c67ccdba4392af48b9a84f59c20e6d4437fc64438102b3eef99fa51f",
+      "origin": {
+        "kind": "literal_original_source_frame_input"
+      }
+    },
+    {
+      "path": "upstream/authored-files/bindings/python/tree_sitter_xml/__init__.pyi",
+      "bytes": 69,
+      "sha256": "aed979c9abba1827aaee2741e279ce029cf10bebc6534f4dccb51922ae6b4c9c",
+      "origin": {
+        "kind": "literal_original_source_frame_input"
+      }
+    },
+    {
+      "path": "upstream/authored-files/bindings/python/tree_sitter_xml/binding.c",
+      "bytes": 948,
+      "sha256": "bb48bbef3b9253786bb6128912f533daab462c2b3a0bd7606886142b228b6db9",
+      "origin": {
+        "kind": "literal_original_source_frame_input"
+      }
+    },
+    {
+      "path": "upstream/authored-files/bindings/python/tree_sitter_xml/py.typed",
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "origin": {
+        "kind": "literal_original_source_frame_input"
+      }
+    },
+    {
+      "path": "upstream/authored-files/bindings/rust/build.rs",
+      "bytes": 826,
+      "sha256": "43bde1861b9b8d17ac4fd12b91bb631098e2423a7d9d217a9c6c3dd299690f52",
+      "origin": {
+        "kind": "literal_original_source_frame_input"
+      }
+    },
+    {
+      "path": "upstream/authored-files/bindings/rust/lib.rs",
+      "bytes": 2824,
+      "sha256": "32402e85a41efaa29abe736820aa82e843a64d6ee2cf4dbde66c22f5c6cb9d64",
+      "origin": {
+        "kind": "literal_original_source_frame_input"
+      }
+    },
+    {
+      "path": "upstream/authored-files/bindings/swift/TreeSitterXMLTests/TreeSitterXMLTests.swift",
+      "bytes": 632,
+      "sha256": "f7a2754136054fa84a5282388f9f32fee8a5c49fbe2e9a4a51787b0d529d87ec",
+      "origin": {
+        "kind": "literal_original_source_frame_input"
+      }
+    },
+    {
+      "path": "upstream/authored-files/bindings/swift/dtd/TreeSitterDTD/dtd.h",
+      "bytes": 234,
+      "sha256": "99b9ba9983687d86df3833e217032201dd2cbac034ca8885ab3d607eeb16bac8",
+      "origin": {
+        "kind": "literal_original_source_frame_input"
+      }
+    },
+    {
+      "path": "upstream/authored-files/bindings/swift/xml/TreeSitterXML/xml.h",
+      "bytes": 234,
+      "sha256": "24def48b06c7ff9821bd43715bafc2c629fa57afe4457dd8268c08666500f68f",
+      "origin": {
+        "kind": "literal_original_source_frame_input"
+      }
+    },
+    {
+      "path": "upstream/authored-files/common/common.mak",
+      "bytes": 3138,
+      "sha256": "15e9973721751abf34c931cc20540c64339facf9d34eb1615eaf80f803f7f142",
+      "origin": {
+        "kind": "literal_original_source_frame_input"
+      }
+    },
+    {
+      "path": "upstream/authored-files/common/common.mjs",
+      "bytes": 6420,
+      "sha256": "208d0786c7a105b19d1ff4949725f733808348902ad25aaeffa21a2400913b56",
+      "origin": {
+        "kind": "literal_original_source_frame_input"
+      }
+    },
+    {
+      "path": "upstream/authored-files/common/scanner.h",
+      "bytes": 4270,
+      "sha256": "ce5082af60b1808035a43c3df129df9b811c9c69949fdb664a351f7aae340409",
+      "origin": {
+        "kind": "literal_original_source_frame_input"
+      }
+    },
+    {
+      "path": "upstream/authored-files/dtd/CMakeLists.txt",
+      "bytes": 72,
+      "sha256": "5ccdb8b4febf3c6d59312526af622f1d7310d2c09cc77d65a3a9935726a325df",
+      "origin": {
+        "kind": "literal_original_source_frame_input"
+      }
+    },
+    {
+      "path": "upstream/authored-files/dtd/Makefile",
+      "bytes": 106,
+      "sha256": "ef5a8e820193738fc2a6966dd5d76db97d9d709abe8e9280676f655ab063507b",
+      "origin": {
+        "kind": "literal_original_source_frame_input"
+      }
+    },
+    {
+      "path": "upstream/authored-files/dtd/grammar.js",
+      "bytes": 1090,
+      "sha256": "cf67cc005837875dbac2147f73385565ecc166cdc8ce75ede2b31e65867ee762",
+      "origin": {
+        "kind": "literal_original_source_frame_input"
+      }
+    },
+    {
+      "path": "upstream/authored-files/dtd/package.json",
+      "bytes": 215,
+      "sha256": "97b378586563e572170350b88571297245fa8a7adf7919b80277dd0b3d8942c8",
+      "origin": {
+        "kind": "literal_original_source_frame_input"
+      }
+    },
+    {
+      "path": "upstream/authored-files/dtd/src/grammar.json",
+      "bytes": 42499,
+      "sha256": "44d3d915ed635a45181206d1d05352f6a7060fff6be07906c9f3aa8f809f5786",
+      "origin": {
+        "kind": "literal_original_source_frame_input"
+      }
+    },
+    {
+      "path": "upstream/authored-files/dtd/src/node-types.json",
+      "bytes": 12260,
+      "sha256": "a9d83e7efcad5d96f16b4e664062cc602aa6408716bf6f5a7355186aaec311ff",
+      "origin": {
+        "kind": "literal_original_source_frame_input"
+      }
+    },
+    {
+      "path": "upstream/authored-files/dtd/src/parser.c",
+      "bytes": 176894,
+      "sha256": "79aa52e71ba9685115e2fc2742a3a30f91987f96fcf5ffbb7e34827155a6b932",
+      "origin": {
+        "kind": "literal_original_source_frame_input"
+      }
+    },
+    {
+      "path": "upstream/authored-files/dtd/src/scanner.c",
+      "bytes": 1398,
+      "sha256": "cdb323ea613368705ade3c6904523848f262db38ee01f5722e2f16e0751bd71c",
+      "origin": {
+        "kind": "literal_original_source_frame_input"
+      }
+    },
+    {
+      "path": "upstream/authored-files/dtd/src/tree_sitter/alloc.h",
+      "bytes": 985,
+      "sha256": "b29c1c9fb7cc82f58c84b376df1297d6e2737a1d655fd356db0859e3c29c2fea",
+      "origin": {
+        "kind": "literal_original_source_frame_input"
+      }
+    },
+    {
+      "path": "upstream/authored-files/dtd/src/tree_sitter/array.h",
+      "bytes": 10420,
+      "sha256": "4ff743903dc46f5db6aa54f31c6b4d160a8a9779e5b2ab1ee59ae7ebcd850ea1",
+      "origin": {
+        "kind": "literal_original_source_frame_input"
+      }
+    },
+    {
+      "path": "upstream/authored-files/dtd/src/tree_sitter/parser.h",
+      "bytes": 7039,
+      "sha256": "a1f6ef161fbaf48a0e10fca90ef5290a062462b307b3898aa562993853b9f80a",
+      "origin": {
+        "kind": "literal_original_source_frame_input"
+      }
+    },
+    {
+      "path": "upstream/authored-files/go.mod",
+      "bytes": 175,
+      "sha256": "e9b6f9ebaa1d81f8e75006e9b0ff3a7ed55a9c63f203bcb900b2c0685ade28c4",
+      "origin": {
+        "kind": "literal_original_source_frame_input"
+      }
+    },
+    {
+      "path": "upstream/authored-files/go.sum",
+      "bytes": 4176,
+      "sha256": "a7d2dd524ce7f8e47eb33d9aa480d5011628376107c15e3a415cfef44d22fc44",
+      "origin": {
+        "kind": "literal_original_source_frame_input"
+      }
+    },
+    {
+      "path": "upstream/authored-files/package-lock.json",
+      "bytes": 13102,
+      "sha256": "d523e163d6a383f1e0b464aa6c299978bc005d452d28a3fdad371f98edbdc7fa",
+      "origin": {
+        "kind": "literal_original_source_frame_input"
+      }
+    },
+    {
+      "path": "upstream/authored-files/package.json",
+      "bytes": 1608,
+      "sha256": "270e696f3636a931c8e4ffc355eb88b589b23f1449be7f0b0b172ce377b26e62",
+      "origin": {
+        "kind": "literal_original_source_frame_input"
+      }
+    },
+    {
+      "path": "upstream/authored-files/pyproject.toml",
+      "bytes": 935,
+      "sha256": "0ca507089db9d897d40ac89b35da4fa792f379c7198fa362006cb9206481fdb9",
+      "origin": {
+        "kind": "literal_original_source_frame_input"
+      }
+    },
+    {
+      "path": "upstream/authored-files/queries/dtd/highlights.scm",
+      "bytes": 1780,
+      "sha256": "5091ae8e8311c16a1bbdffa0ee8819b55b97b786cca12392a9252a5393206bc9",
+      "origin": {
+        "kind": "literal_original_source_frame_input"
+      }
+    },
+    {
+      "path": "upstream/authored-files/queries/xml/highlights.scm",
+      "bytes": 2281,
+      "sha256": "aa4a561c846928c3a4d885acbe690a60689661a45684babe16cf8b7a1509b610",
+      "origin": {
+        "kind": "literal_original_source_frame_input"
+      }
+    },
+    {
+      "path": "upstream/authored-files/setup.py",
+      "bytes": 1784,
+      "sha256": "f4d4b4894a15338d1e8da38ab6646911171cf59bdbaf1f963db98dd0d6d62cb6",
+      "origin": {
+        "kind": "literal_original_source_frame_input"
+      }
+    },
+    {
+      "path": "upstream/authored-files/test/corpus/errors.txt",
+      "bytes": 1969,
+      "sha256": "a0dc978bb76d1e2f3a44029787d67a2e69d5861a72ad5bd5f87f9c03042709e8",
+      "origin": {
+        "kind": "literal_original_source_frame_input"
+      }
+    },
+    {
+      "path": "upstream/authored-files/test/corpus/examples.txt",
+      "bytes": 5008,
+      "sha256": "cd8bc250abf5f8e3ee9b4dd559b9dcdc7ed739e87c160b0325fc9223f288bcdc",
+      "origin": {
+        "kind": "literal_original_source_frame_input"
+      }
+    },
+    {
+      "path": "upstream/authored-files/test/corpus/extra.txt",
+      "bytes": 2668,
+      "sha256": "af0bef4ed1703c2648494e3d49add7623161cf5c3f05f19f2524c080cef79725",
+      "origin": {
+        "kind": "literal_original_source_frame_input"
+      }
+    },
+    {
+      "path": "upstream/authored-files/test/corpus/issues.txt",
+      "bytes": 6265,
+      "sha256": "36e5950d726c54b0838feb9935aa1c327510b6c9efd4a2571a4d36e7dc3b7663",
+      "origin": {
+        "kind": "literal_original_source_frame_input"
+      }
+    },
+    {
+      "path": "upstream/authored-files/test/corpus/standard.txt",
+      "bytes": 7211,
+      "sha256": "5d7d47fb4ac78bf43a205b5d250c47dad702d7b57b275bbff8666c25b65446c6",
+      "origin": {
+        "kind": "literal_original_source_frame_input"
+      }
+    },
+    {
+      "path": "upstream/authored-files/test/highlight/test.dtd",
+      "bytes": 613,
+      "sha256": "7a1be27cf85af1bc6f79494f5c4f0025c0070261e25da516a29a07a2e6ff53b5",
+      "origin": {
+        "kind": "literal_original_source_frame_input"
+      }
+    },
+    {
+      "path": "upstream/authored-files/test/highlight/test.xml",
+      "bytes": 480,
+      "sha256": "0f31f9ea44b0bfa1ae6a1da6d6d56d1669d7e9b3a0a921401c0d7ca66ff58bdf",
+      "origin": {
+        "kind": "literal_original_source_frame_input"
+      }
+    },
+    {
+      "path": "upstream/authored-files/tree-sitter.json",
+      "bytes": 1182,
+      "sha256": "ed5d1b704d3fc53180ab85ea8b3243b200080a6c81c8bee47c18b089cd97e4ea",
+      "origin": {
+        "kind": "literal_original_source_frame_input"
+      }
+    },
+    {
+      "path": "upstream/authored-files/xml/CMakeLists.txt",
+      "bytes": 72,
+      "sha256": "390e38c059db8f9269f3fac14bbef1bef579af481107268e109567e319f33094",
+      "origin": {
+        "kind": "literal_original_source_frame_input"
+      }
+    },
+    {
+      "path": "upstream/authored-files/xml/Makefile",
+      "bytes": 106,
+      "sha256": "4232203ca5edc601cdf574cddd23e386c950b91a3d78d3dd9e6b856ca7491a57",
+      "origin": {
+        "kind": "literal_original_source_frame_input"
+      }
+    },
+    {
+      "path": "upstream/authored-files/xml/grammar.js",
+      "bytes": 3209,
+      "sha256": "521d4071b40625b319f8c1ee20e76a81e01c3c89a4fb27ab20965df6dae53a29",
+      "origin": {
+        "kind": "literal_original_source_frame_input"
+      }
+    },
+    {
+      "path": "upstream/authored-files/xml/package.json",
+      "bytes": 215,
+      "sha256": "ec243a30725bce7c76cebce2b3080adbe9a7a9623c47a76b19a72f6d4cd9aee3",
+      "origin": {
+        "kind": "literal_original_source_frame_input"
+      }
+    },
+    {
+      "path": "upstream/authored-files/xml/src/grammar.json",
+      "bytes": 58409,
+      "sha256": "99e650457a7228ef521f1909bf231b43d4846b2a1010e79b91b418226a2be2a4",
+      "origin": {
+        "kind": "literal_original_source_frame_input"
+      }
+    },
+    {
+      "path": "upstream/authored-files/xml/src/node-types.json",
+      "bytes": 17444,
+      "sha256": "3b63e111187a0f9b2282e1748db2dd6b10e968f0cdb3676772def93bf89f2a7b",
+      "origin": {
+        "kind": "literal_original_source_frame_input"
+      }
+    },
+    {
+      "path": "upstream/authored-files/xml/src/parser.c",
+      "bytes": 240185,
+      "sha256": "e41811d97cfd672a902924a3d99bdf696d6fcec08188a35404e4a3d2698ab844",
+      "origin": {
+        "kind": "literal_original_source_frame_input"
+      }
+    },
+    {
+      "path": "upstream/authored-files/xml/src/scanner.c",
+      "bytes": 7688,
+      "sha256": "e7f401b138bbb0bd3f736c196dddcb74ff627fef2427e333bc4a7a629c0ad3b0",
+      "origin": {
+        "kind": "literal_original_source_frame_input"
+      }
+    },
+    {
+      "path": "upstream/authored-files/xml/src/tree_sitter/alloc.h",
+      "bytes": 985,
+      "sha256": "b29c1c9fb7cc82f58c84b376df1297d6e2737a1d655fd356db0859e3c29c2fea",
+      "origin": {
+        "kind": "literal_original_source_frame_input"
+      }
+    },
+    {
+      "path": "upstream/authored-files/xml/src/tree_sitter/array.h",
+      "bytes": 10420,
+      "sha256": "4ff743903dc46f5db6aa54f31c6b4d160a8a9779e5b2ab1ee59ae7ebcd850ea1",
+      "origin": {
+        "kind": "literal_original_source_frame_input"
+      }
+    },
+    {
+      "path": "upstream/authored-files/xml/src/tree_sitter/parser.h",
+      "bytes": 7039,
+      "sha256": "a1f6ef161fbaf48a0e10fca90ef5290a062462b307b3898aa562993853b9f80a",
+      "origin": {
+        "kind": "literal_original_source_frame_input"
+      }
+    },
+    {
+      "path": "upstream/explicit-license-overlay/LICENSE",
+      "bytes": 1058,
+      "sha256": "3297073719030b7261afd78b7267931ccc03a27f7a65ca6fc644316180f71bf6",
+      "origin": {
+        "kind": "literal_original_source_frame_input"
+      }
+    },
+    {
+      "path": "upstream/explicit-license-overlay/provenance.json",
+      "bytes": 427,
+      "sha256": "c46b3903009231b2b6b52a19a06305f71fab9bdcaebc7a23a11f9d953f2d216b",
+      "origin": {
+        "kind": "literal_original_source_frame_input"
+      }
+    },
+    {
+      "path": "upstream/git-commit.json",
+      "bytes": 2287,
+      "sha256": "ae1db7092fd7d2ae4b6fed4b9a905914b5fe425d46c6b687d407393ea91ae5b6",
+      "origin": {
+        "kind": "literal_original_source_frame_input"
+      }
+    },
+    {
+      "path": "upstream/git-tree.json",
+      "bytes": 26539,
+      "sha256": "6c98a74d0454cc123fbb31145c1e06734eb31f4caf6347dd826e3ba3f0fbe6d1",
+      "origin": {
+        "kind": "literal_original_source_frame_input"
+      }
+    },
+    {
+      "path": "upstream/published-files/.cargo_vcs_info.json",
+      "bytes": 94,
+      "sha256": "c7d94569cc0a9a3b8e718376427eb4a1a0739dc3dff6988ae1489c2b0932bb35",
+      "origin": {
+        "kind": "literal_original_source_frame_input"
+      }
+    },
+    {
+      "path": "upstream/published-files/Cargo.toml",
+      "bytes": 1430,
+      "sha256": "021408492551f56f870e16450fc7569582d023896fe94786877d2adea8d5776a",
+      "origin": {
+        "kind": "literal_original_source_frame_input"
+      }
+    },
+    {
+      "path": "upstream/published-files/Cargo.toml.orig",
+      "bytes": 806,
+      "sha256": "ca1721bc0a229634026ab2d84d46530a86421380b920246f745d126e7af169f7",
+      "origin": {
+        "kind": "literal_original_source_frame_input"
+      }
+    },
+    {
+      "path": "upstream/published-files/README.md",
+      "bytes": 1350,
+      "sha256": "950a5a97be2b4b8abee61d0b7291a25d9b192b0b47dacb42ec27cf54c184df8c",
+      "origin": {
+        "kind": "literal_original_source_frame_input"
+      }
+    },
+    {
+      "path": "upstream/published-files/bindings/rust/build.rs",
+      "bytes": 826,
+      "sha256": "43bde1861b9b8d17ac4fd12b91bb631098e2423a7d9d217a9c6c3dd299690f52",
+      "origin": {
+        "kind": "literal_original_source_frame_input"
+      }
+    },
+    {
+      "path": "upstream/published-files/bindings/rust/lib.rs",
+      "bytes": 2824,
+      "sha256": "32402e85a41efaa29abe736820aa82e843a64d6ee2cf4dbde66c22f5c6cb9d64",
+      "origin": {
+        "kind": "literal_original_source_frame_input"
+      }
+    },
+    {
+      "path": "upstream/published-files/common/common.mak",
+      "bytes": 3138,
+      "sha256": "15e9973721751abf34c931cc20540c64339facf9d34eb1615eaf80f803f7f142",
+      "origin": {
+        "kind": "literal_original_source_frame_input"
+      }
+    },
+    {
+      "path": "upstream/published-files/common/common.mjs",
+      "bytes": 6420,
+      "sha256": "208d0786c7a105b19d1ff4949725f733808348902ad25aaeffa21a2400913b56",
+      "origin": {
+        "kind": "literal_original_source_frame_input"
+      }
+    },
+    {
+      "path": "upstream/published-files/common/scanner.h",
+      "bytes": 4270,
+      "sha256": "ce5082af60b1808035a43c3df129df9b811c9c69949fdb664a351f7aae340409",
+      "origin": {
+        "kind": "literal_original_source_frame_input"
+      }
+    },
+    {
+      "path": "upstream/published-files/dtd/grammar.js",
+      "bytes": 1090,
+      "sha256": "cf67cc005837875dbac2147f73385565ecc166cdc8ce75ede2b31e65867ee762",
+      "origin": {
+        "kind": "literal_original_source_frame_input"
+      }
+    },
+    {
+      "path": "upstream/published-files/dtd/src/grammar.json",
+      "bytes": 42499,
+      "sha256": "44d3d915ed635a45181206d1d05352f6a7060fff6be07906c9f3aa8f809f5786",
+      "origin": {
+        "kind": "literal_original_source_frame_input"
+      }
+    },
+    {
+      "path": "upstream/published-files/dtd/src/node-types.json",
+      "bytes": 12260,
+      "sha256": "a9d83e7efcad5d96f16b4e664062cc602aa6408716bf6f5a7355186aaec311ff",
+      "origin": {
+        "kind": "literal_original_source_frame_input"
+      }
+    },
+    {
+      "path": "upstream/published-files/dtd/src/parser.c",
+      "bytes": 176894,
+      "sha256": "79aa52e71ba9685115e2fc2742a3a30f91987f96fcf5ffbb7e34827155a6b932",
+      "origin": {
+        "kind": "literal_original_source_frame_input"
+      }
+    },
+    {
+      "path": "upstream/published-files/dtd/src/scanner.c",
+      "bytes": 1398,
+      "sha256": "cdb323ea613368705ade3c6904523848f262db38ee01f5722e2f16e0751bd71c",
+      "origin": {
+        "kind": "literal_original_source_frame_input"
+      }
+    },
+    {
+      "path": "upstream/published-files/dtd/src/tree_sitter/alloc.h",
+      "bytes": 985,
+      "sha256": "b29c1c9fb7cc82f58c84b376df1297d6e2737a1d655fd356db0859e3c29c2fea",
+      "origin": {
+        "kind": "literal_original_source_frame_input"
+      }
+    },
+    {
+      "path": "upstream/published-files/dtd/src/tree_sitter/array.h",
+      "bytes": 10420,
+      "sha256": "4ff743903dc46f5db6aa54f31c6b4d160a8a9779e5b2ab1ee59ae7ebcd850ea1",
+      "origin": {
+        "kind": "literal_original_source_frame_input"
+      }
+    },
+    {
+      "path": "upstream/published-files/dtd/src/tree_sitter/parser.h",
+      "bytes": 7039,
+      "sha256": "a1f6ef161fbaf48a0e10fca90ef5290a062462b307b3898aa562993853b9f80a",
+      "origin": {
+        "kind": "literal_original_source_frame_input"
+      }
+    },
+    {
+      "path": "upstream/published-files/queries/dtd/highlights.scm",
+      "bytes": 1780,
+      "sha256": "5091ae8e8311c16a1bbdffa0ee8819b55b97b786cca12392a9252a5393206bc9",
+      "origin": {
+        "kind": "literal_original_source_frame_input"
+      }
+    },
+    {
+      "path": "upstream/published-files/queries/xml/highlights.scm",
+      "bytes": 2281,
+      "sha256": "aa4a561c846928c3a4d885acbe690a60689661a45684babe16cf8b7a1509b610",
+      "origin": {
+        "kind": "literal_original_source_frame_input"
+      }
+    },
+    {
+      "path": "upstream/published-files/tree-sitter.json",
+      "bytes": 1182,
+      "sha256": "ed5d1b704d3fc53180ab85ea8b3243b200080a6c81c8bee47c18b089cd97e4ea",
+      "origin": {
+        "kind": "literal_original_source_frame_input"
+      }
+    },
+    {
+      "path": "upstream/published-files/xml/grammar.js",
+      "bytes": 3209,
+      "sha256": "521d4071b40625b319f8c1ee20e76a81e01c3c89a4fb27ab20965df6dae53a29",
+      "origin": {
+        "kind": "literal_original_source_frame_input"
+      }
+    },
+    {
+      "path": "upstream/published-files/xml/src/grammar.json",
+      "bytes": 58409,
+      "sha256": "99e650457a7228ef521f1909bf231b43d4846b2a1010e79b91b418226a2be2a4",
+      "origin": {
+        "kind": "literal_original_source_frame_input"
+      }
+    },
+    {
+      "path": "upstream/published-files/xml/src/node-types.json",
+      "bytes": 17444,
+      "sha256": "3b63e111187a0f9b2282e1748db2dd6b10e968f0cdb3676772def93bf89f2a7b",
+      "origin": {
+        "kind": "literal_original_source_frame_input"
+      }
+    },
+    {
+      "path": "upstream/published-files/xml/src/parser.c",
+      "bytes": 240185,
+      "sha256": "e41811d97cfd672a902924a3d99bdf696d6fcec08188a35404e4a3d2698ab844",
+      "origin": {
+        "kind": "literal_original_source_frame_input"
+      }
+    },
+    {
+      "path": "upstream/published-files/xml/src/scanner.c",
+      "bytes": 7688,
+      "sha256": "e7f401b138bbb0bd3f736c196dddcb74ff627fef2427e333bc4a7a629c0ad3b0",
+      "origin": {
+        "kind": "literal_original_source_frame_input"
+      }
+    },
+    {
+      "path": "upstream/published-files/xml/src/tree_sitter/alloc.h",
+      "bytes": 985,
+      "sha256": "b29c1c9fb7cc82f58c84b376df1297d6e2737a1d655fd356db0859e3c29c2fea",
+      "origin": {
+        "kind": "literal_original_source_frame_input"
+      }
+    },
+    {
+      "path": "upstream/published-files/xml/src/tree_sitter/array.h",
+      "bytes": 10420,
+      "sha256": "4ff743903dc46f5db6aa54f31c6b4d160a8a9779e5b2ab1ee59ae7ebcd850ea1",
+      "origin": {
+        "kind": "literal_original_source_frame_input"
+      }
+    },
+    {
+      "path": "upstream/published-files/xml/src/tree_sitter/parser.h",
+      "bytes": 7039,
+      "sha256": "a1f6ef161fbaf48a0e10fca90ef5290a062462b307b3898aa562993853b9f80a",
+      "origin": {
+        "kind": "literal_original_source_frame_input"
+      }
+    },
+    {
+      "path": "upstream/registry-index.jsonl",
+      "bytes": 5222,
+      "sha256": "39cb697d2886eff004ea8f3bb806cf8d4b19ada43fd54b593572acd2d9875cda",
+      "origin": {
+        "kind": "literal_original_source_frame_input"
+      }
+    },
+    {
+      "path": "upstream/tree-sitter-xml-0.7.0.crate",
+      "bytes": 75507,
+      "sha256": "e670041f591d994f54d597ddcd8f4ebc930e282c4c76a42268743b71f0c8b6b3",
+      "origin": {
+        "kind": "literal_original_source_frame_input"
+      }
+    },
+    {
+      "path": "upstream/tree-sitter-xml-authored.tar.gz",
+      "bytes": 98364,
+      "sha256": "e93293550a10535197c6d682a79fcf2942f6a3b1277118d37beb0dcf0a6255cb",
+      "origin": {
+        "kind": "literal_original_source_frame_input"
+      }
+    },
+    {
+      "path": "xml/grammar.js",
+      "bytes": 3300,
+      "sha256": "99d40c15eafd118efaf328a820b26e169ef019118eed8d579d29d9a21d40ae4b",
+      "origin": {
+        "kind": "exact_reviewed_preferred_source"
+      }
+    },
+    {
+      "path": "xml/src/grammar.json",
+      "bytes": 59216,
+      "sha256": "7644794b036571912090a8e46fff3b5e6fdc27e756203e81fee31716ba963df3",
+      "origin": {
+        "kind": "exact_closed_preferred_canonical_generation"
+      }
+    },
+    {
+      "path": "xml/src/node-types.json",
+      "bytes": 17444,
+      "sha256": "3b63e111187a0f9b2282e1748db2dd6b10e968f0cdb3676772def93bf89f2a7b",
+      "origin": {
+        "kind": "exact_closed_preferred_canonical_generation"
+      }
+    },
+    {
+      "path": "xml/src/parser.c",
+      "bytes": 238087,
+      "sha256": "16829db6dee156badeaf41e8874ab9862df27fd5715ef524932a4c68c4cd4b77",
+      "origin": {
+        "kind": "exact_closed_preferred_canonical_generation"
+      }
+    },
+    {
+      "path": "xml/src/scanner.c",
+      "bytes": 3967,
+      "sha256": "e5a8595c263774ddaad83ecf906e330832a578f6f231b5c51831ffaa87bda244",
+      "origin": {
+        "kind": "exact_reviewed_preferred_source"
+      }
+    },
+    {
+      "path": "xml/src/tree_sitter/alloc.h",
+      "bytes": 985,
+      "sha256": "b29c1c9fb7cc82f58c84b376df1297d6e2737a1d655fd356db0859e3c29c2fea",
+      "origin": {
+        "kind": "exact_closed_preferred_canonical_generation"
+      }
+    },
+    {
+      "path": "xml/src/tree_sitter/array.h",
+      "bytes": 13269,
+      "sha256": "31e60a1bff6f715afacce03b5b70efe42b58371b4f9595dd4af52a577ff9608c",
+      "origin": {
+        "kind": "exact_closed_preferred_canonical_generation"
+      }
+    },
+    {
+      "path": "xml/src/tree_sitter/parser.h",
+      "bytes": 7624,
+      "sha256": "180b893c8734778fd32f372dfbc27bd6ad1cd2221f26150b31256ff6716320d2",
+      "origin": {
+        "kind": "exact_closed_preferred_canonical_generation"
+      }
+    }
+  ],
+  "sources": [
+    {
+      "name": "tree-sitter-xml",
+      "version": "0.7.0",
+      "repository": "https://github.com/tree-sitter-grammars/tree-sitter-xml",
+      "revision": "4b64dd3a03ec002258d6268d712fd93716d6ab57",
+      "git_tree": "c0ab4ece2a3b4859749f405bcd3ea1423f25e4f1",
+      "published_archive": "upstream/tree-sitter-xml-0.7.0.crate",
+      "authored_archive": "upstream/tree-sitter-xml-authored.tar.gz",
+      "acquisition_inventory": "upstream/acquisition-inventory.json",
+      "authenticated_git_roster": "upstream/authenticated-roster.json",
+      "authored_files": 79,
+      "authored_file_bytes": 691160,
+      "published_files": 28,
+      "published_file_bytes": 624365,
+      "authored_raw_members": 110,
+      "authored_effective_members": 109,
+      "authored_directory_records": 30,
+      "published_raw_members": 28,
+      "published_effective_members": 28,
+      "published_license_present": false,
+      "license_overlay": "upstream/explicit-license-overlay/provenance.json",
+      "notice": "LICENSE",
+      "notice_git_blob": "7094a20529cd00436ad0cab177e635308982b1ef"
+    }
+  ]
+}

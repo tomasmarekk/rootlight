@@ -1,0 +1,5350 @@
+{
+  "all_authored_git_blobs_verified": true,
+  "git_roster": {
+    "commit": "4b64dd3a03ec002258d6268d712fd93716d6ab57",
+    "directory_count": 29,
+    "entries": [
+      {
+        "mode": "100644",
+        "path": ".editorconfig",
+        "sha": "d597f8bc1ee5b26929755855dd4fbf888e04f58f",
+        "size": 594,
+        "type": "blob",
+        "url": "https://api.github.com/repos/tree-sitter-grammars/tree-sitter-xml/git/blobs/d597f8bc1ee5b26929755855dd4fbf888e04f58f"
+      },
+      {
+        "mode": "100644",
+        "path": ".gitattributes",
+        "sha": "7fb9f4ab6ae4def19e68b8bb1f053969437518bd",
+        "size": 871,
+        "type": "blob",
+        "url": "https://api.github.com/repos/tree-sitter-grammars/tree-sitter-xml/git/blobs/7fb9f4ab6ae4def19e68b8bb1f053969437518bd"
+      },
+      {
+        "mode": "040000",
+        "path": ".github",
+        "sha": "3143a43161446236923cb271e873b77a49422698",
+        "type": "tree",
+        "url": "https://api.github.com/repos/tree-sitter-grammars/tree-sitter-xml/git/trees/3143a43161446236923cb271e873b77a49422698"
+      },
+      {
+        "mode": "100644",
+        "path": ".github/FUNDING.yml",
+        "sha": "812f0903dc3e901c94cd648c775936ba8d26c4cd",
+        "size": 49,
+        "type": "blob",
+        "url": "https://api.github.com/repos/tree-sitter-grammars/tree-sitter-xml/git/blobs/812f0903dc3e901c94cd648c775936ba8d26c4cd"
+      },
+      {
+        "mode": "040000",
+        "path": ".github/workflows",
+        "sha": "bc30605e7bd300f48f0a117564c8bdba473d5c9a",
+        "type": "tree",
+        "url": "https://api.github.com/repos/tree-sitter-grammars/tree-sitter-xml/git/trees/bc30605e7bd300f48f0a117564c8bdba473d5c9a"
+      },
+      {
+        "mode": "100644",
+        "path": ".github/workflows/ci.yml",
+        "sha": "1f9c7e34ffa448befdc871e7f8eb889d7eb6571c",
+        "size": 2897,
+        "type": "blob",
+        "url": "https://api.github.com/repos/tree-sitter-grammars/tree-sitter-xml/git/blobs/1f9c7e34ffa448befdc871e7f8eb889d7eb6571c"
+      },
+      {
+        "mode": "100644",
+        "path": ".github/workflows/publish.yml",
+        "sha": "54c728eef016f4080b15a6c2a770ec1098aa3443",
+        "size": 753,
+        "type": "blob",
+        "url": "https://api.github.com/repos/tree-sitter-grammars/tree-sitter-xml/git/blobs/54c728eef016f4080b15a6c2a770ec1098aa3443"
+      },
+      {
+        "mode": "100644",
+        "path": ".gitignore",
+        "sha": "308fcab2cfa3ef886a298a6d331a7730f5fb091a",
+        "size": 324,
+        "type": "blob",
+        "url": "https://api.github.com/repos/tree-sitter-grammars/tree-sitter-xml/git/blobs/308fcab2cfa3ef886a298a6d331a7730f5fb091a"
+      },
+      {
+        "mode": "100644",
+        "path": "CMakeLists.txt",
+        "sha": "5038e63bd7e9a1b4e8f14c1863824c9168bdca3a",
+        "size": 2732,
+        "type": "blob",
+        "url": "https://api.github.com/repos/tree-sitter-grammars/tree-sitter-xml/git/blobs/5038e63bd7e9a1b4e8f14c1863824c9168bdca3a"
+      },
+      {
+        "mode": "100644",
+        "path": "Cargo.lock",
+        "sha": "694e52ae5a02f604a31b6d56f4d0cad22b1d980e",
+        "size": 2480,
+        "type": "blob",
+        "url": "https://api.github.com/repos/tree-sitter-grammars/tree-sitter-xml/git/blobs/694e52ae5a02f604a31b6d56f4d0cad22b1d980e"
+      },
+      {
+        "mode": "100644",
+        "path": "Cargo.toml",
+        "sha": "4cafe71f3124ca817be9def513b094f05b5df56a",
+        "size": 806,
+        "type": "blob",
+        "url": "https://api.github.com/repos/tree-sitter-grammars/tree-sitter-xml/git/blobs/4cafe71f3124ca817be9def513b094f05b5df56a"
+      },
+      {
+        "mode": "100644",
+        "path": "LICENSE",
+        "sha": "7094a20529cd00436ad0cab177e635308982b1ef",
+        "size": 1058,
+        "type": "blob",
+        "url": "https://api.github.com/repos/tree-sitter-grammars/tree-sitter-xml/git/blobs/7094a20529cd00436ad0cab177e635308982b1ef"
+      },
+      {
+        "mode": "100644",
+        "path": "Makefile",
+        "sha": "e7663cdc867e87f51efa696cfd469c94544de06a",
+        "size": 128,
+        "type": "blob",
+        "url": "https://api.github.com/repos/tree-sitter-grammars/tree-sitter-xml/git/blobs/e7663cdc867e87f51efa696cfd469c94544de06a"
+      },
+      {
+        "mode": "100644",
+        "path": "Package.resolved",
+        "sha": "9e0a023927d11cf7699cd75cd79303aabb951097",
+        "size": 333,
+        "type": "blob",
+        "url": "https://api.github.com/repos/tree-sitter-grammars/tree-sitter-xml/git/blobs/9e0a023927d11cf7699cd75cd79303aabb951097"
+      },
+      {
+        "mode": "100644",
+        "path": "Package.swift",
+        "sha": "48e3eb7a6ade9ee18948363d250e5b2661250bd6",
+        "size": 1467,
+        "type": "blob",
+        "url": "https://api.github.com/repos/tree-sitter-grammars/tree-sitter-xml/git/blobs/48e3eb7a6ade9ee18948363d250e5b2661250bd6"
+      },
+      {
+        "mode": "100644",
+        "path": "README.md",
+        "sha": "c0dcb08c082684fddbdb4bd46f19b6221112a32e",
+        "size": 1350,
+        "type": "blob",
+        "url": "https://api.github.com/repos/tree-sitter-grammars/tree-sitter-xml/git/blobs/c0dcb08c082684fddbdb4bd46f19b6221112a32e"
+      },
+      {
+        "mode": "100644",
+        "path": "binding.gyp",
+        "sha": "f58eb04a98476ca35b3d6d863ad2c3e6cf3c873f",
+        "size": 667,
+        "type": "blob",
+        "url": "https://api.github.com/repos/tree-sitter-grammars/tree-sitter-xml/git/blobs/f58eb04a98476ca35b3d6d863ad2c3e6cf3c873f"
+      },
+      {
+        "mode": "040000",
+        "path": "bindings",
+        "sha": "6baf8d9a2c6e076844aa7b3e4793c78eee73b0be",
+        "type": "tree",
+        "url": "https://api.github.com/repos/tree-sitter-grammars/tree-sitter-xml/git/trees/6baf8d9a2c6e076844aa7b3e4793c78eee73b0be"
+      },
+      {
+        "mode": "040000",
+        "path": "bindings/c",
+        "sha": "fa362130030c9bed8e4b77fc9a1e30931260d157",
+        "type": "tree",
+        "url": "https://api.github.com/repos/tree-sitter-grammars/tree-sitter-xml/git/trees/fa362130030c9bed8e4b77fc9a1e30931260d157"
+      },
+      {
+        "mode": "100644",
+        "path": "bindings/c/tree-sitter-dtd.h",
+        "sha": "1b6d9fb7163d2346d9638eb0fb546fff3e5c376a",
+        "size": 234,
+        "type": "blob",
+        "url": "https://api.github.com/repos/tree-sitter-grammars/tree-sitter-xml/git/blobs/1b6d9fb7163d2346d9638eb0fb546fff3e5c376a"
+      },
+      {
+        "mode": "100644",
+        "path": "bindings/c/tree-sitter-dtd.pc.in",
+        "sha": "09ec1187c8a66a1e5258a2a7b3a38c864c80c3be",
+        "size": 303,
+        "type": "blob",
+        "url": "https://api.github.com/repos/tree-sitter-grammars/tree-sitter-xml/git/blobs/09ec1187c8a66a1e5258a2a7b3a38c864c80c3be"
+      },
+      {
+        "mode": "100644",
+        "path": "bindings/c/tree-sitter-xml.h",
+        "sha": "581dfe53f9a240d76043270fc9a09d93756fe258",
+        "size": 234,
+        "type": "blob",
+        "url": "https://api.github.com/repos/tree-sitter-grammars/tree-sitter-xml/git/blobs/581dfe53f9a240d76043270fc9a09d93756fe258"
+      },
+      {
+        "mode": "100644",
+        "path": "bindings/c/tree-sitter-xml.pc.in",
+        "sha": "f8ae071d370aecee5f79986b82466b95e9931b7c",
+        "size": 303,
+        "type": "blob",
+        "url": "https://api.github.com/repos/tree-sitter-grammars/tree-sitter-xml/git/blobs/f8ae071d370aecee5f79986b82466b95e9931b7c"
+      },
+      {
+        "mode": "040000",
+        "path": "bindings/go",
+        "sha": "7ed5b2d9e76f6889cc8b7d81634fbc3dbbfdd1dc",
+        "type": "tree",
+        "url": "https://api.github.com/repos/tree-sitter-grammars/tree-sitter-xml/git/trees/7ed5b2d9e76f6889cc8b7d81634fbc3dbbfdd1dc"
+      },
+      {
+        "mode": "100644",
+        "path": "bindings/go/binding_test.go",
+        "sha": "f54b04aa3ccd0c1d5079f4e27d5b0d442cdf1013",
+        "size": 543,
+        "type": "blob",
+        "url": "https://api.github.com/repos/tree-sitter-grammars/tree-sitter-xml/git/blobs/f54b04aa3ccd0c1d5079f4e27d5b0d442cdf1013"
+      },
+      {
+        "mode": "100644",
+        "path": "bindings/go/dtd.go",
+        "sha": "79d026b5181acc68557896bdbcc7b464f68f95c1",
+        "size": 317,
+        "type": "blob",
+        "url": "https://api.github.com/repos/tree-sitter-grammars/tree-sitter-xml/git/blobs/79d026b5181acc68557896bdbcc7b464f68f95c1"
+      },
+      {
+        "mode": "100644",
+        "path": "bindings/go/xml.go",
+        "sha": "9ca11ee6b518e69a108cf343ed978d2de4bc677d",
+        "size": 317,
+        "type": "blob",
+        "url": "https://api.github.com/repos/tree-sitter-grammars/tree-sitter-xml/git/blobs/9ca11ee6b518e69a108cf343ed978d2de4bc677d"
+      },
+      {
+        "mode": "040000",
+        "path": "bindings/node",
+        "sha": "582ddfd8ede6c1148239f8a52b119c7a81f12054",
+        "type": "tree",
+        "url": "https://api.github.com/repos/tree-sitter-grammars/tree-sitter-xml/git/trees/582ddfd8ede6c1148239f8a52b119c7a81f12054"
+      },
+      {
+        "mode": "100644",
+        "path": "bindings/node/binding.cc",
+        "sha": "4972ac362c5d80d4238c36f648145a0efcbe9666",
+        "size": 961,
+        "type": "blob",
+        "url": "https://api.github.com/repos/tree-sitter-grammars/tree-sitter-xml/git/blobs/4972ac362c5d80d4238c36f648145a0efcbe9666"
+      },
+      {
+        "mode": "100644",
+        "path": "bindings/node/binding_test.js",
+        "sha": "90caa8274a05a778977ad33ae294e92bbbbf1816",
+        "size": 398,
+        "type": "blob",
+        "url": "https://api.github.com/repos/tree-sitter-grammars/tree-sitter-xml/git/blobs/90caa8274a05a778977ad33ae294e92bbbbf1816"
+      },
+      {
+        "mode": "100644",
+        "path": "bindings/node/dtd.js",
+        "sha": "c298868b2ac7ac782f89f3f74b531e6582ba58b4",
+        "size": 35,
+        "type": "blob",
+        "url": "https://api.github.com/repos/tree-sitter-grammars/tree-sitter-xml/git/blobs/c298868b2ac7ac782f89f3f74b531e6582ba58b4"
+      },
+      {
+        "mode": "100644",
+        "path": "bindings/node/index.d.ts",
+        "sha": "ed3e0ee9c38ab15f3e10746fdc59b7e4f43c1719",
+        "size": 478,
+        "type": "blob",
+        "url": "https://api.github.com/repos/tree-sitter-grammars/tree-sitter-xml/git/blobs/ed3e0ee9c38ab15f3e10746fdc59b7e4f43c1719"
+      },
+      {
+        "mode": "100644",
+        "path": "bindings/node/index.js",
+        "sha": "f8d3a834def0795ff3a4296e33ca323f81a42ca3",
+        "size": 288,
+        "type": "blob",
+        "url": "https://api.github.com/repos/tree-sitter-grammars/tree-sitter-xml/git/blobs/f8d3a834def0795ff3a4296e33ca323f81a42ca3"
+      },
+      {
+        "mode": "100644",
+        "path": "bindings/node/xml.js",
+        "sha": "f6182190516e338c15508e4772c662da86215bfa",
+        "size": 35,
+        "type": "blob",
+        "url": "https://api.github.com/repos/tree-sitter-grammars/tree-sitter-xml/git/blobs/f6182190516e338c15508e4772c662da86215bfa"
+      },
+      {
+        "mode": "040000",
+        "path": "bindings/python",
+        "sha": "37cb99def0cc74dba3543edae73d80ae36bb6b6a",
+        "type": "tree",
+        "url": "https://api.github.com/repos/tree-sitter-grammars/tree-sitter-xml/git/trees/37cb99def0cc74dba3543edae73d80ae36bb6b6a"
+      },
+      {
+        "mode": "040000",
+        "path": "bindings/python/tests",
+        "sha": "8c31bad138be47e29354c41e6177845f699c9254",
+        "type": "tree",
+        "url": "https://api.github.com/repos/tree-sitter-grammars/tree-sitter-xml/git/trees/8c31bad138be47e29354c41e6177845f699c9254"
+      },
+      {
+        "mode": "100644",
+        "path": "bindings/python/tests/test_binding.py",
+        "sha": "dfdbc836c74214cf19b416f795aad54594cbdd25",
+        "size": 492,
+        "type": "blob",
+        "url": "https://api.github.com/repos/tree-sitter-grammars/tree-sitter-xml/git/blobs/dfdbc836c74214cf19b416f795aad54594cbdd25"
+      },
+      {
+        "mode": "040000",
+        "path": "bindings/python/tree_sitter_xml",
+        "sha": "fd0c1fe101ed519aa5a84b5dfeecf74f0df6fdf9",
+        "type": "tree",
+        "url": "https://api.github.com/repos/tree-sitter-grammars/tree-sitter-xml/git/trees/fd0c1fe101ed519aa5a84b5dfeecf74f0df6fdf9"
+      },
+      {
+        "mode": "100644",
+        "path": "bindings/python/tree_sitter_xml/__init__.py",
+        "sha": "976a6fdb2e5294bd75e7788a87bc612e5e9e0cb6",
+        "size": 131,
+        "type": "blob",
+        "url": "https://api.github.com/repos/tree-sitter-grammars/tree-sitter-xml/git/blobs/976a6fdb2e5294bd75e7788a87bc612e5e9e0cb6"
+      },
+      {
+        "mode": "100644",
+        "path": "bindings/python/tree_sitter_xml/__init__.pyi",
+        "sha": "f49aecfc0983bce20ffcd036a4789e7381c44c75",
+        "size": 69,
+        "type": "blob",
+        "url": "https://api.github.com/repos/tree-sitter-grammars/tree-sitter-xml/git/blobs/f49aecfc0983bce20ffcd036a4789e7381c44c75"
+      },
+      {
+        "mode": "100644",
+        "path": "bindings/python/tree_sitter_xml/binding.c",
+        "sha": "5f69321059e6759ed4862615935f7b4ae2eb46d6",
+        "size": 948,
+        "type": "blob",
+        "url": "https://api.github.com/repos/tree-sitter-grammars/tree-sitter-xml/git/blobs/5f69321059e6759ed4862615935f7b4ae2eb46d6"
+      },
+      {
+        "mode": "100644",
+        "path": "bindings/python/tree_sitter_xml/py.typed",
+        "sha": "e69de29bb2d1d6434b8b29ae775ad8c2e48c5391",
+        "size": 0,
+        "type": "blob",
+        "url": "https://api.github.com/repos/tree-sitter-grammars/tree-sitter-xml/git/blobs/e69de29bb2d1d6434b8b29ae775ad8c2e48c5391"
+      },
+      {
+        "mode": "040000",
+        "path": "bindings/rust",
+        "sha": "7c3f45a074b2f91ae58dd17d41ba28e944aae71b",
+        "type": "tree",
+        "url": "https://api.github.com/repos/tree-sitter-grammars/tree-sitter-xml/git/trees/7c3f45a074b2f91ae58dd17d41ba28e944aae71b"
+      },
+      {
+        "mode": "100644",
+        "path": "bindings/rust/build.rs",
+        "sha": "27e35af0a79905ec92ce23aa7d1fbd3eb77d4331",
+        "size": 826,
+        "type": "blob",
+        "url": "https://api.github.com/repos/tree-sitter-grammars/tree-sitter-xml/git/blobs/27e35af0a79905ec92ce23aa7d1fbd3eb77d4331"
+      },
+      {
+        "mode": "100644",
+        "path": "bindings/rust/lib.rs",
+        "sha": "397dfb375501518ab4514110356a07bea2305c57",
+        "size": 2824,
+        "type": "blob",
+        "url": "https://api.github.com/repos/tree-sitter-grammars/tree-sitter-xml/git/blobs/397dfb375501518ab4514110356a07bea2305c57"
+      },
+      {
+        "mode": "040000",
+        "path": "bindings/swift",
+        "sha": "8592d4c61914b359aa3b1c217d69af574713a195",
+        "type": "tree",
+        "url": "https://api.github.com/repos/tree-sitter-grammars/tree-sitter-xml/git/trees/8592d4c61914b359aa3b1c217d69af574713a195"
+      },
+      {
+        "mode": "040000",
+        "path": "bindings/swift/TreeSitterXMLTests",
+        "sha": "282f5477217c79ee78553ba9f4c01131c3fd242c",
+        "type": "tree",
+        "url": "https://api.github.com/repos/tree-sitter-grammars/tree-sitter-xml/git/trees/282f5477217c79ee78553ba9f4c01131c3fd242c"
+      },
+      {
+        "mode": "100644",
+        "path": "bindings/swift/TreeSitterXMLTests/TreeSitterXMLTests.swift",
+        "sha": "9c80e113969d5faf27862dfa0a080ca0a40d5386",
+        "size": 632,
+        "type": "blob",
+        "url": "https://api.github.com/repos/tree-sitter-grammars/tree-sitter-xml/git/blobs/9c80e113969d5faf27862dfa0a080ca0a40d5386"
+      },
+      {
+        "mode": "040000",
+        "path": "bindings/swift/dtd",
+        "sha": "d47e5e6be2788a41c166c65414f3da499bfb5e5c",
+        "type": "tree",
+        "url": "https://api.github.com/repos/tree-sitter-grammars/tree-sitter-xml/git/trees/d47e5e6be2788a41c166c65414f3da499bfb5e5c"
+      },
+      {
+        "mode": "040000",
+        "path": "bindings/swift/dtd/TreeSitterDTD",
+        "sha": "46746325a8f52f1c6045d75969cdfc01d7422292",
+        "type": "tree",
+        "url": "https://api.github.com/repos/tree-sitter-grammars/tree-sitter-xml/git/trees/46746325a8f52f1c6045d75969cdfc01d7422292"
+      },
+      {
+        "mode": "100644",
+        "path": "bindings/swift/dtd/TreeSitterDTD/dtd.h",
+        "sha": "1b6d9fb7163d2346d9638eb0fb546fff3e5c376a",
+        "size": 234,
+        "type": "blob",
+        "url": "https://api.github.com/repos/tree-sitter-grammars/tree-sitter-xml/git/blobs/1b6d9fb7163d2346d9638eb0fb546fff3e5c376a"
+      },
+      {
+        "mode": "040000",
+        "path": "bindings/swift/xml",
+        "sha": "feec0e34ff2d0e4ef297f87caa097f7082dc838f",
+        "type": "tree",
+        "url": "https://api.github.com/repos/tree-sitter-grammars/tree-sitter-xml/git/trees/feec0e34ff2d0e4ef297f87caa097f7082dc838f"
+      },
+      {
+        "mode": "040000",
+        "path": "bindings/swift/xml/TreeSitterXML",
+        "sha": "8ac1771bc71b623f82cde651471df8795498444c",
+        "type": "tree",
+        "url": "https://api.github.com/repos/tree-sitter-grammars/tree-sitter-xml/git/trees/8ac1771bc71b623f82cde651471df8795498444c"
+      },
+      {
+        "mode": "100644",
+        "path": "bindings/swift/xml/TreeSitterXML/xml.h",
+        "sha": "581dfe53f9a240d76043270fc9a09d93756fe258",
+        "size": 234,
+        "type": "blob",
+        "url": "https://api.github.com/repos/tree-sitter-grammars/tree-sitter-xml/git/blobs/581dfe53f9a240d76043270fc9a09d93756fe258"
+      },
+      {
+        "mode": "040000",
+        "path": "common",
+        "sha": "5d79e76408dd3c321b58121f8e742692428ee66c",
+        "type": "tree",
+        "url": "https://api.github.com/repos/tree-sitter-grammars/tree-sitter-xml/git/trees/5d79e76408dd3c321b58121f8e742692428ee66c"
+      },
+      {
+        "mode": "100644",
+        "path": "common/common.mak",
+        "sha": "9c086761c862f04ce4872632b0edeb1faeb785dc",
+        "size": 3138,
+        "type": "blob",
+        "url": "https://api.github.com/repos/tree-sitter-grammars/tree-sitter-xml/git/blobs/9c086761c862f04ce4872632b0edeb1faeb785dc"
+      },
+      {
+        "mode": "100644",
+        "path": "common/common.mjs",
+        "sha": "436d8140c393b9835668866fb0b31fd8ec463a28",
+        "size": 6420,
+        "type": "blob",
+        "url": "https://api.github.com/repos/tree-sitter-grammars/tree-sitter-xml/git/blobs/436d8140c393b9835668866fb0b31fd8ec463a28"
+      },
+      {
+        "mode": "100644",
+        "path": "common/scanner.h",
+        "sha": "c2cb1092d121ed64fdf13f122f2ad26bb0ba1fde",
+        "size": 4270,
+        "type": "blob",
+        "url": "https://api.github.com/repos/tree-sitter-grammars/tree-sitter-xml/git/blobs/c2cb1092d121ed64fdf13f122f2ad26bb0ba1fde"
+      },
+      {
+        "mode": "040000",
+        "path": "dtd",
+        "sha": "820558635db3c929fdc272bad4e6a84c312d8ded",
+        "type": "tree",
+        "url": "https://api.github.com/repos/tree-sitter-grammars/tree-sitter-xml/git/trees/820558635db3c929fdc272bad4e6a84c312d8ded"
+      },
+      {
+        "mode": "100644",
+        "path": "dtd/CMakeLists.txt",
+        "sha": "3708122ed06a95d335c6cdea429ca272a92b0ed0",
+        "size": 72,
+        "type": "blob",
+        "url": "https://api.github.com/repos/tree-sitter-grammars/tree-sitter-xml/git/blobs/3708122ed06a95d335c6cdea429ca272a92b0ed0"
+      },
+      {
+        "mode": "100644",
+        "path": "dtd/Makefile",
+        "sha": "6f026b0210acc470ac4187805fc0f274ee4191c1",
+        "size": 106,
+        "type": "blob",
+        "url": "https://api.github.com/repos/tree-sitter-grammars/tree-sitter-xml/git/blobs/6f026b0210acc470ac4187805fc0f274ee4191c1"
+      },
+      {
+        "mode": "100644",
+        "path": "dtd/grammar.js",
+        "sha": "00a76d154d47c270799348a3773f78cb40ef1998",
+        "size": 1090,
+        "type": "blob",
+        "url": "https://api.github.com/repos/tree-sitter-grammars/tree-sitter-xml/git/blobs/00a76d154d47c270799348a3773f78cb40ef1998"
+      },
+      {
+        "mode": "100644",
+        "path": "dtd/package.json",
+        "sha": "c58af7d8fcff93d695ecbca713bff09b5cfe8915",
+        "size": 215,
+        "type": "blob",
+        "url": "https://api.github.com/repos/tree-sitter-grammars/tree-sitter-xml/git/blobs/c58af7d8fcff93d695ecbca713bff09b5cfe8915"
+      },
+      {
+        "mode": "040000",
+        "path": "dtd/src",
+        "sha": "855d46b54114a46d9dc6f0d0e4c87c801e111758",
+        "type": "tree",
+        "url": "https://api.github.com/repos/tree-sitter-grammars/tree-sitter-xml/git/trees/855d46b54114a46d9dc6f0d0e4c87c801e111758"
+      },
+      {
+        "mode": "100644",
+        "path": "dtd/src/grammar.json",
+        "sha": "4c060e88a70a4b00be8945eeb5e91529459321bb",
+        "size": 42499,
+        "type": "blob",
+        "url": "https://api.github.com/repos/tree-sitter-grammars/tree-sitter-xml/git/blobs/4c060e88a70a4b00be8945eeb5e91529459321bb"
+      },
+      {
+        "mode": "100644",
+        "path": "dtd/src/node-types.json",
+        "sha": "b1d32883720d85794838824ede05155924895f95",
+        "size": 12260,
+        "type": "blob",
+        "url": "https://api.github.com/repos/tree-sitter-grammars/tree-sitter-xml/git/blobs/b1d32883720d85794838824ede05155924895f95"
+      },
+      {
+        "mode": "100644",
+        "path": "dtd/src/parser.c",
+        "sha": "60841abf1356270f4211eb5ee00f41e60d67a3a4",
+        "size": 176894,
+        "type": "blob",
+        "url": "https://api.github.com/repos/tree-sitter-grammars/tree-sitter-xml/git/blobs/60841abf1356270f4211eb5ee00f41e60d67a3a4"
+      },
+      {
+        "mode": "100644",
+        "path": "dtd/src/scanner.c",
+        "sha": "7a076623ff5d7f7703a97f0d06bc78924f99becb",
+        "size": 1398,
+        "type": "blob",
+        "url": "https://api.github.com/repos/tree-sitter-grammars/tree-sitter-xml/git/blobs/7a076623ff5d7f7703a97f0d06bc78924f99becb"
+      },
+      {
+        "mode": "040000",
+        "path": "dtd/src/tree_sitter",
+        "sha": "41a1e2abad6cb49797e3dea7c264f795f746f79f",
+        "type": "tree",
+        "url": "https://api.github.com/repos/tree-sitter-grammars/tree-sitter-xml/git/trees/41a1e2abad6cb49797e3dea7c264f795f746f79f"
+      },
+      {
+        "mode": "100644",
+        "path": "dtd/src/tree_sitter/alloc.h",
+        "sha": "1abdd1201578605b8d05a3001f01ebc0d58826d9",
+        "size": 985,
+        "type": "blob",
+        "url": "https://api.github.com/repos/tree-sitter-grammars/tree-sitter-xml/git/blobs/1abdd1201578605b8d05a3001f01ebc0d58826d9"
+      },
+      {
+        "mode": "100644",
+        "path": "dtd/src/tree_sitter/array.h",
+        "sha": "15a3b233bbb8760a5d87089b259fe0122da75c8a",
+        "size": 10420,
+        "type": "blob",
+        "url": "https://api.github.com/repos/tree-sitter-grammars/tree-sitter-xml/git/blobs/15a3b233bbb8760a5d87089b259fe0122da75c8a"
+      },
+      {
+        "mode": "100644",
+        "path": "dtd/src/tree_sitter/parser.h",
+        "sha": "799f599bd4e292e95565f90733c59fa422899eae",
+        "size": 7039,
+        "type": "blob",
+        "url": "https://api.github.com/repos/tree-sitter-grammars/tree-sitter-xml/git/blobs/799f599bd4e292e95565f90733c59fa422899eae"
+      },
+      {
+        "mode": "100644",
+        "path": "go.mod",
+        "sha": "41b2322c83a9f4f47472b4b2a7060ba7a66ad385",
+        "size": 175,
+        "type": "blob",
+        "url": "https://api.github.com/repos/tree-sitter-grammars/tree-sitter-xml/git/blobs/41b2322c83a9f4f47472b4b2a7060ba7a66ad385"
+      },
+      {
+        "mode": "100644",
+        "path": "go.sum",
+        "sha": "0a48bbef1a4f02c81a25440ba8fc49a8aca1cde7",
+        "size": 4176,
+        "type": "blob",
+        "url": "https://api.github.com/repos/tree-sitter-grammars/tree-sitter-xml/git/blobs/0a48bbef1a4f02c81a25440ba8fc49a8aca1cde7"
+      },
+      {
+        "mode": "100644",
+        "path": "package-lock.json",
+        "sha": "90b5ffa2169edffe39bd8c2a8db2569cf5b5a4ba",
+        "size": 13102,
+        "type": "blob",
+        "url": "https://api.github.com/repos/tree-sitter-grammars/tree-sitter-xml/git/blobs/90b5ffa2169edffe39bd8c2a8db2569cf5b5a4ba"
+      },
+      {
+        "mode": "100644",
+        "path": "package.json",
+        "sha": "44c50ef081f494cc039b8f924f07b4ffa890801f",
+        "size": 1608,
+        "type": "blob",
+        "url": "https://api.github.com/repos/tree-sitter-grammars/tree-sitter-xml/git/blobs/44c50ef081f494cc039b8f924f07b4ffa890801f"
+      },
+      {
+        "mode": "100644",
+        "path": "pyproject.toml",
+        "sha": "ec5d3f5fad2a673c5edb831bbc1a7cb73dc6d94b",
+        "size": 935,
+        "type": "blob",
+        "url": "https://api.github.com/repos/tree-sitter-grammars/tree-sitter-xml/git/blobs/ec5d3f5fad2a673c5edb831bbc1a7cb73dc6d94b"
+      },
+      {
+        "mode": "040000",
+        "path": "queries",
+        "sha": "37facb68b5753a2d743e49bd36c8def60597b67e",
+        "type": "tree",
+        "url": "https://api.github.com/repos/tree-sitter-grammars/tree-sitter-xml/git/trees/37facb68b5753a2d743e49bd36c8def60597b67e"
+      },
+      {
+        "mode": "040000",
+        "path": "queries/dtd",
+        "sha": "679c5471fb0cd0d5c8fd8d244c96b145d9667da6",
+        "type": "tree",
+        "url": "https://api.github.com/repos/tree-sitter-grammars/tree-sitter-xml/git/trees/679c5471fb0cd0d5c8fd8d244c96b145d9667da6"
+      },
+      {
+        "mode": "100644",
+        "path": "queries/dtd/highlights.scm",
+        "sha": "8255b47ec102330e058a85eea74181acb19d46b9",
+        "size": 1780,
+        "type": "blob",
+        "url": "https://api.github.com/repos/tree-sitter-grammars/tree-sitter-xml/git/blobs/8255b47ec102330e058a85eea74181acb19d46b9"
+      },
+      {
+        "mode": "040000",
+        "path": "queries/xml",
+        "sha": "3b7157b0f5da506ec6077843361e7f4828d5e61a",
+        "type": "tree",
+        "url": "https://api.github.com/repos/tree-sitter-grammars/tree-sitter-xml/git/trees/3b7157b0f5da506ec6077843361e7f4828d5e61a"
+      },
+      {
+        "mode": "100644",
+        "path": "queries/xml/highlights.scm",
+        "sha": "9861eea17847e23a3a86fee52f90dd168f3c6f7d",
+        "size": 2281,
+        "type": "blob",
+        "url": "https://api.github.com/repos/tree-sitter-grammars/tree-sitter-xml/git/blobs/9861eea17847e23a3a86fee52f90dd168f3c6f7d"
+      },
+      {
+        "mode": "100644",
+        "path": "setup.py",
+        "sha": "01a74311e1034db5f9288cad05e4d92029a2e601",
+        "size": 1784,
+        "type": "blob",
+        "url": "https://api.github.com/repos/tree-sitter-grammars/tree-sitter-xml/git/blobs/01a74311e1034db5f9288cad05e4d92029a2e601"
+      },
+      {
+        "mode": "040000",
+        "path": "test",
+        "sha": "2773a172ca56c66b1bc2c60c6bdfd3e2fa5c9d71",
+        "type": "tree",
+        "url": "https://api.github.com/repos/tree-sitter-grammars/tree-sitter-xml/git/trees/2773a172ca56c66b1bc2c60c6bdfd3e2fa5c9d71"
+      },
+      {
+        "mode": "040000",
+        "path": "test/corpus",
+        "sha": "784ebefe1bcdaa1b8cabbd354521ef11017b4b5c",
+        "type": "tree",
+        "url": "https://api.github.com/repos/tree-sitter-grammars/tree-sitter-xml/git/trees/784ebefe1bcdaa1b8cabbd354521ef11017b4b5c"
+      },
+      {
+        "mode": "100644",
+        "path": "test/corpus/errors.txt",
+        "sha": "dddb5d1023de8a0828af556c9ccc74792295702e",
+        "size": 1969,
+        "type": "blob",
+        "url": "https://api.github.com/repos/tree-sitter-grammars/tree-sitter-xml/git/blobs/dddb5d1023de8a0828af556c9ccc74792295702e"
+      },
+      {
+        "mode": "100644",
+        "path": "test/corpus/examples.txt",
+        "sha": "4ab2cd08373c3b66cea8d36cb07a7013767a1b81",
+        "size": 5008,
+        "type": "blob",
+        "url": "https://api.github.com/repos/tree-sitter-grammars/tree-sitter-xml/git/blobs/4ab2cd08373c3b66cea8d36cb07a7013767a1b81"
+      },
+      {
+        "mode": "100644",
+        "path": "test/corpus/extra.txt",
+        "sha": "0d11c4c80752a8ec77cdfb1c5648b00e0169f052",
+        "size": 2668,
+        "type": "blob",
+        "url": "https://api.github.com/repos/tree-sitter-grammars/tree-sitter-xml/git/blobs/0d11c4c80752a8ec77cdfb1c5648b00e0169f052"
+      },
+      {
+        "mode": "100644",
+        "path": "test/corpus/issues.txt",
+        "sha": "f907ec7ae4a1535e6e2b6ae051fc3dec10c9c923",
+        "size": 6265,
+        "type": "blob",
+        "url": "https://api.github.com/repos/tree-sitter-grammars/tree-sitter-xml/git/blobs/f907ec7ae4a1535e6e2b6ae051fc3dec10c9c923"
+      },
+      {
+        "mode": "100644",
+        "path": "test/corpus/standard.txt",
+        "sha": "72d3024ec298f68ebea7f5180d0d7dca63d11cc5",
+        "size": 7211,
+        "type": "blob",
+        "url": "https://api.github.com/repos/tree-sitter-grammars/tree-sitter-xml/git/blobs/72d3024ec298f68ebea7f5180d0d7dca63d11cc5"
+      },
+      {
+        "mode": "040000",
+        "path": "test/highlight",
+        "sha": "2ada6188d2bd08048e07834afb2fb21b4cc842b8",
+        "type": "tree",
+        "url": "https://api.github.com/repos/tree-sitter-grammars/tree-sitter-xml/git/trees/2ada6188d2bd08048e07834afb2fb21b4cc842b8"
+      },
+      {
+        "mode": "100644",
+        "path": "test/highlight/test.dtd",
+        "sha": "e6eb9a41c088a60d2cbf2499ad4ae8bf2efeed2b",
+        "size": 613,
+        "type": "blob",
+        "url": "https://api.github.com/repos/tree-sitter-grammars/tree-sitter-xml/git/blobs/e6eb9a41c088a60d2cbf2499ad4ae8bf2efeed2b"
+      },
+      {
+        "mode": "100644",
+        "path": "test/highlight/test.xml",
+        "sha": "a090a38eeece9d70ef8cdb59df4b4fad956cc109",
+        "size": 480,
+        "type": "blob",
+        "url": "https://api.github.com/repos/tree-sitter-grammars/tree-sitter-xml/git/blobs/a090a38eeece9d70ef8cdb59df4b4fad956cc109"
+      },
+      {
+        "mode": "100644",
+        "path": "tree-sitter.json",
+        "sha": "ff6d0fbd22fc1090871592916e64709d526ee871",
+        "size": 1182,
+        "type": "blob",
+        "url": "https://api.github.com/repos/tree-sitter-grammars/tree-sitter-xml/git/blobs/ff6d0fbd22fc1090871592916e64709d526ee871"
+      },
+      {
+        "mode": "040000",
+        "path": "xml",
+        "sha": "6168ff2bc023e718ef4ca410e42c090d171e1e9f",
+        "type": "tree",
+        "url": "https://api.github.com/repos/tree-sitter-grammars/tree-sitter-xml/git/trees/6168ff2bc023e718ef4ca410e42c090d171e1e9f"
+      },
+      {
+        "mode": "100644",
+        "path": "xml/CMakeLists.txt",
+        "sha": "c1a821d17e95d1e083ad8948e2ade9b613d0b6d9",
+        "size": 72,
+        "type": "blob",
+        "url": "https://api.github.com/repos/tree-sitter-grammars/tree-sitter-xml/git/blobs/c1a821d17e95d1e083ad8948e2ade9b613d0b6d9"
+      },
+      {
+        "mode": "100644",
+        "path": "xml/Makefile",
+        "sha": "61a2b57bc8f84906f659b8312d6d8a577543ec34",
+        "size": 106,
+        "type": "blob",
+        "url": "https://api.github.com/repos/tree-sitter-grammars/tree-sitter-xml/git/blobs/61a2b57bc8f84906f659b8312d6d8a577543ec34"
+      },
+      {
+        "mode": "100644",
+        "path": "xml/grammar.js",
+        "sha": "c36108c26ee8ee482b6e4d449e09f8e02f0c7721",
+        "size": 3209,
+        "type": "blob",
+        "url": "https://api.github.com/repos/tree-sitter-grammars/tree-sitter-xml/git/blobs/c36108c26ee8ee482b6e4d449e09f8e02f0c7721"
+      },
+      {
+        "mode": "100644",
+        "path": "xml/package.json",
+        "sha": "1cee999e0054743e3356a81f28870b1da4ce215c",
+        "size": 215,
+        "type": "blob",
+        "url": "https://api.github.com/repos/tree-sitter-grammars/tree-sitter-xml/git/blobs/1cee999e0054743e3356a81f28870b1da4ce215c"
+      },
+      {
+        "mode": "040000",
+        "path": "xml/src",
+        "sha": "72db58bc9cf802f6b7f83c2f844e607e0043720e",
+        "type": "tree",
+        "url": "https://api.github.com/repos/tree-sitter-grammars/tree-sitter-xml/git/trees/72db58bc9cf802f6b7f83c2f844e607e0043720e"
+      },
+      {
+        "mode": "100644",
+        "path": "xml/src/grammar.json",
+        "sha": "1ad6842b9481fa1d135860494da88ad3bc4fc596",
+        "size": 58409,
+        "type": "blob",
+        "url": "https://api.github.com/repos/tree-sitter-grammars/tree-sitter-xml/git/blobs/1ad6842b9481fa1d135860494da88ad3bc4fc596"
+      },
+      {
+        "mode": "100644",
+        "path": "xml/src/node-types.json",
+        "sha": "472c1a83fa2f402b9fe9ea8adda176da09c40b81",
+        "size": 17444,
+        "type": "blob",
+        "url": "https://api.github.com/repos/tree-sitter-grammars/tree-sitter-xml/git/blobs/472c1a83fa2f402b9fe9ea8adda176da09c40b81"
+      },
+      {
+        "mode": "100644",
+        "path": "xml/src/parser.c",
+        "sha": "74085eacff1404f3b81daa3e333429e3f5962cae",
+        "size": 240185,
+        "type": "blob",
+        "url": "https://api.github.com/repos/tree-sitter-grammars/tree-sitter-xml/git/blobs/74085eacff1404f3b81daa3e333429e3f5962cae"
+      },
+      {
+        "mode": "100644",
+        "path": "xml/src/scanner.c",
+        "sha": "6364dcbeb1e644cb794c105b5207ecaf69043071",
+        "size": 7688,
+        "type": "blob",
+        "url": "https://api.github.com/repos/tree-sitter-grammars/tree-sitter-xml/git/blobs/6364dcbeb1e644cb794c105b5207ecaf69043071"
+      },
+      {
+        "mode": "040000",
+        "path": "xml/src/tree_sitter",
+        "sha": "41a1e2abad6cb49797e3dea7c264f795f746f79f",
+        "type": "tree",
+        "url": "https://api.github.com/repos/tree-sitter-grammars/tree-sitter-xml/git/trees/41a1e2abad6cb49797e3dea7c264f795f746f79f"
+      },
+      {
+        "mode": "100644",
+        "path": "xml/src/tree_sitter/alloc.h",
+        "sha": "1abdd1201578605b8d05a3001f01ebc0d58826d9",
+        "size": 985,
+        "type": "blob",
+        "url": "https://api.github.com/repos/tree-sitter-grammars/tree-sitter-xml/git/blobs/1abdd1201578605b8d05a3001f01ebc0d58826d9"
+      },
+      {
+        "mode": "100644",
+        "path": "xml/src/tree_sitter/array.h",
+        "sha": "15a3b233bbb8760a5d87089b259fe0122da75c8a",
+        "size": 10420,
+        "type": "blob",
+        "url": "https://api.github.com/repos/tree-sitter-grammars/tree-sitter-xml/git/blobs/15a3b233bbb8760a5d87089b259fe0122da75c8a"
+      },
+      {
+        "mode": "100644",
+        "path": "xml/src/tree_sitter/parser.h",
+        "sha": "799f599bd4e292e95565f90733c59fa422899eae",
+        "size": 7039,
+        "type": "blob",
+        "url": "https://api.github.com/repos/tree-sitter-grammars/tree-sitter-xml/git/blobs/799f599bd4e292e95565f90733c59fa422899eae"
+      }
+    ],
+    "file_bytes": 691160,
+    "file_count": 79,
+    "limits_derived_from_exact_roster": {
+      "compressed_bytes": 915968,
+      "effective_members": 117,
+      "expanded_tar_bytes": 911872,
+      "file_bytes": 256569,
+      "raw_members": 228,
+      "regular_bytes": 707544
+    },
+    "tree": "c0ab4ece2a3b4859749f405bcd3ea1423f25e4f1",
+    "tree_objects_reconstructed": 30
+  },
+  "inputs": {
+    "LICENSE.exact-revision": {
+      "bytes": 1058,
+      "sha256": "3297073719030b7261afd78b7267931ccc03a27f7a65ca6fc644316180f71bf6"
+    },
+    "git-commit.json": {
+      "bytes": 2287,
+      "sha256": "ae1db7092fd7d2ae4b6fed4b9a905914b5fe425d46c6b687d407393ea91ae5b6"
+    },
+    "git-tree.json": {
+      "bytes": 26539,
+      "sha256": "6c98a74d0454cc123fbb31145c1e06734eb31f4caf6347dd826e3ba3f0fbe6d1"
+    },
+    "registry-index.jsonl": {
+      "bytes": 5222,
+      "sha256": "39cb697d2886eff004ea8f3bb806cf8d4b19ada43fd54b593572acd2d9875cda"
+    },
+    "tree-sitter-xml-0.7.0.crate": {
+      "bytes": 75507,
+      "sha256": "e670041f591d994f54d597ddcd8f4ebc930e282c4c76a42268743b71f0c8b6b3"
+    },
+    "tree-sitter-xml-authored.tar.gz": {
+      "bytes": 98364,
+      "sha256": "e93293550a10535197c6d682a79fcf2942f6a3b1277118d37beb0dcf0a6255cb"
+    }
+  },
+  "inventories": {
+    "authored": {
+      "expanded_tar_bytes": 778240,
+      "git_archive_comment_verified": true,
+      "member_count": 109,
+      "members": [
+        {
+          "archive_path": "tree-sitter-xml-4b64dd3a03ec002258d6268d712fd93716d6ab57",
+          "bytes": 0,
+          "directory": true,
+          "executable_intent": false,
+          "gid": 0,
+          "mtime": 1731478685,
+          "path": "",
+          "pax_headers": {
+            "comment": "4b64dd3a03ec002258d6268d712fd93716d6ab57"
+          },
+          "raw_mode": 509,
+          "raw_type_hex": "35",
+          "uid": 0
+        },
+        {
+          "archive_path": "tree-sitter-xml-4b64dd3a03ec002258d6268d712fd93716d6ab57/.editorconfig",
+          "bytes": 594,
+          "directory": false,
+          "executable_intent": false,
+          "gid": 0,
+          "mtime": 1731478685,
+          "path": ".editorconfig",
+          "pax_headers": {
+            "comment": "4b64dd3a03ec002258d6268d712fd93716d6ab57"
+          },
+          "raw_mode": 436,
+          "raw_type_hex": "30",
+          "sha256": "1e7e1331ec711fad1b55565f4f160ec9459f34b56a27b74f61ca88f8fec1c225",
+          "uid": 0
+        },
+        {
+          "archive_path": "tree-sitter-xml-4b64dd3a03ec002258d6268d712fd93716d6ab57/.gitattributes",
+          "bytes": 871,
+          "directory": false,
+          "executable_intent": false,
+          "gid": 0,
+          "mtime": 1731478685,
+          "path": ".gitattributes",
+          "pax_headers": {
+            "comment": "4b64dd3a03ec002258d6268d712fd93716d6ab57"
+          },
+          "raw_mode": 436,
+          "raw_type_hex": "30",
+          "sha256": "f312680cbef613af38c9543e7dd4bf3ab4748f17a879de9bfa66eca0e0e204e3",
+          "uid": 0
+        },
+        {
+          "archive_path": "tree-sitter-xml-4b64dd3a03ec002258d6268d712fd93716d6ab57/.github",
+          "bytes": 0,
+          "directory": true,
+          "executable_intent": false,
+          "gid": 0,
+          "mtime": 1731478685,
+          "path": ".github",
+          "pax_headers": {
+            "comment": "4b64dd3a03ec002258d6268d712fd93716d6ab57"
+          },
+          "raw_mode": 509,
+          "raw_type_hex": "35",
+          "uid": 0
+        },
+        {
+          "archive_path": "tree-sitter-xml-4b64dd3a03ec002258d6268d712fd93716d6ab57/.github/FUNDING.yml",
+          "bytes": 49,
+          "directory": false,
+          "executable_intent": false,
+          "gid": 0,
+          "mtime": 1731478685,
+          "path": ".github/FUNDING.yml",
+          "pax_headers": {
+            "comment": "4b64dd3a03ec002258d6268d712fd93716d6ab57"
+          },
+          "raw_mode": 436,
+          "raw_type_hex": "30",
+          "sha256": "00f5a75b2c6821d936afd817be6da96aab8067f4d6945766dedf8e7678291099",
+          "uid": 0
+        },
+        {
+          "archive_path": "tree-sitter-xml-4b64dd3a03ec002258d6268d712fd93716d6ab57/.github/workflows",
+          "bytes": 0,
+          "directory": true,
+          "executable_intent": false,
+          "gid": 0,
+          "mtime": 1731478685,
+          "path": ".github/workflows",
+          "pax_headers": {
+            "comment": "4b64dd3a03ec002258d6268d712fd93716d6ab57"
+          },
+          "raw_mode": 509,
+          "raw_type_hex": "35",
+          "uid": 0
+        },
+        {
+          "archive_path": "tree-sitter-xml-4b64dd3a03ec002258d6268d712fd93716d6ab57/.github/workflows/ci.yml",
+          "bytes": 2897,
+          "directory": false,
+          "executable_intent": false,
+          "gid": 0,
+          "mtime": 1731478685,
+          "path": ".github/workflows/ci.yml",
+          "pax_headers": {
+            "comment": "4b64dd3a03ec002258d6268d712fd93716d6ab57"
+          },
+          "raw_mode": 436,
+          "raw_type_hex": "30",
+          "sha256": "993308a010bf4f9cf88e97ae8f81b23a79fd150d53792f365a74ffd27f67be23",
+          "uid": 0
+        },
+        {
+          "archive_path": "tree-sitter-xml-4b64dd3a03ec002258d6268d712fd93716d6ab57/.github/workflows/publish.yml",
+          "bytes": 753,
+          "directory": false,
+          "executable_intent": false,
+          "gid": 0,
+          "mtime": 1731478685,
+          "path": ".github/workflows/publish.yml",
+          "pax_headers": {
+            "comment": "4b64dd3a03ec002258d6268d712fd93716d6ab57"
+          },
+          "raw_mode": 436,
+          "raw_type_hex": "30",
+          "sha256": "fa6b8309f6c59632e6b3ec3d9164ef1d0f7fefa953e0f068ef66edeb97076b3f",
+          "uid": 0
+        },
+        {
+          "archive_path": "tree-sitter-xml-4b64dd3a03ec002258d6268d712fd93716d6ab57/.gitignore",
+          "bytes": 324,
+          "directory": false,
+          "executable_intent": false,
+          "gid": 0,
+          "mtime": 1731478685,
+          "path": ".gitignore",
+          "pax_headers": {
+            "comment": "4b64dd3a03ec002258d6268d712fd93716d6ab57"
+          },
+          "raw_mode": 436,
+          "raw_type_hex": "30",
+          "sha256": "b3ab146577626a302df228cfdbe663020ecbed513dd0a02700b68fea1e8ce00e",
+          "uid": 0
+        },
+        {
+          "archive_path": "tree-sitter-xml-4b64dd3a03ec002258d6268d712fd93716d6ab57/CMakeLists.txt",
+          "bytes": 2732,
+          "directory": false,
+          "executable_intent": false,
+          "gid": 0,
+          "mtime": 1731478685,
+          "path": "CMakeLists.txt",
+          "pax_headers": {
+            "comment": "4b64dd3a03ec002258d6268d712fd93716d6ab57"
+          },
+          "raw_mode": 436,
+          "raw_type_hex": "30",
+          "sha256": "880383f9fb35b3dfc429a6338737e45414d3747162532a6b4cd8538d6dfafdcf",
+          "uid": 0
+        },
+        {
+          "archive_path": "tree-sitter-xml-4b64dd3a03ec002258d6268d712fd93716d6ab57/Cargo.lock",
+          "bytes": 2480,
+          "directory": false,
+          "executable_intent": false,
+          "gid": 0,
+          "mtime": 1731478685,
+          "path": "Cargo.lock",
+          "pax_headers": {
+            "comment": "4b64dd3a03ec002258d6268d712fd93716d6ab57"
+          },
+          "raw_mode": 436,
+          "raw_type_hex": "30",
+          "sha256": "d79a06b56bac664c58d2e1bcfd5feb1c6be3ae9a8c634347dcf3970b361f8ab7",
+          "uid": 0
+        },
+        {
+          "archive_path": "tree-sitter-xml-4b64dd3a03ec002258d6268d712fd93716d6ab57/Cargo.toml",
+          "bytes": 806,
+          "directory": false,
+          "executable_intent": false,
+          "gid": 0,
+          "mtime": 1731478685,
+          "path": "Cargo.toml",
+          "pax_headers": {
+            "comment": "4b64dd3a03ec002258d6268d712fd93716d6ab57"
+          },
+          "raw_mode": 436,
+          "raw_type_hex": "30",
+          "sha256": "ca1721bc0a229634026ab2d84d46530a86421380b920246f745d126e7af169f7",
+          "uid": 0
+        },
+        {
+          "archive_path": "tree-sitter-xml-4b64dd3a03ec002258d6268d712fd93716d6ab57/LICENSE",
+          "bytes": 1058,
+          "directory": false,
+          "executable_intent": false,
+          "gid": 0,
+          "mtime": 1731478685,
+          "path": "LICENSE",
+          "pax_headers": {
+            "comment": "4b64dd3a03ec002258d6268d712fd93716d6ab57"
+          },
+          "raw_mode": 436,
+          "raw_type_hex": "30",
+          "sha256": "3297073719030b7261afd78b7267931ccc03a27f7a65ca6fc644316180f71bf6",
+          "uid": 0
+        },
+        {
+          "archive_path": "tree-sitter-xml-4b64dd3a03ec002258d6268d712fd93716d6ab57/Makefile",
+          "bytes": 128,
+          "directory": false,
+          "executable_intent": false,
+          "gid": 0,
+          "mtime": 1731478685,
+          "path": "Makefile",
+          "pax_headers": {
+            "comment": "4b64dd3a03ec002258d6268d712fd93716d6ab57"
+          },
+          "raw_mode": 436,
+          "raw_type_hex": "30",
+          "sha256": "1323512b3f08e41b021fd0a929d57177dfe6868428e851bdc251295a54eccc6f",
+          "uid": 0
+        },
+        {
+          "archive_path": "tree-sitter-xml-4b64dd3a03ec002258d6268d712fd93716d6ab57/Package.resolved",
+          "bytes": 333,
+          "directory": false,
+          "executable_intent": false,
+          "gid": 0,
+          "mtime": 1731478685,
+          "path": "Package.resolved",
+          "pax_headers": {
+            "comment": "4b64dd3a03ec002258d6268d712fd93716d6ab57"
+          },
+          "raw_mode": 436,
+          "raw_type_hex": "30",
+          "sha256": "cef0ed0b229ba190f267939af963f3ca1411da00d4e32950b7085d6c46210104",
+          "uid": 0
+        },
+        {
+          "archive_path": "tree-sitter-xml-4b64dd3a03ec002258d6268d712fd93716d6ab57/Package.swift",
+          "bytes": 1467,
+          "directory": false,
+          "executable_intent": false,
+          "gid": 0,
+          "mtime": 1731478685,
+          "path": "Package.swift",
+          "pax_headers": {
+            "comment": "4b64dd3a03ec002258d6268d712fd93716d6ab57"
+          },
+          "raw_mode": 436,
+          "raw_type_hex": "30",
+          "sha256": "d5d72b0368761b4a3b7e13fb607c720be693ae7b1d6906db1eeda4aec96bb48b",
+          "uid": 0
+        },
+        {
+          "archive_path": "tree-sitter-xml-4b64dd3a03ec002258d6268d712fd93716d6ab57/README.md",
+          "bytes": 1350,
+          "directory": false,
+          "executable_intent": false,
+          "gid": 0,
+          "mtime": 1731478685,
+          "path": "README.md",
+          "pax_headers": {
+            "comment": "4b64dd3a03ec002258d6268d712fd93716d6ab57"
+          },
+          "raw_mode": 436,
+          "raw_type_hex": "30",
+          "sha256": "950a5a97be2b4b8abee61d0b7291a25d9b192b0b47dacb42ec27cf54c184df8c",
+          "uid": 0
+        },
+        {
+          "archive_path": "tree-sitter-xml-4b64dd3a03ec002258d6268d712fd93716d6ab57/binding.gyp",
+          "bytes": 667,
+          "directory": false,
+          "executable_intent": false,
+          "gid": 0,
+          "mtime": 1731478685,
+          "path": "binding.gyp",
+          "pax_headers": {
+            "comment": "4b64dd3a03ec002258d6268d712fd93716d6ab57"
+          },
+          "raw_mode": 436,
+          "raw_type_hex": "30",
+          "sha256": "76c4c61c756011ff02d3987d4ad07c093f1451bc758eeb6e318ac6b5d9dffc3d",
+          "uid": 0
+        },
+        {
+          "archive_path": "tree-sitter-xml-4b64dd3a03ec002258d6268d712fd93716d6ab57/bindings",
+          "bytes": 0,
+          "directory": true,
+          "executable_intent": false,
+          "gid": 0,
+          "mtime": 1731478685,
+          "path": "bindings",
+          "pax_headers": {
+            "comment": "4b64dd3a03ec002258d6268d712fd93716d6ab57"
+          },
+          "raw_mode": 509,
+          "raw_type_hex": "35",
+          "uid": 0
+        },
+        {
+          "archive_path": "tree-sitter-xml-4b64dd3a03ec002258d6268d712fd93716d6ab57/bindings/c",
+          "bytes": 0,
+          "directory": true,
+          "executable_intent": false,
+          "gid": 0,
+          "mtime": 1731478685,
+          "path": "bindings/c",
+          "pax_headers": {
+            "comment": "4b64dd3a03ec002258d6268d712fd93716d6ab57"
+          },
+          "raw_mode": 509,
+          "raw_type_hex": "35",
+          "uid": 0
+        },
+        {
+          "archive_path": "tree-sitter-xml-4b64dd3a03ec002258d6268d712fd93716d6ab57/bindings/c/tree-sitter-dtd.h",
+          "bytes": 234,
+          "directory": false,
+          "executable_intent": false,
+          "gid": 0,
+          "mtime": 1731478685,
+          "path": "bindings/c/tree-sitter-dtd.h",
+          "pax_headers": {
+            "comment": "4b64dd3a03ec002258d6268d712fd93716d6ab57"
+          },
+          "raw_mode": 436,
+          "raw_type_hex": "30",
+          "sha256": "99b9ba9983687d86df3833e217032201dd2cbac034ca8885ab3d607eeb16bac8",
+          "uid": 0
+        },
+        {
+          "archive_path": "tree-sitter-xml-4b64dd3a03ec002258d6268d712fd93716d6ab57/bindings/c/tree-sitter-dtd.pc.in",
+          "bytes": 303,
+          "directory": false,
+          "executable_intent": false,
+          "gid": 0,
+          "mtime": 1731478685,
+          "path": "bindings/c/tree-sitter-dtd.pc.in",
+          "pax_headers": {
+            "comment": "4b64dd3a03ec002258d6268d712fd93716d6ab57"
+          },
+          "raw_mode": 436,
+          "raw_type_hex": "30",
+          "sha256": "61fb99bb495c61c833055dd2059d5531b3e5de1bcf3eb70687d0b4ff96d8691e",
+          "uid": 0
+        },
+        {
+          "archive_path": "tree-sitter-xml-4b64dd3a03ec002258d6268d712fd93716d6ab57/bindings/c/tree-sitter-xml.h",
+          "bytes": 234,
+          "directory": false,
+          "executable_intent": false,
+          "gid": 0,
+          "mtime": 1731478685,
+          "path": "bindings/c/tree-sitter-xml.h",
+          "pax_headers": {
+            "comment": "4b64dd3a03ec002258d6268d712fd93716d6ab57"
+          },
+          "raw_mode": 436,
+          "raw_type_hex": "30",
+          "sha256": "24def48b06c7ff9821bd43715bafc2c629fa57afe4457dd8268c08666500f68f",
+          "uid": 0
+        },
+        {
+          "archive_path": "tree-sitter-xml-4b64dd3a03ec002258d6268d712fd93716d6ab57/bindings/c/tree-sitter-xml.pc.in",
+          "bytes": 303,
+          "directory": false,
+          "executable_intent": false,
+          "gid": 0,
+          "mtime": 1731478685,
+          "path": "bindings/c/tree-sitter-xml.pc.in",
+          "pax_headers": {
+            "comment": "4b64dd3a03ec002258d6268d712fd93716d6ab57"
+          },
+          "raw_mode": 436,
+          "raw_type_hex": "30",
+          "sha256": "e4dbbc9c691755916c9ef9df20b08ff2c001618fc9965c022902c9e7193dc4eb",
+          "uid": 0
+        },
+        {
+          "archive_path": "tree-sitter-xml-4b64dd3a03ec002258d6268d712fd93716d6ab57/bindings/go",
+          "bytes": 0,
+          "directory": true,
+          "executable_intent": false,
+          "gid": 0,
+          "mtime": 1731478685,
+          "path": "bindings/go",
+          "pax_headers": {
+            "comment": "4b64dd3a03ec002258d6268d712fd93716d6ab57"
+          },
+          "raw_mode": 509,
+          "raw_type_hex": "35",
+          "uid": 0
+        },
+        {
+          "archive_path": "tree-sitter-xml-4b64dd3a03ec002258d6268d712fd93716d6ab57/bindings/go/binding_test.go",
+          "bytes": 543,
+          "directory": false,
+          "executable_intent": false,
+          "gid": 0,
+          "mtime": 1731478685,
+          "path": "bindings/go/binding_test.go",
+          "pax_headers": {
+            "comment": "4b64dd3a03ec002258d6268d712fd93716d6ab57"
+          },
+          "raw_mode": 436,
+          "raw_type_hex": "30",
+          "sha256": "32184afb5bea154cb547b9f27b5d41111a91559befa769fd96233809c61221f8",
+          "uid": 0
+        },
+        {
+          "archive_path": "tree-sitter-xml-4b64dd3a03ec002258d6268d712fd93716d6ab57/bindings/go/dtd.go",
+          "bytes": 317,
+          "directory": false,
+          "executable_intent": false,
+          "gid": 0,
+          "mtime": 1731478685,
+          "path": "bindings/go/dtd.go",
+          "pax_headers": {
+            "comment": "4b64dd3a03ec002258d6268d712fd93716d6ab57"
+          },
+          "raw_mode": 436,
+          "raw_type_hex": "30",
+          "sha256": "19067689e1b298435a5e77f837e45f78911349bf8af9977b0d85be5764f39572",
+          "uid": 0
+        },
+        {
+          "archive_path": "tree-sitter-xml-4b64dd3a03ec002258d6268d712fd93716d6ab57/bindings/go/xml.go",
+          "bytes": 317,
+          "directory": false,
+          "executable_intent": false,
+          "gid": 0,
+          "mtime": 1731478685,
+          "path": "bindings/go/xml.go",
+          "pax_headers": {
+            "comment": "4b64dd3a03ec002258d6268d712fd93716d6ab57"
+          },
+          "raw_mode": 436,
+          "raw_type_hex": "30",
+          "sha256": "38710594ef426ac788565420123b74b61dcf1f2b077b6287c334678f80351754",
+          "uid": 0
+        },
+        {
+          "archive_path": "tree-sitter-xml-4b64dd3a03ec002258d6268d712fd93716d6ab57/bindings/node",
+          "bytes": 0,
+          "directory": true,
+          "executable_intent": false,
+          "gid": 0,
+          "mtime": 1731478685,
+          "path": "bindings/node",
+          "pax_headers": {
+            "comment": "4b64dd3a03ec002258d6268d712fd93716d6ab57"
+          },
+          "raw_mode": 509,
+          "raw_type_hex": "35",
+          "uid": 0
+        },
+        {
+          "archive_path": "tree-sitter-xml-4b64dd3a03ec002258d6268d712fd93716d6ab57/bindings/node/binding.cc",
+          "bytes": 961,
+          "directory": false,
+          "executable_intent": false,
+          "gid": 0,
+          "mtime": 1731478685,
+          "path": "bindings/node/binding.cc",
+          "pax_headers": {
+            "comment": "4b64dd3a03ec002258d6268d712fd93716d6ab57"
+          },
+          "raw_mode": 436,
+          "raw_type_hex": "30",
+          "sha256": "fe0f42195d412a339db7e3f7fa3450433a6beb22d18d460de031f36ef6c27e20",
+          "uid": 0
+        },
+        {
+          "archive_path": "tree-sitter-xml-4b64dd3a03ec002258d6268d712fd93716d6ab57/bindings/node/binding_test.js",
+          "bytes": 398,
+          "directory": false,
+          "executable_intent": false,
+          "gid": 0,
+          "mtime": 1731478685,
+          "path": "bindings/node/binding_test.js",
+          "pax_headers": {
+            "comment": "4b64dd3a03ec002258d6268d712fd93716d6ab57"
+          },
+          "raw_mode": 436,
+          "raw_type_hex": "30",
+          "sha256": "f079f363f1dfdd63c1c138b3aa0916632ac0479469b8eb81002190ba637105ae",
+          "uid": 0
+        },
+        {
+          "archive_path": "tree-sitter-xml-4b64dd3a03ec002258d6268d712fd93716d6ab57/bindings/node/dtd.js",
+          "bytes": 35,
+          "directory": false,
+          "executable_intent": false,
+          "gid": 0,
+          "mtime": 1731478685,
+          "path": "bindings/node/dtd.js",
+          "pax_headers": {
+            "comment": "4b64dd3a03ec002258d6268d712fd93716d6ab57"
+          },
+          "raw_mode": 436,
+          "raw_type_hex": "30",
+          "sha256": "d1f345a3041fbe6bbc81e86fddec62be003d2790209255bda5cae4275d441d44",
+          "uid": 0
+        },
+        {
+          "archive_path": "tree-sitter-xml-4b64dd3a03ec002258d6268d712fd93716d6ab57/bindings/node/index.d.ts",
+          "bytes": 478,
+          "directory": false,
+          "executable_intent": false,
+          "gid": 0,
+          "mtime": 1731478685,
+          "path": "bindings/node/index.d.ts",
+          "pax_headers": {
+            "comment": "4b64dd3a03ec002258d6268d712fd93716d6ab57"
+          },
+          "raw_mode": 436,
+          "raw_type_hex": "30",
+          "sha256": "f51a4da077590f44daf2654908479b0657a5787e5531655f45b40da0db28c0dc",
+          "uid": 0
+        },
+        {
+          "archive_path": "tree-sitter-xml-4b64dd3a03ec002258d6268d712fd93716d6ab57/bindings/node/index.js",
+          "bytes": 288,
+          "directory": false,
+          "executable_intent": false,
+          "gid": 0,
+          "mtime": 1731478685,
+          "path": "bindings/node/index.js",
+          "pax_headers": {
+            "comment": "4b64dd3a03ec002258d6268d712fd93716d6ab57"
+          },
+          "raw_mode": 436,
+          "raw_type_hex": "30",
+          "sha256": "41460e11f79a5794fdebe1f810e947f07bbf3f594d3e2b26fcccfd9dcca5dcc7",
+          "uid": 0
+        },
+        {
+          "archive_path": "tree-sitter-xml-4b64dd3a03ec002258d6268d712fd93716d6ab57/bindings/node/xml.js",
+          "bytes": 35,
+          "directory": false,
+          "executable_intent": false,
+          "gid": 0,
+          "mtime": 1731478685,
+          "path": "bindings/node/xml.js",
+          "pax_headers": {
+            "comment": "4b64dd3a03ec002258d6268d712fd93716d6ab57"
+          },
+          "raw_mode": 436,
+          "raw_type_hex": "30",
+          "sha256": "81eb70ba9de6092273c7bde4334bb87841407fe3491642b8088c13282e1e0d12",
+          "uid": 0
+        },
+        {
+          "archive_path": "tree-sitter-xml-4b64dd3a03ec002258d6268d712fd93716d6ab57/bindings/python",
+          "bytes": 0,
+          "directory": true,
+          "executable_intent": false,
+          "gid": 0,
+          "mtime": 1731478685,
+          "path": "bindings/python",
+          "pax_headers": {
+            "comment": "4b64dd3a03ec002258d6268d712fd93716d6ab57"
+          },
+          "raw_mode": 509,
+          "raw_type_hex": "35",
+          "uid": 0
+        },
+        {
+          "archive_path": "tree-sitter-xml-4b64dd3a03ec002258d6268d712fd93716d6ab57/bindings/python/tests",
+          "bytes": 0,
+          "directory": true,
+          "executable_intent": false,
+          "gid": 0,
+          "mtime": 1731478685,
+          "path": "bindings/python/tests",
+          "pax_headers": {
+            "comment": "4b64dd3a03ec002258d6268d712fd93716d6ab57"
+          },
+          "raw_mode": 509,
+          "raw_type_hex": "35",
+          "uid": 0
+        },
+        {
+          "archive_path": "tree-sitter-xml-4b64dd3a03ec002258d6268d712fd93716d6ab57/bindings/python/tests/test_binding.py",
+          "bytes": 492,
+          "directory": false,
+          "executable_intent": false,
+          "gid": 0,
+          "mtime": 1731478685,
+          "path": "bindings/python/tests/test_binding.py",
+          "pax_headers": {
+            "comment": "4b64dd3a03ec002258d6268d712fd93716d6ab57"
+          },
+          "raw_mode": 436,
+          "raw_type_hex": "30",
+          "sha256": "537fdbdf8f2aa8722ddea6dbf9d10f7f1ec091f1d28219af39e57472ebe9ef8f",
+          "uid": 0
+        },
+        {
+          "archive_path": "tree-sitter-xml-4b64dd3a03ec002258d6268d712fd93716d6ab57/bindings/python/tree_sitter_xml",
+          "bytes": 0,
+          "directory": true,
+          "executable_intent": false,
+          "gid": 0,
+          "mtime": 1731478685,
+          "path": "bindings/python/tree_sitter_xml",
+          "pax_headers": {
+            "comment": "4b64dd3a03ec002258d6268d712fd93716d6ab57"
+          },
+          "raw_mode": 509,
+          "raw_type_hex": "35",
+          "uid": 0
+        },
+        {
+          "archive_path": "tree-sitter-xml-4b64dd3a03ec002258d6268d712fd93716d6ab57/bindings/python/tree_sitter_xml/__init__.py",
+          "bytes": 131,
+          "directory": false,
+          "executable_intent": false,
+          "gid": 0,
+          "mtime": 1731478685,
+          "path": "bindings/python/tree_sitter_xml/__init__.py",
+          "pax_headers": {
+            "comment": "4b64dd3a03ec002258d6268d712fd93716d6ab57"
+          },
+          "raw_mode": 436,
+          "raw_type_hex": "30",
+          "sha256": "a88c0e26c67ccdba4392af48b9a84f59c20e6d4437fc64438102b3eef99fa51f",
+          "uid": 0
+        },
+        {
+          "archive_path": "tree-sitter-xml-4b64dd3a03ec002258d6268d712fd93716d6ab57/bindings/python/tree_sitter_xml/__init__.pyi",
+          "bytes": 69,
+          "directory": false,
+          "executable_intent": false,
+          "gid": 0,
+          "mtime": 1731478685,
+          "path": "bindings/python/tree_sitter_xml/__init__.pyi",
+          "pax_headers": {
+            "comment": "4b64dd3a03ec002258d6268d712fd93716d6ab57"
+          },
+          "raw_mode": 436,
+          "raw_type_hex": "30",
+          "sha256": "aed979c9abba1827aaee2741e279ce029cf10bebc6534f4dccb51922ae6b4c9c",
+          "uid": 0
+        },
+        {
+          "archive_path": "tree-sitter-xml-4b64dd3a03ec002258d6268d712fd93716d6ab57/bindings/python/tree_sitter_xml/binding.c",
+          "bytes": 948,
+          "directory": false,
+          "executable_intent": false,
+          "gid": 0,
+          "mtime": 1731478685,
+          "path": "bindings/python/tree_sitter_xml/binding.c",
+          "pax_headers": {
+            "comment": "4b64dd3a03ec002258d6268d712fd93716d6ab57"
+          },
+          "raw_mode": 436,
+          "raw_type_hex": "30",
+          "sha256": "bb48bbef3b9253786bb6128912f533daab462c2b3a0bd7606886142b228b6db9",
+          "uid": 0
+        },
+        {
+          "archive_path": "tree-sitter-xml-4b64dd3a03ec002258d6268d712fd93716d6ab57/bindings/python/tree_sitter_xml/py.typed",
+          "bytes": 0,
+          "directory": false,
+          "executable_intent": false,
+          "gid": 0,
+          "mtime": 1731478685,
+          "path": "bindings/python/tree_sitter_xml/py.typed",
+          "pax_headers": {
+            "comment": "4b64dd3a03ec002258d6268d712fd93716d6ab57"
+          },
+          "raw_mode": 436,
+          "raw_type_hex": "30",
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "uid": 0
+        },
+        {
+          "archive_path": "tree-sitter-xml-4b64dd3a03ec002258d6268d712fd93716d6ab57/bindings/rust",
+          "bytes": 0,
+          "directory": true,
+          "executable_intent": false,
+          "gid": 0,
+          "mtime": 1731478685,
+          "path": "bindings/rust",
+          "pax_headers": {
+            "comment": "4b64dd3a03ec002258d6268d712fd93716d6ab57"
+          },
+          "raw_mode": 509,
+          "raw_type_hex": "35",
+          "uid": 0
+        },
+        {
+          "archive_path": "tree-sitter-xml-4b64dd3a03ec002258d6268d712fd93716d6ab57/bindings/rust/build.rs",
+          "bytes": 826,
+          "directory": false,
+          "executable_intent": false,
+          "gid": 0,
+          "mtime": 1731478685,
+          "path": "bindings/rust/build.rs",
+          "pax_headers": {
+            "comment": "4b64dd3a03ec002258d6268d712fd93716d6ab57"
+          },
+          "raw_mode": 436,
+          "raw_type_hex": "30",
+          "sha256": "43bde1861b9b8d17ac4fd12b91bb631098e2423a7d9d217a9c6c3dd299690f52",
+          "uid": 0
+        },
+        {
+          "archive_path": "tree-sitter-xml-4b64dd3a03ec002258d6268d712fd93716d6ab57/bindings/rust/lib.rs",
+          "bytes": 2824,
+          "directory": false,
+          "executable_intent": false,
+          "gid": 0,
+          "mtime": 1731478685,
+          "path": "bindings/rust/lib.rs",
+          "pax_headers": {
+            "comment": "4b64dd3a03ec002258d6268d712fd93716d6ab57"
+          },
+          "raw_mode": 436,
+          "raw_type_hex": "30",
+          "sha256": "32402e85a41efaa29abe736820aa82e843a64d6ee2cf4dbde66c22f5c6cb9d64",
+          "uid": 0
+        },
+        {
+          "archive_path": "tree-sitter-xml-4b64dd3a03ec002258d6268d712fd93716d6ab57/bindings/swift",
+          "bytes": 0,
+          "directory": true,
+          "executable_intent": false,
+          "gid": 0,
+          "mtime": 1731478685,
+          "path": "bindings/swift",
+          "pax_headers": {
+            "comment": "4b64dd3a03ec002258d6268d712fd93716d6ab57"
+          },
+          "raw_mode": 509,
+          "raw_type_hex": "35",
+          "uid": 0
+        },
+        {
+          "archive_path": "tree-sitter-xml-4b64dd3a03ec002258d6268d712fd93716d6ab57/bindings/swift/TreeSitterXMLTests",
+          "bytes": 0,
+          "directory": true,
+          "executable_intent": false,
+          "gid": 0,
+          "mtime": 1731478685,
+          "path": "bindings/swift/TreeSitterXMLTests",
+          "pax_headers": {
+            "comment": "4b64dd3a03ec002258d6268d712fd93716d6ab57"
+          },
+          "raw_mode": 509,
+          "raw_type_hex": "35",
+          "uid": 0
+        },
+        {
+          "archive_path": "tree-sitter-xml-4b64dd3a03ec002258d6268d712fd93716d6ab57/bindings/swift/TreeSitterXMLTests/TreeSitterXMLTests.swift",
+          "bytes": 632,
+          "directory": false,
+          "executable_intent": false,
+          "gid": 0,
+          "mtime": 1731478685,
+          "path": "bindings/swift/TreeSitterXMLTests/TreeSitterXMLTests.swift",
+          "pax_headers": {
+            "comment": "4b64dd3a03ec002258d6268d712fd93716d6ab57"
+          },
+          "raw_mode": 436,
+          "raw_type_hex": "30",
+          "sha256": "f7a2754136054fa84a5282388f9f32fee8a5c49fbe2e9a4a51787b0d529d87ec",
+          "uid": 0
+        },
+        {
+          "archive_path": "tree-sitter-xml-4b64dd3a03ec002258d6268d712fd93716d6ab57/bindings/swift/dtd",
+          "bytes": 0,
+          "directory": true,
+          "executable_intent": false,
+          "gid": 0,
+          "mtime": 1731478685,
+          "path": "bindings/swift/dtd",
+          "pax_headers": {
+            "comment": "4b64dd3a03ec002258d6268d712fd93716d6ab57"
+          },
+          "raw_mode": 509,
+          "raw_type_hex": "35",
+          "uid": 0
+        },
+        {
+          "archive_path": "tree-sitter-xml-4b64dd3a03ec002258d6268d712fd93716d6ab57/bindings/swift/dtd/TreeSitterDTD",
+          "bytes": 0,
+          "directory": true,
+          "executable_intent": false,
+          "gid": 0,
+          "mtime": 1731478685,
+          "path": "bindings/swift/dtd/TreeSitterDTD",
+          "pax_headers": {
+            "comment": "4b64dd3a03ec002258d6268d712fd93716d6ab57"
+          },
+          "raw_mode": 509,
+          "raw_type_hex": "35",
+          "uid": 0
+        },
+        {
+          "archive_path": "tree-sitter-xml-4b64dd3a03ec002258d6268d712fd93716d6ab57/bindings/swift/dtd/TreeSitterDTD/dtd.h",
+          "bytes": 234,
+          "directory": false,
+          "executable_intent": false,
+          "gid": 0,
+          "mtime": 1731478685,
+          "path": "bindings/swift/dtd/TreeSitterDTD/dtd.h",
+          "pax_headers": {
+            "comment": "4b64dd3a03ec002258d6268d712fd93716d6ab57"
+          },
+          "raw_mode": 436,
+          "raw_type_hex": "30",
+          "sha256": "99b9ba9983687d86df3833e217032201dd2cbac034ca8885ab3d607eeb16bac8",
+          "uid": 0
+        },
+        {
+          "archive_path": "tree-sitter-xml-4b64dd3a03ec002258d6268d712fd93716d6ab57/bindings/swift/xml",
+          "bytes": 0,
+          "directory": true,
+          "executable_intent": false,
+          "gid": 0,
+          "mtime": 1731478685,
+          "path": "bindings/swift/xml",
+          "pax_headers": {
+            "comment": "4b64dd3a03ec002258d6268d712fd93716d6ab57"
+          },
+          "raw_mode": 509,
+          "raw_type_hex": "35",
+          "uid": 0
+        },
+        {
+          "archive_path": "tree-sitter-xml-4b64dd3a03ec002258d6268d712fd93716d6ab57/bindings/swift/xml/TreeSitterXML",
+          "bytes": 0,
+          "directory": true,
+          "executable_intent": false,
+          "gid": 0,
+          "mtime": 1731478685,
+          "path": "bindings/swift/xml/TreeSitterXML",
+          "pax_headers": {
+            "comment": "4b64dd3a03ec002258d6268d712fd93716d6ab57"
+          },
+          "raw_mode": 509,
+          "raw_type_hex": "35",
+          "uid": 0
+        },
+        {
+          "archive_path": "tree-sitter-xml-4b64dd3a03ec002258d6268d712fd93716d6ab57/bindings/swift/xml/TreeSitterXML/xml.h",
+          "bytes": 234,
+          "directory": false,
+          "executable_intent": false,
+          "gid": 0,
+          "mtime": 1731478685,
+          "path": "bindings/swift/xml/TreeSitterXML/xml.h",
+          "pax_headers": {
+            "comment": "4b64dd3a03ec002258d6268d712fd93716d6ab57"
+          },
+          "raw_mode": 436,
+          "raw_type_hex": "30",
+          "sha256": "24def48b06c7ff9821bd43715bafc2c629fa57afe4457dd8268c08666500f68f",
+          "uid": 0
+        },
+        {
+          "archive_path": "tree-sitter-xml-4b64dd3a03ec002258d6268d712fd93716d6ab57/common",
+          "bytes": 0,
+          "directory": true,
+          "executable_intent": false,
+          "gid": 0,
+          "mtime": 1731478685,
+          "path": "common",
+          "pax_headers": {
+            "comment": "4b64dd3a03ec002258d6268d712fd93716d6ab57"
+          },
+          "raw_mode": 509,
+          "raw_type_hex": "35",
+          "uid": 0
+        },
+        {
+          "archive_path": "tree-sitter-xml-4b64dd3a03ec002258d6268d712fd93716d6ab57/common/common.mak",
+          "bytes": 3138,
+          "directory": false,
+          "executable_intent": false,
+          "gid": 0,
+          "mtime": 1731478685,
+          "path": "common/common.mak",
+          "pax_headers": {
+            "comment": "4b64dd3a03ec002258d6268d712fd93716d6ab57"
+          },
+          "raw_mode": 436,
+          "raw_type_hex": "30",
+          "sha256": "15e9973721751abf34c931cc20540c64339facf9d34eb1615eaf80f803f7f142",
+          "uid": 0
+        },
+        {
+          "archive_path": "tree-sitter-xml-4b64dd3a03ec002258d6268d712fd93716d6ab57/common/common.mjs",
+          "bytes": 6420,
+          "directory": false,
+          "executable_intent": false,
+          "gid": 0,
+          "mtime": 1731478685,
+          "path": "common/common.mjs",
+          "pax_headers": {
+            "comment": "4b64dd3a03ec002258d6268d712fd93716d6ab57"
+          },
+          "raw_mode": 436,
+          "raw_type_hex": "30",
+          "sha256": "208d0786c7a105b19d1ff4949725f733808348902ad25aaeffa21a2400913b56",
+          "uid": 0
+        },
+        {
+          "archive_path": "tree-sitter-xml-4b64dd3a03ec002258d6268d712fd93716d6ab57/common/scanner.h",
+          "bytes": 4270,
+          "directory": false,
+          "executable_intent": false,
+          "gid": 0,
+          "mtime": 1731478685,
+          "path": "common/scanner.h",
+          "pax_headers": {
+            "comment": "4b64dd3a03ec002258d6268d712fd93716d6ab57"
+          },
+          "raw_mode": 436,
+          "raw_type_hex": "30",
+          "sha256": "ce5082af60b1808035a43c3df129df9b811c9c69949fdb664a351f7aae340409",
+          "uid": 0
+        },
+        {
+          "archive_path": "tree-sitter-xml-4b64dd3a03ec002258d6268d712fd93716d6ab57/dtd",
+          "bytes": 0,
+          "directory": true,
+          "executable_intent": false,
+          "gid": 0,
+          "mtime": 1731478685,
+          "path": "dtd",
+          "pax_headers": {
+            "comment": "4b64dd3a03ec002258d6268d712fd93716d6ab57"
+          },
+          "raw_mode": 509,
+          "raw_type_hex": "35",
+          "uid": 0
+        },
+        {
+          "archive_path": "tree-sitter-xml-4b64dd3a03ec002258d6268d712fd93716d6ab57/dtd/CMakeLists.txt",
+          "bytes": 72,
+          "directory": false,
+          "executable_intent": false,
+          "gid": 0,
+          "mtime": 1731478685,
+          "path": "dtd/CMakeLists.txt",
+          "pax_headers": {
+            "comment": "4b64dd3a03ec002258d6268d712fd93716d6ab57"
+          },
+          "raw_mode": 436,
+          "raw_type_hex": "30",
+          "sha256": "5ccdb8b4febf3c6d59312526af622f1d7310d2c09cc77d65a3a9935726a325df",
+          "uid": 0
+        },
+        {
+          "archive_path": "tree-sitter-xml-4b64dd3a03ec002258d6268d712fd93716d6ab57/dtd/Makefile",
+          "bytes": 106,
+          "directory": false,
+          "executable_intent": false,
+          "gid": 0,
+          "mtime": 1731478685,
+          "path": "dtd/Makefile",
+          "pax_headers": {
+            "comment": "4b64dd3a03ec002258d6268d712fd93716d6ab57"
+          },
+          "raw_mode": 436,
+          "raw_type_hex": "30",
+          "sha256": "ef5a8e820193738fc2a6966dd5d76db97d9d709abe8e9280676f655ab063507b",
+          "uid": 0
+        },
+        {
+          "archive_path": "tree-sitter-xml-4b64dd3a03ec002258d6268d712fd93716d6ab57/dtd/grammar.js",
+          "bytes": 1090,
+          "directory": false,
+          "executable_intent": false,
+          "gid": 0,
+          "mtime": 1731478685,
+          "path": "dtd/grammar.js",
+          "pax_headers": {
+            "comment": "4b64dd3a03ec002258d6268d712fd93716d6ab57"
+          },
+          "raw_mode": 436,
+          "raw_type_hex": "30",
+          "sha256": "cf67cc005837875dbac2147f73385565ecc166cdc8ce75ede2b31e65867ee762",
+          "uid": 0
+        },
+        {
+          "archive_path": "tree-sitter-xml-4b64dd3a03ec002258d6268d712fd93716d6ab57/dtd/package.json",
+          "bytes": 215,
+          "directory": false,
+          "executable_intent": false,
+          "gid": 0,
+          "mtime": 1731478685,
+          "path": "dtd/package.json",
+          "pax_headers": {
+            "comment": "4b64dd3a03ec002258d6268d712fd93716d6ab57"
+          },
+          "raw_mode": 436,
+          "raw_type_hex": "30",
+          "sha256": "97b378586563e572170350b88571297245fa8a7adf7919b80277dd0b3d8942c8",
+          "uid": 0
+        },
+        {
+          "archive_path": "tree-sitter-xml-4b64dd3a03ec002258d6268d712fd93716d6ab57/dtd/src",
+          "bytes": 0,
+          "directory": true,
+          "executable_intent": false,
+          "gid": 0,
+          "mtime": 1731478685,
+          "path": "dtd/src",
+          "pax_headers": {
+            "comment": "4b64dd3a03ec002258d6268d712fd93716d6ab57"
+          },
+          "raw_mode": 509,
+          "raw_type_hex": "35",
+          "uid": 0
+        },
+        {
+          "archive_path": "tree-sitter-xml-4b64dd3a03ec002258d6268d712fd93716d6ab57/dtd/src/grammar.json",
+          "bytes": 42499,
+          "directory": false,
+          "executable_intent": false,
+          "gid": 0,
+          "mtime": 1731478685,
+          "path": "dtd/src/grammar.json",
+          "pax_headers": {
+            "comment": "4b64dd3a03ec002258d6268d712fd93716d6ab57"
+          },
+          "raw_mode": 436,
+          "raw_type_hex": "30",
+          "sha256": "44d3d915ed635a45181206d1d05352f6a7060fff6be07906c9f3aa8f809f5786",
+          "uid": 0
+        },
+        {
+          "archive_path": "tree-sitter-xml-4b64dd3a03ec002258d6268d712fd93716d6ab57/dtd/src/node-types.json",
+          "bytes": 12260,
+          "directory": false,
+          "executable_intent": false,
+          "gid": 0,
+          "mtime": 1731478685,
+          "path": "dtd/src/node-types.json",
+          "pax_headers": {
+            "comment": "4b64dd3a03ec002258d6268d712fd93716d6ab57"
+          },
+          "raw_mode": 436,
+          "raw_type_hex": "30",
+          "sha256": "a9d83e7efcad5d96f16b4e664062cc602aa6408716bf6f5a7355186aaec311ff",
+          "uid": 0
+        },
+        {
+          "archive_path": "tree-sitter-xml-4b64dd3a03ec002258d6268d712fd93716d6ab57/dtd/src/parser.c",
+          "bytes": 176894,
+          "directory": false,
+          "executable_intent": false,
+          "gid": 0,
+          "mtime": 1731478685,
+          "path": "dtd/src/parser.c",
+          "pax_headers": {
+            "comment": "4b64dd3a03ec002258d6268d712fd93716d6ab57"
+          },
+          "raw_mode": 436,
+          "raw_type_hex": "30",
+          "sha256": "79aa52e71ba9685115e2fc2742a3a30f91987f96fcf5ffbb7e34827155a6b932",
+          "uid": 0
+        },
+        {
+          "archive_path": "tree-sitter-xml-4b64dd3a03ec002258d6268d712fd93716d6ab57/dtd/src/scanner.c",
+          "bytes": 1398,
+          "directory": false,
+          "executable_intent": false,
+          "gid": 0,
+          "mtime": 1731478685,
+          "path": "dtd/src/scanner.c",
+          "pax_headers": {
+            "comment": "4b64dd3a03ec002258d6268d712fd93716d6ab57"
+          },
+          "raw_mode": 436,
+          "raw_type_hex": "30",
+          "sha256": "cdb323ea613368705ade3c6904523848f262db38ee01f5722e2f16e0751bd71c",
+          "uid": 0
+        },
+        {
+          "archive_path": "tree-sitter-xml-4b64dd3a03ec002258d6268d712fd93716d6ab57/dtd/src/tree_sitter",
+          "bytes": 0,
+          "directory": true,
+          "executable_intent": false,
+          "gid": 0,
+          "mtime": 1731478685,
+          "path": "dtd/src/tree_sitter",
+          "pax_headers": {
+            "comment": "4b64dd3a03ec002258d6268d712fd93716d6ab57"
+          },
+          "raw_mode": 509,
+          "raw_type_hex": "35",
+          "uid": 0
+        },
+        {
+          "archive_path": "tree-sitter-xml-4b64dd3a03ec002258d6268d712fd93716d6ab57/dtd/src/tree_sitter/alloc.h",
+          "bytes": 985,
+          "directory": false,
+          "executable_intent": false,
+          "gid": 0,
+          "mtime": 1731478685,
+          "path": "dtd/src/tree_sitter/alloc.h",
+          "pax_headers": {
+            "comment": "4b64dd3a03ec002258d6268d712fd93716d6ab57"
+          },
+          "raw_mode": 436,
+          "raw_type_hex": "30",
+          "sha256": "b29c1c9fb7cc82f58c84b376df1297d6e2737a1d655fd356db0859e3c29c2fea",
+          "uid": 0
+        },
+        {
+          "archive_path": "tree-sitter-xml-4b64dd3a03ec002258d6268d712fd93716d6ab57/dtd/src/tree_sitter/array.h",
+          "bytes": 10420,
+          "directory": false,
+          "executable_intent": false,
+          "gid": 0,
+          "mtime": 1731478685,
+          "path": "dtd/src/tree_sitter/array.h",
+          "pax_headers": {
+            "comment": "4b64dd3a03ec002258d6268d712fd93716d6ab57"
+          },
+          "raw_mode": 436,
+          "raw_type_hex": "30",
+          "sha256": "4ff743903dc46f5db6aa54f31c6b4d160a8a9779e5b2ab1ee59ae7ebcd850ea1",
+          "uid": 0
+        },
+        {
+          "archive_path": "tree-sitter-xml-4b64dd3a03ec002258d6268d712fd93716d6ab57/dtd/src/tree_sitter/parser.h",
+          "bytes": 7039,
+          "directory": false,
+          "executable_intent": false,
+          "gid": 0,
+          "mtime": 1731478685,
+          "path": "dtd/src/tree_sitter/parser.h",
+          "pax_headers": {
+            "comment": "4b64dd3a03ec002258d6268d712fd93716d6ab57"
+          },
+          "raw_mode": 436,
+          "raw_type_hex": "30",
+          "sha256": "a1f6ef161fbaf48a0e10fca90ef5290a062462b307b3898aa562993853b9f80a",
+          "uid": 0
+        },
+        {
+          "archive_path": "tree-sitter-xml-4b64dd3a03ec002258d6268d712fd93716d6ab57/go.mod",
+          "bytes": 175,
+          "directory": false,
+          "executable_intent": false,
+          "gid": 0,
+          "mtime": 1731478685,
+          "path": "go.mod",
+          "pax_headers": {
+            "comment": "4b64dd3a03ec002258d6268d712fd93716d6ab57"
+          },
+          "raw_mode": 436,
+          "raw_type_hex": "30",
+          "sha256": "e9b6f9ebaa1d81f8e75006e9b0ff3a7ed55a9c63f203bcb900b2c0685ade28c4",
+          "uid": 0
+        },
+        {
+          "archive_path": "tree-sitter-xml-4b64dd3a03ec002258d6268d712fd93716d6ab57/go.sum",
+          "bytes": 4176,
+          "directory": false,
+          "executable_intent": false,
+          "gid": 0,
+          "mtime": 1731478685,
+          "path": "go.sum",
+          "pax_headers": {
+            "comment": "4b64dd3a03ec002258d6268d712fd93716d6ab57"
+          },
+          "raw_mode": 436,
+          "raw_type_hex": "30",
+          "sha256": "a7d2dd524ce7f8e47eb33d9aa480d5011628376107c15e3a415cfef44d22fc44",
+          "uid": 0
+        },
+        {
+          "archive_path": "tree-sitter-xml-4b64dd3a03ec002258d6268d712fd93716d6ab57/package-lock.json",
+          "bytes": 13102,
+          "directory": false,
+          "executable_intent": false,
+          "gid": 0,
+          "mtime": 1731478685,
+          "path": "package-lock.json",
+          "pax_headers": {
+            "comment": "4b64dd3a03ec002258d6268d712fd93716d6ab57"
+          },
+          "raw_mode": 436,
+          "raw_type_hex": "30",
+          "sha256": "d523e163d6a383f1e0b464aa6c299978bc005d452d28a3fdad371f98edbdc7fa",
+          "uid": 0
+        },
+        {
+          "archive_path": "tree-sitter-xml-4b64dd3a03ec002258d6268d712fd93716d6ab57/package.json",
+          "bytes": 1608,
+          "directory": false,
+          "executable_intent": false,
+          "gid": 0,
+          "mtime": 1731478685,
+          "path": "package.json",
+          "pax_headers": {
+            "comment": "4b64dd3a03ec002258d6268d712fd93716d6ab57"
+          },
+          "raw_mode": 436,
+          "raw_type_hex": "30",
+          "sha256": "270e696f3636a931c8e4ffc355eb88b589b23f1449be7f0b0b172ce377b26e62",
+          "uid": 0
+        },
+        {
+          "archive_path": "tree-sitter-xml-4b64dd3a03ec002258d6268d712fd93716d6ab57/pyproject.toml",
+          "bytes": 935,
+          "directory": false,
+          "executable_intent": false,
+          "gid": 0,
+          "mtime": 1731478685,
+          "path": "pyproject.toml",
+          "pax_headers": {
+            "comment": "4b64dd3a03ec002258d6268d712fd93716d6ab57"
+          },
+          "raw_mode": 436,
+          "raw_type_hex": "30",
+          "sha256": "0ca507089db9d897d40ac89b35da4fa792f379c7198fa362006cb9206481fdb9",
+          "uid": 0
+        },
+        {
+          "archive_path": "tree-sitter-xml-4b64dd3a03ec002258d6268d712fd93716d6ab57/queries",
+          "bytes": 0,
+          "directory": true,
+          "executable_intent": false,
+          "gid": 0,
+          "mtime": 1731478685,
+          "path": "queries",
+          "pax_headers": {
+            "comment": "4b64dd3a03ec002258d6268d712fd93716d6ab57"
+          },
+          "raw_mode": 509,
+          "raw_type_hex": "35",
+          "uid": 0
+        },
+        {
+          "archive_path": "tree-sitter-xml-4b64dd3a03ec002258d6268d712fd93716d6ab57/queries/dtd",
+          "bytes": 0,
+          "directory": true,
+          "executable_intent": false,
+          "gid": 0,
+          "mtime": 1731478685,
+          "path": "queries/dtd",
+          "pax_headers": {
+            "comment": "4b64dd3a03ec002258d6268d712fd93716d6ab57"
+          },
+          "raw_mode": 509,
+          "raw_type_hex": "35",
+          "uid": 0
+        },
+        {
+          "archive_path": "tree-sitter-xml-4b64dd3a03ec002258d6268d712fd93716d6ab57/queries/dtd/highlights.scm",
+          "bytes": 1780,
+          "directory": false,
+          "executable_intent": false,
+          "gid": 0,
+          "mtime": 1731478685,
+          "path": "queries/dtd/highlights.scm",
+          "pax_headers": {
+            "comment": "4b64dd3a03ec002258d6268d712fd93716d6ab57"
+          },
+          "raw_mode": 436,
+          "raw_type_hex": "30",
+          "sha256": "5091ae8e8311c16a1bbdffa0ee8819b55b97b786cca12392a9252a5393206bc9",
+          "uid": 0
+        },
+        {
+          "archive_path": "tree-sitter-xml-4b64dd3a03ec002258d6268d712fd93716d6ab57/queries/xml",
+          "bytes": 0,
+          "directory": true,
+          "executable_intent": false,
+          "gid": 0,
+          "mtime": 1731478685,
+          "path": "queries/xml",
+          "pax_headers": {
+            "comment": "4b64dd3a03ec002258d6268d712fd93716d6ab57"
+          },
+          "raw_mode": 509,
+          "raw_type_hex": "35",
+          "uid": 0
+        },
+        {
+          "archive_path": "tree-sitter-xml-4b64dd3a03ec002258d6268d712fd93716d6ab57/queries/xml/highlights.scm",
+          "bytes": 2281,
+          "directory": false,
+          "executable_intent": false,
+          "gid": 0,
+          "mtime": 1731478685,
+          "path": "queries/xml/highlights.scm",
+          "pax_headers": {
+            "comment": "4b64dd3a03ec002258d6268d712fd93716d6ab57"
+          },
+          "raw_mode": 436,
+          "raw_type_hex": "30",
+          "sha256": "aa4a561c846928c3a4d885acbe690a60689661a45684babe16cf8b7a1509b610",
+          "uid": 0
+        },
+        {
+          "archive_path": "tree-sitter-xml-4b64dd3a03ec002258d6268d712fd93716d6ab57/setup.py",
+          "bytes": 1784,
+          "directory": false,
+          "executable_intent": false,
+          "gid": 0,
+          "mtime": 1731478685,
+          "path": "setup.py",
+          "pax_headers": {
+            "comment": "4b64dd3a03ec002258d6268d712fd93716d6ab57"
+          },
+          "raw_mode": 436,
+          "raw_type_hex": "30",
+          "sha256": "f4d4b4894a15338d1e8da38ab6646911171cf59bdbaf1f963db98dd0d6d62cb6",
+          "uid": 0
+        },
+        {
+          "archive_path": "tree-sitter-xml-4b64dd3a03ec002258d6268d712fd93716d6ab57/test",
+          "bytes": 0,
+          "directory": true,
+          "executable_intent": false,
+          "gid": 0,
+          "mtime": 1731478685,
+          "path": "test",
+          "pax_headers": {
+            "comment": "4b64dd3a03ec002258d6268d712fd93716d6ab57"
+          },
+          "raw_mode": 509,
+          "raw_type_hex": "35",
+          "uid": 0
+        },
+        {
+          "archive_path": "tree-sitter-xml-4b64dd3a03ec002258d6268d712fd93716d6ab57/test/corpus",
+          "bytes": 0,
+          "directory": true,
+          "executable_intent": false,
+          "gid": 0,
+          "mtime": 1731478685,
+          "path": "test/corpus",
+          "pax_headers": {
+            "comment": "4b64dd3a03ec002258d6268d712fd93716d6ab57"
+          },
+          "raw_mode": 509,
+          "raw_type_hex": "35",
+          "uid": 0
+        },
+        {
+          "archive_path": "tree-sitter-xml-4b64dd3a03ec002258d6268d712fd93716d6ab57/test/corpus/errors.txt",
+          "bytes": 1969,
+          "directory": false,
+          "executable_intent": false,
+          "gid": 0,
+          "mtime": 1731478685,
+          "path": "test/corpus/errors.txt",
+          "pax_headers": {
+            "comment": "4b64dd3a03ec002258d6268d712fd93716d6ab57"
+          },
+          "raw_mode": 436,
+          "raw_type_hex": "30",
+          "sha256": "a0dc978bb76d1e2f3a44029787d67a2e69d5861a72ad5bd5f87f9c03042709e8",
+          "uid": 0
+        },
+        {
+          "archive_path": "tree-sitter-xml-4b64dd3a03ec002258d6268d712fd93716d6ab57/test/corpus/examples.txt",
+          "bytes": 5008,
+          "directory": false,
+          "executable_intent": false,
+          "gid": 0,
+          "mtime": 1731478685,
+          "path": "test/corpus/examples.txt",
+          "pax_headers": {
+            "comment": "4b64dd3a03ec002258d6268d712fd93716d6ab57"
+          },
+          "raw_mode": 436,
+          "raw_type_hex": "30",
+          "sha256": "cd8bc250abf5f8e3ee9b4dd559b9dcdc7ed739e87c160b0325fc9223f288bcdc",
+          "uid": 0
+        },
+        {
+          "archive_path": "tree-sitter-xml-4b64dd3a03ec002258d6268d712fd93716d6ab57/test/corpus/extra.txt",
+          "bytes": 2668,
+          "directory": false,
+          "executable_intent": false,
+          "gid": 0,
+          "mtime": 1731478685,
+          "path": "test/corpus/extra.txt",
+          "pax_headers": {
+            "comment": "4b64dd3a03ec002258d6268d712fd93716d6ab57"
+          },
+          "raw_mode": 436,
+          "raw_type_hex": "30",
+          "sha256": "af0bef4ed1703c2648494e3d49add7623161cf5c3f05f19f2524c080cef79725",
+          "uid": 0
+        },
+        {
+          "archive_path": "tree-sitter-xml-4b64dd3a03ec002258d6268d712fd93716d6ab57/test/corpus/issues.txt",
+          "bytes": 6265,
+          "directory": false,
+          "executable_intent": false,
+          "gid": 0,
+          "mtime": 1731478685,
+          "path": "test/corpus/issues.txt",
+          "pax_headers": {
+            "comment": "4b64dd3a03ec002258d6268d712fd93716d6ab57"
+          },
+          "raw_mode": 436,
+          "raw_type_hex": "30",
+          "sha256": "36e5950d726c54b0838feb9935aa1c327510b6c9efd4a2571a4d36e7dc3b7663",
+          "uid": 0
+        },
+        {
+          "archive_path": "tree-sitter-xml-4b64dd3a03ec002258d6268d712fd93716d6ab57/test/corpus/standard.txt",
+          "bytes": 7211,
+          "directory": false,
+          "executable_intent": false,
+          "gid": 0,
+          "mtime": 1731478685,
+          "path": "test/corpus/standard.txt",
+          "pax_headers": {
+            "comment": "4b64dd3a03ec002258d6268d712fd93716d6ab57"
+          },
+          "raw_mode": 436,
+          "raw_type_hex": "30",
+          "sha256": "5d7d47fb4ac78bf43a205b5d250c47dad702d7b57b275bbff8666c25b65446c6",
+          "uid": 0
+        },
+        {
+          "archive_path": "tree-sitter-xml-4b64dd3a03ec002258d6268d712fd93716d6ab57/test/highlight",
+          "bytes": 0,
+          "directory": true,
+          "executable_intent": false,
+          "gid": 0,
+          "mtime": 1731478685,
+          "path": "test/highlight",
+          "pax_headers": {
+            "comment": "4b64dd3a03ec002258d6268d712fd93716d6ab57"
+          },
+          "raw_mode": 509,
+          "raw_type_hex": "35",
+          "uid": 0
+        },
+        {
+          "archive_path": "tree-sitter-xml-4b64dd3a03ec002258d6268d712fd93716d6ab57/test/highlight/test.dtd",
+          "bytes": 613,
+          "directory": false,
+          "executable_intent": false,
+          "gid": 0,
+          "mtime": 1731478685,
+          "path": "test/highlight/test.dtd",
+          "pax_headers": {
+            "comment": "4b64dd3a03ec002258d6268d712fd93716d6ab57"
+          },
+          "raw_mode": 436,
+          "raw_type_hex": "30",
+          "sha256": "7a1be27cf85af1bc6f79494f5c4f0025c0070261e25da516a29a07a2e6ff53b5",
+          "uid": 0
+        },
+        {
+          "archive_path": "tree-sitter-xml-4b64dd3a03ec002258d6268d712fd93716d6ab57/test/highlight/test.xml",
+          "bytes": 480,
+          "directory": false,
+          "executable_intent": false,
+          "gid": 0,
+          "mtime": 1731478685,
+          "path": "test/highlight/test.xml",
+          "pax_headers": {
+            "comment": "4b64dd3a03ec002258d6268d712fd93716d6ab57"
+          },
+          "raw_mode": 436,
+          "raw_type_hex": "30",
+          "sha256": "0f31f9ea44b0bfa1ae6a1da6d6d56d1669d7e9b3a0a921401c0d7ca66ff58bdf",
+          "uid": 0
+        },
+        {
+          "archive_path": "tree-sitter-xml-4b64dd3a03ec002258d6268d712fd93716d6ab57/tree-sitter.json",
+          "bytes": 1182,
+          "directory": false,
+          "executable_intent": false,
+          "gid": 0,
+          "mtime": 1731478685,
+          "path": "tree-sitter.json",
+          "pax_headers": {
+            "comment": "4b64dd3a03ec002258d6268d712fd93716d6ab57"
+          },
+          "raw_mode": 436,
+          "raw_type_hex": "30",
+          "sha256": "ed5d1b704d3fc53180ab85ea8b3243b200080a6c81c8bee47c18b089cd97e4ea",
+          "uid": 0
+        },
+        {
+          "archive_path": "tree-sitter-xml-4b64dd3a03ec002258d6268d712fd93716d6ab57/xml",
+          "bytes": 0,
+          "directory": true,
+          "executable_intent": false,
+          "gid": 0,
+          "mtime": 1731478685,
+          "path": "xml",
+          "pax_headers": {
+            "comment": "4b64dd3a03ec002258d6268d712fd93716d6ab57"
+          },
+          "raw_mode": 509,
+          "raw_type_hex": "35",
+          "uid": 0
+        },
+        {
+          "archive_path": "tree-sitter-xml-4b64dd3a03ec002258d6268d712fd93716d6ab57/xml/CMakeLists.txt",
+          "bytes": 72,
+          "directory": false,
+          "executable_intent": false,
+          "gid": 0,
+          "mtime": 1731478685,
+          "path": "xml/CMakeLists.txt",
+          "pax_headers": {
+            "comment": "4b64dd3a03ec002258d6268d712fd93716d6ab57"
+          },
+          "raw_mode": 436,
+          "raw_type_hex": "30",
+          "sha256": "390e38c059db8f9269f3fac14bbef1bef579af481107268e109567e319f33094",
+          "uid": 0
+        },
+        {
+          "archive_path": "tree-sitter-xml-4b64dd3a03ec002258d6268d712fd93716d6ab57/xml/Makefile",
+          "bytes": 106,
+          "directory": false,
+          "executable_intent": false,
+          "gid": 0,
+          "mtime": 1731478685,
+          "path": "xml/Makefile",
+          "pax_headers": {
+            "comment": "4b64dd3a03ec002258d6268d712fd93716d6ab57"
+          },
+          "raw_mode": 436,
+          "raw_type_hex": "30",
+          "sha256": "4232203ca5edc601cdf574cddd23e386c950b91a3d78d3dd9e6b856ca7491a57",
+          "uid": 0
+        },
+        {
+          "archive_path": "tree-sitter-xml-4b64dd3a03ec002258d6268d712fd93716d6ab57/xml/grammar.js",
+          "bytes": 3209,
+          "directory": false,
+          "executable_intent": false,
+          "gid": 0,
+          "mtime": 1731478685,
+          "path": "xml/grammar.js",
+          "pax_headers": {
+            "comment": "4b64dd3a03ec002258d6268d712fd93716d6ab57"
+          },
+          "raw_mode": 436,
+          "raw_type_hex": "30",
+          "sha256": "521d4071b40625b319f8c1ee20e76a81e01c3c89a4fb27ab20965df6dae53a29",
+          "uid": 0
+        },
+        {
+          "archive_path": "tree-sitter-xml-4b64dd3a03ec002258d6268d712fd93716d6ab57/xml/package.json",
+          "bytes": 215,
+          "directory": false,
+          "executable_intent": false,
+          "gid": 0,
+          "mtime": 1731478685,
+          "path": "xml/package.json",
+          "pax_headers": {
+            "comment": "4b64dd3a03ec002258d6268d712fd93716d6ab57"
+          },
+          "raw_mode": 436,
+          "raw_type_hex": "30",
+          "sha256": "ec243a30725bce7c76cebce2b3080adbe9a7a9623c47a76b19a72f6d4cd9aee3",
+          "uid": 0
+        },
+        {
+          "archive_path": "tree-sitter-xml-4b64dd3a03ec002258d6268d712fd93716d6ab57/xml/src",
+          "bytes": 0,
+          "directory": true,
+          "executable_intent": false,
+          "gid": 0,
+          "mtime": 1731478685,
+          "path": "xml/src",
+          "pax_headers": {
+            "comment": "4b64dd3a03ec002258d6268d712fd93716d6ab57"
+          },
+          "raw_mode": 509,
+          "raw_type_hex": "35",
+          "uid": 0
+        },
+        {
+          "archive_path": "tree-sitter-xml-4b64dd3a03ec002258d6268d712fd93716d6ab57/xml/src/grammar.json",
+          "bytes": 58409,
+          "directory": false,
+          "executable_intent": false,
+          "gid": 0,
+          "mtime": 1731478685,
+          "path": "xml/src/grammar.json",
+          "pax_headers": {
+            "comment": "4b64dd3a03ec002258d6268d712fd93716d6ab57"
+          },
+          "raw_mode": 436,
+          "raw_type_hex": "30",
+          "sha256": "99e650457a7228ef521f1909bf231b43d4846b2a1010e79b91b418226a2be2a4",
+          "uid": 0
+        },
+        {
+          "archive_path": "tree-sitter-xml-4b64dd3a03ec002258d6268d712fd93716d6ab57/xml/src/node-types.json",
+          "bytes": 17444,
+          "directory": false,
+          "executable_intent": false,
+          "gid": 0,
+          "mtime": 1731478685,
+          "path": "xml/src/node-types.json",
+          "pax_headers": {
+            "comment": "4b64dd3a03ec002258d6268d712fd93716d6ab57"
+          },
+          "raw_mode": 436,
+          "raw_type_hex": "30",
+          "sha256": "3b63e111187a0f9b2282e1748db2dd6b10e968f0cdb3676772def93bf89f2a7b",
+          "uid": 0
+        },
+        {
+          "archive_path": "tree-sitter-xml-4b64dd3a03ec002258d6268d712fd93716d6ab57/xml/src/parser.c",
+          "bytes": 240185,
+          "directory": false,
+          "executable_intent": false,
+          "gid": 0,
+          "mtime": 1731478685,
+          "path": "xml/src/parser.c",
+          "pax_headers": {
+            "comment": "4b64dd3a03ec002258d6268d712fd93716d6ab57"
+          },
+          "raw_mode": 436,
+          "raw_type_hex": "30",
+          "sha256": "e41811d97cfd672a902924a3d99bdf696d6fcec08188a35404e4a3d2698ab844",
+          "uid": 0
+        },
+        {
+          "archive_path": "tree-sitter-xml-4b64dd3a03ec002258d6268d712fd93716d6ab57/xml/src/scanner.c",
+          "bytes": 7688,
+          "directory": false,
+          "executable_intent": false,
+          "gid": 0,
+          "mtime": 1731478685,
+          "path": "xml/src/scanner.c",
+          "pax_headers": {
+            "comment": "4b64dd3a03ec002258d6268d712fd93716d6ab57"
+          },
+          "raw_mode": 436,
+          "raw_type_hex": "30",
+          "sha256": "e7f401b138bbb0bd3f736c196dddcb74ff627fef2427e333bc4a7a629c0ad3b0",
+          "uid": 0
+        },
+        {
+          "archive_path": "tree-sitter-xml-4b64dd3a03ec002258d6268d712fd93716d6ab57/xml/src/tree_sitter",
+          "bytes": 0,
+          "directory": true,
+          "executable_intent": false,
+          "gid": 0,
+          "mtime": 1731478685,
+          "path": "xml/src/tree_sitter",
+          "pax_headers": {
+            "comment": "4b64dd3a03ec002258d6268d712fd93716d6ab57"
+          },
+          "raw_mode": 509,
+          "raw_type_hex": "35",
+          "uid": 0
+        },
+        {
+          "archive_path": "tree-sitter-xml-4b64dd3a03ec002258d6268d712fd93716d6ab57/xml/src/tree_sitter/alloc.h",
+          "bytes": 985,
+          "directory": false,
+          "executable_intent": false,
+          "gid": 0,
+          "mtime": 1731478685,
+          "path": "xml/src/tree_sitter/alloc.h",
+          "pax_headers": {
+            "comment": "4b64dd3a03ec002258d6268d712fd93716d6ab57"
+          },
+          "raw_mode": 436,
+          "raw_type_hex": "30",
+          "sha256": "b29c1c9fb7cc82f58c84b376df1297d6e2737a1d655fd356db0859e3c29c2fea",
+          "uid": 0
+        },
+        {
+          "archive_path": "tree-sitter-xml-4b64dd3a03ec002258d6268d712fd93716d6ab57/xml/src/tree_sitter/array.h",
+          "bytes": 10420,
+          "directory": false,
+          "executable_intent": false,
+          "gid": 0,
+          "mtime": 1731478685,
+          "path": "xml/src/tree_sitter/array.h",
+          "pax_headers": {
+            "comment": "4b64dd3a03ec002258d6268d712fd93716d6ab57"
+          },
+          "raw_mode": 436,
+          "raw_type_hex": "30",
+          "sha256": "4ff743903dc46f5db6aa54f31c6b4d160a8a9779e5b2ab1ee59ae7ebcd850ea1",
+          "uid": 0
+        },
+        {
+          "archive_path": "tree-sitter-xml-4b64dd3a03ec002258d6268d712fd93716d6ab57/xml/src/tree_sitter/parser.h",
+          "bytes": 7039,
+          "directory": false,
+          "executable_intent": false,
+          "gid": 0,
+          "mtime": 1731478685,
+          "path": "xml/src/tree_sitter/parser.h",
+          "pax_headers": {
+            "comment": "4b64dd3a03ec002258d6268d712fd93716d6ab57"
+          },
+          "raw_mode": 436,
+          "raw_type_hex": "30",
+          "sha256": "a1f6ef161fbaf48a0e10fca90ef5290a062462b307b3898aa562993853b9f80a",
+          "uid": 0
+        }
+      ],
+      "prefix": "tree-sitter-xml-4b64dd3a03ec002258d6268d712fd93716d6ab57",
+      "raw_member_count": 110,
+      "raw_members": [
+        {
+          "bytes": 52,
+          "extension_payload_utf8": "52 comment=4b64dd3a03ec002258d6268d712fd93716d6ab57\n",
+          "gid": 0,
+          "header_sha256": "f28931c9d07025534493828f6b5ec79cd7602a08128142ce3d08c96c74d99993",
+          "mtime": 1731478685,
+          "offset": 0,
+          "raw_directory": false,
+          "raw_executable_intent": false,
+          "raw_mode": 438,
+          "raw_name": "pax_global_header",
+          "raw_prefix": "",
+          "raw_type_hex": "67",
+          "uid": 0
+        },
+        {
+          "bytes": 0,
+          "gid": 0,
+          "header_sha256": "8a049826b08ca5935d4f9ed1d7ddf5a4af48b07274b06a3c7bf4f797a278f5ab",
+          "mtime": 1731478685,
+          "offset": 1024,
+          "raw_directory": true,
+          "raw_executable_intent": false,
+          "raw_mode": 509,
+          "raw_name": "tree-sitter-xml-4b64dd3a03ec002258d6268d712fd93716d6ab57/",
+          "raw_prefix": "",
+          "raw_type_hex": "35",
+          "uid": 0
+        },
+        {
+          "bytes": 594,
+          "gid": 0,
+          "header_sha256": "7873adb9f2289cbf52de90d74109f04015b24ccf9a7f1773c9230f3ab3d5689a",
+          "mtime": 1731478685,
+          "offset": 1536,
+          "raw_directory": false,
+          "raw_executable_intent": false,
+          "raw_mode": 436,
+          "raw_name": "tree-sitter-xml-4b64dd3a03ec002258d6268d712fd93716d6ab57/.editorconfig",
+          "raw_prefix": "",
+          "raw_type_hex": "30",
+          "uid": 0
+        },
+        {
+          "bytes": 871,
+          "gid": 0,
+          "header_sha256": "d667893a0c2f585637cb36643413af0a764cde47c27f7c574786a40ec63691a5",
+          "mtime": 1731478685,
+          "offset": 3072,
+          "raw_directory": false,
+          "raw_executable_intent": false,
+          "raw_mode": 436,
+          "raw_name": "tree-sitter-xml-4b64dd3a03ec002258d6268d712fd93716d6ab57/.gitattributes",
+          "raw_prefix": "",
+          "raw_type_hex": "30",
+          "uid": 0
+        },
+        {
+          "bytes": 0,
+          "gid": 0,
+          "header_sha256": "7a49ed817e2d646d82316890911179111c0c1cba9406900708ea6650dcf82703",
+          "mtime": 1731478685,
+          "offset": 4608,
+          "raw_directory": true,
+          "raw_executable_intent": false,
+          "raw_mode": 509,
+          "raw_name": "tree-sitter-xml-4b64dd3a03ec002258d6268d712fd93716d6ab57/.github/",
+          "raw_prefix": "",
+          "raw_type_hex": "35",
+          "uid": 0
+        },
+        {
+          "bytes": 49,
+          "gid": 0,
+          "header_sha256": "9c1f4adb6e7717d49462b971a760967d1ec406f802d97771d4dbed41fdc038f7",
+          "mtime": 1731478685,
+          "offset": 5120,
+          "raw_directory": false,
+          "raw_executable_intent": false,
+          "raw_mode": 436,
+          "raw_name": "tree-sitter-xml-4b64dd3a03ec002258d6268d712fd93716d6ab57/.github/FUNDING.yml",
+          "raw_prefix": "",
+          "raw_type_hex": "30",
+          "uid": 0
+        },
+        {
+          "bytes": 0,
+          "gid": 0,
+          "header_sha256": "9c62f913cc33187f57049538116057eb8806945dbce42b0a4a74c554a681e8ea",
+          "mtime": 1731478685,
+          "offset": 6144,
+          "raw_directory": true,
+          "raw_executable_intent": false,
+          "raw_mode": 509,
+          "raw_name": "tree-sitter-xml-4b64dd3a03ec002258d6268d712fd93716d6ab57/.github/workflows/",
+          "raw_prefix": "",
+          "raw_type_hex": "35",
+          "uid": 0
+        },
+        {
+          "bytes": 2897,
+          "gid": 0,
+          "header_sha256": "bba5df82c3327194d29bd080e26ee7e93c94b21ad750ec6fbf8e7b97c37bc25e",
+          "mtime": 1731478685,
+          "offset": 6656,
+          "raw_directory": false,
+          "raw_executable_intent": false,
+          "raw_mode": 436,
+          "raw_name": "tree-sitter-xml-4b64dd3a03ec002258d6268d712fd93716d6ab57/.github/workflows/ci.yml",
+          "raw_prefix": "",
+          "raw_type_hex": "30",
+          "uid": 0
+        },
+        {
+          "bytes": 753,
+          "gid": 0,
+          "header_sha256": "5aee1d634acd5ae1f019f9ec7d973cfccbb49d840ce130ecc952b90461a98511",
+          "mtime": 1731478685,
+          "offset": 10240,
+          "raw_directory": false,
+          "raw_executable_intent": false,
+          "raw_mode": 436,
+          "raw_name": "tree-sitter-xml-4b64dd3a03ec002258d6268d712fd93716d6ab57/.github/workflows/publish.yml",
+          "raw_prefix": "",
+          "raw_type_hex": "30",
+          "uid": 0
+        },
+        {
+          "bytes": 324,
+          "gid": 0,
+          "header_sha256": "bc2a7aa503ee2dec4c52eacbe377760adb00cd12b4ca6dab268f0c56cfa23bcd",
+          "mtime": 1731478685,
+          "offset": 11776,
+          "raw_directory": false,
+          "raw_executable_intent": false,
+          "raw_mode": 436,
+          "raw_name": "tree-sitter-xml-4b64dd3a03ec002258d6268d712fd93716d6ab57/.gitignore",
+          "raw_prefix": "",
+          "raw_type_hex": "30",
+          "uid": 0
+        },
+        {
+          "bytes": 2732,
+          "gid": 0,
+          "header_sha256": "210a208967528295e560eee8090ab1fb28a4a7fd3299db7ff2ceedbc62b4da73",
+          "mtime": 1731478685,
+          "offset": 12800,
+          "raw_directory": false,
+          "raw_executable_intent": false,
+          "raw_mode": 436,
+          "raw_name": "tree-sitter-xml-4b64dd3a03ec002258d6268d712fd93716d6ab57/CMakeLists.txt",
+          "raw_prefix": "",
+          "raw_type_hex": "30",
+          "uid": 0
+        },
+        {
+          "bytes": 2480,
+          "gid": 0,
+          "header_sha256": "cf2f4e1553a9c89be8080495ced4dc49c5ed7148d30f78d5532479926ab66559",
+          "mtime": 1731478685,
+          "offset": 16384,
+          "raw_directory": false,
+          "raw_executable_intent": false,
+          "raw_mode": 436,
+          "raw_name": "tree-sitter-xml-4b64dd3a03ec002258d6268d712fd93716d6ab57/Cargo.lock",
+          "raw_prefix": "",
+          "raw_type_hex": "30",
+          "uid": 0
+        },
+        {
+          "bytes": 806,
+          "gid": 0,
+          "header_sha256": "ce6d0efbca847190fd39797922b31dd784f6f009cd6abe0c0752458cb84649b7",
+          "mtime": 1731478685,
+          "offset": 19456,
+          "raw_directory": false,
+          "raw_executable_intent": false,
+          "raw_mode": 436,
+          "raw_name": "tree-sitter-xml-4b64dd3a03ec002258d6268d712fd93716d6ab57/Cargo.toml",
+          "raw_prefix": "",
+          "raw_type_hex": "30",
+          "uid": 0
+        },
+        {
+          "bytes": 1058,
+          "gid": 0,
+          "header_sha256": "bb275f28f0b059039b0973108f2a363380d1671415bad6307e3fff4767bf2dcf",
+          "mtime": 1731478685,
+          "offset": 20992,
+          "raw_directory": false,
+          "raw_executable_intent": false,
+          "raw_mode": 436,
+          "raw_name": "tree-sitter-xml-4b64dd3a03ec002258d6268d712fd93716d6ab57/LICENSE",
+          "raw_prefix": "",
+          "raw_type_hex": "30",
+          "uid": 0
+        },
+        {
+          "bytes": 128,
+          "gid": 0,
+          "header_sha256": "0428f981cf92c75c5789491260f72c20f6889a2daa24a64cf422d7854ac5ca8a",
+          "mtime": 1731478685,
+          "offset": 23040,
+          "raw_directory": false,
+          "raw_executable_intent": false,
+          "raw_mode": 436,
+          "raw_name": "tree-sitter-xml-4b64dd3a03ec002258d6268d712fd93716d6ab57/Makefile",
+          "raw_prefix": "",
+          "raw_type_hex": "30",
+          "uid": 0
+        },
+        {
+          "bytes": 333,
+          "gid": 0,
+          "header_sha256": "5188effc59277c5e860d4c744f25b930adf5fdc91be3800d17744ffacf1d1a5f",
+          "mtime": 1731478685,
+          "offset": 24064,
+          "raw_directory": false,
+          "raw_executable_intent": false,
+          "raw_mode": 436,
+          "raw_name": "tree-sitter-xml-4b64dd3a03ec002258d6268d712fd93716d6ab57/Package.resolved",
+          "raw_prefix": "",
+          "raw_type_hex": "30",
+          "uid": 0
+        },
+        {
+          "bytes": 1467,
+          "gid": 0,
+          "header_sha256": "4fb49e5ba0d429fc5142a7b4bdb066383e641ed2791e0c485cc52eec1da40388",
+          "mtime": 1731478685,
+          "offset": 25088,
+          "raw_directory": false,
+          "raw_executable_intent": false,
+          "raw_mode": 436,
+          "raw_name": "tree-sitter-xml-4b64dd3a03ec002258d6268d712fd93716d6ab57/Package.swift",
+          "raw_prefix": "",
+          "raw_type_hex": "30",
+          "uid": 0
+        },
+        {
+          "bytes": 1350,
+          "gid": 0,
+          "header_sha256": "43aa6a0eb0d16b3d1bbe8df62b7ed5a6bb8480a1cce079c3647b87742d02a352",
+          "mtime": 1731478685,
+          "offset": 27136,
+          "raw_directory": false,
+          "raw_executable_intent": false,
+          "raw_mode": 436,
+          "raw_name": "tree-sitter-xml-4b64dd3a03ec002258d6268d712fd93716d6ab57/README.md",
+          "raw_prefix": "",
+          "raw_type_hex": "30",
+          "uid": 0
+        },
+        {
+          "bytes": 667,
+          "gid": 0,
+          "header_sha256": "883ff6a409c2bc831c5698320c9df628926552130ef23410f7bf1dda4f967b8e",
+          "mtime": 1731478685,
+          "offset": 29184,
+          "raw_directory": false,
+          "raw_executable_intent": false,
+          "raw_mode": 436,
+          "raw_name": "tree-sitter-xml-4b64dd3a03ec002258d6268d712fd93716d6ab57/binding.gyp",
+          "raw_prefix": "",
+          "raw_type_hex": "30",
+          "uid": 0
+        },
+        {
+          "bytes": 0,
+          "gid": 0,
+          "header_sha256": "77f88b1e6295853fce6cc8e559eb482195fb4c27486a77299a7f12aa8c3c64f6",
+          "mtime": 1731478685,
+          "offset": 30720,
+          "raw_directory": true,
+          "raw_executable_intent": false,
+          "raw_mode": 509,
+          "raw_name": "tree-sitter-xml-4b64dd3a03ec002258d6268d712fd93716d6ab57/bindings/",
+          "raw_prefix": "",
+          "raw_type_hex": "35",
+          "uid": 0
+        },
+        {
+          "bytes": 0,
+          "gid": 0,
+          "header_sha256": "1755514ae5f025ac26cba3beb352af9ead241af3d2d15360bfc31b3f8f8727ea",
+          "mtime": 1731478685,
+          "offset": 31232,
+          "raw_directory": true,
+          "raw_executable_intent": false,
+          "raw_mode": 509,
+          "raw_name": "tree-sitter-xml-4b64dd3a03ec002258d6268d712fd93716d6ab57/bindings/c/",
+          "raw_prefix": "",
+          "raw_type_hex": "35",
+          "uid": 0
+        },
+        {
+          "bytes": 234,
+          "gid": 0,
+          "header_sha256": "bf65ab58f46e877f9b500e3543d0eb4e9a36dd3d3f32064ae879da9600c7cf16",
+          "mtime": 1731478685,
+          "offset": 31744,
+          "raw_directory": false,
+          "raw_executable_intent": false,
+          "raw_mode": 436,
+          "raw_name": "tree-sitter-xml-4b64dd3a03ec002258d6268d712fd93716d6ab57/bindings/c/tree-sitter-dtd.h",
+          "raw_prefix": "",
+          "raw_type_hex": "30",
+          "uid": 0
+        },
+        {
+          "bytes": 303,
+          "gid": 0,
+          "header_sha256": "53574f09bdbe7175a4fda5c89b3ae8450b471ec956f661ec7474b3e33df02905",
+          "mtime": 1731478685,
+          "offset": 32768,
+          "raw_directory": false,
+          "raw_executable_intent": false,
+          "raw_mode": 436,
+          "raw_name": "tree-sitter-xml-4b64dd3a03ec002258d6268d712fd93716d6ab57/bindings/c/tree-sitter-dtd.pc.in",
+          "raw_prefix": "",
+          "raw_type_hex": "30",
+          "uid": 0
+        },
+        {
+          "bytes": 234,
+          "gid": 0,
+          "header_sha256": "fb9e14cfe3ea865940d605753b32d395609117288c51a692098bd379de94c372",
+          "mtime": 1731478685,
+          "offset": 33792,
+          "raw_directory": false,
+          "raw_executable_intent": false,
+          "raw_mode": 436,
+          "raw_name": "tree-sitter-xml-4b64dd3a03ec002258d6268d712fd93716d6ab57/bindings/c/tree-sitter-xml.h",
+          "raw_prefix": "",
+          "raw_type_hex": "30",
+          "uid": 0
+        },
+        {
+          "bytes": 303,
+          "gid": 0,
+          "header_sha256": "697ed6cb9bdd48846e4a302279a1f222a5421169b041501eab827c573a91d376",
+          "mtime": 1731478685,
+          "offset": 34816,
+          "raw_directory": false,
+          "raw_executable_intent": false,
+          "raw_mode": 436,
+          "raw_name": "tree-sitter-xml-4b64dd3a03ec002258d6268d712fd93716d6ab57/bindings/c/tree-sitter-xml.pc.in",
+          "raw_prefix": "",
+          "raw_type_hex": "30",
+          "uid": 0
+        },
+        {
+          "bytes": 0,
+          "gid": 0,
+          "header_sha256": "0de5f2c2add515873aae9ec10009256f3e6accb0b4000d9719ae503a0cdf1c68",
+          "mtime": 1731478685,
+          "offset": 35840,
+          "raw_directory": true,
+          "raw_executable_intent": false,
+          "raw_mode": 509,
+          "raw_name": "tree-sitter-xml-4b64dd3a03ec002258d6268d712fd93716d6ab57/bindings/go/",
+          "raw_prefix": "",
+          "raw_type_hex": "35",
+          "uid": 0
+        },
+        {
+          "bytes": 543,
+          "gid": 0,
+          "header_sha256": "13b9e07958925e91285ade9b703d07e37559aa209f2b2652861b9af655183de7",
+          "mtime": 1731478685,
+          "offset": 36352,
+          "raw_directory": false,
+          "raw_executable_intent": false,
+          "raw_mode": 436,
+          "raw_name": "tree-sitter-xml-4b64dd3a03ec002258d6268d712fd93716d6ab57/bindings/go/binding_test.go",
+          "raw_prefix": "",
+          "raw_type_hex": "30",
+          "uid": 0
+        },
+        {
+          "bytes": 317,
+          "gid": 0,
+          "header_sha256": "eed381692d972dd76d5a833832b27c9abfeec186a43537eeb23d0c08931562fb",
+          "mtime": 1731478685,
+          "offset": 37888,
+          "raw_directory": false,
+          "raw_executable_intent": false,
+          "raw_mode": 436,
+          "raw_name": "tree-sitter-xml-4b64dd3a03ec002258d6268d712fd93716d6ab57/bindings/go/dtd.go",
+          "raw_prefix": "",
+          "raw_type_hex": "30",
+          "uid": 0
+        },
+        {
+          "bytes": 317,
+          "gid": 0,
+          "header_sha256": "cdcb5dbdd8890aa128f3372eff8f64d17e1e0e0770395bc51700a3204ca64856",
+          "mtime": 1731478685,
+          "offset": 38912,
+          "raw_directory": false,
+          "raw_executable_intent": false,
+          "raw_mode": 436,
+          "raw_name": "tree-sitter-xml-4b64dd3a03ec002258d6268d712fd93716d6ab57/bindings/go/xml.go",
+          "raw_prefix": "",
+          "raw_type_hex": "30",
+          "uid": 0
+        },
+        {
+          "bytes": 0,
+          "gid": 0,
+          "header_sha256": "c9957d0b20866cc0a880e9608489c3e8a60164a8e757c883625f35d2665cf171",
+          "mtime": 1731478685,
+          "offset": 39936,
+          "raw_directory": true,
+          "raw_executable_intent": false,
+          "raw_mode": 509,
+          "raw_name": "tree-sitter-xml-4b64dd3a03ec002258d6268d712fd93716d6ab57/bindings/node/",
+          "raw_prefix": "",
+          "raw_type_hex": "35",
+          "uid": 0
+        },
+        {
+          "bytes": 961,
+          "gid": 0,
+          "header_sha256": "f22d03471b3c808ccb428fcbe8354cd7a041909c7731a03ca28f804b9079e1e0",
+          "mtime": 1731478685,
+          "offset": 40448,
+          "raw_directory": false,
+          "raw_executable_intent": false,
+          "raw_mode": 436,
+          "raw_name": "tree-sitter-xml-4b64dd3a03ec002258d6268d712fd93716d6ab57/bindings/node/binding.cc",
+          "raw_prefix": "",
+          "raw_type_hex": "30",
+          "uid": 0
+        },
+        {
+          "bytes": 398,
+          "gid": 0,
+          "header_sha256": "20a8d6d6750e4d28d19b6c30e6f79be0dd69fc8086cdb7120f3347972419057a",
+          "mtime": 1731478685,
+          "offset": 41984,
+          "raw_directory": false,
+          "raw_executable_intent": false,
+          "raw_mode": 436,
+          "raw_name": "tree-sitter-xml-4b64dd3a03ec002258d6268d712fd93716d6ab57/bindings/node/binding_test.js",
+          "raw_prefix": "",
+          "raw_type_hex": "30",
+          "uid": 0
+        },
+        {
+          "bytes": 35,
+          "gid": 0,
+          "header_sha256": "29730e308891cd9deaa1fbe06036660a0acfbb132e1bbd13e74cb413df97b944",
+          "mtime": 1731478685,
+          "offset": 43008,
+          "raw_directory": false,
+          "raw_executable_intent": false,
+          "raw_mode": 436,
+          "raw_name": "tree-sitter-xml-4b64dd3a03ec002258d6268d712fd93716d6ab57/bindings/node/dtd.js",
+          "raw_prefix": "",
+          "raw_type_hex": "30",
+          "uid": 0
+        },
+        {
+          "bytes": 478,
+          "gid": 0,
+          "header_sha256": "4a2cdb7869416d33cb99117234976cd6c045e8f4179f9ebde3f306626d48f368",
+          "mtime": 1731478685,
+          "offset": 44032,
+          "raw_directory": false,
+          "raw_executable_intent": false,
+          "raw_mode": 436,
+          "raw_name": "tree-sitter-xml-4b64dd3a03ec002258d6268d712fd93716d6ab57/bindings/node/index.d.ts",
+          "raw_prefix": "",
+          "raw_type_hex": "30",
+          "uid": 0
+        },
+        {
+          "bytes": 288,
+          "gid": 0,
+          "header_sha256": "6dc65a927d73cfc1598016d6cd44a406e4668bffc9de8880d5d0f67eb7011172",
+          "mtime": 1731478685,
+          "offset": 45056,
+          "raw_directory": false,
+          "raw_executable_intent": false,
+          "raw_mode": 436,
+          "raw_name": "tree-sitter-xml-4b64dd3a03ec002258d6268d712fd93716d6ab57/bindings/node/index.js",
+          "raw_prefix": "",
+          "raw_type_hex": "30",
+          "uid": 0
+        },
+        {
+          "bytes": 35,
+          "gid": 0,
+          "header_sha256": "0cba0ddd5aad7ca948b1ecf6213ea256ba9a679e473a687c355799181054b3f7",
+          "mtime": 1731478685,
+          "offset": 46080,
+          "raw_directory": false,
+          "raw_executable_intent": false,
+          "raw_mode": 436,
+          "raw_name": "tree-sitter-xml-4b64dd3a03ec002258d6268d712fd93716d6ab57/bindings/node/xml.js",
+          "raw_prefix": "",
+          "raw_type_hex": "30",
+          "uid": 0
+        },
+        {
+          "bytes": 0,
+          "gid": 0,
+          "header_sha256": "8df27fd5ebb2710eee60607fef18876bcf752a67aa65972a978579361317a098",
+          "mtime": 1731478685,
+          "offset": 47104,
+          "raw_directory": true,
+          "raw_executable_intent": false,
+          "raw_mode": 509,
+          "raw_name": "tree-sitter-xml-4b64dd3a03ec002258d6268d712fd93716d6ab57/bindings/python/",
+          "raw_prefix": "",
+          "raw_type_hex": "35",
+          "uid": 0
+        },
+        {
+          "bytes": 0,
+          "gid": 0,
+          "header_sha256": "cadfdae9600ff108615aac5989644ba5a89e20b45e109ed9baff14f2085ff163",
+          "mtime": 1731478685,
+          "offset": 47616,
+          "raw_directory": true,
+          "raw_executable_intent": false,
+          "raw_mode": 509,
+          "raw_name": "tree-sitter-xml-4b64dd3a03ec002258d6268d712fd93716d6ab57/bindings/python/tests/",
+          "raw_prefix": "",
+          "raw_type_hex": "35",
+          "uid": 0
+        },
+        {
+          "bytes": 492,
+          "gid": 0,
+          "header_sha256": "56c818dfc0eecb0575740ac2f2f157ad9177868d33cf3561272b548bfb16addd",
+          "mtime": 1731478685,
+          "offset": 48128,
+          "raw_directory": false,
+          "raw_executable_intent": false,
+          "raw_mode": 436,
+          "raw_name": "tree-sitter-xml-4b64dd3a03ec002258d6268d712fd93716d6ab57/bindings/python/tests/test_binding.py",
+          "raw_prefix": "",
+          "raw_type_hex": "30",
+          "uid": 0
+        },
+        {
+          "bytes": 0,
+          "gid": 0,
+          "header_sha256": "ba28a1674f75164dd5955e17fcfdce7e10c9cffc4c64a7485a7fb471413376d8",
+          "mtime": 1731478685,
+          "offset": 49152,
+          "raw_directory": true,
+          "raw_executable_intent": false,
+          "raw_mode": 509,
+          "raw_name": "tree-sitter-xml-4b64dd3a03ec002258d6268d712fd93716d6ab57/bindings/python/tree_sitter_xml/",
+          "raw_prefix": "",
+          "raw_type_hex": "35",
+          "uid": 0
+        },
+        {
+          "bytes": 131,
+          "gid": 0,
+          "header_sha256": "44f9e3aad4aa29ce47ba833987f46f865e7c9effbe0516706dd175e7221c9c90",
+          "mtime": 1731478685,
+          "offset": 49664,
+          "raw_directory": false,
+          "raw_executable_intent": false,
+          "raw_mode": 436,
+          "raw_name": "tree-sitter-xml-4b64dd3a03ec002258d6268d712fd93716d6ab57/bindings/python/tree_sitter_xml/__init__.py",
+          "raw_prefix": "",
+          "raw_type_hex": "30",
+          "uid": 0
+        },
+        {
+          "bytes": 69,
+          "gid": 0,
+          "header_sha256": "cd3661c8b62e14d24b8ddbbfddc68c79a187d1ac203bee600a9b382eee3954de",
+          "mtime": 1731478685,
+          "offset": 50688,
+          "raw_directory": false,
+          "raw_executable_intent": false,
+          "raw_mode": 436,
+          "raw_name": "__init__.pyi",
+          "raw_prefix": "tree-sitter-xml-4b64dd3a03ec002258d6268d712fd93716d6ab57/bindings/python/tree_sitter_xml",
+          "raw_type_hex": "30",
+          "uid": 0
+        },
+        {
+          "bytes": 948,
+          "gid": 0,
+          "header_sha256": "ac4cc0f32e14bc7fc2feef100e1d80b4055db580bd8ec766878f391706d63b7c",
+          "mtime": 1731478685,
+          "offset": 51712,
+          "raw_directory": false,
+          "raw_executable_intent": false,
+          "raw_mode": 436,
+          "raw_name": "tree-sitter-xml-4b64dd3a03ec002258d6268d712fd93716d6ab57/bindings/python/tree_sitter_xml/binding.c",
+          "raw_prefix": "",
+          "raw_type_hex": "30",
+          "uid": 0
+        },
+        {
+          "bytes": 0,
+          "gid": 0,
+          "header_sha256": "a050ae2e4c0153430ac40370e2943c2715fb34bd606a506e440241bd46d9e1b4",
+          "mtime": 1731478685,
+          "offset": 53248,
+          "raw_directory": false,
+          "raw_executable_intent": false,
+          "raw_mode": 436,
+          "raw_name": "tree-sitter-xml-4b64dd3a03ec002258d6268d712fd93716d6ab57/bindings/python/tree_sitter_xml/py.typed",
+          "raw_prefix": "",
+          "raw_type_hex": "30",
+          "uid": 0
+        },
+        {
+          "bytes": 0,
+          "gid": 0,
+          "header_sha256": "3a1527122bcfbc558fcf19a9ff24f63271fabc159b3a6d6ce84d4ba7c5c1d37a",
+          "mtime": 1731478685,
+          "offset": 53760,
+          "raw_directory": true,
+          "raw_executable_intent": false,
+          "raw_mode": 509,
+          "raw_name": "tree-sitter-xml-4b64dd3a03ec002258d6268d712fd93716d6ab57/bindings/rust/",
+          "raw_prefix": "",
+          "raw_type_hex": "35",
+          "uid": 0
+        },
+        {
+          "bytes": 826,
+          "gid": 0,
+          "header_sha256": "ae0088e0203506c6034efb0bca5b820d7af76eb13f26c22e5d5f7604fded1b1f",
+          "mtime": 1731478685,
+          "offset": 54272,
+          "raw_directory": false,
+          "raw_executable_intent": false,
+          "raw_mode": 436,
+          "raw_name": "tree-sitter-xml-4b64dd3a03ec002258d6268d712fd93716d6ab57/bindings/rust/build.rs",
+          "raw_prefix": "",
+          "raw_type_hex": "30",
+          "uid": 0
+        },
+        {
+          "bytes": 2824,
+          "gid": 0,
+          "header_sha256": "79f09192d0b0963f746c29fc9e46a1449e1847731ea33531d9e872a49fb74ba6",
+          "mtime": 1731478685,
+          "offset": 55808,
+          "raw_directory": false,
+          "raw_executable_intent": false,
+          "raw_mode": 436,
+          "raw_name": "tree-sitter-xml-4b64dd3a03ec002258d6268d712fd93716d6ab57/bindings/rust/lib.rs",
+          "raw_prefix": "",
+          "raw_type_hex": "30",
+          "uid": 0
+        },
+        {
+          "bytes": 0,
+          "gid": 0,
+          "header_sha256": "a1ecb64f71720426cda37507dd2c6c5422d948d130acabcc594efb11e88ac088",
+          "mtime": 1731478685,
+          "offset": 59392,
+          "raw_directory": true,
+          "raw_executable_intent": false,
+          "raw_mode": 509,
+          "raw_name": "tree-sitter-xml-4b64dd3a03ec002258d6268d712fd93716d6ab57/bindings/swift/",
+          "raw_prefix": "",
+          "raw_type_hex": "35",
+          "uid": 0
+        },
+        {
+          "bytes": 0,
+          "gid": 0,
+          "header_sha256": "6f74a29e35ef3b12f0083a3bb0d63d625d9a3f8811b8d2052413beb4b6308cba",
+          "mtime": 1731478685,
+          "offset": 59904,
+          "raw_directory": true,
+          "raw_executable_intent": false,
+          "raw_mode": 509,
+          "raw_name": "tree-sitter-xml-4b64dd3a03ec002258d6268d712fd93716d6ab57/bindings/swift/TreeSitterXMLTests/",
+          "raw_prefix": "",
+          "raw_type_hex": "35",
+          "uid": 0
+        },
+        {
+          "bytes": 632,
+          "gid": 0,
+          "header_sha256": "9cfcf09f17480169c2ae71f978eb67a11fbc9829a8a17e70fb748adf21454811",
+          "mtime": 1731478685,
+          "offset": 60416,
+          "raw_directory": false,
+          "raw_executable_intent": false,
+          "raw_mode": 436,
+          "raw_name": "TreeSitterXMLTests.swift",
+          "raw_prefix": "tree-sitter-xml-4b64dd3a03ec002258d6268d712fd93716d6ab57/bindings/swift/TreeSitterXMLTests",
+          "raw_type_hex": "30",
+          "uid": 0
+        },
+        {
+          "bytes": 0,
+          "gid": 0,
+          "header_sha256": "2bc87b983e3995defa0808ed30e16e341797db227e6ca4cdab9be65cec498882",
+          "mtime": 1731478685,
+          "offset": 61952,
+          "raw_directory": true,
+          "raw_executable_intent": false,
+          "raw_mode": 509,
+          "raw_name": "tree-sitter-xml-4b64dd3a03ec002258d6268d712fd93716d6ab57/bindings/swift/dtd/",
+          "raw_prefix": "",
+          "raw_type_hex": "35",
+          "uid": 0
+        },
+        {
+          "bytes": 0,
+          "gid": 0,
+          "header_sha256": "7a5341eb08cf9eb9afe5060518e7856581af07fe31007283e625f3308ef26f12",
+          "mtime": 1731478685,
+          "offset": 62464,
+          "raw_directory": true,
+          "raw_executable_intent": false,
+          "raw_mode": 509,
+          "raw_name": "tree-sitter-xml-4b64dd3a03ec002258d6268d712fd93716d6ab57/bindings/swift/dtd/TreeSitterDTD/",
+          "raw_prefix": "",
+          "raw_type_hex": "35",
+          "uid": 0
+        },
+        {
+          "bytes": 234,
+          "gid": 0,
+          "header_sha256": "4609f304578778b367ed721e983cbd90956266c04bb3618e136ccecbd65269fe",
+          "mtime": 1731478685,
+          "offset": 62976,
+          "raw_directory": false,
+          "raw_executable_intent": false,
+          "raw_mode": 436,
+          "raw_name": "tree-sitter-xml-4b64dd3a03ec002258d6268d712fd93716d6ab57/bindings/swift/dtd/TreeSitterDTD/dtd.h",
+          "raw_prefix": "",
+          "raw_type_hex": "30",
+          "uid": 0
+        },
+        {
+          "bytes": 0,
+          "gid": 0,
+          "header_sha256": "a8814e107294ef0d7ec5248f87770ef00396f5cd9bb791727491ef26fc721f22",
+          "mtime": 1731478685,
+          "offset": 64000,
+          "raw_directory": true,
+          "raw_executable_intent": false,
+          "raw_mode": 509,
+          "raw_name": "tree-sitter-xml-4b64dd3a03ec002258d6268d712fd93716d6ab57/bindings/swift/xml/",
+          "raw_prefix": "",
+          "raw_type_hex": "35",
+          "uid": 0
+        },
+        {
+          "bytes": 0,
+          "gid": 0,
+          "header_sha256": "be3f483e4f999dabac496f0d6abcb6d94fce57b564654b64920a90c501cc4ed3",
+          "mtime": 1731478685,
+          "offset": 64512,
+          "raw_directory": true,
+          "raw_executable_intent": false,
+          "raw_mode": 509,
+          "raw_name": "tree-sitter-xml-4b64dd3a03ec002258d6268d712fd93716d6ab57/bindings/swift/xml/TreeSitterXML/",
+          "raw_prefix": "",
+          "raw_type_hex": "35",
+          "uid": 0
+        },
+        {
+          "bytes": 234,
+          "gid": 0,
+          "header_sha256": "a49ae48bdcb08c4ac05cecfe93bd7c622d8b296070e15ea696139752deaa15c5",
+          "mtime": 1731478685,
+          "offset": 65024,
+          "raw_directory": false,
+          "raw_executable_intent": false,
+          "raw_mode": 436,
+          "raw_name": "tree-sitter-xml-4b64dd3a03ec002258d6268d712fd93716d6ab57/bindings/swift/xml/TreeSitterXML/xml.h",
+          "raw_prefix": "",
+          "raw_type_hex": "30",
+          "uid": 0
+        },
+        {
+          "bytes": 0,
+          "gid": 0,
+          "header_sha256": "1662c011e3c5ee8cbcf255a4c3f56504a28a56f1e9bf557dab943524fa99c961",
+          "mtime": 1731478685,
+          "offset": 66048,
+          "raw_directory": true,
+          "raw_executable_intent": false,
+          "raw_mode": 509,
+          "raw_name": "tree-sitter-xml-4b64dd3a03ec002258d6268d712fd93716d6ab57/common/",
+          "raw_prefix": "",
+          "raw_type_hex": "35",
+          "uid": 0
+        },
+        {
+          "bytes": 3138,
+          "gid": 0,
+          "header_sha256": "7d8220625eb56d8a8d37af5681c664483a36d9438d6fa82c5a45d2f67348380f",
+          "mtime": 1731478685,
+          "offset": 66560,
+          "raw_directory": false,
+          "raw_executable_intent": false,
+          "raw_mode": 436,
+          "raw_name": "tree-sitter-xml-4b64dd3a03ec002258d6268d712fd93716d6ab57/common/common.mak",
+          "raw_prefix": "",
+          "raw_type_hex": "30",
+          "uid": 0
+        },
+        {
+          "bytes": 6420,
+          "gid": 0,
+          "header_sha256": "6b125fee4d0efdb73496e5466fbb15b61f3ca80d3fdfe0e0f8f93c33897356cb",
+          "mtime": 1731478685,
+          "offset": 70656,
+          "raw_directory": false,
+          "raw_executable_intent": false,
+          "raw_mode": 436,
+          "raw_name": "tree-sitter-xml-4b64dd3a03ec002258d6268d712fd93716d6ab57/common/common.mjs",
+          "raw_prefix": "",
+          "raw_type_hex": "30",
+          "uid": 0
+        },
+        {
+          "bytes": 4270,
+          "gid": 0,
+          "header_sha256": "aa28079e3ffc4e5c4f97a12bd7cad995e18202c3e99fc77db5b2512a2e1c37a0",
+          "mtime": 1731478685,
+          "offset": 77824,
+          "raw_directory": false,
+          "raw_executable_intent": false,
+          "raw_mode": 436,
+          "raw_name": "tree-sitter-xml-4b64dd3a03ec002258d6268d712fd93716d6ab57/common/scanner.h",
+          "raw_prefix": "",
+          "raw_type_hex": "30",
+          "uid": 0
+        },
+        {
+          "bytes": 0,
+          "gid": 0,
+          "header_sha256": "f7309a9e4c655ecea9c7ad81114e3af149e1c38b03918a46f9a25bf2e28605d8",
+          "mtime": 1731478685,
+          "offset": 82944,
+          "raw_directory": true,
+          "raw_executable_intent": false,
+          "raw_mode": 509,
+          "raw_name": "tree-sitter-xml-4b64dd3a03ec002258d6268d712fd93716d6ab57/dtd/",
+          "raw_prefix": "",
+          "raw_type_hex": "35",
+          "uid": 0
+        },
+        {
+          "bytes": 72,
+          "gid": 0,
+          "header_sha256": "11834e83f24bbeefce2c8fe932b945a9a3891500de9e7e875b32e23c735133c8",
+          "mtime": 1731478685,
+          "offset": 83456,
+          "raw_directory": false,
+          "raw_executable_intent": false,
+          "raw_mode": 436,
+          "raw_name": "tree-sitter-xml-4b64dd3a03ec002258d6268d712fd93716d6ab57/dtd/CMakeLists.txt",
+          "raw_prefix": "",
+          "raw_type_hex": "30",
+          "uid": 0
+        },
+        {
+          "bytes": 106,
+          "gid": 0,
+          "header_sha256": "117c524d858c63ccc942ca66144487b7ae6dba88640b0b5e13409640e33b71ed",
+          "mtime": 1731478685,
+          "offset": 84480,
+          "raw_directory": false,
+          "raw_executable_intent": false,
+          "raw_mode": 436,
+          "raw_name": "tree-sitter-xml-4b64dd3a03ec002258d6268d712fd93716d6ab57/dtd/Makefile",
+          "raw_prefix": "",
+          "raw_type_hex": "30",
+          "uid": 0
+        },
+        {
+          "bytes": 1090,
+          "gid": 0,
+          "header_sha256": "286b43736ed39e1760993577cc877d917a10489eeecb474b60eefefffd7b9a30",
+          "mtime": 1731478685,
+          "offset": 85504,
+          "raw_directory": false,
+          "raw_executable_intent": false,
+          "raw_mode": 436,
+          "raw_name": "tree-sitter-xml-4b64dd3a03ec002258d6268d712fd93716d6ab57/dtd/grammar.js",
+          "raw_prefix": "",
+          "raw_type_hex": "30",
+          "uid": 0
+        },
+        {
+          "bytes": 215,
+          "gid": 0,
+          "header_sha256": "a204b054e5c4e3cbe57329f524bc739ba14147a675f07bd1501b59b26516f791",
+          "mtime": 1731478685,
+          "offset": 87552,
+          "raw_directory": false,
+          "raw_executable_intent": false,
+          "raw_mode": 436,
+          "raw_name": "tree-sitter-xml-4b64dd3a03ec002258d6268d712fd93716d6ab57/dtd/package.json",
+          "raw_prefix": "",
+          "raw_type_hex": "30",
+          "uid": 0
+        },
+        {
+          "bytes": 0,
+          "gid": 0,
+          "header_sha256": "f5446e19a94b41a91ea717d666a35284c736cf83f1afdbb23b3131f48bf0b6bb",
+          "mtime": 1731478685,
+          "offset": 88576,
+          "raw_directory": true,
+          "raw_executable_intent": false,
+          "raw_mode": 509,
+          "raw_name": "tree-sitter-xml-4b64dd3a03ec002258d6268d712fd93716d6ab57/dtd/src/",
+          "raw_prefix": "",
+          "raw_type_hex": "35",
+          "uid": 0
+        },
+        {
+          "bytes": 42499,
+          "gid": 0,
+          "header_sha256": "3243152a207f4bc9ca712d4de0fbd096698db9576e2640771c24854ee0ac3bf6",
+          "mtime": 1731478685,
+          "offset": 89088,
+          "raw_directory": false,
+          "raw_executable_intent": false,
+          "raw_mode": 436,
+          "raw_name": "tree-sitter-xml-4b64dd3a03ec002258d6268d712fd93716d6ab57/dtd/src/grammar.json",
+          "raw_prefix": "",
+          "raw_type_hex": "30",
+          "uid": 0
+        },
+        {
+          "bytes": 12260,
+          "gid": 0,
+          "header_sha256": "ce72bdce840f9915b56869da994d52306cd11b163ef41157cb0c2264ec198e6a",
+          "mtime": 1731478685,
+          "offset": 132608,
+          "raw_directory": false,
+          "raw_executable_intent": false,
+          "raw_mode": 436,
+          "raw_name": "tree-sitter-xml-4b64dd3a03ec002258d6268d712fd93716d6ab57/dtd/src/node-types.json",
+          "raw_prefix": "",
+          "raw_type_hex": "30",
+          "uid": 0
+        },
+        {
+          "bytes": 176894,
+          "gid": 0,
+          "header_sha256": "f71db34705f85d9c8907ea484ddee37649467636357f18676b2a0f814a811c24",
+          "mtime": 1731478685,
+          "offset": 145408,
+          "raw_directory": false,
+          "raw_executable_intent": false,
+          "raw_mode": 436,
+          "raw_name": "tree-sitter-xml-4b64dd3a03ec002258d6268d712fd93716d6ab57/dtd/src/parser.c",
+          "raw_prefix": "",
+          "raw_type_hex": "30",
+          "uid": 0
+        },
+        {
+          "bytes": 1398,
+          "gid": 0,
+          "header_sha256": "15898750a5bdf8ad6ccd18c9da221d56ceca238f731d11537a0eab3c79952738",
+          "mtime": 1731478685,
+          "offset": 323072,
+          "raw_directory": false,
+          "raw_executable_intent": false,
+          "raw_mode": 436,
+          "raw_name": "tree-sitter-xml-4b64dd3a03ec002258d6268d712fd93716d6ab57/dtd/src/scanner.c",
+          "raw_prefix": "",
+          "raw_type_hex": "30",
+          "uid": 0
+        },
+        {
+          "bytes": 0,
+          "gid": 0,
+          "header_sha256": "389ad48de42d79c3238e6074eb020018b1388f322357d535e0d009c847c5581f",
+          "mtime": 1731478685,
+          "offset": 325120,
+          "raw_directory": true,
+          "raw_executable_intent": false,
+          "raw_mode": 509,
+          "raw_name": "tree-sitter-xml-4b64dd3a03ec002258d6268d712fd93716d6ab57/dtd/src/tree_sitter/",
+          "raw_prefix": "",
+          "raw_type_hex": "35",
+          "uid": 0
+        },
+        {
+          "bytes": 985,
+          "gid": 0,
+          "header_sha256": "988f38d4fff35b3ade9859d224fedd75427df49061aae2f450ddee25eaaf7fd4",
+          "mtime": 1731478685,
+          "offset": 325632,
+          "raw_directory": false,
+          "raw_executable_intent": false,
+          "raw_mode": 436,
+          "raw_name": "tree-sitter-xml-4b64dd3a03ec002258d6268d712fd93716d6ab57/dtd/src/tree_sitter/alloc.h",
+          "raw_prefix": "",
+          "raw_type_hex": "30",
+          "uid": 0
+        },
+        {
+          "bytes": 10420,
+          "gid": 0,
+          "header_sha256": "714a269c4a5e7a30ef1e279d68e161a73dda87500addd88c6b89e54cecc5597a",
+          "mtime": 1731478685,
+          "offset": 327168,
+          "raw_directory": false,
+          "raw_executable_intent": false,
+          "raw_mode": 436,
+          "raw_name": "tree-sitter-xml-4b64dd3a03ec002258d6268d712fd93716d6ab57/dtd/src/tree_sitter/array.h",
+          "raw_prefix": "",
+          "raw_type_hex": "30",
+          "uid": 0
+        },
+        {
+          "bytes": 7039,
+          "gid": 0,
+          "header_sha256": "a6633be935d3db1ae09534fa1bbfacaf5bed9b75a4d21800915b1571bea53204",
+          "mtime": 1731478685,
+          "offset": 338432,
+          "raw_directory": false,
+          "raw_executable_intent": false,
+          "raw_mode": 436,
+          "raw_name": "tree-sitter-xml-4b64dd3a03ec002258d6268d712fd93716d6ab57/dtd/src/tree_sitter/parser.h",
+          "raw_prefix": "",
+          "raw_type_hex": "30",
+          "uid": 0
+        },
+        {
+          "bytes": 175,
+          "gid": 0,
+          "header_sha256": "2c49dee481df090245a82dfddf19f1a9d36378f65c2104a4bc94331e3e81469f",
+          "mtime": 1731478685,
+          "offset": 346112,
+          "raw_directory": false,
+          "raw_executable_intent": false,
+          "raw_mode": 436,
+          "raw_name": "tree-sitter-xml-4b64dd3a03ec002258d6268d712fd93716d6ab57/go.mod",
+          "raw_prefix": "",
+          "raw_type_hex": "30",
+          "uid": 0
+        },
+        {
+          "bytes": 4176,
+          "gid": 0,
+          "header_sha256": "5be5596e55bd971199b4c3b5a0edf7b4057ad52da97d8a19351dfaced3a870f1",
+          "mtime": 1731478685,
+          "offset": 347136,
+          "raw_directory": false,
+          "raw_executable_intent": false,
+          "raw_mode": 436,
+          "raw_name": "tree-sitter-xml-4b64dd3a03ec002258d6268d712fd93716d6ab57/go.sum",
+          "raw_prefix": "",
+          "raw_type_hex": "30",
+          "uid": 0
+        },
+        {
+          "bytes": 13102,
+          "gid": 0,
+          "header_sha256": "20ff02c8e22c849af913e2da2535eb4e2185a2526637f6ac020240af9c9d9b84",
+          "mtime": 1731478685,
+          "offset": 352256,
+          "raw_directory": false,
+          "raw_executable_intent": false,
+          "raw_mode": 436,
+          "raw_name": "tree-sitter-xml-4b64dd3a03ec002258d6268d712fd93716d6ab57/package-lock.json",
+          "raw_prefix": "",
+          "raw_type_hex": "30",
+          "uid": 0
+        },
+        {
+          "bytes": 1608,
+          "gid": 0,
+          "header_sha256": "da75f7df0c962c06f7c5d2a0ccf675c3279cfe3129f41e729b23b31843e37d1d",
+          "mtime": 1731478685,
+          "offset": 366080,
+          "raw_directory": false,
+          "raw_executable_intent": false,
+          "raw_mode": 436,
+          "raw_name": "tree-sitter-xml-4b64dd3a03ec002258d6268d712fd93716d6ab57/package.json",
+          "raw_prefix": "",
+          "raw_type_hex": "30",
+          "uid": 0
+        },
+        {
+          "bytes": 935,
+          "gid": 0,
+          "header_sha256": "d1e18334a7655d46073a001aaa629e9debc57ada67b245ba24821ca407156e56",
+          "mtime": 1731478685,
+          "offset": 368640,
+          "raw_directory": false,
+          "raw_executable_intent": false,
+          "raw_mode": 436,
+          "raw_name": "tree-sitter-xml-4b64dd3a03ec002258d6268d712fd93716d6ab57/pyproject.toml",
+          "raw_prefix": "",
+          "raw_type_hex": "30",
+          "uid": 0
+        },
+        {
+          "bytes": 0,
+          "gid": 0,
+          "header_sha256": "4b2f0f91f536fec928f22f4fe89f45f91761a2d9af911c6c74bf1d6b59635283",
+          "mtime": 1731478685,
+          "offset": 370176,
+          "raw_directory": true,
+          "raw_executable_intent": false,
+          "raw_mode": 509,
+          "raw_name": "tree-sitter-xml-4b64dd3a03ec002258d6268d712fd93716d6ab57/queries/",
+          "raw_prefix": "",
+          "raw_type_hex": "35",
+          "uid": 0
+        },
+        {
+          "bytes": 0,
+          "gid": 0,
+          "header_sha256": "72abad7f7afc4d2b6fa35255909facb45df45a46504c9d9afc11202cc045db92",
+          "mtime": 1731478685,
+          "offset": 370688,
+          "raw_directory": true,
+          "raw_executable_intent": false,
+          "raw_mode": 509,
+          "raw_name": "tree-sitter-xml-4b64dd3a03ec002258d6268d712fd93716d6ab57/queries/dtd/",
+          "raw_prefix": "",
+          "raw_type_hex": "35",
+          "uid": 0
+        },
+        {
+          "bytes": 1780,
+          "gid": 0,
+          "header_sha256": "15c041144e77b4e4079463838b0d30080a65bf1779a2805a5420ba3c70e84a9c",
+          "mtime": 1731478685,
+          "offset": 371200,
+          "raw_directory": false,
+          "raw_executable_intent": false,
+          "raw_mode": 436,
+          "raw_name": "tree-sitter-xml-4b64dd3a03ec002258d6268d712fd93716d6ab57/queries/dtd/highlights.scm",
+          "raw_prefix": "",
+          "raw_type_hex": "30",
+          "uid": 0
+        },
+        {
+          "bytes": 0,
+          "gid": 0,
+          "header_sha256": "86cdfb72c359f9ffba530ee0ab61ff68add5e1a01d2e5cddc2a457c4a52ca42c",
+          "mtime": 1731478685,
+          "offset": 373760,
+          "raw_directory": true,
+          "raw_executable_intent": false,
+          "raw_mode": 509,
+          "raw_name": "tree-sitter-xml-4b64dd3a03ec002258d6268d712fd93716d6ab57/queries/xml/",
+          "raw_prefix": "",
+          "raw_type_hex": "35",
+          "uid": 0
+        },
+        {
+          "bytes": 2281,
+          "gid": 0,
+          "header_sha256": "c23a38849aaca4cd445589ee1d9c4a768cee68ebc9f3a7c32a1515416ac99bc8",
+          "mtime": 1731478685,
+          "offset": 374272,
+          "raw_directory": false,
+          "raw_executable_intent": false,
+          "raw_mode": 436,
+          "raw_name": "tree-sitter-xml-4b64dd3a03ec002258d6268d712fd93716d6ab57/queries/xml/highlights.scm",
+          "raw_prefix": "",
+          "raw_type_hex": "30",
+          "uid": 0
+        },
+        {
+          "bytes": 1784,
+          "gid": 0,
+          "header_sha256": "9507b28dc4bb8a2cdfde101a73133dae87ea54ff35f6ed4ca453ebe1525affdf",
+          "mtime": 1731478685,
+          "offset": 377344,
+          "raw_directory": false,
+          "raw_executable_intent": false,
+          "raw_mode": 436,
+          "raw_name": "tree-sitter-xml-4b64dd3a03ec002258d6268d712fd93716d6ab57/setup.py",
+          "raw_prefix": "",
+          "raw_type_hex": "30",
+          "uid": 0
+        },
+        {
+          "bytes": 0,
+          "gid": 0,
+          "header_sha256": "9c04d45034bcfcaa086bc497f38c8ff39a829f81246786d2426bb0714fa30fe5",
+          "mtime": 1731478685,
+          "offset": 379904,
+          "raw_directory": true,
+          "raw_executable_intent": false,
+          "raw_mode": 509,
+          "raw_name": "tree-sitter-xml-4b64dd3a03ec002258d6268d712fd93716d6ab57/test/",
+          "raw_prefix": "",
+          "raw_type_hex": "35",
+          "uid": 0
+        },
+        {
+          "bytes": 0,
+          "gid": 0,
+          "header_sha256": "0faa5363717ef6b989d6251872225aa02d2e9ed8da3c77a4d217552e3ad0aba6",
+          "mtime": 1731478685,
+          "offset": 380416,
+          "raw_directory": true,
+          "raw_executable_intent": false,
+          "raw_mode": 509,
+          "raw_name": "tree-sitter-xml-4b64dd3a03ec002258d6268d712fd93716d6ab57/test/corpus/",
+          "raw_prefix": "",
+          "raw_type_hex": "35",
+          "uid": 0
+        },
+        {
+          "bytes": 1969,
+          "gid": 0,
+          "header_sha256": "e202646a1d553d6038fb9cd49703de0affa47e49148722b98da7b26845095e9f",
+          "mtime": 1731478685,
+          "offset": 380928,
+          "raw_directory": false,
+          "raw_executable_intent": false,
+          "raw_mode": 436,
+          "raw_name": "tree-sitter-xml-4b64dd3a03ec002258d6268d712fd93716d6ab57/test/corpus/errors.txt",
+          "raw_prefix": "",
+          "raw_type_hex": "30",
+          "uid": 0
+        },
+        {
+          "bytes": 5008,
+          "gid": 0,
+          "header_sha256": "71d28119d75bbc44edba8c4175453a9e589c52093bf6ea588248989441e5d734",
+          "mtime": 1731478685,
+          "offset": 383488,
+          "raw_directory": false,
+          "raw_executable_intent": false,
+          "raw_mode": 436,
+          "raw_name": "tree-sitter-xml-4b64dd3a03ec002258d6268d712fd93716d6ab57/test/corpus/examples.txt",
+          "raw_prefix": "",
+          "raw_type_hex": "30",
+          "uid": 0
+        },
+        {
+          "bytes": 2668,
+          "gid": 0,
+          "header_sha256": "b04f7055c7eaa958892cf209f90d523d2a1e26d9aaf93f76d07893c16fbf423e",
+          "mtime": 1731478685,
+          "offset": 389120,
+          "raw_directory": false,
+          "raw_executable_intent": false,
+          "raw_mode": 436,
+          "raw_name": "tree-sitter-xml-4b64dd3a03ec002258d6268d712fd93716d6ab57/test/corpus/extra.txt",
+          "raw_prefix": "",
+          "raw_type_hex": "30",
+          "uid": 0
+        },
+        {
+          "bytes": 6265,
+          "gid": 0,
+          "header_sha256": "8c5514c784c83d4cbffbb59b634bb094a8275959c0e8bc6dca3304eefcdde537",
+          "mtime": 1731478685,
+          "offset": 392704,
+          "raw_directory": false,
+          "raw_executable_intent": false,
+          "raw_mode": 436,
+          "raw_name": "tree-sitter-xml-4b64dd3a03ec002258d6268d712fd93716d6ab57/test/corpus/issues.txt",
+          "raw_prefix": "",
+          "raw_type_hex": "30",
+          "uid": 0
+        },
+        {
+          "bytes": 7211,
+          "gid": 0,
+          "header_sha256": "1b93edab9abe3b230d0473b7624f92dc1097fb04024784ecbd5b0f97b4429492",
+          "mtime": 1731478685,
+          "offset": 399872,
+          "raw_directory": false,
+          "raw_executable_intent": false,
+          "raw_mode": 436,
+          "raw_name": "tree-sitter-xml-4b64dd3a03ec002258d6268d712fd93716d6ab57/test/corpus/standard.txt",
+          "raw_prefix": "",
+          "raw_type_hex": "30",
+          "uid": 0
+        },
+        {
+          "bytes": 0,
+          "gid": 0,
+          "header_sha256": "b99694468e5512a52b25f455500194d0acf2e628855544590571824bbe1e4b27",
+          "mtime": 1731478685,
+          "offset": 408064,
+          "raw_directory": true,
+          "raw_executable_intent": false,
+          "raw_mode": 509,
+          "raw_name": "tree-sitter-xml-4b64dd3a03ec002258d6268d712fd93716d6ab57/test/highlight/",
+          "raw_prefix": "",
+          "raw_type_hex": "35",
+          "uid": 0
+        },
+        {
+          "bytes": 613,
+          "gid": 0,
+          "header_sha256": "aab545f7010391dafcf106c043a2783acad8c4b2b5eea331ab8975f958407a0a",
+          "mtime": 1731478685,
+          "offset": 408576,
+          "raw_directory": false,
+          "raw_executable_intent": false,
+          "raw_mode": 436,
+          "raw_name": "tree-sitter-xml-4b64dd3a03ec002258d6268d712fd93716d6ab57/test/highlight/test.dtd",
+          "raw_prefix": "",
+          "raw_type_hex": "30",
+          "uid": 0
+        },
+        {
+          "bytes": 480,
+          "gid": 0,
+          "header_sha256": "ee221a00ee4df64080ba83b8e15daeb9496e970150ec0c422fce9ccefa7d8f95",
+          "mtime": 1731478685,
+          "offset": 410112,
+          "raw_directory": false,
+          "raw_executable_intent": false,
+          "raw_mode": 436,
+          "raw_name": "tree-sitter-xml-4b64dd3a03ec002258d6268d712fd93716d6ab57/test/highlight/test.xml",
+          "raw_prefix": "",
+          "raw_type_hex": "30",
+          "uid": 0
+        },
+        {
+          "bytes": 1182,
+          "gid": 0,
+          "header_sha256": "df602bc65c55d38e34278d3215cde3536509c85ae6eb2f9855628e5099e4c0e3",
+          "mtime": 1731478685,
+          "offset": 411136,
+          "raw_directory": false,
+          "raw_executable_intent": false,
+          "raw_mode": 436,
+          "raw_name": "tree-sitter-xml-4b64dd3a03ec002258d6268d712fd93716d6ab57/tree-sitter.json",
+          "raw_prefix": "",
+          "raw_type_hex": "30",
+          "uid": 0
+        },
+        {
+          "bytes": 0,
+          "gid": 0,
+          "header_sha256": "254ff8edfa6798931281b4cdefeb62eff983436bf94fda63e9ebf8eb7894c653",
+          "mtime": 1731478685,
+          "offset": 413184,
+          "raw_directory": true,
+          "raw_executable_intent": false,
+          "raw_mode": 509,
+          "raw_name": "tree-sitter-xml-4b64dd3a03ec002258d6268d712fd93716d6ab57/xml/",
+          "raw_prefix": "",
+          "raw_type_hex": "35",
+          "uid": 0
+        },
+        {
+          "bytes": 72,
+          "gid": 0,
+          "header_sha256": "014da7ffab840ebac90099160dfc2e05da93f5e29184a03954e6d7a53ddabf65",
+          "mtime": 1731478685,
+          "offset": 413696,
+          "raw_directory": false,
+          "raw_executable_intent": false,
+          "raw_mode": 436,
+          "raw_name": "tree-sitter-xml-4b64dd3a03ec002258d6268d712fd93716d6ab57/xml/CMakeLists.txt",
+          "raw_prefix": "",
+          "raw_type_hex": "30",
+          "uid": 0
+        },
+        {
+          "bytes": 106,
+          "gid": 0,
+          "header_sha256": "f2fb37b9ced426f06b453ed50d04796285216356a49de676283ed49e0a26c374",
+          "mtime": 1731478685,
+          "offset": 414720,
+          "raw_directory": false,
+          "raw_executable_intent": false,
+          "raw_mode": 436,
+          "raw_name": "tree-sitter-xml-4b64dd3a03ec002258d6268d712fd93716d6ab57/xml/Makefile",
+          "raw_prefix": "",
+          "raw_type_hex": "30",
+          "uid": 0
+        },
+        {
+          "bytes": 3209,
+          "gid": 0,
+          "header_sha256": "31ba864499ed421d1f082f1ee3e4856b8a84065c326de0c642a0653c02b2c5db",
+          "mtime": 1731478685,
+          "offset": 415744,
+          "raw_directory": false,
+          "raw_executable_intent": false,
+          "raw_mode": 436,
+          "raw_name": "tree-sitter-xml-4b64dd3a03ec002258d6268d712fd93716d6ab57/xml/grammar.js",
+          "raw_prefix": "",
+          "raw_type_hex": "30",
+          "uid": 0
+        },
+        {
+          "bytes": 215,
+          "gid": 0,
+          "header_sha256": "30f5e8b8bb6279bf5738fcaf05e4cbfb705fe07b4c50836e24fe84ba1325e108",
+          "mtime": 1731478685,
+          "offset": 419840,
+          "raw_directory": false,
+          "raw_executable_intent": false,
+          "raw_mode": 436,
+          "raw_name": "tree-sitter-xml-4b64dd3a03ec002258d6268d712fd93716d6ab57/xml/package.json",
+          "raw_prefix": "",
+          "raw_type_hex": "30",
+          "uid": 0
+        },
+        {
+          "bytes": 0,
+          "gid": 0,
+          "header_sha256": "d36b18a4bf4aa728082f00146da33660cd5836035f77cdab8d38c117a7c8c350",
+          "mtime": 1731478685,
+          "offset": 420864,
+          "raw_directory": true,
+          "raw_executable_intent": false,
+          "raw_mode": 509,
+          "raw_name": "tree-sitter-xml-4b64dd3a03ec002258d6268d712fd93716d6ab57/xml/src/",
+          "raw_prefix": "",
+          "raw_type_hex": "35",
+          "uid": 0
+        },
+        {
+          "bytes": 58409,
+          "gid": 0,
+          "header_sha256": "52fc78c6663459f3aabd3af4f125c0e7778d68f6c3f78ec3e3878fae00943689",
+          "mtime": 1731478685,
+          "offset": 421376,
+          "raw_directory": false,
+          "raw_executable_intent": false,
+          "raw_mode": 436,
+          "raw_name": "tree-sitter-xml-4b64dd3a03ec002258d6268d712fd93716d6ab57/xml/src/grammar.json",
+          "raw_prefix": "",
+          "raw_type_hex": "30",
+          "uid": 0
+        },
+        {
+          "bytes": 17444,
+          "gid": 0,
+          "header_sha256": "f0f335bebd8b6ef260fb407013989eeb6fce825257133a088cd489f58f2c6fb0",
+          "mtime": 1731478685,
+          "offset": 480768,
+          "raw_directory": false,
+          "raw_executable_intent": false,
+          "raw_mode": 436,
+          "raw_name": "tree-sitter-xml-4b64dd3a03ec002258d6268d712fd93716d6ab57/xml/src/node-types.json",
+          "raw_prefix": "",
+          "raw_type_hex": "30",
+          "uid": 0
+        },
+        {
+          "bytes": 240185,
+          "gid": 0,
+          "header_sha256": "a36a307d6f2d0b746405810821d3fa11d5bbcf4a3e862483e21018873d78b131",
+          "mtime": 1731478685,
+          "offset": 499200,
+          "raw_directory": false,
+          "raw_executable_intent": false,
+          "raw_mode": 436,
+          "raw_name": "tree-sitter-xml-4b64dd3a03ec002258d6268d712fd93716d6ab57/xml/src/parser.c",
+          "raw_prefix": "",
+          "raw_type_hex": "30",
+          "uid": 0
+        },
+        {
+          "bytes": 7688,
+          "gid": 0,
+          "header_sha256": "39f3c967ca6b538f094af7aa3ef5efd1d215bfe20c0eb9a4f343983102bdfa56",
+          "mtime": 1731478685,
+          "offset": 740352,
+          "raw_directory": false,
+          "raw_executable_intent": false,
+          "raw_mode": 436,
+          "raw_name": "tree-sitter-xml-4b64dd3a03ec002258d6268d712fd93716d6ab57/xml/src/scanner.c",
+          "raw_prefix": "",
+          "raw_type_hex": "30",
+          "uid": 0
+        },
+        {
+          "bytes": 0,
+          "gid": 0,
+          "header_sha256": "c0e0135ac8c237291712d47203f6a64bf308f6e38c2184b319baa467cf0a23a8",
+          "mtime": 1731478685,
+          "offset": 749056,
+          "raw_directory": true,
+          "raw_executable_intent": false,
+          "raw_mode": 509,
+          "raw_name": "tree-sitter-xml-4b64dd3a03ec002258d6268d712fd93716d6ab57/xml/src/tree_sitter/",
+          "raw_prefix": "",
+          "raw_type_hex": "35",
+          "uid": 0
+        },
+        {
+          "bytes": 985,
+          "gid": 0,
+          "header_sha256": "779de5e5a73421275ed112832398ecdf415fe0fec0d95960c91582459a82b86f",
+          "mtime": 1731478685,
+          "offset": 749568,
+          "raw_directory": false,
+          "raw_executable_intent": false,
+          "raw_mode": 436,
+          "raw_name": "tree-sitter-xml-4b64dd3a03ec002258d6268d712fd93716d6ab57/xml/src/tree_sitter/alloc.h",
+          "raw_prefix": "",
+          "raw_type_hex": "30",
+          "uid": 0
+        },
+        {
+          "bytes": 10420,
+          "gid": 0,
+          "header_sha256": "d7d7cf627d57f48dffb9a1ebfcc1d507b950db64b002239962bcc3ca334c292a",
+          "mtime": 1731478685,
+          "offset": 751104,
+          "raw_directory": false,
+          "raw_executable_intent": false,
+          "raw_mode": 436,
+          "raw_name": "tree-sitter-xml-4b64dd3a03ec002258d6268d712fd93716d6ab57/xml/src/tree_sitter/array.h",
+          "raw_prefix": "",
+          "raw_type_hex": "30",
+          "uid": 0
+        },
+        {
+          "bytes": 7039,
+          "gid": 0,
+          "header_sha256": "23800c173b7439ca14dc0d448388c0162c8c50df33490156e34aaab987e25cc8",
+          "mtime": 1731478685,
+          "offset": 762368,
+          "raw_directory": false,
+          "raw_executable_intent": false,
+          "raw_mode": 436,
+          "raw_name": "tree-sitter-xml-4b64dd3a03ec002258d6268d712fd93716d6ab57/xml/src/tree_sitter/parser.h",
+          "raw_prefix": "",
+          "raw_type_hex": "30",
+          "uid": 0
+        }
+      ],
+      "regular_file_bytes": 691160,
+      "regular_file_count": 79
+    },
+    "published": {
+      "expanded_tar_bytes": 647680,
+      "git_archive_comment_verified": false,
+      "member_count": 28,
+      "members": [
+        {
+          "archive_path": "tree-sitter-xml-0.7.0/.cargo_vcs_info.json",
+          "bytes": 94,
+          "directory": false,
+          "executable_intent": false,
+          "gid": 0,
+          "mtime": 1,
+          "path": ".cargo_vcs_info.json",
+          "pax_headers": {},
+          "raw_mode": 420,
+          "raw_type_hex": "30",
+          "sha256": "c7d94569cc0a9a3b8e718376427eb4a1a0739dc3dff6988ae1489c2b0932bb35",
+          "uid": 0
+        },
+        {
+          "archive_path": "tree-sitter-xml-0.7.0/Cargo.toml",
+          "bytes": 1430,
+          "directory": false,
+          "executable_intent": false,
+          "gid": 0,
+          "mtime": 1,
+          "path": "Cargo.toml",
+          "pax_headers": {},
+          "raw_mode": 420,
+          "raw_type_hex": "30",
+          "sha256": "021408492551f56f870e16450fc7569582d023896fe94786877d2adea8d5776a",
+          "uid": 0
+        },
+        {
+          "archive_path": "tree-sitter-xml-0.7.0/Cargo.toml.orig",
+          "bytes": 806,
+          "directory": false,
+          "executable_intent": false,
+          "gid": 0,
+          "mtime": 1153704088,
+          "path": "Cargo.toml.orig",
+          "pax_headers": {},
+          "raw_mode": 420,
+          "raw_type_hex": "30",
+          "sha256": "ca1721bc0a229634026ab2d84d46530a86421380b920246f745d126e7af169f7",
+          "uid": 0
+        },
+        {
+          "archive_path": "tree-sitter-xml-0.7.0/README.md",
+          "bytes": 1350,
+          "directory": false,
+          "executable_intent": false,
+          "gid": 0,
+          "mtime": 1153704088,
+          "path": "README.md",
+          "pax_headers": {},
+          "raw_mode": 420,
+          "raw_type_hex": "30",
+          "sha256": "950a5a97be2b4b8abee61d0b7291a25d9b192b0b47dacb42ec27cf54c184df8c",
+          "uid": 0
+        },
+        {
+          "archive_path": "tree-sitter-xml-0.7.0/bindings/rust/build.rs",
+          "bytes": 826,
+          "directory": false,
+          "executable_intent": false,
+          "gid": 0,
+          "mtime": 1153704088,
+          "path": "bindings/rust/build.rs",
+          "pax_headers": {},
+          "raw_mode": 420,
+          "raw_type_hex": "30",
+          "sha256": "43bde1861b9b8d17ac4fd12b91bb631098e2423a7d9d217a9c6c3dd299690f52",
+          "uid": 0
+        },
+        {
+          "archive_path": "tree-sitter-xml-0.7.0/bindings/rust/lib.rs",
+          "bytes": 2824,
+          "directory": false,
+          "executable_intent": false,
+          "gid": 0,
+          "mtime": 1153704088,
+          "path": "bindings/rust/lib.rs",
+          "pax_headers": {},
+          "raw_mode": 420,
+          "raw_type_hex": "30",
+          "sha256": "32402e85a41efaa29abe736820aa82e843a64d6ee2cf4dbde66c22f5c6cb9d64",
+          "uid": 0
+        },
+        {
+          "archive_path": "tree-sitter-xml-0.7.0/common/common.mak",
+          "bytes": 3138,
+          "directory": false,
+          "executable_intent": false,
+          "gid": 0,
+          "mtime": 1153704088,
+          "path": "common/common.mak",
+          "pax_headers": {},
+          "raw_mode": 420,
+          "raw_type_hex": "30",
+          "sha256": "15e9973721751abf34c931cc20540c64339facf9d34eb1615eaf80f803f7f142",
+          "uid": 0
+        },
+        {
+          "archive_path": "tree-sitter-xml-0.7.0/common/common.mjs",
+          "bytes": 6420,
+          "directory": false,
+          "executable_intent": false,
+          "gid": 0,
+          "mtime": 1153704088,
+          "path": "common/common.mjs",
+          "pax_headers": {},
+          "raw_mode": 420,
+          "raw_type_hex": "30",
+          "sha256": "208d0786c7a105b19d1ff4949725f733808348902ad25aaeffa21a2400913b56",
+          "uid": 0
+        },
+        {
+          "archive_path": "tree-sitter-xml-0.7.0/common/scanner.h",
+          "bytes": 4270,
+          "directory": false,
+          "executable_intent": false,
+          "gid": 0,
+          "mtime": 1153704088,
+          "path": "common/scanner.h",
+          "pax_headers": {},
+          "raw_mode": 420,
+          "raw_type_hex": "30",
+          "sha256": "ce5082af60b1808035a43c3df129df9b811c9c69949fdb664a351f7aae340409",
+          "uid": 0
+        },
+        {
+          "archive_path": "tree-sitter-xml-0.7.0/dtd/grammar.js",
+          "bytes": 1090,
+          "directory": false,
+          "executable_intent": false,
+          "gid": 0,
+          "mtime": 1153704088,
+          "path": "dtd/grammar.js",
+          "pax_headers": {},
+          "raw_mode": 420,
+          "raw_type_hex": "30",
+          "sha256": "cf67cc005837875dbac2147f73385565ecc166cdc8ce75ede2b31e65867ee762",
+          "uid": 0
+        },
+        {
+          "archive_path": "tree-sitter-xml-0.7.0/dtd/src/grammar.json",
+          "bytes": 42499,
+          "directory": false,
+          "executable_intent": false,
+          "gid": 0,
+          "mtime": 1153704088,
+          "path": "dtd/src/grammar.json",
+          "pax_headers": {},
+          "raw_mode": 420,
+          "raw_type_hex": "30",
+          "sha256": "44d3d915ed635a45181206d1d05352f6a7060fff6be07906c9f3aa8f809f5786",
+          "uid": 0
+        },
+        {
+          "archive_path": "tree-sitter-xml-0.7.0/dtd/src/node-types.json",
+          "bytes": 12260,
+          "directory": false,
+          "executable_intent": false,
+          "gid": 0,
+          "mtime": 1153704088,
+          "path": "dtd/src/node-types.json",
+          "pax_headers": {},
+          "raw_mode": 420,
+          "raw_type_hex": "30",
+          "sha256": "a9d83e7efcad5d96f16b4e664062cc602aa6408716bf6f5a7355186aaec311ff",
+          "uid": 0
+        },
+        {
+          "archive_path": "tree-sitter-xml-0.7.0/dtd/src/parser.c",
+          "bytes": 176894,
+          "directory": false,
+          "executable_intent": false,
+          "gid": 0,
+          "mtime": 1153704088,
+          "path": "dtd/src/parser.c",
+          "pax_headers": {},
+          "raw_mode": 420,
+          "raw_type_hex": "30",
+          "sha256": "79aa52e71ba9685115e2fc2742a3a30f91987f96fcf5ffbb7e34827155a6b932",
+          "uid": 0
+        },
+        {
+          "archive_path": "tree-sitter-xml-0.7.0/dtd/src/scanner.c",
+          "bytes": 1398,
+          "directory": false,
+          "executable_intent": false,
+          "gid": 0,
+          "mtime": 1153704088,
+          "path": "dtd/src/scanner.c",
+          "pax_headers": {},
+          "raw_mode": 420,
+          "raw_type_hex": "30",
+          "sha256": "cdb323ea613368705ade3c6904523848f262db38ee01f5722e2f16e0751bd71c",
+          "uid": 0
+        },
+        {
+          "archive_path": "tree-sitter-xml-0.7.0/dtd/src/tree_sitter/alloc.h",
+          "bytes": 985,
+          "directory": false,
+          "executable_intent": false,
+          "gid": 0,
+          "mtime": 1153704088,
+          "path": "dtd/src/tree_sitter/alloc.h",
+          "pax_headers": {},
+          "raw_mode": 420,
+          "raw_type_hex": "30",
+          "sha256": "b29c1c9fb7cc82f58c84b376df1297d6e2737a1d655fd356db0859e3c29c2fea",
+          "uid": 0
+        },
+        {
+          "archive_path": "tree-sitter-xml-0.7.0/dtd/src/tree_sitter/array.h",
+          "bytes": 10420,
+          "directory": false,
+          "executable_intent": false,
+          "gid": 0,
+          "mtime": 1153704088,
+          "path": "dtd/src/tree_sitter/array.h",
+          "pax_headers": {},
+          "raw_mode": 420,
+          "raw_type_hex": "30",
+          "sha256": "4ff743903dc46f5db6aa54f31c6b4d160a8a9779e5b2ab1ee59ae7ebcd850ea1",
+          "uid": 0
+        },
+        {
+          "archive_path": "tree-sitter-xml-0.7.0/dtd/src/tree_sitter/parser.h",
+          "bytes": 7039,
+          "directory": false,
+          "executable_intent": false,
+          "gid": 0,
+          "mtime": 1153704088,
+          "path": "dtd/src/tree_sitter/parser.h",
+          "pax_headers": {},
+          "raw_mode": 420,
+          "raw_type_hex": "30",
+          "sha256": "a1f6ef161fbaf48a0e10fca90ef5290a062462b307b3898aa562993853b9f80a",
+          "uid": 0
+        },
+        {
+          "archive_path": "tree-sitter-xml-0.7.0/queries/dtd/highlights.scm",
+          "bytes": 1780,
+          "directory": false,
+          "executable_intent": false,
+          "gid": 0,
+          "mtime": 1153704088,
+          "path": "queries/dtd/highlights.scm",
+          "pax_headers": {},
+          "raw_mode": 420,
+          "raw_type_hex": "30",
+          "sha256": "5091ae8e8311c16a1bbdffa0ee8819b55b97b786cca12392a9252a5393206bc9",
+          "uid": 0
+        },
+        {
+          "archive_path": "tree-sitter-xml-0.7.0/queries/xml/highlights.scm",
+          "bytes": 2281,
+          "directory": false,
+          "executable_intent": false,
+          "gid": 0,
+          "mtime": 1153704088,
+          "path": "queries/xml/highlights.scm",
+          "pax_headers": {},
+          "raw_mode": 420,
+          "raw_type_hex": "30",
+          "sha256": "aa4a561c846928c3a4d885acbe690a60689661a45684babe16cf8b7a1509b610",
+          "uid": 0
+        },
+        {
+          "archive_path": "tree-sitter-xml-0.7.0/tree-sitter.json",
+          "bytes": 1182,
+          "directory": false,
+          "executable_intent": false,
+          "gid": 0,
+          "mtime": 1153704088,
+          "path": "tree-sitter.json",
+          "pax_headers": {},
+          "raw_mode": 420,
+          "raw_type_hex": "30",
+          "sha256": "ed5d1b704d3fc53180ab85ea8b3243b200080a6c81c8bee47c18b089cd97e4ea",
+          "uid": 0
+        },
+        {
+          "archive_path": "tree-sitter-xml-0.7.0/xml/grammar.js",
+          "bytes": 3209,
+          "directory": false,
+          "executable_intent": false,
+          "gid": 0,
+          "mtime": 1153704088,
+          "path": "xml/grammar.js",
+          "pax_headers": {},
+          "raw_mode": 420,
+          "raw_type_hex": "30",
+          "sha256": "521d4071b40625b319f8c1ee20e76a81e01c3c89a4fb27ab20965df6dae53a29",
+          "uid": 0
+        },
+        {
+          "archive_path": "tree-sitter-xml-0.7.0/xml/src/grammar.json",
+          "bytes": 58409,
+          "directory": false,
+          "executable_intent": false,
+          "gid": 0,
+          "mtime": 1153704088,
+          "path": "xml/src/grammar.json",
+          "pax_headers": {},
+          "raw_mode": 420,
+          "raw_type_hex": "30",
+          "sha256": "99e650457a7228ef521f1909bf231b43d4846b2a1010e79b91b418226a2be2a4",
+          "uid": 0
+        },
+        {
+          "archive_path": "tree-sitter-xml-0.7.0/xml/src/node-types.json",
+          "bytes": 17444,
+          "directory": false,
+          "executable_intent": false,
+          "gid": 0,
+          "mtime": 1153704088,
+          "path": "xml/src/node-types.json",
+          "pax_headers": {},
+          "raw_mode": 420,
+          "raw_type_hex": "30",
+          "sha256": "3b63e111187a0f9b2282e1748db2dd6b10e968f0cdb3676772def93bf89f2a7b",
+          "uid": 0
+        },
+        {
+          "archive_path": "tree-sitter-xml-0.7.0/xml/src/parser.c",
+          "bytes": 240185,
+          "directory": false,
+          "executable_intent": false,
+          "gid": 0,
+          "mtime": 1153704088,
+          "path": "xml/src/parser.c",
+          "pax_headers": {},
+          "raw_mode": 420,
+          "raw_type_hex": "30",
+          "sha256": "e41811d97cfd672a902924a3d99bdf696d6fcec08188a35404e4a3d2698ab844",
+          "uid": 0
+        },
+        {
+          "archive_path": "tree-sitter-xml-0.7.0/xml/src/scanner.c",
+          "bytes": 7688,
+          "directory": false,
+          "executable_intent": false,
+          "gid": 0,
+          "mtime": 1153704088,
+          "path": "xml/src/scanner.c",
+          "pax_headers": {},
+          "raw_mode": 420,
+          "raw_type_hex": "30",
+          "sha256": "e7f401b138bbb0bd3f736c196dddcb74ff627fef2427e333bc4a7a629c0ad3b0",
+          "uid": 0
+        },
+        {
+          "archive_path": "tree-sitter-xml-0.7.0/xml/src/tree_sitter/alloc.h",
+          "bytes": 985,
+          "directory": false,
+          "executable_intent": false,
+          "gid": 0,
+          "mtime": 1153704088,
+          "path": "xml/src/tree_sitter/alloc.h",
+          "pax_headers": {},
+          "raw_mode": 420,
+          "raw_type_hex": "30",
+          "sha256": "b29c1c9fb7cc82f58c84b376df1297d6e2737a1d655fd356db0859e3c29c2fea",
+          "uid": 0
+        },
+        {
+          "archive_path": "tree-sitter-xml-0.7.0/xml/src/tree_sitter/array.h",
+          "bytes": 10420,
+          "directory": false,
+          "executable_intent": false,
+          "gid": 0,
+          "mtime": 1153704088,
+          "path": "xml/src/tree_sitter/array.h",
+          "pax_headers": {},
+          "raw_mode": 420,
+          "raw_type_hex": "30",
+          "sha256": "4ff743903dc46f5db6aa54f31c6b4d160a8a9779e5b2ab1ee59ae7ebcd850ea1",
+          "uid": 0
+        },
+        {
+          "archive_path": "tree-sitter-xml-0.7.0/xml/src/tree_sitter/parser.h",
+          "bytes": 7039,
+          "directory": false,
+          "executable_intent": false,
+          "gid": 0,
+          "mtime": 1153704088,
+          "path": "xml/src/tree_sitter/parser.h",
+          "pax_headers": {},
+          "raw_mode": 420,
+          "raw_type_hex": "30",
+          "sha256": "a1f6ef161fbaf48a0e10fca90ef5290a062462b307b3898aa562993853b9f80a",
+          "uid": 0
+        }
+      ],
+      "prefix": "tree-sitter-xml-0.7.0",
+      "raw_member_count": 28,
+      "raw_members": [
+        {
+          "bytes": 94,
+          "gid": 0,
+          "header_sha256": "61b3aad07df5374939115fb426e874d15c79a348b39de15d2818fd22c4527a78",
+          "mtime": 1,
+          "offset": 0,
+          "raw_directory": false,
+          "raw_executable_intent": false,
+          "raw_mode": 420,
+          "raw_name": "tree-sitter-xml-0.7.0/.cargo_vcs_info.json",
+          "raw_prefix": "",
+          "raw_type_hex": "30",
+          "uid": 0
+        },
+        {
+          "bytes": 1430,
+          "gid": 0,
+          "header_sha256": "339c69a60f2e61eaece4a56c4c7df064754c72d27debe6141626f293874fc9ad",
+          "mtime": 1,
+          "offset": 1024,
+          "raw_directory": false,
+          "raw_executable_intent": false,
+          "raw_mode": 420,
+          "raw_name": "tree-sitter-xml-0.7.0/Cargo.toml",
+          "raw_prefix": "",
+          "raw_type_hex": "30",
+          "uid": 0
+        },
+        {
+          "bytes": 806,
+          "gid": 0,
+          "header_sha256": "e155c5f9fbfe9182a8f8efd0a26568c0603002ddeb36e5060fbfb2f7eedeaa32",
+          "mtime": 1153704088,
+          "offset": 3072,
+          "raw_directory": false,
+          "raw_executable_intent": false,
+          "raw_mode": 420,
+          "raw_name": "tree-sitter-xml-0.7.0/Cargo.toml.orig",
+          "raw_prefix": "",
+          "raw_type_hex": "30",
+          "uid": 0
+        },
+        {
+          "bytes": 1350,
+          "gid": 0,
+          "header_sha256": "5874e5f16e694d673894b51c46de986ad29804024a4d09199019b8a3c9d62a68",
+          "mtime": 1153704088,
+          "offset": 4608,
+          "raw_directory": false,
+          "raw_executable_intent": false,
+          "raw_mode": 420,
+          "raw_name": "tree-sitter-xml-0.7.0/README.md",
+          "raw_prefix": "",
+          "raw_type_hex": "30",
+          "uid": 0
+        },
+        {
+          "bytes": 826,
+          "gid": 0,
+          "header_sha256": "ecde203552fa39b8366660b4da04c127e128921f8fa269f1d3a7d3347710174b",
+          "mtime": 1153704088,
+          "offset": 6656,
+          "raw_directory": false,
+          "raw_executable_intent": false,
+          "raw_mode": 420,
+          "raw_name": "tree-sitter-xml-0.7.0/bindings/rust/build.rs",
+          "raw_prefix": "",
+          "raw_type_hex": "30",
+          "uid": 0
+        },
+        {
+          "bytes": 2824,
+          "gid": 0,
+          "header_sha256": "73cad09669c9e5a627f1c0bba7dbb8817bb9974ad7d051f55aa7dbe8b83c7c84",
+          "mtime": 1153704088,
+          "offset": 8192,
+          "raw_directory": false,
+          "raw_executable_intent": false,
+          "raw_mode": 420,
+          "raw_name": "tree-sitter-xml-0.7.0/bindings/rust/lib.rs",
+          "raw_prefix": "",
+          "raw_type_hex": "30",
+          "uid": 0
+        },
+        {
+          "bytes": 3138,
+          "gid": 0,
+          "header_sha256": "a11b9b6c7f19c65171b17c03199b448fe4d5c918b1c5f549b990fb0fedfdb4f0",
+          "mtime": 1153704088,
+          "offset": 11776,
+          "raw_directory": false,
+          "raw_executable_intent": false,
+          "raw_mode": 420,
+          "raw_name": "tree-sitter-xml-0.7.0/common/common.mak",
+          "raw_prefix": "",
+          "raw_type_hex": "30",
+          "uid": 0
+        },
+        {
+          "bytes": 6420,
+          "gid": 0,
+          "header_sha256": "3ed996621ec89e4f8a7998ec3df8c04329177a3cd3a9b59d9e5523dd98178ba6",
+          "mtime": 1153704088,
+          "offset": 15872,
+          "raw_directory": false,
+          "raw_executable_intent": false,
+          "raw_mode": 420,
+          "raw_name": "tree-sitter-xml-0.7.0/common/common.mjs",
+          "raw_prefix": "",
+          "raw_type_hex": "30",
+          "uid": 0
+        },
+        {
+          "bytes": 4270,
+          "gid": 0,
+          "header_sha256": "38975df55d15cef3225a59171b8d9d7c57bb52ef280009b5842fb1c940886806",
+          "mtime": 1153704088,
+          "offset": 23040,
+          "raw_directory": false,
+          "raw_executable_intent": false,
+          "raw_mode": 420,
+          "raw_name": "tree-sitter-xml-0.7.0/common/scanner.h",
+          "raw_prefix": "",
+          "raw_type_hex": "30",
+          "uid": 0
+        },
+        {
+          "bytes": 1090,
+          "gid": 0,
+          "header_sha256": "3298fd13aa0a7a1ebbf0cd7bada928ce87f9f360c6bb8916f4a3fa2429dea634",
+          "mtime": 1153704088,
+          "offset": 28160,
+          "raw_directory": false,
+          "raw_executable_intent": false,
+          "raw_mode": 420,
+          "raw_name": "tree-sitter-xml-0.7.0/dtd/grammar.js",
+          "raw_prefix": "",
+          "raw_type_hex": "30",
+          "uid": 0
+        },
+        {
+          "bytes": 42499,
+          "gid": 0,
+          "header_sha256": "fb51eb9b9aee201d01eb103bfd2b3b9e85f749dcd0a04f5754035f4b625b576d",
+          "mtime": 1153704088,
+          "offset": 30208,
+          "raw_directory": false,
+          "raw_executable_intent": false,
+          "raw_mode": 420,
+          "raw_name": "tree-sitter-xml-0.7.0/dtd/src/grammar.json",
+          "raw_prefix": "",
+          "raw_type_hex": "30",
+          "uid": 0
+        },
+        {
+          "bytes": 12260,
+          "gid": 0,
+          "header_sha256": "809dc6e091cc3fae09b982f2df00a4bf72dd9ed41952bab149b4d408bce1df24",
+          "mtime": 1153704088,
+          "offset": 73728,
+          "raw_directory": false,
+          "raw_executable_intent": false,
+          "raw_mode": 420,
+          "raw_name": "tree-sitter-xml-0.7.0/dtd/src/node-types.json",
+          "raw_prefix": "",
+          "raw_type_hex": "30",
+          "uid": 0
+        },
+        {
+          "bytes": 176894,
+          "gid": 0,
+          "header_sha256": "3a1dd8ebf5b525b2d0ca5d0b79cbe256c154a0f938c8ffcc027a8c4f3ee6cd22",
+          "mtime": 1153704088,
+          "offset": 86528,
+          "raw_directory": false,
+          "raw_executable_intent": false,
+          "raw_mode": 420,
+          "raw_name": "tree-sitter-xml-0.7.0/dtd/src/parser.c",
+          "raw_prefix": "",
+          "raw_type_hex": "30",
+          "uid": 0
+        },
+        {
+          "bytes": 1398,
+          "gid": 0,
+          "header_sha256": "4bc09563bcf7ab318aaf0e96c26d19e1af2dd2fbaebce552f64d63b90711a465",
+          "mtime": 1153704088,
+          "offset": 264192,
+          "raw_directory": false,
+          "raw_executable_intent": false,
+          "raw_mode": 420,
+          "raw_name": "tree-sitter-xml-0.7.0/dtd/src/scanner.c",
+          "raw_prefix": "",
+          "raw_type_hex": "30",
+          "uid": 0
+        },
+        {
+          "bytes": 985,
+          "gid": 0,
+          "header_sha256": "cc10be5324a3a6c2c4eb7c0eb583f208039a3498a1cee5c41bc8d8e062a69bb9",
+          "mtime": 1153704088,
+          "offset": 266240,
+          "raw_directory": false,
+          "raw_executable_intent": false,
+          "raw_mode": 420,
+          "raw_name": "tree-sitter-xml-0.7.0/dtd/src/tree_sitter/alloc.h",
+          "raw_prefix": "",
+          "raw_type_hex": "30",
+          "uid": 0
+        },
+        {
+          "bytes": 10420,
+          "gid": 0,
+          "header_sha256": "41ecfbea88f75b905aaf984b4862475c8975ca7995754e59e01c5032862ab3b4",
+          "mtime": 1153704088,
+          "offset": 267776,
+          "raw_directory": false,
+          "raw_executable_intent": false,
+          "raw_mode": 420,
+          "raw_name": "tree-sitter-xml-0.7.0/dtd/src/tree_sitter/array.h",
+          "raw_prefix": "",
+          "raw_type_hex": "30",
+          "uid": 0
+        },
+        {
+          "bytes": 7039,
+          "gid": 0,
+          "header_sha256": "d2aeb843ecc1fbed1e2aacce9640e578b94fea6957bfce4e993637de8609c8c4",
+          "mtime": 1153704088,
+          "offset": 279040,
+          "raw_directory": false,
+          "raw_executable_intent": false,
+          "raw_mode": 420,
+          "raw_name": "tree-sitter-xml-0.7.0/dtd/src/tree_sitter/parser.h",
+          "raw_prefix": "",
+          "raw_type_hex": "30",
+          "uid": 0
+        },
+        {
+          "bytes": 1780,
+          "gid": 0,
+          "header_sha256": "5fc9002f4e40171884254f144ecc17a3343241298f7c2c6c95a9d3606b406578",
+          "mtime": 1153704088,
+          "offset": 286720,
+          "raw_directory": false,
+          "raw_executable_intent": false,
+          "raw_mode": 420,
+          "raw_name": "tree-sitter-xml-0.7.0/queries/dtd/highlights.scm",
+          "raw_prefix": "",
+          "raw_type_hex": "30",
+          "uid": 0
+        },
+        {
+          "bytes": 2281,
+          "gid": 0,
+          "header_sha256": "f4515644fc5f2ea0da1d6beb9d27a75817184fd11a0599ac474406d374952d51",
+          "mtime": 1153704088,
+          "offset": 289280,
+          "raw_directory": false,
+          "raw_executable_intent": false,
+          "raw_mode": 420,
+          "raw_name": "tree-sitter-xml-0.7.0/queries/xml/highlights.scm",
+          "raw_prefix": "",
+          "raw_type_hex": "30",
+          "uid": 0
+        },
+        {
+          "bytes": 1182,
+          "gid": 0,
+          "header_sha256": "c7db3815edad37ac87ac9b2cc0d688932695cd57b0ea98d5e8b282698a657b03",
+          "mtime": 1153704088,
+          "offset": 292352,
+          "raw_directory": false,
+          "raw_executable_intent": false,
+          "raw_mode": 420,
+          "raw_name": "tree-sitter-xml-0.7.0/tree-sitter.json",
+          "raw_prefix": "",
+          "raw_type_hex": "30",
+          "uid": 0
+        },
+        {
+          "bytes": 3209,
+          "gid": 0,
+          "header_sha256": "54f4c25c9d331f7a1a9b4dde51174b8f7482adc1fb810c9e95a0260eb0184774",
+          "mtime": 1153704088,
+          "offset": 294400,
+          "raw_directory": false,
+          "raw_executable_intent": false,
+          "raw_mode": 420,
+          "raw_name": "tree-sitter-xml-0.7.0/xml/grammar.js",
+          "raw_prefix": "",
+          "raw_type_hex": "30",
+          "uid": 0
+        },
+        {
+          "bytes": 58409,
+          "gid": 0,
+          "header_sha256": "1893050f769eae9b77068ebdfc1264d33be68fe28d07e5c3df3b754b531afe5e",
+          "mtime": 1153704088,
+          "offset": 298496,
+          "raw_directory": false,
+          "raw_executable_intent": false,
+          "raw_mode": 420,
+          "raw_name": "tree-sitter-xml-0.7.0/xml/src/grammar.json",
+          "raw_prefix": "",
+          "raw_type_hex": "30",
+          "uid": 0
+        },
+        {
+          "bytes": 17444,
+          "gid": 0,
+          "header_sha256": "e87a25c007463fdb6ae7cd704b3f69d2c79ae377fcfacac9bac73f6b1e9bc448",
+          "mtime": 1153704088,
+          "offset": 357888,
+          "raw_directory": false,
+          "raw_executable_intent": false,
+          "raw_mode": 420,
+          "raw_name": "tree-sitter-xml-0.7.0/xml/src/node-types.json",
+          "raw_prefix": "",
+          "raw_type_hex": "30",
+          "uid": 0
+        },
+        {
+          "bytes": 240185,
+          "gid": 0,
+          "header_sha256": "5361a0b62d6b6610178c2d808eb62e5fbf69da9707c0c41f579d19665bd18787",
+          "mtime": 1153704088,
+          "offset": 376320,
+          "raw_directory": false,
+          "raw_executable_intent": false,
+          "raw_mode": 420,
+          "raw_name": "tree-sitter-xml-0.7.0/xml/src/parser.c",
+          "raw_prefix": "",
+          "raw_type_hex": "30",
+          "uid": 0
+        },
+        {
+          "bytes": 7688,
+          "gid": 0,
+          "header_sha256": "71bc7e2e6b37b6ac916cc121656b1286ab5adb0d7645bfef458ba611bd789e39",
+          "mtime": 1153704088,
+          "offset": 617472,
+          "raw_directory": false,
+          "raw_executable_intent": false,
+          "raw_mode": 420,
+          "raw_name": "tree-sitter-xml-0.7.0/xml/src/scanner.c",
+          "raw_prefix": "",
+          "raw_type_hex": "30",
+          "uid": 0
+        },
+        {
+          "bytes": 985,
+          "gid": 0,
+          "header_sha256": "1344f0f797b44d4717cf6025ad01704bdc3bbd569abc2ce166d0767eff8b658f",
+          "mtime": 1153704088,
+          "offset": 626176,
+          "raw_directory": false,
+          "raw_executable_intent": false,
+          "raw_mode": 420,
+          "raw_name": "tree-sitter-xml-0.7.0/xml/src/tree_sitter/alloc.h",
+          "raw_prefix": "",
+          "raw_type_hex": "30",
+          "uid": 0
+        },
+        {
+          "bytes": 10420,
+          "gid": 0,
+          "header_sha256": "8073232f76ee9b53473ba6b0db5c504fb26a8171d9613f81a78f0bdec74cc205",
+          "mtime": 1153704088,
+          "offset": 627712,
+          "raw_directory": false,
+          "raw_executable_intent": false,
+          "raw_mode": 420,
+          "raw_name": "tree-sitter-xml-0.7.0/xml/src/tree_sitter/array.h",
+          "raw_prefix": "",
+          "raw_type_hex": "30",
+          "uid": 0
+        },
+        {
+          "bytes": 7039,
+          "gid": 0,
+          "header_sha256": "0732b842540e6b3631845c8e188e2d03501a8c419a3fc730428281a09fc4eb8f",
+          "mtime": 1153704088,
+          "offset": 638976,
+          "raw_directory": false,
+          "raw_executable_intent": false,
+          "raw_mode": 420,
+          "raw_name": "tree-sitter-xml-0.7.0/xml/src/tree_sitter/parser.h",
+          "raw_prefix": "",
+          "raw_type_hex": "30",
+          "uid": 0
+        }
+      ],
+      "regular_file_bytes": 624365,
+      "regular_file_count": 28
+    }
+  },
+  "license": {
+    "original_archive_not_modified": true,
+    "published_contains_license": false,
+    "same_revision_repository_notice": {
+      "bytes": 1058,
+      "sha256": "3297073719030b7261afd78b7267931ccc03a27f7a65ca6fc644316180f71bf6"
+    }
+  },
+  "local_boundary": {
+    "bytes": 13976,
+    "sha256": "35bfa0ff566dd15f28ac6db9b35d5631cae9a8531352216fbbe32f568c1125c9"
+  },
+  "overlap": {
+    "differences": [
+      {
+        "authored": null,
+        "authored_path": ".cargo_vcs_info.json",
+        "authored_present": false,
+        "published": {
+          "bytes": 94,
+          "sha256": "c7d94569cc0a9a3b8e718376427eb4a1a0739dc3dff6988ae1489c2b0932bb35"
+        },
+        "published_path": ".cargo_vcs_info.json"
+      },
+      {
+        "authored": {
+          "bytes": 806,
+          "sha256": "ca1721bc0a229634026ab2d84d46530a86421380b920246f745d126e7af169f7"
+        },
+        "authored_path": "Cargo.toml",
+        "authored_present": true,
+        "published": {
+          "bytes": 1430,
+          "sha256": "021408492551f56f870e16450fc7569582d023896fe94786877d2adea8d5776a"
+        },
+        "published_path": "Cargo.toml"
+      }
+    ],
+    "matching_paths": [
+      "Cargo.toml.orig",
+      "README.md",
+      "bindings/rust/build.rs",
+      "bindings/rust/lib.rs",
+      "common/common.mak",
+      "common/common.mjs",
+      "common/scanner.h",
+      "dtd/grammar.js",
+      "dtd/src/grammar.json",
+      "dtd/src/node-types.json",
+      "dtd/src/parser.c",
+      "dtd/src/scanner.c",
+      "dtd/src/tree_sitter/alloc.h",
+      "dtd/src/tree_sitter/array.h",
+      "dtd/src/tree_sitter/parser.h",
+      "queries/dtd/highlights.scm",
+      "queries/xml/highlights.scm",
+      "tree-sitter.json",
+      "xml/grammar.js",
+      "xml/src/grammar.json",
+      "xml/src/node-types.json",
+      "xml/src/parser.c",
+      "xml/src/scanner.c",
+      "xml/src/tree_sitter/alloc.h",
+      "xml/src/tree_sitter/array.h",
+      "xml/src/tree_sitter/parser.h"
+    ]
+  },
+  "published_vcs_info": {
+    "git": {
+      "sha1": "4b64dd3a03ec002258d6268d712fd93716d6ab57"
+    },
+    "path_in_vcs": ""
+  },
+  "qualifications": {
+    "coverage_measurement": false,
+    "generator_execution": false,
+    "inert_inventory": true,
+    "installed_mcp": false,
+    "native_compilation": false,
+    "offline_empty_cache_network_denial": false,
+    "source_projection_bytes_verified": true,
+    "upstream_signature_verified": false,
+    "vendor_acceptance": false
+  },
+  "registry_selected_record": {
+    "cksum": "e670041f591d994f54d597ddcd8f4ebc930e282c4c76a42268743b71f0c8b6b3",
+    "deps": [
+      {
+        "default_features": true,
+        "features": [],
+        "kind": "build",
+        "name": "cc",
+        "optional": false,
+        "req": "^1.1",
+        "target": null
+      },
+      {
+        "default_features": true,
+        "features": [],
+        "kind": "dev",
+        "name": "tree-sitter",
+        "optional": false,
+        "req": "^0.24",
+        "target": null
+      },
+      {
+        "default_features": true,
+        "features": [],
+        "kind": "normal",
+        "name": "tree-sitter-language",
+        "optional": false,
+        "req": "^0.1",
+        "target": null
+      }
+    ],
+    "features": {},
+    "name": "tree-sitter-xml",
+    "pubtime": "2024-11-13T17:24:52Z",
+    "vers": "0.7.0",
+    "yanked": false
+  },
+  "reviewed_plan": {
+    "bytes": 12355,
+    "sha256": "054bfc2518f26cbd1bfba53448e6b6f969f3d69b414a553e5dd26ffbbab9b03f"
+  },
+  "schema": "rootlight.xml-inert-acquisition-inventory/1",
+  "static": {
+    "manifest": {
+      "build-dependencies": {
+        "cc": "1.1"
+      },
+      "dependencies": {
+        "tree-sitter-language": "0.1"
+      },
+      "dev-dependencies": {
+        "tree-sitter": "0.24"
+      },
+      "lib": {
+        "path": "bindings/rust/lib.rs"
+      },
+      "package": {
+        "authors": [
+          "ObserverOfTime <chronobserver@disroot.org>",
+          "Amaan Qureshi <amaanq12@gmail.com>"
+        ],
+        "autoexamples": false,
+        "build": "bindings/rust/build.rs",
+        "categories": [
+          "parsing",
+          "text-editors"
+        ],
+        "description": "XML & DTD grammars for tree-sitter",
+        "edition": "2021",
+        "include": [
+          "common/*",
+          "bindings/rust/*",
+          "dtd/grammar.js",
+          "dtd/src/*",
+          "xml/grammar.js",
+          "xml/src/*",
+          "queries/*",
+          "tree-sitter.json"
+        ],
+        "keywords": [
+          "incremental",
+          "parsing",
+          "tree-sitter",
+          "dtd",
+          "xml"
+        ],
+        "license": "MIT",
+        "name": "tree-sitter-xml",
+        "readme": "README.md",
+        "repository": "https://github.com/tree-sitter-grammars/tree-sitter-xml",
+        "version": "0.7.0"
+      }
+    },
+    "native_input_pins": {
+      "bindings/rust/build.rs": {
+        "bytes": 826,
+        "sha256": "43bde1861b9b8d17ac4fd12b91bb631098e2423a7d9d217a9c6c3dd299690f52"
+      },
+      "bindings/rust/lib.rs": {
+        "bytes": 2824,
+        "sha256": "32402e85a41efaa29abe736820aa82e843a64d6ee2cf4dbde66c22f5c6cb9d64"
+      },
+      "common/common.mak": {
+        "bytes": 3138,
+        "sha256": "15e9973721751abf34c931cc20540c64339facf9d34eb1615eaf80f803f7f142"
+      },
+      "common/common.mjs": {
+        "bytes": 6420,
+        "sha256": "208d0786c7a105b19d1ff4949725f733808348902ad25aaeffa21a2400913b56"
+      },
+      "common/scanner.h": {
+        "bytes": 4270,
+        "sha256": "ce5082af60b1808035a43c3df129df9b811c9c69949fdb664a351f7aae340409"
+      },
+      "dtd/src/grammar.json": {
+        "bytes": 42499,
+        "sha256": "44d3d915ed635a45181206d1d05352f6a7060fff6be07906c9f3aa8f809f5786"
+      },
+      "dtd/src/node-types.json": {
+        "bytes": 12260,
+        "sha256": "a9d83e7efcad5d96f16b4e664062cc602aa6408716bf6f5a7355186aaec311ff"
+      },
+      "dtd/src/parser.c": {
+        "bytes": 176894,
+        "sha256": "79aa52e71ba9685115e2fc2742a3a30f91987f96fcf5ffbb7e34827155a6b932"
+      },
+      "dtd/src/scanner.c": {
+        "bytes": 1398,
+        "sha256": "cdb323ea613368705ade3c6904523848f262db38ee01f5722e2f16e0751bd71c"
+      },
+      "dtd/src/tree_sitter/alloc.h": {
+        "bytes": 985,
+        "sha256": "b29c1c9fb7cc82f58c84b376df1297d6e2737a1d655fd356db0859e3c29c2fea"
+      },
+      "dtd/src/tree_sitter/array.h": {
+        "bytes": 10420,
+        "sha256": "4ff743903dc46f5db6aa54f31c6b4d160a8a9779e5b2ab1ee59ae7ebcd850ea1"
+      },
+      "dtd/src/tree_sitter/parser.h": {
+        "bytes": 7039,
+        "sha256": "a1f6ef161fbaf48a0e10fca90ef5290a062462b307b3898aa562993853b9f80a"
+      },
+      "queries/dtd/highlights.scm": {
+        "bytes": 1780,
+        "sha256": "5091ae8e8311c16a1bbdffa0ee8819b55b97b786cca12392a9252a5393206bc9"
+      },
+      "queries/xml/highlights.scm": {
+        "bytes": 2281,
+        "sha256": "aa4a561c846928c3a4d885acbe690a60689661a45684babe16cf8b7a1509b610"
+      },
+      "xml/src/grammar.json": {
+        "bytes": 58409,
+        "sha256": "99e650457a7228ef521f1909bf231b43d4846b2a1010e79b91b418226a2be2a4"
+      },
+      "xml/src/node-types.json": {
+        "bytes": 17444,
+        "sha256": "3b63e111187a0f9b2282e1748db2dd6b10e968f0cdb3676772def93bf89f2a7b"
+      },
+      "xml/src/parser.c": {
+        "bytes": 240185,
+        "sha256": "e41811d97cfd672a902924a3d99bdf696d6fcec08188a35404e4a3d2698ab844"
+      },
+      "xml/src/scanner.c": {
+        "bytes": 7688,
+        "sha256": "e7f401b138bbb0bd3f736c196dddcb74ff627fef2427e333bc4a7a629c0ad3b0"
+      },
+      "xml/src/tree_sitter/alloc.h": {
+        "bytes": 985,
+        "sha256": "b29c1c9fb7cc82f58c84b376df1297d6e2737a1d655fd356db0859e3c29c2fea"
+      },
+      "xml/src/tree_sitter/array.h": {
+        "bytes": 10420,
+        "sha256": "4ff743903dc46f5db6aa54f31c6b4d160a8a9779e5b2ab1ee59ae7ebcd850ea1"
+      },
+      "xml/src/tree_sitter/parser.h": {
+        "bytes": 7039,
+        "sha256": "a1f6ef161fbaf48a0e10fca90ef5290a062462b307b3898aa562993853b9f80a"
+      }
+    },
+    "parser_declarations_not_acceptance": {
+      "dtd": {
+        "EXTERNAL_TOKEN_COUNT": 3,
+        "FIELD_COUNT": 1,
+        "LANGUAGE_VERSION": 14,
+        "STATE_COUNT": 334,
+        "SYMBOL_COUNT": 111,
+        "TOKEN_COUNT": 61
+      },
+      "xml": {
+        "EXTERNAL_TOKEN_COUNT": 11,
+        "FIELD_COUNT": 2,
+        "LANGUAGE_VERSION": 14,
+        "STATE_COUNT": 495,
+        "SYMBOL_COUNT": 143,
+        "TOKEN_COUNT": 74
+      }
+    },
+    "quoted_native_include_closure_complete": true,
+    "quoted_native_includes": [
+      {
+        "from": "common/scanner.h",
+        "include": "tree_sitter/parser.h",
+        "resolved": "xml/src/tree_sitter/parser.h"
+      },
+      {
+        "from": "dtd/src/parser.c",
+        "include": "tree_sitter/parser.h",
+        "resolved": "dtd/src/tree_sitter/parser.h"
+      },
+      {
+        "from": "dtd/src/scanner.c",
+        "include": "../../common/scanner.h",
+        "resolved": "common/scanner.h"
+      },
+      {
+        "from": "dtd/src/tree_sitter/array.h",
+        "include": "./alloc.h",
+        "resolved": "dtd/src/tree_sitter/alloc.h"
+      },
+      {
+        "from": "xml/src/parser.c",
+        "include": "tree_sitter/parser.h",
+        "resolved": "xml/src/tree_sitter/parser.h"
+      },
+      {
+        "from": "xml/src/scanner.c",
+        "include": "../../common/scanner.h",
+        "resolved": "common/scanner.h"
+      },
+      {
+        "from": "xml/src/scanner.c",
+        "include": "tree_sitter/array.h",
+        "resolved": "xml/src/tree_sitter/array.h"
+      },
+      {
+        "from": "xml/src/tree_sitter/array.h",
+        "include": "./alloc.h",
+        "resolved": "xml/src/tree_sitter/alloc.h"
+      }
+    ],
+    "rust_literal_inputs": [
+      {
+        "bytes": 2281,
+        "from": "bindings/rust/lib.rs",
+        "include": "../../queries/xml/highlights.scm",
+        "resolved": "queries/xml/highlights.scm",
+        "sha256": "aa4a561c846928c3a4d885acbe690a60689661a45684babe16cf8b7a1509b610"
+      },
+      {
+        "bytes": 1780,
+        "from": "bindings/rust/lib.rs",
+        "include": "../../queries/dtd/highlights.scm",
+        "resolved": "queries/dtd/highlights.scm",
+        "sha256": "5091ae8e8311c16a1bbdffa0ee8819b55b97b786cca12392a9252a5393206bc9"
+      },
+      {
+        "bytes": 17444,
+        "from": "bindings/rust/lib.rs",
+        "include": "../../xml/src/node-types.json",
+        "resolved": "xml/src/node-types.json",
+        "sha256": "3b63e111187a0f9b2282e1748db2dd6b10e968f0cdb3676772def93bf89f2a7b"
+      },
+      {
+        "bytes": 12260,
+        "from": "bindings/rust/lib.rs",
+        "include": "../../dtd/src/node-types.json",
+        "resolved": "dtd/src/node-types.json",
+        "sha256": "a9d83e7efcad5d96f16b4e664062cc602aa6408716bf6f5a7355186aaec311ff"
+      }
+    ]
+  },
+  "status": "inert_acquisition_inventory_completed",
+  "transport": {
+    "LICENSE.exact-revision": {
+      "bytes": 1058,
+      "final_url": "https://raw.githubusercontent.com/tree-sitter-grammars/tree-sitter-xml/4b64dd3a03ec002258d6268d712fd93716d6ab57/LICENSE",
+      "http_status": 200,
+      "requested_url": "https://raw.githubusercontent.com/tree-sitter-grammars/tree-sitter-xml/4b64dd3a03ec002258d6268d712fd93716d6ab57/LICENSE",
+      "sha256": "3297073719030b7261afd78b7267931ccc03a27f7a65ca6fc644316180f71bf6"
+    },
+    "git-commit.json": {
+      "bytes": 2287,
+      "final_url": "https://api.github.com/repos/tree-sitter-grammars/tree-sitter-xml/git/commits/4b64dd3a03ec002258d6268d712fd93716d6ab57",
+      "http_status": 200,
+      "requested_url": "https://api.github.com/repos/tree-sitter-grammars/tree-sitter-xml/git/commits/4b64dd3a03ec002258d6268d712fd93716d6ab57",
+      "sha256": "ae1db7092fd7d2ae4b6fed4b9a905914b5fe425d46c6b687d407393ea91ae5b6"
+    },
+    "git-tree.json": {
+      "bytes": 26539,
+      "final_url": "https://api.github.com/repos/tree-sitter-grammars/tree-sitter-xml/git/trees/c0ab4ece2a3b4859749f405bcd3ea1423f25e4f1?recursive=1",
+      "http_status": 200,
+      "requested_url": "https://api.github.com/repos/tree-sitter-grammars/tree-sitter-xml/git/trees/c0ab4ece2a3b4859749f405bcd3ea1423f25e4f1?recursive=1",
+      "sha256": "6c98a74d0454cc123fbb31145c1e06734eb31f4caf6347dd826e3ba3f0fbe6d1"
+    },
+    "registry-index.jsonl": {
+      "bytes": 5222,
+      "final_url": "https://index.crates.io/tr/ee/tree-sitter-xml",
+      "http_status": 200,
+      "requested_url": "https://index.crates.io/tr/ee/tree-sitter-xml",
+      "sha256": "39cb697d2886eff004ea8f3bb806cf8d4b19ada43fd54b593572acd2d9875cda"
+    },
+    "tree-sitter-xml-0.7.0.crate": {
+      "bytes": 75507,
+      "final_url": "https://static.crates.io/crates/tree-sitter-xml/tree-sitter-xml-0.7.0.crate",
+      "http_status": 200,
+      "requested_url": "https://static.crates.io/crates/tree-sitter-xml/tree-sitter-xml-0.7.0.crate",
+      "sha256": "e670041f591d994f54d597ddcd8f4ebc930e282c4c76a42268743b71f0c8b6b3"
+    },
+    "tree-sitter-xml-authored.tar.gz": {
+      "bytes": 98364,
+      "final_url": "https://codeload.github.com/tree-sitter-grammars/tree-sitter-xml/tar.gz/4b64dd3a03ec002258d6268d712fd93716d6ab57",
+      "http_status": 200,
+      "requested_url": "https://codeload.github.com/tree-sitter-grammars/tree-sitter-xml/tar.gz/4b64dd3a03ec002258d6268d712fd93716d6ab57",
+      "sha256": "e93293550a10535197c6d682a79fcf2942f6a3b1277118d37beb0dcf0a6255cb"
+    }
+  },
+  "upstream_code_executed": false
+}
