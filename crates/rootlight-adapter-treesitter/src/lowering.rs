@@ -1460,11 +1460,9 @@ fn preflight_lowering_limits(
         relation_candidates,
         limits.max_relations,
     )?;
-    require_resource_limit(
-        ResourceKind::Records,
-        skipped_candidates,
-        limits.max_skipped_regions,
-    )?;
+    // Candidate gaps reserve space even when optional lexical evidence succeeds.
+    // Keep their sizing budgets conservative, but admit only actual skipped records
+    // against the collection quota before growing the skipped-region map.
     require_resource_limit(
         ResourceKind::Diagnostics,
         diagnostic_count,
@@ -1737,6 +1735,7 @@ impl<'context, 'source> Lowering<'context, 'source> {
         let mut extensions = BTreeMap::<FactId, ExtensionEnvelope>::new();
         let mut extension_bytes = 0_usize;
         let mut skipped = BTreeMap::<FactId, SkippedRegion>::new();
+        let skipped_limit = self.request.limits().ir().max_skipped_regions;
         let mut diagnostics = BTreeMap::<FactId, DiagnosticRecord>::new();
         for span in classic_dialect_spans(self.request) {
             cancellation.check()?;
@@ -1748,7 +1747,7 @@ impl<'context, 'source> Lowering<'context, 'source> {
                 "visual-basic-dialect-unproven",
                 provenance_id,
             )?;
-            skipped.insert(region.id, region);
+            insert_skipped_region(&mut skipped, region, skipped_limit, cancellation)?;
         }
         for span in self.classic_fences.iter().copied() {
             cancellation.check()?;
@@ -1759,7 +1758,7 @@ impl<'context, 'source> Lowering<'context, 'source> {
                 "visual-basic-dialect-unproven",
                 provenance_id,
             )?;
-            skipped.insert(region.id, region);
+            insert_skipped_region(&mut skipped, region, skipped_limit, cancellation)?;
         }
         for &(span, detail) in &entity_plan.yaml_warnings {
             cancellation.check()?;
@@ -1770,7 +1769,7 @@ impl<'context, 'source> Lowering<'context, 'source> {
                 detail,
                 provenance_id,
             )?;
-            skipped.insert(region.id, region);
+            insert_skipped_region(&mut skipped, region, skipped_limit, cancellation)?;
         }
         let facts_by_id: HashMap<_, _> = self
             .coordinates
@@ -2254,7 +2253,7 @@ impl<'context, 'source> Lowering<'context, 'source> {
                     HASKELL_ANNOTATION_UNAVAILABLE,
                     provenance_id,
                 )?;
-                skipped.insert(gap.id, gap);
+                insert_skipped_region(&mut skipped, gap, skipped_limit, cancellation)?;
             }
             if let Some(annotation) = entity_plan.haskell_annotations.get(&fact.local_id()) {
                 let Some(definition) = annotation.definition.and_then(|id| facts_by_id.get(&id))
@@ -2266,7 +2265,7 @@ impl<'context, 'source> Lowering<'context, 'source> {
                         HASKELL_ANNOTATION_UNAVAILABLE,
                         provenance_id,
                     )?;
-                    skipped.insert(gap.id, gap);
+                    insert_skipped_region(&mut skipped, gap, skipped_limit, cancellation)?;
                     continue;
                 };
                 let target = annotation.target.and_then(|id| materialized.get(&id));
@@ -2295,7 +2294,7 @@ impl<'context, 'source> Lowering<'context, 'source> {
                         HASKELL_ANNOTATION_UNAVAILABLE,
                         provenance_id,
                     )?;
-                    skipped.insert(gap.id, gap);
+                    insert_skipped_region(&mut skipped, gap, skipped_limit, cancellation)?;
                 }
                 let signature_source = annotation
                     .signature
@@ -2353,7 +2352,7 @@ impl<'context, 'source> Lowering<'context, 'source> {
                             "lexical-evidence-resource-limit",
                             provenance_id,
                         )?;
-                        skipped.insert(gap.id, gap);
+                        insert_skipped_region(&mut skipped, gap, skipped_limit, cancellation)?;
                     }
                 } else {
                     let gap = self.skipped_region(
@@ -2363,7 +2362,7 @@ impl<'context, 'source> Lowering<'context, 'source> {
                         HASKELL_ANNOTATION_UNAVAILABLE,
                         provenance_id,
                     )?;
-                    skipped.insert(gap.id, gap);
+                    insert_skipped_region(&mut skipped, gap, skipped_limit, cancellation)?;
                 }
                 occurrences.insert(occurrence.id, occurrence);
                 continue;
@@ -2380,7 +2379,7 @@ impl<'context, 'source> Lowering<'context, 'source> {
                     },
                     provenance_id,
                 )?;
-                skipped.insert(region.id, region);
+                insert_skipped_region(&mut skipped, region, skipped_limit, cancellation)?;
             }
             if nix_paths::is_segment(fact)
                 && (entity_plan.nix_path_gaps.contains(&fact.local_id())
@@ -2395,7 +2394,7 @@ impl<'context, 'source> Lowering<'context, 'source> {
                     nix_paths::OWNER_UNAVAILABLE,
                     provenance_id,
                 )?;
-                skipped.insert(region.id, region);
+                insert_skipped_region(&mut skipped, region, skipped_limit, cancellation)?;
             }
             for (domain, detail) in source_coverage_gaps(fact) {
                 if (entity_plan.perl.owned_functions.contains(&fact.local_id())
@@ -2426,7 +2425,7 @@ impl<'context, 'source> Lowering<'context, 'source> {
                 };
                 let region =
                     self.skipped_region(fact.span(), domain, reason, detail, provenance_id)?;
-                skipped.insert(region.id, region);
+                insert_skipped_region(&mut skipped, region, skipped_limit, cancellation)?;
             }
             if entity_plan.duplicate_data_keys.contains(&fact.local_id()) {
                 // Both written occurrences remain searchable, but their data
@@ -2438,7 +2437,7 @@ impl<'context, 'source> Lowering<'context, 'source> {
                     "yaml-duplicate-mapping-key",
                     provenance_id,
                 )?;
-                skipped.insert(region.id, region);
+                insert_skipped_region(&mut skipped, region, skipped_limit, cancellation)?;
             }
             if let Some(entity) = materialized.get(&fact.local_id()) {
                 let entity_source = source_for_span(
@@ -2510,7 +2509,7 @@ impl<'context, 'source> Lowering<'context, 'source> {
                             "groovy-member-evidence-resource-limit",
                             provenance_id,
                         )?;
-                        skipped.insert(gap.id, gap);
+                        insert_skipped_region(&mut skipped, gap, skipped_limit, cancellation)?;
                     }
                 } else if groovy_bindings.is_some()
                     && matches!(
@@ -2525,7 +2524,7 @@ impl<'context, 'source> Lowering<'context, 'source> {
                         "groovy-member-evidence-unavailable",
                         provenance_id,
                     )?;
-                    skipped.insert(gap.id, gap);
+                    insert_skipped_region(&mut skipped, gap, skipped_limit, cancellation)?;
                 }
                 if let Some(callable) = groovy_callables.get(&fact.local_id()) {
                     let mut callable = *callable;
@@ -2554,7 +2553,7 @@ impl<'context, 'source> Lowering<'context, 'source> {
                             "groovy-callable-evidence-resource-limit",
                             provenance_id,
                         )?;
-                        skipped.insert(gap.id, gap);
+                        insert_skipped_region(&mut skipped, gap, skipped_limit, cancellation)?;
                     }
                 }
                 if groovy_bindings.is_some()
@@ -2568,7 +2567,7 @@ impl<'context, 'source> Lowering<'context, 'source> {
                         "groovy-callable-evidence-unavailable",
                         provenance_id,
                     )?;
-                    skipped.insert(gap.id, gap);
+                    insert_skipped_region(&mut skipped, gap, skipped_limit, cancellation)?;
                 }
                 if let Some(signature) = entity.signature_evidence.as_ref() {
                     let signature_span = entity
@@ -2603,7 +2602,12 @@ impl<'context, 'source> Lowering<'context, 'source> {
                                 "lexical-evidence-resource-limit",
                                 provenance_id,
                             )?;
-                            skipped.insert(region.id, region);
+                            insert_skipped_region(
+                                &mut skipped,
+                                region,
+                                skipped_limit,
+                                cancellation,
+                            )?;
                         }
                     } else {
                         let region = self.skipped_region(
@@ -2613,7 +2617,7 @@ impl<'context, 'source> Lowering<'context, 'source> {
                             "lexical-evidence-unavailable",
                             provenance_id,
                         )?;
-                        skipped.insert(region.id, region);
+                        insert_skipped_region(&mut skipped, region, skipped_limit, cancellation)?;
                     }
                 } else if supports_declaration_signature(
                     entity.record.kind,
@@ -2639,7 +2643,7 @@ impl<'context, 'source> Lowering<'context, 'source> {
                         "signature-capture-unavailable",
                         provenance_id,
                     )?;
-                    skipped.insert(region.id, region);
+                    insert_skipped_region(&mut skipped, region, skipped_limit, cancellation)?;
                 }
                 continue;
             }
@@ -2722,7 +2726,7 @@ impl<'context, 'source> Lowering<'context, 'source> {
                             },
                             provenance_id,
                         )?;
-                        skipped.insert(gap.id, gap);
+                        insert_skipped_region(&mut skipped, gap, skipped_limit, cancellation)?;
                     }
                 } else if groovy_bindings.is_some()
                     && (matches!(
@@ -2742,7 +2746,7 @@ impl<'context, 'source> Lowering<'context, 'source> {
                         },
                         provenance_id,
                     )?;
-                    skipped.insert(gap.id, gap);
+                    insert_skipped_region(&mut skipped, gap, skipped_limit, cancellation)?;
                 }
                 let role = if entity_plan.perl.calls.contains(&fact.local_id()) {
                     OccurrenceRole::CallSite
@@ -2819,7 +2823,7 @@ impl<'context, 'source> Lowering<'context, 'source> {
                         ),
                         provenance_id,
                     )?;
-                    skipped.insert(region.id, region);
+                    insert_skipped_region(&mut skipped, region, skipped_limit, cancellation)?;
                 }
                 if fact.syntax_kind().as_str() == "make.target.reference"
                     && let Some(Some(symbol)) = make_targets.get(text)
@@ -2871,7 +2875,7 @@ impl<'context, 'source> Lowering<'context, 'source> {
                             "vba-event-handlers-unavailable",
                             provenance_id,
                         )?;
-                        skipped.insert(gap.id, gap);
+                        insert_skipped_region(&mut skipped, gap, skipped_limit, cancellation)?;
                     }
                     occurrence.target = OccurrenceTarget::Resolved {
                         symbol: binding.symbol,
@@ -3027,7 +3031,7 @@ impl<'context, 'source> Lowering<'context, 'source> {
                             "groovy-import-use-evidence-resource-limit",
                             provenance_id,
                         )?;
-                        skipped.insert(gap.id, gap);
+                        insert_skipped_region(&mut skipped, gap, skipped_limit, cancellation)?;
                     }
                 }
                 if let Some(bindings) = &groovy_bindings
@@ -3070,7 +3074,7 @@ impl<'context, 'source> Lowering<'context, 'source> {
                             "groovy-type-lookup-evidence-resource-limit",
                             provenance_id,
                         )?;
-                        skipped.insert(gap.id, gap);
+                        insert_skipped_region(&mut skipped, gap, skipped_limit, cancellation)?;
                     }
                 }
                 if let Some(bindings) = &nix_bindings
@@ -3171,7 +3175,7 @@ impl<'context, 'source> Lowering<'context, 'source> {
                         detail,
                         provenance_id,
                     )?;
-                    skipped.insert(region.id, region);
+                    insert_skipped_region(&mut skipped, region, skipped_limit, cancellation)?;
                 }
                 if let Some(detail) = automatic_instantiation_gap(fact) {
                     let region = self.skipped_region(
@@ -3181,7 +3185,7 @@ impl<'context, 'source> Lowering<'context, 'source> {
                         detail,
                         provenance_id,
                     )?;
-                    skipped.insert(region.id, region);
+                    insert_skipped_region(&mut skipped, region, skipped_limit, cancellation)?;
                 }
                 if self.language_for_fact(fact) == "yaml"
                     && fact.syntax_kind().as_str() == "yaml.alias.reference"
@@ -3206,7 +3210,7 @@ impl<'context, 'source> Lowering<'context, 'source> {
                             "yaml-alias-target-unavailable",
                             provenance_id,
                         )?;
-                        skipped.insert(region.id, region);
+                        insert_skipped_region(&mut skipped, region, skipped_limit, cancellation)?;
                     }
                 }
                 if self.request.language().as_str() == "markdown"
@@ -3233,7 +3237,7 @@ impl<'context, 'source> Lowering<'context, 'source> {
                             crate::markdown_bindings::TARGET_UNAVAILABLE,
                             provenance_id,
                         )?;
-                        skipped.insert(region.id, region);
+                        insert_skipped_region(&mut skipped, region, skipped_limit, cancellation)?;
                     }
                 }
                 let occurrence_id = occurrence.id;
@@ -3268,7 +3272,12 @@ impl<'context, 'source> Lowering<'context, 'source> {
                                 "lexical-evidence-resource-limit",
                                 provenance_id,
                             )?;
-                            skipped.insert(region.id, region);
+                            insert_skipped_region(
+                                &mut skipped,
+                                region,
+                                skipped_limit,
+                                cancellation,
+                            )?;
                         }
                     } else {
                         let region = self.skipped_region(
@@ -3278,7 +3287,7 @@ impl<'context, 'source> Lowering<'context, 'source> {
                             "lexical-evidence-unavailable",
                             provenance_id,
                         )?;
-                        skipped.insert(region.id, region);
+                        insert_skipped_region(&mut skipped, region, skipped_limit, cancellation)?;
                     }
                 }
             }
@@ -3291,7 +3300,7 @@ impl<'context, 'source> Lowering<'context, 'source> {
                     import_target_gap(fact),
                     provenance_id,
                 )?;
-                skipped.insert(region.id, region);
+                insert_skipped_region(&mut skipped, region, skipped_limit, cancellation)?;
             } else if matches!(
                 fact.kind(),
                 SyntaxFactKind::Declaration | SyntaxFactKind::Module
@@ -3304,7 +3313,7 @@ impl<'context, 'source> Lowering<'context, 'source> {
                         gap.detail(),
                         provenance_id,
                     )?;
-                    skipped.insert(region.id, region);
+                    insert_skipped_region(&mut skipped, region, skipped_limit, cancellation)?;
                     continue;
                 }
                 let detail = if entity_plan
@@ -3322,7 +3331,7 @@ impl<'context, 'source> Lowering<'context, 'source> {
                     detail,
                     provenance_id,
                 )?;
-                skipped.insert(region.id, region);
+                insert_skipped_region(&mut skipped, region, skipped_limit, cancellation)?;
             }
         }
 
@@ -3357,7 +3366,7 @@ impl<'context, 'source> Lowering<'context, 'source> {
                         "fsharp-project-evidence-resource-limit",
                         provenance_id,
                     )?;
-                    skipped.insert(gap.id, gap);
+                    insert_skipped_region(&mut skipped, gap, skipped_limit, cancellation)?;
                     continue;
                 }
                 let mut binding = item.binding.clone();
@@ -3395,7 +3404,7 @@ impl<'context, 'source> Lowering<'context, 'source> {
                         "fsharp-project-evidence-resource-limit",
                         provenance_id,
                     )?;
-                    skipped.insert(gap.id, gap);
+                    insert_skipped_region(&mut skipped, gap, skipped_limit, cancellation)?;
                 }
             }
             // A surviving subset must never license an export or qualified target.
@@ -3424,7 +3433,7 @@ impl<'context, 'source> Lowering<'context, 'source> {
                         "fsharp-project-evidence-resource-limit",
                         provenance_id,
                     )?;
-                    skipped.insert(gap.id, gap);
+                    insert_skipped_region(&mut skipped, gap, skipped_limit, cancellation)?;
                 }
             }
         }
@@ -3439,7 +3448,7 @@ impl<'context, 'source> Lowering<'context, 'source> {
                 "fsharp-signature-mask-unavailable",
                 provenance_id,
             )?;
-            skipped.insert(gap.id, gap);
+            insert_skipped_region(&mut skipped, gap, skipped_limit, cancellation)?;
         }
 
         // Publish a native-context marker only after every binding claim for that
@@ -3487,7 +3496,7 @@ impl<'context, 'source> Lowering<'context, 'source> {
                     "perl-project-evidence-resource-limit",
                     provenance_id,
                 )?;
-                skipped.insert(gap.id, gap);
+                insert_skipped_region(&mut skipped, gap, skipped_limit, cancellation)?;
             }
         }
         for (module, complete) in project_complete {
@@ -3519,7 +3528,7 @@ impl<'context, 'source> Lowering<'context, 'source> {
                     "perl-project-evidence-resource-limit",
                     provenance_id,
                 )?;
-                skipped.insert(gap.id, gap);
+                insert_skipped_region(&mut skipped, gap, skipped_limit, cancellation)?;
             }
         }
 
@@ -3532,7 +3541,7 @@ impl<'context, 'source> Lowering<'context, 'source> {
                 "outside-included-ranges",
                 provenance_id,
             )?;
-            skipped.insert(region.id, region);
+            insert_skipped_region(&mut skipped, region, skipped_limit, cancellation)?;
         }
 
         for diagnostic in self.parse_output.diagnostics() {
@@ -3547,7 +3556,7 @@ impl<'context, 'source> Lowering<'context, 'source> {
                     diagnostic.code().as_str(),
                     provenance_id,
                 )?;
-                skipped.insert(region.id, region);
+                insert_skipped_region(&mut skipped, region, skipped_limit, cancellation)?;
             }
         }
 
@@ -3566,7 +3575,7 @@ impl<'context, 'source> Lowering<'context, 'source> {
                 "parser-coverage-incomplete",
                 provenance_id,
             )?;
-            skipped.insert(region.id, region);
+            insert_skipped_region(&mut skipped, region, skipped_limit, cancellation)?;
         }
 
         cancellation.check()?;
@@ -3636,7 +3645,7 @@ impl<'context, 'source> Lowering<'context, 'source> {
                         "signature-capture-unavailable",
                         provenance_id,
                     )?;
-                    skipped.insert(gap.id, gap);
+                    insert_skipped_region(&mut skipped, gap, skipped_limit, cancellation)?;
                     continue;
                 }
                 let text = self.text_for_span(span)?;
@@ -3710,7 +3719,7 @@ impl<'context, 'source> Lowering<'context, 'source> {
                     detail,
                     provenance_id,
                 )?;
-                skipped.insert(gap.id, gap);
+                insert_skipped_region(&mut skipped, gap, skipped_limit, cancellation)?;
             }
         }
         let stats = DomainStats::new(
@@ -9122,6 +9131,26 @@ fn ensure_extension_budget(
     Ok(())
 }
 
+fn insert_skipped_region(
+    skipped: &mut BTreeMap<FactId, SkippedRegion>,
+    region: SkippedRegion,
+    limit: usize,
+    cancellation: &Cancellation,
+) -> Result<(), AdapterError> {
+    cancellation.check()?;
+    let current_count = skipped.len();
+    match skipped.entry(region.id) {
+        std::collections::btree_map::Entry::Occupied(mut entry) => {
+            entry.insert(region);
+        }
+        std::collections::btree_map::Entry::Vacant(entry) => {
+            require_resource_limit(ResourceKind::Records, checked_add(current_count, 1)?, limit)?;
+            entry.insert(region);
+        }
+    }
+    Ok(())
+}
+
 fn insert_optional_extension(
     envelope: ExtensionEnvelope,
     extensions: &mut BTreeMap<FactId, ExtensionEnvelope>,
@@ -9359,6 +9388,87 @@ mod tests {
     use rootlight_ir::{Confidence, SourceRef, SourceSpan};
 
     use super::*;
+
+    fn skipped_admission_gap(detail: &str) -> SkippedRegion {
+        let span = SourceSpan::new(FileId::from_bytes([3; 20]), 0, 1).unwrap();
+        let source = SourceRef::new(
+            RepositoryId::from_bytes([1; 16]),
+            GenerationId::from_bytes([2; 20]),
+            span,
+            content_hash(b"x"),
+            None,
+        );
+        skipped_region(
+            &source,
+            span,
+            FactDomain::Extensions,
+            SkippedRegionReason::UnsupportedConstruct,
+            detail,
+            FactId::from_bytes([4; 20]),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn skipped_region_admission_reuses_exact_identity_at_capacity() {
+        let cancellation = Cancellation::new();
+        let mut skipped = BTreeMap::new();
+        let first = skipped_admission_gap("first");
+        insert_skipped_region(&mut skipped, first.clone(), 1, &cancellation).unwrap();
+        insert_skipped_region(&mut skipped, first.clone(), 1, &cancellation).unwrap();
+        assert_eq!(skipped.len(), 1);
+        assert_eq!(skipped.get(&first.id), Some(&first));
+
+        let second = skipped_admission_gap("second");
+        assert!(matches!(
+            insert_skipped_region(&mut skipped, second, 1, &cancellation),
+            Err(AdapterError::Sink(SinkError::StreamLimit {
+                resource: ResourceKind::Records,
+                observed: 2,
+                limit: 1,
+            }))
+        ));
+        assert_eq!(skipped.len(), 1);
+        assert_eq!(skipped.get(&first.id), Some(&first));
+    }
+
+    #[test]
+    fn skipped_region_admission_rejects_before_new_entry_growth() {
+        let mut skipped = BTreeMap::new();
+        assert!(matches!(
+            insert_skipped_region(
+                &mut skipped,
+                skipped_admission_gap("first"),
+                0,
+                &Cancellation::new(),
+            ),
+            Err(AdapterError::Sink(SinkError::StreamLimit {
+                resource: ResourceKind::Records,
+                observed: 1,
+                limit: 0,
+            }))
+        ));
+        assert!(skipped.is_empty());
+    }
+
+    #[test]
+    fn skipped_region_admission_propagates_cancellation_without_growth() {
+        let cancellation = Cancellation::new();
+        cancellation.cancel(rootlight_cancel::CancellationReason::ClientRequest);
+        let mut skipped = BTreeMap::new();
+        assert!(matches!(
+            insert_skipped_region(
+                &mut skipped,
+                skipped_admission_gap("first"),
+                1,
+                &cancellation,
+            ),
+            Err(AdapterError::Cancelled {
+                reason: rootlight_cancel::CancellationReason::ClientRequest,
+            })
+        ));
+        assert!(skipped.is_empty());
+    }
 
     fn declaration(label: &str) -> SyntaxFact {
         let file = FileId::from_bytes([3; 20]);

@@ -1560,12 +1560,12 @@ fn nix_implicit_path_owners_reserve_entities_occurrences_and_relations() {
 }
 
 #[test]
-fn nix_lexical_relations_and_gaps_are_reserved_before_materialization() {
+fn nix_lexical_relations_and_gaps_obey_existing_output_quotas() {
     assert_nix_lexical_quotas("let value = 1; in value", "value = 1;", "value");
 }
 
 #[test]
-fn nix_quoted_lexical_relations_obey_the_same_preflight_quotas() {
+fn nix_quoted_lexical_relations_obey_existing_output_quotas() {
     assert_nix_lexical_quotas(
         r#"let "\value" = 1; in value"#,
         r#""\value" = 1;"#,
@@ -1918,6 +1918,20 @@ fn assert_nix_lexical_quotas(nix: &str, declaration: &str, definition: &str) {
                 .count(),
             1
         );
+        let actual_skipped = output.document().skipped_regions.len();
+        assert!(actual_skipped > 0);
+        let mut exact = IrLimits::default();
+        exact.max_skipped_regions = actual_skipped;
+        let exact_output = analyze_custom(
+            &snapshot,
+            &source,
+            language.clone(),
+            &limits(exact),
+            facts.clone(),
+        )
+        .expect("all existing gaps fit their exact collection quota");
+        assert_eq!(exact_output.document(), output.document());
+
         for quota in ["relations", "gaps", "total"] {
             let mut ir = IrLimits::default();
             let (observed, limit) = match quota {
@@ -1926,8 +1940,10 @@ fn assert_nix_lexical_quotas(nix: &str, declaration: &str, definition: &str) {
                     (3, 2)
                 }
                 "gaps" => {
-                    ir.max_skipped_regions = 3;
-                    (4, 3)
+                    ir.max_skipped_regions = actual_skipped
+                        .checked_sub(1)
+                        .expect("fixture retains a real semantic gap");
+                    (actual_skipped, ir.max_skipped_regions)
                 }
                 _ => {
                     ir.max_total_records = 24;
@@ -1941,7 +1957,7 @@ fn assert_nix_lexical_quotas(nix: &str, declaration: &str, definition: &str) {
                 &limits(ir),
                 facts.clone(),
             )
-            .expect_err("Nix relation and uncertainty require preflight reservations");
+            .expect_err("Nix relations and actual uncertainty obey their output quotas");
             assert!(
                 matches!(error, AdapterError::Sink(SinkError::StreamLimit {
                 resource: rootlight_adapter_sdk::ResourceKind::Records, observed: actual, limit: maximum,
@@ -3244,6 +3260,91 @@ fn python_and_javascript_file_modules_use_repository_paths() {
             "an implicit file module has no declaration spelling"
         );
     }
+}
+
+#[test]
+fn retained_signature_does_not_consume_skipped_region_quota() {
+    const FUNCTION: &str = "fn alpha() {}\n";
+    let (_temporary, snapshot, source) =
+        source_fixture_for(FUNCTION, "src/lib.rs", b"retained-signature-quota-fixture");
+    let mut ir = IrLimits::default();
+    ir.max_skipped_regions = 0;
+    let constrained = limits(ir);
+
+    for reverse in [false, true] {
+        let output = analyze_custom(
+            &snapshot,
+            &source,
+            language(),
+            &constrained,
+            single_function_facts(FUNCTION, &source, 1, reverse),
+        )
+        .expect("complete signature needs no skipped-region credit");
+        assert_eq!(output.document().entities.len(), 1);
+        assert!(output.document().skipped_regions.is_empty());
+        assert!(output.document().extensions.iter().any(|extension| {
+            decode_lexical_evidence_envelope(extension)
+                .is_ok_and(|evidence| evidence.kind() == LexicalEvidenceKind::Signature)
+        }));
+    }
+}
+
+#[test]
+fn rejected_signature_extension_consumes_actual_skipped_region_quota() {
+    const FUNCTION: &str = "fn alpha() {}\n";
+    let (_temporary, snapshot, source) =
+        source_fixture_for(FUNCTION, "src/lib.rs", b"rejected-signature-quota-fixture");
+    let mut ir = IrLimits::default();
+    ir.max_extensions = 2;
+    ir.max_skipped_regions = 1;
+    let constrained = limits(ir.clone());
+    let output = analyze_custom(
+        &snapshot,
+        &source,
+        language(),
+        &constrained,
+        single_function_facts(FUNCTION, &source, 1, false),
+    )
+    .expect("one actual signature gap fits its exact quota");
+    assert_eq!(output.document().skipped_regions.len(), 1);
+    assert_eq!(
+        output.document().skipped_regions[0].domain,
+        rootlight_ir::FactDomain::Extensions
+    );
+    assert_eq!(
+        output.document().skipped_regions[0].reason,
+        rootlight_ir::SkippedRegionReason::ResourceLimit
+    );
+    assert_eq!(
+        output.document().skipped_regions[0].detail,
+        "lexical-evidence-resource-limit"
+    );
+    assert!(
+        output
+            .document()
+            .extensions
+            .iter()
+            .all(|extension| extension.namespace != LEXICAL_EXTENSION_NAMESPACE)
+    );
+
+    ir.max_skipped_regions = 0;
+    let constrained = limits(ir);
+    let error = analyze_custom(
+        &snapshot,
+        &source,
+        language(),
+        &constrained,
+        single_function_facts(FUNCTION, &source, 1, false),
+    )
+    .expect_err("an actual gap cannot bypass the skipped-region quota");
+    assert!(matches!(
+        error,
+        AdapterError::Sink(SinkError::StreamLimit {
+            resource: rootlight_adapter_sdk::ResourceKind::Records,
+            observed: 1,
+            limit: 0,
+        })
+    ));
 }
 
 #[test]

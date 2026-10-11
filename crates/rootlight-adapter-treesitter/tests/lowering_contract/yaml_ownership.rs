@@ -123,7 +123,7 @@ fn properties(document: &NormalizedIrDocument) -> Vec<&rootlight_ir::EntityRecor
 }
 
 #[test]
-fn tagged_value_warnings_are_reserved_in_preflight_quotas() {
+fn tagged_value_warnings_obey_actual_skipped_region_quota() {
     for value in ["!custom text", "!!int text"] {
         let mut fixture = Fixture::new(value);
         let document = fixture.add(2, "yaml.document.scope", value, 0);
@@ -137,9 +137,9 @@ fn tagged_value_warnings_are_reserved_in_preflight_quotas() {
         let full = fixture.analyze();
         assert_eq!(full.skipped_regions.len(), 1);
         let mut enough = IrLimits::default();
-        // Module, document and lexical-signature reservations cannot substitute
-        // for the separate node-tag semantic gap, even if unused in this input.
-        enough.max_skipped_regions = 4;
+        // Retained tag warnings consume actual gap credit, not unused module,
+        // document or lexical-signature reservations.
+        enough.max_skipped_regions = 1;
         assert_eq!(
             fixture
                 .analyze_with(fixture.facts.clone(), enough)
@@ -148,17 +148,17 @@ fn tagged_value_warnings_are_reserved_in_preflight_quotas() {
             &full
         );
         let mut insufficient = IrLimits::default();
-        insufficient.max_skipped_regions = 3;
+        insufficient.max_skipped_regions = 0;
         let error = fixture
             .analyze_with(fixture.facts.clone(), insufficient)
-            .expect_err("tag semantics reserve their own skipped-region quota");
+            .expect_err("tag semantics require an actual skipped-region record");
         assert!(
             matches!(
                 error,
                 AdapterError::Sink(SinkError::StreamLimit {
                     resource: rootlight_adapter_sdk::ResourceKind::Records,
-                    observed: 4,
-                    limit: 3,
+                    observed: 1,
+                    limit: 0,
                 })
             ),
             "{error:?}"
