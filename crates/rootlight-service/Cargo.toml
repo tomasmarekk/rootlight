@@ -7,6 +7,10 @@ repository.workspace = true
 license.workspace = true
 publish = false
 
+[[example]]
+name = "index_coverage"
+path = "src/index_coverage_example.rs"
+
 [dependencies]
 blake3.workspace = true
 cap-fs-ext.workspace = true

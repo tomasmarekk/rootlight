@@ -31,17 +31,17 @@ use rootlight_service::{
 use rootlight_source::{SourceEncoding, SourceReadOptions};
 use serde_json::json;
 
-#[path = "index_coverage/gap_text.rs"]
+#[path = "index_coverage_example/gap_text.rs"]
 mod gap_text;
 
-#[path = "index_coverage/binding_proofs.rs"]
+#[path = "index_coverage_example/binding_proofs.rs"]
 mod binding_proofs;
 
-#[path = "index_coverage/gap_census.rs"]
+#[path = "index_coverage_example/gap_census.rs"]
 mod gap_census;
 
 #[cfg(test)]
-#[path = "../src/container_sources/fixture.rs"]
+#[path = "container_sources/fixture.rs"]
 mod fixture;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
