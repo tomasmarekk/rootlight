@@ -48,6 +48,38 @@ fn exact_native_process_reports_every_required_control() {
 }
 
 #[test]
+fn report_cli_observes_the_exact_native_process() {
+    const SOURCE_REVISION: &str = "0123456789abcdef0123456789abcdef01234567";
+    let output = std::process::Command::new(adapter_executable())
+        .args(["--report", "--source-revision", SOURCE_REVISION])
+        .output()
+        .expect("report command executes");
+    assert!(
+        output.status.success(),
+        "report failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(output.stderr.is_empty());
+    let report: serde_json::Value = serde_json::from_slice(&output.stdout).expect("report is JSON");
+    assert_eq!(report["schema"], "rootlight.adapter-isolation/1");
+    assert_eq!(report["source_revision"], SOURCE_REVISION);
+    assert_eq!(report["activation"], "isolated_deep");
+    assert_eq!(report["deep_adapter_permitted"], true);
+    assert_eq!(report["structural_fallback_active"], false);
+    let controls = report["controls"]
+        .as_array()
+        .expect("native controls exist");
+    assert_eq!(controls.len(), 9);
+    for control in controls {
+        assert_eq!(control["enforced"], true);
+        assert_eq!(
+            control["reason_code"],
+            "all_required_native_mechanisms_enforced"
+        );
+    }
+}
+
+#[test]
 fn native_profile_denies_filesystem_network_and_process_creation() {
     for mode in ["write", "child"] {
         let (status, output, diagnostics) = run_adversary(mode);

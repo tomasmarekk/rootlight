@@ -324,8 +324,10 @@ fn exact_process_isolation_report() -> Result<IsolationReport, ()> {
         .expected_executable_digest(AdapterExecutableDigest::from_bytes(executable_digest))
         .arg("--isolation-witness")
         .map_err(|_| ())?;
+    // Match the native witness profile: its address-space budget includes all
+    // statically linked grammar tables before the witness executes.
     let limits =
-        AdapterSandboxLimits::new(128 * 1024 * 1024, Duration::from_secs(5)).map_err(|_| ())?;
+        AdapterSandboxLimits::new(256 * 1024 * 1024, Duration::from_secs(5)).map_err(|_| ())?;
     let mut process = spawn_isolated_adapter(command, limits).map_err(|_| ())?;
     drop(process.take_stdin().ok_or(())?);
     let mut stdout = process.take_stdout().ok_or(())?;
