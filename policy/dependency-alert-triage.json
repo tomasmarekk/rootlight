@@ -8900,11 +8900,11 @@
       },
       {
         "path": "scripts/check_lightning_frontend_boundary.cjs",
-        "sha256": "1537b314de1bba4d7cc3ef559b52f3dfce30746514a10245a17ebfe2244dc025"
+        "sha256": "57c1928670b8dd005a4b28987cf1cc4b8356136fcfb6a8030d8d4fc841930e79"
       },
       {
         "path": "scripts/test_lightning_frontend_boundary.cjs",
-        "sha256": "1d2a09b41870bdf50d8fccdf9da730acabf09ca99cfcbbc9d1a180c86eccb9bb"
+        "sha256": "6ee7a1b7393b390f4408ed373849d72cb488936d1d99a0e7147978026701e438"
       }
     ],
     "upstream_artifact_association_only": true
