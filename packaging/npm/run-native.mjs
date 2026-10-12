@@ -38,6 +38,8 @@ const serviceFailureReasons = new Set([
   "runtime_unavailable",
   "launch_failed",
   "early_exit",
+  "daemon_start_timeout",
+  "daemon_unavailable",
   "start_timeout",
   "stop_timeout",
   "control_failed",

@@ -7,7 +7,7 @@ use std::{
     io::{self, Read as _, Write as _},
     net::{Ipv4Addr, SocketAddrV4, TcpStream},
     path::{Path, PathBuf},
-    process::{Command, Stdio},
+    process::{Command, ExitStatus, Stdio},
     thread,
     time::{Duration, Instant},
 };
@@ -18,7 +18,9 @@ use rootlight_client::{
 };
 #[cfg(windows)]
 use rootlight_runtime::trusted_windows_system_executable;
-use rootlight_runtime::{RuntimeError, RuntimePaths, WEB_UI_PORT, WebDiscoveryRecord};
+use rootlight_runtime::{
+    RuntimeError, RuntimePaths, WEB_UI_PORT, WebDiscoveryRecord, WebServiceStartupFailure,
+};
 use serde::{Deserialize, Serialize};
 
 #[cfg(not(windows))]
@@ -88,6 +90,8 @@ pub(crate) enum WebServiceError {
     WindowsLaunch(#[source] DetachedProcessError),
     #[error("Web UI process exited before becoming ready")]
     EarlyExit,
+    #[error("Web UI daemon startup failed")]
+    Startup(WebServiceStartupFailure),
     #[error("Web UI service did not become ready before the startup deadline")]
     StartTimedOut,
     #[error("Web UI service did not stop before the shutdown deadline")]
@@ -117,6 +121,7 @@ impl WebServiceError {
             #[cfg(windows)]
             Self::WindowsLaunch(_) => "launch_failed",
             Self::EarlyExit => "early_exit",
+            Self::Startup(failure) => failure.diagnostic_reason(),
             Self::StartTimedOut => "start_timeout",
             Self::StopTimedOut => "stop_timeout",
             Self::Control(_) => "control_failed",
@@ -186,9 +191,9 @@ fn wait_until_started(
             return Ok(WebServiceStatus::running(record.pid()));
         }
         if let Some(child) = child.as_mut()
-            && detached_child_exited(child)?
+            && let Some(status) = detached_child_exit_status(child)?
         {
-            return Err(WebServiceError::EarlyExit);
+            return Err(service_child_failure(status));
         }
         if Instant::now() >= deadline {
             return Err(WebServiceError::StartTimedOut);
@@ -394,19 +399,24 @@ fn spawn_detached(
 }
 
 #[cfg(windows)]
-fn detached_child_exited(child: &mut DetachedChild) -> Result<bool, WebServiceError> {
-    child
-        .try_wait()
-        .map(|status| status.is_some())
-        .map_err(WebServiceError::WindowsLaunch)
+fn detached_child_exit_status(
+    child: &mut DetachedChild,
+) -> Result<Option<ExitStatus>, WebServiceError> {
+    child.try_wait().map_err(WebServiceError::WindowsLaunch)
 }
 
 #[cfg(not(windows))]
-fn detached_child_exited(child: &mut DetachedChild) -> Result<bool, WebServiceError> {
-    child
-        .try_wait()
-        .map(|status| status.is_some())
-        .map_err(WebServiceError::Launch)
+fn detached_child_exit_status(
+    child: &mut DetachedChild,
+) -> Result<Option<ExitStatus>, WebServiceError> {
+    child.try_wait().map_err(WebServiceError::Launch)
+}
+
+fn service_child_failure(status: ExitStatus) -> WebServiceError {
+    status
+        .code()
+        .and_then(WebServiceStartupFailure::from_exit_code)
+        .map_or(WebServiceError::EarlyExit, WebServiceError::Startup)
 }
 
 fn probe() -> Result<u32, WebServiceError> {
@@ -983,6 +993,76 @@ struct ProbeResponse {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn service_child_status_preserves_the_public_busy_contract() {
+        for (fixture, reason) in [
+            ("timeout", "daemon_start_timeout"),
+            ("unavailable", "daemon_unavailable"),
+            ("0", "early_exit"),
+            ("1", "early_exit"),
+            ("70", "early_exit"),
+            ("101", "early_exit"),
+        ] {
+            let status = service_exit_fixture_status(fixture);
+            let error = crate::CliError::WebService(service_child_failure(status));
+            assert_eq!(error.exit_family().code(), 3);
+            let public = error.public_error().expect("public failure builds");
+            assert_eq!(public.code(), rootlight_error::ErrorCode::Busy);
+            assert!(public.retryable());
+            let envelope = crate::CliEnvelope::failure(error.exit_family(), public);
+            let value = serde_json::to_value(envelope).expect("failure envelope serializes");
+            assert_eq!(value["error"]["details"]["service_reason"]["value"], reason);
+            assert!(
+                !value
+                    .to_string()
+                    .contains("private-source-and-bootstrap-capability")
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn signalled_service_child_keeps_the_generic_early_exit() {
+        let status = service_exit_fixture_status("signal");
+        assert_eq!(status.code(), None);
+        assert!(matches!(
+            service_child_failure(status),
+            WebServiceError::EarlyExit
+        ));
+    }
+
+    fn service_exit_fixture_status(value: &str) -> ExitStatus {
+        Command::new(env::current_exe().expect("test binary resolves"))
+            .args([
+                "--exact",
+                "web_service::tests::service_startup_exit_fixture",
+            ])
+            .env("ROOTLIGHT_TEST_WEB_SERVICE_EXIT", value)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .expect("service exit fixture runs")
+    }
+
+    #[test]
+    fn service_startup_exit_fixture() {
+        let Ok(value) = env::var("ROOTLIGHT_TEST_WEB_SERVICE_EXIT") else {
+            return;
+        };
+        #[cfg(unix)]
+        if value == "signal" {
+            rustix::process::kill_process(rustix::process::getpid(), rustix::process::Signal::TERM)
+                .expect("fixture signals itself");
+            panic!("terminating signal must not return");
+        }
+        let code = match value.as_str() {
+            "timeout" => WebServiceStartupFailure::DaemonStartTimedOut.exit_code(),
+            "unavailable" => WebServiceStartupFailure::DaemonUnavailable.exit_code(),
+            _ => value.parse::<u8>().expect("fixture exit code is valid"),
+        };
+        std::process::exit(i32::from(code));
+    }
 
     #[test]
     fn http_parser_is_bounded_and_rejects_malformed_status() {

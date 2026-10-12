@@ -27,6 +27,7 @@ MAX_COMMAND_OUTPUT_BYTES = 1024 * 1024
 SERVICE_FAILURE_PREFIX = "rootlight: service failure "
 SERVICE_FAILURE_REASONS = {
     "runtime_unavailable", "launch_failed", "early_exit", "start_timeout",
+    "daemon_start_timeout", "daemon_unavailable",
     "stop_timeout", "control_failed", "invalid_response", "browser_failed",
     "registration_failed", "privilege_inspection_failed", "elevated_execution",
     "spawn_failed", "output_limit", "unclassified",

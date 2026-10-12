@@ -703,7 +703,7 @@ async fn connect_owned_once(
             client_instance_id,
             ConnectPolicy::StartIfMissing,
         )
-        .map_err(|_| WebError::DaemonUnavailable)?;
+        .map_err(WebError::from_daemon_start)?;
         let previous = retain_started_child(&retained, owned)?;
         drop(previous);
         Ok(Arc::new(client))

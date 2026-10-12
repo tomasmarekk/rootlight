@@ -23,7 +23,7 @@ class VerifyNpmInstallTests(unittest.TestCase):
     def test_failure_receipt_survives_install_cleanup_without_raw_output(self) -> None:
         diagnostic = {
             "schema": "rootlight.npm-service-failure/1", "action": "install",
-            "reason": "early_exit", "exit_status": 3, "signal": None,
+            "reason": "daemon_start_timeout", "exit_status": 3, "signal": None,
         }
         completed = verify_npm_install.subprocess.CompletedProcess(
             args=["npm", "install"], returncode=1, stdout="private-source-value",

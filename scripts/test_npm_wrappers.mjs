@@ -232,6 +232,8 @@ try {
 
   for (const [nativeReason, expectedReason] of [
     ["early_exit", "early_exit"],
+    ["daemon_start_timeout", "daemon_start_timeout"],
+    ["daemon_unavailable", "daemon_unavailable"],
     ["registration_failed", "registration_failed"],
     ["large", "early_exit"],
     ["descendant", "early_exit"],

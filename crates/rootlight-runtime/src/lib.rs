@@ -47,6 +47,49 @@ pub const COORDINATED_START_SIGNAL_VERSION: &str = "1";
 /// Fixed per-user configuration filename beneath the protected state directory.
 pub const USER_CONFIG_FILE_NAME: &str = "config.toml";
 
+/// Source-free daemon failures returned by the exact `rootlight-web --service` child.
+///
+/// Statuses 80 and 81 are reserved for this private startup boundary, outside
+/// public CLI exit families and shell/signal statuses. Other child exits carry
+/// no startup diagnosis and must retain the caller's generic early-exit handling.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WebServiceStartupFailure {
+    /// Coordinated daemon startup exceeded its existing readiness deadline.
+    DaemonStartTimedOut,
+    /// Daemon discovery, launch, or authentication failed without a finer diagnosis.
+    DaemonUnavailable,
+}
+
+impl WebServiceStartupFailure {
+    /// Returns the private service-child exit status.
+    #[must_use]
+    pub const fn exit_code(self) -> u8 {
+        match self {
+            Self::DaemonStartTimedOut => 80,
+            Self::DaemonUnavailable => 81,
+        }
+    }
+
+    /// Decodes only the reserved private service-child exit statuses.
+    #[must_use]
+    pub const fn from_exit_code(code: i32) -> Option<Self> {
+        match code {
+            80 => Some(Self::DaemonStartTimedOut),
+            81 => Some(Self::DaemonUnavailable),
+            _ => None,
+        }
+    }
+
+    /// Returns the closed public diagnostic label without process data.
+    #[must_use]
+    pub const fn diagnostic_reason(self) -> &'static str {
+        match self {
+            Self::DaemonStartTimedOut => "daemon_start_timeout",
+            Self::DaemonUnavailable => "daemon_unavailable",
+        }
+    }
+}
+
 /// Resolves an existing executable beneath the trusted Windows system root.
 ///
 /// The returned path is canonical, remains beneath the canonical `SystemRoot`,
@@ -1846,6 +1889,36 @@ pub enum RuntimeError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn service_startup_statuses_reject_every_unreserved_exit_code() {
+        for (failure, code, reason) in [
+            (
+                WebServiceStartupFailure::DaemonStartTimedOut,
+                80,
+                "daemon_start_timeout",
+            ),
+            (
+                WebServiceStartupFailure::DaemonUnavailable,
+                81,
+                "daemon_unavailable",
+            ),
+        ] {
+            assert_eq!(failure.exit_code(), code);
+            assert_eq!(failure.diagnostic_reason(), reason);
+            assert_eq!(
+                WebServiceStartupFailure::from_exit_code(i32::from(code)),
+                Some(failure)
+            );
+        }
+        for code in -1..=256 {
+            if ![80, 81].contains(&code) {
+                assert_eq!(WebServiceStartupFailure::from_exit_code(code), None);
+            }
+        }
+        assert_eq!(WebServiceStartupFailure::from_exit_code(i32::MIN), None);
+        assert_eq!(WebServiceStartupFailure::from_exit_code(i32::MAX), None);
+    }
 
     #[test]
     fn coordinated_startup_signals_round_trip_and_reject_unknown_bytes() {
