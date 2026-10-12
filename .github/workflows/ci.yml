@@ -23,7 +23,7 @@ jobs:
   fast:
     name: fast / pinned / linux
     runs-on: ubuntu-24.04
-    timeout-minutes: 45
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
         with:
@@ -352,7 +352,7 @@ jobs:
   msrv:
     name: msrv / 1.90.0 / linux
     runs-on: ubuntu-24.04
-    timeout-minutes: 45
+    timeout-minutes: 90
     env:
       RUSTUP_TOOLCHAIN: "1.90.0"
     steps:
@@ -385,7 +385,7 @@ jobs:
   current-stable:
     name: current stable / linux
     runs-on: ubuntu-24.04
-    timeout-minutes: 45
+    timeout-minutes: 90
     env:
       RUSTUP_TOOLCHAIN: stable
     steps:
@@ -798,9 +798,15 @@ jobs:
         run: |
           cargo deny check bans licenses sources
           cargo audit --db artifacts/rustsec-db --no-fetch -D warnings
+          cargo audit --file tests/native-grammars/Cargo.lock --db artifacts/rustsec-db --no-fetch -D warnings
+          cargo tree --manifest-path fuzz/Cargo.toml --locked --offline --depth 1
+          cargo audit --file fuzz/Cargo.lock --db artifacts/rustsec-db --no-fetch -D warnings
           cargo audit --file source-inputs/producer-security/lightningcss-1d680fa14e9a089c92dc0929f869d6757ae91c30/overlays/Cargo.lock --db artifacts/rustsec-db --no-fetch -D warnings
           OSV_SCANNER_LOCAL_DB_CACHE_DIRECTORY="$PWD/artifacts/osv-db" \
             osv-scanner scan source --offline --format json --lockfile Cargo.lock \
+            --lockfile tests/native-grammars/Cargo.lock \
+            --lockfile fuzz/Cargo.lock \
+            --lockfile source-inputs/producer-security/lightningcss-1d680fa14e9a089c92dc0929f869d6757ae91c30/overlays/Cargo.lock \
             > artifacts/osv-report.json
       - name: Secret scan
         run: gitleaks git --redact=100 --no-banner --no-color --log-level warn .
@@ -934,7 +940,8 @@ jobs:
   offline:
     name: offline / blocked egress / linux
     runs-on: ubuntu-24.04
-    timeout-minutes: 35
+    # Source export and independent empty-cache qualification share this budget.
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
         with:
