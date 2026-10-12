@@ -38324,8 +38324,8 @@ mod tests {
 
     #[test]
     fn durable_long_symbol_names_preserve_source_and_embedded_language_gaps() {
-        let fixture = TempDir::new().unwrap();
-        let state = TempDir::new().unwrap();
+        let fixture = durable_test_tempdir();
+        let state = durable_test_tempdir();
         let rust_name = format!("rustLongName_{}_End", "x".repeat(520));
         let script_name = format!("scriptLongName_{}_End", "y".repeat(520));
         let rust_source = format!("pub fn {rust_name}() {{}}\n");
