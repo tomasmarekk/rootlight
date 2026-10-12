@@ -1006,6 +1006,13 @@ mod tests {
 
     type ProofKey = (String, String);
 
+    fn tempdir() -> tempfile::TempDir {
+        // macOS exposes its default temporary directory through `/var`; SQLite's
+        // no-follow boundary requires the real parent even for private fixtures.
+        let parent = fs::canonicalize(std::env::temp_dir()).unwrap();
+        tempfile::tempdir_in(parent).unwrap()
+    }
+
     fn inspected_document(repository: &Path, state: &Path) -> rootlight_ir::NormalizedIrDocument {
         let session = DiagnosticSession::open(repository, state, None, StateMode::Resume).unwrap();
         let registered = session
@@ -1295,7 +1302,7 @@ mod tests {
 
     #[test]
     fn emitted_gap_fields_export_exact_roots_without_binding_records() {
-        let directory = tempfile::tempdir().unwrap();
+        let directory = tempdir();
         let repository = directory.path().join("repository");
         fs::create_dir(&repository).unwrap();
         fs::write(repository.join("Module.bas"), "Attribute VB_Name = \"Module\"\nSub Visit(ByVal required As Long)\nEnd Sub\nSub Run()\nVisit\nEnd Sub\n").unwrap();
@@ -1388,7 +1395,7 @@ mod tests {
 
     #[test]
     fn exact_gap_matching_rejects_other_spans_owners_and_content() {
-        let directory = tempfile::tempdir().unwrap();
+        let directory = tempdir();
         let repository = directory.path().join("repository");
         fs::create_dir(&repository).unwrap();
         fs::write(
@@ -1466,7 +1473,7 @@ mod tests {
 
     #[test]
     fn candidate_field_targets_root_actual_entities_and_missing_targets_fail() {
-        let directory = tempfile::tempdir().unwrap();
+        let directory = tempdir();
         let repository = directory.path().join("repository");
         fs::create_dir(&repository).unwrap();
         fs::write(
@@ -1543,7 +1550,7 @@ mod tests {
 
     #[test]
     fn normalized_file_field_proofs_reject_missing_owners_and_source_drift() {
-        let directory = tempfile::tempdir().unwrap();
+        let directory = tempdir();
         let repository = directory.path().join("repository");
         fs::create_dir(&repository).unwrap();
         fs::write(repository.join("value.rs"), "pub fn value() {}\n").unwrap();
@@ -1694,7 +1701,7 @@ mod tests {
 
     #[test]
     fn external_function_evidence_distinguishes_references_and_calls() {
-        let directory = tempfile::tempdir().unwrap();
+        let directory = tempdir();
         let repository = directory.path().join("repository");
         fs::create_dir(&repository).unwrap();
         fs::write(repository.join("book.xlsm"), fixture::book(&[("Client",
@@ -1843,7 +1850,7 @@ mod tests {
 
     #[test]
     fn external_binding_proof_export_rejects_missing_ancestors_and_duplicate_ids() {
-        let directory = tempfile::tempdir().unwrap();
+        let directory = tempdir();
         let repository = directory.path().join("repository");
         fs::create_dir(&repository).unwrap();
         fs::write(repository.join("book.xlsm"), fixture::book(&[("Client",
@@ -1913,7 +1920,7 @@ mod tests {
 
     #[test]
     fn external_bindings_export_exact_uses_without_repository_definitions() {
-        let directory = tempfile::tempdir().unwrap();
+        let directory = tempdir();
         let repository = directory.path().join("repository");
         fs::create_dir(&repository).unwrap();
         fs::write(repository.join("book.xlsm"), fixture::book(&[("Client",
@@ -1953,7 +1960,7 @@ mod tests {
 
     #[test]
     fn external_class_evidence_preserves_type_reference_and_call_roles() {
-        let directory = tempfile::tempdir().unwrap();
+        let directory = tempdir();
         let repository = directory.path().join("repository");
         fs::create_dir(&repository).unwrap();
         fs::write(repository.join("book.xlsm"), fixture::book(&[("Client",
@@ -1996,7 +2003,7 @@ mod tests {
 
     #[test]
     fn supplemental_calls_preserve_distinct_targets_and_conditions_after_reopen() {
-        let directory = tempfile::tempdir().unwrap();
+        let directory = tempdir();
         let repository = directory.path().join("repository");
         fs::create_dir(&repository).unwrap();
         fs::write(
@@ -2036,7 +2043,7 @@ mod tests {
 
     #[test]
     fn internal_only_initializer_exports_exact_roots_and_complete_source_closure() {
-        let directory = tempfile::tempdir().unwrap();
+        let directory = tempdir();
         let repository = directory.path().join("repository");
         fs::create_dir(&repository).unwrap();
         fs::write(
@@ -2222,7 +2229,7 @@ mod tests {
 
     #[test]
     fn gap_evidence_distinguishes_callees_applications_and_shared_spans() {
-        let directory = tempfile::tempdir().unwrap();
+        let directory = tempdir();
         let repository = directory.path().join("repository");
         fs::create_dir(&repository).unwrap();
         let source = "Attribute VB_Name = \"Module\"\nSub Visit(ByVal required As Long)\nEnd Sub\nSub Run()\nDim result As Long\nresult = Missing(1)\nOther\nVisit\nEnd Sub\n";
@@ -2310,7 +2317,7 @@ mod tests {
 
     #[test]
     fn warm_reports_keep_one_session_through_edits_and_restoration() {
-        let directory = tempfile::tempdir().unwrap();
+        let directory = tempdir();
         let repository = directory.path().join("repository");
         fs::create_dir(&repository).unwrap();
         let file = repository.join("value.rs");
@@ -2359,7 +2366,7 @@ mod tests {
 
     #[test]
     fn sequence_protocol_emits_complete_reports_and_bounds_commands() {
-        let directory = tempfile::tempdir().unwrap();
+        let directory = tempdir();
         let repository = directory.path().join("repository");
         fs::create_dir(&repository).unwrap();
         fs::write(repository.join("value.rs"), "pub fn value() {}\n").unwrap();
@@ -2409,7 +2416,7 @@ mod tests {
 
     #[test]
     fn resumed_diagnostic_tracks_body_edits_and_source_restoration() {
-        let directory = tempfile::tempdir().unwrap();
+        let directory = tempdir();
         let root = fs::canonicalize(directory.path()).unwrap();
         let repository = root.join("repository");
         let state = root.join("state");
@@ -2481,7 +2488,7 @@ mod tests {
 
     #[test]
     fn timing_reports_actual_warm_parser_and_fact_reuse() {
-        let directory = tempfile::tempdir().unwrap();
+        let directory = tempdir();
         let repository = directory.path().join("repository");
         fs::create_dir(&repository).unwrap();
         let file = repository.join("value.rs");
@@ -2695,7 +2702,7 @@ mod tests {
 
     #[test]
     fn full_report_keeps_its_default_schema_and_field_contract() {
-        let directory = tempfile::tempdir().unwrap();
+        let directory = tempdir();
         let repository = directory.path().join("repository");
         fs::create_dir(&repository).unwrap();
         fs::write(
@@ -2779,7 +2786,7 @@ mod tests {
 
     #[test]
     fn source_accounting_reads_all_physical_bytes_and_conserves_retained_counts_after_reopen() {
-        let directory = tempfile::tempdir().unwrap();
+        let directory = tempdir();
         let root = fs::canonicalize(directory.path()).unwrap();
         let repository = root.join("repository");
         let state = root.join("state");
@@ -2900,7 +2907,7 @@ mod tests {
 
     #[test]
     fn source_accounting_preserves_explicit_configuration_and_routes_on_resume() {
-        let directory = tempfile::tempdir().unwrap();
+        let directory = tempdir();
         let repository = directory.path().join("repository");
         fs::create_dir(&repository).unwrap();
         fs::write(
@@ -2945,7 +2952,7 @@ mod tests {
 
     #[test]
     fn source_accounting_preserves_extracted_sources_without_claiming_independent_expansion() {
-        let directory = tempfile::tempdir().unwrap();
+        let directory = tempdir();
         let repository = directory.path().join("repository");
         fs::create_dir(&repository).unwrap();
         let module = b"Attribute VB_Name = \"Client\"\r\nSub Run()\r\nEnd Sub\r\n";
@@ -2992,7 +2999,7 @@ mod tests {
 
     #[test]
     fn source_accounting_resume_reindexes_changed_bytes_and_rejects_stale_live_source_proof() {
-        let directory = tempfile::tempdir().unwrap();
+        let directory = tempdir();
         let root = fs::canonicalize(directory.path()).unwrap();
         let repository = root.join("repository");
         let state = root.join("state");
@@ -3050,7 +3057,7 @@ mod tests {
 
     #[test]
     fn bounded_reads_reject_oversized_and_missing_files() {
-        let directory = tempfile::tempdir().unwrap();
+        let directory = tempdir();
         let path = directory.path().join("input");
         assert!(read_bounded(&path, 3).is_err());
         fs::write(&path, b"abcd").unwrap();
@@ -3080,7 +3087,7 @@ mod tests {
 
     #[test]
     fn diagnostic_reads_multichunk_utf16_without_transcoding() {
-        let directory = tempfile::tempdir().unwrap();
+        let directory = tempdir();
         let root = fs::canonicalize(directory.path()).unwrap();
         let repository = root.join("repository");
         fs::create_dir(&repository).unwrap();
@@ -3123,7 +3130,7 @@ mod tests {
 
     #[test]
     fn diagnostic_checks_exact_sources_and_distinguishes_language_assignments() {
-        let directory = tempfile::tempdir().unwrap();
+        let directory = tempdir();
         let root = fs::canonicalize(directory.path()).unwrap();
         let repository = root.join("repository");
         fs::create_dir(&repository).unwrap();
