@@ -33,6 +33,11 @@ NATIVE_CLOSURE = (
     "lightningcss-1d680fa14e9a089c92dc0929f869d6757ae91c30/native-source-closure.json"
 )
 GRAMMAR_LOCK = "adapters/grammars.lock"
+YARN_NONASCII_DOC = (
+    "source-inputs/producer-dependencies/"
+    "lightningcss-1d680fa14e9a089c92dc0929f869d6757ae91c30/yarn-originals/packages/"
+    "b1ff0c2a3ae1c98752b511a82deb3a7a0b0e98f42f12dc2d147405dffa124ffc/package/README-es.md"
+)
 
 
 def _historical_cargo_checksum(root: Path, name: str) -> dict:
@@ -289,6 +294,13 @@ class GitleaksPolicyTests(unittest.TestCase):
                  f"{WINDOWS}/Security/Cryptography/Certificates/mod.rs"]
         self.assertFalse(self.scan({name: (ROOT / name).read_bytes() for name in paths}),
                          "authenticated upstream samples require exact exceptions")
+
+    def test_non_ascii_upstream_documentation_exception_preserves_exact_text(self) -> None:
+        content = (ROOT / YARN_NONASCII_DOC).read_bytes()
+        for mode in ("dir", "git"):
+            with self.subTest(mode=mode):
+                self.assertFalse(self.scan({YARN_NONASCII_DOC: content}, mode),
+                                 "the exact UTF-8 upstream documentation exception must survive edits")
 
     def test_unknown_digest_value_in_known_checksum_path_is_detected(self) -> None:
         synthetic = hashlib.sha256(b"rootlight synthetic checksum credential").hexdigest()
